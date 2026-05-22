@@ -23,3 +23,4 @@ pub use ids::{
     AgentId, HookId, McpConnectionId, MessageId, PluginId, PrefetchId, RequestId, SessionId,
     SnapshotId, ToolUseId,
 };
+pub use messages::{ContentBlock, ConversationMessage, MessageRole};

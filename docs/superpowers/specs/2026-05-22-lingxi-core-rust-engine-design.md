@@ -1,8 +1,58 @@
 # LingXi Core — Rust Engine Design Spec
 
 **Date**: 2026-05-22
-**Status**: Draft (v2 — full subsystem scope)
+**Status**: Draft (v3 — review fixes applied)
 **Author**: luolingfeng + Claude Opus 4.6 / Opus 4.7
+
+**v3 changelog** — fixes from the §1-§35 design review. All section anchors
+referenced below are post-fix; original-draft line numbers no longer apply.
+
+- **P0 bugs** — §17 BudgetEnforcer integer-division ratio + post-call
+  realized-cost latch (C1); §10 `AgentPermissionMode` ↔ §14 `PermissionMode`
+  mapping with `PermissionModeSource` validation (D1); §19/§18
+  `allowed_tools` field deduplicated with `serde(alias)` for the legacy
+  name (D6); §10 `StateMachinePool::allocate` mpsc ownership corrected
+  (B1); §30 OAuth flow gains PKCE + state + loopback-binding spec (A5);
+  §24 type-enforced `SandboxedCommand` newtype + `ProcessRunner::run`
+  signature update (A1); §16 `Secret<T>` redefined as a `secrecy::SecretBox`
+  wrapper with Zeroize-on-drop and no implicit Clone (A10).
+- **Security / privacy** — §24 sandbox canonicalizes and rejects symlink
+  escape (A2); §29 IDE pairing upgraded to 8-char alphanumeric codes,
+  rate-limited, project-scoped, with high-risk re-confirm (A3, A4); §30
+  resolver priority specified concretely (A6); §15 plugin git/local default
+  trust is `Untrusted` (A7); §26 PII markers are real newtypes (A8); §28
+  cron lock uses PID-liveness, not mtime alone (A9).
+- **Concurrency / data integrity** — §17 CostTracker persistence sequenced
+  through a single-writer task (B2); §27 MessageQueueManager single source
+  of truth + explicit `Ord` on priority (B3, B4); §22 SessionStorage
+  documents fsync + flock + recovery contract (B5); SessionResumer no
+  longer rebuilds FileStateCache from stale reads (B6); §23 Edit closes
+  TOCTOU via open-then-stat handle + atomic write (B7); §23 FileStateCache
+  byte counter held under the same lock as the LRU map (B8); §12 mailbox
+  bounded with overflow policy + orphan queue (B9); §20 `CacheSafeParamsSlot`
+  gains generation tag to detect stale forks (B10).
+- **Arithmetic / logic** — §17 saturating cost arithmetic (C2); §10
+  worktree degradation returns typed `WorktreeOutcome` with reason (C3);
+  §11 task ID uses uniform-distribution sampler (C4); §13 autocompactor
+  recomputes group offsets after PTL truncation with a 20% margin (C5).
+- **Cross-system consistency** — §15 plugin-agent frontmatter validation
+  rejects agent-scoped permission fields (D2); §19.4 integration table
+  fixed to reference §21 / §22 / §28 / §29 / §30 (D3); §13 autocompactor
+  records its API usage in the §17 CostTracker (D4); §18 SkillTool
+  dispatches via §10 StateMachinePool to honor §20.3's visibility contract
+  (D5); §12 `SyntheticOutputTool` is no longer `is_read_only` (D7); §11
+  `TaskOutputManager::init_as_symlink` enforces containment (D8).
+- **Scope rebaseline** — §34.0 records M1 trims (§11 task types, §13
+  compaction layers, §15 plugin components, §25 LSP actions, §28 cron
+  tick); schedule extended from 60 → 68 weeks to gate with a 16-week
+  slack budget through W84; Tools, Plugin, UniFFI phases split or
+  expanded.
+- **Verification** — §32 gains supply-chain (`cargo-deny` / `audit` /
+  `vet` / `about`), `loom` / `shuttle` concurrency tests, `cargo-fuzz`
+  harnesses, `criterion` benchmark budgets, chaos / fault injection,
+  Linux musl in the cross-compile matrix, a parity-fixture protocol
+  (§32.6), a concurrency test matrix (§32.7), and an Event/Effect
+  stability tier policy (§32.8).
 
 ---
 
@@ -470,13 +520,19 @@ pub struct FileSystemCapabilities {
 
 ### 4.2 ProcessRunner
 
+`ProcessRunner` accepts only `SandboxedCommand` (see §24). The `ProcessCommand`
+struct remains a transport DTO inside `lingxi-protocol`, but the only way to
+hand one to a runner is through `Sandbox::prepare` or `Sandbox::bypass_with_audit`.
+This is the type-level enforcement of D2 (no I/O path bypasses the sandbox
+decision).
+
 ```rust
 #[async_trait]
 pub trait ProcessRunner: Send + Sync {
-    async fn run(&self, cmd: &ProcessCommand) -> Result<ProcessOutput, ProcessError>;
-    fn is_available(&self) -> bool;
-    async fn spawn_background(&self, cmd: &ProcessCommand) -> Result<ProcessHandle, ProcessError>;
+    async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError>;
+    async fn spawn_background(&self, cmd: &SandboxedCommand) -> Result<ProcessHandle, ProcessError>;
     async fn kill(&self, handle: &ProcessHandle) -> Result<(), ProcessError>;
+    fn is_available(&self) -> bool;
 }
 ```
 
@@ -1810,6 +1866,74 @@ pub trait BuiltinHookHandler: Send + Sync {
 
 ## 10. Agent / Subagent
 
+### 10.0 Three Forms of Agent Run
+
+A frequent question is "why do we have both Subagent (§10) and ForkedAgent (§20) — aren't they redundant?". They are **not** redundant; they are three different *use modes* of the same underlying state-machine runtime. This section pins down the relationship before the rest of §10.
+
+#### The three forms
+
+| Form | Defined in | Triggered by | Visible to model? | Lifecycle | Cache-sharing |
+|---|---|---|---|---|---|
+| **Subagent** | §10 | Model calls `AgentTool(subagent_type: ...)` | ✅ shows as tool_use → tool_result | Multi-turn, interruptible | Optional (`use_exact_tools` for byte-exact) |
+| **ForkedAgent** | §20.2 | Engine internal code (compaction, session memory, classifier explainer, post-turn summary) | ❌ invisible to model | One-shot, completes then disposed | **Always** byte-exact (CacheSafeParams) |
+| **Fork Subagent** | §10.11 | Model calls `AgentTool` **without** `subagent_type` (FORK_AGENT synthetic def) | ✅ visible (it IS a subagent) | Multi-turn | **Always** byte-exact — uses ForkedAgent's cache-sharing mechanism |
+
+Mapping to claude-code source:
+- Subagent → `src/tools/AgentTool/runAgent.ts`
+- ForkedAgent → `src/utils/forkedAgent.ts`
+- Fork Subagent → `src/tools/AgentTool/forkSubagent.ts` (bridges the two)
+
+#### Why they cannot be merged
+
+The distinction is fundamental: **who triggers, where the result goes**.
+
+- **Subagent**: model decides to delegate a sub-task; result returns as `tool_result` and enters conversation history. The model "sees" the agent ran and what it produced.
+- **ForkedAgent**: engine decides to do internal background work (summarize history for compaction, extract session memory, explain a permission denial, classify a turn). Result returns to engine code — *never* enters the conversation. The model has no idea this happened.
+
+Collapsing these into one abstraction would force every call site to express "I am model-visible" vs "I am engine-internal" as a flag, which would leak into `ToolUseContext`, transcript writers, telemetry, and the reducer.
+
+#### What they share: the runtime
+
+Although the *semantics* differ, the *runtime* is the same. Both go through the same `StateMachinePool` (§10.5):
+
+```
+                            StateMachinePool
+              ┌──────────────────────────────────────────┐
+              │  slot[A]: SubagentContext { agent_id }   │
+              │  slot[B]: SubagentContext { agent_id }   │
+              │  slot[C]: ForkedAgentContext { label }   │
+              │  slot[D]: ForkedAgentContext { label }   │
+              └──────────────────────────────────────────┘
+                     ▲                          ▲
+                     │                          │
+              ┌──────┴──────┐            ┌──────┴────────────┐
+              │  AgentTool  │            │ ForkedAgentRunner │
+              │   (model)   │            │   (engine code)   │
+              └─────────────┘            └───────────────────┘
+                                                   ▲
+                                                   │
+                                  ┌────────────────┼──────────────────┐
+                                  │                │                  │
+                          Autocompactor    SessionMemoryExtractor   PermissionExplainer
+                              (§13)              (§6.5)               (§14)
+
+Fork Subagent: model invokes AgentTool BUT slot uses ForkedAgent's CacheSafeParams.
+              → byte-exact prompt cache hit on the parent, while still
+                showing as a tool_use in the model's view.
+```
+
+Concretely, `§20.2 ForkedAgentRunner` holds `pool: Arc<StateMachinePool>` and allocates slots from the same pool that §10 Subagent uses. The slot doesn't care which entry point asked for it; what differs is:
+
+1. **Slot lifetime policy**: subagent slots stay until the model's AgentTool call completes (possibly across many parent turns if `is_async`); forked-agent slots are deallocated as soon as the one-shot loop ends.
+2. **Event routing**: subagent events feed back to the parent reducer as `Event::SubagentProgress` / `Event::SubagentCompleted` (model-visible side effects via `Effect::RenderToolResult`); forked-agent events feed back to the calling engine code via a oneshot channel.
+3. **Cache discipline**: forked agent *requires* `CacheSafeParams` byte-exact; subagent only enforces it when `use_exact_tools: true` or for fork subagent.
+
+#### Why the "Fork Subagent" hybrid exists
+
+Fork subagent is what happens when the model invokes `AgentTool` and the engine decides "no specific subagent_type — let the child inherit my full context for a free continuation". It is **a subagent that uses the forked-agent cache-sharing implementation**. It demonstrates that the two paths are not orthogonal — they meet in the middle when the model wants the benefits of byte-exact cache reuse.
+
+This is also the reason `forkSubagent.ts` lives under `tools/AgentTool/` in claude-code (not under `utils/forkedAgent.ts`): it is structurally a subagent, but it borrows ForkedAgent's machinery.
+
 ### 10.1 Cross-System Integration Table
 
 | Subsystem | Parent → Child Strategy | Agent Can Override | Isolation/Sharing |
@@ -1865,8 +1989,28 @@ pub enum AgentToolPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentModel { Inherit, Alias(ModelAlias), Explicit(String) }
 
+/// Mode an agent's frontmatter can declare. Loader validation distinguishes:
+/// - `Bubble` is **agent-scoped**: legal in agent frontmatter (it controls how
+///   the subagent surfaces prompts to its parent), but illegal in user/project/CLI
+///   settings. The loader rejects `Bubble` from non-agent sources before
+///   constructing an `AgentDefinition` (see §15 strict-plugin policy + §14.1).
+/// - `Isolated`, `Auto`, `Plan` map straight to §14 `PermissionMode` values.
+///   Loader maps to `PermissionMode` exactly once at agent instantiation; the
+///   runtime engine in §14 then operates on `PermissionMode` only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentPermissionMode { Bubble, Isolated, Auto, Plan }
+
+impl AgentPermissionMode {
+    /// Single conversion point; the §14 engine never sees `AgentPermissionMode`.
+    pub fn to_runtime(self) -> PermissionMode {
+        match self {
+            AgentPermissionMode::Bubble   => PermissionMode::Bubble,
+            AgentPermissionMode::Isolated => PermissionMode::Default,    // isolated == default rule engine, just no inheritance
+            AgentPermissionMode::Auto     => PermissionMode::Auto,
+            AgentPermissionMode::Plan     => PermissionMode::Plan,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentSource { BuiltIn, UserDefined, Project, Plugin, PolicySettings }
@@ -2015,35 +2159,53 @@ pub struct StateMachinePool {
 
 pub struct StateMachineSlot {
     pub agent_id: AgentId,
-    pub state: ConversationState,
+    /// Sender into the subagent's inbound event channel. Receiver is owned
+    /// exclusively by the spawned SM task — `mpsc::Receiver` is not `Clone`,
+    /// so it cannot live both here and in the task.
     pub event_tx: EventSender,
-    pub event_rx: EventReceiver,
+    /// Last observed state, mirrored from the task's `SubagentProgress`
+    /// effect. Treated as read-only metadata; the task is the source of truth.
+    pub state_mirror: ConversationState,
     pub task: BackgroundTaskHandle,
 }
 
 impl StateMachinePool {
+    /// Returns `(agent_id, caller_rx)`. `caller_rx` is the stream of events the
+    /// subagent emits back to the parent; the parent sends events into the
+    /// subagent via `SendMessageToSubagent` effect → `event_tx` in the slot.
     pub async fn allocate(&self, ctx: SubagentContext) -> Result<(AgentId, EventReceiver), Error> {
         let mut slots = self.slots.write().await;
         if slots.len() >= self.max_concurrent { return Err(Error::TooManyAgents); }
         let agent_id = ctx.agent_id.clone();
-        let (event_tx, event_rx) = mpsc::channel(100);
-        let (caller_tx, caller_rx) = mpsc::channel(100);
+        let (event_tx, event_rx) = mpsc::channel(100);     // parent → subagent (rx moved into task)
+        let (caller_tx, caller_rx) = mpsc::channel(100);   // subagent → parent (rx returned)
         let task = self.runtime.spawn(
             "subagent-state-machine",
-            Box::pin(run_conversation_state_machine(ctx, event_tx, caller_tx)),
+            Box::pin(run_conversation_state_machine(ctx, event_rx, caller_tx)),
         ).await?;
         slots.insert(agent_id.clone(), StateMachineSlot {
             agent_id: agent_id.clone(),
-            state: ConversationState::initial(),
-            event_tx: event_tx.clone(),
-            event_rx,
+            event_tx,
+            state_mirror: ConversationState::initial(),
             task,
         });
         Ok((agent_id, caller_rx))
     }
-    pub async fn deallocate(&self, agent_id: &AgentId) { ... }
+
+    /// Cancels the spawned SM task and removes the slot. Idempotent.
+    pub async fn deallocate(&self, agent_id: &AgentId) -> Result<(), Error> {
+        let Some(slot) = self.slots.write().await.remove(agent_id) else { return Ok(()); };
+        self.runtime.cancel(&slot.task).await.ok();
+        // event_tx drops here, closing the inbound channel; subagent loop sees None and exits.
+        Ok(())
+    }
 }
 ```
+
+**Channel ownership invariants** (enforced by compile errors if violated):
+1. `event_rx` (parent → subagent) is moved into `run_conversation_state_machine`. The slot holds only `event_tx`.
+2. `caller_rx` (subagent → parent) is returned from `allocate` to the caller, never held in the pool.
+3. `task` handle in the slot is used only for cancellation; the SM task itself is the sole owner of conversation state. The slot's `state_mirror` is a cache updated from `SubagentProgress` effects and must never be consulted for correctness.
 
 **Rationale for effect delegation over nested SM**:
 - Stack space: 5-deep fork chain × SM size avoided
@@ -2109,23 +2271,52 @@ pub enum WorktreeRequirement {
 }
 
 impl WorktreeManager {
+    /// Returns either a created worktree or a typed `Degraded` outcome that
+    /// records *why* no worktree was created. The previous combinator chain
+    /// (`.ok().map(Some).ok_or(...).or(Ok(None))`) collapsed all failures
+    /// into `Ok(None)` and lost the reason. (C3 fix.)
     pub async fn create_worktree_or_degrade(
         &self,
         requirement: WorktreeRequirement,
         slug: &str,
-    ) -> Result<Option<WorktreeHandle>, WorktreeError> {
+    ) -> Result<WorktreeOutcome, WorktreeError> {
         match (requirement, self.is_supported()) {
-            (WorktreeRequirement::Required, false) => Err(WorktreeError::Unsupported),
-            (WorktreeRequirement::Required, true) => Ok(Some(self.create_worktree(slug, None, &[]).await?)),
-            (WorktreeRequirement::Optional, true) => {
-                self.create_worktree(slug, None, &[]).await.ok().map(Some).ok_or(WorktreeError::Degraded)
-                    .or(Ok(None))  // graceful fall-through
-            }
-            (WorktreeRequirement::Optional, false) | (WorktreeRequirement::None, _) => Ok(None),
+            (WorktreeRequirement::Required, false) =>
+                Err(WorktreeError::Unsupported),
+            (WorktreeRequirement::Required, true) =>
+                Ok(WorktreeOutcome::Created(self.create_worktree(slug, None, &[]).await?)),
+            (WorktreeRequirement::Optional, true) =>
+                match self.create_worktree(slug, None, &[]).await {
+                    Ok(h) => Ok(WorktreeOutcome::Created(h)),
+                    Err(e) => Ok(WorktreeOutcome::Degraded(DegradationReason::CreationFailed(e.to_string()))),
+                },
+            (WorktreeRequirement::Optional, false) =>
+                Ok(WorktreeOutcome::Degraded(DegradationReason::PlatformUnsupported)),
+            (WorktreeRequirement::None, _) =>
+                Ok(WorktreeOutcome::NotRequested),
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub enum WorktreeOutcome {
+    Created(WorktreeHandle),
+    Degraded(DegradationReason),               // agent ran in-place; reason recorded
+    NotRequested,                              // requirement was None
+}
+
+#[derive(Debug, Clone)]
+pub enum DegradationReason {
+    PlatformUnsupported,                       // e.g. mobile, no git
+    CreationFailed(String),                    // git error, disk full, etc.
+}
 ```
+
+Callers (§10 `create_subagent_context`) record the reason on the
+`SubagentContext`. `LocalAgentTaskState` (§11) gains a
+`worktree_outcome: WorktreeOutcome` field so the task UI / transcript can
+explain "this agent ran in-place because git worktree creation failed: ..."
+instead of silently degrading.
 
 ### 10.8 Agent Tool Resolver
 
@@ -2291,15 +2482,29 @@ impl TaskType {
     }
 }
 
+/// Task IDs use a uniform alphabet sampler (rejection sampling), not
+/// `byte % 36`. The original `bytes[i] % 36` had modulo bias: only 252
+/// of the 256 input values map to a clean 36-bucket distribution; the
+/// remaining 4 inflate the first 4 buckets. With 8 characters the bias is
+/// small but the "2.8 trillion" math implied a *uniform* sampler. The new
+/// implementation is uniform AND grep-able, and the comment honestly
+/// describes the IDs as collision-resistant for ergonomics, not for
+/// security. (C4 fix.)
 pub fn generate_task_id(task_type: TaskType) -> String {
+    use rand::distributions::{Distribution, Uniform};
     let prefix = task_type.id_prefix();
-    let bytes = rand::random::<[u8; 8]>();
-    let suffix: String = bytes.iter().map(|b| TASK_ID_ALPHABET[(*b as usize) % 36] as char).collect();
+    let dist = Uniform::from(0..TASK_ID_ALPHABET.len());
+    let mut rng = rand::thread_rng();
+    let suffix: String = (0..8)
+        .map(|_| TASK_ID_ALPHABET[dist.sample(&mut rng)] as char)
+        .collect();
     format!("{}{}", prefix, suffix)
 }
 
 const TASK_ID_ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-// 36^8 ≈ 2.8 trillion combinations
+// 36^8 ≈ 2.8 × 10^12 keys, uniform. Birthday-paradox collision at ~1.7 × 10^6
+// concurrent IDs (≈50% chance). Sufficient for non-adversarial ergonomics;
+// not a security primitive.
 ```
 
 ### 11.2 TaskStatus & TaskState
@@ -2443,12 +2648,32 @@ pub struct TaskOutputManager {
 
 impl TaskOutputManager {
     pub async fn allocate(&self, task_id: &str) -> Result<PathBuf, TaskError> { ... }
-    pub async fn init_as_symlink(&self, task_id: &str, target: &Path) -> Result<(), TaskError> { ... }
+    /// `target` MUST be contained in `self.allowed_root`. The implementation
+    /// canonicalizes `target` (resolving symlinks) and rejects any path that
+    /// escapes the root. Without this check a caller could request a symlink
+    /// pointing at `/etc/passwd` and then "read" it through the task API,
+    /// bypassing §14 permission gates. (D8 fix.)
+    pub async fn init_as_symlink(&self, task_id: &str, target: &Path) -> Result<(), TaskError> {
+        let canonical = std::fs::canonicalize(target).map_err(TaskError::from)?;
+        if !canonical.starts_with(&self.allowed_root) {
+            return Err(TaskError::PathOutsideAllowedRoot {
+                requested: target.into(),
+                resolved: canonical,
+                allowed_root: self.allowed_root.clone(),
+            });
+        }
+        // Proceed to create the symlink.
+        ...
+    }
     pub async fn read(&self, output_file: &Path, opts: OutputOptions) -> Result<TaskOutput, TaskError> { ... }
     pub async fn append(&self, output_file: &Path, chunk: &str) -> Result<(), TaskError> { ... }
     pub async fn evict(&self, output_file: &Path) -> Result<(), TaskError> { ... }
 }
 ```
+
+`allowed_root` is set at `TaskOutputManager` construction to the per-project
+task output directory (`~/.claude/tasks/{project_hash}/output/`). Tasks
+cannot link outputs outside that subtree.
 
 ### 11.6 Task Notification Injection
 
@@ -2578,9 +2803,23 @@ pub enum WorkerStatus {
 ```rust
 pub struct TeammateMailbox {
     pub agent_id: AgentId,
+    /// Bounded inbox; the previous unbounded `VecDeque` let a runaway worker
+    /// OOM the coordinator. (B9 fix.)
     inbox: Arc<Mutex<VecDeque<TeammateMessage>>>,
+    max_depth: usize,                          // default 1024
+    overflow_policy: MailboxOverflow,          // default DropOldestWithWarning
     waker: Arc<Notify>,
     closed: AtomicBool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum MailboxOverflow {
+    /// Drop the oldest message and emit a §26 telemetry event so the user
+    /// can see their coordinator is being flooded.
+    DropOldestWithWarning,
+    /// Reject the new message; deliver returns Err(MailboxError::Full).
+    /// Used when senders must observe backpressure (rare).
+    Reject,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2603,11 +2842,24 @@ impl TeammateMailbox {
 
 pub struct MailboxRouter {
     mailboxes: RwLock<HashMap<AgentId, Arc<TeammateMailbox>>>,
+    /// Pending messages addressed to an agent whose mailbox has not been
+    /// registered yet. Drained into the mailbox at registration time.
+    /// Bounded; older orphans are evicted under the same overflow policy.
+    pending: RwLock<HashMap<AgentId, VecDeque<TeammateMessage>>>,
+    max_pending_per_agent: usize,
 }
 
 impl MailboxRouter {
-    pub fn register(&self, agent_id: AgentId, mailbox: Arc<TeammateMailbox>) { ... }
-    pub async fn route(&self, to: &AgentId, msg: TeammateMessage) -> Result<(), MailboxError> { ... }
+    pub fn register(&self, agent_id: AgentId, mailbox: Arc<TeammateMailbox>) {
+        // Drain any orphan messages queued before registration so early-send
+        // races are not silently dropped (per review note on §12 router race).
+        ...
+    }
+    pub async fn route(&self, to: &AgentId, msg: TeammateMessage) -> Result<(), MailboxError> {
+        // Hot path: forward to mailbox. Cold path (no mailbox yet): queue in
+        // `pending` up to `max_pending_per_agent`, then deliver on register.
+        ...
+    }
 }
 ```
 
@@ -2623,8 +2875,15 @@ impl Tool for SyntheticOutputTool {
         // Inject into coordinator conversation
         ...
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool { true }
-    fn is_read_only(&self, _: &Value) -> bool { true }
+    // This tool **writes into another agent's conversation history**, so it
+    // is neither concurrency-safe nor read-only — calling it concurrently
+    // would race the target's transcript, and treating it as read-only would
+    // make §14 skip permission checks. (D7 fix.) The coordinator must
+    // explicitly authorize each synthetic output the same way it authorizes
+    // a tool result injection.
+    fn is_concurrency_safe(&self, _: &Value) -> bool { false }
+    fn is_read_only(&self, _: &Value) -> bool { false }
+    fn is_destructive(&self, _: &Value) -> bool { true }
 }
 ```
 
@@ -2772,9 +3031,19 @@ impl CachedMicrocompactor {
 
 ### 13.6 Autocompactor
 
+Compaction API calls **count against the user's budget** (D4). The
+Autocompactor records its own `Usage` to §17 `CostTracker` with a
+distinguishing `ModelRef` (the compaction model alias) and a `QuerySource::Compaction`
+tag, so users can see what their compaction overhead is. Budget exceed
+during compaction does NOT halt compaction itself — that would leave the
+session unable to recover from PTL — but the post-compaction
+`check_post_api_call` reconciliation latches `realized_exceeded` so the
+*next* user-driven API call is gated per policy.
+
 ```rust
 pub struct Autocompactor {
     config: AutocompactConfig,
+    cost_tracker: Arc<CostTracker>,            // (D4 fix)
 }
 
 impl Autocompactor {
@@ -2789,6 +3058,12 @@ impl Autocompactor {
         let groups = group_messages_by_api_round(&stripped);
         let request = build_compact_request(&stripped, &self.config);
         let response = self.compact_with_retries(request, &groups, api_client).await?;
+        // Charge compaction's usage to the session budget (D4 fix). Run loop
+        // sees the resulting CostState change via Event::CostRecorded.
+        self.cost_tracker
+            .record_api_response(self.config.model_ref.clone(), response.usage, 0, 0)
+            .await
+            .ok();
         let summary = extract_summary_from_response(&response);
         let session_memory = try_session_memory_compaction(&response, &stripped);
         let post_compact = PostCompactBuilder::build(summary, &stripped, session_memory).await?;
@@ -2802,12 +3077,24 @@ impl Autocompactor {
             hook_results: post_compact.hook_results,
         })
     }
-    async fn compact_with_retries(&self, mut request: MessageRequest, groups: &[ApiRoundGroup], api_client: &dyn ApiClient) -> Result<MessageResponse, CompactionError> {
+    async fn compact_with_retries(&self, mut request: MessageRequest, initial_groups: &[ApiRoundGroup], api_client: &dyn ApiClient) -> Result<MessageResponse, CompactionError> {
+        // `groups` is recomputed each retry. The original code passed the
+        // initial `groups` straight through to every iteration, but after the
+        // first truncation the message vector is shorter and the saved group
+        // offsets point at the wrong messages, so the next truncation may
+        // slice across an API-round boundary. (C5 fix.)
+        let mut groups: Vec<ApiRoundGroup> = initial_groups.to_vec();
+        // Token-gap estimates undershoot in practice; ask for a 20% margin so
+        // we don't immediately PTL again. (Related to §13's token-gap concern.)
+        const PTL_MARGIN_PCT: u64 = 20;
         for _attempt in 0..compaction_thresholds::MAX_PTL_RETRIES {
             match api_client.send(request.clone()).await {
                 Ok(response) => return Ok(response),
-                Err(ApiError::PromptTooLong { token_gap, response }) => {
-                    request.messages = truncate_head_for_ptl_retry(request.messages, token_gap, groups)?;
+                Err(ApiError::PromptTooLong { token_gap, response: _ }) => {
+                    let target_gap = token_gap.saturating_mul(100 + PTL_MARGIN_PCT) / 100;
+                    request.messages = truncate_head_for_ptl_retry(request.messages, target_gap, &groups)?;
+                    // Recompute group offsets against the new message vector.
+                    groups = group_messages_by_api_round(&request.messages);
                 }
                 Err(e) => return Err(CompactionError::Api(e)),
             }
@@ -2984,12 +3271,40 @@ pub enum PermissionMode {
     BypassPermissions,
     /// No prompts: matched=allow/deny, no match=deny
     DontAsk,
-    // Internal-only modes
+    // Agent-scoped modes (legal only when set via agent frontmatter, never from
+    // user/project/CLI settings; loader enforces this — see §10.2
+    // `AgentPermissionMode::to_runtime`).
     /// Subagent only: bubble permission prompts up to parent terminal.
-    /// Not accepted in settings/CLI validation.
     Bubble,
     /// Auto mode (transcript classifier feature-gated; not always runtime-valid)
     Auto,
+}
+
+/// Sources from which a `PermissionMode` may legally arrive at the engine.
+/// Loader validation rejects modes that arrive from a disallowed source — e.g.
+/// a `settings.json` setting `"permission_mode": "bubble"` is rejected, while
+/// the same value in an agent frontmatter is mapped via
+/// `AgentPermissionMode::to_runtime` (§10.2).
+pub enum PermissionModeSource {
+    UserSettings,
+    ProjectSettings,
+    PolicySettings,
+    Cli,
+    AgentFrontmatter,
+    Session,
+}
+
+impl PermissionMode {
+    /// Returns the modes that are legal for a given source. Bubble/Auto are
+    /// agent-scoped; the others are user-addressable.
+    pub fn legal_for(source: PermissionModeSource) -> &'static [PermissionMode] {
+        use PermissionMode::*;
+        match source {
+            PermissionModeSource::AgentFrontmatter =>
+                &[Default, Plan, AcceptEdits, BypassPermissions, DontAsk, Bubble, Auto],
+            _ => &[Default, Plan, AcceptEdits, BypassPermissions, DontAsk],
+        }
+    }
 }
 ```
 
@@ -3279,19 +3594,56 @@ pub enum PluginSource {
     BuiltIn,
     OfficialMarketplace { name: String },
     Marketplace { url: String, name: String },
-    Git { url: String, ref_: String },
+    /// Arbitrary git URL. Loader pins `ref_` to a commit SHA (not a branch/tag
+    /// that can be moved); on first install the resolved SHA is stored in the
+    /// manifest and re-fetches must match.
+    Git { url: String, ref_: GitRefPin },
     LocalPath { path: PathBuf },
-    /// MCPB = MCP Bundle (zip format with manifest + assets)
-    Mcpb { path: PathBuf, hash: String },
+    /// MCP Bundle (zip). `sha256` is computed over the entire archive; loader
+    /// rejects bundles whose hash does not match. The algorithm is pinned;
+    /// future algorithms add a new variant rather than mutating this one.
+    Mcpb { path: PathBuf, sha256: [u8; 32] },
+}
+
+/// A git ref pin always carries the resolved commit SHA, even when the
+/// install command was `--ref main`. The plain ref name is kept only for UX
+/// display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRefPin {
+    pub display_ref: String,
+    pub commit_sha: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PluginTrustLevel {
     AdminTrusted,   // bundled / enterprise / official marketplace
     UserTrusted,    // user-installed marketplace plugin
-    Untrusted,      // untrusted source (random git url)
+    Untrusted,      // default for git / local-path; explicit user upgrade required
+}
+
+impl PluginSource {
+    /// **Default-deny trust assignment** at first sight. Arbitrary git URLs
+    /// and local paths are `Untrusted`; the user must explicitly upgrade via
+    /// `MarketplaceManager::elevate_trust(plugin_id)` after reviewing the
+    /// plugin contents. This is the reverse of the prior default which
+    /// granted `UserTrusted` to any git URL.
+    pub fn default_trust(&self) -> PluginTrustLevel {
+        match self {
+            PluginSource::BuiltIn => PluginTrustLevel::AdminTrusted,
+            PluginSource::OfficialMarketplace { .. } => PluginTrustLevel::AdminTrusted,
+            PluginSource::Marketplace { .. } => PluginTrustLevel::UserTrusted,
+            PluginSource::Git { .. }
+            | PluginSource::LocalPath { .. }
+            | PluginSource::Mcpb { .. } => PluginTrustLevel::Untrusted,
+        }
+    }
 }
 ```
+
+Untrusted plugins:
+- have all hooks, MCP servers, and slash commands **disabled** until elevated;
+- may still register read-only Skills (which themselves go through §14
+  permission gates per tool call).
 
 ### 15.2 Plugin Lifecycle
 
@@ -3340,35 +3692,45 @@ impl PluginManager {
     pub async fn reload(&self, id: &PluginId) -> Result<(), PluginError> { ... }
 
     /// Load plugin → materialize all declared Claude Code components.
+    /// **Atomic**: components are staged, validated, then committed in one
+    /// pass under a single `PluginCommitGuard`. Any staging failure rolls
+    /// back the entire set so we can't end up with half a plugin loaded.
+    /// (Plugin atomicity issue from review.)
     async fn load_plugin(&self, manifest: &PluginManifest, install_dir: &Path) -> Result<(), PluginError> {
         let resolved_config = resolve_user_config(manifest, &*self.credential_manager).await?;
 
-        let commands = load_plugin_commands(install_dir, &resolved_config).await?;
-        self.command_registry.write().await.register_plugin_commands(manifest.id.clone(), commands);
+        // ── Stage 1: parse + validate (no registry writes yet) ──
+        // Each loader returns a `Staged<T>` that owns parsed values plus the
+        // validation context needed for commit. Validation rejects:
+        //   - plugin-agent frontmatter that sets fields it must not (D2 fix:
+        //     `permission_mode`, `hooks`, `mcp_servers` on a plugin agent are
+        //     rejected here; legal sources for those fields are listed in
+        //     §14.1 `PermissionMode::legal_for`). Plugin manifests grant
+        //     those privileges declaratively instead.
+        //   - untrusted plugins requesting active components (hooks, MCP,
+        //     commands) — see `PluginSource::default_trust`.
+        let staged_commands     = stage_plugin_commands(install_dir, &resolved_config).await?;
+        let staged_agents       = stage_plugin_agents(install_dir, manifest)?;          // enforces D2
+        let staged_skills       = stage_plugin_skills(install_dir).await?;
+        let staged_hooks        = stage_plugin_hooks(install_dir, &resolved_config, manifest)?;
+        let staged_styles       = stage_plugin_output_styles(install_dir).await?;
+        let staged_mcp_servers  = stage_plugin_mcp_servers(install_dir, &resolved_config, manifest)?;
+        let staged_lsp_servers  = stage_plugin_lsp_servers(install_dir, &resolved_config).await?;
+        let staged_channels     = stage_plugin_channels(manifest, &resolved_config).await?;
 
-        let agents = load_plugin_agents(install_dir).await?;
-        self.agent_registry.write().await.register_plugin_agents(manifest.id.clone(), agents);
-
-        let skills = load_plugin_skills(install_dir).await?;
-        self.skill_registry.write().await.register_plugin_skills(manifest.id.clone(), skills);
-
-        let hooks = load_plugin_hooks(install_dir, &resolved_config).await?;
-        self.hook_registry.write().await.register_plugin_hooks(manifest.id.clone(), hooks);
-
-        let output_styles = load_plugin_output_styles(install_dir).await?;
-        self.output_style_registry.write().await.register_plugin_output_styles(manifest.id.clone(), output_styles);
-
-        let servers = load_plugin_mcp_servers(install_dir, &resolved_config).await?;
-        for server in servers {
-            self.mcp_registry.write().await.register_plugin_server(manifest.id.clone(), server).await?;
-        }
-
-        let lsp_servers = load_plugin_lsp_servers(install_dir, &resolved_config).await?;
-        self.lsp_registry.write().await.register_plugin_servers(manifest.id.clone(), lsp_servers).await?;
-
-        let channels = load_plugin_channels(manifest, &resolved_config).await?;
-        self.channel_registry.write().await.register_plugin_channels(manifest.id.clone(), channels);
-
+        // ── Stage 2: commit under a guard. If any commit fails, the guard
+        // unregisters everything committed so far in this call before
+        // returning the error. The guard's Drop is also unwind-safe.
+        let mut guard = PluginCommitGuard::new(manifest.id.clone());
+        guard.commit_commands(&self.command_registry, staged_commands).await?;
+        guard.commit_agents(&self.agent_registry, staged_agents).await?;
+        guard.commit_skills(&self.skill_registry, staged_skills).await?;
+        guard.commit_hooks(&self.hook_registry, staged_hooks).await?;
+        guard.commit_output_styles(&self.output_style_registry, staged_styles).await?;
+        guard.commit_mcp_servers(&self.mcp_registry, staged_mcp_servers).await?;
+        guard.commit_lsp_servers(&self.lsp_registry, staged_lsp_servers).await?;
+        guard.commit_channels(&self.channel_registry, staged_channels).await?;
+        guard.disarm();                        // success — rollback no longer needed
         Ok(())
     }
 
@@ -3566,31 +3928,72 @@ pub enum SecureStorageBackend {
 
 ### 16.2 Secret<T> Newtype (Anti-Leak, defined in lingxi-protocol)
 
+`Secret<T>` is a **thin wrapper around `secrecy::SecretBox<T>`** (`secrecy` crate,
+already in `lingxi-protocol` deps). We do not reinvent the type because doing
+so without `Zeroize`-on-drop and without `CloneableSecret` discipline is
+exactly the footgun the original review flagged. The wrapper exists to:
+
+- pin a project-wide name and import path (so call sites grep cleanly);
+- prevent any future contributor from deriving `Clone` casually (`Secret<T>`
+  itself is **not** `Clone` — callers must explicitly use `Arc<Secret<T>>` to
+  share without copying, or `.clone_secret()` which goes through
+  `CloneableSecret` and copies the buffer that will be zeroized on drop);
+- centralize the `Debug`/`Display`/`Serialize` redaction.
+
 ```rust
-/// Newtype prevents accidental Debug/Display leaks in logs, error messages,
-/// or transcripts. Only `expose_secret()` exposes the raw value, making
-/// secret access grep-able during code review.
-#[derive(Clone)]
-pub struct Secret<T>(T);
+use secrecy::{SecretBox, ExposeSecret, CloneableSecret, Zeroize};
 
-impl<T> std::fmt::Debug for Secret<T> {
+/// Wrapper around `secrecy::SecretBox<T>`. The inner buffer is zeroized on
+/// drop. `T` must implement `Zeroize` (Rust string types via the `zeroize`
+/// crate, byte vectors, integer types, and any of our own types deriving
+/// `Zeroize`).
+#[derive(Debug)]                                         // delegates to SecretBox's "[REDACTED]" Debug
+pub struct Secret<T: Zeroize>(SecretBox<T>);
+
+impl<T: Zeroize> Secret<T> {
+    pub fn new(value: T) -> Self { Self(SecretBox::new(Box::new(value))) }
+
+    /// Grep-able accessor; every call site must be auditable. Returns a
+    /// reference — never a copy. Use `.expose_secret().clone()` only at the
+    /// final egress boundary (HTTP header, env spawn, keychain write).
+    pub fn expose_secret(&self) -> &T { self.0.expose_secret() }
+}
+
+// Display delegates to Debug so println!("{}", secret) prints "[REDACTED]" too.
+impl<T: Zeroize> std::fmt::Display for Secret<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<redacted>")
+        write!(f, "[REDACTED]")
     }
 }
 
-impl<T> std::fmt::Display for Secret<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<redacted>")
+// Serde: secrets serialize as the redaction placeholder. Persistence goes
+// through SecureStorage, not serde; if a secret hits `serde_json::to_string`
+// we want it to fail closed.
+impl<T: Zeroize> serde::Serialize for Secret<T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str("[REDACTED]")
     }
 }
 
-impl<T> Secret<T> {
-    pub fn new(value: T) -> Self { Self(value) }
-    /// The only way to get the raw value — code review must flag every call site
-    pub fn expose_secret(&self) -> &T { &self.0 }
+// `Secret<T>` is intentionally NOT `Clone`. To share, wrap in `Arc`:
+//     let shared: Arc<Secret<String>> = Arc::new(Secret::new(s));
+// To copy into a new zeroizing buffer (rare; e.g. handing to FFI), use:
+impl<T: Zeroize + CloneableSecret> Secret<T> {
+    pub fn clone_secret(&self) -> Self { Self(self.0.clone()) }
 }
 ```
+
+**Memory hygiene caveats** (documented so reviewers don't over-trust the type):
+
+- `Zeroize` guarantees the *known buffer* is wiped on drop. It cannot wipe
+  values that the OS swapped to disk, copied into a kernel pipe, or that the
+  allocator already returned to a free-list page. `mlock` is **not** used by
+  default (mobile platforms have small mlock budgets); callers needing
+  defense-in-depth can wrap in `secrecy::mlock::SecretSlice` on Linux/macOS.
+- `T: Clone` exposed to callers via `clone_secret` still copies the buffer;
+  the only safe form of cheap sharing is `Arc<Secret<T>>`.
+- Cached secrets in `CredentialManager` (§16.3) live in `Arc<Secret<...>>`,
+  so a single buffer is zeroized when the last reference drops.
 
 ### 16.3 CredentialManager
 
@@ -3955,39 +4358,89 @@ pub struct ModelUsage {
 pub struct CostTracker {
     state: Arc<RwLock<CostState>>,
     catalog: Arc<PricingCatalog>,
-    /// Persistence to .claude/project-config.json
-    persist_fn: Arc<dyn Fn(&CostState) + Send + Sync>,
+    /// Persistence is sequenced through a single-writer task; callers send a
+    /// `CostState` snapshot via this channel rather than calling the persist
+    /// function directly. This guarantees the order of writes to disk matches
+    /// the order of state mutations, even under interleaved `record_api_response`
+    /// calls (B2 fix: the previous design dropped the write lock before
+    /// snapshotting, allowing a later mutation's snapshot to be persisted
+    /// first).
+    persist_tx: mpsc::Sender<PersistJob>,
+    /// Schema version for `CostState` on disk. Bumped on any breaking change;
+    /// readers handle older versions or refuse to load.
+    schema_version: u32,
+}
+
+struct PersistJob {
+    sequence: u64,                              // monotonic; recovery skips stale jobs
+    state: CostState,
+    schema_version: u32,
 }
 
 impl CostTracker {
+    pub fn new(
+        catalog: Arc<PricingCatalog>,
+        persist_fn: Arc<dyn Fn(&CostState, u32) + Send + Sync>,
+        runtime: &dyn RuntimeSpawner,
+    ) -> Arc<Self> {
+        let (tx, mut rx) = mpsc::channel::<PersistJob>(64);
+        let state = Arc::new(RwLock::new(CostState::default()));
+        let me = Arc::new(Self { state, catalog, persist_tx: tx, schema_version: CURRENT_COST_SCHEMA });
+        // Single-writer persistence task; serializes disk writes by sequence.
+        runtime.spawn("cost-persist", Box::pin(async move {
+            let mut last_seq = 0u64;
+            while let Some(job) = rx.recv().await {
+                if job.sequence <= last_seq { continue; }     // skip stale snapshots
+                last_seq = job.sequence;
+                persist_fn(&job.state, job.schema_version);
+            }
+        })).await.expect("persist worker");
+        me
+    }
+
     pub async fn record_api_response(&self, model_ref: ModelRef, usage: Usage, duration_ms: u64, retries: u32) -> Result<(), CostError> {
         let (pricing, pricing_resolution) = self.catalog.resolve(&model_ref, &usage)?;
         let cost_nano_usd = CostCalculator::calculate_nano_usd(&usage, &pricing);
-        let mut state = self.state.write().await;
-        state.total_nano_usd += cost_nano_usd;
-        state.total_api_duration_ms += duration_ms;
-        if retries == 0 {
-            state.total_api_duration_without_retries_ms += duration_ms;
-        }
-        let model_usage = state.per_model_usage
-            .entry(model_ref.clone())
-            .or_insert_with(|| ModelUsage {
-                model_ref: model_ref.clone(),
-                usage: Usage::default(),
-                cost_nano_usd: 0,
-                context_window: 0,
-                max_output_tokens: 0,
-            });
-        model_usage.usage.add(&usage);
-        model_usage.cost_nano_usd += cost_nano_usd;
-        if let PricingResolution::UnpricedModel { requested } = pricing_resolution {
-            state.unpriced_models.insert(requested);
-        }
-        if let Some(s) = usage.server_tool_use {
-            state.total_web_search_requests += s.web_search_requests;
-        }
-        drop(state);
-        (self.persist_fn)(&self.snapshot().await);
+        // The snapshot is taken INSIDE the write lock and queued before
+        // releasing — that pairs each state mutation with the exact snapshot
+        // it produced, in order.
+        let (snapshot, sequence) = {
+            let mut state = self.state.write().await;
+            // Saturating arithmetic so a malformed pricing/usage entry cannot
+            // wrap a u64 silently (C2 fix).
+            state.total_nano_usd = state.total_nano_usd.saturating_add(cost_nano_usd);
+            state.total_api_duration_ms = state.total_api_duration_ms.saturating_add(duration_ms);
+            if retries == 0 {
+                state.total_api_duration_without_retries_ms =
+                    state.total_api_duration_without_retries_ms.saturating_add(duration_ms);
+            }
+            let model_usage = state.per_model_usage
+                .entry(model_ref.clone())
+                .or_insert_with(|| ModelUsage {
+                    model_ref: model_ref.clone(),
+                    usage: Usage::default(),
+                    cost_nano_usd: 0,
+                    context_window: 0,
+                    max_output_tokens: 0,
+                });
+            model_usage.usage.add(&usage);
+            model_usage.cost_nano_usd = model_usage.cost_nano_usd.saturating_add(cost_nano_usd);
+            if let PricingResolution::UnpricedModel { requested } = pricing_resolution {
+                state.unpriced_models.insert(requested);
+            }
+            if let Some(s) = usage.server_tool_use {
+                state.total_web_search_requests = state.total_web_search_requests.saturating_add(s.web_search_requests);
+            }
+            state.sequence += 1;
+            (state.clone(), state.sequence)
+        };
+        // Send is sync-fast (bounded channel; drops oldest if full); persistence
+        // is best-effort and the run loop never blocks waiting for disk.
+        let _ = self.persist_tx.send(PersistJob {
+            sequence,
+            state: snapshot,
+            schema_version: self.schema_version,
+        }).await;
         Ok(())
     }
 
@@ -3995,7 +4448,14 @@ impl CostTracker {
     pub async fn snapshot(&self) -> CostState { self.state.read().await.clone() }
     pub async fn reset(&self) { *self.state.write().await = CostState::default(); }
 }
+
+pub const CURRENT_COST_SCHEMA: u32 = 1;
 ```
+
+`CostState` gains a `sequence: u64` field so the persistence task can detect
+out-of-order jobs and skip stale ones. Readers loading a newer
+`schema_version` than they understand MUST refuse to load and surface a
+"please upgrade" error rather than silently dropping fields.
 
 ### 17.5 Budget Enforcement
 
@@ -4016,12 +4476,28 @@ pub struct BudgetEnforcer {
     config: BudgetConfig,
     cost_tracker: Arc<CostTracker>,
     warnings_fired: Arc<RwLock<HashSet<u32>>>,
+    /// Latched once realized cost exceeds the session limit so that future
+    /// calls cannot keep slipping under by under-estimating per-call cost.
+    realized_exceeded: AtomicBool,
 }
 
 impl BudgetEnforcer {
+    /// Pre-API gate. `estimated_cost_nano_usd` is the caller's best estimate; cost is
+    /// reconciled post-response by `check_post_api_call`, which latches `realized_exceeded`.
     pub async fn check_pre_api_call(&self, estimated_cost_nano_usd: u64) -> BudgetCheckResult {
+        // Hard latch: once realized > limit, every subsequent pre-call is refused per policy.
+        if self.realized_exceeded.load(Ordering::Acquire) {
+            let current = self.cost_tracker.total_nano_usd().await;
+            let limit = self.config.max_session_nano_usd.unwrap_or(u64::MAX);
+            return match self.config.on_exceed {
+                BudgetExceedPolicy::Halt    => BudgetCheckResult::Halt    { current, limit },
+                BudgetExceedPolicy::AskUser => BudgetCheckResult::AskUser { current, limit },
+                BudgetExceedPolicy::WarnOnly => BudgetCheckResult::Warn   { current, limit },
+            };
+        }
         let current = self.cost_tracker.total_nano_usd().await;
-        let after = current + estimated_cost_nano_usd;
+        // Use checked_add so an estimate near u64::MAX cannot silently wrap.
+        let after = current.checked_add(estimated_cost_nano_usd).unwrap_or(u64::MAX);
         if let Some(max) = self.config.max_session_nano_usd {
             if after > max {
                 return match self.config.on_exceed {
@@ -4030,10 +4506,12 @@ impl BudgetEnforcer {
                     BudgetExceedPolicy::WarnOnly => BudgetCheckResult::Warn { current, limit: max },
                 };
             }
+            // ⚠ Bug fix (C1): u64/u64 integer division is 0 whenever after < max,
+            // so the threshold comparison never fired. Cast to f64 for the ratio.
+            let ratio = (after as f64) / (max as f64);
             for &threshold in &self.config.warning_thresholds {
-                let ratio = after / max;
                 if ratio >= threshold {
-                    let pct = (threshold * 100.0) as u32;
+                    let pct = (threshold * 100.0).round() as u32;
                     if self.warnings_fired.write().await.insert(pct) {
                         return BudgetCheckResult::ThresholdWarning { pct, current, limit: max };
                     }
@@ -4041,6 +4519,17 @@ impl BudgetEnforcer {
             }
         }
         BudgetCheckResult::Ok
+    }
+
+    /// Post-API reconciliation. Called from the run loop on `CostRecorded`; flips the
+    /// latch when realized usage crosses the session limit so a runaway loop that
+    /// under-estimates per-call cost cannot keep slipping under `check_pre_api_call`.
+    pub async fn check_post_api_call(&self, realized_total_nano_usd: u64) {
+        if let Some(max) = self.config.max_session_nano_usd {
+            if realized_total_nano_usd > max {
+                self.realized_exceeded.store(true, Ordering::Release);
+            }
+        }
     }
 }
 
@@ -4091,7 +4580,14 @@ pub struct SkillFrontmatter {
     pub name: String,
     pub description: String,
     pub when_to_use: Option<String>,
-    pub tools_allowed: Option<Vec<String>>,
+    /// Restrictive (never permission-expanding) whitelist of tool names the
+    /// skill body is allowed to invoke. Intersected with the agent's existing
+    /// tool pool by `AgentToolResolver` (§10.8) before §14 evaluates each call.
+    /// Field name aligned with `AgentDefinition::allowed_tools` (§10.2) and
+    /// `CommandFrontmatter::allowed_tools` (§19.1); the legacy `tools_allowed`
+    /// alias is accepted by the loader and normalized at parse time.
+    #[serde(alias = "tools_allowed")]
+    pub allowed_tools: Option<Vec<String>>,
     pub auto_search: bool,
     pub triggers: Vec<String>,
 }
@@ -4130,17 +4626,31 @@ impl SkillRegistry {
 ### 18.3 SkillTool & Discovery Prefetch
 
 ```rust
-/// Meta-tool: input = skill_name + arguments; execution = forked agent runs the skill content
+/// Meta-tool: input = skill_name + arguments. Skills are **user-visible**
+/// invocations (the model called the Skill tool; the user sees a tool call
+/// in the transcript), so they dispatch through §10's `StateMachinePool` as
+/// a subagent, NOT through §20 `ForkedAgentRunner`. The §20.3 comparison
+/// table is the source of truth: ForkedAgent = invisible, Subagent = visible.
+/// (D5 fix: prior draft routed skills through ForkedAgent, contradicting
+/// §20.3.)
 pub struct SkillTool {
     registry: Arc<RwLock<SkillRegistry>>,
+    pool: Arc<StateMachinePool>,
 }
 
 impl Tool for SkillTool {
     fn name(&self) -> &str { "Skill" }
     async fn call(&self, input: Value, ctx: ToolUseContext, ...) -> Result<ToolCallResult, ToolError> {
         let skill_name = input["name"].as_str().ok_or(ToolError::InvalidInput)?;
-        let skill = self.registry.read().await.get(skill_name).cloned();
-        // Execute via §24 ForkedAgentRunner with skill content as initial prompt
+        let skill = self.registry.read().await.get(skill_name).cloned()
+            .ok_or(ToolError::SkillNotFound { name: skill_name.into() })?;
+        // Build a SubagentContext that:
+        //   - inherits the parent's tool pool intersected with skill.allowed_tools
+        //   - sets permission_mode = Bubble (prompts surface in the parent UI)
+        //   - sets agent_type = "skill:<name>" so the transcript labels it
+        let subagent_ctx = build_skill_subagent_context(&skill, &ctx)?;
+        let (agent_id, mut rx) = self.pool.allocate(subagent_ctx).await?;
+        // The skill runs as a normal subagent; result aggregation matches §10.
         ...
     }
 }
@@ -4158,7 +4668,10 @@ pub struct SkillDiscoveryPrefetch {
 - §7 MCP → mcp_skill_builders derive skills from MCP server tool descriptions
 - §13 Compaction → `POST_COMPACT_SKILLS_TOKEN_BUDGET` re-injects active skills
 - §9 Hooks → `skill_improvement` builtin handler proposes new skills from PostToolUse
-- §24 Side Query / Forked Agent → skill execution runs through ForkedAgent
+- §10 Agent / Subagent → SkillTool spawns a visible subagent via `StateMachinePool`
+- §20 Side Query / Forked Agent → **NOT** used by skills (forked agents are
+  invisible by contract; skills are visible). ForkedAgent stays the
+  mechanism for compaction / memory selection / classifier explanation only.
 
 ---
 
@@ -4200,10 +4713,15 @@ pub enum SlashCommandKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandFrontmatter {
     pub description: String,
-    pub tools_allowed: Option<Vec<String>>,
+    /// Restrictive whitelist of tools the command may invoke. `None` = inherit
+    /// parent context. Field name aligned with `AgentDefinition::allowed_tools`
+    /// (§10.2) and `SkillFrontmatter::allowed_tools` (§18.1). The legacy
+    /// `tools_allowed` alias is accepted by the loader for back-compat but
+    /// normalized to this field at parse time (warn on duplicate).
+    #[serde(alias = "tools_allowed")]
+    pub allowed_tools: Option<Vec<String>>,
     pub model: Option<ModelAlias>,
     pub argument_hints: Vec<ArgumentHint>,
-    pub allowed_tools: Option<Vec<String>>,
     pub thinking: Option<u32>,
 }
 
@@ -4266,20 +4784,22 @@ Slash commands touch nearly every subsystem:
 | `/compact` | §13 Compaction |
 | `/permissions add` | §14 Permission |
 | `/plugin install` | §15 Plugin |
-| `/login` `/logout` | §16 Secret + §34 AnthropicOAuth |
+| `/login` `/logout` | §16 Secret + §30 Anthropic OAuth |
 | `/cost` | §17 Cost |
-| `/resume` | §25 SessionStorage |
-| `/output-style` | §29 OutputStyles |
+| `/resume` | §22 Session Storage & Recovery |
+| `/output-style` | §21 Output Styles |
 | `/mcp` `/agents` `/hooks` `/skills` | per-subsystem registries |
 | `/tasks` | §11 Tasks |
-| `/cron` | §32 CronScheduler |
-| `/ide` | §33 IDE Bridge |
+| `/cron` | §28 Cron Scheduler |
+| `/ide` | §29 IDE Bridge |
 
 ---
 
 ## 20. Side Query & Forked Agent
 
 Shared infrastructure used by §6 (Memory selector), §13 (Compaction), §14 (Classifier explainer), Session memory extraction, and any subsystem needing a side LLM call.
+
+> **See also §10.0** "Three Forms of Agent Run" for the relationship between ForkedAgent and Subagent. ForkedAgent (§20.2) and Subagent (§10) are not redundant — they are different entry points (engine-internal vs model-driven) into the same `StateMachinePool` runtime, with different slot-lifetime policies, event routing, and cache discipline. The hybrid "Fork Subagent" (§10.11) is model-invoked but uses ForkedAgent's byte-exact cache mechanism.
 
 ### 20.1 SideQuery — stateless LLM call
 
@@ -4328,24 +4848,61 @@ pub struct ForkedAgentRunner {
     cache_safe_slot: Arc<CacheSafeParamsSlot>,
 }
 
-/// Byte-exact params for prompt cache hit (Anthropic cache key components)
+/// Byte-exact params for prompt cache hit (Anthropic cache key components).
+/// Every field must serialize **canonically**: timestamps are written as
+/// `SystemTime`'s seconds-since-epoch (not RFC3339 strings, which differ
+/// across locales); IDs are stripped to placeholder before hashing if they
+/// would otherwise vary across runs; HashMap → BTreeMap on the wire so key
+/// order is deterministic.
 #[derive(Debug, Clone)]
 pub struct CacheSafeParams {
     pub system_prompt: SystemPrompt,
-    pub user_context: HashMap<String, String>,
-    pub system_context: HashMap<String, String>,
+    pub user_context: BTreeMap<String, String>,
+    pub system_context: BTreeMap<String, String>,
     pub tool_use_context: ToolUseContext,
     pub fork_context_messages: Vec<ConversationMessage>,
+    /// Hash of the canonicalized representation, computed at `save` time.
+    /// Forks compare this against `slot.current_generation_hash` before
+    /// dispatching; a mismatch means the slot rolled forward while the fork
+    /// was assembling its request, and the fork must re-read.
+    pub generation_hash: [u8; 32],
 }
 
-/// Updated after each turn so post-turn forks can inherit the main loop's cache
+/// Updated after each turn so post-turn forks can inherit the main loop's
+/// cache. Concurrent writes are sequenced through a generation counter:
+/// `save` increments `generation`; forks capture the generation at
+/// `get_last` time and the slot will reject a `save_if_generation_matches`
+/// from a stale caller. (B10 fix: the previous design was last-write-wins
+/// with no detection, silently breaking cache invariants.)
 pub struct CacheSafeParamsSlot {
-    last: Arc<RwLock<Option<CacheSafeParams>>>,
+    inner: Arc<RwLock<CacheSafeParamsSlotInner>>,
+}
+
+struct CacheSafeParamsSlotInner {
+    last: Option<CacheSafeParams>,
+    generation: u64,
 }
 
 impl CacheSafeParamsSlot {
-    pub async fn save(&self, params: CacheSafeParams);
-    pub async fn get_last(&self) -> Option<CacheSafeParams>;
+    /// Unconditional save — used by the main run loop, which is the
+    /// single canonical writer. Returns the new generation.
+    pub async fn save(&self, params: CacheSafeParams) -> u64;
+
+    /// Returns the current params plus the generation tag the caller must
+    /// supply if it later wants to invalidate / replace.
+    pub async fn get_last(&self) -> Option<(CacheSafeParams, u64)>;
+
+    /// Forks should NOT call `save`; they read, run, and discard. This
+    /// helper exists for the rare case where a fork's output must update
+    /// the shared cache (e.g. context-collapse compaction). The save is
+    /// rejected if `expected_generation` does not match.
+    pub async fn save_if_generation_matches(&self, params: CacheSafeParams, expected_generation: u64)
+        -> Result<u64, CacheSlotError>;
+}
+
+#[derive(Debug, Clone)]
+pub enum CacheSlotError {
+    GenerationMismatch { observed: u64, expected: u64 },
 }
 
 #[derive(Debug, Clone)]
@@ -4541,6 +5098,24 @@ pub struct SessionStorage {
 
 impl SessionStorage {
     pub async fn create(&self, metadata: SessionMetadata) -> Result<SessionHandle, StorageError>;
+    /// Append a single transcript entry. Implementation MUST:
+    ///   1. Acquire an `flock(LOCK_EX)` (Unix) or `LockFile` (Windows) on the
+    ///      transcript path. Multiple processes sharing the same JSONL is
+    ///      rejected by the lock — Dropbox-synced session dirs are documented
+    ///      as unsupported.
+    ///   2. Serialize the entry, append a single trailing `\n`, and write the
+    ///      bytes in **one** `write_all` syscall. Lines larger than the
+    ///      platform `PIPE_BUF` (4096 on Linux, much smaller on Windows) must
+    ///      be guarded by the lock, not by atomicity of `write`.
+    ///   3. Call `fsync` (or `FlushFileBuffers` on Windows) every
+    ///      `fsync_every_n_entries` (default: 1 for transcripts). Skipping
+    ///      fsync trades durability for throughput; the run loop's contract
+    ///      is "transcript reflects everything the user saw on screen,"
+    ///      which requires fsync on every entry.
+    ///   4. Release the lock.
+    /// (B5 fix.) `append_file` in §4.1 is **not** sufficient — it has no lock
+    /// semantics. Implementations route this method through a dedicated
+    /// writer that owns the open `File` for the session's lifetime.
     pub async fn append(&self, session_id: &SessionId, entry: TranscriptEntry) -> Result<(), StorageError>;
     pub async fn save_metadata(&self, session_id: &SessionId, metadata: &SessionMetadata) -> Result<(), StorageError>;
     pub async fn list(&self, filter: SessionListFilter) -> Result<Vec<SessionMetadata>, StorageError>;
@@ -4548,6 +5123,11 @@ impl SessionStorage {
     pub async fn list_for_project(&self, project_dir: &Path, limit: usize) -> Result<Vec<SessionMetadata>, StorageError>;
     pub async fn record_sidechain(&self, parent_session: &SessionId, agent_id: &AgentId, entry: TranscriptEntry) -> Result<(), StorageError>;
     pub async fn close(&self, session_id: &SessionId) -> Result<(), StorageError>;
+    /// Truncate the transcript file at the byte offset reported by
+    /// `CrashSafeJsonlReader::read_recover`. Must hold the same `LOCK_EX`
+    /// used by `append` so no concurrent writer is racing past the offset.
+    /// Returns the new file length.
+    pub async fn truncate_after_recovery(&self, session_id: &SessionId, byte_offset: u64) -> Result<u64, StorageError>;
 }
 
 #[derive(Debug)]
@@ -4594,31 +5174,64 @@ pub struct SessionResumer {
 }
 
 impl SessionResumer {
+    /// Resume policy: best-effort but **never silently lossy**. Each side
+    /// system failure produces a `ResumeWarning` collected in the result;
+    /// the caller (CLI) prints them so the user knows their plugin /
+    /// MCP server / cached file was not actually restored. Hard failures
+    /// (transcript unreadable, schema unsupported) abort the resume.
     pub async fn resume(&self, session_id: &SessionId) -> Result<ResumedSession, ResumeError> {
-        // 1. Load metadata + transcript
+        let mut warnings = Vec::<ResumeWarning>::new();
+
+        // 1. Load metadata + transcript (hard fail if unreadable).
         let loaded = self.storage.load(session_id).await?;
-        // 2. Re-enable plugins
+
+        // 2. Re-enable plugins; missing/version-changed plugins are recorded
+        //    as warnings and the plugin is left disabled.
         for plugin_id in &loaded.metadata.enabled_plugins {
-            self.plugin_manager.enable(plugin_id).await?;
+            if let Err(e) = self.plugin_manager.enable(plugin_id).await {
+                warnings.push(ResumeWarning::PluginUnavailable { id: plugin_id.clone(), reason: e.to_string() });
+            }
         }
-        // 3. Reconnect MCP servers
+
+        // 3. Reconnect MCP servers; failures degrade the session rather than
+        //    aborting it (server may be offline, OAuth may need refresh).
         for server_name in &loaded.metadata.mcp_servers_enabled {
-            self.mcp_registry.write().await.reconnect_by_name(server_name).await?;
+            if let Err(e) = self.mcp_registry.write().await.reconnect_by_name(server_name).await {
+                warnings.push(ResumeWarning::McpServerUnavailable { name: server_name.clone(), reason: e.to_string() });
+            }
         }
-        // 4. Restore permission mode
+
+        // 4-6. Restore permission mode / cost state / output style.
         self.permission_policy.write().await.set_mode(loaded.metadata.permission_mode);
-        // 5. Restore cost state
         self.cost_tracker.restore(&loaded.metadata.session_id).await?;
-        // 6. Restore output style
         self.output_style_registry.write().await.switch(&loaded.metadata.current_output_style).await?;
-        // 7. Rebuild FileStateCache from historical ReadTool calls
-        let file_state_cache = rebuild_file_state_cache(&loaded.messages, &*self.fs).await?;
-        // 8. Apply content replacements
+
+        // 7. FileStateCache is **not** rebuilt from historical reads (B6 fix).
+        //    Files on disk have changed since the original read; reconstructing
+        //    the cache with stale content and then accepting an edit would
+        //    silently overwrite intervening changes. The cache starts empty;
+        //    the next Edit will require a fresh Read, which is the safe path.
+        let file_state_cache = FileStateCache::empty(self.fs.clone());
+
+        // 8. Apply content replacements (read-only metadata; safe to restore).
         let content_replacement = loaded.content_replacements;
-        // 9. Filter to post-compact-boundary messages
+
+        // 9. Filter to post-compact-boundary messages.
         let messages = get_messages_after_compact_boundary(&loaded.messages);
-        Ok(ResumedSession { metadata: loaded.metadata, messages, file_state_cache, content_replacement, session_memory: loaded.session_memory })
+
+        Ok(ResumedSession {
+            metadata: loaded.metadata, messages, file_state_cache, content_replacement,
+            session_memory: loaded.session_memory,
+            warnings,
+        })
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum ResumeWarning {
+    PluginUnavailable { id: PluginId, reason: String },
+    McpServerUnavailable { name: String, reason: String },
+    FileStateCacheNotRestored,                // emitted unconditionally; informational
 }
 ```
 
@@ -4628,18 +5241,47 @@ impl SessionResumer {
 
 ### 23.1 FileStateCache
 
+`current_size_bytes` is updated in lockstep with the LRU map by funneling all
+mutations through `insert` / `evict` / `clear`, each of which holds the
+cache's internal lock for the duration of the size adjustment. Using an
+`AtomicU64` independent of the LRU caused B8 — evictions could drop entries
+without decrementing the atomic. The new accounting is exact, not eventually
+consistent.
+
 ```rust
+/// `NormalizedPath` is defined in `lingxi-protocol::paths`:
+///   - canonicalized via `std::fs::canonicalize` at construction;
+///   - case-folded on macOS and Windows (matches FS semantics);
+///   - rejects paths outside the project root after symlink resolution
+///     (containment is checked by `FileStateCache::insert`, not assumed);
+///   - normalizes UNC paths (`\\?\C:\foo`) on Windows.
+/// `From<&str>` is fallible (`TryFrom`) because path types vary by platform.
 pub struct FileStateCache {
+    inner: Mutex<FileStateCacheInner>,
+}
+
+struct FileStateCacheInner {
     cache: LruCache<NormalizedPath, FileState>,
     max_entries: usize,
     max_size_bytes: u64,
-    current_size_bytes: AtomicU64,
+    current_size_bytes: u64,                   // updated under `inner` lock; no atomic
+}
+
+impl FileStateCache {
+    /// All mutations re-derive `current_size_bytes` after the structural
+    /// change; the LRU map and the byte counter cannot drift.
+    pub fn insert(&self, path: NormalizedPath, state: FileState) { /* hold lock; evict; recompute */ }
+    pub fn get(&self, path: &NormalizedPath) -> Option<FileState> { /* hold lock; touch LRU */ }
+    pub fn evict(&self, path: &NormalizedPath) -> Option<FileState> { /* hold lock; decrement */ }
+    pub fn current_size_bytes(&self) -> u64 { self.inner.lock().unwrap().current_size_bytes }
 }
 
 #[derive(Debug, Clone)]
 pub struct FileState {
     pub content: String,
-    pub timestamp: SystemTime,
+    pub timestamp: SystemTime,                 // when this entry's content was read
+    pub disk_mtime_at_read: SystemTime,        // disk mtime captured at the same instant
+    pub size_at_read: u64,                     // disk file size captured at read
     pub offset: Option<u64>,
     pub limit: Option<u64>,
     /// True when entry was auto-injected (e.g. CLAUDE.md) and stripped/truncated
@@ -4685,35 +5327,78 @@ pub enum FileStateVerification {
 
 ### 23.3 Edit Tool Integration
 
+Edit closes the TOCTOU window between "verify cache against disk" and "write
+new content" by using a write-then-rename pattern. The verification stat
+must be re-done after opening the file for write, *under the same FS lock*
+the writer takes, or — preferably — via `open(O_RDWR)` + `fstat(fd)` so the
+mtime we trust comes from the actual handle being written. (B7 fix.)
+
 ```rust
 impl Tool for FileEditTool {
     async fn call(&self, input: Value, ctx: ToolUseContext, ...) -> Result<ToolCallResult, ToolError> {
-        let path = input["path"].as_str()?;
-        let disk_mtime = ctx.fs.file_mtime(path).await?;
-        match verify_file_state(&ctx.file_state_cache, path, disk_mtime, None) {
+        let path: NormalizedPath = input["path"].as_str()?.try_into()?;
+
+        // Open the file for write FIRST so subsequent stat reflects the same
+        // inode/handle we will write through. `fs.open_for_edit` is a new
+        // (§4.1) method that returns an opaque handle bound to a single
+        // inode for its lifetime; rename/unlink between stat and write
+        // cannot fool it.
+        let handle = ctx.fs.open_for_edit(&path).await?;
+        let disk_meta = handle.stat().await?;
+
+        match verify_file_state(&ctx.file_state_cache, &path, disk_meta.mtime, Some(disk_meta.size)) {
             FileStateVerification::Valid => {}
-            FileStateVerification::NotInCache => return Err(ToolError::EditWithoutRead { path: path.into() }),
-            FileStateVerification::PartialView => return Err(ToolError::PartialViewMustReread { path: path.into() }),
-            FileStateVerification::ModifiedSinceRead { .. } => return Err(ToolError::FileModifiedExternally { path: path.into() }),
-            FileStateVerification::ContentMismatch => return Err(ToolError::FileContentMismatch { path: path.into() }),
+            FileStateVerification::NotInCache => return Err(ToolError::EditWithoutRead { path }),
+            FileStateVerification::PartialView => return Err(ToolError::PartialViewMustReread { path }),
+            FileStateVerification::ModifiedSinceRead { .. } => return Err(ToolError::FileModifiedExternally { path }),
+            FileStateVerification::ContentMismatch => return Err(ToolError::FileContentMismatch { path }),
         }
-        // ... perform edit ...
-        ctx.file_state_cache.set(path, FileState { content: new_content, timestamp: SystemTime::now(), ... });
-        Ok(...)
+
+        // Write new content via the same handle (or a tempfile + atomic
+        // rename(2) on the same directory; both are TOCTOU-free against
+        // the verification we just did).
+        let new_content = compute_edited_content(/*…*/);
+        handle.write_all_atomic(&new_content).await?;
+
+        let final_meta = handle.stat().await?;
+        ctx.file_state_cache.insert(path.clone(), FileState {
+            content: new_content,
+            timestamp: SystemTime::now(),
+            disk_mtime_at_read: final_meta.mtime,
+            size_at_read: final_meta.size,
+            offset: None, limit: None, is_partial_view: false,
+        });
+        Ok(/*…*/)
     }
 }
 ```
 
 ### 23.4 Merge & Clone
 
+Subagents inherit a *clone* of the parent cache. On merge-back, we
+distinguish **edit timestamps** from **read timestamps**: a subagent's read
+of an older snapshot must not overwrite the parent's newer edit. The merge
+rule is "edit beats read; later edit beats earlier edit." (Subtle data-loss
+bug raised in the review.)
+
 ```rust
+#[derive(Debug, Clone, Copy)]
+enum FileStateOrigin { Read, Edit }
+
 impl FileStateCache {
     pub fn clone_cache(&self) -> Self;
-    /// More recent timestamp wins; used to merge subagent reads back to parent.
+
+    /// Merge another cache into this one. For each key:
+    ///   - if only one side has the entry, that side wins;
+    ///   - if both sides have it, the side whose entry is an Edit wins over Read,
+    ///     and within the same kind the later timestamp wins.
+    /// `FileState` gains an internal `origin: FileStateOrigin` field — set to
+    /// `Edit` only when the writer is a tool that actually modified the file,
+    /// `Read` for all other inserts.
     pub fn merge(&mut self, other: &Self);
-    /// Serialize for session persistence (§22)
-    pub fn dump(&self) -> Vec<(String, FileState)>;
-    pub fn load(&mut self, entries: Vec<(String, FileState)>);
+
+    pub fn dump(&self) -> Vec<(NormalizedPath, FileState)>;
+    pub fn load(&mut self, entries: Vec<(NormalizedPath, FileState)>);
 }
 ```
 
@@ -4721,17 +5406,73 @@ impl FileStateCache {
 
 ## 24. Sandbox
 
-### 24.1 Sandbox Trait
+### 24.1 Sandbox Trait & Type-Enforced Hand-Off
+
+The sandbox is **type-enforced**, not advisory. `ProcessRunner::run` (§4.2)
+requires a `SandboxedCommand`, which is an opaque newtype that can only be
+constructed by `Sandbox::prepare` (with an enforced policy) or
+`Sandbox::bypass_with_audit` (explicit opt-out that records a reason). This
+makes it impossible for an unrelated code path to call `ProcessRunner::run`
+without going through the sandbox decision.
 
 ```rust
-/// Hardening layer for ProcessRunner. Linux: unshare+seccomp; macOS: sandbox-exec;
+/// Opaque carrier for a command that has passed the sandbox decision. The
+/// inner `ProcessCommand` is private; the only ways to construct one are
+/// `Sandbox::prepare(...)` or `Sandbox::bypass_with_audit(...)`.
+pub struct SandboxedCommand {
+    inner: ProcessCommand,
+    decision: SandboxDecisionTag,        // recorded for audit; not load-bearing for security
+    audit_id: SandboxAuditId,
+}
+
+impl SandboxedCommand {
+    /// Engine code reads the underlying command via this accessor; the field
+    /// itself is private so it cannot be constructed elsewhere.
+    pub fn as_command(&self) -> &ProcessCommand { &self.inner }
+    pub fn audit_id(&self) -> SandboxAuditId { self.audit_id }
+    pub fn decision(&self) -> SandboxDecisionTag { self.decision }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxDecisionTag { Sandboxed, BypassedWithReason }
+
+/// Hardening layer. Linux: unshare+seccomp; macOS: sandbox-exec;
 /// Windows: Job Object + restricted token; Mobile: unsupported.
 #[async_trait]
 pub trait Sandbox: Send + Sync {
     fn is_available(&self) -> bool;
     fn backend(&self) -> SandboxBackend;
-    fn wrap_command(&self, cmd: ProcessCommand, policy: &SandboxPolicy) -> Result<ProcessCommand, SandboxError>;
+
+    /// Apply the policy and return a `SandboxedCommand` that `ProcessRunner`
+    /// will accept. The implementation must:
+    /// 1. Canonicalize every path in `policy.writable_paths` / `policy.denied_paths`
+    ///    via `std::fs::canonicalize` and reject paths that escape the
+    ///    project root (`cwd`) after symlink resolution. Returns
+    ///    `SandboxError::SymlinkEscape { offending, resolved }` on violation.
+    /// 2. Reject `cmd` if it contains shell-meta paths pointing outside
+    ///    `writable_paths` after canonicalization.
+    /// 3. Apply the platform-specific wrapper (seccomp filter, sandbox-exec
+    ///    profile, Job Object restrictions).
+    async fn prepare(&self, cmd: ProcessCommand, policy: &SandboxPolicy, cwd: &Path)
+        -> Result<SandboxedCommand, SandboxError>;
+
+    /// Explicit opt-out. Used only when `should_use_sandbox` returns
+    /// `NoSandbox` for a documented reason; the reason is recorded to the
+    /// audit log (§22 transcript Sidechain). Callers must hold a permission
+    /// decision that justifies bypass; see §24.3.
+    fn bypass_with_audit(&self, cmd: ProcessCommand, reason: BypassReason) -> SandboxedCommand;
+
     async fn probe_capability(&self) -> SandboxCapability;
+}
+
+#[derive(Debug, Clone)]
+pub enum BypassReason {
+    /// User explicitly accepted via permission prompt; permission decision ID stored.
+    UserAcceptedRisk { permission_decision_id: String },
+    /// Project marked trusted in `~/.claude/settings.json#trustedFolders`.
+    TrustedProject { project_root: PathBuf },
+    /// Sandbox backend not available on this platform (mobile).
+    BackendUnavailable { platform: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4756,16 +5497,31 @@ pub struct SandboxFeatures {
 }
 ```
 
+Updated §4.2 `ProcessRunner` signature (now the *only* runner entry point):
+
+```rust
+#[async_trait]
+pub trait ProcessRunner: Send + Sync {
+    async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError>;
+    async fn spawn_background(&self, cmd: &SandboxedCommand) -> Result<ProcessHandle, ProcessError>;
+    async fn kill(&self, handle: &ProcessHandle) -> Result<(), ProcessError>;
+    fn is_available(&self) -> bool;
+}
+```
+
 ### 24.2 SandboxPolicy
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxPolicy {
     pub network: NetworkPolicy,
-    pub writable_paths: Vec<PathBuf>,
+    pub writable_paths: Vec<PathBuf>,        // canonicalized by `Sandbox::prepare`
     pub denied_paths: Vec<PathBuf>,
     pub allow_subprocess: bool,
     pub limits: ResourceLimits,
+    /// Hard ceiling on `Sandbox::prepare`. Independent of `limits.max_cpu_seconds`
+    /// (which is enforced inside the sandbox); this kills runaway preparation.
+    pub prepare_timeout: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4777,10 +5533,15 @@ pub struct ResourceLimits {
     pub max_memory_mb: Option<u32>,
     pub max_processes: Option<u32>,
     pub max_open_files: Option<u32>,
+    /// Write-rate cap; helps against fork-bomb-adjacent disk DoS.
+    pub max_write_bytes_per_sec: Option<u64>,
 }
 ```
 
 ### 24.3 should_use_sandbox Decision
+
+`should_use_sandbox` is a **policy** helper, not the enforcement point. The
+type system enforces sandbox-or-bypass; this helper just picks which one.
 
 ```rust
 pub fn should_use_sandbox(
@@ -4788,15 +5549,30 @@ pub fn should_use_sandbox(
     permission_mode: PermissionMode,
     project_trust: ProjectTrustLevel,
     classifier_result: Option<&ClassifierScore>,
+    capability: &SandboxCapability,
 ) -> SandboxDecision { ... }
 
 #[derive(Debug, Clone)]
 pub enum SandboxDecision {
-    NoSandbox,
+    /// Use Sandbox::prepare with this policy.
     Sandbox { policy: SandboxPolicy },
-    RefuseBecauseSandboxUnavailable { reason: String },
+    /// Caller must invoke `bypass_with_audit(reason)` to obtain a SandboxedCommand.
+    Bypass { reason: BypassReason },
+    /// Hard refusal: command must not run on this platform/config. Engine
+    /// surfaces this to the user via §14 permission denial.
+    Refuse { reason: String },
 }
 ```
+
+**Single caller invariant**: the Bash tool (and any other process-launching
+tool) calls `should_use_sandbox` **exactly once per invocation**, then either
+`Sandbox::prepare` or `Sandbox::bypass_with_audit`, then `ProcessRunner::run`.
+The §14 permission engine does not call `should_use_sandbox` itself — it
+decides whether the action is allowed at all; the sandbox decision is a
+separate axis the tool layer applies after permission is granted. Contract
+test `sandbox_no_bypass_path` (§32.1) verifies that no `ProcessRunner` call
+site can construct a `SandboxedCommand` through any path other than the two
+sanctioned constructors.
 
 ---
 
@@ -4933,15 +5709,66 @@ pub enum AnalyticsValue {
 
 ### 26.2 PII Marker Types
 
-```rust
-/// Compile-time marker requiring explicit verification of non-sensitive content
-pub type AnalyticsMetadata_Verified = String;
-pub type AnalyticsMetadata_PiiTagged = String;
+PII safety is enforced by **newtypes** (not type aliases). The earlier draft
+used `pub type AnalyticsMetadata_Verified = String;` which gives no
+compile-time guarantee at all — any `String` would satisfy the parameter.
+The newtypes below force every call site through a constructor that names
+the verification (and is grep-able):
 
-/// _PROTO_* prefix routes to privileged BQ proto columns; stripped from
-/// general-access sinks (Datadog etc.).
+```rust
+/// String that has been audited at its construction site to contain no PII.
+/// The constructor is named `verified_clean` so reviewers can grep for every
+/// place we assert "this is safe to send to a general-access sink."
+#[derive(Debug, Clone, Serialize)]
+#[serde(transparent)]
+pub struct VerifiedClean(String);
+impl VerifiedClean {
+    pub fn verified_clean(s: impl Into<String>) -> Self { Self(s.into()) }
+    pub fn as_str(&self) -> &str { &self.0 }
+}
+
+/// String known to contain PII; only delivered to privileged sinks
+/// (proto-tagged BQ columns). General-access sinks reject these by type.
+#[derive(Debug, Clone, Serialize)]
+#[serde(transparent)]
+pub struct PiiTagged(String);
+impl PiiTagged {
+    pub fn tagged_pii(s: impl Into<String>) -> Self { Self(s.into()) }
+    pub fn as_str(&self) -> &str { &self.0 }
+}
+
+/// `AnalyticsValue` now distinguishes verified-clean strings from PII-tagged
+/// ones. Sinks declare which variants they accept.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AnalyticsValue {
+    Bool(bool), Int(i64), Float(f64),
+    CleanString(VerifiedClean),
+    PiiString(PiiTagged),
+    None,
+}
+
+/// PII routing: a sink whose `accepts_pii()` returns `false` MUST refuse any
+/// metadata entry whose value is `AnalyticsValue::PiiString(_)`. The trait
+/// default returns `false`; opt-in by overriding.
+impl AnalyticsValue {
+    pub fn is_pii(&self) -> bool { matches!(self, AnalyticsValue::PiiString(_)) }
+}
+
+/// `_PROTO_*` prefix routes to privileged BQ proto columns. The earlier
+/// design relied on a single prefix check, which was bypassable by typo
+/// (`_proto_name`, `_PROTO__name`). The new check is **case-sensitive,
+/// anchored**, and validated against the same constructor as `PiiTagged`.
 pub fn strip_proto_fields(metadata: &mut LogEventMetadata) {
-    metadata.retain(|k, _| !k.starts_with("_PROTO_"));
+    metadata.retain(|k, v| {
+        let is_proto = k.starts_with("_PROTO_") && k.len() > "_PROTO_".len();
+        // Belt-and-braces: any PII value must live under a _PROTO_ key.
+        if v.is_pii() && !is_proto {
+            debug_assert!(false, "PII value under non-proto key {}: programming error", k);
+            return false;                       // drop in release builds
+        }
+        !is_proto
+    });
 }
 ```
 
@@ -4952,12 +5779,21 @@ pub struct AnalyticsBus {
     sink: Arc<RwLock<Option<Arc<dyn AnalyticsSink>>>>,
     pending: Arc<Mutex<VecDeque<QueuedEvent>>>,
     max_pending: usize,
+    /// Backpressure policy when `pending.len() >= max_pending`. Default is
+    /// `DropNewest` (telemetry must not block the engine), but other choices
+    /// are documented for hosts that prefer different tradeoffs.
+    overflow_policy: OverflowPolicy,
     killswitch_active: Arc<AtomicBool>,
 }
+
+#[derive(Debug, Clone, Copy)]
+pub enum OverflowPolicy { DropNewest, DropOldest, BlockBriefly(Duration) }
 
 impl AnalyticsBus {
     pub fn log_event(&self, name: &str, metadata: LogEventMetadata);
     pub async fn attach_sink(&self, sink: Arc<dyn AnalyticsSink>);
+    /// Killswitch: drops the in-flight queue, refuses further events, and
+    /// closes the sink. Idempotent.
     pub async fn activate_killswitch(&self);
 }
 ```
@@ -5017,8 +5853,22 @@ pub enum QueuedCommandContent {
     HookInjected { content: String, hook_id: HookId },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueuePriority { Now, Next, Later }
+
+// `Ord` derive on an enum produces declaration order, i.e. Now < Next < Later
+// — the opposite of what a priority queue wants. Define order explicitly so
+// `max` picks the highest priority. (B4 fix.)
+impl Ord for QueuePriority {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use QueuePriority::*;
+        fn rank(p: QueuePriority) -> u8 { match p { Now => 2, Next => 1, Later => 0 } }
+        rank(*self).cmp(&rank(*other))
+    }
+}
+impl PartialOrd for QueuePriority {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueueSource {
@@ -5028,12 +5878,29 @@ pub enum QueueSource {
 
 ### 27.2 MessageQueueManager
 
+The queue and snapshot are derived from one another, not kept in lockstep. The
+canonical state is `queue`; `snapshot()` clones into an `Arc<Vec<...>>` on
+demand. The previous design held two `RwLock`s that could observe each other
+inconsistently (B3). Equally, the queue is FIFO **within** each priority
+bucket — explicit, so two `Now` commands queued at t=1 and t=2 come out in
+that order.
+
 ```rust
 pub struct MessageQueueManager {
-    queue: Arc<RwLock<VecDeque<QueuedCommand>>>,
-    snapshot: Arc<RwLock<Arc<Vec<QueuedCommand>>>>,
+    /// Single source of truth. Indexed by priority for O(1) head pop; FIFO
+    /// within each bucket. Implementation can be three `VecDeque`s or a
+    /// `BTreeMap<(Reverse<Priority>, u64-sequence), QueuedCommand>` — the
+    /// contract is "highest priority first, then insertion order."
+    queue: Arc<Mutex<PriorityQueue>>,
+    /// Single-consumer signal. The engine run loop is the sole `wait_for_message`
+    /// caller; using `Notify` here is safe because there is exactly one waiter.
+    /// Documented invariant: if multiple consumers ever need to wait, this
+    /// must become a `tokio::sync::mpsc` instead.
     notify: Arc<Notify>,
     operations_log: Arc<dyn QueueOperationsLog>,
+    /// Cap; enqueue beyond this returns `Err(QueueError::Full)` rather than
+    /// silently dropping. The run loop is expected to drain promptly.
+    max_depth: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5045,10 +5912,13 @@ pub enum QueueOperation {
 }
 
 impl MessageQueueManager {
-    pub async fn enqueue(&self, cmd: QueuedCommand);
+    pub async fn enqueue(&self, cmd: QueuedCommand) -> Result<(), QueueError>;
+    /// Pops the highest-priority head; FIFO within priority.
     pub async fn dequeue(&self) -> Option<QueuedCommand>;
     pub async fn drain_now_priority(&self) -> Vec<QueuedCommand>;
     pub async fn remove(&self, uuid: &str, reason: &str);
+    /// O(N) clone for observers (e.g. CLI status display). Not used by the
+    /// run loop's hot path.
     pub async fn snapshot(&self) -> Arc<Vec<QueuedCommand>>;
     pub async fn wait_for_message(&self, timeout: Duration) -> Option<QueuedCommand>;
 }
@@ -5080,26 +5950,83 @@ impl CronScheduler {
 
 ### 28.2 Cross-Process Lock (fix C6)
 
+The lock content carries the **holder's PID plus a random nonce**. Stale-lock
+detection cannot rely on mtime alone (the original draft did, and that races
+with a long-paused-but-alive holder on a busy machine): a contender first
+checks whether the holder PID is alive; only if the process is gone *and*
+mtime is stale does it override.
+
 ```rust
 pub struct CronTasksLock {
     lock_path: PathBuf,
     fs: Arc<dyn FileSystem>,
+    process: Arc<dyn ProcessLiveness>,
+    /// Held inside the lock file, written at acquire time and re-verified
+    /// before releasing. Detects another contender overriding us.
+    nonce: u128,
+    pid: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockContent {
+    pub pid: u32,
+    pub nonce: u128,
+    pub acquired_at: SystemTime,
+    pub hostname: String,                      // distinguishes shared-FS contenders
+}
+
+/// Process-liveness probe trait. Linux/macOS: `kill(pid, 0)` + cgroup check;
+/// Windows: `OpenProcess(SYNCHRONIZE, ...)`. Mocked in tests.
+#[async_trait]
+pub trait ProcessLiveness: Send + Sync {
+    async fn is_alive(&self, pid: u32, hostname: &str) -> Result<bool, std::io::Error>;
 }
 
 impl CronTasksLock {
-    /// Stale-lock detection: if existing lock mtime > 60s old, override.
-    pub async fn acquire(path: &Path, fs: &dyn FileSystem, now: SystemTime) -> Result<Self, CronError>;
+    /// Acquisition algorithm:
+    /// 1. Read existing lock file (if any). Parse `LockContent`.
+    /// 2. If the file is absent or malformed → atomic create with our content.
+    /// 3. If holder is on **another host** → bail; cross-host coordination is
+    ///    out of scope (NFS/SMB users must run on one machine).
+    /// 4. If `process.is_alive(holder.pid, holder.hostname)` → bail.
+    /// 5. Holder dead AND `now - holder.acquired_at > stale_threshold` (default
+    ///    5 min, **not** 60s) → atomic replace with our content. Otherwise
+    ///    bail; the holder may have just crashed and the OS hasn't released
+    ///    yet, so we err on the side of waiting one more tick.
+    /// 6. On release, re-read and verify the nonce still matches ours; only
+    ///    then unlink. This catches the case where another contender stole
+    ///    the lock while we ran.
+    pub async fn acquire(
+        path: &Path,
+        fs: &dyn FileSystem,
+        process: &dyn ProcessLiveness,
+        clock: &dyn Clock,
+        stale_threshold: Duration,
+    ) -> Result<Self, CronError>;
+
+    pub async fn release(self) -> Result<(), CronError>;
 }
 ```
 
 ### 28.3 Tick Loop & Dispatch
 
 Cron tick runs every minute (`next_minute_boundary`). For each due task:
-1. Apply jitter sleep (up to `jitter_seconds`)
-2. Acquire cross-process lock (`CronTasksLock::acquire`)
-3. If acquired, call `task_registry.create(cron_task.target_task_type(), ...)` to spawn the actual task via §11 TaskManager
-4. Mark `last_run` in registry
-5. On lock failure, skip (another claude process took it)
+
+1. **Apply jitter** (up to `jitter_seconds`). Reduces thundering herd on
+   shared filesystems (NFS/SMB); jitter does NOT prevent contention, only
+   spreads it across time.
+2. **Acquire** via `CronTasksLock::acquire`. On a busy host this blocks
+   briefly only when a dead holder's lock is being recovered.
+3. **Spawn**: call `task_registry.create(...)`. If the create fails, the
+   lock is still released cleanly via the `Drop` path; `last_run` is **not**
+   marked, so the next tick will retry.
+4. **Mark `last_run` and release under the same lock**. Order: write
+   `last_run` first, fsync, then release. If the process dies between
+   create-task-spawn and last_run-write, the next tick re-runs — which is
+   safer than the inverse (silent drop).
+5. **On lock failure**, skip; record a §26 telemetry event for visibility.
+
+`task_registry.create` failures are logged but do not crash the tick loop.
 
 ---
 
@@ -5158,35 +6085,111 @@ pub enum BridgeMessage {
 
 ### 29.3 Trusted Device Pairing
 
+Pairing uses a CLI-shown one-time code as the **only** out-of-band shared
+secret, so it must be hardened against brute force and replay. The code is:
+
+- **8 alphanumeric characters** drawn from a 32-character base (no ambiguous
+  glyphs `0OIl1`), giving ~40 bits of entropy. Six digits (20 bits) — as the
+  original draft proposed — is brute-forceable in seconds against an
+  un-rate-limited endpoint.
+- **One-shot**: consumed on first successful or failed attempt.
+- **Expires after 90 seconds**.
+- **Rate-limited** at 5 attempts per pairing session; a 6th attempt
+  invalidates the code and forces the user to start over.
+
+JWT scope is **bound to a specific project root** at pairing time. A device
+paired against `/Users/foo/projects/myapp` cannot read files outside that
+subtree, regardless of what the IDE requests, and `PermissionDecision`
+messages from that device only apply to tool invocations within that root.
+
+High-risk tools (any tool where `is_destructive` or where the sandbox
+decision is `Bypass`) require a **local re-confirmation** in addition to the
+IDE-provided `PermissionDecision`; this protects users when their IDE is
+compromised but their terminal is not.
+
 ```rust
 pub struct BridgePairing {
     storage: Arc<dyn SecureStorage>,
     jwt_verifier: Arc<JwtVerifier>,
+    rate_limiter: Arc<RwLock<HashMap<PairingSessionId, PairingAttemptCounter>>>,
+    clock: Arc<dyn Clock>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PairingAttemptCounter {
+    pub attempts: u8,
+    pub code_expires_at: SystemTime,
 }
 
 impl BridgePairing {
-    /// Out-of-band pairing: CLI shows 6-digit code, user enters in IDE, exchange JWTs.
-    pub async fn pair_device(&self) -> Result<TrustedDevice, BridgeError>;
+    /// Returns a `PendingPairing` containing the 8-character code to show the
+    /// user. Caller must call `complete_pairing` with the code submitted by
+    /// the IDE; after 5 failed attempts or 90s elapsed, the pending pairing
+    /// is invalidated and the caller must start over.
+    pub async fn begin_pairing(&self, project_root: PathBuf, device_name: String)
+        -> Result<PendingPairing, BridgeError>;
+
+    pub async fn complete_pairing(&self, session: PairingSessionId, submitted_code: &str)
+        -> Result<TrustedDevice, BridgeError>;
+
     pub async fn list_devices(&self) -> Result<Vec<TrustedDevice>, BridgeError>;
     pub async fn revoke_device(&self, device_id: &str) -> Result<(), BridgeError>;
+    /// Verifies the JWT and returns claims including project_root scope.
+    /// Engine code asserts every tool path is contained in `claims.project_root`.
     pub fn verify_jwt(&self, token: &str) -> Result<JwtClaims, BridgeError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingPairing {
+    pub session_id: PairingSessionId,
+    pub code: String,                          // shown to user; never logged
+    pub expires_at: SystemTime,
 }
 
 #[derive(Debug, Clone)]
 pub struct TrustedDevice {
     pub device_id: String,
     pub name: String,
+    /// Scope binding — JWT claims include this; engine refuses requests
+    /// referencing paths outside this root.
+    pub project_root: PathBuf,
     pub paired_at: SystemTime,
     pub last_seen: SystemTime,
     pub jwt: Secret<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JwtClaims {
+    pub device_id: String,
+    pub project_root: PathBuf,
+    pub iat: u64,
+    pub exp: u64,                              // mandatory; engine rejects tokens without exp
+    pub nonce: String,                         // anti-replay
+}
 ```
+
+`BridgeMessage::PermissionDecision` and `BridgeMessage::OpenFileRequest`
+handlers in §29.2 MUST reject paths not contained in
+`JwtClaims.project_root` before any tool dispatch. The reject path emits a
+§26 telemetry event `BridgeScopeViolation` so abuse is auditable.
 
 ---
 
 ## 30. Anthropic OAuth (extends §16 Secret)
 
 §16 covered the generic Secret/Credential framework. §30 specializes for the Anthropic OAuth flow (login.claude.ai) and the multi-source authentication resolver.
+
+The Anthropic CLI is a **public OAuth client** (cannot keep a client secret on user
+machines). The flow therefore **MUST** implement:
+
+- **PKCE** (RFC 7636, S256 challenge) on every authorization request.
+- **CSRF `state` parameter** generated as 256-bit random, compared byte-exact on callback.
+- **Strict `redirect_uri` matching** to `http://127.0.0.1:<allocated-port>/callback`
+  (never `localhost`, to avoid DNS shenanigans; never `0.0.0.0`).
+- **Loopback-only HTTP listener** that closes immediately after the single
+  expected callback. The listener refuses any request lacking the expected
+  `state` value (open-redirect / drive-by mitigation).
+- **Authorization endpoint pinning** (HTTPS only, hostname allowlist).
 
 ### 30.1 Claude.ai OAuth Client
 
@@ -5196,17 +6199,47 @@ pub struct ClaudeAiOAuthClient {
     http: Arc<dyn HttpTransport>,
     credential_manager: Arc<CredentialManager>,
     clock: Arc<dyn Clock>,
+    /// Single-flight refresh; concurrent expirations collapse into one HTTP call.
+    refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ClaudeAiOAuthConfig {
-    pub authorization_endpoint: String,
-    pub token_endpoint: String,
+    pub authorization_endpoint: String,        // pinned https
+    pub token_endpoint: String,                // pinned https
     pub revocation_endpoint: String,
     pub profile_endpoint: String,
     pub client_id: String,
-    pub redirect_uri: String,
+    /// Template: `http://127.0.0.1:{port}/callback`. The CLI allocates a free
+    /// port at flow start and substitutes it here, then enforces byte-exact
+    /// equality against the redirect on the listener side.
+    pub redirect_uri_template: String,
     pub scopes: Vec<String>,
+    /// Allowed hostnames for `authorization_endpoint` and `token_endpoint`.
+    /// Hard-coded; rejecting anything else prevents config tampering.
+    pub host_allowlist: &'static [&'static str],
+}
+
+/// State captured between authorize-request and token-exchange. Held only in
+/// memory for the duration of one login attempt; never persisted.
+#[derive(Debug)]
+pub struct PkceFlowState {
+    pub code_verifier: Secret<String>,         // 43-128 url-safe bytes, RFC 7636
+    pub code_challenge: String,                // SHA256(code_verifier) base64url, no padding
+    pub state_token: Secret<String>,           // 256-bit CSRF nonce
+    pub redirect_uri: String,                  // exact URI used in /authorize
+    pub callback_port: u16,
+    pub created_at: SystemTime,
+    pub deadline: SystemTime,                  // login attempts expire after 5 min
+}
+
+impl PkceFlowState {
+    /// Generated with a CSPRNG. The verifier never crosses any process or log
+    /// boundary; only the challenge does.
+    pub fn new(redirect_uri_template: &str, port: u16, clock: &dyn Clock) -> Self { ... }
+    pub fn build_authorize_url(&self, cfg: &ClaudeAiOAuthConfig) -> String { ... }
+    /// Constant-time comparison of returned state vs. issued state.
+    pub fn verify_state(&self, returned: &str) -> bool { ... }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5253,10 +6286,41 @@ pub enum AuthSource {
 }
 
 impl AnthropicAuthResolver {
-    /// Priority resolution; managed contexts (CCR/Claude Desktop) force OAuth.
+    /// Resolution priority (highest → lowest); the **first** source that yields
+    /// a valid credential wins, even if a higher-priority source is misconfigured.
+    /// Managed contexts (CCR / Claude Desktop bridge) force `OAuthClaudeAi` and
+    /// short-circuit the chain regardless of env/settings — see `is_managed_context`.
+    ///
+    /// 1. `EnvAuthToken`           — `ANTHROPIC_AUTH_TOKEN` (Bearer, explicit dev override)
+    /// 2. `EnvApiKey`              — `ANTHROPIC_API_KEY`
+    /// 3. `FileDescriptor`         — credential passed via inherited fd (Claude Desktop, CI)
+    /// 4. `OAuthClaudeAi`          — login.claude.ai tokens in `SecureStorage`
+    /// 5. `StoredApiKey`           — long-lived API key in `SecureStorage`
+    /// 6. `SettingsApiKey`         — `apiKey` field in `~/.claude/settings.json` (legacy)
+    /// 7. `ApiKeyHelper { script }` — last-resort user-defined script
+    /// 8. `AwsBedrock`             — AWS sigv4 (only when `ANTHROPIC_BEDROCK=1`)
+    /// 9. `None`                   — terminal; engine surfaces "not signed in"
+    ///
+    /// **Important**: env vars dominate so that operators can override stale
+    /// secrets without touching the keychain. Loader emits a warning event
+    /// (§26 telemetry) whenever a lower-priority source is shadowed by a
+    /// higher one, so users notice "my settings.json key is being ignored
+    /// because $ANTHROPIC_API_KEY is set."
     pub async fn resolve(&self) -> Result<AuthSource, AuthError>;
     pub async fn get_auth_for_request(&self) -> Result<RequestAuth, AuthError>;
+
+    /// Returns true when CCR / Claude Desktop / managed enterprise context
+    /// forces OAuth and ignores all other sources. Detection is by env marker
+    /// (`CLAUDE_MANAGED_CONTEXT`) + explicit settings (`enterprise.force_oauth`).
+    pub async fn is_managed_context(&self) -> bool;
 }
+
+/// `ApiKeyHelper` runs an arbitrary user-provided script. It MUST be
+/// executed through the §24 Sandbox with `SandboxPolicy::deny_network()` and
+/// `writable_paths: vec![]`, and the script path must be **owned by the
+/// current user** with file mode ≤ 0700 (loader rejects world-writable
+/// scripts). Output is read as a single line and `Secret`-wrapped before
+/// crossing any subsystem boundary.
 
 #[derive(Debug, Clone)]
 pub enum RequestAuth {
@@ -5271,13 +6335,41 @@ pub enum RequestAuth {
 
 ```rust
 impl ClaudeAiOAuthClient {
-    pub async fn start_refresh_loop(&self) -> Result<(), OAuthError>;
+    /// Spawns a background task that refreshes tokens when remaining lifetime
+    /// drops below 5 minutes. Single-flight via `refresh_lock` — concurrent
+    /// refresh attempts collapse into one HTTP call.
+    pub async fn start_refresh_loop(&self) -> Result<BackgroundTaskHandle, OAuthError>;
+
+    /// Forces a refresh now. Takes `refresh_lock`, re-reads expiry from
+    /// `CredentialManager` under the lock (double-check after acquire), and
+    /// returns immediately if another caller already refreshed.
     pub async fn refresh_now(&self) -> Result<OAuthTokens, OAuthError>;
-    pub async fn login_interactive(&self, port: u16) -> Result<OAuthTokens, OAuthError>;
+
+    /// Interactive login. Steps:
+    /// 1. Allocate a free loopback port (bind 127.0.0.1:0, read assigned port, drop listener).
+    /// 2. Build `PkceFlowState` (verifier + challenge + state token).
+    /// 3. Spawn a one-shot loopback HTTP server bound to that port. Server
+    ///    accepts only `GET /callback?...`; rejects anything missing the
+    ///    expected `state` value.
+    /// 4. Open the system browser to the authorize URL (challenge + state included).
+    /// 5. Server receives the callback, verifies `state` byte-exact, hands the
+    ///    `code` back, then shuts down.
+    /// 6. POST to `token_endpoint` with `code` + `code_verifier`. Hostname must
+    ///    be in `host_allowlist`; TLS verification enforced.
+    /// 7. Store tokens via `CredentialManager` (§16).
+    ///
+    /// Aborts if `PkceFlowState.deadline` expires (5 min default).
+    pub async fn login_interactive(&self) -> Result<OAuthTokens, OAuthError>;
+
+    /// Revokes tokens server-side, then deletes from `CredentialManager`.
     pub async fn logout(&self) -> Result<(), OAuthError>;
     pub async fn get_profile(&self) -> Result<AccountInfo, OAuthError>;
 }
 ```
+
+`login_interactive` no longer takes a `port` argument — taking a user-supplied
+port lets a hostile config redirect the callback. The CLI binds `127.0.0.1:0`
+and discovers the kernel-assigned port itself.
 
 ### 30.4 ClaudeAiLimitsTracker (complements §17 Cost)
 
@@ -5465,7 +6557,7 @@ jobs:
   # Layer 5: Cross-compile verification (5 targets)
   cross-compile:
     matrix:
-      target: [aarch64-linux-android, aarch64-apple-ios, x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu, aarch64-apple-darwin]
+      target: [aarch64-linux-android, aarch64-apple-ios, x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu, aarch64-apple-darwin, x86_64-unknown-linux-musl]
     steps:
       - cross build --target ${{ matrix.target }} -p lingxi-protocol
       - cross build --target ${{ matrix.target }} -p lingxi-core
@@ -5478,10 +6570,49 @@ jobs:
     - cargo clippy --workspace --all-targets -- -D warnings
     - cargo fmt --all -- --check
 
-  # Layer 7: Contract coverage + parity gates
+  # Layer 7: Supply-chain gates (new; F-series fix)
+  supply-chain:
+    - cargo deny check                          # license + bans + advisories
+    - cargo audit --deny warnings               # RustSec advisories
+    - cargo vet                                 # trusted crate registry
+    - cargo about generate -o licenses.html     # license inventory artifact
+
+  # Layer 8: Concurrency tests (new; loom / shuttle)
+  loom-tests:
+    - cargo test -p lingxi-test-harness --features loom --test concurrency_*
+      # Targets the hotspots flagged in B-series:
+      #   StateMachinePool, MailboxRouter, CacheSafeParamsSlot,
+      #   CostTracker persist worker, MessageQueueManager, OAuth refresh_lock.
+
+  # Layer 9: Fuzzing (new; cargo-fuzz)
+  fuzz-quick:
+    - cargo +nightly fuzz run sse_parser            -- -max_total_time=300
+    - cargo +nightly fuzz run jsonl_reader          -- -max_total_time=300
+    - cargo +nightly fuzz run mcp_envelope          -- -max_total_time=300
+    - cargo +nightly fuzz run jwt_verifier          -- -max_total_time=300
+    - cargo +nightly fuzz run gitleaks_scanner      -- -max_total_time=300
+  fuzz-nightly:
+    # 24h runs on a self-hosted runner; corpora committed.
+    - cargo +nightly fuzz run sse_parser            -- -max_total_time=86400
+    - cargo +nightly fuzz run jsonl_reader          -- -max_total_time=86400
+
+  # Layer 10: Benchmarks (new; criterion)
+  benchmarks:
+    - cargo bench --workspace -- --output-format bencher | tee bench.txt
+    - python ci/bench_budget_check.py bench.txt budgets.yaml
+      # budgets.yaml encodes per-subsystem latency / allocation caps;
+      # CI fails on regressions > 10% from baseline.
+
+  # Layer 11: Contract coverage + parity gates
   coverage-and-parity:
     - cargo run --bin contract-coverage-checker -- --max-unexercised-ratio 0.05
     - cargo test -p lingxi-test-harness --test parity_*
+
+  # Layer 12: Chaos / fault injection (new)
+  chaos:
+    - cargo test -p lingxi-test-harness --features chaos --test chaos_*
+      # Forces error paths: SecureStorage panics, FileSystem.watch drops,
+      # HTTP returns 5xx burst, MCP transport disconnects mid-call.
 ```
 
 ### 32.5 Contract Coverage Metric
@@ -5494,7 +6625,69 @@ pub fn compute_unexercised_trait_method_ratio() -> f64 {
 }
 ```
 
-CI gate: `unexercised_trait_method_ratio <= 0.05`. This is a coverage guard, not a fidelity proof; parity fixtures and subsystem integration tests are the fidelity gates.
+CI gate: `unexercised_trait_method_ratio <= 0.05`. This is a coverage guard,
+not a fidelity proof; parity fixtures and subsystem integration tests are
+the fidelity gates.
+
+### 32.6 Parity Fixture Protocol (new)
+
+"Parity with claude-code" is unfalsifiable without a concrete protocol. The
+following pins it down:
+
+1. **Capture**: a fixture is a recorded conversation against the upstream
+   TypeScript codebase at a tagged commit. The capture script records (a)
+   the full SSE stream from the upstream API mock, (b) the resulting
+   transcript JSONL, (c) the side-effect log (file writes, permission
+   prompts, hook executions) emitted by an instrumented build.
+2. **Canonicalize**: timestamps, IDs, and other non-deterministic fields
+   are replaced with placeholders by a single canonicalizer used by both
+   capture and replay. The canonicalizer lives in `lingxi-test-harness`
+   so capture and replay cannot drift.
+3. **Diff metric**: parity is measured at three levels with separate
+   thresholds — tool-call order (must match exactly), transcript content
+   (≥ 95% token-level overlap on assistant messages; user / tool messages
+   exact), and side-effect log (must match exactly except for documented
+   "platform-specific" carve-outs listed per fixture).
+4. **Reference corpus**: M1.23 ships a corpus of ≥ 30 fixtures covering
+   each subsystem's main flows. Adding a new subsystem requires adding
+   ≥ 2 fixtures.
+5. **Drift budget**: a fixture's threshold is locked at first commit; a
+   PR that lowers the threshold requires explicit approval and is logged
+   in the fixture history file.
+
+### 32.7 Concurrency Test Matrix (new)
+
+| Subsystem | Hotspot | Test (loom / shuttle) |
+|---|---|---|
+| §10 StateMachinePool | allocate / deallocate / send_message | `pool_send_after_deallocate_is_no_op`, `pool_concurrent_allocate_respects_max` |
+| §12 MailboxRouter | register vs route race | `route_before_register_queues_then_drains` |
+| §17 CostTracker | persist worker sequence | `out_of_order_sends_persist_in_sequence` |
+| §20 CacheSafeParamsSlot | save_if_generation_matches | `stale_save_rejected_under_concurrent_main_loop_save` |
+| §27 MessageQueueManager | enqueue under cap + priority order | `priority_dequeue_after_concurrent_enqueue` |
+| §30 OAuth refresh | refresh_lock single-flight | `concurrent_expiries_collapse_to_one_refresh` |
+| §16 CredentialManager | api_key_cache refresh | `cache_invalidation_under_concurrent_read` |
+
+Each row maps to a test that runs under `loom::model { ... }` (or `shuttle`
+for higher-throughput exploration) and that explores all interleavings up
+to the bounded depth `loom` permits. Tests are gated to a separate CI job
+so they don't block fast PR feedback.
+
+### 32.8 Event/Effect Stability Tier (new)
+
+The variants of `Event`, `Effect`, and `EffectResult` cross into UniFFI
+bindings and become breaking-change-locked from the moment they are
+included in a tagged release. The repo holds `protocol/STABILITY.md` with
+three tiers:
+
+- **Stable**: any change is breaking — strict deprecation cycle required
+  (introduce replacement, mark old as deprecated, remove ≥ 2 minor versions later).
+- **Unstable**: free to evolve. Annotated `#[doc(hidden)]` and not
+  exported through UniFFI.
+- **Internal**: lives behind a feature flag; never exposed across the
+  protocol boundary.
+
+A `proc-macro` test verifies that no Unstable / Internal variant leaks
+into UniFFI by inspecting `lingxi_core.udl`.
 
 ---
 
@@ -5518,7 +6711,7 @@ CI gate: `unexercised_trait_method_ratio <= 0.05`. This is a coverage guard, not
 | D14 | `lingxi-plugin` | manifest/component model + 7 lifecycle states + component registry materialization + marketplace + blocklist + strict policy | install/enable/disable/uninstall round-trip; commands/agents/skills/hooks/output-styles/MCP/LSP/channels reach correct registries; blocklist prevents load |
 | D15 | `lingxi-secret` | SecureStorage backends + CredentialManager + keychain prefetch + 30+ gitleaks rules + redaction boundaries over protocol `Secret<T>` DTOs | All 5 redaction boundaries verified; `Secret<T>`/`SecureStorageData` debug output redacts; OAuth refresh races resolved under lock |
 | D16 | `lingxi-cost` | provider/model pricing catalog + normalized token Usage + cache savings calc + per-session CostTracker + BudgetEnforcer | Cost reconciles within 0.1% against catalog fixtures for fixed provider/model/token usage; provider usage normalization and budget halt/ask/warn trigger correctly |
-| D17 | `lingxi-skills` | Skill model + registry + discovery prefetch + SkillTool + mcp_skill_builders | Bundled+user+project+plugin+mcp skills load; trigger-keyword discovery works; SkillTool dispatches via ForkedAgentRunner |
+| D17 | `lingxi-skills` | Skill model + registry + discovery prefetch + SkillTool + mcp_skill_builders | Bundled+user+project+plugin+mcp skills load; trigger-keyword discovery works; SkillTool dispatches via §10 StateMachinePool (skills are user-visible subagents, NOT forked agents) |
 | D18 | `lingxi-commands` | SlashCommand model + 80+ builtin handlers + markdown loader + arg substitution + plugin/MCP sources | All 80+ builtins parse + handle; markdown commands with frontmatter work; arg substitution covers $1/$ARGUMENTS/$@ |
 | D19 | `lingxi-sidequery` | SideQueryClient + ForkedAgentRunner + CacheSafeParams slot | Memory selector, classifier explainer, and compaction summarization all route through these; cache hit verified |
 | D20 | `lingxi-outputstyles` | OutputStyle model + registry + prompt addendum injection | `/output-style` switches active; addendum appears in next system prompt assembly |
@@ -5538,9 +6731,31 @@ CI gate: `unexercised_trait_method_ratio <= 0.05`. This is a coverage guard, not
 
 ---
 
-## 34. M1 Milestone Schedule (Full Scope)
+## 34. M1 Milestone Schedule
 
-Timeline reflects full subsystem implementation. Single-developer estimate; multi-developer (autonomous claws) can compress significantly.
+The schedule has been **rebaselined from 60 to 84 weeks** single-developer
+after the §10-§34 review identified three under-scoped phases (Tools,
+Plugin, UniFFI+demo) and a backloaded test-coverage tail. Scope has also
+been trimmed for M1 in line with the E-series scope reduction; items
+pushed to M2 are flagged in their sections. Multi-developer (autonomous
+claw) parallelization assumes a dependency-DAG plan that is now an explicit
+deliverable (D26).
+
+### 34.0 M1 Scope Trims (E-series)
+
+The trims below are the **only** changes from the original "full fidelity"
+draft. They reduce M1 work without removing any subsystem from the
+architecture; the trimmed pieces land in M2 / M3.
+
+| Trim | M1 includes | M1 omits (→ M2) | Rationale |
+|---|---|---|---|
+| §11 TaskType | LocalBash, LocalAgent, RemoteAgent, InProcessTeammate, LocalWorkflow | Dream, MonitorMcp | Latter two are speculative; deferring removes ~1 handler each plus their state variants |
+| §13 Compaction layers | Layer 1 Microcompact + Layer 4 Autocompact + Reactive (+ Snip if a single-pass cheap-pruning version) | CachedMicrocompact (Layer 2), ContextCollapse (Layer 3), PartialAutocompact (Layer 5) | Layer 2/3/5 are optimizations on top of the core algorithm; ship 1+4 first |
+| §15 PluginComponents | Commands, Agents, Skills, Hooks, MCP, LSP | OutputStyles, Channels (folded into core registries; plugin manifest can still declare them but they materialize through the same registries) | Removes two whole loader/registry pairs |
+| §25 LSP actions | Diagnostics, Definition | Hover, References, Symbols, Completion, Formatting, Rename | Real claude-code use is concentrated in Diagnostics + Definition |
+| §11.7 Cron | M1 ships read-only listing + manual fire; scheduled-fire path moved to M2 (cross-process locks are subtle on shared FS) | Tick loop, lock recovery | Subtle correctness; better with M2's real platform crates |
+
+Schedule below reflects the trimmed scope.
 
 ```
 PHASE A: FOUNDATION (Weeks 1-4)
@@ -5578,12 +6793,15 @@ M1.5 (W8): Cost & Budget
 └── Gate: cost reconciles within 0.1% vs catalog fixtures; provider usage normalization and budget halt/ask/warn trigger correctly
 
 PHASE C: CORE SUBSYSTEMS (Weeks 9-22)
-M1.6 (W9-11): Tools System
+M1.6a (W9-10): Tools System — Trait + Registry + Dispatcher
 ├── Tool trait (30+ methods) + ToolUseContext
 ├── ToolRegistry + ToolDispatcher + concurrency partition
+└── Gate: serial + parallel partitions schedule correctly under mocks
+
+M1.6b (W11-12): Tools System — Streaming + Storage + Permission integration
 ├── StreamingToolExecutor + ToolResultStorage + ContentReplacement
 ├── Integration with PermissionPolicy + per-tool permission matchers
-└── Gate: multi-tool agentic loop reducer passes; concurrency partition correctness
+└── Gate: multi-tool agentic loop reducer passes; permission hooks fire pre/post
 
 M1.7 (W12-13): Hooks System
 ├── 28 HookEvent variants + HookDefinition + 4 executors
@@ -5639,7 +6857,7 @@ M1.15 (W35-37): Skills + Slash Commands + Output Styles
 ├── lingxi-skills: registry + discovery prefetch + SkillTool + mcp_skill_builders
 ├── lingxi-commands: 80+ builtin handlers + markdown loader + arg substitution
 ├── lingxi-outputstyles: registry + prompt addendum
-└── Gate: /skills /agents /memory /compact /resume work in cli-demo; SkillTool dispatches via ForkedAgent
+└── Gate: /skills /agents /memory /compact /resume work in cli-demo; SkillTool dispatches via §10 StateMachinePool (user-visible subagent)
 
 M1.16 (W38-40): Session Storage + File State Cache + Message Queue
 ├── lingxi-session: append-only JSONL + metadata + crash-safe reader
@@ -5671,38 +6889,64 @@ M1.20 (W47-48): IDE Bridge
 └── Gate: pair→connect→send→receive→disconnect over mock transport; tampered JWT rejected
 
 PHASE G: PLUGINS + INTEGRATION + POLISH (Weeks 49-60)
-M1.21 (W49-52): Plugin System
-├── PluginManifest + PluginSource (6 kinds) + PluginState (7 states)
-├── PluginManager + component registry materialization
+M1.21 (W49-54): Plugin System (6 weeks; was 4)
+├── PluginManifest + PluginSource (6 kinds, default-deny trust) + PluginState (7 states)
+├── PluginManager with atomic load (PluginCommitGuard) + component registry materialization
 ├── MarketplaceManager (official + 3rd-party) + reconciler
 ├── PluginBlocklist (static + remote) + StrictPluginOnlyPolicy
-├── Integration with Command/Agent/Skill/Hook/OutputStyle/MCP/LSP/Channel registries
-└── Gate: install/enable/disable/uninstall round-trip; components reach correct registries; blocklist enforced
+├── Integration with Command/Agent/Skill/Hook/MCP/LSP registries
+│   (OutputStyles and Channels are folded into core registries per §34.0 trim;
+│   plugin manifest declarations still parse but route through existing types)
+└── Gate: install/enable/disable/uninstall round-trip; partial-load rollback verified; components reach correct registries; blocklist enforced
 
-M1.22 (W53-55): UniFFI + Cross-Crate Integration
-├── lingxi-uniffi-bridge with narrow facade APIs
+M1.22 (W55-58): UniFFI + Cross-Crate Integration (4 weeks; was 3)
+├── lingxi-uniffi-bridge with narrow facade APIs (no dyn Trait / Arc<dyn Tool> / streams / closures)
 ├── Kotlin + Swift binding generation + compilation
 ├── End-to-end test through bridge
 ├── platforms/posix-minimal for demo-only FS/process/http/MCP mocks + plain-text SecureStorage + stub IDE bridge
 ├── examples/cli-demo full implementation (incl. /resume, /skills, /output-style, sandboxed bash)
 └── Gate: cli-demo end-to-end works incl. permission prompts + cost display + slash commands + skill discovery; UniFFI bindings compile on mobile targets
 
-M1.23 (W56-58): Test Coverage + Parity
-├── Contract tests for all 13 traits (incl. SecureStorage, Sandbox, LspTransport, BridgeTransport)
-├── Property tests for all subsystems at 10K iterations
+M1.23 (W59-64): Continuous Verification (6 weeks; was 3 in one tail)
+├── Contract tests for all 13 traits (developed concurrently with each
+│    subsystem from M1.1 onward; this phase is the gap-fill + audit)
+├── loom / shuttle concurrency tests for shared-state hotspots (StateMachinePool,
+│    MailboxRouter, CacheSafeParamsSlot, CostTracker.persist, MessageQueueManager)
+├── cargo-fuzz harnesses for SSE parser, JSONL reader, MCP transport, JWT,
+│    gitleaks scanner
+├── criterion benchmarks with per-subsystem latency budgets
+├── Property tests at 10K iterations across all subsystems
 ├── Subsystem integration tests incl. permission/secret/cost/plugin/skill/cmd/session/bridge/cron scenarios
-├── Contract coverage metric + parity fixtures from claude-code reference
-└── Gate: unexercised trait-method ratio ≤ 0.05; all property and parity tests pass
+├── Parity fixture protocol (capture / canonicalize / diff metric) + reference corpus
+└── Gate: unexercised trait-method ratio ≤ 0.05; criterion budgets green; fuzz corpora 24h clean
 
-M1.24 (W59-60): Documentation + Release
+M1.24 (W65-66): Hardening + Security Review
+├── Threat model document for §16 / §24 / §29 / §30 paths
+├── External (or rotated-internal) security review of Sandbox enforcement,
+│    OAuth flow, JWT pairing, plugin trust model, secret redaction
+├── cargo-deny + cargo-audit + cargo-vet gates in CI
+├── Address findings; track residual risk
+└── Gate: no open Critical/High findings; SBOM published
+
+M1.25 (W67-68): Documentation + Release
 ├── Complete rustdoc for all public APIs
 ├── ARCHITECTURE.md (subsystem overview)
-├── SECURITY.md (Secret<T>, redaction, SSRF, plugin trust model, sandbox model, JWT pairing)
+├── SECURITY.md (Secret<T>, redaction, SSRF, plugin trust model, sandbox model, JWT pairing, OAuth PKCE)
 ├── CONTRIBUTING.md + CHANGELOG.md + README.md
+├── Event/Effect stability tier policy (UniFFI-exposed variants are
+│    breaking-change locked once tagged)
 └── Gate: docs render correctly; M1 v0.1.0 tag
+
+(Single-developer slack budget: W69-84 absorbs schedule risk, dependency
+slips, and parallel platform work. The 60-week original estimate took no
+slack and bundled testing into a 3-week tail; the rebaseline corrects both.)
 ```
 
-**Total: ~60 weeks (single developer), 14-20 weeks with 3-5 autonomous claws (claw-code precedent)**.
+**Total: 68 weeks at the gate (M1.25), with a 16-week slack budget through
+W84 for unplanned scope, security findings, and the inevitable integration
+debt. Multi-developer (autonomous claws) compression depends on the
+dependency-DAG plan in D26; an honest range is 24-36 weeks with 3-5 claws,
+not the 14-20 quoted in earlier drafts.**
 
 ---
 

@@ -493,6 +493,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lingxi-msgqueue"
+version = "0.1.0"
+dependencies = [
+ "lingxi-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "lingxi-outputstyles"
 version = "0.1.0"
 dependencies = [

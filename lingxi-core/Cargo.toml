@@ -20,6 +20,7 @@ members = [
     "crates/sidequery",
     "crates/skills",
     "crates/commands",
+    "crates/outputstyles",
 ]
 
 [workspace.package]

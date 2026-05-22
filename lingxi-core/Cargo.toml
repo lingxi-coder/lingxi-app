@@ -26,6 +26,7 @@ members = [
     "crates/session",
     "crates/cron",
     "crates/sandbox",
+    "crates/lsp",
 ]
 
 [workspace.package]

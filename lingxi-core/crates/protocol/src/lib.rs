@@ -17,12 +17,9 @@ pub mod messages;
 pub mod transport;
 
 // Re-exports for ergonomics.
-pub use capabilities::PlatformCapabilities;
-pub use effect_result::{EffectError, EffectResult};
-pub use effects::Effect;
+// NOTE: re-exports for other modules are added by each module's task (4-7) once
+// the underlying types exist.
 pub use ids::{
     AgentId, HookId, McpConnectionId, MessageId, PluginId, PrefetchId, RequestId, SessionId,
     SnapshotId, ToolUseId,
 };
-pub use messages::{ContentBlock, ConversationMessage, MessageRole};
-pub use transport::{HttpMethod, HttpRequest, HttpResponse, SseEvent};

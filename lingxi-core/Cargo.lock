@@ -829,6 +829,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lingxi-uniffi-bridge"
+version = "0.1.0"
+dependencies = [
+ "lingxi-core",
+ "lingxi-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"

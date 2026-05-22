@@ -31,6 +31,7 @@ members = [
     "crates/anthropic-oauth",
     "crates/bridge",
     "crates/plugin",
+    "crates/uniffi-bridge",
 ]
 
 [workspace.package]

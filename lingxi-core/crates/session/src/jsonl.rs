@@ -30,10 +30,7 @@ pub struct RecoveryResult {
 
 /// Read `path` line-by-line; on the first parse failure, truncate the file
 /// to the last-good byte offset and return the recovered prefix.
-pub async fn read_recover(
-    fs: &dyn FileSystem,
-    path: &str,
-) -> Result<RecoveryResult, StorageError> {
+pub async fn read_recover(fs: &dyn FileSystem, path: &str) -> Result<RecoveryResult, StorageError> {
     let content = fs.read_file(path, None, None).await?.content;
     let mut entries = Vec::new();
     let mut last_valid_offset: u64 = 0;

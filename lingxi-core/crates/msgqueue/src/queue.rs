@@ -161,10 +161,7 @@ impl MessageQueueManager {
     }
 
     /// Wait up to `timeout` for an item, returning it if one arrives.
-    pub async fn wait_for_message(
-        &self,
-        timeout: std::time::Duration,
-    ) -> Option<QueuedCommand> {
+    pub async fn wait_for_message(&self, timeout: std::time::Duration) -> Option<QueuedCommand> {
         tokio::select! {
             () = self.notify.notified() => self.queue.write().await.pop_front(),
             () = tokio::time::sleep(timeout) => None,

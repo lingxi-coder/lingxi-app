@@ -59,8 +59,7 @@ impl SessionResumer {
             .load(session_id)
             .await
             .map_err(|e| ResumeError::Storage(e.to_string()))?;
-        let cache =
-            FileStateCache::new(lingxi_filestate::MAX_ENTRIES, lingxi_filestate::MAX_BYTES);
+        let cache = FileStateCache::new(lingxi_filestate::MAX_ENTRIES, lingxi_filestate::MAX_BYTES);
         Ok(ResumedSession {
             loaded,
             file_state_cache: cache,

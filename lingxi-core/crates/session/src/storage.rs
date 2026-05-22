@@ -68,9 +68,7 @@ impl SessionStorage {
 
     /// Save metadata.json atomically (write + fsync) under an exclusive flock.
     pub async fn save_metadata(&self, metadata: &SessionMetadata) -> Result<(), StorageError> {
-        let path = self
-            .session_dir(&metadata.session_id)
-            .join("metadata.json");
+        let path = self.session_dir(&metadata.session_id).join("metadata.json");
         let path_str = path.to_str().expect("utf-8 path");
         let _flock = self.fs.flock_exclusive(path_str).await?;
         self.fs

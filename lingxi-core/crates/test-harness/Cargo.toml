@@ -5,5 +5,20 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+lingxi-protocol = { path = "../protocol" }
+lingxi-traits = { path = "../traits" }
+lingxi-core = { path = "../core" }
+lingxi-api-client = { path = "../api-client" }
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+futures-core.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true

@@ -144,6 +144,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lingxi-cost"
+version = "0.1.0"
+dependencies = [
+ "lingxi-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "lingxi-protocol"
 version = "0.1.0"
 dependencies = [

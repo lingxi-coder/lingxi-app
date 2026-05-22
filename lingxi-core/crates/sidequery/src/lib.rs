@@ -19,6 +19,8 @@ pub mod purposes;
 pub mod side_query;
 
 pub use cache_safe_params::{CacheSafeParams, CacheSafeParamsSlot};
+pub use forked_agent::{
+    ForkError, ForkPurpose, ForkedAgentRequest, ForkedAgentResult, ForkedAgentRunner,
+};
 pub use purposes::QuerySource;
 pub use side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
-// Re-exports for forked_agent are added in Task 4 of this plan.

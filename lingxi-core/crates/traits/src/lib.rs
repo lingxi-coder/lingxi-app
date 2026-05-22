@@ -12,12 +12,14 @@ pub mod clock;
 pub mod effect_handler;
 pub mod filesystem;
 pub mod http;
+pub mod mcp;
 pub mod runtime;
 pub mod secure_storage;
 
 pub use clock::Clock;
 pub use effect_handler::EffectHandler;
-pub use filesystem::{FileContent, FileSystem, FsError};
+pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FsError};
 pub use http::{HttpError, HttpTransport};
+pub use mcp::*;
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use secure_storage::{SecureStorage, SecureStorageBackend, SecureStorageError};

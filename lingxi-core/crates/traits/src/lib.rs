@@ -15,6 +15,7 @@ pub mod http;
 pub mod mcp;
 pub mod runtime;
 pub mod secure_storage;
+pub mod swarm;
 pub mod worktree;
 
 pub use clock::Clock;
@@ -24,6 +25,7 @@ pub use http::{HttpError, HttpTransport};
 pub use mcp::*;
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use secure_storage::{SecureStorage, SecureStorageBackend, SecureStorageError};
+pub use swarm::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 #[allow(unused_imports)]
 pub use worktree::*;
 pub use worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};

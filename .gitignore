@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------
+# Reference subprojects (each has its own .git history)
+# ---------------------------------------------------------------
+claude-code/
+claw-code/
+
+# ---------------------------------------------------------------
+# Generated graphify artifacts (rebuildable; large)
+# ---------------------------------------------------------------
+claude-code-graphify/
+claw-code-graphify/
+claw-code-graphify-orchestrator/
+**/graphify-out/
+.graphify_python
+.graphify_*.json
+
+# ---------------------------------------------------------------
+# Tool state directories
+# ---------------------------------------------------------------
+.omx/
+.omc/
+.claude/
+.claude.json
+.claw/
+.claw.json
+.port_sessions/
+.sandbox-home/
+.clawd-todos.json
+
+# ---------------------------------------------------------------
+# OS / editor noise
+# ---------------------------------------------------------------
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# ---------------------------------------------------------------
+# Rust build artifacts (when the engine starts being built)
+# ---------------------------------------------------------------
+target/
+**/*.rs.bk
+Cargo.lock.*
+
+# ---------------------------------------------------------------
+# Python caches (graphify is python)
+# ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/

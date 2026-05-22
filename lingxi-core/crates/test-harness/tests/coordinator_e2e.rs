@@ -20,7 +20,10 @@ async fn coordinator_routes_message_to_worker() {
         message_id: "m1".into(),
         timestamp: std::time::SystemTime::now(),
     };
-    team.mailbox_router.route(&worker, msg.clone()).await.unwrap();
+    team.mailbox_router
+        .route(&worker, msg.clone())
+        .await
+        .unwrap();
 
     // The worker's mailbox is registered in the router; routing succeeded.
     // (Drain test belongs to the worker side — covered in Plan 09 SkillTool tests.)

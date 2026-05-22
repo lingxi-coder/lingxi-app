@@ -13,11 +13,8 @@ pub trait Task: Send + Sync {
     /// Task type discriminant.
     fn task_type(&self) -> crate::id::TaskType;
     /// Spawn a new task instance.
-    async fn spawn(
-        &self,
-        input: TaskSpawnInput,
-        ctx: TaskContext,
-    ) -> Result<TaskHandle, TaskError>;
+    async fn spawn(&self, input: TaskSpawnInput, ctx: TaskContext)
+        -> Result<TaskHandle, TaskError>;
     /// Kill a running task instance.
     async fn kill(&self, task_id: &str, ctx: TaskContext) -> Result<(), TaskError>;
     /// Whether this task type supports inbound messages.

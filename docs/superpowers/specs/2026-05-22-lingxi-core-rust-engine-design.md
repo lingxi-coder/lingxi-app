@@ -22,10 +22,10 @@ LingXi Core is a **platform-agnostic Rust library** that implements the complete
 - **Task Manager** (7 task types, polymorphic state, disk-persisted output, notification injection, cron)
 - **Coordinator/Team** (coordinator mode, internal tools, teammate mailbox, swarm backend, team memory sync)
 - **Compaction Engine** (5 layers + reactive + PTL retry, circuit breaker, cached microcompact, session memory dual extraction)
-- **Permission Policy Engine** (7 modes, 3 classifiers, 9 rule sources, denial tracking, shadow detection, bypass killswitch)
-- **Plugin System** (manifest/lifecycle/marketplace/blocklist, 6-registry capability injection, strict-plugin-only policy)
-- **Secret & Credential Management** (SecureStorage trait, `Secret<T>` newtype, 5 backends, 30+ gitleaks rules, 5 redaction boundaries)
-- **API Cost & Budget Tracking** (6 pricing tiers, prompt cache savings, per-model usage, 4 budget policies)
+- **Permission Policy Engine** (5 external + 2 internal modes, 3 classifiers, 8 rule sources, denial tracking, shadow detection, pending classifier checks, bypass killswitch)
+- **Plugin System** (manifest/lifecycle/marketplace/blocklist, Claude Code component surface, output styles/LSP/channels/user config, strict-plugin-only policy)
+- **Secret & Credential Management** (SecureStorage trait, `Secret<T>` newtype, 7 backend variants, 30+ gitleaks rules, 5 redaction boundaries)
+- **API Cost & Budget Tracking** (provider/model pricing catalog, token-class rates, prompt cache savings, per-model usage, budget halt/ask/warn policies)
 - **Configuration Loading & Merge Precedence**
 
 It does **NOT** include:
@@ -79,9 +79,9 @@ This is a **clean-room new codebase**. `claw-code` serves as a reference impleme
 | D16 | Shared protocol boundary | `lingxi-protocol` owns shared IDs, DTOs, effect envelopes, and effect results used by `core` and `traits` | Put effects in `core` and make `traits` depend on `core` (cycle), duplicate DTOs in each crate |
 | D17 | Runtime boundary | Engine crates depend on an injected `RuntimeSpawner`, not directly on Tokio | Allow `tokio` in engine crates, make all background work host-owned only |
 | D18 | Permission as dedicated crate | `lingxi-permission` is its own crate consumed by `tools`/`agent`/etc., not embedded in `core` | Embed permission engine in `core`, or split per-tool with no central policy |
-| D19 | Secret containment | `Secret<T>` newtype + SecureStorage trait; engine touches secrets only via these. All 5 redaction boundaries enforced before low-trust egress | Plain `String` secrets, optional redaction, scattered keychain access |
-| D20 | Cost as ground truth | Cost computed deterministically from `Usage` × pricing table; persisted per-session; budget enforced pre-API | Trust server-reported cost, no client-side budget enforcement |
-| D21 | Plugin injection model | Plugins inject capabilities into 6 existing registries (Tools/Hooks/MCP/Agent/Skill/Command) on load and unload symmetrically | Plugins as a separate ABI layer (e.g. WASM sandbox), or only declarative manifests with no code |
+| D19 | Secret containment | `Secret<T>` newtype + SecureStorage trait; engine touches secrets only via these. All 5 low-trust redaction boundaries enforced before egress | Plain `String` secrets, optional redaction, scattered keychain access |
+| D20 | Cost as ground truth | Cost computed deterministically from normalized token usage × provider/model pricing catalog; persisted per-session; budget enforced pre-API | Trust server-reported cost, no client-side budget enforcement |
+| D21 | Plugin materialization model | Plugins materialize Claude Code components into existing registries (Commands/Agents/Skills/Hooks/OutputStyles/MCP/LSP/config channels) on load and unload symmetrically | Invent an arbitrary tool ABI, or only declarative manifests with no materialized components |
 
 ---
 
@@ -99,6 +99,7 @@ lingxi-core/                          ← workspace root
 │   │   │   ├── effects.rs            ← Effect + EffectResult + EffectError
 │   │   │   ├── messages.rs           ← ConversationMessage + API-neutral content blocks
 │   │   │   ├── transport.rs          ← HTTP/MCP/process request/response DTOs
+│   │   │   ├── secret.rs             ← Secret<T>, SecureStorageData, RedactableContent
 │   │   │   └── capabilities.rs       ← PlatformCapabilities + capability flags
 │   │   └── Cargo.toml                ← external deps: serde, serde_json, thiserror ONLY
 │   │
@@ -110,11 +111,10 @@ lingxi-core/                          ← workspace root
 │   │   │   ├── effects.rs            ← core-to-protocol effect builders
 │   │   │   ├── reducer.rs            ← pure state transitions
 │   │   │   ├── prompt.rs             ← prompt assembly
-│   │   │   ├── token.rs              ← token counting & cost tracking
-│   │   │   ├── permission.rs         ← permission policy engine
+│   │   │   ├── token.rs              ← token accounting primitives (pricing/budget lives in cost/)
 │   │   │   ├── session.rs            ← session state model
 │   │   │   ├── config.rs             ← config model & merge precedence
-│   │   │   └── model.rs              ← model aliases, pricing tables
+│   │   │   └── model.rs              ← model aliases + context-window metadata (pricing lives in cost/)
 │   │   └── Cargo.toml                ← deps: protocol + serde, serde_json, thiserror, tracing
 │   │
 │   ├── traits/                       ← ⭐ Platform abstraction traits
@@ -148,8 +148,8 @@ lingxi-core/                          ← workspace root
 │   ├── permission/                   ← ⭐ Permission Policy Engine (§14)
 │   │   ├── src/
 │   │   │   ├── lib.rs
-│   │   │   ├── mode.rs               ← 7 PermissionMode
-│   │   │   ├── rule.rs               ← PermissionRule + 9 RuleSource
+│   │   │   ├── mode.rs               ← 5 external + 2 internal PermissionMode
+│   │   │   ├── rule.rs               ← PermissionRule + 8 RuleSource
 │   │   │   ├── result.rs             ← PermissionResult + Decision reasons
 │   │   │   ├── policy.rs             ← PermissionPolicy (central engine)
 │   │   │   ├── classifier.rs         ← Yolo/Bash/Transcript classifier traits
@@ -162,7 +162,6 @@ lingxi-core/                          ← workspace root
 │   ├── secret/                       ← ⭐ Secret & Credential Management (§16)
 │   │   ├── src/
 │   │   │   ├── lib.rs
-│   │   │   ├── newtype.rs            ← Secret<T>
 │   │   │   ├── credential.rs         ← CredentialManager
 │   │   │   ├── keychain_prefetch.rs  ← KeychainPrefetch
 │   │   │   ├── scanner.rs            ← SecretScanner + 30+ gitleaks rules
@@ -173,11 +172,11 @@ lingxi-core/                          ← workspace root
 │   ├── cost/                         ← ⭐ Cost & Budget (§17)
 │   │   ├── src/
 │   │   │   ├── lib.rs
-│   │   │   ├── pricing.rs            ← 6 pricing tiers
-│   │   │   ├── usage.rs              ← Usage counter
-│   │   │   ├── calculator.rs         ← CostCalculator + cache savings
+│   │   │   ├── pricing.rs            ← provider/model pricing catalog
+│   │   │   ├── usage.rs              ← normalized token usage counter
+│   │   │   ├── calculator.rs         ← CostCalculator + token-class rates + cache savings
 │   │   │   ├── tracker.rs            ← CostTracker + persistence
-│   │   │   └── budget.rs             ← BudgetEnforcer + 4 policies
+│   │   │   └── budget.rs             ← BudgetEnforcer + halt/ask/warn policies
 │   │   └── Cargo.toml                ← deps: protocol, core, traits
 │   │
 │   ├── memory/                       ← ⭐ Memory System (§6)
@@ -290,15 +289,17 @@ lingxi-core/                          ← workspace root
 │   │   │   ├── marketplace.rs        ← MarketplaceManager + reconciler
 │   │   │   ├── blocklist.rs          ← PluginBlocklist (static + remote)
 │   │   │   ├── strict_policy.rs      ← StrictPluginOnlyPolicy
-│   │   │   ├── loaders/              ← per-capability loaders
-│   │   │   │   ├── tools.rs
-│   │   │   │   ├── hooks.rs
-│   │   │   │   ├── mcp_servers.rs
+│   │   │   ├── loaders/              ← per-component loaders
+│   │   │   │   ├── commands.rs
 │   │   │   │   ├── agents.rs
 │   │   │   │   ├── skills.rs
-│   │   │   │   └── commands.rs
+│   │   │   │   ├── hooks.rs
+│   │   │   │   ├── output_styles.rs
+│   │   │   │   ├── mcp_servers.rs
+│   │   │   │   ├── lsp_servers.rs
+│   │   │   │   └── channels.rs
 │   │   │   └── mcpb.rs               ← MCP Bundle (.mcpb zip) parser
-│   │   └── Cargo.toml                ← deps: protocol, core, traits, tools, hooks, mcp, agent
+│   │   └── Cargo.toml                ← deps: protocol, core, traits, hooks, mcp, agent
 │   │
 │   ├── compaction/                   ← ⭐ Compaction Engine (§13)
 │   │   ├── src/
@@ -395,7 +396,7 @@ lingxi-core/                          ← workspace root
                        └─────┬──────┘
                              │
                        ┌─────▼──────┐
-                       │   plugin   │ (injects into 6 registries)
+                       │   plugin   │ (materializes Claude Code components)
                        └─────┬──────┘
                              │
                        ┌─────▼───────┐
@@ -549,7 +550,9 @@ pub trait RuntimeSpawner: Send + Sync {
 
 ### 4.9 SecureStorage
 
-Used by §16 Secret & Credential Management. Platform impls vary (Keychain / libsecret / CredVault / Keystore / encrypted-file / plain-text fallback).
+Used by §16 Secret & Credential Management. `SecureStorageData` and `SecureStorageBackend`
+are protocol DTOs; platform impls vary (Keychain / libsecret / CredVault / mobile keystores /
+encrypted-file / plain-text fallback).
 
 ```rust
 #[async_trait]
@@ -686,7 +689,7 @@ pub enum ConversationState {
 }
 ```
 
-### 5.2 Event Definitions (28+ events, full list)
+### 5.2 Event Definitions (canonical full list)
 
 Events are partitioned by source:
 
@@ -704,6 +707,13 @@ pub enum Event {
     ApiStreamEnd { request_id: RequestId, response: MessageResponse, usage: Usage },
     ApiError { request_id: RequestId, error: ApiError },
 
+    // === Cost/Budget (§17) ===
+    CostRecorded { model_ref: ModelRef, usage: Usage, cost_nano_usd: u64 },
+    BudgetThresholdReached { pct: u32, current: u64, limit: u64 },
+    BudgetExceeded { current: u64, limit: u64 },
+    UnpricedModelDetected { model_ref: ModelRef },
+    CostStateRestored { state: CostState },
+
     // === Tool execution (§8 + §9) ===
     ToolStarted { tool_use_id: ToolUseId, tool_name: String },
     ToolProgress { tool_use_id: ToolUseId, progress: ToolProgress },
@@ -712,9 +722,16 @@ pub enum Event {
     ToolValidationFailed { tool_use_id: ToolUseId, error: ValidationError },
     ToolNotFound { tool_use_id: ToolUseId, name: String },
 
-    // === Permission (§9) ===
+    // === Permission (§14) ===
     PermissionGranted { call_id: ToolUseId, scope: PermissionScope },
     PermissionDenied { call_id: ToolUseId },
+    PermissionRuleAdded { rule: PermissionRule, source: PermissionRuleSource },
+    PermissionRuleRemoved { rule: PermissionRule, source: PermissionRuleSource },
+    PermissionModeSwitched { from: PermissionMode, to: PermissionMode },
+    PendingClassifierStarted { tool_use_id: ToolUseId, kind: ClassifierKind },
+    ClassifierScoreReceived { tool_use_id: ToolUseId, kind: ClassifierKind, score: ClassifierScore },
+    BypassKillswitchActivated,
+    DenialLimitReached { tool: String, count: u32 },
 
     // === Hooks (§9) ===
     HookCompleted { hook_id: HookId, result: HookResult },
@@ -740,6 +757,14 @@ pub enum Event {
     MemoryPrefetchTimeout,
     TeamMemoryUpdated { path: PathBuf, content: String },
 
+    // === Secret/Credential (§16) ===
+    SecretDetected { boundary: RedactionBoundary, rule_id: String, redacted: bool },
+    CredentialStored { kind: SecretKind },
+    CredentialRefreshed { kind: SecretKind },
+    CredentialDeleted { kind: SecretKind },
+    OAuthTokenExpired { service: String },
+    KeychainPrefetchComplete,
+
     // === MCP (§7) ===
     McpConnected { name: String, tools: Vec<McpTool> },
     McpDisconnected { name: String, error: Option<String> },
@@ -748,6 +773,16 @@ pub enum Event {
     McpToolUpdated { name: String, new_tools: Vec<McpTool> },
     McpOAuthCallbackReceived { name: String, code: String, state: String },
     McpApprovalDecision { name: String, approved: bool },
+
+    // === Plugin (§15) ===
+    PluginInstalled { id: PluginId, source: PluginSource },
+    PluginUninstalled { id: PluginId },
+    PluginEnabled { id: PluginId },
+    PluginDisabled { id: PluginId },
+    PluginUpdated { id: PluginId, from_version: String, to_version: String },
+    PluginLoadFailed { id: PluginId, error: String },
+    MarketplaceSynced { name: String, entries: usize },
+    PluginBlocked { id: PluginId, reason: String },
 
     // === Agent/Subagent (§10) ===
     SubagentSlotAllocated { agent_id: AgentId },
@@ -797,9 +832,21 @@ pub enum Effect {
     SendApiRequest { request_id: RequestId, request: MessageRequest },
     SendSideQuery { request_id: RequestId, request: MessageRequest, purpose: SideQueryPurpose },
 
+    // === Cost/Budget (§17) ===
+    PersistCostState { state: CostState },
+    LoadCostState { session_id: SessionId },
+    DisplayCostUpdate { snapshot: CostState },
+    EnforceBudget { estimated_cost_nano_usd: u64 },
+    FireBudgetWarning { pct: u32, current: u64, limit: u64 },
+    HaltOnBudget,
+
     // === Tool execution (§8) ===
     ExecuteTool { call_id: ToolUseId, tool_name: String, tool_input: Value },
     RequestPermission { call_id: ToolUseId, tool_name: String, action_description: String, risk_level: RiskLevel },
+    EvaluatePermission { tool_use_id: ToolUseId, tool_name: String, input: Value },
+    PersistPermissionUpdate { update: PermissionUpdate },
+    RunClassifier { kind: ClassifierKind, tool_use_id: ToolUseId, tool_name: String, input: Value },
+    DetectShadowedRules { rule: PermissionRule },
 
     // === Render ===
     RenderStreamDelta { text: String },
@@ -819,6 +866,14 @@ pub enum Effect {
     PersistSessionMemory { content: String },
     StartTeamMemoryWatch { team_dir: PathBuf },
 
+    // === Secret/Credential (§16) ===
+    StoreCredential { kind: SecretKind, data: SecureStorageData },
+    RetrieveCredential { kind: SecretKind },
+    DeleteCredential { kind: SecretKind },
+    RefreshOAuthToken { service: String },
+    ScanForSecrets { boundary: RedactionBoundary, content: RedactableContent },
+    RedactContent { content: RedactableContent },
+
     // === MCP (§7) ===
     ConnectMcpServer { name: String, config: McpServerConfig },
     DisconnectMcpServer { name: String },
@@ -828,6 +883,15 @@ pub enum Effect {
     RequestMcpApproval { name: String, config: McpServerConfig },
     ConnectMcpForAgent { agent_id: AgentId, servers: Vec<McpServerConfig> },
     CleanupMcpForAgent { agent_id: AgentId },
+
+    // === Plugin (§15) ===
+    InstallPlugin { source: PluginSource },
+    UninstallPlugin { id: PluginId },
+    EnablePlugin { id: PluginId },
+    DisablePlugin { id: PluginId },
+    UpdatePlugin { id: PluginId },
+    SyncMarketplace { name: String },
+    FetchPluginBlocklist,
 
     // === Agent/Subagent (§10) ===
     AllocateStateMachineSlot { context: SubagentContext },
@@ -1371,7 +1435,7 @@ pub struct ToolUseOptions {
     pub agent_definitions: Vec<AgentDefinition>,
     pub custom_system_prompt: Option<String>,
     pub append_system_prompt: Option<String>,
-    pub max_budget_usd: Option<f64>,
+    pub max_budget_nano_usd: Option<u64>,
     pub refresh_tools: Option<Arc<dyn Fn() -> Vec<Arc<dyn Tool>> + Send + Sync>>,
 }
 ```
@@ -1397,7 +1461,6 @@ pub struct ToolRegistry {
     builtin: Vec<Arc<dyn Tool>>,
     mcp_tools: HashMap<McpConnectionId, Vec<Arc<dyn Tool>>>,
     lsp_tools: Vec<Arc<dyn Tool>>,
-    plugin_tools: HashMap<PluginId, Vec<Arc<dyn Tool>>>,
 }
 
 impl ToolRegistry {
@@ -1750,6 +1813,12 @@ pub trait BuiltinHookHandler: Send + Sync {
 | **Telemetry** | Inherit chainId, depth+1 | N/A | Parent-child link via QueryChainTracking |
 | **transcripts** | Sidechain JSONL (isolated) | N/A | Parent doesn't read directly |
 | **API client** | Share HttpTransport, independent prompt cache | ✅ `model` field including `inherit` | forked agent `model: inherit` for cache hit |
+
+Plugin-provided agents are a narrower trust surface than user/project agents:
+their frontmatter `permission_mode`, `hooks`, and `mcpServers` fields are ignored.
+Those privileges must be granted through the plugin manifest at install/enable time,
+then materialized by PluginManager (§15), so a third-party agent file cannot silently
+expand permissions after review.
 
 ### 10.2 AgentDefinition
 
@@ -2886,11 +2955,12 @@ impl CompactionOrchestrator {
 
 ## 14. Permission Policy Engine
 
-### 14.1 PermissionMode (7 modes)
+### 14.1 PermissionMode (5 external + 2 internal modes)
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PermissionMode {
+    // External/user-addressable modes (settings, CLI, recovery)
     /// Default: rule-driven decision, prompt on no match
     Default,
     /// Plan mode: only Read/Grep/Glob/WebSearch/WebFetch
@@ -2901,9 +2971,11 @@ pub enum PermissionMode {
     BypassPermissions,
     /// No prompts: matched=allow/deny, no match=deny
     DontAsk,
-    /// Subagent only: bubble permission prompts up to parent terminal
+    // Internal-only modes
+    /// Subagent only: bubble permission prompts up to parent terminal.
+    /// Not accepted in settings/CLI validation.
     Bubble,
-    /// Auto mode (ant-only, transcript classifier experimental)
+    /// Auto mode (transcript classifier feature-gated; not always runtime-valid)
     Auto,
 }
 ```
@@ -2930,17 +3002,16 @@ pub struct PermissionRuleValue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PermissionBehavior { Allow, Deny, Ask }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PermissionRuleSource {
-    BuiltIn,         // compiled-in (lowest priority)
     UserSettings,    // ~/.claude/settings.json
     ProjectSettings, // .claude/settings.json
     LocalSettings,   // .claude/settings.local.json
-    ManagedSettings, // enterprise policy
-    Plugin,
-    CliArg,          // --allow-tools
+    FlagSettings,    // --settings / SDK inline settings
+    PolicySettings,  // enterprise managed settings
+    CliArg,          // --allow-tools / --deny-tools / --permission-mode
     Command,         // /permissions add ...
-    Session,         // runtime "always allow" (highest)
+    Session,         // runtime "always allow"
 }
 ```
 
@@ -2964,6 +3035,9 @@ pub enum PermissionResult {
     Ask {
         reason: PermissionDecisionReason,
         prompt: PermissionPrompt,
+        /// Bash safety classifiers may run while the user prompt is displayed.
+        /// If they approve first, the prompt is resolved without user action.
+        pending_classifier_check: Option<PendingClassifierCheck>,
         metadata: PermissionMetadata,
     },
 }
@@ -2972,13 +3046,32 @@ pub enum PermissionResult {
 pub enum PermissionDecisionReason {
     MatchedRule { rule: PermissionRule },
     PermissionMode { mode: PermissionMode },
+    SubcommandResults { reasons: HashMap<String, PermissionResult> },
+    PermissionPromptTool { tool_name: String },
     ClassifierApproved { classifier: ClassifierKind, score: f64 },
     ClassifierRejected { classifier: ClassifierKind, score: f64 },
-    HookOverride { hook_id: HookId },
-    ToolSpecific { tool: String, reason: String },
+    HookOverride { hook_id: HookId, source: Option<String>, reason: Option<String> },
+    AsyncAgent { reason: String },
+    SandboxOverride { reason: SandboxOverrideReason },
+    WorkingDirectory { reason: String },
+    SafetyCheck { reason: String, classifier_approvable: bool },
+    Other { reason: String },
     DenialLimitExceeded,
     AutoModeFallback,
     BypassPermissions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingClassifierCheck {
+    pub classifier: ClassifierKind,
+    pub request_id: RequestId,
+    pub started_at: SystemTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SandboxOverrideReason {
+    ExcludedCommand,
+    DangerouslyDisableSandbox,
 }
 ```
 
@@ -3066,9 +3159,12 @@ pub struct PermissionPolicy {
 impl PermissionPolicy {
     pub async fn authorize(&self, tool: &dyn Tool, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
         // 1. Tool-level matcher
-        // 2. Priority traversal: Deny → Allow → Ask, sources ordered Managed > Session > Local > Project > User > BuiltIn
+        // 2. Behavior traversal: Deny → Allow → Ask, with Claude Code source order:
+        //    userSettings → projectSettings → localSettings → flagSettings → policySettings → cliArg → command → session.
+        //    Policy/flag/command are read-only; only user/project/local/session/cliArg are valid update destinations.
         // 3. Mode-driven fallback (Bypass / Plan / AcceptEdits + Yolo / DontAsk / Auto + Transcript)
-        // 4. Denial limit fallback to Ask
+        // 4. Bash pendingClassifierCheck can race the user prompt and auto-approve before user response
+        // 5. Denial limit fallback to Ask
         ...
     }
 
@@ -3089,33 +3185,18 @@ pub struct PermissionUpdate {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum PermissionUpdateDestination {
-    Session, ProjectSettings, UserSettings, LocalSettings,
+    UserSettings,
+    ProjectSettings,
+    LocalSettings,
+    Session,
+    CliArg,
 }
 ```
 
 ### 14.8 Integration
 
-```rust
-// New events
-pub enum Event {
-    // ...
-    PermissionRuleAdded { rule: PermissionRule, source: PermissionRuleSource },
-    PermissionRuleRemoved { rule: PermissionRule, source: PermissionRuleSource },
-    PermissionModeSwitched { from: PermissionMode, to: PermissionMode },
-    ClassifierScoreReceived { tool_use_id: ToolUseId, kind: ClassifierKind, score: ClassifierScore },
-    BypassKillswitchActivated,
-    DenialLimitReached { tool: String, count: u32 },
-}
-
-// New effects
-pub enum Effect {
-    // ...
-    EvaluatePermission { tool_use_id: ToolUseId, tool_name: String, input: Value },
-    PersistPermissionUpdate { update: PermissionUpdate },
-    RunClassifier { kind: ClassifierKind, tool_use_id: ToolUseId, tool_name: String, input: Value },
-    DetectShadowedRules { rule: PermissionRule },
-}
-```
+Canonical `Event`/`Effect` variants for permission are defined in §5.2-§5.3.
+Section §14 owns the policy semantics only.
 
 ---
 
@@ -3124,7 +3205,7 @@ pub enum Effect {
 ### 15.1 PluginManifest
 
 ```rust
-/// A plugin can provide 7 kinds of capabilities
+/// A plugin materializes the same component surface as Claude Code plugins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
     pub id: PluginId,
@@ -3134,21 +3215,50 @@ pub struct PluginManifest {
     pub author: Option<String>,
     pub homepage: Option<String>,
     pub source: PluginSource,
-    pub provides: PluginCapabilities,
+    pub components: PluginComponents,
     pub trust_level: PluginTrustLevel,
     pub depends_on: Vec<PluginId>,
-    pub config_schema: Option<Value>,
+    /// User-provided values; sensitive entries are stored through SecureStorage
+    /// and substituted into MCP/LSP/hooks/commands at load time.
+    pub user_config: Option<UserConfigSchema>,
+    pub channels: Vec<PluginChannel>,
+    pub settings: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginCapabilities {
-    pub tools: Vec<String>,
-    pub agents: Vec<String>,
+pub struct PluginComponents {
+    pub commands: Vec<ComponentPath>,
+    pub agents: Vec<ComponentPath>,
+    pub skills: Vec<ComponentPath>,
+    pub output_styles: Vec<ComponentPath>,
     pub hooks: Vec<HookDefinition>,
-    pub mcp_servers: Vec<McpServerSpec>,
-    pub skills: Vec<String>,
-    pub commands: Vec<String>,
-    pub output_styles: Vec<String>,
+    pub mcp_servers: HashMap<String, McpServerConfig>,
+    pub lsp_servers: HashMap<String, LspServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentPath {
+    pub path: PathBuf,
+    pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserConfigSchema {
+    pub fields: HashMap<String, UserConfigField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserConfigField {
+    pub description: String,
+    pub sensitive: bool,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginChannel {
+    pub name: String,
+    pub mcp_server: String,
+    pub user_config: Option<UserConfigSchema>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3196,13 +3306,16 @@ pub struct PluginManager {
     fs: Arc<dyn FileSystem>,
     http: Arc<dyn HttpTransport>,
     runtime: Arc<dyn RuntimeSpawner>,
-    /// Cross-subsystem registries to inject capabilities into
-    tool_registry: Arc<RwLock<ToolRegistry>>,
-    hook_registry: Arc<RwLock<HookRegistry>>,
-    mcp_registry: Arc<RwLock<McpRegistry>>,
+    credential_manager: Arc<CredentialManager>,
+    /// Cross-subsystem registries to materialize plugin components into
+    command_registry: Arc<RwLock<CommandRegistry>>,
     agent_registry: Arc<RwLock<AgentRegistry>>,
     skill_registry: Arc<RwLock<SkillRegistry>>,
-    command_registry: Arc<RwLock<CommandRegistry>>,
+    hook_registry: Arc<RwLock<HookRegistry>>,
+    output_style_registry: Arc<RwLock<OutputStyleRegistry>>,
+    mcp_registry: Arc<RwLock<McpRegistry>>,
+    lsp_registry: Arc<RwLock<LspRegistry>>,
+    channel_registry: Arc<RwLock<ChannelRegistry>>,
 }
 
 impl PluginManager {
@@ -3213,18 +3326,12 @@ impl PluginManager {
     pub async fn update(&self, id: &PluginId) -> Result<(), PluginError> { ... }
     pub async fn reload(&self, id: &PluginId) -> Result<(), PluginError> { ... }
 
-    /// Load plugin → inject capabilities into all 6 registries
+    /// Load plugin → materialize all declared Claude Code components.
     async fn load_plugin(&self, manifest: &PluginManifest, install_dir: &Path) -> Result<(), PluginError> {
-        let tools = load_plugin_tools(install_dir).await?;
-        self.tool_registry.write().await.register_plugin_tools(manifest.id.clone(), tools);
+        let resolved_config = resolve_user_config(manifest, &*self.credential_manager).await?;
 
-        let hooks = load_plugin_hooks(install_dir).await?;
-        self.hook_registry.write().await.register_plugin_hooks(manifest.id.clone(), hooks);
-
-        let servers = load_plugin_mcp_servers(install_dir).await?;
-        for server in servers {
-            self.mcp_registry.write().await.register_plugin_server(manifest.id.clone(), server).await?;
-        }
+        let commands = load_plugin_commands(install_dir, &resolved_config).await?;
+        self.command_registry.write().await.register_plugin_commands(manifest.id.clone(), commands);
 
         let agents = load_plugin_agents(install_dir).await?;
         self.agent_registry.write().await.register_plugin_agents(manifest.id.clone(), agents);
@@ -3232,20 +3339,36 @@ impl PluginManager {
         let skills = load_plugin_skills(install_dir).await?;
         self.skill_registry.write().await.register_plugin_skills(manifest.id.clone(), skills);
 
-        let commands = load_plugin_commands(install_dir).await?;
-        self.command_registry.write().await.register_plugin_commands(manifest.id.clone(), commands);
+        let hooks = load_plugin_hooks(install_dir, &resolved_config).await?;
+        self.hook_registry.write().await.register_plugin_hooks(manifest.id.clone(), hooks);
+
+        let output_styles = load_plugin_output_styles(install_dir).await?;
+        self.output_style_registry.write().await.register_plugin_output_styles(manifest.id.clone(), output_styles);
+
+        let servers = load_plugin_mcp_servers(install_dir, &resolved_config).await?;
+        for server in servers {
+            self.mcp_registry.write().await.register_plugin_server(manifest.id.clone(), server).await?;
+        }
+
+        let lsp_servers = load_plugin_lsp_servers(install_dir, &resolved_config).await?;
+        self.lsp_registry.write().await.register_plugin_servers(manifest.id.clone(), lsp_servers).await?;
+
+        let channels = load_plugin_channels(manifest, &resolved_config).await?;
+        self.channel_registry.write().await.register_plugin_channels(manifest.id.clone(), channels);
 
         Ok(())
     }
 
-    /// Unload plugin → clean up all registries
+    /// Unload plugin → clean up the exact registries touched by load_plugin.
     async fn unload_plugin(&self, id: &PluginId) -> Result<(), PluginError> {
-        self.tool_registry.write().await.unregister_plugin(id);
-        self.hook_registry.write().await.unregister_plugin(id);
-        self.mcp_registry.write().await.unregister_plugin(id).await?;
+        self.command_registry.write().await.unregister_plugin(id);
         self.agent_registry.write().await.unregister_plugin(id);
         self.skill_registry.write().await.unregister_plugin(id);
-        self.command_registry.write().await.unregister_plugin(id);
+        self.hook_registry.write().await.unregister_plugin(id);
+        self.output_style_registry.write().await.unregister_plugin(id);
+        self.mcp_registry.write().await.unregister_plugin(id).await?;
+        self.lsp_registry.write().await.unregister_plugin(id).await?;
+        self.channel_registry.write().await.unregister_plugin(id);
         Ok(())
     }
 }
@@ -3309,20 +3432,27 @@ impl PluginBlocklist {
 ### 15.6 Strict Plugin-Only Mode
 
 ```rust
-/// Enterprise policy can lock certain capabilities to plugin-only
+/// Enterprise policy can lock certain components to plugin-only
 /// e.g., strict_plugin_only = ["mcp", "agents"] means user-defined
 /// .claude/agents/*.md is ignored; only plugin-provided agents are loaded.
 pub struct StrictPluginOnlyPolicy {
-    pub locked_capabilities: HashSet<PluginCapability>,
+    pub locked_components: HashSet<PluginComponent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum PluginCapability {
-    Mcp, Agents, Hooks, Skills, Commands, OutputStyles,
+pub enum PluginComponent {
+    Commands,
+    Agents,
+    Skills,
+    Hooks,
+    OutputStyles,
+    McpServers,
+    LspServers,
+    Channels,
 }
 
 impl StrictPluginOnlyPolicy {
-    pub fn is_locked(&self, capability: PluginCapability) -> bool { ... }
+    pub fn is_locked(&self, component: PluginComponent) -> bool { ... }
 }
 ```
 
@@ -3330,46 +3460,31 @@ impl StrictPluginOnlyPolicy {
 
 ```
 PluginManager.load_plugin()
-    ├── ToolRegistry.register_plugin_tools()        → §8
-    ├── HookRegistry.register_plugin_hooks()        → §9
-    ├── McpRegistry.register_plugin_server()        → §7
+    ├── CommandRegistry.register_plugin_commands()  → core
     ├── AgentRegistry.register_plugin_agents()      → §10
     ├── SkillRegistry.register_plugin_skills()      → core
-    └── CommandRegistry.register_plugin_commands()  → core
+    ├── HookRegistry.register_plugin_hooks()        → §9
+    ├── OutputStyleRegistry.register_plugin_styles()→ core/UI facade
+    ├── McpRegistry.register_plugin_server()        → §7
+    ├── LspRegistry.register_plugin_servers()       → tools/LSP
+    └── ChannelRegistry.register_plugin_channels()  → MCP assistant channels
 ```
 
-```rust
-// New events
-pub enum Event {
-    // ...
-    PluginInstalled { id: PluginId, source: PluginSource },
-    PluginUninstalled { id: PluginId },
-    PluginEnabled { id: PluginId },
-    PluginDisabled { id: PluginId },
-    PluginUpdated { id: PluginId, from_version: String, to_version: String },
-    PluginLoadFailed { id: PluginId, error: String },
-    MarketplaceSynced { name: String, entries: usize },
-    PluginBlocked { id: PluginId, reason: String },
-}
+Canonical `Event`/`Effect` variants for plugin lifecycle are defined in §5.2-§5.3.
+Section §15 owns manifest/component semantics and registry materialization.
 
-// New effects
-pub enum Effect {
-    // ...
-    InstallPlugin { source: PluginSource },
-    UninstallPlugin { id: PluginId },
-    EnablePlugin { id: PluginId },
-    DisablePlugin { id: PluginId },
-    UpdatePlugin { id: PluginId },
-    SyncMarketplace { name: String },
-    FetchPluginBlocklist,
-}
-```
+Hook reload is transactional: compute the next plugin hook set, swap it under the
+hook registry lock, and prune removed plugin hooks without clearing unrelated
+registered hooks. Cache invalidation must not be used as hook unregistration.
 
 ---
 
 ## 16. Secret & Credential Management
 
 ### 16.1 SecureStorage Trait
+
+`SecureStorage` lives in `lingxi-traits`; the shared DTOs below live in `lingxi-protocol`
+so platform backends can implement the trait without depending on `lingxi-secret`.
 
 ```rust
 #[async_trait]
@@ -3382,11 +3497,28 @@ pub trait SecureStorage: Send + Sync {
     fn backend(&self) -> SecureStorageBackend;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct SecureStorageData {
-    /// Actual secret bytes — MUST NEVER appear in log/transcript
-    pub bytes: Vec<u8>,
+    /// Actual secret bytes — MUST NEVER appear in log/transcript.
+    /// Kept private so call sites must use `expose_secret()` explicitly.
+    bytes: Secret<Vec<u8>>,
     pub metadata: SecureStorageMetadata,
+}
+
+impl std::fmt::Debug for SecureStorageData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecureStorageData")
+            .field("bytes", &"<redacted>")
+            .field("metadata", &self.metadata)
+            .finish()
+    }
+}
+
+impl SecureStorageData {
+    pub fn new(bytes: Vec<u8>, metadata: SecureStorageMetadata) -> Self {
+        Self { bytes: Secret::new(bytes), metadata }
+    }
+    pub fn expose_secret_bytes(&self) -> &[u8] { self.bytes.expose_secret() }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3419,7 +3551,7 @@ pub enum SecureStorageBackend {
 }
 ```
 
-### 16.2 Secret<T> Newtype (Anti-Leak)
+### 16.2 Secret<T> Newtype (Anti-Leak, defined in lingxi-protocol)
 
 ```rust
 /// Newtype prevents accidental Debug/Display leaks in logs, error messages,
@@ -3509,17 +3641,18 @@ impl CredentialManager {
 /// at startup parallel with other init so the prompt appears once, early.
 pub struct KeychainPrefetch {
     result_rx: Mutex<Option<oneshot::Receiver<Result<Option<SecureStorageData>, SecureStorageError>>>>,
+    handle: BackgroundTaskHandle,
 }
 
 impl KeychainPrefetch {
-    pub fn start_prefetch(storage: Arc<dyn SecureStorage>, runtime: &dyn RuntimeSpawner) -> Self {
+    pub async fn start_prefetch(storage: Arc<dyn SecureStorage>, runtime: &dyn RuntimeSpawner) -> Result<Self, RuntimeError> {
         let (tx, rx) = oneshot::channel();
         let storage_clone = storage.clone();
-        runtime.spawn("keychain-prefetch", Box::pin(async move {
+        let handle = runtime.spawn("keychain-prefetch", Box::pin(async move {
             let result = storage_clone.retrieve("lingxi", "anthropic-credentials").await;
             let _ = tx.send(result);
-        }));
-        Self { result_rx: Mutex::new(Some(rx)) }
+        })).await?;
+        Ok(Self { result_rx: Mutex::new(Some(rx)), handle })
     }
     pub async fn consume(&self) -> Option<Result<Option<SecureStorageData>, SecureStorageError>> { ... }
 }
@@ -3551,7 +3684,9 @@ pub fn builtin_rules() -> Vec<SecretRuleSpec> {
         SecretRuleSpec { id: "azure-ad-client-secret", source: "..." },
         SecretRuleSpec { id: "digitalocean-pat", source: r"\b(dop_v1_[a-f0-9]{64})..." },
         // AI APIs
-        SecretRuleSpec { id: "anthropic-api-key", source: r"\b(sk-ant-api03-[a-zA-Z0-9_\-]{93}AA)..." },
+        // Build distinctive Anthropic prefixes from fragments at runtime so the bundled scanner
+        // does not itself contain a complete credential-looking token prefix.
+        SecretRuleSpec::anthropic_api_key_runtime_built_prefix(),
         SecretRuleSpec { id: "anthropic-admin-api-key", source: "..." },
         SecretRuleSpec { id: "openai-api-key", source: "..." },
         SecretRuleSpec { id: "huggingface-access-token", source: "..." },
@@ -3564,15 +3699,31 @@ pub fn builtin_rules() -> Vec<SecretRuleSpec> {
 }
 
 impl SecretScanner {
-    pub fn scan(&self, content: &str) -> Vec<SecretMatch> { ... }
+    /// Public detection results intentionally omit values and byte ranges.
+    /// Redaction can use internal match spans, but scan results are safe for telemetry/logging.
+    pub fn scan(&self, content: &str) -> Vec<SecretDetection> { ... }
     pub fn redact(&self, content: &str) -> String { ... }
 }
 
 #[derive(Debug, Clone)]
-pub struct SecretMatch {
+pub struct SecretDetection {
     pub rule_id: String,
     pub label: String,
-    pub range: Range<usize>,
+}
+
+/// Protocol DTO for effect payloads that may contain sensitive user content.
+#[derive(Clone)]
+pub struct RedactableContent(String);
+
+impl std::fmt::Debug for RedactableContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<redactable-content>")
+    }
+}
+
+impl RedactableContent {
+    pub fn new(content: String) -> Self { Self(content) }
+    pub fn expose_for_scan(&self) -> &str { &self.0 }
 }
 ```
 
@@ -3602,67 +3753,88 @@ pub enum BoundaryPolicy {
 
 ### 16.7 Integration
 
-```rust
-// New events
-pub enum Event {
-    // ...
-    SecretDetected { boundary: RedactionBoundary, rule_id: String, redacted: bool },
-    CredentialStored { kind: SecretKind },
-    CredentialRefreshed { kind: SecretKind },
-    CredentialDeleted { kind: SecretKind },
-    OAuthTokenExpired { service: String },
-    KeychainPrefetchComplete,
-}
-
-// New effects
-pub enum Effect {
-    // ...
-    StoreCredential { kind: SecretKind, data: SecureStorageData },
-    RetrieveCredential { kind: SecretKind },
-    DeleteCredential { kind: SecretKind },
-    RefreshOAuthToken { service: String },
-    ScanForSecrets { boundary: RedactionBoundary, content: String },
-    RedactContent { content: String },
-}
-```
+Canonical `Event`/`Effect` variants for secret and credential flows are defined in §5.2-§5.3.
+Effect payloads that may contain user content use `RedactableContent`, whose `Debug`
+implementation never prints the body.
 
 ---
 
 ## 17. API Cost & Budget Tracking
 
-### 17.1 ModelPricing
+### 17.1 Provider/Model Pricing Catalog
 
 ```rust
-/// Compile-time pricing table
+/// Cost keys include provider because the same model string can exist behind
+/// different gateways, and future providers (OpenAI/ChatGPT-family, Gemini,
+/// OpenAI-compatible vendors) can have different token categories and rates.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModelRef {
+    pub provider: ProviderId,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProviderId {
+    Anthropic,
+    OpenAI,
+    GoogleGemini,
+    OpenAICompatible { name: String },
+    Custom { name: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TokenClass {
+    Input,
+    Output,
+    CacheWrite,
+    CacheRead,
+    ReasoningOutput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NonTokenBillableUnit {
+    WebSearchRequest,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct MoneyPerToken {
+    /// Store rates as nano-USD per token to keep calculation deterministic.
+    pub nano_usd_per_token: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPricing {
-    pub input_tokens_per_mtok_usd: f64,
-    pub output_tokens_per_mtok_usd: f64,
-    pub prompt_cache_write_per_mtok_usd: f64,
-    pub prompt_cache_read_per_mtok_usd: f64,
-    pub web_search_request_usd: f64,
+    pub model_ref: ModelRef,
+    pub token_rates: HashMap<TokenClass, MoneyPerToken>,
+    pub non_token_rates_nano_usd: HashMap<NonTokenBillableUnit, u64>,
+    pub effective_from: Option<SystemTime>,
+    pub source: PricingSource,
 }
 
-/// 6+ pricing tiers (values verified against claude-code)
-pub mod pricing {
-    use super::ModelPricing;
-    pub const TIER_3_15: ModelPricing = ModelPricing {
-        input_tokens_per_mtok_usd: 3.0, output_tokens_per_mtok_usd: 15.0,
-        prompt_cache_write_per_mtok_usd: 3.75, prompt_cache_read_per_mtok_usd: 0.3,
-        web_search_request_usd: 0.01,
-    };
-    pub const TIER_15_75: ModelPricing = ModelPricing {
-        input_tokens_per_mtok_usd: 15.0, output_tokens_per_mtok_usd: 75.0,
-        prompt_cache_write_per_mtok_usd: 18.75, prompt_cache_read_per_mtok_usd: 1.5,
-        web_search_request_usd: 0.01,
-    };
-    pub const TIER_5_25: ModelPricing = ModelPricing { /* Opus 4.5 */ };
-    pub const TIER_30_150: ModelPricing = ModelPricing { /* Opus 4.6 Fast Mode */ };
-    pub const TIER_HAIKU_35: ModelPricing = ModelPricing { /* Haiku 3.5: $0.80/$4 */ };
-    pub const TIER_HAIKU_45: ModelPricing = ModelPricing { /* Haiku 4.5: $1/$5 */ };
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PricingSource {
+    BuiltInReference { provider: ProviderId },
+    HostOverride { path: PathBuf },
+    RemoteManagedSettings,
 }
 
-pub fn pricing_for_model(model: &str, fast_mode: bool) -> Option<ModelPricing> { ... }
+pub struct PricingCatalog {
+    entries: HashMap<ModelRef, ModelPricing>,
+    provider_defaults: HashMap<ProviderId, ModelPricing>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PricingResolution {
+    ExactModel { model_ref: ModelRef },
+    ProviderDefault { requested: ModelRef },
+    UnpricedModel { requested: ModelRef },
+}
+
+impl PricingCatalog {
+    /// Resolve by provider + model. Anthropic/Claude Code parity entries are the first
+    /// built-in reference set; OpenAI (ChatGPT-family) and Gemini entries can be added without touching CostTracker.
+    pub fn resolve(&self, model_ref: &ModelRef, usage: &Usage) -> Result<(ModelPricing, PricingResolution), CostError> { ... }
+}
 ```
 
 ### 17.2 Usage Counter
@@ -3670,11 +3842,20 @@ pub fn pricing_for_model(model: &str, fast_mode: bool) -> Option<ModelPricing> {
 ```rust
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Usage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_creation_input_tokens: u64,
-    pub cache_read_input_tokens: u64,
+    pub tokens: TokenUsage,
     pub server_tool_use: Option<ServerToolUsage>,
+    /// Provider-reported speed/variant can change model pricing while the model
+    /// string stays the same (e.g. fast tier). Catalog resolution may inspect it.
+    pub speed: Option<ApiSpeed>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+    pub reasoning_output: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -3682,11 +3863,20 @@ pub struct ServerToolUsage {
     pub web_search_requests: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApiSpeed { Standard, Fast }
+
 impl Usage {
     pub fn add(&mut self, other: &Usage) { ... }
+    pub fn tokens_for(&self, class: TokenClass) -> u64 { ... }
     pub fn total_tokens(&self) -> u64 { ... }
 }
 ```
+
+Provider adapters normalize native API usage into this shape before emitting
+`ApiStreamEnd`. Anthropic cache fields map to `cache_write/cache_read`; OpenAI or
+Gemini-specific fields map to the closest `TokenClass`, and unsupported classes
+stay at zero. This keeps calculation model/token-based even when providers differ.
 
 ### 17.3 CostCalculator
 
@@ -3694,22 +3884,31 @@ impl Usage {
 pub struct CostCalculator;
 
 impl CostCalculator {
-    pub fn calculate_usd(usage: &Usage, pricing: &ModelPricing) -> f64 {
-        let input = usage.input_tokens as f64 / 1_000_000.0 * pricing.input_tokens_per_mtok_usd;
-        let output = usage.output_tokens as f64 / 1_000_000.0 * pricing.output_tokens_per_mtok_usd;
-        let cache_write = usage.cache_creation_input_tokens as f64 / 1_000_000.0 * pricing.prompt_cache_write_per_mtok_usd;
-        let cache_read = usage.cache_read_input_tokens as f64 / 1_000_000.0 * pricing.prompt_cache_read_per_mtok_usd;
+    pub fn calculate_nano_usd(usage: &Usage, pricing: &ModelPricing) -> u64 {
+        let token_cost = pricing.token_rates.iter().map(|(class, rate)| {
+            usage.tokens_for(*class) * rate.nano_usd_per_token
+        }).sum::<u64>();
+
         let web_search = usage.server_tool_use
-            .map(|s| s.web_search_requests as f64 * pricing.web_search_request_usd)
-            .unwrap_or(0.0);
-        input + output + cache_write + cache_read + web_search
+            .map(|s| {
+                s.web_search_requests as u64
+                    * pricing.non_token_rates_nano_usd
+                        .get(&NonTokenBillableUnit::WebSearchRequest)
+                        .copied()
+                        .unwrap_or(0)
+            })
+            .unwrap_or(0);
+
+        token_cost + web_search
     }
 
     /// How much prompt cache saved (for display)
-    pub fn cache_savings_usd(usage: &Usage, pricing: &ModelPricing) -> f64 {
-        let would_have_paid = usage.cache_read_input_tokens as f64 / 1_000_000.0 * pricing.input_tokens_per_mtok_usd;
-        let actually_paid = usage.cache_read_input_tokens as f64 / 1_000_000.0 * pricing.prompt_cache_read_per_mtok_usd;
-        would_have_paid - actually_paid
+    pub fn cache_savings_nano_usd(usage: &Usage, pricing: &ModelPricing) -> u64 {
+        let Some(input_rate) = pricing.token_rates.get(&TokenClass::Input) else { return 0 };
+        let Some(cache_read_rate) = pricing.token_rates.get(&TokenClass::CacheRead) else { return 0 };
+        let full = usage.tokens.cache_read * input_rate.nano_usd_per_token;
+        let discounted = usage.tokens.cache_read * cache_read_rate.nano_usd_per_token;
+        full.saturating_sub(discounted)
     }
 }
 ```
@@ -3720,46 +3919,57 @@ impl CostCalculator {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CostState {
     pub session_id: SessionId,
-    pub total_usd: f64,
-    pub per_model_usage: HashMap<String, ModelUsage>,
+    pub total_nano_usd: u64,
+    pub per_model_usage: HashMap<ModelRef, ModelUsage>,
     pub total_api_duration_ms: u64,
     pub total_api_duration_without_retries_ms: u64,
     pub total_tool_duration_ms: u64,
     pub total_lines_added: u64,
     pub total_lines_removed: u64,
-    pub has_unknown_model_cost: bool,
+    pub unpriced_models: HashSet<ModelRef>,
     pub total_web_search_requests: u32,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelUsage {
-    pub model: String,
+    pub model_ref: ModelRef,
     pub usage: Usage,
-    pub cost_usd: f64,
+    pub cost_nano_usd: u64,
     pub context_window: u64,
     pub max_output_tokens: u64,
 }
 
 pub struct CostTracker {
     state: Arc<RwLock<CostState>>,
+    catalog: Arc<PricingCatalog>,
     /// Persistence to .claude/project-config.json
     persist_fn: Arc<dyn Fn(&CostState) + Send + Sync>,
 }
 
 impl CostTracker {
-    pub async fn record_api_response(&self, model: &str, usage: Usage, duration_ms: u64, retries: u32) -> Result<(), CostError> {
-        let pricing = pricing_for_model(model, is_fast_mode());
-        let cost_usd = pricing.map(|p| CostCalculator::calculate_usd(&usage, &p)).unwrap_or(0.0);
+    pub async fn record_api_response(&self, model_ref: ModelRef, usage: Usage, duration_ms: u64, retries: u32) -> Result<(), CostError> {
+        let (pricing, pricing_resolution) = self.catalog.resolve(&model_ref, &usage)?;
+        let cost_nano_usd = CostCalculator::calculate_nano_usd(&usage, &pricing);
         let mut state = self.state.write().await;
-        state.total_usd += cost_usd;
+        state.total_nano_usd += cost_nano_usd;
         state.total_api_duration_ms += duration_ms;
         if retries == 0 {
             state.total_api_duration_without_retries_ms += duration_ms;
         }
-        let model_usage = state.per_model_usage.entry(model.to_string()).or_default();
+        let model_usage = state.per_model_usage
+            .entry(model_ref.clone())
+            .or_insert_with(|| ModelUsage {
+                model_ref: model_ref.clone(),
+                usage: Usage::default(),
+                cost_nano_usd: 0,
+                context_window: 0,
+                max_output_tokens: 0,
+            });
         model_usage.usage.add(&usage);
-        model_usage.cost_usd += cost_usd;
-        if pricing.is_none() { state.has_unknown_model_cost = true; }
+        model_usage.cost_nano_usd += cost_nano_usd;
+        if let PricingResolution::UnpricedModel { requested } = pricing_resolution {
+            state.unpriced_models.insert(requested);
+        }
         if let Some(s) = usage.server_tool_use {
             state.total_web_search_requests += s.web_search_requests;
         }
@@ -3768,7 +3978,7 @@ impl CostTracker {
         Ok(())
     }
 
-    pub async fn total_usd(&self) -> f64 { self.state.read().await.total_usd }
+    pub async fn total_nano_usd(&self) -> u64 { self.state.read().await.total_nano_usd }
     pub async fn snapshot(&self) -> CostState { self.state.read().await.clone() }
     pub async fn reset(&self) { *self.state.write().await = CostState::default(); }
 }
@@ -3779,8 +3989,8 @@ impl CostTracker {
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BudgetConfig {
-    pub max_session_usd: Option<f64>,
-    pub max_turn_usd: Option<f64>,
+    pub max_session_nano_usd: Option<u64>,
+    pub max_turn_nano_usd: Option<u64>,
     pub max_turn_tokens: Option<u64>,
     pub warning_thresholds: Vec<f64>,  // [0.5, 0.8, 0.95]
     pub on_exceed: BudgetExceedPolicy,
@@ -3796,10 +4006,10 @@ pub struct BudgetEnforcer {
 }
 
 impl BudgetEnforcer {
-    pub async fn check_pre_api_call(&self, estimated_cost: f64) -> BudgetCheckResult {
-        let current = self.cost_tracker.total_usd().await;
-        let after = current + estimated_cost;
-        if let Some(max) = self.config.max_session_usd {
+    pub async fn check_pre_api_call(&self, estimated_cost_nano_usd: u64) -> BudgetCheckResult {
+        let current = self.cost_tracker.total_nano_usd().await;
+        let after = current + estimated_cost_nano_usd;
+        if let Some(max) = self.config.max_session_nano_usd {
             if after > max {
                 return match self.config.on_exceed {
                     BudgetExceedPolicy::Halt => BudgetCheckResult::Halt { current, limit: max },
@@ -3824,37 +4034,24 @@ impl BudgetEnforcer {
 #[derive(Debug, Clone)]
 pub enum BudgetCheckResult {
     Ok,
-    ThresholdWarning { pct: u32, current: f64, limit: f64 },
-    Warn { current: f64, limit: f64 },
-    AskUser { current: f64, limit: f64 },
-    Halt { current: f64, limit: f64 },
+    ThresholdWarning { pct: u32, current: u64, limit: u64 },
+    Warn { current: u64, limit: u64 },
+    AskUser { current: u64, limit: u64 },
+    Halt { current: u64, limit: u64 },
 }
 ```
 
 ### 17.6 Integration
 
-```rust
-// New events
-pub enum Event {
-    // ...
-    CostRecorded { model: String, usage: Usage, cost_usd: f64 },
-    BudgetThresholdReached { pct: u32, current: f64, limit: f64 },
-    BudgetExceeded { current: f64, limit: f64 },
-    UnknownModelCostDetected { model: String },
-    CostStateRestored { state: CostState },
-}
+Canonical `Event`/`Effect` variants for cost and budget flows are defined in §5.2-§5.3.
+Budget policies are the exceed actions (`Halt`, `AskUser`, `WarnOnly`); threshold
+warnings are separate budget events, not a fourth exceed policy.
 
-// New effects
-pub enum Effect {
-    // ...
-    PersistCostState { state: CostState },
-    LoadCostState { session_id: SessionId },
-    DisplayCostUpdate { snapshot: CostState },
-    EnforceBudget { estimated_cost: f64 },
-    FireBudgetWarning { pct: u32, current: f64, limit: f64 },
-    HaltOnBudget,
-}
-```
+Adding a provider such as OpenAI or Gemini is a catalog/adapter change:
+1. add provider-specific `ModelPricing` entries keyed by `ModelRef`;
+2. normalize that provider's API usage response into `Usage`;
+3. add parity fixtures for representative input/output/cache/reasoning token counts.
+No CostTracker or BudgetEnforcer logic should become provider-specific.
 
 ---
 
@@ -3935,15 +4132,16 @@ proptest! { #[test] fn keychain_roundtrip(kind in arb_secret_kind(), bytes in an
 
 // Cost invariants
 proptest! { #[test] fn cost_is_monotonic(events in arb_usage_sequence(1..100)) { ... } }
-proptest! { #[test] fn cost_matches_claude_code_reference(usage in arb_usage(), model in arb_model()) { ... } }
-proptest! { #[test] fn cache_savings_non_negative(usage in arb_usage(), pricing in arb_pricing()) { ... } }
+proptest! { #[test] fn cost_matches_pricing_catalog(usage in arb_usage(), model_ref in arb_model_ref()) { ... } }
+proptest! { #[test] fn provider_usage_normalization_preserves_billable_tokens(native in arb_provider_usage()) { ... } }
+proptest! { #[test] fn cache_savings_non_negative(usage in arb_usage(), pricing in arb_model_pricing()) { ... } }
 proptest! { #[test] fn budget_halt_stops_subsequent_calls(budget in arb_budget()) { ... } }
 
 // Plugin invariants
 proptest! { #[test] fn install_uninstall_roundtrip(manifest in arb_plugin_manifest()) { ... } }
-proptest! { #[test] fn capabilities_cleanup_on_uninstall(plugin in arb_loaded_plugin()) { ... } }
+proptest! { #[test] fn components_cleanup_on_uninstall(plugin in arb_loaded_plugin()) { ... } }
 proptest! { #[test] fn blocklist_prevents_load(blocked_id in arb_plugin_id()) { ... } }
-proptest! { #[test] fn strict_plugin_only_blocks_user_defined(capability in arb_capability()) { ... } }
+proptest! { #[test] fn strict_plugin_only_blocks_user_defined(component in arb_plugin_component()) { ... } }
 ```
 
 ### 18.3 Subsystem Integration Tests
@@ -3960,10 +4158,10 @@ Per-subsystem integration scenarios using mock implementations:
 | Tasks | 7 types lifecycle, disk output streaming, notification injection, cron triggers |
 | Coordinator | TeamCreate → SendMessage → SyntheticOutput → completion |
 | Compaction | 5 layers stacked, PTL retry, session memory dual extraction, post-compact restore |
-| Permission | 7 modes × representative rules, classifier paths, denial fallback, shadow detection, bypass killswitch |
+| Permission | 5 external + 2 internal modes × representative rules, classifier paths, pending classifier race, denial fallback, shadow detection, bypass killswitch |
 | Secret | keychain roundtrip, Secret<T> Debug/Display, 5 redaction boundaries, OAuth refresh under concurrency, prefetch consume |
-| Cost | cost reconcile against claude-code reference fixtures, cache savings, budget halt/ask/warn paths, persistence roundtrip |
-| Plugin | install (git + marketplace + mcpb) → load → capability injection (6 registries) → disable → uninstall → cleanup; blocklist enforcement; strict policy |
+| Cost | provider/model pricing catalog fixtures, provider usage normalization, cache savings, budget halt/ask/warn paths, persistence roundtrip |
+| Plugin | install (git + marketplace + mcpb) → load → component materialization → disable → uninstall → cleanup; blocklist enforcement; strict policy |
 | FFI | session facade, event/effect DTO roundtrip, Kotlin/Swift handle lifecycle |
 | Parity | claw-code mock scenarios for tools, hooks, subagents, tasks, and compaction |
 
@@ -4054,10 +4252,10 @@ CI gate: `unexercised_trait_method_ratio <= 0.05`. This is a coverage guard, not
 | D10 | `lingxi-tasks` | 7 task types + registry + output manager + notifications + cron | Each task type passes lifecycle tests; cron uses injected clock/runtime |
 | D11 | `lingxi-coordinator` | Mode + internal tools + team registry + mailbox + swarm + team memory | Coordinator → TeamCreate → SendMessage → completion verified |
 | D12 | `lingxi-compaction` | 5 layers + reactive + PTL retry + session memory + post-compact | Property tests for token monotonicity + circuit breaker |
-| D13 | `lingxi-permission` | 7 modes + 3 classifiers + 9 rule sources + denial tracking + shadow detection | Authorize path tested under all modes; classifier mock returns deterministic; denial-fallback triggers correctly |
-| D14 | `lingxi-plugin` | manifest model + 6 lifecycle states + 6-registry injection + marketplace + blocklist + strict policy | install/enable/disable/uninstall round-trip; capabilities reach correct registries; blocklist prevents load |
-| D15 | `lingxi-secret` | SecureStorage trait + `Secret<T>` newtype + CredentialManager + keychain prefetch + 30+ gitleaks rules + redaction boundaries | All 5 redaction boundaries verified; `Secret<T>::Debug` returns `<redacted>`; OAuth refresh races resolved under lock |
-| D16 | `lingxi-cost` | 6 pricing tiers + Usage counter + cache savings calc + per-session CostTracker + BudgetEnforcer | Cost reconciles within 0.1% of claude-code reference for fixed Usage; budget halt/ask/warn triggers correctly |
+| D13 | `lingxi-permission` | 5 external + 2 internal modes + 3 classifiers + 8 rule sources + pending classifier checks + denial tracking + shadow detection | Authorize path tested under all runtime-valid modes; classifier mock returns deterministic; pending classifier can resolve prompt; denial-fallback triggers correctly |
+| D14 | `lingxi-plugin` | manifest/component model + 7 lifecycle states + component registry materialization + marketplace + blocklist + strict policy | install/enable/disable/uninstall round-trip; commands/agents/skills/hooks/output-styles/MCP/LSP/channels reach correct registries; blocklist prevents load |
+| D15 | `lingxi-secret` | SecureStorage backends + CredentialManager + keychain prefetch + 30+ gitleaks rules + redaction boundaries over protocol `Secret<T>` DTOs | All 5 redaction boundaries verified; `Secret<T>`/`SecureStorageData` debug output redacts; OAuth refresh races resolved under lock |
+| D16 | `lingxi-cost` | provider/model pricing catalog + normalized token Usage + cache savings calc + per-session CostTracker + BudgetEnforcer | Cost reconciles within 0.1% against catalog fixtures for fixed provider/model/token usage; provider usage normalization and budget halt/ask/warn trigger correctly |
 | D17 | `lingxi-test-harness` | mocks + contract suites + property tests + parity fixtures | Contract coverage ≤ 0.05 unexercised trait-method ratio; property tests at 10K iterations |
 | D18 | `lingxi-uniffi-bridge` | FFI-safe facade, DTOs, and opaque engine handles | Generated Kotlin + Swift compile; no raw `dyn Trait`, stream, closure, or `Arc<dyn Tool>` exposed |
 | D19 | Cross-compile CI | 5 targets green | `protocol`, `core`, `traits`, `api-client`, and `uniffi-bridge` compile on supported target matrix |
@@ -4087,22 +4285,22 @@ M1.2 (W3-4): API + Streaming
 
 PHASE B: SECURITY + COST FOUNDATIONS (Weeks 5-8)
 M1.3 (W5-6): Permission Policy Engine
-├── 7 PermissionMode + 9 RuleSource + PermissionRule/Result/Update
+├── 5 external + 2 internal PermissionMode + 8 RuleSource + PermissionRule/Result/Update
 ├── PermissionPolicy + 3 classifiers (Yolo / Bash / Transcript) with mocks
-├── Denial tracking + shadow detection + bypass killswitch
-└── Gate: authorize() returns correct result under all modes; denial fallback triggers
+├── Pending classifier checks + denial tracking + shadow detection + bypass killswitch
+└── Gate: authorize() returns correct result under all runtime-valid modes; pending classifier and denial fallback trigger
 
 M1.4 (W7): Secret & Credential Management
-├── SecureStorage trait + 5 backend stubs (Keychain / Libsecret / CredVault / EncryptedFile / PlainText)
-├── Secret<T> newtype + CredentialManager + OAuth refresh-lock
+├── SecureStorage trait + 7 backend variants (5 M1 stubs: Keychain / Libsecret / CredVault / EncryptedFile / PlainText; mobile implementations M2)
+├── protocol Secret<T> newtype + CredentialManager + OAuth refresh-lock
 ├── KeychainPrefetch + SecretScanner with 30+ gitleaks rules + RedactionPolicy
 └── Gate: Secret<T>::Debug returns "<redacted>"; all 5 redaction boundaries verified; OAuth refresh race-safe
 
 M1.5 (W8): Cost & Budget
-├── 6 pricing tiers + Usage counter + CostCalculator (incl. cache savings)
-├── CostTracker (per-model, per-session, persisted) + BudgetEnforcer (4 policies)
+├── provider/model pricing catalog + normalized token Usage + CostCalculator (incl. cache savings)
+├── CostTracker (per-provider/model, per-session, persisted) + BudgetEnforcer (halt/ask/warn)
 ├── Integration with reducer for token usage event flow
-└── Gate: cost reconciles within 0.1% vs claude-code reference; budget halt/ask/warn triggers correctly
+└── Gate: cost reconciles within 0.1% vs catalog fixtures; provider usage normalization and budget halt/ask/warn trigger correctly
 
 PHASE C: CORE SUBSYSTEMS (Weeks 9-22)
 M1.6 (W9-11): Tools System
@@ -4158,11 +4356,11 @@ M1.13 (W30-32): Coordinator / Team
 PHASE E: PLUGINS + INTEGRATION + POLISH (Weeks 33-44)
 M1.14 (W33-36): Plugin System
 ├── PluginManifest + PluginSource (6 kinds) + PluginState (7 states)
-├── PluginManager + 6-registry capability injection
+├── PluginManager + component registry materialization
 ├── MarketplaceManager (official + 3rd-party) + reconciler
 ├── PluginBlocklist (static + remote) + StrictPluginOnlyPolicy
-├── Integration with Tools/Hooks/MCP/Agent/Skill/Command registries
-└── Gate: install/enable/disable/uninstall round-trip; capabilities reach correct registries; blocklist enforced
+├── Integration with Command/Agent/Skill/Hook/OutputStyle/MCP/LSP/Channel registries
+└── Gate: install/enable/disable/uninstall round-trip; components reach correct registries; blocklist enforced
 
 M1.15 (W37-39): UniFFI + Cross-Crate Integration
 ├── lingxi-uniffi-bridge with narrow facade APIs
@@ -4357,10 +4555,10 @@ Grand total: **~60K Rust LOC** for full-fidelity M1.
 ### Why these added ~15K LOC
 
 The §14-§17 subsystems represent serious depth:
-- **lingxi-permission** (2.5K): 7 modes × per-mode logic + 3 classifiers + 9 rule sources + shadow detection + denial tracking
-- **lingxi-secret** (2.0K): SecureStorage trait + 5 backends + Secret<T> + CredentialManager + 30+ gitleaks rules + redaction policy
-- **lingxi-cost** (1.2K): 6 pricing tiers + Usage counter + Cost calculator + per-session tracker + 4 budget policies
-- **lingxi-plugin** (2.8K): manifest/lifecycle/marketplace/blocklist + 6-registry capability injection + strict-plugin-only policy
+- **lingxi-permission** (2.5K): 5 external + 2 internal modes + 3 classifiers + 8 rule sources + pending classifier checks + shadow detection + denial tracking
+- **lingxi-secret** (2.0K): SecureStorage backends + CredentialManager + 30+ gitleaks rules + redaction policy over protocol Secret<T> DTOs
+- **lingxi-cost** (1.2K): provider/model pricing catalog + normalized token Usage + Cost calculator + per-session tracker + halt/ask/warn budget policies
+- **lingxi-plugin** (2.8K): manifest/lifecycle/marketplace/blocklist + component registry materialization + strict-plugin-only policy
 - **traits +0.1K**: SecureStorage trait
 - **test-harness +0.2K + 1.0K tests**: contract suites for 4 new subsystems
 - **uniffi-bridge +0.2K**: facade DTOs for permission/cost/plugin status

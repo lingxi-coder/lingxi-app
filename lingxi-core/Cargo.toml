@@ -30,6 +30,7 @@ members = [
     "crates/telemetry",
     "crates/anthropic-oauth",
     "crates/bridge",
+    "crates/plugin",
 ]
 
 [workspace.package]

@@ -622,6 +622,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "lingxi-plugin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "lingxi-agent",
+ "lingxi-commands",
+ "lingxi-hooks",
+ "lingxi-lsp",
+ "lingxi-mcp",
+ "lingxi-outputstyles",
+ "lingxi-protocol",
+ "lingxi-secret",
+ "lingxi-skills",
+ "lingxi-tools",
+ "lingxi-traits",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "lingxi-protocol"
 version = "0.1.0"
 dependencies = [
@@ -1049,6 +1075,12 @@ dependencies = [
  "serde",
  "zeroize",
 ]
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"

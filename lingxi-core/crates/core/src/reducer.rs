@@ -154,6 +154,12 @@ fn event_name(e: &Event) -> &'static str {
         Event::ApiStreamEnd { .. } => "ApiStreamEnd",
         Event::ApiError { .. } => "ApiError",
         Event::SessionLoaded(_) => "SessionLoaded",
+        Event::CostRecorded { .. } => "CostRecorded",
+        Event::BudgetThresholdReached { .. } => "BudgetThresholdReached",
+        Event::BudgetExceeded { .. } => "BudgetExceeded",
+        Event::PermissionGranted { .. } => "PermissionGranted",
+        Event::PermissionDenied { .. } => "PermissionDenied",
+        Event::SecretDetected { .. } => "SecretDetected",
     }
 }
 

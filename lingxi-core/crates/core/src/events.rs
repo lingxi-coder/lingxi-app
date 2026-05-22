@@ -7,7 +7,7 @@
 
 use crate::session::SessionState;
 use crate::token::Usage;
-use lingxi_protocol::{ConversationMessage, MessageId, RequestId};
+use lingxi_protocol::{ConversationMessage, MessageId, RequestId, ToolUseId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -63,6 +63,56 @@ pub enum Event {
     // — System —
     /// A persisted session was loaded back into memory.
     SessionLoaded(SessionState),
+
+    // — Cost —
+    /// A cost record was committed by the cost subsystem for a model call.
+    CostRecorded {
+        /// Model identifier the cost was recorded against.
+        model: String,
+        /// Opaque usage payload (schema owned by the `lingxi-cost` crate).
+        usage: serde_json::Value,
+        /// Computed cost of the call in nano USD (1e-9 USD).
+        cost_nano_usd: u64,
+    },
+    /// Cumulative spend has crossed a configured budget threshold.
+    BudgetThresholdReached {
+        /// Threshold percentage that was crossed (e.g. `80` for 80%).
+        pct: u32,
+        /// Current spend in nano USD at the time of the event.
+        current: u64,
+        /// Configured budget limit in nano USD.
+        limit: u64,
+    },
+    /// Cumulative spend has met or exceeded the configured budget limit.
+    BudgetExceeded {
+        /// Current spend in nano USD at the time of the event.
+        current: u64,
+        /// Configured budget limit in nano USD.
+        limit: u64,
+    },
+
+    // — Permission —
+    /// The permission subsystem granted a previously-pending tool call.
+    PermissionGranted {
+        /// `ToolUseId` of the granted call.
+        call_id: ToolUseId,
+    },
+    /// The permission subsystem denied a previously-pending tool call.
+    PermissionDenied {
+        /// `ToolUseId` of the denied call.
+        call_id: ToolUseId,
+    },
+
+    // — Secret —
+    /// The secret scanner detected sensitive material crossing a boundary.
+    SecretDetected {
+        /// Boundary label where the match was observed.
+        boundary: String,
+        /// Identifier of the rule that matched.
+        rule_id: String,
+        /// Whether the scanner emitted a redacted copy of the content.
+        redacted: bool,
+    },
 }
 
 /// Structured payload for `Event::ApiError`.

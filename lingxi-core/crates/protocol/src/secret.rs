@@ -61,6 +61,12 @@ impl<'de, T: Deserialize<'de> + Zeroize + Default> Deserialize<'de> for Secret<T
 ///
 /// The byte payload is held in a [`Secret`] and is zeroized on drop. The
 /// metadata is plain (non-secret) data describing the secret's provenance.
+///
+/// `Serialize`/`Deserialize` are provided so this DTO can cross the engine
+/// boundary as part of an [`crate::effects::Effect`]. The inner bytes are
+/// transmitted as-is via the `Secret<T>` serde delegation — callers are
+/// responsible for choosing a secure transport.
+#[derive(Serialize, Deserialize)]
 pub struct SecureStorageData {
     bytes: Secret<Vec<u8>>,
     /// Non-secret metadata describing the secret payload.
@@ -135,7 +141,11 @@ pub struct SecretKindDto(
 /// Wraps a string that has not yet been scanned for secrets. `Debug` prints
 /// only the byte length to avoid accidental disclosure in logs. Callers that
 /// need to scan or sanitize the content must call [`RedactableContent::expose_for_scan`].
-#[derive(Clone)]
+///
+/// `Serialize`/`Deserialize` are provided so this DTO can cross the engine
+/// boundary as part of an [`crate::effects::Effect`]. The wrapped string is
+/// transmitted as-is — `Debug` still hides it from logs.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RedactableContent(String);
 
 impl fmt::Debug for RedactableContent {

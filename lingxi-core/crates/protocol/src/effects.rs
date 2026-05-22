@@ -6,12 +6,19 @@
 //! M1.1 ships a subset: API, render, persistence. Later plans (Tools, Hooks,
 //! Memory, MCP, Agent, etc.) extend this enum.
 
-use crate::ids::{RequestId, SessionId};
+use crate::ids::{RequestId, SessionId, ToolUseId};
+use crate::secret::{RedactableContent, SecureStorageData};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// A side effect requested by the reducer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Effect` deliberately does NOT implement `PartialEq`/`Eq`: some variants
+/// carry secret material (`StoreCredential.data`, `ScanForSecrets.content`)
+/// whose contents must never be compared by value (timing leaks; accidental
+/// disclosure in panic messages). Tests that need to assert structural
+/// equality should round-trip through JSON and compare strings instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Effect {
     // — API —
@@ -72,6 +79,93 @@ pub enum Effect {
         /// Name of the event variant that had no handler.
         event_name: String,
     },
+
+    // — Cost —
+    /// Persist the current cost-tracking state to durable storage.
+    PersistCostState {
+        /// Opaque cost state payload (schema owned by the `lingxi-cost` crate).
+        state_json: Value,
+    },
+    /// Push an updated cost snapshot to attached UI consumers for display.
+    DisplayCostUpdate {
+        /// Opaque cost snapshot payload (schema owned by the `lingxi-cost` crate).
+        snapshot_json: Value,
+    },
+    /// Ask the host to enforce the active budget against an estimated cost.
+    EnforceBudget {
+        /// Estimated cost of the pending operation in nano USD (1e-9 USD).
+        estimated_cost_nano_usd: u64,
+    },
+    /// Fire a budget-threshold warning at the given percentage of the limit.
+    FireBudgetWarning {
+        /// Threshold percentage that was crossed (e.g. `80` for 80%).
+        pct: u32,
+        /// Current spend in nano USD at the time of the warning.
+        current: u64,
+        /// Configured budget limit in nano USD.
+        limit: u64,
+    },
+    /// Halt the run loop because the active budget has been exceeded.
+    HaltOnBudget,
+
+    // — Permission —
+    /// Ask the permission subsystem to evaluate a tool call against active rules.
+    EvaluatePermission {
+        /// `ToolUseId` of the call being evaluated.
+        tool_use_id: ToolUseId,
+        /// Fully-qualified tool name (e.g. `"fs.read"`).
+        tool_name: String,
+        /// Tool input payload to evaluate against rule predicates.
+        input: Value,
+    },
+    /// Persist a permission rule update (add/remove/modify) to durable storage.
+    PersistPermissionUpdate {
+        /// Opaque permission update payload (schema owned by `lingxi-permission`).
+        update_json: Value,
+    },
+    /// Run shadowed-rule detection over a newly-added permission rule.
+    DetectShadowedRules {
+        /// Opaque rule payload to analyse for shadowing.
+        rule_json: Value,
+    },
+
+    // — Secret —
+    /// Store a credential of the given kind in the platform secret store.
+    StoreCredential {
+        /// Credential kind tag (e.g. `"api_key"`, `"oauth_token"`).
+        ///
+        /// Serialized as `credential_kind` on the wire to avoid colliding with
+        /// the enum's `kind` discriminator tag.
+        #[serde(rename = "credential_kind")]
+        kind: String,
+        /// Secure payload to persist (zeroized on drop).
+        data: SecureStorageData,
+    },
+    /// Retrieve a credential of the given kind from the platform secret store.
+    RetrieveCredential {
+        /// Credential kind tag to look up.
+        ///
+        /// Serialized as `credential_kind` on the wire to avoid colliding with
+        /// the enum's `kind` discriminator tag.
+        #[serde(rename = "credential_kind")]
+        kind: String,
+    },
+    /// Delete a credential of the given kind from the platform secret store.
+    DeleteCredential {
+        /// Credential kind tag to delete.
+        ///
+        /// Serialized as `credential_kind` on the wire to avoid colliding with
+        /// the enum's `kind` discriminator tag.
+        #[serde(rename = "credential_kind")]
+        kind: String,
+    },
+    /// Scan content crossing a trust boundary for secret-like material.
+    ScanForSecrets {
+        /// Boundary label (e.g. `"prompt_to_model"`, `"tool_output_to_user"`).
+        boundary: String,
+        /// Redactable content to scan (the scanner may emit a redacted copy).
+        content: RedactableContent,
+    },
 }
 
 #[cfg(test)]
@@ -80,13 +174,17 @@ mod tests {
 
     #[test]
     fn send_api_request_roundtrip() {
+        // `Effect` no longer implements `PartialEq` (secrets must not be
+        // compared by value). Verify the roundtrip by re-serializing and
+        // comparing the JSON strings instead.
         let e = Effect::SendApiRequest {
             request_id: RequestId::nil(),
             request_body: serde_json::json!({"model": "claude-opus-4-6"}),
         };
         let s = serde_json::to_string(&e).unwrap();
         let e2: Effect = serde_json::from_str(&s).unwrap();
-        assert_eq!(e, e2);
+        let s2 = serde_json::to_string(&e2).unwrap();
+        assert_eq!(s, s2);
     }
 
     #[test]

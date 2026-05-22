@@ -21,6 +21,7 @@ members = [
     "crates/skills",
     "crates/commands",
     "crates/outputstyles",
+    "crates/filestate",
 ]
 
 [workspace.package]

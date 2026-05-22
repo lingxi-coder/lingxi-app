@@ -13,7 +13,9 @@ pub mod effect_handler;
 pub mod filesystem;
 pub mod http;
 pub mod mcp;
+pub mod process;
 pub mod runtime;
+pub mod sandbox;
 pub mod secure_storage;
 pub mod swarm;
 pub mod worktree;
@@ -23,7 +25,12 @@ pub use effect_handler::EffectHandler;
 pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
 pub use http::{HttpError, HttpTransport};
 pub use mcp::*;
+pub use process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+pub use sandbox::{
+    NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend, SandboxCapability,
+    SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
+};
 pub use secure_storage::{SecureStorage, SecureStorageBackend, SecureStorageError};
 pub use swarm::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 #[allow(unused_imports)]

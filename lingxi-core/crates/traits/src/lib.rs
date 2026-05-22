@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bridge;
 pub mod clock;
 pub mod effect_handler;
 pub mod filesystem;
@@ -21,6 +22,7 @@ pub mod secure_storage;
 pub mod swarm;
 pub mod worktree;
 
+pub use bridge::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 pub use clock::Clock;
 pub use effect_handler::EffectHandler;
 pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};

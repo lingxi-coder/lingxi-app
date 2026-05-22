@@ -29,6 +29,7 @@ members = [
     "crates/lsp",
     "crates/telemetry",
     "crates/anthropic-oauth",
+    "crates/bridge",
 ]
 
 [workspace.package]

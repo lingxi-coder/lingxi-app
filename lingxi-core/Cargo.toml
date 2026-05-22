@@ -16,6 +16,7 @@ members = [
     "crates/compaction",
     "crates/agent",
     "crates/tasks",
+    "crates/coordinator",
 ]
 
 [workspace.package]

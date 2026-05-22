@@ -1,0 +1,23 @@
+[package]
+name = "lingxi-coordinator"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lingxi-protocol = { path = "../protocol" }
+lingxi-traits = { path = "../traits" }
+lingxi-core = { path = "../core" }
+lingxi-tools = { path = "../tools" }
+lingxi-agent = { path = "../agent" }
+lingxi-tasks = { path = "../tasks" }
+lingxi-memory = { path = "../memory" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio = { version = "1", features = ["sync"] }
+tracing.workspace = true
+
+[lints]
+workspace = true

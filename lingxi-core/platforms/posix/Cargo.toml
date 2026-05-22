@@ -1,0 +1,29 @@
+[package]
+name = "lingxi-platform-posix"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lingxi-protocol = { path = "../../crates/protocol" }
+lingxi-traits = { path = "../../crates/traits" }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+futures = "0.3"
+futures-core = { workspace = true }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+fs2 = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+inotify = "0.10"
+
+# macOS FSEvents binding deferred — `watch` returns an empty stream on macOS.
+
+[lints]
+workspace = true

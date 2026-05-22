@@ -23,6 +23,7 @@ members = [
     "crates/outputstyles",
     "crates/filestate",
     "crates/msgqueue",
+    "crates/session",
 ]
 
 [workspace.package]

@@ -273,6 +273,7 @@ dependencies = [
  "lingxi-memory",
  "lingxi-permission",
  "lingxi-protocol",
+ "lingxi-test-harness",
  "lingxi-tools",
  "lingxi-traits",
  "serde",

@@ -21,5 +21,8 @@ async-trait.workspace = true
 tokio = { version = "1", features = ["sync"] }
 tracing.workspace = true
 
+[dev-dependencies]
+lingxi-test-harness = { path = "../test-harness" }
+
 [lints]
 workspace = true

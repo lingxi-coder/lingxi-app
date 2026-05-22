@@ -1,0 +1,22 @@
+[package]
+name = "lingxi-platform-posix-minimal"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lingxi-protocol = { path = "../../crates/protocol" }
+lingxi-traits = { path = "../../crates/traits" }
+async-trait.workspace = true
+tokio = { workspace = true, features = ["full"] }
+futures-core = { workspace = true }
+futures-util = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+fs2 = "0.4"
+
+[lints]
+workspace = true

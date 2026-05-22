@@ -15,6 +15,7 @@ pub mod http;
 pub mod mcp;
 pub mod runtime;
 pub mod secure_storage;
+pub mod worktree;
 
 pub use clock::Clock;
 pub use effect_handler::EffectHandler;
@@ -23,3 +24,6 @@ pub use http::{HttpError, HttpTransport};
 pub use mcp::*;
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use secure_storage::{SecureStorage, SecureStorageBackend, SecureStorageError};
+#[allow(unused_imports)]
+pub use worktree::*;
+pub use worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};

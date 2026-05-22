@@ -36,6 +36,58 @@ pub trait FileSystem: Send + Sync {
         &self,
         dir: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = FileEvent> + Send>>, FsError>;
+
+    /// Append `content` to `path`, creating the file if it does not exist.
+    ///
+    /// Used by session storage to grow append-only JSONL transcripts without
+    /// rewriting prior bytes (spec §22).
+    async fn append_file(&self, path: &str, content: &str) -> Result<(), FsError>;
+
+    /// Truncate `path` to exactly `len` bytes.
+    ///
+    /// Used by the crash-safe JSONL reader to drop a torn tail after a power
+    /// loss (spec §22.4 / B5).
+    async fn truncate(&self, path: &str, len: u64) -> Result<(), FsError>;
+
+    /// Return the last-modified time of `path`.
+    ///
+    /// Used by `verify_file_state` to detect Read↔Edit races (spec §23.2 / C5).
+    async fn file_mtime(&self, path: &str) -> Result<std::time::SystemTime, FsError>;
+
+    /// Return the size in bytes of `path`.
+    ///
+    /// Used to enforce size budgets and to validate JSONL recovery offsets.
+    async fn file_size(&self, path: &str) -> Result<u64, FsError>;
+
+    /// Delete the regular file at `path`.
+    ///
+    /// Used by session storage and file-state eviction.
+    async fn delete_file(&self, path: &str) -> Result<(), FsError>;
+
+    /// Create a symbolic link `link` pointing at `target`.
+    ///
+    /// Used to materialize project-level shortcuts (e.g. `last-session ->`).
+    async fn symlink(&self, target: &str, link: &str) -> Result<(), FsError>;
+
+    /// Acquire an OS-level advisory exclusive lock on `path`. The returned
+    /// [`FlockGuard`] releases the lock when dropped.
+    ///
+    /// Mobile platforms (Android/iOS) may stub this with app-internal locking;
+    /// the trait method is required so engine code can express the intent.
+    async fn flock_exclusive(&self, path: &str) -> Result<Box<dyn FlockGuard>, FsError>;
+
+    /// `fsync` the file at `path`, flushing OS buffers to durable storage.
+    ///
+    /// Engine code calls this after every important write so a power loss
+    /// cannot leave a partially-flushed transcript visible (spec §22.3 / B5).
+    async fn fsync(&self, path: &str) -> Result<(), FsError>;
+}
+
+/// Guard for an OS advisory file lock acquired via
+/// [`FileSystem::flock_exclusive`]. Releasing the lock happens in `Drop`.
+pub trait FlockGuard: Send + Sync {
+    /// The path the guard locks. Implementations may use this for diagnostics.
+    fn path(&self) -> &str;
 }
 
 /// Result of [`FileSystem::read_file`].

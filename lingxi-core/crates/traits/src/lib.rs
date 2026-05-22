@@ -20,7 +20,7 @@ pub mod worktree;
 
 pub use clock::Clock;
 pub use effect_handler::EffectHandler;
-pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FsError};
+pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
 pub use http::{HttpError, HttpTransport};
 pub use mcp::*;
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};

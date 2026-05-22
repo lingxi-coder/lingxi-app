@@ -8,6 +8,7 @@ members = [
     "crates/test-harness",
     "crates/secret",
     "crates/cost",
+    "crates/permission",
 ]
 
 [workspace.package]

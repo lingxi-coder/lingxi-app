@@ -33,6 +33,7 @@ members = [
     "crates/plugin",
     "crates/uniffi-bridge",
     "platforms/posix-minimal",
+    "examples/cli-demo",
 ]
 
 [workspace.package]

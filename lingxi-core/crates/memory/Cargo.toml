@@ -1,0 +1,21 @@
+[package]
+name = "lingxi-memory"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lingxi-protocol = { path = "../protocol" }
+lingxi-traits = { path = "../traits" }
+lingxi-api-client = { path = "../api-client" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+thiserror.workspace = true
+regex = "1"
+tracing.workspace = true
+tokio = { version = "1", features = ["sync"] }
+
+[lints]
+workspace = true

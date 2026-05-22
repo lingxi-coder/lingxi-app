@@ -1,13 +1,13 @@
-//! Autocompact — LLM-driven summarization layer. M1.7 ships a stub that
-//! preserves the PTL retry plumbing; real summarization wires
-//! `ForkedAgentRunner` in Plan 08.
+//! Autocompact — LLM-driven summarization layer.
+//!
+//! Plan 08 wires the optional `ForkedAgentRunner` path: when a runner +
+//! `CacheSafeParamsSlot` are configured via
+//! [`Autocompactor::with_forked_runner`], `compact` issues a forked agent
+//! that shares the parent's prompt cache. When neither is configured (as
+//! in the orchestrator's default construction today) the layer falls back
+//! to the M1.7 stub summary so the orchestrator e2e test still runs.
 
-#![allow(
-    unused_imports,
-    unreachable_code,
-    clippy::needless_range_loop,
-    clippy::unused_async
-)]
+#![allow(unused_imports, unreachable_code, clippy::needless_range_loop)]
 
 use crate::grouping::group_messages_by_api_round;
 use crate::ptl_retry::truncate_head_for_ptl_retry;
@@ -15,6 +15,8 @@ use crate::thresholds::{MAX_OUTPUT_TOKENS_FOR_SUMMARY, MAX_PTL_RETRIES};
 use lingxi_api_client::ApiError;
 use lingxi_cost::Usage;
 use lingxi_protocol::ConversationMessage;
+use lingxi_sidequery::{CacheSafeParamsSlot, ForkedAgentRequest, ForkedAgentRunner, QuerySource};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Result of one autocompact pass.
@@ -69,35 +71,105 @@ impl Default for AutocompactConfig {
     }
 }
 
-/// Stateful autocompactor. M1.7 has no injected dependencies; Plan 08 will add
-/// a `ForkedAgentRunner` field.
+/// Stateful autocompactor.
+///
+/// Two construction paths:
+/// - [`Autocompactor::new`] / [`Autocompactor::default`] — no forked
+///   runner, returns the M1.7 stub summary. Used by the orchestrator's
+///   default wiring and the e2e test that does not need a real
+///   summarization call.
+/// - [`Autocompactor::with_forked_runner`] — Plan 08 path, routes through
+///   the shared `ForkedAgentRunner` using the latest `CacheSafeParams`
+///   from the supplied slot. Closes spec gap **C2**.
 #[derive(Default)]
 pub struct Autocompactor {
     /// Tunables; defaults to [`AutocompactConfig::default`].
     pub config: AutocompactConfig,
+    forked_runner: Option<Arc<ForkedAgentRunner>>,
+    cache_slot: Option<Arc<CacheSafeParamsSlot>>,
 }
 
 impl Autocompactor {
-    /// Construct an autocompactor with default config.
+    /// Construct an autocompactor with default config and no forked runner
+    /// (falls back to the M1.7 stub summary).
     #[must_use]
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Construct an autocompactor that routes through `forked_runner`,
+    /// reading the latest cache-safe prompt prefix from `cache_slot`. This
+    /// is the Plan 08 production path.
+    #[must_use]
+    pub fn with_forked_runner(
+        forked_runner: Arc<ForkedAgentRunner>,
+        cache_slot: Arc<CacheSafeParamsSlot>,
+    ) -> Self {
         Self {
             config: AutocompactConfig::default(),
+            forked_runner: Some(forked_runner),
+            cache_slot: Some(cache_slot),
         }
     }
 
-    /// M1.7 sketch: PTL retry shape + summary plumbing. Real summarization
-    /// happens once Plan 08 wires `ForkedAgentRunner`.
-    #[allow(clippy::never_loop)]
+    /// Compact `messages` into a summary.
+    ///
+    /// When a forked runner is configured, issues a forked-agent call that
+    /// shares the parent's prompt cache via the latest `CacheSafeParams`
+    /// snapshot. Otherwise falls back to the M1.7 stub.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompactionError::Internal`] when the configured runner is
+    /// present but the slot is empty, or the forked call fails.
+    #[allow(clippy::never_loop, clippy::cast_possible_truncation)]
     pub async fn compact(
         &self,
         messages: Vec<ConversationMessage>,
     ) -> Result<CompactionResult, CompactionError> {
         let pre = crate::grouping::estimate_tokens_for_range(&messages);
-        let groups = group_messages_by_api_round(&messages);
 
+        // Plan 08 path — closes C2.
+        if let (Some(runner), Some(slot)) = (&self.forked_runner, &self.cache_slot) {
+            let cache_params = slot
+                .get_last()
+                .await
+                .ok_or_else(|| CompactionError::Internal("no cache-safe params".into()))?;
+
+            let req = ForkedAgentRequest {
+                prompt_messages: vec![ConversationMessage::user(
+                    lingxi_protocol::MessageId::new(),
+                    self.config.compact_user_prompt.clone(),
+                )],
+                cache_safe_params: cache_params,
+                fork_label: "compaction".into(),
+                query_source: QuerySource::Compaction,
+                max_output_tokens: Some(
+                    u32::try_from(self.config.max_output_tokens).unwrap_or(u32::MAX),
+                ),
+            };
+            let result = runner
+                .run(req)
+                .await
+                .map_err(|e| CompactionError::Internal(e.to_string()))?;
+
+            return Ok(CompactionResult {
+                pre_compact_token_count: pre,
+                post_compact_token_count: (result.final_text.len() as u64) / 4,
+                true_post_compact_token_count: result.usage.tokens.input,
+                compaction_usage: Some(result.usage),
+                summary_messages: vec![ConversationMessage::System {
+                    id: lingxi_protocol::MessageId::new(),
+                    content: result.final_text,
+                }],
+            });
+        }
+
+        // Fallback: M1.7 stub summary (used by the orchestrator's default
+        // construction). Real summarization only happens when the engine
+        // wires a ForkedAgentRunner via `with_forked_runner`.
+        let groups = group_messages_by_api_round(&messages);
         for attempt in 0..MAX_PTL_RETRIES {
-            // In Plan 08 this is replaced with ForkedAgentRunner::run.
             let summary_text = format!(
                 "[stub-summary attempt={attempt}; messages={}]",
                 messages.len()
@@ -115,7 +187,7 @@ impl Autocompactor {
                 summary_messages: vec![summary_msg],
             });
         }
-        // PTL handling sketch (not reached in stub but compiles):
+        // PTL handling sketch (not reached in stub but compiles).
         let _ = truncate_head_for_ptl_retry(messages, 0, &groups);
         Err(CompactionError::MaxRetriesExceeded)
     }

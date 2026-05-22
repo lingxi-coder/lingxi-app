@@ -320,6 +320,7 @@ dependencies = [
  "lingxi-cost",
  "lingxi-hooks",
  "lingxi-protocol",
+ "lingxi-sidequery",
  "lingxi-traits",
  "serde",
  "serde_json",

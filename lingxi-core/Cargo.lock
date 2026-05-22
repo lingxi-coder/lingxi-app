@@ -277,6 +277,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lingxi-compaction"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "lingxi-api-client",
+ "lingxi-core",
+ "lingxi-cost",
+ "lingxi-hooks",
+ "lingxi-protocol",
+ "lingxi-traits",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lingxi-core"
 version = "0.1.0"
 dependencies = [

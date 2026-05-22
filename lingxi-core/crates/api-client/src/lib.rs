@@ -10,7 +10,6 @@ pub mod error;
 pub mod sse;
 pub mod types;
 
-// `AnthropicProvider` is uncommented in Task 15 once the module ships real code.
-// pub use anthropic::AnthropicProvider;
+pub use anthropic::AnthropicProvider;
 pub use error::ApiError;
 pub use types::{ContentDelta, MessageRequest, MessageResponse, StreamEvent};

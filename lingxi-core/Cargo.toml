@@ -28,6 +28,7 @@ members = [
     "crates/sandbox",
     "crates/lsp",
     "crates/telemetry",
+    "crates/anthropic-oauth",
 ]
 
 [workspace.package]

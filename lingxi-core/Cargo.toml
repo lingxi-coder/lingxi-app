@@ -34,6 +34,7 @@ members = [
     "crates/uniffi-bridge",
     "platforms/posix-minimal",
     "platforms/posix",
+    "platforms/windows",
     "examples/cli-demo",
 ]
 

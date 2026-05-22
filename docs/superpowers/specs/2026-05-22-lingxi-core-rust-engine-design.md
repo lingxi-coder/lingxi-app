@@ -26,6 +26,19 @@ LingXi Core is a **platform-agnostic Rust library** that implements the complete
 - **Plugin System** (manifest/lifecycle/marketplace/blocklist, Claude Code component surface, output styles/LSP/channels/user config, strict-plugin-only policy)
 - **Secret & Credential Management** (SecureStorage trait, `Secret<T>` newtype, 7 backend variants, 30+ gitleaks rules, 5 redaction boundaries)
 - **API Cost & Budget Tracking** (provider/model pricing catalog, token-class rates, prompt cache savings, per-model usage, budget halt/ask/warn policies)
+- **Skills System** (bundled/user/project/plugin/MCP-derived skills, trigger-based discovery prefetch, SkillTool dispatch)
+- **Slash Commands** (80+ builtin handlers, markdown command loader, argument substitution, plugin/MCP-sourced commands)
+- **Side Query & Forked Agent infrastructure** (CacheSafeParams byte-exact cache sharing, used by Memory selector / Compaction / classifier explainer)
+- **Output Styles** (registry, prompt addendum injection, plugin-provided styles)
+- **Session Storage & Recovery** (append-only JSONL transcripts, crash-safe reader, SessionResumer integrating all subsystems)
+- **File State Cache** (LRU + size-limited, Read↔Edit coordination, partial-view detection, merge/clone for fork)
+- **Sandbox** (Linux namespaces / sandbox-exec / Job Object, NetworkPolicy, ResourceLimits, should_use_sandbox decision)
+- **LSP Integration** (per-server state machine, language→server routing, LspTool dispatch)
+- **Telemetry & Analytics** (AnalyticsSink + AnalyticsBus + GrowthBook feature flags + PII markers + killswitch)
+- **Message Queue Manager** (unified priority queue: user input / task notification / orphan permission / SendMessage / hook / cron)
+- **Cron Scheduler** (tick loop + cross-process lock + jitter + integration with §11 TaskRegistry)
+- **IDE Bridge** (BridgeTransport, 9 message variants, JWT-paired trusted devices)
+- **Anthropic OAuth** (login.claude.ai flow, multi-source auth resolver, subscription type detection, ClaudeAiLimitsTracker)
 - **Configuration Loading & Merge Precedence**
 
 It does **NOT** include:
@@ -53,7 +66,7 @@ This is a **clean-room new codebase**. `claw-code` serves as a reference impleme
 
 - Original TypeScript claude-code: ~519K TS LOC
 - claw-code Rust port: ~92K Rust LOC, 476+ tests, 40 tool specs, 12 mock parity scenarios
-- Estimated M1 Rust LOC: ~40K engine/bridge/demo host + ~19K tests (~60K total)
+- Estimated M1 Rust LOC: ~60K engine/bridge/demo host + ~28K tests (~88K total)
 
 ---
 
@@ -4055,11 +4068,1260 @@ No CostTracker or BudgetEnforcer logic should become provider-specific.
 
 ---
 
-## 18. Verification Strategy
+## 18. Skills System
+
+### 18.1 Skill Definition
+
+```rust
+/// Skill = markdown file with frontmatter that the model discovers and invokes via SkillTool
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub frontmatter: SkillFrontmatter,
+    pub content: String,
+    pub source: SkillSource,
+    pub loaded_from: LoadedFrom,
+    pub plugin_id: Option<PluginId>,
+    pub file_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillFrontmatter {
+    pub name: String,
+    pub description: String,
+    pub when_to_use: Option<String>,
+    pub tools_allowed: Option<Vec<String>>,
+    pub auto_search: bool,
+    pub triggers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SkillSource {
+    Bundled, User, Project, Plugin, Managed,
+    Mcp { server_name: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoadedFrom {
+    Bundled, Skills, Plugin, Managed, Mcp, CommandsDeprecated,
+}
+```
+
+### 18.2 SkillRegistry
+
+```rust
+pub struct SkillRegistry {
+    skills: HashMap<String, Skill>,
+    trigger_index: HashMap<String, Vec<String>>,
+    mcp_skills: HashMap<McpConnectionId, Vec<String>>,
+    plugin_skills: HashMap<PluginId, Vec<String>>,
+}
+
+impl SkillRegistry {
+    pub fn discover(&self, query: &str) -> Vec<&Skill>;
+    pub fn get(&self, name: &str) -> Option<&Skill>;
+    pub fn register_plugin_skills(&mut self, plugin_id: PluginId, skills: Vec<Skill>);
+    pub fn unregister_plugin(&mut self, plugin_id: &PluginId);
+    pub fn register_mcp_skills(&mut self, conn: McpConnectionId, skills: Vec<Skill>);
+}
+```
+
+### 18.3 SkillTool & Discovery Prefetch
+
+```rust
+/// Meta-tool: input = skill_name + arguments; execution = forked agent runs the skill content
+pub struct SkillTool {
+    registry: Arc<RwLock<SkillRegistry>>,
+}
+
+impl Tool for SkillTool {
+    fn name(&self) -> &str { "Skill" }
+    async fn call(&self, input: Value, ctx: ToolUseContext, ...) -> Result<ToolCallResult, ToolError> {
+        let skill_name = input["name"].as_str().ok_or(ToolError::InvalidInput)?;
+        let skill = self.registry.read().await.get(skill_name).cloned();
+        // Execute via §24 ForkedAgentRunner with skill content as initial prompt
+        ...
+    }
+}
+
+/// Parallel skill discovery (analogous to §6.4 MemoryPrefetch)
+pub struct SkillDiscoveryPrefetch {
+    registry: Arc<RwLock<SkillRegistry>>,
+    runtime: Arc<dyn RuntimeSpawner>,
+}
+```
+
+### 18.4 Integration
+
+- §15 Plugin → `register_plugin_skills`
+- §7 MCP → mcp_skill_builders derive skills from MCP server tool descriptions
+- §13 Compaction → `POST_COMPACT_SKILLS_TOKEN_BUDGET` re-injects active skills
+- §9 Hooks → `skill_improvement` builtin handler proposes new skills from PostToolUse
+- §24 Side Query / Forked Agent → skill execution runs through ForkedAgent
+
+---
+
+## 19. Slash Commands
+
+### 19.1 SlashCommand Definition
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+    pub source: CommandSource,
+    pub args_schema: Option<ArgsSchema>,
+    pub kind: SlashCommandKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SlashCommandKind {
+    /// 80+ built-in commands: /help /init /memory /compact /resume /login /plugin /agents …
+    Builtin { handler_id: String },
+    /// Markdown files in ~/.claude/commands/ or .claude/commands/
+    Markdown {
+        file_path: PathBuf,
+        frontmatter: CommandFrontmatter,
+        prompt_template: String,
+    },
+    /// Plugin-provided (markdown + plugin attribution)
+    Plugin {
+        plugin_id: PluginId,
+        file_path: PathBuf,
+        frontmatter: CommandFrontmatter,
+        prompt_template: String,
+    },
+    /// MCP prompt promoted to slash command
+    Mcp { connection_id: McpConnectionId, prompt_name: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandFrontmatter {
+    pub description: String,
+    pub tools_allowed: Option<Vec<String>>,
+    pub model: Option<ModelAlias>,
+    pub argument_hints: Vec<ArgumentHint>,
+    pub allowed_tools: Option<Vec<String>>,
+    pub thinking: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandSource {
+    Builtin, User, Project, Local, Plugin, Managed, Mcp,
+}
+```
+
+### 19.2 Parsing & Argument Substitution
+
+```rust
+pub fn parse_slash_command(input: &str) -> Option<ParsedSlashCommand>;
+
+#[derive(Debug, Clone)]
+pub struct ParsedSlashCommand {
+    pub name: String,
+    pub raw_args: String,
+    pub positional_args: Vec<String>,
+}
+
+/// Substitutes $1, $2, $ARGUMENTS, $@ in prompt templates
+pub fn substitute_arguments(template: &str, args: &ParsedSlashCommand) -> String;
+```
+
+### 19.3 CommandRegistry
+
+```rust
+pub struct CommandRegistry {
+    commands: HashMap<String, SlashCommand>,
+    aliases: HashMap<String, String>,
+    builtin_handlers: HashMap<String, Arc<dyn BuiltinCommandHandler>>,
+    plugin_commands: HashMap<PluginId, Vec<String>>,
+}
+
+#[async_trait]
+pub trait BuiltinCommandHandler: Send + Sync {
+    async fn handle(&self, args: &ParsedSlashCommand, ctx: &CommandContext) -> CommandResult;
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+}
+
+#[derive(Debug, Clone)]
+pub enum CommandResult {
+    Done { display: Option<String> },
+    InjectMessage { content: String },
+    EmitEffects { effects: Vec<Effect>, display: Option<String> },
+    SwitchMode { new_state: ConversationState },
+    RequestConfirmation { prompt: String, on_confirm: Vec<Effect> },
+}
+```
+
+### 19.4 Integration
+
+Slash commands touch nearly every subsystem:
+
+| Command | Subsystem |
+|---|---|
+| `/memory add` | §6 Memory |
+| `/compact` | §13 Compaction |
+| `/permissions add` | §14 Permission |
+| `/plugin install` | §15 Plugin |
+| `/login` `/logout` | §16 Secret + §34 AnthropicOAuth |
+| `/cost` | §17 Cost |
+| `/resume` | §25 SessionStorage |
+| `/output-style` | §29 OutputStyles |
+| `/mcp` `/agents` `/hooks` `/skills` | per-subsystem registries |
+| `/tasks` | §11 Tasks |
+| `/cron` | §32 CronScheduler |
+| `/ide` | §33 IDE Bridge |
+
+---
+
+## 20. Side Query & Forked Agent
+
+Shared infrastructure used by §6 (Memory selector), §13 (Compaction), §14 (Classifier explainer), Session memory extraction, and any subsystem needing a side LLM call.
+
+### 20.1 SideQuery — stateless LLM call
+
+```rust
+/// One-shot LLM call outside the main conversation loop.
+/// Used by: memory selector, permission explainer, session search, classifiers.
+#[derive(Debug, Clone)]
+pub struct SideQueryRequest {
+    pub model: String,
+    pub system_prompt: Option<String>,
+    pub messages: Vec<ConversationMessage>,
+    pub tools: Vec<ToolDefinition>,
+    pub tool_choice: Option<ToolChoice>,
+    pub output_format: Option<JsonOutputFormat>,
+    pub max_tokens: u32,
+    pub max_retries: u32,
+    pub temperature: Option<f32>,
+    pub thinking: Option<ThinkingConfig>,
+    pub stop_sequences: Vec<String>,
+    pub query_source: QuerySource,
+    pub skip_system_prompt_prefix: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SideQueryResponse {
+    pub text: Option<String>,
+    pub structured: Option<Value>,
+    pub tool_calls: Vec<ToolCall>,
+    pub usage: Usage,
+    pub stop_reason: StopReason,
+}
+
+#[async_trait]
+pub trait SideQueryClient: Send + Sync {
+    async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError>;
+}
+```
+
+### 20.2 ForkedAgent — full agent loop replica
+
+```rust
+/// Runs a complete query loop sharing the parent's prompt cache but isolated state.
+/// Used by: compaction summarization, session memory extraction, supervisor, post-turn summary.
+pub struct ForkedAgentRunner {
+    pool: Arc<StateMachinePool>,
+    cache_safe_slot: Arc<CacheSafeParamsSlot>,
+}
+
+/// Byte-exact params for prompt cache hit (Anthropic cache key components)
+#[derive(Debug, Clone)]
+pub struct CacheSafeParams {
+    pub system_prompt: SystemPrompt,
+    pub user_context: HashMap<String, String>,
+    pub system_context: HashMap<String, String>,
+    pub tool_use_context: ToolUseContext,
+    pub fork_context_messages: Vec<ConversationMessage>,
+}
+
+/// Updated after each turn so post-turn forks can inherit the main loop's cache
+pub struct CacheSafeParamsSlot {
+    last: Arc<RwLock<Option<CacheSafeParams>>>,
+}
+
+impl CacheSafeParamsSlot {
+    pub async fn save(&self, params: CacheSafeParams);
+    pub async fn get_last(&self) -> Option<CacheSafeParams>;
+}
+
+#[derive(Debug, Clone)]
+pub struct ForkedAgentRequest {
+    pub prompt_messages: Vec<ConversationMessage>,
+    pub cache_safe_params: CacheSafeParams,
+    pub fork_label: String,
+    pub query_source: QuerySource,
+    pub overrides: SubagentContextOverrides,
+    pub max_output_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ForkPurpose {
+    Compaction,
+    SessionMemoryExtraction,
+    Supervisor,
+    PromptSuggestion,
+    PostTurnSummary,
+    ClassifierExplainer,
+    SkillExecution,
+    Custom(String),
+}
+```
+
+### 20.3 ForkedAgent vs §10 Subagent
+
+| Dimension | §10 Subagent (AgentTool) | §20 ForkedAgent (infra) |
+|---|---|---|
+| Triggered by | Model calls AgentTool | System internal trigger |
+| User visible | ✅ shows as tool call | ❌ invisible to model |
+| Lifecycle | Multi-turn, interruptible | One-shot, completes then disposed |
+| Result destination | Returned as parent tool_result | Returned to calling code |
+| Permission | bubble / isolated / auto / plan | Inherits parent context, typically read-only |
+| Worktree | Optional | Never (no isolation needed) |
+| Cache sharing | Fork mode = byte-exact | Always byte-exact |
+
+### 20.4 Cross-subsystem fixes (C1, C2)
+
+`§6.3 MemorySelector` and `§13.6 Autocompactor` now explicitly call `SideQueryClient` / `ForkedAgentRunner`:
+
+```rust
+// §6.3 MemorySelector
+let request = SideQueryRequest {
+    model: self.selector_model.clone(),
+    system_prompt: Some(MEMORY_SELECTOR_PROMPT.into()),
+    messages: vec![create_user_message(prompt)],
+    output_format: Some(json_output_format_for_filename_list()),
+    max_tokens: 1024,
+    query_source: QuerySource::MemorySelector,
+    ...
+};
+let response = self.side_query_client.query(request).await?;
+
+// §13.6 Autocompactor
+let cache_safe = self.cache_safe_params_slot.get_last().await
+    .ok_or(CompactionError::NoCacheSafeParams)?;
+let request = ForkedAgentRequest {
+    prompt_messages: vec![create_user_message(compact_prompt)],
+    cache_safe_params: cache_safe,
+    fork_label: "compaction".into(),
+    query_source: QuerySource::Compaction,
+    ...
+};
+let response = self.forked_runner.run(request).await?;
+```
+
+---
+
+## 21. Output Styles
+
+### 21.1 OutputStyle Definition
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputStyle {
+    pub name: String,
+    pub description: String,
+    pub source: OutputStyleSource,
+    pub frontmatter: OutputStyleFrontmatter,
+    pub system_prompt_addendum: String,
+    pub source_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputStyleFrontmatter {
+    pub name: String,
+    pub description: String,
+    pub default: bool,
+    pub format: OutputFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutputFormat { Markdown, Plain, JsonStream, Concise, Explanatory }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutputStyleSource { Builtin, User, Project, Plugin, Managed }
+```
+
+### 21.2 OutputStyleRegistry
+
+```rust
+pub struct OutputStyleRegistry {
+    styles: HashMap<String, OutputStyle>,
+    current_active: Arc<RwLock<String>>,
+    plugin_styles: HashMap<PluginId, Vec<String>>,
+}
+
+impl OutputStyleRegistry {
+    pub fn active(&self) -> OutputStyle;
+    pub async fn switch(&self, name: &str) -> Result<(), OutputStyleError>;
+    pub fn register_plugin_styles(&mut self, plugin_id: PluginId, styles: Vec<OutputStyle>);
+    pub fn unregister_plugin(&mut self, plugin_id: &PluginId);
+}
+```
+
+### 21.3 Integration
+
+- §5 Prompt assembly injects `current_active.system_prompt_addendum`
+- §15 Plugin registers plugin styles
+- §19 SlashCommand `/output-style` switches active
+
+---
+
+## 22. Session Storage & Recovery
+
+### 22.1 File Layout
+
+```
+~/.claude/sessions/<session_id>/
+├── metadata.json
+├── transcript.jsonl
+├── content_replacements.jsonl
+├── queue_operations.jsonl
+├── agents/<agent_id>/{metadata.json, sidechain.jsonl}
+├── tasks/<task_id>.txt
+├── session_memory.md
+└── plan.md
+
+~/.claude/projects/<project_hash>/
+├── current_session_id
+└── last_session_id_for_resume
+```
+
+### 22.2 Persistence Model
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMetadata {
+    pub session_id: SessionId,
+    pub parent_session_id: Option<SessionId>,
+    pub created_at: SystemTime,
+    pub project_dir: PathBuf,
+    pub cwd: PathBuf,
+    pub agent_type: Option<String>,
+    pub model: String,
+    pub permission_mode: PermissionMode,
+    pub coordinator_mode: bool,
+    pub enabled_plugins: Vec<PluginId>,
+    pub mcp_servers_enabled: Vec<String>,
+    pub working_directories: Vec<PathBuf>,
+    pub current_output_style: String,
+    pub claude_md_paths: Vec<PathBuf>,
+    pub last_modified: SystemTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TranscriptEntry {
+    Message { uuid: MessageId, timestamp: SystemTime, message: ConversationMessage },
+    StreamEvent { request_id: RequestId, event: StreamEvent },
+    ToolUseSummary { tool_use_id: ToolUseId, summary: String },
+    CompactBoundary { boundary: CompactBoundaryMessage },
+    Tombstone { replaced_uuid: MessageId, reason: TombstoneReason },
+    HookResult { hook_id: HookId, result: HookResult },
+    QueueOperation { op: QueueOperation },
+    ContentReplacement { replacement: ReplacementRecord },
+    SessionResumed { previous_session_id: SessionId, resumed_at: SystemTime },
+}
+```
+
+### 22.3 SessionStorage Service
+
+```rust
+pub struct SessionStorage {
+    base_dir: PathBuf,
+    fs: Arc<dyn FileSystem>,
+    clock: Arc<dyn Clock>,
+    runtime: Arc<dyn RuntimeSpawner>,
+    pending_writes: Arc<Mutex<Vec<PendingWrite>>>,
+    transcript_writer: Arc<Mutex<Option<TranscriptWriter>>>,
+}
+
+impl SessionStorage {
+    pub async fn create(&self, metadata: SessionMetadata) -> Result<SessionHandle, StorageError>;
+    pub async fn append(&self, session_id: &SessionId, entry: TranscriptEntry) -> Result<(), StorageError>;
+    pub async fn save_metadata(&self, session_id: &SessionId, metadata: &SessionMetadata) -> Result<(), StorageError>;
+    pub async fn list(&self, filter: SessionListFilter) -> Result<Vec<SessionMetadata>, StorageError>;
+    pub async fn load(&self, session_id: &SessionId) -> Result<LoadedSession, StorageError>;
+    pub async fn list_for_project(&self, project_dir: &Path, limit: usize) -> Result<Vec<SessionMetadata>, StorageError>;
+    pub async fn record_sidechain(&self, parent_session: &SessionId, agent_id: &AgentId, entry: TranscriptEntry) -> Result<(), StorageError>;
+    pub async fn close(&self, session_id: &SessionId) -> Result<(), StorageError>;
+}
+
+#[derive(Debug)]
+pub struct LoadedSession {
+    pub metadata: SessionMetadata,
+    pub messages: Vec<ConversationMessage>,
+    pub compact_boundaries: Vec<CompactBoundaryMessage>,
+    pub content_replacements: ContentReplacementState,
+    pub queue_operations: Vec<QueueOperation>,
+    pub session_memory: Option<String>,
+    pub plan: Option<String>,
+}
+```
+
+### 22.4 Crash-Safe JSONL
+
+```rust
+/// Tolerant reader: parses line-by-line, truncates on corruption (last write interrupted)
+pub struct CrashSafeJsonlReader {
+    fs: Arc<dyn FileSystem>,
+}
+
+impl CrashSafeJsonlReader {
+    pub async fn read_recover(&self, path: &Path) -> Result<RecoveryResult, StorageError>;
+}
+
+pub struct RecoveryResult {
+    pub entries: Vec<TranscriptEntry>,
+    pub truncated_at: u64,
+}
+```
+
+### 22.5 SessionResumer (fix C7)
+
+```rust
+pub struct SessionResumer {
+    storage: Arc<SessionStorage>,
+    plugin_manager: Arc<PluginManager>,
+    mcp_registry: Arc<RwLock<McpRegistry>>,
+    permission_policy: Arc<RwLock<PermissionPolicy>>,
+    cost_tracker: Arc<CostTracker>,
+    output_style_registry: Arc<RwLock<OutputStyleRegistry>>,
+    fs: Arc<dyn FileSystem>,
+}
+
+impl SessionResumer {
+    pub async fn resume(&self, session_id: &SessionId) -> Result<ResumedSession, ResumeError> {
+        // 1. Load metadata + transcript
+        let loaded = self.storage.load(session_id).await?;
+        // 2. Re-enable plugins
+        for plugin_id in &loaded.metadata.enabled_plugins {
+            self.plugin_manager.enable(plugin_id).await?;
+        }
+        // 3. Reconnect MCP servers
+        for server_name in &loaded.metadata.mcp_servers_enabled {
+            self.mcp_registry.write().await.reconnect_by_name(server_name).await?;
+        }
+        // 4. Restore permission mode
+        self.permission_policy.write().await.set_mode(loaded.metadata.permission_mode);
+        // 5. Restore cost state
+        self.cost_tracker.restore(&loaded.metadata.session_id).await?;
+        // 6. Restore output style
+        self.output_style_registry.write().await.switch(&loaded.metadata.current_output_style).await?;
+        // 7. Rebuild FileStateCache from historical ReadTool calls
+        let file_state_cache = rebuild_file_state_cache(&loaded.messages, &*self.fs).await?;
+        // 8. Apply content replacements
+        let content_replacement = loaded.content_replacements;
+        // 9. Filter to post-compact-boundary messages
+        let messages = get_messages_after_compact_boundary(&loaded.messages);
+        Ok(ResumedSession { metadata: loaded.metadata, messages, file_state_cache, content_replacement, session_memory: loaded.session_memory })
+    }
+}
+```
+
+---
+
+## 23. File State Cache
+
+### 23.1 FileStateCache
+
+```rust
+pub struct FileStateCache {
+    cache: LruCache<NormalizedPath, FileState>,
+    max_entries: usize,
+    max_size_bytes: u64,
+    current_size_bytes: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileState {
+    pub content: String,
+    pub timestamp: SystemTime,
+    pub offset: Option<u64>,
+    pub limit: Option<u64>,
+    /// True when entry was auto-injected (e.g. CLAUDE.md) and stripped/truncated
+    /// before reaching the model. content holds RAW disk bytes; Edit must require explicit Read first.
+    pub is_partial_view: bool,
+}
+
+pub const READ_FILE_STATE_CACHE_MAX_ENTRIES: usize = 100;
+pub const READ_FILE_STATE_CACHE_MAX_BYTES: u64 = 25 * 1024 * 1024;
+```
+
+### 23.2 Verification (fix C5)
+
+```rust
+pub fn verify_file_state(
+    cache: &FileStateCache,
+    path: &str,
+    current_disk_mtime: SystemTime,
+    current_disk_hash: Option<[u8; 32]>,
+) -> FileStateVerification {
+    let Some(cached) = cache.get(path) else { return FileStateVerification::NotInCache; };
+    if cached.is_partial_view { return FileStateVerification::PartialView; }
+    if current_disk_mtime > cached.timestamp {
+        return FileStateVerification::ModifiedSinceRead {
+            cached_at: cached.timestamp,
+            disk_mtime: current_disk_mtime,
+        };
+    }
+    if let Some(disk_hash) = current_disk_hash {
+        let cached_hash = sha256(cached.content.as_bytes());
+        if disk_hash != cached_hash { return FileStateVerification::ContentMismatch; }
+    }
+    FileStateVerification::Valid
+}
+
+#[derive(Debug, Clone)]
+pub enum FileStateVerification {
+    Valid, NotInCache, PartialView,
+    ModifiedSinceRead { cached_at: SystemTime, disk_mtime: SystemTime },
+    ContentMismatch,
+}
+```
+
+### 23.3 Edit Tool Integration
+
+```rust
+impl Tool for FileEditTool {
+    async fn call(&self, input: Value, ctx: ToolUseContext, ...) -> Result<ToolCallResult, ToolError> {
+        let path = input["path"].as_str()?;
+        let disk_mtime = ctx.fs.file_mtime(path).await?;
+        match verify_file_state(&ctx.file_state_cache, path, disk_mtime, None) {
+            FileStateVerification::Valid => {}
+            FileStateVerification::NotInCache => return Err(ToolError::EditWithoutRead { path: path.into() }),
+            FileStateVerification::PartialView => return Err(ToolError::PartialViewMustReread { path: path.into() }),
+            FileStateVerification::ModifiedSinceRead { .. } => return Err(ToolError::FileModifiedExternally { path: path.into() }),
+            FileStateVerification::ContentMismatch => return Err(ToolError::FileContentMismatch { path: path.into() }),
+        }
+        // ... perform edit ...
+        ctx.file_state_cache.set(path, FileState { content: new_content, timestamp: SystemTime::now(), ... });
+        Ok(...)
+    }
+}
+```
+
+### 23.4 Merge & Clone
+
+```rust
+impl FileStateCache {
+    pub fn clone_cache(&self) -> Self;
+    /// More recent timestamp wins; used to merge subagent reads back to parent.
+    pub fn merge(&mut self, other: &Self);
+    /// Serialize for session persistence (§22)
+    pub fn dump(&self) -> Vec<(String, FileState)>;
+    pub fn load(&mut self, entries: Vec<(String, FileState)>);
+}
+```
+
+---
+
+## 24. Sandbox
+
+### 24.1 Sandbox Trait
+
+```rust
+/// Hardening layer for ProcessRunner. Linux: unshare+seccomp; macOS: sandbox-exec;
+/// Windows: Job Object + restricted token; Mobile: unsupported.
+#[async_trait]
+pub trait Sandbox: Send + Sync {
+    fn is_available(&self) -> bool;
+    fn backend(&self) -> SandboxBackend;
+    fn wrap_command(&self, cmd: ProcessCommand, policy: &SandboxPolicy) -> Result<ProcessCommand, SandboxError>;
+    async fn probe_capability(&self) -> SandboxCapability;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxBackend {
+    LinuxNamespaces, LinuxFirejail, MacOsSandboxExec, WindowsJobObject, None,
+}
+
+#[derive(Debug, Clone)]
+pub struct SandboxCapability {
+    pub available: bool,
+    pub reason: Option<String>,
+    pub features_supported: SandboxFeatures,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SandboxFeatures {
+    pub network_isolation: bool,
+    pub fs_readonly: bool,
+    pub fs_readwrite_paths: bool,
+    pub process_limit: bool,
+    pub no_new_privileges: bool,
+}
+```
+
+### 24.2 SandboxPolicy
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxPolicy {
+    pub network: NetworkPolicy,
+    pub writable_paths: Vec<PathBuf>,
+    pub denied_paths: Vec<PathBuf>,
+    pub allow_subprocess: bool,
+    pub limits: ResourceLimits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NetworkPolicy { Disabled, LoopbackOnly, Allowed }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    pub max_cpu_seconds: Option<u32>,
+    pub max_memory_mb: Option<u32>,
+    pub max_processes: Option<u32>,
+    pub max_open_files: Option<u32>,
+}
+```
+
+### 24.3 should_use_sandbox Decision
+
+```rust
+pub fn should_use_sandbox(
+    cmd: &str,
+    permission_mode: PermissionMode,
+    project_trust: ProjectTrustLevel,
+    classifier_result: Option<&ClassifierScore>,
+) -> SandboxDecision { ... }
+
+#[derive(Debug, Clone)]
+pub enum SandboxDecision {
+    NoSandbox,
+    Sandbox { policy: SandboxPolicy },
+    RefuseBecauseSandboxUnavailable { reason: String },
+}
+```
+
+---
+
+## 25. LSP Integration
+
+### 25.1 LSP Server Config
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspServerConfig {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub trigger_languages: Vec<String>,
+    pub root_dir_markers: Vec<String>,
+    pub initialization_options: Option<Value>,
+}
+```
+
+### 25.2 LSP Connection State
+
+```rust
+#[derive(Debug, Clone)]
+pub enum LspConnectionState {
+    Disconnected { config: LspServerConfig },
+    Starting { config: LspServerConfig, started_at: SystemTime, pid: u32 },
+    Initialized {
+        config: LspServerConfig,
+        connection_id: LspConnectionId,
+        server_capabilities: LspServerCapabilities,
+        pid: u32,
+    },
+    Failed { config: LspServerConfig, error: String },
+    Stopped { config: LspServerConfig },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspServerCapabilities {
+    pub text_document_sync: TextDocumentSyncKind,
+    pub completion: bool,
+    pub hover: bool,
+    pub definition: bool,
+    pub references: bool,
+    pub diagnostics: bool,
+    pub symbols: bool,
+    pub formatting: bool,
+    pub rename: bool,
+    pub code_action: bool,
+}
+```
+
+### 25.3 LspTransport & Registry
+
+```rust
+#[async_trait]
+pub trait LspTransport: Send + Sync {
+    async fn start_server(&self, config: &LspServerConfig) -> Result<LspRawConnection, LspError>;
+    async fn initialize(&self, conn: &LspRawConnection, root_uri: &str) -> Result<LspServerCapabilities, LspError>;
+    async fn request(&self, conn: &LspRawConnection, method: &str, params: Value) -> Result<Value, LspError>;
+    async fn notify(&self, conn: &LspRawConnection, method: &str, params: Value) -> Result<(), LspError>;
+    async fn shutdown(&self, conn_id: LspConnectionId) -> Result<(), LspError>;
+    fn is_available(&self) -> bool;
+}
+
+pub struct LspRegistry {
+    servers: HashMap<String, LspConnectionState>,
+    file_route_cache: Arc<RwLock<HashMap<PathBuf, String>>>,
+    transport: Arc<dyn LspTransport>,
+    plugin_servers: HashMap<PluginId, Vec<String>>,
+}
+
+impl LspRegistry {
+    pub async fn ensure_server_for_file(&self, path: &Path) -> Result<LspConnectionId, LspError>;
+    pub async fn dispatch(&self, action: LspAction, path: &Path, ...) -> Result<LspResponse, LspError>;
+    pub fn register_plugin_servers(&mut self, plugin_id: PluginId, configs: Vec<LspServerConfig>);
+    pub fn unregister_plugin(&mut self, plugin_id: &PluginId) -> Vec<LspConnectionId>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LspAction {
+    Hover { line: u32, character: u32 },
+    Definition { line: u32, character: u32 },
+    References { line: u32, character: u32 },
+    Diagnostics,
+    Symbols { query: Option<String> },
+    Completion { line: u32, character: u32 },
+    Formatting,
+    Rename { line: u32, character: u32, new_name: String },
+}
+```
+
+### 25.4 LspTool
+
+```rust
+pub struct LspTool {
+    registry: Arc<RwLock<LspRegistry>>,
+}
+
+impl Tool for LspTool {
+    fn name(&self) -> &str { "LSP" }
+    fn is_lsp(&self) -> bool { true }
+    async fn call(&self, input: Value, ctx: ToolUseContext, ...) -> Result<ToolCallResult, ToolError> {
+        let action = parse_action(&input)?;
+        let path = input["path"].as_str()?;
+        let response = self.registry.read().await.dispatch(action, Path::new(path), ...).await?;
+        Ok(ToolCallResult { data: serde_json::to_value(&response)?, ... })
+    }
+}
+```
+
+---
+
+## 26. Telemetry & Analytics
+
+### 26.1 AnalyticsSink Trait
+
+```rust
+#[async_trait]
+pub trait AnalyticsSink: Send + Sync {
+    async fn log_event(&self, name: &str, metadata: LogEventMetadata);
+    async fn log_event_async(&self, name: &str, metadata: LogEventMetadata);
+    fn name(&self) -> &str;
+}
+
+pub type LogEventMetadata = HashMap<String, AnalyticsValue>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AnalyticsValue {
+    Bool(bool), Int(i64), Float(f64), String(String), None,
+}
+```
+
+### 26.2 PII Marker Types
+
+```rust
+/// Compile-time marker requiring explicit verification of non-sensitive content
+pub type AnalyticsMetadata_Verified = String;
+pub type AnalyticsMetadata_PiiTagged = String;
+
+/// _PROTO_* prefix routes to privileged BQ proto columns; stripped from
+/// general-access sinks (Datadog etc.).
+pub fn strip_proto_fields(metadata: &mut LogEventMetadata) {
+    metadata.retain(|k, _| !k.starts_with("_PROTO_"));
+}
+```
+
+### 26.3 AnalyticsBus
+
+```rust
+pub struct AnalyticsBus {
+    sink: Arc<RwLock<Option<Arc<dyn AnalyticsSink>>>>,
+    pending: Arc<Mutex<VecDeque<QueuedEvent>>>,
+    max_pending: usize,
+    killswitch_active: Arc<AtomicBool>,
+}
+
+impl AnalyticsBus {
+    pub fn log_event(&self, name: &str, metadata: LogEventMetadata);
+    pub async fn attach_sink(&self, sink: Arc<dyn AnalyticsSink>);
+    pub async fn activate_killswitch(&self);
+}
+```
+
+### 26.4 GrowthBook Feature Flags
+
+```rust
+pub struct FeatureFlagsClient {
+    cache: Arc<RwLock<HashMap<String, FeatureValue>>>,
+    cache_ttl: Duration,
+    fetcher: Arc<dyn FeatureFlagsFetcher>,
+    runtime: Arc<dyn RuntimeSpawner>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FeatureValue {
+    Bool(bool), Number(f64), String(String), Json(Value),
+}
+
+#[async_trait]
+pub trait FeatureFlagsFetcher: Send + Sync {
+    async fn fetch(&self) -> Result<HashMap<String, FeatureValue>, FeatureFlagsError>;
+}
+
+impl FeatureFlagsClient {
+    /// Cached-may-be-stale getter, analogous to claude-code's *_CACHED_MAY_BE_STALE
+    pub fn get_value(&self, key: &str, default: FeatureValue) -> FeatureValue;
+    pub fn get_bool(&self, key: &str, default: bool) -> bool;
+    pub fn get_json<T: DeserializeOwned>(&self, key: &str, default: T) -> T;
+    pub async fn start_refresh_loop(&self) -> Result<(), FeatureFlagsError>;
+}
+```
+
+---
+
+## 27. Message Queue Manager
+
+### 27.1 Unified Command Queue
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedCommand {
+    pub uuid: String,
+    pub content: QueuedCommandContent,
+    pub priority: QueuePriority,
+    pub queued_at: SystemTime,
+    pub source: QueueSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum QueuedCommandContent {
+    UserInput { text: String, attachments: Vec<Attachment> },
+    SlashCommand { parsed: ParsedSlashCommand },
+    TaskNotification { value: String, mode: NotificationMode },
+    TeammateMessage { from: AgentId, message: TeammateMessage },
+    OrphanedPermission { tool_use_id: ToolUseId, request: PermissionRequest },
+    HookInjected { content: String, hook_id: HookId },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Serialize, Deserialize)]
+pub enum QueuePriority { Now, Next, Later }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueueSource {
+    PromptInput, TaskCompletion, AgentSendMessage, Hook, Orphan, Cron,
+}
+```
+
+### 27.2 MessageQueueManager
+
+```rust
+pub struct MessageQueueManager {
+    queue: Arc<RwLock<VecDeque<QueuedCommand>>>,
+    snapshot: Arc<RwLock<Arc<Vec<QueuedCommand>>>>,
+    notify: Arc<Notify>,
+    operations_log: Arc<dyn QueueOperationsLog>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum QueueOperation {
+    Enqueue { uuid: String, priority: QueuePriority, source: QueueSource },
+    Dequeue { uuid: String },
+    Remove { uuid: String, reason: String },
+    Clear { count: usize },
+}
+
+impl MessageQueueManager {
+    pub async fn enqueue(&self, cmd: QueuedCommand);
+    pub async fn dequeue(&self) -> Option<QueuedCommand>;
+    pub async fn drain_now_priority(&self) -> Vec<QueuedCommand>;
+    pub async fn remove(&self, uuid: &str, reason: &str);
+    pub async fn snapshot(&self) -> Arc<Vec<QueuedCommand>>;
+    pub async fn wait_for_message(&self, timeout: Duration) -> Option<QueuedCommand>;
+}
+```
+
+---
+
+## 28. Cron Scheduler
+
+### 28.1 Scheduler
+
+```rust
+pub struct CronScheduler {
+    registry: Arc<RwLock<CronTaskRegistry>>,
+    task_registry: Arc<TaskRegistry>,
+    fs: Arc<dyn FileSystem>,
+    clock: Arc<dyn Clock>,
+    runtime: Arc<dyn RuntimeSpawner>,
+    lock_dir: PathBuf,
+    jitter_seconds: u32,
+    tick_task: Mutex<Option<BackgroundTaskHandle>>,
+}
+
+impl CronScheduler {
+    pub async fn start(&self) -> Result<(), CronError>;
+    pub async fn stop(&self) -> Result<(), CronError>;
+}
+```
+
+### 28.2 Cross-Process Lock (fix C6)
+
+```rust
+pub struct CronTasksLock {
+    lock_path: PathBuf,
+    fs: Arc<dyn FileSystem>,
+}
+
+impl CronTasksLock {
+    /// Stale-lock detection: if existing lock mtime > 60s old, override.
+    pub async fn acquire(path: &Path, fs: &dyn FileSystem, now: SystemTime) -> Result<Self, CronError>;
+}
+```
+
+### 28.3 Tick Loop & Dispatch
+
+Cron tick runs every minute (`next_minute_boundary`). For each due task:
+1. Apply jitter sleep (up to `jitter_seconds`)
+2. Acquire cross-process lock (`CronTasksLock::acquire`)
+3. If acquired, call `task_registry.create(cron_task.target_task_type(), ...)` to spawn the actual task via §11 TaskManager
+4. Mark `last_run` in registry
+5. On lock failure, skip (another claude process took it)
+
+---
+
+## 29. IDE Bridge
+
+### 29.1 Bridge Protocol
+
+```rust
+pub struct IdeBridge {
+    transport: Arc<dyn BridgeTransport>,
+    pairing: Arc<BridgePairing>,
+    state: Arc<RwLock<BridgeState>>,
+    runtime: Arc<dyn RuntimeSpawner>,
+}
+
+#[async_trait]
+pub trait BridgeTransport: Send + Sync {
+    async fn connect(&self, config: &BridgeConfig) -> Result<BridgeConnection, BridgeError>;
+    async fn send(&self, conn: &BridgeConnection, message: BridgeMessage) -> Result<(), BridgeError>;
+    async fn receive(&self, conn: &BridgeConnection) -> Result<Box<dyn Stream<Item = BridgeMessage> + Send + Unpin>, BridgeError>;
+    async fn disconnect(&self, conn: BridgeConnection) -> Result<(), BridgeError>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeConfig {
+    pub bridge_url: String,
+    pub jwt_token: Secret<String>,
+    pub poll_interval_ms: u32,
+    pub trusted_device_id: String,
+}
+```
+
+### 29.2 Bridge Messages
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum BridgeMessage {
+    // IDE → CLI
+    UserPrompt { text: String, attachments: Vec<Attachment> },
+    OpenFileRequest { path: PathBuf, line: Option<u32> },
+    GetCurrentFileResponse { path: PathBuf, content: String },
+    PermissionDecision { tool_use_id: ToolUseId, decision: PermissionUserDecision },
+    AbortRequest,
+    // CLI → IDE
+    ShowDiff { path: PathBuf, old_content: String, new_content: String },
+    ShowPermissionPrompt { tool_use_id: ToolUseId, action: String, risk: RiskLevel },
+    UpdateStatus { status: BridgeStatus },
+    AssistantMessage { text: String, role: MessageRole },
+    ToolExecution { tool_use_id: ToolUseId, tool_name: String, status: ToolExecStatus },
+    SessionEvent { event: SessionEvent },
+    // Bidirectional
+    Heartbeat { timestamp: SystemTime },
+}
+```
+
+### 29.3 Trusted Device Pairing
+
+```rust
+pub struct BridgePairing {
+    storage: Arc<dyn SecureStorage>,
+    jwt_verifier: Arc<JwtVerifier>,
+}
+
+impl BridgePairing {
+    /// Out-of-band pairing: CLI shows 6-digit code, user enters in IDE, exchange JWTs.
+    pub async fn pair_device(&self) -> Result<TrustedDevice, BridgeError>;
+    pub async fn list_devices(&self) -> Result<Vec<TrustedDevice>, BridgeError>;
+    pub async fn revoke_device(&self, device_id: &str) -> Result<(), BridgeError>;
+    pub fn verify_jwt(&self, token: &str) -> Result<JwtClaims, BridgeError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct TrustedDevice {
+    pub device_id: String,
+    pub name: String,
+    pub paired_at: SystemTime,
+    pub last_seen: SystemTime,
+    pub jwt: Secret<String>,
+}
+```
+
+---
+
+## 30. Anthropic OAuth (extends §16 Secret)
+
+§16 covered the generic Secret/Credential framework. §30 specializes for the Anthropic OAuth flow (login.claude.ai) and the multi-source authentication resolver.
+
+### 30.1 Claude.ai OAuth Client
+
+```rust
+pub struct ClaudeAiOAuthClient {
+    config: ClaudeAiOAuthConfig,
+    http: Arc<dyn HttpTransport>,
+    credential_manager: Arc<CredentialManager>,
+    clock: Arc<dyn Clock>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaudeAiOAuthConfig {
+    pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub revocation_endpoint: String,
+    pub profile_endpoint: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthTokens {
+    pub access_token: Secret<String>,
+    pub refresh_token: Secret<String>,
+    pub expires_at: SystemTime,
+    pub subscription_type: SubscriptionType,
+    pub account_info: AccountInfo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubscriptionType { Free, Pro, Max, Team, Enterprise, Unknown }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountInfo {
+    pub user_id: String,
+    pub email: String,
+    pub org_id: Option<String>,
+    pub display_name: Option<String>,
+}
+```
+
+### 30.2 Multi-Source Resolver
+
+```rust
+pub struct AnthropicAuthResolver {
+    credential_manager: Arc<CredentialManager>,
+    config_loader: Arc<ConfigLoader>,
+    env_reader: Arc<dyn EnvReader>,
+}
+
+#[derive(Debug, Clone)]
+pub enum AuthSource {
+    EnvApiKey,
+    EnvAuthToken,
+    FileDescriptor,
+    OAuthClaudeAi,
+    StoredApiKey,
+    SettingsApiKey,
+    ApiKeyHelper { script_path: PathBuf },
+    AwsBedrock,
+    None,
+}
+
+impl AnthropicAuthResolver {
+    /// Priority resolution; managed contexts (CCR/Claude Desktop) force OAuth.
+    pub async fn resolve(&self) -> Result<AuthSource, AuthError>;
+    pub async fn get_auth_for_request(&self) -> Result<RequestAuth, AuthError>;
+}
+
+#[derive(Debug, Clone)]
+pub enum RequestAuth {
+    ApiKey(Secret<String>),
+    BearerToken(Secret<String>),
+    AwsSigv4 { credentials: Secret<AwsCredentials>, region: String },
+    None,
+}
+```
+
+### 30.3 Token Refresh & Lifecycle
+
+```rust
+impl ClaudeAiOAuthClient {
+    pub async fn start_refresh_loop(&self) -> Result<(), OAuthError>;
+    pub async fn refresh_now(&self) -> Result<OAuthTokens, OAuthError>;
+    pub async fn login_interactive(&self, port: u16) -> Result<OAuthTokens, OAuthError>;
+    pub async fn logout(&self) -> Result<(), OAuthError>;
+    pub async fn get_profile(&self) -> Result<AccountInfo, OAuthError>;
+}
+```
+
+### 30.4 ClaudeAiLimitsTracker (complements §17 Cost)
+
+Claude.ai subscriptions enforce a 5-hour rolling message-count window; this is server-side rate limit data parsed from `x-claudeai-*` response headers, separate from client-side cost budget.
+
+```rust
+pub struct ClaudeAiLimitsTracker {
+    state: Arc<RwLock<ClaudeAiLimitsState>>,
+    parser: Arc<ClaudeAiLimitsHeaderParser>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClaudeAiLimitsState {
+    pub subscription_type: SubscriptionType,
+    pub message_count_window: u32,
+    pub message_limit_window: u32,
+    pub window_resets_at: Option<SystemTime>,
+    pub extra_usage_dollars: f64,
+    pub last_updated: SystemTime,
+}
+
+impl ClaudeAiLimitsTracker {
+    pub async fn update_from_response_headers(&self, headers: &HashMap<String, String>);
+    pub async fn check_pre_api_call(&self) -> ClaudeAiLimitCheckResult;
+}
+```
+
+---
+
+## 31. Cross-System Event & Effect Additions
+
+Sections 18-30 introduce additional canonical Event/Effect variants. They live in §5.2 / §5.3 (single source of truth); summarized here for navigation:
+
+**Events**: `SlashCommandParsed`, `SlashCommandCompleted`, `SlashCommandRejected`, `CommandRegistryReloaded`, `OutputStyleSwitched`, `SessionCreated`, `SessionResumed`, `SessionClosed`, `TranscriptCorruptionRecovered`, `SidechainRecorded`, `CommandQueued`, `CommandDequeued`, `QueueDrained`, `LspServerStarted`, `LspServerFailed`, `BridgeConnected`, `BridgeDisconnected`, `BridgeMessageReceived`, `ClaudeAiLimitsUpdated`, `OAuthLoginCompleted`, `OAuthLogout`, `FeatureFlagsRefreshed`, `AnalyticsKillswitchActivated`.
+
+**Effects**: `ExecuteSlashCommand`, `ReloadCommands`, `SwitchOutputStyle`, `AppendTranscript`, `SaveSessionMetadata`, `ResumeSession`, `ListSessions`, `CloseSession`, `RecordSidechain`, `EnqueueCommand`, `DrainQueueAtBoundary`, `RunSideQuery`, `RunForkedAgent`, `EnsureLspServerForFile`, `DispatchLsp`, `WrapSandbox`, `LogAnalyticsEvent`, `FetchFeatureFlags`, `ActivateAnalyticsKillswitch`, `ConnectBridge`, `DisconnectBridge`, `SendBridgeMessage`, `PairDevice`, `LoginClaudeAi`, `LogoutClaudeAi`, `RefreshClaudeAiToken`, `UpdateClaudeAiLimits`.
+
+---
+
+## 32. Verification Strategy
 
 Three-layer verification: **Contract Tests** (trait contracts), **Property Tests** (invariants), and **Parity/Integration Tests** (behavioral fidelity).
 
-### 18.1 Contract Tests (all traits)
+### 32.1 Contract Tests (all traits)
 
 Each trait has a companion contract test suite that **any platform implementation must pass**:
 
@@ -4076,7 +5338,7 @@ pub fn runtime_contract_tests<R: RuntimeSpawner>(rt: &R) { /* spawn, sleep, canc
 pub fn secure_storage_contract_tests<S: SecureStorage>(storage: &S) { /* store, retrieve, delete, list, roundtrip; is_encrypted reflects reality */ }
 ```
 
-### 18.2 Property Tests (state machine + subsystem invariants)
+### 32.2 Property Tests (state machine + subsystem invariants)
 
 ```rust
 // crates/test-harness/src/properties/
@@ -4144,7 +5406,7 @@ proptest! { #[test] fn blocklist_prevents_load(blocked_id in arb_plugin_id()) { 
 proptest! { #[test] fn strict_plugin_only_blocks_user_defined(component in arb_plugin_component()) { ... } }
 ```
 
-### 18.3 Subsystem Integration Tests
+### 32.3 Subsystem Integration Tests
 
 Per-subsystem integration scenarios using mock implementations:
 
@@ -4165,7 +5427,7 @@ Per-subsystem integration scenarios using mock implementations:
 | FFI | session facade, event/effect DTO roundtrip, Kotlin/Swift handle lifecycle |
 | Parity | claw-code mock scenarios for tools, hooks, subagents, tasks, and compaction |
 
-### 18.4 CI Pipeline (extended)
+### 32.4 CI Pipeline (extended)
 
 ```yaml
 jobs:
@@ -4222,7 +5484,7 @@ jobs:
     - cargo test -p lingxi-test-harness --test parity_*
 ```
 
-### 18.5 Contract Coverage Metric
+### 32.5 Contract Coverage Metric
 
 ```rust
 pub fn compute_unexercised_trait_method_ratio() -> f64 {
@@ -4236,7 +5498,7 @@ CI gate: `unexercised_trait_method_ratio <= 0.05`. This is a coverage guard, not
 
 ---
 
-## 19. M1 Deliverables (Updated for Full Scope)
+## 33. M1 Deliverables (Updated for Full Scope)
 
 | # | Crate / Deliverable | Definition | Completion Criteria |
 |---|---|---|---|
@@ -4256,14 +5518,27 @@ CI gate: `unexercised_trait_method_ratio <= 0.05`. This is a coverage guard, not
 | D14 | `lingxi-plugin` | manifest/component model + 7 lifecycle states + component registry materialization + marketplace + blocklist + strict policy | install/enable/disable/uninstall round-trip; commands/agents/skills/hooks/output-styles/MCP/LSP/channels reach correct registries; blocklist prevents load |
 | D15 | `lingxi-secret` | SecureStorage backends + CredentialManager + keychain prefetch + 30+ gitleaks rules + redaction boundaries over protocol `Secret<T>` DTOs | All 5 redaction boundaries verified; `Secret<T>`/`SecureStorageData` debug output redacts; OAuth refresh races resolved under lock |
 | D16 | `lingxi-cost` | provider/model pricing catalog + normalized token Usage + cache savings calc + per-session CostTracker + BudgetEnforcer | Cost reconciles within 0.1% against catalog fixtures for fixed provider/model/token usage; provider usage normalization and budget halt/ask/warn trigger correctly |
-| D17 | `lingxi-test-harness` | mocks + contract suites + property tests + parity fixtures | Contract coverage ≤ 0.05 unexercised trait-method ratio; property tests at 10K iterations |
-| D18 | `lingxi-uniffi-bridge` | FFI-safe facade, DTOs, and opaque engine handles | Generated Kotlin + Swift compile; no raw `dyn Trait`, stream, closure, or `Arc<dyn Tool>` exposed |
-| D19 | Cross-compile CI | 5 targets green | `protocol`, `core`, `traits`, `api-client`, and `uniffi-bridge` compile on supported target matrix |
-| D20 | `platforms/posix-minimal` + `examples/cli-demo` | M1 demo host with minimal FS/process/http/MCP mocks + plain-text SecureStorage fallback | Multi-turn conversation + mock tool use + mock subagent + compact + permission prompt + cost display works; production POSIX remains M2 |
+| D17 | `lingxi-skills` | Skill model + registry + discovery prefetch + SkillTool + mcp_skill_builders | Bundled+user+project+plugin+mcp skills load; trigger-keyword discovery works; SkillTool dispatches via ForkedAgentRunner |
+| D18 | `lingxi-commands` | SlashCommand model + 80+ builtin handlers + markdown loader + arg substitution + plugin/MCP sources | All 80+ builtins parse + handle; markdown commands with frontmatter work; arg substitution covers $1/$ARGUMENTS/$@ |
+| D19 | `lingxi-sidequery` | SideQueryClient + ForkedAgentRunner + CacheSafeParams slot | Memory selector, classifier explainer, and compaction summarization all route through these; cache hit verified |
+| D20 | `lingxi-outputstyles` | OutputStyle model + registry + prompt addendum injection | `/output-style` switches active; addendum appears in next system prompt assembly |
+| D21 | `lingxi-session` | SessionStorage + transcript JSONL + crash-safe reader + SessionResumer | Append/load roundtrip + corruption recovery + resume restores plugins/MCP/permission/cost/file-state |
+| D22 | `lingxi-filestate` | FileStateCache + verify_file_state + Edit-Read coordination + merge/clone | All 5 FileStateVerification variants tested; Edit refuses with correct error on each |
+| D23 | `lingxi-sandbox` | Sandbox trait + 4 backend stubs + SandboxPolicy + should_use_sandbox | Linux namespaces probe + sandbox-exec profile + Windows Job Object stubs compile; refuse-when-unavailable path tested |
+| D24 | `lingxi-lsp` | LspTransport trait + LspRegistry + LspTool + per-conn state machine | mock LSP transport drives all LspAction variants; auto-route by file extension works |
+| D25 | `lingxi-telemetry` | AnalyticsSink trait + AnalyticsBus + FeatureFlagsClient + PII markers + _PROTO_ strip | Pending events drain to attached sink; killswitch halts cleanly; FeatureFlagsClient cache + background refresh works |
+| D26 | `lingxi-msgqueue` | MessageQueueManager + 6 QueuedCommandContent variants + 3-tier priority + ops log | Priority + FIFO drained correctly; tool-round boundary drain works; queue ops persist for crash recovery |
+| D27 | `lingxi-cron` | CronScheduler + CronTasksLock + tick loop + jitter | Cron fires at minute boundary; cross-process lock prevents duplicate runs; jitter spreads thundering herd |
+| D28 | `lingxi-bridge` | BridgeTransport trait + IdeBridge + JWT pairing + 9 BridgeMessage variants | Mock transport drives full pair/connect/send/receive/disconnect; JWT verify rejects tampered tokens |
+| D29 | `lingxi-anthropic-oauth` | ClaudeAiOAuthClient + AnthropicAuthResolver + 9 AuthSource variants + ClaudeAiLimitsTracker | login_interactive completes via mock IdP; resolver picks correct source under priority rules; limits parsed from response headers |
+| D30 | `lingxi-test-harness` | mocks + contract suites + property tests + parity fixtures | Contract coverage ≤ 0.05 unexercised trait-method ratio; property tests at 10K iterations |
+| D31 | `lingxi-uniffi-bridge` | FFI-safe facade, DTOs, and opaque engine handles | Generated Kotlin + Swift compile; no raw `dyn Trait`, stream, closure, or `Arc<dyn Tool>` exposed |
+| D32 | Cross-compile CI | 5 targets green | `protocol`, `core`, `traits`, `api-client`, and `uniffi-bridge` compile on supported target matrix |
+| D33 | `platforms/posix-minimal` + `examples/cli-demo` | M1 demo host with minimal FS/process/http/MCP mocks + plain-text SecureStorage + stub IDE bridge | Multi-turn conversation + mock tool use + mock subagent + compact + permission prompt + cost display + slash command + skill discovery + file state verify works; production POSIX remains M2 |
 
 ---
 
-## 20. M1 Milestone Schedule (Full Scope)
+## 34. M1 Milestone Schedule (Full Scope)
 
 Timeline reflects full subsystem implementation. Single-developer estimate; multi-developer (autonomous claws) can compress significantly.
 
@@ -4353,8 +5628,50 @@ M1.13 (W30-32): Coordinator / Team
 ├── SwarmBackend trait + tmux reference impl + TeamMemorySync
 └── Gate: Coordinator → TeamCreate → SendMessage → SyntheticOutput → completion verified
 
-PHASE E: PLUGINS + INTEGRATION + POLISH (Weeks 33-44)
-M1.14 (W33-36): Plugin System
+PHASE E: USER-FACING + EXECUTION SUPPORT (Weeks 33-42)
+M1.14 (W33-34): Side Query & Forked Agent
+├── SideQueryClient + ForkedAgentRunner + CacheSafeParams slot
+├── Refactor §6 MemorySelector and §13 Autocompactor to use these
+├── Mock LLM impl for testing
+└── Gate: byte-exact cache hit verified; concurrent forked agents isolated
+
+M1.15 (W35-37): Skills + Slash Commands + Output Styles
+├── lingxi-skills: registry + discovery prefetch + SkillTool + mcp_skill_builders
+├── lingxi-commands: 80+ builtin handlers + markdown loader + arg substitution
+├── lingxi-outputstyles: registry + prompt addendum
+└── Gate: /skills /agents /memory /compact /resume work in cli-demo; SkillTool dispatches via ForkedAgent
+
+M1.16 (W38-40): Session Storage + File State Cache + Message Queue
+├── lingxi-session: append-only JSONL + metadata + crash-safe reader
+├── SessionResumer integrating Plugin/MCP/Permission/Cost/FileStateCache
+├── lingxi-filestate: verify_file_state + Edit integration + merge/clone
+├── lingxi-msgqueue: priority queue + tool-round drain + ops log
+└── Gate: /resume restores all subsystems; Edit refuses on stale state; queue priority correct
+
+M1.17 (W41-42): Cron Scheduler
+├── CronScheduler tick + cross-process lock + jitter
+├── Integration with §11 TaskRegistry
+└── Gate: scheduled tasks fire at minute boundary; lock prevents duplicates
+
+PHASE F: INFRA + EXTERNAL (Weeks 43-50)
+M1.18 (W43-44): Sandbox + LSP
+├── Sandbox trait + Linux namespaces / sandbox-exec / Job Object stubs
+├── SandboxPolicy + should_use_sandbox decision
+├── LspTransport trait + LspRegistry + LspTool
+└── Gate: Bash routes through Sandbox.wrap_command when appropriate; mock LSP drives all actions
+
+M1.19 (W45-46): Telemetry + Anthropic OAuth
+├── AnalyticsBus + AnalyticsSink + FeatureFlagsClient + killswitch
+├── ClaudeAiOAuthClient + AnthropicAuthResolver + ClaudeAiLimitsTracker
+└── Gate: events queue→drain when sink attaches; OAuth login_interactive works against mock IdP
+
+M1.20 (W47-48): IDE Bridge
+├── BridgeTransport trait + IdeBridge + JWT pairing
+├── 9 BridgeMessage variants + heartbeat
+└── Gate: pair→connect→send→receive→disconnect over mock transport; tampered JWT rejected
+
+PHASE G: PLUGINS + INTEGRATION + POLISH (Weeks 49-60)
+M1.21 (W49-52): Plugin System
 ├── PluginManifest + PluginSource (6 kinds) + PluginState (7 states)
 ├── PluginManager + component registry materialization
 ├── MarketplaceManager (official + 3rd-party) + reconciler
@@ -4362,34 +5679,34 @@ M1.14 (W33-36): Plugin System
 ├── Integration with Command/Agent/Skill/Hook/OutputStyle/MCP/LSP/Channel registries
 └── Gate: install/enable/disable/uninstall round-trip; components reach correct registries; blocklist enforced
 
-M1.15 (W37-39): UniFFI + Cross-Crate Integration
+M1.22 (W53-55): UniFFI + Cross-Crate Integration
 ├── lingxi-uniffi-bridge with narrow facade APIs
 ├── Kotlin + Swift binding generation + compilation
 ├── End-to-end test through bridge
-├── platforms/posix-minimal for demo-only FS/process/http/MCP mocks + plain-text SecureStorage
-├── examples/cli-demo full implementation
-└── Gate: cli-demo end-to-end works incl. permission prompts + cost display; UniFFI bindings compile on mobile targets
+├── platforms/posix-minimal for demo-only FS/process/http/MCP mocks + plain-text SecureStorage + stub IDE bridge
+├── examples/cli-demo full implementation (incl. /resume, /skills, /output-style, sandboxed bash)
+└── Gate: cli-demo end-to-end works incl. permission prompts + cost display + slash commands + skill discovery; UniFFI bindings compile on mobile targets
 
-M1.16 (W40-42): Test Coverage + Parity
-├── Contract tests for all 13 traits (incl. SecureStorage)
+M1.23 (W56-58): Test Coverage + Parity
+├── Contract tests for all 13 traits (incl. SecureStorage, Sandbox, LspTransport, BridgeTransport)
 ├── Property tests for all subsystems at 10K iterations
-├── Subsystem integration tests incl. permission/secret/cost/plugin scenarios
-├── Contract coverage metric + parity fixtures from claw-code
+├── Subsystem integration tests incl. permission/secret/cost/plugin/skill/cmd/session/bridge/cron scenarios
+├── Contract coverage metric + parity fixtures from claude-code reference
 └── Gate: unexercised trait-method ratio ≤ 0.05; all property and parity tests pass
 
-M1.17 (W43-44): Documentation + Release
+M1.24 (W59-60): Documentation + Release
 ├── Complete rustdoc for all public APIs
 ├── ARCHITECTURE.md (subsystem overview)
-├── SECURITY.md (Secret<T>, redaction, SSRF, plugin trust model)
+├── SECURITY.md (Secret<T>, redaction, SSRF, plugin trust model, sandbox model, JWT pairing)
 ├── CONTRIBUTING.md + CHANGELOG.md + README.md
 └── Gate: docs render correctly; M1 v0.1.0 tag
 ```
 
-**Total: ~44 weeks (single developer), 10-15 weeks with 3-5 autonomous claws (claw-code precedent)**.
+**Total: ~60 weeks (single developer), 14-20 weeks with 3-5 autonomous claws (claw-code precedent)**.
 
 ---
 
-## 21. Post-M1 Roadmap (Preview)
+## 35. Post-M1 Roadmap (Preview)
 
 ```
 M2: Production Platform Crates (Weeks 37-50, 14 weeks)
@@ -4528,7 +5845,7 @@ uniffi = { version = "0.28", features = ["build"] }
 |---|---|---|
 | lingxi-protocol | 1,000 | 300 |
 | lingxi-core | 4,000 | 1,500 |
-| lingxi-traits | 1,500 | 350 |
+| lingxi-traits | 1,800 | 400 |
 | lingxi-api-client | 2,500 | 800 |
 | lingxi-permission | 2,500 | 1,200 |
 | lingxi-secret | 2,000 | 1,000 |
@@ -4542,23 +5859,37 @@ uniffi = { version = "0.28", features = ["build"] }
 | lingxi-coordinator | 1,500 | 600 |
 | lingxi-compaction | 2,500 | 1,000 |
 | lingxi-plugin | 2,800 | 1,200 |
-| lingxi-test-harness | 1,200 | 4,000 |
-| lingxi-uniffi-bridge | 1,000 | 250 |
-| platforms/posix-minimal | 1,000 | 400 |
-| examples/cli-demo | 600 | 0 |
-| **Total** | **~40,300** | **~19,200** |
+| lingxi-skills | 1,500 | 700 |
+| lingxi-commands | 4,000 | 1,500 |
+| lingxi-sidequery | 1,200 | 600 |
+| lingxi-outputstyles | 600 | 300 |
+| lingxi-session | 3,000 | 1,500 |
+| lingxi-filestate | 600 | 400 |
+| lingxi-sandbox | 1,500 | 700 |
+| lingxi-lsp | 2,000 | 900 |
+| lingxi-telemetry | 1,500 | 600 |
+| lingxi-msgqueue | 1,000 | 500 |
+| lingxi-cron | 800 | 400 |
+| lingxi-bridge | 2,000 | 900 |
+| lingxi-anthropic-oauth | 1,500 | 700 |
+| lingxi-test-harness | 1,800 | 7,000 |
+| lingxi-uniffi-bridge | 1,200 | 300 |
+| platforms/posix-minimal | 1,500 | 500 |
+| examples/cli-demo | 800 | 0 |
+| **Total** | **~59,500** | **~28,300** |
 
-Grand total: **~60K Rust LOC** for full-fidelity M1.
+Grand total: **~88K Rust LOC** for full-fidelity M1.
 
 (Comparison: claw-code current `main` = 92K LOC, but includes substantial duplication, dead code, and tests; the fresh implementation should be more compact.)
 
-### Why these added ~15K LOC
+### Why ~88K LOC
 
-The §14-§17 subsystems represent serious depth:
-- **lingxi-permission** (2.5K): 5 external + 2 internal modes + 3 classifiers + 8 rule sources + pending classifier checks + shadow detection + denial tracking
-- **lingxi-secret** (2.0K): SecureStorage backends + CredentialManager + 30+ gitleaks rules + redaction policy over protocol Secret<T> DTOs
-- **lingxi-cost** (1.2K): provider/model pricing catalog + normalized token Usage + Cost calculator + per-session tracker + halt/ask/warn budget policies
-- **lingxi-plugin** (2.8K): manifest/lifecycle/marketplace/blocklist + component registry materialization + strict-plugin-only policy
-- **traits +0.1K**: SecureStorage trait
-- **test-harness +0.2K + 1.0K tests**: contract suites for 4 new subsystems
-- **uniffi-bridge +0.2K**: facade DTOs for permission/cost/plugin status
+The full parity audit (against claude-code's ~519K TS LOC) identified 30 subsystems in M1. Major LOC drivers beyond the original §6–§13 core:
+- **lingxi-commands** (4K): 80+ builtin handlers + markdown loader + frontmatter parse + argument substitution + alias resolution
+- **lingxi-session** (3K): append-only JSONL writer + crash-safe reader + SessionResumer integrating all subsystems + per-agent sidechain
+- **lingxi-permission/plugin/agent** (2.5-3K each): full claude-code parity (modes/classifiers/component materialization/effect delegation)
+- **lingxi-bridge / lingxi-lsp / lingxi-anthropic-oauth / lingxi-sandbox** (1.5-2K each): protocol + transport + per-conn state machines
+- **test-harness** (1.8K + 7K tests): contract suites for all 13 traits + property tests + parity fixtures at 10K iterations
+- Smaller cross-cutting crates (skills/outputstyles/sidequery/filestate/msgqueue/cron/telemetry/cost): 600-1500 LOC each
+
+This estimate stays roughly half of claude-code's TS LOC despite full feature parity, because Rust's type system absorbs many TS validation/runtime checks at compile time.

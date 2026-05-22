@@ -12,6 +12,7 @@ members = [
     "crates/tools",
     "crates/hooks",
     "crates/memory",
+    "crates/mcp",
 ]
 
 [workspace.package]

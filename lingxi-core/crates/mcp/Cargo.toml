@@ -1,0 +1,19 @@
+[package]
+name = "lingxi-mcp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lingxi-protocol = { path = "../protocol" }
+lingxi-traits = { path = "../traits" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio = { version = "1", features = ["sync"] }
+tracing.workspace = true
+
+[lints]
+workspace = true

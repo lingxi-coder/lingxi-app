@@ -13,6 +13,7 @@ lingxi-api-client = { path = "../api-client" }
 lingxi-cost = { path = "../cost" }
 lingxi-hooks = { path = "../hooks" }
 lingxi-mcp = { path = "../mcp" }
+lingxi-compaction = { path = "../compaction" }
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true

@@ -408,6 +408,7 @@ dependencies = [
  "futures",
  "futures-core",
  "lingxi-api-client",
+ "lingxi-compaction",
  "lingxi-core",
  "lingxi-cost",
  "lingxi-hooks",

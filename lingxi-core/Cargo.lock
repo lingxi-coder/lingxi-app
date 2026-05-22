@@ -285,6 +285,7 @@ dependencies = [
  "lingxi-memory",
  "lingxi-permission",
  "lingxi-protocol",
+ "lingxi-sidequery",
  "lingxi-test-harness",
  "lingxi-tools",
  "lingxi-traits",
@@ -404,6 +405,7 @@ version = "0.1.0"
 dependencies = [
  "lingxi-api-client",
  "lingxi-protocol",
+ "lingxi-sidequery",
  "lingxi-traits",
  "regex",
  "serde",
@@ -457,7 +459,6 @@ name = "lingxi-sidequery"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "lingxi-agent",
  "lingxi-api-client",
  "lingxi-core",
  "lingxi-cost",

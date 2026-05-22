@@ -14,6 +14,7 @@ lingxi-mcp = { path = "../mcp" }
 lingxi-memory = { path = "../memory" }
 lingxi-hooks = { path = "../hooks" }
 lingxi-permission = { path = "../permission" }
+lingxi-sidequery = { path = "../sidequery" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/core",
+    "crates/traits",
+    "crates/api-client",
+    "crates/test-harness",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+authors = ["LingXi Core Contributors"]
+repository = "https://github.com/lingxi/lingxi-core"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+async-trait = "0.1"
+futures-core = "0.3"
+
+# dev-only
+proptest = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"

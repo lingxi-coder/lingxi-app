@@ -8,9 +8,11 @@
 pub mod content_replacement;
 pub mod context;
 pub mod progress;
+pub mod registry;
 pub mod tool_trait;
 
 pub use context::{ToolUseContext, ToolUseOptions};
+pub use registry::ToolRegistry;
 pub use tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, SearchReadInfo, Tool, ToolCallResult,
     ToolError, ToolStaticContext, ValidationError,

@@ -302,6 +302,7 @@ dependencies = [
  "lingxi-permission",
  "lingxi-protocol",
  "lingxi-traits",
+ "once_cell",
  "serde",
  "serde_json",
  "thiserror",

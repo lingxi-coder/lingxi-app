@@ -24,6 +24,7 @@ members = [
     "crates/filestate",
     "crates/msgqueue",
     "crates/session",
+    "crates/cron",
 ]
 
 [workspace.package]

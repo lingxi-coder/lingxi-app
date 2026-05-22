@@ -12,6 +12,7 @@ lingxi-core = { path = "../core" }
 lingxi-api-client = { path = "../api-client" }
 lingxi-agent = { path = "../agent" }
 lingxi-cost = { path = "../cost" }
+lingxi-tools = { path = "../tools" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

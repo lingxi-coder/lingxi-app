@@ -462,6 +462,7 @@ dependencies = [
  "lingxi-core",
  "lingxi-cost",
  "lingxi-protocol",
+ "lingxi-tools",
  "lingxi-traits",
  "serde",
  "serde_json",

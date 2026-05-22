@@ -474,6 +474,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "lingxi-skills"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "lingxi-agent",
+ "lingxi-mcp",
+ "lingxi-permission",
+ "lingxi-protocol",
+ "lingxi-sidequery",
+ "lingxi-tools",
+ "lingxi-traits",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lingxi-tasks"
 version = "0.1.0"
 dependencies = [

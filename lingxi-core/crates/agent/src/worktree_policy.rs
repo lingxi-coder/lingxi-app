@@ -26,13 +26,15 @@ pub async fn create_worktree_or_degrade(
         (WorktreeRequirement::Required, true) => {
             Ok(Some(manager.create_worktree(slug, None, &[]).await?))
         }
-        (WorktreeRequirement::Optional, true) => match manager.create_worktree(slug, None, &[]).await {
-            Ok(h) => Ok(Some(h)),
-            Err(e) => {
-                tracing::warn!("worktree degraded: {e}");
-                Ok(None)
+        (WorktreeRequirement::Optional, true) => {
+            match manager.create_worktree(slug, None, &[]).await {
+                Ok(h) => Ok(Some(h)),
+                Err(e) => {
+                    tracing::warn!("worktree degraded: {e}");
+                    Ok(None)
+                }
             }
-        },
+        }
         (WorktreeRequirement::Optional, false) | (WorktreeRequirement::None, _) => Ok(None),
     }
 }

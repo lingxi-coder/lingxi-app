@@ -54,7 +54,10 @@ impl AgentToolResolver {
         tools.extend(agent_mcp_tools.iter().cloned());
         if agent_def.permission_mode == AgentPermissionMode::Plan {
             tools.retain(|t| {
-                matches!(t.name(), "Read" | "Grep" | "Glob" | "WebSearch" | "WebFetch")
+                matches!(
+                    t.name(),
+                    "Read" | "Grep" | "Glob" | "WebSearch" | "WebFetch"
+                )
             });
         }
         tools

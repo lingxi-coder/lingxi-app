@@ -49,15 +49,24 @@ impl AgentTranscriptWriter {
     }
 
     /// Append one [`TranscriptEntry`] for `message`.
-    pub async fn record(&self, message: &ConversationMessage) -> Result<(), lingxi_traits::FsError> {
+    pub async fn record(
+        &self,
+        message: &ConversationMessage,
+    ) -> Result<(), lingxi_traits::FsError> {
         let entry = TranscriptEntry {
             agent_id: self.agent_id,
             timestamp: SystemTime::now(),
             message: message.clone(),
         };
-        let line = format!("{}\n", serde_json::to_string(&entry).expect("transcript serialization"));
+        let line = format!(
+            "{}\n",
+            serde_json::to_string(&entry).expect("transcript serialization")
+        );
         // FileSystem.append_file added in Plan 10. For now use write+read concat.
-        let path_str = self.transcript_path.to_str().expect("utf-8 transcript path");
+        let path_str = self
+            .transcript_path
+            .to_str()
+            .expect("utf-8 transcript path");
         let existing = self
             .fs
             .read_file(path_str, None, None)

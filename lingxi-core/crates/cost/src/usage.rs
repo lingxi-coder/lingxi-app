@@ -66,25 +66,38 @@ impl Usage {
     /// Sum of all token classes.
     #[must_use]
     pub fn total_tokens(&self) -> u64 {
-        self.tokens.input
-            + self.tokens.output
-            + self.tokens.cache_write
-            + self.tokens.cache_read
-            + self.tokens.reasoning_output
+        self.tokens
+            .input
+            .saturating_add(self.tokens.output)
+            .saturating_add(self.tokens.cache_write)
+            .saturating_add(self.tokens.cache_read)
+            .saturating_add(self.tokens.reasoning_output)
     }
 
     /// Accumulate `other` into `self`, merging token counts and server-tool
     /// counters component-wise.
     pub fn add(&mut self, other: &Usage) {
-        self.tokens.input += other.tokens.input;
-        self.tokens.output += other.tokens.output;
-        self.tokens.cache_write += other.tokens.cache_write;
-        self.tokens.cache_read += other.tokens.cache_read;
-        self.tokens.reasoning_output += other.tokens.reasoning_output;
+        self.tokens.input = self.tokens.input.saturating_add(other.tokens.input);
+        self.tokens.output = self.tokens.output.saturating_add(other.tokens.output);
+        self.tokens.cache_write = self
+            .tokens
+            .cache_write
+            .saturating_add(other.tokens.cache_write);
+        self.tokens.cache_read = self
+            .tokens
+            .cache_read
+            .saturating_add(other.tokens.cache_read);
+        self.tokens.reasoning_output = self
+            .tokens
+            .reasoning_output
+            .saturating_add(other.tokens.reasoning_output);
         if let Some(s) = other.server_tool_use {
-            self.server_tool_use
-                .get_or_insert(ServerToolUsage::default())
-                .web_search_requests += s.web_search_requests;
+            let dst = self
+                .server_tool_use
+                .get_or_insert(ServerToolUsage::default());
+            dst.web_search_requests = dst
+                .web_search_requests
+                .saturating_add(s.web_search_requests);
         }
     }
 }

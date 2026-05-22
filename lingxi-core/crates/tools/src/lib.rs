@@ -7,13 +7,15 @@
 
 pub mod content_replacement;
 pub mod context;
+pub mod permissions;
 pub mod progress;
 pub mod registry;
+pub mod result_storage;
+pub mod streaming_exec;
 pub mod tool_trait;
 
 pub use context::{ToolUseContext, ToolUseOptions};
+pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};
 pub use registry::ToolRegistry;
-pub use tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, SearchReadInfo, Tool, ToolCallResult,
-    ToolError, ToolStaticContext, ValidationError,
-};
+pub use result_storage::ToolResultStorage;
+pub use tool_trait::*;

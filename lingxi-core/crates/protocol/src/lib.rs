@@ -20,6 +20,8 @@ pub mod transport;
 // NOTE: re-exports for other modules are added by each module's task (4-7) once
 // the underlying types exist.
 pub use capabilities::{FileSystemCapabilities, PlatformCapabilities};
+pub use effect_result::{EffectError, EffectErrorKind, EffectResult};
+pub use effects::Effect;
 pub use ids::{
     AgentId, HookId, McpConnectionId, MessageId, PluginId, PrefetchId, RequestId, SessionId,
     SnapshotId, ToolUseId,

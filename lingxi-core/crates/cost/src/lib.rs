@@ -3,9 +3,6 @@
 //! budget enforcer.
 //!
 //! See design spec §7 (Cost) and the M1 plan for the canonical scope.
-//!
-//! Task 4 implements [`pricing`], [`usage`], and [`calculator`]. Task 5 fills
-//! in [`budget`] and [`tracker`] (currently stubs so this crate compiles).
 #![forbid(unsafe_code)]
 
 pub mod budget;

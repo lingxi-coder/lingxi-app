@@ -56,3 +56,11 @@ to parent → tool_result.
 - **No tokio::fs/std::fs in engine crates** — all I/O via `FileSystem` trait.
 - **Secrets never logged** — `Secret<T>` debug is always `<redacted>`.
 - **Sandbox is type-enforced** — `ProcessRunner::run` only accepts `SandboxedCommand`.
+
+## Platform crates (M2)
+
+- `platforms/posix-minimal/` — M1 demo host. Stubs for most traits; used by `examples/cli-demo`.
+- `platforms/posix/` — M2 production host for Linux + macOS. Real impls for Clock, FileSystem (inotify watch on Linux), HTTP, Process, Runtime, SecureStorage (plain-text), Worktree (git CLI). Sandbox/MCP/LSP/Swarm/Bridge are type-safe stubs awaiting M2 follow-up.
+- `platforms/windows/` — M2 production host for Windows. Mirrors posix with Windows-friendly tokio fallbacks.
+
+Pre-M3 (mobile platforms) is documented in spec §35.

@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.0] — M2 Production Desktop Platforms
+
+### Crates shipped
+- `lingxi-platform-posix` (Linux + macOS) — real impls for Clock, FileSystem (with inotify watch on Linux), HTTP (reqwest), Process (tokio::process), Runtime (tokio::spawn), SecureStorage (plain-text file fallback), Worktree (git CLI). Sandbox, MCP stdio, LSP, Swarm, Bridge ship as type-correct stubs.
+- `lingxi-platform-windows` — mirrors posix with Windows-friendly fallbacks. Same stubbed surfaces; uses fs2 cross-platform locking instead of LockFileEx directly; symlink uses `tokio::fs::symlink_file` under cfg(windows).
+
+### Platform support
+- Linux/macOS/Windows: production-ready for most engine workloads; demo cli-demo still wires posix-minimal.
+- Android/iOS: unchanged from M1 — cross-compile only, M3 work.
+
+### Known deferred (M2-followup TODOs in code)
+- Real OS sandbox isolation (Linux user namespaces, macOS sandbox-exec, Windows Job Objects).
+- Full JSON-RPC framing for MCP stdio and LSP (request id tracking, Content-Length headers, notification streaming).
+- FSEvents (macOS) and ReadDirectoryChangesW (Windows) for filesystem watch.
+- tmux/Windows Terminal CLI driver for SwarmBackend.
+- WebSocket BridgeTransport.
+- Native SecureStorage backends (libsecret, macOS Keychain, Windows Credential Vault) — current PlainTextFile fallback is functional but not encrypted.
+- `http.stream_sse` — non-trivial but needed for live API streaming; currently returns InvalidRequest.
+
 ## [0.1.0] — M1 Foundation Release
 
 ### Crates shipped

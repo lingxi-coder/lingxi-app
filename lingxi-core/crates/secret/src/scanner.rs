@@ -5,11 +5,10 @@
 
 use regex::Regex;
 
-/// Spec for one detection rule.
+/// Spec for one detection rule (used by the builtin ruleset).
 ///
-/// Construction is internal: the canonical rule list is returned by
-/// [`builtin_rule_specs`] and compiled into a [`SecretScanner`] via
-/// [`SecretScanner::builtin`].
+/// Construction is internal: the canonical rule list lives inside this crate
+/// and is compiled into a [`SecretScanner`] via [`SecretScanner::builtin`].
 pub struct SecretRuleSpec {
     /// Stable rule identifier (e.g. `aws-access-token`). Embedded in redacted
     /// output as `[REDACTED:<id>]` so reviewers can map back to a rule.
@@ -115,7 +114,9 @@ fn builtin_rule_specs() -> Vec<SecretRuleSpec> {
         SecretRuleSpec {
             id: "openai-api-key",
             label: "OpenAI API Key",
-            source: r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}".into(),
+            // Strict base62 body (no `-` / `_`) prevents false-positives on
+            // Anthropic keys (`sk-ant-…`) and URL slugs (`sk-mymodel-v2`).
+            source: r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9]{32,}\b".into(),
         },
         SecretRuleSpec {
             id: "github-pat",
@@ -179,5 +180,21 @@ mod tests {
     fn clean_content_passes() {
         let s = SecretScanner::builtin();
         assert!(s.scan("just normal text here").is_empty());
+    }
+
+    #[test]
+    fn all_builtin_rules_compile() {
+        // Run a benign scan to exercise the builtin ruleset construction.
+        let scanner = SecretScanner::builtin();
+        let _ = scanner.scan("");
+        // builtin_rule_specs() should produce 11 entries — guard against
+        // accidental additions/removals to keep the public surface stable.
+        assert_eq!(builtin_rule_specs().len(), 11, "expected 11 builtin rules");
+        // Verify every rule compiles to a Regex so a syntax break does not
+        // silently drop a rule via SecretScanner::builtin's filter_map.
+        for spec in builtin_rule_specs() {
+            regex::Regex::new(&spec.source)
+                .unwrap_or_else(|e| panic!("builtin rule {} failed to compile: {e}", spec.id));
+        }
     }
 }

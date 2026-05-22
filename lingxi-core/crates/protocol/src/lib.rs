@@ -14,6 +14,7 @@ pub mod effect_result;
 pub mod effects;
 pub mod ids;
 pub mod messages;
+pub mod secret;
 pub mod transport;
 
 // Re-exports for ergonomics.
@@ -27,4 +28,7 @@ pub use ids::{
     SnapshotId, ToolUseId,
 };
 pub use messages::{ContentBlock, ConversationMessage, MessageRole};
+pub use secret::{
+    RedactableContent, Secret, SecretKindDto, SecureStorageData, SecureStorageMetadata,
+};
 pub use transport::{HttpMethod, HttpRequest, HttpResponse, SseEvent};

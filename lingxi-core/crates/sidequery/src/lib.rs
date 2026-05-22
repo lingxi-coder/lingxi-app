@@ -19,5 +19,6 @@ pub mod purposes;
 pub mod side_query;
 
 pub use purposes::QuerySource;
-// Re-exports for side_query / cache_safe_params / forked_agent are added in
-// later tasks of this plan as each module gains its public types.
+pub use side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
+// Re-exports for cache_safe_params / forked_agent are added in later tasks
+// of this plan as each module gains its public types.

@@ -5,6 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Bumps proptest case counts in property suites to 10K. Off by default so
+# `cargo test --workspace` stays fast; CI flips this on for the nightly job.
+# M1.23 ships the feature flag plumbing only — existing property tests do not
+# yet read it; the migration lands alongside the M2 property suite expansion.
+"10k-iterations" = []
+
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
 lingxi-traits = { path = "../traits" }

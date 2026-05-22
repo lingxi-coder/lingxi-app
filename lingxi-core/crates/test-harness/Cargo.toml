@@ -14,6 +14,7 @@ lingxi-cost = { path = "../cost" }
 lingxi-hooks = { path = "../hooks" }
 lingxi-mcp = { path = "../mcp" }
 lingxi-compaction = { path = "../compaction" }
+lingxi-coordinator = { path = "../coordinator" }
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true

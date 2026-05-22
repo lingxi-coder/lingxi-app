@@ -556,6 +556,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lingxi-sandbox"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "lingxi-permission",
+ "lingxi-protocol",
+ "lingxi-traits",
+ "serde",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "lingxi-secret"
 version = "0.1.0"
 dependencies = [

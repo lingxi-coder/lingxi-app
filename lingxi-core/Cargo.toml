@@ -25,6 +25,7 @@ members = [
     "crates/msgqueue",
     "crates/session",
     "crates/cron",
+    "crates/sandbox",
 ]
 
 [workspace.package]

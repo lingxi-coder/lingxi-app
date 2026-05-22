@@ -944,6 +944,7 @@ dependencies = [
  "lingxi-cost",
  "lingxi-hooks",
  "lingxi-mcp",
+ "lingxi-platform-posix-minimal",
  "lingxi-protocol",
  "lingxi-traits",
  "proptest",

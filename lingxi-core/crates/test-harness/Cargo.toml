@@ -25,6 +25,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+lingxi-platform-posix-minimal = { path = "../../platforms/posix-minimal" }
 
 [lints]
 workspace = true

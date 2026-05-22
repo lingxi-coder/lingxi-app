@@ -1,0 +1,25 @@
+[package]
+name = "lingxi-agent"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lingxi-protocol = { path = "../protocol" }
+lingxi-traits = { path = "../traits" }
+lingxi-core = { path = "../core" }
+lingxi-tools = { path = "../tools" }
+lingxi-mcp = { path = "../mcp" }
+lingxi-memory = { path = "../memory" }
+lingxi-hooks = { path = "../hooks" }
+lingxi-permission = { path = "../permission" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio = { version = "1", features = ["sync"] }
+tracing.workspace = true
+
+[lints]
+workspace = true

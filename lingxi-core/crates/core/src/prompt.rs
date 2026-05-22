@@ -9,11 +9,7 @@ use serde_json::{json, Value};
 /// Assemble the JSON request body for one turn given the current session and a new user message.
 #[must_use]
 pub fn assemble_request(session: &SessionState, user_message: &str) -> Value {
-    let mut messages: Vec<Value> = session
-        .history
-        .iter()
-        .map(message_to_api_shape)
-        .collect();
+    let mut messages: Vec<Value> = session.history.iter().map(message_to_api_shape).collect();
     messages.push(json!({"role": "user", "content": user_message}));
 
     json!({
@@ -47,11 +43,18 @@ fn content_blocks_to_api(blocks: &[lingxi_protocol::ContentBlock]) -> Value {
             ContentBlock::ToolUse { id, name, input } => {
                 json!({"type": "tool_use", "id": id, "name": name, "input": input})
             }
-            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 json!({"type": "tool_result", "tool_use_id": tool_use_id,
                        "content": content, "is_error": is_error})
             }
-            ContentBlock::Thinking { thinking, signature } => {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
                 json!({"type": "thinking", "thinking": thinking, "signature": signature})
             }
         })
@@ -80,7 +83,10 @@ mod tests {
     fn assemble_appends_prior_history() {
         use lingxi_protocol::{ConversationMessage, MessageId};
         let mut session = SessionState::empty(SessionId::nil(), "claude-opus-4-6".into());
-        session.history.push(ConversationMessage::user(MessageId::nil(), "earlier".into()));
+        session.history.push(ConversationMessage::user(
+            MessageId::nil(),
+            "earlier".into(),
+        ));
         let req = assemble_request(&session, "now");
         let messages = req["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 2);

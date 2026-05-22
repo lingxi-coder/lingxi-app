@@ -88,7 +88,10 @@ impl ConversationMessage {
     /// Construct a simple user message containing a single text block.
     #[must_use]
     pub fn user(id: MessageId, text: String) -> Self {
-        Self::User { id, content: vec![ContentBlock::Text { text }] }
+        Self::User {
+            id,
+            content: vec![ContentBlock::Text { text }],
+        }
     }
 
     /// Return the role of this message.
@@ -174,7 +177,9 @@ mod tests {
         let m = ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![
-                ContentBlock::Text { text: "I'll read the file.".into() },
+                ContentBlock::Text {
+                    text: "I'll read the file.".into(),
+                },
                 ContentBlock::ToolUse {
                     id: ToolUseId::new(),
                     name: "Read".into(),

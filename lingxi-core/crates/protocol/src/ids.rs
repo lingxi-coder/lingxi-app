@@ -11,7 +11,9 @@ macro_rules! id_newtype {
     ($name:ident, $prefix:literal) => {
         #[doc = concat!("Identifier for a ", stringify!($name), ". UUID v4 internally; ")]
         #[doc = concat!("serialized with the `", $prefix, ":` prefix for log-grep-ability.")]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize,
+        )]
         #[serde(transparent)]
         pub struct $name(Uuid);
 

@@ -1,4 +1,4 @@
-//! Shared protocol types for LingXi Core engine.
+//! Shared protocol types for `LingXi` Core engine.
 //!
 //! This crate owns the boundary types (`Effect`, `EffectResult`, `EffectError`,
 //! IDs, message DTOs, transport DTOs, capability flags) consumed by both

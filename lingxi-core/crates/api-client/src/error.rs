@@ -49,7 +49,10 @@ mod tests {
 
     #[test]
     fn prompt_too_long_carries_token_gap() {
-        let e = ApiError::PromptTooLong { token_gap: 1500, raw: "...".into() };
+        let e = ApiError::PromptTooLong {
+            token_gap: 1500,
+            raw: "...".into(),
+        };
         assert!(format!("{e}").contains("1500"));
     }
 }

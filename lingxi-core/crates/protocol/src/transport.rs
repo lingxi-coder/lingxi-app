@@ -83,7 +83,11 @@ mod tests {
 
     #[test]
     fn sse_event_default_type_omitted() {
-        let e = SseEvent { event_type: None, data: "{}".into(), id: None };
+        let e = SseEvent {
+            event_type: None,
+            data: "{}".into(),
+            id: None,
+        };
         let s = serde_json::to_string(&e).unwrap();
         assert!(!s.contains("id"));
     }

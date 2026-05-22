@@ -90,14 +90,19 @@ mod tests {
     #[test]
     fn idle_state_holds_session() {
         let session = SessionState::empty(SessionId::nil(), "claude-opus-4-6".into());
-        let state = ConversationState::Idle { session: session.clone() };
+        let state = ConversationState::Idle {
+            session: session.clone(),
+        };
         assert_eq!(state.session().session_id, session.session_id);
     }
 
     #[test]
     fn terminated_is_terminal() {
         let session = SessionState::empty(SessionId::nil(), "x".into());
-        let state = ConversationState::Terminated { session, reason: "ok".into() };
+        let state = ConversationState::Terminated {
+            session,
+            reason: "ok".into(),
+        };
         assert!(state.is_terminal());
     }
 }

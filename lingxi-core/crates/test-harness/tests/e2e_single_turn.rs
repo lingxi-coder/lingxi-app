@@ -3,9 +3,7 @@
 
 use lingxi_api_client::AnthropicProvider;
 use lingxi_core::{reduce, ConversationState, Event, SessionState, Usage};
-use lingxi_protocol::{
-    ConversationMessage, Effect, HttpResponse, MessageId, RequestId, SessionId,
-};
+use lingxi_protocol::{ConversationMessage, Effect, HttpResponse, MessageId, RequestId, SessionId};
 use lingxi_test_harness::mocks::{MockHttpTransport, ScriptedResponse};
 use lingxi_traits::HttpTransport;
 use std::sync::Arc;
@@ -37,7 +35,10 @@ async fn single_turn_conversation_against_mock_http() {
     }
     let mut saw_send_request = false;
     for e in &effects {
-        if let Effect::SendApiRequest { request_id: rid, .. } = e {
+        if let Effect::SendApiRequest {
+            request_id: rid, ..
+        } = e
+        {
             assert_eq!(*rid, request_id);
             saw_send_request = true;
         }
@@ -109,7 +110,10 @@ async fn anthropic_provider_against_mock_http_does_one_roundtrip() {
     let provider = AnthropicProvider::new("sk-ant-test", None);
     let body = serde_json::json!({"model":"claude-opus-4-6","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]});
     let req = provider.build_request(&body);
-    let resp = transport.request(req).await.expect("request should succeed");
+    let resp = transport
+        .request(req)
+        .await
+        .expect("request should succeed");
     assert_eq!(resp.status, 200);
     transport.assert_drained();
 }

@@ -80,12 +80,9 @@ impl AnthropicProvider {
         // Re-parse the body we just serialised so we can flip `stream: true`.
         // `unwrap` is safe: it was produced by `serde_json::Value::to_string`
         // a few lines above, which always emits valid JSON.
-        let mut body_val: Value = serde_json::from_str(
-            req.body
-                .as_ref()
-                .expect("build_request always sets a body"),
-        )
-        .expect("body was just serialised from a Value");
+        let mut body_val: Value =
+            serde_json::from_str(req.body.as_ref().expect("build_request always sets a body"))
+                .expect("body was just serialised from a Value");
         body_val["stream"] = Value::Bool(true);
         req.body = Some(body_val.to_string());
         if let Some((_, v)) = req.headers.iter_mut().find(|(k, _)| k == "accept") {

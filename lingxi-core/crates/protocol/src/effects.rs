@@ -91,7 +91,9 @@ mod tests {
 
     #[test]
     fn render_stream_delta_carries_text() {
-        let e = Effect::RenderStreamDelta { text: "hello".into() };
+        let e = Effect::RenderStreamDelta {
+            text: "hello".into(),
+        };
         let s = serde_json::to_string(&e).unwrap();
         assert!(s.contains("hello"));
     }

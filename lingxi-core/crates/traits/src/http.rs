@@ -65,7 +65,10 @@ mod tests {
 
     #[test]
     fn http_error_display_includes_status() {
-        let e = HttpError::Status { status: 429, body: "rate limited".into() };
+        let e = HttpError::Status {
+            status: 429,
+            body: "rate limited".into(),
+        };
         assert!(format!("{e}").contains("429"));
     }
 }

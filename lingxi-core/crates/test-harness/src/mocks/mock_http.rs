@@ -103,11 +103,9 @@ impl HttpTransport for MockHttpTransport {
             Some(ScriptedResponse::Stream(events)) => Ok(Box::pin(ScriptedSseStream {
                 remaining: events.into(),
             })),
-            Some(ScriptedResponse::Sync(_)) | Some(ScriptedResponse::SyncErr(_)) => {
-                Err(HttpError::InvalidResponse(
-                    "scripted non-stream response on stream call".into(),
-                ))
-            }
+            Some(ScriptedResponse::Sync(_)) | Some(ScriptedResponse::SyncErr(_)) => Err(
+                HttpError::InvalidResponse("scripted non-stream response on stream call".into()),
+            ),
             None => Err(HttpError::InvalidResponse(
                 "no scripted response available".into(),
             )),

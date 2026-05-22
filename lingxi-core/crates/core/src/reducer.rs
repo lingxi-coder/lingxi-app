@@ -11,6 +11,7 @@ use lingxi_protocol::{ConversationMessage, Effect};
 
 /// Reduce one (state, event) pair to (new state, effects to emit).
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn reduce(state: ConversationState, event: Event) -> (ConversationState, Vec<Effect>) {
     // Terminated is absorbing.
     if let ConversationState::Terminated { .. } = state {
@@ -21,20 +22,37 @@ pub fn reduce(state: ConversationState, event: Event) -> (ConversationState, Vec
         // Idle + UserMessage → AwaitingApiResponse (append history, emit send).
         (
             ConversationState::Idle { mut session },
-            Event::UserMessage { message_id, request_id, content },
+            Event::UserMessage {
+                message_id,
+                request_id,
+                content,
+            },
         ) => {
             let request_body = assemble_request(&session, &content);
-            session.history.push(ConversationMessage::user(message_id, content));
+            session
+                .history
+                .push(ConversationMessage::user(message_id, content));
             (
-                ConversationState::AwaitingApiResponse { session, request_id },
-                vec![Effect::SendApiRequest { request_id, request_body }],
+                ConversationState::AwaitingApiResponse {
+                    session,
+                    request_id,
+                },
+                vec![Effect::SendApiRequest {
+                    request_id,
+                    request_body,
+                }],
             )
         }
 
         // AwaitingApiResponse + ApiStreamStart → StreamingResponse.
         (
-            ConversationState::AwaitingApiResponse { session, request_id: rid_state },
-            Event::ApiStreamStart { request_id: rid_evt },
+            ConversationState::AwaitingApiResponse {
+                session,
+                request_id: rid_state,
+            },
+            Event::ApiStreamStart {
+                request_id: rid_evt,
+            },
         ) if rid_state == rid_evt => (
             ConversationState::StreamingResponse {
                 session,
@@ -51,7 +69,10 @@ pub fn reduce(state: ConversationState, event: Event) -> (ConversationState, Vec
                 request_id: rid_state,
                 mut partial_text,
             },
-            Event::ApiStreamDelta { request_id: rid_evt, text },
+            Event::ApiStreamDelta {
+                request_id: rid_evt,
+                text,
+            },
         ) if rid_state == rid_evt => {
             partial_text.push_str(&text);
             (
@@ -66,8 +87,16 @@ pub fn reduce(state: ConversationState, event: Event) -> (ConversationState, Vec
 
         // StreamingResponse + ApiStreamEnd → Idle (append final assistant message + usage).
         (
-            ConversationState::StreamingResponse { mut session, request_id: rid_state, .. },
-            Event::ApiStreamEnd { request_id: rid_evt, final_message, usage },
+            ConversationState::StreamingResponse {
+                mut session,
+                request_id: rid_state,
+                ..
+            },
+            Event::ApiStreamEnd {
+                request_id: rid_evt,
+                final_message,
+                usage,
+            },
         ) if rid_state == rid_evt => {
             session.usage.add(&usage);
             session.history.push(final_message);
@@ -85,15 +114,22 @@ pub fn reduce(state: ConversationState, event: Event) -> (ConversationState, Vec
             Event::ApiError { error, .. },
         ) => (
             ConversationState::Idle { session },
-            vec![Effect::RenderError { error: error.message }],
+            vec![Effect::RenderError {
+                error: error.message,
+            }],
         ),
 
         // Anywhere + UserExit → Terminated.
         (state, Event::UserExit) => {
             let session = state.session().clone();
             (
-                ConversationState::Terminated { session, reason: "user_exit".into() },
-                vec![Effect::Terminate { reason: "user_exit".into() }],
+                ConversationState::Terminated {
+                    session,
+                    reason: "user_exit".into(),
+                },
+                vec![Effect::Terminate {
+                    reason: "user_exit".into(),
+                }],
             )
         }
 
@@ -132,7 +168,9 @@ mod tests {
     #[test]
     fn idle_plus_user_message_yields_awaiting_api_with_send_effect() {
         let session = SessionState::empty(SessionId::nil(), "claude-opus-4-6".into());
-        let state = ConversationState::Idle { session: session.clone() };
+        let state = ConversationState::Idle {
+            session: session.clone(),
+        };
         let event = Event::UserMessage {
             message_id: MessageId::nil(),
             request_id: RequestId::nil(),
@@ -141,7 +179,10 @@ mod tests {
         let (next, effects) = reduce(state, event);
 
         match next {
-            ConversationState::AwaitingApiResponse { session, request_id } => {
+            ConversationState::AwaitingApiResponse {
+                session,
+                request_id,
+            } => {
                 assert_eq!(session.history.len(), 1, "user message appended to history");
                 assert_eq!(request_id, RequestId::nil());
             }
@@ -155,7 +196,10 @@ mod tests {
     #[test]
     fn terminated_is_absorbing() {
         let session = SessionState::empty(SessionId::nil(), "x".into());
-        let state = ConversationState::Terminated { session, reason: "ok".into() };
+        let state = ConversationState::Terminated {
+            session,
+            reason: "ok".into(),
+        };
         let (next, effects) = reduce(state, Event::UserInterrupt);
         assert!(next.is_terminal());
         assert!(effects.is_empty());
@@ -165,8 +209,13 @@ mod tests {
     fn unexpected_event_emits_record_effect() {
         let session = SessionState::empty(SessionId::nil(), "x".into());
         let state = ConversationState::Idle { session };
-        let event = Event::ApiStreamDelta { request_id: RequestId::nil(), text: "x".into() };
+        let event = Event::ApiStreamDelta {
+            request_id: RequestId::nil(),
+            text: "x".into(),
+        };
         let (_, effects) = reduce(state, event);
-        assert!(effects.iter().any(|e| matches!(e, Effect::RecordUnexpectedEvent { .. })));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::RecordUnexpectedEvent { .. })));
     }
 }

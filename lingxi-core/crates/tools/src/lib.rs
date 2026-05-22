@@ -7,6 +7,7 @@
 
 pub mod content_replacement;
 pub mod context;
+pub mod dispatcher;
 pub mod permissions;
 pub mod progress;
 pub mod registry;
@@ -15,6 +16,7 @@ pub mod streaming_exec;
 pub mod tool_trait;
 
 pub use context::{ToolUseContext, ToolUseOptions};
+pub use dispatcher::{ToolCall, ToolDispatchEvent, ToolDispatcher};
 pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};
 pub use registry::ToolRegistry;
 pub use result_storage::ToolResultStorage;

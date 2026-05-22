@@ -19,6 +19,7 @@ members = [
     "crates/coordinator",
     "crates/sidequery",
     "crates/skills",
+    "crates/commands",
 ]
 
 [workspace.package]

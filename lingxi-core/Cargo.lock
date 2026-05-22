@@ -311,6 +311,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "lingxi-commands"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "lingxi-core",
+ "lingxi-protocol",
+ "lingxi-tools",
+ "lingxi-traits",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "lingxi-compaction"
 version = "0.1.0"
 dependencies = [

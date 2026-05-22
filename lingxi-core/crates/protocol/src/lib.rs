@@ -24,3 +24,4 @@ pub use ids::{
     SnapshotId, ToolUseId,
 };
 pub use messages::{ContentBlock, ConversationMessage, MessageRole};
+pub use transport::{HttpMethod, HttpRequest, HttpResponse, SseEvent};

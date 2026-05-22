@@ -60,7 +60,7 @@ referenced below are post-fix; original-draft line numbers no longer apply.
 
 ### 1.1 What
 
-LingXi Core is a **platform-agnostic Rust library** that implements the complete conversation engine for an AI coding assistant (claude-code equivalent). It includes the full engine stack:
+LingXi Core is a **platform-agnostic Rust library** that implements the complete conversation engine for an AI coding assistant (claude-code equivalent). Designed for 5 target platforms (Linux / macOS / Windows / Android / iOS) via trait-injected I/O; **M1 ships runnable desktop platforms** (Linux/macOS/Windows demo host) and verifies mobile cross-compile only, with full Android/iOS platform crates deferred to M3 — see §1.4.1. It includes the full engine stack:
 
 - **Conversation State Machine** (event-sourced, pure-function reducer)
 - **API Client** (Anthropic / OpenAI-compatible, streaming SSE)
@@ -112,6 +112,20 @@ This is a **clean-room new codebase**. `claw-code` serves as a reference impleme
 
 **Full fidelity core, explicit platform split.** Every subsystem is designed at the same depth as claude-code. M1 is not a "minimal working version" of the engine; it is behaviorally complete under mocks and a demo-only `posix-minimal` host. Production platform implementations and UI layers remain post-M1.
 
+#### 1.4.1 Multi-Platform Scope
+
+| Platform | M1 | M2 | M3 |
+|---|---|---|---|
+| **Linux** | trait surface + mock platform demo | production `platforms/posix` | ✅ stable |
+| **macOS** | trait surface + mock platform demo | production `platforms/posix` | ✅ stable |
+| **Windows** | trait surface + mock platform demo | production `platforms/windows` | ✅ stable |
+| **Android** | **trait surface only — verified compiles, no runtime** | trait + UniFFI bindings audited | production `platforms/android` |
+| **iOS** | **trait surface only — verified compiles, no runtime** | trait + UniFFI bindings audited | production `platforms/ios` |
+
+M1 commits to the 13-trait abstraction surface being mobile-ready (mobile targets compile under cross-compile CI). M1 does **not** ship runnable Android / iOS platform crates. The mobile-specific gaps catalogued during the audit (mobile background scheduling for §28 Cron, deep-link callback for §30 OAuth, mobile session storage paths for §22, mobile-restricted SlashCommand subset for §19, etc.) are addressed in M3 when `platforms/android` and `platforms/ios` are written.
+
+This is a scope cut, not a design cut: the trait system, capability matrix, and `is_available()` discipline established in M1 will hold mobile in M3 without requiring engine-crate changes. If mobile in M3 forces an engine-crate change, that is a M1 design defect.
+
 ### 1.5 Reference
 
 - Original TypeScript claude-code: ~519K TS LOC
@@ -145,6 +159,7 @@ This is a **clean-room new codebase**. `claw-code` serves as a reference impleme
 | D19 | Secret containment | `Secret<T>` newtype + SecureStorage trait; engine touches secrets only via these. All 5 low-trust redaction boundaries enforced before egress | Plain `String` secrets, optional redaction, scattered keychain access |
 | D20 | Cost as ground truth | Cost computed deterministically from normalized token usage × provider/model pricing catalog; persisted per-session; budget enforced pre-API | Trust server-reported cost, no client-side budget enforcement |
 | D21 | Plugin materialization model | Plugins materialize Claude Code components into existing registries (Commands/Agents/Skills/Hooks/OutputStyles/MCP/LSP/config channels) on load and unload symmetrically | Invent an arbitrary tool ABI, or only declarative manifests with no materialized components |
+| D22 | Mobile scope in M1 | **M1 ships desktop runnable (Linux/macOS/Windows demo host); Android/iOS are trait-surface + cross-compile only, runnable platform crates land in M3.** Trait abstractions and capability flags stay broad enough that M3 mobile is a platform-crate addition, not an engine-crate change. | Ship M1 with full 5-platform runnable (would inflate timeline ~30% for mobile-specific gaps in Cron/OAuth/SessionStorage/SlashCommand without delivering desktop value first); or drop mobile from design entirely (loses the FFI/UniFFI investment and forces a rewrite later) |
 
 ---
 
@@ -6726,8 +6741,8 @@ into UniFFI by inspecting `lingxi_core.udl`.
 | D29 | `lingxi-anthropic-oauth` | ClaudeAiOAuthClient + AnthropicAuthResolver + 9 AuthSource variants + ClaudeAiLimitsTracker | login_interactive completes via mock IdP; resolver picks correct source under priority rules; limits parsed from response headers |
 | D30 | `lingxi-test-harness` | mocks + contract suites + property tests + parity fixtures | Contract coverage ≤ 0.05 unexercised trait-method ratio; property tests at 10K iterations |
 | D31 | `lingxi-uniffi-bridge` | FFI-safe facade, DTOs, and opaque engine handles | Generated Kotlin + Swift compile; no raw `dyn Trait`, stream, closure, or `Arc<dyn Tool>` exposed |
-| D32 | Cross-compile CI | 5 targets green | `protocol`, `core`, `traits`, `api-client`, and `uniffi-bridge` compile on supported target matrix |
-| D33 | `platforms/posix-minimal` + `examples/cli-demo` | M1 demo host with minimal FS/process/http/MCP mocks + plain-text SecureStorage + stub IDE bridge | Multi-turn conversation + mock tool use + mock subagent + compact + permission prompt + cost display + slash command + skill discovery + file state verify works; production POSIX remains M2 |
+| D32 | Cross-compile CI | 5 targets green at **compile-only** level (3 desktop + 2 mobile) | `protocol`, `core`, `traits`, `api-client`, and `uniffi-bridge` compile on `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, `aarch64-linux-android`, `aarch64-apple-ios`. Desktop targets also run tests; mobile targets are compile-gate only — runnable mobile platform crates are M3 (see §1.4.1, D22). |
+| D33 | `platforms/posix-minimal` + `examples/cli-demo` | M1 desktop demo host with minimal FS/process/http/MCP mocks + plain-text SecureStorage + stub IDE bridge | Multi-turn conversation + mock tool use + mock subagent + compact + permission prompt + cost display + slash command + skill discovery + file state verify works on Linux/macOS/Windows; production POSIX remains M2; runnable mobile remains M3. |
 
 ---
 
@@ -6953,29 +6968,43 @@ not the 14-20 quoted in earlier drafts.**
 ## 35. Post-M1 Roadmap (Preview)
 
 ```
-M2: Production Platform Crates (Weeks 37-50, 14 weeks)
-├── lingxi-platform-posix (Linux + macOS) — all 12 traits implemented, replacing posix-minimal
-├── lingxi-platform-windows — all 12 traits implemented
-├── Bash execution + Linux namespaces / macOS sandbox-exec
+M2: Production Desktop Platform Crates (~12-16 weeks)
+├── lingxi-platform-posix (Linux + macOS) — all 13 traits implemented, replacing posix-minimal
+├── lingxi-platform-windows — all 13 traits implemented
+├── Bash execution + Linux namespaces / macOS sandbox-exec / Windows Job Object
 ├── MCP stdio transport + LSP process orchestration
 ├── Git worktree manager
-└── tmux SwarmBackend implementation
+└── tmux SwarmBackend implementation (Windows: wezterm/Windows Terminal fallback)
 
-M3: Mobile (Weeks 51-64, 14 weeks)
+M3: Mobile Platform Crates + Mobile Gap Closures (~14-18 weeks)
 ├── lingxi-platform-android (JNI via UniFFI Kotlin bindings)
 ├── lingxi-platform-ios (Swift via UniFFI bindings)
-├── WebSocket McpTransport for mobile
-├── Mobile-appropriate FileSystem (sandboxed)
-├── Mobile capability constraints (ProcessRunner unavailable, Bash hidden)
+├── G1: Mobile background scheduler — Android WorkManager / iOS BGTaskScheduler
+│   replaces §28 tick loop; CronScheduler abstracts to BackgroundScheduler trait
+├── G2: OAuth deep-link callback — Android intent:// / iOS Universal Link;
+│   §30 login_interactive gains MobileCallbackStrategy variant
+├── G3: IDE Bridge gated off (PlatformCapabilities.ide_bridge = false on mobile)
+├── G4: SlashCommand capability-filter (hide /ide /vim /voice /terminalSetup etc.)
+├── G5: Hook Command-executor registration fails on mobile (no ProcessRunner)
+├── G6: Task type capability-filter (only RemoteAgent / InProcessTeammate /
+│   MonitorMcp / Dream available on mobile)
+├── G7: Session storage flock alternative (app-internal lock / file lease)
+├── G8: App lifecycle events (AppEnteringBackground / AppRestored) wired into
+│   §22 SessionStorage + §11 TaskRegistry + §28 BackgroundScheduler
+├── G9-G12: LSP/Sandbox/Swarm/MessageQueue mobile-specific behavior
+├── WebSocket McpTransport for mobile (already designed in §7.1)
+├── Mobile-appropriate FileSystem (sandboxed, OS-specified paths)
 └── React Native / Flutter bridge (optional)
 
-M4: UI Layer (independent projects, parallel)
+M4: UI Layer (independent projects, can be parallel after M2/M3)
 ├── Terminal UI (crossterm/ratatui) for desktop
 ├── Native iOS UI (SwiftUI)
 ├── Native Android UI (Compose)
 ├── Web UI (WebAssembly + React)
 └── Full feature parity with claude-code
 ```
+
+**Mobile gap closure principle**: All G1-G12 fixes are confined to the M3 platform crates plus capability-flag wiring in the existing trait surface. **Zero engine-crate changes** are expected. If a gap requires changing `lingxi-core`, `lingxi-traits`, or any subsystem crate during M3, that is a M1 design defect that should be re-opened immediately rather than worked around in the platform crate.
 
 ---
 
@@ -7001,6 +7030,16 @@ M4: UI Layer (independent projects, parallel)
 | LSP tool | ✅ | ✅ | ✅ | ❌ | ❌ |
 | OS notifications | notify-rust | NSUserNotification | toast | NotificationManager | UNUserNotification |
 | SecureStorage | libsecret (or EncryptedFile) | Keychain (Security.framework) | Credential Vault | Keystore | Keychain |
+| Background scheduler (§28) | tick loop | tick loop | tick loop | WorkManager (M3) | BGTaskScheduler (M3) |
+| OAuth callback (§30) | localhost loopback | localhost loopback | localhost loopback | intent:// deep link (M3) | Universal Link (M3) |
+| IDE Bridge (§29) | ✅ | ✅ | ✅ | ❌ disabled | ❌ disabled |
+| SlashCommand `/ide` `/vim` `/voice` `/terminalSetup` (§19) | ✅ | ✅ | ✅ | hidden (capability filter, M3) | hidden (capability filter, M3) |
+| Hook executor `Command` (§9) | ✅ | ✅ | ✅ | refused at register (M3) | refused at register (M3) |
+| Task type `local_bash`/`local_agent`/`local_workflow` (§11) | ✅ | ✅ | ✅ | refused at register (M3) | refused at register (M3) |
+| Session storage lock strategy (§22) | flock | flock | LockFileEx | app-internal lock (M3) | file lease (M3) |
+| Session storage path root | `~/.claude/sessions` | `~/.claude/sessions` | `%APPDATA%\.claude\sessions` | `getFilesDir()` (M3) | `NSDocumentDirectory` (M3) |
+| App-lifecycle events (§22+§11+§28) | n/a (always running) | n/a | n/a | `AppEnteringBackground`/`AppRestored` (M3) | same (M3) |
+| Runtime: M1 ships runnable? | ✅ M1 demo host | ✅ M1 demo host | ✅ M1 demo host | ❌ compile-only in M1; runnable M3 | ❌ compile-only in M1; runnable M3 |
 
 ---
 

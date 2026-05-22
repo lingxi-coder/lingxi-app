@@ -200,6 +200,7 @@ dependencies = [
  "futures-core",
  "lingxi-api-client",
  "lingxi-core",
+ "lingxi-cost",
  "lingxi-protocol",
  "lingxi-traits",
  "proptest",

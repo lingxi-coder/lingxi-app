@@ -10,6 +10,7 @@ lingxi-protocol = { path = "../protocol" }
 lingxi-traits = { path = "../traits" }
 lingxi-core = { path = "../core" }
 lingxi-api-client = { path = "../api-client" }
+lingxi-cost = { path = "../cost" }
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true

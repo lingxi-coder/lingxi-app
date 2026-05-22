@@ -5,3 +5,4 @@
 
 pub mod contracts;
 pub mod mocks;
+pub mod parity;

@@ -387,11 +387,13 @@ name = "lingxi-test-harness"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "futures-core",
  "lingxi-api-client",
  "lingxi-core",
  "lingxi-cost",
  "lingxi-hooks",
+ "lingxi-mcp",
  "lingxi-protocol",
  "lingxi-traits",
  "proptest",

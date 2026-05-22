@@ -12,10 +12,12 @@ lingxi-core = { path = "../core" }
 lingxi-api-client = { path = "../api-client" }
 lingxi-cost = { path = "../cost" }
 lingxi-hooks = { path = "../hooks" }
+lingxi-mcp = { path = "../mcp" }
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true
 futures-core.workspace = true
+futures = "0.3"
 tokio = { workspace = true }
 tracing.workspace = true
 

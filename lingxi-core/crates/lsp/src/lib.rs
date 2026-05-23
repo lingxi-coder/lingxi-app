@@ -19,6 +19,7 @@ pub mod open_file_tracker;
 pub mod passive_feedback;
 pub mod registry;
 pub mod tool;
+pub mod tool_operations;
 pub mod transport;
 
 pub use action::{LspAction, LspResponse};
@@ -29,3 +30,6 @@ pub use open_file_tracker::OpenFileTracker;
 pub use passive_feedback::PassiveDiagnosticSubscriber;
 pub use registry::LspRegistry;
 pub use tool::LspTool;
+pub use tool_operations::{
+    LspOperation, LspOperationError, LspOperationResult, MAX_LSP_FILE_SIZE_BYTES,
+};

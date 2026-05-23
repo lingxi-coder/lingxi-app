@@ -30,6 +30,10 @@ inotify = "0.10"
 
 [dev-dependencies]
 tempfile = "3.13"
+# Axum + tokio TcpListener for the MCP WebSocket roundtrip integration test
+# (`tests/mcp_ws_test.rs`). `ws` enables the WebSocketUpgrade extractor.
+axum = { version = "0.7", features = ["ws"] }
+url = "2"
 
 [lints]
 workspace = true

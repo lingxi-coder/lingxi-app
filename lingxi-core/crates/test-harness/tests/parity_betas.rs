@@ -1,0 +1,42 @@
+//! Parity driver: per-provider × per-endpoint expected `anthropic-beta` header.
+
+use lingxi_api_client::betas::{Endpoint, Provider, assemble_beta_header};
+use lingxi_test_harness::parity::load_fixture;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Fixture {
+    matrix: Vec<Row>,
+}
+
+#[derive(Deserialize)]
+struct Row {
+    provider: String,
+    endpoint: String,
+    expected: String,
+}
+
+#[test]
+fn beta_header_matrix_matches_claude_code() {
+    let fx: Fixture = load_fixture("betas");
+    for row in fx.matrix {
+        let p = match row.provider.as_str() {
+            "anthropic" => Provider::Anthropic,
+            "vertex" => Provider::Vertex,
+            "bedrock" => Provider::Bedrock,
+            other => panic!("unknown provider in fixture: {other:?}"),
+        };
+        let e = match row.endpoint.as_str() {
+            "messages_create" => Endpoint::MessagesCreate,
+            "messages_create_stream" => Endpoint::MessagesCreateStream,
+            "count_tokens" => Endpoint::CountTokens,
+            other => panic!("unknown endpoint in fixture: {other:?}"),
+        };
+        let got = assemble_beta_header(p, e);
+        assert_eq!(
+            got, row.expected,
+            "beta header drift for {:?}/{:?}\n  got:      {got}\n  expected: {}",
+            row.provider, row.endpoint, row.expected,
+        );
+    }
+}

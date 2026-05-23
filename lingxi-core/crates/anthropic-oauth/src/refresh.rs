@@ -468,3 +468,89 @@ pub fn proactive_lead(remaining: Duration) -> Duration {
         PROACTIVE_LEAD_CAP
     }
 }
+
+impl RefreshDriver {
+    /// Spawn the proactive refresh task. Returns once the spawn handle is
+    /// stored in `state.proactive_handle`. The task itself loops until canceled
+    /// by `AuthState::shutdown`.
+    ///
+    /// Wake interval is `min(remaining_lifetime / 2, PROACTIVE_LEAD_CAP)`
+    /// before expiry (spec §7 line 721).
+    pub async fn spawn_proactive(
+        state: Arc<AuthState>,
+        spawner: Arc<dyn lingxi_traits::RuntimeSpawner>,
+    ) -> Result<(), OAuthError> {
+        let task_state = state.clone();
+        let task_spawner = spawner.clone();
+        let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> =
+            Box::pin(async move {
+                proactive_loop(task_state, task_spawner).await;
+            });
+        let handle = spawner
+            .spawn("lingxi-oauth-proactive-refresh", fut)
+            .await
+            .map_err(|e| OAuthError::TokenExchange(format!("spawn failed: {e}")))?;
+        *state.proactive_handle.write().await = Some(handle);
+        Ok(())
+    }
+}
+
+/// The proactive task loop. Wakes at `min(remaining/2, 5min)` before expiry,
+/// calls `RefreshDriver::refresh`, and reschedules against the new expiry.
+async fn proactive_loop(
+    state: Arc<AuthState>,
+    spawner: Arc<dyn lingxi_traits::RuntimeSpawner>,
+) {
+    let driver = RefreshDriver::new(state.clone());
+    loop {
+        // Read current expiry + token_hash.
+        let (expires_at, prev_hash) = {
+            let t = state.token.read().await;
+            (t.expires_at, t.token_hash())
+        };
+        let now = state.clock.now();
+        let remaining = expires_at.duration_since(now).unwrap_or(Duration::ZERO);
+        let lead = proactive_lead(remaining);
+        let sleep_for = remaining.checked_sub(lead).unwrap_or(Duration::ZERO);
+
+        emit_refresh_started(&state.bus, "proactive_timer").await;
+
+        // Sleep until the wake instant. `RuntimeSpawner::sleep` lets tests
+        // virtualize time.
+        spawner.sleep(sleep_for).await;
+
+        // Fire a refresh. If it fails we emit a `_failed` event and back off
+        // for 30 seconds; on hard failure (RefreshExpired) we exit the loop —
+        // the next API call will surface the auth error to the user.
+        match <RefreshDriver as lingxi_api_client::oauth_hook::OAuthRefreshHook>::refresh(
+            &driver, prev_hash,
+        )
+        .await
+        {
+            Ok(_) => {
+                // Success — loop continues against the freshly-rotated token.
+                continue;
+            }
+            Err(lingxi_api_client::oauth_hook::OAuthHookError::RefreshFailed(msg))
+                if msg == "Session expired. Re-authenticate?" =>
+            {
+                tracing::error!(
+                    target: "lingxi::anthropic_oauth::proactive",
+                    "refresh_token expired; exiting proactive loop"
+                );
+                emit_refresh_failed(&state.bus, "proactive_timer", "refresh_expired").await;
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "lingxi::anthropic_oauth::proactive",
+                    error = ?e,
+                    "transient refresh failure; backing off 30s",
+                );
+                emit_refresh_failed(&state.bus, "proactive_timer", "provider_unreachable").await;
+                spawner.sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+        }
+    }
+}

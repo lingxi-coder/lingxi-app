@@ -5,8 +5,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod codec;
 pub mod messages;
 
+pub use codec::{CodecError, LineCodec, LspCodec};
 pub use messages::{
     Id, Message, Notification, Request, Response, ResponseError, INTERNAL_ERROR, INVALID_PARAMS,
     INVALID_REQUEST, JSONRPC_VERSION, METHOD_NOT_FOUND, PARSE_ERROR,

@@ -80,10 +80,28 @@ pub enum WorktreeError {
     /// Worktrees are not available on this platform (e.g. no git binary).
     #[error("worktree not supported on this platform")]
     Unsupported,
+    /// Caller-supplied slug failed validation (bad char, too long, empty
+    /// segment, ...). Validation rules are platform-agnostic — see
+    /// `validate_worktree_slug` in the platform crates.
+    #[error("invalid slug: {0}")]
+    InvalidSlug(String),
     /// Underlying git invocation failed with the embedded message.
     #[error("git error: {0}")]
     Git(String),
     /// Filesystem error (permissions, disk full, ...).
     #[error("io error: {0}")]
     Io(String),
+}
+
+#[cfg(test)]
+mod m2_01_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_slug_carries_message() {
+        let e = WorktreeError::InvalidSlug("contains '*'".into());
+        let s = format!("{e}");
+        assert!(s.contains("invalid slug"));
+        assert!(s.contains("contains '*'"));
+    }
 }

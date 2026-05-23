@@ -25,5 +25,8 @@ inotify = "0.10"
 
 # macOS FSEvents binding deferred — `watch` returns an empty stream on macOS.
 
+[dev-dependencies]
+tempfile = "3.13"
+
 [lints]
 workspace = true

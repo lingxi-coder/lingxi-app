@@ -1,9 +1,11 @@
-//! `Sandbox` trait impl — Windows policy-validating no-op.
+//! `Sandbox` trait impl — Windows.
 //!
-//! M2.03 ships type-safe sandbox plumbing only. Real isolation (Job
-//! Objects, `AppContainer`) is a follow-up. Production code MUST still route
-//! through [`Sandbox::prepare`] so the [`SandboxedCommand`] type invariant
-//! from D2 is preserved.
+//! claude-code does not support sandboxing on Windows at all: the
+//! `@anthropic-ai/sandbox-runtime` dependency-check refuses the platform
+//! outright. We match that behavior by returning [`SandboxError::Unsupported`]
+//! from every fallible method and reporting `available: false` from
+//! [`Sandbox::probe_capability`]. No follow-up plan turns this on —
+//! `AppContainer` / Job Objects work is not part of claude-code parity.
 
 use async_trait::async_trait;
 use lingxi_traits::{
@@ -11,16 +13,12 @@ use lingxi_traits::{
     SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
 
-/// Policy-validating no-op sandbox for Windows desktops.
-///
-/// Validates `SandboxPolicy.denied_paths` against the requested cwd and
-/// flags symlink escape under the workspace, but does NOT yet wrap the
-/// child process in any OS isolation primitive.
+/// Windows-side [`Sandbox`] — always reports unsupported.
 #[derive(Default)]
 pub struct WindowsSandbox;
 
 impl WindowsSandbox {
-    /// Construct a new `WindowsSandbox`.
+    /// Construct a new `WindowsSandbox`. Holds no state.
     #[must_use]
     pub fn new() -> Self {
         Self
@@ -30,7 +28,7 @@ impl WindowsSandbox {
 #[async_trait]
 impl Sandbox for WindowsSandbox {
     fn is_available(&self) -> bool {
-        true
+        false
     }
 
     fn backend(&self) -> SandboxBackend {
@@ -39,24 +37,10 @@ impl Sandbox for WindowsSandbox {
 
     fn prepare(
         &self,
-        cmd: ProcessCommand,
-        policy: &SandboxPolicy,
+        _cmd: ProcessCommand,
+        _policy: &SandboxPolicy,
     ) -> Result<SandboxedCommand, SandboxError> {
-        // Validate cwd is not inside a denied path. Real backends will also
-        // canonicalize and apply the network / writable_paths policies.
-        if let Some(cwd) = &cmd.cwd {
-            for denied in &policy.denied_paths {
-                if cwd.starts_with(denied) {
-                    return Err(SandboxError::SymlinkEscape(cwd.display().to_string()));
-                }
-            }
-        }
-        Ok(SandboxedCommand::__new_sandboxed(
-            cmd,
-            SandboxedTag::Wrapped {
-                backend: SandboxBackend::None,
-            },
-        ))
+        Err(SandboxError::Unsupported)
     }
 
     fn bypass_with_audit(&self, cmd: ProcessCommand, reason: &str) -> SandboxedCommand {
@@ -71,11 +55,75 @@ impl Sandbox for WindowsSandbox {
     async fn probe_capability(&self) -> SandboxCapability {
         SandboxCapability {
             available: false,
-            reason: Some(
-                "M2.03 windows sandbox is a policy-validating no-op; Job Objects / AppContainer land in a follow-up"
-                    .into(),
-            ),
+            reason: Some("claude-code does not support sandbox on Windows".into()),
             features: SandboxFeatures::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lingxi_traits::{
+        NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend, SandboxPolicy,
+    };
+    use std::collections::HashMap;
+
+    fn empty_cmd() -> ProcessCommand {
+        ProcessCommand {
+            command: "echo".into(),
+            args: vec!["hi".into()],
+            cwd: None,
+            env: HashMap::new(),
+            timeout: None,
+            stdin: None,
+        }
+    }
+
+    fn empty_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            network: NetworkPolicy::Disabled,
+            writable_paths: vec![],
+            denied_paths: vec![],
+            allow_subprocess: false,
+            limits: ResourceLimits::default(),
+        }
+    }
+
+    #[test]
+    fn is_available_returns_false() {
+        assert!(!WindowsSandbox::new().is_available());
+    }
+
+    #[test]
+    fn backend_returns_none() {
+        assert_eq!(WindowsSandbox::new().backend(), SandboxBackend::None);
+    }
+
+    #[test]
+    fn prepare_returns_unsupported() {
+        let err = WindowsSandbox::new()
+            .prepare(empty_cmd(), &empty_policy())
+            .unwrap_err();
+        assert!(matches!(err, lingxi_traits::SandboxError::Unsupported));
+    }
+
+    #[test]
+    fn bypass_with_audit_still_wraps_cmd() {
+        // bypass_with_audit returns SandboxedCommand unconditionally — even
+        // on unsupported platforms an explicit audit grant must still produce
+        // a usable command.
+        let wrapped = WindowsSandbox::new().bypass_with_audit(empty_cmd(), "explicit override");
+        let _: lingxi_traits::SandboxedCommand = wrapped;
+    }
+
+    #[tokio::test]
+    async fn probe_capability_reports_claude_code_string() {
+        let cap = WindowsSandbox::new().probe_capability().await;
+        assert!(!cap.available);
+        assert_eq!(
+            cap.reason.as_deref(),
+            Some("claude-code does not support sandbox on Windows"),
+        );
     }
 }

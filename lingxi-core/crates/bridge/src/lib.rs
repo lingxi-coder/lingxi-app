@@ -1,31 +1,24 @@
-//! `lingxi-bridge` — IDE bridge protocol, pairing, and JWT verifier.
+//! `lingxi-bridge` — local IDE bridge (placeholder until M2-02 wires the real
+//! MCP-over-WebSocket transport).
 //!
-//! This crate owns the engine-side half of the IDE bridge described in
-//! spec §29. It exposes:
+//! claude-code's local IDE bridge connects to a VS Code / `JetBrains` plugin
+//! announced by `~/.claude/ide/<port>.lock`. Transport is plain WebSocket
+//! carrying MCP JSON-RPC, auth'd by `X-Claude-Code-Ide-Authorization` from
+//! the lockfile.
 //!
-//! - [`BridgeMessage`] — the 9-variant wire vocabulary (§29.2).
-//! - [`IdeBridge`] — thin wrapper around any
-//!   [`lingxi_traits::BridgeTransport`] implementation (§29.1).
-//! - [`JwtVerifier`] — project-scoped HS256 JWT sign/verify (§29.3, A3).
-//! - [`generate_pairing_code`] — 8-char human-readable pairing codes (A3).
-//! - [`RateLimiter`] / [`BridgePairing`] — per-project pairing throttle (A4).
+//! M2-01 strips out the M1-invented pairing/JWT stack. M2-02 §6.2 adds
+//! `lockfile.rs` and rewrites `transport.rs` to build an
+//! `McpTransportSpec::WebSocket { url, headers }` and hand off to
+//! `lingxi_mcp::McpRegistry::connect_with_spec()`.
 //!
-//! Platform-specific transports (Tokio WebSocket etc.) live in `platforms/*`.
+//! Until then this crate exposes only stub types so downstream callers compile.
 
 #![forbid(unsafe_code)]
 
-pub mod codes;
-pub mod jwt;
 pub mod message;
-pub mod pairing;
-pub mod rate_limiter;
 pub mod state;
 pub mod transport;
 
-pub use codes::generate_pairing_code;
-pub use jwt::{JwtClaims, JwtError, JwtVerifier};
-pub use message::BridgeMessage;
-pub use pairing::{BridgePairing, PairingError, TrustedDevice};
-pub use rate_limiter::RateLimiter;
+pub use message::BridgeMessagePlaceholder;
 pub use state::BridgeState;
 pub use transport::IdeBridge;

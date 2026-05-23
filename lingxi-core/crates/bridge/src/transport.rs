@@ -1,56 +1,103 @@
-//! Thin façade over [`BridgeTransport`] holding the current connection.
+//! `IdeBridge` — placeholder stub.
 //!
-//! The engine instantiates a single [`IdeBridge`] per session, calls
-//! [`IdeBridge::connect`] once, and then dispatches [`crate::message::BridgeMessage`]
-//! values through [`IdeBridge::send`]. The platform-supplied
-//! [`BridgeTransport`] handles framing, auth, and the underlying socket.
+//! M2-01 strips the M1-invented JWT / pairing stack. M2-02 §6.2 will rewrite
+//! this stub to: (1) discover the most-recent `~/.claude/ide/<port>.lock`
+//! via the M2-02-added `crates/bridge/src/lockfile.rs`; (2) parse the lockfile
+//! JSON `{workspaceFolders, pid, ideName, transport, runningInWindows,
+//! authToken}`; (3) construct
+//! `lingxi_mcp::McpTransportSpec::WebSocket { url: format!("ws://localhost:{port}"),
+//! headers: HashMap::from([("X-Claude-Code-Ide-Authorization", authToken)]) }`;
+//! (4) hand off to `lingxi_mcp::McpRegistry::connect_with_spec`.
+//!
+//! The auth header is exactly `X-Claude-Code-Ide-Authorization` — NOT
+//! `Authorization: Bearer …`. Locked here so M2-02 can't drift.
+//!
+//! Until then every method returns [`lingxi_traits::BridgeError::Unsupported`].
 
-use lingxi_traits::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
-use std::sync::Arc;
+use crate::message::BridgeMessagePlaceholder;
+use crate::state::BridgeState;
+use lingxi_traits::BridgeError;
 use tokio::sync::RwLock;
 
-/// Engine-side handle to the IDE bridge.
+/// Engine-side façade for the local IDE bridge. Stub until M2-02.
 pub struct IdeBridge {
-    transport: Arc<dyn BridgeTransport>,
-    connection: RwLock<Option<BridgeConnection>>,
+    state: RwLock<BridgeState>,
 }
 
 impl IdeBridge {
-    /// Wrap a transport. Does not open a connection — call [`connect`] first.
-    ///
-    /// [`connect`]: Self::connect
+    /// Construct an unconnected `IdeBridge` with default state.
     #[must_use]
-    pub fn new(transport: Arc<dyn BridgeTransport>) -> Self {
+    pub fn new() -> Self {
         Self {
-            transport,
-            connection: RwLock::new(None),
+            state: RwLock::new(BridgeState::default()),
         }
     }
 
-    /// Open a connection using `config` and remember the handle for later
-    /// [`send`] calls.
-    ///
-    /// [`send`]: Self::send
-    pub async fn connect(&self, config: BridgeConfig) -> Result<(), BridgeError> {
-        let conn = self.transport.connect(&config).await?;
-        *self.connection.write().await = Some(conn);
-        Ok(())
+    /// Read-only snapshot of the bridge's current observable state.
+    pub async fn state(&self) -> BridgeState {
+        self.state.read().await.clone()
     }
 
-    /// Serialize `msg` and forward it through the transport. Returns
-    /// [`BridgeError::Closed`] when no connection is open.
-    pub async fn send(&self, msg: crate::message::BridgeMessage) -> Result<(), BridgeError> {
-        let conn = self
-            .connection
-            .read()
+    /// **Always returns `Unsupported`** until M2-02 wires lockfile + WebSocket.
+    /// Kept async for parity with the M2-02 signature.
+    #[allow(clippy::unused_async)]
+    pub async fn connect(&self) -> Result<(), BridgeError> {
+        Err(BridgeError::Unsupported)
+    }
+
+    /// **Always returns `Unsupported`**. Removed in M2-02 in favor of MCP JSON-RPC.
+    /// Kept async for parity with the M2-02 signature.
+    #[allow(clippy::unused_async)]
+    pub async fn send_placeholder(
+        &self,
+        _msg: BridgeMessagePlaceholder,
+    ) -> Result<(), BridgeError> {
+        Err(BridgeError::Unsupported)
+    }
+
+    /// **Always returns `Unsupported`**.
+    /// Kept async for parity with the M2-02 signature.
+    #[allow(clippy::unused_async)]
+    pub async fn disconnect(&self) -> Result<(), BridgeError> {
+        Err(BridgeError::Unsupported)
+    }
+}
+
+impl Default for IdeBridge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn new_constructs_with_default_state() {
+        let s = IdeBridge::new().state().await;
+        assert!(!s.connected);
+        assert!(s.current_file.is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_returns_unsupported() {
+        let err = IdeBridge::new().connect().await.unwrap_err();
+        assert!(matches!(err, BridgeError::Unsupported));
+    }
+
+    #[tokio::test]
+    async fn send_placeholder_returns_unsupported() {
+        let err = IdeBridge::new()
+            .send_placeholder(BridgeMessagePlaceholder)
             .await
-            .clone()
-            .ok_or(BridgeError::Closed)?;
-        self.transport
-            .send(
-                &conn,
-                serde_json::to_value(&msg).expect("serialize bridge message"),
-            )
-            .await
+            .unwrap_err();
+        assert!(matches!(err, BridgeError::Unsupported));
+    }
+
+    #[tokio::test]
+    async fn disconnect_returns_unsupported() {
+        let err = IdeBridge::new().disconnect().await.unwrap_err();
+        assert!(matches!(err, BridgeError::Unsupported));
     }
 }

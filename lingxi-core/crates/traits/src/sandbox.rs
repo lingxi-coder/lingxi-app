@@ -136,6 +136,14 @@ pub enum SandboxError {
     /// Backend cannot wrap commands on this host.
     #[error("unavailable: {0}")]
     Unavailable(String),
+    /// Backend cannot wrap commands on this platform at all (e.g. Windows).
+    /// Distinct from [`Unavailable`] — `Unavailable` means the backend exists
+    /// but dependencies are missing; `Unsupported` means the backend itself
+    /// is absent from claude-code on this OS.
+    ///
+    /// [`Unavailable`]: SandboxError::Unavailable
+    #[error("sandbox not supported on this platform")]
+    Unsupported,
     /// `realpath`-style canonicalization failed for a policy path.
     #[error("path canonicalization failed: {0}")]
     PathCanonicalize(String),
@@ -220,5 +228,24 @@ impl SandboxedCommand {
     #[must_use]
     pub fn tag(&self) -> &SandboxedTag {
         &self.tag
+    }
+}
+
+#[cfg(test)]
+mod m2_01_tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_error_unsupported_displays() {
+        let e = SandboxError::Unsupported;
+        assert_eq!(format!("{e}"), "sandbox not supported on this platform");
+    }
+
+    #[test]
+    fn sandbox_error_unsupported_distinct_from_unavailable() {
+        let u = SandboxError::Unsupported;
+        let a = SandboxError::Unavailable("bwrap missing".into());
+        assert!(!matches!(u, SandboxError::Unavailable(_)));
+        assert!(matches!(a, SandboxError::Unavailable(_)));
     }
 }

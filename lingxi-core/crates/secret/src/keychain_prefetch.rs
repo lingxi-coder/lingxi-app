@@ -2,10 +2,18 @@
 //! interrupt the first interactive moment.
 //!
 //! Spawns a background task that immediately retrieves the Anthropic API key
-//! from [`SecureStorage`]; the first OS-level prompt happens during that
-//! warm-up rather than during the user's first request. The eventual result
-//! is delivered through a `oneshot` channel that callers can drain via
-//! [`KeychainPrefetch::consume`].
+//! from [`SecureStorage`]; the first OS-level prompt happens during the
+//! warm-up rather than during the user's first request.
+//!
+//! **Status**: this file holds the type + control-flow shell. The actual
+//! `security` CLI invocations land in **M2-06 §6.6** (`SecureStorage` macOS
+//! Keychain) — see
+//! `docs/superpowers/plans/2026-05-23-m2-06-securestorage-sse-process.md`.
+//! Until M2-06 runs, the `retrieve` call invoked here falls back to
+//! `PlainTextSecureStorage` because no `security` shell-out exists yet.
+//!
+//! The eventual result is delivered through a `oneshot` channel callers
+//! drain via [`KeychainPrefetch::consume`].
 
 use lingxi_protocol::SecureStorageData;
 use lingxi_traits::{RuntimeError, RuntimeSpawner, SecureStorage, SecureStorageError};

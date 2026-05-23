@@ -1160,15 +1160,19 @@ version = "0.1.0"
 dependencies = [
  "lingxi-api-client",
  "lingxi-protocol",
+ "lingxi-secret",
  "lingxi-sidequery",
+ "lingxi-telemetry",
  "lingxi-traits",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "walkdir",
 ]
 
 [[package]]

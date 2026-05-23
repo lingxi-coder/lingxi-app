@@ -152,6 +152,40 @@ impl ConversationMessage {
     }
 }
 
+/// One in-memory unit surfaced from the loader to the agent loop.
+///
+/// Boundary type shared by `lingxi-memory` (producer) and `lingxi-agent`
+/// (consumer). Tier ordering and scoring rules live in `lingxi-memory`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct MemoryEntry {
+    /// Absolute path the entry was loaded from.
+    pub path: std::path::PathBuf,
+    /// Tier the entry belongs to (`Session`, `Project`, `Team`, `User`).
+    pub tier: MemoryEntryTier,
+    /// Raw markdown body (frontmatter stripped, secrets redacted).
+    pub body: String,
+    /// Age in whole days from the load `now`. `0` for a just-written file.
+    pub age_days: u64,
+    /// File size in bytes (post-redaction body length).
+    pub size_bytes: u64,
+}
+
+/// Cross-crate stand-in for `lingxi_memory::MemoryTier`.
+///
+/// Defined here to keep `lingxi-protocol` free of platform deps; the richer
+/// variants (`Project { repo_root }`, etc.) live in `lingxi-memory::tier`.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
+pub enum MemoryEntryTier {
+    /// Session-scoped entry (highest tier weight).
+    Session,
+    /// Project-scoped entry (next tier).
+    Project,
+    /// Team-scoped entry (subject to team-boost gate).
+    Team,
+    /// User-scoped entry (lowest tier).
+    User,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +204,20 @@ mod tests {
         let s = serde_json::to_string(&m).unwrap();
         let m2: ConversationMessage = serde_json::from_str(&s).unwrap();
         assert_eq!(m, m2);
+    }
+
+    #[test]
+    fn memory_entry_roundtrip_json() {
+        let e = MemoryEntry {
+            path: std::path::PathBuf::from("/tmp/CLAUDE.md"),
+            tier: MemoryEntryTier::Project,
+            body: "hello".into(),
+            age_days: 3,
+            size_bytes: 5,
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        let e2: MemoryEntry = serde_json::from_str(&s).unwrap();
+        assert_eq!(e, e2);
     }
 
     #[test]

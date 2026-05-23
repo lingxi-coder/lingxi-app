@@ -27,7 +27,7 @@ pub use ids::{
     AgentId, HookId, McpConnectionId, MessageId, PluginId, PrefetchId, RequestId, SessionId,
     SnapshotId, ToolUseId,
 };
-pub use messages::{ContentBlock, ConversationMessage, MessageRole};
+pub use messages::{ContentBlock, ConversationMessage, MemoryEntry, MemoryEntryTier, MessageRole};
 pub use secret::{
     RedactableContent, Secret, SecretKindDto, SecureStorageData, SecureStorageMetadata,
 };

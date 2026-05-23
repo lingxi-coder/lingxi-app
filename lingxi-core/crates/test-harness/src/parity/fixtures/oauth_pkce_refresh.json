@@ -1,0 +1,23 @@
+{
+  "_source": "claude-code/src/services/auth/oauth-client.ts + src/constants/oauth.ts (commit 6a25909, 2026-05-23)",
+  "_note": "OAuth endpoints + refresh grant_type + scopes + error string + proactive lead formula. The authorize endpoint is on claude.ai (the user-facing domain); token + revoke endpoints live on console.anthropic.com. Scope order matters — emitted as the space-joined `scope=` body parameter in `read:user write:messages read:projects` order. The proactive wake formula `min(remaining/2, 5*60)` is locked at the second granularity; sub-second arithmetic is allowed (and tested in proactive_lead_test.rs).",
+  "authorize_endpoint": "https://claude.ai/oauth/authorize",
+  "token_endpoint": "https://console.anthropic.com/v1/oauth/token",
+  "revocation_endpoint": "https://console.anthropic.com/v1/oauth/revoke",
+  "refresh_grant_type": "refresh_token",
+  "scopes_in_order": ["read:user", "write:messages", "read:projects"],
+  "loopback_redirect_uri_template": "http://127.0.0.1:{port}/callback",
+  "refresh_expired_error_string": "Session expired. Re-authenticate?",
+  "scope_rejected_error_string": "Scope upgrade denied by provider",
+  "proactive_lead_cap_seconds": 300,
+  "proactive_lead_formula": "min(remaining_lifetime / 2, 5 * 60) seconds",
+  "telemetry_event_names": [
+    "tengu_oauth_refresh_started",
+    "tengu_oauth_refresh_succeeded",
+    "tengu_oauth_refresh_failed",
+    "tengu_oauth_scope_upgraded",
+    "tengu_oauth_proactive_canceled"
+  ],
+  "keychain_service": "lingxi",
+  "keychain_account": "claude-code-credentials"
+}

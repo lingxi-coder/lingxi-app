@@ -1526,6 +1526,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "lingxi-anthropic-oauth",
  "lingxi-api-client",
  "lingxi-compaction",
  "lingxi-coordinator",

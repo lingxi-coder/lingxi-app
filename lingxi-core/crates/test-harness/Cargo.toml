@@ -57,6 +57,10 @@ lingxi-telemetry = { path = "../telemetry" }
 # against fixed reference fixtures. Dev-only.
 lingxi-memory = { path = "../memory" }
 filetime = "0.2"
+# Used by the M3-04 Phase 10 parity driver (oauth_pkce_refresh) to exercise
+# `ClaudeAiOAuthConfig::default_with_port` + `OAuthError` Display strings +
+# `proactive_lead` formula against locked wire identifiers. Dev-only.
+lingxi-anthropic-oauth = { path = "../anthropic-oauth" }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 lingxi-platform-posix = { path = "../../platforms/posix" }

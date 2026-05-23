@@ -24,7 +24,7 @@ pub enum ApiError {
     },
 
     /// HTTP 429: rate limited by the provider.
-    #[error("rate limited (HTTP 429): retry after {retry_after_secs}s")]
+    #[error("Rate limited; retrying in {retry_after_secs}s")]
     RateLimited {
         /// Number of seconds the server asked us to wait before retrying.
         retry_after_secs: u64,
@@ -87,5 +87,11 @@ mod tests {
             raw: "...".into(),
         };
         assert!(format!("{e}").contains("1500"));
+    }
+
+    #[test]
+    fn rate_limited_display_string_is_byte_locked() {
+        let e = ApiError::RateLimited { retry_after_secs: 7 };
+        assert_eq!(format!("{e}"), "Rate limited; retrying in 7s");
     }
 }

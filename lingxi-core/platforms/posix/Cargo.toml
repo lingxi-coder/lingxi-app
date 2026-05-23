@@ -34,6 +34,9 @@ tempfile = "3.13"
 # (`tests/mcp_ws_test.rs`). `ws` enables the WebSocketUpgrade extractor.
 axum = { version = "0.7", features = ["ws"] }
 url = "2"
+# Integration test (`tests/mcp_client_stdio_test.rs`) drives the real
+# `lingxi_mcp::McpClient` over a stdio-spawned mock MCP server.
+lingxi-mcp = { path = "../../crates/mcp" }
 
 [lints]
 workspace = true

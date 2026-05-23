@@ -9,10 +9,18 @@ license.workspace = true
 lingxi-protocol = { path = "../protocol" }
 lingxi-traits = { path = "../traits" }
 lingxi-permission = { path = "../permission" }
-serde.workspace = true
-thiserror.workspace = true
-async-trait.workspace = true
-tracing.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+which = "6"
+tempfile = "3"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

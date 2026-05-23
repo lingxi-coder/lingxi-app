@@ -15,7 +15,10 @@
 #![forbid(unsafe_code)]
 
 pub mod decision;
+pub mod path_pattern;
 pub mod policy;
+pub mod policy_convert;
+pub mod runtime_config;
 
 pub use decision::{
     is_obviously_dangerous, should_use_sandbox, ProjectTrustLevel, SandboxDecision,
@@ -24,7 +27,13 @@ pub use lingxi_traits::{
     NetworkPolicy, ResourceLimits, Sandbox, SandboxBackend, SandboxError, SandboxPolicy,
     SandboxedCommand, SandboxedTag,
 };
+pub use path_pattern::resolve_path_pattern_for_sandbox;
 pub use policy::default_policy;
+pub use policy_convert::{convert_settings_to_runtime_config, linux_glob_pattern_warnings};
+pub use runtime_config::{
+    FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, RipgrepConfig,
+    SandboxRuntimeConfig, SandboxSettingsJson, SettingsJson, SettingsPermissions,
+};
 
 /// Canonicalize `path` and verify the result stays inside `workspace`.
 ///

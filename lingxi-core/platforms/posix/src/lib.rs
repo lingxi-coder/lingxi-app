@@ -17,6 +17,7 @@ pub mod sandbox;
 pub mod secure_storage;
 pub mod swarm;
 pub mod worktree;
+pub mod wsl_detect;
 
 pub use bridge::PosixBridgeTransport;
 pub use clock::PosixClock;

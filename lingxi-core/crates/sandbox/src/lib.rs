@@ -5,8 +5,19 @@
 //!
 //! - [`policy::default_policy`] — the conservative policy used when callers
 //!   don't supply one explicitly.
-//! - [`decision::should_use_sandbox`] — the decision matrix used by the
+//! - [`decision::should_use_sandbox`] — the M1 decision matrix used by the
 //!   tool layer to pick between sandbox / no-sandbox / refusal.
+//! - [`decision::should_use_sandbox_for_command`] — the M2 decision that
+//!   consults `SandboxRuntimeConfig::excluded_commands` after
+//!   compound-command splitting and safe-wrapper / env-var fixed-point
+//!   stripping (port of claude-code's `shouldUseSandbox.ts`).
+//! - [`dependency_check::check_dependencies`] — host probe for required
+//!   sandbox binaries (`sandbox-exec`, `bwrap`, `socat`).
+//! - [`dependency_check::sandbox_unavailable_reason`] — decoder for the
+//!   five claude-code byte-for-byte error strings surfaced when sandbox
+//!   can't run.
+//! - [`violation_store::SandboxViolationStore`] — bounded ring buffer of
+//!   sandbox violation events surfaced by the backend.
 //! - [`canonicalize_safely`] — a symlink-escape-safe path canonicalization
 //!   helper used by backend impls.
 //!
@@ -15,13 +26,20 @@
 #![forbid(unsafe_code)]
 
 pub mod decision;
+pub mod dependency_check;
 pub mod path_pattern;
 pub mod policy;
 pub mod policy_convert;
 pub mod runtime_config;
+pub mod violation_store;
 
 pub use decision::{
-    is_obviously_dangerous, should_use_sandbox, ProjectTrustLevel, SandboxDecision,
+    is_obviously_dangerous, should_use_sandbox, should_use_sandbox_for_command,
+    split_compound_command, strip_env_and_wrappers_fixedpoint, ProjectTrustLevel, SandboxDecision,
+    BINARY_HIJACK_VARS,
+};
+pub use dependency_check::{
+    check_dependencies, sandbox_unavailable_reason, MissingDeps, SandboxDependencyCheck,
 };
 pub use lingxi_traits::{
     NetworkPolicy, ResourceLimits, Sandbox, SandboxBackend, SandboxError, SandboxPolicy,
@@ -33,6 +51,9 @@ pub use policy_convert::{convert_settings_to_runtime_config, linux_glob_pattern_
 pub use runtime_config::{
     FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, RipgrepConfig,
     SandboxRuntimeConfig, SandboxSettingsJson, SettingsJson, SettingsPermissions,
+};
+pub use violation_store::{
+    SandboxViolationEvent, SandboxViolationKind, SandboxViolationStore, SANDBOX_VIOLATION_STORE_CAP,
 };
 
 /// Canonicalize `path` and verify the result stays inside `workspace`.

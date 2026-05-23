@@ -1,15 +1,22 @@
-//! MCP stdio transport — POSIX.
+//! MCP transport — POSIX.
 //!
-//! M2.02c lands `spawn_stdio`: a low-level helper that spawns a child MCP
-//! server, frames its stdio with NDJSON, drains stderr into a 64 MB ring,
-//! and returns a fully-wired `lingxi_jsonrpc::Connection`. The legacy
-//! `PosixMcpTransport` trait impl below is retained for the current MCP
-//! client; a follow-up plan routes its `connect`/`call_tool`/`list_tools`
-//! arms through `spawn_stdio` for full `JSON-RPC` semantics.
+//! Supports the `Stdio`, `Sse`, and `Http` variants in M2. The `WebSocket`
+//! variant's low-level `connect_ws` helper is re-exported by M2-02c, but
+//! `PosixMcpTransport::connect` does NOT yet route `WebSocket` specs — that
+//! arm currently falls through to `McpError::UnsupportedTransport` and will
+//! be wired in a follow-up. Other variants (`InProcess`, `SseIde`,
+//! `SdkControl`) return `McpError::UnsupportedTransport`.
+//!
+//! M2.02c also lands `spawn_stdio`: a low-level helper that spawns a child
+//! MCP server, frames its stdio with NDJSON, drains stderr into a 64 MB
+//! ring, and returns a fully-wired `lingxi_jsonrpc::Connection`. Used by
+//! the `Stdio` arm here as well as by callers that want stdio plumbing
+//! without going through the trait surface.
 
 use async_trait::async_trait;
 use lingxi_jsonrpc::Connection;
 use lingxi_platform_common::mcp_stdio::{StderrRing, StdioConfig};
+use lingxi_platform_common::{connect_http, connect_sse};
 use lingxi_protocol::McpConnectionId;
 use lingxi_traits::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
@@ -24,15 +31,33 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Child;
 use tokio::sync::Mutex as AsyncMutex;
 
-/// POSIX MCP transport — supports the `Stdio` variant only in M2.02.
+/// Per-connection state held by `PosixMcpTransport`.
 ///
-/// Other transports (`Sse`, `Http`, `WebSocket`, `InProcess`, `SseIde`,
-/// `SdkControl`) return `McpError::UnsupportedTransport`. Most request
-/// methods are intentionally stubbed pending full `JSON-RPC` framing in
-/// M2 phase 3.
+/// Different transports keep slightly different ownership: `Stdio` owns the
+/// spawned child so `disconnect` can kill it; SSE / HTTP just own the
+/// JSON-RPC `Connection` (the underlying `reqwest` tasks live inside the
+/// connection's broker).
+pub(crate) enum PosixMcpConnection {
+    /// `Stdio` connection — owns the child process and the JSON-RPC link.
+    Stdio {
+        /// Owned child process; killed on `disconnect`.
+        child: Child,
+    },
+    /// `Sse` connection — owns the JSON-RPC connection over the HTTP+SSE pair.
+    Sse,
+    /// `Http` connection — owns the JSON-RPC connection over Streamable HTTP.
+    Http,
+}
+
+/// POSIX MCP transport.
+///
+/// Supports the `Stdio`, `Sse`, and `Http` variants in M2. Other transports
+/// (`WebSocket`, `InProcess`, `SseIde`, `SdkControl`) return
+/// `McpError::UnsupportedTransport`. Most request methods are intentionally
+/// stubbed pending full `JSON-RPC` framing in M2 phase 3.
 #[derive(Default)]
 pub struct PosixMcpTransport {
-    connections: Mutex<HashMap<McpConnectionId, Child>>,
+    connections: Mutex<HashMap<McpConnectionId, PosixMcpConnection>>,
 }
 
 impl PosixMcpTransport {
@@ -41,32 +66,54 @@ impl PosixMcpTransport {
     pub fn new() -> Self {
         Self::default()
     }
+
+    fn insert(&self, id: McpConnectionId, conn: PosixMcpConnection) {
+        // Recover from a poisoned std `Mutex` by silently dropping the
+        // insert — the engine will surface the failure on the next call
+        // when the connection id misses the map.
+        if let Ok(mut guard) = self.connections.lock() {
+            guard.insert(id, conn);
+        }
+    }
 }
 
 #[async_trait]
 impl McpTransport for PosixMcpTransport {
     async fn connect(&self, spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
-        let (command, args, env) = match spec {
+        let id = McpConnectionId::new();
+        match spec {
             McpTransportSpec::Stdio { command, args, env } => {
-                (command.clone(), args.clone(), env.clone())
+                let mut cmd = tokio::process::Command::new(command);
+                cmd.args(args);
+                for (k, v) in env {
+                    cmd.env(k, v);
+                }
+                cmd.stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+                let child = cmd
+                    .spawn()
+                    .map_err(|e| McpError::Connection(e.to_string()))?;
+                self.insert(id, PosixMcpConnection::Stdio { child });
+            }
+            McpTransportSpec::Sse { url, headers, .. } => {
+                // Delegate to the shared connector. The OAuth + headers_helper
+                // arms are out of scope for M2-02d's dispatch task; the
+                // transport currently passes only the static `headers` map
+                // and no auth token. OAuth integration lands in M2-06.
+                let _conn = connect_sse(url, None, headers)
+                    .await
+                    .map_err(McpError::from)?;
+                self.insert(id, PosixMcpConnection::Sse);
+            }
+            McpTransportSpec::Http { url, headers, .. } => {
+                // See `Sse` arm — OAuth + per-request headers_helper deferred.
+                let _conn = connect_http(url, None, headers)
+                    .await
+                    .map_err(McpError::from)?;
+                self.insert(id, PosixMcpConnection::Http);
             }
             other => return Err(McpError::UnsupportedTransport(map_kind(other))),
-        };
-        let mut cmd = tokio::process::Command::new(&command);
-        cmd.args(&args);
-        for (k, v) in &env {
-            cmd.env(k, v);
-        }
-        cmd.stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        let child = cmd
-            .spawn()
-            .map_err(|e| McpError::Connection(e.to_string()))?;
-        let id = McpConnectionId::new();
-        // Recover from a poisoned std `Mutex` by extracting the inner map.
-        if let Ok(mut conns) = self.connections.lock() {
-            conns.insert(id, child);
         }
         Ok(McpRawConnection { connection_id: id })
     }
@@ -87,7 +134,7 @@ impl McpTransport for PosixMcpTransport {
 
     async fn list_tools(&self, _conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
         Err(McpError::Internal(
-            "posix mcp stdio list_tools: M2 follow-up".into(),
+            "posix mcp list_tools delegated to lingxi-mcp::McpClient (M2-02b)".into(),
         ))
     }
 
@@ -109,7 +156,7 @@ impl McpTransport for PosixMcpTransport {
         _input: Value,
     ) -> Result<McpToolResultDto, McpError> {
         Err(McpError::Internal(
-            "posix mcp stdio call_tool: M2 follow-up".into(),
+            "posix mcp call_tool delegated to lingxi-mcp::McpClient (M2-02b)".into(),
         ))
     }
 
@@ -119,7 +166,7 @@ impl McpTransport for PosixMcpTransport {
         _uri: &str,
     ) -> Result<McpResourceContentDto, McpError> {
         Err(McpError::Internal(
-            "posix mcp stdio read_resource: M2 follow-up".into(),
+            "posix mcp read_resource delegated to lingxi-mcp::McpClient (M2-02b)".into(),
         ))
     }
 
@@ -141,24 +188,30 @@ impl McpTransport for PosixMcpTransport {
         _req: ElicitRequestDto,
     ) -> Result<ElicitResultDto, McpError> {
         Err(McpError::Internal(
-            "posix mcp elicitation: M2 follow-up".into(),
+            "posix mcp elicitation delegated to lingxi-mcp::McpClient (M2-02b)".into(),
         ))
     }
 
     async fn disconnect(&self, conn_id: McpConnectionId) -> Result<(), McpError> {
-        let child_opt = self
+        let entry = self
             .connections
             .lock()
             .ok()
-            .and_then(|mut conns| conns.remove(&conn_id));
-        if let Some(mut child) = child_opt {
+            .and_then(|mut g| g.remove(&conn_id));
+        if let Some(PosixMcpConnection::Stdio { mut child }) = entry {
             let _ = child.kill().await;
         }
+        // For Sse / Http there is no owned child; dropping the entry tears
+        // down the JSON-RPC connection (and its background tasks) naturally.
         Ok(())
     }
 
     fn supported_transports(&self) -> Vec<McpTransportKind> {
-        vec![McpTransportKind::Stdio]
+        vec![
+            McpTransportKind::Stdio,
+            McpTransportKind::Sse,
+            McpTransportKind::Http,
+        ]
     }
 }
 

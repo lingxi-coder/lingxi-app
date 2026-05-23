@@ -19,7 +19,7 @@
 - M3-03 plan (`docs/superpowers/plans/2026-05-23-m3-03-api-client.md`) — defines `parity_messages_create.rs` + `parity_betas.rs` drivers, 16 anthropic-beta constants, `anthropic-version: 2023-06-01` header, retry+jitter pattern.
 - M3-04 plan (`docs/superpowers/plans/2026-05-23-m3-04-oauth.md`) — defines `parity_oauth_pkce_refresh.rs` driver, loom test at `crates/anthropic-oauth/tests/refresh_single_flight_test.rs` gated behind `#[cfg(loom)]`, single-flight refresh lock (v3 §32.7 hotspot).
 - M3-05 plan (`docs/superpowers/plans/2026-05-23-m3-05-cost-events.md`) — defines `parity_cost_events.rs` driver, `tengu_cost_recorded` payload schema (`is_batch_request: bool` reserved for M4).
-- M3-06 plan (`docs/superpowers/plans/2026-05-23-m3-06-telemetry.md`) — defines `parity_tengu_events.rs` driver, `tengu_event_audit` proc-macro (registers `telemetry-macros` as a new workspace member), 145+ event names across 8 sub-modules.
+- M3-06 plan (`docs/superpowers/plans/2026-05-23-m3-06-telemetry.md`) — defines `parity_tengu_events.rs` driver, `tengu_event_audit` proc-macro (registers `telemetry-macros` as a new workspace member), 143 event names across 8 sub-modules (settings count corrected from 5 to 3 to match M3-01's actual emitters).
 - v3 §32.6 parity protocol — every fixture carries `_source` + `_note` citation keys (canonical shape: `crates/test-harness/src/parity/fixtures/sandbox_config_conversion.json`).
 - Existing parity fixture loader: `crates/test-harness/src/parity/mod.rs::load_fixture::<T>("stem")`.
 - Existing `.github/workflows/ci.yml` — already has `compile-check` / `unit-tests` / `lint` / `cross-compile-desktop` / `cross-compile-mobile` jobs from M2-07.
@@ -34,7 +34,7 @@ Creates (new files):
 - `.github/workflows/ci-fuzz.yml` — dedicated fuzz workflow. Triggers: `workflow_dispatch` + `schedule: cron('0 7 * * *')` (daily 07:00 UTC). 4 harnesses, 5-minute CI budget each (controlled by `-runs=` count). All harness steps run with `continue-on-error: true` for v0.4.0 (per the brief: "mandatory at v0.5.0+"). Harnesses: `settings_json_parse` (M3-01), `anthropic_beta_assemble` (M3-03), `memdir_canonicalizer` (M3-02), `tengu_payload_deserialize` (M3-06).
 - `.github/workflows/ci-bench.yml` — dedicated criterion workflow. Triggers: `workflow_dispatch` + `schedule: cron('0 8 * * 1')` (weekly Monday 08:00 UTC). 6 benches: `memory_ranking` (M3-02 N×K), `settings_4layer_merge` (M3-01), `messages_create_middleware` (M3-03), `tengu_event_encode` (M3-06), `oauth_refresh_under_contention` (M3-04), `engine_init_startup` (full Engine::init() startup). Regression baseline check `continue-on-error: true` initially (per the brief: "regression check against baseline file (continue-on-error: true initially)").
 - `.github/workflows/ci-chaos.yml` — dedicated chaos workflow. Triggers: `workflow_dispatch` + `schedule: cron('0 9 * * 1')` (weekly Monday 09:00 UTC). 6 scenarios: `securestorage_refuses` (M2-06 reuse), `fs_watch_drops_events` (M2-05 reuse), `http_5xx_burst_across_retry_window` (M3-03), `oauth_token_expires_mid_request` (M3-04), `telemetry_sink_rejects` (M3-06), `partial_write_settings_json` (M3-01). Each scenario is a `#[ignore]`-gated `cargo test` invocation under a `--ignored chaos_` pattern; `continue-on-error: false` (chaos passes are mandatory).
-- `lingxi-core/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json` — high-level smoke fixture. Asserts ALL of M3's locked literals appear in a representative startup-and-API-call run: settings 4-layer order, memory filenames, 16 anthropic-beta constants list, OAuth token endpoint URL, `tengu_cost_recorded` event name, three of M3-06's 145 event names. Per v3 §32.6 parity protocol — carries `_source` + `_note` citations.
+- `lingxi-core/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json` — high-level smoke fixture. Asserts ALL of M3's locked literals appear in a representative startup-and-API-call run: settings 4-layer order, memory filenames, 16 anthropic-beta constants list, OAuth token endpoint URL, `tengu_cost_recorded` event name, three of M3-06's 143 event names. Per v3 §32.6 parity protocol — carries `_source` + `_note` citations.
 - `lingxi-core/crates/test-harness/tests/parity_full_v0_4_0_smoke.rs` — parity driver: loads `full_v0_4_0_smoke.json` and asserts every locked literal is reachable through the public API of each M3 crate (`lingxi-core::settings::ENV_PREFIX_PRIORITY`, `lingxi-memory::claude_md::CLAUDE_MD_FILENAME`, `lingxi-api-client::anthropic::betas::*`, `lingxi-anthropic-oauth::TOKEN_ENDPOINT_URL`, `lingxi-telemetry::tengu::cost::TENGU_COST_RECORDED`, etc.).
 
 Modifies (in-place):
@@ -66,7 +66,7 @@ These are the M3 final-release acceptance criteria. Drift breaks downstream pari
 - **CHANGELOG `[0.4.0]` section appears above `[0.3.0]`**: mirrors the M2-07 CHANGELOG insertion convention. Grep check: `grep -n "^## \[0.4.0\]" CHANGELOG.md` must print a smaller line number than `grep -n "^## \[0.3.0\]" CHANGELOG.md`.
 - **ARCHITECTURE "claude-code parity guarantees (v0.4.0 additions)" subsection appears AFTER the existing v0.3.0 subsection**: mirrors the v0.3.0 layout. New subsection lists every spec §7 wire identifier verbatim (settings, memory, API client, OAuth, cost events, telemetry, file paths).
 - **`full_v0_4_0_smoke.json` carries `_source` + `_note` citation keys**: v3 §32.6 parity protocol. The fixture's `_source` field cites the spec line range `lines 620-810` (Wire identifiers section); the `_note` field documents the smoke fixture's role as a "full literal coverage cross-check".
-- **Workspace test count at v0.4.0**: ~700 functional tests + ~24 non-functional gates per spec line 599. Baseline v0.3.0: ~145; M3-01..M3-06 add ~550 (per spec §6 expected counts: ~150 unit + 12 contract drivers + ~25 integration + 6 parity + 8 loom + 4 fuzz + 6 benches + 6 chaos). The exact count gets recorded in the tag annotation message — don't pre-commit a number that the M3-01..M3-06 actual outcomes might not match.
+- **Workspace test count at v0.4.0**: ~700 functional tests + ~24 non-functional gates per spec line 599. Baseline v0.3.0: 488 (per master spec §6 line 590; M2 final test count). M3-01..M3-06 add ~200-300 to hit the ~700 target (per spec §6 expected counts: ~150 unit + 12 contract drivers + ~25 integration + 6 parity + 8 loom + 4 fuzz + 6 benches + 6 chaos). The exact count gets recorded in the tag annotation message — don't pre-commit a number that the M3-01..M3-06 actual outcomes might not match.
 - **Cross-compile matrix preserved unchanged from M2-07 (desktop gating + mobile continue-on-error) PLUS new musl leg**: do NOT remove or restructure `cross-compile-desktop` or `cross-compile-mobile`. The new `cross-compile-musl` job runs in parallel as a third leg.
 - **Push policy**: do not `git push origin v0.4.0` or `git push origin m3.7` unless the user explicitly asks. The tags exist locally; the release worker can decide push timing. Same precedent as M2-07.
 
@@ -88,7 +88,7 @@ These are the M3 final-release acceptance criteria. Drift breaks downstream pari
 | §7 Wire identifiers — API client 16 anthropic-beta constants | Phase D Tasks 9 & 10, Phase E Task 12 |
 | §7 Wire identifiers — OAuth endpoints + single-flight | Phase D Tasks 9 & 10, Phase E Task 12 |
 | §7 Wire identifiers — cost events + `is_batch_request` reserved | Phase D Tasks 9 & 10, Phase E Task 12 |
-| §7 Wire identifiers — telemetry schema 145+ events | Phase D Tasks 9 & 10, Phase E Task 12 |
+| §7 Wire identifiers — telemetry schema 143 events | Phase D Tasks 9 & 10, Phase E Task 12 |
 | §9 Release timeline (10-week, weeks 9-10 are M3-07) | All phases — this plan IS the week 9-10 deliverable |
 | Brief — `CHANGELOG.md` v0.4.0 entry | Phase E Task 11 |
 | Brief — `docs/ARCHITECTURE.md` refresh + parity subsection | Phase E Task 12 |
@@ -1003,7 +1003,7 @@ Create `lingxi-core/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.js
     ]
   },
   "telemetry": {
-    "expected_total_event_count_at_least": 145,
+    "expected_total_event_count_at_least": 143,
     "module_event_counts": {
       "api": 25,
       "agent": 30,
@@ -1012,7 +1012,7 @@ Create `lingxi-core/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.js
       "cost": 10,
       "oauth": 8,
       "memory": 12,
-      "settings": 5
+      "settings": 3
     },
     "statsig_wire_keys": ["event_name", "value", "metadata"]
   }
@@ -1227,10 +1227,11 @@ fn full_v0_4_0_smoke_fixture_loads_and_self_consistent() {
     assert!(fx.cost_events.tengu_api_event_names_subset.contains(&"tengu_api_rate_limited".to_string()));
 
     // --- Telemetry literals ---
-    // Per spec §7 line 764: ~145 explicit + ~55 incremental = ~200 events
-    // total at maturity. v0.4.0 ships at least 145.
-    assert!(fx.telemetry.expected_total_event_count_at_least >= 145);
-    // Per-category counts per spec §7 lines 755-764.
+    // Per spec §7 line 764: 143 explicit + ~55 incremental = ~200 events
+    // total at maturity. v0.4.0 ships at least 143 (settings count corrected
+    // from spec's 5 to 3 to match M3-01's actual emitters).
+    assert!(fx.telemetry.expected_total_event_count_at_least >= 143);
+    // Per-category counts per spec §7 lines 755-764 (settings corrected to 3).
     assert_eq!(fx.telemetry.module_event_counts.api, 25);
     assert_eq!(fx.telemetry.module_event_counts.agent, 30);
     assert_eq!(fx.telemetry.module_event_counts.session, 15);
@@ -1238,7 +1239,7 @@ fn full_v0_4_0_smoke_fixture_loads_and_self_consistent() {
     assert_eq!(fx.telemetry.module_event_counts.cost, 10);
     assert_eq!(fx.telemetry.module_event_counts.oauth, 8);
     assert_eq!(fx.telemetry.module_event_counts.memory, 12);
-    assert_eq!(fx.telemetry.module_event_counts.settings, 5);
+    assert_eq!(fx.telemetry.module_event_counts.settings, 3);
     let sum = fx.telemetry.module_event_counts.api
         + fx.telemetry.module_event_counts.agent
         + fx.telemetry.module_event_counts.session
@@ -1247,7 +1248,7 @@ fn full_v0_4_0_smoke_fixture_loads_and_self_consistent() {
         + fx.telemetry.module_event_counts.oauth
         + fx.telemetry.module_event_counts.memory
         + fx.telemetry.module_event_counts.settings;
-    assert_eq!(sum, 145, "per-category counts must sum to 145 (spec §7 line 764)");
+    assert_eq!(sum, 143, "per-category counts must sum to 143 (spec §7 line 764, settings corrected to 3)");
     // Statsig wire shape per claude-code src/services/statsig.ts.
     assert_eq!(
         fx.telemetry.statsig_wire_keys,
@@ -1339,7 +1340,7 @@ the spec §7 wire identifiers table (lines 620-810):
   5-min login deadline, three scopes, five tengu_oauth_* events.
 - Cost events: tengu_cost_recorded / _budget_warning / _budget_exceeded,
   is_batch_request reserved-for-M4 flag, four tengu_api_* event names.
-- Telemetry: per-category event counts (25/30/15/40/10/8/12/5 = 145),
+- Telemetry: per-category event counts (25/30/15/40/10/8/12/3 = 143),
   statsig wire-shape keys.
 
 NOT a substitute for the per-subsystem parity drivers (parity_*.rs
@@ -1465,7 +1466,7 @@ developer sustained-Rust delivery per spec §9.
   endpoint).
 - `lingxi-telemetry` — new `tengu/` module tree with 8 sub-modules
   (`api`, `agent`, `session`, `tool`, `cost`, `oauth`, `memory`,
-  `settings`) declaring 145+ events as the single authoritative source.
+  `settings`) declaring 143 events as the single authoritative source.
   Every payload struct `#[serde(deny_unknown_fields)]`, every payload
   enum `#[non_exhaustive]`, every user-derived string field
   `Verified` / `PiiTagged` (NOT bare `String`). Three new sinks:
@@ -1507,18 +1508,18 @@ developer sustained-Rust delivery per spec §9.
   seconds. Single-flight via `refresh_lock: Arc<tokio::sync::Mutex<()>>`
   per v3 §16.3. 401 retry policy: retry ONCE after refresh.
 - **Cost events**: `tengu_cost_recorded` payload fields
-  `model: VerifiedClean`, `input_tokens: u64`, `output_tokens: u64`,
+  `model: Verified`, `input_tokens: u64`, `output_tokens: u64`,
   `cache_read_input_tokens: u64`, `cache_creation_input_tokens: u64`,
-  `cost_usd: u64` (nano-USD per v3 §17), `session_id: VerifiedClean`,
+  `cost_usd: u64` (nano-USD per v3 §17), `session_id: Verified`,
   `is_batch_request: bool` (reserved for M4; always false in M3).
-  `tengu_cost_budget_warning` uses `percent_bps: u32` (basis points,
-  fixed-point per §4 Flow C).
+  `tengu_cost_budget_warning` uses `percent_bps: u64` (basis points,
+  fixed-point per §4 Flow C; M3-06's BudgetWarningPayload locks the type).
 - **Telemetry**: ~200 event names organized into 8 modules with locked
   per-category counts: api=25, agent=30, session=15, tool=40, cost=10,
-  oauth=8, memory=12, settings=5 (= 145 explicit; ~55 incremental from
+  oauth=8, memory=12, settings=3 (= 143 explicit; ~55 incremental from
   M2-touched subsystems). Statsig wire shape `{event_name, value,
   metadata}` per `claude-code/src/services/statsig.ts`. All payload
-  strings `VerifiedClean` / `PiiTagged`; `strip_proto_fields` runs at
+  strings `Verified` / `PiiTagged`; `strip_proto_fields` runs at
   every general-access sink. Event-name list is append-only; field
   additions to existing events use sibling-v2 names (`tengu_<name>_v2`)
   over a 2-minor-release deprecation cycle.
@@ -1526,7 +1527,8 @@ developer sustained-Rust delivery per spec §9.
 ### Tests + verification
 
 - Workspace test count: ~700 functional tests + ~24 non-functional gates
-  (loom / fuzz / criterion / chaos) per spec §6. Up from ~145 at v0.3.0.
+  (loom / fuzz / criterion / chaos) per spec §6. Up from 488 at v0.3.0
+  (per master spec §6 line 590; M2 final test count); M3 adds ~200-300.
   Net add: ~150 unit + 12 contract drivers + ~25 integration + 6 parity
   + 8 loom + 4 fuzz + 6 criterion + 6 chaos.
 - 16 parity drivers gate on every PR: 7 inherited from M2 (M2-07) plus 9
@@ -1705,7 +1707,7 @@ Edit `docs/ARCHITECTURE.md` to update the existing `telemetry/anthropic-oauth` e
 ```
 - `telemetry` — analytics bus + sinks + PII discipline. M3 adds the
   `tengu/` module tree (8 sub-modules: `api`, `agent`, `session`, `tool`,
-  `cost`, `oauth`, `memory`, `settings`; 145+ event names; every payload
+  `cost`, `oauth`, `memory`, `settings`; 143 event names; every payload
   struct `#[serde(deny_unknown_fields)]`, every payload enum
   `#[non_exhaustive]`, every user-derived string `Verified` / `PiiTagged`)
   and `sinks/` (NoOpSink default, InMemorySink test capture, StatsigSink
@@ -1815,20 +1817,20 @@ three-constant `VERTEX_COUNT_TOKENS_ALLOWED` allowlist; Bedrock routes
 | 401 retry policy | retry ONCE after refresh |
 
 ### Cost events (M3-05)
-- `tengu_cost_recorded` payload fields: `model: VerifiedClean`,
+- `tengu_cost_recorded` payload fields: `model: Verified`,
   `input_tokens: u64`, `output_tokens: u64`, `cache_read_input_tokens: u64`,
   `cache_creation_input_tokens: u64`, `cost_usd: u64` (nano-USD),
-  `session_id: VerifiedClean`, `is_batch_request: bool` (reserved for M4,
+  `session_id: Verified`, `is_batch_request: bool` (reserved for M4,
   always `false` in v0.4.0).
-- `tengu_cost_budget_warning` uses `percent_bps: u32` (basis points;
+- `tengu_cost_budget_warning` uses `percent_bps: u64` (basis points;
   fixed-point per §4 Flow C — no `f64` in payload).
 - Four `tengu_api_*` events: `_request_started`, `_request_succeeded`,
-  `_request_failed`, `_rate_limited`. All payload strings `VerifiedClean`.
+  `_request_failed`, `_rate_limited`. All payload strings `Verified`.
 
 ### Telemetry schema (M3-06)
 - ~200 `tengu_*` event names in 8 sub-modules. Per-category counts:
   api=25, agent=30, session=15, tool=40, cost=10, oauth=8, memory=12,
-  settings=5 (= 145 explicit; ~55 incremental from M2-touched subsystems).
+  settings=3 (= 143 explicit; ~55 incremental from M2-touched subsystems).
 - Statsig wire shape: `{event_name, value, metadata}` per
   `claude-code/src/services/statsig.ts::logStatsigEvent`.
 - All payload strings `Verified` / `PiiTagged`; `strip_proto_fields`
@@ -1942,7 +1944,7 @@ abstract:
 - **Cost events (M3-05)** — emits `tengu_cost_recorded` (with reserved
   `is_batch_request: bool` for M4 Batch endpoint) and the budget +
   api_request events through M3-06's typed schema.
-- **Telemetry schema (M3-06)** — 145+ `tengu_*` events across 8
+- **Telemetry schema (M3-06)** — 143 `tengu_*` events across 8
   sub-modules, each payload struct `#[serde(deny_unknown_fields)]`,
   every payload enum `#[non_exhaustive]`, every user-derived string
   field `Verified` / `PiiTagged` (NOT bare `String`). Three sinks:
@@ -2014,7 +2016,7 @@ and `new_string`:
 Platform-agnostic Rust engine for an AI coding assistant with 1:1 behavioral
 parity to claude-code (2026-03-31 TypeScript reference) on desktop OSes.
 v0.4.0 (M3) completes the engine surface — Settings, Memory, real API
-client, OAuth refresh, cost events, 145+ telemetry events — over an 8-10
+client, OAuth refresh, cost events, 143 telemetry events — over an 8-10
 week single-developer delivery on top of v0.3.0 (M2 desktop platforms).
 Android/iOS land in M4.
 ```
@@ -2358,7 +2360,7 @@ Predecessor M3 commits (all green at this point):
             + single-flight loom test
 - 3062299  M3-05 Cost events — tengu_cost_recorded with reserved
             is_batch_request + four tengu_api_* events
-- 06dbc2b  M3-06 Telemetry — 145+ events in 8 modules + 3 sinks +
+- 06dbc2b  M3-06 Telemetry — 143 events in 8 modules + 3 sinks +
             tengu_event_audit proc-macro
 
 The m3.7 tag points at the release-verification marker commit. The
@@ -2406,7 +2408,7 @@ git tag -a v0.4.0 -m "$(cat <<'EOF'
 LingXi Core v0.4.0 — M3 engine completion
 
 Completes the claude-code engine surface — Settings, Memory, real API
-client, OAuth refresh, cost events, 145+ telemetry events — at 1:1
+client, OAuth refresh, cost events, 143 telemetry events — at 1:1
 byte-aligned parity with claude-code upstream commit 6a25909
 (2026-05-23). 8-10-week single-developer sustained-Rust delivery on
 top of v0.3.0 (M2 desktop platforms).
@@ -2432,9 +2434,9 @@ Locked wire identifiers (see CHANGELOG.md [0.4.0] and docs/ARCHITECTURE.md
   via refresh_lock (loom-verified).
 - Cost events: tengu_cost_recorded with reserved is_batch_request:bool
   for M4 Batch endpoint (always false in v0.4.0); _budget_warning with
-  percent_bps:u32 basis points (fixed-point); four tengu_api_* events.
-- Telemetry: 145+ tengu_* events in 8 sub-modules (api=25, agent=30,
-  session=15, tool=40, cost=10, oauth=8, memory=12, settings=5);
+  percent_bps:u64 basis points (fixed-point); four tengu_api_* events.
+- Telemetry: 143 tengu_* events in 8 sub-modules (api=25, agent=30,
+  session=15, tool=40, cost=10, oauth=8, memory=12, settings=3);
   Verified / PiiTagged on every user-derived string field; statsig
   wire shape {event_name, value, metadata}; tengu_event_audit proc-
   macro enforces schema discipline at compile time.
@@ -2546,7 +2548,7 @@ Expected output: recent log shows the M3-07 commits + the release marker; tag li
 - `oauth-2025-04-20` / `refresh_token` / `S256` / `http://127.0.0.1:{port}/callback` / 300s deadline / 3 scopes → fixture + driver.
 - `tengu_cost_recorded` / `tengu_cost_budget_warning` / `tengu_cost_budget_exceeded` / `tengu_api_*` event names → fixture + driver.
 - `is_batch_request` reserved flag → fixture + driver.
-- Per-category counts 25/30/15/40/10/8/12/5 = 145 → fixture + driver assertion that `sum == 145`.
+- Per-category counts 25/30/15/40/10/8/12/3 = 143 → fixture + driver assertion that `sum == 143`.
 - Statsig wire keys `event_name`, `value`, `metadata` → fixture + driver.
 
 **Deviations from the user's brief:**

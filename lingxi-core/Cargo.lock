@@ -933,12 +933,19 @@ name = "lingxi-api-client"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "futures-core",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "lingxi-protocol",
+ "lingxi-telemetry",
  "lingxi-traits",
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 

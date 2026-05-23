@@ -175,3 +175,45 @@ async fn no_op_hook_does_not_retry_on_401() {
 fn default_base_url_matches_spec_byte_for_byte() {
     assert_eq!(DEFAULT_BASE_URL, "https://api.anthropic.com");
 }
+
+// ---- end-to-end coverage matrix --------------------------------------------
+
+/// Full Flow B coverage: 429 (with Retry-After) → 401 (refresh) → 200.
+///
+/// Catches integration bugs the per-feature tests above might miss — e.g.
+/// the 429 sleep eating the 401-handling budget, or the OAuth refresh path
+/// being skipped after a rate-limit retry.
+#[tokio::test]
+async fn matrix_429_then_401_then_200_end_to_end() {
+    let server = spawn_mock(vec![
+        MockResp {
+            status: 429,
+            body: "wait".into(),
+            headers: vec![("Retry-After".into(), "1".into())],
+        },
+        MockResp {
+            status: 401,
+            body: "stale".into(),
+            headers: vec![],
+        },
+        MockResp {
+            status: 200,
+            body: r#"{"id":"msg_99","model":"claude-opus-4-6","content":[{"type":"text","text":"final"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}"#.into(),
+            headers: vec![],
+        },
+    ])
+    .await;
+    let hook = Arc::new(ScriptedHook {
+        refresh_count: AtomicU8::new(0),
+    });
+    let provider = AnthropicProvider::new("sk-test", Some(server.base_url.clone()))
+        .with_oauth_hook(hook.clone());
+    let transport = server.transport();
+    let r = provider
+        .messages_create_non_stream("claude-opus-4-6", make_msgs(), transport.as_ref())
+        .await;
+    assert!(r.is_ok(), "full matrix must converge: {r:?}");
+    assert_eq!(hook.refresh_count.load(Ordering::SeqCst), 1);
+    assert_eq!(server.attempt_count(), 3);
+    server.shutdown().await;
+}

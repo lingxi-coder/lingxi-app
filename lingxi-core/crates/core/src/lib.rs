@@ -16,6 +16,7 @@ pub mod model;
 pub mod prompt;
 pub mod reducer;
 pub mod session;
+pub mod settings;
 pub mod state_machine;
 pub mod token;
 

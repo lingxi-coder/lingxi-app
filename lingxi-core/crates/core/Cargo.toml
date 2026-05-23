@@ -11,6 +11,12 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# M3-01 settings module: schemas + source-loader pattern reference.
+schemars = "0.8"
+figment = { version = "0.10", features = ["env", "json", "toml"] }
+
+[dev-dependencies]
+tempfile = "3.13"
 
 [lints]
 workspace = true

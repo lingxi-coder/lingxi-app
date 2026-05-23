@@ -11,6 +11,7 @@ lingxi-traits = { path = "../../crates/traits" }
 lingxi-jsonrpc = { path = "../../crates/jsonrpc" }
 lingxi-lsp = { path = "../../crates/lsp" }
 lingxi-platform-common = { path = "../common" }
+lingxi-api-client = { path = "../../crates/api-client" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
@@ -26,9 +27,11 @@ fs2 = "0.4"
 notify = "8"
 notify-debouncer-mini = "0.6"
 tokio-stream = "0.1"
+bytes = "1"
 
 [dev-dependencies]
 tempfile = "3.13"
+axum = "0.7"
 
 [lints]
 workspace = true

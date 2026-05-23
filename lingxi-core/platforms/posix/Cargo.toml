@@ -12,6 +12,7 @@ lingxi-jsonrpc = { path = "../../crates/jsonrpc" }
 lingxi-lsp = { path = "../../crates/lsp" }
 lingxi-platform-common = { path = "../common" }
 lingxi-sandbox = { path = "../../crates/sandbox" }
+lingxi-api-client = { path = "../../crates/api-client" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }

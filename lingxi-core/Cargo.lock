@@ -1192,6 +1192,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hex",
+ "lingxi-api-client",
  "lingxi-jsonrpc",
  "lingxi-lsp",
  "lingxi-mcp",
@@ -1239,10 +1240,13 @@ name = "lingxi-platform-windows"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
+ "bytes",
  "fs2",
  "futures",
  "futures-core",
  "futures-util",
+ "lingxi-api-client",
  "lingxi-jsonrpc",
  "lingxi-lsp",
  "lingxi-platform-common",

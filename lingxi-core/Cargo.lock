@@ -1495,6 +1495,7 @@ dependencies = [
  "lingxi-platform-windows",
  "lingxi-protocol",
  "lingxi-sandbox",
+ "lingxi-telemetry",
  "lingxi-traits",
  "proptest",
  "serde",

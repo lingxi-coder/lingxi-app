@@ -26,7 +26,7 @@
     "CLAUDE_CODE_MODEL": "claude-haiku-4-5"
   },
   "expected_effective_settings": {
-    "model": "claude-opus-4-7",
+    "model": "claude-haiku-4-5",
     "trustedDirectories": [
       "/opt/lingxi/defaults",
       "/srv/project",
@@ -42,7 +42,7 @@
     }
   },
   "expected_provenance": {
-    "model": ["user"],
+    "model": ["env"],
     "trustedDirectories": ["defaults", "project", "user", "env"],
     "enabledTools": ["defaults", "project", "user"],
     "hooks": ["user"]

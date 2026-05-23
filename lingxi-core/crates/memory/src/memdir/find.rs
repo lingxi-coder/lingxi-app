@@ -93,10 +93,7 @@ fn score_bps_no_boost(prompt: &str, entry: &MemoryEntry) -> u64 {
 /// Ties break by `(tier_order_asc, path_lex_asc)` for deterministic
 /// cross-platform ordering.
 #[must_use]
-pub fn find_relevant(
-    entries: &[MemoryEntry],
-    inputs: &RelevanceInputs<'_>,
-) -> Vec<MemoryEntry> {
+pub fn find_relevant(entries: &[MemoryEntry], inputs: &RelevanceInputs<'_>) -> Vec<MemoryEntry> {
     let k = inputs.k.unwrap_or(DEFAULT_RELEVANT_MEMORIES);
     if k == 0 || entries.is_empty() {
         return Vec::new();
@@ -129,11 +126,7 @@ pub fn find_relevant(
             .then_with(|| a.1.path.cmp(&b.1.path))
     });
 
-    scored
-        .into_iter()
-        .take(k)
-        .map(|(_, e)| e.clone())
-        .collect()
+    scored.into_iter().take(k).map(|(_, e)| e.clone()).collect()
 }
 
 /// Team boost numerator in basis points (× 1.2 = × `12_000` / `10_000`).
@@ -156,7 +149,15 @@ mod tests {
     fn tokenize_lowercases_and_splits_on_punctuation() {
         let t = tokenize("Hello, World! Foo_bar 123.");
         let v: Vec<_> = t.iter().cloned().collect();
-        assert_eq!(v, vec!["123".to_string(), "foo_bar".into(), "hello".into(), "world".into()]);
+        assert_eq!(
+            v,
+            vec![
+                "123".to_string(),
+                "foo_bar".into(),
+                "hello".into(),
+                "world".into()
+            ]
+        );
     }
 
     #[test]
@@ -184,7 +185,10 @@ mod tests {
     #[test]
     fn jaccard_deterministic() {
         for _ in 0..5 {
-            assert_eq!(jaccard_bps("alpha beta gamma", "beta gamma delta"), jaccard_bps("alpha beta gamma", "beta gamma delta"));
+            assert_eq!(
+                jaccard_bps("alpha beta gamma", "beta gamma delta"),
+                jaccard_bps("alpha beta gamma", "beta gamma delta")
+            );
         }
     }
 
@@ -231,7 +235,10 @@ mod tests {
         //   b: jaccard({a,b},{b,g}) = 3333 ; project weight = 8000 → 26_664_000
         //   c: jaccard({a,b},{d}) = 0     ; session weight = 10000 → 0
         // Top-2 must be [a, b].
-        let names: Vec<_> = out.iter().map(|e| e.path.to_string_lossy().to_string()).collect();
+        let names: Vec<_> = out
+            .iter()
+            .map(|e| e.path.to_string_lossy().to_string())
+            .collect();
         assert_eq!(names, vec!["/m/a.md", "/m/b.md"]);
     }
 
@@ -256,7 +263,11 @@ mod tests {
                 team_boost_enabled: false,
             },
         );
-        assert_eq!(out.len(), 5, "default k must be DEFAULT_RELEVANT_MEMORIES (5)");
+        assert_eq!(
+            out.len(),
+            5,
+            "default k must be DEFAULT_RELEVANT_MEMORIES (5)"
+        );
     }
 
     #[test]
@@ -286,11 +297,17 @@ mod tests {
         ];
         let out = find_relevant(
             &entries,
-            &RelevanceInputs { prompt: "alpha", k: Some(2), team_boost_enabled: false },
+            &RelevanceInputs {
+                prompt: "alpha",
+                k: Some(2),
+                team_boost_enabled: false,
+            },
         );
         // Lexicographic ascending after equal scores: a.md before z.md.
         assert_eq!(
-            out.iter().map(|e| e.path.to_string_lossy().to_string()).collect::<Vec<_>>(),
+            out.iter()
+                .map(|e| e.path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
             vec!["/m/a.md", "/m/z.md"]
         );
     }
@@ -320,7 +337,11 @@ mod tests {
         ];
         let out = find_relevant(
             &entries,
-            &RelevanceInputs { prompt: "alpha beta", k: Some(5), team_boost_enabled: false },
+            &RelevanceInputs {
+                prompt: "alpha beta",
+                k: Some(5),
+                team_boost_enabled: false,
+            },
         );
         assert_eq!(out.len(), 2, "old entry must remain (not dropped)");
     }
@@ -346,8 +367,22 @@ mod tests {
         ];
         // Without boost: team weight 7000 > user weight 6000 → team first.
         // With boost (team × 12000/10000 = team × 1.2): team weight 8400 > user weight 6000 → team first by even more.
-        let without = find_relevant(&entries, &RelevanceInputs { prompt: "alpha", k: Some(2), team_boost_enabled: false });
-        let with_boost = find_relevant(&entries, &RelevanceInputs { prompt: "alpha", k: Some(2), team_boost_enabled: true });
+        let without = find_relevant(
+            &entries,
+            &RelevanceInputs {
+                prompt: "alpha",
+                k: Some(2),
+                team_boost_enabled: false,
+            },
+        );
+        let with_boost = find_relevant(
+            &entries,
+            &RelevanceInputs {
+                prompt: "alpha",
+                k: Some(2),
+                team_boost_enabled: true,
+            },
+        );
         assert_eq!(
             without[0].path.to_string_lossy(),
             "/m/team.md",
@@ -363,22 +398,28 @@ mod tests {
     fn team_boost_only_applies_to_team_tier() {
         use lingxi_protocol::{MemoryEntry, MemoryEntryTier};
         // A Project entry must NOT receive the boost when team_boost_enabled.
-        let entries = vec![
-            MemoryEntry {
-                path: "/m/proj.md".into(),
-                tier: MemoryEntryTier::Project,
-                body: "alpha".into(),
-                age_days: 0,
-                size_bytes: 1,
-            },
-        ];
+        let entries = vec![MemoryEntry {
+            path: "/m/proj.md".into(),
+            tier: MemoryEntryTier::Project,
+            body: "alpha".into(),
+            age_days: 0,
+            size_bytes: 1,
+        }];
         let with_boost = find_relevant(
             &entries,
-            &RelevanceInputs { prompt: "alpha", k: Some(1), team_boost_enabled: true },
+            &RelevanceInputs {
+                prompt: "alpha",
+                k: Some(1),
+                team_boost_enabled: true,
+            },
         );
         let without = find_relevant(
             &entries,
-            &RelevanceInputs { prompt: "alpha", k: Some(1), team_boost_enabled: false },
+            &RelevanceInputs {
+                prompt: "alpha",
+                k: Some(1),
+                team_boost_enabled: false,
+            },
         );
         // Scores must be identical (project tier — boost doesn't apply).
         // We can't observe the score directly, but we can re-rank against a known

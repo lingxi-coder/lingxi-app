@@ -107,10 +107,8 @@ pub async fn emit_case_mismatch(
     md.insert(
         "_PROTO_path".into(),
         lingxi_telemetry::sink::AnalyticsValue::String(
-            lingxi_telemetry::pii::PiiTagged::assert_pii_tagged_column(
-                path.display().to_string(),
-            )
-            .into_inner(),
+            lingxi_telemetry::pii::PiiTagged::assert_pii_tagged_column(path.display().to_string())
+                .into_inner(),
         ),
     );
     md.insert(

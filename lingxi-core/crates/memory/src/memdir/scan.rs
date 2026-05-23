@@ -60,10 +60,7 @@ fn enumerate(
         // used by `team_prompts::collect_team_prompts` when no user_memdir
         // is needed. We match by raw OS error rather than
         // `ErrorKind::NotADirectory` (unstable on stable Rust as of 1.83).
-        Err(e)
-            if e.kind() == std::io::ErrorKind::NotFound
-                || e.raw_os_error() == Some(20) =>
-        {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(20) => {
             return Ok(())
         }
         Err(e) => return Err(e),
@@ -134,14 +131,22 @@ mod tests {
         let memdir = home.join(".claude").join("memdir");
         fs::create_dir_all(&memdir).unwrap();
         write_dated(&memdir.join("fresh.md"), b"fresh\n", 10);
-        write_dated(&memdir.join("stale.md"), b"stale\n", MEMORY_AGE_HARD_DROP_DAYS + 1);
+        write_dated(
+            &memdir.join("stale.md"),
+            b"stale\n",
+            MEMORY_AGE_HARD_DROP_DAYS + 1,
+        );
 
         let roots = memdir_path(home, false);
         let snap = scan_memdir_at(&roots, SystemTime::now()).unwrap();
         let names: Vec<_> = snap
             .entries
             .iter()
-            .filter_map(|e| e.path.file_name().and_then(|n| n.to_str().map(String::from)))
+            .filter_map(|e| {
+                e.path
+                    .file_name()
+                    .and_then(|n| n.to_str().map(String::from))
+            })
             .collect();
         assert!(names.contains(&"fresh.md".into()));
         assert!(!names.contains(&"stale.md".into()), "stale dropped at scan");

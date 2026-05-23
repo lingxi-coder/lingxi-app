@@ -42,7 +42,11 @@ fn full_memdir_scan_then_find_relevant_returns_byte_identical_ordering() {
     );
     let names: Vec<_> = out
         .iter()
-        .map(|e| e.path.file_name().and_then(|n| n.to_str().map(String::from)))
+        .map(|e| {
+            e.path
+                .file_name()
+                .and_then(|n| n.to_str().map(String::from))
+        })
         .collect::<Option<Vec<_>>>()
         .unwrap();
 
@@ -52,7 +56,10 @@ fn full_memdir_scan_then_find_relevant_returns_byte_identical_ordering() {
     // 6666 * 10000 * 6000 = 399_960_000_000
     // 10000 * 1000 * 6000 = 60_000_000_000
     // 0 → 0
-    assert_eq!(names, vec!["fresh-alpha.md", "old-alpha.md", "fresh-delta.md"]);
+    assert_eq!(
+        names,
+        vec!["fresh-alpha.md", "old-alpha.md", "fresh-delta.md"]
+    );
 }
 
 #[test]
@@ -108,7 +115,11 @@ fn entries_older_than_365_dropped_at_scan_not_in_results() {
     let names: Vec<_> = snap
         .entries
         .iter()
-        .filter_map(|e| e.path.file_name().and_then(|n| n.to_str().map(String::from)))
+        .filter_map(|e| {
+            e.path
+                .file_name()
+                .and_then(|n| n.to_str().map(String::from))
+        })
         .collect();
     assert!(names.contains(&"fresh.md".into()));
     assert!(!names.contains(&"ancient.md".into()));

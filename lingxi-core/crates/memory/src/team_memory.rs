@@ -55,6 +55,9 @@ mod tests {
     #[test]
     fn watcher_active_resolves_to_team_mem() {
         let w = TeamMemoryWatcher::new(&PathBuf::from("/home/u"), true);
-        assert_eq!(w.dir(), Some(std::path::Path::new("/home/u/.claude/team-mem")));
+        assert_eq!(
+            w.dir(),
+            Some(std::path::Path::new("/home/u/.claude/team-mem"))
+        );
     }
 }

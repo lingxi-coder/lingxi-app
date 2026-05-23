@@ -24,7 +24,10 @@ pub fn collect_team_prompts(team_dir: &Path) -> std::io::Result<Vec<MemoryEntry>
 /// # Errors
 ///
 /// Forwards `std::io::Error` from the underlying scan.
-pub fn collect_team_prompts_at(team_dir: &Path, now: SystemTime) -> std::io::Result<Vec<MemoryEntry>> {
+pub fn collect_team_prompts_at(
+    team_dir: &Path,
+    now: SystemTime,
+) -> std::io::Result<Vec<MemoryEntry>> {
     let roots = MemdirRoots {
         user_memdir: PathBuf::from("/dev/null"),
         team_memdir: Some(team_dir.to_path_buf()),

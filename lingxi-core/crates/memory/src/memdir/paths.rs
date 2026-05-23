@@ -51,7 +51,10 @@ mod tests {
     fn team_memdir_is_dot_claude_team_mem_when_enabled() {
         let home = PathBuf::from("/home/u");
         let roots = memdir_path(&home, true);
-        assert_eq!(roots.team_memdir, Some(PathBuf::from("/home/u/.claude/team-mem")));
+        assert_eq!(
+            roots.team_memdir,
+            Some(PathBuf::from("/home/u/.claude/team-mem"))
+        );
     }
 
     #[test]

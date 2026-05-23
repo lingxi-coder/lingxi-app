@@ -1,6 +1,6 @@
 //! Parity fixture: `find_relevant` ranking determinism.
 //!
-//! Locks fixed-point u64 scoring (jaccard × age × tier × team_boost) against
+//! Locks fixed-point u64 scoring (jaccard × age × tier × `team_boost`) against
 //! claude-code's reference. Each scenario is platform-independent: we
 //! construct `MemoryEntry` literals directly with explicit `age_days` so
 //! filesystem mtime drift can't affect the assertion. Drift in any factor

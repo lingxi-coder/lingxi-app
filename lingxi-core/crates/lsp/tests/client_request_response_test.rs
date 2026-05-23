@@ -103,3 +103,55 @@ async fn initialize_sends_canonical_lsp_params_and_receives_capabilities() {
 
     peer_task.await.expect("peer task ok");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_hover_round_trips_and_deserializes() {
+    use lsp_types::{
+        Hover, HoverContents, MarkedString, Position, TextDocumentIdentifier,
+        TextDocumentPositionParams,
+    };
+
+    let (client_io, mut peer_io) = duplex(FRAME_BUFFER);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let connection = Connection::new_lsp(client_read, client_write);
+    let client = LspClient::new("test-server".to_string(), connection);
+
+    let peer_task = tokio::spawn(async move {
+        let req = read_one_frame(&mut peer_io).await;
+        assert_eq!(req["method"], "textDocument/hover");
+        assert_eq!(req["params"]["textDocument"]["uri"], "file:///tmp/foo.rs");
+        assert_eq!(req["params"]["position"]["line"], 4);
+        assert_eq!(req["params"]["position"]["character"], 2);
+
+        write_frame(
+            &mut peer_io,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": req["id"],
+                "result": {"contents": "Hello hover"}
+            }),
+        )
+        .await;
+    });
+
+    let params = TextDocumentPositionParams {
+        text_document: TextDocumentIdentifier {
+            uri: lsp_types::Url::parse("file:///tmp/foo.rs").unwrap(),
+        },
+        position: Position {
+            line: 4,
+            character: 2,
+        },
+    };
+    let hover: Option<Hover> = client
+        .request("textDocument/hover", params)
+        .await
+        .expect("hover ok");
+    let hover = hover.expect("hover present");
+    match hover.contents {
+        HoverContents::Scalar(MarkedString::String(s)) => assert_eq!(s, "Hello hover"),
+        other => panic!("unexpected hover contents shape: {:?}", other),
+    }
+
+    peer_task.await.expect("peer ok");
+}

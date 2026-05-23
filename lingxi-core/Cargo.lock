@@ -912,6 +912,7 @@ name = "lingxi-mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "lingxi-jsonrpc",
  "lingxi-protocol",
  "lingxi-traits",
  "serde",

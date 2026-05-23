@@ -6,10 +6,12 @@
 #![forbid(unsafe_code)]
 
 pub mod codec;
+pub mod inbound;
 pub mod messages;
 pub mod router;
 
 pub use codec::{CodecError, LineCodec, LspCodec};
+pub use inbound::{BoxedHandler, Dispatcher, InboundHandler};
 pub use messages::{
     Id, Message, Notification, Request, Response, ResponseError, INTERNAL_ERROR, INVALID_PARAMS,
     INVALID_REQUEST, JSONRPC_VERSION, METHOD_NOT_FOUND, PARSE_ERROR,

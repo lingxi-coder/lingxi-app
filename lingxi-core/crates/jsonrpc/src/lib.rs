@@ -5,11 +5,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod broker;
 pub mod codec;
 pub mod inbound;
 pub mod messages;
 pub mod router;
 
+pub use broker::{spawn as spawn_broker, BrokerError, BrokerHandle, DEFAULT_NOTIFICATION_CAPACITY};
 pub use codec::{CodecError, LineCodec, LspCodec};
 pub use inbound::{BoxedHandler, Dispatcher, InboundHandler};
 pub use messages::{

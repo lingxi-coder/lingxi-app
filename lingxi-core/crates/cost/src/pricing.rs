@@ -129,12 +129,55 @@ pub enum PricingResolution {
     },
 }
 
-/// Errors emitted by the pricing layer.
+/// Errors emitted by the cost layer.
 #[derive(Debug, Clone, Error)]
 pub enum CostError {
     /// Lookup failed: no exact entry and no provider default for this model.
     #[error("unpriced model: {0:?}")]
     UnpricedModel(ModelRef),
+    /// The model is not in the catalog and has no provider default.
+    ///
+    /// Display string is byte-for-byte locked against claude-code:
+    /// `"Cost tracking unavailable for {model}"`. See spec §5 lines 496-497.
+    #[error("Cost tracking unavailable for {model}")]
+    UnknownModel {
+        /// The model identifier that was not found.
+        model: String,
+    },
+    /// The session's cumulative cost has crossed the configured budget limit.
+    ///
+    /// Display string is byte-for-byte locked against claude-code:
+    /// `"Budget exceeded (${current:.2}); stopped."`. See spec §5 lines 498-500.
+    /// `limit` and `current` are in USD (post-conversion from nano-USD); the
+    /// dollar-formatted `current` uses
+    /// [`nano_usd_to_dollars_format`](crate::nano_usd_to_dollars_format).
+    #[error("Budget exceeded (${current:.2}); stopped.")]
+    BudgetExceeded {
+        /// The configured limit, in USD.
+        limit: f64,
+        /// The current cumulative cost, in USD.
+        current: f64,
+    },
+}
+
+/// Basis-points discount applied to cost when `is_batch_request = true`.
+///
+/// 5000 bps = 50% off. **M3 never applies this discount** because
+/// `is_batch_request` is always `false` in M3 (the `/v1/messages/batches`
+/// endpoint is M4). M4 will multiply `cost_nano_usd` by
+/// `(10000 - BATCH_DISCOUNT_BPS) / 10000` when batches fire.
+pub const BATCH_DISCOUNT_BPS: u32 = 5000;
+
+/// Format a nano-USD amount as a 2-decimal dollar string, e.g.
+/// `1_500_000_000` → `"$1.50"`.
+///
+/// Used by the budget-exceeded error string. `f64` lossiness on cents-precision
+/// is acceptable here because this output is for **display only** and never
+/// feeds back into accumulating arithmetic (cost storage stays `u64` per v3 §17).
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn nano_usd_to_dollars_format(nano: u64) -> String {
+    format!("${:.2}", (nano as f64) / 1_000_000_000.0)
 }
 
 /// Catalog mapping [`ModelRef`] to [`ModelPricing`], with provider-level

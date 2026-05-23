@@ -13,6 +13,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Basis-points threshold at which `tengu_cost_budget_warning` fires.
+///
+/// 8000 bps = 80% of the configured session limit. Locked by spec §7 line 735
+/// and the M3-05 brief.
+pub const BUDGET_WARNING_THRESHOLD_BPS: u32 = 8000;
+
+/// Basis-points threshold at which `tengu_cost_budget_exceeded` fires.
+///
+/// 10000 bps = 100% of the configured session limit. Locked by spec §7 line 736
+/// and the M3-05 brief.
+pub const BUDGET_EXCEEDED_THRESHOLD_BPS: u32 = 10000;
+
 /// Configuration controlling [`BudgetEnforcer`] behaviour.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BudgetConfig {

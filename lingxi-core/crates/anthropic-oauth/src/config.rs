@@ -31,7 +31,7 @@ pub struct ClaudeAiOAuthConfig {
 /// the exact `read:user write:messages read:projects` byte sequence.
 pub const CLAUDE_CODE_OAUTH_SCOPES: &[&str] = &["read:user", "write:messages", "read:projects"];
 
-/// Spec §7 line 715 — refresh grant_type. Locked byte-for-byte.
+/// Spec §7 line 715 — refresh `grant_type`. Locked byte-for-byte.
 pub const REFRESH_GRANT_TYPE: &str = "refresh_token";
 
 impl ClaudeAiOAuthConfig {

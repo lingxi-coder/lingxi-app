@@ -29,3 +29,41 @@ fn config_default_uses_spec_locked_endpoints() {
         ],
     );
 }
+
+#[tokio::test]
+async fn auth_state_new_returns_arc() {
+    use lingxi_anthropic_oauth::refresh::AuthState;
+    use lingxi_anthropic_oauth::ClaudeAiOAuthConfig;
+    use lingxi_protocol::Secret;
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+
+    // We only build a state with no I/O hooks attached yet — Task 4 wires the
+    // full constructor. For now, the state struct must exist with a `new(...)`
+    // signature we can call against in-memory mocks.
+    let cfg = ClaudeAiOAuthConfig::default_with_port(0);
+    let state: Arc<AuthState> = AuthState::new_for_test(
+        cfg,
+        Secret::new("initial_access".to_string()),
+        Some(Secret::new("initial_refresh".to_string())),
+        SystemTime::now() + Duration::from_secs(3600),
+    );
+    let _ = state;
+}
+
+#[tokio::test]
+async fn refresh_driver_new_holds_state() {
+    use lingxi_anthropic_oauth::refresh::{AuthState, RefreshDriver};
+    use lingxi_anthropic_oauth::ClaudeAiOAuthConfig;
+    use lingxi_protocol::Secret;
+    use std::time::{Duration, SystemTime};
+
+    let cfg = ClaudeAiOAuthConfig::default_with_port(0);
+    let state = AuthState::new_for_test(
+        cfg,
+        Secret::new("a".to_string()),
+        None,
+        SystemTime::now() + Duration::from_secs(3600),
+    );
+    let _driver = RefreshDriver::new(state);
+}

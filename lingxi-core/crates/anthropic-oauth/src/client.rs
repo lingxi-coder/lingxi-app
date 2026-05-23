@@ -12,7 +12,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// OAuth-flow failures.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Error)]
 pub enum OAuthError {
     /// Loopback callback failed (bind, parse, or state mismatch).
     #[error("callback failed: {0}")]
@@ -20,6 +20,26 @@ pub enum OAuthError {
     /// Token exchange against the `IdP` failed.
     #[error("token exchange failed: {0}")]
     TokenExchange(String),
+    /// Stored `refresh_token` has expired or was revoked. User must re-authenticate.
+    ///
+    /// Display string is locked byte-for-byte against claude-code @ 6a25909
+    /// (`"Session expired. Re-authenticate?"`).
+    #[error("Session expired. Re-authenticate?")]
+    RefreshExpired,
+    /// Scope upgrade attempt was denied by the provider.
+    #[error("Scope upgrade denied by provider")]
+    ScopeRejected {
+        /// Scopes the provider required.
+        required: Vec<String>,
+        /// Scopes the token currently holds.
+        granted: Vec<String>,
+    },
+    /// Proactive refresh task failed and is shutting down.
+    #[error("proactive refresh failed: {source}")]
+    ProactiveFailed {
+        /// The underlying error that caused the proactive task to fail.
+        source: Box<OAuthError>,
+    },
 }
 
 /// Stateful client for the Claude.ai Authorization Code flow.

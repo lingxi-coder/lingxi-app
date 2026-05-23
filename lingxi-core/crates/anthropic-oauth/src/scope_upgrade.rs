@@ -1,5 +1,5 @@
 //! OAuth scope upgrade: 403-with-`required_scopes` re-triggers PKCE preserving
-//! the existing refresh_token. See spec §3 / §8 M3-04 phase 4.
+//! the existing `refresh_token`. See spec §3 / §8 M3-04 phase 4.
 //!
 //! M3-04 populates this in Task 7.
 

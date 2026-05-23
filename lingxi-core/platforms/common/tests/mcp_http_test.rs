@@ -6,6 +6,7 @@
 
 use axum::{extract::State, http::HeaderMap, routing::post, Json, Router};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -46,7 +47,7 @@ async fn spawn_mock() -> (String, MockState) {
 #[tokio::test]
 async fn connect_http_sends_accept_and_content_type() {
     let (url, state) = spawn_mock().await;
-    let conn = lingxi_platform_common::connect_http(&url, None, &Default::default())
+    let conn = lingxi_platform_common::connect_http(&url, None, &HashMap::new())
         .await
         .expect("connect_http should succeed");
 
@@ -85,7 +86,7 @@ async fn connect_http_includes_ide_auth_header_when_provided() {
     let conn = lingxi_platform_common::connect_http(
         &url,
         Some("deadbeefdeadbeefdeadbeefdeadbeef"),
-        &Default::default(),
+        &HashMap::new(),
     )
     .await
     .expect("connect_http should succeed");

@@ -40,6 +40,12 @@ http-body-util = "0.1"
 [dev-dependencies]
 proptest.workspace = true
 lingxi-platform-posix-minimal = { path = "../../platforms/posix-minimal" }
+# Used by the M2-07 Phase B parity drivers to exercise production
+# `convert_settings_to_runtime_config` (sandbox config conversion fixture).
+lingxi-sandbox = { path = "../sandbox" }
+# Used by the M2-07 Phase B LSP parity driver to confirm `LspRegistry`
+# `register_config` visibility stays `pub(crate)`.
+lingxi-lsp = { path = "../lsp" }
 # Used by the M2-07 contract drivers that need a real on-disk root
 # (worktree, secure_storage). Dev-only — never reaches production builds.
 tempfile = "3.13"

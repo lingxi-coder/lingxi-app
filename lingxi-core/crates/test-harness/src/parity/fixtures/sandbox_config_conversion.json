@@ -1,0 +1,37 @@
+{
+  "_source": "claude-code/src/utils/sandbox/sandbox-adapter.ts: convertToSandboxRuntimeConfig (lines 38-103)",
+  "_note": "Edit(...)/Read(...)/WebFetch(domain:...) rules walked into filesystem.{allowWrite,denyWrite,allowRead,denyRead} and network.allowedDomains. Bash(...) intentionally ignored — its decision lives in should_use_sandbox. claude-code's path-resolver treats `/path` as relative to the settings directory and `//path` as an absolute escape hatch — see resolve_path_pattern_for_sandbox in path_pattern.rs.",
+  "input_settings": {
+    "permissions": {
+      "allow": [
+        "Edit(//Users/alice/projects/*)",
+        "Read(//Users/alice/projects/*)",
+        "Bash(npm install:*)",
+        "WebFetch(domain:api.anthropic.com)",
+        "WebFetch(domain:github.com)"
+      ],
+      "deny": [
+        "Edit(//etc/*)",
+        "Read(//Users/alice/.ssh/*)"
+      ]
+    },
+    "sandbox": {
+      "enabled": true,
+      "failIfUnavailable": false
+    },
+    "settingsDir": "/Users/alice/.claude"
+  },
+  "expected_runtime_config": {
+    "enabled": true,
+    "failIfUnavailable": false,
+    "filesystem": {
+      "allowWrite": ["/Users/alice/projects/*"],
+      "denyWrite": ["/etc/*"],
+      "allowRead": ["/Users/alice/projects/*"],
+      "denyRead": ["/Users/alice/.ssh/*"]
+    },
+    "network": {
+      "allowedDomains": ["api.anthropic.com", "github.com"]
+    }
+  }
+}

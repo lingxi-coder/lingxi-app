@@ -1,0 +1,14 @@
+{
+  "_source": "claude-code/src/services/mcp/client.ts: createMcpClient (lines 985-1002) — clientInfo + capabilities literals",
+  "_note": "Wire identity: clientInfo.name='claude-code', title='Claude Code', websiteUrl='https://claude.com/claude-code'. Version is CARGO_PKG_VERSION of the lingxi-mcp crate at compile time (the runtime check verifies this rather than baking a number into the fixture). capabilities.roots and capabilities.elicitation are LITERAL empty objects (not null, not missing). Java MCP SDK rejects {form:{},url:{}} for elicitation.",
+  "expected_protocol_version": "2024-11-05",
+  "expected_client_info": {
+    "name": "claude-code",
+    "title": "Claude Code",
+    "websiteUrl": "https://claude.com/claude-code"
+  },
+  "expected_capabilities_shape": {
+    "roots": {},
+    "elicitation": {}
+  }
+}

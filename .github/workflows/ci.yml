@@ -42,7 +42,7 @@ jobs:
         working-directory: lingxi-core
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  cross-compile:
+  cross-compile-desktop:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -51,6 +51,28 @@ jobs:
           - x86_64-unknown-linux-gnu
           - aarch64-apple-darwin
           - x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --locked
+      - name: Cross-compile core crates
+        working-directory: lingxi-core
+        run: |
+          cross check --target ${{ matrix.target }} -p lingxi-protocol
+          cross check --target ${{ matrix.target }} -p lingxi-core
+          cross check --target ${{ matrix.target }} -p lingxi-traits
+          cross check --target ${{ matrix.target }} -p lingxi-api-client
+
+  cross-compile-mobile:
+    runs-on: ubuntu-latest
+    continue-on-error: true   # M3 scope — informational only for v0.3.0
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
           - aarch64-linux-android
           - aarch64-apple-ios
     steps:
@@ -60,7 +82,7 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Install cross
         run: cargo install cross --locked
-      - name: Cross-compile core crates
+      - name: Cross-compile core crates (informational)
         working-directory: lingxi-core
         run: |
           cross check --target ${{ matrix.target }} -p lingxi-protocol

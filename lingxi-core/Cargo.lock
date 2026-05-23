@@ -1015,6 +1015,8 @@ dependencies = [
  "futures-core",
  "futures-util",
  "inotify",
+ "lingxi-jsonrpc",
+ "lingxi-platform-common",
  "lingxi-protocol",
  "lingxi-traits",
  "reqwest",
@@ -1023,6 +1025,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

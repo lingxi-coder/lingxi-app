@@ -13,6 +13,11 @@
 
 #![forbid(unsafe_code)]
 
+// `callback` uses `tokio::net::TcpListener` which tokio gates out under
+// `--cfg loom`. Loom doesn't model network primitives anyway — the loom test
+// only exercises the single-flight invariant on synthetic atomics — so we
+// exclude this module from loom builds. Normal builds are unaffected.
+#[cfg(not(loom))]
 pub mod callback;
 pub mod client;
 pub mod config;
@@ -22,6 +27,7 @@ pub mod refresh;
 pub mod resolver;
 pub mod scope_upgrade;
 
+#[cfg(not(loom))]
 pub use callback::{await_callback, CallbackError, CallbackParams};
 pub use client::{ClaudeAiOAuthClient, OAuthError};
 pub use config::{ClaudeAiOAuthConfig, CLAUDE_CODE_OAUTH_SCOPES, REFRESH_GRANT_TYPE};

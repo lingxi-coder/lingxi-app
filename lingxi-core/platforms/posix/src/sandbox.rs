@@ -1,21 +1,34 @@
-//! `Sandbox` trait impl — POSIX policy-validating no-op.
+//! Real POSIX `Sandbox` implementation.
 //!
-//! M2.02 ships type-safe sandbox plumbing only. Real isolation (Linux user
-//! namespaces, macOS `sandbox-exec`) is a follow-up. Production code MUST
-//! still route through [`Sandbox::prepare`] so the [`SandboxedCommand`] type
-//! invariant from D2 is preserved.
+//! Linux / WSL2 → bwrap via [`lingxi_sandbox::wrap_with_sandbox`].
+//! macOS → `sandbox-exec -f` with an SBPL profile written to a tempfile.
+//! WSL1 / unknown POSIX → `is_available()` returns `false`, `prepare()` falls
+//! back to a `Wrapped { backend: None }` no-op so callers that ignore the
+//! capability flag still get a valid `SandboxedCommand` shape.
+//!
+//! Spec §6.4 (M2 Plan 04 — `docs/superpowers/plans/2026-05-23-m2-04-sandbox-runtime.md`)
+//! is the source-of-truth for the dependency check ordering, the WSL1 refusal
+//! string, and the `bwrap` / `sandbox-exec` argv shape.
 
 use async_trait::async_trait;
+use lingxi_sandbox::dependency_check::{
+    check_dependencies, sandbox_unavailable_reason, SandboxDependencyCheck,
+};
+use lingxi_sandbox::runtime_config::{
+    FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, SandboxRuntimeConfig,
+};
+use lingxi_sandbox::wrap::wrap_with_sandbox;
 use lingxi_traits::{
-    ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError, SandboxFeatures,
-    SandboxPolicy, SandboxedCommand, SandboxedTag,
+    NetworkPolicy, ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
+    SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
 
-/// Policy-validating no-op sandbox for POSIX desktops.
+use crate::wsl_detect::{detect as detect_wsl, WslKind};
+
+/// Real `Sandbox` impl over `bwrap` (Linux/WSL2) / `sandbox-exec` (macOS).
 ///
-/// Validates `SandboxPolicy.denied_paths` against the requested cwd and
-/// flags symlink escape under the workspace, but does NOT yet wrap the
-/// child process in any OS isolation primitive.
+/// Construction is cheap (no I/O); the dependency probe happens lazily on
+/// [`Sandbox::is_available`] / [`Sandbox::probe_capability`] / [`Sandbox::prepare`].
 #[derive(Default)]
 pub struct PosixSandbox;
 
@@ -25,16 +38,94 @@ impl PosixSandbox {
     pub fn new() -> Self {
         Self
     }
+
+    /// Build the full dependency check result for this host.
+    fn dep_check() -> SandboxDependencyCheck {
+        // `in_enabled_list` defaults to true at this layer; the
+        // `enabledPlatforms` setting is read at the call-site that has access
+        // to the merged settings (M2-04 ships the helper; consumers wire it
+        // through when they have settings in hand).
+        check_dependencies(detect_platform(), true)
+    }
+
+    /// Surface the human-readable unavailable reason for the current host
+    /// (or `None` when the sandbox can actually run).
+    fn unavailable_reason() -> Option<String> {
+        let wsl_one = matches!(detect_wsl(), WslKind::WslOne);
+        let platform = detect_platform();
+        let supported = platform.is_some() && !wsl_one;
+        let label = if platform.is_none() {
+            Some(host_platform_label())
+        } else {
+            None
+        };
+        let deps = Self::dep_check();
+        sandbox_unavailable_reason(true, supported, platform, wsl_one, label, &deps)
+    }
+}
+
+/// Detect the host platform per claude-code's `Platform` enum.
+/// Returns `None` for WSL1 (refused) or non-POSIX hosts.
+///
+/// The `Option` return is intentional even when the macOS cfg branch always
+/// produces `Some(Platform::Mac)` — the linux branch genuinely returns `None`
+/// for WSL1 and the non-POSIX branch always does. We silence
+/// `clippy::unnecessary_wraps` to keep the cross-platform signature uniform.
+#[allow(clippy::unnecessary_wraps)]
+fn detect_platform() -> Option<Platform> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(Platform::Mac)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match detect_wsl() {
+            WslKind::WslTwo => Some(Platform::Wsl),
+            WslKind::WslOne => None, // refused
+            WslKind::NotWsl => Some(Platform::Linux),
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+/// Best-effort host platform label for the "unsupported" error string.
+fn host_platform_label() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        "macos".to_string()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "linux".to_string()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "windows".to_string()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        std::env::consts::OS.to_string()
+    }
 }
 
 #[async_trait]
 impl Sandbox for PosixSandbox {
     fn is_available(&self) -> bool {
-        true
+        if detect_platform().is_none() {
+            return false;
+        }
+        Self::dep_check().errors.is_empty()
     }
 
     fn backend(&self) -> SandboxBackend {
-        SandboxBackend::None
+        match detect_platform() {
+            Some(Platform::Mac) => SandboxBackend::MacOsSandboxExec,
+            Some(Platform::Linux | Platform::Wsl) => SandboxBackend::LinuxNamespaces,
+            None => SandboxBackend::None,
+        }
     }
 
     fn prepare(
@@ -42,8 +133,8 @@ impl Sandbox for PosixSandbox {
         cmd: ProcessCommand,
         policy: &SandboxPolicy,
     ) -> Result<SandboxedCommand, SandboxError> {
-        // Validate cwd is not inside a denied path. Real backends will also
-        // canonicalize and apply the network / writable_paths policies.
+        // Validate cwd not inside denied paths (preserves M1 behavior for
+        // callers that don't touch SandboxRuntimeConfig yet).
         if let Some(cwd) = &cmd.cwd {
             for denied in &policy.denied_paths {
                 if cwd.starts_with(denied) {
@@ -51,15 +142,59 @@ impl Sandbox for PosixSandbox {
                 }
             }
         }
+
+        // If sandbox is not available on this host, return a Wrapped(None) tag
+        // so the SandboxedCommand newtype invariant holds. Callers that pass
+        // `failIfUnavailable: true` should consult `is_available()` first.
+        let Some(platform) = detect_platform() else {
+            return Ok(SandboxedCommand::__new_sandboxed(
+                cmd,
+                SandboxedTag::Wrapped {
+                    backend: SandboxBackend::None,
+                },
+            ));
+        };
+        if !Self::dep_check().errors.is_empty() {
+            return Ok(SandboxedCommand::__new_sandboxed(
+                cmd,
+                SandboxedTag::Wrapped {
+                    backend: SandboxBackend::None,
+                },
+            ));
+        }
+
+        // Translate M1 `SandboxPolicy` → `SandboxRuntimeConfig`.
+        let runtime_cfg = runtime_config_from_policy(policy);
+
+        // Build the full original command string for wrapping (command + args).
+        let mut cmd_string = cmd.command.clone();
+        for arg in &cmd.args {
+            cmd_string.push(' ');
+            cmd_string.push_str(arg);
+        }
+
+        let wrapped = wrap_with_sandbox(&cmd_string, &runtime_cfg, platform)
+            .map_err(|e| SandboxError::Unavailable(format!("wrap_with_sandbox failed: {e}")))?;
+
+        let inner = ProcessCommand {
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), wrapped],
+            cwd: cmd.cwd,
+            env: cmd.env,
+            timeout: cmd.timeout,
+            stdin: cmd.stdin,
+        };
+
         Ok(SandboxedCommand::__new_sandboxed(
-            cmd,
+            inner,
             SandboxedTag::Wrapped {
-                backend: SandboxBackend::None,
+                backend: self.backend(),
             },
         ))
     }
 
     fn bypass_with_audit(&self, cmd: ProcessCommand, reason: &str) -> SandboxedCommand {
+        tracing::warn!(reason, "sandbox bypass via bypass_with_audit");
         SandboxedCommand::__new_sandboxed(
             cmd,
             SandboxedTag::BypassAuditedWithReason {
@@ -69,13 +204,69 @@ impl Sandbox for PosixSandbox {
     }
 
     async fn probe_capability(&self) -> SandboxCapability {
+        let available = self.is_available();
+        let reason = if available {
+            None
+        } else {
+            // `sandbox_unavailable_reason` returns `None` when `enabled` is
+            // false, but we want to surface the reason even when the caller
+            // hasn't enabled sandbox yet — they're asking the capability probe,
+            // not running. Use `enabled = true` to force message generation.
+            Self::unavailable_reason()
+        };
+        let features = SandboxFeatures {
+            network_isolation: available,
+            fs_readonly: available,
+            fs_readwrite_paths: available,
+            process_limit: false, // bwrap can't enforce per-policy.limits today
+            no_new_privileges: available,
+        };
         SandboxCapability {
-            available: false,
-            reason: Some(
-                "M2.02 posix sandbox is a policy-validating no-op; OS isolation lands in a follow-up"
-                    .into(),
-            ),
-            features: SandboxFeatures::default(),
+            available,
+            reason,
+            features,
         }
+    }
+}
+
+/// Translate the M1 [`SandboxPolicy`] into a [`SandboxRuntimeConfig`] for the
+/// wrap dispatcher. The mapping is intentionally narrow — M1 callers only
+/// carry `writable_paths`, `denied_paths`, `network`, and `limits`.
+///
+/// Future work (Task TODO in M2-followup): expand [`SandboxPolicy`] itself to
+/// hold a [`SandboxRuntimeConfig`] field so this translation becomes an
+/// identity pass and the existing call sites pick up `excludedCommands` etc.
+fn runtime_config_from_policy(policy: &SandboxPolicy) -> SandboxRuntimeConfig {
+    let allow_write: Vec<String> = policy
+        .writable_paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let deny_write: Vec<String> = policy
+        .denied_paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let want_net = matches!(
+        policy.network,
+        NetworkPolicy::Allowed | NetworkPolicy::LoopbackOnly
+    );
+    SandboxRuntimeConfig {
+        enabled: true,
+        filesystem: FilesystemRestrictionConfig {
+            allow_write,
+            deny_write,
+            ..Default::default()
+        },
+        network: NetworkRestrictionConfig {
+            allow_local_binding: matches!(policy.network, NetworkPolicy::LoopbackOnly),
+            allowed_domains: if want_net {
+                vec!["*".to_string()]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        },
+        ..Default::default()
     }
 }

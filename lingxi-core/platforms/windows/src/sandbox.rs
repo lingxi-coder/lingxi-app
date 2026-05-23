@@ -1,11 +1,14 @@
-//! `Sandbox` trait impl — Windows.
+//! `Sandbox` trait impl — Windows is Unsupported.
 //!
-//! claude-code does not support sandboxing on Windows at all: the
-//! `@anthropic-ai/sandbox-runtime` dependency-check refuses the platform
-//! outright. We match that behavior by returning [`SandboxError::Unsupported`]
-//! from every fallible method and reporting `available: false` from
-//! [`Sandbox::probe_capability`]. No follow-up plan turns this on —
-//! `AppContainer` / Job Objects work is not part of claude-code parity.
+//! claude-code refuses sandbox on Windows (its `@anthropic-ai/sandbox-runtime`
+//! has no Windows backend). M2 Plan 04 mirrors that: [`Sandbox::is_available`]
+//! returns `false`, [`Sandbox::prepare`] returns [`SandboxError::Unsupported`],
+//! and `probe_capability().reason` carries the exact claude-code error string.
+//!
+//! Cross-ref: `docs/superpowers/plans/2026-05-23-m2-04-sandbox-runtime.md` —
+//! the parity story for sandbox lives in M2-04; this file is unchanged by
+//! M2-04 itself but documents that constraint. No follow-up plan turns this
+//! on — `AppContainer` / Job Objects work is not part of claude-code parity.
 
 use async_trait::async_trait;
 use lingxi_traits::{

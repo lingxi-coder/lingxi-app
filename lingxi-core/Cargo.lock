@@ -1163,6 +1163,7 @@ dependencies = [
  "lingxi-mcp",
  "lingxi-platform-common",
  "lingxi-protocol",
+ "lingxi-sandbox",
  "lingxi-traits",
  "reqwest",
  "serde",

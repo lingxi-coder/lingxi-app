@@ -1142,6 +1142,7 @@ dependencies = [
  "futures-util",
  "inotify",
  "lingxi-jsonrpc",
+ "lingxi-lsp",
  "lingxi-mcp",
  "lingxi-platform-common",
  "lingxi-protocol",

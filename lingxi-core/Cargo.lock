@@ -848,6 +848,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dirs",
+ "http",
  "lingxi-jsonrpc",
  "lingxi-mcp",
  "lingxi-platform-common",

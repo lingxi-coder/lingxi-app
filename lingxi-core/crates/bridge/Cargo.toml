@@ -25,6 +25,7 @@ tokio-tungstenite = "0.21"
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = "3.13"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [lints]
 workspace = true

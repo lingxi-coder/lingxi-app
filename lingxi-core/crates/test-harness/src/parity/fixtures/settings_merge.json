@@ -1,0 +1,58 @@
+{
+  "_source": "claude-code @ commit 6a25909 — src/settings/loader.ts:loadEffectiveSettings (4-layer chain) + src/settings/merger.ts:mergeSettings (per-field strategy)",
+  "_note": "4-layer priority is env > user > project > defaults. Array fields (trustedDirectories, additionalDirectories, enabledTools, additionalIncludes) concat-dedup; object fields (sandbox, hooks, outputStyle) deep-merge; every other field is scalar-override. Env prefix priority is LINGXI_ > CLAUDE_CODE_ > CLAUDE_ (LingXi-only; claude-code uses only CLAUDE_*). The $schema field is NOT emitted by claude-code @ 6a25909 — we tolerate it on read for future-compat. PII routing: user paths and raw env values go to _PROTO_-prefixed metadata keys per spec §26.2.",
+  "input_defaults": {
+    "model": "claude-sonnet-4-5",
+    "trustedDirectories": ["/opt/lingxi/defaults"],
+    "enabledTools": ["Bash", "Read"]
+  },
+  "input_project_settings_json": {
+    "trustedDirectories": ["/srv/project"],
+    "enabledTools": ["Edit"],
+    "hooks": {
+      "PreToolUse": {"Bash": ["echo project-pre"]}
+    }
+  },
+  "input_user_settings_json": {
+    "model": "claude-opus-4-7",
+    "trustedDirectories": ["/home/alice/work"],
+    "enabledTools": ["Read", "Grep"],
+    "hooks": {
+      "PreToolUse": {"Read": ["echo user-pre"]}
+    }
+  },
+  "input_env": {
+    "LINGXI_TRUSTED_DIRECTORIES": "/tmp/emergency",
+    "CLAUDE_CODE_MODEL": "claude-haiku-4-5"
+  },
+  "expected_effective_settings": {
+    "model": "claude-opus-4-7",
+    "trustedDirectories": [
+      "/opt/lingxi/defaults",
+      "/srv/project",
+      "/home/alice/work",
+      "/tmp/emergency"
+    ],
+    "enabledTools": ["Bash", "Read", "Edit", "Grep"],
+    "hooks": {
+      "PreToolUse": {
+        "Bash": ["echo project-pre"],
+        "Read": ["echo user-pre"]
+      }
+    }
+  },
+  "expected_provenance": {
+    "model": ["user"],
+    "trustedDirectories": ["defaults", "project", "user", "env"],
+    "enabledTools": ["defaults", "project", "user"],
+    "hooks": ["user"]
+  },
+  "expected_telemetry_event_names": [
+    "tengu_settings_loaded"
+  ],
+  "expected_telemetry_loaded_keys": [
+    "layers_present",
+    "had_env_override",
+    "_PROTO_user_path"
+  ]
+}

@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use lingxi_anthropic_oauth::refresh::{AuthState, RefreshDriver};
 use lingxi_anthropic_oauth::ClaudeAiOAuthConfig;
 use lingxi_protocol::{HttpRequest, HttpResponse, Secret};
+use lingxi_telemetry::sink::{AnalyticsSink, LogEventMetadata};
 use lingxi_traits::http::SseStream;
 use lingxi_traits::{
     BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner,
@@ -143,4 +144,73 @@ async fn short_ttl_token_refreshes_at_half_remaining() {
         "expected proactive refresh fired at remaining/2 = 30s, calls = {}",
         calls.load(Ordering::SeqCst),
     );
+}
+
+#[derive(Default)]
+struct CaptureSink {
+    events: Mutex<Vec<(String, LogEventMetadata)>>,
+}
+#[async_trait]
+impl AnalyticsSink for CaptureSink {
+    async fn log_event(&self, name: &str, m: LogEventMetadata) {
+        self.events.lock().await.push((name.into(), m));
+    }
+    async fn log_event_async(&self, name: &str, m: LogEventMetadata) {
+        self.events.lock().await.push((name.into(), m));
+    }
+    fn name(&self) -> &str {
+        "capture"
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_cancels_handle_and_emits_event() {
+    let cfg = ClaudeAiOAuthConfig::default_with_port(0);
+    let calls = Arc::new(AtomicU32::new(0));
+    let elapsed = Arc::new(AtomicU64::new(0));
+    let transport: Arc<dyn HttpTransport> = Arc::new(CountingTransport {
+        calls: calls.clone(),
+        expires_in_secs: 3600,
+    });
+    let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let clock: Arc<dyn Clock> = Arc::new(AdvancingClock { base, elapsed });
+    let spawner: Arc<dyn RuntimeSpawner> = Arc::new(TokioSpawner {
+        next_id: AtomicU64::new(0),
+        handles: Mutex::new(vec![]),
+    });
+    let bus = Arc::new(lingxi_telemetry::AnalyticsBus::new());
+    let sink = Arc::new(CaptureSink::default());
+    bus.attach_sink(sink.clone()).await;
+
+    let state = AuthState::new(
+        cfg,
+        Secret::new("INITIAL".into()),
+        Some(Secret::new("INITIAL_R".into())),
+        base + Duration::from_secs(3600),
+        transport,
+        clock,
+        Some(bus.clone()),
+        None,
+    );
+
+    RefreshDriver::spawn_proactive(state.clone(), spawner.clone())
+        .await
+        .expect("spawn ok");
+    assert!(state.proactive_handle().await.is_some());
+
+    // First shutdown — cancels the handle and emits the event.
+    state.shutdown(&*spawner).await;
+    assert!(state.proactive_handle().await.is_none(), "handle cleared");
+
+    let events = sink.events.lock().await;
+    let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(
+        names.contains(&"tengu_oauth_proactive_canceled"),
+        "events: {names:?}",
+    );
+    drop(events);
+
+    // Second shutdown — idempotent, no panic.
+    state.shutdown(&*spawner).await;
+    assert!(state.proactive_handle().await.is_none());
 }

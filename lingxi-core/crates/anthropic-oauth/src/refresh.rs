@@ -142,6 +142,30 @@ impl AuthState {
         self.proactive_handle.read().await.clone()
     }
 
+    /// Cancel the proactive refresh task (if running) and emit
+    /// `tengu_oauth_proactive_canceled`. Idempotent — safe to call after the
+    /// handle is already cleared.
+    ///
+    /// `spawner` must be the same `RuntimeSpawner` used by `spawn_proactive`;
+    /// if a different one is passed, the handle may not be recognized and
+    /// `cancel` returns `RuntimeError::NotFound` which we treat as a no-op.
+    pub async fn shutdown(&self, spawner: &dyn lingxi_traits::RuntimeSpawner) {
+        let handle = self.proactive_handle.write().await.take();
+        let Some(handle) = handle else {
+            // Already shut down — emit no event; matches v3 §16.4 idempotency.
+            return;
+        };
+        if let Err(e) = spawner.cancel(&handle).await {
+            tracing::warn!(
+                target: "lingxi::anthropic_oauth::shutdown",
+                error = ?e,
+                task_name = %handle.task_name,
+                "proactive task cancel returned error; treating as no-op",
+            );
+        }
+        emit_proactive_canceled(&self.bus, "engine_shutdown").await;
+    }
+
     /// Perform the actual HTTP refresh POST. Returns the parsed response on
     /// 200, or maps non-2xx to an [`OAuthError`]. Called from inside
     /// `refresh_lock`.
@@ -443,6 +467,23 @@ async fn emit_refresh_failed(
         ),
     );
     bus.log_event("tengu_oauth_refresh_failed", m).await;
+}
+
+async fn emit_proactive_canceled(
+    bus: &Option<Arc<lingxi_telemetry::AnalyticsBus>>,
+    reason: &str,
+) {
+    let Some(bus) = bus else { return };
+    let mut m = lingxi_telemetry::sink::LogEventMetadata::new();
+    m.insert(
+        "reason".into(),
+        lingxi_telemetry::sink::AnalyticsValue::String(
+            lingxi_telemetry::Verified::assert_safe(reason.to_string())
+                .as_str()
+                .to_string(),
+        ),
+    );
+    bus.log_event("tengu_oauth_proactive_canceled", m).await;
 }
 
 /// Maximum lead time before token expiry that the proactive refresh task wakes.

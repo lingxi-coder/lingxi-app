@@ -1192,6 +1192,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hex",
+ "libc",
  "lingxi-api-client",
  "lingxi-jsonrpc",
  "lingxi-lsp",

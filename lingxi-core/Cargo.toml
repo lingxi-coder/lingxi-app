@@ -115,7 +115,12 @@ dashmap = "6"
 futures = "0.3"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Workspace-wide default: `deny` (not `forbid`) so the one module in
+# `lingxi-platform-posix` that needs `libc::setsid()` via `pre_exec`
+# can opt into `#![allow(unsafe_code)]`. Every other crate in the
+# workspace adds a crate-level `#![forbid(unsafe_code)]` in its
+# `lib.rs`, which preserves the original hard constraint.
+unsafe_code = "deny"
 missing_docs = "warn"
 
 [workspace.lints.clippy]

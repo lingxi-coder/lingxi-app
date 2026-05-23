@@ -2,10 +2,17 @@
 //!
 //! Implements `lingxi-traits` interfaces using real OS APIs. Replaces the
 //! M1 `posix-minimal` crate for desktop runnable scenarios.
-
-// Workspace-level lints already set `unsafe_code = "forbid"`. Phase C will
-// relax this when the `process::spawn_unsafe` module needs `pre_exec` for
-// `setsid()`; see `docs/superpowers/plans/2026-05-23-m2-06-...md` Task 10.
+//!
+//! ## `unsafe_code`
+//!
+//! The workspace lint is `deny(unsafe_code)`. Exactly one module in this
+//! crate — [`process::spawn_unsafe`] — opts into `#![allow(unsafe_code)]`
+//! for a single call to `libc::setsid()` from `CommandExt::pre_exec`. That
+//! call is required so the background-spawned child becomes a process-group
+//! leader, which lets [`process::kill_tree::kill_tree_unix`] tree-kill its
+//! descendants via `killpg(2)`. See plan
+//! `docs/superpowers/plans/2026-05-23-m2-06-securestorage-sse-process.md`
+//! Tasks 14-15.
 
 pub mod bridge;
 pub mod clock;

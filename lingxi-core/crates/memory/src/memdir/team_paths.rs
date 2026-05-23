@@ -1,5 +1,4 @@
 //! Team-mem path resolution, gated on `settings.team_memory.enabled`.
-//! Filled in Task 11.
 
 use std::path::{Path, PathBuf};
 
@@ -14,4 +13,26 @@ pub fn resolve_team_memory_dir(home: &Path, enabled: bool) -> Option<PathBuf> {
         return None;
     }
     Some(home.join(".claude").join(super::paths::TEAM_MEM_SUBDIR))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_returns_none_even_if_dir_exists() {
+        // Auto-detect is NOT used; the bool is the only signal.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        // Pretend the dir exists on disk anyway:
+        std::fs::create_dir_all(home.join(".claude").join("team-mem")).unwrap();
+        assert_eq!(resolve_team_memory_dir(home, false), None);
+    }
+
+    #[test]
+    fn enabled_returns_dot_claude_team_mem() {
+        let home = std::path::PathBuf::from("/home/u");
+        let p = resolve_team_memory_dir(&home, true).expect("Some");
+        assert_eq!(p, std::path::PathBuf::from("/home/u/.claude/team-mem"));
+    }
 }

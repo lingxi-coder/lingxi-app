@@ -55,7 +55,17 @@ fn enumerate(
 ) -> std::io::Result<()> {
     let read = match std::fs::read_dir(dir) {
         Ok(r) => r,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        // Missing dirs are silently treated as empty. ENOTDIR (errno 20
+        // on unix) covers cases like the sentinel `/dev/null` placeholder
+        // used by `team_prompts::collect_team_prompts` when no user_memdir
+        // is needed. We match by raw OS error rather than
+        // `ErrorKind::NotADirectory` (unstable on stable Rust as of 1.83).
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.raw_os_error() == Some(20) =>
+        {
+            return Ok(())
+        }
         Err(e) => return Err(e),
     };
     // Sort by filename for deterministic ordering.

@@ -64,16 +64,11 @@ fn collect_in_dir(dir: &Path, out: &mut Vec<HierarchyEntry>) {
 }
 
 fn probe(dir: &Path, want: &str, is_local: bool) -> Option<HierarchyEntry> {
-    // Exact-case check first.
-    let exact = dir.join(want);
-    if exact.is_file() {
-        return Some(HierarchyEntry {
-            path: exact,
-            is_local_override: is_local,
-            exact_case: true,
-        });
-    }
-    // Case-insensitive fallback (Task 3 wires the warning event).
+    // Scan the directory and compare names case-insensitively. We rely on
+    // the dirent listing (NOT `Path::is_file`) so that case-insensitive
+    // filesystems (macOS APFS-default, Windows NTFS) still produce a
+    // `exact_case == false` signal when the on-disk name differs from
+    // `want` in case. The event hook lives in [`emit_case_mismatch`].
     let want_lc = want.to_ascii_lowercase();
     let read = std::fs::read_dir(dir).ok()?;
     for ent in read.flatten() {
@@ -88,6 +83,43 @@ fn probe(dir: &Path, want: &str, is_local: bool) -> Option<HierarchyEntry> {
         }
     }
     None
+}
+
+use std::sync::Arc;
+
+/// Telemetry event name emitted when a CLAUDE.md is found under a
+/// different case (e.g. `claude.md` on macOS APFS).
+pub const TENGU_MEMORY_CASE_MISMATCH: &str = "tengu_memory_case_mismatch";
+
+/// Emit `tengu_memory_case_mismatch` for entries where `exact_case == false`.
+///
+/// `actual` is the filename component (NOT the full path); the full path is
+/// PII-tagged via `_PROTO_path`. No-op when `bus` is `None`.
+pub async fn emit_case_mismatch(
+    bus: Option<&Arc<lingxi_telemetry::AnalyticsBus>>,
+    path: &std::path::Path,
+    actual: &str,
+) {
+    let Some(bus) = bus else {
+        return;
+    };
+    let mut md = lingxi_telemetry::sink::LogEventMetadata::new();
+    md.insert(
+        "_PROTO_path".into(),
+        lingxi_telemetry::sink::AnalyticsValue::String(
+            lingxi_telemetry::pii::PiiTagged::assert_pii_tagged_column(
+                path.display().to_string(),
+            )
+            .into_inner(),
+        ),
+    );
+    md.insert(
+        "actual".into(),
+        lingxi_telemetry::sink::AnalyticsValue::String(
+            lingxi_telemetry::pii::Verified::assert_safe(actual.to_string()).into_inner(),
+        ),
+    );
+    bus.log_event(TENGU_MEMORY_CASE_MISMATCH, md).await;
 }
 
 #[cfg(test)]
@@ -161,5 +193,71 @@ mod tests {
         fs::create_dir_all(&home).unwrap(); // .claude does NOT exist
         let h = walk(&cwd, &home);
         assert!(h.entries.is_empty());
+    }
+
+    #[test]
+    fn case_mismatch_flag_set_on_lowercased_filename() {
+        // On a case-sensitive filesystem we simulate a mismatch by writing
+        // the file as `claude.md` (all-lowercase) and asserting exact_case=false.
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().join("repo");
+        fs::create_dir_all(&cwd).unwrap();
+        touch(&cwd, "claude.md");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+
+        let h = walk(&cwd, &home);
+        assert_eq!(h.entries.len(), 1, "lowercased file must still be found");
+        assert!(!h.entries[0].exact_case, "exact_case must be false");
+    }
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::*;
+    use lingxi_telemetry::{sink::LogEventMetadata, AnalyticsBus, AnalyticsSink, AnalyticsValue};
+    use std::sync::{Arc, Mutex};
+
+    struct CapturingSink {
+        events: Mutex<Vec<(String, LogEventMetadata)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AnalyticsSink for CapturingSink {
+        async fn log_event(&self, name: &str, metadata: LogEventMetadata) {
+            self.events.lock().unwrap().push((name.into(), metadata));
+        }
+        async fn log_event_async(&self, name: &str, metadata: LogEventMetadata) {
+            self.log_event(name, metadata).await;
+        }
+        fn name(&self) -> &str {
+            "capturing"
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_case_mismatch_writes_event_with_pii_tagged_path() {
+        let bus = Arc::new(AnalyticsBus::new());
+        let sink = Arc::new(CapturingSink {
+            events: Mutex::new(Vec::new()),
+        });
+        bus.attach_sink(sink.clone()).await;
+
+        emit_case_mismatch(
+            Some(&bus),
+            std::path::Path::new("/Users/u/proj/claude.md"),
+            "claude.md",
+        )
+        .await;
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let (name, md) = &events[0];
+        assert_eq!(name, "tengu_memory_case_mismatch");
+        assert!(md.contains_key("_PROTO_path"));
+        match md.get("actual") {
+            Some(AnalyticsValue::String(s)) => assert_eq!(s, "claude.md"),
+            _ => panic!("actual must be a string"),
+        }
     }
 }

@@ -460,6 +460,82 @@ async fn raw_tool_decodes_anthropic_meta_block() {
 }
 
 #[tokio::test]
+async fn list_prompts_returns_server_prompts() {
+    let (client, _cap, _h) = make_client_against_mock(
+        "prompts-srv",
+        std::path::PathBuf::from("/tmp/work"),
+        |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "prompts": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "prompts/list" => json!({
+                    "prompts": [
+                        { "name": "summarize", "description": "Summarize text" },
+                        { "name": "translate" }
+                    ]
+                }),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        },
+    )
+    .await;
+
+    client.initialize().await.expect("init");
+    let prompts = client.list_prompts().await.expect("list");
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0].name, "summarize");
+    assert_eq!(prompts[0].description.as_deref(), Some("Summarize text"));
+    assert_eq!(prompts[1].name, "translate");
+    assert_eq!(prompts[1].description, None);
+}
+
+#[tokio::test]
+async fn get_prompt_sends_name_and_arguments() {
+    let (client, captured, _h) = make_client_against_mock(
+        "prompts-srv",
+        std::path::PathBuf::from("/tmp/work"),
+        |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "prompts": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "prompts/get" => json!({
+                    "description": "test",
+                    "messages": []
+                }),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        },
+    )
+    .await;
+
+    client.initialize().await.expect("init");
+    let resp = client
+        .get_prompt("summarize", json!({"target": "rust"}))
+        .await
+        .expect("get");
+    assert!(resp.get("messages").is_some());
+
+    // Verify wire bytes carry the literal `prompts/get` method + name.
+    let frames = captured.snapshot().await;
+    let last = frames.last().expect("at least one");
+    let s = std::str::from_utf8(last).unwrap();
+    assert!(s.contains(r#""method":"prompts/get""#));
+    assert!(s.contains(r#""name":"summarize""#));
+}
+
+#[tokio::test]
 async fn captured_frames_capture_outbound_lines() {
     // Verify the harness itself round-trips a single line through the
     // capture buffer. This is independent of `McpClient`; we drive the

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use lingxi_traits::{McpToolDto, McpToolResultDto, ServerCapabilitiesDto};
+use lingxi_traits::{McpPromptDto, McpToolDto, McpToolResultDto, ServerCapabilitiesDto};
 use serde::Deserialize;
 
 use crate::inbound::{ElicitationCreateHandler, RootsListHandler};
@@ -290,6 +290,54 @@ impl McpClient {
             }),
         }
     }
+
+    /// Enumerate every prompt advertised by the server.
+    ///
+    /// Sends `prompts/list` and truncates oversized prompt descriptions
+    /// through [`truncate_description`] to mirror claude-code behavior.
+    pub async fn list_prompts(&self) -> Result<Vec<McpPromptDto>, McpClientError> {
+        let resp: PromptsListResponse = self
+            .connection
+            .call("prompts/list", serde_json::Value::Null)
+            .await
+            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+        Ok(resp
+            .prompts
+            .into_iter()
+            .map(|p| McpPromptDto {
+                name: p.name,
+                description: p.description.map(|d| truncate_description(&d).into_owned()),
+            })
+            .collect())
+    }
+
+    /// Render a prompt template with the supplied arguments. The returned
+    /// `Value` is the server's `{description, messages}` envelope verbatim.
+    pub async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, McpClientError> {
+        let params = serde_json::json!({ "name": name, "arguments": arguments });
+        self.connection
+            .call("prompts/get", params)
+            .await
+            .map_err(|e| McpClientError::Rpc(e.to_string()))
+    }
+}
+
+/// Wire-level shape of a `prompts/list` response body.
+#[derive(Debug, Deserialize)]
+struct PromptsListResponse {
+    prompts: Vec<RawPrompt>,
+}
+
+/// Wire-level shape for one prompt entry inside `prompts/list`.
+#[derive(Debug, Deserialize)]
+struct RawPrompt {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 /// Default per-call timeout for `tools/call`, matching claude-code's

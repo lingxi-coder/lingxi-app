@@ -2,6 +2,7 @@
 
 pub mod mock_clock;
 pub mod mock_http;
+pub mod mock_lsp_server;
 pub mod mock_mcp;
 pub mod mock_runtime;
 

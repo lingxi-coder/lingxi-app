@@ -35,5 +35,9 @@ tracing.workspace = true
 proptest.workspace = true
 lingxi-platform-posix-minimal = { path = "../../platforms/posix-minimal" }
 
+[[bin]]
+name = "mock_lsp_server"
+path = "src/bin/mock_lsp_server.rs"
+
 [lints]
 workspace = true

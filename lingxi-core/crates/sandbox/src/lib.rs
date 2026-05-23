@@ -32,6 +32,7 @@ pub mod policy;
 pub mod policy_convert;
 pub mod runtime_config;
 pub mod violation_store;
+pub mod wrap;
 
 pub use decision::{
     is_obviously_dangerous, should_use_sandbox, should_use_sandbox_for_command,
@@ -55,6 +56,7 @@ pub use runtime_config::{
 pub use violation_store::{
     SandboxViolationEvent, SandboxViolationKind, SandboxViolationStore, SANDBOX_VIOLATION_STORE_CAP,
 };
+pub use wrap::{wrap_with_sandbox, SandboxWrapError};
 
 /// Canonicalize `path` and verify the result stays inside `workspace`.
 ///

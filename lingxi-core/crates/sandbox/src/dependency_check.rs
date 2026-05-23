@@ -135,32 +135,24 @@ pub fn sandbox_unavailable_reason(
     }
 
     if wsl_one_detected {
-        return Some(
-            "sandbox.enabled is set but WSL1 is not supported (requires WSL2)".to_string(),
-        );
+        return Some(error_strings::WSL1_REFUSAL.to_string());
     }
 
     if !supported_platform {
         let label = raw_platform_label.unwrap_or_else(|| "unknown".to_string());
-        return Some(format!(
-            "sandbox.enabled is set but {label} is not supported (requires macOS, Linux, or WSL2)"
-        ));
+        return Some(error_strings::UNSUPPORTED_PLATFORM_TEMPLATE.replace("{platform}", &label));
     }
 
     if !deps.in_enabled_list {
         let label = platform.map_or("unknown", |p| p.as_str());
-        return Some(format!(
-            "sandbox.enabled is set but {label} is not in sandbox.enabledPlatforms"
-        ));
+        return Some(error_strings::NOT_IN_ENABLED_PLATFORMS_TEMPLATE.replace("{platform}", label));
     }
 
     if !deps.errors.is_empty() {
         let joined = deps.errors.join(", ");
         let hint = match platform {
-            Some(Platform::Mac) => "run /sandbox or /doctor for details",
-            Some(Platform::Linux | Platform::Wsl) => {
-                "install missing tools (e.g. apt install bubblewrap socat) or run /sandbox for details"
-            }
+            Some(Platform::Mac) => error_strings::MISSING_DEPS_HINT_MAC,
+            Some(Platform::Linux | Platform::Wsl) => error_strings::MISSING_DEPS_HINT_LINUX,
             None => "run /sandbox for details",
         };
         return Some(format!(
@@ -169,4 +161,28 @@ pub fn sandbox_unavailable_reason(
     }
 
     None
+}
+
+/// Byte-for-byte exact error strings from claude-code's sandbox-adapter.ts.
+/// Tests assert against these to lock the messages in.
+pub mod error_strings {
+    /// WSL1 refusal — emitted when `/proc/version` indicates WSL1.
+    pub const WSL1_REFUSAL: &str =
+        "sandbox.enabled is set but WSL1 is not supported (requires WSL2)";
+
+    /// Unsupported-platform template. `{platform}` is replaced with the OS
+    /// label (e.g. `"windows"`, `"freebsd"`).
+    pub const UNSUPPORTED_PLATFORM_TEMPLATE: &str =
+        "sandbox.enabled is set but {platform} is not supported (requires macOS, Linux, or WSL2)";
+
+    /// `enabledPlatforms` rejection template.
+    pub const NOT_IN_ENABLED_PLATFORMS_TEMPLATE: &str =
+        "sandbox.enabled is set but {platform} is not in sandbox.enabledPlatforms";
+
+    /// Hint suffix for missing-deps on macOS.
+    pub const MISSING_DEPS_HINT_MAC: &str = "run /sandbox or /doctor for details";
+
+    /// Hint suffix for missing-deps on Linux/WSL.
+    pub const MISSING_DEPS_HINT_LINUX: &str =
+        "install missing tools (e.g. apt install bubblewrap socat) or run /sandbox for details";
 }

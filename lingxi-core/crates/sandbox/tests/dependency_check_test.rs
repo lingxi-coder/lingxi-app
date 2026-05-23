@@ -133,3 +133,18 @@ fn missing_deps_helpers() {
         socat: true,
     };
 }
+
+#[test]
+fn wsl1_refusal_byte_for_byte() {
+    let r = sandbox_unavailable_reason(
+        true,
+        true,
+        Some(Platform::Wsl),
+        true, // wsl_one_detected
+        None,
+        &SandboxDependencyCheck::default(),
+    );
+    let expected = "sandbox.enabled is set but WSL1 is not supported (requires WSL2)";
+    let actual = r.expect("WSL1 with sandbox.enabled must produce a reason");
+    assert_eq!(actual.as_bytes(), expected.as_bytes());
+}

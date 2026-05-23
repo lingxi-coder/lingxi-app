@@ -5,14 +5,77 @@
 //! Tasks 6-12. This file currently exposes only the struct shell + error
 //! enum so the public surface in `lib.rs` resolves.
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
 use lingxi_traits::ServerCapabilitiesDto;
+use serde::Deserialize;
 
 use crate::inbound::{ElicitationCreateHandler, RootsListHandler};
+use crate::initialize_params::InitializeParams;
+
+/// Maximum character length for free-form text fields sourced from MCP
+/// servers (tool/prompt descriptions, server `instructions`). Mirrors
+/// claude-code `services/mcp/client.ts:1163-1166`.
+pub const MAX_MCP_DESCRIPTION_LENGTH: usize = 2048;
+
+/// Truncate `text` to at most `MAX_MCP_DESCRIPTION_LENGTH` Unicode scalar
+/// values. If truncation happens, appends the literal suffix
+/// `"\u{2026} [truncated]"` (U+2026 horizontal ellipsis + space + the
+/// English word `[truncated]`) — matching claude-code's exact wording so
+/// downstream tooling can detect the marker.
+///
+/// Returns a borrowed `Cow` when no truncation is required.
+#[must_use]
+pub fn truncate_description(text: &str) -> Cow<'_, str> {
+    if text.chars().count() <= MAX_MCP_DESCRIPTION_LENGTH {
+        return Cow::Borrowed(text);
+    }
+    let head: String = text.chars().take(MAX_MCP_DESCRIPTION_LENGTH).collect();
+    Cow::Owned(format!("{head}\u{2026} [truncated]"))
+}
+
+/// Parsed body of an MCP `initialize` response.
+///
+/// `capabilities` is left as a raw JSON value because the wire shape uses
+/// per-feature *objects* (e.g. `"tools": {}`) but the trait DTO only
+/// surfaces booleans. The conversion happens in [`decode_server_capabilities`].
+#[derive(Debug, Deserialize)]
+struct InitializeResponse {
+    #[serde(default)]
+    capabilities: serde_json::Value,
+    /// Server-provided free-form instructions appended to the system prompt.
+    /// Truncated to [`MAX_MCP_DESCRIPTION_LENGTH`] on receipt (matches
+    /// `claude-code/src/services/mcp/client.ts:1163-1166`).
+    #[serde(default)]
+    instructions: Option<String>,
+}
+
+/// Decode the server's capability JSON object into the trait DTO.
+///
+/// MCP servers send capability *objects* (e.g. `"tools": {}`); the DTO
+/// only carries boolean presence flags. Presence of the key (even with an
+/// empty object value) is treated as `true`.
+fn decode_server_capabilities(raw: &serde_json::Value) -> ServerCapabilitiesDto {
+    use std::collections::HashMap;
+    let obj = raw.as_object();
+    let has = |k: &str| obj.is_some_and(|o| o.contains_key(k));
+    let experimental: HashMap<String, serde_json::Value> = obj
+        .and_then(|o| o.get("experimental"))
+        .and_then(|v| v.as_object())
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+    ServerCapabilitiesDto {
+        tools: has("tools"),
+        resources: has("resources"),
+        prompts: has("prompts"),
+        logging: has("logging"),
+        experimental,
+    }
+}
 
 /// Async MCP client built on top of a [`lingxi_jsonrpc::Connection`].
 ///
@@ -25,15 +88,13 @@ pub struct McpClient {
     #[allow(dead_code)] // read indirectly via the registered RootsListHandler
     cwd: PathBuf,
     /// Underlying JSON-RPC connection produced by the platform transport.
-    #[allow(dead_code)] // wired in Tasks 8-12 (initialize, tools/list, ...)
+    #[allow(dead_code)] // wired further in Tasks 9-12 (tools/list, ...)
     connection: Arc<lingxi_jsonrpc::Connection>,
     /// Server capabilities snapshot from the `initialize` response.
-    #[allow(dead_code)] // populated in Task 8
     server_capabilities: RwLock<Option<ServerCapabilitiesDto>>,
     /// Server-provided instructions string from the `initialize` response,
-    /// truncated to `MAX_MCP_DESCRIPTION_LENGTH` chars on receipt
+    /// truncated to [`MAX_MCP_DESCRIPTION_LENGTH`] chars on receipt
     /// (matches claude-code `client.ts:1163-1166`).
-    #[allow(dead_code)] // populated in Task 8
     server_instructions: RwLock<Option<String>>,
 }
 
@@ -85,16 +146,63 @@ impl McpClient {
         &self.server_name
     }
 
-    /// Send the MCP `initialize` request and store server capabilities.
+    /// Send the MCP `initialize` request, parse the server capability
+    /// declaration, and cache it on `self`. Also captures and truncates
+    /// the optional `instructions` field per claude-code parity.
     ///
-    /// Stub-only — the real implementation lands in Task 8 (sends the
-    /// literal `InitializeParams`, captures the response, writes
-    /// `server_capabilities` + `server_instructions`). The stub exists so
-    /// the mock-harness integration test in `tests/mock_mcp.rs` can compile
-    /// + reach `initialize()` before Task 8 ships the real RPC.
-    #[allow(clippy::unused_async)] // becomes an actual await in Task 8
+    /// Emits a JSON-RPC payload whose bytes contain:
+    ///   * `"method":"initialize"`
+    ///   * `"clientInfo":{"name":"claude-code", ...}`
+    ///   * `"protocolVersion":"2024-11-05"`
+    ///   * `"capabilities":{"roots":{},"elicitation":{}}`
+    ///
+    /// On success, the parsed [`ServerCapabilitiesDto`] is both returned
+    /// and stored in [`McpClient::server_capabilities`]; the optional
+    /// `instructions` string is truncated (see [`truncate_description`])
+    /// and stored in [`McpClient::server_instructions`].
     pub async fn initialize(&self) -> Result<ServerCapabilitiesDto, McpClientError> {
-        Err(McpClientError::Initialize("not yet implemented".into()))
+        let params = InitializeParams::default();
+        let resp: InitializeResponse = self
+            .connection
+            .call("initialize", &params)
+            .await
+            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+
+        let caps = decode_server_capabilities(&resp.capabilities);
+        *self.server_capabilities.write().await = Some(caps.clone());
+
+        // Truncate server instructions matching claude-code behavior
+        // (client.ts:1163-1166: if > MAX_MCP_DESCRIPTION_LENGTH, slice
+        // + "\u{2026} [truncated]").
+        if let Some(raw) = resp.instructions {
+            let orig_len = raw.chars().count();
+            let truncated = truncate_description(&raw).into_owned();
+            if orig_len > MAX_MCP_DESCRIPTION_LENGTH {
+                tracing::warn!(
+                    target: "lingxi_mcp::client",
+                    server = %self.server_name,
+                    from = orig_len,
+                    to = MAX_MCP_DESCRIPTION_LENGTH,
+                    "Server instructions truncated from {orig_len} to {} chars",
+                    MAX_MCP_DESCRIPTION_LENGTH,
+                );
+            }
+            *self.server_instructions.write().await = Some(truncated);
+        }
+
+        Ok(caps)
+    }
+
+    /// Returns the (possibly truncated) server instructions captured during
+    /// `initialize`, or `None` if the server omitted them.
+    pub async fn server_instructions(&self) -> Option<String> {
+        self.server_instructions.read().await.clone()
+    }
+
+    /// Returns a clone of the server capabilities captured during
+    /// `initialize`, or `None` if `initialize` has not yet completed.
+    pub async fn server_capabilities(&self) -> Option<ServerCapabilitiesDto> {
+        self.server_capabilities.read().await.clone()
     }
 }
 

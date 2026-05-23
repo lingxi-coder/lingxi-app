@@ -48,7 +48,14 @@ repository = "https://github.com/lingxi/lingxi-core"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps `serde_json::Map` keys in insertion order across
+# Value round-trips. Required for claude-code wire-byte fidelity: outbound
+# MCP/LSP requests serialize through the JSON-RPC router's
+# `serde_json::to_value(params)` pass and the resulting bytes must keep
+# the order claude-code emits (e.g. `capabilities` declared as
+# `{"roots":{},"elicitation":{}}`, not the alphabetized
+# `{"elicitation":{},"roots":{}}`).
+serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"

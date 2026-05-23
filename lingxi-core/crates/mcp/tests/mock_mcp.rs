@@ -128,19 +128,127 @@ async fn mock_server_responds_to_initialize() {
         })
         .await;
 
-    // Task 8 wires the real implementation; for now `initialize()` is a
-    // stub returning `McpClientError::Initialize`. We assert the harness
-    // is reachable (i.e. the client constructed against the mock and
-    // `initialize()` is callable). The wire-bytes assertion will move
-    // into Task 8 once the real `initialize` writes outbound frames.
-    let err = client
+    // Task 8 wires the real implementation; the harness should round-trip
+    // a successful `initialize` against the mock and yield the parsed
+    // server-capability DTO.
+    let caps = client
         .initialize()
         .await
-        .expect_err("Task 7 stub returns Initialize error");
-    let msg = err.to_string();
+        .expect("initialize succeeds against mock");
+    assert!(caps.tools, "single `tools` capability parsed");
+}
+
+#[tokio::test]
+async fn initialize_emits_literal_claude_code_clientinfo() {
+    let (client, captured, _h) =
+        make_client_against_mock("filesystem", std::path::PathBuf::from("/tmp/work"), |req| {
+            let id = req["id"].clone();
+            Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {}, "resources": {}, "prompts": {} },
+                    "serverInfo": { "name": "mock", "version": "1.0.0" }
+                }
+            }))
+        })
+        .await;
+
+    client.initialize().await.expect("initialize ok");
+    let frames = captured.snapshot().await;
+    assert_eq!(frames.len(), 1, "initialize sent exactly one frame");
+
+    let frame = std::str::from_utf8(&frames[0]).expect("utf8");
+    // Literal byte assertions — these lock the wire format.
     assert!(
-        msg.contains("not yet implemented"),
-        "expected stub error, got: {msg}",
+        frame.contains(r#""method":"initialize""#),
+        "method must be literal \"initialize\", got: {frame}",
+    );
+    assert!(
+        frame.contains(r#""clientInfo":{"name":"claude-code""#),
+        "literal claude-code clientInfo must appear, got: {frame}",
+    );
+    assert!(
+        frame.contains(r#""protocolVersion":"2024-11-05""#),
+        "literal protocolVersion must appear, got: {frame}",
+    );
+    // Capabilities are EXACTLY {"roots":{},"elicitation":{}}.
+    assert!(
+        frame.contains(r#""capabilities":{"roots":{},"elicitation":{}}"#),
+        "literal capability shape must appear, got: {frame}",
+    );
+}
+
+#[tokio::test]
+async fn initialize_stores_server_capabilities() {
+    let (client, _captured, _h) =
+        make_client_against_mock("filesystem", std::path::PathBuf::from("/tmp/work"), |req| {
+            let id = req["id"].clone();
+            Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {},
+                        "resources": {},
+                        "prompts": {},
+                        "logging": {}
+                    },
+                    "serverInfo": { "name": "mock", "version": "1.0.0" }
+                }
+            }))
+        })
+        .await;
+
+    let caps = client.initialize().await.expect("ok");
+    assert!(caps.tools, "tools cap parsed");
+    assert!(caps.resources, "resources cap parsed");
+    assert!(caps.prompts, "prompts cap parsed");
+    assert!(caps.logging, "logging cap parsed");
+}
+
+#[tokio::test]
+async fn initialize_truncates_long_server_instructions() {
+    // Build a >2048-char instructions blob; assert the stored value is
+    // capped at MAX_MCP_DESCRIPTION_LENGTH and ends with the U+2026
+    // " [truncated]" suffix that claude-code uses.
+    let long_text: String = "x".repeat(3000);
+    let long_text_for_responder = long_text.clone();
+    let (client, _captured, _h) = make_client_against_mock(
+        "filesystem",
+        std::path::PathBuf::from("/tmp/work"),
+        move |req| {
+            let id = req["id"].clone();
+            Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "mock", "version": "1.0.0" },
+                    "instructions": long_text_for_responder,
+                }
+            }))
+        },
+    )
+    .await;
+
+    client.initialize().await.expect("ok");
+    let stored = client
+        .server_instructions()
+        .await
+        .expect("instructions captured");
+    assert!(
+        stored.ends_with("\u{2026} [truncated]"),
+        "instructions must end with the literal truncation suffix, got: {stored:?}",
+    );
+    // Truncated value must be strictly shorter than the original 3000-char input.
+    assert!(
+        stored.chars().count() < long_text.chars().count(),
+        "truncated value must be shorter than original 3000-char input ({} chars)",
+        stored.chars().count(),
     );
 }
 

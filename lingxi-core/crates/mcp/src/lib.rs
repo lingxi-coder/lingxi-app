@@ -21,7 +21,7 @@ pub mod initialize_params;
 pub mod oauth;
 pub mod registry;
 
-pub use client::{McpClient, McpClientError};
+pub use client::{truncate_description, McpClient, McpClientError, MAX_MCP_DESCRIPTION_LENGTH};
 pub use connection::{ConfigScope, McpConnectionState, McpServerConfig};
 pub use identity::{
     ClientInfo, CLIENT_INFO, CLIENT_NAME, CLIENT_TITLE, CLIENT_VERSION, MCP_WEBSITE_URL,

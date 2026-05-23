@@ -214,3 +214,63 @@ async fn shutdown_cancels_handle_and_emits_event() {
     state.shutdown(&*spawner).await;
     assert!(state.proactive_handle().await.is_none());
 }
+
+#[tokio::test(start_paused = true)]
+async fn proactive_then_reactive_collapses_to_one_refresh() {
+    // Same setup as `short_ttl_token_refreshes_at_half_remaining`, but we
+    // additionally fire a reactive `refresh()` while the proactive task is
+    // sleeping. Both must collapse to a single HTTP call thanks to the shared
+    // refresh_lock + double-check-after-acquire.
+    let cfg = ClaudeAiOAuthConfig::default_with_port(0);
+    let calls = Arc::new(AtomicU32::new(0));
+    let elapsed = Arc::new(AtomicU64::new(0));
+    let transport: Arc<dyn HttpTransport> = Arc::new(CountingTransport {
+        calls: calls.clone(),
+        expires_in_secs: 3600,
+    });
+    let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let clock: Arc<dyn Clock> = Arc::new(AdvancingClock { base, elapsed });
+    let spawner: Arc<dyn RuntimeSpawner> = Arc::new(TokioSpawner {
+        next_id: AtomicU64::new(0),
+        handles: Mutex::new(vec![]),
+    });
+
+    let state = AuthState::new(
+        cfg,
+        Secret::new("INITIAL".into()),
+        Some(Secret::new("R_INITIAL".into())),
+        base + Duration::from_secs(60), // 1-minute TTL so proactive wakes at 30s
+        transport,
+        clock,
+        None,
+        None,
+    );
+
+    RefreshDriver::spawn_proactive(state.clone(), spawner.clone())
+        .await
+        .expect("spawn ok");
+
+    // Fire a reactive refresh BEFORE the proactive timer's 30s wake.
+    let driver = lingxi_anthropic_oauth::refresh::RefreshDriver::new(state.clone());
+    let prev = state.token.read().await.token_hash();
+    let r = lingxi_api_client::oauth_hook::OAuthRefreshHook::refresh(&driver, prev).await;
+    assert!(r.is_ok(), "reactive refresh ok: {r:?}");
+    let after_reactive = calls.load(Ordering::SeqCst);
+    assert_eq!(after_reactive, 1, "reactive made exactly one call");
+
+    // Now advance time past the proactive wake. The proactive task will read
+    // the new (already-rotated) expiry and reschedule against it; it should
+    // NOT make a second HTTP call yet because the new expiry is 1 hour away.
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(100)).await;
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "proactive saw the freshly-rotated token (expiry now 1h away); no second HTTP call",
+    );
+
+    state.shutdown(&*spawner).await;
+}

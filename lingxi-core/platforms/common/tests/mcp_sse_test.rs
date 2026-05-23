@@ -1,6 +1,6 @@
 //! Verifies `connect_sse` wire format against a real HTTP server:
 //! - GET request bears `Accept: text/event-stream`.
-//! - When auth_token is supplied, GET also bears
+//! - When `auth_token` is supplied, GET also bears
 //!   `X-Claude-Code-Ide-Authorization: <token>`.
 //! - Outbound JSON-RPC requests POST to the same URL with
 //!   `Content-Type: application/json`.
@@ -16,6 +16,7 @@ use axum::{
 };
 use futures::{stream, StreamExt};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -83,7 +84,7 @@ async fn connect_sse_sends_get_with_accept_event_stream() {
     });
     let (url, state) = spawn_mock(pre_baked_reply).await;
 
-    let conn = lingxi_platform_common::connect_sse(&url, None, &Default::default())
+    let conn = lingxi_platform_common::connect_sse(&url, None, &HashMap::new())
         .await
         .expect("connect_sse should succeed against mock");
 
@@ -130,7 +131,7 @@ async fn connect_sse_passes_auth_header_when_token_supplied() {
     let conn = lingxi_platform_common::connect_sse(
         &url,
         Some("abc123def456abc123def456abc12345"),
-        &Default::default(),
+        &HashMap::new(),
     )
     .await
     .expect("connect_sse should succeed");

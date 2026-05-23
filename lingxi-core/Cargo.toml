@@ -12,6 +12,7 @@ members = [
     "crates/tools",
     "crates/hooks",
     "crates/memory",
+    "crates/jsonrpc",
     "crates/mcp",
     "crates/compaction",
     "crates/agent",
@@ -56,6 +57,10 @@ futures-core = "0.3"
 # dev-only
 proptest = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1"
+dashmap = "6"
+futures = "0.3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

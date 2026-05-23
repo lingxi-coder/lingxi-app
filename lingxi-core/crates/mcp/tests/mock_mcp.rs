@@ -627,3 +627,206 @@ async fn captured_frames_capture_outbound_lines() {
         frames.len()
     );
 }
+
+/// Drive a full inbound roundtrip: the mock server completes the
+/// `initialize` handshake, fires a peer-initiated request to the client
+/// (`peer_method` + `peer_params`), and captures the literal JSON response
+/// the client's registered handler emits back.
+///
+/// Returns the wire-level `(id, result)` pair parsed from the captured
+/// response frame so individual tests can assert on echoed id + result
+/// shape together (Task 12 wire-byte contract).
+async fn run_inbound_roundtrip(
+    peer_method: &'static str,
+    peer_params: Value,
+    peer_id: i64,
+    cwd: std::path::PathBuf,
+) -> (Value, Value) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (client_read, mut server_write) = duplex(64 * 1024);
+    let (server_read, client_write) = duplex(64 * 1024);
+
+    // Holds the parsed (id, result) pair extracted from the client's
+    // response to the peer-initiated request.
+    let response_holder = Arc::new(Mutex::new(None::<(Value, Value)>));
+    let response_clone = response_holder.clone();
+
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(server_read);
+        let mut line = String::new();
+
+        // Step 1: wait for the client's `initialize` request, respond.
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                return;
+            }
+            let req: Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if req["method"] == "initialize" {
+                let id = req["id"].clone();
+                let resp = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "serverInfo": { "name": "m", "version": "0" }
+                    }
+                });
+                let mut out = serde_json::to_vec(&resp).unwrap();
+                out.push(b'\n');
+                if server_write.write_all(&out).await.is_err() {
+                    return;
+                }
+                if server_write.flush().await.is_err() {
+                    return;
+                }
+                break;
+            }
+        }
+
+        // Step 2: issue the peer-initiated request to the client.
+        let peer_req = json!({
+            "jsonrpc": "2.0",
+            "id": peer_id,
+            "method": peer_method,
+            "params": peer_params,
+        });
+        let mut out = serde_json::to_vec(&peer_req).unwrap();
+        out.push(b'\n');
+        if server_write.write_all(&out).await.is_err() {
+            return;
+        }
+        if server_write.flush().await.is_err() {
+            return;
+        }
+
+        // Step 3: read frames until we see the response that echoes our
+        // `peer_id` — the client's handler output.
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                return;
+            }
+            let msg: Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if msg["id"] == json!(peer_id) {
+                *response_clone.lock().await = Some((msg["id"].clone(), msg["result"].clone()));
+                return;
+            }
+        }
+    });
+
+    let client_read: Box<dyn AsyncRead + Send + Unpin> = Box::new(client_read);
+    let client_write: Box<dyn AsyncWrite + Send + Unpin> = Box::new(client_write);
+    let connection = lingxi_jsonrpc::Connection::new_line_delimited(client_read, client_write);
+    let client = McpClient::new("inbound-srv", cwd, Arc::new(connection)).await;
+    client.initialize().await.expect("init");
+
+    // Fence the entire roundtrip with a 100ms ceiling so a regression in
+    // the inbound dispatcher doesn't hang the suite.
+    let captured = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+        loop {
+            if response_holder.lock().await.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    captured.expect("inbound roundtrip completed within 100ms");
+
+    // Snapshot the captured response BEFORE the client is dropped so the
+    // connection broker (and its registered handlers) stays alive through
+    // the response read. Holding the MutexGuard across the `drop(client)`
+    // would extend the borrow past `response_holder`'s scope, so we clone
+    // out of the guard immediately.
+    let captured_pair = response_holder
+        .lock()
+        .await
+        .clone()
+        .expect("response captured");
+    drop(client);
+    captured_pair
+}
+
+#[tokio::test]
+async fn inbound_roots_list_returns_file_uri() {
+    // Mock fires `roots/list` with id=42; client's registered
+    // `RootsListHandler` must respond with the literal
+    // `{"roots":[{"uri":"file://<cwd>"}]}` payload and echo id=42.
+    let (id, result) = run_inbound_roundtrip(
+        "roots/list",
+        json!({}),
+        42,
+        std::path::PathBuf::from("/Users/example/proj"),
+    )
+    .await;
+
+    // Echoed id MUST match the request id (JSON-RPC 2.0 §5).
+    assert_eq!(id, json!(42), "response id must echo request id");
+
+    // Wire-shape assertion: outer object with exactly one `roots` array.
+    let roots = result["roots"].as_array().expect("roots array");
+    assert_eq!(roots.len(), 1, "exactly one root");
+    assert_eq!(
+        roots[0]["uri"], "file:///Users/example/proj",
+        "uri must be literal file:// + absolute cwd",
+    );
+
+    // Wire-byte assertion: serialize the full response envelope and lock
+    // the exact JSON-RPC frame the mock would have observed on the wire.
+    let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+    let bytes = serde_json::to_vec(&envelope).unwrap();
+    let text = std::str::from_utf8(&bytes).unwrap();
+    assert!(
+        text.contains(r#""id":42"#),
+        "wire bytes must echo id=42, got: {text}",
+    );
+    assert!(
+        text.contains(r#""roots":[{"uri":"file:///Users/example/proj"}]"#),
+        "wire bytes must carry literal roots array, got: {text}",
+    );
+}
+
+#[tokio::test]
+async fn inbound_elicitation_create_returns_cancel_literal() {
+    // Mock fires `elicitation/create` with id=43; client's registered
+    // `ElicitationCreateHandler` must respond with the literal
+    // `{"action":"cancel"}` payload and echo id=43.
+    let (id, result) = run_inbound_roundtrip(
+        "elicitation/create",
+        json!({"message": "any"}),
+        43,
+        std::path::PathBuf::from("/tmp"),
+    )
+    .await;
+
+    // Echoed id MUST match the request id.
+    assert_eq!(id, json!(43), "response id must echo request id");
+
+    // EXACT shape — one field, value "cancel". Extra fields would break
+    // claude-code parity (services/mcp/client.ts:1196).
+    let obj = result.as_object().expect("object");
+    assert_eq!(obj.len(), 1, "exactly one field in elicitation result");
+    assert_eq!(result["action"], "cancel", "action must be literal cancel");
+
+    // Wire-byte assertion: lock the exact response frame.
+    let envelope = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+    let bytes = serde_json::to_vec(&envelope).unwrap();
+    let text = std::str::from_utf8(&bytes).unwrap();
+    assert!(
+        text.contains(r#""id":43"#),
+        "wire bytes must echo id=43, got: {text}",
+    );
+    assert!(
+        text.contains(r#""result":{"action":"cancel"}"#),
+        "wire bytes must carry literal cancel result, got: {text}",
+    );
+}

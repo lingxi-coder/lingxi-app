@@ -80,6 +80,116 @@ impl BrokerHandle {
     }
 }
 
+/// Spawn the broker over a pre-decoded `Stream<Message>` + `Sink<Message>`
+/// pair. Used by transports that already decode JSON text frames upstream of
+/// the JSON-RPC layer (e.g. WebSocket text-frame messages).
+///
+/// Skips the codec entirely. The provided sink's error type is mapped to
+/// `BrokerError::Join` for uniform shutdown semantics.
+pub fn spawn_typed<S, K>(
+    inbound: S,
+    outbound: K,
+    router: Router,
+    dispatcher: Dispatcher,
+    outbound_rx: mpsc::UnboundedReceiver<OutboundMessage>,
+) -> (BrokerHandle, broadcast::Receiver<Notification>)
+where
+    S: futures::Stream<Item = Message> + Send + Unpin + 'static,
+    K: futures::Sink<Message, Error = crate::connection::ConnectionError> + Send + Unpin + 'static,
+{
+    let (notif_tx, notif_rx) = broadcast::channel(DEFAULT_NOTIFICATION_CAPACITY);
+
+    // Responses produced by the inbound `Dispatcher` are fed back to the
+    // writer task through this internal channel.
+    let (responder_tx, responder_rx) = mpsc::unbounded_channel::<Message>();
+
+    let reader = tokio::spawn(typed_reader_loop(
+        inbound,
+        router,
+        dispatcher,
+        notif_tx.clone(),
+        responder_tx,
+    ));
+
+    let writer = tokio::spawn(typed_writer_loop(outbound, outbound_rx, responder_rx));
+
+    drop(notif_tx);
+
+    (BrokerHandle { reader, writer }, notif_rx)
+}
+
+/// Reader half for `spawn_typed` — same routing logic as `reader_loop`, but
+/// over pre-decoded `Message`s.
+async fn typed_reader_loop<S>(
+    mut inbound: S,
+    router: Router,
+    dispatcher: Dispatcher,
+    notif_tx: broadcast::Sender<Notification>,
+    responder_tx: mpsc::UnboundedSender<Message>,
+) -> Result<(), BrokerError>
+where
+    S: futures::Stream<Item = Message> + Send + Unpin + 'static,
+{
+    while let Some(frame) = inbound.next().await {
+        match frame {
+            Message::Request(req) => {
+                let dispatcher_clone = dispatcher.clone();
+                let responder = responder_tx.clone();
+                tokio::spawn(async move {
+                    let resp = dispatcher_clone.dispatch(req).await;
+                    let _ = responder.send(Message::Response(resp));
+                });
+            }
+            Message::Response(resp) => {
+                router.dispatch_response(resp);
+            }
+            Message::Notification(n) => {
+                let _ = notif_tx.send(n);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Writer half for `spawn_typed` — drains the same two queues as
+/// `writer_loop`, sending pre-decoded `Message`s without a codec layer.
+async fn typed_writer_loop<K>(
+    mut outbound: K,
+    mut outbound_rx: mpsc::UnboundedReceiver<OutboundMessage>,
+    mut responder_rx: mpsc::UnboundedReceiver<Message>,
+) -> Result<(), BrokerError>
+where
+    K: futures::Sink<Message, Error = crate::connection::ConnectionError> + Send + Unpin + 'static,
+{
+    loop {
+        let frame: Message = tokio::select! {
+            biased;
+            msg = outbound_rx.recv() => match msg {
+                Some(OutboundMessage::Request(r)) => Message::Request(r),
+                Some(OutboundMessage::Notification(n)) => Message::Notification(n),
+                None => match responder_rx.recv().await {
+                    Some(m) => m,
+                    None => break,
+                },
+            },
+            resp = responder_rx.recv() => match resp {
+                Some(m) => m,
+                None => match outbound_rx.recv().await {
+                    Some(OutboundMessage::Request(r)) => Message::Request(r),
+                    Some(OutboundMessage::Notification(n)) => Message::Notification(n),
+                    None => break,
+                },
+            },
+        };
+
+        outbound
+            .send(frame)
+            .await
+            .map_err(|e| BrokerError::Join(e.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Spawn the broker tasks.
 ///
 /// Returns:

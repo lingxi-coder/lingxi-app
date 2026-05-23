@@ -1,11 +1,14 @@
-//! Swarm backend — Windows.
+//! Swarm backend — Windows (no tmux).
 //!
-//! claude-code refuses tmux / swarm on Windows: the platform check returns
-//! before any swarm code runs and the user sees `--tmux is not supported on
-//! Windows`. We match by returning [`SwarmError::Unsupported`] from every
-//! fallible method. The previous v0.2.0 doc mentioned a "wezterm / Windows
-//! Terminal" fallback — that feature does not exist in claude-code and was
-//! invented in M1. M2-01 removes it.
+//! claude-code refuses `--tmux` on Windows; we match. Linux + macOS get the
+//! tmux / iTerm / `InProcess` trifecta in `platforms/posix/src/swarm/`. See
+//! the M2-05 plan for the cross-platform parity story.
+//!
+//! Future: if Windows ever gains a swarm story, it would land here as a
+//! Windows Terminal / wezterm CLI shell-out. Out of scope for v0.3.0.
+//!
+//! Wire-fidelity note: the error string `--tmux is not supported on Windows`
+//! (M2-01) must remain unchanged — only the module doc was updated here.
 
 use async_trait::async_trait;
 use lingxi_protocol::AgentId;

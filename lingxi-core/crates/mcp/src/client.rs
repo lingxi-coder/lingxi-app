@@ -84,6 +84,18 @@ impl McpClient {
     pub fn server_name(&self) -> &str {
         &self.server_name
     }
+
+    /// Send the MCP `initialize` request and store server capabilities.
+    ///
+    /// Stub-only — the real implementation lands in Task 8 (sends the
+    /// literal `InitializeParams`, captures the response, writes
+    /// `server_capabilities` + `server_instructions`). The stub exists so
+    /// the mock-harness integration test in `tests/mock_mcp.rs` can compile
+    /// + reach `initialize()` before Task 8 ships the real RPC.
+    #[allow(clippy::unused_async)] // becomes an actual await in Task 8
+    pub async fn initialize(&self) -> Result<ServerCapabilitiesDto, McpClientError> {
+        Err(McpClientError::Initialize("not yet implemented".into()))
+    }
 }
 
 /// Errors emitted by [`McpClient`] operations.

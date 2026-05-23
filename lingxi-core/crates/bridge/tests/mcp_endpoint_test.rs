@@ -6,7 +6,6 @@
 //!   the lockfile via the embedded `LockfileGuard`.
 
 use lingxi_bridge::{IdeBridge, IdeLockfile, McpEndpoint};
-use std::path::PathBuf;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 
 #[tokio::test]
@@ -61,7 +60,7 @@ async fn rejects_upgrade_with_wrong_token() {
 
 #[tokio::test]
 async fn bridge_writes_lockfile_then_round_trips_ws_upgrade() {
-    let bridge = IdeBridge::start(vec![PathBuf::from(std::env::current_dir().unwrap())])
+    let bridge = IdeBridge::start(vec![std::env::current_dir().unwrap()])
         .await
         .expect("start bridge");
     let path = bridge.lockfile_path().clone();
@@ -71,7 +70,10 @@ async fn bridge_writes_lockfile_then_round_trips_ws_upgrade() {
     // 1. Lockfile exists on disk with the auth token we expect.
     assert!(path.exists(), "lockfile must exist after start");
     let (body, port_from_filename) = IdeLockfile::read(&path).expect("read lockfile");
-    assert_eq!(port_from_filename, port, "filename port must match bind port");
+    assert_eq!(
+        port_from_filename, port,
+        "filename port must match bind port"
+    );
     assert_eq!(body.auth_token, expected_token);
     assert_eq!(body.transport, "ws");
     assert_eq!(body.ide_name, "LingXi");

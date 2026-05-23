@@ -302,6 +302,20 @@ pub enum McpError {
     /// Server does not advertise the requested tool.
     #[error("tool not found: {0}")]
     ToolNotFound(String),
+    /// Tool invocation exceeded the per-call timeout budget.
+    ///
+    /// Display format is **load-bearing** — integration tests (plan M2-07) and
+    /// REPL surface match against the exact string. Lock changes via plan
+    /// `2026-05-23-m2-02b-mcp-client.md`.
+    #[error("MCP server \"{server}\" tool \"{tool}\" timed out after {secs}s")]
+    Timeout {
+        /// Logical server name (registry key).
+        server: String,
+        /// Tool name (unprefixed — no `mcp__` prefix).
+        tool: String,
+        /// Timeout budget in whole seconds.
+        secs: u64,
+    },
     /// Catch-all for unexpected failures.
     #[error("internal error: {0}")]
     Internal(String),

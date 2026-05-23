@@ -62,8 +62,11 @@ These divergences are documented in §6.1 (Plan M2-01) — listed here in summar
    (`~/.claude/ide/<port>.lock`); the cloud Remote Control bridge is a separate
    ~14k-line subsystem (out of scope, see §5).
 3. **`WorktreeManager` uses branch prefix `lingxi/`** and a configurable
-   `worktree_base`. claude-code mandates `claude/<slug>` branch names and
-   `<repo>/.claude/worktrees/<flattened-slug>` paths with strict slug validation.
+   `worktree_base`. claude-code's desktop/local worktree path mandates
+   `worktree-<flattened-slug>` branch names and
+   `<repo>/.claude/worktrees/<flattened-slug>` paths with strict slug validation
+   (`/` flattened to `+`). The separate cloud/remote git outcome uses
+   `claude/<branch>` and must not be copied into the desktop worktree manager.
 4. **Windows swarm file exists** but claude-code does not support tmux/swarm
    on Windows. Should return `Unsupported`.
 
@@ -102,13 +105,14 @@ following discriminators:
   `"sandbox.enabled is set but WSL1 is not supported (requires WSL2)"`,
   `"Already in a worktree session"`, `"MCP server "<name>" tool "<tool>" timed
   out after Ns"`.
-- **File paths** — `~/.claude/worktrees/<slug>`, `~/.claude/ide/<port>.lock`,
-  `~/.claude/.credentials.json`, keychain service names. Cross-version state
-  compatibility depends on these.
+- **File paths** — `<gitRoot>/.claude/worktrees/<flattened-slug>`,
+  `~/.claude/ide/<port>.lock`, `~/.claude/.credentials.json`, keychain service
+  names. Cross-version state compatibility depends on these.
 - **Wire identifiers** — MCP client `name: "claude-code"`, capabilities
   `{roots:{}, elicitation:{}}` (note the empty object — Java SDK rejects
-  `{form:{}, url:{}}`), git branch prefix `claude/`, MCP tool prefix
-  `mcp__<server>__<tool>`.
+  `{form:{}, url:{}}`), desktop git worktree branch prefix `worktree-`, MCP tool
+  prefix `mcp__<server>__<tool>`. Cloud/remote bridge git outcomes may still
+  mention `claude/<branch>`; that is not the desktop worktree branch name.
 - **OS support matrix** — sandbox: macOS + Linux + WSL2; reject WSL1 and
   Windows. tmux/swarm: macOS + Linux; reject Windows. LSP: from plugins only
   (not user/project settings).
@@ -144,7 +148,7 @@ strategy. Categories:
 | TS dep | Used in claude-code for | Rust strategy | Category |
 |---|---|---|---|
 | `@anthropic-ai/sandbox-runtime` | sandbox config + dispatch | `crates/sandbox/` + `platforms/*/sandbox.rs` — we reimplement | C |
-| `@modelcontextprotocol/sdk` | MCP client (stdio/http/sse/ws/in-process) | `crates/mcp/` + new `crates/jsonrpc/` — we reimplement | C |
+| `@modelcontextprotocol/sdk` | MCP client (stdio/http/sse/ws; in-process deferred) | `crates/mcp/` + new `crates/jsonrpc/` — we reimplement | C |
 | `@anthropic-ai/sdk` | Anthropic API client (SSE) | `crates/api-client/` (already exists) + `reqwest::Response::bytes_stream` — we reimplement | C |
 | `vscode-jsonrpc/node` | LSP JSON-RPC client | `lingxi-jsonrpc` (shared with MCP) | C |
 | `vscode-languageserver-protocol/types` | LSP message types | `lsp-types` crate | A |
@@ -153,7 +157,7 @@ strategy. Categories:
 | `axios` | HTTP client | `reqwest` (already in v0.2.0) | A |
 | `execa` | subprocess (utilities) | `tokio::process::Command` (already in v0.2.0) | A |
 | `node-pty` | PTY (web pty-server only) | `portable-pty` crate (deferred to M3+) | A |
-| `tree-kill` | kill process tree | `nix::sys::signal::killpg(-pgid, SIGTERM)` (Unix) / `taskkill /T /F /PID` (Windows) | D |
+| `tree-kill` | kill process tree | `nix::sys::signal::killpg(pgid, SIGTERM)` after `setsid()` (Unix) / `taskkill /T /F /PID` (Windows) | D |
 | `proper-lockfile` | file locking | `fs2::FileExt::lock_exclusive` (already in v0.2.0) | A |
 | `child_process.spawn` | bash spawn | `tokio::process::Command` (already in v0.2.0) | A |
 | `crypto` | hashing | `sha2`, `blake3` crates (already in v0.2.0) | A |
@@ -200,8 +204,9 @@ Other deferrals:
   exposes a PTY over WebSocket. Not part of the CLI path. Deferred to M4 (UI
   Layer per spec §35).
 - **Computer-use / Chrome MCP servers** — claude-code has in-process MCP
-  servers for browser automation. The Rust port can support `InProcess` MCP
-  transport in M2-02, but the actual computer-use server is its own project.
+  servers for browser automation. `InProcess`/`SdkControl` are not part of
+  user `settings.json` transport parity and are deferred; the actual
+  computer-use server is its own project.
 
 ---
 
@@ -212,7 +217,7 @@ Other deferrals:
 | Plan | Goal | New code (LOC est.) | Touched crates | Sequential? |
 |---|---|---|---|---|
 | M2-01 | v0.2.0 corrections + scaffold prep | ~400 added, ~800 deleted | bridge (delete only), platforms/posix, platforms/windows, secret | Required first |
-| M2-02 | lingxi-jsonrpc + MCP client + bridge wiring | ~1500 | jsonrpc (new), mcp, platforms/posix/mcp, platforms/windows/mcp, bridge | Depends on M2-01 |
+| M2-02 | lingxi-jsonrpc + MCP client + bridge wiring | ~2200 | jsonrpc (new), mcp, platforms/posix/mcp, platforms/windows/mcp, bridge | Depends on M2-01 |
 | M2-03 | LSP client + plugin-only registration | ~700 | lsp, plugin, platforms/posix/lsp, platforms/windows/lsp | Depends on M2-02 |
 | M2-04 | Sandbox runtime (biggest single plan) | ~1200 | sandbox, platforms/posix/sandbox, platforms/windows/sandbox | Depends on M2-01 |
 | M2-05 | FS watch (notify) + Swarm backends (tmux/iTerm/InProcess) | ~800 | platforms/posix/fs+swarm, platforms/windows/fs+swarm | Depends on M2-01 |
@@ -249,14 +254,16 @@ feature work. Mostly deletions and renames.
     (no longer needed without JWT). Keep `tokio`, `serde`, `thiserror`.
   - Lockfile reader and MCP-over-WS wiring deferred to M2-02 §6.2.
 - `platforms/posix/src/worktree.rs` and `platforms/windows/src/worktree.rs`:
-  - Branch name: `format!("claude/{slug}")` (was `lingxi/{slug}`).
+  - Branch name: `format!("worktree-{}", flatten_slug(slug))` (was
+    `lingxi/{slug}`).
   - Path: parameter renamed from `worktree_base` to `repo_root`; actual path
     becomes `repo_root.join(".claude").join("worktrees").join(flatten_slug(slug))`.
   - Add `fn validate_worktree_slug(slug: &str) -> Result<(), WorktreeError>`:
     each `/`-separated segment must be alphanumeric + `_-.`, max 64 chars
     total. Reject empty segments. Implementation copies claude-code's regex.
-  - Add `fn flatten_slug(slug: &str) -> String` — replace `/` with `_` to
-    keep file names flat.
+  - Add `fn flatten_slug(slug: &str) -> String` — replace `/` with `+` to keep
+    file names flat. `+` is outside the allowed slug-segment character set, so
+    `user/feature` and `user+feature` cannot collide.
   - Add `copy_worktree_includes` parameter handling in `create_worktree`:
     iterate `copy_includes: &[PathBuf]`, copy each into the new worktree if
     it exists in the source.
@@ -268,8 +275,9 @@ feature work. Mostly deletions and renames.
 **1:1 fidelity items to lock in**:
 - `"Already in a worktree session"` error string in worktree create when
   source is itself a worktree (claude-code chdir's to canonical git root).
-- Branch prefix exactly `claude/` (used by claude-code's `teleport.tsx` for
-  title generation, must match).
+- Desktop/local worktree branch prefix exactly `worktree-`; do not use the
+  cloud/remote `claude/<branch>` git outcome format here.
+- Nested slug flattening uses `+`, not `_` or `/`.
 - Worktree paths under `<gitRoot>/.claude/worktrees/` exactly.
 - IDE lockfile shape (the JSON keys above) byte-for-byte from
   `src/utils/ide.ts`.
@@ -277,14 +285,15 @@ feature work. Mostly deletions and renames.
 **Tests**:
 - Update existing `e2e_single_turn.rs` to use new worktree paths (no
   functional change).
-- New `crates/bridge/tests/lockfile_test.rs` — write a fake lockfile to
-  tmpdir, discover, parse, verify selection of most recent by mtime.
+- Worktree naming test: slug `user/feature` yields branch
+  `worktree-user+feature` and path `<gitRoot>/.claude/worktrees/user+feature`.
+  The lockfile reader is still deferred to M2-02, so no bridge lockfile test
+  belongs in M2-01.
 
 **Dependencies**: none (operates on v0.2.0).
 
-**Estimated complexity**: medium. Most edits are deletions or renames. The
-lockfile reader is ~80 lines, worktree slug validation is ~50 lines,
-worktree path/branch refactor is ~150 lines.
+**Estimated complexity**: medium. Most edits are deletions or renames. Worktree
+slug validation is ~50 lines; worktree path/branch refactor is ~150 lines.
 
 **Commit**: single commit `refactor(M2-01): correct v0.2.0 divergences from claude-code`.
 
@@ -307,13 +316,23 @@ MCP stub with a real client matching claude-code's protocol behavior.
 - `src/messages.rs` — `JsonRpcMessage` enum (Request / Response / Notification),
   `RequestId` newtype, `JsonRpcError` shape matching the JSON-RPC 2.0 spec.
 - `src/router.rs` — `RequestRouter` holding `HashMap<RequestId, oneshot::Sender<Result<Value, JsonRpcError>>>`. Public API: `send_request(method, params) -> Future<Result<...>>`. Internal: writer task drains an outbound channel, reader task dispatches responses to pending senders. Cancellation: `Drop` on the future removes the entry from the map and cancels the oneshot.
+- `src/inbound.rs` — `InboundRequestRouter` holding method → async handler
+  registrations. Reader task dispatches incoming peer requests to handlers and
+  writer task sends JSON-RPC responses. Unknown methods return a JSON-RPC
+  method-not-found error instead of hanging. Required because MCP declares
+  `roots` and `elicitation` client capabilities.
 - `src/broker.rs` — `NotificationBroker` using `tokio::sync::broadcast`. Public API: `subscribe(method: &str) -> BroadcastReceiver<Notification>`. Reader task fans out notifications by method name.
-- `src/connection.rs` — `Connection` glues codec + router + broker. Constructor: `Connection::new(read: AsyncRead, write: AsyncWrite, mode: Mode) -> Connection`. Spawns reader/writer background tasks via the platform's `RuntimeSpawner` (passed in). Exposes `send_request`, `send_notification`, `subscribe_notifications`, `close`.
+- `src/connection.rs` — `Connection` glues codec + outgoing router + inbound
+  router + broker. Constructor: `Connection::new(read: AsyncRead, write:
+  AsyncWrite, mode: Mode) -> Connection`. Spawns reader/writer background tasks
+  via the platform's `RuntimeSpawner` (passed in). Exposes `send_request`,
+  `send_notification`, `register_request_handler`, `subscribe_notifications`,
+  `close`.
 - Stderr capture: a separate concern — owned by the `crates/mcp/` consumer, not by `lingxi-jsonrpc`. The connection only handles stdin/stdout.
 
 **Modifications to `crates/mcp/`**:
 
-- `src/client.rs` (new file, ~400 lines): `McpClient` type holding a `lingxi_jsonrpc::Connection`. Methods:
+- `src/client.rs` (new file, ~550 lines): `McpClient` type holding a `lingxi_jsonrpc::Connection`. Methods:
   - `async fn initialize(&self) -> Result<ServerCapabilitiesDto, McpError>`
   - `async fn list_tools(&self) -> Result<Vec<McpToolDto>, McpError>`
   - `async fn list_resources(&self) -> Result<Vec<McpResourceDto>, McpError>`
@@ -322,6 +341,11 @@ MCP stub with a real client matching claude-code's protocol behavior.
   - `async fn read_resource(&self, uri: &str) -> Result<McpResourceContentDto, McpError>`
   - `async fn ping(&self) -> Result<(), McpError>`
   - `fn notifications_stream(&self) -> impl Stream<Item = McpNotificationDto>`
+  - `fn register_roots_handler(&self, handler)` — default returns one root,
+    `file://{original_cwd}`, matching claude-code's `ListRootsRequestSchema`
+    handler.
+  - `fn register_elicitation_handler(&self, handler)` — default returns
+    `{ action: "cancel" }` until a REPL/UI layer replaces it.
 - `src/identity.rs` — constants: `MCP_CLIENT_NAME = "claude-code"`, `MCP_CLIENT_TITLE = "Claude Code"`, `MCP_CLIENT_VERSION = env!("CARGO_PKG_VERSION")`, `MCP_WEBSITE_URL = "https://claude.com/claude-code"`. Capability JSON: literal `{"roots":{}, "elicitation":{}}` constructed via `serde_json::json!`.
 - `src/initialize_params.rs` — assembles the `initialize` JSON-RPC params per MCP spec with the identity constants above.
 
@@ -329,8 +353,21 @@ MCP stub with a real client matching claude-code's protocol behavior.
 
 - Each `connect` impl branches on `McpTransportSpec`:
   - `Stdio` — spawns the child via `tokio::process::Command`, takes stdin/stdout/stderr handles, constructs `McpClient` over a `lingxi_jsonrpc::Connection::new_stdio(stdin, stdout)`, stores the client in the connection map.
+  - `Sse { url, headers, oauth }` — implement claude-code's user-configured
+    SSE MCP transport. Resolve `headers` + `headersHelper`, attach
+    `User-Agent`, use stored OAuth tokens when present, and surface the same
+    unauthorized/re-authorization error class through `McpError`.
+  - `Http { url, headers, oauth }` — implement Streamable HTTP MCP transport
+    over `reqwest`, including `headersHelper`, OAuth provider hooks, request
+    timeout, and session-expired cache clear semantics. This is required for
+    `settings.json` parity because claude-code accepts `type: "http"`.
   - `WebSocket { url, headers }` — opens `tokio-tungstenite::connect_async(url)` with the headers, splits the WS stream, adapts to `AsyncRead + AsyncWrite` via a small Sink/Stream-to-pipe shim, constructs `McpClient` over `lingxi_jsonrpc::Connection::new_websocket(ws_stream)`. This unblocks the IDE bridge work (`crates/bridge/`).
-  - `Http`, `Sse`, `InProcess`, `SseIde`, `SdkControl` — return `Err(McpError::UnsupportedTransport(...))` for M2; M2.next or M3 can wire them.
+  - `SseIde { url, ide_name, running_in_windows }` — reuse the SSE transport
+    without auth headers for older IDE extensions. New lockfile-based IDE
+    bridge uses `WebSocket`.
+  - `InProcess`, `SdkControl` — return `Err(McpError::UnsupportedTransport(...))`
+    for M2 because they are internal SDK/bundled-server paths, not
+    user-configured `settings.json` transports.
 - `initialize` delegates to `McpClient::initialize`.
 - `list_tools`, `call_tool`, etc. delegate accordingly.
 - `notifications` returns `McpClient::notifications_stream`.
@@ -348,7 +385,7 @@ MCP stub with a real client matching claude-code's protocol behavior.
 - `crates/bridge/src/transport.rs` (rewrite, replacing M2-01's stub):
   `IdeBridge::connect()` calls `lockfile::discover_latest()`, then builds an
   `McpTransportSpec::WebSocket { url: format!("ws://localhost:{port}"),
-  headers: HashMap::from([("Authorization", format!("Bearer {authToken}"))]) }`,
+  headers: HashMap::from([("X-Claude-Code-Ide-Authorization", authToken)]) }`,
   hands off to `lingxi-mcp::McpRegistry::connect_with_spec()`. The bridge
   itself owns no JSON-RPC framing — it's a thin lockfile-discovery +
   WebSocket transport spec builder.
@@ -358,6 +395,13 @@ MCP stub with a real client matching claude-code's protocol behavior.
 - MCP client `name: "claude-code"` literal — interoperability bugs hinge here.
 - Capability shape literally `{"roots":{}, "elicitation":{}}` — empty elicitation
   object is required (Java MCP servers reject `{form:{}, url:{}}`).
+- Because those capabilities are declared, inbound JSON-RPC requests must work:
+  `roots/list` returns `file://{original_cwd}` and elicitation defaults to
+  `{action:"cancel"}` until UI replaces the handler.
+- User-configured MCP transports `stdio`, `sse`, and `http` must work in M2.
+  Only internal `sdk` / in-process paths may remain unsupported.
+- IDE WebSocket auth header is exactly `X-Claude-Code-Ide-Authorization`, not
+  `Authorization: Bearer ...`.
 - Tool full-name format `mcp__<server>__<tool>` — already covered in
   `crates/mcp` / `crates/tools` but verify after wiring.
 - Tool metadata fields: `tool._meta?.['anthropic/searchHint']` (whitespace-collapsed)
@@ -378,17 +422,26 @@ MCP stub with a real client matching claude-code's protocol behavior.
 - `mcp_client_test.rs` — using a mock JSON-RPC server in-process, verify
   `initialize` sends the literal identity / capabilities; `call_tool` enforces
   timeout with exact error string.
+- `mcp_inbound_request_test.rs` — mock server sends `roots/list` and
+  `elicitation/create`; verify roots response and default cancel response.
+- `mcp_http_sse_transport_test.rs` — mock HTTP and SSE MCP servers configured
+  through settings-shaped specs; verify both connect and list tools.
+- `bridge_lockfile_test.rs` — write fake `~/.claude/ide/<port>.lock` files to a
+  temp home, discover newest by mtime, and verify the generated WebSocket spec
+  uses `X-Claude-Code-Ide-Authorization`.
 
 **Dependencies**: M2-01.
 
-**Estimated complexity**: large. `lingxi-jsonrpc` is ~600 lines of foundational
-async plumbing; MCP client is ~400 lines on top; platform-side glue (stdio +
-WebSocket) is ~300 lines each (×2 platforms); bridge rewrite is ~200 lines.
-Total ~1500 lines new code + ~300 deleted (stub returns).
+**Estimated complexity**: large. `lingxi-jsonrpc` is ~750 lines of foundational
+async plumbing once inbound request handling is included; MCP client is ~550
+lines on top; platform-side glue (stdio + SSE + HTTP + WebSocket) is ~500 lines
+each (×2 platforms); bridge rewrite is ~200 lines. Total ~2200 lines new code +
+~300 deleted (stub returns).
 
-**Commits**: 4 commits — `feat(jsonrpc): codec + router + broker`,
+**Commits**: 5 commits — `feat(jsonrpc): codec + routers + broker`,
 `feat(mcp): real client over lingxi-jsonrpc`,
-`feat(platforms): wire MCP client + WebSocket transport into posix + windows`,
+`feat(platforms): wire MCP stdio/http/sse/ws transports`,
+`feat(mcp): inbound roots and elicitation handlers`,
 `feat(bridge): lockfile discovery + MCP-over-WS wiring`.
 
 ---
@@ -429,6 +482,11 @@ the plugin code path.
   - Internally converts to 0-based for LSP wire protocol.
   - File size cap: `MAX_LSP_FILE_SIZE_BYTES = 10_000_000` (10 MB). Reject
     files exceeding this.
+  - Before sending any request for a file-backed operation, check whether that
+    absolute path is already open on the selected server. If not, read the file
+    (after the 10 MB cap check) and send `textDocument/didOpen` with
+    `{uri, languageId, version: 1, text}`. Many LSP servers return empty results
+    unless `didOpen` has happened first.
   - Returns claude-code-shaped result (struct with file/range/preview).
 
 - `src/registry.rs` — modify `register_config`:
@@ -458,6 +516,9 @@ the plugin code path.
 **1:1 fidelity items to lock in**:
 - 1-based line/character at the tool boundary (LSP itself is 0-based).
 - 10 MB file size cap with exact `MAX_LSP_FILE_SIZE_BYTES` value.
+- `textDocument/didOpen` before first request for each file, with language id
+  derived from the plugin server's `extensionToLanguage` mapping and a per-server
+  open-file registry so repeated LSP calls do not reread the file.
 - Spawn options: `stdio: ['pipe','pipe','pipe']`, `windowsHide: true`.
 - ENOENT race: await spawn before listen.
 - LSP servers from plugins only (no user/project settings path).
@@ -467,6 +528,8 @@ the plugin code path.
 **Tests** (`crates/lsp/tests/`):
 - `lsp_client_test.rs` — mock LSP server (echoes initialize, returns canned
   hover), verify 1-based↔0-based conversion.
+- `lsp_did_open_test.rs` — first hover reads the file and emits
+  `textDocument/didOpen`; second hover skips duplicate open for the same server.
 - `lsp_diagnostic_registry_test.rs` — publish diagnostics, verify accumulation.
 - `lsp_plugin_only_test.rs` — verify `register_config` is not callable from
   outside `crates/lsp` (compile-fail test if practical, otherwise doc test
@@ -717,9 +780,17 @@ Modify `platforms/posix/src/secure_storage.rs`:
 - Constructor takes `user: String` and `config_dir: PathBuf`.
 - `store(service, account, data)`:
   - Service name format: `format!("Claude Code{oauth_suffix}-credentials{dir_hash}", oauth_suffix = ..., dir_hash = sha256(config_dir).hex()[..8] if non-default else "")`.
-  - Spawn `security add-generic-password -U -a <user> -s <full_service_name>` with `-i` flag (stdin mode) to write data without exposing it in argv.
-  - Stdin payload: JSON-serialized `SecureStorageData`, written through pipe.
-  - Fallback when payload > `SECURITY_STDIN_LINE_LIMIT = 4096 - 64`: hex-encode and use `-X <hex>` flag.
+  - JSON-serialize `SecureStorageData`, then hex-encode it. Claude-code stores
+    via Keychain's `-X <hex>` password flag, not raw JSON stdin.
+  - Preferred path: spawn `security -i` and write the complete interactive
+    command to stdin:
+    `add-generic-password -U -a "<user>" -s "<full_service_name>" -X "<hex>"\n`.
+    This keeps the secret out of argv when the command line is shorter than
+    `SECURITY_STDIN_LINE_LIMIT = 4096 - 64`.
+  - Fallback when the interactive command would overflow that line buffer:
+    spawn `security add-generic-password -U -a <user> -s <full_service_name> -X <hex>`
+    directly. This exposes hex in argv but avoids the `security -i` truncation
+    failure mode that leaves stale credentials in place.
 - `retrieve(service, account)`:
   - 30-second TTL cache (`KEYCHAIN_CACHE_TTL_MS = 30_000`).
   - Generation counter prevents stale subprocess writes from overwriting fresh updates.
@@ -773,7 +844,11 @@ At startup, asynchronously call `MacOsKeychainStorage::retrieve(service, account
 **Process spawn — polish on `platforms/posix/src/process.rs` and `platforms/windows/src/process.rs`**:
 
 - Add `kill_tree(pid: u32)`:
-  - Unix: `nix::sys::signal::killpg(unistd::Pid::from_raw(-(pid as i32)), Signal::SIGTERM)`. Wait 5s. If still alive, SIGKILL.
+  - Unix: background children are spawned with `setsid()`, so child PID == process
+    group ID. Call `nix::sys::signal::killpg(unistd::Pid::from_raw(pid as i32),
+    Signal::SIGTERM)`. Wait 5s. If still alive, send SIGKILL to the same process
+    group. Do not pass a negative PID to `killpg`; negative PIDs are for
+    `kill(2)`, not `killpg(2)`.
   - Windows: spawn `taskkill /T /F /PID <pid>`.
 - Implement `spawn_background` for real:
   - Spawn child with `tokio::process::Command`.
@@ -793,8 +868,9 @@ At startup, asynchronously call `MacOsKeychainStorage::retrieve(service, account
 **1:1 fidelity items to lock in** (each subsystem):
 
 - **Keychain**: service name format with `dir_hash` derivation, 30s TTL,
-  generation counter, in-flight dedupe, `-i` stdin path, hex-encode argv fallback
-  threshold. Plaintext fallback warning string: `"Warning: Storing credentials in plaintext."`.
+  generation counter, in-flight dedupe, `security -i` interactive-command stdin
+  path, hex-encoded `-X` payload, and argv fallback threshold. Plaintext fallback
+  warning string: `"Warning: Storing credentials in plaintext."`.
 - **SSE**: event names from Messages API contract literally.
 - **Process**: env vars `CLAUDECODE=1`, `GIT_EDITOR=true`; 30-minute timeout;
   `pwd -P` cwd tracking; extglob disable; detached + windowsHide; tree-kill
@@ -843,13 +919,16 @@ At startup, asynchronously call `MacOsKeychainStorage::retrieve(service, account
   - `effect_handler_contract`
 - `tests/contract_*.rs` — drivers for each, running platform impls (posix and
   windows where applicable) through the contract suite.
-- `src/parity/` — fixtures for 6 high-value claude-code behavior parity tests:
+- `src/parity/` — fixtures for 7 high-value claude-code behavior parity tests:
   - `sandbox_config_conversion.json` — SettingsJson → SandboxRuntimeConfig roundtrip.
   - `mcp_initialize_request.json` — verify literal `name: "claude-code"`, `capabilities: {roots:{}, elicitation:{}}`.
+  - `mcp_transport_settings_matrix.json` — verify user settings accept
+    `stdio`, `sse`, and `http` transports; internal `sdk`/in-process paths are
+    not treated as user-configured settings transports.
   - `lsp_plugin_only.json` — verify that `register_config` is not callable from
     user/project settings paths.
-  - `worktree_branch_naming.json` — verify branch is `claude/<slug>`,
-    path is `<root>/.claude/worktrees/<flattened-slug>`.
+  - `worktree_branch_naming.json` — verify slug `user/feature` maps to branch
+    `worktree-user+feature` and path `<root>/.claude/worktrees/user+feature`.
   - `secure_storage_macos_service_name.json` — verify service name format.
   - `tmux_windows_refusal.json` — verify Windows returns Unsupported with
     matching error string.
@@ -877,10 +956,11 @@ At startup, asynchronously call `MacOsKeychainStorage::retrieve(service, account
 - `cargo fmt --all --check` clean.
 - `cargo check --no-default-features` clean.
 - Cross-compile matrix in CI (existing `.github/workflows/ci.yml`) passes for
-  5 targets: `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`,
-  `x86_64-pc-windows-msvc`, `aarch64-linux-android`, `aarch64-apple-ios`.
+  the desktop M2 targets: `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`,
+  `x86_64-pc-windows-msvc`. Android/iOS remain M3 scope and must not block the
+  v0.3.0 desktop parity release.
 - All contract tests pass for posix-minimal, posix, windows where applicable.
-- All 6 parity fixtures verified.
+- All 7 parity fixtures verified.
 
 **Tag**: from repo root, `git tag -a v0.3.0 -m "M2 v0.3.0 — claude-code
 behavioral parity"`.
@@ -1130,7 +1210,7 @@ Total file count: ~90 files touched, ~25 net-new files.
 - **claude-code** — the 2026-03-31 leaked TypeScript source at `/Users/luolingfeng/Projects/LingXi-Next/claude-code/`. Reference implementation.
 - **CLI** — `claude` (TypeScript) and `lingxi-demo` (our Rust port).
 - **Lockfile** — `~/.claude/ide/<port>.lock`, JSON file written by VS Code/JetBrains plugins announcing the IDE's WebSocket port + auth token.
-- **MCP** — Model Context Protocol. Tool / resource / prompt protocol over stdio/HTTP/SSE/WS/InProcess.
+- **MCP** — Model Context Protocol. Tool / resource / prompt protocol over stdio/HTTP/SSE/WS. Claude-code also has internal in-process/SDK transports; those are not user settings transports and are deferred here.
 - **Plan** — one of M2-01..M2-07; a unit of work with its own commit(s) and implementation plan doc.
 - **v0.2.0** — current release tag (M2 pragmatic scaffolds).
 - **v0.3.0** — target release tag (M2 behavioral parity, end of M2-07).

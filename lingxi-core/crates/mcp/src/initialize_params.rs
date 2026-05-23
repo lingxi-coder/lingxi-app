@@ -48,3 +48,63 @@ impl Default for InitializeParams {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initialize_params_wire_shape_matches_claude_code() {
+        let params = InitializeParams::default();
+        let json = serde_json::to_value(&params).expect("serialize");
+
+        // protocolVersion is the literal MCP date.
+        assert_eq!(json["protocolVersion"], "2024-11-05");
+
+        // capabilities is EXACTLY {"roots": {}, "elicitation": {}}.
+        let caps = &json["capabilities"];
+        assert!(caps.is_object(), "capabilities must be a JSON object");
+        let caps_obj = caps.as_object().unwrap();
+        assert_eq!(caps_obj.len(), 2, "capabilities must have exactly 2 keys");
+        assert!(caps_obj.contains_key("roots"), "roots key required");
+        assert!(
+            caps_obj.contains_key("elicitation"),
+            "elicitation key required"
+        );
+        assert!(caps["roots"].is_object(), "roots must be an object");
+        assert_eq!(
+            caps["roots"].as_object().unwrap().len(),
+            0,
+            "roots must be EMPTY"
+        );
+        assert!(
+            caps["elicitation"].is_object(),
+            "elicitation must be an object"
+        );
+        assert_eq!(
+            caps["elicitation"].as_object().unwrap().len(),
+            0,
+            "elicitation must be EMPTY — Java MCP SDK rejects {{form:{{}},url:{{}}}}",
+        );
+
+        // clientInfo is camelCase (NOT client_info).
+        assert!(
+            json.get("clientInfo").is_some(),
+            "must be camelCase clientInfo"
+        );
+        assert!(json.get("client_info").is_none(), "no snake_case leak");
+        assert_eq!(json["clientInfo"]["name"], "claude-code");
+    }
+
+    #[test]
+    fn raw_wire_bytes_contain_literal_claude_code_marker() {
+        // Lock the BYTES of the outgoing JSON-RPC payload.
+        let params = InitializeParams::default();
+        let bytes = serde_json::to_vec(&params).expect("serialize");
+        let s = std::str::from_utf8(&bytes).expect("utf8");
+        assert!(
+            s.contains(r#""name":"claude-code""#),
+            "wire bytes must contain literal \"name\":\"claude-code\", got: {s}",
+        );
+    }
+}

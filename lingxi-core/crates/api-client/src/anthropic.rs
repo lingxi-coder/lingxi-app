@@ -5,13 +5,11 @@
 //! payloads; all network I/O is delegated to the `HttpTransport` trait
 //! (wired in Tasks 16–18).
 
+use crate::ApiError;
 use crate::oauth_hook::{OAuthRefreshHook, TokenHash, current_hook};
-use crate::rate_limit::{
-    format_rate_limited_msg, parse_anthropic_ratelimit_reset, parse_retry_after,
-};
+use crate::rate_limit::{parse_anthropic_ratelimit_reset, parse_retry_after};
 use crate::retry::{DEFAULT_BASE_DELAYS_MS, DEFAULT_RETRY_BUDGET, with_retry};
 use crate::types::{MessageResponse, StreamEvent};
-use crate::ApiError;
 use lingxi_protocol::{ConversationMessage, HttpMethod, HttpRequest};
 use lingxi_traits::HttpTransport;
 use serde_json::Value;
@@ -62,6 +60,10 @@ pub struct AnthropicProvider {
     /// Optional per-provider OAuth hook override. When `None`, falls back to
     /// the process-global registration via `oauth_hook::current_hook()`.
     oauth_hook: Option<Arc<dyn OAuthRefreshHook>>,
+    /// Optional analytics bus. When `Some`, `tengu_api_*` events are emitted
+    /// via `lingxi_telemetry::AnalyticsBus`. When `None` (test-mode default),
+    /// emission is silently skipped — matches M3-01 / M3-02 convention.
+    bus: Option<Arc<lingxi_telemetry::AnalyticsBus>>,
 }
 
 impl fmt::Debug for AnthropicProvider {
@@ -73,6 +75,7 @@ impl fmt::Debug for AnthropicProvider {
                 "oauth_hook",
                 &self.oauth_hook.as_ref().map(|_| "<dyn OAuthRefreshHook>"),
             )
+            .field("bus", &self.bus.as_ref().map(|_| "<AnalyticsBus>"))
             .finish()
     }
 }
@@ -86,6 +89,7 @@ impl AnthropicProvider {
             api_key: api_key.into(),
             base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
             oauth_hook: None,
+            bus: None,
         }
     }
 
@@ -95,6 +99,14 @@ impl AnthropicProvider {
     #[must_use]
     pub fn with_oauth_hook(mut self, hook: Arc<dyn OAuthRefreshHook>) -> Self {
         self.oauth_hook = Some(hook);
+        self
+    }
+
+    /// Attach an `AnalyticsBus` so middleware emits `tengu_api_*` events.
+    /// Without a bus, events are silently skipped (test-mode default).
+    #[must_use]
+    pub fn with_bus(mut self, bus: Arc<lingxi_telemetry::AnalyticsBus>) -> Self {
+        self.bus = Some(bus);
         self
     }
 
@@ -166,7 +178,8 @@ impl AnthropicProvider {
     /// On 401, calls the OAuth hook ONCE per request; on a second 401 the
     /// [`ApiError::Unauthorized`] propagates without further refresh attempts.
     /// On 429, parses Retry-After / anthropic-ratelimit-requests-reset and
-    /// sleeps before counting another retry.
+    /// sleeps before counting another retry. Emits four `tengu_api_*`
+    /// telemetry events through the optional `AnalyticsBus`.
     ///
     /// # Errors
     /// See [`ApiError`] for the full failure taxonomy.
@@ -176,73 +189,165 @@ impl AnthropicProvider {
         msgs: Vec<ConversationMessage>,
         transport: &T,
     ) -> Result<MessageResponse, ApiError> {
+        let request_id = new_request_id();
+        let started = std::time::Instant::now();
+        telemetry::emit_started(&self.bus, model, &request_id, false).await;
+
         let body = serde_json::json!({
             "model": model,
             "max_tokens": 4096u32,
             "messages": msgs,
         });
-        // Bearer-token override populated only after a successful 401-driven
-        // refresh; the first attempt always uses the constructor-supplied
-        // x-api-key. `with_retry` does not see the override variable — it is
-        // consumed only on the post-refresh manual retry below.
-        let bearer_token: Option<String> = None;
 
-        let hook = self.effective_hook();
-        let resp = with_retry(DEFAULT_RETRY_BUDGET, DEFAULT_BASE_DELAYS_MS, |_attempt| {
-            let token_override = bearer_token.clone();
+        let resp_result = self.drive_retry_loop_with_429(&body, transport).await;
+        let outcome = self
+            .resolve_outcome(resp_result, &body, model, &request_id, transport)
+            .await;
+
+        self.emit_terminal_event(&outcome, model, &request_id, started)
+            .await;
+        outcome
+    }
+
+    /// Run the retry loop, treating 429 as a synthesised 503 after sleeping
+    /// for the parsed `Retry-After` / `anthropic-ratelimit-requests-reset`
+    /// delay. Returns the underlying `with_retry` outcome.
+    async fn drive_retry_loop_with_429<T: HttpTransport>(
+        &self,
+        body: &Value,
+        transport: &T,
+    ) -> Result<lingxi_protocol::HttpResponse, ApiError> {
+        let bus_for_loop = self.bus.clone();
+        let model_for_loop = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        with_retry(DEFAULT_RETRY_BUDGET, DEFAULT_BASE_DELAYS_MS, |_attempt| {
             let body = body.clone();
+            let bus = bus_for_loop.clone();
+            let model_s = model_for_loop.clone();
             async move {
-                let req = self.build_request_with_betas(&body, token_override.as_deref());
-                transport.request(req).await
+                let req = self.build_request_with_betas(&body, None);
+                let resp = transport.request(req).await?;
+                if resp.status == 429 {
+                    handle_429(&resp.headers, &bus, &model_s).await;
+                    return Ok(lingxi_protocol::HttpResponse {
+                        status: 503,
+                        headers: Vec::new(),
+                        body: String::new(),
+                    });
+                }
+                Ok(resp)
             }
         })
-        .await;
+        .await
+    }
 
-        match resp {
+    /// Map the retry-loop outcome into the public response: parse 2xx bodies,
+    /// drive the 401 → refresh path, and pass other errors through.
+    async fn resolve_outcome<T: HttpTransport>(
+        &self,
+        resp_result: Result<lingxi_protocol::HttpResponse, ApiError>,
+        body: &Value,
+        model: &str,
+        request_id: &str,
+        transport: &T,
+    ) -> Result<MessageResponse, ApiError> {
+        match resp_result {
             Ok(http_resp) => serde_json::from_str::<MessageResponse>(&http_resp.body)
                 .map_err(|e| ApiError::MalformedStream(e.to_string())),
             Err(ApiError::Server {
                 status: 401,
                 body: server_body,
             }) => {
-                // Drive one refresh + retry, then surface the next outcome verbatim.
-                let result = match hook.refresh(TokenHash([0u8; 32])).await {
-                    Ok(crate::BearerToken(token)) => {
-                        let bearer = self.bearer_to_header(&token);
-                        let bearer_opt = Some(bearer);
-                        // Retry exactly once with the new token (no further refresh):
-                        let req = self.build_request_with_betas(&body, bearer_opt.as_deref());
-                        let resp2 = transport.request(req).await.map_err(ApiError::Http)?;
-                        if resp2.status == 200 {
-                            serde_json::from_str::<MessageResponse>(&resp2.body)
-                                .map_err(|e| ApiError::MalformedStream(e.to_string()))
-                        } else if resp2.status == 401 {
-                            Err(ApiError::Unauthorized(resp2.body))
-                        } else {
-                            Err(ApiError::Server {
-                                status: resp2.status,
-                                body: resp2.body,
-                            })
-                        }
-                    }
-                    Err(crate::OAuthHookError::TokenStale) => {
-                        Err(ApiError::OAuthHook(crate::OAuthHookError::TokenStale))
-                    }
-                    Err(other) => Err(ApiError::OAuthHook(other)),
-                };
-                // Note: server_body is intentionally dropped on the happy path
-                // — the spec §5 says the user-facing string for AuthExhausted
-                // comes from the second 401 (or the hook error), not the first.
-                result.map_err(|e| {
-                    if matches!(e, ApiError::Server { .. }) {
-                        // Map 4xx other than 401 into Unauthorized for parity.
-                        ApiError::Unauthorized(server_body.clone())
-                    } else {
-                        e
-                    }
-                })
+                self.refresh_and_retry_401(body, server_body, transport)
+                    .await
             }
             Err(other) => Err(other),
+        }
+        .inspect_err(|e| {
+            tracing::debug!(
+                target: "lingxi::api_client",
+                request_id = %request_id,
+                model = %model,
+                kind = error_kind(e),
+                "request terminated with error"
+            );
+        })
+    }
+
+    /// 401 refresh path: call the OAuth hook, retry once with the new bearer,
+    /// then surface whatever the retry produced (or wrap stray 4xx as
+    /// `Unauthorized` for spec parity).
+    async fn refresh_and_retry_401<T: HttpTransport>(
+        &self,
+        body: &Value,
+        server_body: String,
+        transport: &T,
+    ) -> Result<MessageResponse, ApiError> {
+        let hook = self.effective_hook();
+        let result = match hook.refresh(TokenHash([0u8; 32])).await {
+            Ok(crate::BearerToken(token)) => {
+                let bearer = self.bearer_to_header(&token);
+                let req = self.build_request_with_betas(body, Some(&bearer));
+                match transport.request(req).await {
+                    Ok(resp2) if resp2.status == 200 => {
+                        serde_json::from_str::<MessageResponse>(&resp2.body)
+                            .map_err(|e| ApiError::MalformedStream(e.to_string()))
+                    }
+                    Ok(resp2) if resp2.status == 401 => Err(ApiError::Unauthorized(resp2.body)),
+                    Ok(resp2) => Err(ApiError::Server {
+                        status: resp2.status,
+                        body: resp2.body,
+                    }),
+                    Err(e) => Err(ApiError::Http(e)),
+                }
+            }
+            Err(crate::OAuthHookError::TokenStale) => {
+                Err(ApiError::OAuthHook(crate::OAuthHookError::TokenStale))
+            }
+            Err(other) => Err(ApiError::OAuthHook(other)),
+        };
+        result.map_err(|e| {
+            if matches!(e, ApiError::Server { .. }) {
+                ApiError::Unauthorized(server_body.clone())
+            } else {
+                e
+            }
+        })
+    }
+
+    /// Emit the terminal telemetry event — either `tengu_api_request_succeeded`
+    /// (with the wall-clock `duration_ms`) or `tengu_api_request_failed`.
+    async fn emit_terminal_event(
+        &self,
+        outcome: &Result<MessageResponse, ApiError>,
+        model: &str,
+        request_id: &str,
+        started: std::time::Instant,
+    ) {
+        match outcome {
+            Ok(_) => {
+                telemetry::emit_succeeded(
+                    &self.bus,
+                    model,
+                    request_id,
+                    duration_ms_clamped(started.elapsed()),
+                    200,
+                )
+                .await;
+            }
+            Err(e) => {
+                telemetry::emit_failed(
+                    &self.bus,
+                    model,
+                    request_id,
+                    error_kind(e),
+                    status_of(e),
+                )
+                .await;
+            }
         }
     }
 
@@ -397,23 +502,197 @@ impl AnthropicProvider {
     }
 }
 
-/// Sleep helper for 429 responses. Parses `Retry-After` /
-/// `anthropic-ratelimit-requests-reset`, falling back to 1s. Hooked up
-/// end-to-end in Task 9 (rate-limit integration); kept here so the rate-limit
-/// + telemetry wiring is co-located with the request middleware.
-#[allow(dead_code, reason = "wired into messages_create_non_stream in Task 9")]
-async fn handle_rate_limit(headers: &[(String, String)]) {
+/// Parse the rate-limit headers, emit the `tengu_api_rate_limited` event, and
+/// sleep for the resolved delay (defaulting to 1s when no header was sent).
+async fn handle_429(
+    headers: &[(String, String)],
+    bus: &Option<Arc<lingxi_telemetry::AnalyticsBus>>,
+    model: &str,
+) {
     let now = SystemTime::now();
     let sleep = parse_retry_after(headers)
         .or_else(|| parse_anthropic_ratelimit_reset(headers, now))
         .unwrap_or(std::time::Duration::from_secs(1));
+    telemetry::emit_rate_limited(bus, model, duration_ms_clamped(sleep)).await;
     tracing::warn!(
         target: "lingxi::api_client::rate_limit",
         secs = sleep.as_secs(),
-        msg = %format_rate_limited_msg(sleep.as_secs()),
-        "429 received; sleeping"
+        "429 received; sleeping for {}s",
+        sleep.as_secs()
     );
     tokio::time::sleep(sleep).await;
+}
+
+/// Convert a `Duration` to a `u64` millisecond count, saturating at `u64::MAX`.
+/// Used for telemetry payloads where ms-resolution `i64` is the wire shape.
+fn duration_ms_clamped(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Map an [`ApiError`] to the stable `error_kind` label emitted in the
+/// `tengu_api_request_failed` telemetry event. Strings are spec-locked
+/// vocabulary; do not edit without a matching schema update.
+fn error_kind(e: &ApiError) -> &'static str {
+    match e {
+        ApiError::Http(_) => "http",
+        ApiError::PromptTooLong { .. } => "prompt_too_long",
+        ApiError::RateLimited { .. } => "rate_limited",
+        ApiError::Unauthorized(_) => "unauthorized",
+        ApiError::MalformedStream(_) => "malformed_stream",
+        ApiError::UnexpectedStreamEnd => "stream_end",
+        ApiError::Server { .. } => "server",
+        ApiError::RetryExhausted { .. } => "retry_exhausted",
+        ApiError::UnsupportedModel { .. } => "unsupported_model",
+        ApiError::OAuthHook(_) => "oauth_hook",
+    }
+}
+
+/// Extract the HTTP status code, if any, from an [`ApiError`].
+fn status_of(e: &ApiError) -> Option<u16> {
+    match e {
+        ApiError::Server { status, .. } => Some(*status),
+        ApiError::RetryExhausted { last_status } => *last_status,
+        _ => None,
+    }
+}
+
+/// Helpers that emit the four `tengu_api_*` telemetry events through the
+/// optional `AnalyticsBus`. Each helper short-circuits when the bus is `None`
+/// so test setups that don't attach a sink pay no cost.
+///
+/// Payload keys are spec-locked (see spec §7 telemetry table):
+/// * `model`, `request_id`, `error_kind` use the [`Verified`] newtype.
+/// * `status_code` becomes `AnalyticsValue::None` when absent, never omitted.
+mod telemetry {
+    use lingxi_telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata, Verified};
+    use std::sync::Arc;
+
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "duration_ms / retry_after_ms fit in i64 for all realistic deployments"
+    )]
+    pub async fn emit_started(
+        bus: &Option<Arc<AnalyticsBus>>,
+        model: &str,
+        request_id: &str,
+        stream: bool,
+    ) {
+        let Some(bus) = bus else { return };
+        let mut m = LogEventMetadata::new();
+        m.insert(
+            "model".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(model.to_string()).as_str().to_string(),
+            ),
+        );
+        m.insert(
+            "request_id".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(request_id.to_string())
+                    .as_str()
+                    .to_string(),
+            ),
+        );
+        m.insert("stream".into(), AnalyticsValue::Bool(stream));
+        bus.log_event("tengu_api_request_started", m).await;
+    }
+
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "duration_ms fits in i64 for all realistic deployments"
+    )]
+    pub async fn emit_succeeded(
+        bus: &Option<Arc<AnalyticsBus>>,
+        model: &str,
+        request_id: &str,
+        duration_ms: u64,
+        status: u16,
+    ) {
+        let Some(bus) = bus else { return };
+        let mut m = LogEventMetadata::new();
+        m.insert(
+            "model".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(model.to_string()).as_str().to_string(),
+            ),
+        );
+        m.insert(
+            "request_id".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(request_id.to_string())
+                    .as_str()
+                    .to_string(),
+            ),
+        );
+        m.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        m.insert("status".into(), AnalyticsValue::Int(i64::from(status)));
+        bus.log_event("tengu_api_request_succeeded", m).await;
+    }
+
+    pub async fn emit_failed(
+        bus: &Option<Arc<AnalyticsBus>>,
+        model: &str,
+        request_id: &str,
+        error_kind: &str,
+        status_code: Option<u16>,
+    ) {
+        let Some(bus) = bus else { return };
+        let mut m = LogEventMetadata::new();
+        m.insert(
+            "model".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(model.to_string()).as_str().to_string(),
+            ),
+        );
+        m.insert(
+            "request_id".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(request_id.to_string())
+                    .as_str()
+                    .to_string(),
+            ),
+        );
+        m.insert(
+            "error_kind".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(error_kind.to_string())
+                    .as_str()
+                    .to_string(),
+            ),
+        );
+        m.insert(
+            "status_code".into(),
+            match status_code {
+                Some(s) => AnalyticsValue::Int(i64::from(s)),
+                None => AnalyticsValue::None,
+            },
+        );
+        bus.log_event("tengu_api_request_failed", m).await;
+    }
+
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "retry_after_ms fits in i64 for all realistic deployments"
+    )]
+    pub async fn emit_rate_limited(
+        bus: &Option<Arc<AnalyticsBus>>,
+        model: &str,
+        retry_after_ms: u64,
+    ) {
+        let Some(bus) = bus else { return };
+        let mut m = LogEventMetadata::new();
+        m.insert(
+            "model".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(model.to_string()).as_str().to_string(),
+            ),
+        );
+        m.insert(
+            "retry_after_ms".into(),
+            AnalyticsValue::Int(retry_after_ms as i64),
+        );
+        bus.log_event("tengu_api_rate_limited", m).await;
+    }
 }
 
 #[cfg(test)]

@@ -222,6 +222,13 @@ pub struct StdioHandles {
     pub stderr: Arc<AsyncMutex<StderrRing>>,
 }
 
+// Re-export the shared WebSocket connector so callers can use a single path
+// (`lingxi_platform_posix::mcp::connect_ws`) without reaching into the
+// `lingxi_platform_common` crate directly.
+pub use lingxi_platform_common::mcp_ws::{
+    connect_ws, WsConnectError, AUTH_HEADER_NAME, WS_SUBPROTOCOL,
+};
+
 /// Same as [`spawn_stdio`] but also surfaces the shared stderr ring buffer
 /// so callers can inspect captured stderr after the child exits or hangs.
 ///
@@ -302,4 +309,13 @@ pub async fn spawn_stdio_with_handles(cfg: StdioConfig) -> Result<StdioHandles, 
         connection,
         stderr: stderr_ring,
     })
+}
+
+#[cfg(test)]
+mod re_export_tests {
+    /// Verify the posix crate exposes the public `connect_ws` symbol at
+    /// `lingxi_platform_posix::mcp::connect_ws` (callers should not have to
+    /// import from `lingxi_platform_common` directly).
+    #[allow(unused_imports)]
+    use crate::mcp::connect_ws;
 }

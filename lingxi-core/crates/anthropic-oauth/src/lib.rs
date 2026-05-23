@@ -29,4 +29,6 @@ pub use limits::{ClaudeAiLimitsState, ClaudeAiLimitsTracker, SubscriptionType};
 pub use pkce::{generate_pkce, generate_state_token};
 pub use refresh::{AuthState, RefreshDriver};
 pub use resolver::{resolve, AuthSource, ResolverContext};
-pub use scope_upgrade::{parse_scope_upgrade, ScopeUpgradeRequired};
+pub use scope_upgrade::{
+    parse_scope_upgrade, run_scope_upgrade, PkceRunResult, PkceRunner, ScopeUpgradeRequired,
+};

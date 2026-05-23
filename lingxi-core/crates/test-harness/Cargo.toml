@@ -28,12 +28,27 @@ serde_json.workspace = true
 async-trait.workspace = true
 futures-core.workspace = true
 futures = "0.3"
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
 tracing.workspace = true
+# Hyper-based in-process echo server used by the `contracts::http` suite.
+# The test-harness is dev-only (consumers depend on it via `dev-dependencies`)
+# so this does not bleed into production builds.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+http-body-util = "0.1"
 
 [dev-dependencies]
 proptest.workspace = true
 lingxi-platform-posix-minimal = { path = "../../platforms/posix-minimal" }
+# Used by the M2-07 contract drivers that need a real on-disk root
+# (worktree, secure_storage). Dev-only — never reaches production builds.
+tempfile = "3.13"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
+lingxi-platform-posix = { path = "../../platforms/posix" }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+lingxi-platform-windows = { path = "../../platforms/windows" }
 
 [[bin]]
 name = "mock_lsp_server"

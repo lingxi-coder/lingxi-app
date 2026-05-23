@@ -7,12 +7,14 @@
 
 pub mod codec;
 pub mod messages;
+pub mod router;
 
 pub use codec::{CodecError, LineCodec, LspCodec};
 pub use messages::{
     Id, Message, Notification, Request, Response, ResponseError, INTERNAL_ERROR, INVALID_PARAMS,
     INVALID_REQUEST, JSONRPC_VERSION, METHOD_NOT_FOUND, PARSE_ERROR,
 };
+pub use router::{OutboundMessage, Router, RouterError, DEFAULT_TIMEOUT};
 
 /// Crate version constant — kept in sync with `Cargo.toml`.
 pub const VERSION: &str = "0.1.0";

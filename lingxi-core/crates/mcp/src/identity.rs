@@ -53,3 +53,49 @@ pub const CLIENT_INFO: ClientInfo = ClientInfo {
     version: CLIENT_VERSION,
     website_url: MCP_WEBSITE_URL,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_info_serializes_to_claude_code_literal() {
+        let info = ClientInfo::default();
+        let json = serde_json::to_string(&info).expect("serialize");
+        // Field order is not guaranteed by serde_json — assert by parsing back.
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["name"], "claude-code");
+        assert_eq!(parsed["title"], "Claude Code");
+        assert_eq!(parsed["websiteUrl"], "https://claude.com/claude-code");
+        // CARGO_PKG_VERSION must be present and look like a semver triple.
+        let version = parsed["version"].as_str().expect("version");
+        assert!(
+            version.split('.').count() >= 3,
+            "version should be semver-like, got {version:?}"
+        );
+    }
+
+    #[test]
+    fn client_info_wire_bytes_carry_camelcase_website_url() {
+        // Lock the camelCase field name — claude-code emits `websiteUrl`
+        // (NOT `website_url`) inside `clientInfo`.
+        let bytes = serde_json::to_vec(&ClientInfo::default()).expect("serialize");
+        let s = std::str::from_utf8(&bytes).expect("utf8");
+        assert!(
+            s.contains(r#""websiteUrl":"https://claude.com/claude-code""#),
+            "wire bytes must contain literal websiteUrl, got: {s}",
+        );
+        assert!(
+            !s.contains("website_url"),
+            "no snake_case leak in wire bytes"
+        );
+    }
+
+    #[test]
+    fn client_name_constant_is_literal_claude_code() {
+        // Lock the wire constant against accidental renames.
+        assert_eq!(CLIENT_NAME, "claude-code");
+        assert_eq!(CLIENT_TITLE, "Claude Code");
+        assert_eq!(MCP_WEBSITE_URL, "https://claude.com/claude-code");
+    }
+}

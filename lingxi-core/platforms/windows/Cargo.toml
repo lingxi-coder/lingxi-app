@@ -9,6 +9,7 @@ license.workspace = true
 lingxi-protocol = { path = "../../crates/protocol" }
 lingxi-traits = { path = "../../crates/traits" }
 lingxi-jsonrpc = { path = "../../crates/jsonrpc" }
+lingxi-lsp = { path = "../../crates/lsp" }
 lingxi-platform-common = { path = "../common" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

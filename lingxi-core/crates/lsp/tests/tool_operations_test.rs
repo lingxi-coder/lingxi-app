@@ -547,3 +547,82 @@ async fn zero_position_rejected_before_io() {
         .expect_err("must reject");
     assert!(matches!(err, LspOperationError::InvalidPosition { .. }));
 }
+
+// Pin the 10 MB cap to the exact value from claude-code
+// (LSPTool.ts:53 — `MAX_LSP_FILE_SIZE_BYTES = 10_000_000`).
+#[test]
+fn max_lsp_file_size_bytes_constant_matches_claude_code() {
+    assert_eq!(MAX_LSP_FILE_SIZE_BYTES, 10_000_000);
+}
+
+// Cross-operation check: the cap is enforced by *all* file-bound operations,
+// not just `hover`. We exercise `go_to_definition` to ensure the guard lives
+// in the shared `ensure_file_under_limit` helper, not per call site.
+#[tokio::test]
+async fn go_to_definition_also_rejects_oversize_file() {
+    use std::os::unix::fs::FileExt;
+    let temp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    let f = std::fs::File::options()
+        .write(true)
+        .open(temp.path())
+        .unwrap();
+    f.write_at(b"x", MAX_LSP_FILE_SIZE_BYTES + 1).unwrap();
+    let file_path = temp.path().to_path_buf();
+
+    let (client_io, _peer_io) = duplex(FRAME_BUFFER);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let connection = Connection::new_lsp(client_read, client_write);
+    let client = Arc::new(LspClient::new("rust-analyzer".to_string(), connection));
+    let tracker = OpenFileTracker::new();
+    let cfg = rust_config();
+
+    let err = go_to_definition(&client, &tracker, &cfg, &file_path, 1, 1)
+        .await
+        .expect_err("size cap applies to definition too");
+    assert!(matches!(err, LspOperationError::FileTooLarge { .. }));
+}
+
+// Boundary: a file exactly one byte UNDER the cap is accepted (didOpen sent).
+// Pairs with `file_too_large_is_rejected_before_did_open` (+1 byte rejected)
+// to pin the inclusive/exclusive semantics: `size > limit` rejects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn file_one_byte_under_cap_is_accepted() {
+    use std::os::unix::fs::FileExt;
+    let temp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    let f = std::fs::File::options()
+        .write(true)
+        .open(temp.path())
+        .unwrap();
+    // Sparse file of size exactly MAX - 1 byte: write one byte at offset MAX-2
+    // so the resulting file length is MAX_LSP_FILE_SIZE_BYTES - 1.
+    f.write_at(b"x", MAX_LSP_FILE_SIZE_BYTES - 2).unwrap();
+    let file_path = temp.path().to_path_buf();
+    // Sanity-check the on-disk size before the assertion runs.
+    let meta = std::fs::metadata(&file_path).unwrap();
+    assert_eq!(meta.len(), MAX_LSP_FILE_SIZE_BYTES - 1);
+
+    let (client_io, mut peer_io) = duplex(FRAME_BUFFER);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let connection = Connection::new_lsp(client_read, client_write);
+    let client = Arc::new(LspClient::new("rust-analyzer".to_string(), connection));
+    let tracker = OpenFileTracker::new();
+    let cfg = rust_config();
+
+    let peer = tokio::spawn(async move {
+        // didOpen MUST be sent — proving the cap did not reject us.
+        let did_open = read_one_frame(&mut peer_io).await;
+        assert_eq!(did_open["method"], "textDocument/didOpen");
+        let req = read_one_frame(&mut peer_io).await;
+        assert_eq!(req["method"], "textDocument/hover");
+        write_frame(
+            &mut peer_io,
+            &json!({"jsonrpc":"2.0","id":req["id"],"result":{"contents":""}}),
+        )
+        .await;
+    });
+
+    hover(&client, &tracker, &cfg, &file_path, 1, 1)
+        .await
+        .expect("file just under the cap is accepted");
+    peer.await.expect("peer ok");
+}

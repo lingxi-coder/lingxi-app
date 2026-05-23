@@ -66,11 +66,17 @@ fn enumerate(
         .collect();
     paths.sort();
     for path in paths {
-        let meta = match std::fs::metadata(&path) {
-            Ok(m) => m,
-            Err(_) => continue,
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
         };
-        if meta.len() as usize > MAX_MEMORY_FILE_SIZE {
+        // On 32-bit targets a >4 GB file overflows `usize`; in that case it
+        // is by definition over the 10 MB cap, so treat the conversion failure
+        // as "too large" rather than rejecting it as an I/O error.
+        let over_cap = match usize::try_from(meta.len()) {
+            Ok(n) => n > MAX_MEMORY_FILE_SIZE,
+            Err(_) => true,
+        };
+        if over_cap {
             // Oversized — skip (caller emits tengu_memory_file_too_large
             // via the loader wrapper in Task 13).
             continue;

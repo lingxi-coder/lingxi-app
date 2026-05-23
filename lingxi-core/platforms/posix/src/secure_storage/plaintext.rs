@@ -1,9 +1,11 @@
 //! Plain-text file-based [`SecureStorage`] for desktop hosts.
 //!
+//! Used as a fallback on Linux (no libsecret wiring yet) and as the safety
+//! net on macOS when [`super::macos::MacOsKeychainStorage::new`] cannot
+//! initialise. The macOS keychain backend lives in [`super::macos`].
+//!
 //! Stores secrets as JSON files under `<base>/<service>/<account>.json`.
-//! This is NOT secure on shared systems — it is a development fallback for
-//! when OS keychains are unavailable. The Keychain (`macOS`) and `libsecret`
-//! (Linux) backends are separate follow-up tasks.
+//! This is NOT secure on shared systems.
 
 use async_trait::async_trait;
 use lingxi_protocol::SecureStorageData;

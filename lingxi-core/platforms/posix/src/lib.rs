@@ -3,7 +3,9 @@
 //! Implements `lingxi-traits` interfaces using real OS APIs. Replaces the
 //! M1 `posix-minimal` crate for desktop runnable scenarios.
 
-#![forbid(unsafe_code)]
+// Workspace-level lints already set `unsafe_code = "forbid"`. Phase C will
+// relax this when the `process::spawn_unsafe` module needs `pre_exec` for
+// `setsid()`; see `docs/superpowers/plans/2026-05-23-m2-06-...md` Task 10.
 
 pub mod bridge;
 pub mod clock;
@@ -32,6 +34,8 @@ pub use mcp::{connect_ws, spawn_stdio, McpTransportError};
 pub use process::PosixProcess;
 pub use runtime::PosixRuntime;
 pub use sandbox::PosixSandbox;
-pub use secure_storage::PlainTextSecureStorage;
+pub use secure_storage::{
+    secure_storage_for_platform, MacOsKeychainStorage, PlainTextSecureStorage,
+};
 pub use swarm::TmuxSwarmBackend;
 pub use worktree::PosixWorktreeManager;

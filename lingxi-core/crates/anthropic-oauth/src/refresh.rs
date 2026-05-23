@@ -469,10 +469,7 @@ async fn emit_refresh_failed(
     bus.log_event("tengu_oauth_refresh_failed", m).await;
 }
 
-async fn emit_proactive_canceled(
-    bus: &Option<Arc<lingxi_telemetry::AnalyticsBus>>,
-    reason: &str,
-) {
+async fn emit_proactive_canceled(bus: &Option<Arc<lingxi_telemetry::AnalyticsBus>>, reason: &str) {
     let Some(bus) = bus else { return };
     let mut m = lingxi_telemetry::sink::LogEventMetadata::new();
     m.insert(
@@ -538,10 +535,7 @@ impl RefreshDriver {
 
 /// The proactive task loop. Wakes at `min(remaining/2, 5min)` before expiry,
 /// calls `RefreshDriver::refresh`, and reschedules against the new expiry.
-async fn proactive_loop(
-    state: Arc<AuthState>,
-    spawner: Arc<dyn lingxi_traits::RuntimeSpawner>,
-) {
+async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn lingxi_traits::RuntimeSpawner>) {
     let driver = RefreshDriver::new(state.clone());
     loop {
         // Read current expiry + token_hash.

@@ -7,7 +7,7 @@
 //! invariants explicitly listed.
 //!
 //! Build/run:
-//!   RUSTFLAGS="--cfg loom" cargo test -p lingxi-anthropic-oauth --test refresh_single_flight_test
+//!   `RUSTFLAGS="--cfg loom" cargo test -p lingxi-anthropic-oauth --test refresh_single_flight_test`
 //!
 //! This file is gated behind `#[cfg(loom)]` so it does NOT compile in normal
 //! `cargo test` runs (loom replaces std primitives with model-checking variants).

@@ -21,7 +21,9 @@ fn scope_rejected_display_is_byte_locked() {
 #[test]
 fn proactive_failed_display_wraps_source() {
     let inner = OAuthError::RefreshExpired;
-    let e = OAuthError::ProactiveFailed { source: Box::new(inner) };
+    let e = OAuthError::ProactiveFailed {
+        source: Box::new(inner),
+    };
     assert_eq!(
         format!("{e}"),
         "proactive refresh failed: Session expired. Re-authenticate?",

@@ -17,8 +17,14 @@ fn scope_upgrade_module_exports_parser() {
 fn config_default_uses_spec_locked_endpoints() {
     use lingxi_anthropic_oauth::ClaudeAiOAuthConfig;
     let c = ClaudeAiOAuthConfig::default_with_port(0);
-    assert_eq!(c.authorization_endpoint, "https://claude.ai/oauth/authorize");
-    assert_eq!(c.token_endpoint, "https://console.anthropic.com/v1/oauth/token");
+    assert_eq!(
+        c.authorization_endpoint,
+        "https://claude.ai/oauth/authorize"
+    );
+    assert_eq!(
+        c.token_endpoint,
+        "https://console.anthropic.com/v1/oauth/token"
+    );
     // Scope order is locked.
     assert_eq!(
         c.scopes,

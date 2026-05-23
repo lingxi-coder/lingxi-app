@@ -11,7 +11,8 @@ use std::time::{Duration, SystemTime};
 
 #[test]
 fn parse_scope_upgrade_returns_some_for_required_scopes_body() {
-    let body = r#"{"required_scopes":["read:projects","write:billing"],"granted_scopes":["read:user"]}"#;
+    let body =
+        r#"{"required_scopes":["read:projects","write:billing"],"granted_scopes":["read:user"]}"#;
     let parsed = parse_scope_upgrade(body).expect("must parse");
     assert_eq!(
         parsed.required,

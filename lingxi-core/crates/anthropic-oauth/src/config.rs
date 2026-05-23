@@ -46,7 +46,10 @@ impl ClaudeAiOAuthConfig {
             profile_endpoint: "https://api.claude.ai/v1/me".into(),
             client_id: "lingxi-core".into(),
             redirect_uri: format!("http://127.0.0.1:{port}/callback"),
-            scopes: CLAUDE_CODE_OAUTH_SCOPES.iter().map(|s| (*s).into()).collect(),
+            scopes: CLAUDE_CODE_OAUTH_SCOPES
+                .iter()
+                .map(|s| (*s).into())
+                .collect(),
         }
     }
 }

@@ -36,7 +36,10 @@ fn oauth_wire_identifiers_match_claude_code() {
         cfg.authorization_endpoint, fx.authorize_endpoint,
         "authorize endpoint drift",
     );
-    assert_eq!(cfg.token_endpoint, fx.token_endpoint, "token endpoint drift");
+    assert_eq!(
+        cfg.token_endpoint, fx.token_endpoint,
+        "token endpoint drift"
+    );
     assert_eq!(
         cfg.revocation_endpoint, fx.revocation_endpoint,
         "revocation endpoint drift",
@@ -46,9 +49,14 @@ fn oauth_wire_identifiers_match_claude_code() {
     assert_eq!(REFRESH_GRANT_TYPE, fx.refresh_grant_type);
 
     // Scope list + order.
-    let scopes_in_order: Vec<String> =
-        CLAUDE_CODE_OAUTH_SCOPES.iter().map(|s| (*s).into()).collect();
-    assert_eq!(scopes_in_order, fx.scopes_in_order, "scope list/order drift");
+    let scopes_in_order: Vec<String> = CLAUDE_CODE_OAUTH_SCOPES
+        .iter()
+        .map(|s| (*s).into())
+        .collect();
+    assert_eq!(
+        scopes_in_order, fx.scopes_in_order,
+        "scope list/order drift"
+    );
 
     // Loopback redirect URI template — config builds it for port 0; we compare
     // against the literal `{port}` template from the fixture. We do NOT do a
@@ -59,7 +67,10 @@ fn oauth_wire_identifiers_match_claude_code() {
 
     // Error strings (byte-for-byte).
     let refresh_expired = OAuthError::RefreshExpired;
-    assert_eq!(format!("{refresh_expired}"), fx.refresh_expired_error_string);
+    assert_eq!(
+        format!("{refresh_expired}"),
+        fx.refresh_expired_error_string
+    );
 
     let scope_rejected = OAuthError::ScopeRejected {
         required: vec!["x".into()],

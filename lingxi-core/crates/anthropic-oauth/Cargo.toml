@@ -9,6 +9,8 @@ license.workspace = true
 lingxi-protocol = { path = "../protocol" }
 lingxi-traits = { path = "../traits" }
 lingxi-secret = { path = "../secret" }
+lingxi-telemetry = { path = "../telemetry" }
+lingxi-api-client = { path = "../api-client" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -18,8 +20,13 @@ base64 = "0.22"
 rand = "0.9"
 sha2 = "0.10"
 urlencoding = "2"
-tokio = { version = "1", features = ["sync", "time", "net", "io-util"] }
+tokio = { workspace = true, features = ["sync", "time", "net", "io-util", "macros", "rt-multi-thread"] }
 tracing.workspace = true
+
+[dev-dependencies]
+loom = "0.7"
+futures = "0.3"
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

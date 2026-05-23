@@ -5,9 +5,11 @@
 //! - Loopback HTTP listener for the redirect URI
 //! - Auth-source resolver covering the 9 documented sources (A6)
 //! - Static config + a placeholder rate-limit tracker
+//! - Reactive + proactive token refresh (M3-04)
+//! - Scope upgrade flow (M3-04)
 //!
-//! The full OAuth dance (browser open + token exchange + refresh) is wired up
-//! by the cli-demo in Plan 16; M1.19 ships the building blocks.
+//! M3-04 implements `lingxi_api_client::oauth_hook::OAuthRefreshHook` (frozen
+//! in M3-03 §3); we extend, never modify, the api-client trait surface.
 
 #![forbid(unsafe_code)]
 
@@ -16,11 +18,15 @@ pub mod client;
 pub mod config;
 pub mod limits;
 pub mod pkce;
+pub mod refresh;
 pub mod resolver;
+pub mod scope_upgrade;
 
 pub use callback::{await_callback, CallbackError, CallbackParams};
 pub use client::{ClaudeAiOAuthClient, OAuthError};
-pub use config::ClaudeAiOAuthConfig;
+pub use config::{ClaudeAiOAuthConfig, CLAUDE_CODE_OAUTH_SCOPES, REFRESH_GRANT_TYPE};
 pub use limits::{ClaudeAiLimitsState, ClaudeAiLimitsTracker, SubscriptionType};
 pub use pkce::{generate_pkce, generate_state_token};
+pub use refresh::{AuthState, RefreshDriver};
 pub use resolver::{resolve, AuthSource, ResolverContext};
+pub use scope_upgrade::{parse_scope_upgrade, ScopeUpgradeRequired};

@@ -25,19 +25,28 @@ pub struct ClaudeAiOAuthConfig {
     pub scopes: Vec<String>,
 }
 
+/// Spec §7 line 720 — claude-code's authoritative scope list.
+///
+/// Order is preserved when joined into the `scope=` parameter; tests assert
+/// the exact `read:user write:messages read:projects` byte sequence.
+pub const CLAUDE_CODE_OAUTH_SCOPES: &[&str] = &["read:user", "write:messages", "read:projects"];
+
+/// Spec §7 line 715 — refresh grant_type. Locked byte-for-byte.
+pub const REFRESH_GRANT_TYPE: &str = "refresh_token";
+
 impl ClaudeAiOAuthConfig {
     /// Default config — endpoints per claude-code reference, redirect URI
     /// targeted at a caller-supplied loopback `port`.
     #[must_use]
     pub fn default_with_port(port: u16) -> Self {
         Self {
-            authorization_endpoint: "https://login.claude.ai/oauth/authorize".into(),
-            token_endpoint: "https://login.claude.ai/oauth/token".into(),
-            revocation_endpoint: "https://login.claude.ai/oauth/revoke".into(),
+            authorization_endpoint: "https://claude.ai/oauth/authorize".into(),
+            token_endpoint: "https://console.anthropic.com/v1/oauth/token".into(),
+            revocation_endpoint: "https://console.anthropic.com/v1/oauth/revoke".into(),
             profile_endpoint: "https://api.claude.ai/v1/me".into(),
             client_id: "lingxi-core".into(),
             redirect_uri: format!("http://127.0.0.1:{port}/callback"),
-            scopes: vec!["profile".into(), "messages".into()],
+            scopes: CLAUDE_CODE_OAUTH_SCOPES.iter().map(|s| (*s).into()).collect(),
         }
     }
 }

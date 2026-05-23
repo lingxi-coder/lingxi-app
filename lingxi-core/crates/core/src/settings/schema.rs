@@ -105,6 +105,39 @@ pub struct SettingsJson {
     pub model: Option<String>,
 }
 
+impl SettingsJson {
+    /// Run cross-field semantic checks beyond what `deny_unknown_fields` catches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SettingsError::SchemaViolation`] with a human-readable trail
+    /// pointing at the offending field path (e.g. `trustedDirectories[1]`).
+    ///
+    /// [`SettingsError::SchemaViolation`]: crate::settings::SettingsError::SchemaViolation
+    pub fn validate(&self) -> Result<(), crate::settings::SettingsError> {
+        for (field_name, array) in [
+            ("trustedDirectories", self.trusted_directories.as_deref()),
+            (
+                "additionalDirectories",
+                self.additional_directories.as_deref(),
+            ),
+            ("enabledTools", self.enabled_tools.as_deref()),
+            ("additionalIncludes", self.additional_includes.as_deref()),
+        ] {
+            if let Some(arr) = array {
+                for (i, s) in arr.iter().enumerate() {
+                    if s.is_empty() {
+                        return Err(crate::settings::SettingsError::SchemaViolation(format!(
+                            "{field_name}[{i}] is empty"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +199,23 @@ mod tests {
                 "{field} should be DeepMerge, got {strat:?}"
             );
         }
+    }
+
+    #[test]
+    fn validate_rejects_empty_string_in_trusted_dirs() {
+        let json = r#"{"trustedDirectories": ["/foo", ""]}"#;
+        let parsed: SettingsJson = serde_json::from_str(json).unwrap();
+        let err = parsed.validate().unwrap_err();
+        assert!(
+            matches!(err, crate::settings::SettingsError::SchemaViolation(ref s) if s.contains("trustedDirectories[1]")),
+            "expected SchemaViolation pointing at index 1, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_settings() {
+        let json = r#"{"trustedDirectories": ["/foo"], "telemetryEnabled": true}"#;
+        let parsed: SettingsJson = serde_json::from_str(json).unwrap();
+        assert!(parsed.validate().is_ok());
     }
 }

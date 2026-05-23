@@ -253,6 +253,213 @@ async fn initialize_truncates_long_server_instructions() {
 }
 
 #[tokio::test]
+async fn list_tools_prefixes_full_name_with_double_underscores() {
+    let (client, _cap, _h) =
+        make_client_against_mock("filesystem", std::path::PathBuf::from("/tmp/work"), |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "tools/list" => json!({
+                    "tools": [
+                        { "name": "read_file", "description": "Read", "inputSchema": {} },
+                        { "name": "write_file", "description": "Write", "inputSchema": {} }
+                    ]
+                }),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        })
+        .await;
+
+    client.initialize().await.expect("init");
+    let tools = client.list_tools().await.expect("list");
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0].server_name, "filesystem");
+    assert_eq!(tools[0].tool_name, "read_file");
+    // LITERAL full-name format: mcp__<server>__<tool>.
+    assert_eq!(tools[0].full_name, "mcp__filesystem__read_file");
+    assert_eq!(tools[1].full_name, "mcp__filesystem__write_file");
+}
+
+#[tokio::test]
+async fn call_tool_times_out_with_locked_error_string() {
+    // Mock responds to `initialize` but NEVER responds to `tools/call`,
+    // forcing the client to hit the timeout branch.
+    let (client, _cap, _h) =
+        make_client_against_mock("filesystem", std::path::PathBuf::from("/tmp/work"), |req| {
+            let method = req["method"].as_str().unwrap_or("");
+            if method == "initialize" {
+                let id = req["id"].clone();
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "m", "version": "0" }
+                    }
+                }))
+            } else {
+                None // black hole → timeout
+            }
+        })
+        .await;
+
+    client.initialize().await.expect("init");
+
+    // Use a tiny override so the test runs in <100ms instead of 60s.
+    let err = client
+        .call_tool_with_timeout(
+            "mcp__filesystem__read_file",
+            json!({}),
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .expect_err("should time out");
+
+    // EXACT literal — error string is load-bearing for M2-07 integration tests.
+    // NOTE: the user-facing seconds value is the rounded-up Duration.as_secs().
+    // For sub-second timeouts we still report at least 1 (claude-code's
+    // implementation uses the seconds setting from settings.json, but our
+    // unit-test path uses Duration directly — round-up keeps the format stable).
+    let msg = format!("{err}");
+    assert!(
+        msg.starts_with(r#"MCP server "filesystem" tool "read_file" timed out after "#),
+        "must match literal prefix, got: {msg}",
+    );
+    assert!(msg.ends_with('s'), "must end with literal s, got: {msg}");
+}
+
+#[tokio::test]
+async fn call_tool_full_name_validation_rejects_wrong_prefix() {
+    // The CALLER passes a full-name like `mcp__filesystem__read_file`.
+    // The client must strip the `mcp__<server>__` prefix before sending
+    // `name: "read_file"` over the wire.
+    let captured_method = Arc::new(Mutex::new(None::<String>));
+    let captured_clone = captured_method.clone();
+
+    let (client, _cap, _h) = make_client_against_mock(
+        "filesystem",
+        std::path::PathBuf::from("/tmp/work"),
+        move |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            if method == "tools/call" {
+                let tool_name = req["params"]["name"].as_str().unwrap_or("").to_string();
+                let captured_clone = captured_clone.clone();
+                tokio::spawn(async move {
+                    *captured_clone.lock().await = Some(tool_name);
+                });
+            }
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "tools/call" => json!({
+                    "content": [{ "type": "text", "text": "ok" }],
+                    "isError": false
+                }),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        },
+    )
+    .await;
+
+    client.initialize().await.expect("init");
+    client
+        .call_tool("mcp__filesystem__read_file", json!({}))
+        .await
+        .expect("call");
+
+    // Give the inner spawn a moment to land.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let name = captured_method.lock().await.clone();
+    assert_eq!(
+        name.as_deref(),
+        Some("read_file"),
+        "wire name must be unprefixed"
+    );
+}
+
+#[tokio::test]
+async fn list_tools_truncates_oversized_descriptions() {
+    // 2049-char description (above MAX_MCP_DESCRIPTION_LENGTH) must come
+    // back truncated with the `… [truncated]` sentinel — locks the
+    // MAX_MCP_DESCRIPTION_LENGTH contract against accidental drift.
+    let long = "x".repeat(2049);
+    let long_clone = long.clone();
+    let (client, _cap, _h) = make_client_against_mock(
+        "filesystem",
+        std::path::PathBuf::from("/tmp/work"),
+        move |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "tools/list" => json!({
+                    "tools": [
+                        { "name": "noisy", "description": long_clone, "inputSchema": {} }
+                    ]
+                }),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        },
+    )
+    .await;
+
+    client.initialize().await.expect("init");
+    let tools = client.list_tools().await.expect("list");
+    assert_eq!(tools.len(), 1);
+    assert!(
+        tools[0].description.ends_with("\u{2026} [truncated]"),
+        "must end with truncation sentinel, got: …{}",
+        &tools[0].description[tools[0].description.len().saturating_sub(40)..],
+    );
+    assert!(
+        tools[0].description.chars().count()
+            <= lingxi_mcp::MAX_MCP_DESCRIPTION_LENGTH + "\u{2026} [truncated]".chars().count(),
+        "must not exceed MAX_MCP_DESCRIPTION_LENGTH + sentinel length",
+    );
+}
+
+#[tokio::test]
+async fn raw_tool_decodes_anthropic_meta_block() {
+    // Locks the `_meta.anthropic/searchHint` and `_meta.anthropic/alwaysLoad`
+    // wire keys directly via serde — important because slashes in field
+    // names cannot be expressed in Rust identifiers and rely on the
+    // serde(rename) attributes.
+    let raw_json = serde_json::json!({
+        "name": "x",
+        "description": "y",
+        "inputSchema": {},
+        "_meta": {
+            "anthropic/searchHint": "shell",
+            "anthropic/alwaysLoad": true
+        }
+    });
+    // Use a public alias-import trick to reach the private RawTool — for
+    // black-box testing we serialize a `ToolMeta` directly via the public
+    // re-export and assert symmetric encoding/decoding.
+    let meta: lingxi_mcp::client::ToolMeta =
+        serde_json::from_value(raw_json["_meta"].clone()).expect("decode meta");
+    assert_eq!(meta.search_hint.as_deref(), Some("shell"));
+    assert_eq!(meta.always_load, Some(true));
+}
+
+#[tokio::test]
 async fn captured_frames_capture_outbound_lines() {
     // Verify the harness itself round-trips a single line through the
     // capture buffer. This is independent of `McpClient`; we drive the

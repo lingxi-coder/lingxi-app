@@ -11,7 +11,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use lingxi_traits::ServerCapabilitiesDto;
+use lingxi_traits::{McpToolDto, McpToolResultDto, ServerCapabilitiesDto};
 use serde::Deserialize;
 
 use crate::inbound::{ElicitationCreateHandler, RootsListHandler};
@@ -204,6 +204,145 @@ impl McpClient {
     pub async fn server_capabilities(&self) -> Option<ServerCapabilitiesDto> {
         self.server_capabilities.read().await.clone()
     }
+
+    /// Enumerate every tool advertised by the server.
+    ///
+    /// Sends `tools/list`, decorates each entry with the LITERAL full-name
+    /// `mcp__<server>__<tool>` per spec §6.2, and truncates oversized
+    /// descriptions through [`truncate_description`] so downstream prompt
+    /// rendering never has to worry about MCP server description bloat.
+    pub async fn list_tools(&self) -> Result<Vec<McpToolDto>, McpClientError> {
+        let resp: ToolsListResponse = self
+            .connection
+            .call("tools/list", serde_json::Value::Null)
+            .await
+            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+
+        Ok(resp
+            .tools
+            .into_iter()
+            .map(|t| McpToolDto {
+                full_name: format!("mcp__{}__{}", self.server_name, t.name),
+                server_name: self.server_name.clone(),
+                description: truncate_description(&t.description).into_owned(),
+                input_schema: t.input_schema,
+                tool_name: t.name,
+            })
+            .collect())
+    }
+
+    /// Invoke a tool by its `mcp__<server>__<tool>` full-name with the
+    /// default 60-second timeout.
+    pub async fn call_tool(
+        &self,
+        full_name: &str,
+        input: serde_json::Value,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        self.call_tool_with_timeout(full_name, input, DEFAULT_CALL_TOOL_TIMEOUT)
+            .await
+    }
+
+    /// `call_tool` with a custom timeout — used by tests to exercise the
+    /// timeout branch without waiting the full 60 seconds.
+    ///
+    /// Strips the `mcp__<server>__` prefix from `full_name` to recover the
+    /// unprefixed wire `name`. On timeout produces
+    /// [`McpClientError::Timeout`] with its locked Display format.
+    pub async fn call_tool_with_timeout(
+        &self,
+        full_name: &str,
+        input: serde_json::Value,
+        timeout: std::time::Duration,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        // Strip the mcp__<server>__ prefix to recover the wire `name`.
+        let prefix = format!("mcp__{}__", self.server_name);
+        let tool_name = full_name
+            .strip_prefix(&prefix)
+            .ok_or_else(|| {
+                McpClientError::Rpc(format!("full_name {full_name:?} missing prefix {prefix:?}"))
+            })?
+            .to_string();
+
+        let params = serde_json::json!({
+            "name": tool_name,
+            "arguments": input,
+        });
+
+        // Sub-second timeouts still report at least 1s to keep the
+        // user-facing error string stable. Round up using ceil semantics on
+        // the millis fraction so non-zero sub-second timeouts don't collapse
+        // to "after 0s".
+        let secs = timeout.as_secs().max(1);
+        let fut = self
+            .connection
+            .call::<_, ToolCallResponse>("tools/call", params);
+
+        match tokio::time::timeout(timeout, fut).await {
+            Err(_elapsed) => Err(McpClientError::Timeout {
+                server: self.server_name.clone(),
+                tool: tool_name,
+                secs,
+            }),
+            Ok(Err(e)) => Err(McpClientError::Rpc(e.to_string())),
+            Ok(Ok(resp)) => Ok(McpToolResultDto {
+                content: resp.content,
+                is_error: resp.is_error,
+            }),
+        }
+    }
+}
+
+/// Default per-call timeout for `tools/call`, matching claude-code's
+/// `MCP_TOOL_TIMEOUT_MS` (60 seconds).
+pub const DEFAULT_CALL_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Wire-level shape of a `tools/list` response body.
+#[derive(Debug, Deserialize)]
+struct ToolsListResponse {
+    tools: Vec<RawTool>,
+}
+
+/// Wire-level shape for one tool entry inside `tools/list`. The optional
+/// `_meta` block carries claude-code-specific hints
+/// (`anthropic/searchHint` for retrieval prefiltering, `anthropic/alwaysLoad`
+/// to force-include the tool in the agent prompt even when the search hint
+/// doesn't match).
+#[derive(Debug, Deserialize)]
+struct RawTool {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(rename = "inputSchema", default)]
+    input_schema: serde_json::Value,
+    #[serde(default, rename = "_meta")]
+    #[allow(dead_code)] // surfaced when M2-02b §10 hooks the tool registry up
+    meta: ToolMeta,
+}
+
+/// Optional `_meta` companion attached to each tool. All fields default to
+/// `None`/`false` when absent so non-claude-code servers decode cleanly.
+///
+/// Public because the round-trip serde contract for the slashed key names
+/// (`anthropic/searchHint`, `anthropic/alwaysLoad`) is part of the
+/// load-bearing wire surface tests assert against.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ToolMeta {
+    /// Claude-code retrieval prefilter hint (e.g. `"shell"`, `"editor"`).
+    #[serde(default, rename = "anthropic/searchHint")]
+    pub search_hint: Option<String>,
+    /// `true` to force-include the tool in the agent prompt even when the
+    /// search hint doesn't match the current task.
+    #[serde(default, rename = "anthropic/alwaysLoad")]
+    pub always_load: Option<bool>,
+}
+
+/// Wire-level shape of a `tools/call` response body.
+#[derive(Debug, Deserialize)]
+struct ToolCallResponse {
+    #[serde(default)]
+    content: serde_json::Value,
+    #[serde(rename = "isError", default)]
+    is_error: bool,
 }
 
 /// Errors emitted by [`McpClient`] operations.

@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 pub mod action;
+pub mod client;
 pub mod config;
 pub mod connection;
 pub mod registry;
@@ -18,6 +19,7 @@ pub mod tool;
 pub mod transport;
 
 pub use action::{LspAction, LspResponse};
+pub use client::LspClient;
 pub use connection::LspConnectionState;
 pub use registry::LspRegistry;
 pub use tool::LspTool;

@@ -66,10 +66,7 @@ async fn initialize_sends_canonical_lsp_params_and_receives_capabilities() {
         assert!(id.is_number() || id.is_string(), "id present");
         let params = &req["params"];
         // process_id may be null per LSP spec; we just verify the field exists.
-        assert!(
-            params.get("processId").is_some(),
-            "processId field present"
-        );
+        assert!(params.get("processId").is_some(), "processId field present");
         assert_eq!(params["rootUri"], "file:///tmp/workspace");
         assert!(
             params["capabilities"].is_object(),

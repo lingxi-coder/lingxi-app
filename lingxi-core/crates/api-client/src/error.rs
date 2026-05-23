@@ -41,6 +41,39 @@ pub enum ApiError {
     /// SSE stream terminated before a `message_stop` event.
     #[error("stream ended unexpectedly")]
     UnexpectedStreamEnd,
+
+    /// Server-side error response (any non-2xx the caller didn't already
+    /// classify into a more specific variant). 4xx other than 401 falls
+    /// through here from the retry loop.
+    #[error("server error (HTTP {status}): {body}")]
+    Server {
+        /// Numeric HTTP status code.
+        status: u16,
+        /// Response body verbatim.
+        body: String,
+    },
+
+    /// Retry budget exhausted. Carries the last HTTP status seen, if any.
+    #[error("retry budget exhausted (last status: {last_status:?})")]
+    RetryExhausted {
+        /// HTTP status of the last attempt, or `None` if every attempt
+        /// failed with a transport error before reaching a status line.
+        last_status: Option<u16>,
+    },
+
+    /// Provider does not support the requested model for this endpoint
+    /// (e.g. Vertex `count_tokens` is restricted to a 3-model whitelist).
+    #[error("unsupported model {model} for provider {provider}")]
+    UnsupportedModel {
+        /// Model identifier the caller requested.
+        model: String,
+        /// Provider name (`anthropic`, `vertex`, `bedrock`).
+        provider: &'static str,
+    },
+
+    /// OAuth hook raised an error during a 401-driven refresh attempt.
+    #[error("oauth refresh hook failed: {0}")]
+    OAuthHook(#[from] crate::oauth_hook::OAuthHookError),
 }
 
 #[cfg(test)]

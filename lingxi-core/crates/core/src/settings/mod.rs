@@ -13,6 +13,17 @@ pub mod merger;
 pub mod schema;
 pub mod tracer;
 
+/// Test-only support — process-wide mutex shared by every settings test that
+/// mutates `HOME` to redirect [`loader::user_settings_path`] at a tempdir.
+/// All such tests must lock this before calling `std::env::set_var("HOME", ...)`
+/// so the parallel test runner can't observe another test's `HOME`.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Mutex;
+
+    pub(crate) static HOME_LOCK: Mutex<()> = Mutex::new(());
+}
+
 /// Errors returned by [`Settings::load`] and its sub-modules.
 ///
 /// Mirrors spec §5 `SettingsError`.
@@ -73,8 +84,20 @@ pub struct LoadInputs<'a> {
 pub struct EffectiveSettings {
     /// The merged settings.
     pub settings: SettingsJson,
-    /// Per-field provenance trace for `/doctor` (M6). Wired in Task 9.
+    /// Per-field provenance trace for `/doctor` (M6).
     pub trace: tracer::ProvenanceTrace,
+}
+
+impl EffectiveSettings {
+    /// Look up provenance for a top-level settings field.
+    ///
+    /// Field names are camelCase wire identifiers (e.g. `trustedDirectories`),
+    /// matching the JSON keys — NOT the Rust `snake_case` field names.
+    /// Returns `None` if no layer ever set this field.
+    #[must_use]
+    pub fn effective_for(&self, field: &str) -> Option<&tracer::FieldProvenance> {
+        self.trace.by_field.get(field)
+    }
 }
 
 /// Public entry point. See spec §4 Flow D for the data-flow diagram.
@@ -100,29 +123,35 @@ impl Settings {
             defaults,
         } = inputs;
 
+        let mut trace = tracer::ProvenanceTrace::default();
+
         // Layer 1 (lowest): defaults
+        trace.record_layer(tracer::Source::Defaults, &defaults);
         let mut acc = defaults;
 
         // Layer 2: project
         let project_path = loader::project_settings_path(project_dir);
         if let Some(proj) = loader::read_settings_file(&project_path)? {
+            trace.record_layer(tracer::Source::Project, &proj);
             acc = merger::merge(acc, proj);
         }
 
         // Layer 3: user
         if let Some(user_path) = loader::user_settings_path() {
             if let Some(usr) = loader::read_settings_file(&user_path)? {
+                trace.record_layer(tracer::Source::User, &usr);
                 acc = merger::merge(acc, usr);
             }
         }
 
         // Layer 4 (highest): env
         let (env_layer, _invalid_env) = env_parser::parse_env(env)?;
+        trace.record_layer(tracer::Source::Env, &env_layer);
         acc = merger::merge(acc, env_layer);
 
         Ok(EffectiveSettings {
             settings: acc,
-            trace: tracer::ProvenanceTrace::default(),
+            trace,
         })
     }
 }
@@ -130,14 +159,9 @@ impl Settings {
 #[cfg(test)]
 mod load_tests {
     use super::*;
+    use crate::settings::test_support::HOME_LOCK;
     use std::collections::BTreeMap;
     use std::io::Write;
-    use std::sync::Mutex;
-
-    /// `Settings::load` reads `HOME` via [`loader::user_settings_path`], and
-    /// these tests mutate `HOME` to point at a tempdir. Mutex serializes them
-    /// so the parallel test runner can't observe another test's `HOME`.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn env_beats_user_beats_project_beats_defaults() {

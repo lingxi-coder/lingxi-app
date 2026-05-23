@@ -33,6 +33,7 @@ members = [
     "crates/bridge",
     "crates/plugin",
     "crates/uniffi-bridge",
+    "platforms/common",
     "platforms/posix-minimal",
     "platforms/posix",
     "platforms/windows",

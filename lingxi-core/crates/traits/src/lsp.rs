@@ -29,6 +29,12 @@ pub struct LspServerConfig {
     pub root_dir_markers: Vec<String>,
     /// Optional server-specific initialization payload.
     pub initialization_options: Option<Value>,
+    /// File-extension → `languageId` mapping for `textDocument/didOpen`.
+    /// Mirrors claude-code's `LSPServerConfig.extensionToLanguage`. The keys
+    /// must include the leading dot (`.rs`, `.ts`) and are case-folded to
+    /// lowercase before lookup.
+    #[serde(default)]
+    pub extension_to_language: std::collections::HashMap<String, String>,
 }
 
 /// Handle returned by a successful [`LspTransport::start_server`].

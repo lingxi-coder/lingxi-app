@@ -16,6 +16,31 @@ pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// Value sent in the `anthropic-version` header on every request.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// User-Agent value sent on every Anthropic API request. Spec §7 wire identifier.
+///
+/// Format: `claude-cli/<CARGO_PKG_VERSION> (external, cli)`. Locked byte-for-byte
+/// against claude-code @ 6a25909. The `<version>` is the api-client crate's
+/// `CARGO_PKG_VERSION` at compile time.
+#[must_use]
+pub fn user_agent() -> String {
+    format!("claude-cli/{} (external, cli)", env!("CARGO_PKG_VERSION"))
+}
+
+/// Generate a short opaque request ID for telemetry tagging. URL-safe alphanumeric.
+///
+/// Format: 16 chars `[a-zA-Z0-9-]`. Backed by `rand::thread_rng()` so each
+/// request gets an independent ID; we don't need cryptographic uniqueness
+/// here — only enough to disambiguate concurrent requests in event logs.
+#[must_use]
+pub fn new_request_id() -> String {
+    use rand::Rng;
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-";
+    let mut rng = rand::thread_rng();
+    (0..16)
+        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
+        .collect()
+}
+
 /// Provider that builds Anthropic Messages API requests and parses
 /// streaming events.
 ///
@@ -128,5 +153,25 @@ mod tests {
         let provider = AnthropicProvider::new("sk-ant-secret", None);
         let s = format!("{provider:?}");
         assert!(!s.contains("sk-ant-secret"), "api key leaked: {s}");
+    }
+
+    #[test]
+    fn user_agent_format_is_byte_locked() {
+        let ua = crate::anthropic::user_agent();
+        let expected = format!(
+            "claude-cli/{} (external, cli)",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(ua, expected);
+        // Also smoke: the literal substring must be present so we catch
+        // accidental rewrites that swap the parenthetical.
+        assert!(ua.contains("(external, cli)"));
+    }
+
+    #[test]
+    fn new_request_id_is_non_empty_and_url_safe() {
+        let id = crate::anthropic::new_request_id();
+        assert!(!id.is_empty());
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
     }
 }

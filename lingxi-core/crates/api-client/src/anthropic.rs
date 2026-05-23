@@ -283,6 +283,120 @@ impl AnthropicProvider {
     }
 }
 
+/// Provider parameter for [`AnthropicProvider::count_tokens`]. Different
+/// providers gate different model families per spec §7. M3-03 implements
+/// three:
+/// * `Anthropic` — accepts any model.
+/// * `Vertex` — restricted to `claude-3*` and `claude-opus*` families
+///   (matches the `VERTEX_COUNT_TOKENS_ALLOWED` beta whitelist's model
+///   coverage).
+/// * `Bedrock` — same whitelist as Vertex (claude-code parity).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CountTokensProvider {
+    /// Anthropic (api.anthropic.com); no model restriction.
+    Anthropic,
+    /// Vertex AI; only `claude-3*` and `claude-opus*` accepted.
+    Vertex,
+    /// AWS Bedrock; same restriction as Vertex.
+    Bedrock,
+}
+
+impl CountTokensProvider {
+    fn name(self) -> &'static str {
+        match self {
+            CountTokensProvider::Anthropic => "anthropic",
+            CountTokensProvider::Vertex => "vertex",
+            CountTokensProvider::Bedrock => "bedrock",
+        }
+    }
+
+    fn allows_model(self, model: &str) -> bool {
+        match self {
+            CountTokensProvider::Anthropic => true,
+            CountTokensProvider::Vertex | CountTokensProvider::Bedrock => {
+                model.starts_with("claude-3") || model.starts_with("claude-opus")
+            }
+        }
+    }
+}
+
+/// Decoded body of a `count_tokens` response. Anthropic's wire shape is
+/// `{"input_tokens": N}`; that's all we need.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CountTokensResponse {
+    /// Number of input tokens the prompt consumes.
+    pub input_tokens: u64,
+}
+
+impl AnthropicProvider {
+    /// `POST /v1/messages/count_tokens` with provider-specific model whitelist.
+    ///
+    /// Default timeout is 30s per spec §7 line 664.
+    ///
+    /// # Errors
+    /// * [`ApiError::UnsupportedModel`] if the provider doesn't permit `model`.
+    /// * Otherwise the same failure modes as `messages_create_non_stream`.
+    pub async fn count_tokens<T: HttpTransport>(
+        &self,
+        model: &str,
+        msgs: Vec<ConversationMessage>,
+        provider: CountTokensProvider,
+        transport: &T,
+    ) -> Result<CountTokensResponse, ApiError> {
+        if !provider.allows_model(model) {
+            return Err(ApiError::UnsupportedModel {
+                model: model.into(),
+                provider: provider.name(),
+            });
+        }
+        let body = serde_json::json!({
+            "model": model,
+            "messages": msgs,
+        });
+        let req = self.build_count_tokens_request(&body, provider);
+        let resp = transport.request(req).await.map_err(ApiError::Http)?;
+        if resp.status != 200 {
+            return Err(ApiError::Server {
+                status: resp.status,
+                body: resp.body,
+            });
+        }
+        serde_json::from_str::<CountTokensResponse>(&resp.body)
+            .map_err(|e| ApiError::MalformedStream(e.to_string()))
+    }
+
+    fn build_count_tokens_request(
+        &self,
+        body: &Value,
+        provider: CountTokensProvider,
+    ) -> HttpRequest {
+        use crate::betas::{Endpoint, Provider as BetaProvider, assemble_beta_header};
+        let beta_provider = match provider {
+            CountTokensProvider::Anthropic => BetaProvider::Anthropic,
+            CountTokensProvider::Vertex => BetaProvider::Vertex,
+            CountTokensProvider::Bedrock => BetaProvider::Bedrock,
+        };
+        let mut headers = vec![
+            ("x-api-key".into(), self.api_key.clone()),
+            ("anthropic-version".into(), ANTHROPIC_VERSION.into()),
+            ("content-type".into(), "application/json".into()),
+            ("accept".into(), "application/json".into()),
+            ("user-agent".into(), user_agent()),
+        ];
+        let beta = assemble_beta_header(beta_provider, Endpoint::CountTokens);
+        if !beta.is_empty() {
+            headers.push(("anthropic-beta".into(), beta));
+        }
+        HttpRequest {
+            method: HttpMethod::Post,
+            url: format!("{}/v1/messages/count_tokens", self.base_url),
+            headers,
+            body: Some(body.to_string()),
+            timeout: Some(std::time::Duration::from_secs(30)),
+        }
+    }
+}
+
 /// Sleep helper for 429 responses. Parses `Retry-After` /
 /// `anthropic-ratelimit-requests-reset`, falling back to 1s. Hooked up
 /// end-to-end in Task 9 (rate-limit integration); kept here so the rate-limit

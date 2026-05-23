@@ -16,7 +16,7 @@ use lingxi_api_client::oauth_hook::TokenHash;
 use lingxi_protocol::Secret;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 
 /// In-memory token state. Kept under `AuthState::token` (`RwLock`) and atomically
@@ -104,5 +104,29 @@ impl RefreshDriver {
     #[must_use]
     pub fn new(state: Arc<AuthState>) -> Self {
         Self { state }
+    }
+}
+
+/// Maximum lead time before token expiry that the proactive refresh task wakes.
+///
+/// Spec §7 line 721. 5 minutes = 300 seconds. Locked byte-for-byte against
+/// claude-code's proactive-refresh timer.
+pub const PROACTIVE_LEAD_CAP: Duration = Duration::from_secs(5 * 60);
+
+/// Compute the proactive refresh lead for a token with `remaining` lifetime.
+///
+/// Returns `min(remaining / 2, PROACTIVE_LEAD_CAP)` in whole seconds. Spec §7
+/// line 721 — handles short-lived debug tokens (TTL < 5 min) by waking at
+/// remaining/2 instead of a fixed 5-minute lead that would never fire.
+///
+/// Division is integer-floor over whole seconds to match claude-code's TS
+/// `Math.floor(remaining / 2)` semantics.
+#[must_use]
+pub fn proactive_lead(remaining: Duration) -> Duration {
+    let half = Duration::from_secs(remaining.as_secs() / 2);
+    if half < PROACTIVE_LEAD_CAP {
+        half
+    } else {
+        PROACTIVE_LEAD_CAP
     }
 }

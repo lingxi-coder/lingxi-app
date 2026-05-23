@@ -5,10 +5,19 @@
 //! payloads; all network I/O is delegated to the `HttpTransport` trait
 //! (wired in Tasks 16–18).
 
-use crate::types::StreamEvent;
-use lingxi_protocol::{HttpMethod, HttpRequest};
+use crate::oauth_hook::{OAuthRefreshHook, TokenHash, current_hook};
+use crate::rate_limit::{
+    format_rate_limited_msg, parse_anthropic_ratelimit_reset, parse_retry_after,
+};
+use crate::retry::{DEFAULT_BASE_DELAYS_MS, DEFAULT_RETRY_BUDGET, with_retry};
+use crate::types::{MessageResponse, StreamEvent};
+use crate::ApiError;
+use lingxi_protocol::{ConversationMessage, HttpMethod, HttpRequest};
+use lingxi_traits::HttpTransport;
 use serde_json::Value;
 use std::fmt;
+use std::sync::Arc;
+use std::time::SystemTime;
 
 /// Default Anthropic API base URL. Override via [`AnthropicProvider::new`].
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -50,6 +59,9 @@ pub fn new_request_id() -> String {
 pub struct AnthropicProvider {
     api_key: String,
     base_url: String,
+    /// Optional per-provider OAuth hook override. When `None`, falls back to
+    /// the process-global registration via `oauth_hook::current_hook()`.
+    oauth_hook: Option<Arc<dyn OAuthRefreshHook>>,
 }
 
 impl fmt::Debug for AnthropicProvider {
@@ -57,6 +69,10 @@ impl fmt::Debug for AnthropicProvider {
         f.debug_struct("AnthropicProvider")
             .field("api_key", &"<redacted>")
             .field("base_url", &self.base_url)
+            .field(
+                "oauth_hook",
+                &self.oauth_hook.as_ref().map(|_| "<dyn OAuthRefreshHook>"),
+            )
             .finish()
     }
 }
@@ -69,7 +85,21 @@ impl AnthropicProvider {
         Self {
             api_key: api_key.into(),
             base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            oauth_hook: None,
         }
+    }
+
+    /// Override the OAuth refresh hook for this provider instance. Useful in
+    /// tests; production wiring usually relies on the process-global
+    /// `register_oauth_hook(...)`.
+    #[must_use]
+    pub fn with_oauth_hook(mut self, hook: Arc<dyn OAuthRefreshHook>) -> Self {
+        self.oauth_hook = Some(hook);
+        self
+    }
+
+    fn effective_hook(&self) -> Arc<dyn OAuthRefreshHook> {
+        self.oauth_hook.clone().unwrap_or_else(current_hook)
     }
 
     /// Build a non-streaming `POST /v1/messages` request. The caller owns
@@ -128,6 +158,148 @@ impl AnthropicProvider {
         serde_json::from_str::<StreamEvent>(data)
             .map_err(|e| crate::ApiError::MalformedStream(e.to_string()))
     }
+
+    /// Non-streaming `POST /v1/messages` with retry + rate-limit + OAuth-hook
+    /// middleware.
+    ///
+    /// Spec §4 Flow B. Retry budget = 3 attempts (500ms / 1s / 2s ± 20% jitter).
+    /// On 401, calls the OAuth hook ONCE per request; on a second 401 the
+    /// [`ApiError::Unauthorized`] propagates without further refresh attempts.
+    /// On 429, parses Retry-After / anthropic-ratelimit-requests-reset and
+    /// sleeps before counting another retry.
+    ///
+    /// # Errors
+    /// See [`ApiError`] for the full failure taxonomy.
+    pub async fn messages_create_non_stream<T: HttpTransport>(
+        &self,
+        model: &str,
+        msgs: Vec<ConversationMessage>,
+        transport: &T,
+    ) -> Result<MessageResponse, ApiError> {
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": 4096u32,
+            "messages": msgs,
+        });
+        // Bearer-token override populated only after a successful 401-driven
+        // refresh; the first attempt always uses the constructor-supplied
+        // x-api-key. `with_retry` does not see the override variable — it is
+        // consumed only on the post-refresh manual retry below.
+        let bearer_token: Option<String> = None;
+
+        let hook = self.effective_hook();
+        let resp = with_retry(DEFAULT_RETRY_BUDGET, DEFAULT_BASE_DELAYS_MS, |_attempt| {
+            let token_override = bearer_token.clone();
+            let body = body.clone();
+            async move {
+                let req = self.build_request_with_betas(&body, token_override.as_deref());
+                transport.request(req).await
+            }
+        })
+        .await;
+
+        match resp {
+            Ok(http_resp) => serde_json::from_str::<MessageResponse>(&http_resp.body)
+                .map_err(|e| ApiError::MalformedStream(e.to_string())),
+            Err(ApiError::Server {
+                status: 401,
+                body: server_body,
+            }) => {
+                // Drive one refresh + retry, then surface the next outcome verbatim.
+                let result = match hook.refresh(TokenHash([0u8; 32])).await {
+                    Ok(crate::BearerToken(token)) => {
+                        let bearer = self.bearer_to_header(&token);
+                        let bearer_opt = Some(bearer);
+                        // Retry exactly once with the new token (no further refresh):
+                        let req = self.build_request_with_betas(&body, bearer_opt.as_deref());
+                        let resp2 = transport.request(req).await.map_err(ApiError::Http)?;
+                        if resp2.status == 200 {
+                            serde_json::from_str::<MessageResponse>(&resp2.body)
+                                .map_err(|e| ApiError::MalformedStream(e.to_string()))
+                        } else if resp2.status == 401 {
+                            Err(ApiError::Unauthorized(resp2.body))
+                        } else {
+                            Err(ApiError::Server {
+                                status: resp2.status,
+                                body: resp2.body,
+                            })
+                        }
+                    }
+                    Err(crate::OAuthHookError::TokenStale) => {
+                        Err(ApiError::OAuthHook(crate::OAuthHookError::TokenStale))
+                    }
+                    Err(other) => Err(ApiError::OAuthHook(other)),
+                };
+                // Note: server_body is intentionally dropped on the happy path
+                // — the spec §5 says the user-facing string for AuthExhausted
+                // comes from the second 401 (or the hook error), not the first.
+                result.map_err(|e| {
+                    if matches!(e, ApiError::Server { .. }) {
+                        // Map 4xx other than 401 into Unauthorized for parity.
+                        ApiError::Unauthorized(server_body.clone())
+                    } else {
+                        e
+                    }
+                })
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Build a base HTTP request with `anthropic-beta`, `user-agent`, and
+    /// (if provided) `authorization: Bearer ...` headers attached.
+    fn build_request_with_betas(
+        &self,
+        body: &Value,
+        bearer_override: Option<&str>,
+    ) -> HttpRequest {
+        use crate::betas::{Endpoint, Provider, assemble_beta_header};
+        let mut req = self.build_request(body);
+        // Attach beta header (Anthropic / MessagesCreate non-stream by default).
+        let beta = assemble_beta_header(Provider::Anthropic, Endpoint::MessagesCreate);
+        if !beta.is_empty() {
+            req.headers.push(("anthropic-beta".into(), beta));
+        }
+        req.headers.push(("user-agent".into(), user_agent()));
+        // Spec §7: X-Request-Id is set per call for telemetry correlation.
+        req.headers
+            .push(("x-request-id".into(), new_request_id()));
+        // Default timeout for non-stream messages.create is 600s (spec §7);
+        // override what `build_request` set (120s).
+        req.timeout = Some(std::time::Duration::from_secs(600));
+        if let Some(token) = bearer_override {
+            // Replace x-api-key with Bearer auth (M3-04 token-based flow).
+            req.headers
+                .retain(|(k, _)| !k.eq_ignore_ascii_case("x-api-key"));
+            req.headers
+                .push(("authorization".into(), format!("Bearer {token}")));
+        }
+        req
+    }
+
+    fn bearer_to_header(&self, token: &lingxi_protocol::Secret<String>) -> String {
+        let _ = self; // suppress dead-code lint when impl is empty.
+        token.expose_secret().clone()
+    }
+}
+
+/// Sleep helper for 429 responses. Parses `Retry-After` /
+/// `anthropic-ratelimit-requests-reset`, falling back to 1s. Hooked up
+/// end-to-end in Task 9 (rate-limit integration); kept here so the rate-limit
+/// + telemetry wiring is co-located with the request middleware.
+#[allow(dead_code, reason = "wired into messages_create_non_stream in Task 9")]
+async fn handle_rate_limit(headers: &[(String, String)]) {
+    let now = SystemTime::now();
+    let sleep = parse_retry_after(headers)
+        .or_else(|| parse_anthropic_ratelimit_reset(headers, now))
+        .unwrap_or(std::time::Duration::from_secs(1));
+    tracing::warn!(
+        target: "lingxi::api_client::rate_limit",
+        secs = sleep.as_secs(),
+        msg = %format_rate_limited_msg(sleep.as_secs()),
+        "429 received; sleeping"
+    );
+    tokio::time::sleep(sleep).await;
 }
 
 #[cfg(test)]

@@ -255,7 +255,10 @@ mod tests {
         // but make it explicit here for the 3P entry specifically).
         assert!(!s.split(',').any(|p| p == TOOL_SEARCH_TOOL_3P));
         // Sanity: at least one entry must be there.
-        assert!(!s.is_empty(), "Bedrock messages.create must emit at least one beta");
+        assert!(
+            !s.is_empty(),
+            "Bedrock messages.create must emit at least one beta"
+        );
     }
 
     #[test]

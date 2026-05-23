@@ -21,7 +21,7 @@ pub mod types;
 pub use anthropic::AnthropicProvider;
 pub use error::ApiError;
 pub use oauth_hook::{
-    BearerToken, MiddlewareError, NoOpOAuthHook, OAuthHookError, OAuthRefreshHook, TokenHash,
-    register_oauth_hook,
+    register_oauth_hook, BearerToken, MiddlewareError, NoOpOAuthHook, OAuthHookError,
+    OAuthRefreshHook, TokenHash,
 };
 pub use types::{ContentDelta, MessageRequest, MessageResponse, StreamEvent};

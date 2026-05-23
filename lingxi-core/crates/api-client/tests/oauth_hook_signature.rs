@@ -2,8 +2,8 @@
 //! shape M3-04 depends on. If this test breaks, M3-04 will fail to link.
 
 use lingxi_api_client::oauth_hook::{
-    BearerToken, MiddlewareError, NoOpOAuthHook, OAuthHookError, OAuthRefreshHook, TokenHash,
-    register_oauth_hook,
+    register_oauth_hook, BearerToken, MiddlewareError, NoOpOAuthHook, OAuthHookError,
+    OAuthRefreshHook, TokenHash,
 };
 use lingxi_protocol::Secret;
 use std::sync::Arc;

@@ -1,12 +1,12 @@
 //! Integration test for `count_tokens(model, msgs)` including the Vertex
 //! restricted-model whitelist.
 
-use lingxi_api_client::ApiError;
 use lingxi_api_client::anthropic::{AnthropicProvider, CountTokensProvider};
+use lingxi_api_client::ApiError;
 use lingxi_protocol::{ContentBlock, ConversationMessage, MessageId};
 
 mod mock_server;
-use mock_server::{MockResp, spawn_mock};
+use mock_server::{spawn_mock, MockResp};
 
 fn msgs() -> Vec<ConversationMessage> {
     vec![ConversationMessage::User {

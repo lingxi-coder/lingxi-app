@@ -101,7 +101,11 @@ fn parse_iso8601_utc(s: &str) -> Option<u64> {
     let yoe = (y_adj - era * 400) as u64; // [0, 399]
     let doy: u64 = (153 * {
         let m = m as u64;
-        if m > 2 { m - 3 } else { m + 9 }
+        if m > 2 {
+            m - 3
+        } else {
+            m + 9
+        }
     } + 2)
         / 5
         + d as u64

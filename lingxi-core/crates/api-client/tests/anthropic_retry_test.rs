@@ -5,11 +5,11 @@ use lingxi_api_client::{
     ApiError, BearerToken, NoOpOAuthHook, OAuthHookError, OAuthRefreshHook, TokenHash,
 };
 use lingxi_protocol::{ContentBlock, ConversationMessage, MessageId, Secret};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
 mod mock_server;
-use mock_server::{MockResp, spawn_mock};
+use mock_server::{spawn_mock, MockResp};
 
 fn make_msgs() -> Vec<ConversationMessage> {
     vec![ConversationMessage::User {
@@ -163,9 +163,7 @@ async fn no_op_hook_does_not_retry_on_401() {
         .await;
     // NoOp hook returns TokenStale → caller surfaces as Unauthorized.
     match r {
-        Err(
-            ApiError::OAuthHook(OAuthHookError::TokenStale) | ApiError::Unauthorized(_),
-        ) => {}
+        Err(ApiError::OAuthHook(OAuthHookError::TokenStale) | ApiError::Unauthorized(_)) => {}
         other => panic!("expected Unauthorized or OAuthHook(TokenStale), got {other:?}"),
     }
     server.shutdown().await;

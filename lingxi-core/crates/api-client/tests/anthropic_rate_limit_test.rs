@@ -1,15 +1,15 @@
 //! Integration test: 429 with `Retry-After` sleeps and retries; telemetry events fire.
 
 use async_trait::async_trait;
-use lingxi_api_client::ApiError;
 use lingxi_api_client::anthropic::AnthropicProvider;
+use lingxi_api_client::ApiError;
 use lingxi_protocol::{ContentBlock, ConversationMessage, MessageId};
 use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 mod mock_server;
-use mock_server::{MockResp, spawn_mock};
+use mock_server::{spawn_mock, MockResp};
 
 #[derive(Default)]
 struct CaptureSink {
@@ -54,10 +54,10 @@ async fn four29_with_retry_after_sleeps_and_retries() {
 
     let bus = Arc::new(AnalyticsBus::new());
     let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
-    bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>).await;
+    bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
+        .await;
 
-    let p =
-        AnthropicProvider::new("sk-test", Some(server.base_url.clone())).with_bus(bus.clone());
+    let p = AnthropicProvider::new("sk-test", Some(server.base_url.clone())).with_bus(bus.clone());
     let transport = server.transport();
     let start = Instant::now();
     let r = p
@@ -108,14 +108,27 @@ async fn four29_without_header_falls_through_to_retry_backoff() {
 #[tokio::test]
 async fn failure_emits_request_failed_event() {
     let server = spawn_mock(vec![
-        MockResp { status: 503, body: "boom".into(), headers: vec![] },
-        MockResp { status: 503, body: "boom".into(), headers: vec![] },
-        MockResp { status: 503, body: "boom".into(), headers: vec![] },
+        MockResp {
+            status: 503,
+            body: "boom".into(),
+            headers: vec![],
+        },
+        MockResp {
+            status: 503,
+            body: "boom".into(),
+            headers: vec![],
+        },
+        MockResp {
+            status: 503,
+            body: "boom".into(),
+            headers: vec![],
+        },
     ])
     .await;
     let bus = Arc::new(AnalyticsBus::new());
     let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
-    bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>).await;
+    bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
+        .await;
     let p = AnthropicProvider::new("sk-test", Some(server.base_url.clone())).with_bus(bus);
 
     let transport = server.transport();

@@ -173,8 +173,8 @@ where
 mod with_retry_tests {
     use super::*;
     use lingxi_protocol::HttpResponse;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
 
     fn ok(status: u16, body: &str) -> HttpResponse {
         HttpResponse {

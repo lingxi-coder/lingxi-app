@@ -5,11 +5,11 @@
 //! payloads; all network I/O is delegated to the `HttpTransport` trait
 //! (wired in Tasks 16–18).
 
-use crate::ApiError;
-use crate::oauth_hook::{OAuthRefreshHook, TokenHash, current_hook};
+use crate::oauth_hook::{current_hook, OAuthRefreshHook, TokenHash};
 use crate::rate_limit::{parse_anthropic_ratelimit_reset, parse_retry_after};
-use crate::retry::{DEFAULT_BASE_DELAYS_MS, DEFAULT_RETRY_BUDGET, with_retry};
+use crate::retry::{with_retry, DEFAULT_BASE_DELAYS_MS, DEFAULT_RETRY_BUDGET};
 use crate::types::{MessageResponse, StreamEvent};
+use crate::ApiError;
 use lingxi_protocol::{ConversationMessage, HttpMethod, HttpRequest};
 use lingxi_traits::HttpTransport;
 use serde_json::Value;
@@ -339,26 +339,16 @@ impl AnthropicProvider {
                 .await;
             }
             Err(e) => {
-                telemetry::emit_failed(
-                    &self.bus,
-                    model,
-                    request_id,
-                    error_kind(e),
-                    status_of(e),
-                )
-                .await;
+                telemetry::emit_failed(&self.bus, model, request_id, error_kind(e), status_of(e))
+                    .await;
             }
         }
     }
 
     /// Build a base HTTP request with `anthropic-beta`, `user-agent`, and
     /// (if provided) `authorization: Bearer ...` headers attached.
-    fn build_request_with_betas(
-        &self,
-        body: &Value,
-        bearer_override: Option<&str>,
-    ) -> HttpRequest {
-        use crate::betas::{Endpoint, Provider, assemble_beta_header};
+    fn build_request_with_betas(&self, body: &Value, bearer_override: Option<&str>) -> HttpRequest {
+        use crate::betas::{assemble_beta_header, Endpoint, Provider};
         let mut req = self.build_request(body);
         // Attach beta header (Anthropic / MessagesCreate non-stream by default).
         let beta = assemble_beta_header(Provider::Anthropic, Endpoint::MessagesCreate);
@@ -367,8 +357,7 @@ impl AnthropicProvider {
         }
         req.headers.push(("user-agent".into(), user_agent()));
         // Spec §7: X-Request-Id is set per call for telemetry correlation.
-        req.headers
-            .push(("x-request-id".into(), new_request_id()));
+        req.headers.push(("x-request-id".into(), new_request_id()));
         // Default timeout for non-stream messages.create is 600s (spec §7);
         // override what `build_request` set (120s).
         req.timeout = Some(std::time::Duration::from_secs(600));
@@ -475,7 +464,7 @@ impl AnthropicProvider {
         body: &Value,
         provider: CountTokensProvider,
     ) -> HttpRequest {
-        use crate::betas::{Endpoint, Provider as BetaProvider, assemble_beta_header};
+        use crate::betas::{assemble_beta_header, Endpoint, Provider as BetaProvider};
         let beta_provider = match provider {
             CountTokensProvider::Anthropic => BetaProvider::Anthropic,
             CountTokensProvider::Vertex => BetaProvider::Vertex,
@@ -582,7 +571,9 @@ mod telemetry {
         m.insert(
             "model".into(),
             AnalyticsValue::String(
-                Verified::assert_safe(model.to_string()).as_str().to_string(),
+                Verified::assert_safe(model.to_string())
+                    .as_str()
+                    .to_string(),
             ),
         );
         m.insert(
@@ -613,7 +604,9 @@ mod telemetry {
         m.insert(
             "model".into(),
             AnalyticsValue::String(
-                Verified::assert_safe(model.to_string()).as_str().to_string(),
+                Verified::assert_safe(model.to_string())
+                    .as_str()
+                    .to_string(),
             ),
         );
         m.insert(
@@ -624,7 +617,10 @@ mod telemetry {
                     .to_string(),
             ),
         );
-        m.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        m.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(duration_ms as i64),
+        );
         m.insert("status".into(), AnalyticsValue::Int(i64::from(status)));
         bus.log_event("tengu_api_request_succeeded", m).await;
     }
@@ -641,7 +637,9 @@ mod telemetry {
         m.insert(
             "model".into(),
             AnalyticsValue::String(
-                Verified::assert_safe(model.to_string()).as_str().to_string(),
+                Verified::assert_safe(model.to_string())
+                    .as_str()
+                    .to_string(),
             ),
         );
         m.insert(
@@ -684,7 +682,9 @@ mod telemetry {
         m.insert(
             "model".into(),
             AnalyticsValue::String(
-                Verified::assert_safe(model.to_string()).as_str().to_string(),
+                Verified::assert_safe(model.to_string())
+                    .as_str()
+                    .to_string(),
             ),
         );
         m.insert(
@@ -723,10 +723,7 @@ mod tests {
     #[test]
     fn user_agent_format_is_byte_locked() {
         let ua = crate::anthropic::user_agent();
-        let expected = format!(
-            "claude-cli/{} (external, cli)",
-            env!("CARGO_PKG_VERSION")
-        );
+        let expected = format!("claude-cli/{} (external, cli)", env!("CARGO_PKG_VERSION"));
         assert_eq!(ua, expected);
         // Also smoke: the literal substring must be present so we catch
         // accidental rewrites that swap the parenthetical.

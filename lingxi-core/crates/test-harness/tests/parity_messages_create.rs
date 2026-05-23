@@ -2,9 +2,9 @@
 //! request whose URL + locked headers byte-match claude-code @ 6a25909.
 
 use lingxi_api_client::anthropic::{
-    user_agent, ANTHROPIC_VERSION, AnthropicProvider, DEFAULT_BASE_URL,
+    user_agent, AnthropicProvider, ANTHROPIC_VERSION, DEFAULT_BASE_URL,
 };
-use lingxi_api_client::betas::{Endpoint, Provider, assemble_beta_header};
+use lingxi_api_client::betas::{assemble_beta_header, Endpoint, Provider};
 use lingxi_test_harness::parity::load_fixture;
 use serde::Deserialize;
 use serde_json::Value;

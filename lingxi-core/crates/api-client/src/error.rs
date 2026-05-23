@@ -91,7 +91,9 @@ mod tests {
 
     #[test]
     fn rate_limited_display_string_is_byte_locked() {
-        let e = ApiError::RateLimited { retry_after_secs: 7 };
+        let e = ApiError::RateLimited {
+            retry_after_secs: 7,
+        };
         assert_eq!(format!("{e}"), "Rate limited; retrying in 7s");
     }
 }

@@ -119,10 +119,11 @@ closing the engine-layer parity gaps.
 v0.3.0 (now)  ──►  M3 (v0.4.0)        ──►  M4 (v0.5.0)        ──►  M5 (v0.6.0)              ──►  M6 (v0.7.0)
                    Engine completion       Tools 全集               Agent surface +              Ecosystem
                                                                    Commands + Hooks
-                   5-7 weeks               8-10 weeks               5-6 weeks                    4-5 weeks
+                   8-10 weeks              8-10 weeks               5-6 weeks                    4-5 weeks
 ```
 
-M3 is **single-developer, ~5-7 weeks, six sub-plans**:
+M3 is **single-developer, ~8-10 weeks, six sub-plans** (rebaselined from
+an initial 5-7 estimate; see §9 for the per-week breakdown):
 
 ```
 M3-01 Settings  ──►  M3-02 Memory  ──►  M3-03 API client  ──►  M3-04 OAuth  ──►  M3-05 Cost events  ──►  M3-06 Telemetry

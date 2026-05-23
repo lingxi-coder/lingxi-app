@@ -2,9 +2,10 @@
 //!
 //! Implements the engine's sandboxed filesystem trait using the real OS
 //! filesystem. Path containment is enforced via prefix-match against the
-//! workspace root supplied at construction. On Linux, [`FileSystem::watch`]
-//! is backed by `inotify`; on macOS it returns an empty stream pending an
-//! `FSEvents` binding (deferred to a follow-up).
+//! workspace root supplied at construction. [`FileSystem::watch`] is
+//! backed by `notify` + `notify-debouncer-mini` (see `watch_helper`),
+//! delivering chokidar-4-equivalent `awaitWriteFinish` semantics across
+//! Linux (`inotify`), macOS (`FSEvents`), and Windows (`RDC`).
 
 use async_trait::async_trait;
 use fs2::FileExt;
@@ -146,51 +147,16 @@ impl FileSystem for PosixFileSystem {
         std::path::Path::new(path).starts_with(&self.workspace_root)
     }
 
-    #[cfg(target_os = "linux")]
     async fn watch(
         &self,
         dir: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = FileEvent> + Send>>, FsError> {
-        use futures_util::stream::StreamExt;
-        use lingxi_traits::FileEventKind;
-
-        let inotify_handle = inotify::Inotify::init().map_err(|e| FsError::Io(e.to_string()))?;
-        inotify_handle
-            .watches()
-            .add(
-                dir,
-                inotify::WatchMask::CREATE
-                    | inotify::WatchMask::MODIFY
-                    | inotify::WatchMask::DELETE,
-            )
-            .map_err(|e| FsError::Io(e.to_string()))?;
-        let buffer = [0u8; 4096];
-        let stream = inotify_handle
-            .into_event_stream(buffer)
-            .map_err(|e| FsError::Io(e.to_string()))?
-            .filter_map(|ev| async move {
-                let ev = ev.ok()?;
-                let path = std::path::PathBuf::from(ev.name?.to_string_lossy().into_owned());
-                let kind = if ev.mask.contains(inotify::EventMask::CREATE) {
-                    FileEventKind::Created
-                } else if ev.mask.contains(inotify::EventMask::DELETE) {
-                    FileEventKind::Deleted
-                } else {
-                    FileEventKind::Modified
-                };
-                Some(FileEvent { path, kind })
-            });
-        Ok(Box::pin(stream))
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    async fn watch(
-        &self,
-        _dir: &str,
-    ) -> Result<Pin<Box<dyn Stream<Item = FileEvent> + Send>>, FsError> {
-        use futures_util::stream::empty;
-        // TODO(M2-followup): wire `FSEvents` binding on macOS.
-        Ok(Box::pin(empty()))
+        crate::watch_helper::watch_dir_with_debounce(
+            dir,
+            crate::watch_helper::DEFAULT_STABILITY_THRESHOLD_MS,
+            crate::watch_helper::DEFAULT_POLL_INTERVAL_MS,
+        )
+        .await
     }
 }
 

@@ -23,6 +23,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;
 pub mod swarm;
+pub(crate) mod watch_helper;
 pub mod worktree;
 
 pub use bridge::WindowsBridgeTransport;

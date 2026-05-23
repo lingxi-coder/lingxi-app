@@ -2,13 +2,14 @@
 //!
 //! Implements the engine's sandboxed filesystem trait using the real OS
 //! filesystem. Path containment is enforced via prefix-match against the
-//! workspace root supplied at construction. [`FileSystem::watch`] returns
-//! an empty stream pending a `ReadDirectoryChangesW` binding (deferred to
-//! a follow-up).
+//! workspace root supplied at construction. [`FileSystem::watch`] is
+//! backed by `notify` + `notify-debouncer-mini` (see `watch_helper`),
+//! delivering chokidar-4-equivalent `awaitWriteFinish` semantics on
+//! Windows (via `ReadDirectoryChangesW` selected by `RecommendedWatcher`).
 
 use async_trait::async_trait;
 use fs2::FileExt;
-use futures::stream::Stream;
+use futures_core::stream::Stream;
 use lingxi_traits::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -153,11 +154,14 @@ impl FileSystem for WindowsFileSystem {
 
     async fn watch(
         &self,
-        _dir: &str,
+        dir: &str,
     ) -> Result<Pin<Box<dyn Stream<Item = FileEvent> + Send>>, FsError> {
-        use futures::stream::empty;
-        // TODO(M2-followup): ReadDirectoryChangesW binding for Windows.
-        Ok(Box::pin(empty()))
+        crate::watch_helper::watch_dir_with_debounce(
+            dir,
+            crate::watch_helper::DEFAULT_STABILITY_THRESHOLD_MS,
+            crate::watch_helper::DEFAULT_POLL_INTERVAL_MS,
+        )
+        .await
     }
 }
 

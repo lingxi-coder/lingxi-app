@@ -1493,6 +1493,7 @@ name = "lingxi-test-harness"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "filetime",
  "futures",
  "futures-core",
  "http-body-util",
@@ -1506,6 +1507,7 @@ dependencies = [
  "lingxi-hooks",
  "lingxi-lsp",
  "lingxi-mcp",
+ "lingxi-memory",
  "lingxi-platform-posix",
  "lingxi-platform-posix-minimal",
  "lingxi-platform-windows",

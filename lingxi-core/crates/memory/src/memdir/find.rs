@@ -101,6 +101,14 @@ pub fn find_relevant(
     if k == 0 || entries.is_empty() {
         return Vec::new();
     }
+    // An empty prompt has no tokens, so every entry would receive a
+    // jaccard of 0 (score 0). claude-code's `rankByRelevance` short-circuits
+    // in this case and returns an empty ranking rather than surfacing
+    // arbitrary tie-broken entries. Mirror that here so the public contract
+    // stays byte-for-byte identical (see `parity_memory_relevance.rs`).
+    if tokenize(inputs.prompt).is_empty() {
+        return Vec::new();
+    }
 
     let mut scored: Vec<(u64, &MemoryEntry)> = entries
         .iter()

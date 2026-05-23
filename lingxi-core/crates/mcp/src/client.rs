@@ -11,7 +11,10 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use lingxi_traits::{McpPromptDto, McpToolDto, McpToolResultDto, ServerCapabilitiesDto};
+use lingxi_traits::{
+    McpPromptDto, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
+    ServerCapabilitiesDto,
+};
 use serde::Deserialize;
 
 use crate::inbound::{ElicitationCreateHandler, RootsListHandler};
@@ -324,6 +327,61 @@ impl McpClient {
             .await
             .map_err(|e| McpClientError::Rpc(e.to_string()))
     }
+
+    /// Enumerate every resource advertised by the server.
+    ///
+    /// Sends `resources/list` and returns the parsed entries verbatim. The
+    /// MCP spec lets `mimeType` be absent for opaque/unknown content; we
+    /// surface that as `None`.
+    pub async fn list_resources(&self) -> Result<Vec<McpResourceDto>, McpClientError> {
+        let resp: ResourcesListResponse = self
+            .connection
+            .call("resources/list", serde_json::Value::Null)
+            .await
+            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+        Ok(resp
+            .resources
+            .into_iter()
+            .map(|r| McpResourceDto {
+                uri: r.uri,
+                name: r.name,
+                mime_type: r.mime_type,
+            })
+            .collect())
+    }
+
+    /// Fetch the contents of one resource by URI. Returns the FIRST element
+    /// of the server's `contents` array (the protocol allows multiple but
+    /// claude-code always reads the first).
+    pub async fn read_resource(&self, uri: &str) -> Result<McpResourceContentDto, McpClientError> {
+        let resp: ResourceReadResponse = self
+            .connection
+            .call("resources/read", serde_json::json!({ "uri": uri }))
+            .await
+            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+        resp.contents
+            .into_iter()
+            .next()
+            .map(|c| McpResourceContentDto {
+                uri: c.uri,
+                content: c.text,
+            })
+            .ok_or_else(|| {
+                McpClientError::Deserialize("resources/read returned empty contents array".into())
+            })
+    }
+
+    /// Liveness probe — JSON-RPC `ping` with no params; success on any
+    /// non-error response. The health checker uses this to detect dead
+    /// servers without forcing a full `tools/list` roundtrip.
+    pub async fn ping(&self) -> Result<(), McpClientError> {
+        let _: serde_json::Value = self
+            .connection
+            .call("ping", serde_json::Value::Null)
+            .await
+            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+        Ok(())
+    }
 }
 
 /// Wire-level shape of a `prompts/list` response body.
@@ -338,6 +396,36 @@ struct RawPrompt {
     name: String,
     #[serde(default)]
     description: Option<String>,
+}
+
+/// Wire-level shape of a `resources/list` response body.
+#[derive(Debug, Deserialize)]
+struct ResourcesListResponse {
+    resources: Vec<RawResource>,
+}
+
+/// Wire-level shape for one resource entry inside `resources/list`.
+#[derive(Debug, Deserialize)]
+struct RawResource {
+    uri: String,
+    #[serde(default)]
+    name: String,
+    #[serde(rename = "mimeType", default)]
+    mime_type: Option<String>,
+}
+
+/// Wire-level shape of a `resources/read` response body.
+#[derive(Debug, Deserialize)]
+struct ResourceReadResponse {
+    contents: Vec<RawResourceContent>,
+}
+
+/// Wire-level shape for one element of the `contents` array in `resources/read`.
+#[derive(Debug, Deserialize)]
+struct RawResourceContent {
+    uri: String,
+    #[serde(default)]
+    text: String,
 }
 
 /// Default per-call timeout for `tools/call`, matching claude-code's

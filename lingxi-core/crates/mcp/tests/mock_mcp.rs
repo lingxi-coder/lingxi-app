@@ -536,6 +536,69 @@ async fn get_prompt_sends_name_and_arguments() {
 }
 
 #[tokio::test]
+async fn list_resources_and_read_resource_roundtrip() {
+    let (client, _cap, _h) =
+        make_client_against_mock("res-srv", std::path::PathBuf::from("/tmp/work"), |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "resources": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "resources/list" => json!({
+                    "resources": [
+                        { "uri": "file:///a.txt", "name": "a", "mimeType": "text/plain" }
+                    ]
+                }),
+                "resources/read" => json!({
+                    "contents": [{ "uri": "file:///a.txt", "text": "hello" }]
+                }),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        })
+        .await;
+
+    client.initialize().await.expect("init");
+    let resources = client.list_resources().await.expect("list");
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0].uri, "file:///a.txt");
+    assert_eq!(resources[0].mime_type.as_deref(), Some("text/plain"));
+
+    let content = client.read_resource("file:///a.txt").await.expect("read");
+    assert_eq!(content.uri, "file:///a.txt");
+    assert_eq!(content.content, "hello");
+}
+
+#[tokio::test]
+async fn ping_returns_ok_on_empty_result() {
+    let (client, captured, _h) =
+        make_client_against_mock("ping-srv", std::path::PathBuf::from("/tmp/work"), |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "ping" => json!({}),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        })
+        .await;
+
+    client.initialize().await.expect("init");
+    client.ping().await.expect("ping ok");
+    let frames = captured.snapshot().await;
+    let s = std::str::from_utf8(frames.last().unwrap()).unwrap();
+    assert!(s.contains(r#""method":"ping""#));
+}
+
+#[tokio::test]
 async fn captured_frames_capture_outbound_lines() {
     // Verify the harness itself round-trips a single line through the
     // capture buffer. This is independent of `McpClient`; we drive the

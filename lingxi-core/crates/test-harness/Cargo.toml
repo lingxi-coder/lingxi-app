@@ -52,6 +52,11 @@ tempfile = "3.13"
 # Used by the M3-01 parity driver to exercise
 # `Settings::load_with_telemetry` against a capture sink. Dev-only.
 lingxi-telemetry = { path = "../telemetry" }
+# Used by the M3-02 Phase 11 parity drivers (memory_loading + memory_relevance)
+# to exercise `claude_md::hierarchy::walk` + `memdir::find::find_relevant`
+# against fixed reference fixtures. Dev-only.
+lingxi-memory = { path = "../memory" }
+filetime = "0.2"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 lingxi-platform-posix = { path = "../../platforms/posix" }

@@ -1,0 +1,58 @@
+{
+  "_source": "claude-code/src/memory/hierarchy.ts: walkClaudeMdHierarchy (lines 22-71); claude-code/src/memory/loader.ts: loadOneFile (lines 14-38)",
+  "_note": "Hierarchy walk is cwd → each parent → ~/.claude/. Within a directory, CLAUDE.local.md (when present) precedes CLAUDE.md so local overrides shadow canonical entries. The 10 MB per-file cap drops oversized files with a tengu_memory_file_too_large event but does NOT abort the walk. Case-insensitive matching is OS-layer best-effort; mismatches emit tengu_memory_case_mismatch but do not block load.",
+  "scenarios": [
+    {
+      "name": "cwd_then_parent_then_home",
+      "layout": {
+        "home/.claude/CLAUDE.md": "# user notes\n",
+        "repo/CLAUDE.md": "# repo notes\n",
+        "repo/pkg/CLAUDE.md": "# pkg notes\n"
+      },
+      "cwd": "repo/pkg",
+      "home": "home",
+      "expected_order": [
+        "repo/pkg/CLAUDE.md",
+        "repo/CLAUDE.md",
+        "home/.claude/CLAUDE.md"
+      ]
+    },
+    {
+      "name": "local_override_precedes_canonical",
+      "layout": {
+        "home/.claude/CLAUDE.md": "# user\n",
+        "repo/CLAUDE.md": "# repo\n",
+        "repo/CLAUDE.local.md": "# repo override\n"
+      },
+      "cwd": "repo",
+      "home": "home",
+      "expected_order": [
+        "repo/CLAUDE.local.md",
+        "repo/CLAUDE.md",
+        "home/.claude/CLAUDE.md"
+      ]
+    },
+    {
+      "name": "oversized_file_skipped_others_load",
+      "layout": {
+        "home/.claude/CLAUDE.md": "# small home\n",
+        "repo/CLAUDE.md": "OVERSIZED:11mb"
+      },
+      "cwd": "repo",
+      "home": "home",
+      "expected_order": [
+        "home/.claude/CLAUDE.md"
+      ],
+      "expected_skipped": [
+        "repo/CLAUDE.md"
+      ]
+    },
+    {
+      "name": "empty_tree_no_files",
+      "layout": {},
+      "cwd": "empty",
+      "home": "home",
+      "expected_order": []
+    }
+  ]
+}

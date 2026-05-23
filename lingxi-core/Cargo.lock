@@ -1121,6 +1121,10 @@ dependencies = [
  "async-trait",
  "fs2",
  "futures",
+ "futures-core",
+ "futures-util",
+ "lingxi-jsonrpc",
+ "lingxi-platform-common",
  "lingxi-protocol",
  "lingxi-traits",
  "reqwest",
@@ -1129,6 +1133,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

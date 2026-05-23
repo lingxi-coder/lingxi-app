@@ -8,9 +8,14 @@ license.workspace = true
 [dependencies]
 lingxi-protocol = { path = "../../crates/protocol" }
 lingxi-traits = { path = "../../crates/traits" }
+lingxi-jsonrpc = { path = "../../crates/jsonrpc" }
+lingxi-platform-common = { path = "../common" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
 futures = "0.3"
+futures-core = { workspace = true }
+futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

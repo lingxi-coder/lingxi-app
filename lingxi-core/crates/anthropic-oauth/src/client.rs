@@ -6,9 +6,13 @@
 
 use crate::config::ClaudeAiOAuthConfig;
 use crate::pkce::{generate_pkce, generate_state_token};
+use crate::refresh::{AuthState, RefreshDriver};
+use lingxi_api_client::oauth_hook::register_oauth_hook;
+use lingxi_protocol::Secret;
 use lingxi_secret::CredentialManager;
 use lingxi_traits::HttpTransport;
 use std::sync::Arc;
+use std::time::SystemTime;
 use thiserror::Error;
 
 /// OAuth-flow failures.
@@ -90,4 +94,55 @@ impl ClaudeAiOAuthClient {
         );
         (url, verifier, state)
     }
+}
+
+/// Wire the OAuth refresh subsystem: construct `AuthState`, register the
+/// `OAuthRefreshHook` impl process-globally, and spawn the proactive task.
+///
+/// Returns the `Arc<AuthState>` so the engine can call `shutdown()` at
+/// `Engine::shutdown` time. Re-calling `init_refresh_driver` is a bug
+/// (process-global hook is already registered); the second call logs a WARN
+/// and returns the freshly-constructed `AuthState` so callers see consistent
+/// behaviour but stale token data won't be auto-refreshed (the original
+/// proactive task is still running on the original state).
+///
+/// # Errors
+/// * [`OAuthError::TokenExchange`] if the runtime spawner fails to spawn.
+#[allow(clippy::too_many_arguments)]
+pub async fn init_refresh_driver(
+    config: ClaudeAiOAuthConfig,
+    access_token: Secret<String>,
+    refresh_token: Option<Secret<String>>,
+    expires_at: SystemTime,
+    http: Arc<dyn lingxi_traits::HttpTransport>,
+    clock: Arc<dyn lingxi_traits::Clock>,
+    bus: Option<Arc<lingxi_telemetry::AnalyticsBus>>,
+    credentials: Option<Arc<lingxi_secret::CredentialManager>>,
+    spawner: Arc<dyn lingxi_traits::RuntimeSpawner>,
+) -> Result<Arc<AuthState>, OAuthError> {
+    let state = AuthState::new(
+        config,
+        access_token,
+        refresh_token,
+        expires_at,
+        http,
+        clock,
+        bus,
+        credentials,
+    );
+    let driver: Arc<dyn lingxi_api_client::oauth_hook::OAuthRefreshHook> =
+        Arc::new(RefreshDriver::new(state.clone()));
+    // Process-global registration. Second-call-in-same-process is a logic
+    // bug but not fatal in tests; tolerate by warning.
+    if let Err(e) = register_oauth_hook(driver) {
+        tracing::warn!(
+            target: "lingxi::anthropic_oauth::init",
+            error = ?e,
+            "OAuth hook already registered (likely a second init in same process)",
+        );
+    }
+    RefreshDriver::spawn_proactive(state.clone(), spawner)
+        .await
+        .map_err(|e| OAuthError::TokenExchange(format!("spawn_proactive: {e}")))?;
+    Ok(state)
 }

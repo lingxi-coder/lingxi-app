@@ -1,5 +1,14 @@
-//! `LspRegistry` — owns per-server connection state and the file → server
-//! routing cache.
+//! `LspRegistry` — owns per-server connection state and plugin-only
+//! registration.
+//!
+//! **Registration is plugin-only.** [`LspRegistry::register_plugin_servers`]
+//! is the sole public registration path. The internal
+//! [`LspRegistry::register_config`] entry point is `pub(crate)` so
+//! user/project settings cannot inject LSP servers — matching claude-code's
+//! `getAllLspServers()` which only consults `getPluginLspServers()`
+//! (`claude-code/src/services/lsp/config.ts:15-79`).
+//!
+//! See spec §6.3 (Plan M2-03) — "LSP servers from plugins only".
 //!
 //! M1.18 ships the registry skeleton; production routing wiring lands in
 //! Plan 16 alongside the posix-minimal `LspTransport` implementation.
@@ -47,7 +56,10 @@ impl LspRegistry {
     }
 
     /// Register a server configuration in the `Disconnected` state.
-    pub async fn register_config(&self, config: LspServerConfig) {
+    ///
+    /// Crate-private: callers outside `lingxi-lsp` must use
+    /// [`Self::register_plugin_servers`].
+    pub(crate) async fn register_config(&self, config: LspServerConfig) {
         self.servers.write().await.insert(
             config.name.clone(),
             LspConnectionState::Disconnected { config },
@@ -71,6 +83,10 @@ impl LspRegistry {
     }
 
     /// Bulk-register server configurations contributed by `plugin_id`.
+    ///
+    /// This is the **only** public path for registering LSP servers in
+    /// `lingxi-core`. User and project settings cannot register LSP servers
+    /// — see module documentation.
     pub async fn register_plugin_servers(
         &self,
         plugin_id: PluginId,
@@ -78,10 +94,7 @@ impl LspRegistry {
     ) {
         let names: Vec<String> = configs.iter().map(|c| c.name.clone()).collect();
         for c in configs {
-            self.servers.write().await.insert(
-                c.name.clone(),
-                LspConnectionState::Disconnected { config: c },
-            );
+            self.register_config(c).await;
         }
         self.plugin_servers.write().await.insert(plugin_id, names);
     }

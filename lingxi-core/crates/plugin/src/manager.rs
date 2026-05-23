@@ -246,7 +246,13 @@ impl PluginManager {
         let _ = &self.skill_registry;
 
         // 6. MCP servers — registered through McpRegistry::connect for each entry.
-        // 7. LSP servers.
+        // 7. LSP servers — plugin-only registration path.
+        //
+        // `LspRegistry::register_plugin_servers` is the ONLY supported way
+        // to register LSP servers. The internal `register_config` is
+        // `pub(crate)` so user/project settings cannot bypass this gate.
+        // Matches claude-code's `getAllLspServers()`
+        // (`claude-code/src/services/lsp/config.ts`).
         let configs: Vec<_> = manifest.components.lsp_servers.values().cloned().collect();
         self.lsp_registry
             .register_plugin_servers(manifest.id, configs)

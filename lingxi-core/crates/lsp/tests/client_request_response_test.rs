@@ -150,7 +150,7 @@ async fn request_hover_round_trips_and_deserializes() {
     let hover = hover.expect("hover present");
     match hover.contents {
         HoverContents::Scalar(MarkedString::String(s)) => assert_eq!(s, "Hello hover"),
-        other => panic!("unexpected hover contents shape: {:?}", other),
+        other => panic!("unexpected hover contents shape: {other:?}"),
     }
 
     peer_task.await.expect("peer ok");

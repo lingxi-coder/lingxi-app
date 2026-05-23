@@ -11,9 +11,9 @@
 //! `notifications()` broadcast receiver that fans out *every* inbound
 //! notification (no per-method subscription). We resubscribe to a fresh
 //! receiver and filter for `textDocument/publishDiagnostics` ourselves —
-//! the broadcast queue is sized in `lingxi-jsonrpc` (DEFAULT_NOTIFICATION_
-//! CAPACITY), so a slow subscriber will eventually `Lagged`; we log and
-//! continue rather than aborting (other diagnostics may still be useful).
+//! the broadcast queue is sized inside `lingxi-jsonrpc`, so a slow
+//! subscriber will eventually report `Lagged`; we log and continue rather
+//! than aborting (other diagnostics may still be useful).
 
 use crate::diagnostic_registry::{DiagnosticEntry, LspDiagnosticRegistry};
 use lingxi_jsonrpc::Connection;
@@ -36,9 +36,14 @@ impl PassiveDiagnosticSubscriber {
     /// Subscribe to `textDocument/publishDiagnostics` on `connection` and
     /// drain into `registry`. Returns immediately; a background tokio task
     /// continues until the connection's broker is closed.
+    ///
+    /// The `connection` argument is taken by reference because the
+    /// subscriber only needs it to acquire a fresh notifications receiver
+    /// (the receiver itself is decoupled from the `Arc`). Pass
+    /// `&Arc::clone(&conn)` or just `&conn` — both work.
     #[must_use]
     pub fn spawn(
-        connection: Arc<Connection>,
+        connection: &Arc<Connection>,
         server_name: String,
         registry: LspDiagnosticRegistry,
     ) -> Self {

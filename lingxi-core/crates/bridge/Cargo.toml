@@ -9,12 +9,18 @@ license.workspace = true
 lingxi-protocol = { path = "../protocol" }
 lingxi-traits = { path = "../traits" }
 lingxi-secret = { path = "../secret" }
+lingxi-jsonrpc = { path = "../jsonrpc" }
+lingxi-mcp = { path = "../mcp" }
+lingxi-platform-common = { path = "../../platforms/common" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 tokio = { version = "1", features = ["sync", "time"] }
 tracing.workspace = true
+rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "os_rng"] }
+dirs = "5"
+tokio-tungstenite = "0.21"
 
 [dev-dependencies]
 tokio = { workspace = true }

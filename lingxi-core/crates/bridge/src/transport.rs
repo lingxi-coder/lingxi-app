@@ -14,7 +14,6 @@
 //!
 //! Until then every method returns [`lingxi_traits::BridgeError::Unsupported`].
 
-use crate::message::BridgeMessagePlaceholder;
 use crate::state::BridgeState;
 use lingxi_traits::BridgeError;
 use tokio::sync::RwLock;
@@ -42,16 +41,6 @@ impl IdeBridge {
     /// Kept async for parity with the M2-02 signature.
     #[allow(clippy::unused_async)]
     pub async fn connect(&self) -> Result<(), BridgeError> {
-        Err(BridgeError::Unsupported)
-    }
-
-    /// **Always returns `Unsupported`**. Removed in M2-02 in favor of MCP JSON-RPC.
-    /// Kept async for parity with the M2-02 signature.
-    #[allow(clippy::unused_async)]
-    pub async fn send_placeholder(
-        &self,
-        _msg: BridgeMessagePlaceholder,
-    ) -> Result<(), BridgeError> {
         Err(BridgeError::Unsupported)
     }
 
@@ -83,15 +72,6 @@ mod tests {
     #[tokio::test]
     async fn connect_returns_unsupported() {
         let err = IdeBridge::new().connect().await.unwrap_err();
-        assert!(matches!(err, BridgeError::Unsupported));
-    }
-
-    #[tokio::test]
-    async fn send_placeholder_returns_unsupported() {
-        let err = IdeBridge::new()
-            .send_placeholder(BridgeMessagePlaceholder)
-            .await
-            .unwrap_err();
         assert!(matches!(err, BridgeError::Unsupported));
     }
 

@@ -11,7 +11,8 @@ fn auth_token_is_32_hex_lowercase() {
     let t = IdeLockfile::generate_auth_token();
     assert_eq!(t.len(), 32, "auth token must be 32 chars");
     assert!(
-        t.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        t.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "auth token must be lowercase hex, got {t:?}"
     );
 }
@@ -44,7 +45,7 @@ fn lockfile_json_uses_camelcase_keys_matching_claude_code() {
     // Verify EXACT key set — no extras, no missing.
     let obj = v.as_object().unwrap();
     let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
-    keys.sort();
+    keys.sort_unstable();
     assert_eq!(
         keys,
         vec![
@@ -60,12 +61,22 @@ fn lockfile_json_uses_camelcase_keys_matching_claude_code() {
     // Spot-check critical fields.
     assert_eq!(obj["pid"].as_u64().unwrap(), u64::from(std::process::id()));
     assert_eq!(obj["transport"].as_str().unwrap(), "ws");
-    assert_eq!(obj["runningInWindows"].as_bool().unwrap(), cfg!(target_os = "windows"));
+    assert_eq!(
+        obj["runningInWindows"].as_bool().unwrap(),
+        cfg!(target_os = "windows")
+    );
     assert_eq!(obj["ideName"].as_str().unwrap(), "LingXi");
-    assert_eq!(obj["workspaceFolders"].as_array().unwrap()[0].as_str().unwrap(), "/work/proj");
+    assert_eq!(
+        obj["workspaceFolders"].as_array().unwrap()[0]
+            .as_str()
+            .unwrap(),
+        "/work/proj"
+    );
     let token = obj["authToken"].as_str().unwrap();
     assert_eq!(token.len(), 32);
-    assert!(token.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert!(token
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
 }
 
 #[test]
@@ -78,9 +89,10 @@ fn drop_guard_removes_lockfile_on_drop() {
             vec![PathBuf::from("/work/proj")],
         );
         lf.write().expect("write lockfile");
-        let _guard = LockfileGuard::new(lf.path().to_path_buf());
-        assert!(lf.path().exists(), "lockfile must exist while guard alive");
-        lf.path().to_path_buf()
+        let path = lf.path();
+        let _guard = LockfileGuard::new(path.clone());
+        assert!(path.exists(), "lockfile must exist while guard alive");
+        path
         // _guard drops here.
     };
     assert!(
@@ -98,14 +110,11 @@ fn drop_guard_removes_lockfile_on_panic() {
         vec![PathBuf::from("/work/proj")],
     );
     lf.write().expect("write lockfile");
-    let path = lf.path().to_path_buf();
+    let path = lf.path();
     let result = std::panic::catch_unwind(|| {
         let _guard = LockfileGuard::new(path.clone());
         panic!("simulated crash");
     });
     assert!(result.is_err(), "panic should propagate from closure");
-    assert!(
-        !path.exists(),
-        "lockfile must be deleted even after panic"
-    );
+    assert!(!path.exists(), "lockfile must be deleted even after panic");
 }

@@ -1,24 +1,24 @@
-//! `lingxi-bridge` — local IDE bridge (placeholder until M2-02 wires the real
-//! MCP-over-WebSocket transport).
+//! `lingxi-bridge` — IDE bridge over MCP-WebSocket.
 //!
-//! claude-code's local IDE bridge connects to a VS Code / `JetBrains` plugin
-//! announced by `~/.claude/ide/<port>.lock`. Transport is plain WebSocket
-//! carrying MCP JSON-RPC, auth'd by `X-Claude-Code-Ide-Authorization` from
-//! the lockfile.
+//! After M2-02d this crate is a thin lockfile-discovery + transport-spec
+//! builder. The cloud Remote Control bridge (claude.ai workers) is deferred
+//! to a separate milestone per spec §5. The local IDE bridge:
 //!
-//! M2-01 strips out the M1-invented pairing/JWT stack. M2-02 §6.2 adds
-//! `lockfile.rs` and rewrites `transport.rs` to build an
-//! `McpTransportSpec::WebSocket { url, headers }` and hand off to
-//! `lingxi_mcp::McpRegistry::connect_with_spec()`.
-//!
-//! Until then this crate exposes only stub types so downstream callers compile.
+//! 1. [`lockfile::IdeLockfile`] writes `~/.claude/ide/<port>.lock` with the
+//!    auth token an IDE plugin must echo back in the
+//!    `X-Claude-Code-Ide-Authorization` header.
+//! 2. [`LockfileGuard`] removes that file on shutdown AND on panic.
+//! 3. [`state::BridgeState`] is the observable connection snapshot held by
+//!    the engine for UI / telemetry.
+//! 4. [`IdeBridge`] glues the lockfile + transport stack into the engine's
+//!    MCP registry (full wiring lands in later M2-02d tasks).
 
 #![forbid(unsafe_code)]
 
-pub mod message;
+pub mod lockfile;
 pub mod state;
 pub mod transport;
 
-pub use message::BridgeMessagePlaceholder;
+pub use lockfile::{IdeLockfile, LockfileBody, LockfileGuard, IDE_NAME, TRANSPORT};
 pub use state::BridgeState;
 pub use transport::IdeBridge;

@@ -417,6 +417,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_path_outside_trusted() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let target = outside.path().join("nb.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = NotebookEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "notebook_path": target.to_str().unwrap(),
+                    "cell_id": "c1",
+                    "edit_mode": "delete"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::PathBlocked { .. } => {}
+            other => panic!("expected PathBlocked, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_json() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("bad.ipynb");
+        std::fs::write(&target, "this is not json").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = NotebookEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "notebook_path": target.to_str().unwrap(),
+                    "cell_id": "c1",
+                    "edit_mode": "delete"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("notebook JSON parse"));
+    }
+
+    #[tokio::test]
     async fn rejects_missing_cell_for_replace() {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("nb.ipynb");

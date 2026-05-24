@@ -426,6 +426,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn per_file_cap_sets_truncated_flag() {
+        let tmp = TempDir::new().unwrap();
+        let content: String = (0..150).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        std::fs::write(tmp.path().join("big.rs"), content).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        let result = tool
+            .call(json!({ "pattern": "fn" }), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        assert_eq!(result.data["truncated"], true);
+        assert_eq!(result.data["total_matches"], GREP_PER_FILE_CAP as i64);
+    }
+
+    #[tokio::test]
     async fn rejects_invalid_regex() {
         let tmp = TempDir::new().unwrap();
         let (ctx, _sink) = make_ctx(&tmp);

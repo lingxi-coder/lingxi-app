@@ -25,6 +25,7 @@ pub mod notebook_edit;
 pub mod powershell;
 pub mod repl;
 pub mod shell_events;
+pub mod sleep;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -38,6 +39,7 @@ pub use grep::GrepTool;
 pub use notebook_edit::NotebookEditTool;
 pub use powershell::PowerShellTool;
 pub use repl::REPLTool;
+pub use sleep::SleepTool;
 
 /// Static surface every builtin tool needs at construction time.
 ///

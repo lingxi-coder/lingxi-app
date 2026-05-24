@@ -67,6 +67,7 @@ pub use sleep::SleepTool;
 pub use task::{
     TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
 };
+pub use team::{TeamCreateTool, TeamDeleteTool};
 pub use todo_write::TodoWriteTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
@@ -173,7 +174,10 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     registry.register_builtin(Arc::new(TaskUpdateTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(TaskStopTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(TaskOutputTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(SendMessageTool::new(ctx)));
+    registry.register_builtin(Arc::new(SendMessageTool::new(ctx.clone())));
+    // M4-06 — team tools.
+    registry.register_builtin(Arc::new(TeamCreateTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(TeamDeleteTool::new(ctx)));
 }
 
 #[cfg(test)]
@@ -223,13 +227,13 @@ mod tests {
     }
 
     #[test]
-    fn register_all_inserts_twenty_five_tools_after_m4_05() {
+    fn register_all_inserts_twenty_seven_tools_after_m4_06() {
         let mut registry = ToolRegistry::new();
         register_all_builtin_tools(&mut registry, dummy_ctx());
         let ctx = crate::tool_trait::ToolStaticContext::default();
         let tools = registry.available_tools(&ctx);
-        // M4-01 (6) + M4-02 (4) + M4-03 (2) + M4-04 (5) + M4-05 (8) = 25.
-        assert_eq!(tools.len(), 25);
+        // M4-01 (6) + M4-02 (4) + M4-03 (2) + M4-04 (5) + M4-05 (8) + M4-06 (2) = 27.
+        assert_eq!(tools.len(), 27);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         for n in [
             "Read",
@@ -257,6 +261,8 @@ mod tests {
             "TaskStop",
             "TaskOutput",
             "SendMessage",
+            "TeamCreate",
+            "TeamDelete",
         ] {
             assert!(names.contains(&n), "missing tool {n}: {names:?}");
         }
@@ -292,6 +298,8 @@ mod tests {
             "TaskStop",
             "TaskOutput",
             "SendMessage",
+            "TeamCreate",
+            "TeamDelete",
         ] {
             assert!(
                 registry.find_by_name(name).is_some(),

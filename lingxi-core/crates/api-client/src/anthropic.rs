@@ -64,6 +64,10 @@ pub struct AnthropicProvider {
     /// via `lingxi_telemetry::AnalyticsBus`. When `None` (test-mode default),
     /// emission is silently skipped — matches M3-01 / M3-02 convention.
     bus: Option<Arc<lingxi_telemetry::AnalyticsBus>>,
+    /// Optional cost tracker; when present, every successful 200 response
+    /// records cost via `tracker.record_api_response_v2(...)` and (if the
+    /// provider also has a `bus`) emits `tengu_cost_recorded`.
+    cost_tracker: Option<Arc<lingxi_cost::CostTracker>>,
 }
 
 impl fmt::Debug for AnthropicProvider {
@@ -76,6 +80,14 @@ impl fmt::Debug for AnthropicProvider {
                 &self.oauth_hook.as_ref().map(|_| "<dyn OAuthRefreshHook>"),
             )
             .field("bus", &self.bus.as_ref().map(|_| "<AnalyticsBus>"))
+            .field(
+                "cost_tracker",
+                &if self.cost_tracker.is_some() {
+                    "<set>"
+                } else {
+                    "<unset>"
+                },
+            )
             .finish()
     }
 }
@@ -90,6 +102,7 @@ impl AnthropicProvider {
             base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
             oauth_hook: None,
             bus: None,
+            cost_tracker: None,
         }
     }
 
@@ -107,6 +120,18 @@ impl AnthropicProvider {
     #[must_use]
     pub fn with_bus(mut self, bus: Arc<lingxi_telemetry::AnalyticsBus>) -> Self {
         self.bus = Some(bus);
+        self
+    }
+
+    /// Attach a cost tracker so successful 200 responses record cost.
+    /// If the provider also has an
+    /// [`AnalyticsBus`](lingxi_telemetry::AnalyticsBus) attached via
+    /// [`Self::with_bus`], the tracker uses it to emit `tengu_cost_recorded`
+    /// per spec §4 Flow B lines 364-376. Without a bus, the cost state
+    /// still updates but no event fires.
+    #[must_use]
+    pub fn with_cost_tracker(mut self, tracker: Arc<lingxi_cost::CostTracker>) -> Self {
+        self.cost_tracker = Some(tracker);
         self
     }
 
@@ -206,7 +231,70 @@ impl AnthropicProvider {
 
         self.emit_terminal_event(&outcome, model, &request_id, started)
             .await;
+
+        // M3-05 §6 Flow B: after `tengu_api_request_succeeded` fires, record
+        // cost via the optional tracker. Ordering is locked — this MUST
+        // happen after the success event so `tengu_cost_recorded` (emitted
+        // inside `record_api_response_v2`) lands strictly after.
+        if let Ok(ref message_response) = outcome {
+            self.record_cost_for_response(message_response, model, started.elapsed())
+                .await;
+        }
+
         outcome
+    }
+
+    /// Record cost for a successful 200 response via the optional tracker.
+    /// No-op when `self.cost_tracker` is `None`.
+    ///
+    /// Mapping (per M3-05 §6):
+    /// * `model` is the user-requested model (NOT `MessageResponse.model`,
+    ///   which may differ).
+    /// * `Usage` folds `cache_read_input_tokens` / `cache_creation_input_tokens`
+    ///   into `tokens.cache_read` / `tokens.cache_write` so the calculator
+    ///   applies the cache token rates, AND forwards them as separate args
+    ///   for the event payload.
+    /// * `retries = 0` — M3-03's `with_retry` doesn't surface the attempt
+    ///   count; consistent with M1's `record_accumulates_cost` semantics.
+    /// * `is_batch_request = false` ALWAYS in M3 (M4 brings batches).
+    /// * The provider's own `bus` is forwarded so `tengu_cost_recorded`
+    ///   fires on the same sink as `tengu_api_request_succeeded`.
+    async fn record_cost_for_response(
+        &self,
+        message_response: &MessageResponse,
+        model: &str,
+        elapsed: std::time::Duration,
+    ) {
+        let Some(tracker) = &self.cost_tracker else {
+            return;
+        };
+        let mr = lingxi_cost::ModelRef {
+            provider: lingxi_cost::ProviderId::Anthropic,
+            model: model.to_string(),
+        };
+        let usage = lingxi_cost::Usage {
+            tokens: lingxi_cost::TokenUsage {
+                input: message_response.usage.input_tokens,
+                output: message_response.usage.output_tokens,
+                cache_read: message_response.usage.cache_read_input_tokens,
+                cache_write: message_response.usage.cache_creation_input_tokens,
+                reasoning_output: 0,
+            },
+            server_tool_use: None,
+            speed: None,
+        };
+        let _ = tracker
+            .record_api_response_v2(
+                mr,
+                usage,
+                elapsed,
+                0, // retries — M3-03's with_retry doesn't surface the count
+                message_response.usage.cache_read_input_tokens,
+                message_response.usage.cache_creation_input_tokens,
+                false, // is_batch_request — ALWAYS false in M3
+                self.bus.as_ref(),
+            )
+            .await;
     }
 
     /// Run the retry loop, treating 429 as a synthesised 503 after sleeping

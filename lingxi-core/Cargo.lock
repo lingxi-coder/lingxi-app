@@ -1008,6 +1008,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "lingxi-cost",
  "lingxi-protocol",
  "lingxi-telemetry",
  "lingxi-traits",

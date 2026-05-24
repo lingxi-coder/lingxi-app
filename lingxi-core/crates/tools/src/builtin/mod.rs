@@ -56,3 +56,49 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     registry.register_builtin(Arc::new(GlobTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(GrepTool::new(ctx)));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builtin::test_support::make_dummy_fs;
+    use crate::registry::ToolRegistry;
+    use lingxi_telemetry::AnalyticsBus;
+    use std::path::PathBuf;
+
+    fn dummy_ctx() -> BuiltinToolContext {
+        BuiltinToolContext {
+            fs: make_dummy_fs(),
+            bus: Arc::new(AnalyticsBus::new()),
+            trusted_dirs: vec![PathBuf::from("/tmp")],
+        }
+    }
+
+    #[test]
+    fn register_all_inserts_six_tools() {
+        let mut registry = ToolRegistry::new();
+        register_all_builtin_tools(&mut registry, dummy_ctx());
+        let ctx = crate::tool_trait::ToolStaticContext::default();
+        let tools = registry.available_tools(&ctx);
+        // M4-01 ships exactly 6 builtin tools; later sub-plans extend.
+        assert_eq!(tools.len(), 6);
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"Read"));
+        assert!(names.contains(&"Write"));
+        assert!(names.contains(&"Edit"));
+        assert!(names.contains(&"NotebookEdit"));
+        assert!(names.contains(&"Glob"));
+        assert!(names.contains(&"Grep"));
+    }
+
+    #[test]
+    fn find_by_name_works_for_every_tool() {
+        let mut registry = ToolRegistry::new();
+        register_all_builtin_tools(&mut registry, dummy_ctx());
+        for name in ["Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep"] {
+            assert!(
+                registry.find_by_name(name).is_some(),
+                "registry missing {name}"
+            );
+        }
+    }
+}

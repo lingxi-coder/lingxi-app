@@ -29,6 +29,7 @@ pub mod repl;
 pub mod shell_events;
 pub mod sleep;
 pub mod web_fetch;
+pub mod web_search;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -44,6 +45,7 @@ pub use powershell::PowerShellTool;
 pub use repl::REPLTool;
 pub use sleep::SleepTool;
 pub use web_fetch::WebFetchTool;
+pub use web_search::WebSearchTool;
 
 /// Static surface every builtin tool needs at construction time.
 ///

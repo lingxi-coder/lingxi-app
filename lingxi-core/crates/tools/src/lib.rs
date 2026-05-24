@@ -47,7 +47,7 @@ pub mod tool_trait;
 
 pub use builtin::{
     register_all_builtin_tools, BuiltinToolContext, FileEditTool, FileReadTool, FileWriteTool,
-    GlobTool, GrepTool, NotebookEditTool, WebFetchTool,
+    GlobTool, GrepTool, NotebookEditTool, WebFetchTool, WebSearchTool,
 };
 pub use context::{ToolUseContext, ToolUseOptions};
 pub use dispatcher::{ToolCall, ToolDispatchEvent, ToolDispatcher};

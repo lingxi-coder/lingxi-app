@@ -23,6 +23,7 @@ pub mod glob;
 pub mod grep;
 pub mod notebook_edit;
 pub mod powershell;
+pub mod repl;
 pub mod shell_events;
 
 #[cfg(test)]
@@ -36,6 +37,7 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use notebook_edit::NotebookEditTool;
 pub use powershell::PowerShellTool;
+pub use repl::REPLTool;
 
 /// Static surface every builtin tool needs at construction time.
 ///

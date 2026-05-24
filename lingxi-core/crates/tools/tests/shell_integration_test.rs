@@ -13,6 +13,7 @@ use lingxi_sandbox::decision::ProjectTrustLevel;
 use lingxi_sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use lingxi_telemetry::AnalyticsBus;
 use lingxi_tools::builtin::bash::BashTool;
+use lingxi_tools::builtin::repl::REPLTool;
 use lingxi_tools::builtin::BuiltinToolContext;
 use lingxi_tools::context::{ToolUseContext, ToolUseOptions};
 use lingxi_tools::progress::progress_channel;
@@ -218,4 +219,35 @@ async fn bash_run_in_background_returns_pid_and_task_output_path() {
     assert!(res.data["pid"].as_u64().unwrap() > 0);
     let p = res.data["task_output_path"].as_str().unwrap();
     assert!(p.contains("lingxi-task-output"), "got task_output_path={p}");
+}
+
+fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for d in std::env::split_paths(&path) {
+        let c = d.join(name);
+        if c.is_file() {
+            return Some(c);
+        }
+    }
+    None
+}
+
+#[tokio::test]
+async fn repl_python_executes_print() {
+    if which_in_path("python3").is_none() {
+        eprintln!("python3 not on PATH; skipping");
+        return;
+    }
+    let tool = REPLTool::new(make_ctx());
+    let (tx, _rx) = progress_channel();
+    let r = tool
+        .call(
+            json!({"language": "python", "code": "print('hi from repl')"}),
+            fresh_ctx(),
+            tx,
+        )
+        .await
+        .expect("ok");
+    assert!(r.data["stdout"].as_str().unwrap().contains("hi from repl"));
+    assert_eq!(r.data["exit_code"], 0);
 }

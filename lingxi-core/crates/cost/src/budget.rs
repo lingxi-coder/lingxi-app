@@ -170,13 +170,143 @@ impl BudgetEnforcer {
             }
         }
     }
+
+    /// M3-05 entry point: latch the realized-exceeded flag AND emit budget
+    /// alarm events if thresholds were crossed.
+    ///
+    /// - Fires `tengu_cost_budget_warning` at 80% (basis-points threshold
+    ///   `BUDGET_WARNING_THRESHOLD_BPS`); guarded by `warnings_fired` so each
+    ///   threshold fires at most once per session.
+    /// - Fires `tengu_cost_budget_exceeded` at 100% (basis-points threshold
+    ///   `BUDGET_EXCEEDED_THRESHOLD_BPS`); guarded by the existing
+    ///   `realized_exceeded` `AtomicBool` so it fires at most once per session.
+    /// - Without a bus (`None`), behaves identically to
+    ///   [`Self::check_post_api_call`] (latches the flag, emits nothing).
+    ///
+    /// Existing M1/M2 callers should keep using [`Self::check_post_api_call`];
+    /// new M3-05 callers (e.g. api-client integration in Task 7) pass
+    /// `Some(&bus)`.
+    pub async fn check_post_api_call_with_bus(
+        &self,
+        _realized_cost: u64,
+        bus: Option<&Arc<lingxi_telemetry::AnalyticsBus>>,
+    ) {
+        let total = self.cost_tracker.total_nano_usd().await;
+        let Some(max) = self.config.max_session_nano_usd else {
+            // No limit configured — nothing to alarm on.
+            return;
+        };
+
+        // ----- compute percent in basis points (no f64 in the threshold path) -----
+        // Use u128 to avoid intermediate overflow: `total * 10_000` could exceed
+        // u64 when total is near u64::MAX. Saturate on the way back down.
+        let percent_bps_u128: u128 =
+            (u128::from(total)).saturating_mul(10_000) / (u128::from(max).max(1));
+        #[allow(clippy::cast_possible_truncation)]
+        let percent_bps: u32 = if percent_bps_u128 > u128::from(u32::MAX) {
+            u32::MAX
+        } else {
+            percent_bps_u128 as u32
+        };
+
+        // ----- 100% exceeded -----
+        if percent_bps >= BUDGET_EXCEEDED_THRESHOLD_BPS {
+            // Atomic-latch on realized_exceeded ensures idempotency.
+            if !self.realized_exceeded.swap(true, Ordering::AcqRel) {
+                if let Some(bus) = bus {
+                    emit_budget_exceeded(bus, max, total).await;
+                }
+            }
+        } else if percent_bps >= BUDGET_WARNING_THRESHOLD_BPS {
+            // ----- 80% warning (fires once per session) -----
+            // Reuse warnings_fired with a synthetic pct value of 80 so the same
+            // dedupe set guards both M1 thresholds and the M3-05 BPS warning.
+            let mut fired = self.warnings_fired.write().await;
+            if fired.insert(80) {
+                if let Some(bus) = bus {
+                    emit_budget_warning(bus, max, total, percent_bps).await;
+                }
+            }
+        }
+    }
+}
+
+/// Emit `tengu_cost_budget_warning` with the 3-key spec-locked payload.
+///
+/// `percent_bps` is computed as `u32` here (basis points, max `10_000` in
+/// practice) but M3-06's `BudgetWarningPayload::percent_bps: u64` is the
+/// authoritative schema type. The `AnalyticsValue::Int(_ as i64)` cast at the
+/// bus boundary is the documented payload-encoding convention shared by all
+/// `tengu_*` numeric fields (basis points are always non-negative and well
+/// below `i64::MAX`, so the cast is exact and round-trips losslessly back to
+/// the `u64` schema field at the `StatsigSink` wire-encode site).
+async fn emit_budget_warning(
+    bus: &Arc<lingxi_telemetry::AnalyticsBus>,
+    limit_nano_usd: u64,
+    current_nano_usd: u64,
+    percent_bps: u32,
+) {
+    use lingxi_telemetry::{AnalyticsValue, LogEventMetadata};
+    let mut m = LogEventMetadata::new();
+    m.insert(
+        "limit_usd".into(),
+        AnalyticsValue::Int(i64_from_u64_saturating(limit_nano_usd)),
+    );
+    m.insert(
+        "current_usd".into(),
+        AnalyticsValue::Int(i64_from_u64_saturating(current_nano_usd)),
+    );
+    m.insert(
+        "percent_bps".into(),
+        // i64::from(u32) is infallible; the bus-side i64 stays non-negative
+        // and re-decodes to BudgetWarningPayload::percent_bps: u64 cleanly.
+        AnalyticsValue::Int(i64::from(percent_bps)),
+    );
+    bus.log_event("tengu_cost_budget_warning", m).await;
+}
+
+/// Emit `tengu_cost_budget_exceeded` with the 2-key spec-locked payload.
+async fn emit_budget_exceeded(
+    bus: &Arc<lingxi_telemetry::AnalyticsBus>,
+    limit_nano_usd: u64,
+    current_nano_usd: u64,
+) {
+    use lingxi_telemetry::{AnalyticsValue, LogEventMetadata};
+    let mut m = LogEventMetadata::new();
+    m.insert(
+        "limit_usd".into(),
+        AnalyticsValue::Int(i64_from_u64_saturating(limit_nano_usd)),
+    );
+    m.insert(
+        "current_usd".into(),
+        AnalyticsValue::Int(i64_from_u64_saturating(current_nano_usd)),
+    );
+    bus.log_event("tengu_cost_budget_exceeded", m).await;
+}
+
+#[inline]
+#[allow(clippy::cast_possible_wrap)]
+const fn i64_from_u64_saturating(v: u64) -> i64 {
+    if v > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        v as i64
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::PricingCatalog;
+    use crate::pricing::{nano_usd_to_dollars_format, CostError, PricingCatalog, ProviderId};
+    use crate::usage::{TokenUsage, Usage};
+    use crate::ModelRef;
+    use async_trait::async_trait;
     use lingxi_protocol::SessionId;
+    use lingxi_telemetry::{
+        AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata,
+    };
+    use std::sync::Mutex;
+    use std::time::Duration;
     use tokio::sync::mpsc;
 
     fn make_tracker() -> Arc<CostTracker> {
@@ -218,5 +348,272 @@ mod tests {
             e.check_pre_api_call(10_000).await,
             BudgetCheckResult::Halt { .. }
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // M3-05 Task 4: budget alarm emission at 80% / 100% thresholds.
+    // -----------------------------------------------------------------
+
+    #[derive(Default)]
+    struct CaptureSink {
+        events: Mutex<Vec<(String, LogEventMetadata)>>,
+    }
+
+    #[async_trait]
+    impl AnalyticsSink for CaptureSink {
+        async fn log_event(&self, name: &str, metadata: LogEventMetadata) {
+            self.events.lock().unwrap().push((name.into(), metadata));
+        }
+        async fn log_event_async(&self, name: &str, metadata: LogEventMetadata) {
+            self.events.lock().unwrap().push((name.into(), metadata));
+        }
+        fn name(&self) -> &str {
+            "capture"
+        }
+    }
+
+    async fn make_setup(
+        limit_nano_usd: u64,
+    ) -> (
+        Arc<CostTracker>,
+        BudgetEnforcer,
+        Arc<AnalyticsBus>,
+        Arc<CaptureSink>,
+    ) {
+        let (tx, _rx) = mpsc::channel(8);
+        let tracker = Arc::new(CostTracker::new(
+            SessionId::nil(),
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        ));
+        let cfg = BudgetConfig {
+            max_session_nano_usd: Some(limit_nano_usd),
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: vec![], // M3-05 uses BPS thresholds, not the M1 f64 list
+            on_exceed: BudgetExceedPolicy::Halt,
+        };
+        let enforcer = BudgetEnforcer::new(cfg, tracker.clone());
+        let bus = Arc::new(AnalyticsBus::new());
+        let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
+        bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
+            .await;
+        (tracker, enforcer, bus, sink)
+    }
+
+    #[test]
+    fn alarm_threshold_constants_match_spec() {
+        assert_eq!(BUDGET_WARNING_THRESHOLD_BPS, 8000_u32, "80% in basis points");
+        assert_eq!(
+            BUDGET_EXCEEDED_THRESHOLD_BPS, 10000_u32,
+            "100% in basis points"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn alarm_warning_fires_at_80_percent_with_locked_payload() {
+        let (tracker, enforcer, bus, sink) = make_setup(1_000_000_000).await; // $1.00 limit
+
+        // 160_000 input tokens * 5000 nano-USD/tok = 800_000_000 nano-USD = 80%.
+        let mr = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-opus-4-6".into(),
+        };
+        tracker
+            .record_api_response_v2(
+                mr,
+                Usage {
+                    tokens: TokenUsage {
+                        input: 160_000,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Duration::from_millis(10),
+                0,
+                0,
+                0,
+                false,
+                None,
+            )
+            .await;
+
+        enforcer.check_post_api_call_with_bus(0, Some(&bus)).await;
+
+        let events = sink.events.lock().unwrap();
+        let warnings: Vec<_> = events
+            .iter()
+            .filter(|(n, _)| n == "tengu_cost_budget_warning")
+            .collect();
+        assert_eq!(warnings.len(), 1, "exactly one warning fires at 80%");
+
+        let payload = &warnings[0].1;
+        assert_eq!(payload.len(), 3, "warning payload has exactly 3 keys");
+        assert!(payload.contains_key("limit_usd"));
+        assert!(payload.contains_key("current_usd"));
+        assert!(payload.contains_key("percent_bps"));
+
+        match &payload["limit_usd"] {
+            AnalyticsValue::Int(n) => assert_eq!(*n, 1_000_000_000),
+            other => panic!("limit_usd must be Int, got {other:?}"),
+        }
+        match &payload["current_usd"] {
+            AnalyticsValue::Int(n) => assert_eq!(*n, 800_000_000),
+            other => panic!("current_usd must be Int, got {other:?}"),
+        }
+        match &payload["percent_bps"] {
+            AnalyticsValue::Int(n) => assert_eq!(*n, 8000, "exactly 80% in basis points"),
+            other => panic!("percent_bps must be Int, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn alarm_warning_does_not_double_emit_within_session() {
+        let (tracker, enforcer, bus, sink) = make_setup(1_000_000_000).await;
+
+        // Trip to 80% twice (each post-call check is a separate invocation).
+        let mr = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-opus-4-6".into(),
+        };
+        for _ in 0..2 {
+            tracker
+                .record_api_response_v2(
+                    mr.clone(),
+                    Usage {
+                        tokens: TokenUsage {
+                            input: 80_000,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    Duration::from_millis(10),
+                    0,
+                    0,
+                    0,
+                    false,
+                    None,
+                )
+                .await;
+            enforcer.check_post_api_call_with_bus(0, Some(&bus)).await;
+        }
+
+        let events = sink.events.lock().unwrap();
+        let warnings = events
+            .iter()
+            .filter(|(n, _)| n == "tengu_cost_budget_warning")
+            .count();
+        assert_eq!(warnings, 1, "warning fires exactly once per session");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn alarm_exceeded_fires_at_100_percent_with_locked_payload() {
+        let (tracker, enforcer, bus, sink) = make_setup(1_000_000_000).await;
+
+        let mr = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-opus-4-6".into(),
+        };
+        // 200_000 input tokens * 5000 = 1_000_000_000 nano-USD = 100%.
+        tracker
+            .record_api_response_v2(
+                mr,
+                Usage {
+                    tokens: TokenUsage {
+                        input: 200_000,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                Duration::from_millis(10),
+                0,
+                0,
+                0,
+                false,
+                None,
+            )
+            .await;
+        enforcer.check_post_api_call_with_bus(0, Some(&bus)).await;
+
+        let events = sink.events.lock().unwrap();
+        let exceeded: Vec<_> = events
+            .iter()
+            .filter(|(n, _)| n == "tengu_cost_budget_exceeded")
+            .collect();
+        assert_eq!(exceeded.len(), 1, "exactly one exceeded fires at 100%");
+
+        let payload = &exceeded[0].1;
+        assert_eq!(payload.len(), 2, "exceeded payload has exactly 2 keys");
+        assert!(payload.contains_key("limit_usd"));
+        assert!(payload.contains_key("current_usd"));
+
+        match &payload["limit_usd"] {
+            AnalyticsValue::Int(n) => assert_eq!(*n, 1_000_000_000),
+            other => panic!("limit_usd must be Int, got {other:?}"),
+        }
+        match &payload["current_usd"] {
+            AnalyticsValue::Int(n) => assert_eq!(*n, 1_000_000_000),
+            other => panic!("current_usd must be Int, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn alarm_exceeded_idempotent_no_double_emit() {
+        let (tracker, enforcer, bus, sink) = make_setup(1_000_000_000).await;
+
+        let mr = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-opus-4-6".into(),
+        };
+        // Two over-budget calls back-to-back. Exceeded must still fire exactly once.
+        for _ in 0..2 {
+            tracker
+                .record_api_response_v2(
+                    mr.clone(),
+                    Usage {
+                        tokens: TokenUsage {
+                            input: 200_000,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    Duration::from_millis(10),
+                    0,
+                    0,
+                    0,
+                    false,
+                    None,
+                )
+                .await;
+            enforcer.check_post_api_call_with_bus(0, Some(&bus)).await;
+        }
+
+        let events = sink.events.lock().unwrap();
+        let exceeded = events
+            .iter()
+            .filter(|(n, _)| n == "tengu_cost_budget_exceeded")
+            .count();
+        assert_eq!(exceeded, 1, "exceeded fires exactly once thanks to atomic latch");
+    }
+
+    #[test]
+    fn alarm_budget_exceeded_error_string_byte_for_byte() {
+        let e = CostError::BudgetExceeded {
+            limit: 100.00,
+            current: 150.75,
+        };
+        assert_eq!(
+            e.to_string(),
+            "Budget exceeded ($150.75); stopped.",
+            "claude-code parity: spec §5 line 498",
+        );
+    }
+
+    #[test]
+    fn alarm_nano_usd_to_dollars_format_matches_spec_examples() {
+        assert_eq!(nano_usd_to_dollars_format(1_500_000_000), "$1.50");
+        assert_eq!(nano_usd_to_dollars_format(12_345_678_901), "$12.35");
+        assert_eq!(nano_usd_to_dollars_format(0), "$0.00");
+        assert_eq!(nano_usd_to_dollars_format(999_999_999), "$1.00", "rounding edge");
     }
 }

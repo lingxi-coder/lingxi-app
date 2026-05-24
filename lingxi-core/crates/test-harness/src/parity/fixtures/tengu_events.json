@@ -1,6 +1,6 @@
 {
   "_source": "lingxi-telemetry::tengu::ALL_EVENT_NAMES (lingxi-core/crates/telemetry/src/tengu/mod.rs) — M3-06 schema lock against claude-code @ 6a25909 src/services/statsig.ts::logStatsigEvent wire shape.",
-  "_note": "194 tengu_* event names in registration order: api (25) -> agent (30) -> session (15) -> tool (91) -> cost (10) -> oauth (8) -> memory (12) -> settings (3). The tool block is 40 (M3-06 baseline) + 9 (M4-02 powershell/repl/sleep) + 3 (M4-03 web_search) + 15 (M4-04 workflow: todo_write/{enter,exit}_plan_mode/{enter,exit}_worktree) + 24 (M4-05 agent/task: agent/task_{create,get,list,update,stop,output}/send_message). Order is append-only per spec §7 line 787-789; adding a name MUST extend the list and bump the count. Removing a name is a v0.5+ breaking change. Field-set changes to existing events use sibling tengu_<name>_v2 names with a 2-minor deprecation cycle.",
+  "_note": "200 tengu_* event names in registration order: api (25) -> agent (30) -> session (15) -> tool (97) -> cost (10) -> oauth (8) -> memory (12) -> settings (3). The tool block is 40 (M3-06 baseline) + 9 (M4-02 powershell/repl/sleep) + 3 (M4-03 web_search) + 15 (M4-04 workflow: todo_write/{enter,exit}_plan_mode/{enter,exit}_worktree) + 24 (M4-05 agent/task: agent/task_{create,get,list,update,stop,output}/send_message) + 6 (M4-06 team: team_{create,delete}). Order is append-only per spec §7 line 787-789; adding a name MUST extend the list and bump the count. Removing a name is a v0.5+ breaking change. Field-set changes to existing events use sibling tengu_<name>_v2 names with a 2-minor deprecation cycle.",
   "event_names": [
     "tengu_api_request_started",
     "tengu_api_request_succeeded",
@@ -163,6 +163,12 @@
     "tengu_tool_send_message_started",
     "tengu_tool_send_message_completed",
     "tengu_tool_send_message_failed",
+    "tengu_tool_team_create_started",
+    "tengu_tool_team_create_completed",
+    "tengu_tool_team_create_failed",
+    "tengu_tool_team_delete_started",
+    "tengu_tool_team_delete_completed",
+    "tengu_tool_team_delete_failed",
     "tengu_cost_recorded",
     "tengu_cost_budget_warning",
     "tengu_cost_budget_exceeded",

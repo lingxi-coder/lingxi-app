@@ -18,10 +18,10 @@ fn all_3_settings_event_names_are_locked() {
 }
 
 #[test]
-fn registry_has_exactly_194_entries_after_m4_05() {
+fn registry_has_exactly_200_entries_after_m4_06() {
     assert_eq!(
         lingxi_telemetry::tengu::ALL_EVENT_NAMES.len(),
-        194,
-        "M3-06 baseline 143 + M4-02 9 powershell/repl/sleep + M4-03 3 web_search + M4-04 15 workflow + M4-05 24 agent/task = 194",
+        200,
+        "M3-06 baseline 143 + M4-02 9 powershell/repl/sleep + M4-03 3 web_search + M4-04 15 workflow + M4-05 24 agent/task + M4-06 6 team = 200",
     );
 }

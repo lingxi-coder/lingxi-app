@@ -5,6 +5,7 @@
 //! and shared state (content replacement, file-state cache in Plan 10).
 
 use crate::content_replacement::ContentReplacementState;
+use lingxi_core::SessionState;
 use lingxi_protocol::{AgentId, McpConnectionId, ToolUseId};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -26,6 +27,11 @@ pub struct ToolUseContext {
     pub agent_id: Option<AgentId>,
     /// Shared content-replacement state. Populated in Task 3.
     pub content_replacement_state: Option<Arc<Mutex<ContentReplacementState>>>,
+    /// Mutable session state (M4-04). Tools that mutate the conversation
+    /// (`TodoWrite`, `EnterPlanMode`, `ExitPlanMode`) acquire the `Mutex`
+    /// before reading or writing. `None` for legacy call sites that have not
+    /// wired a session yet; M4-04 tools surface a clear error in that case.
+    pub session: Option<Arc<Mutex<SessionState>>>,
     // File state cache wired in Plan 10.
 }
 

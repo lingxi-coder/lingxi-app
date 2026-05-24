@@ -22,6 +22,6 @@ pub mod token;
 
 pub use events::Event;
 pub use reducer::reduce;
-pub use session::{CumulativeUsage, SessionState};
+pub use session::{CumulativeUsage, SessionState, TodoItem, TodoState};
 pub use state_machine::ConversationState;
 pub use token::Usage;

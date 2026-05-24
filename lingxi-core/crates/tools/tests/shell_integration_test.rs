@@ -219,6 +219,7 @@ fn fresh_ctx() -> ToolUseContext {
         tool_use_id: None,
         agent_id: None,
         content_replacement_state: None,
+        session: None,
     }
 }
 

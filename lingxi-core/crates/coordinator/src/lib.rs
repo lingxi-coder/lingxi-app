@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod handle;
 pub mod internal_tools;
 pub mod mailbox;
 pub mod mode;

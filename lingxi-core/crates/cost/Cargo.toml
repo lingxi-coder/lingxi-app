@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
 lingxi-telemetry = { path = "../telemetry" }
+lingxi-traits = { path = "../traits" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

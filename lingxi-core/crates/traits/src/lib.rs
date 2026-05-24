@@ -44,7 +44,8 @@ pub use sandbox::{
 };
 pub use secure_storage::{SecureStorage, SecureStorageBackend, SecureStorageError};
 pub use subagent_spawn::{
-    SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
+    SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest,
+    SubagentSpawner, SubagentUsage,
 };
 pub use swarm::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 pub use task_registry::{

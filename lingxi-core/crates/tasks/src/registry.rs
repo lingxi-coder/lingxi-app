@@ -111,6 +111,32 @@ impl TaskRegistry {
         self.tasks.read().await.values().cloned().collect()
     }
 
+    /// Force `task_id`'s status to `status`. Returns
+    /// [`TaskError::NotFound`] if the id is unknown. Only Bash and Agent
+    /// variants currently carry a writable `status` field in the M1 surface;
+    /// other variants are no-ops on the variant but still return the
+    /// (possibly unchanged) state for the caller's consumption.
+    pub async fn set_status(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+    ) -> Result<TaskState, TaskError> {
+        let mut map = self.tasks.write().await;
+        let entry = map
+            .get_mut(task_id)
+            .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+        match entry {
+            TaskState::LocalBash(b) => b.base.status = status,
+            TaskState::LocalAgent(a) => a.base.status = status,
+            TaskState::RemoteAgent(r) => r.base.status = status,
+            TaskState::InProcessTeammate(t) => t.base.status = status,
+            TaskState::LocalWorkflow(w) => w.base.status = status,
+            TaskState::MonitorMcp(m) => m.base.status = status,
+            TaskState::Dream(d) => d.base.status = status,
+        }
+        Ok(entry.clone())
+    }
+
     /// Kill a task, cancelling its background handle if any.
     ///
     /// Note: only Bash and Agent states currently carry a writable `status`

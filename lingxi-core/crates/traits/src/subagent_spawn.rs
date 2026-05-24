@@ -8,10 +8,13 @@
 //!
 //! See M4-05 wiring follow-up plan.
 
+use crate::budget::BudgetEnforcerHandle;
+use crate::tool_invoker::ToolInvoker;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Locked subagent input passed to [`SubagentSpawner::spawn`].
@@ -69,14 +72,33 @@ pub enum SubagentSpawnError {
     Internal(String),
 }
 
+/// Inheritance bundle the parent agent hands to a child spawn.
+///
+/// The recursion-lock + budget-inheritance invariants are asserted in
+/// `lingxi-tools` tests via `Arc::ptr_eq` on these trait-object pointers.
+#[derive(Clone)]
+pub struct SubagentInheritance {
+    /// Parent's tool invoker (`Arc<ToolRegistry>` wrapped). The recursion
+    /// lock requires the child to reuse this exact `Arc`, NOT a fresh one.
+    pub tool_invoker: Arc<dyn ToolInvoker>,
+    /// Parent's budget enforcer. The child inherits this `Arc` so budget
+    /// charges aggregate across the whole agent tree.
+    pub budget: Arc<dyn BudgetEnforcerHandle>,
+}
+
 /// Spawn-a-subagent seam used by `AgentTool`.
 #[async_trait]
 pub trait SubagentSpawner: Send + Sync {
     /// Allocate a subagent slot, pump its state machine to completion, and
     /// return the terminal [`SubagentResult`].
+    ///
+    /// `inherit` carries the parent's tool invoker (registry recursion lock)
+    /// and budget enforcer; the implementation MUST hand the same `Arc`s on
+    /// to the child without cloning the inner value.
     async fn spawn(
         &self,
         request: SubagentSpawnRequest,
+        inherit: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError>;
 }
 

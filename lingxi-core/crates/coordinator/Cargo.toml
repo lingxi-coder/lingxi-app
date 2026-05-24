@@ -13,6 +13,7 @@ lingxi-agent = { path = "../agent" }
 lingxi-tasks = { path = "../tasks" }
 lingxi-memory = { path = "../memory" }
 serde.workspace = true
+uuid = { version = "1", features = ["v4", "serde"] }
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true

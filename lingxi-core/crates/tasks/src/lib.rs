@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cron;
+pub mod handle;
 pub mod handlers;
 pub mod id;
 pub mod notification;

@@ -11,6 +11,7 @@
 pub mod budget;
 pub mod calculator;
 pub mod events;
+pub mod handle;
 pub mod pricing;
 pub mod summary;
 pub mod tracker;

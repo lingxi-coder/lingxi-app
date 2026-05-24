@@ -99,6 +99,13 @@ pub enum BudgetCheckResult {
 }
 
 impl BudgetEnforcer {
+    /// Borrow the underlying [`CostTracker`] (used by the
+    /// `BudgetEnforcerHandle` trait impl in `handle.rs`).
+    #[must_use]
+    pub fn cost_tracker_arc(&self) -> Arc<CostTracker> {
+        self.cost_tracker.clone()
+    }
+
     /// Construct a new enforcer bound to `cost_tracker`.
     #[must_use]
     pub fn new(config: BudgetConfig, cost_tracker: Arc<CostTracker>) -> Self {

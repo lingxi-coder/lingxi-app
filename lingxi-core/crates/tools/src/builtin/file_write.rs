@@ -372,4 +372,40 @@ mod tests {
             other => panic!("expected PathBlocked, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn is_destructive_returns_true() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileWriteTool::new(ctx);
+        assert!(tool.is_destructive(&json!({})));
+    }
+
+    #[tokio::test]
+    async fn is_concurrency_safe_returns_false() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileWriteTool::new(ctx);
+        assert!(!tool.is_concurrency_safe(&json!({})));
+    }
+
+    #[tokio::test]
+    async fn is_read_only_returns_false() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileWriteTool::new(ctx);
+        assert!(!tool.is_read_only(&json!({})));
+    }
+
+    #[tokio::test]
+    async fn input_schema_requires_file_path_and_content() {
+        let tmp = TempDir::new().unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileWriteTool::new(ctx);
+        let schema = tool.input_schema();
+        let required = schema["required"].as_array().unwrap();
+        let names: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(names.contains(&"file_path"));
+        assert!(names.contains(&"content"));
+    }
 }

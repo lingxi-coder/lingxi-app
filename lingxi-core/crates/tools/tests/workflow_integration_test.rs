@@ -240,6 +240,10 @@ fn make_bctx(mock: Arc<LocalMockWorktree>) -> BuiltinToolContext {
         provider: Arc::new(lingxi_api_client::AnthropicProvider::new("test-key", None)),
         default_model: "claude-sonnet-4-20250514".into(),
         worktree: mock as Arc<dyn WorktreeManager>,
+        subagent_spawner: None,
+        task_registry: None,
+        mailbox_router: None,
+        budget_enforcer: None,
     }
 }
 
@@ -264,6 +268,7 @@ fn make_use_ctx_with_session() -> (ToolUseContext, Arc<Mutex<SessionState>>) {
         agent_id: None,
         content_replacement_state: None,
         session: Some(session.clone()),
+        subagent_registry: None,
     };
     (ctx, session)
 }

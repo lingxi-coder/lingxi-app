@@ -9,11 +9,15 @@ use lingxi_permission::PermissionMode;
 use lingxi_sandbox::decision::ProjectTrustLevel;
 use lingxi_sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use lingxi_telemetry::AnalyticsBus;
+use lingxi_traits::budget::BudgetEnforcerHandle;
 use lingxi_traits::clock::Clock;
 use lingxi_traits::filesystem::FileSystem;
 use lingxi_traits::http::HttpTransport;
+use lingxi_traits::mailbox::MailboxRouterHandle;
 use lingxi_traits::process::ProcessRunner;
 use lingxi_traits::sandbox::Sandbox;
+use lingxi_traits::subagent_spawn::SubagentSpawner;
+use lingxi_traits::task_registry::TaskRegistryHandle;
 use lingxi_traits::worktree::WorktreeManager;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -106,6 +110,22 @@ pub struct BuiltinToolContext {
     /// (M4-04). Tests inject `MockWorktreeManager`; production uses
     /// `lingxi_platform_posix::PosixWorktreeManager`.
     pub worktree: Arc<dyn WorktreeManager>,
+
+    // ===== M4-05 wiring (Phase 3) =====
+    /// Subagent spawner — `AgentTool` dispatches recursive subagent runs
+    /// through this seam. `None` when the host has not wired a state-
+    /// machine pool yet; in that case `AgentTool::call` surfaces a clear
+    /// internal error. Production wires `lingxi_agent::PoolSubagentSpawner`.
+    pub subagent_spawner: Option<Arc<dyn SubagentSpawner>>,
+    /// Task registry — the 6 `Task*` tools dispatch CRUD through this seam.
+    /// Production wires `lingxi_tasks::TaskRegistry`.
+    pub task_registry: Option<Arc<dyn TaskRegistryHandle>>,
+    /// Mailbox router — `SendMessageTool` dispatches teammate routing
+    /// through this seam. Production wires `lingxi_coordinator::MailboxRouter`.
+    pub mailbox_router: Option<Arc<dyn MailboxRouterHandle>>,
+    /// Budget enforcer — `AgentTool` gates spawn calls through this seam.
+    /// Production wires `lingxi_cost::BudgetEnforcer`.
+    pub budget_enforcer: Option<Arc<dyn BudgetEnforcerHandle>>,
 }
 
 /// Register every M4-01 foundation tool against `registry`.
@@ -189,6 +209,10 @@ mod tests {
             provider: Arc::new(AnthropicProvider::new("test-key", None)),
             default_model: "claude-sonnet-4-20250514".to_string(),
             worktree: crate::builtin::test_support::make_mock_worktree(),
+            subagent_spawner: None,
+            task_registry: None,
+            mailbox_router: None,
+            budget_enforcer: None,
         }
     }
 

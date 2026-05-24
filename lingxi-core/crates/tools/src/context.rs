@@ -5,6 +5,7 @@
 //! and shared state (content replacement, file-state cache in Plan 10).
 
 use crate::content_replacement::ContentReplacementState;
+use crate::registry::ToolRegistry;
 use lingxi_core::SessionState;
 use lingxi_protocol::{AgentId, McpConnectionId, ToolUseId};
 use std::sync::Arc;
@@ -32,6 +33,12 @@ pub struct ToolUseContext {
     /// before reading or writing. `None` for legacy call sites that have not
     /// wired a session yet; M4-04 tools surface a clear error in that case.
     pub session: Option<Arc<Mutex<SessionState>>>,
+    /// Parent's tool registry — `AgentTool` clones this `Arc` into the child
+    /// subagent's invocation context so the recursion lock (parent and child
+    /// share the same `Arc<ToolRegistry>`) is asserted via `Arc::ptr_eq` in
+    /// M4-05 wiring tests. `None` for top-level invocations that have no
+    /// parent agent yet.
+    pub subagent_registry: Option<Arc<ToolRegistry>>,
     // File state cache wired in Plan 10.
 }
 

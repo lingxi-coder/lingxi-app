@@ -43,6 +43,7 @@ pub mod registry;
 pub mod result_storage;
 pub mod shared;
 pub mod streaming_exec;
+pub mod tool_invoker_impl;
 pub mod tool_trait;
 
 pub use builtin::{
@@ -54,4 +55,5 @@ pub use dispatcher::{ToolCall, ToolDispatchEvent, ToolDispatcher};
 pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};
 pub use registry::ToolRegistry;
 pub use result_storage::ToolResultStorage;
+pub use tool_invoker_impl::RegistryToolInvoker;
 pub use tool_trait::*;

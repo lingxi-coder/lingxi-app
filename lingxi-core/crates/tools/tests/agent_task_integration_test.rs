@@ -55,6 +55,7 @@ mod common {
             agent_id: None,
             content_replacement_state: None,
             session: None,
+            subagent_registry: None,
         }
     }
 
@@ -257,6 +258,10 @@ mod common {
             provider: Arc::new(AnthropicProvider::new("test", None)),
             default_model: "claude-sonnet-4-20250514".into(),
             worktree: Arc::new(StubWt),
+            subagent_spawner: None,
+            task_registry: None,
+            mailbox_router: None,
+            budget_enforcer: None,
         }
     }
 }

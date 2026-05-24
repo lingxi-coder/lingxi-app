@@ -30,6 +30,9 @@ use lingxi_telemetry::tengu::tool::{
     TASK_UPDATE_STARTED,
 };
 use lingxi_telemetry::AnalyticsBus;
+use lingxi_traits::task_registry::{
+    TaskCreateInput, TaskListFilter, TaskRegistryError, TaskUpdatePatch,
+};
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 
@@ -99,7 +102,10 @@ pub fn validate_task_id(s: &str) -> Result<(), String> {
 /// Generate a fresh task-id matching the M1 format (`[bartwmd][0-9a-z]{8}`).
 ///
 /// Mirrors `lingxi_tasks::id::generate_task_id` without taking the
-/// cyclic dep on `lingxi-tasks`.
+/// cyclic dep on `lingxi-tasks`. Retained for test fixtures + parity
+/// (the regex test in this file generates ids locally to verify they
+/// match the locked regex without depending on the registry being wired).
+#[cfg(test)]
 fn fresh_task_id(prefix: char) -> String {
     use rand::Rng;
     const ALPHA: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
@@ -178,6 +184,20 @@ async fn emit_completed(
         md.insert((*k).into(), v.clone());
     }
     bus.log_event(event, md).await;
+}
+
+/// Convert a `TaskRegistryError` to a `ToolError` so the 6 task tools can
+/// share one mapping.
+fn registry_err_to_tool_err(prefix: &str, e: TaskRegistryError) -> ToolError {
+    match e {
+        TaskRegistryError::NotFound(id) => ToolError::InvalidInput(format!(
+            "{prefix}: task not found: {id}"
+        )),
+        TaskRegistryError::InvalidInput(s) => {
+            ToolError::InvalidInput(format!("{prefix}: {s}"))
+        }
+        TaskRegistryError::Internal(s) => ToolError::Internal(format!("{prefix}: {s}")),
+    }
 }
 
 async fn emit_failed(
@@ -347,6 +367,11 @@ impl Tool for TaskCreateTool {
             }
         };
 
+        // Drop the prefix-only path — registry now generates the id; the
+        // prefix(_str) variable stays for telemetry continuity but we no
+        // longer materialise an id ourselves here.
+        let _ = prefix;
+
         emit_started(
             &bus,
             TASK_CREATE_STARTED,
@@ -358,7 +383,42 @@ impl Tool for TaskCreateTool {
         )
         .await;
 
-        let task_id = fresh_task_id(prefix);
+        let registry = match self.ctx.task_registry.clone() {
+            Some(r) => r,
+            None => {
+                emit_failed(
+                    &bus,
+                    TASK_CREATE_FAILED,
+                    &invocation_id,
+                    "registry_not_wired",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::Internal(
+                    "TaskCreateTool: TaskRegistryHandle not wired into BuiltinToolContext".into(),
+                ));
+            }
+        };
+        let record = match registry
+            .create(TaskCreateInput {
+                task_type: task_type_str.clone(),
+                description: description.clone(),
+            })
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                emit_failed(
+                    &bus,
+                    TASK_CREATE_FAILED,
+                    &invocation_id,
+                    "registry_error",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(registry_err_to_tool_err("TaskCreate", e));
+            }
+        };
 
         emit_completed(
             &bus,
@@ -367,17 +427,17 @@ impl Tool for TaskCreateTool {
             started.elapsed().as_millis() as u64,
             &[(
                 "task_id",
-                AnalyticsValue::String(Verified::assert_safe(task_id.clone()).into_inner()),
+                AnalyticsValue::String(Verified::assert_safe(record.task_id.clone()).into_inner()),
             )],
         )
         .await;
 
         Ok(ToolCallResult {
             data: json!({
-                "task_id": task_id,
-                "task_type": task_type_str,
-                "status": "pending",
-                "description": description,
+                "task_id": record.task_id,
+                "task_type": record.task_type,
+                "status": record.status,
+                "description": record.description,
             }),
             new_messages: vec![],
             context_modifier: None,
@@ -491,6 +551,37 @@ impl Tool for TaskGetTool {
         }
 
         emit_started(&bus, TASK_GET_STARTED, &invocation_id, &[]).await;
+
+        let registry = match self.ctx.task_registry.clone() {
+            Some(r) => r,
+            None => {
+                emit_failed(
+                    &bus,
+                    TASK_GET_FAILED,
+                    &invocation_id,
+                    "registry_not_wired",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::Internal(
+                    "TaskGetTool: TaskRegistryHandle not wired into BuiltinToolContext".into(),
+                ));
+            }
+        };
+        let opt = match registry.get(&task_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                emit_failed(
+                    &bus,
+                    TASK_GET_FAILED,
+                    &invocation_id,
+                    "registry_error",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(registry_err_to_tool_err("TaskGet", e));
+            }
+        };
         emit_completed(
             &bus,
             TASK_GET_COMPLETED,
@@ -500,13 +591,17 @@ impl Tool for TaskGetTool {
         )
         .await;
 
-        // Shape-correct surface — real lookup arrives via the post-M5 wiring.
-        Ok(ToolCallResult {
-            data: json!({
-                "task_id": task_id,
-                "status": "pending",
-                "task_type": "local_bash",
+        let data = match opt {
+            Some(rec) => json!({
+                "task_id": rec.task_id,
+                "status": rec.status,
+                "task_type": rec.task_type,
+                "description": rec.description,
             }),
+            None => json!({ "task_id": task_id, "found": false }),
+        };
+        Ok(ToolCallResult {
+            data,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -610,17 +705,65 @@ impl Tool for TaskListTool {
         }
 
         emit_started(&bus, TASK_LIST_STARTED, &invocation_id, &[]).await;
+
+        let registry = match self.ctx.task_registry.clone() {
+            Some(r) => r,
+            None => {
+                emit_failed(
+                    &bus,
+                    TASK_LIST_FAILED,
+                    &invocation_id,
+                    "registry_not_wired",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::Internal(
+                    "TaskListTool: TaskRegistryHandle not wired into BuiltinToolContext".into(),
+                ));
+            }
+        };
+        let filter = TaskListFilter {
+            status: input
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        };
+        let records = match registry.list(filter).await {
+            Ok(v) => v,
+            Err(e) => {
+                emit_failed(
+                    &bus,
+                    TASK_LIST_FAILED,
+                    &invocation_id,
+                    "registry_error",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(registry_err_to_tool_err("TaskList", e));
+            }
+        };
         emit_completed(
             &bus,
             TASK_LIST_COMPLETED,
             &invocation_id,
             started.elapsed().as_millis() as u64,
-            &[("count", AnalyticsValue::Int(0))],
+            &[("count", AnalyticsValue::Int(records.len() as i64))],
         )
         .await;
 
+        let tasks: Vec<Value> = records
+            .into_iter()
+            .map(|r| {
+                json!({
+                    "task_id": r.task_id,
+                    "task_type": r.task_type,
+                    "status": r.status,
+                    "description": r.description,
+                })
+            })
+            .collect();
         Ok(ToolCallResult {
-            data: json!({ "tasks": [] }),
+            data: json!({ "tasks": tasks }),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -765,6 +908,46 @@ impl Tool for TaskUpdateTool {
         }
 
         emit_started(&bus, TASK_UPDATE_STARTED, &invocation_id, &[]).await;
+
+        let registry = match self.ctx.task_registry.clone() {
+            Some(r) => r,
+            None => {
+                emit_failed(
+                    &bus,
+                    TASK_UPDATE_FAILED,
+                    &invocation_id,
+                    "registry_not_wired",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::Internal(
+                    "TaskUpdateTool: TaskRegistryHandle not wired into BuiltinToolContext".into(),
+                ));
+            }
+        };
+        let record = match registry
+            .update(
+                &task_id,
+                TaskUpdatePatch {
+                    status: Some(status.clone()),
+                },
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                emit_failed(
+                    &bus,
+                    TASK_UPDATE_FAILED,
+                    &invocation_id,
+                    "registry_error",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(registry_err_to_tool_err("TaskUpdate", e));
+            }
+        };
+
         emit_completed(
             &bus,
             TASK_UPDATE_COMPLETED,
@@ -775,7 +958,7 @@ impl Tool for TaskUpdateTool {
         .await;
 
         Ok(ToolCallResult {
-            data: json!({ "task_id": task_id, "status": status }),
+            data: json!({ "task_id": record.task_id, "status": record.status }),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -893,6 +1076,37 @@ impl Tool for TaskStopTool {
         }
 
         emit_started(&bus, TASK_STOP_STARTED, &invocation_id, &[]).await;
+
+        let registry = match self.ctx.task_registry.clone() {
+            Some(r) => r,
+            None => {
+                emit_failed(
+                    &bus,
+                    TASK_STOP_FAILED,
+                    &invocation_id,
+                    "registry_not_wired",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::Internal(
+                    "TaskStopTool: TaskRegistryHandle not wired into BuiltinToolContext".into(),
+                ));
+            }
+        };
+        let record = match registry.kill(&task_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                emit_failed(
+                    &bus,
+                    TASK_STOP_FAILED,
+                    &invocation_id,
+                    "registry_error",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(registry_err_to_tool_err("TaskStop", e));
+            }
+        };
         emit_completed(
             &bus,
             TASK_STOP_COMPLETED,
@@ -903,7 +1117,7 @@ impl Tool for TaskStopTool {
         .await;
 
         Ok(ToolCallResult {
-            data: json!({ "task_id": task_id, "status": "killed" }),
+            data: json!({ "task_id": record.task_id, "status": record.status }),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -1022,6 +1236,38 @@ impl Tool for TaskOutputTool {
         }
 
         emit_started(&bus, TASK_OUTPUT_STARTED, &invocation_id, &[]).await;
+
+        let registry = match self.ctx.task_registry.clone() {
+            Some(r) => r,
+            None => {
+                emit_failed(
+                    &bus,
+                    TASK_OUTPUT_FAILED,
+                    &invocation_id,
+                    "registry_not_wired",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::Internal(
+                    "TaskOutputTool: TaskRegistryHandle not wired into BuiltinToolContext".into(),
+                ));
+            }
+        };
+        let offset = input.get("offset").and_then(Value::as_u64);
+        let chunk = match registry.output(&task_id, offset).await {
+            Ok(c) => c,
+            Err(e) => {
+                emit_failed(
+                    &bus,
+                    TASK_OUTPUT_FAILED,
+                    &invocation_id,
+                    "registry_error",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(registry_err_to_tool_err("TaskOutput", e));
+            }
+        };
         emit_completed(
             &bus,
             TASK_OUTPUT_COMPLETED,
@@ -1033,10 +1279,10 @@ impl Tool for TaskOutputTool {
 
         Ok(ToolCallResult {
             data: json!({
-                "task_id": task_id,
-                "content": "",
-                "total_lines": 0,
-                "truncated": false,
+                "task_id": chunk.task_id,
+                "content": chunk.content,
+                "total_lines": chunk.total_lines,
+                "truncated": chunk.truncated,
             }),
             new_messages: vec![],
             context_modifier: None,

@@ -26,6 +26,10 @@ use lingxi_telemetry::pii::{PiiTagged, Verified};
 use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use lingxi_telemetry::tengu::tool::{AGENT_COMPLETED_M4_05, AGENT_FAILED, AGENT_STARTED};
 use lingxi_telemetry::AnalyticsBus;
+use lingxi_traits::budget::BudgetError;
+use lingxi_traits::subagent_spawn::{
+    SubagentInheritance, SubagentResult, SubagentSpawnRequest,
+};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -244,7 +248,7 @@ impl Tool for AgentTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
@@ -296,7 +300,40 @@ impl Tool for AgentTool {
             return Err(ToolError::InvalidInput("Agent: prompt is empty".into()));
         }
 
-        // 4. Emit started.
+        // 4. Wiring guard: spawner + budget + registry must be present.
+        let spawner = self.ctx.subagent_spawner.clone().ok_or_else(|| {
+            ToolError::Internal(
+                "AgentTool: SubagentSpawner not wired into BuiltinToolContext".into(),
+            )
+        })?;
+        let budget = self.ctx.budget_enforcer.clone().ok_or_else(|| {
+            ToolError::Internal(
+                "AgentTool: BudgetEnforcerHandle not wired into BuiltinToolContext".into(),
+            )
+        })?;
+        let parent_registry = ctx.subagent_registry.clone().ok_or_else(|| {
+            ToolError::Internal(
+                "AgentTool: parent ToolRegistry not threaded via ToolUseContext.subagent_registry"
+                    .into(),
+            )
+        })?;
+
+        // 5. M3-05 byte-locked budget gate. `check_and_charge(0)` re-runs the
+        // pre-call gate; on Exceeded we surface the locked denial string.
+        if let Err(BudgetError::Exceeded { current_nano_usd }) =
+            budget.check_and_charge(0).await
+        {
+            Self::emit_failed(
+                &bus,
+                &invocation_id,
+                "budget_exceeded",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(ToolError::Internal(format_budget_denied(current_nano_usd)));
+        }
+
+        // 6. Emit started.
         Self::emit_started(
             &bus,
             &invocation_id,
@@ -305,25 +342,56 @@ impl Tool for AgentTool {
         )
         .await;
 
-        // 5. Subagent dispatch surface (real recursion wired in post-M5).
-        // For now: return a shape-correct stub so the tool composes cleanly
-        // with the registry + UI. The byte-locked event triple still fires.
-        let subagent_id = format!("agent-{invocation_id}");
-        let final_result = json!({ "summary": "subagent surface (M4-05): dispatch deferred to post-M5 coordinator wiring" });
+        // 7. Build the inheritance bundle and dispatch into the spawner.
+        // The recursion-lock invariant: `parent_registry` is passed verbatim
+        // into the bundle via `RegistryToolInvoker::new(parent_registry)`.
+        // The budget Arc is cloned (no deep clone — `Arc::clone` only bumps
+        // the refcount), so `Arc::ptr_eq` between parent + child holds.
+        let invoker: Arc<dyn lingxi_traits::tool_invoker::ToolInvoker> = Arc::new(
+            crate::tool_invoker_impl::RegistryToolInvoker::new(parent_registry.clone()),
+        );
+        let inherit = SubagentInheritance {
+            tool_invoker: invoker,
+            budget: budget.clone(),
+        };
+        let request = SubagentSpawnRequest {
+            subagent_type: parsed.subagent_type.clone(),
+            prompt: parsed.prompt.clone(),
+            context_paths: parsed.context_paths.clone(),
+        };
 
+        let outcome = spawner.spawn(request, inherit).await;
         let duration_ms = started.elapsed().as_millis() as u64;
-        Self::emit_completed(&bus, &invocation_id, duration_ms, &parsed.subagent_type).await;
 
-        Ok(ToolCallResult {
-            data: json!({
-                "subagent_id": subagent_id,
-                "subagent_type": parsed.subagent_type,
-                "result": final_result
-            }),
-            new_messages: vec![],
-            context_modifier: None,
-            mcp_meta: None,
-        })
+        match outcome {
+            Ok(SubagentResult::Completed { content, .. }) => {
+                Self::emit_completed(&bus, &invocation_id, duration_ms, &parsed.subagent_type)
+                    .await;
+                Ok(ToolCallResult {
+                    data: json!({
+                        "subagent_type": parsed.subagent_type,
+                        "result": content,
+                    }),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    mcp_meta: None,
+                })
+            }
+            Ok(SubagentResult::Failed { reason }) => {
+                Self::emit_failed(&bus, &invocation_id, "subagent_failed", duration_ms).await;
+                Err(ToolError::Internal(reason))
+            }
+            Ok(SubagentResult::Killed) => {
+                Self::emit_failed(&bus, &invocation_id, "killed", duration_ms).await;
+                Err(ToolError::Internal("Agent: subagent was killed".into()))
+            }
+            Err(e) => {
+                Self::emit_failed(&bus, &invocation_id, "spawn_error", duration_ms).await;
+                Err(ToolError::Internal(format!(
+                    "Agent: spawner failed: {e}"
+                )))
+            }
+        }
     }
 }
 

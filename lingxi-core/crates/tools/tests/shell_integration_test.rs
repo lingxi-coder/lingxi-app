@@ -142,6 +142,10 @@ fn make_ctx() -> BuiltinToolContext {
         provider: Arc::new(lingxi_api_client::AnthropicProvider::new("test-key", None)),
         default_model: "claude-sonnet-4-20250514".to_string(),
         worktree: Arc::new(NoopWorktree),
+        subagent_spawner: None,
+        task_registry: None,
+        mailbox_router: None,
+        budget_enforcer: None,
     }
 }
 
@@ -220,6 +224,7 @@ fn fresh_ctx() -> ToolUseContext {
         agent_id: None,
         content_replacement_state: None,
         session: None,
+        subagent_registry: None,
     }
 }
 

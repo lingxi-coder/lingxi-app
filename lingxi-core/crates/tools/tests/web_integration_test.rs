@@ -195,6 +195,10 @@ fn make_web_ctx(http: Arc<dyn HttpTransport>) -> (BuiltinToolContext, Arc<InMemo
         provider,
         default_model: "claude-sonnet-4-20250514".into(),
         worktree: Arc::new(NoopWorktree),
+        subagent_spawner: None,
+        task_registry: None,
+        mailbox_router: None,
+        budget_enforcer: None,
     };
     (ctx, sink)
 }
@@ -253,6 +257,7 @@ fn fresh_use_ctx() -> ToolUseContext {
         agent_id: None,
         content_replacement_state: None,
         session: None,
+        subagent_registry: None,
     }
 }
 

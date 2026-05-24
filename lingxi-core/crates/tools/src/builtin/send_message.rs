@@ -23,6 +23,7 @@ use lingxi_telemetry::tengu::tool::{
     SEND_MESSAGE_COMPLETED, SEND_MESSAGE_FAILED, SEND_MESSAGE_STARTED,
 };
 use lingxi_telemetry::AnalyticsBus;
+use lingxi_traits::mailbox::MailboxMessage;
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 
@@ -169,7 +170,7 @@ impl Tool for SendMessageTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
@@ -221,23 +222,69 @@ impl Tool for SendMessageTool {
 
         Self::emit_started(&bus, &invocation_id, message.chars().count() as i64).await;
 
-        // Routing surface — wired to a real `MailboxRouter` in
-        // `lingxi-coordinator` post-M5. The 30s claim-window literal lives
-        // in this source so the parity grep succeeds.
-        let _claim_window = SEND_MESSAGE_CLAIM_WINDOW;
+        // Wiring guard: mailbox router must be present in the context.
+        let router = match self.ctx.mailbox_router.clone() {
+            Some(r) => r,
+            None => {
+                Self::emit_failed(
+                    &bus,
+                    &invocation_id,
+                    "router_not_wired",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::Internal(
+                    "SendMessageTool: MailboxRouterHandle not wired into BuiltinToolContext"
+                        .into(),
+                ));
+            }
+        };
 
-        Self::emit_completed(&bus, &invocation_id, started.elapsed().as_millis() as u64).await;
+        // Resolve the parent agent id (sender). When `ctx.agent_id` is
+        // absent we synthesise a nil id — the production agent always has
+        // one, so this only happens in narrowly scoped tests.
+        let from_str = ctx
+            .agent_id
+            .map(|a| a.as_uuid().to_string())
+            .unwrap_or_else(|| lingxi_protocol::AgentId::nil().as_uuid().to_string());
 
-        Ok(ToolCallResult {
-            data: json!({
-                "to_agent_id": to_str,
-                "delivered": true,
-                "claim_window_secs": SEND_MESSAGE_CLAIM_WINDOW.as_secs(),
-            }),
-            new_messages: vec![],
-            context_modifier: None,
-            mcp_meta: None,
-        })
+        let mailbox_msg = MailboxMessage {
+            message_id: invocation_id.clone(),
+            content: message.clone(),
+            timestamp: std::time::SystemTime::now(),
+        };
+
+        match router.route(&from_str, &to_str, mailbox_msg).await {
+            Ok(ack) => {
+                debug_assert_eq!(ack.claim_window_secs, SEND_MESSAGE_CLAIM_WINDOW.as_secs());
+                Self::emit_completed(
+                    &bus,
+                    &invocation_id,
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                Ok(ToolCallResult {
+                    data: json!({
+                        "to_agent_id": to_str,
+                        "delivered": true,
+                        "claim_window_secs": ack.claim_window_secs,
+                    }),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    mcp_meta: None,
+                })
+            }
+            Err(e) => {
+                Self::emit_failed(
+                    &bus,
+                    &invocation_id,
+                    "route_error",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                Err(ToolError::Internal(format!("SendMessage: {e}")))
+            }
+        }
     }
 }
 

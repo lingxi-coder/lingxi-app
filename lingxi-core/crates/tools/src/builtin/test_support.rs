@@ -102,6 +102,7 @@ pub fn fresh_ctx() -> ToolUseContext {
         agent_id: None,
         content_replacement_state: None,
         session: None,
+        subagent_registry: None,
     }
 }
 
@@ -494,6 +495,10 @@ pub fn ctx_for_file_tools(
         provider: Arc::new(lingxi_api_client::AnthropicProvider::new("test-key", None)),
         default_model: "claude-sonnet-4-20250514".to_string(),
         worktree: make_mock_worktree(),
+        subagent_spawner: None,
+        task_registry: None,
+        mailbox_router: None,
+        budget_enforcer: None,
     }
 }
 
@@ -528,5 +533,9 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         provider: Arc::new(lingxi_api_client::AnthropicProvider::new("test-key", None)),
         default_model: "claude-sonnet-4-20250514".to_string(),
         worktree: make_mock_worktree(),
+        subagent_spawner: None,
+        task_registry: None,
+        mailbox_router: None,
+        budget_enforcer: None,
     }
 }

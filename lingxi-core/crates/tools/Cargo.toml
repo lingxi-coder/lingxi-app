@@ -29,9 +29,13 @@ ignore = "=0.4.23"
 grep-regex = "=0.1.13"
 grep-searcher = "=0.1.14"
 grep-matcher = "=0.1.7"
+# M4-05 — task-id generation (no cyclic dep on lingxi-tasks; the
+# byte-locked `[bartwmd][0-9a-z]{8}` format is mirrored here).
+rand = "0.9"
 
 [dev-dependencies]
 tempfile = "3.13"
+regex = "1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "sync", "time", "net"] }
 filetime = "0.2"
 axum = "0.7"

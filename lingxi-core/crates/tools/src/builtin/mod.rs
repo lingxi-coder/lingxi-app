@@ -18,6 +18,7 @@ use lingxi_traits::worktree::WorktreeManager;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub mod agent;
 pub mod bash;
 pub mod file_edit;
 pub mod file_read;
@@ -28,8 +29,10 @@ pub mod notebook_edit;
 pub mod plan_mode;
 pub mod powershell;
 pub mod repl;
+pub mod send_message;
 pub mod shell_events;
 pub mod sleep;
+pub mod task;
 pub mod todo_write;
 pub mod web_fetch;
 pub mod web_search;
@@ -38,6 +41,7 @@ pub mod worktree;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub use agent::AgentTool;
 pub use bash::BashTool;
 pub use file_edit::FileEditTool;
 pub use file_read::FileReadTool;
@@ -48,6 +52,10 @@ pub use notebook_edit::NotebookEditTool;
 pub use plan_mode::{EnterPlanModeTool, ExitPlanModeTool};
 pub use powershell::PowerShellTool;
 pub use repl::REPLTool;
+pub use send_message::SendMessageTool;
+pub use task::{
+    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
+};
 pub use sleep::SleepTool;
 pub use todo_write::TodoWriteTool;
 pub use web_fetch::WebFetchTool;
@@ -130,7 +138,16 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     registry.register_builtin(Arc::new(EnterPlanModeTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(ExitPlanModeTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(EnterWorktreeTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(ExitWorktreeTool::new(ctx)));
+    registry.register_builtin(Arc::new(ExitWorktreeTool::new(ctx.clone())));
+    // M4-05 — agent + task + send_message tools.
+    registry.register_builtin(Arc::new(AgentTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(TaskCreateTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(TaskGetTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(TaskListTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(TaskUpdateTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(TaskStopTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(TaskOutputTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(SendMessageTool::new(ctx)));
 }
 
 #[cfg(test)]
@@ -176,13 +193,13 @@ mod tests {
     }
 
     #[test]
-    fn register_all_inserts_seventeen_tools_after_m4_04() {
+    fn register_all_inserts_twenty_five_tools_after_m4_05() {
         let mut registry = ToolRegistry::new();
         register_all_builtin_tools(&mut registry, dummy_ctx());
         let ctx = crate::tool_trait::ToolStaticContext::default();
         let tools = registry.available_tools(&ctx);
-        // M4-01 (6) + M4-02 (4) + M4-03 (2) + M4-04 (5) = 17.
-        assert_eq!(tools.len(), 17);
+        // M4-01 (6) + M4-02 (4) + M4-03 (2) + M4-04 (5) + M4-05 (8) = 25.
+        assert_eq!(tools.len(), 25);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         for n in [
             "Read",
@@ -202,6 +219,14 @@ mod tests {
             "ExitPlanMode",
             "EnterWorktree",
             "ExitWorktree",
+            "Agent",
+            "TaskCreate",
+            "TaskGet",
+            "TaskList",
+            "TaskUpdate",
+            "TaskStop",
+            "TaskOutput",
+            "SendMessage",
         ] {
             assert!(names.contains(&n), "missing tool {n}: {names:?}");
         }
@@ -229,11 +254,30 @@ mod tests {
             "ExitPlanMode",
             "EnterWorktree",
             "ExitWorktree",
+            "Agent",
+            "TaskCreate",
+            "TaskGet",
+            "TaskList",
+            "TaskUpdate",
+            "TaskStop",
+            "TaskOutput",
+            "SendMessage",
         ] {
             assert!(
                 registry.find_by_name(name).is_some(),
                 "registry missing {name}"
             );
         }
+    }
+
+    #[test]
+    fn agent_tool_resolvable_by_legacy_task_alias() {
+        let mut registry = ToolRegistry::new();
+        register_all_builtin_tools(&mut registry, dummy_ctx());
+        // The dispatcher must honor `aliases()` — "Task" → AgentTool.
+        let tool = registry
+            .find_by_name("Task")
+            .expect("legacy 'Task' alias must resolve to AgentTool");
+        assert_eq!(tool.name(), "Agent");
     }
 }

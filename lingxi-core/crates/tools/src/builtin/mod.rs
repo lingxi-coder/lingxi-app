@@ -15,6 +15,7 @@ use lingxi_traits::sandbox::Sandbox;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub mod bash;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -26,6 +27,7 @@ pub mod shell_events;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub use bash::BashTool;
 pub use file_edit::FileEditTool;
 pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;

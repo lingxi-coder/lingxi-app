@@ -305,11 +305,11 @@ mod tests {
         let bus = Arc::new(AnalyticsBus::new());
         let sink = Arc::new(InMemorySink::default());
         (
-            BuiltinToolContext {
-                fs: make_dummy_fs(),
+            crate::builtin::test_support::ctx_for_file_tools(
+                make_dummy_fs(),
                 bus,
-                trusted_dirs: vec![tmp.path().to_path_buf()],
-            },
+                vec![tmp.path().to_path_buf()],
+            ),
             sink,
         )
     }

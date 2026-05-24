@@ -10,6 +10,7 @@ lingxi-protocol = { path = "../protocol" }
 lingxi-traits = { path = "../traits" }
 lingxi-core = { path = "../core" }
 lingxi-permission = { path = "../permission" }
+lingxi-sandbox = { path = "../sandbox" }
 lingxi-telemetry = { path = "../telemetry" }
 serde.workspace = true
 serde_json.workspace = true
@@ -29,8 +30,11 @@ grep-matcher = "=0.1.7"
 
 [dev-dependencies]
 tempfile = "3.13"
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "sync", "time"] }
 filetime = "0.2"
+
+[target.'cfg(unix)'.dev-dependencies]
+lingxi-platform-posix = { path = "../../platforms/posix" }
 
 [lints]
 workspace = true

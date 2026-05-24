@@ -69,6 +69,10 @@ impl FileSystem for PanickingFs {
 }
 
 fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {
+    use lingxi_permission::PermissionMode;
+    use lingxi_sandbox::decision::ProjectTrustLevel;
+    use lingxi_sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
+
     let bus = Arc::new(AnalyticsBus::new());
     let sink = Arc::new(InMemorySink::default());
     let fs: Arc<dyn FileSystem> = Arc::new(PanickingFs);
@@ -77,9 +81,100 @@ fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {
             fs,
             bus,
             trusted_dirs: vec![tmp.path().to_path_buf()],
+            process: Arc::new(NoopProcess),
+            sandbox: Arc::new(NoopSandbox),
+            clock: Arc::new(NoopClock),
+            sandbox_runtime: SandboxRuntimeConfig::default(),
+            permission_mode: PermissionMode::Default,
+            project_trust: ProjectTrustLevel::Trusted,
+            sandbox_available: false,
+            workspace: tmp.path().to_path_buf(),
+            platform: if cfg!(target_os = "macos") {
+                Platform::Mac
+            } else {
+                Platform::Linux
+            },
         },
         sink,
     )
+}
+
+// No-op stubs for the M4-02 fields — these foundation tests never exercise
+// the process/sandbox/clock seams (only file-op tools).
+struct NoopProcess;
+#[async_trait::async_trait]
+impl lingxi_traits::process::ProcessRunner for NoopProcess {
+    async fn run(
+        &self,
+        _: &lingxi_traits::sandbox::SandboxedCommand,
+    ) -> Result<lingxi_traits::process::ProcessOutput, lingxi_traits::process::ProcessError> {
+        panic!("foundation tests do not invoke process runner")
+    }
+    async fn spawn_background(
+        &self,
+        _: &lingxi_traits::sandbox::SandboxedCommand,
+    ) -> Result<lingxi_traits::process::ProcessHandle, lingxi_traits::process::ProcessError> {
+        panic!("not called")
+    }
+    async fn kill(
+        &self,
+        _: &lingxi_traits::process::ProcessHandle,
+    ) -> Result<(), lingxi_traits::process::ProcessError> {
+        Ok(())
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+struct NoopSandbox;
+#[async_trait::async_trait]
+impl lingxi_traits::sandbox::Sandbox for NoopSandbox {
+    fn is_available(&self) -> bool {
+        true
+    }
+    fn backend(&self) -> lingxi_traits::sandbox::SandboxBackend {
+        lingxi_traits::sandbox::SandboxBackend::None
+    }
+    fn prepare(
+        &self,
+        cmd: lingxi_traits::sandbox::ProcessCommand,
+        _: &lingxi_traits::sandbox::SandboxPolicy,
+    ) -> Result<lingxi_traits::sandbox::SandboxedCommand, lingxi_traits::sandbox::SandboxError>
+    {
+        Ok(lingxi_traits::sandbox::SandboxedCommand::__new_sandboxed(
+            cmd,
+            lingxi_traits::sandbox::SandboxedTag::BypassAuditedWithReason {
+                reason: "test".into(),
+            },
+        ))
+    }
+    fn bypass_with_audit(
+        &self,
+        cmd: lingxi_traits::sandbox::ProcessCommand,
+        reason: &str,
+    ) -> lingxi_traits::sandbox::SandboxedCommand {
+        lingxi_traits::sandbox::SandboxedCommand::__new_sandboxed(
+            cmd,
+            lingxi_traits::sandbox::SandboxedTag::BypassAuditedWithReason {
+                reason: reason.into(),
+            },
+        )
+    }
+    async fn probe_capability(&self) -> lingxi_traits::sandbox::SandboxCapability {
+        lingxi_traits::sandbox::SandboxCapability {
+            available: true,
+            reason: None,
+            features: lingxi_traits::sandbox::SandboxFeatures::default(),
+        }
+    }
+}
+
+struct NoopClock;
+impl lingxi_traits::Clock for NoopClock {
+    fn now(&self) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH
+    }
 }
 
 fn fresh_ctx() -> ToolUseContext {

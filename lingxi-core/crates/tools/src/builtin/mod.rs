@@ -4,8 +4,14 @@
 //! `register_all_builtin_tools` entrypoint that future sub-plans extend.
 
 use crate::registry::ToolRegistry;
+use lingxi_permission::PermissionMode;
+use lingxi_sandbox::decision::ProjectTrustLevel;
+use lingxi_sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use lingxi_telemetry::AnalyticsBus;
+use lingxi_traits::clock::Clock;
 use lingxi_traits::filesystem::FileSystem;
+use lingxi_traits::process::ProcessRunner;
+use lingxi_traits::sandbox::Sandbox;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -38,6 +44,25 @@ pub struct BuiltinToolContext {
     pub bus: Arc<AnalyticsBus>,
     /// Canonicalised root directories the agent is allowed to read/write.
     pub trusted_dirs: Vec<PathBuf>,
+    /// Process runner — backs BashTool/PowerShellTool/REPLTool (M4-02).
+    pub process: Arc<dyn ProcessRunner>,
+    /// Sandbox seam — provides the `prepare`/`bypass_with_audit` constructors
+    /// that turn `ProcessCommand` into `SandboxedCommand` (M4-02).
+    pub sandbox: Arc<dyn Sandbox>,
+    /// Wall-clock — backs SleepTool + duration measurement (M4-02).
+    pub clock: Arc<dyn Clock>,
+    /// Sandbox policy runtime config — drives `wrap_with_sandbox` (M4-02).
+    pub sandbox_runtime: SandboxRuntimeConfig,
+    /// Active permission mode (M4-02).
+    pub permission_mode: PermissionMode,
+    /// Whether the project workspace has been explicitly trusted (M4-02).
+    pub project_trust: ProjectTrustLevel,
+    /// Whether the host has a working sandbox backend right now (M4-02).
+    pub sandbox_available: bool,
+    /// Project workspace path (M4-02).
+    pub workspace: PathBuf,
+    /// Detected platform — drives `wrap_with_sandbox` branch (M4-02).
+    pub platform: Platform,
 }
 
 /// Register every M4-01 foundation tool against `registry`.
@@ -67,10 +92,32 @@ mod tests {
     use std::path::PathBuf;
 
     fn dummy_ctx() -> BuiltinToolContext {
+        use crate::builtin::test_support::{
+            make_bypass_sandbox, make_stub_clock, make_stub_process,
+        };
+        use lingxi_traits::process::ProcessOutput;
         BuiltinToolContext {
             fs: make_dummy_fs(),
             bus: Arc::new(AnalyticsBus::new()),
             trusted_dirs: vec![PathBuf::from("/tmp")],
+            process: make_stub_process(ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            }),
+            sandbox: make_bypass_sandbox(),
+            clock: make_stub_clock(),
+            sandbox_runtime: SandboxRuntimeConfig::default(),
+            permission_mode: PermissionMode::Default,
+            project_trust: ProjectTrustLevel::Trusted,
+            sandbox_available: false,
+            workspace: PathBuf::from("/tmp"),
+            platform: if cfg!(target_os = "macos") {
+                Platform::Mac
+            } else {
+                Platform::Linux
+            },
         }
     }
 

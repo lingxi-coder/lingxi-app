@@ -37,6 +37,7 @@ pub mod send_message;
 pub mod shell_events;
 pub mod sleep;
 pub mod task;
+pub mod team;
 pub mod todo_write;
 pub mod web_fetch;
 pub mod web_search;

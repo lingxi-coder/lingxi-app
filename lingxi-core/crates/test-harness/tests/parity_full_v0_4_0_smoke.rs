@@ -100,6 +100,7 @@ struct ModuleEventCounts {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // single-shot driver: byte-literal cross-check of every M3 locked identifier
 fn full_v0_4_0_smoke_fixture_loads_and_self_consistent() {
     // Load the fixture; the driver's primary job is to ensure the
     // fixture deserializes into the typed shape above. That alone

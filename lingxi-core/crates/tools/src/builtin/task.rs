@@ -353,9 +353,7 @@ impl Tool for TaskCreateTool {
             &invocation_id,
             &[(
                 "task_type",
-                AnalyticsValue::String(
-                    Verified::assert_safe(task_type_str.clone()).into_inner(),
-                ),
+                AnalyticsValue::String(Verified::assert_safe(task_type_str.clone()).into_inner()),
             )],
         )
         .await;
@@ -477,9 +475,7 @@ impl Tool for TaskGetTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(
-                    "TaskGet: missing 'task_id'".into(),
-                ));
+                return Err(ToolError::InvalidInput("TaskGet: missing 'task_id'".into()));
             }
         };
         if let Err(msg) = validate_task_id(&task_id) {
@@ -923,7 +919,7 @@ static TASK_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "properties": {
             "task_id": { "type": "string" },
             "offset":  { "type": "integer", "minimum": 0 },
-            "limit":   { "type": "integer", "minimum": 1, "maximum": 1048576 }
+            "limit":   { "type": "integer", "minimum": 1, "maximum": 1_048_576 }
         },
         "required": ["task_id"]
     })

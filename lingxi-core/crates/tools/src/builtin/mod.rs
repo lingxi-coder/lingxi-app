@@ -53,10 +53,10 @@ pub use plan_mode::{EnterPlanModeTool, ExitPlanModeTool};
 pub use powershell::PowerShellTool;
 pub use repl::REPLTool;
 pub use send_message::SendMessageTool;
+pub use sleep::SleepTool;
 pub use task::{
     TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
 };
-pub use sleep::SleepTool;
 pub use todo_write::TodoWriteTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;

@@ -66,18 +66,19 @@ mod common {
     /// Builds a minimal `BuiltinToolContext` for integration tests. Mirrors
     /// the `test_support::ctx_for_file_tools` helper since that one is
     /// `pub(crate)` and unreachable from `tests/`.
+    #[allow(clippy::too_many_lines)]
     pub fn test_builtin_ctx(bus: Arc<AnalyticsBus>) -> BuiltinToolContext {
         use async_trait::async_trait;
         use lingxi_traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
         use lingxi_traits::http::{HttpError, HttpTransport, SseStream};
-        use lingxi_traits::process::{
-            ProcessError, ProcessHandle, ProcessOutput, ProcessRunner,
-        };
+        use lingxi_traits::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
         use lingxi_traits::sandbox::{
-            ProcessCommand as SbxCommand, Sandbox, SandboxBackend, SandboxCapability,
-            SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
+            ProcessCommand as SbxCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
+            SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
         };
-        use lingxi_traits::worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
+        use lingxi_traits::worktree::{
+            WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager,
+        };
 
         struct PanickingFs;
         #[async_trait]
@@ -99,10 +100,8 @@ mod common {
             async fn watch(
                 &self,
                 _: &str,
-            ) -> Result<
-                std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>,
-                FsError,
-            > {
+            ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>, FsError>
+            {
                 panic!()
             }
             async fn append_file(&self, _: &str, _: &str) -> Result<(), FsError> {
@@ -123,10 +122,7 @@ mod common {
             async fn symlink(&self, _: &str, _: &str) -> Result<(), FsError> {
                 panic!()
             }
-            async fn flock_exclusive(
-                &self,
-                _: &str,
-            ) -> Result<Box<dyn FlockGuard>, FsError> {
+            async fn flock_exclusive(&self, _: &str) -> Result<Box<dyn FlockGuard>, FsError> {
                 panic!()
             }
             async fn fsync(&self, _: &str) -> Result<(), FsError> {

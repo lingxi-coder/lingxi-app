@@ -30,6 +30,7 @@ grep-matcher = "=0.1.7"
 [dev-dependencies]
 tempfile = "3.13"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "sync"] }
+filetime = "0.2"
 
 [lints]
 workspace = true

@@ -306,6 +306,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn results_sorted_newest_first() {
+        use filetime::{set_file_mtime, FileTime};
+        let tmp = TempDir::new().unwrap();
+        let old = tmp.path().join("old.rs");
+        let mid = tmp.path().join("mid.rs");
+        let new = tmp.path().join("new.rs");
+        std::fs::write(&old, "x").unwrap();
+        std::fs::write(&mid, "x").unwrap();
+        std::fs::write(&new, "x").unwrap();
+        set_file_mtime(&old, FileTime::from_unix_time(1_000_000_000, 0)).unwrap();
+        set_file_mtime(&mid, FileTime::from_unix_time(1_500_000_000, 0)).unwrap();
+        set_file_mtime(&new, FileTime::from_unix_time(1_700_000_000, 0)).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        let result = tool
+            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        let matches: Vec<&str> = result.data["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(matches[0].ends_with("new.rs"));
+        assert!(matches[1].ends_with("mid.rs"));
+        assert!(matches[2].ends_with("old.rs"));
+    }
+
+    #[tokio::test]
     async fn rejects_invalid_pattern() {
         let tmp = TempDir::new().unwrap();
         let (ctx, _sink) = make_ctx(&tmp);

@@ -61,6 +61,9 @@ filetime = "0.2"
 # `ClaudeAiOAuthConfig::default_with_port` + `OAuthError` Display strings +
 # `proactive_lead` formula against locked wire identifiers. Dev-only.
 lingxi-anthropic-oauth = { path = "../anthropic-oauth" }
+# Used by the M4-01 parity driver (parity_file_tools) to assert fixture
+# constants match production byte-for-byte. Dev-only.
+lingxi-tools = { path = "../tools" }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 lingxi-platform-posix = { path = "../../platforms/posix" }

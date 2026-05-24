@@ -1728,6 +1728,7 @@ dependencies = [
  "lingxi-protocol",
  "lingxi-sandbox",
  "lingxi-telemetry",
+ "lingxi-tools",
  "lingxi-traits",
  "proptest",
  "serde",

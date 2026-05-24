@@ -1,5 +1,203 @@
 # Changelog
 
+## [0.4.0] — M3 Engine Completion
+
+Locks in claude-code's engine surface — Settings, Memory, real API client,
+OAuth refresh, cost events, telemetry schema — at 1:1 byte-aligned parity
+with claude-code upstream commit `6a25909` (2026-05-23). 8-10-week single-
+developer sustained-Rust delivery per spec §9.
+
+### Crates added
+
+- `lingxi-telemetry-macros` — new sibling proc-macro crate. Ships the
+  `tengu_event_audit!()` macro which walks `lingxi-telemetry::tengu/*.rs`
+  at compile time and emits `compile_error!()` if any payload struct uses
+  bare `String` (must be `Verified` or `PiiTagged`), omits
+  `#[serde(deny_unknown_fields)]`, or any payload enum omits
+  `#[non_exhaustive]`. Per spec §7 Event evolution policy (lines 781-789).
+
+### Crates expanded
+
+- `lingxi-core` — new `settings/` module tree: `schema.rs` (full
+  `SettingsJson` with `deny_unknown_fields`), `env_parser.rs` (3-prefix
+  priority `LINGXI_*` > `CLAUDE_CODE_*` > `CLAUDE_*`), `loader.rs`
+  (4-layer: env > user > project > defaults), `merger.rs` (per-field
+  array/object merge dispatcher), `tracer.rs` (provenance per field),
+  and three `tengu_settings_*` events.
+- `lingxi-memory` — new `claude_md/` and `memdir/` sub-modules. Walks the
+  CLAUDE.md / CLAUDE.local.md hierarchy bottom-up with a 10 MB cap per
+  file. Memdir scan applies a 365-day hard-drop threshold then ranks by
+  the `score_bps: u64` product (jaccard × age weight × tier weight × team
+  boost) — fixed-point `u64` basis points throughout, no `f64` in the
+  scoring path. `secret_scan.rs` adapts the existing v3 §16.5
+  `lingxi_secret::SecretScanner` (gitleaks rule reuse — no duplicate rule
+  set). `tengu_agent_memory_loaded` + `tengu_memory_secret_redacted` emit
+  through M3-06's schema.
+- `lingxi-api-client` — non-streaming `messages.create` + `count_tokens`
+  endpoints, retry middleware (3 attempts at 500ms / 1s / 2s ± 20% jitter
+  for thundering-herd mitigation), `Retry-After` + `anthropic-ratelimit-
+  requests-reset` aware rate-limit handling, frozen `OAuthRefreshHook`
+  trait surface (M3-04 implements; this crate never re-modifies the
+  trait), and `BetaHeaderRegistry` emitting only the headers relevant to
+  the current request kind (16 locked `anthropic-beta` constants from
+  claude-code @ 6a25909, per-provider × per-endpoint applicability).
+  Bedrock extra-params route + Vertex `count_tokens` 3-constant allowlist
+  captured verbatim.
+- `lingxi-anthropic-oauth` — concrete `RefreshDriver` implementing
+  M3-03's `OAuthRefreshHook`. Reactive 401 refresh and proactive task
+  share a single `refresh_lock: Arc<tokio::sync::Mutex<()>>` with
+  double-check-after-acquire; loom test in `refresh_single_flight_test.rs`
+  (v3 §32.7 hotspot) verifies concurrent paths collapse to one HTTP
+  refresh. Proactive wake interval `min(remaining/2, 5 min)` handles
+  short-lived (< 5 min TTL) tokens. 403-with-`required_scopes` re-runs
+  PKCE preserving the existing `refresh_token`. Endpoints HTTPS-pinned:
+  authorize `https://claude.ai/oauth/authorize`, token
+  `https://console.anthropic.com/v1/oauth/token`. Five tengu_oauth_*
+  events including `_proactive_canceled` on `Engine::shutdown`.
+- `lingxi-cost` — `events.rs` emits `tengu_cost_recorded` /
+  `tengu_cost_budget_warning` / `tengu_cost_budget_exceeded` and the
+  four `tengu_api_*` events (started / succeeded / failed / rate_limited).
+  `is_batch_request: bool` reserved in the `tengu_cost_recorded` payload
+  for forward compatibility with M4's Batch endpoint; always `false` in
+  v0.4.0. No 50% batch discount in M3 (arrives in M4 alongside the
+  endpoint).
+- `lingxi-telemetry` — new `tengu/` module tree with 8 sub-modules
+  (`api`, `agent`, `session`, `tool`, `cost`, `oauth`, `memory`,
+  `settings`) declaring 143 events as the single authoritative source.
+  Every payload struct `#[serde(deny_unknown_fields)]`, every payload
+  enum `#[non_exhaustive]`, every user-derived string field
+  `Verified` / `PiiTagged` (NOT bare `String`). Three new sinks:
+  `NoOpSink` (default, no network), `InMemorySink` (test capture),
+  `StatsigSink` trait + `MockStatsigSink` skeleton with statsig wire
+  shape `{event_name, value, metadata}`.
+
+### 1:1 parity guarantees locked (v0.4.0 additions on top of v0.3.0)
+
+- **Settings**: file paths `~/.claude/settings.json` + `<repo>/.claude/
+  settings.json`. 4-layer priority `env > user > project > defaults`. Env
+  prefix priority `LINGXI_*` > `CLAUDE_CODE_*` > `CLAUDE_*`. Array-merge
+  fields `trustedDirectories`, `additionalDirectories`, `enabledTools`,
+  `additionalIncludes`. Object-merge fields `sandbox`, `hooks`,
+  `outputStyle`. `"$schema"` not emitted (claude-code does not emit it
+  either; reader tolerates for forward compat).
+- **Memory**: `CLAUDE.md` (case-sensitive), `CLAUDE.local.md`,
+  `~/.claude/memdir/`, `~/.claude/team-mem/`. `MAX_MEMORY_FILE_SIZE = 10 *
+  1024 * 1024`. `MEMORY_AGE_PENALTY_DAYS = 30` (relevance penalty unit,
+  NOT a drop threshold). `MEMORY_AGE_HARD_DROP_DAYS = 365` (scan-time
+  hygiene drop). `MEMORY_MIN_AGE_WEIGHT_BPS = 1_000` (even very old
+  entries stay reachable at 10% weight). `DEFAULT_RELEVANT_MEMORIES = 5`.
+  Scoring is fixed-point u64 (basis points) — NOT `f64`, cross-platform
+  deterministic per §4 Flow C.
+- **API client**: base URL `https://api.anthropic.com`, version header
+  `anthropic-version: 2023-06-01`, User-Agent
+  `claude-cli/<CARGO_PKG_VERSION> (external, cli)`, retry budget 3 with
+  exponential backoff 500ms / 1s / 2s ± 20% jitter, streaming timeout 600s,
+  `messages.create` timeout 120s, `count_tokens` timeout 30s. Rate-limit
+  error string `"Rate limited; retrying in {N}s"`. 16 `anthropic-beta`
+  constants locked verbatim from claude-code @ 6a25909.
+- **OAuth**: authorize endpoint `https://claude.ai/oauth/authorize`,
+  token endpoint `https://console.anthropic.com/v1/oauth/token`, OAuth
+  beta header value `oauth-2025-04-20`, refresh grant_type
+  `refresh_token`, PKCE method `S256`, 256-bit CSPRNG state token,
+  loopback redirect template `http://127.0.0.1:{port}/callback`, 5-minute
+  login flow deadline, three scopes `read:user` / `write:messages` /
+  `read:projects`. Proactive refresh lead `min(remaining/2, 5 * 60)`
+  seconds. Single-flight via `refresh_lock: Arc<tokio::sync::Mutex<()>>`
+  per v3 §16.3. 401 retry policy: retry ONCE after refresh.
+- **Cost events**: `tengu_cost_recorded` payload fields
+  `model: Verified`, `input_tokens: u64`, `output_tokens: u64`,
+  `cache_read_input_tokens: u64`, `cache_creation_input_tokens: u64`,
+  `cost_usd: u64` (nano-USD per v3 §17), `session_id: Verified`,
+  `is_batch_request: bool` (reserved for M4; always false in M3).
+  `tengu_cost_budget_warning` uses `percent_bps: u64` (basis points,
+  fixed-point per §4 Flow C; M3-06's BudgetWarningPayload locks the type).
+- **Telemetry**: ~200 event names organized into 8 modules with locked
+  per-category counts: api=25, agent=30, session=15, tool=40, cost=10,
+  oauth=8, memory=12, settings=3 (= 143 explicit; ~55 incremental from
+  M2-touched subsystems). Statsig wire shape `{event_name, value,
+  metadata}` per `claude-code/src/services/statsig.ts`. All payload
+  strings `Verified` / `PiiTagged`; `strip_proto_fields` runs at
+  every general-access sink. Event-name list is append-only; field
+  additions to existing events use sibling-v2 names (`tengu_<name>_v2`)
+  over a 2-minor-release deprecation cycle.
+
+### Tests + verification
+
+- Workspace test count: ~700 functional tests + ~24 non-functional gates
+  (loom / fuzz / criterion / chaos) per spec §6. Up from 488 at v0.3.0
+  (per master spec §6 line 590; M2 final test count); M3 adds ~200-300.
+  Net add: ~150 unit + 12 contract drivers + ~25 integration + 6 parity
+  + 8 loom + 4 fuzz + 6 criterion + 6 chaos.
+- 16 parity drivers gate on every PR: 7 inherited from M2 (M2-07) plus 9
+  new from M3 (`parity_settings_merge`, `parity_memory_loading`,
+  `parity_memory_relevance`, `parity_messages_create`, `parity_betas`,
+  `parity_oauth_pkce_refresh`, `parity_cost_events`, `parity_tengu_events`,
+  `parity_full_v0_4_0_smoke`).
+- New CI workflows: `ci-loom.yml` (weekly Monday 06:00 UTC),
+  `ci-fuzz.yml` (daily 07:00 UTC, continue-on-error: true for v0.4.0),
+  `ci-bench.yml` (weekly Monday 08:00 UTC, regression check
+  continue-on-error initially), `ci-chaos.yml` (weekly Monday 09:00 UTC,
+  hard gate).
+- `ci.yml` gains `cross-compile-musl` (v3 §32.4 Layer 5 — `cargo check`
+  against `x86_64-unknown-linux-musl`), `supply-chain` (`cargo deny` +
+  `cargo audit` + `cargo vet` per v3 §32.4 Layers 1-3), and
+  `parity-fixtures` (all 16 `parity_*` drivers).
+- `cargo test --workspace` clean.
+- `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- `cargo fmt --all --check` clean.
+- Existing `cross-compile-desktop` (x86_64-unknown-linux-gnu, aarch64-
+  apple-darwin, x86_64-pc-windows-msvc) and `cross-compile-mobile`
+  (aarch64-linux-android, aarch64-apple-ios — informational only) jobs
+  preserved unchanged from M2-07.
+
+### Known deferrals carried forward to M4+
+
+- **`/v1/messages/batches` endpoint + 50% batch discount** — M4
+  alongside the Batch API. The `is_batch_request: bool` field in
+  `tengu_cost_recorded` is reserved for that work.
+- **Cross-device token sync via claude.ai** — Out of M3. Would land in
+  M6 if needed.
+- **Statsig HTTP endpoint wiring** — `StatsigSink` trait + `MockStatsigSink`
+  skeleton ship in M3-06; real HTTP client + retry remain consumer
+  responsibility (M6 task if a real Statsig SDK key becomes available).
+- **Embedding-based memory relevance** — M3-02 ships the keyword + age +
+  tier heuristic. claude-code may use embeddings; if so, M3.5 or M4 can
+  swap to embeddings without breaking the public `MemoryProvider` trait.
+- **Anthropic SDK `files` / `models` / `organizations` endpoints** — Not
+  in claude-code's usage; not in M3. Land in a separate plan if needed.
+- **cargo-fuzz hard-gate** — Currently `continue-on-error: true` in
+  `ci-fuzz.yml`. Flip to hard-gate at v0.5.0+.
+- **cargo-bench regression baseline** — Currently informational. Baseline
+  tooling + `benches/baselines/v0_4_0.json` audit data ship in v0.5.0.
+- **cargo-vet supply-chain audit data** — `supply-chain/` audit directory
+  is an M4 deliverable; v0.4.0 ships the workflow scaffold only.
+
+### Migration from v0.3.0
+
+The following surfaces changed in source-incompatible ways. Downstream
+users of `lingxi-core` as a library MUST update accordingly:
+
+- **`lingxi-telemetry::tengu`** is a new top-level module tree. Code that
+  emits events through `AnalyticsBus::log_event` should now reference the
+  typed event names from `lingxi_telemetry::tengu::<category>` instead of
+  hand-rolled `&'static str`s. Existing string-based call sites still
+  compile, but the audit proc-macro will flag any new payload that
+  bypasses the typed schema.
+- **`lingxi-api-client::OAuthRefreshHook`** is a new trait. Downstream
+  consumers that want to participate in 401-driven refresh must implement
+  this trait and register via `register_oauth_hook(...)`. The trait is
+  frozen — M3-04's `RefreshDriver` is the canonical impl; future
+  consumers should compose, not modify.
+- **`lingxi-memory` API shape**: the public `MemoryProvider` trait gains
+  `find_relevant_memories(query, k) -> Vec<MemoryEntry>` and
+  `load_claude_md_hierarchy(repo_root) -> Vec<MemoryEntry>`. Existing
+  callers of the M2 shape see `non_exhaustive` warnings.
+- **`lingxi-core::settings`** is a new module. The 4-layer loader
+  (`Settings::load(LoadInputs)`) replaces any ad-hoc settings reading.
+  Downstream code that read settings via direct `serde_json::from_str`
+  on `.claude/settings.json` should switch to the loader so it picks up
+  the env-var and project-layer merges automatically.
+
 ## [0.3.0] — M2 claude-code Behavioral Parity
 
 ### Crates added

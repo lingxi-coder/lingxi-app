@@ -7,12 +7,28 @@ This document is a navigation aid; full design lives in
 ## Crate map
 
 - `protocol` — shared DTOs, IDs, Effect/Event envelopes
-- `core` — state machine, reducer, prompt assembly, session model
+- `core` — state machine, reducer, prompt assembly, session model. M3 adds
+  the `settings/` module tree: `schema.rs` (full `SettingsJson` shape),
+  `env_parser.rs` (3-prefix priority `LINGXI_*` > `CLAUDE_CODE_*` >
+  `CLAUDE_*`), `loader.rs` (4-layer env > user > project > defaults),
+  `merger.rs` (per-field dispatcher), `tracer.rs` (provenance).
 - `traits` — 13 platform abstraction traits
-- `api-client` — Anthropic/OpenAI-compatible API + SSE
-- `permission/secret/cost` — security & cost foundations (Plan 02)
+- `api-client` — Anthropic/OpenAI-compatible API + SSE. M3 adds
+  `anthropic/messages_create.rs` + `anthropic/count_tokens.rs`,
+  `oauth_hook.rs` (frozen `OAuthRefreshHook` trait), `retry/` middleware
+  (3 attempts at 500ms/1s/2s ± 20% jitter), `rate_limit/` (Retry-After
+  + `anthropic-ratelimit-requests-reset` aware), `betas.rs` (16 locked
+  `anthropic-beta` constants + per-provider × per-endpoint applicability).
+- `permission/secret/cost` — security & cost foundations (Plan 02). M3
+  extends `cost/events.rs` with `tengu_cost_recorded` (incl. reserved
+  `is_batch_request: bool` for M4) / `_budget_warning` / `_budget_exceeded`
+  and the four `tengu_api_*` events.
 - `tools/hooks` — execution + extension (Plan 03)
-- `memory/mcp` — retrieval + tool surface (Plan 04)
+- `memory/mcp` — retrieval + tool surface (Plan 04). M3 expands `memory`
+  with `claude_md/` (hierarchy walk + 10 MB cap), `memdir/` (memdir +
+  team-mem scan + fixed-point u64 ranking), `find.rs`
+  (`#![deny(clippy::float_arithmetic)]` integer-only scoring path),
+  `secret_scan.rs` (adapter over v3 §16.5 `lingxi_secret::SecretScanner`).
 - `jsonrpc` — JSON-RPC 2.0 framing shared by MCP and LSP. Content-Length and
   line-delimited framing, outbound request router with timeout + drop-cancel,
   inbound request router, notification broker (added in M2).
@@ -25,7 +41,23 @@ This document is a navigation aid; full design lives in
 - `cron` — scheduled tasks (Plan 11)
 - `sandbox/lsp` — execution support (Plan 12; M2 expands sandbox to full
   `SandboxRuntimeConfig` + dispatcher, LSP to real client over `jsonrpc`)
-- `telemetry/anthropic-oauth` — infra + main auth (Plan 13)
+- `telemetry` — analytics bus + sinks + PII discipline. M3 adds the
+  `tengu/` module tree (8 sub-modules: `api`, `agent`, `session`, `tool`,
+  `cost`, `oauth`, `memory`, `settings`; 143 event names; every payload
+  struct `#[serde(deny_unknown_fields)]`, every payload enum
+  `#[non_exhaustive]`, every user-derived string `Verified` / `PiiTagged`)
+  and `sinks/` (NoOpSink default, InMemorySink test capture, StatsigSink
+  trait + MockStatsigSink skeleton).
+- `telemetry-macros` — sibling proc-macro crate added in M3. Ships
+  `tengu_event_audit!()` which walks `telemetry::tengu/*.rs` at compile
+  time and emits `compile_error!()` on bare `String`, missing
+  `deny_unknown_fields`, or missing `non_exhaustive`.
+- `anthropic-oauth` — main auth (Plan 13). M3 adds `refresh/RefreshDriver`
+  implementing `OAuthRefreshHook` (single-flight via
+  `refresh_lock: Arc<Mutex<()>>` per v3 §16.3; loom-verified hotspot),
+  `scope_upgrade.rs` (403-with-`required_scopes` re-runs PKCE preserving
+  refresh_token), proactive task with lifecycle owned by `AuthState` and
+  cancelable via `Engine::shutdown`.
 - `bridge` — lockfile-based local IDE bridge (MCP-over-WebSocket). M2 swap
   removed the pre-claude-code pairing/JWT machinery.
 - `plugin` — manifest + 8-registry materialization (Plan 15)
@@ -152,3 +184,115 @@ state. They are covered by parity fixtures in
 | MCP WebSocket | yes | yes | yes | yes | yes |
 | SecureStorage encrypted | yes (Keychain) | no (plaintext) | no (plaintext) | no (plaintext) | no (plaintext) |
 | FS watch | yes (FSEvents via notify) | yes (inotify via notify) | yes | yes | yes (RDC via notify) |
+
+## claude-code parity guarantees (v0.4.0 additions)
+
+M3 locks the following identifiers/paths/numerics on top of v0.3.0.
+Coverage in `crates/test-harness/src/parity/fixtures/`: `settings_merge.json`
+(M3-01), `memory_loading.json` + `memory_relevance.json` (M3-02),
+`messages_create.json` + `betas.json` (M3-03), `oauth_pkce_refresh.json`
+(M3-04), `cost_events.json` (M3-05), `tengu_events.json` (M3-06),
+`full_v0_4_0_smoke.json` (M3-07 cross-check).
+
+### Settings (M3-01)
+| Item | Value | Rationale |
+|---|---|---|
+| User settings file | `~/.claude/settings.json` | Mirrors claude-code's location. |
+| Project settings file | `<repo>/.claude/settings.json` | Same. |
+| 4-layer priority | `env > user > project > defaults` | Higher specificity wins. |
+| Env var prefix priority | `LINGXI_*` > `CLAUDE_CODE_*` > `CLAUDE_*` | Allows policy override across both LingXi and inherited claude-code env vars. |
+| Array-merge fields | `trustedDirectories`, `additionalDirectories`, `enabledTools`, `additionalIncludes` | Per spec §7 line 633. |
+| Object-merge fields | `sandbox`, `hooks`, `outputStyle` | Per spec §7 line 634. |
+| `$schema` emission | NOT emitted (reader tolerates) | claude-code does not emit it. |
+
+### Memory (M3-02)
+| Item | Value |
+|---|---|
+| Project memory filename | `CLAUDE.md` (case-sensitive) |
+| Local override filename | `CLAUDE.local.md` |
+| Memdir directory | `~/.claude/memdir/` |
+| Team memory directory | `~/.claude/team-mem/` |
+| Per-file size cap | 10 MB (`MAX_MEMORY_FILE_SIZE = 10 * 1024 * 1024`) |
+| Age penalty block | 30 days (`MEMORY_AGE_PENALTY_DAYS = 30`) — relevance penalty, NOT a drop |
+| Hard-drop threshold | 365 days (`MEMORY_AGE_HARD_DROP_DAYS = 365`) — scan-time hygiene |
+| Minimum age weight | 1000 bps (`MEMORY_MIN_AGE_WEIGHT_BPS = 1_000`) — even very old entries reachable at 10% |
+| Default relevance k | 5 (`DEFAULT_RELEVANT_MEMORIES = 5`) |
+| Scoring arithmetic | fixed-point `u64` (basis points), NOT `f64` — cross-platform deterministic per §4 Flow C |
+
+### API client (M3-03)
+| Item | Value |
+|---|---|
+| Base URL | `https://api.anthropic.com` |
+| Version header | `anthropic-version: 2023-06-01` |
+| User-Agent | `claude-cli/<CARGO_PKG_VERSION> (external, cli)` |
+| Retry budget (default) | 3 (exponential backoff 500ms / 1s / 2s ± 20% jitter) |
+| Streaming timeout | 600s (10 min) |
+| `messages.create` timeout | 120s |
+| `count_tokens` timeout | 30s |
+| Rate-limit error string | `"Rate limited; retrying in {N}s"` |
+
+The 16 locked `anthropic-beta` constants are stored in
+`lingxi-api-client/src/anthropic/betas.rs` and asserted byte-for-byte
+in `parity_betas.json`. Vertex `count_tokens` is restricted to the
+three-constant `VERTEX_COUNT_TOKENS_ALLOWED` allowlist; Bedrock routes
+`INTERLEAVED_THINKING`, `CONTEXT_1M`, and `TOOL_SEARCH_TOOL_3P` via
+`extraBodyParams` rather than the header. The full list:
+`claude-code-20250219`, `interleaved-thinking-2025-05-14`,
+`context-1m-2025-08-07`, `context-management-2025-06-27`,
+`structured-outputs-2025-12-15`, `web-search-2025-03-05`,
+`advanced-tool-use-2025-11-20`, `tool-search-tool-2025-10-19`,
+`effort-2025-11-24`, `task-budgets-2026-03-13`,
+`prompt-caching-scope-2026-01-05`, `fast-mode-2026-02-01`,
+`redact-thinking-2026-02-12`, `token-efficient-tools-2026-03-28`,
+`advisor-tool-2026-03-01`, `oauth-2025-04-20`.
+
+### OAuth (M3-04)
+| Item | Value |
+|---|---|
+| Authorize endpoint | `https://claude.ai/oauth/authorize` (HTTPS-pinned) |
+| Token endpoint | `https://console.anthropic.com/v1/oauth/token` (HTTPS-pinned) |
+| OAuth beta header value | `oauth-2025-04-20` |
+| Refresh grant_type | `refresh_token` |
+| PKCE method | `S256` (v3 §30 mandate) |
+| State token entropy | 256 bits CSPRNG (v3 §30.1 `PkceFlowState`) |
+| Redirect URI template | `http://127.0.0.1:{port}/callback` (loopback only) |
+| Login flow deadline | 5 min (300s) |
+| Scopes | `read:user`, `write:messages`, `read:projects` |
+| Proactive refresh lead | `min(remaining_lifetime / 2, 5 * 60)` seconds |
+| Single-flight lock | `refresh_lock: Arc<tokio::sync::Mutex<()>>` (v3 §16.3) |
+| 401 retry policy | retry ONCE after refresh |
+
+### Cost events (M3-05)
+- `tengu_cost_recorded` payload fields: `model: Verified`,
+  `input_tokens: u64`, `output_tokens: u64`, `cache_read_input_tokens: u64`,
+  `cache_creation_input_tokens: u64`, `cost_usd: u64` (nano-USD),
+  `session_id: Verified`, `is_batch_request: bool` (reserved for M4,
+  always `false` in v0.4.0).
+- `tengu_cost_budget_warning` uses `percent_bps: u64` (basis points;
+  fixed-point per §4 Flow C — no `f64` in payload).
+- Four `tengu_api_*` events: `_request_started`, `_request_succeeded`,
+  `_request_failed`, `_rate_limited`. All payload strings `Verified`.
+
+### Telemetry schema (M3-06)
+- ~200 `tengu_*` event names in 8 sub-modules. Per-category counts:
+  api=25, agent=30, session=15, tool=40, cost=10, oauth=8, memory=12,
+  settings=3 (= 143 explicit; ~55 incremental from M2-touched subsystems).
+- Statsig wire shape: `{event_name, value, metadata}` per
+  `claude-code/src/services/statsig.ts::logStatsigEvent`.
+- All payload strings `Verified` / `PiiTagged`; `strip_proto_fields`
+  runs at every general-access sink before serialization.
+- Event evolution: append-only event names; adding a field to an
+  existing event is breaking — define sibling `tengu_<name>_v2` and
+  deprecate `tengu_<name>` over 2 minor releases. Enforced by the
+  `tengu_event_audit!()` proc-macro in `lingxi-telemetry-macros`.
+
+### CI gates added in v0.4.0
+| Gate | Trigger | Hard? |
+|---|---|---|
+| `cross-compile-musl` (`x86_64-unknown-linux-musl` cargo check) | per-PR | Yes (v3 §32.4 Layer 5) |
+| `supply-chain` (cargo-deny + cargo-audit + cargo-vet) | per-PR | Yes for deny + audit; warn for vet until M4 |
+| `parity-fixtures` (all 16 `parity_*` drivers) | per-PR | Yes |
+| `ci-loom.yml` (M3-04 OAuth refresh single-flight) | weekly Monday 06:00 UTC + manual | Yes (warning fallback for not-yet-added tests) |
+| `ci-fuzz.yml` (4 cargo-fuzz harnesses) | daily 07:00 UTC + manual | No (continue-on-error: true for v0.4.0; mandatory at v0.5.0+) |
+| `ci-bench.yml` (6 criterion benches + baseline check) | weekly Monday 08:00 UTC + manual | No (baseline tooling lands in v0.5.0) |
+| `ci-chaos.yml` (6 fault-injection scenarios) | weekly Monday 09:00 UTC + manual | Yes |

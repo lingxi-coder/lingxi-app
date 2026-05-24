@@ -33,6 +33,56 @@ This document is the authoritative per-OS capability table; it mirrors
 ### WSL2
 - Treated as Linux end-to-end. `bwrap+socat` works the same way.
 
+### M3 engine subsystems (Tier-1 on macOS / Linux / WSL2 since v0.4.0)
+
+The following engine subsystems gained Tier-1 coverage in v0.4.0. All
+three Tier-1 platforms (macOS / Linux / WSL2) run them identically — no
+platform-specific code paths beyond what the underlying traits already
+abstract:
+
+- **Settings (M3-01)** — 4-layer loader (`env > user > project >
+  defaults`) reading `~/.claude/settings.json` + `<repo>/.claude/
+  settings.json` + the three env prefixes `LINGXI_*` > `CLAUDE_CODE_*` >
+  `CLAUDE_*`. Per-field merge dispatcher honours the array-merge fields
+  (`trustedDirectories` etc.) and object-merge fields (`sandbox`,
+  `hooks`, `outputStyle`). Provenance tracer reports which layer each
+  field came from for debug.
+- **Memory (M3-02)** — `CLAUDE.md` / `CLAUDE.local.md` hierarchy walk +
+  `~/.claude/memdir/` + `~/.claude/team-mem/` scan with fixed-point
+  `u64` basis-point ranking (cross-platform deterministic; no `f64`
+  in the scoring path). 10 MB per-file cap, 365-day hard-drop, 30-day
+  age penalty with 10% floor weight. Secret scanner reuses the v3 §16.5
+  gitleaks rule set — no duplicate rules.
+- **API client (M3-03)** — non-streaming `messages.create` +
+  `count_tokens` over `HttpTransport`. Retry middleware (3 attempts at
+  500ms / 1s / 2s ± 20% random jitter) + rate-limit awareness
+  (`Retry-After` + `anthropic-ratelimit-requests-reset`).
+  `BetaHeaderRegistry` emits per-request the relevant subset of the
+  16 locked `anthropic-beta` constants. `OAuthRefreshHook` trait is
+  frozen here for M3-04 to implement.
+- **OAuth (M3-04)** — concrete refresh driver implementing
+  `OAuthRefreshHook`. Both reactive (401-driven from middleware) and
+  proactive (wakes at `min(remaining/2, 5 min)`) paths share a single
+  `refresh_lock` mutex; loom-verified single-flight per v3 §32.7
+  hotspot. 403-with-`required_scopes` re-runs PKCE preserving the
+  existing refresh_token. Proactive task lifecycle is owned by
+  `AuthState` and cancelable via `Engine::shutdown`.
+- **Cost events (M3-05)** — emits `tengu_cost_recorded` (with reserved
+  `is_batch_request: bool` for M4 Batch endpoint) and the budget +
+  api_request events through M3-06's typed schema.
+- **Telemetry schema (M3-06)** — 143 `tengu_*` events across 8
+  sub-modules, each payload struct `#[serde(deny_unknown_fields)]`,
+  every payload enum `#[non_exhaustive]`, every user-derived string
+  field `Verified` / `PiiTagged` (NOT bare `String`). Three sinks:
+  `NoOpSink` (default, no network), `InMemorySink` (test capture
+  required by M3-01..M3-05 integration tests), `StatsigSink` trait +
+  `MockStatsigSink` skeleton. `tengu_event_audit!()` proc-macro
+  enforces the schema discipline at compile time.
+
+Windows (Tier-2) runs all six M3 subsystems identically — the M3 work
+introduced no platform-specific code paths beyond what `Sandbox` and
+`SwarmBackend` already declared `Unsupported` for Windows in v0.3.0.
+
 ## Tier 2: limited support
 
 ### Windows (10 22H2+, 11)

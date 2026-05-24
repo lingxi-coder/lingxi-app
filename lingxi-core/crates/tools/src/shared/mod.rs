@@ -3,10 +3,12 @@
 //! Each helper is intentionally pure-functional (or thin async over the bus)
 //! so concurrent callers don't share state.
 
+pub mod ansi_strip;
 pub mod file_kit;
 pub mod output_truncation;
 pub mod path_validation;
 
+pub use ansi_strip::{strip_ansi, strip_ansi_count, ANSI_ESCAPE_REGEX_LITERAL};
 pub use output_truncation::{
     truncate, truncate_default, MAX_TOOL_OUTPUT_LENGTH, TRUNCATION_SUFFIX,
 };

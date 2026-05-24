@@ -90,3 +90,26 @@ impl Default for AnalyticsBus {
         Self::new()
     }
 }
+
+/// Policy applied when the pre-attach event buffer overflows.
+///
+/// v3 §26.3 mandates the bus expose its overflow behaviour to platform
+/// init code so operators can choose between losing oldest events,
+/// losing newest, or blocking. M3-06 only implements `DropOldest`
+/// (matches the existing `buffer()` implementation); the enum is
+/// `#[non_exhaustive]` so adding `DropNewest`/`Block` later is
+/// non-breaking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OverflowPolicy {
+    /// When the buffer is full, evict the oldest queued event to make room.
+    DropOldest,
+}
+
+impl AnalyticsBus {
+    /// Return the overflow policy in effect for this bus.
+    #[must_use]
+    pub fn overflow_policy(&self) -> OverflowPolicy {
+        OverflowPolicy::DropOldest
+    }
+}

@@ -1562,12 +1562,22 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "lingxi-protocol",
+ "lingxi-telemetry-macros",
  "lingxi-traits",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "lingxi-telemetry-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

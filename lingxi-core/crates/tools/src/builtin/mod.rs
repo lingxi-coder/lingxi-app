@@ -33,6 +33,7 @@ pub mod sleep;
 pub mod todo_write;
 pub mod web_fetch;
 pub mod web_search;
+pub mod worktree;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -51,6 +52,7 @@ pub use sleep::SleepTool;
 pub use todo_write::TodoWriteTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
+pub use worktree::{EnterWorktreeTool, ExitWorktreeTool};
 
 /// Static surface every builtin tool needs at construction time.
 ///

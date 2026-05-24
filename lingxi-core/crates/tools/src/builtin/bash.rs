@@ -393,6 +393,16 @@ impl Tool for BashTool {
                     mcp_meta: None,
                 })
             }
+            Err(lingxi_traits::process::ProcessError::Timeout) => {
+                let mut meta: LogEventMetadata = HashMap::new();
+                meta.insert(
+                    "request_id".into(),
+                    AnalyticsValue::String(request_id.clone()),
+                );
+                meta.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
+                self.ctx.bus.log_event(BASH_TIMEOUT, meta).await;
+                Err(ToolError::Internal(format_timeout_error(timeout_ms)))
+            }
             Err(e) => {
                 emit_failed(&self.ctx.bus, &request_id, "spawn_failed", started_at).await;
                 Err(ToolError::Io(format!("{e}")))

@@ -34,8 +34,9 @@ fn overflow_policy_default_is_drop_oldest() {
 fn tengu_module_compiles() {
     // Reach for the registry constant; subsequent tasks populate it.
     let all: &[&'static str] = lingxi_telemetry::tengu::ALL_EVENT_NAMES;
-    // Empty for now (Task 1 ships the empty registry); Tasks 2-9 populate it.
-    assert_eq!(all.len(), 0);
+    // After Task 1 the registry is empty; once Tasks 2-9 land it grows monotonically.
+    // We don't assert an exact length here so this skeleton doesn't churn per task.
+    assert!(all.iter().all(|n| n.starts_with("tengu_")));
 }
 
 #[test]

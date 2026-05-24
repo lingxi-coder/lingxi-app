@@ -2,6 +2,8 @@
 //! same tempdir to confirm they cooperate. NO mocks — uses real
 //! `tokio::fs` inside a sandboxed `trusted_dirs = [tempdir]`.
 
+#![allow(clippy::format_collect, clippy::too_many_lines)]
+
 use async_trait::async_trait;
 use lingxi_telemetry::{AnalyticsBus, InMemorySink};
 use lingxi_tools::builtin::{

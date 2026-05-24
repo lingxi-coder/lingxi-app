@@ -48,9 +48,7 @@ impl GlobTool {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "invocation_id".to_string(),
-            AnalyticsValue::String(
-                Verified::assert_safe(invocation_id.to_string()).into_inner(),
-            ),
+            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
         );
         md.insert(
             "_PROTO_pattern".to_string(),
@@ -65,9 +63,7 @@ impl GlobTool {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "invocation_id".to_string(),
-            AnalyticsValue::String(
-                Verified::assert_safe(invocation_id.to_string()).into_inner(),
-            ),
+            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
         );
         md.insert("matches".to_string(), AnalyticsValue::Int(matches as i64));
         md.insert(
@@ -81,9 +77,7 @@ impl GlobTool {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "invocation_id".to_string(),
-            AnalyticsValue::String(
-                Verified::assert_safe(invocation_id.to_string()).into_inner(),
-            ),
+            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
         );
         md.insert(
             "failure_kind".to_string(),
@@ -126,11 +120,7 @@ impl Tool for GlobTool {
         true
     }
 
-    async fn check_permissions(
-        &self,
-        _input: &Value,
-        _ctx: &ToolUseContext,
-    ) -> PermissionResult {
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-01 default)".into(),
@@ -167,9 +157,7 @@ impl Tool for GlobTool {
             .map(PathBuf::from)
             .or_else(|| self.ctx.trusted_dirs.first().cloned())
             .ok_or_else(|| {
-                ToolError::InvalidInput(
-                    "no path supplied and no trusted_dirs configured".into(),
-                )
+                ToolError::InvalidInput("no path supplied and no trusted_dirs configured".into())
             })?;
 
         let started = Instant::now();

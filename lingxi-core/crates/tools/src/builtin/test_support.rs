@@ -5,8 +5,6 @@
 //! `Arc<dyn FileSystem>` field in `BuiltinToolContext` is required for future
 //! M5 sandbox wiring but never touched by the tools themselves.
 
-#![cfg(test)]
-
 use crate::context::{ToolUseContext, ToolUseOptions};
 use crate::progress::{progress_channel, ToolProgressSender};
 use async_trait::async_trait;
@@ -29,11 +27,7 @@ impl lingxi_traits::filesystem::FileSystem for PanickingFs {
     ) -> Result<lingxi_traits::filesystem::FileContent, lingxi_traits::filesystem::FsError> {
         panic!("M4-01 builtin tools do not call FileSystem::read_file");
     }
-    async fn write_file(
-        &self,
-        _: &str,
-        _: &str,
-    ) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn write_file(&self, _: &str, _: &str) -> Result<(), lingxi_traits::filesystem::FsError> {
         panic!("M4-01 builtin tools do not call FileSystem::write_file")
     }
     fn is_within_workspace(&self, _: &str) -> bool {
@@ -43,9 +37,7 @@ impl lingxi_traits::filesystem::FileSystem for PanickingFs {
         &self,
         _: &str,
     ) -> Result<
-        std::pin::Pin<
-            Box<dyn futures::Stream<Item = lingxi_traits::filesystem::FileEvent> + Send>,
-        >,
+        std::pin::Pin<Box<dyn futures::Stream<Item = lingxi_traits::filesystem::FileEvent> + Send>>,
         lingxi_traits::filesystem::FsError,
     > {
         panic!("not called")
@@ -57,11 +49,7 @@ impl lingxi_traits::filesystem::FileSystem for PanickingFs {
     ) -> Result<(), lingxi_traits::filesystem::FsError> {
         panic!("not called")
     }
-    async fn truncate(
-        &self,
-        _: &str,
-        _: u64,
-    ) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn truncate(&self, _: &str, _: u64) -> Result<(), lingxi_traits::filesystem::FsError> {
         panic!("not called")
     }
     async fn file_mtime(
@@ -70,38 +58,23 @@ impl lingxi_traits::filesystem::FileSystem for PanickingFs {
     ) -> Result<std::time::SystemTime, lingxi_traits::filesystem::FsError> {
         panic!("not called")
     }
-    async fn file_size(
-        &self,
-        _: &str,
-    ) -> Result<u64, lingxi_traits::filesystem::FsError> {
+    async fn file_size(&self, _: &str) -> Result<u64, lingxi_traits::filesystem::FsError> {
         panic!("not called")
     }
-    async fn delete_file(
-        &self,
-        _: &str,
-    ) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn delete_file(&self, _: &str) -> Result<(), lingxi_traits::filesystem::FsError> {
         panic!("not called")
     }
-    async fn symlink(
-        &self,
-        _: &str,
-        _: &str,
-    ) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn symlink(&self, _: &str, _: &str) -> Result<(), lingxi_traits::filesystem::FsError> {
         panic!("not called")
     }
     async fn flock_exclusive(
         &self,
         _: &str,
-    ) -> Result<
-        Box<dyn lingxi_traits::filesystem::FlockGuard>,
-        lingxi_traits::filesystem::FsError,
-    > {
+    ) -> Result<Box<dyn lingxi_traits::filesystem::FlockGuard>, lingxi_traits::filesystem::FsError>
+    {
         panic!("not called")
     }
-    async fn fsync(
-        &self,
-        _: &str,
-    ) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn fsync(&self, _: &str) -> Result<(), lingxi_traits::filesystem::FsError> {
         panic!("not called")
     }
 }

@@ -59,9 +59,7 @@ impl FileEditTool {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "invocation_id".to_string(),
-            AnalyticsValue::String(
-                Verified::assert_safe(invocation_id.to_string()).into_inner(),
-            ),
+            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
         );
         md.insert(
             "_PROTO_file_path".to_string(),
@@ -72,18 +70,11 @@ impl FileEditTool {
         self.ctx.bus.log_event(EDIT_STARTED, md).await;
     }
 
-    async fn emit_completed(
-        &self,
-        invocation_id: &str,
-        replacements: u32,
-        duration_ms: u64,
-    ) {
+    async fn emit_completed(&self, invocation_id: &str, replacements: u32, duration_ms: u64) {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "invocation_id".to_string(),
-            AnalyticsValue::String(
-                Verified::assert_safe(invocation_id.to_string()).into_inner(),
-            ),
+            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
         );
         md.insert(
             "replacements".to_string(),
@@ -100,9 +91,7 @@ impl FileEditTool {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "invocation_id".to_string(),
-            AnalyticsValue::String(
-                Verified::assert_safe(invocation_id.to_string()).into_inner(),
-            ),
+            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
         );
         md.insert(
             "failure_kind".to_string(),
@@ -133,7 +122,11 @@ impl FileEditTool {
         if diff.len() <= PATCH_PREVIEW_LINE_LIMIT {
             return diff.join("\n");
         }
-        let kept: Vec<String> = diff.iter().take(PATCH_PREVIEW_LINE_LIMIT).cloned().collect();
+        let kept: Vec<String> = diff
+            .iter()
+            .take(PATCH_PREVIEW_LINE_LIMIT)
+            .cloned()
+            .collect();
         let elided = diff.len() - PATCH_PREVIEW_LINE_LIMIT;
         let mut out = kept.join("\n");
         out.push_str(&patch_truncation_suffix(elided));
@@ -179,11 +172,7 @@ impl Tool for FileEditTool {
         true
     }
 
-    async fn check_permissions(
-        &self,
-        _input: &Value,
-        _ctx: &ToolUseContext,
-    ) -> PermissionResult {
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-01 default)".into(),
@@ -340,7 +329,10 @@ mod tests {
 
     #[test]
     fn patch_truncation_suffix_substitutes_n() {
-        assert_eq!(patch_truncation_suffix(42), "\n\n... [42 lines truncated] ...");
+        assert_eq!(
+            patch_truncation_suffix(42),
+            "\n\n... [42 lines truncated] ..."
+        );
     }
 
     #[tokio::test]

@@ -10,6 +10,28 @@
 //!   sub-plans extend.
 
 #![forbid(unsafe_code)]
+// M4-01 telemetry emitters convert `u64` byte/duration counters into the
+// `AnalyticsValue::Int(i64)` wire type — values are always well below
+// `i64::MAX` (file sizes are capped at 256 KB, durations are ms-scale, line
+// counts are user-bounded). The saturating helper used in `lingxi-cost`
+// would add noise across 6 emitter files for no observable benefit. Same
+// rationale for the `usize → i64` casts in tests and for a few style
+// choices (let-else vs match destructure) the per-tool dispatch keeps for
+// readability.
+#![allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless,
+    clippy::match_wildcard_for_single_variants,
+    clippy::single_match_else,
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines,
+    clippy::format_collect,
+    clippy::similar_names,
+    clippy::doc_markdown,
+    clippy::manual_let_else
+)]
 
 pub mod builtin;
 pub mod content_replacement;

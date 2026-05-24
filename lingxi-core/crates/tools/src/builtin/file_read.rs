@@ -69,9 +69,7 @@ impl FileReadTool {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "invocation_id".to_string(),
-            AnalyticsValue::String(
-                Verified::assert_safe(invocation_id.to_string()).into_inner(),
-            ),
+            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
         );
         md.insert(
             "_PROTO_file_path".to_string(),
@@ -86,9 +84,7 @@ impl FileReadTool {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "invocation_id".to_string(),
-            AnalyticsValue::String(
-                Verified::assert_safe(invocation_id.to_string()).into_inner(),
-            ),
+            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
         );
         md.insert(
             "bytes_read".to_string(),
@@ -105,15 +101,11 @@ impl FileReadTool {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "invocation_id".to_string(),
-            AnalyticsValue::String(
-                Verified::assert_safe(invocation_id.to_string()).into_inner(),
-            ),
+            AnalyticsValue::String(Verified::assert_safe(invocation_id.to_string()).into_inner()),
         );
         md.insert(
             "failure_kind".to_string(),
-            AnalyticsValue::String(
-                Verified::assert_safe(failure_kind.to_string()).into_inner(),
-            ),
+            AnalyticsValue::String(Verified::assert_safe(failure_kind.to_string()).into_inner()),
         );
         self.ctx.bus.log_event(READ_FAILED, md).await;
     }
@@ -153,11 +145,7 @@ impl Tool for FileReadTool {
         true
     }
 
-    async fn check_permissions(
-        &self,
-        _input: &Value,
-        _ctx: &ToolUseContext,
-    ) -> PermissionResult {
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "allow-all-gate (M4-01 default)".into(),

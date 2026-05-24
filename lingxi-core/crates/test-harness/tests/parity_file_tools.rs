@@ -4,6 +4,8 @@
 //! Spec: `docs/superpowers/specs/2026-05-24-m4-tools-implementation-design.md`
 //! §6 (test target — `parity_file_tools.json` driver) + §7 (wire identifiers).
 
+#![allow(clippy::too_many_lines, clippy::items_after_statements)]
+
 use lingxi_test_harness::parity::load_fixture;
 use serde::Deserialize;
 

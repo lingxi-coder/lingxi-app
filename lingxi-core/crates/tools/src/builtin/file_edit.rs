@@ -437,6 +437,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn patch_preview_truncates_with_suffix() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("big.txt");
+        let big: String = (0..100).map(|i| format!("L{i}\n")).collect();
+        std::fs::write(&target, &big).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        let result = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "L",
+                    "new_string": "M",
+                    "replace_all": true
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let preview = result.data["patch_preview"].as_str().unwrap();
+        assert!(
+            preview.contains("lines truncated] ..."),
+            "preview missing truncation suffix: {preview}"
+        );
+        assert!(
+            preview.contains("\n\n... ["),
+            "preview missing suffix prefix: {preview}"
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_empty_old_string() {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("a.txt");

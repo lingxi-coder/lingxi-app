@@ -7,11 +7,7 @@
 //!   `MessageResponse` JSON; an axum mock would add no value.
 
 #![cfg(unix)]
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::similar_names
-)]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::similar_names)]
 
 use async_trait::async_trait;
 use axum::{routing::get, Router};
@@ -229,12 +225,7 @@ async fn start_mock_http(
 ) -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
     let app = Router::new().route(
         "/",
-        get(move || async move {
-            (
-                axum::http::StatusCode::from_u16(status).unwrap(),
-                body,
-            )
-        }),
+        get(move || async move { (axum::http::StatusCode::from_u16(status).unwrap(), body) }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -293,7 +284,10 @@ async fn webfetch_500_returns_transport_err() {
         .await
         .expect_err("500 must be Err");
     let msg = format!("{err}");
-    assert!(msg.contains("WebFetch: HTTP 500 from http://"), "got: {msg}");
+    assert!(
+        msg.contains("WebFetch: HTTP 500 from http://"),
+        "got: {msg}"
+    );
     let events = sink.events().await;
     let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
     assert!(names.contains(&"tengu_tool_web_fetch_failed"));
@@ -305,11 +299,7 @@ async fn webfetch_rejects_file_scheme() {
     let tool = WebFetchTool::new(ctx);
     let (tx, _rx) = progress_channel();
     let err = tool
-        .call(
-            json!({ "url": "file:///etc/passwd" }),
-            fresh_use_ctx(),
-            tx,
-        )
+        .call(json!({ "url": "file:///etc/passwd" }), fresh_use_ctx(), tx)
         .await
         .expect_err("file:// must be rejected");
     assert!(matches!(err, ToolError::InvalidInput(_)));
@@ -349,11 +339,7 @@ async fn websearch_happy_path_with_mock_messages_response() {
     let tool = WebSearchTool::new(ctx);
     let (tx, _rx) = progress_channel();
     let res = tool
-        .call(
-            json!({ "query": "rust async traits" }),
-            fresh_use_ctx(),
-            tx,
-        )
+        .call(json!({ "query": "rust async traits" }), fresh_use_ctx(), tx)
         .await
         .expect("ok");
     let arr = res.data["results"].as_array().expect("array");
@@ -391,11 +377,7 @@ async fn websearch_503_returns_transport_err_without_retry() {
         format!("{err}").contains("HTTP 503"),
         "expected HTTP 503 in error, got: {err}"
     );
-    assert_eq!(
-        http.received_requests().len(),
-        1,
-        "must NOT self-retry"
-    );
+    assert_eq!(http.received_requests().len(), 1, "must NOT self-retry");
     let events = sink.events().await;
     let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
     assert!(names.contains(&"tengu_tool_web_search_failed"));

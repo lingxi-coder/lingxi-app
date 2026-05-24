@@ -24,9 +24,7 @@ use lingxi_permission::result::PermissionMetadata;
 use lingxi_permission::{PermissionDecisionReason, PermissionResult};
 use lingxi_telemetry::pii::{PiiTagged, Verified};
 use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{
-    WEB_SEARCH_COMPLETED, WEB_SEARCH_FAILED, WEB_SEARCH_STARTED,
-};
+use lingxi_telemetry::tengu::tool::{WEB_SEARCH_COMPLETED, WEB_SEARCH_FAILED, WEB_SEARCH_STARTED};
 use lingxi_traits::http::HttpError;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -145,7 +143,11 @@ impl WebSearchTool {
     }
 
     fn user_agent() -> String {
-        format!("{}{}", WEBFETCH_USER_AGENT_PREFIX, env!("CARGO_PKG_VERSION"))
+        format!(
+            "{}{}",
+            WEBFETCH_USER_AGENT_PREFIX,
+            env!("CARGO_PKG_VERSION")
+        )
     }
 
     async fn emit_started(
@@ -289,12 +291,9 @@ impl Tool for WebSearchTool {
         input: &Value,
         _ctx: &ToolUseContext,
     ) -> Result<(), crate::tool_trait::ValidationError> {
-        let q = input
-            .get("query")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                crate::tool_trait::ValidationError("missing required field: query".into())
-            })?;
+        let q = input.get("query").and_then(Value::as_str).ok_or_else(|| {
+            crate::tool_trait::ValidationError("missing required field: query".into())
+        })?;
         if q.chars().count() < 2 {
             return Err(crate::tool_trait::ValidationError(
                 "query must be at least 2 characters".into(),
@@ -342,8 +341,7 @@ impl Tool for WebSearchTool {
         let mut req = self.ctx.provider.build_request(&body);
         req.headers
             .push(("anthropic-beta".into(), WEB_SEARCH_BETA.to_string()));
-        req.headers
-            .push(("user-agent".into(), Self::user_agent()));
+        req.headers.push(("user-agent".into(), Self::user_agent()));
 
         let resp_result = self.ctx.http.request(req).await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -406,9 +404,7 @@ impl Tool for WebSearchTool {
             Err(HttpError::Timeout(_)) => {
                 self.emit_failed(&invocation_id, "timeout", None, elapsed_ms)
                     .await;
-                Err(ToolError::Transport(
-                    "WebSearch: request timed out".into(),
-                ))
+                Err(ToolError::Transport("WebSearch: request timed out".into()))
             }
             Err(other) => {
                 self.emit_failed(&invocation_id, "transport", None, elapsed_ms)
@@ -563,7 +559,11 @@ mod tests {
     use lingxi_traits::http::HttpTransport;
     use std::sync::Arc;
 
-    fn make_web_ctx() -> (BuiltinToolContext, Arc<MockHttpTransport>, Arc<InMemorySink>) {
+    fn make_web_ctx() -> (
+        BuiltinToolContext,
+        Arc<MockHttpTransport>,
+        Arc<InMemorySink>,
+    ) {
         let bus = Arc::new(AnalyticsBus::new());
         let sink = Arc::new(InMemorySink::default());
         let http = Arc::new(MockHttpTransport::new());

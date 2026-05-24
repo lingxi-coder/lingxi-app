@@ -1,0 +1,27 @@
+{
+  "_source": "claude-code/src/tools/WebFetchTool/utils.ts + WebSearchTool/WebSearchTool.ts",
+  "_note": "Byte-aligned locks for M4-03 web tools. LingXi caps WebFetch at 5 MB (spec §7 lock); upstream uses 10 MB. All other literals match upstream verbatim. Event names follow M3-06 lock (_completed suffix, not _succeeded).",
+  "webfetch_max_bytes": 5242880,
+  "webfetch_truncation_suffix": "\n\n[Content truncated due to length...]",
+  "webfetch_user_agent_prefix": "claude-code-tool/",
+  "webfetch_allowed_schemes": ["https", "http"],
+  "webfetch_timeout_secs": 30,
+  "websearch_tool_block_type": "web_search_20250305",
+  "websearch_tool_block_name": "web_search",
+  "websearch_max_uses": 8,
+  "websearch_default_max_tokens": 4096,
+  "websearch_anthropic_beta": "web-search-2025-03-05",
+  "event_names": [
+    "tengu_tool_web_fetch_started",
+    "tengu_tool_web_fetch_completed",
+    "tengu_tool_web_fetch_failed",
+    "tengu_tool_web_search_started",
+    "tengu_tool_web_search_completed",
+    "tengu_tool_web_search_failed"
+  ],
+  "error_templates": {
+    "scheme_rejected": "URL scheme '{scheme}' not allowed; only https/http",
+    "http_status": "WebFetch: HTTP {status} from {url}",
+    "dns_failure": "WebFetch: cannot resolve {host}"
+  }
+}

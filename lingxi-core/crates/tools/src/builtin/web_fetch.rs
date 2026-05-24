@@ -141,7 +141,11 @@ impl WebFetchTool {
     }
 
     fn user_agent() -> String {
-        format!("{}{}", WEBFETCH_USER_AGENT_PREFIX, env!("CARGO_PKG_VERSION"))
+        format!(
+            "{}{}",
+            WEBFETCH_USER_AGENT_PREFIX,
+            env!("CARGO_PKG_VERSION")
+        )
     }
 
     async fn emit_started(&self, invocation_id: &str, url: &str, prompt_present: bool) {
@@ -158,9 +162,7 @@ impl WebFetchTool {
         );
         md.insert(
             "prompt_present".into(),
-            AnalyticsValue::String(
-                Verified::assert_safe(prompt_present.to_string()).into_inner(),
-            ),
+            AnalyticsValue::String(Verified::assert_safe(prompt_present.to_string()).into_inner()),
         );
         self.ctx.bus.log_event(WEB_FETCH_STARTED, md).await;
     }
@@ -286,10 +288,7 @@ impl Tool for WebFetchTool {
         let parsed_input: WebFetchInput = serde_json::from_value(input)
             .map_err(|e| ToolError::InvalidInput(format!("invalid input: {e}")))?;
         let parsed_url = validate_url(&parsed_input.url).map_err(ToolError::InvalidInput)?;
-        let host = parsed_url
-            .host_str()
-            .unwrap_or("<unknown>")
-            .to_string();
+        let host = parsed_url.host_str().unwrap_or("<unknown>").to_string();
         let invocation_id = crate::builtin::file_read::ulid_or_uuid();
 
         self.emit_started(
@@ -520,7 +519,11 @@ mod tests {
     use lingxi_traits::http::HttpTransport;
     use std::sync::Arc;
 
-    fn make_web_ctx() -> (BuiltinToolContext, Arc<MockHttpTransport>, Arc<InMemorySink>) {
+    fn make_web_ctx() -> (
+        BuiltinToolContext,
+        Arc<MockHttpTransport>,
+        Arc<InMemorySink>,
+    ) {
         let bus = Arc::new(AnalyticsBus::new());
         let sink = Arc::new(InMemorySink::default());
         let http = Arc::new(MockHttpTransport::new());
@@ -581,11 +584,7 @@ mod tests {
                 fresh_tx(),
             )
             .await;
-        assert_eq!(
-            http.received_requests().len(),
-            1,
-            "must NOT self-retry"
-        );
+        assert_eq!(http.received_requests().len(), 1, "must NOT self-retry");
     }
 
     #[tokio::test]

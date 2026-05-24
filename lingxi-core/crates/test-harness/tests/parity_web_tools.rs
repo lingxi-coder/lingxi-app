@@ -1,0 +1,134 @@
+//! Parity driver for `web_tools.json` — cross-checks every M4-03 locked
+//! literal against the production constants in `lingxi-tools` /
+//! `lingxi-telemetry` / `lingxi-api-client`. Spec §7 + protocol v3 §32.6.
+
+#![allow(
+    clippy::too_many_lines,
+    clippy::items_after_statements,
+    clippy::used_underscore_binding
+)]
+
+use lingxi_api_client::betas::WEB_SEARCH as API_CLIENT_WEB_SEARCH_BETA;
+use lingxi_telemetry::tengu::tool::{
+    WEB_FETCH_COMPLETED, WEB_FETCH_FAILED, WEB_FETCH_STARTED, WEB_SEARCH_COMPLETED,
+    WEB_SEARCH_FAILED, WEB_SEARCH_STARTED,
+};
+use lingxi_test_harness::parity::load_fixture;
+use lingxi_tools::builtin::web_fetch::{
+    fmt_dns_error, fmt_http_error, WEBFETCH_ALLOWED_SCHEMES, WEBFETCH_MAX_BYTES, WEBFETCH_TIMEOUT,
+    WEBFETCH_TRUNCATION_SUFFIX, WEBFETCH_USER_AGENT_PREFIX,
+};
+use lingxi_tools::builtin::web_search::{
+    WEB_SEARCH_DEFAULT_MAX_TOKENS, WEB_SEARCH_MAX_USES, WEB_SEARCH_TOOL_BLOCK_NAME,
+    WEB_SEARCH_TOOL_BLOCK_TYPE,
+};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct ErrorTemplates {
+    scheme_rejected: String,
+    http_status: String,
+    dns_failure: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebToolsFixture {
+    _source: String,
+    _note: String,
+    webfetch_max_bytes: usize,
+    webfetch_truncation_suffix: String,
+    webfetch_user_agent_prefix: String,
+    webfetch_allowed_schemes: Vec<String>,
+    webfetch_timeout_secs: u64,
+    websearch_tool_block_type: String,
+    websearch_tool_block_name: String,
+    websearch_max_uses: u32,
+    websearch_default_max_tokens: u32,
+    websearch_anthropic_beta: String,
+    event_names: Vec<String>,
+    error_templates: ErrorTemplates,
+}
+
+#[test]
+fn webfetch_constants_match_fixture() {
+    let fix: WebToolsFixture = load_fixture("web_tools");
+    assert!(!fix._source.is_empty());
+    assert!(!fix._note.is_empty());
+    assert_eq!(fix.webfetch_max_bytes, WEBFETCH_MAX_BYTES);
+    assert_eq!(fix.webfetch_max_bytes, 5_242_880);
+    assert_eq!(fix.webfetch_truncation_suffix, WEBFETCH_TRUNCATION_SUFFIX);
+    assert_eq!(fix.webfetch_user_agent_prefix, WEBFETCH_USER_AGENT_PREFIX);
+    let allowed: Vec<&str> = fix
+        .webfetch_allowed_schemes
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(allowed, WEBFETCH_ALLOWED_SCHEMES);
+    assert_eq!(fix.webfetch_timeout_secs, WEBFETCH_TIMEOUT.as_secs());
+}
+
+#[test]
+fn websearch_constants_match_fixture() {
+    let fix: WebToolsFixture = load_fixture("web_tools");
+    assert_eq!(fix.websearch_tool_block_type, WEB_SEARCH_TOOL_BLOCK_TYPE);
+    assert_eq!(fix.websearch_tool_block_type, "web_search_20250305");
+    assert_eq!(fix.websearch_tool_block_name, WEB_SEARCH_TOOL_BLOCK_NAME);
+    assert_eq!(fix.websearch_max_uses, WEB_SEARCH_MAX_USES);
+    assert_eq!(fix.websearch_max_uses, 8);
+    assert_eq!(
+        fix.websearch_default_max_tokens,
+        WEB_SEARCH_DEFAULT_MAX_TOKENS
+    );
+    assert_eq!(fix.websearch_anthropic_beta, API_CLIENT_WEB_SEARCH_BETA);
+    assert_eq!(fix.websearch_anthropic_beta, "web-search-2025-03-05");
+}
+
+#[test]
+fn event_names_match_fixture() {
+    let fix: WebToolsFixture = load_fixture("web_tools");
+    let production = [
+        WEB_FETCH_STARTED,
+        WEB_FETCH_COMPLETED,
+        WEB_FETCH_FAILED,
+        WEB_SEARCH_STARTED,
+        WEB_SEARCH_COMPLETED,
+        WEB_SEARCH_FAILED,
+    ];
+    let fixture_names: Vec<&str> = fix.event_names.iter().map(String::as_str).collect();
+    let production_names: Vec<&str> = production.to_vec();
+    assert_eq!(fixture_names, production_names);
+    // Defensive: every event MUST end with _started, _completed, or _failed
+    // (NOT _succeeded — M3-06 lock).
+    for name in &production_names {
+        assert!(
+            name.ends_with("_started") || name.ends_with("_completed") || name.ends_with("_failed"),
+            "event `{name}` violates the M3-06 suffix lock"
+        );
+    }
+}
+
+#[test]
+fn error_templates_match_runtime_formatters() {
+    let fix: WebToolsFixture = load_fixture("web_tools");
+    let concrete_scheme = fix
+        .error_templates
+        .scheme_rejected
+        .replace("{scheme}", "file");
+    assert_eq!(
+        concrete_scheme,
+        "URL scheme 'file' not allowed; only https/http"
+    );
+
+    let concrete_http = fix
+        .error_templates
+        .http_status
+        .replace("{status}", "500")
+        .replace("{url}", "https://example.com/");
+    assert_eq!(concrete_http, fmt_http_error(500, "https://example.com/"));
+
+    let concrete_dns = fix
+        .error_templates
+        .dns_failure
+        .replace("{host}", "doesnotexist.invalid");
+    assert_eq!(concrete_dns, fmt_dns_error("doesnotexist.invalid"));
+}

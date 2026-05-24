@@ -25,13 +25,20 @@ pub mod tool;
 /// inside the `tengu` module so the path `lingxi_telemetry::tengu::ALL_EVENT_NAMES`
 /// remains the single source of truth; see `parity_tengu_events.rs`).
 pub const ALL_EVENT_NAMES: &[&str] = {
-    const fn concat_all() -> [&'static str; 25] {
-        // const-fn concat is awkward; we use a manually-flattened array.
-        // Each task adds 25 / 30 / 15 / 40 / 10 / 8 / 12 / 5 entries here.
-        let mut out: [&'static str; 25] = [""; 25];
+    const TOTAL: usize = 25 + 30;
+    const fn concat_all() -> [&'static str; TOTAL] {
+        let mut out: [&'static str; TOTAL] = [""; TOTAL];
+        let mut idx = 0;
         let mut i = 0;
         while i < api::NAMES.len() {
-            out[i] = api::NAMES[i];
+            out[idx] = api::NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        let mut i = 0;
+        while i < agent::NAMES.len() {
+            out[idx] = agent::NAMES[i];
+            idx += 1;
             i += 1;
         }
         out

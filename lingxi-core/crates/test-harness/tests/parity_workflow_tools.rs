@@ -55,7 +55,7 @@ fn todo_aliases_are_rejected_by_serde() {
 fn todo_max_content_chars_matches_fixture() {
     let f = fixture();
     assert_eq!(
-        f["todo_max_content_chars"].as_u64().unwrap() as usize,
+        usize::try_from(f["todo_max_content_chars"].as_u64().unwrap()).unwrap(),
         TODO_MAX_CONTENT_CHARS
     );
 }
@@ -82,7 +82,7 @@ fn worktree_constants_match_fixture() {
         WORKTREE_FLATTEN_CHAR
     );
     assert_eq!(
-        f["worktree"]["max_slug_length"].as_u64().unwrap() as usize,
+        usize::try_from(f["worktree"]["max_slug_length"].as_u64().unwrap()).unwrap(),
         MAX_WORKTREE_SLUG_LENGTH
     );
 }

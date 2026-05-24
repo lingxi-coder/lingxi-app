@@ -288,9 +288,7 @@ pub fn make_stub_http() -> Arc<dyn lingxi_traits::http::HttpTransport> {
 
 // ===== M4-04 workflow-tool test stubs =======================================
 
-use lingxi_traits::worktree::{
-    WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager,
-};
+use lingxi_traits::worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -403,10 +401,7 @@ impl WorktreeManager for MockWorktreeManager {
         Ok(Vec::new())
     }
 
-    async fn cleanup_stale(
-        &self,
-        _max_age: Duration,
-    ) -> Result<Vec<PathBuf>, WorktreeError> {
+    async fn cleanup_stale(&self, _max_age: Duration) -> Result<Vec<PathBuf>, WorktreeError> {
         Ok(Vec::new())
     }
 

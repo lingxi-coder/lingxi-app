@@ -1,6 +1,6 @@
-//! M4-04 cross-tool integration tests: TodoWrite state machine, plan mode
+//! M4-04 cross-tool integration tests: `TodoWrite` state machine, plan mode
 //! toggle, and worktree enter→exit roundtrip. All hermetic — no git CLI,
-//! no real filesystem. Worktree calls go through a local `NoopOrScripted`
+//! no real filesystem. Worktree calls go through a local `LocalMockWorktree`
 //! `WorktreeManager` so the test never touches `lingxi-test-harness`.
 
 use async_trait::async_trait;
@@ -136,7 +136,8 @@ impl lingxi_traits::sandbox::Sandbox for NoopSandbox {
         &self,
         cmd: lingxi_traits::sandbox::ProcessCommand,
         _: &lingxi_traits::sandbox::SandboxPolicy,
-    ) -> Result<lingxi_traits::sandbox::SandboxedCommand, lingxi_traits::sandbox::SandboxError> {
+    ) -> Result<lingxi_traits::sandbox::SandboxedCommand, lingxi_traits::sandbox::SandboxError>
+    {
         Ok(lingxi_traits::sandbox::SandboxedCommand::__new_sandboxed(
             cmd,
             lingxi_traits::sandbox::SandboxedTag::BypassAuditedWithReason {
@@ -378,7 +379,10 @@ async fn plan_mode_toggle_roundtrip() {
     assert_eq!(res.data["marker"], PLAN_MODE_ENTER_MARKER);
     assert!(session.lock().await.plan_mode);
 
-    let res = exit.call(json!({}), use_ctx, progress()).await.expect("exit");
+    let res = exit
+        .call(json!({}), use_ctx, progress())
+        .await
+        .expect("exit");
     assert_eq!(res.data["marker"], PLAN_MODE_EXIT_MARKER);
     assert!(!session.lock().await.plan_mode);
 }

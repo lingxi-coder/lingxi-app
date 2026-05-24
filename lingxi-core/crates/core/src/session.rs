@@ -146,8 +146,9 @@ mod m4_04_session_extension_tests {
 
     #[test]
     fn todo_state_rejects_done_alias() {
-        let err = serde_json::from_str::<TodoState>(r#""done""#)
-            .expect_err("'done' must NOT be accepted (spec §7 locks pending/in_progress/completed)");
+        let err = serde_json::from_str::<TodoState>(r#""done""#).expect_err(
+            "'done' must NOT be accepted (spec §7 locks pending/in_progress/completed)",
+        );
         let msg = format!("{err}");
         assert!(
             msg.contains("unknown variant"),
@@ -158,8 +159,8 @@ mod m4_04_session_extension_tests {
 
     #[test]
     fn todo_state_rejects_todo_alias() {
-        let err =
-            serde_json::from_str::<TodoState>(r#""todo""#).expect_err("'todo' must NOT be accepted");
+        let err = serde_json::from_str::<TodoState>(r#""todo""#)
+            .expect_err("'todo' must NOT be accepted");
         let msg = format!("{err}");
         assert!(msg.contains("unknown variant"), "msg: {msg}");
     }

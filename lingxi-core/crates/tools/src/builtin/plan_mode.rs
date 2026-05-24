@@ -75,7 +75,10 @@ impl EnterPlanModeTool {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert("invocation_id".into(), verified(invocation_id));
         md.insert("tool_name".into(), verified(ENTER_TOOL_NAME));
-        md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(duration_ms as i64),
+        );
         self.ctx.bus.log_event(ENTER_PLAN_MODE_COMPLETED, md).await;
     }
 
@@ -84,7 +87,10 @@ impl EnterPlanModeTool {
         md.insert("invocation_id".into(), verified(invocation_id));
         md.insert("tool_name".into(), verified(ENTER_TOOL_NAME));
         md.insert("error_kind".into(), verified(error_kind));
-        md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(duration_ms as i64),
+        );
         self.ctx.bus.log_event(ENTER_PLAN_MODE_FAILED, md).await;
     }
 }
@@ -200,7 +206,10 @@ impl ExitPlanModeTool {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert("invocation_id".into(), verified(invocation_id));
         md.insert("tool_name".into(), verified(EXIT_TOOL_NAME));
-        md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(duration_ms as i64),
+        );
         self.ctx.bus.log_event(EXIT_PLAN_MODE_COMPLETED, md).await;
     }
 
@@ -209,7 +218,10 @@ impl ExitPlanModeTool {
         md.insert("invocation_id".into(), verified(invocation_id));
         md.insert("tool_name".into(), verified(EXIT_TOOL_NAME));
         md.insert("error_kind".into(), verified(error_kind));
-        md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(duration_ms as i64),
+        );
         self.ctx.bus.log_event(EXIT_PLAN_MODE_FAILED, md).await;
     }
 }
@@ -256,7 +268,8 @@ impl Tool for ExitPlanModeTool {
         "Exit plan mode".into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "ExitPlanMode flips the session out of plan mode and emits the literal `[EXIT PLAN MODE]`.".into()
+        "ExitPlanMode flips the session out of plan mode and emits the literal `[EXIT PLAN MODE]`."
+            .into()
     }
 
     async fn call(
@@ -319,11 +332,7 @@ mod tests {
     ) {
         let bus = Arc::new(AnalyticsBus::new());
         let sink = Arc::new(InMemorySink::default());
-        let bctx = ctx_for_file_tools(
-            make_dummy_fs(),
-            bus.clone(),
-            vec![std::env::temp_dir()],
-        );
+        let bctx = ctx_for_file_tools(make_dummy_fs(), bus.clone(), vec![std::env::temp_dir()]);
         let session = Arc::new(Mutex::new(SessionState::empty(
             SessionId::nil(),
             "claude-opus-4-7".into(),

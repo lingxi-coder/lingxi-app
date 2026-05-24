@@ -166,17 +166,15 @@ impl EnterWorktreeTool {
         self.ctx.bus.log_event(ENTER_WORKTREE_STARTED, md).await;
     }
 
-    async fn emit_completed(
-        &self,
-        invocation_id: &str,
-        branch_name: &str,
-        duration_ms: u64,
-    ) {
+    async fn emit_completed(&self, invocation_id: &str, branch_name: &str, duration_ms: u64) {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert("invocation_id".into(), verified(invocation_id));
         md.insert("tool_name".into(), verified(ENTER_TOOL_NAME));
         md.insert("_PROTO_branch_name".into(), pii_tagged(branch_name));
-        md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(duration_ms as i64),
+        );
         self.ctx.bus.log_event(ENTER_WORKTREE_COMPLETED, md).await;
     }
 
@@ -185,7 +183,10 @@ impl EnterWorktreeTool {
         md.insert("invocation_id".into(), verified(invocation_id));
         md.insert("tool_name".into(), verified(ENTER_TOOL_NAME));
         md.insert("error_kind".into(), verified(error_kind));
-        md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(duration_ms as i64),
+        );
         self.ctx.bus.log_event(ENTER_WORKTREE_FAILED, md).await;
     }
 }
@@ -283,8 +284,7 @@ impl Tool for EnterWorktreeTool {
             )));
         }
 
-        let copy_includes: Vec<PathBuf> =
-            parsed.copy_includes.iter().map(PathBuf::from).collect();
+        let copy_includes: Vec<PathBuf> = parsed.copy_includes.iter().map(PathBuf::from).collect();
         let result = self
             .ctx
             .worktree
@@ -363,7 +363,10 @@ impl ExitWorktreeTool {
         let mut md: LogEventMetadata = HashMap::new();
         md.insert("invocation_id".into(), verified(invocation_id));
         md.insert("tool_name".into(), verified(EXIT_TOOL_NAME));
-        md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(duration_ms as i64),
+        );
         self.ctx.bus.log_event(EXIT_WORKTREE_COMPLETED, md).await;
     }
 
@@ -372,7 +375,10 @@ impl ExitWorktreeTool {
         md.insert("invocation_id".into(), verified(invocation_id));
         md.insert("tool_name".into(), verified(EXIT_TOOL_NAME));
         md.insert("error_kind".into(), verified(error_kind));
-        md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(duration_ms as i64),
+        );
         self.ctx.bus.log_event(EXIT_WORKTREE_FAILED, md).await;
     }
 }
@@ -511,11 +517,7 @@ mod tests {
     fn make_bctx(mock: Arc<MockWorktreeManager>) -> (BuiltinToolContext, Arc<InMemorySink>) {
         let bus = Arc::new(AnalyticsBus::new());
         let sink = Arc::new(InMemorySink::default());
-        let mut bctx = ctx_for_file_tools(
-            make_dummy_fs(),
-            bus.clone(),
-            vec![std::env::temp_dir()],
-        );
+        let mut bctx = ctx_for_file_tools(make_dummy_fs(), bus.clone(), vec![std::env::temp_dir()]);
         bctx.worktree = mock as Arc<dyn WorktreeManager>;
         (bctx, sink)
     }
@@ -588,11 +590,7 @@ mod tests {
         bctx.bus.attach_sink(sink.clone()).await;
         let tool = EnterWorktreeTool::new(bctx);
         let res = tool
-            .call(
-                json!({ "slug": "user/feature" }),
-                fresh_ctx(),
-                fresh_tx(),
-            )
+            .call(json!({ "slug": "user/feature" }), fresh_ctx(), fresh_tx())
             .await
             .expect("create must succeed");
         assert_eq!(res.data["branch_name"], "worktree-user+feature");
@@ -603,12 +601,7 @@ mod tests {
         );
         assert_eq!(mock.created().len(), 1);
         assert_eq!(mock.created()[0].0, "user/feature");
-        let names: Vec<String> = sink
-            .events()
-            .await
-            .iter()
-            .map(|e| e.name.clone())
-            .collect();
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&ENTER_WORKTREE_STARTED.to_string()));
         assert!(names.contains(&ENTER_WORKTREE_COMPLETED.to_string()));
     }
@@ -625,12 +618,7 @@ mod tests {
             .expect_err("space must reject");
         let msg = format!("{err}");
         assert!(msg.contains("EnterWorktree: invalid slug:"), "msg: {msg}");
-        let names: Vec<String> = sink
-            .events()
-            .await
-            .iter()
-            .map(|e| e.name.clone())
-            .collect();
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&ENTER_WORKTREE_FAILED.to_string()));
     }
 
@@ -648,12 +636,7 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("EnterWorktree: git error:"), "msg: {msg}");
         assert!(msg.contains("fatal: not a git repository"), "msg: {msg}");
-        let names: Vec<String> = sink
-            .events()
-            .await
-            .iter()
-            .map(|e| e.name.clone())
-            .collect();
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&ENTER_WORKTREE_FAILED.to_string()));
     }
 
@@ -672,12 +655,7 @@ mod tests {
             format!("{err}"),
             "internal: EnterWorktree: worktrees are not supported on this platform"
         );
-        let names: Vec<String> = sink
-            .events()
-            .await
-            .iter()
-            .map(|e| e.name.clone())
-            .collect();
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&ENTER_WORKTREE_FAILED.to_string()));
     }
 
@@ -720,12 +698,7 @@ mod tests {
         assert_eq!(res.data["branch_name"], "worktree-user+feature");
         assert_eq!(mock.removed().len(), 1);
         assert_eq!(mock.removed()[0].branch_name, "worktree-user+feature");
-        let names: Vec<String> = sink
-            .events()
-            .await
-            .iter()
-            .map(|e| e.name.clone())
-            .collect();
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&EXIT_WORKTREE_STARTED.to_string()));
         assert!(names.contains(&EXIT_WORKTREE_COMPLETED.to_string()));
     }
@@ -742,12 +715,7 @@ mod tests {
             .expect_err("missing branch_name must reject");
         let msg = format!("{err}");
         assert!(msg.contains("ExitWorktree: invalid input"), "msg: {msg}");
-        let names: Vec<String> = sink
-            .events()
-            .await
-            .iter()
-            .map(|e| e.name.clone())
-            .collect();
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&EXIT_WORKTREE_FAILED.to_string()));
     }
 }

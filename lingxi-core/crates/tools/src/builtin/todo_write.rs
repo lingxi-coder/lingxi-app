@@ -12,9 +12,7 @@ use lingxi_permission::result::PermissionMetadata;
 use lingxi_permission::{PermissionDecisionReason, PermissionResult};
 use lingxi_telemetry::pii::Verified;
 use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{
-    TODO_WRITE_COMPLETED, TODO_WRITE_FAILED, TODO_WRITE_STARTED,
-};
+use lingxi_telemetry::tengu::tool::{TODO_WRITE_COMPLETED, TODO_WRITE_FAILED, TODO_WRITE_STARTED};
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -151,19 +149,11 @@ impl TodoWriteTool {
             "tool_name".into(),
             AnalyticsValue::String(Verified::assert_safe(TOOL_NAME.into()).into_inner()),
         );
-        md.insert(
-            "todo_count".into(),
-            AnalyticsValue::Int(todo_count as i64),
-        );
+        md.insert("todo_count".into(), AnalyticsValue::Int(todo_count as i64));
         self.ctx.bus.log_event(TODO_WRITE_STARTED, md).await;
     }
 
-    async fn emit_completed(
-        &self,
-        invocation_id: &str,
-        todos: &[TodoItem],
-        duration_ms: u64,
-    ) {
+    async fn emit_completed(&self, invocation_id: &str, todos: &[TodoItem], duration_ms: u64) {
         let (pending, in_progress, completed) = summary(todos);
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
@@ -174,10 +164,7 @@ impl TodoWriteTool {
             "tool_name".into(),
             AnalyticsValue::String(Verified::assert_safe(TOOL_NAME.into()).into_inner()),
         );
-        md.insert(
-            "todo_count".into(),
-            AnalyticsValue::Int(todos.len() as i64),
-        );
+        md.insert("todo_count".into(), AnalyticsValue::Int(todos.len() as i64));
         md.insert("pending".into(), AnalyticsValue::Int(i64::from(pending)));
         md.insert(
             "in_progress".into(),
@@ -187,7 +174,10 @@ impl TodoWriteTool {
             "completed".into(),
             AnalyticsValue::Int(i64::from(completed)),
         );
-        md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(duration_ms as i64),
+        );
         self.ctx.bus.log_event(TODO_WRITE_COMPLETED, md).await;
     }
 
@@ -205,7 +195,10 @@ impl TodoWriteTool {
             "error_kind".into(),
             AnalyticsValue::String(Verified::assert_safe(error_kind.into()).into_inner()),
         );
-        md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+        md.insert(
+            "duration_ms".into(),
+            AnalyticsValue::Int(duration_ms as i64),
+        );
         self.ctx.bus.log_event(TODO_WRITE_FAILED, md).await;
     }
 }
@@ -317,11 +310,12 @@ impl Tool for TodoWriteTool {
         })?;
         {
             let mut guard = session.lock().await;
-            guard.todos = todos.clone();
+            guard.todos.clone_from(&todos);
         }
 
         let duration_ms = started_at.elapsed().as_millis() as u64;
-        self.emit_completed(&invocation_id, &todos, duration_ms).await;
+        self.emit_completed(&invocation_id, &todos, duration_ms)
+            .await;
 
         let (pending, in_progress, completed) = summary(&todos);
         Ok(ToolCallResult {
@@ -358,11 +352,7 @@ mod tests {
     ) {
         let bus = Arc::new(AnalyticsBus::new());
         let sink = Arc::new(InMemorySink::default());
-        let bctx = ctx_for_file_tools(
-            make_dummy_fs(),
-            bus.clone(),
-            vec![std::env::temp_dir()],
-        );
+        let bctx = ctx_for_file_tools(make_dummy_fs(), bus.clone(), vec![std::env::temp_dir()]);
         // Attach sink synchronously by spawning a quick task is overkill —
         // tests use a tokio runtime so we can attach via .await in each test.
         let session = Arc::new(Mutex::new(SessionState::empty(
@@ -404,7 +394,8 @@ mod tests {
 
     #[test]
     fn rejects_done_alias() {
-        let err = serde_json::from_str::<TodoState>(r#""done""#).expect_err("'done' must be rejected");
+        let err =
+            serde_json::from_str::<TodoState>(r#""done""#).expect_err("'done' must be rejected");
         let msg = format!("{err}");
         assert!(msg.contains("unknown variant"), "msg: {msg}");
         assert!(msg.contains("done"), "msg: {msg}");
@@ -412,7 +403,8 @@ mod tests {
 
     #[test]
     fn rejects_todo_alias() {
-        let err = serde_json::from_str::<TodoState>(r#""todo""#).expect_err("'todo' must be rejected");
+        let err =
+            serde_json::from_str::<TodoState>(r#""todo""#).expect_err("'todo' must be rejected");
         assert!(format!("{err}").contains("unknown variant"));
     }
 
@@ -575,12 +567,7 @@ mod tests {
         assert_eq!(res.data["summary"]["pending"], 1);
         assert_eq!(res.data["summary"]["in_progress"], 1);
         assert_eq!(res.data["summary"]["completed"], 1);
-        let names: Vec<String> = sink
-            .events()
-            .await
-            .iter()
-            .map(|e| e.name.clone())
-            .collect();
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&TODO_WRITE_STARTED.to_string()));
         assert!(names.contains(&TODO_WRITE_COMPLETED.to_string()));
         assert!(!names.contains(&TODO_WRITE_FAILED.to_string()));
@@ -602,12 +589,7 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("TodoWrite: invalid todos shape"), "msg: {msg}");
         assert!(msg.contains("unknown variant"), "msg: {msg}");
-        let names: Vec<String> = sink
-            .events()
-            .await
-            .iter()
-            .map(|e| e.name.clone())
-            .collect();
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(
             names.contains(&TODO_WRITE_FAILED.to_string()),
             "failed event must fire: {names:?}"
@@ -632,12 +614,7 @@ mod tests {
             format!("{err}"),
             "invalid input: TodoWrite: at most one todo may be 'in_progress' (got 2)"
         );
-        let names: Vec<String> = sink
-            .events()
-            .await
-            .iter()
-            .map(|e| e.name.clone())
-            .collect();
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&TODO_WRITE_FAILED.to_string()));
     }
 }

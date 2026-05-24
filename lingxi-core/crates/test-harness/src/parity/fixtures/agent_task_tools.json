@@ -1,0 +1,74 @@
+{
+  "_source": "claude-code/src/tools/{AgentTool,SendMessageTool,TaskCreateTool,TaskGetTool,TaskListTool,TaskUpdateTool,TaskStopTool,TaskOutputTool}/{constants,prompt}.ts (commit 2026-03-31 snapshot)",
+  "_note": "M4-05 byte-aligned literals for 8 agent/task tools. Documented divergences from the plan + spec: (a) Task ID format is `[bartwmd][0-9a-z]{8}` (9 chars; M1 lock from lingxi_tasks::id::generate_task_id), NOT UUID v4 as spec §7 line 497 says. (b) Subagent types — six literals from claude-code/src/tools/AgentTool/built-in/*.ts (general-purpose, Plan, Explore, verification, claude-code-guide, statusline-setup); spec §7 line 495 says 'claude' but no such literal exists upstream. (c) Send-message claim window 30s is a LingXi-internal lock (no upstream literal). (d) Tool event suffix `_completed` per M3-06; spec §1 shorthand `_succeeded` is NOT the wire string. (e) Agent + 6 task tools + SendMessage ship as a tool surface in lingxi-tools (byte-locked schemas + telemetry + error formats); actual recursive subagent dispatch + registry mutation lands in lingxi-coordinator post-M5 because the M1 dep graph (lingxi-tasks/lingxi-agent → lingxi-tools) blocks a direct path-dep.",
+
+  "tool_names": {
+    "agent": "Agent",
+    "agent_legacy_alias": "Task",
+    "send_message": "SendMessage",
+    "task_create": "TaskCreate",
+    "task_get": "TaskGet",
+    "task_list": "TaskList",
+    "task_update": "TaskUpdate",
+    "task_stop": "TaskStop",
+    "task_output": "TaskOutput"
+  },
+
+  "builtin_subagent_types": [
+    "general-purpose",
+    "Plan",
+    "Explore",
+    "verification",
+    "claude-code-guide",
+    "statusline-setup"
+  ],
+
+  "send_message_claim_window_secs": 30,
+
+  "task_id_regex": "^[bartwmd][0-9a-z]{8}$",
+
+  "task_types": [
+    "local_bash", "local_agent", "remote_agent",
+    "in_process_teammate", "local_workflow", "monitor_mcp", "dream"
+  ],
+
+  "task_status_values": [
+    "pending", "running", "completed", "failed", "killed"
+  ],
+
+  "telemetry_events": [
+    "tengu_tool_agent_started",
+    "tengu_tool_agent_completed",
+    "tengu_tool_agent_failed",
+    "tengu_tool_task_create_started",
+    "tengu_tool_task_create_completed",
+    "tengu_tool_task_create_failed",
+    "tengu_tool_task_get_started",
+    "tengu_tool_task_get_completed",
+    "tengu_tool_task_get_failed",
+    "tengu_tool_task_list_started",
+    "tengu_tool_task_list_completed",
+    "tengu_tool_task_list_failed",
+    "tengu_tool_task_update_started",
+    "tengu_tool_task_update_completed",
+    "tengu_tool_task_update_failed",
+    "tengu_tool_task_stop_started",
+    "tengu_tool_task_stop_completed",
+    "tengu_tool_task_stop_failed",
+    "tengu_tool_task_output_started",
+    "tengu_tool_task_output_completed",
+    "tengu_tool_task_output_failed",
+    "tengu_tool_send_message_started",
+    "tengu_tool_send_message_completed",
+    "tengu_tool_send_message_failed"
+  ],
+
+  "constants_lock": {
+    "AGENT_TOOL_NAME": "Agent",
+    "LEGACY_AGENT_TOOL_NAME": "Task",
+    "SEND_MESSAGE_TOOL_NAME": "SendMessage",
+    "SEND_MESSAGE_CLAIM_WINDOW_RUST": "Duration::from_secs(30)",
+    "SUBAGENT_BUDGET_DENIED_PREFIX": "Budget exceeded ($",
+    "M3_05_BYTE_LOCKED_BUDGET_EXAMPLE": "Budget exceeded ($150.75); stopped."
+  }
+}

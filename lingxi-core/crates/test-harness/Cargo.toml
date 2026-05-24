@@ -64,6 +64,9 @@ lingxi-anthropic-oauth = { path = "../anthropic-oauth" }
 # Used by the M4-01 parity driver (parity_file_tools) to assert fixture
 # constants match production byte-for-byte. Dev-only.
 lingxi-tools = { path = "../tools" }
+# Used by the M4-05 parity driver (parity_agent_task_tools) to validate the
+# task-id regex against fresh-generated 9-char [bartwmd][0-9a-z]{8} ids.
+regex = "1"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 lingxi-platform-posix = { path = "../../platforms/posix" }

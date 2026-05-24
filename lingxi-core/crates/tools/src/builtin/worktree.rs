@@ -22,7 +22,7 @@ use lingxi_telemetry::tengu::tool::{
     ENTER_WORKTREE_COMPLETED, ENTER_WORKTREE_FAILED, ENTER_WORKTREE_STARTED,
     EXIT_WORKTREE_COMPLETED, EXIT_WORKTREE_FAILED, EXIT_WORKTREE_STARTED,
 };
-use lingxi_traits::worktree::{WorktreeError, WorktreeHandle, WorktreeManager};
+use lingxi_traits::worktree::{WorktreeError, WorktreeHandle};
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -505,6 +505,7 @@ mod tests {
         ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs, MockWorktreeManager,
     };
     use lingxi_telemetry::{AnalyticsBus, InMemorySink};
+    use lingxi_traits::worktree::WorktreeManager;
     use std::sync::Arc;
 
     fn make_bctx(mock: Arc<MockWorktreeManager>) -> (BuiltinToolContext, Arc<InMemorySink>) {

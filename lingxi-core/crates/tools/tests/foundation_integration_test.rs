@@ -94,9 +94,34 @@ fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {
             } else {
                 Platform::Linux
             },
+            http: Arc::new(NoopHttp),
+            provider: Arc::new(lingxi_api_client::AnthropicProvider::new("test-key", None)),
+            default_model: "claude-sonnet-4-20250514".to_string(),
         },
         sink,
     )
+}
+
+// HTTP stub for the M4-03 field — foundation tests never call web tools.
+struct NoopHttp;
+#[async_trait::async_trait]
+impl lingxi_traits::http::HttpTransport for NoopHttp {
+    async fn request(
+        &self,
+        _: lingxi_protocol::HttpRequest,
+    ) -> Result<lingxi_protocol::HttpResponse, lingxi_traits::http::HttpError> {
+        Err(lingxi_traits::http::HttpError::InvalidRequest(
+            "NoopHttp: not configured for foundation integration".into(),
+        ))
+    }
+    async fn stream_sse(
+        &self,
+        _: lingxi_protocol::HttpRequest,
+    ) -> Result<lingxi_traits::http::SseStream, lingxi_traits::http::HttpError> {
+        Err(lingxi_traits::http::HttpError::InvalidRequest(
+            "NoopHttp: stream_sse not supported".into(),
+        ))
+    }
 }
 
 // No-op stubs for the M4-02 fields — these foundation tests never exercise

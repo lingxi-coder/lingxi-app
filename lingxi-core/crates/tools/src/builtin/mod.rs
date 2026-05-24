@@ -22,6 +22,7 @@ pub mod file_write;
 pub mod glob;
 pub mod grep;
 pub mod notebook_edit;
+pub mod powershell;
 pub mod shell_events;
 
 #[cfg(test)]
@@ -34,6 +35,7 @@ pub use file_write::FileWriteTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use notebook_edit::NotebookEditTool;
+pub use powershell::PowerShellTool;
 
 /// Static surface every builtin tool needs at construction time.
 ///

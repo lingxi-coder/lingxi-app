@@ -16,6 +16,9 @@ pub mod glob;
 pub mod grep;
 pub mod notebook_edit;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use file_edit::FileEditTool;
 pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
@@ -42,11 +45,15 @@ pub struct BuiltinToolContext {
 /// duplicate registrations). Later sub-plans add Shell / Web / Workflow /
 /// Agent / Team / MCP+LSP / System tools by extending this function.
 ///
-/// NOTE (Task 1 skeleton): the tool impls land in Tasks 5/7/9/11/13/15.
-/// Until those tasks wire the `Tool` trait, this function is intentionally
-/// empty (placeholder structs cannot be cast to `Arc<dyn Tool>` yet). The
-/// wiring is restored in Task 17 (registry wiring).
-#[allow(unused_variables)]
+/// Each tool's `impl Tool` is wired in Tasks 5/7/9/11/13/15; as the impls
+/// land, the matching line below is uncommented incrementally so the crate
+/// remains buildable between tasks. Task 17 verifies that all 6 are wired.
 pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolContext) {
-    // Wired in Tasks 5..16 when each tool's `impl Tool` lands.
+    registry.register_builtin(Arc::new(FileReadTool::new(ctx.clone())));
+    // Wired in Task 7:  registry.register_builtin(Arc::new(FileWriteTool::new(ctx.clone())));
+    // Wired in Task 9:  registry.register_builtin(Arc::new(FileEditTool::new(ctx.clone())));
+    // Wired in Task 11: registry.register_builtin(Arc::new(NotebookEditTool::new(ctx.clone())));
+    // Wired in Task 13: registry.register_builtin(Arc::new(GlobTool::new(ctx.clone())));
+    // Wired in Task 15: registry.register_builtin(Arc::new(GrepTool::new(ctx)));
+    let _ = &ctx;
 }

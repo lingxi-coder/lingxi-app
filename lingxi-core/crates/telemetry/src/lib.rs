@@ -25,4 +25,4 @@ pub use feature_flags::{FeatureFlagsClient, FeatureFlagsFetcher, FeatureValue};
 pub use killswitch::Killswitch;
 pub use pii::{strip_proto_fields, PiiTagged, Verified};
 pub use sink::{AnalyticsSink, AnalyticsValue, LogEventMetadata};
-pub use sinks::{InMemorySink, NoOpSink, RecordedEvent};
+pub use sinks::{InMemorySink, MockStatsigSink, NoOpSink, RecordedEvent, StatsigSink};

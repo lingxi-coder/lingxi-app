@@ -14,6 +14,7 @@ use lingxi_traits::filesystem::FileSystem;
 use lingxi_traits::http::HttpTransport;
 use lingxi_traits::process::ProcessRunner;
 use lingxi_traits::sandbox::Sandbox;
+use lingxi_traits::worktree::WorktreeManager;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -87,6 +88,10 @@ pub struct BuiltinToolContext {
     /// Model used by `WebSearch` when calling `POST /v1/messages` (M4-03).
     /// Sourced from the session's `coordinator_model` at registration time.
     pub default_model: String,
+    /// Worktree manager (M2-01 trait) — backs `EnterWorktree` + `ExitWorktree`
+    /// (M4-04). Tests inject `MockWorktreeManager`; production uses
+    /// `lingxi_platform_posix::PosixWorktreeManager`.
+    pub worktree: Arc<dyn WorktreeManager>,
 }
 
 /// Register every M4-01 foundation tool against `registry`.
@@ -154,6 +159,7 @@ mod tests {
             http: make_stub_http(),
             provider: Arc::new(AnthropicProvider::new("test-key", None)),
             default_model: "claude-sonnet-4-20250514".to_string(),
+            worktree: crate::builtin::test_support::make_mock_worktree(),
         }
     }
 

@@ -285,6 +285,175 @@ pub fn make_stub_http() -> Arc<dyn lingxi_traits::http::HttpTransport> {
     Arc::new(PanickingHttp)
 }
 
+// ===== M4-04 workflow-tool test stubs =======================================
+
+use lingxi_traits::worktree::{
+    WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager,
+};
+use std::path::PathBuf;
+use std::time::Duration;
+
+/// In-memory `WorktreeManager` for hermetic tests. Tracks every call so tests
+/// can assert on `created`, `removed`, `listed`. Reuses the M2-01 slug helpers
+/// (`validate_worktree_slug` + `flatten_slug`) so its outputs are byte-aligned
+/// with production.
+#[allow(dead_code)] // M4-04 Tasks 10/11/13 use these helpers
+#[derive(Default)]
+pub struct MockWorktreeManager {
+    inner: std::sync::Mutex<MockWtInner>,
+}
+
+#[derive(Default)]
+struct MockWtInner {
+    created: Vec<(String, WorktreeHandle)>,
+    removed: Vec<WorktreeHandle>,
+    next_path_root: Option<PathBuf>,
+    scripted_create_error: Option<WorktreeError>,
+    scripted_remove_error: Option<WorktreeError>,
+}
+
+#[allow(dead_code)] // M4-04 Tasks 10/11/13 use these helpers
+impl MockWorktreeManager {
+    /// Build a fresh `MockWorktreeManager`. Defaults to creating worktrees
+    /// under `/tmp/mock-repo/.claude/worktrees/<flatten(slug)>`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Override the root used to assemble new worktree paths.
+    #[must_use]
+    pub fn with_root(root: impl Into<PathBuf>) -> Self {
+        let s = Self::default();
+        s.inner.lock().unwrap().next_path_root = Some(root.into());
+        s
+    }
+
+    /// Force the next `create_worktree` call to return `err`.
+    pub fn script_create_error(&self, err: WorktreeError) {
+        self.inner.lock().unwrap().scripted_create_error = Some(err);
+    }
+
+    /// Force the next `remove_worktree` call to return `err`.
+    #[allow(dead_code)]
+    pub fn script_remove_error(&self, err: WorktreeError) {
+        self.inner.lock().unwrap().scripted_remove_error = Some(err);
+    }
+
+    /// Inspect created worktrees.
+    #[must_use]
+    pub fn created(&self) -> Vec<(String, WorktreeHandle)> {
+        self.inner.lock().unwrap().created.clone()
+    }
+
+    /// Inspect removed worktrees.
+    #[must_use]
+    pub fn removed(&self) -> Vec<WorktreeHandle> {
+        self.inner.lock().unwrap().removed.clone()
+    }
+}
+
+#[async_trait]
+impl WorktreeManager for MockWorktreeManager {
+    async fn create_worktree(
+        &self,
+        slug: &str,
+        _base_branch: Option<&str>,
+        _copy_includes: &[PathBuf],
+    ) -> Result<WorktreeHandle, WorktreeError> {
+        // Drain scripted error first.
+        if let Some(err) = self.inner.lock().unwrap().scripted_create_error.take() {
+            return Err(err);
+        }
+        // Mirror the M2-01 validation locally — keeps the mock byte-aligned
+        // with `EnterWorktreeTool`'s pre-flight check without pulling in
+        // `lingxi-platform-posix` (which would form a dep cycle).
+        validate_slug_inline(slug)?;
+        let flat = flatten_slug_inline(slug);
+        let root = self
+            .inner
+            .lock()
+            .unwrap()
+            .next_path_root
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("/tmp/mock-repo"));
+        let path = root.join(".claude").join("worktrees").join(&flat);
+        let handle = WorktreeHandle {
+            path,
+            branch_name: format!("worktree-{flat}"),
+        };
+        self.inner
+            .lock()
+            .unwrap()
+            .created
+            .push((slug.to_string(), handle.clone()));
+        Ok(handle)
+    }
+
+    async fn remove_worktree(&self, handle: &WorktreeHandle) -> Result<(), WorktreeError> {
+        if let Some(err) = self.inner.lock().unwrap().scripted_remove_error.take() {
+            return Err(err);
+        }
+        self.inner.lock().unwrap().removed.push(handle.clone());
+        Ok(())
+    }
+
+    async fn list_worktrees(&self) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+        Ok(Vec::new())
+    }
+
+    async fn cleanup_stale(
+        &self,
+        _max_age: Duration,
+    ) -> Result<Vec<PathBuf>, WorktreeError> {
+        Ok(Vec::new())
+    }
+
+    fn is_supported(&self) -> bool {
+        true
+    }
+}
+
+/// Convenience: wrap a fresh `MockWorktreeManager` in `Arc<dyn WorktreeManager>`.
+#[must_use]
+pub fn make_mock_worktree() -> Arc<dyn WorktreeManager> {
+    Arc::new(MockWorktreeManager::new())
+}
+
+const MAX_SLUG_LEN: usize = 64;
+
+fn validate_slug_inline(slug: &str) -> Result<(), WorktreeError> {
+    if slug.is_empty() {
+        return Err(WorktreeError::InvalidSlug("slug is empty".into()));
+    }
+    if slug.len() > MAX_SLUG_LEN {
+        return Err(WorktreeError::InvalidSlug(format!(
+            "slug exceeds {MAX_SLUG_LEN} chars (got {})",
+            slug.len()
+        )));
+    }
+    for segment in slug.split('/') {
+        if segment.is_empty() {
+            return Err(WorktreeError::InvalidSlug(format!(
+                "slug contains empty segment: {slug:?}"
+            )));
+        }
+        for ch in segment.chars() {
+            let allowed = ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-';
+            if !allowed {
+                return Err(WorktreeError::InvalidSlug(format!(
+                    "slug contains invalid character {ch:?} in segment {segment:?}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn flatten_slug_inline(slug: &str) -> String {
+    slug.replace('/', "+")
+}
+
 /// Build a [`super::BuiltinToolContext`] for M4-01 file-tool unit tests
 /// (process/sandbox/clock get stubbed defaults so the M4-02 fields satisfy
 /// the struct shape without affecting file-tool behavior).
@@ -328,6 +497,7 @@ pub fn ctx_for_file_tools(
         http: make_stub_http(),
         provider: Arc::new(lingxi_api_client::AnthropicProvider::new("test-key", None)),
         default_model: "claude-sonnet-4-20250514".to_string(),
+        worktree: make_mock_worktree(),
     }
 }
 
@@ -361,5 +531,6 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         http: make_stub_http(),
         provider: Arc::new(lingxi_api_client::AnthropicProvider::new("test-key", None)),
         default_model: "claude-sonnet-4-20250514".to_string(),
+        worktree: make_mock_worktree(),
     }
 }

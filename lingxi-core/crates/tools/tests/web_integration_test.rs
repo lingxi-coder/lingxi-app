@@ -194,8 +194,46 @@ fn make_web_ctx(http: Arc<dyn HttpTransport>) -> (BuiltinToolContext, Arc<InMemo
         http,
         provider,
         default_model: "claude-sonnet-4-20250514".into(),
+        worktree: Arc::new(NoopWorktree),
     };
     (ctx, sink)
+}
+
+// M4-04: web tests never invoke worktree tools; the `worktree` field on
+// `BuiltinToolContext` is satisfied by an unsupported stub.
+struct NoopWorktree;
+#[async_trait::async_trait]
+impl lingxi_traits::worktree::WorktreeManager for NoopWorktree {
+    async fn create_worktree(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: &[std::path::PathBuf],
+    ) -> Result<lingxi_traits::worktree::WorktreeHandle, lingxi_traits::worktree::WorktreeError>
+    {
+        Err(lingxi_traits::worktree::WorktreeError::Unsupported)
+    }
+    async fn remove_worktree(
+        &self,
+        _: &lingxi_traits::worktree::WorktreeHandle,
+    ) -> Result<(), lingxi_traits::worktree::WorktreeError> {
+        Err(lingxi_traits::worktree::WorktreeError::Unsupported)
+    }
+    async fn list_worktrees(
+        &self,
+    ) -> Result<Vec<lingxi_traits::worktree::WorktreeInfo>, lingxi_traits::worktree::WorktreeError>
+    {
+        Ok(Vec::new())
+    }
+    async fn cleanup_stale(
+        &self,
+        _: std::time::Duration,
+    ) -> Result<Vec<std::path::PathBuf>, lingxi_traits::worktree::WorktreeError> {
+        Ok(Vec::new())
+    }
+    fn is_supported(&self) -> bool {
+        false
+    }
 }
 
 fn fresh_use_ctx() -> ToolUseContext {

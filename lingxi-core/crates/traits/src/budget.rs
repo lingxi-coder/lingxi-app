@@ -1,0 +1,53 @@
+//! `BudgetEnforcerHandle` — narrow trait abstracting `BudgetEnforcer` so
+//! `AgentTool` in `lingxi-tools` can consult the parent's budget without
+//! taking a cyclic dep on `lingxi-cost`.
+//!
+//! Concrete impl lives in `lingxi-cost`. Tests inject a scriptable mock.
+//!
+//! The `BudgetError::Exceeded { current_nano_usd }` shape is what `AgentTool`
+//! uses to format the M3-05 byte-locked denial string
+//! (`"Budget exceeded ($X.YZ); stopped."`).
+
+use async_trait::async_trait;
+use thiserror::Error;
+
+/// Failure modes for [`BudgetEnforcerHandle::check_and_charge`].
+#[derive(Debug, Error)]
+pub enum BudgetError {
+    /// Budget exceeded — the caller should format the M3-05 denial string
+    /// from `current_nano_usd`.
+    #[error("BudgetEnforcer: exceeded at {current_nano_usd} nano-USD")]
+    Exceeded {
+        /// Cumulative cost at the moment of the check, in nano-USD.
+        current_nano_usd: u64,
+    },
+    /// Any other internal failure.
+    #[error("BudgetEnforcer: internal error: {0}")]
+    Internal(String),
+}
+
+/// Budget consultation seam used by `AgentTool` before spawning a subagent.
+#[async_trait]
+pub trait BudgetEnforcerHandle: Send + Sync {
+    /// Charge `nano_usd` against the budget. Returns
+    /// [`BudgetError::Exceeded`] (carrying the current cumulative total) if
+    /// the post-charge state would exceed the configured limit.
+    async fn check_and_charge(&self, nano_usd: u64) -> Result<(), BudgetError>;
+
+    /// Snapshot the current cumulative total (in nano-USD). Used to format
+    /// the M3-05 denial string when `check_and_charge` returns
+    /// [`BudgetError::Exceeded`] in a context where the caller needs the
+    /// number directly.
+    async fn snapshot_total_nano_usd(&self) -> u64;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn trait_is_object_safe() {
+        let _: Option<Arc<dyn BudgetEnforcerHandle>> = None;
+    }
+}

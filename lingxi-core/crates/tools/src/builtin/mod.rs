@@ -54,6 +54,5 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     registry.register_builtin(Arc::new(FileEditTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(NotebookEditTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(GlobTool::new(ctx.clone())));
-    // Wired in Task 15: registry.register_builtin(Arc::new(GrepTool::new(ctx)));
-    let _ = &ctx;
+    registry.register_builtin(Arc::new(GrepTool::new(ctx)));
 }

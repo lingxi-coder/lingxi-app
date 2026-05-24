@@ -1,0 +1,50 @@
+{
+  "_source": "claude-code/src/cost-tracker.ts: tengu_cost_recorded emission @ commit 6a25909, plus M3 spec docs/superpowers/specs/2026-05-23-m3-engine-completion-design.md §7 lines 730-748 (cost-events table) + §8 M3-05 phase list.",
+  "_note": "Locks (a) the three tengu_cost_* event names, (b) the 8-field tengu_cost_recorded payload set + values for a canonical API response, (c) the basis-points budget thresholds (8000 / 10000), (d) is_batch_request: false for every M3-recorded call. M4 will update this fixture when the /v1/messages/batches endpoint fires (is_batch_request: true).",
+  "event_names": {
+    "cost_recorded": "tengu_cost_recorded",
+    "budget_warning": "tengu_cost_budget_warning",
+    "budget_exceeded": "tengu_cost_budget_exceeded"
+  },
+  "thresholds_bps": {
+    "warning": 8000,
+    "exceeded": 10000,
+    "batch_discount": 5000
+  },
+  "canonical_cost_recorded_input": {
+    "model": "claude-opus-4-6",
+    "input_tokens": 1000,
+    "output_tokens": 500,
+    "cache_read_input_tokens": 128,
+    "cache_creation_input_tokens": 64,
+    "cost_nano_usd": 17500000,
+    "session_id": "sess:00000000-0000-0000-0000-000000000000",
+    "is_batch_request": false
+  },
+  "expected_payload_keys_in_declaration_order": [
+    "model",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "cost_usd",
+    "session_id",
+    "is_batch_request"
+  ],
+  "expected_payload_values": {
+    "model": "claude-opus-4-6",
+    "input_tokens": 1000,
+    "output_tokens": 500,
+    "cache_read_input_tokens": 128,
+    "cache_creation_input_tokens": 64,
+    "cost_usd": 17500000,
+    "session_id": "sess:00000000-0000-0000-0000-000000000000",
+    "is_batch_request": false
+  },
+  "expected_error_strings": {
+    "unknown_model": "Cost tracking unavailable for {model}",
+    "budget_exceeded": "Budget exceeded (${current}); stopped."
+  },
+  "budget_warning_payload_keys": ["limit_usd", "current_usd", "percent_bps"],
+  "budget_exceeded_payload_keys": ["limit_usd", "current_usd"]
+}

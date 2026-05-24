@@ -44,6 +44,8 @@ pub enum LspOperation {
     FindReferences,
     /// `textDocument/hover`.
     Hover,
+    /// `textDocument/completion` (M4-07 additive).
+    Completion,
     /// `textDocument/documentSymbol`.
     DocumentSymbol,
     /// `workspace/symbol`.
@@ -287,6 +289,33 @@ pub async fn find_references(
     let raw: Value = client.request("textDocument/references", params).await?;
     Ok(LspOperationResult {
         operation: LspOperation::FindReferences,
+        file_uri: uri.to_string(),
+        raw,
+    })
+}
+
+/// `textDocument/completion` at a 1-based position (M4-07 additive).
+///
+/// # Errors
+/// Same set as [`hover`].
+pub async fn completion(
+    client: &LspClient,
+    tracker: &OpenFileTracker,
+    config: &LspServerConfig,
+    file_path: &Path,
+    line: u32,
+    character: u32,
+) -> Result<LspOperationResult, LspOperationError> {
+    let position = position_from_one_based(line, character)?;
+    let uri = uri_from_path(file_path)?;
+    ensure_did_open(client, tracker, config, file_path, &uri).await?;
+    let params = TextDocumentPositionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        position,
+    };
+    let raw: Value = client.request("textDocument/completion", params).await?;
+    Ok(LspOperationResult {
+        operation: LspOperation::Completion,
         file_uri: uri.to_string(),
         raw,
     })

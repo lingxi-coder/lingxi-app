@@ -234,10 +234,51 @@ pub const TEAM_DELETE_COMPLETED: &str = "tengu_tool_team_delete_completed";
 /// `tengu_tool_team_delete_failed` — `TeamDeleteTool` errored (M4-06).
 pub const TEAM_DELETE_FAILED: &str = "tengu_tool_team_delete_failed";
 
-/// Order-locked array of all 97 names; consumed by `tengu::ALL_EVENT_NAMES`.
+// ===== M4-07 MCP + LSP tools (13 new events) ================================
+//
+// Note: `MCP_COMPLETED` and `MCP_FAILED` are already declared above (M3-06
+// baseline at lines 96-100); we reuse them and only add `MCP_STARTED`
+// here so the wire-string set grows by 13 (not 15 — deviation from plan
+// header: legacy `MCP_INVOKED` was M3-06's "started" surrogate, but the
+// M4-06 baseline lacked the `tengu_tool_mcp_started` literal that M4-07
+// requires).
+
+/// `tengu_tool_mcp_started` — `MCPTool` (M4-07 dispatcher) began execution.
+pub const MCP_STARTED: &str = "tengu_tool_mcp_started";
+
+/// `tengu_tool_mcp_auth_started` — `McpAuthTool` began inspection (M4-07).
+pub const MCP_AUTH_STARTED: &str = "tengu_tool_mcp_auth_started";
+/// `tengu_tool_mcp_auth_completed` — `McpAuthTool` finished (M4-07).
+pub const MCP_AUTH_COMPLETED: &str = "tengu_tool_mcp_auth_completed";
+/// `tengu_tool_mcp_auth_failed` — `McpAuthTool` errored (M4-07).
+pub const MCP_AUTH_FAILED: &str = "tengu_tool_mcp_auth_failed";
+
+/// `tengu_tool_list_mcp_resources_started` — `ListMcpResourcesTool` began (M4-07).
+pub const LIST_MCP_RESOURCES_STARTED: &str = "tengu_tool_list_mcp_resources_started";
+/// `tengu_tool_list_mcp_resources_completed` — `ListMcpResourcesTool` finished (M4-07).
+pub const LIST_MCP_RESOURCES_COMPLETED: &str = "tengu_tool_list_mcp_resources_completed";
+/// `tengu_tool_list_mcp_resources_failed` — `ListMcpResourcesTool` errored (M4-07).
+pub const LIST_MCP_RESOURCES_FAILED: &str = "tengu_tool_list_mcp_resources_failed";
+
+/// `tengu_tool_read_mcp_resource_started` — `ReadMcpResourceTool` began (M4-07).
+pub const READ_MCP_RESOURCE_STARTED: &str = "tengu_tool_read_mcp_resource_started";
+/// `tengu_tool_read_mcp_resource_completed` — `ReadMcpResourceTool` finished (M4-07).
+pub const READ_MCP_RESOURCE_COMPLETED: &str = "tengu_tool_read_mcp_resource_completed";
+/// `tengu_tool_read_mcp_resource_failed` — `ReadMcpResourceTool` errored (M4-07).
+pub const READ_MCP_RESOURCE_FAILED: &str = "tengu_tool_read_mcp_resource_failed";
+
+/// `tengu_tool_lsp_started` — `LSPTool` began (M4-07).
+pub const LSP_STARTED: &str = "tengu_tool_lsp_started";
+/// `tengu_tool_lsp_completed` — `LSPTool` finished (M4-07).
+pub const LSP_COMPLETED: &str = "tengu_tool_lsp_completed";
+/// `tengu_tool_lsp_failed` — `LSPTool` errored (M4-07).
+pub const LSP_FAILED: &str = "tengu_tool_lsp_failed";
+
+/// Order-locked array of all 110 names; consumed by `tengu::ALL_EVENT_NAMES`.
 /// M3-06 locked the first 40; M4-02 appended 9 (powershell/repl/sleep);
 /// M4-03 appended 3 (`web_search`); M4-04 appended 15 workflow events;
-/// M4-05 appended 24 agent/task events; M4-06 appends 6 team events.
+/// M4-05 appended 24 agent/task events; M4-06 appends 6 team events;
+/// M4-07 appends 13 MCP + LSP events.
 pub(crate) const NAMES: &[&str] = &[
     STARTED,
     COMPLETED,
@@ -339,6 +380,22 @@ pub(crate) const NAMES: &[&str] = &[
     TEAM_DELETE_STARTED,
     TEAM_DELETE_COMPLETED,
     TEAM_DELETE_FAILED,
+    // M4-07 MCP + LSP tools (13 NEW events; MCP_COMPLETED + MCP_FAILED are
+    // M3-06 baseline above and already in this array — they cover MCPTool's
+    // completed/failed lifecycle states).
+    MCP_STARTED,
+    MCP_AUTH_STARTED,
+    MCP_AUTH_COMPLETED,
+    MCP_AUTH_FAILED,
+    LIST_MCP_RESOURCES_STARTED,
+    LIST_MCP_RESOURCES_COMPLETED,
+    LIST_MCP_RESOURCES_FAILED,
+    READ_MCP_RESOURCE_STARTED,
+    READ_MCP_RESOURCE_COMPLETED,
+    READ_MCP_RESOURCE_FAILED,
+    LSP_STARTED,
+    LSP_COMPLETED,
+    LSP_FAILED,
 ];
 
 #[cfg(test)]
@@ -422,9 +479,74 @@ mod m4_04_workflow_event_tests {
         }
         assert_eq!(
             NAMES.len(),
-            97,
-            "M3-06 40 + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 + M4-06 6 = 97"
+            110,
+            "M3-06 40 + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 + M4-06 6 + M4-07 13 = 110"
         );
+    }
+}
+
+#[cfg(test)]
+mod m4_07_mcp_lsp_event_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_lsp_constants_are_locked() {
+        assert_eq!(MCP_STARTED, "tengu_tool_mcp_started");
+        assert_eq!(MCP_AUTH_STARTED, "tengu_tool_mcp_auth_started");
+        assert_eq!(MCP_AUTH_COMPLETED, "tengu_tool_mcp_auth_completed");
+        assert_eq!(MCP_AUTH_FAILED, "tengu_tool_mcp_auth_failed");
+        assert_eq!(
+            LIST_MCP_RESOURCES_STARTED,
+            "tengu_tool_list_mcp_resources_started"
+        );
+        assert_eq!(
+            LIST_MCP_RESOURCES_COMPLETED,
+            "tengu_tool_list_mcp_resources_completed"
+        );
+        assert_eq!(
+            LIST_MCP_RESOURCES_FAILED,
+            "tengu_tool_list_mcp_resources_failed"
+        );
+        assert_eq!(
+            READ_MCP_RESOURCE_STARTED,
+            "tengu_tool_read_mcp_resource_started"
+        );
+        assert_eq!(
+            READ_MCP_RESOURCE_COMPLETED,
+            "tengu_tool_read_mcp_resource_completed"
+        );
+        assert_eq!(
+            READ_MCP_RESOURCE_FAILED,
+            "tengu_tool_read_mcp_resource_failed"
+        );
+        assert_eq!(LSP_STARTED, "tengu_tool_lsp_started");
+        assert_eq!(LSP_COMPLETED, "tengu_tool_lsp_completed");
+        assert_eq!(LSP_FAILED, "tengu_tool_lsp_failed");
+    }
+
+    #[test]
+    fn names_array_contains_all_13_m4_07_events() {
+        let mcp_lsp = [
+            MCP_STARTED,
+            MCP_AUTH_STARTED,
+            MCP_AUTH_COMPLETED,
+            MCP_AUTH_FAILED,
+            LIST_MCP_RESOURCES_STARTED,
+            LIST_MCP_RESOURCES_COMPLETED,
+            LIST_MCP_RESOURCES_FAILED,
+            READ_MCP_RESOURCE_STARTED,
+            READ_MCP_RESOURCE_COMPLETED,
+            READ_MCP_RESOURCE_FAILED,
+            LSP_STARTED,
+            LSP_COMPLETED,
+            LSP_FAILED,
+        ];
+        for name in mcp_lsp {
+            assert!(
+                NAMES.contains(&name),
+                "NAMES array missing M4-07 event: {name}"
+            );
+        }
     }
 }
 

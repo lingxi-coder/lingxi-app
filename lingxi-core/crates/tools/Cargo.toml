@@ -13,6 +13,10 @@ lingxi-permission = { path = "../permission" }
 lingxi-sandbox = { path = "../sandbox" }
 lingxi-telemetry = { path = "../telemetry" }
 lingxi-api-client = { path = "../api-client" }
+# M4-07 — MCP + LSP tool wrappers.
+lingxi-mcp = { path = "../mcp" }
+lingxi-lsp = { path = "../lsp" }
+lingxi-jsonrpc = { path = "../jsonrpc" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -8,8 +8,6 @@ license.workspace = true
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
 lingxi-traits = { path = "../traits" }
-lingxi-tools = { path = "../tools" }
-lingxi-permission = { path = "../permission" }
 lingxi-jsonrpc = { path = "../jsonrpc" }
 lsp-types = "0.95"
 url = "2"

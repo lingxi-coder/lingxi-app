@@ -1,10 +1,12 @@
-//! LSP (Language Server Protocol) registry, action enum, and Tool wiring.
+//! LSP (Language Server Protocol) registry and core primitives.
 //!
 //! M1.18 ships the engine-side surface: per-server state machine
 //! ([`LspConnectionState`]), routing registry ([`LspRegistry`]), action
-//! payload ([`LspAction`]), and the [`LspTool`] that exposes LSP to the
-//! model. The production `LspTransport` (stdio JSON-RPC) is wired up in
-//! Plan 16 inside `platforms/posix-minimal`.
+//! payload ([`LspAction`]).
+//!
+//! The `Tool`-implementing `LSPTool` lives in `lingxi-tools` (M4-07) to
+//! break a `lingxi-lsp → lingxi-tools` cycle now that M4-07 needs
+//! `lingxi-tools → lingxi-lsp` for `LspClient` + `tool_operations`.
 //!
 //! See spec §25 (LSP).
 
@@ -18,7 +20,6 @@ pub mod diagnostic_registry;
 pub mod open_file_tracker;
 pub mod passive_feedback;
 pub mod registry;
-pub mod tool;
 pub mod tool_operations;
 pub mod transport;
 
@@ -29,7 +30,6 @@ pub use diagnostic_registry::{DiagnosticEntry, LspDiagnosticRegistry};
 pub use open_file_tracker::OpenFileTracker;
 pub use passive_feedback::PassiveDiagnosticSubscriber;
 pub use registry::LspRegistry;
-pub use tool::LspTool;
 pub use tool_operations::{
     LspOperation, LspOperationError, LspOperationResult, MAX_LSP_FILE_SIZE_BYTES,
 };

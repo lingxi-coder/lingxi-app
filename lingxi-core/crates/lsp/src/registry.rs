@@ -15,6 +15,7 @@
 //!
 //! See spec §25.3 (`LspRegistry`).
 
+use crate::client::LspClient;
 use crate::connection::LspConnectionState;
 use lingxi_protocol::{McpConnectionId, PluginId};
 use lingxi_traits::{LspError, LspServerConfig, LspTransport};
@@ -31,6 +32,13 @@ use tokio::sync::RwLock;
 pub struct LspRegistry {
     /// Server name → live state.
     servers: RwLock<HashMap<String, LspConnectionState>>,
+    /// Side-channel cache of [`LspClient`] handles per server name.
+    ///
+    /// Populated by [`Self::register_client`] (M4-07) — production wiring
+    /// inserts an `Arc<LspClient>` for each `Initialized` server so the
+    /// builtin LSP tool (`LSPTool`) can dispatch over the wire-locked
+    /// `tool_operations` surface.
+    clients: RwLock<HashMap<String, Arc<LspClient>>>,
     /// File → server-name routing cache (populated by future
     /// `ensure_server_for_file`).
     #[allow(dead_code)] // Plan 16 wires routing.
@@ -49,10 +57,48 @@ impl LspRegistry {
     pub fn new(transport: Arc<dyn LspTransport>) -> Self {
         Self {
             servers: RwLock::new(HashMap::new()),
+            clients: RwLock::new(HashMap::new()),
             file_route_cache: RwLock::new(HashMap::new()),
             transport,
             plugin_servers: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Cache an `Arc<LspClient>` for `name` (M4-07).
+    pub async fn register_client(&self, name: &str, client: Arc<LspClient>) {
+        self.clients.write().await.insert(name.into(), client);
+    }
+
+    /// Return the cached `Arc<LspClient>` for `name`, if any (M4-07).
+    pub async fn get_client(&self, name: &str) -> Option<Arc<LspClient>> {
+        self.clients.read().await.get(name).cloned()
+    }
+
+    /// Return the [`LspServerConfig`] for `name`, if any (M4-07).
+    pub async fn get_config(&self, name: &str) -> Option<LspServerConfig> {
+        let servers = self.servers.read().await;
+        match servers.get(name)? {
+            LspConnectionState::Disconnected { config }
+            | LspConnectionState::Starting { config, .. }
+            | LspConnectionState::Initialized { config, .. }
+            | LspConnectionState::Failed { config, .. }
+            | LspConnectionState::Stopped { config } => Some(config.clone()),
+        }
+    }
+
+    /// Test-only helper: register `config` (Disconnected state) and cache `client`.
+    #[doc(hidden)]
+    pub async fn register_test_client(
+        &self,
+        name: &str,
+        config: LspServerConfig,
+        client: Arc<LspClient>,
+    ) {
+        self.servers
+            .write()
+            .await
+            .insert(name.into(), LspConnectionState::Disconnected { config });
+        self.clients.write().await.insert(name.into(), client);
     }
 
     /// Register a server configuration in the `Disconnected` state.

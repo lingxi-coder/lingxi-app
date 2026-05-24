@@ -5,11 +5,12 @@
 use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_200_entries() {
+fn registry_is_exactly_213_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
-    // M4-06 added 6 (2 team tools × 3 lifecycle stages):
-    // 170 (post-M4-04) + 24 (M4-05) + 6 (M4-06) = 200.
-    assert_eq!(ALL_EVENT_NAMES.len(), 200);
+    // M4-06 added 6 (2 team tools × 3 lifecycle stages),
+    // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages):
+    // 170 (post-M4-04) + 24 (M4-05) + 6 (M4-06) + 13 (M4-07) = 213.
+    assert_eq!(ALL_EVENT_NAMES.len(), 213);
 }
 
 #[test]
@@ -42,21 +43,21 @@ fn category_ordering_preserved() {
     for n in &ALL_EVENT_NAMES[55..70] {
         assert!(n.starts_with("tengu_session_"), "session block: {n}");
     }
-    // M4-05 grew the tool block by +24 (67 → 91); M4-06 grew it by +6 (91 → 97),
-    // shifting downstream offsets by +6.
-    for n in &ALL_EVENT_NAMES[70..167] {
+    // M4-05 grew the tool block by +24 (67 → 91); M4-06 grew it by +6 (91 → 97);
+    // M4-07 grew it by +13 (97 → 110), shifting downstream offsets by +13.
+    for n in &ALL_EVENT_NAMES[70..180] {
         assert!(n.starts_with("tengu_tool_"), "tool block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[167..177] {
+    for n in &ALL_EVENT_NAMES[180..190] {
         assert!(n.starts_with("tengu_cost_"), "cost block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[177..185] {
+    for n in &ALL_EVENT_NAMES[190..198] {
         assert!(n.starts_with("tengu_oauth_"), "oauth block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[185..197] {
+    for n in &ALL_EVENT_NAMES[198..210] {
         assert!(n.starts_with("tengu_memory_"), "memory block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[197..200] {
+    for n in &ALL_EVENT_NAMES[210..213] {
         assert!(n.starts_with("tengu_settings_"), "settings block: {n}");
     }
 }

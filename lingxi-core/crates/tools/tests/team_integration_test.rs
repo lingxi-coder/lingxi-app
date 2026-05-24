@@ -19,7 +19,19 @@ use tempfile::TempDir;
 // `std::env::set_var` mutates process-wide state. The four tests in this file
 // each redirect HOME, so we serialize them through a global Mutex to prevent
 // parallel test threads from racing on $HOME.
+//
+// We use sync `#[test]` + a per-test `tokio::runtime::Runtime::block_on` so
+// the `MutexGuard` is held only on the outer sync thread (never across an
+// `.await`), keeping clippy's `await_holding_lock` lint happy.
 static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+fn run<F: std::future::Future<Output = ()>>(f: F) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(f);
+}
 
 struct PanickingFs;
 #[async_trait]
@@ -257,143 +269,148 @@ fn fresh_ctx() -> ToolUseContext {
     }
 }
 
-#[tokio::test]
-async fn create_then_delete_roundtrip() {
-    let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+#[test]
+fn create_then_delete_roundtrip() {
+    let _g = HOME_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = TempDir::new().unwrap();
     std::env::set_var("HOME", tmp.path());
-
     let ctx_b = make_ctx(tmp.path());
     let create = TeamCreateTool::new(ctx_b.clone());
     let delete = TeamDeleteTool::new(ctx_b);
+    run(async move {
+        let (tx1, _r1) = progress_channel();
+        let res = create
+            .call(json!({"team_name": "alpha"}), fresh_ctx(), tx1)
+            .await
+            .unwrap();
+        let dir = res.data["team_dir"].as_str().unwrap().to_string();
+        assert!(dir.ends_with(".claude/team-mem/alpha"), "got {dir}");
+        assert_eq!(res.data["created"], true);
+        assert!(tokio::fs::try_exists(&dir).await.unwrap());
 
-    let (tx1, _r1) = progress_channel();
-    let res = create
-        .call(json!({"team_name": "alpha"}), fresh_ctx(), tx1)
-        .await
-        .unwrap();
-    let dir = res.data["team_dir"].as_str().unwrap();
-    assert!(dir.ends_with(".claude/team-mem/alpha"), "got {dir}");
-    assert_eq!(res.data["created"], true);
-    assert!(tokio::fs::try_exists(dir).await.unwrap());
+        let cfg = res.data["config_path"].as_str().unwrap().to_string();
+        let bytes = tokio::fs::read(&cfg).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["team_name"], "alpha");
+        assert_eq!(parsed["schema_version"], 1);
 
-    let cfg = res.data["config_path"].as_str().unwrap();
-    let bytes = tokio::fs::read(cfg).await.unwrap();
-    let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(parsed["team_name"], "alpha");
-    assert_eq!(parsed["schema_version"], 1);
-
-    let (tx2, _r2) = progress_channel();
-    let res2 = delete
-        .call(
-            json!({"team_name": "alpha", "force": true}),
-            fresh_ctx(),
-            tx2,
-        )
-        .await
-        .unwrap();
-    assert_eq!(res2.data["deleted"], true);
-    assert!(res2.data["file_count_at_delete"].as_u64().unwrap() >= 1);
-    assert!(!tokio::fs::try_exists(dir).await.unwrap());
+        let (tx2, _r2) = progress_channel();
+        let res2 = delete
+            .call(
+                json!({"team_name": "alpha", "force": true}),
+                fresh_ctx(),
+                tx2,
+            )
+            .await
+            .unwrap();
+        assert_eq!(res2.data["deleted"], true);
+        assert!(res2.data["file_count_at_delete"].as_u64().unwrap() >= 1);
+        assert!(!tokio::fs::try_exists(&dir).await.unwrap());
+    });
 }
 
-#[tokio::test]
-async fn create_rejects_duplicate() {
-    let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+#[test]
+fn create_rejects_duplicate() {
+    let _g = HOME_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = TempDir::new().unwrap();
     std::env::set_var("HOME", tmp.path());
-
     let ctx_b = make_ctx(tmp.path());
     let create = TeamCreateTool::new(ctx_b);
+    run(async move {
+        let (tx1, _r1) = progress_channel();
+        create
+            .call(json!({"team_name": "beta"}), fresh_ctx(), tx1)
+            .await
+            .unwrap();
 
-    let (tx1, _r1) = progress_channel();
-    create
-        .call(json!({"team_name": "beta"}), fresh_ctx(), tx1)
-        .await
-        .unwrap();
-
-    let (tx2, _r2) = progress_channel();
-    let err = create
-        .call(json!({"team_name": "beta"}), fresh_ctx(), tx2)
-        .await
-        .unwrap_err();
-    match err {
-        ToolError::InvalidInput(s) => {
-            assert!(
-                s.starts_with("TeamCreate: team 'beta' already exists at"),
-                "got {s}"
-            );
+        let (tx2, _r2) = progress_channel();
+        let err = create
+            .call(json!({"team_name": "beta"}), fresh_ctx(), tx2)
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(s) => {
+                assert!(
+                    s.starts_with("TeamCreate: team 'beta' already exists at"),
+                    "got {s}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
         }
-        other => panic!("expected InvalidInput, got {other:?}"),
-    }
+    });
 }
 
-#[tokio::test]
-async fn delete_refuses_nonempty_without_force() {
-    let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+#[test]
+fn delete_refuses_nonempty_without_force() {
+    let _g = HOME_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = TempDir::new().unwrap();
     std::env::set_var("HOME", tmp.path());
-
-    let ctx_b = make_ctx(tmp.path());
-    let create = TeamCreateTool::new(ctx_b.clone());
-    let delete = TeamDeleteTool::new(ctx_b);
-
-    let (tx1, _r1) = progress_channel();
-    create
-        .call(json!({"team_name": "gamma"}), fresh_ctx(), tx1)
-        .await
-        .unwrap();
-
-    let (tx2, _r2) = progress_channel();
-    let err = delete
-        .call(json!({"team_name": "gamma"}), fresh_ctx(), tx2)
-        .await
-        .unwrap_err();
-    match err {
-        ToolError::InvalidInput(s) => {
-            assert!(
-                s.starts_with("TeamDelete: team 'gamma' directory is non-empty"),
-                "got {s}"
-            );
-            assert!(s.contains("pass force=true to delete anyway"), "got {s}");
-        }
-        other => panic!("expected InvalidInput, got {other:?}"),
-    }
-
-    // Directory must still be present after the refused call.
     let dir = tmp.path().join(".claude/team-mem/gamma");
-    assert!(tokio::fs::try_exists(&dir).await.unwrap());
-}
-
-#[tokio::test]
-async fn delete_with_force_clears_non_empty_dir() {
-    let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let tmp = TempDir::new().unwrap();
-    std::env::set_var("HOME", tmp.path());
-
     let ctx_b = make_ctx(tmp.path());
     let create = TeamCreateTool::new(ctx_b.clone());
     let delete = TeamDeleteTool::new(ctx_b);
+    run(async move {
+        let (tx1, _r1) = progress_channel();
+        create
+            .call(json!({"team_name": "gamma"}), fresh_ctx(), tx1)
+            .await
+            .unwrap();
 
-    let (tx1, _r1) = progress_channel();
-    create
-        .call(json!({"team_name": "delta"}), fresh_ctx(), tx1)
-        .await
-        .unwrap();
+        let (tx2, _r2) = progress_channel();
+        let err = delete
+            .call(json!({"team_name": "gamma"}), fresh_ctx(), tx2)
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(s) => {
+                assert!(
+                    s.starts_with("TeamDelete: team 'gamma' directory is non-empty"),
+                    "got {s}"
+                );
+                assert!(s.contains("pass force=true to delete anyway"), "got {s}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert!(tokio::fs::try_exists(&dir).await.unwrap());
+    });
+}
 
+#[test]
+fn delete_with_force_clears_non_empty_dir() {
+    let _g = HOME_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("HOME", tmp.path());
     let dir = tmp.path().join(".claude/team-mem/delta");
-    tokio::fs::write(dir.join("notes.md"), b"hi").await.unwrap();
+    let ctx_b = make_ctx(tmp.path());
+    let create = TeamCreateTool::new(ctx_b.clone());
+    let delete = TeamDeleteTool::new(ctx_b);
+    run(async move {
+        let (tx1, _r1) = progress_channel();
+        create
+            .call(json!({"team_name": "delta"}), fresh_ctx(), tx1)
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("notes.md"), b"hi").await.unwrap();
 
-    let (tx2, _r2) = progress_channel();
-    let res = delete
-        .call(
-            json!({"team_name": "delta", "force": true}),
-            fresh_ctx(),
-            tx2,
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.data["deleted"], true);
-    assert!(res.data["file_count_at_delete"].as_u64().unwrap() >= 2);
-    assert!(!tokio::fs::try_exists(&dir).await.unwrap());
+        let (tx2, _r2) = progress_channel();
+        let res = delete
+            .call(
+                json!({"team_name": "delta", "force": true}),
+                fresh_ctx(),
+                tx2,
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.data["deleted"], true);
+        assert!(res.data["file_count_at_delete"].as_u64().unwrap() >= 2);
+        assert!(!tokio::fs::try_exists(&dir).await.unwrap());
+    });
 }

@@ -73,7 +73,11 @@ fn telemetry_events_present_in_tengu_tool_names_array() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert_eq!(events.len(), 6, "M4-06 must lock exactly 6 telemetry events");
+    assert_eq!(
+        events.len(),
+        6,
+        "M4-06 must lock exactly 6 telemetry events"
+    );
     for name in &events {
         assert!(
             lingxi_telemetry::tengu::ALL_EVENT_NAMES.contains(name),
@@ -85,11 +89,11 @@ fn telemetry_events_present_in_tengu_tool_names_array() {
 
 #[test]
 fn telemetry_constant_symbols_match_event_strings() {
-    let fx = fx();
     use lingxi_telemetry::tengu::tool::{
         TEAM_CREATE_COMPLETED, TEAM_CREATE_FAILED, TEAM_CREATE_STARTED, TEAM_DELETE_COMPLETED,
         TEAM_DELETE_FAILED, TEAM_DELETE_STARTED,
     };
+    let fx = fx();
     let want = fx["telemetry_events"].as_array().unwrap();
     assert_eq!(want[0].as_str().unwrap(), TEAM_CREATE_STARTED);
     assert_eq!(want[1].as_str().unwrap(), TEAM_CREATE_COMPLETED);

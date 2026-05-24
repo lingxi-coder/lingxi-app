@@ -125,9 +125,7 @@ pub(crate) fn home_dir_or_internal() -> Result<PathBuf, ToolError> {
 /// `parity/fixtures/team_tools.json`).
 pub(crate) fn validate_team_name(name: &str) -> Result<(), ToolError> {
     if name.is_empty() {
-        return Err(ToolError::InvalidInput(
-            "Team: team_name is empty".into(),
-        ));
+        return Err(ToolError::InvalidInput("Team: team_name is empty".into()));
     }
     if name.len() > MAX_TEAM_NAME_LEN {
         return Err(ToolError::InvalidInput(format!(
@@ -166,9 +164,7 @@ fn now_unix_secs() -> u64 {
 }
 
 fn pii_team_name(team_name: &str) -> AnalyticsValue {
-    AnalyticsValue::String(
-        PiiTagged::assert_pii_tagged_column(team_name.to_string()).into_inner(),
-    )
+    AnalyticsValue::String(PiiTagged::assert_pii_tagged_column(team_name.to_string()).into_inner())
 }
 
 fn verified_str(s: &str) -> AnalyticsValue {
@@ -202,7 +198,10 @@ async fn emit_team_completed(
     let mut md: LogEventMetadata = HashMap::new();
     md.insert("invocation_id".into(), verified_str(invocation_id));
     md.insert("_PROTO_team_name".into(), pii_team_name(team_name));
-    md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+    md.insert(
+        "duration_ms".into(),
+        AnalyticsValue::Int(duration_ms as i64),
+    );
     for (k, v) in extras {
         md.insert((*k).into(), v.clone());
     }
@@ -221,7 +220,10 @@ async fn emit_team_failed(
     md.insert("invocation_id".into(), verified_str(invocation_id));
     md.insert("_PROTO_team_name".into(), pii_team_name(team_name));
     md.insert("error_kind".into(), verified_str(error_kind));
-    md.insert("duration_ms".into(), AnalyticsValue::Int(duration_ms as i64));
+    md.insert(
+        "duration_ms".into(),
+        AnalyticsValue::Int(duration_ms as i64),
+    );
     bus.log_event(event, md).await;
 }
 
@@ -533,10 +535,7 @@ impl Tool for TeamDeleteTool {
                 ));
             }
         };
-        let force = input
-            .get("force")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let force = input.get("force").and_then(Value::as_bool).unwrap_or(false);
 
         emit_team_started(
             &bus,

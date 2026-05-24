@@ -399,6 +399,100 @@ mod tests {
             .contains("appears to be binary (first 8KB contains NUL bytes)"));
     }
 
+    #[tokio::test]
+    async fn offset_1_returns_from_first_line() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("a.txt");
+        std::fs::write(&target, "line1\nline2\nline3\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "offset": 1, "limit": 1 }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["content"], "line1\n");
+    }
+
+    #[tokio::test]
+    async fn offset_2_skips_one_line() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("a.txt");
+        std::fs::write(&target, "line1\nline2\nline3\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 1 }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["content"], "line2\n");
+    }
+
+    #[tokio::test]
+    async fn limit_greater_than_remaining_returns_what_exists() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("a.txt");
+        std::fs::write(&target, "line1\nline2\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 50 }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["content"], "line2\n");
+    }
+
+    #[tokio::test]
+    async fn no_offset_no_limit_returns_full_content() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("a.txt");
+        std::fs::write(&target, "alpha\nbeta\ngamma\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["content"], "alpha\nbeta\ngamma\n");
+        assert_eq!(result.data["total_lines"], 3);
+    }
+
+    #[tokio::test]
+    async fn utf8_bom_stripped_on_read() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("bom.txt");
+        // BOM + "hello"
+        let mut content = vec![0xEF, 0xBB, 0xBF];
+        content.extend_from_slice(b"hello");
+        std::fs::write(&target, &content).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["content"], "hello");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn rejects_path_outside_trusted() {

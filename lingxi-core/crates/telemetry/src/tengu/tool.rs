@@ -119,7 +119,46 @@ pub const SLEEP_COMPLETED: &str = "tengu_tool_sleep_completed";
 /// `tengu_tool_sleep_failed` — `Sleep` invocation rejected/errored (M4-02).
 pub const SLEEP_FAILED: &str = "tengu_tool_sleep_failed";
 
-/// Order-locked array of all 52 names; consumed by `tengu::ALL_EVENT_NAMES`.
+// -- M4-04 Workflow tools (15 events) ------------------------------------------
+
+/// `tengu_tool_todo_write_started` — TodoWriteTool began updating the session.
+pub const TODO_WRITE_STARTED: &str = "tengu_tool_todo_write_started";
+/// `tengu_tool_todo_write_completed` — TodoWriteTool finished updating.
+pub const TODO_WRITE_COMPLETED: &str = "tengu_tool_todo_write_completed";
+/// `tengu_tool_todo_write_failed` — TodoWriteTool errored (validation, etc.).
+pub const TODO_WRITE_FAILED: &str = "tengu_tool_todo_write_failed";
+
+/// `tengu_tool_enter_plan_mode_started` — EnterPlanModeTool began (M4-04).
+pub const ENTER_PLAN_MODE_STARTED: &str = "tengu_tool_enter_plan_mode_started";
+/// `tengu_tool_enter_plan_mode_completed` — EnterPlanModeTool flipped the flag (M4-04).
+pub const ENTER_PLAN_MODE_COMPLETED: &str = "tengu_tool_enter_plan_mode_completed";
+/// `tengu_tool_enter_plan_mode_failed` — EnterPlanModeTool errored (already in mode) (M4-04).
+pub const ENTER_PLAN_MODE_FAILED: &str = "tengu_tool_enter_plan_mode_failed";
+
+/// `tengu_tool_exit_plan_mode_started` — ExitPlanModeTool began (M4-04).
+pub const EXIT_PLAN_MODE_STARTED: &str = "tengu_tool_exit_plan_mode_started";
+/// `tengu_tool_exit_plan_mode_completed` — ExitPlanModeTool flipped the flag (M4-04).
+pub const EXIT_PLAN_MODE_COMPLETED: &str = "tengu_tool_exit_plan_mode_completed";
+/// `tengu_tool_exit_plan_mode_failed` — ExitPlanModeTool errored (not in mode) (M4-04).
+pub const EXIT_PLAN_MODE_FAILED: &str = "tengu_tool_exit_plan_mode_failed";
+
+/// `tengu_tool_enter_worktree_started` — EnterWorktreeTool began (M4-04).
+pub const ENTER_WORKTREE_STARTED: &str = "tengu_tool_enter_worktree_started";
+/// `tengu_tool_enter_worktree_completed` — EnterWorktreeTool created a worktree (M4-04).
+pub const ENTER_WORKTREE_COMPLETED: &str = "tengu_tool_enter_worktree_completed";
+/// `tengu_tool_enter_worktree_failed` — EnterWorktreeTool errored (bad slug, git, IO) (M4-04).
+pub const ENTER_WORKTREE_FAILED: &str = "tengu_tool_enter_worktree_failed";
+
+/// `tengu_tool_exit_worktree_started` — ExitWorktreeTool began (M4-04).
+pub const EXIT_WORKTREE_STARTED: &str = "tengu_tool_exit_worktree_started";
+/// `tengu_tool_exit_worktree_completed` — ExitWorktreeTool removed a worktree (M4-04).
+pub const EXIT_WORKTREE_COMPLETED: &str = "tengu_tool_exit_worktree_completed";
+/// `tengu_tool_exit_worktree_failed` — ExitWorktreeTool errored (M4-04).
+pub const EXIT_WORKTREE_FAILED: &str = "tengu_tool_exit_worktree_failed";
+
+/// Order-locked array of all 67 names; consumed by `tengu::ALL_EVENT_NAMES`.
+/// M3-06 locked the first 40; M4-02 appended 9 (powershell/repl/sleep);
+/// M4-03 appended 3 (web_search); M4-04 appends 15 workflow events.
 pub(crate) const NAMES: &[&str] = &[
     STARTED,
     COMPLETED,
@@ -173,7 +212,100 @@ pub(crate) const NAMES: &[&str] = &[
     SLEEP_STARTED,
     SLEEP_COMPLETED,
     SLEEP_FAILED,
+    // M4-04 Workflow tools (15 events)
+    TODO_WRITE_STARTED,
+    TODO_WRITE_COMPLETED,
+    TODO_WRITE_FAILED,
+    ENTER_PLAN_MODE_STARTED,
+    ENTER_PLAN_MODE_COMPLETED,
+    ENTER_PLAN_MODE_FAILED,
+    EXIT_PLAN_MODE_STARTED,
+    EXIT_PLAN_MODE_COMPLETED,
+    EXIT_PLAN_MODE_FAILED,
+    ENTER_WORKTREE_STARTED,
+    ENTER_WORKTREE_COMPLETED,
+    ENTER_WORKTREE_FAILED,
+    EXIT_WORKTREE_STARTED,
+    EXIT_WORKTREE_COMPLETED,
+    EXIT_WORKTREE_FAILED,
 ];
+
+#[cfg(test)]
+mod m4_04_workflow_event_tests {
+    use super::*;
+
+    #[test]
+    fn todo_write_constants_are_locked() {
+        assert_eq!(TODO_WRITE_STARTED, "tengu_tool_todo_write_started");
+        assert_eq!(TODO_WRITE_COMPLETED, "tengu_tool_todo_write_completed");
+        assert_eq!(TODO_WRITE_FAILED, "tengu_tool_todo_write_failed");
+    }
+
+    #[test]
+    fn enter_plan_mode_constants_are_locked() {
+        assert_eq!(ENTER_PLAN_MODE_STARTED, "tengu_tool_enter_plan_mode_started");
+        assert_eq!(
+            ENTER_PLAN_MODE_COMPLETED,
+            "tengu_tool_enter_plan_mode_completed"
+        );
+        assert_eq!(ENTER_PLAN_MODE_FAILED, "tengu_tool_enter_plan_mode_failed");
+    }
+
+    #[test]
+    fn exit_plan_mode_constants_are_locked() {
+        assert_eq!(EXIT_PLAN_MODE_STARTED, "tengu_tool_exit_plan_mode_started");
+        assert_eq!(
+            EXIT_PLAN_MODE_COMPLETED,
+            "tengu_tool_exit_plan_mode_completed"
+        );
+        assert_eq!(EXIT_PLAN_MODE_FAILED, "tengu_tool_exit_plan_mode_failed");
+    }
+
+    #[test]
+    fn enter_worktree_constants_are_locked() {
+        assert_eq!(ENTER_WORKTREE_STARTED, "tengu_tool_enter_worktree_started");
+        assert_eq!(
+            ENTER_WORKTREE_COMPLETED,
+            "tengu_tool_enter_worktree_completed"
+        );
+        assert_eq!(ENTER_WORKTREE_FAILED, "tengu_tool_enter_worktree_failed");
+    }
+
+    #[test]
+    fn exit_worktree_constants_are_locked() {
+        assert_eq!(EXIT_WORKTREE_STARTED, "tengu_tool_exit_worktree_started");
+        assert_eq!(EXIT_WORKTREE_COMPLETED, "tengu_tool_exit_worktree_completed");
+        assert_eq!(EXIT_WORKTREE_FAILED, "tengu_tool_exit_worktree_failed");
+    }
+
+    #[test]
+    fn names_array_contains_all_15_workflow_events() {
+        let workflow = [
+            TODO_WRITE_STARTED,
+            TODO_WRITE_COMPLETED,
+            TODO_WRITE_FAILED,
+            ENTER_PLAN_MODE_STARTED,
+            ENTER_PLAN_MODE_COMPLETED,
+            ENTER_PLAN_MODE_FAILED,
+            EXIT_PLAN_MODE_STARTED,
+            EXIT_PLAN_MODE_COMPLETED,
+            EXIT_PLAN_MODE_FAILED,
+            ENTER_WORKTREE_STARTED,
+            ENTER_WORKTREE_COMPLETED,
+            ENTER_WORKTREE_FAILED,
+            EXIT_WORKTREE_STARTED,
+            EXIT_WORKTREE_COMPLETED,
+            EXIT_WORKTREE_FAILED,
+        ];
+        for name in workflow {
+            assert!(
+                NAMES.contains(&name),
+                "NAMES array missing workflow event: {name}"
+            );
+        }
+        assert_eq!(NAMES.len(), 67, "M3-06 40 + M4-02 9 + M4-03 3 + M4-04 15 = 67");
+    }
+}
 
 // -- Shared enums -------------------------------------------------------------
 

@@ -190,12 +190,10 @@ async fn emit_completed(
 /// share one mapping.
 fn registry_err_to_tool_err(prefix: &str, e: TaskRegistryError) -> ToolError {
     match e {
-        TaskRegistryError::NotFound(id) => ToolError::InvalidInput(format!(
-            "{prefix}: task not found: {id}"
-        )),
-        TaskRegistryError::InvalidInput(s) => {
-            ToolError::InvalidInput(format!("{prefix}: {s}"))
+        TaskRegistryError::NotFound(id) => {
+            ToolError::InvalidInput(format!("{prefix}: task not found: {id}"))
         }
+        TaskRegistryError::InvalidInput(s) => ToolError::InvalidInput(format!("{prefix}: {s}")),
         TaskRegistryError::Internal(s) => ToolError::Internal(format!("{prefix}: {s}")),
     }
 }

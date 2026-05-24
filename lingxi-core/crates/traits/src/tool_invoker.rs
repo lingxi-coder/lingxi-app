@@ -11,6 +11,7 @@
 use async_trait::async_trait;
 use lingxi_protocol::AgentId;
 use serde_json::Value;
+use std::any::Any;
 use thiserror::Error;
 
 /// Per-call invocation context handed to a [`ToolInvoker`].
@@ -44,7 +45,7 @@ pub enum ToolInvokerError {
 /// Concrete impls live in `lingxi-tools` (production wrapper around
 /// `ToolRegistry`) and in test fixtures (recording mock).
 #[async_trait]
-pub trait ToolInvoker: Send + Sync {
+pub trait ToolInvoker: Send + Sync + Any {
     /// Invoke the tool named `name` with the supplied JSON `input`.
     async fn invoke(
         &self,
@@ -52,6 +53,10 @@ pub trait ToolInvoker: Send + Sync {
         input: Value,
         ctx: SubagentInvocationContext,
     ) -> Result<Value, ToolInvokerError>;
+
+    /// Cast to `&dyn Any` for downcast-based test introspection.
+    /// Default impl works for all `Sized + 'static` implementors.
+    fn as_any(&self) -> &dyn Any;
 }
 
 #[cfg(test)]

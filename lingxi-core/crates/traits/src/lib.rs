@@ -34,7 +34,9 @@ pub use effect_handler::EffectHandler;
 pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
 pub use http::{HttpError, HttpTransport};
 pub use lsp::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
-pub use mailbox::{MailboxError as RouterMailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
+pub use mailbox::{
+    MailboxError as RouterMailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
+};
 pub use mcp::*;
 pub use process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
@@ -44,8 +46,8 @@ pub use sandbox::{
 };
 pub use secure_storage::{SecureStorage, SecureStorageBackend, SecureStorageError};
 pub use subagent_spawn::{
-    SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest,
-    SubagentSpawner, SubagentUsage,
+    SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
+    SubagentUsage,
 };
 pub use swarm::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 pub use task_registry::{

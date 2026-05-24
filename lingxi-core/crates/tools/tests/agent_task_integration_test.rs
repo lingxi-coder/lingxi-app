@@ -55,7 +55,9 @@ mod common {
             agent_id: None,
             content_replacement_state: None,
             session: None,
-            subagent_registry: None,
+            // AgentTool requires the parent registry; wire an empty one
+            // for integ tests so the recursion-lock path stays exercised.
+            subagent_registry: Some(Arc::new(lingxi_tools::ToolRegistry::new())),
         }
     }
 
@@ -258,10 +260,22 @@ mod common {
             provider: Arc::new(AnthropicProvider::new("test", None)),
             default_model: "claude-sonnet-4-20250514".into(),
             worktree: Arc::new(StubWt),
-            subagent_spawner: None,
-            task_registry: None,
-            mailbox_router: None,
-            budget_enforcer: None,
+            subagent_spawner: Some(
+                lingxi_tools::builtin::agent_test_support::arc_mock_spawner()
+                    as Arc<dyn lingxi_traits::subagent_spawn::SubagentSpawner>,
+            ),
+            task_registry: Some(
+                lingxi_tools::builtin::agent_test_support::arc_mock_task_registry()
+                    as Arc<dyn lingxi_traits::task_registry::TaskRegistryHandle>,
+            ),
+            mailbox_router: Some(
+                lingxi_tools::builtin::agent_test_support::arc_mock_mailbox()
+                    as Arc<dyn lingxi_traits::mailbox::MailboxRouterHandle>,
+            ),
+            budget_enforcer: Some(lingxi_tools::builtin::agent_test_support::arc_mock_budget(
+                u64::MAX,
+            )
+                as Arc<dyn lingxi_traits::budget::BudgetEnforcerHandle>),
         }
     }
 }
@@ -412,9 +426,26 @@ async fn task_list_empty_returns_empty_array() {
 async fn task_stop_returns_killed_status() {
     let bus = Arc::new(AnalyticsBus::new());
     let ctx = test_builtin_ctx(bus);
+    // Create first so the mock registry has a record to kill.
+    let create = TaskCreateTool::new(ctx.clone());
+    let rec = create
+        .call(
+            serde_json::json!({ "task_type": "local_bash", "description": "x" }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+    let id = rec.data["task_id"].as_str().unwrap().to_string();
     let tool = TaskStopTool::new(ctx);
-    let input = serde_json::json!({ "task_id": "b12345678" });
-    let result = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
+    let result = tool
+        .call(
+            serde_json::json!({ "task_id": id }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
     assert_eq!(result.data["status"], "killed");
 }
 
@@ -422,9 +453,25 @@ async fn task_stop_returns_killed_status() {
 async fn task_update_running_transition() {
     let bus = Arc::new(AnalyticsBus::new());
     let ctx = test_builtin_ctx(bus);
+    let create = TaskCreateTool::new(ctx.clone());
+    let rec = create
+        .call(
+            serde_json::json!({ "task_type": "local_bash", "description": "x" }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+    let id = rec.data["task_id"].as_str().unwrap().to_string();
     let tool = TaskUpdateTool::new(ctx);
-    let input = serde_json::json!({ "task_id": "b12345678", "status": "running" });
-    let result = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
+    let result = tool
+        .call(
+            serde_json::json!({ "task_id": id, "status": "running" }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
     assert_eq!(result.data["status"], "running");
 }
 
@@ -432,9 +479,25 @@ async fn task_update_running_transition() {
 async fn task_output_returns_shape_correct_envelope() {
     let bus = Arc::new(AnalyticsBus::new());
     let ctx = test_builtin_ctx(bus);
+    let create = TaskCreateTool::new(ctx.clone());
+    let rec = create
+        .call(
+            serde_json::json!({ "task_type": "local_bash", "description": "x" }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+    let id = rec.data["task_id"].as_str().unwrap().to_string();
     let tool = TaskOutputTool::new(ctx);
-    let input = serde_json::json!({ "task_id": "b12345678" });
-    let result = tool.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
+    let result = tool
+        .call(
+            serde_json::json!({ "task_id": id }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
     assert!(result.data["content"].is_string());
     assert!(result.data["total_lines"].is_number());
     assert!(result.data["truncated"].is_boolean());

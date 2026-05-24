@@ -63,7 +63,7 @@ pub enum TaskRegistryError {
     /// No task with that id exists.
     #[error("Task: not found: {0}")]
     NotFound(String),
-    /// The input is malformed (unknown task_type, malformed id, bad status).
+    /// The input is malformed (unknown `task_type`, malformed id, bad status).
     #[error("Task: invalid input: {0}")]
     InvalidInput(String),
     /// Any other internal failure.
@@ -93,8 +93,7 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// Force a specific status string (covers `TaskUpdate` for variants whose
     /// status field is exposed in the M1 registry surface). Wired directly to
     /// the concrete `TaskRegistry::set_status` method.
-    async fn set_status(&self, id: &str, status: &str)
-        -> Result<TaskRecord, TaskRegistryError>;
+    async fn set_status(&self, id: &str, status: &str) -> Result<TaskRecord, TaskRegistryError>;
 
     /// Kill the task (cancels any background handle, marks status `killed`).
     async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError>;

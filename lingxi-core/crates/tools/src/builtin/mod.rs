@@ -45,6 +45,11 @@ pub mod worktree;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+/// M4-05 wiring mocks. Public so `tests/agent_task_integration_test.rs`
+/// (an external integration crate) can pull in the same fixtures the
+/// in-crate unit tests use.
+pub mod agent_test_support;
+
 pub use agent::AgentTool;
 pub use bash::BashTool;
 pub use file_edit::FileEditTool;

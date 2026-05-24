@@ -87,9 +87,7 @@ fn task_err_to_registry_err(e: TaskError) -> TaskRegistryError {
     match e {
         TaskError::NotFound(id) => TaskRegistryError::NotFound(id),
         TaskError::UnknownType => TaskRegistryError::InvalidInput("unknown task type".into()),
-        TaskError::TerminatedTask => {
-            TaskRegistryError::Internal("task already terminated".into())
-        }
+        TaskError::TerminatedTask => TaskRegistryError::Internal("task already terminated".into()),
         TaskError::Unsupported => TaskRegistryError::Internal("unsupported".into()),
         TaskError::Io(s) => TaskRegistryError::Internal(format!("io: {s}")),
         TaskError::Internal(s) => TaskRegistryError::Internal(s),
@@ -139,7 +137,11 @@ impl TaskRegistryHandle for TaskRegistry {
     async fn create(&self, input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
         let task_type = task_type_from_wire(&input.task_type)?;
         let id = self
-            .create(task_type, placeholder_input(task_type), input.description.clone())
+            .create(
+                task_type,
+                placeholder_input(task_type),
+                input.description.clone(),
+            )
             .await
             .map_err(task_err_to_registry_err)?;
         Ok(TaskRecord {
@@ -186,11 +188,7 @@ impl TaskRegistryHandle for TaskRegistry {
         }
     }
 
-    async fn set_status(
-        &self,
-        id: &str,
-        status: &str,
-    ) -> Result<TaskRecord, TaskRegistryError> {
+    async fn set_status(&self, id: &str, status: &str) -> Result<TaskRecord, TaskRegistryError> {
         let s = status_from_wire(status)?;
         let state = self
             .set_status(id, s)
@@ -266,10 +264,8 @@ mod tests {
         async fn watch(
             &self,
             _: &str,
-        ) -> Result<
-            std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>,
-            FsError,
-        > {
+        ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>, FsError>
+        {
             Err(FsError::Io("not supported".into()))
         }
         async fn append_file(&self, _: &str, _: &str) -> Result<(), FsError> {
@@ -298,7 +294,7 @@ mod tests {
         }
     }
 
-    async fn make_registry() -> (tempfile::TempDir, Arc<TaskRegistry>) {
+    fn make_registry() -> (tempfile::TempDir, Arc<TaskRegistry>) {
         let dir = tempdir().unwrap();
         let fs: Arc<dyn FileSystem> = Arc::new(NoopFs);
         let runtime = Arc::new(MockRuntimeSpawner::default());
@@ -306,14 +302,14 @@ mod tests {
             PathBuf::from(dir.path()),
             fs.clone(),
         ));
-        let reg = Arc::new(TaskRegistry::new(runtime, fs, out_mgr));
-        (dir, reg)
+        let registry = Arc::new(TaskRegistry::new(runtime, fs, out_mgr));
+        (dir, registry)
     }
 
     #[tokio::test]
     async fn create_via_handle_returns_record_with_pending_status() {
-        let (_d, reg) = make_registry().await;
-        let h: &dyn TaskRegistryHandle = reg.as_ref();
+        let (_d, registry) = make_registry();
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
         let rec = h
             .create(TaskCreateInput {
                 task_type: "local_bash".into(),
@@ -328,8 +324,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_filters_by_status() {
-        let (_d, reg) = make_registry().await;
-        let h: &dyn TaskRegistryHandle = reg.as_ref();
+        let (_d, registry) = make_registry();
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
         h.create(TaskCreateInput {
             task_type: "local_bash".into(),
             description: "a".into(),
@@ -354,8 +350,8 @@ mod tests {
 
     #[tokio::test]
     async fn set_status_via_handle_transitions() {
-        let (_d, reg) = make_registry().await;
-        let h: &dyn TaskRegistryHandle = reg.as_ref();
+        let (_d, registry) = make_registry();
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
         let rec = h
             .create(TaskCreateInput {
                 task_type: "local_bash".into(),
@@ -369,8 +365,8 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_task_type_is_invalid_input() {
-        let (_d, reg) = make_registry().await;
-        let h: &dyn TaskRegistryHandle = reg.as_ref();
+        let (_d, registry) = make_registry();
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
         let err = h
             .create(TaskCreateInput {
                 task_type: "bogus".into(),
@@ -383,8 +379,8 @@ mod tests {
 
     #[tokio::test]
     async fn output_returns_empty_for_freshly_created_task() {
-        let (_d, reg) = make_registry().await;
-        let h: &dyn TaskRegistryHandle = reg.as_ref();
+        let (_d, registry) = make_registry();
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
         let rec = h
             .create(TaskCreateInput {
                 task_type: "local_bash".into(),

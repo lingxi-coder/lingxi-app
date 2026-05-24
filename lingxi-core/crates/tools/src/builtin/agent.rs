@@ -27,9 +27,7 @@ use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use lingxi_telemetry::tengu::tool::{AGENT_COMPLETED_M4_05, AGENT_FAILED, AGENT_STARTED};
 use lingxi_telemetry::AnalyticsBus;
 use lingxi_traits::budget::BudgetError;
-use lingxi_traits::subagent_spawn::{
-    SubagentInheritance, SubagentResult, SubagentSpawnRequest,
-};
+use lingxi_traits::subagent_spawn::{SubagentInheritance, SubagentResult, SubagentSpawnRequest};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -320,9 +318,7 @@ impl Tool for AgentTool {
 
         // 5. M3-05 byte-locked budget gate. `check_and_charge(0)` re-runs the
         // pre-call gate; on Exceeded we surface the locked denial string.
-        if let Err(BudgetError::Exceeded { current_nano_usd }) =
-            budget.check_and_charge(0).await
-        {
+        if let Err(BudgetError::Exceeded { current_nano_usd }) = budget.check_and_charge(0).await {
             Self::emit_failed(
                 &bus,
                 &invocation_id,
@@ -387,9 +383,7 @@ impl Tool for AgentTool {
             }
             Err(e) => {
                 Self::emit_failed(&bus, &invocation_id, "spawn_error", duration_ms).await;
-                Err(ToolError::Internal(format!(
-                    "Agent: spawner failed: {e}"
-                )))
+                Err(ToolError::Internal(format!("Agent: spawner failed: {e}")))
             }
         }
     }
@@ -398,6 +392,199 @@ impl Tool for AgentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtin::agent_test_support::{
+        arc_mock_budget, arc_mock_mailbox, arc_mock_spawner, arc_mock_task_registry,
+        MockBudgetEnforcerHandle, MockSubagentSpawner,
+    };
+    use crate::builtin::test_support::{ctx_for_file_tools, fresh_tx, make_dummy_fs};
+    use crate::context::{ToolUseContext, ToolUseOptions};
+    use crate::registry::ToolRegistry;
+    use lingxi_telemetry::AnalyticsBus;
+    use lingxi_traits::budget::BudgetEnforcerHandle;
+    use lingxi_traits::subagent_spawn::SubagentSpawner;
+    use std::path::PathBuf;
+
+    /// Build a `BuiltinToolContext` wired with all four M4-05 mocks.
+    fn wired_ctx(
+        spawner: Arc<MockSubagentSpawner>,
+        registry: Arc<crate::builtin::agent_test_support::MockTaskRegistryHandle>,
+        mailbox: Arc<crate::builtin::agent_test_support::MockMailboxRouterHandle>,
+        budget: Arc<MockBudgetEnforcerHandle>,
+    ) -> BuiltinToolContext {
+        let mut bctx = ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![PathBuf::from("/tmp")],
+        );
+        bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
+        bctx.task_registry =
+            Some(registry as Arc<dyn lingxi_traits::task_registry::TaskRegistryHandle>);
+        bctx.mailbox_router = Some(mailbox as Arc<dyn lingxi_traits::mailbox::MailboxRouterHandle>);
+        bctx.budget_enforcer = Some(budget.clone() as Arc<dyn BudgetEnforcerHandle>);
+        bctx
+    }
+
+    fn fresh_ctx_with_registry(registry: Arc<ToolRegistry>) -> ToolUseContext {
+        ToolUseContext {
+            options: ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model: "test".into(),
+                max_budget_nano_usd: None,
+                mcp_clients: vec![],
+                is_non_interactive_session: false,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+            },
+            messages: vec![],
+            tool_use_id: None,
+            agent_id: None,
+            content_replacement_state: None,
+            session: None,
+            subagent_registry: Some(registry),
+        }
+    }
+
+    // =====================================================================
+    // CRITICAL TEST 1 — recursion-lock: AgentTool passes parent's
+    // Arc<ToolRegistry> verbatim into the child via SubagentInheritance.
+    // The mock spawner captures the inheritance bundle so we can read back
+    // the Arc<dyn ToolInvoker> and pull the inner Arc<ToolRegistry> out.
+    // =====================================================================
+    #[tokio::test]
+    async fn recursion_lock_child_inherits_parent_tool_registry_arc() {
+        let parent_registry = Arc::new(ToolRegistry::new());
+        let spawner = arc_mock_spawner();
+        let budget = arc_mock_budget(u64::MAX);
+        let bctx = wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            budget,
+        );
+
+        let tool = AgentTool::new(bctx);
+        let ctx = fresh_ctx_with_registry(parent_registry.clone());
+        let input = serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "hi"
+        });
+        tool.call(input, ctx, fresh_tx())
+            .await
+            .expect("spawner returns Completed by default");
+
+        let invocations = spawner.invocations();
+        assert_eq!(invocations.len(), 1, "exactly one spawn call");
+        let captured_invoker = &invocations[0].inherit.tool_invoker;
+        // Downcast to RegistryToolInvoker via Arc::downcast on the concrete
+        // type. Since we can't downcast Arc<dyn>, we instead introspect
+        // through the public accessor on our concrete wrapper. The
+        // production wrapper preserves the Arc<ToolRegistry> verbatim, so
+        // we reach for it via the test-only seam.
+        // SAFETY: the mock spawner returns the exact Arc the production
+        // AgentTool::call passed; we wrap parent_registry in a fresh
+        // RegistryToolInvoker on the call path, so the trait-object pointer
+        // is unique to this invocation. We compare the inner Arcs.
+        let captured = (**captured_invoker)
+            .as_any()
+            .downcast_ref::<crate::tool_invoker_impl::RegistryToolInvoker>()
+            .map(|i| i.registry_arc().clone());
+        assert!(
+            captured.is_some(),
+            "captured invoker must be a RegistryToolInvoker"
+        );
+        assert!(
+            Arc::ptr_eq(&parent_registry, captured.as_ref().unwrap()),
+            "recursion lock: child must inherit parent's Arc<ToolRegistry> verbatim"
+        );
+    }
+
+    // =====================================================================
+    // CRITICAL TEST 2 — budget inheritance: AgentTool passes parent's
+    // Arc<dyn BudgetEnforcerHandle> verbatim into the child via
+    // SubagentInheritance. Arc::ptr_eq on the trait-object Arc holds.
+    // =====================================================================
+    #[tokio::test]
+    async fn budget_inheritance_child_inherits_parent_budget_arc() {
+        let parent_budget: Arc<dyn BudgetEnforcerHandle> =
+            Arc::new(MockBudgetEnforcerHandle::new(u64::MAX));
+        let spawner = arc_mock_spawner();
+
+        let mut bctx = ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![PathBuf::from("/tmp")],
+        );
+        bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
+        bctx.task_registry =
+            Some(arc_mock_task_registry()
+                as Arc<dyn lingxi_traits::task_registry::TaskRegistryHandle>);
+        bctx.mailbox_router =
+            Some(arc_mock_mailbox() as Arc<dyn lingxi_traits::mailbox::MailboxRouterHandle>);
+        bctx.budget_enforcer = Some(parent_budget.clone());
+
+        let tool = AgentTool::new(bctx);
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let input = serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "hi"
+        });
+        tool.call(input, ctx, fresh_tx()).await.unwrap();
+
+        let invocations = spawner.invocations();
+        assert_eq!(invocations.len(), 1);
+        let captured = &invocations[0].inherit.budget;
+        assert!(
+            Arc::ptr_eq(&parent_budget, captured),
+            "budget inheritance: child must inherit parent's Arc<dyn BudgetEnforcerHandle> verbatim"
+        );
+    }
+
+    // =====================================================================
+    // M3-05 byte-locked denial format flows through Budget -> AgentTool.
+    // =====================================================================
+    #[tokio::test]
+    async fn budget_exceeded_yields_m3_05_byte_locked_denial_string() {
+        let budget = Arc::new(MockBudgetEnforcerHandle::new(1_500_000_000)); // $1.50 cap
+        budget.set_total(2_000_000_000); // $2.00 already spent
+
+        let spawner = arc_mock_spawner();
+        let mut bctx = ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![PathBuf::from("/tmp")],
+        );
+        bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
+        bctx.task_registry =
+            Some(arc_mock_task_registry()
+                as Arc<dyn lingxi_traits::task_registry::TaskRegistryHandle>);
+        bctx.mailbox_router =
+            Some(arc_mock_mailbox() as Arc<dyn lingxi_traits::mailbox::MailboxRouterHandle>);
+        bctx.budget_enforcer = Some(budget.clone() as Arc<dyn BudgetEnforcerHandle>);
+
+        let tool = AgentTool::new(bctx);
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let input = serde_json::json!({
+            "subagent_type": "Plan",
+            "prompt": "do work"
+        });
+        let err = tool
+            .call(input, ctx, fresh_tx())
+            .await
+            .expect_err("budget gate must trip and surface denial");
+        let msg = format!("{err}");
+        // M3-05 byte-locked: "Budget exceeded ($X.YZ); stopped."
+        assert!(
+            msg.contains(SUBAGENT_BUDGET_DENIED_PREFIX),
+            "denial msg must start with M3-05 byte-locked prefix: {msg}"
+        );
+        assert!(msg.contains("); stopped."));
+        // Spawner must NOT have been called.
+        assert!(
+            spawner.invocations().is_empty(),
+            "spawner must not be invoked once budget gate trips"
+        );
+    }
 
     #[test]
     fn agent_tool_name_locked() {

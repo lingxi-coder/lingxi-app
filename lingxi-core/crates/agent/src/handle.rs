@@ -45,10 +45,7 @@ impl PoolSubagentSpawner {
         Self { pool }
     }
 
-    fn make_subagent_context(
-        subagent_type: &str,
-        prompt: &str,
-    ) -> SubagentContext {
+    fn make_subagent_context(subagent_type: &str, prompt: &str) -> SubagentContext {
         SubagentContext {
             agent_id: AgentId::new(),
             parent_agent_id: None,
@@ -147,9 +144,7 @@ mod tests {
     use async_trait::async_trait;
     use lingxi_test_harness::mocks::MockRuntimeSpawner;
     use lingxi_traits::budget::{BudgetEnforcerHandle, BudgetError};
-    use lingxi_traits::tool_invoker::{
-        SubagentInvocationContext, ToolInvoker, ToolInvokerError,
-    };
+    use lingxi_traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
     use serde_json::Value;
     use std::sync::Arc;
 
@@ -164,6 +159,9 @@ mod tests {
             _: SubagentInvocationContext,
         ) -> Result<Value, ToolInvokerError> {
             Ok(Value::Null)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 

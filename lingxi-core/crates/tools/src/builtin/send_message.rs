@@ -234,8 +234,7 @@ impl Tool for SendMessageTool {
                 )
                 .await;
                 return Err(ToolError::Internal(
-                    "SendMessageTool: MailboxRouterHandle not wired into BuiltinToolContext"
-                        .into(),
+                    "SendMessageTool: MailboxRouterHandle not wired into BuiltinToolContext".into(),
                 ));
             }
         };
@@ -243,10 +242,10 @@ impl Tool for SendMessageTool {
         // Resolve the parent agent id (sender). When `ctx.agent_id` is
         // absent we synthesise a nil id — the production agent always has
         // one, so this only happens in narrowly scoped tests.
-        let from_str = ctx
-            .agent_id
-            .map(|a| a.as_uuid().to_string())
-            .unwrap_or_else(|| lingxi_protocol::AgentId::nil().as_uuid().to_string());
+        let from_str = ctx.agent_id.map_or_else(
+            || lingxi_protocol::AgentId::nil().as_uuid().to_string(),
+            |a| a.as_uuid().to_string(),
+        );
 
         let mailbox_msg = MailboxMessage {
             message_id: invocation_id.clone(),
@@ -257,12 +256,8 @@ impl Tool for SendMessageTool {
         match router.route(&from_str, &to_str, mailbox_msg).await {
             Ok(ack) => {
                 debug_assert_eq!(ack.claim_window_secs, SEND_MESSAGE_CLAIM_WINDOW.as_secs());
-                Self::emit_completed(
-                    &bus,
-                    &invocation_id,
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
+                Self::emit_completed(&bus, &invocation_id, started.elapsed().as_millis() as u64)
+                    .await;
                 Ok(ToolCallResult {
                     data: json!({
                         "to_agent_id": to_str,

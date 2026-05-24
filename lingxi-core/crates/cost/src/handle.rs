@@ -107,7 +107,7 @@ mod tests {
             BudgetError::Exceeded { current_nano_usd } => {
                 assert!(current_nano_usd > 1_000_000_000);
             }
-            other => panic!("expected Exceeded, got {other:?}"),
+            BudgetError::Internal(s) => panic!("expected Exceeded, got Internal({s})"),
         }
     }
 

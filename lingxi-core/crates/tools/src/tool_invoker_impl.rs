@@ -8,9 +8,7 @@
 
 use crate::registry::ToolRegistry;
 use async_trait::async_trait;
-use lingxi_traits::tool_invoker::{
-    SubagentInvocationContext, ToolInvoker, ToolInvokerError,
-};
+use lingxi_traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -54,6 +52,10 @@ impl ToolInvoker for RegistryToolInvoker {
             .find_by_name(name)
             .ok_or_else(|| ToolInvokerError::NotFound(name.to_string()))?;
         Ok(Value::Null)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

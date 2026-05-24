@@ -50,7 +50,7 @@ pub struct BuiltinToolContext {
 /// remains buildable between tasks. Task 17 verifies that all 6 are wired.
 pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolContext) {
     registry.register_builtin(Arc::new(FileReadTool::new(ctx.clone())));
-    // Wired in Task 7:  registry.register_builtin(Arc::new(FileWriteTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(FileWriteTool::new(ctx.clone())));
     // Wired in Task 9:  registry.register_builtin(Arc::new(FileEditTool::new(ctx.clone())));
     // Wired in Task 11: registry.register_builtin(Arc::new(NotebookEditTool::new(ctx.clone())));
     // Wired in Task 13: registry.register_builtin(Arc::new(GlobTool::new(ctx.clone())));

@@ -1,0 +1,58 @@
+{
+  "_source": "LingXi-internal feature — no upstream claude-code/src/tools/ counterpart. Locks derived from docs/superpowers/specs/2026-05-24-m4-tools-implementation-design.md §7 lines 501-507 (M4-06 Team) + docs/superpowers/specs/2026-05-23-m3-engine-completion-design.md (M3-02 team-mem path).",
+  "_note": "M4-06 byte-aligned literals for 2 team-mem admin tools. Divergences documented inline: (a) safety check on Delete implemented as HARD REFUSAL (force opt-in) rather than soft warning (M4-04 destructive precedent). (b) admin create/delete does NOT consult settings.team_memory.enabled (the M3-02 watcher gate); team-mem provisioning is an admin action. (c) config.json body uses LingXi schema_version:1 — no upstream parity. (d) Tool event suffix `_completed` (M3-06 lock; spec shorthand says `_succeeded`). (e) ToolError::ValidationError variant does not exist; all semantic refusals surface as ToolError::InvalidInput, matching M4-05 task.rs precedent. (f) lingxi-memory dep would form a cycle (via lingxi-sidequery), so lingxi-tools mirrors the M3-02 TEAM_MEM_SUBDIR literal locally; the wire_identifiers.team_mem_subdir field asserts byte-for-byte equality with both.",
+
+  "tool_names": {
+    "team_create": "TeamCreate",
+    "team_delete": "TeamDelete"
+  },
+
+  "wire_identifiers": {
+    "team_mem_subdir": "team-mem",
+    "team_config_filename": "config.json",
+    "default_team_name": "default",
+    "max_team_name_len": 64,
+    "team_name_pattern_desc": "[a-zA-Z0-9_-]+"
+  },
+
+  "team_dir_template": "~/.claude/team-mem/<team_name>/",
+  "team_config_template": "~/.claude/team-mem/<team_name>/config.json",
+
+  "telemetry_events": [
+    "tengu_tool_team_create_started",
+    "tengu_tool_team_create_completed",
+    "tengu_tool_team_create_failed",
+    "tengu_tool_team_delete_started",
+    "tengu_tool_team_delete_completed",
+    "tengu_tool_team_delete_failed"
+  ],
+
+  "error_string_formats": {
+    "empty_team_name": "Team: team_name is empty",
+    "too_long_team_name": "Team: team_name '{team_name}' exceeds max length 64",
+    "slash_or_traversal": "Team: team_name '{team_name}' contains slashes or path traversal",
+    "invalid_chars": "Team: team_name '{team_name}' contains invalid characters (allowed: [a-zA-Z0-9_-]+)",
+    "create_already_exists": "TeamCreate: team '{team_name}' already exists at {team_dir}",
+    "delete_not_found": "TeamDelete: team '{team_name}' does not exist at {team_dir}",
+    "delete_non_empty_no_force": "TeamDelete: team '{team_name}' directory is non-empty ({file_count} files); pass force=true to delete anyway",
+    "io_error_template": "Team: io error at {path}: {err}",
+    "missing_team_name_field_create": "TeamCreate: missing or non-string team_name",
+    "missing_team_name_field_delete": "TeamDelete: missing or non-string team_name"
+  },
+
+  "config_json_body_shape": {
+    "team_name": "<string>",
+    "schema_version": 1,
+    "created_at_unix_secs": "<u64>"
+  },
+
+  "constants_lock": {
+    "TEAM_CREATE_TOOL_NAME": "TeamCreate",
+    "TEAM_DELETE_TOOL_NAME": "TeamDelete",
+    "DEFAULT_TEAM_NAME": "default",
+    "TEAM_CONFIG_FILENAME": "config.json",
+    "MAX_TEAM_NAME_LEN": 64,
+    "TEAM_NAME_PATTERN_DESC": "[a-zA-Z0-9_-]+",
+    "M3_02_TEAM_MEM_SUBDIR": "team-mem"
+  }
+}

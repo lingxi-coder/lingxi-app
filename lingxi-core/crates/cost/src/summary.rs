@@ -1,40 +1,133 @@
 //! `/cost` data API: `CostTracker::summary() -> CostSummary { session, day, month, by_model }`.
 //!
 //! M5 will route this through the `/cost` slash command; M3-05 only provides
-//! the data shape and the read-side aggregation. See spec §8 M3-05 phase 5
-//! (line 899).
+//! the data shape and the read-side aggregation.
+//!
+//! See spec §1 non-goals (line 68) — M3-05 provides the data stub; the actual
+//! slash-command UI ships in M5.
+//!
+//! ## Time-bucketing in M3-05
+//!
+//! M3-05's `CostTracker` does not yet persist time-series data; it tracks a
+//! single cumulative total. So `day` and `month` report **the current
+//! cumulative session total** under a **correctly-labeled** day / month
+//! bucket. M5 will extend the tracker with windowed buckets when wiring
+//! `/cost --day` and `/cost --month` flags; until then, both buckets equal
+//! the session total.
+//!
+//! The labels (`YYYY-MM-DD` and `YYYY-MM`) ARE correct as of `Utc::now()`.
 
 #![forbid(unsafe_code)]
 
-// Task 5 fills in the body. Empty stub for the module-skeleton test.
+use crate::tracker::{CostState, CostTracker};
+use crate::ModelRef;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-/// Read-side aggregate of one tracker's cost state. Returned by
-/// [`CostTracker::summary`](crate::CostTracker::summary).
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+/// Aggregate of one tracker's cost state, returned by [`CostTracker::summary`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CostSummary {
-    /// Session-scope totals (placeholder; Task 5 expands).
-    pub session_total_nano_usd: u64,
+    /// Session-scope totals.
+    pub session: SessionCostSummary,
+    /// Day-scope totals (currently equals session total — see module docs).
+    pub day: PeriodCostSummary,
+    /// Month-scope totals (currently equals session total — see module docs).
+    pub month: PeriodCostSummary,
+    /// Per-model breakdown.
+    pub by_model: HashMap<ModelRef, ModelCostSummary>,
 }
 
-/// Session-scope cost summary. Task 5 fills in the body.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+/// Session-scope rollup.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionCostSummary {
-    /// Placeholder for total nano-USD spent in this session.
+    /// The session this summary is for.
+    pub session_id: lingxi_protocol::SessionId,
+    /// Cumulative cost across all models in nano-USD.
     pub total_nano_usd: u64,
+    /// Cumulative total tokens (input + output across all models).
+    pub total_tokens: u64,
 }
 
-/// Period-scope (day/month) cost summary. Task 5 fills in the body.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+/// Period-scope rollup (day or month).
+///
+/// `label` is a calendar bucket (`"YYYY-MM-DD"` for day, `"YYYY-MM"` for
+/// month, both UTC); `total_nano_usd` is the cumulative cost in that bucket.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PeriodCostSummary {
-    /// Placeholder for the period label (e.g. `"2026-05-23"` or `"2026-05"`).
+    /// Calendar label of the bucket (e.g. `"2026-05-23"` or `"2026-05"`).
     pub label: String,
-    /// Placeholder for total nano-USD spent in this period.
+    /// Cumulative cost across all models in nano-USD within this bucket.
     pub total_nano_usd: u64,
 }
 
-/// Per-model cost breakdown summary. Task 5 fills in the body.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+/// Per-model entry of [`CostSummary::by_model`].
+///
+/// `Default` is intentionally not derived: `ModelRef` has no `Default` impl,
+/// and no current callsite constructs a default per-model summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCostSummary {
-    /// Placeholder for total nano-USD spent on this model.
+    /// Which model this slice is for.
+    pub model_ref: ModelRef,
+    /// Cumulative cost for this model in nano-USD.
     pub total_nano_usd: u64,
+    /// Cumulative input tokens for this model.
+    pub input_tokens: u64,
+    /// Cumulative output tokens for this model.
+    pub output_tokens: u64,
+    /// Cumulative tokens read from the prompt cache.
+    pub cache_read_input_tokens: u64,
+    /// Cumulative tokens written into the prompt cache.
+    pub cache_creation_input_tokens: u64,
+}
+
+impl CostTracker {
+    /// Snapshot the current state into a [`CostSummary`] for the `/cost`
+    /// slash command (M5 will route this through the slash command).
+    ///
+    /// `day` and `month` use UTC date bucketing as of the call. Until M5
+    /// extends the tracker with time-windowed buckets, both amounts equal
+    /// the cumulative session total.
+    pub async fn summary(&self) -> CostSummary {
+        let state: CostState = self.snapshot().await;
+        let now = Utc::now();
+        let day_label = now.format("%Y-%m-%d").to_string();
+        let month_label = now.format("%Y-%m").to_string();
+
+        let mut total_tokens = 0u64;
+        let mut by_model = HashMap::new();
+        for (mr, mu) in &state.per_model_usage {
+            total_tokens = total_tokens
+                .saturating_add(mu.usage.tokens.input)
+                .saturating_add(mu.usage.tokens.output);
+            by_model.insert(
+                mr.clone(),
+                ModelCostSummary {
+                    model_ref: mr.clone(),
+                    total_nano_usd: mu.cost_nano_usd,
+                    input_tokens: mu.usage.tokens.input,
+                    output_tokens: mu.usage.tokens.output,
+                    cache_read_input_tokens: mu.cache_read_input_tokens,
+                    cache_creation_input_tokens: mu.cache_creation_input_tokens,
+                },
+            );
+        }
+
+        CostSummary {
+            session: SessionCostSummary {
+                session_id: state.session_id,
+                total_nano_usd: state.total_nano_usd,
+                total_tokens,
+            },
+            day: PeriodCostSummary {
+                label: day_label,
+                total_nano_usd: state.total_nano_usd,
+            },
+            month: PeriodCostSummary {
+                label: month_label,
+                total_nano_usd: state.total_nano_usd,
+            },
+            by_model,
+        }
+    }
 }

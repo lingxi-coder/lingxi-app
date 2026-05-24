@@ -494,7 +494,7 @@ These literals must appear byte-for-byte in code AND in at least one test assert
 |------|---------|
 | AgentTool subagent types | from `agentTypes.json` (general-purpose, claude, plan, ...) |
 | Task storage | `~/.claude/tasks/<task_id>/` (M2-06 task_output_path lock) |
-| Task ID format | UUID v4 |
+| Task ID format | 9-char `[bartwmd][0-9a-z]{8}` (matches `lingxi_tasks::id::generate_task_id`) |
 | SendMessage claim window | `Duration::from_secs(30)` |
 | Subagent budget | inherits parent `BudgetEnforcer` (M3-05) — single shared instance |
 

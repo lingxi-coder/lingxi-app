@@ -59,7 +59,8 @@ async fn three_calls_trigger_warning_then_exceeded() {
 
     let bus = Arc::new(AnalyticsBus::new());
     let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
-    bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>).await;
+    bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
+        .await;
 
     let mr = ModelRef {
         provider: ProviderId::Anthropic,
@@ -88,7 +89,9 @@ async fn three_calls_trigger_warning_then_exceeded() {
             .await;
         assert_eq!(cost, 400_000_000, "$0.40 per call");
         // Then the post-call budget gate.
-        enforcer.check_post_api_call_with_bus(cost, Some(&bus)).await;
+        enforcer
+            .check_post_api_call_with_bus(cost, Some(&bus))
+            .await;
     }
 
     let events = sink.events.lock().unwrap();
@@ -99,7 +102,10 @@ async fn three_calls_trigger_warning_then_exceeded() {
 
     // tengu_cost_recorded fires three times.
     assert_eq!(
-        names.iter().filter(|n| **n == "tengu_cost_recorded").count(),
+        names
+            .iter()
+            .filter(|n| **n == "tengu_cost_recorded")
+            .count(),
         3,
         "three cost recordings"
     );
@@ -166,6 +172,9 @@ async fn summary_after_pipeline_reflects_all_three_calls() {
             .await;
     }
     let summary = tracker.summary().await;
-    assert_eq!(summary.session.total_nano_usd, 1_200_000_000, "$1.20 cumulative");
+    assert_eq!(
+        summary.session.total_nano_usd, 1_200_000_000,
+        "$1.20 cumulative"
+    );
     assert_eq!(summary.by_model.len(), 1);
 }

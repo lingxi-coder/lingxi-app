@@ -1,7 +1,7 @@
 //! Parity fixture: `tengu_cost_*` event names + payload shapes locked against
 //! the M3 spec (`docs/superpowers/specs/2026-05-23-m3-engine-completion-design.md` §7).
 //!
-//! Drift on this fixture breaks downstream BigQuery / Statsig dashboards that
+//! Drift on this fixture breaks downstream `BigQuery` / Statsig dashboards that
 //! join on `model` + `session_id` + `cost_usd` so a parity test is the right
 //! place to lock it.
 
@@ -106,7 +106,8 @@ async fn cost_recorded_payload_matches_fixture_byte_for_byte() {
 
     let bus = Arc::new(AnalyticsBus::new());
     let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
-    bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>).await;
+    bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
+        .await;
 
     // SessionId::nil().to_string() = "sess:00000000-0000-0000-0000-000000000000"
     // (the `sess:` prefix is part of the Display impl in lingxi-protocol::ids).
@@ -146,14 +147,14 @@ async fn cost_recorded_payload_matches_fixture_byte_for_byte() {
             .unwrap_or_else(|| panic!("fixture missing expected value for key {key}"));
         match (actual, expected) {
             (AnalyticsValue::String(a), serde_json::Value::String(e)) => {
-                assert_eq!(a, e, "key {key} string mismatch")
+                assert_eq!(a, e, "key {key} string mismatch");
             }
             (AnalyticsValue::Int(a), serde_json::Value::Number(e)) => {
                 let e_i64 = e.as_i64().expect("fixture int");
-                assert_eq!(*a, e_i64, "key {key} int mismatch")
+                assert_eq!(*a, e_i64, "key {key} int mismatch");
             }
             (AnalyticsValue::Bool(a), serde_json::Value::Bool(e)) => {
-                assert_eq!(*a, *e, "key {key} bool mismatch")
+                assert_eq!(*a, *e, "key {key} bool mismatch");
             }
             (a, e) => panic!("key {key}: type mismatch — got {a:?}, fixture {e:?}"),
         }

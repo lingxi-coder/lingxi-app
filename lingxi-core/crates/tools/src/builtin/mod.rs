@@ -83,12 +83,18 @@ pub struct BuiltinToolContext {
 /// land, the matching line below is uncommented incrementally so the crate
 /// remains buildable between tasks. Task 17 verifies that all 6 are wired.
 pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolContext) {
+    // M4-01 — file/search tools.
     registry.register_builtin(Arc::new(FileReadTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(FileWriteTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(FileEditTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(NotebookEditTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(GlobTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(GrepTool::new(ctx)));
+    registry.register_builtin(Arc::new(GrepTool::new(ctx.clone())));
+    // M4-02 — shell tools.
+    registry.register_builtin(Arc::new(BashTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(PowerShellTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(REPLTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(SleepTool::new(ctx)));
 }
 
 #[cfg(test)]
@@ -130,27 +136,46 @@ mod tests {
     }
 
     #[test]
-    fn register_all_inserts_six_tools() {
+    fn register_all_inserts_ten_tools_after_m4_02() {
         let mut registry = ToolRegistry::new();
         register_all_builtin_tools(&mut registry, dummy_ctx());
         let ctx = crate::tool_trait::ToolStaticContext::default();
         let tools = registry.available_tools(&ctx);
-        // M4-01 ships exactly 6 builtin tools; later sub-plans extend.
-        assert_eq!(tools.len(), 6);
+        // M4-01 (6) + M4-02 (4) = 10; later sub-plans extend to 40.
+        assert_eq!(tools.len(), 10);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"Read"));
-        assert!(names.contains(&"Write"));
-        assert!(names.contains(&"Edit"));
-        assert!(names.contains(&"NotebookEdit"));
-        assert!(names.contains(&"Glob"));
-        assert!(names.contains(&"Grep"));
+        for n in [
+            "Read",
+            "Write",
+            "Edit",
+            "NotebookEdit",
+            "Glob",
+            "Grep",
+            "Bash",
+            "PowerShell",
+            "REPL",
+            "Sleep",
+        ] {
+            assert!(names.contains(&n), "missing tool {n}: {names:?}");
+        }
     }
 
     #[test]
     fn find_by_name_works_for_every_tool() {
         let mut registry = ToolRegistry::new();
         register_all_builtin_tools(&mut registry, dummy_ctx());
-        for name in ["Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep"] {
+        for name in [
+            "Read",
+            "Write",
+            "Edit",
+            "NotebookEdit",
+            "Glob",
+            "Grep",
+            "Bash",
+            "PowerShell",
+            "REPL",
+            "Sleep",
+        ] {
             assert!(
                 registry.find_by_name(name).is_some(),
                 "registry missing {name}"

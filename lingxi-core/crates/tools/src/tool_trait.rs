@@ -252,6 +252,7 @@ pub struct ValidationError(
 
 /// Error returned by [`Tool::call`] and related dispatcher operations.
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum ToolError {
     /// No tool registered under the requested name.
     #[error("tool not found: {0}")]
@@ -299,4 +300,110 @@ pub enum ToolError {
         /// Path of the file whose hash mismatched.
         path: String,
     },
+    /// M4-01: file exceeds the size limit configured for the read.
+    #[error("file too large: {size} bytes exceeds limit {limit}")]
+    FileTooLarge {
+        /// Actual size encountered, in bytes.
+        size: u64,
+        /// Configured maximum, in bytes.
+        limit: u64,
+    },
+    /// M4-01: requested path resolves outside the trusted-dirs whitelist.
+    #[error("path not in trusted directory: {path:?}")]
+    PathBlocked {
+        /// The canonicalised path that was rejected.
+        path: std::path::PathBuf,
+    },
+    /// M4-01: file looks like a binary blob (NUL bytes in the head window).
+    #[error("binary file detected at {path:?} ({reason})")]
+    BinaryFile {
+        /// Path of the file that was rejected.
+        path: std::path::PathBuf,
+        /// Short reason ("NUL byte at offset N").
+        reason: &'static str,
+    },
+    /// M4-02: subprocess hit the watchdog (placeholder variant; emitter lives in M4-02).
+    #[error("command timed out after {timeout_ms}ms")]
+    Timeout {
+        /// Configured watchdog, in milliseconds.
+        timeout_ms: u64,
+    },
+    /// M4-01..M4-03: tool output exceeded `MAX_TOOL_OUTPUT_LENGTH`.
+    #[error("output truncated at {limit} chars")]
+    OutputTruncated {
+        /// Char limit that was hit.
+        limit: usize,
+    },
+    /// M4-05: subagent loop crashed.
+    #[error("subagent failed: {0}")]
+    SubagentFailed(String),
+    /// M4-07: MCP server reported a tool-call failure.
+    #[error("MCP tool error: {server}/{tool}: {detail}")]
+    McpFailure {
+        /// MCP server identifier.
+        server: String,
+        /// MCP tool name.
+        tool: String,
+        /// Server-supplied detail string.
+        detail: String,
+    },
+    /// M4-07: LSP request failed.
+    #[error("LSP tool error: {0}")]
+    LspFailure(String),
+    /// M4-03: HTTP transport error (DNS, connect, TLS, status code).
+    #[error("transport error: {0}")]
+    Transport(String),
+}
+
+#[cfg(test)]
+mod m4_01_error_variant_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn file_too_large_display_format() {
+        let e = ToolError::FileTooLarge {
+            size: 300_000,
+            limit: 262_144,
+        };
+        assert_eq!(
+            e.to_string(),
+            "file too large: 300000 bytes exceeds limit 262144"
+        );
+    }
+
+    #[test]
+    fn path_blocked_display_format() {
+        let e = ToolError::PathBlocked {
+            path: PathBuf::from("/etc/passwd"),
+        };
+        assert_eq!(
+            e.to_string(),
+            r#"path not in trusted directory: "/etc/passwd""#
+        );
+    }
+
+    #[test]
+    fn binary_file_display_format() {
+        let e = ToolError::BinaryFile {
+            path: PathBuf::from("/tmp/x.bin"),
+            reason: "NUL byte at offset 0",
+        };
+        assert_eq!(
+            e.to_string(),
+            r#"binary file detected at "/tmp/x.bin" (NUL byte at offset 0)"#
+        );
+    }
+
+    #[test]
+    fn timeout_display_format() {
+        let e = ToolError::Timeout { timeout_ms: 5000 };
+        assert_eq!(e.to_string(), "command timed out after 5000ms");
+    }
+
+    #[test]
+    fn output_truncated_display_format() {
+        let e = ToolError::OutputTruncated { limit: 30_000 };
+        assert_eq!(e.to_string(), "output truncated at 30000 chars");
+    }
 }

@@ -25,7 +25,7 @@ pub mod tool;
 /// inside the `tengu` module so the path `lingxi_telemetry::tengu::ALL_EVENT_NAMES`
 /// remains the single source of truth; see `parity_tengu_events.rs`).
 pub const ALL_EVENT_NAMES: &[&str] = {
-    const TOTAL: usize = 25 + 30;
+    const TOTAL: usize = 25 + 30 + 15;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;
@@ -38,6 +38,12 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         let mut i = 0;
         while i < agent::NAMES.len() {
             out[idx] = agent::NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        let mut i = 0;
+        while i < session::NAMES.len() {
+            out[idx] = session::NAMES[i];
             idx += 1;
             i += 1;
         }

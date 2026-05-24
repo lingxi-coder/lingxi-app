@@ -156,9 +156,72 @@ pub const EXIT_WORKTREE_COMPLETED: &str = "tengu_tool_exit_worktree_completed";
 /// `tengu_tool_exit_worktree_failed` — `ExitWorktreeTool` errored (M4-04).
 pub const EXIT_WORKTREE_FAILED: &str = "tengu_tool_exit_worktree_failed";
 
-/// Order-locked array of all 67 names; consumed by `tengu::ALL_EVENT_NAMES`.
+// ===== M4-05 Agent + Task tools (24 events, 8 tools × 3 lifecycle stages) =====
+
+/// `tengu_tool_agent_started` — `AgentTool` began spawning a subagent (M4-05).
+pub const AGENT_STARTED: &str = "tengu_tool_agent_started";
+/// `tengu_tool_agent_completed` — `AgentTool` subagent returned Completed (M4-05).
+///
+/// Distinct from the legacy `TASK_COMPLETED = "tengu_tool_task_completed"` event
+/// (M3-06 baseline, kept for back-compat); the M4-05 const is suffixed with
+/// `_M4_05` to avoid identifier collision with the legacy constant.
+pub const AGENT_COMPLETED_M4_05: &str = "tengu_tool_agent_completed";
+/// `tengu_tool_agent_failed` — `AgentTool` subagent errored or was killed (M4-05).
+pub const AGENT_FAILED: &str = "tengu_tool_agent_failed";
+
+/// `tengu_tool_task_create_started` — `TaskCreateTool` validated input (M4-05).
+pub const TASK_CREATE_STARTED: &str = "tengu_tool_task_create_started";
+/// `tengu_tool_task_create_completed` — `TaskCreateTool` allocated spool + id (M4-05).
+pub const TASK_CREATE_COMPLETED: &str = "tengu_tool_task_create_completed";
+/// `tengu_tool_task_create_failed` — `TaskCreateTool` errored (M4-05).
+pub const TASK_CREATE_FAILED: &str = "tengu_tool_task_create_failed";
+
+/// `tengu_tool_task_get_started` — `TaskGetTool` accepted the request (M4-05).
+pub const TASK_GET_STARTED: &str = "tengu_tool_task_get_started";
+/// `tengu_tool_task_get_completed` — `TaskGetTool` returned a state row (M4-05).
+pub const TASK_GET_COMPLETED: &str = "tengu_tool_task_get_completed";
+/// `tengu_tool_task_get_failed` — `TaskGetTool` errored (M4-05).
+pub const TASK_GET_FAILED: &str = "tengu_tool_task_get_failed";
+
+/// `tengu_tool_task_list_started` — `TaskListTool` began enumeration (M4-05).
+pub const TASK_LIST_STARTED: &str = "tengu_tool_task_list_started";
+/// `tengu_tool_task_list_completed` — `TaskListTool` returned the snapshot (M4-05).
+pub const TASK_LIST_COMPLETED: &str = "tengu_tool_task_list_completed";
+/// `tengu_tool_task_list_failed` — `TaskListTool` errored (M4-05).
+pub const TASK_LIST_FAILED: &str = "tengu_tool_task_list_failed";
+
+/// `tengu_tool_task_update_started` — `TaskUpdateTool` validated input (M4-05).
+pub const TASK_UPDATE_STARTED: &str = "tengu_tool_task_update_started";
+/// `tengu_tool_task_update_completed` — `TaskUpdateTool` mutated status (M4-05).
+pub const TASK_UPDATE_COMPLETED: &str = "tengu_tool_task_update_completed";
+/// `tengu_tool_task_update_failed` — `TaskUpdateTool` errored (M4-05).
+pub const TASK_UPDATE_FAILED: &str = "tengu_tool_task_update_failed";
+
+/// `tengu_tool_task_stop_started` — `TaskStopTool` validated input (M4-05).
+pub const TASK_STOP_STARTED: &str = "tengu_tool_task_stop_started";
+/// `tengu_tool_task_stop_completed` — `TaskStopTool` killed the task (M4-05).
+pub const TASK_STOP_COMPLETED: &str = "tengu_tool_task_stop_completed";
+/// `tengu_tool_task_stop_failed` — `TaskStopTool` errored (M4-05).
+pub const TASK_STOP_FAILED: &str = "tengu_tool_task_stop_failed";
+
+/// `tengu_tool_task_output_started` — `TaskOutputTool` began spool read (M4-05).
+pub const TASK_OUTPUT_STARTED: &str = "tengu_tool_task_output_started";
+/// `tengu_tool_task_output_completed` — `TaskOutputTool` returned content (M4-05).
+pub const TASK_OUTPUT_COMPLETED: &str = "tengu_tool_task_output_completed";
+/// `tengu_tool_task_output_failed` — `TaskOutputTool` errored (M4-05).
+pub const TASK_OUTPUT_FAILED: &str = "tengu_tool_task_output_failed";
+
+/// `tengu_tool_send_message_started` — `SendMessageTool` validated input (M4-05).
+pub const SEND_MESSAGE_STARTED: &str = "tengu_tool_send_message_started";
+/// `tengu_tool_send_message_completed` — `SendMessageTool` enqueued (M4-05).
+pub const SEND_MESSAGE_COMPLETED: &str = "tengu_tool_send_message_completed";
+/// `tengu_tool_send_message_failed` — `SendMessageTool` errored (M4-05).
+pub const SEND_MESSAGE_FAILED: &str = "tengu_tool_send_message_failed";
+
+/// Order-locked array of all 91 names; consumed by `tengu::ALL_EVENT_NAMES`.
 /// M3-06 locked the first 40; M4-02 appended 9 (powershell/repl/sleep);
-/// M4-03 appended 3 (`web_search`); M4-04 appends 15 workflow events.
+/// M4-03 appended 3 (`web_search`); M4-04 appended 15 workflow events;
+/// M4-05 appends 24 agent/task events.
 pub(crate) const NAMES: &[&str] = &[
     STARTED,
     COMPLETED,
@@ -228,6 +291,31 @@ pub(crate) const NAMES: &[&str] = &[
     EXIT_WORKTREE_STARTED,
     EXIT_WORKTREE_COMPLETED,
     EXIT_WORKTREE_FAILED,
+    // M4-05 Agent + Task tools (24 events, 8 tools × 3 lifecycle stages)
+    AGENT_STARTED,
+    AGENT_COMPLETED_M4_05,
+    AGENT_FAILED,
+    TASK_CREATE_STARTED,
+    TASK_CREATE_COMPLETED,
+    TASK_CREATE_FAILED,
+    TASK_GET_STARTED,
+    TASK_GET_COMPLETED,
+    TASK_GET_FAILED,
+    TASK_LIST_STARTED,
+    TASK_LIST_COMPLETED,
+    TASK_LIST_FAILED,
+    TASK_UPDATE_STARTED,
+    TASK_UPDATE_COMPLETED,
+    TASK_UPDATE_FAILED,
+    TASK_STOP_STARTED,
+    TASK_STOP_COMPLETED,
+    TASK_STOP_FAILED,
+    TASK_OUTPUT_STARTED,
+    TASK_OUTPUT_COMPLETED,
+    TASK_OUTPUT_FAILED,
+    SEND_MESSAGE_STARTED,
+    SEND_MESSAGE_COMPLETED,
+    SEND_MESSAGE_FAILED,
 ];
 
 #[cfg(test)]
@@ -311,9 +399,95 @@ mod m4_04_workflow_event_tests {
         }
         assert_eq!(
             NAMES.len(),
-            67,
-            "M3-06 40 + M4-02 9 + M4-03 3 + M4-04 15 = 67"
+            91,
+            "M3-06 40 + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 = 91"
         );
+    }
+}
+
+#[cfg(test)]
+mod m4_05_agent_task_event_tests {
+    use super::*;
+
+    #[test]
+    fn agent_constants_are_locked() {
+        assert_eq!(AGENT_STARTED, "tengu_tool_agent_started");
+        assert_eq!(AGENT_COMPLETED_M4_05, "tengu_tool_agent_completed");
+        assert_eq!(AGENT_FAILED, "tengu_tool_agent_failed");
+    }
+
+    #[test]
+    fn task_create_constants_are_locked() {
+        assert_eq!(TASK_CREATE_STARTED, "tengu_tool_task_create_started");
+        assert_eq!(TASK_CREATE_COMPLETED, "tengu_tool_task_create_completed");
+        assert_eq!(TASK_CREATE_FAILED, "tengu_tool_task_create_failed");
+    }
+
+    #[test]
+    fn task_get_list_update_stop_output_constants_are_locked() {
+        assert_eq!(TASK_GET_STARTED, "tengu_tool_task_get_started");
+        assert_eq!(TASK_GET_COMPLETED, "tengu_tool_task_get_completed");
+        assert_eq!(TASK_GET_FAILED, "tengu_tool_task_get_failed");
+        assert_eq!(TASK_LIST_STARTED, "tengu_tool_task_list_started");
+        assert_eq!(TASK_LIST_COMPLETED, "tengu_tool_task_list_completed");
+        assert_eq!(TASK_LIST_FAILED, "tengu_tool_task_list_failed");
+        assert_eq!(TASK_UPDATE_STARTED, "tengu_tool_task_update_started");
+        assert_eq!(TASK_UPDATE_COMPLETED, "tengu_tool_task_update_completed");
+        assert_eq!(TASK_UPDATE_FAILED, "tengu_tool_task_update_failed");
+        assert_eq!(TASK_STOP_STARTED, "tengu_tool_task_stop_started");
+        assert_eq!(TASK_STOP_COMPLETED, "tengu_tool_task_stop_completed");
+        assert_eq!(TASK_STOP_FAILED, "tengu_tool_task_stop_failed");
+        assert_eq!(TASK_OUTPUT_STARTED, "tengu_tool_task_output_started");
+        assert_eq!(TASK_OUTPUT_COMPLETED, "tengu_tool_task_output_completed");
+        assert_eq!(TASK_OUTPUT_FAILED, "tengu_tool_task_output_failed");
+    }
+
+    #[test]
+    fn send_message_constants_are_locked() {
+        assert_eq!(SEND_MESSAGE_STARTED, "tengu_tool_send_message_started");
+        assert_eq!(SEND_MESSAGE_COMPLETED, "tengu_tool_send_message_completed");
+        assert_eq!(SEND_MESSAGE_FAILED, "tengu_tool_send_message_failed");
+    }
+
+    #[test]
+    fn names_array_contains_all_24_agent_task_events() {
+        let agent_task = [
+            AGENT_STARTED,
+            AGENT_COMPLETED_M4_05,
+            AGENT_FAILED,
+            TASK_CREATE_STARTED,
+            TASK_CREATE_COMPLETED,
+            TASK_CREATE_FAILED,
+            TASK_GET_STARTED,
+            TASK_GET_COMPLETED,
+            TASK_GET_FAILED,
+            TASK_LIST_STARTED,
+            TASK_LIST_COMPLETED,
+            TASK_LIST_FAILED,
+            TASK_UPDATE_STARTED,
+            TASK_UPDATE_COMPLETED,
+            TASK_UPDATE_FAILED,
+            TASK_STOP_STARTED,
+            TASK_STOP_COMPLETED,
+            TASK_STOP_FAILED,
+            TASK_OUTPUT_STARTED,
+            TASK_OUTPUT_COMPLETED,
+            TASK_OUTPUT_FAILED,
+            SEND_MESSAGE_STARTED,
+            SEND_MESSAGE_COMPLETED,
+            SEND_MESSAGE_FAILED,
+        ];
+        for name in agent_task {
+            assert!(
+                NAMES.contains(&name),
+                "NAMES array missing M4-05 event: {name}"
+            );
+        }
+        // Distinctness across the entire NAMES array.
+        let mut seen = std::collections::HashSet::new();
+        for n in NAMES {
+            assert!(seen.insert(*n), "duplicate event name in NAMES: {n}");
+        }
     }
 }
 

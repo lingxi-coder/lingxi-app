@@ -91,3 +91,119 @@ pub(crate) fn home_dir_or_internal() -> Result<PathBuf, ToolError> {
         .map(PathBuf::from)
         .ok_or_else(|| ToolError::Internal("Team: HOME directory not available".into()))
 }
+
+/// Validate a team name per spec §7 + plan locks.
+///
+/// Rules:
+/// - non-empty
+/// - length <= [`MAX_TEAM_NAME_LEN`] bytes
+/// - no `/`, `\`, `..`, or `\0`
+/// - all chars in `[a-zA-Z0-9_-]`
+///
+/// Each failure produces a byte-locked error string (see
+/// `parity/fixtures/team_tools.json`).
+pub(crate) fn validate_team_name(name: &str) -> Result<(), ToolError> {
+    if name.is_empty() {
+        return Err(ToolError::InvalidInput(
+            "Team: team_name is empty".into(),
+        ));
+    }
+    if name.len() > MAX_TEAM_NAME_LEN {
+        return Err(ToolError::InvalidInput(format!(
+            "Team: team_name '{name}' exceeds max length {MAX_TEAM_NAME_LEN}"
+        )));
+    }
+    // Slash / traversal check FIRST so its error string is more specific
+    // than the generic "invalid characters" message.
+    if name.contains('/') || name.contains('\\') || name == ".." || name.contains("..") {
+        return Err(ToolError::InvalidInput(format!(
+            "Team: team_name '{name}' contains slashes or path traversal"
+        )));
+    }
+    for ch in name.chars() {
+        let ok = ch.is_ascii_alphanumeric() || ch == '_' || ch == '-';
+        if !ok {
+            return Err(ToolError::InvalidInput(format!(
+                "Team: team_name '{name}' contains invalid characters (allowed: {TEAM_NAME_PATTERN_DESC})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    fn assert_valid(name: &str) {
+        validate_team_name(name).unwrap_or_else(|_| panic!("expected '{name}' valid"));
+    }
+
+    fn assert_rejects(name: &str, fragment: &str) {
+        let err = validate_team_name(name)
+            .unwrap_err_or_panic_with(|| format!("expected '{name}' rejected"));
+        let msg = match err {
+            ToolError::InvalidInput(s) => s,
+            other => panic!("unexpected error variant: {other:?}"),
+        };
+        assert!(
+            msg.contains(fragment),
+            "error '{msg}' missing fragment '{fragment}'"
+        );
+    }
+
+    // Local extension to ToolError to provide an unwrap_err with custom panic.
+    trait UnwrapErrOrPanic<T> {
+        fn unwrap_err_or_panic_with<F: FnOnce() -> String>(self, msg: F) -> ToolError;
+    }
+    impl<T: std::fmt::Debug> UnwrapErrOrPanic<T> for Result<T, ToolError> {
+        fn unwrap_err_or_panic_with<F: FnOnce() -> String>(self, msg: F) -> ToolError {
+            match self {
+                Ok(_) => panic!("{}", msg()),
+                Err(e) => e,
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_simple_lowercase_name() {
+        assert_valid("default");
+        assert_valid("alpha");
+        assert_valid("team1");
+    }
+
+    #[test]
+    fn accepts_underscore_dash_digits_mixed_case() {
+        assert_valid("Alpha_Beta-1");
+        assert_valid("A_b-2_C");
+        assert_valid("X");
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert_rejects("", "team_name is empty");
+    }
+
+    #[test]
+    fn rejects_too_long() {
+        let long: String = "a".repeat(MAX_TEAM_NAME_LEN + 1);
+        assert_rejects(&long, "exceeds max length 64");
+    }
+
+    #[test]
+    fn rejects_slash_or_traversal() {
+        assert_rejects("a/b", "slashes or path traversal");
+        assert_rejects("a\\b", "slashes or path traversal");
+        assert_rejects("..", "slashes or path traversal");
+        assert_rejects("a/../b", "slashes or path traversal");
+    }
+
+    #[test]
+    fn rejects_invalid_chars() {
+        assert_rejects("hello world", "invalid characters");
+        assert_rejects("hello.world", "invalid characters");
+        assert_rejects("hello!", "invalid characters");
+        assert_rejects("héllo", "invalid characters"); // non-ASCII
+        assert_rejects("a\0b", "invalid characters");
+    }
+}

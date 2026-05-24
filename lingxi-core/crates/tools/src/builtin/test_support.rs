@@ -255,6 +255,36 @@ pub fn make_stub_clock() -> Arc<dyn lingxi_traits::Clock> {
     Arc::new(StubClock::new())
 }
 
+/// A `HttpTransport` stub that always errors. Satisfies the
+/// `BuiltinToolContext::http` field for tests that don't exercise it.
+pub struct PanickingHttp;
+
+#[async_trait]
+impl lingxi_traits::http::HttpTransport for PanickingHttp {
+    async fn request(
+        &self,
+        _: lingxi_protocol::HttpRequest,
+    ) -> Result<lingxi_protocol::HttpResponse, lingxi_traits::http::HttpError> {
+        Err(lingxi_traits::http::HttpError::InvalidRequest(
+            "stub PanickingHttp: not configured for this test".into(),
+        ))
+    }
+    async fn stream_sse(
+        &self,
+        _: lingxi_protocol::HttpRequest,
+    ) -> Result<lingxi_traits::http::SseStream, lingxi_traits::http::HttpError> {
+        Err(lingxi_traits::http::HttpError::InvalidRequest(
+            "stub PanickingHttp: stream_sse not supported".into(),
+        ))
+    }
+}
+
+/// Convenience: wrap [`PanickingHttp`] in `Arc<dyn HttpTransport>`.
+#[must_use]
+pub fn make_stub_http() -> Arc<dyn lingxi_traits::http::HttpTransport> {
+    Arc::new(PanickingHttp)
+}
+
 /// Build a [`super::BuiltinToolContext`] for M4-01 file-tool unit tests
 /// (process/sandbox/clock get stubbed defaults so the M4-02 fields satisfy
 /// the struct shape without affecting file-tool behavior).
@@ -295,6 +325,9 @@ pub fn ctx_for_file_tools(
         } else {
             Platform::Linux
         },
+        http: make_stub_http(),
+        provider: Arc::new(lingxi_api_client::AnthropicProvider::new("test-key", None)),
+        default_model: "claude-sonnet-4-20250514".to_string(),
     }
 }
 
@@ -325,5 +358,8 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         } else {
             Platform::Linux
         },
+        http: make_stub_http(),
+        provider: Arc::new(lingxi_api_client::AnthropicProvider::new("test-key", None)),
+        default_model: "claude-sonnet-4-20250514".to_string(),
     }
 }

@@ -4,12 +4,14 @@
 //! `register_all_builtin_tools` entrypoint that future sub-plans extend.
 
 use crate::registry::ToolRegistry;
+use lingxi_api_client::AnthropicProvider;
 use lingxi_permission::PermissionMode;
 use lingxi_sandbox::decision::ProjectTrustLevel;
 use lingxi_sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use lingxi_telemetry::AnalyticsBus;
 use lingxi_traits::clock::Clock;
 use lingxi_traits::filesystem::FileSystem;
+use lingxi_traits::http::HttpTransport;
 use lingxi_traits::process::ProcessRunner;
 use lingxi_traits::sandbox::Sandbox;
 use std::path::PathBuf;
@@ -71,6 +73,16 @@ pub struct BuiltinToolContext {
     pub workspace: PathBuf,
     /// Detected platform — drives `wrap_with_sandbox` branch (M4-02).
     pub platform: Platform,
+    /// HTTP transport for web tools (WebFetch + WebSearch) (M4-03). M1 trait;
+    /// tests inject `MockHttpTransport`.
+    pub http: Arc<dyn HttpTransport>,
+    /// Anthropic provider for assembling `POST /v1/messages` requests (M3-03).
+    /// `WebSearchTool` uses it to build the HTTP request, then attaches a tool
+    /// block + custom `anthropic-beta` header.
+    pub provider: Arc<AnthropicProvider>,
+    /// Model used by `WebSearch` when calling `POST /v1/messages` (M4-03).
+    /// Sourced from the session's `coordinator_model` at registration time.
+    pub default_model: String,
 }
 
 /// Register every M4-01 foundation tool against `registry`.
@@ -107,7 +119,7 @@ mod tests {
 
     fn dummy_ctx() -> BuiltinToolContext {
         use crate::builtin::test_support::{
-            make_bypass_sandbox, make_stub_clock, make_stub_process,
+            make_bypass_sandbox, make_stub_clock, make_stub_http, make_stub_process,
         };
         use lingxi_traits::process::ProcessOutput;
         BuiltinToolContext {
@@ -132,6 +144,9 @@ mod tests {
             } else {
                 Platform::Linux
             },
+            http: make_stub_http(),
+            provider: Arc::new(AnthropicProvider::new("test-key", None)),
+            default_model: "claude-sonnet-4-20250514".to_string(),
         }
     }
 

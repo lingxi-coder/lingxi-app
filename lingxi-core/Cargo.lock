@@ -1743,6 +1743,7 @@ name = "lingxi-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "filetime",
  "futures",
  "globset",
@@ -1750,12 +1751,14 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "lingxi-api-client",
  "lingxi-core",
  "lingxi-permission",
  "lingxi-platform-posix",
  "lingxi-protocol",
  "lingxi-sandbox",
  "lingxi-telemetry",
+ "lingxi-test-harness",
  "lingxi-traits",
  "once_cell",
  "serde",
@@ -1764,6 +1767,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
  "walkdir",
 ]
 

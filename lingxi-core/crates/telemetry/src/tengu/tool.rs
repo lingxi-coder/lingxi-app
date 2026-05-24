@@ -74,6 +74,12 @@ pub const WEB_FETCH_STARTED: &str = "tengu_tool_web_fetch_started";
 pub const WEB_FETCH_COMPLETED: &str = "tengu_tool_web_fetch_completed";
 /// `tengu_tool_web_fetch_failed` — `WebFetch` tool errored (network, status code).
 pub const WEB_FETCH_FAILED: &str = "tengu_tool_web_fetch_failed";
+/// `tengu_tool_web_search_started` — `WebSearch` tool dispatched a query (M4-03).
+pub const WEB_SEARCH_STARTED: &str = "tengu_tool_web_search_started";
+/// `tengu_tool_web_search_completed` — `WebSearch` tool returned search results (M4-03).
+pub const WEB_SEARCH_COMPLETED: &str = "tengu_tool_web_search_completed";
+/// `tengu_tool_web_search_failed` — `WebSearch` tool errored (HTTP, parse, etc.) (M4-03).
+pub const WEB_SEARCH_FAILED: &str = "tengu_tool_web_search_failed";
 /// `tengu_tool_task_dispatched` — Task tool spawned a subagent.
 pub const TASK_DISPATCHED: &str = "tengu_tool_task_dispatched";
 /// `tengu_tool_task_completed` — Task subagent returned successfully.
@@ -113,7 +119,7 @@ pub const SLEEP_COMPLETED: &str = "tengu_tool_sleep_completed";
 /// `tengu_tool_sleep_failed` — `Sleep` invocation rejected/errored (M4-02).
 pub const SLEEP_FAILED: &str = "tengu_tool_sleep_failed";
 
-/// Order-locked array of all 49 names; consumed by `tengu::ALL_EVENT_NAMES`.
+/// Order-locked array of all 52 names; consumed by `tengu::ALL_EVENT_NAMES`.
 pub(crate) const NAMES: &[&str] = &[
     STARTED,
     COMPLETED,
@@ -145,6 +151,9 @@ pub(crate) const NAMES: &[&str] = &[
     WEB_FETCH_STARTED,
     WEB_FETCH_COMPLETED,
     WEB_FETCH_FAILED,
+    WEB_SEARCH_STARTED,
+    WEB_SEARCH_COMPLETED,
+    WEB_SEARCH_FAILED,
     TASK_DISPATCHED,
     TASK_COMPLETED,
     TASK_FAILED,

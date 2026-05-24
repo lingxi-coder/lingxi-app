@@ -12,14 +12,16 @@ lingxi-core = { path = "../core" }
 lingxi-permission = { path = "../permission" }
 lingxi-sandbox = { path = "../sandbox" }
 lingxi-telemetry = { path = "../telemetry" }
+lingxi-api-client = { path = "../api-client" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 futures = "0.3"
 once_cell = "1"
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
 tracing.workspace = true
+url = "2"
 # M4-01 — walker + globber + ripgrep bindings
 walkdir = "2.5"
 globset = "=0.4.15"
@@ -30,8 +32,10 @@ grep-matcher = "=0.1.7"
 
 [dev-dependencies]
 tempfile = "3.13"
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "sync", "time", "net"] }
 filetime = "0.2"
+axum = "0.7"
+lingxi-test-harness = { path = "../test-harness" }
 
 [target.'cfg(unix)'.dev-dependencies]
 lingxi-platform-posix = { path = "../../platforms/posix" }

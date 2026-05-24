@@ -112,4 +112,24 @@ impl AnalyticsBus {
     pub fn overflow_policy(&self) -> OverflowPolicy {
         OverflowPolicy::DropOldest
     }
+
+    /// Construct a bus with a [`crate::sinks::NoOpSink`] attached synchronously.
+    ///
+    /// Use this when the platform has no opinion about telemetry sinks and
+    /// wants the "never buffer" guarantee. The bus's existing
+    /// [`Self::new`] keeps the "no sink attached, buffer up to 1000 events"
+    /// semantics for boot-strap windows where the sink choice depends on
+    /// settings loaded later.
+    #[must_use]
+    pub fn with_default_sink() -> Self {
+        use crate::sinks::NoOpSink;
+        let bus = Self::new();
+        // Synchronous attach: NoOpSink construction is infallible and the bus
+        // is freshly built, so no other holder of the lock can exist. Use
+        // `try_write` to avoid requiring an async context for this constructor.
+        if let Ok(mut guard) = bus.sink.try_write() {
+            *guard = Some(Arc::new(NoOpSink));
+        }
+        bus
+    }
 }

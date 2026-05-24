@@ -1,10 +1,14 @@
-//! Concrete `AnalyticsSink` implementations: `NoOp` (default), `InMemory`
-//! (tests), and the Statsig trait extension point.
-//!
-//! Populated in Task 10 (`NoOp` + `InMemory`) and Task 11 (Statsig trait + mock).
+//! Concrete `AnalyticsSink` implementations: `NoOp` (default), `InMemory` (tests),
+//! and the Statsig trait extension point (Task 11).
 
-/// Module marker — referenced by `tests/skeleton_test.rs` to confirm the
-/// module path resolves before Task 10 lands the real sinks.
+pub mod in_memory;
+pub mod noop;
+// `statsig` lands in Task 11.
+
+pub use in_memory::{InMemorySink, RecordedEvent};
+pub use noop::NoOpSink;
+
+/// Module marker — kept for the Task-1 skeleton-test path resolution.
 #[doc(hidden)]
 #[must_use]
 pub fn _module_marker() -> &'static str {

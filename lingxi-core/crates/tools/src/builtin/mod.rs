@@ -124,7 +124,13 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     registry.register_builtin(Arc::new(SleepTool::new(ctx.clone())));
     // M4-03 — web tools.
     registry.register_builtin(Arc::new(WebFetchTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(WebSearchTool::new(ctx)));
+    registry.register_builtin(Arc::new(WebSearchTool::new(ctx.clone())));
+    // M4-04 — workflow tools.
+    registry.register_builtin(Arc::new(TodoWriteTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(EnterPlanModeTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(ExitPlanModeTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(EnterWorktreeTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(ExitWorktreeTool::new(ctx)));
 }
 
 #[cfg(test)]
@@ -170,13 +176,13 @@ mod tests {
     }
 
     #[test]
-    fn register_all_inserts_twelve_tools_after_m4_03() {
+    fn register_all_inserts_seventeen_tools_after_m4_04() {
         let mut registry = ToolRegistry::new();
         register_all_builtin_tools(&mut registry, dummy_ctx());
         let ctx = crate::tool_trait::ToolStaticContext::default();
         let tools = registry.available_tools(&ctx);
-        // M4-01 (6) + M4-02 (4) + M4-03 (2) = 12; later sub-plans extend to 40.
-        assert_eq!(tools.len(), 12);
+        // M4-01 (6) + M4-02 (4) + M4-03 (2) + M4-04 (5) = 17.
+        assert_eq!(tools.len(), 17);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         for n in [
             "Read",
@@ -191,6 +197,11 @@ mod tests {
             "Sleep",
             "WebFetch",
             "WebSearch",
+            "TodoWrite",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "EnterWorktree",
+            "ExitWorktree",
         ] {
             assert!(names.contains(&n), "missing tool {n}: {names:?}");
         }
@@ -213,6 +224,11 @@ mod tests {
             "Sleep",
             "WebFetch",
             "WebSearch",
+            "TodoWrite",
+            "EnterPlanMode",
+            "ExitPlanMode",
+            "EnterWorktree",
+            "ExitWorktree",
         ] {
             assert!(
                 registry.find_by_name(name).is_some(),

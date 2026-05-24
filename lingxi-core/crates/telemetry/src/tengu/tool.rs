@@ -94,8 +94,26 @@ pub const MCP_COMPLETED: &str = "tengu_tool_mcp_completed";
 pub const MCP_FAILED: &str = "tengu_tool_mcp_failed";
 /// `tengu_tool_skill_invoked` — Skill tool ran a registered skill.
 pub const SKILL_INVOKED: &str = "tengu_tool_skill_invoked";
+/// `tengu_tool_powershell_started` — PowerShell invocation about to spawn (M4-02).
+pub const POWERSHELL_STARTED: &str = "tengu_tool_powershell_started";
+/// `tengu_tool_powershell_completed` — PowerShell invocation exited (M4-02).
+pub const POWERSHELL_COMPLETED: &str = "tengu_tool_powershell_completed";
+/// `tengu_tool_powershell_failed` — PowerShell invocation errored (M4-02).
+pub const POWERSHELL_FAILED: &str = "tengu_tool_powershell_failed";
+/// `tengu_tool_repl_started` — REPL snippet about to execute (M4-02).
+pub const REPL_STARTED: &str = "tengu_tool_repl_started";
+/// `tengu_tool_repl_completed` — REPL snippet finished (M4-02).
+pub const REPL_COMPLETED: &str = "tengu_tool_repl_completed";
+/// `tengu_tool_repl_failed` — REPL snippet errored (M4-02).
+pub const REPL_FAILED: &str = "tengu_tool_repl_failed";
+/// `tengu_tool_sleep_started` — Sleep invocation began (M4-02).
+pub const SLEEP_STARTED: &str = "tengu_tool_sleep_started";
+/// `tengu_tool_sleep_completed` — Sleep invocation woke (M4-02).
+pub const SLEEP_COMPLETED: &str = "tengu_tool_sleep_completed";
+/// `tengu_tool_sleep_failed` — Sleep invocation rejected/errored (M4-02).
+pub const SLEEP_FAILED: &str = "tengu_tool_sleep_failed";
 
-/// Order-locked array of all 40 names; consumed by `tengu::ALL_EVENT_NAMES`.
+/// Order-locked array of all 49 names; consumed by `tengu::ALL_EVENT_NAMES`.
 pub(crate) const NAMES: &[&str] = &[
     STARTED,
     COMPLETED,
@@ -137,6 +155,15 @@ pub(crate) const NAMES: &[&str] = &[
     MCP_COMPLETED,
     MCP_FAILED,
     SKILL_INVOKED,
+    POWERSHELL_STARTED,
+    POWERSHELL_COMPLETED,
+    POWERSHELL_FAILED,
+    REPL_STARTED,
+    REPL_COMPLETED,
+    REPL_FAILED,
+    SLEEP_STARTED,
+    SLEEP_COMPLETED,
+    SLEEP_FAILED,
 ];
 
 // -- Shared enums -------------------------------------------------------------

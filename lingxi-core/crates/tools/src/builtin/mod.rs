@@ -15,6 +15,7 @@ pub mod file_write;
 pub mod glob;
 pub mod grep;
 pub mod notebook_edit;
+pub mod shell_events;
 
 #[cfg(test)]
 pub(crate) mod test_support;

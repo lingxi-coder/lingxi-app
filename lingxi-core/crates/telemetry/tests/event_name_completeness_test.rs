@@ -5,8 +5,8 @@
 use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_143_entries() {
-    assert_eq!(ALL_EVENT_NAMES.len(), 143);
+fn registry_is_exactly_152_entries() {
+    assert_eq!(ALL_EVENT_NAMES.len(), 152);
 }
 
 #[test]
@@ -39,19 +39,19 @@ fn category_ordering_preserved() {
     for n in &ALL_EVENT_NAMES[55..70] {
         assert!(n.starts_with("tengu_session_"), "session block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[70..110] {
+    for n in &ALL_EVENT_NAMES[70..119] {
         assert!(n.starts_with("tengu_tool_"), "tool block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[110..120] {
+    for n in &ALL_EVENT_NAMES[119..129] {
         assert!(n.starts_with("tengu_cost_"), "cost block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[120..128] {
+    for n in &ALL_EVENT_NAMES[129..137] {
         assert!(n.starts_with("tengu_oauth_"), "oauth block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[128..140] {
+    for n in &ALL_EVENT_NAMES[137..149] {
         assert!(n.starts_with("tengu_memory_"), "memory block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[140..143] {
+    for n in &ALL_EVENT_NAMES[149..152] {
         assert!(n.starts_with("tengu_settings_"), "settings block: {n}");
     }
 }

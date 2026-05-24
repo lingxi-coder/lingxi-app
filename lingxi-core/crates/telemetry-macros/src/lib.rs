@@ -43,7 +43,11 @@ pub fn tengu_event_audit(input: TokenStream) -> TokenStream {
                 }
             }
             Err(e) => {
-                errors.push(format!("{cat}.rs: failed to read {}: {}", path.display(), e));
+                errors.push(format!(
+                    "{cat}.rs: failed to read {}: {}",
+                    path.display(),
+                    e
+                ));
             }
         }
     }
@@ -96,8 +100,15 @@ fn audit_source(src: &str) -> Result<(), String> {
 
     // The whitelist of acceptable primitive type segment names (last segment).
     let allowed_types: HashSet<&str> = [
-        "bool", "i32", "i64", "u32", "u64", "f32", "f64",
-        "Verified", "PiiTagged",
+        "bool",
+        "i32",
+        "i64",
+        "u32",
+        "u64",
+        "f32",
+        "f64",
+        "Verified",
+        "PiiTagged",
         "SessionId",
     ]
     .into_iter()
@@ -141,12 +152,8 @@ fn audit_source(src: &str) -> Result<(), String> {
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_default();
-            let type_ok = field_type_is_allowed(
-                &field.ty,
-                &field_name,
-                &allowed_types,
-                &enums_by_name,
-            )?;
+            let type_ok =
+                field_type_is_allowed(&field.ty, &field_name, &allowed_types, &enums_by_name)?;
             if !type_ok {
                 let ty = &field.ty;
                 let ty_str = quote!(#ty).to_string();
@@ -172,7 +179,9 @@ fn field_type_is_allowed(
         return Ok(false);
     };
     let segs = &p.path.segments;
-    let last = segs.last().expect("type path must have at least one segment");
+    let last = segs
+        .last()
+        .expect("type path must have at least one segment");
     let ident = last.ident.to_string();
 
     // Special-case 1: the LoopIterationPayload `extra: serde_json::Value` field.

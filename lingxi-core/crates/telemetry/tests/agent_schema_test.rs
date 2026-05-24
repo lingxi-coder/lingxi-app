@@ -34,9 +34,16 @@ fn all_30_agent_event_names_are_locked() {
         agent::MESSAGE_ADDED,
         agent::MESSAGE_TRUNCATED,
     ];
-    assert_eq!(names.len(), 30, "agent category must declare exactly 30 events");
+    assert_eq!(
+        names.len(),
+        30,
+        "agent category must declare exactly 30 events"
+    );
     for n in names {
-        assert!(n.starts_with("tengu_agent_"), "{n} must start with tengu_agent_");
+        assert!(
+            n.starts_with("tengu_agent_"),
+            "{n} must start with tengu_agent_"
+        );
     }
     // Locked byte-for-byte against M3-02 plan reference.
     assert_eq!(agent::MEMORY_LOADED, "tengu_agent_memory_loaded");

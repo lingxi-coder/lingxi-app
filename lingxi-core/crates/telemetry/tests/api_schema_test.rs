@@ -35,7 +35,11 @@ fn all_25_api_event_names_are_locked() {
         api::REQUEST_CANCELLED,
         api::CIRCUIT_BREAKER_OPENED,
     ];
-    assert_eq!(names.len(), 25, "api category must declare exactly 25 events");
+    assert_eq!(
+        names.len(),
+        25,
+        "api category must declare exactly 25 events"
+    );
     // Locked prefix: every name must start with `tengu_api_`.
     for n in names {
         assert!(

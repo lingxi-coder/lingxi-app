@@ -13,7 +13,11 @@ fn registry_is_exactly_143_entries() {
 fn registry_entries_are_unique() {
     use std::collections::HashSet;
     let set: HashSet<&&str> = ALL_EVENT_NAMES.iter().collect();
-    assert_eq!(set.len(), ALL_EVENT_NAMES.len(), "duplicate name in ALL_EVENT_NAMES");
+    assert_eq!(
+        set.len(),
+        ALL_EVENT_NAMES.len(),
+        "duplicate name in ALL_EVENT_NAMES"
+    );
 }
 
 #[test]

@@ -13,8 +13,10 @@ use std::sync::Arc;
 async fn noop_sink_e2e_no_crash() {
     let bus = AnalyticsBus::new();
     bus.attach_sink(Arc::new(NoOpSink)).await;
-    bus.log_event("tengu_api_request_started", HashMap::new()).await;
-    bus.log_event("tengu_memory_case_mismatch", HashMap::new()).await;
+    bus.log_event("tengu_api_request_started", HashMap::new())
+        .await;
+    bus.log_event("tengu_memory_case_mismatch", HashMap::new())
+        .await;
     // No assertions: NoOp has no observable state — the test is a smoke gate.
 }
 

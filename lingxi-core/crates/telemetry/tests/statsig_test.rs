@@ -1,16 +1,19 @@
 //! `StatsigSink` trait + `MockStatsigSink` skeleton.
 
+use lingxi_protocol::Secret;
 use lingxi_telemetry::{
     AnalyticsSink, AnalyticsValue, LogEventMetadata, MockStatsigSink, StatsigSink,
 };
-use lingxi_protocol::Secret;
 use std::collections::HashMap;
 
 #[tokio::test]
 async fn statsig_wire_payload_matches_logstatsigevent_shape() {
     let sink = MockStatsigSink::new(Secret::new("sdk-secret".to_string()));
     let mut md: LogEventMetadata = HashMap::new();
-    md.insert("model".into(), AnalyticsValue::String("claude-sonnet-4-5".into()));
+    md.insert(
+        "model".into(),
+        AnalyticsValue::String("claude-sonnet-4-5".into()),
+    );
     md.insert("cost_usd".into(), AnalyticsValue::Int(1_500_000_000));
 
     let wire = sink.statsig_wire_payload("tengu_cost_recorded", &md, Some(1.5));
@@ -33,7 +36,10 @@ async fn statsig_wire_payload_strips_proto_fields_for_general_access() {
     let sink = MockStatsigSink::new(Secret::new("sdk-secret".into()));
     let mut md: LogEventMetadata = HashMap::new();
     md.insert("normal".into(), AnalyticsValue::Int(42));
-    md.insert("_PROTO_path".into(), AnalyticsValue::String("/etc/secret".into()));
+    md.insert(
+        "_PROTO_path".into(),
+        AnalyticsValue::String("/etc/secret".into()),
+    );
     let wire = sink.statsig_wire_payload("tengu_memory_case_mismatch", &md, None);
     assert!(wire["metadata"].get("normal").is_some());
     assert!(

@@ -44,9 +44,16 @@ fn all_40_tool_event_names_are_locked() {
         tool::MCP_FAILED,
         tool::SKILL_INVOKED,
     ];
-    assert_eq!(names.len(), 40, "tool category must declare exactly 40 events");
+    assert_eq!(
+        names.len(),
+        40,
+        "tool category must declare exactly 40 events"
+    );
     for n in names {
-        assert!(n.starts_with("tengu_tool_"), "{n} must start with tengu_tool_");
+        assert!(
+            n.starts_with("tengu_tool_"),
+            "{n} must start with tengu_tool_"
+        );
     }
 }
 

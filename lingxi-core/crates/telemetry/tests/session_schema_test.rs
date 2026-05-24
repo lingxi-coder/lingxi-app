@@ -19,9 +19,16 @@ fn all_15_session_event_names_are_locked() {
         session::IMPORT_COMPLETED,
         session::IMPORT_FAILED,
     ];
-    assert_eq!(names.len(), 15, "session category must declare exactly 15 events");
+    assert_eq!(
+        names.len(),
+        15,
+        "session category must declare exactly 15 events"
+    );
     for n in names {
-        assert!(n.starts_with("tengu_session_"), "{n} must start with tengu_session_");
+        assert!(
+            n.starts_with("tengu_session_"),
+            "{n} must start with tengu_session_"
+        );
     }
     assert_eq!(session::STARTED, "tengu_session_started");
 }

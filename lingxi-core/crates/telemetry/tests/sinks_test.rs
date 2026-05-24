@@ -1,8 +1,6 @@
 //! `NoOpSink` + `InMemorySink` + `with_default_sink` behavior.
 
-use lingxi_telemetry::{
-    AnalyticsBus, AnalyticsSink, AnalyticsValue, InMemorySink, NoOpSink,
-};
+use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, InMemorySink, NoOpSink};
 use std::collections::HashMap;
 use std::sync::Arc;
 

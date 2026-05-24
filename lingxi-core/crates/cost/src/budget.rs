@@ -302,9 +302,7 @@ mod tests {
     use crate::ModelRef;
     use async_trait::async_trait;
     use lingxi_protocol::SessionId;
-    use lingxi_telemetry::{
-        AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata,
-    };
+    use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
     use std::sync::Mutex;
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -403,7 +401,10 @@ mod tests {
 
     #[test]
     fn alarm_threshold_constants_match_spec() {
-        assert_eq!(BUDGET_WARNING_THRESHOLD_BPS, 8000_u32, "80% in basis points");
+        assert_eq!(
+            BUDGET_WARNING_THRESHOLD_BPS, 8000_u32,
+            "80% in basis points"
+        );
         assert_eq!(
             BUDGET_EXCEEDED_THRESHOLD_BPS, 10000_u32,
             "100% in basis points"
@@ -593,7 +594,10 @@ mod tests {
             .iter()
             .filter(|(n, _)| n == "tengu_cost_budget_exceeded")
             .count();
-        assert_eq!(exceeded, 1, "exceeded fires exactly once thanks to atomic latch");
+        assert_eq!(
+            exceeded, 1,
+            "exceeded fires exactly once thanks to atomic latch"
+        );
     }
 
     #[test]
@@ -614,6 +618,10 @@ mod tests {
         assert_eq!(nano_usd_to_dollars_format(1_500_000_000), "$1.50");
         assert_eq!(nano_usd_to_dollars_format(12_345_678_901), "$12.35");
         assert_eq!(nano_usd_to_dollars_format(0), "$0.00");
-        assert_eq!(nano_usd_to_dollars_format(999_999_999), "$1.00", "rounding edge");
+        assert_eq!(
+            nano_usd_to_dollars_format(999_999_999),
+            "$1.00",
+            "rounding edge"
+        );
     }
 }

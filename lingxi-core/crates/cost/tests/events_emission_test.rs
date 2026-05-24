@@ -36,16 +36,17 @@ impl AnalyticsSink for CaptureSink {
 async fn emit_cost_recorded_fires_with_locked_payload() {
     let bus = Arc::new(AnalyticsBus::new());
     let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
-    bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>).await;
+    bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
+        .await;
 
     let session = SessionId::nil();
     emit_cost_recorded(
         &bus,
         "claude-opus-4-6",
-        1_000,  // input
-        500,    // output
-        128,    // cache_read_input_tokens
-        64,     // cache_creation_input_tokens
+        1_000,      // input
+        500,        // output
+        128,        // cache_read_input_tokens
+        64,         // cache_creation_input_tokens
         17_500_000, // cost in nano-USD (= $0.0175)
         &session,
         false, // is_batch_request — ALWAYS false in M3
@@ -55,7 +56,10 @@ async fn emit_cost_recorded_fires_with_locked_payload() {
     let events = sink.events.lock().unwrap();
     assert_eq!(events.len(), 1, "exactly one event must fire");
     let (name, payload) = &events[0];
-    assert_eq!(name, "tengu_cost_recorded", "event name must match spec byte-for-byte");
+    assert_eq!(
+        name, "tengu_cost_recorded",
+        "event name must match spec byte-for-byte"
+    );
 
     // All 8 spec-locked keys must be present.
     let expected_keys = [
@@ -125,7 +129,8 @@ async fn emit_cost_recorded_handles_zero_cost() {
     // Edge case: unpriced model → cost_nano_usd = 0. The event STILL fires.
     let bus = Arc::new(AnalyticsBus::new());
     let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
-    bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>).await;
+    bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
+        .await;
 
     emit_cost_recorded(
         &bus,

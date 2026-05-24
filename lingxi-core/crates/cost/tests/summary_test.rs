@@ -114,7 +114,11 @@ async fn summary_two_models_breakdown_correct() {
             .record_api_response_v2(
                 mr.clone(),
                 Usage {
-                    tokens: TokenUsage { input: 100, output: 50, ..Default::default() },
+                    tokens: TokenUsage {
+                        input: 100,
+                        output: 50,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 Duration::from_millis(10),

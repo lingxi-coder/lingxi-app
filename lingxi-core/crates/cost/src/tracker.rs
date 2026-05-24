@@ -115,11 +115,7 @@ impl CostTracker {
     ) {
         let _ = self
             .record_api_response_v2(
-                model_ref,
-                usage,
-                duration,
-                retries,
-                0,     // cache_read_input_tokens
+                model_ref, usage, duration, retries, 0,     // cache_read_input_tokens
                 0,     // cache_creation_input_tokens
                 false, // is_batch_request — M3 always false
                 None,  // bus — legacy callers don't emit
@@ -321,7 +317,8 @@ mod tests {
         );
         let bus = Arc::new(AnalyticsBus::new());
         let sink: Arc<CaptureSink> = Arc::new(CaptureSink::default());
-        bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>).await;
+        bus.attach_sink(sink.clone() as Arc<dyn AnalyticsSink>)
+            .await;
 
         let mr = ModelRef {
             provider: ProviderId::Anthropic,
@@ -339,10 +336,10 @@ mod tests {
                     ..Default::default()
                 },
                 Duration::from_millis(200),
-                0,           // retries
-                128,         // cache_read_input_tokens
-                64,          // cache_creation_input_tokens
-                false,       // is_batch_request — ALWAYS false in M3
+                0,     // retries
+                128,   // cache_read_input_tokens
+                64,    // cache_creation_input_tokens
+                false, // is_batch_request — ALWAYS false in M3
                 Some(&bus),
             )
             .await;
@@ -392,7 +389,11 @@ mod tests {
             .record_api_response_v2(
                 mr,
                 Usage {
-                    tokens: TokenUsage { input: 100, output: 50, ..Default::default() },
+                    tokens: TokenUsage {
+                        input: 100,
+                        output: 50,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 Duration::from_millis(10),
@@ -427,7 +428,11 @@ mod tests {
             .record_api_response_v2(
                 mr.clone(),
                 Usage {
-                    tokens: TokenUsage { input: 100, output: 50, ..Default::default() },
+                    tokens: TokenUsage {
+                        input: 100,
+                        output: 50,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 Duration::from_millis(10),
@@ -438,7 +443,10 @@ mod tests {
                 None,
             )
             .await;
-        assert_eq!(cost, 0, "unpriced model yields zero cost (existing M1 behavior)");
+        assert_eq!(
+            cost, 0,
+            "unpriced model yields zero cost (existing M1 behavior)"
+        );
         let snap = rx.recv().await.unwrap();
         assert!(snap.unpriced_models.contains(&mr));
     }

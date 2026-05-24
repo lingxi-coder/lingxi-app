@@ -24,8 +24,8 @@ pub use calculator::CostCalculator;
 pub use events::emit_cost_recorded;
 pub use pricing::{
     nano_usd_to_dollars_format, CostError, ModelPricing, ModelRef, MoneyPerToken,
-    NonTokenBillableUnit, PricingCatalog, PricingResolution, PricingSource, ProviderId,
-    TokenClass, BATCH_DISCOUNT_BPS,
+    NonTokenBillableUnit, PricingCatalog, PricingResolution, PricingSource, ProviderId, TokenClass,
+    BATCH_DISCOUNT_BPS,
 };
 pub use summary::{CostSummary, ModelCostSummary, PeriodCostSummary, SessionCostSummary};
 pub use tracker::{CostState, CostTracker, ModelUsage};

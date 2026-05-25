@@ -268,56 +268,56 @@ pub const READ_MCP_RESOURCE_COMPLETED: &str = "tengu_tool_read_mcp_resource_comp
 pub const READ_MCP_RESOURCE_FAILED: &str = "tengu_tool_read_mcp_resource_failed";
 
 /// `tengu_tool_lsp_started` — `LSPTool` began (M4-07).
-/// `tengu_tool_ask_user_question_started` — AskUserQuestion presented options to user (M4-08).
+/// `tengu_tool_ask_user_question_started` — `AskUserQuestion` presented options to user (M4-08).
 pub const ASK_USER_QUESTION_STARTED: &str = "tengu_tool_ask_user_question_started";
-/// `tengu_tool_ask_user_question_completed` — User selected an option (M4-08).
+/// `tengu_tool_ask_user_question_completed` — user selected an option (M4-08).
 pub const ASK_USER_QUESTION_COMPLETED: &str = "tengu_tool_ask_user_question_completed";
-/// `tengu_tool_ask_user_question_failed` — Resolver errored or rejected input (M4-08).
+/// `tengu_tool_ask_user_question_failed` — resolver errored or rejected input (M4-08).
 pub const ASK_USER_QUESTION_FAILED: &str = "tengu_tool_ask_user_question_failed";
-/// `tengu_tool_brief_started` — Brief tool began writing brief markdown (M4-08).
+/// `tengu_tool_brief_started` — `Brief` tool began writing brief markdown (M4-08).
 pub const BRIEF_STARTED: &str = "tengu_tool_brief_started";
-/// `tengu_tool_brief_completed` — Brief tool wrote file successfully (M4-08).
+/// `tengu_tool_brief_completed` — `Brief` tool wrote file successfully (M4-08).
 pub const BRIEF_COMPLETED: &str = "tengu_tool_brief_completed";
-/// `tengu_tool_brief_failed` — Brief tool errored (M4-08).
+/// `tengu_tool_brief_failed` — `Brief` tool errored (M4-08).
 pub const BRIEF_FAILED: &str = "tengu_tool_brief_failed";
-/// `tengu_tool_config_started` — Config tool began read/write op (M4-08).
+/// `tengu_tool_config_started` — `Config` tool began read/write op (M4-08).
 pub const CONFIG_STARTED: &str = "tengu_tool_config_started";
-/// `tengu_tool_config_completed` — Config tool returned a result (M4-08).
+/// `tengu_tool_config_completed` — `Config` tool returned a result (M4-08).
 pub const CONFIG_COMPLETED: &str = "tengu_tool_config_completed";
-/// `tengu_tool_config_failed` — Config tool errored (M4-08).
+/// `tengu_tool_config_failed` — `Config` tool errored (M4-08).
 pub const CONFIG_FAILED: &str = "tengu_tool_config_failed";
-/// `tengu_tool_skill_started` — Skill tool began descriptor load (M4-08).
+/// `tengu_tool_skill_started` — `Skill` tool began descriptor load (M4-08).
 pub const SKILL_STARTED: &str = "tengu_tool_skill_started";
-/// `tengu_tool_skill_completed` — Skill tool returned descriptor (M4-08).
+/// `tengu_tool_skill_completed` — `Skill` tool returned descriptor (M4-08).
 pub const SKILL_COMPLETED: &str = "tengu_tool_skill_completed";
-/// `tengu_tool_skill_failed` — Skill tool errored (M4-08).
+/// `tengu_tool_skill_failed` — `Skill` tool errored (M4-08).
 pub const SKILL_FAILED: &str = "tengu_tool_skill_failed";
-/// `tengu_tool_schedule_cron_started` — ScheduleCron tool began parsing (M4-08).
+/// `tengu_tool_schedule_cron_started` — `ScheduleCron` tool began parsing (M4-08).
 pub const SCHEDULE_CRON_STARTED: &str = "tengu_tool_schedule_cron_started";
-/// `tengu_tool_schedule_cron_completed` — ScheduleCron tool persisted job (M4-08).
+/// `tengu_tool_schedule_cron_completed` — `ScheduleCron` tool persisted job (M4-08).
 pub const SCHEDULE_CRON_COMPLETED: &str = "tengu_tool_schedule_cron_completed";
-/// `tengu_tool_schedule_cron_failed` — ScheduleCron tool errored (M4-08).
+/// `tengu_tool_schedule_cron_failed` — `ScheduleCron` tool errored (M4-08).
 pub const SCHEDULE_CRON_FAILED: &str = "tengu_tool_schedule_cron_failed";
-/// `tengu_tool_tool_search_started` — ToolSearch began scoring (M4-08).
+/// `tengu_tool_tool_search_started` — `ToolSearch` began scoring (M4-08).
 pub const TOOL_SEARCH_STARTED: &str = "tengu_tool_tool_search_started";
-/// `tengu_tool_tool_search_completed` — ToolSearch returned ranked list (M4-08).
+/// `tengu_tool_tool_search_completed` — `ToolSearch` returned ranked list (M4-08).
 pub const TOOL_SEARCH_COMPLETED: &str = "tengu_tool_tool_search_completed";
-/// `tengu_tool_tool_search_failed` — ToolSearch errored (M4-08).
+/// `tengu_tool_tool_search_failed` — `ToolSearch` errored (M4-08).
 pub const TOOL_SEARCH_FAILED: &str = "tengu_tool_tool_search_failed";
-/// `tengu_tool_remote_trigger_started` — RemoteTrigger stub began (M4-08).
+/// `tengu_tool_remote_trigger_started` — `RemoteTrigger` stub began (M4-08).
 pub const REMOTE_TRIGGER_STARTED: &str = "tengu_tool_remote_trigger_started";
-/// `tengu_tool_remote_trigger_completed` — RemoteTrigger stub returned (M4-08).
+/// `tengu_tool_remote_trigger_completed` — `RemoteTrigger` stub returned (M4-08).
 pub const REMOTE_TRIGGER_COMPLETED: &str = "tengu_tool_remote_trigger_completed";
-/// `tengu_tool_remote_trigger_failed` — RemoteTrigger stub errored (M4-08).
+/// `tengu_tool_remote_trigger_failed` — `RemoteTrigger` stub errored (M4-08).
 pub const REMOTE_TRIGGER_FAILED: &str = "tengu_tool_remote_trigger_failed";
-/// `tengu_tool_synthetic_output_started` — SyntheticOutput stub began echo (M4-08).
+/// `tengu_tool_synthetic_output_started` — `SyntheticOutput` stub began echo (M4-08).
 pub const SYNTHETIC_OUTPUT_STARTED: &str = "tengu_tool_synthetic_output_started";
-/// `tengu_tool_synthetic_output_completed` — SyntheticOutput stub returned echo (M4-08).
+/// `tengu_tool_synthetic_output_completed` — `SyntheticOutput` stub returned echo (M4-08).
 pub const SYNTHETIC_OUTPUT_COMPLETED: &str = "tengu_tool_synthetic_output_completed";
-/// `tengu_tool_synthetic_output_failed` — SyntheticOutput stub errored (M4-08).
+/// `tengu_tool_synthetic_output_failed` — `SyntheticOutput` stub errored (M4-08).
 pub const SYNTHETIC_OUTPUT_FAILED: &str = "tengu_tool_synthetic_output_failed";
 
-/// `tengu_tool_lsp_started` — LSP tool dispatched a request (M4-07).
+/// `tengu_tool_lsp_started` — `LSP` tool dispatched a request (M4-07).
 pub const LSP_STARTED: &str = "tengu_tool_lsp_started";
 /// `tengu_tool_lsp_completed` — `LSPTool` finished (M4-07).
 pub const LSP_COMPLETED: &str = "tengu_tool_lsp_completed";

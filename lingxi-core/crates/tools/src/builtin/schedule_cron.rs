@@ -184,12 +184,9 @@ pub(crate) fn generate_cron_task_id() -> String {
 /// Compute the next fire time at or after `from` matching `expr`, capped by
 /// [`NEXT_FIRE_HORIZON_MINUTES`]. Returns `None` if no minute in the horizon
 /// satisfies the expression (rare; only happens for malformed expressions).
-pub(crate) fn next_fire_after(expr: &CronExpression, from: SystemTime) -> Option<SystemTime> {
+fn next_fire_after(expr: &CronExpression, from: SystemTime) -> Option<SystemTime> {
     // Round up to the next minute boundary.
-    let from_secs = from
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
+    let from_secs = from.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs();
     let mut candidate_secs = (from_secs / 60 + 1) * 60;
     for _ in 0..NEXT_FIRE_HORIZON_MINUTES {
         let candidate = SystemTime::UNIX_EPOCH + Duration::from_secs(candidate_secs);
@@ -381,12 +378,7 @@ impl Tool for ScheduleCronTool {
         let parsed = match parse_cron(&expr) {
             Ok(c) => c,
             Err(e) => {
-                emit_failed(
-                    &bus,
-                    "parse_error",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
+                emit_failed(&bus, "parse_error", started.elapsed().as_millis() as u64).await;
                 return Err(ToolError::InvalidInput(format!(
                     "ScheduleCron: invalid cron expression {expr:?}: {e}"
                 )));
@@ -514,7 +506,7 @@ mod tests {
 
     #[tokio::test]
     async fn persists_descriptor() {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = ScheduleCronTool::new(shell_test_ctx(dummy_out()));
@@ -531,7 +523,7 @@ mod tests {
             path.starts_with(&format!("{}/.claude/cron/d", tmp.path().display())),
             "{path}"
         );
-        assert!(path.ends_with(".json"));
+        assert!(path.to_lowercase().ends_with(".json"));
         let written = tokio::fs::read_to_string(path).await.unwrap();
         assert!(written.contains("\"expression\": \"*/5 9-17 * * 1-5\""));
         assert!(written.contains("\"command\": \"echo hi\""));
@@ -539,7 +531,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_6_field_expression() {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = ScheduleCronTool::new(shell_test_ctx(dummy_out()));
@@ -556,7 +548,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_garbage_expression() {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = ScheduleCronTool::new(shell_test_ctx(dummy_out()));

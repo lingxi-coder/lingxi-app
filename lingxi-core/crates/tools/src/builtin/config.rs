@@ -156,9 +156,9 @@ async fn read_settings_obj(path: &Path) -> Result<Map<String, Value>, ToolError>
 
 async fn write_settings_obj(path: &Path, obj: &Map<String, Value>) -> Result<usize, ToolError> {
     if let Some(dir) = path.parent() {
-        tokio::fs::create_dir_all(dir).await.map_err(|e| {
-            ToolError::Io(format!("Config: io error at {}: {e}", dir.display()))
-        })?;
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(|e| ToolError::Io(format!("Config: io error at {}: {e}", dir.display())))?;
     }
     let body = serde_json::to_vec_pretty(&Value::Object(obj.clone()))
         .map_err(|e| ToolError::Internal(format!("Config: serde error: {e}")))?;
@@ -239,8 +239,7 @@ impl Tool for ConfigTool {
         let field = normalize_field(field_in);
         if !CONFIG_FIELDS_ALLOWED.contains(&field) {
             return Err(ValidationError(format!(
-                "Config: field '{field_in}' is not in allowlist (allowed: {:?})",
-                CONFIG_FIELDS_ALLOWED
+                "Config: field '{field_in}' is not in allowlist (allowed: {CONFIG_FIELDS_ALLOWED:?})",
             )));
         }
         if op == "set" {
@@ -309,8 +308,7 @@ impl Tool for ConfigTool {
             )
             .await;
             return Err(ToolError::InvalidInput(format!(
-                "Config: field '{field_in}' is not in allowlist (allowed: {:?})",
-                CONFIG_FIELDS_ALLOWED
+                "Config: field '{field_in}' is not in allowlist (allowed: {CONFIG_FIELDS_ALLOWED:?})",
             )));
         }
 
@@ -440,7 +438,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_returns_null_when_missing() {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = ConfigTool::new(shell_test_ctx(dummy_out()));
@@ -457,7 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_then_get_roundtrip() {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = ConfigTool::new(shell_test_ctx(dummy_out()));
@@ -483,7 +481,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_verbose_accepts_bool() {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = ConfigTool::new(shell_test_ctx(dummy_out()));
@@ -498,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_verbose_rejects_string() {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = ConfigTool::new(shell_test_ctx(dummy_out()));
@@ -515,7 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_field_outside_allowlist() {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = ConfigTool::new(shell_test_ctx(dummy_out()));
@@ -532,7 +530,7 @@ mod tests {
 
     #[tokio::test]
     async fn output_style_snake_case_alias_accepted() {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = ConfigTool::new(shell_test_ctx(dummy_out()));

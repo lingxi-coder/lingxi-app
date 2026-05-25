@@ -158,7 +158,9 @@ impl Tool for RemoteTriggerTool {
                 ValidationError("RemoteTrigger: missing or non-string trigger_name".into())
             })?;
         if name.is_empty() {
-            return Err(ValidationError("RemoteTrigger: trigger_name is empty".into()));
+            return Err(ValidationError(
+                "RemoteTrigger: trigger_name is empty".into(),
+            ));
         }
         Ok(())
     }
@@ -303,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_path_with_valid_credentials() {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let path = credentials_path(tmp.path());
@@ -332,16 +334,12 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_missing_credentials_file() {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = RemoteTriggerTool::new(shell_test_ctx(dummy_out()));
         let err = tool
-            .call(
-                json!({"trigger_name": "deploy"}),
-                fresh_ctx(),
-                fresh_tx(),
-            )
+            .call(json!({"trigger_name": "deploy"}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("missing creds");
         assert!(format!("{err}").contains("credentials file not found"));
@@ -349,7 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_credentials_without_access_token() {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let path = credentials_path(tmp.path());
@@ -361,11 +359,7 @@ mod tests {
             .unwrap();
         let tool = RemoteTriggerTool::new(shell_test_ctx(dummy_out()));
         let err = tool
-            .call(
-                json!({"trigger_name": "deploy"}),
-                fresh_ctx(),
-                fresh_tx(),
-            )
+            .call(json!({"trigger_name": "deploy"}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("no access_token");
         assert!(format!("{err}").contains("missing oauth.access_token"));

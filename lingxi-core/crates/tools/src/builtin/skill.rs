@@ -232,7 +232,11 @@ impl Tool for SkillTool {
 
         // Enforce descriptor cap byte-lock.
         let truncated = if desc.description.chars().count() > MAX_SKILL_DESCRIPTOR_LEN {
-            let s: String = desc.description.chars().take(MAX_SKILL_DESCRIPTOR_LEN).collect();
+            let s: String = desc
+                .description
+                .chars()
+                .take(MAX_SKILL_DESCRIPTOR_LEN)
+                .collect();
             desc.description = s;
             true
         } else {

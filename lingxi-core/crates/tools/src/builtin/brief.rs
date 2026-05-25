@@ -209,11 +209,11 @@ impl Tool for BriefTool {
         }
 
         let mut md: LogEventMetadata = HashMap::new();
+        md.insert("body_len".into(), AnalyticsValue::Int(body.len() as i64));
         md.insert(
-            "body_len".into(),
-            AnalyticsValue::Int(body.len() as i64),
+            "_PROTO_body_preview".into(),
+            pii_str(&body[..body.len().min(80)]),
         );
-        md.insert("_PROTO_body_preview".into(), pii_str(&body[..body.len().min(80)]));
         bus.log_event(BRIEF_STARTED, md).await;
 
         let home = match home_dir_or_internal() {
@@ -310,7 +310,7 @@ mod tests {
 
     #[tokio::test]
     async fn writes_brief_under_home_dot_claude_brief() {
-        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = BriefTool::new(shell_test_ctx(dummy_out()));
@@ -324,7 +324,7 @@ mod tests {
             path.starts_with(&format!("{}/.claude/brief/b", tmp.path().display())),
             "{path}"
         );
-        assert!(path.ends_with(".txt"));
+        assert!(path.to_lowercase().ends_with(".txt"));
         let written = tokio::fs::read_to_string(path).await.unwrap();
         assert_eq!(written, body);
     }

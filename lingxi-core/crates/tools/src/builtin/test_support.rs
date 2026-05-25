@@ -90,7 +90,10 @@ pub fn make_dummy_fs() -> Arc<dyn lingxi_traits::filesystem::FileSystem> {
 /// resolve their on-disk dir from `$HOME`. Their unit tests redirect HOME to
 /// a `tempfile::TempDir`; serialize them through this single lock so parallel
 /// test threads from different modules don't race on the same env var.
-pub static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+///
+/// `tokio::sync::Mutex` (not `std::sync::Mutex`) so the guard can be safely
+/// held across `await` points in `#[tokio::test]` bodies.
+pub static HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Build a fresh, minimal [`ToolUseContext`] for unit tests.
 pub fn fresh_ctx() -> ToolUseContext {

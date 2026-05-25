@@ -84,10 +84,7 @@ fn maybe_truncate(s: &str) -> (String, bool) {
     }
     let keep = MAX_TOOL_OUTPUT_LENGTH.saturating_sub(SYNTHETIC_TRUNCATION_SUFFIX.chars().count());
     let prefix: String = s.chars().take(keep).collect();
-    (
-        format!("{prefix}{SYNTHETIC_TRUNCATION_SUFFIX}"),
-        true,
-    )
+    (format!("{prefix}{SYNTHETIC_TRUNCATION_SUFFIX}"), true)
 }
 
 #[async_trait]
@@ -147,7 +144,9 @@ impl Tool for SyntheticOutputTool {
         input
             .get("content")
             .and_then(Value::as_str)
-            .ok_or_else(|| ValidationError("SyntheticOutput: missing or non-string content".into()))?;
+            .ok_or_else(|| {
+                ValidationError("SyntheticOutput: missing or non-string content".into())
+            })?;
         Ok(())
     }
 
@@ -235,11 +234,7 @@ mod tests {
     async fn echoes_short_input_verbatim() {
         let tool = SyntheticOutputTool::new(shell_test_ctx(dummy_out()));
         let out = tool
-            .call(
-                json!({"content": "hello world"}),
-                fresh_ctx(),
-                fresh_tx(),
-            )
+            .call(json!({"content": "hello world"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
         assert_eq!(out.data["content"], json!("hello world"));

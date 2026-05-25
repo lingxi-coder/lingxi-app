@@ -232,12 +232,16 @@ impl Tool for AskUserQuestionTool {
         let q = input
             .get("question")
             .and_then(Value::as_str)
-            .ok_or_else(|| ValidationError("AskUserQuestion: missing or non-string question".into()))?;
+            .ok_or_else(|| {
+                ValidationError("AskUserQuestion: missing or non-string question".into())
+            })?;
         validate_question(q).map_err(|e| ValidationError(format!("{e}")))?;
         let opts_v = input
             .get("options")
             .and_then(Value::as_array)
-            .ok_or_else(|| ValidationError("AskUserQuestion: missing or non-array options".into()))?;
+            .ok_or_else(|| {
+                ValidationError("AskUserQuestion: missing or non-array options".into())
+            })?;
         let opts: Vec<String> = opts_v
             .iter()
             .map(|v| v.as_str().unwrap_or("").to_string())
@@ -258,7 +262,12 @@ impl Tool for AskUserQuestionTool {
         let q = match input.get("question").and_then(Value::as_str) {
             Some(s) => s.to_string(),
             None => {
-                emit_failed(&bus, "missing_question", started.elapsed().as_millis() as u64).await;
+                emit_failed(
+                    &bus,
+                    "missing_question",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
                 return Err(ToolError::InvalidInput(
                     "AskUserQuestion: missing or non-string question".into(),
                 ));
@@ -277,7 +286,12 @@ impl Tool for AskUserQuestionTool {
         let opts_v = match input.get("options").and_then(Value::as_array) {
             Some(a) => a.clone(),
             None => {
-                emit_failed(&bus, "missing_options", started.elapsed().as_millis() as u64).await;
+                emit_failed(
+                    &bus,
+                    "missing_options",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
                 return Err(ToolError::InvalidInput(
                     "AskUserQuestion: missing or non-array options".into(),
                 ));
@@ -313,12 +327,7 @@ impl Tool for AskUserQuestionTool {
         let idx = match self.resolver.resolve(&q, &opts).await {
             Ok(i) => i,
             Err(e) => {
-                emit_failed(
-                    &bus,
-                    "resolver_error",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
+                emit_failed(&bus, "resolver_error", started.elapsed().as_millis() as u64).await;
                 return Err(e);
             }
         };
@@ -417,10 +426,7 @@ mod tests {
             "question": "Pick one",
             "options": ["Alpha", "Beta", "Gamma"]
         });
-        let out = tool
-            .call(input, fresh_ctx(), fresh_tx())
-            .await
-            .expect("ok");
+        let out = tool.call(input, fresh_ctx(), fresh_tx()).await.expect("ok");
         assert_eq!(out.data["selected_index"], json!(0));
         assert_eq!(out.data["selected_label"], json!("Alpha"));
     }

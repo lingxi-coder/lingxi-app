@@ -279,10 +279,7 @@ impl Tool for ToolSearchTool {
             "duration_ms".into(),
             AnalyticsValue::Int(started.elapsed().as_millis() as i64),
         );
-        md.insert(
-            "result_count".into(),
-            AnalyticsValue::Int(top.len() as i64),
-        );
+        md.insert("result_count".into(), AnalyticsValue::Int(top.len() as i64));
         md.insert(
             "registry_size".into(),
             AnalyticsValue::Int(entries.len() as i64),

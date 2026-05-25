@@ -276,6 +276,8 @@ mod common {
                 u64::MAX,
             )
                 as Arc<dyn lingxi_traits::budget::BudgetEnforcerHandle>),
+            mcp_registry: None,
+            lsp_registry: None,
         }
     }
 }

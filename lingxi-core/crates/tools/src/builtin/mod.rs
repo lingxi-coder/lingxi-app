@@ -29,6 +29,8 @@ pub mod file_read;
 pub mod file_write;
 pub mod glob;
 pub mod grep;
+pub mod lsp;
+pub mod mcp;
 pub mod notebook_edit;
 pub mod plan_mode;
 pub mod powershell;
@@ -58,6 +60,8 @@ pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
+pub use lsp::LSPTool;
+pub use mcp::{ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool};
 pub use notebook_edit::NotebookEditTool;
 pub use plan_mode::{EnterPlanModeTool, ExitPlanModeTool};
 pub use powershell::PowerShellTool;
@@ -133,6 +137,18 @@ pub struct BuiltinToolContext {
     /// Budget enforcer — `AgentTool` gates spawn calls through this seam.
     /// Production wires `lingxi_cost::BudgetEnforcer`.
     pub budget_enforcer: Option<Arc<dyn BudgetEnforcerHandle>>,
+
+    // ===== M4-07 wiring (Phase 7) =====
+    /// MCP registry — the 4 MCP builtin tools (`MCPTool`, `McpAuthTool`,
+    /// `ListMcpResourcesTool`, `ReadMcpResourceTool`) dispatch through this
+    /// seam. `None` when the host has not wired an MCP layer; tools surface
+    /// a "MCP registry not configured" error in that case. Production wires
+    /// `lingxi_mcp::McpRegistry` populated by the platform.
+    pub mcp_registry: Option<Arc<lingxi_mcp::registry::McpRegistry>>,
+    /// LSP registry — `LSPTool` dispatches through this seam. `None` when
+    /// the host has not wired an LSP layer. Production wires
+    /// `lingxi_lsp::registry::LspRegistry` populated by plugin registration.
+    pub lsp_registry: Option<Arc<lingxi_lsp::registry::LspRegistry>>,
 }
 
 /// Register every M4-01 foundation tool against `registry`.
@@ -177,7 +193,13 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     registry.register_builtin(Arc::new(SendMessageTool::new(ctx.clone())));
     // M4-06 — team tools.
     registry.register_builtin(Arc::new(TeamCreateTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(TeamDeleteTool::new(ctx)));
+    registry.register_builtin(Arc::new(TeamDeleteTool::new(ctx.clone())));
+    // M4-07 — MCP + LSP tools.
+    registry.register_builtin(Arc::new(MCPTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(McpAuthTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(ListMcpResourcesTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(ReadMcpResourceTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(LSPTool::new(ctx)));
 }
 
 #[cfg(test)]
@@ -223,17 +245,19 @@ mod tests {
             task_registry: None,
             mailbox_router: None,
             budget_enforcer: None,
+            mcp_registry: None,
+            lsp_registry: None,
         }
     }
 
     #[test]
-    fn register_all_inserts_twenty_seven_tools_after_m4_06() {
+    fn register_all_inserts_thirty_two_tools_after_m4_07() {
         let mut registry = ToolRegistry::new();
         register_all_builtin_tools(&mut registry, dummy_ctx());
         let ctx = crate::tool_trait::ToolStaticContext::default();
         let tools = registry.available_tools(&ctx);
-        // M4-01 (6) + M4-02 (4) + M4-03 (2) + M4-04 (5) + M4-05 (8) + M4-06 (2) = 27.
-        assert_eq!(tools.len(), 27);
+        // M4-01 (6) + M4-02 (4) + M4-03 (2) + M4-04 (5) + M4-05 (8) + M4-06 (2) + M4-07 (5) = 32.
+        assert_eq!(tools.len(), 32);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         for n in [
             "Read",
@@ -263,6 +287,11 @@ mod tests {
             "SendMessage",
             "TeamCreate",
             "TeamDelete",
+            "MCP",
+            "McpAuth",
+            "ListMcpResources",
+            "ReadMcpResource",
+            "LSP",
         ] {
             assert!(names.contains(&n), "missing tool {n}: {names:?}");
         }
@@ -300,6 +329,11 @@ mod tests {
             "SendMessage",
             "TeamCreate",
             "TeamDelete",
+            "MCP",
+            "McpAuth",
+            "ListMcpResources",
+            "ReadMcpResource",
+            "LSP",
         ] {
             assert!(
                 registry.find_by_name(name).is_some(),

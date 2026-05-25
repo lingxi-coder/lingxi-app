@@ -499,6 +499,8 @@ pub fn ctx_for_file_tools(
         task_registry: None,
         mailbox_router: None,
         budget_enforcer: None,
+        mcp_registry: None,
+        lsp_registry: None,
     }
 }
 
@@ -537,5 +539,7 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         task_registry: None,
         mailbox_router: None,
         budget_enforcer: None,
+        mcp_registry: None,
+        lsp_registry: None,
     }
 }

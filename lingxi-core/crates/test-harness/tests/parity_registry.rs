@@ -33,7 +33,10 @@ fn registry_40_tools_fixture_totals_to_40() {
     let f = fx();
     assert_eq!(f.total, 40, "fixture declares total=40");
     let summed: usize = f.by_category.values().map(Vec::len).sum();
-    assert_eq!(summed, 40, "sum of by_category lengths is 40 (got {summed})");
+    assert_eq!(
+        summed, 40,
+        "sum of by_category lengths is 40 (got {summed})"
+    );
     let unique: BTreeSet<&String> = f.by_category.values().flat_map(|v| v.iter()).collect();
     assert_eq!(unique.len(), 40, "by_category names are unique");
 }
@@ -119,7 +122,10 @@ fn fixture_names_match_production_constants() {
         // MCP + LSP (5)
         ("MCP", builtin::mcp::MCP_TOOL_NAME),
         ("McpAuth", builtin::mcp::MCP_AUTH_TOOL_NAME),
-        ("ListMcpResources", builtin::mcp::LIST_MCP_RESOURCES_TOOL_NAME),
+        (
+            "ListMcpResources",
+            builtin::mcp::LIST_MCP_RESOURCES_TOOL_NAME,
+        ),
         ("ReadMcpResource", builtin::mcp::READ_MCP_RESOURCE_TOOL_NAME),
         ("LSP", builtin::lsp::LSP_TOOL_NAME),
         // System (8)
@@ -130,9 +136,15 @@ fn fixture_names_match_production_constants() {
         ("Brief", builtin::brief::BRIEF_TOOL_NAME),
         ("Config", builtin::config::CONFIG_TOOL_NAME),
         ("Skill", builtin::skill::SKILL_TOOL_NAME),
-        ("ScheduleCron", builtin::schedule_cron::SCHEDULE_CRON_TOOL_NAME),
+        (
+            "ScheduleCron",
+            builtin::schedule_cron::SCHEDULE_CRON_TOOL_NAME,
+        ),
         ("ToolSearch", builtin::tool_search::TOOL_SEARCH_TOOL_NAME),
-        ("RemoteTrigger", builtin::remote_trigger::REMOTE_TRIGGER_TOOL_NAME),
+        (
+            "RemoteTrigger",
+            builtin::remote_trigger::REMOTE_TRIGGER_TOOL_NAME,
+        ),
         (
             "SyntheticOutput",
             builtin::synthetic_output::SYNTHETIC_OUTPUT_TOOL_NAME,

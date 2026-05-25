@@ -36,7 +36,12 @@ fn tengu_module_compiles() {
     let all: &[&'static str] = lingxi_telemetry::tengu::ALL_EVENT_NAMES;
     // After Task 1 the registry is empty; once Tasks 2-9 land it grows monotonically.
     // We don't assert an exact length here so this skeleton doesn't churn per task.
-    assert!(all.iter().all(|n| n.starts_with("tengu_")));
+    // M4-09 added `lingxi_core_v0_5_0_released` (release marker — not a
+    // subsystem event, so it carries the `lingxi_core_` prefix instead of
+    // `tengu_`). Allow either.
+    assert!(all
+        .iter()
+        .all(|n| n.starts_with("tengu_") || n.starts_with("lingxi_core_")));
 }
 
 #[test]

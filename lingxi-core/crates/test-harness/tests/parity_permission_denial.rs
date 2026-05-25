@@ -75,8 +75,8 @@ fn every_tool_file_declares_a_permission_result() {
     let mut violations: Vec<String> = Vec::new();
     for file in tool_files() {
         let src = dir.join(file);
-        let body = fs::read_to_string(&src)
-            .unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+        let body =
+            fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
         let has_permission_decl = body.contains("PermissionResult::Allow")
             || body.contains("PermissionResult::Deny")
             || body.contains("PermissionResult::Ask");
@@ -121,8 +121,8 @@ fn permission_module_exports_policy() {
         .parent()
         .unwrap()
         .join("crates/permission/src/lib.rs");
-    let body = fs::read_to_string(&lib_src)
-        .unwrap_or_else(|e| panic!("read {}: {e}", lib_src.display()));
+    let body =
+        fs::read_to_string(&lib_src).unwrap_or_else(|e| panic!("read {}: {e}", lib_src.display()));
     assert!(
         body.contains("pub mod policy") || body.contains("pub use"),
         "lingxi-permission must export policy surface"

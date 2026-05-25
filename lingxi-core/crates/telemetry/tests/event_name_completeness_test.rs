@@ -86,9 +86,6 @@ fn category_ordering_preserved() {
         assert!(n.starts_with("tengu_settings_"), "settings block: {n}");
     }
     for n in &ALL_EVENT_NAMES[237..238] {
-        assert!(
-            n.starts_with("lingxi_core_"),
-            "release block: {n}"
-        );
+        assert!(n.starts_with("lingxi_core_"), "release block: {n}");
     }
 }

@@ -21,15 +21,15 @@ use std::path::PathBuf;
 fn exempt_tools() -> HashSet<&'static str> {
     [
         // Pure side-effect or fixed-shape return:
-        "exit_plan_mode",    // returns empty object (handled in plan_mode.rs alongside enter)
-        "exit_worktree",     // returns empty object (handled in worktree.rs alongside enter)
-        "sleep",             // returns { slept_ms: u64 }
-        "schedule_cron",     // returns { next_fire_unix_secs, task_id }
-        "task_stop",         // returns { stopped: bool, task_id }
-        "task_update",       // returns { task_id, status }
-        "team_delete",       // returns { deleted: bool }
-        "mcp_auth",          // returns { authenticated: bool }
-        "remote_trigger",    // returns { stub: true, ... }
+        "exit_plan_mode", // returns empty object (handled in plan_mode.rs alongside enter)
+        "exit_worktree",  // returns empty object (handled in worktree.rs alongside enter)
+        "sleep",          // returns { slept_ms: u64 }
+        "schedule_cron",  // returns { next_fire_unix_secs, task_id }
+        "task_stop",      // returns { stopped: bool, task_id }
+        "task_update",    // returns { task_id, status }
+        "team_delete",    // returns { deleted: bool }
+        "mcp_auth",       // returns { authenticated: bool }
+        "remote_trigger", // returns { stub: true, ... }
     ]
     .into_iter()
     .collect()
@@ -53,13 +53,13 @@ fn tool_files() -> Vec<&'static str> {
         "web_fetch.rs",
         "web_search.rs",
         "todo_write.rs",
-        "plan_mode.rs",  // Enter+Exit
-        "worktree.rs",   // Enter+Exit
+        "plan_mode.rs", // Enter+Exit
+        "worktree.rs",  // Enter+Exit
         "agent.rs",
-        "task.rs",       // 6 task tools
+        "task.rs", // 6 task tools
         "send_message.rs",
         "team.rs",
-        "mcp.rs",        // MCP + McpAuth + ListMcpResources + ReadMcpResource
+        "mcp.rs", // MCP + McpAuth + ListMcpResources + ReadMcpResource
         "lsp.rs",
         "ask_user_question.rs",
         "brief.rs",
@@ -76,8 +76,7 @@ fn tool_files() -> Vec<&'static str> {
 fn output_truncation_constants_locked() {
     assert_eq!(MAX_TOOL_OUTPUT_LENGTH, 30_000, "spec §7: 30_000 chars");
     assert_eq!(
-        TRUNCATION_SUFFIX,
-        "\n\n[Output truncated due to length]",
+        TRUNCATION_SUFFIX, "\n\n[Output truncated due to length]",
         "spec §7 locked suffix"
     );
 }
@@ -91,8 +90,8 @@ fn truncation_lib_source_contains_literals() {
         .unwrap()
         .to_path_buf();
     let lib_src = repo_root.join("crates/tools/src/shared/output_truncation.rs");
-    let body = fs::read_to_string(&lib_src)
-        .unwrap_or_else(|e| panic!("read {}: {e}", lib_src.display()));
+    let body =
+        fs::read_to_string(&lib_src).unwrap_or_else(|e| panic!("read {}: {e}", lib_src.display()));
     assert!(
         body.contains("30_000"),
         "MAX_TOOL_OUTPUT_LENGTH literal 30_000 missing from {}",
@@ -119,8 +118,8 @@ fn every_tool_with_output_calls_truncate_or_opts_out() {
     let mut violations: Vec<String> = Vec::new();
     for file in tool_files() {
         let src = builtin_dir.join(file);
-        let body = fs::read_to_string(&src)
-            .unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+        let body =
+            fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
         let has_call = body.contains("MAX_TOOL_OUTPUT_LENGTH")
             || body.contains("output_truncation::truncate")
             || body.contains("shared::truncate")

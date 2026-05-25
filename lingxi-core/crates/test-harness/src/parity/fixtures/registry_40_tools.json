@@ -1,0 +1,16 @@
+{
+  "_source": "docs/superpowers/specs/2026-05-24-m4-tools-implementation-design.md §1 Goal (lines 1-60); claude-code upstream tools/ directory.",
+  "_note": "Registry cardinality lock for v0.5.0. Asserts that register_all_builtin_tools(reg, ctx) produces exactly 40 builtin tools across the 9 categories below. Driver derives the sorted-name set from by_category at runtime; do not add a parallel flat list (single source of truth). Per v3 §32.6 parity protocol.",
+  "total": 40,
+  "by_category": {
+    "file": ["Read", "Write", "Edit", "NotebookEdit", "Glob"],
+    "search": ["Grep"],
+    "shell": ["Bash", "PowerShell", "REPL", "Sleep"],
+    "web": ["WebFetch", "WebSearch"],
+    "workflow": ["TodoWrite", "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree"],
+    "agent": ["Agent", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "TaskOutput", "SendMessage"],
+    "team": ["TeamCreate", "TeamDelete"],
+    "mcp_lsp": ["MCP", "McpAuth", "ListMcpResources", "ReadMcpResource", "LSP"],
+    "system": ["AskUserQuestion", "Brief", "Config", "Skill", "ScheduleCron", "ToolSearch", "RemoteTrigger", "SyntheticOutput"]
+  }
+}

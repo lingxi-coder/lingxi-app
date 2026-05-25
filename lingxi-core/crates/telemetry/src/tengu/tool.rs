@@ -268,17 +268,67 @@ pub const READ_MCP_RESOURCE_COMPLETED: &str = "tengu_tool_read_mcp_resource_comp
 pub const READ_MCP_RESOURCE_FAILED: &str = "tengu_tool_read_mcp_resource_failed";
 
 /// `tengu_tool_lsp_started` — `LSPTool` began (M4-07).
+/// `tengu_tool_ask_user_question_started` — AskUserQuestion presented options to user (M4-08).
+pub const ASK_USER_QUESTION_STARTED: &str = "tengu_tool_ask_user_question_started";
+/// `tengu_tool_ask_user_question_completed` — User selected an option (M4-08).
+pub const ASK_USER_QUESTION_COMPLETED: &str = "tengu_tool_ask_user_question_completed";
+/// `tengu_tool_ask_user_question_failed` — Resolver errored or rejected input (M4-08).
+pub const ASK_USER_QUESTION_FAILED: &str = "tengu_tool_ask_user_question_failed";
+/// `tengu_tool_brief_started` — Brief tool began writing brief markdown (M4-08).
+pub const BRIEF_STARTED: &str = "tengu_tool_brief_started";
+/// `tengu_tool_brief_completed` — Brief tool wrote file successfully (M4-08).
+pub const BRIEF_COMPLETED: &str = "tengu_tool_brief_completed";
+/// `tengu_tool_brief_failed` — Brief tool errored (M4-08).
+pub const BRIEF_FAILED: &str = "tengu_tool_brief_failed";
+/// `tengu_tool_config_started` — Config tool began read/write op (M4-08).
+pub const CONFIG_STARTED: &str = "tengu_tool_config_started";
+/// `tengu_tool_config_completed` — Config tool returned a result (M4-08).
+pub const CONFIG_COMPLETED: &str = "tengu_tool_config_completed";
+/// `tengu_tool_config_failed` — Config tool errored (M4-08).
+pub const CONFIG_FAILED: &str = "tengu_tool_config_failed";
+/// `tengu_tool_skill_started` — Skill tool began descriptor load (M4-08).
+pub const SKILL_STARTED: &str = "tengu_tool_skill_started";
+/// `tengu_tool_skill_completed` — Skill tool returned descriptor (M4-08).
+pub const SKILL_COMPLETED: &str = "tengu_tool_skill_completed";
+/// `tengu_tool_skill_failed` — Skill tool errored (M4-08).
+pub const SKILL_FAILED: &str = "tengu_tool_skill_failed";
+/// `tengu_tool_schedule_cron_started` — ScheduleCron tool began parsing (M4-08).
+pub const SCHEDULE_CRON_STARTED: &str = "tengu_tool_schedule_cron_started";
+/// `tengu_tool_schedule_cron_completed` — ScheduleCron tool persisted job (M4-08).
+pub const SCHEDULE_CRON_COMPLETED: &str = "tengu_tool_schedule_cron_completed";
+/// `tengu_tool_schedule_cron_failed` — ScheduleCron tool errored (M4-08).
+pub const SCHEDULE_CRON_FAILED: &str = "tengu_tool_schedule_cron_failed";
+/// `tengu_tool_tool_search_started` — ToolSearch began scoring (M4-08).
+pub const TOOL_SEARCH_STARTED: &str = "tengu_tool_tool_search_started";
+/// `tengu_tool_tool_search_completed` — ToolSearch returned ranked list (M4-08).
+pub const TOOL_SEARCH_COMPLETED: &str = "tengu_tool_tool_search_completed";
+/// `tengu_tool_tool_search_failed` — ToolSearch errored (M4-08).
+pub const TOOL_SEARCH_FAILED: &str = "tengu_tool_tool_search_failed";
+/// `tengu_tool_remote_trigger_started` — RemoteTrigger stub began (M4-08).
+pub const REMOTE_TRIGGER_STARTED: &str = "tengu_tool_remote_trigger_started";
+/// `tengu_tool_remote_trigger_completed` — RemoteTrigger stub returned (M4-08).
+pub const REMOTE_TRIGGER_COMPLETED: &str = "tengu_tool_remote_trigger_completed";
+/// `tengu_tool_remote_trigger_failed` — RemoteTrigger stub errored (M4-08).
+pub const REMOTE_TRIGGER_FAILED: &str = "tengu_tool_remote_trigger_failed";
+/// `tengu_tool_synthetic_output_started` — SyntheticOutput stub began echo (M4-08).
+pub const SYNTHETIC_OUTPUT_STARTED: &str = "tengu_tool_synthetic_output_started";
+/// `tengu_tool_synthetic_output_completed` — SyntheticOutput stub returned echo (M4-08).
+pub const SYNTHETIC_OUTPUT_COMPLETED: &str = "tengu_tool_synthetic_output_completed";
+/// `tengu_tool_synthetic_output_failed` — SyntheticOutput stub errored (M4-08).
+pub const SYNTHETIC_OUTPUT_FAILED: &str = "tengu_tool_synthetic_output_failed";
+
+/// `tengu_tool_lsp_started` — LSP tool dispatched a request (M4-07).
 pub const LSP_STARTED: &str = "tengu_tool_lsp_started";
 /// `tengu_tool_lsp_completed` — `LSPTool` finished (M4-07).
 pub const LSP_COMPLETED: &str = "tengu_tool_lsp_completed";
 /// `tengu_tool_lsp_failed` — `LSPTool` errored (M4-07).
 pub const LSP_FAILED: &str = "tengu_tool_lsp_failed";
 
-/// Order-locked array of all 110 names; consumed by `tengu::ALL_EVENT_NAMES`.
+/// Order-locked array of all 134 names; consumed by `tengu::ALL_EVENT_NAMES`.
 /// M3-06 locked the first 40; M4-02 appended 9 (powershell/repl/sleep);
 /// M4-03 appended 3 (`web_search`); M4-04 appended 15 workflow events;
 /// M4-05 appended 24 agent/task events; M4-06 appends 6 team events;
-/// M4-07 appends 13 MCP + LSP events.
+/// M4-07 appends 13 MCP + LSP events; M4-08 appends 24 system events.
 pub(crate) const NAMES: &[&str] = &[
     STARTED,
     COMPLETED,
@@ -396,6 +446,31 @@ pub(crate) const NAMES: &[&str] = &[
     LSP_STARTED,
     LSP_COMPLETED,
     LSP_FAILED,
+    // M4-08 System tools (24 events, 8 tools × 3 lifecycle stages)
+    ASK_USER_QUESTION_STARTED,
+    ASK_USER_QUESTION_COMPLETED,
+    ASK_USER_QUESTION_FAILED,
+    BRIEF_STARTED,
+    BRIEF_COMPLETED,
+    BRIEF_FAILED,
+    CONFIG_STARTED,
+    CONFIG_COMPLETED,
+    CONFIG_FAILED,
+    SKILL_STARTED,
+    SKILL_COMPLETED,
+    SKILL_FAILED,
+    SCHEDULE_CRON_STARTED,
+    SCHEDULE_CRON_COMPLETED,
+    SCHEDULE_CRON_FAILED,
+    TOOL_SEARCH_STARTED,
+    TOOL_SEARCH_COMPLETED,
+    TOOL_SEARCH_FAILED,
+    REMOTE_TRIGGER_STARTED,
+    REMOTE_TRIGGER_COMPLETED,
+    REMOTE_TRIGGER_FAILED,
+    SYNTHETIC_OUTPUT_STARTED,
+    SYNTHETIC_OUTPUT_COMPLETED,
+    SYNTHETIC_OUTPUT_FAILED,
 ];
 
 #[cfg(test)]
@@ -479,9 +554,102 @@ mod m4_04_workflow_event_tests {
         }
         assert_eq!(
             NAMES.len(),
-            110,
-            "M3-06 40 + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 + M4-06 6 + M4-07 13 = 110"
+            134,
+            "M3-06 40 + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 = 134"
         );
+    }
+}
+
+#[cfg(test)]
+mod m4_08_system_event_tests {
+    use super::*;
+
+    #[test]
+    fn system_constants_are_locked() {
+        assert_eq!(
+            ASK_USER_QUESTION_STARTED,
+            "tengu_tool_ask_user_question_started"
+        );
+        assert_eq!(
+            ASK_USER_QUESTION_COMPLETED,
+            "tengu_tool_ask_user_question_completed"
+        );
+        assert_eq!(
+            ASK_USER_QUESTION_FAILED,
+            "tengu_tool_ask_user_question_failed"
+        );
+        assert_eq!(BRIEF_STARTED, "tengu_tool_brief_started");
+        assert_eq!(BRIEF_COMPLETED, "tengu_tool_brief_completed");
+        assert_eq!(BRIEF_FAILED, "tengu_tool_brief_failed");
+        assert_eq!(CONFIG_STARTED, "tengu_tool_config_started");
+        assert_eq!(CONFIG_COMPLETED, "tengu_tool_config_completed");
+        assert_eq!(CONFIG_FAILED, "tengu_tool_config_failed");
+        assert_eq!(SKILL_STARTED, "tengu_tool_skill_started");
+        assert_eq!(SKILL_COMPLETED, "tengu_tool_skill_completed");
+        assert_eq!(SKILL_FAILED, "tengu_tool_skill_failed");
+        assert_eq!(SCHEDULE_CRON_STARTED, "tengu_tool_schedule_cron_started");
+        assert_eq!(
+            SCHEDULE_CRON_COMPLETED,
+            "tengu_tool_schedule_cron_completed"
+        );
+        assert_eq!(SCHEDULE_CRON_FAILED, "tengu_tool_schedule_cron_failed");
+        assert_eq!(TOOL_SEARCH_STARTED, "tengu_tool_tool_search_started");
+        assert_eq!(TOOL_SEARCH_COMPLETED, "tengu_tool_tool_search_completed");
+        assert_eq!(TOOL_SEARCH_FAILED, "tengu_tool_tool_search_failed");
+        assert_eq!(REMOTE_TRIGGER_STARTED, "tengu_tool_remote_trigger_started");
+        assert_eq!(
+            REMOTE_TRIGGER_COMPLETED,
+            "tengu_tool_remote_trigger_completed"
+        );
+        assert_eq!(REMOTE_TRIGGER_FAILED, "tengu_tool_remote_trigger_failed");
+        assert_eq!(
+            SYNTHETIC_OUTPUT_STARTED,
+            "tengu_tool_synthetic_output_started"
+        );
+        assert_eq!(
+            SYNTHETIC_OUTPUT_COMPLETED,
+            "tengu_tool_synthetic_output_completed"
+        );
+        assert_eq!(
+            SYNTHETIC_OUTPUT_FAILED,
+            "tengu_tool_synthetic_output_failed"
+        );
+    }
+
+    #[test]
+    fn names_array_contains_all_24_m4_08_events() {
+        let system = [
+            ASK_USER_QUESTION_STARTED,
+            ASK_USER_QUESTION_COMPLETED,
+            ASK_USER_QUESTION_FAILED,
+            BRIEF_STARTED,
+            BRIEF_COMPLETED,
+            BRIEF_FAILED,
+            CONFIG_STARTED,
+            CONFIG_COMPLETED,
+            CONFIG_FAILED,
+            SKILL_STARTED,
+            SKILL_COMPLETED,
+            SKILL_FAILED,
+            SCHEDULE_CRON_STARTED,
+            SCHEDULE_CRON_COMPLETED,
+            SCHEDULE_CRON_FAILED,
+            TOOL_SEARCH_STARTED,
+            TOOL_SEARCH_COMPLETED,
+            TOOL_SEARCH_FAILED,
+            REMOTE_TRIGGER_STARTED,
+            REMOTE_TRIGGER_COMPLETED,
+            REMOTE_TRIGGER_FAILED,
+            SYNTHETIC_OUTPUT_STARTED,
+            SYNTHETIC_OUTPUT_COMPLETED,
+            SYNTHETIC_OUTPUT_FAILED,
+        ];
+        for name in system {
+            assert!(
+                NAMES.contains(&name),
+                "NAMES array missing M4-08 event: {name}"
+            );
+        }
     }
 }
 

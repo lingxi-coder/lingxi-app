@@ -1,5 +1,101 @@
 # Changelog
 
+## [0.5.0] — M4 Tools 全集
+
+Lands the **40-tool** parity surface: every concrete `Tool` implementation
+from claude-code's `src/tools/` directory is now a Rust `impl Tool` with
+byte-aligned input/output schemas, byte-aligned error strings, hermetic
+test coverage via M1 trait injection, and a `tengu_tool_*` event triple
+(`started`/`completed`/`failed`). 8 sub-plans M4-01..M4-08 delivered the
+tool bodies; M4-09 ships the cross-cutting parity fixtures, version bump,
+docs, and release tag.
+
+### Tools delivered (40 total, 9 categories)
+
+- **File ops (5, M4-01)** — `Read`, `Write`, `Edit`, `NotebookEdit`,
+  `Glob`. `MAX_FILE_READ_SIZE = 262_144` bytes, binary detection via
+  first-8KB NUL-byte scan, 1-based line indexing.
+- **Search (1, M4-01)** — `Grep` over ripgrep with 100-match-per-file cap.
+- **Shell (4, M4-02)** — `Bash`, `PowerShell`, `REPL`, `Sleep`. All gated
+  through `lingxi_sandbox::Sandbox` per M2-04 lock.
+- **Web (2, M4-03)** — `WebFetch` (5 MB cap, follows up to 3 redirects),
+  `WebSearch` (via `lingxi-api-client`'s search endpoint).
+- **Workflow (5, M4-04)** — `TodoWrite`, `EnterPlanMode`, `ExitPlanMode`,
+  `EnterWorktree`, `ExitWorktree`.
+- **Agent + Task (8, M4-05)** — `Agent` (recursive subagent dispatch),
+  `TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`, `TaskStop`,
+  `TaskOutput`, `SendMessage`. Task IDs use the 9-char
+  `[bartwmd][0-9a-z]{8}` format.
+- **Team (2, M4-06)** — `TeamCreate`, `TeamDelete`.
+- **MCP + LSP (5, M4-07)** — `MCP`, `McpAuth`, `ListMcpResources`,
+  `ReadMcpResource`, `LSP`. Tool full-name prefix `mcp__<server>__<tool>`
+  preserved for federated MCP servers.
+- **System (8, M4-08)** — `AskUserQuestion` (4-option cap, 60-char
+  labels, 200-char question), `Brief`, `Config` (4-field allowlist:
+  `model`/`outputStyle`/`theme`/`verbose`), `Skill`, `ScheduleCron`
+  (5-field cron), `ToolSearch` (top-20 token-overlap), `RemoteTrigger`
+  (local stub), `SyntheticOutput`.
+
+### Cross-cutting locks (M4-09)
+
+- **Registry cardinality**: `register_all_builtin_tools(reg, ctx)`
+  produces exactly 40 tools. Asserted by
+  `crates/test-harness/src/parity/fixtures/registry_40_tools.json` +
+  `parity_registry.rs`.
+- **Telemetry coverage**: every of the 40 tools has its 3 lifecycle
+  events (`tengu_tool_<snake>_{started,completed,failed}`) registered.
+  134 `tengu_tool_*` events total in `ALL_EVENT_NAMES` (M3-06 baseline +
+  M4-02..08 deltas). Asserted by `parity_telemetry_coverage.rs`. Event
+  suffix is `_completed` for tool events (locked at M3-06; NOT
+  `_succeeded`).
+- **Output truncation**: every tool with variable-length output routes
+  through `lingxi_tools::shared::truncate` with
+  `MAX_TOOL_OUTPUT_LENGTH = 30_000` chars and the truncation suffix
+  `"\n\n[Output truncated due to length]"`. Asserted by
+  `parity_output_truncation.rs`; 4 tools opted out via doc-comment
+  markers (`mcp`, `lsp`, `ask_user_question`, `config` — bounded output
+  by construction).
+- **Permission decision surface**: every tool file declares a
+  `PermissionResult` variant (`Allow` / `Deny` / `Ask`) in its
+  `permission_required` body. Default gate `AllowAllGate` (M4-01); real
+  `DenyAllGate`-style runtime denial is owned by `lingxi_permission`'s
+  own `policy::tests` suite. Asserted by `parity_permission_denial.rs`.
+- **Release marker**: new top-level telemetry event
+  `lingxi_core_v0_5_0_released` registered in
+  `lingxi_telemetry::tengu::release::NAMES` (1 entry). Wires up in M5
+  alongside `Engine::init()`. `ALL_EVENT_NAMES` count: 237 → 238.
+
+### Crates expanded
+
+- `lingxi-tools` — 29 builtin tool source files under `src/builtin/`
+  hosting all 40 `impl Tool` blocks (some files host multiple tools,
+  e.g. `task.rs` hosts the 6 task tools, `plan_mode.rs` hosts Enter+Exit,
+  `mcp.rs` hosts MCP+McpAuth+ListMcpResources+ReadMcpResource). The
+  `BuiltinToolContext` struct grew across M4-01..M4-08 to expose every
+  trait-injected dependency the tool bodies need.
+- `lingxi-telemetry` — new `tengu/release.rs` sub-module holding the
+  release-marker constant. `ALL_EVENT_NAMES` grew by 1.
+- `lingxi-test-harness` — 4 new cross-cutting parity drivers in
+  `tests/`: `parity_registry.rs`, `parity_telemetry_coverage.rs`,
+  `parity_output_truncation.rs`, `parity_permission_denial.rs`. New
+  fixture `parity/fixtures/registry_40_tools.json`.
+
+### Workspace
+
+- Version bump 0.1.0 → 0.5.0 across all 39 `Cargo.toml` files
+  (38 packages + the `mock_stdio_mcp` fixture sub-crate).
+- New gate `tools/scripts/check_version.sh` asserts every Cargo.toml is
+  at `0.5.0`.
+
+### Tag
+
+- `m4.9` (M4-09 completion).
+- `v0.5.0` (release).
+
+Both annotated, both lowercase, both on the verification-pass commit.
+
+---
+
 ## [0.4.0] — M3 Engine Completion
 
 Locks in claude-code's engine surface — Settings, Memory, real API client,

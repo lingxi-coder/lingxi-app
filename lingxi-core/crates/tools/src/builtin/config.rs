@@ -12,6 +12,10 @@
 //! plan's 4-field byte-lock). Operating directly on the JSON keeps ConfigTool
 //! aligned with the spec's wire allowlist while leaving the M3-01 schema
 //! untouched.
+//!
+//! no-truncation: ConfigTool returns the 4-field allowlist value (each
+//! bounded by the settings.json schema). No free-form user content flows
+//! through the response.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

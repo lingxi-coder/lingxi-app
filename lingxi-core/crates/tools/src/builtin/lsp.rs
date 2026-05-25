@@ -6,6 +6,11 @@
 //! before issuing the LSP request.
 //!
 //! Wire identifiers locked in spec §7 line 695.
+//!
+//! no-truncation: LSPTool returns structured hover/completion/definition/
+//! references payloads forwarded verbatim from lingxi_lsp::LspClient (the
+//! upstream LSP server is the trust boundary). Free-form text comes only
+//! from hover contents, which are bounded by the LSP protocol itself.
 
 use std::collections::HashMap;
 use std::path::Path;

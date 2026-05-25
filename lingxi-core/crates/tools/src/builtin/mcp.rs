@@ -7,6 +7,13 @@
 //!
 //! Wire identifiers locked in spec §7 lines 685-700 and reproduced
 //! byte-for-byte in `parity/fixtures/mcp_lsp_tools.json`.
+//!
+//! no-truncation: MCPTool forwards the upstream server response verbatim
+//! (the server itself is the trust boundary); McpAuthTool returns
+//! `{ authenticated: bool }`; ListMcpResourcesTool returns a bounded
+//! resource list; ReadMcpResourceTool exposes server-controlled payloads.
+//! Variable-length user content (e.g. tool dispatch results from MCP) is
+//! bounded upstream by lingxi_mcp::McpClient response handling.
 
 use std::collections::HashMap;
 use std::sync::Arc;

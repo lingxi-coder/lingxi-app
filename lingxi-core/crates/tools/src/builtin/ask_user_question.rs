@@ -10,6 +10,9 @@
 //! `ctx.options.ask_user_question_selected_index` (advisory) returns 0 when
 //! absent. Production hosts override `AskUserQuestionTool` constructor input
 //! to inject a real terminal/UI prompt.
+//!
+//! no-truncation: returns `{ selected_index: u32, selected_label: String }`.
+//! Selected label is bounded to ≤60 chars (input contract).
 
 use std::collections::HashMap;
 use std::sync::Arc;

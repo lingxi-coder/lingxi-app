@@ -13,6 +13,7 @@ pub mod api;
 pub mod cost;
 pub mod memory;
 pub mod oauth;
+pub mod release;
 pub mod session;
 pub mod settings;
 pub mod tool;
@@ -25,7 +26,7 @@ pub mod tool;
 /// inside the `tengu` module so the path `lingxi_telemetry::tengu::ALL_EVENT_NAMES`
 /// remains the single source of truth; see `parity_tengu_events.rs`).
 pub const ALL_EVENT_NAMES: &[&str] = {
-    const TOTAL: usize = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3;
+    const TOTAL: usize = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 1;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;
@@ -74,6 +75,12 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         let mut i = 0;
         while i < settings::NAMES.len() {
             out[idx] = settings::NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        let mut i = 0;
+        while i < release::NAMES.len() {
+            out[idx] = release::NAMES[i];
             idx += 1;
             i += 1;
         }

@@ -5,13 +5,14 @@
 use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_237_entries() {
+fn registry_is_exactly_238_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
-    // M4-08 added 24 (8 system tools × 3 lifecycle stages):
-    // 213 (post-M4-07) + 24 (M4-08) = 237.
-    assert_eq!(ALL_EVENT_NAMES.len(), 237);
+    // M4-08 added 24 (8 system tools × 3 lifecycle stages),
+    // M4-09 added 1 (release marker `lingxi_core_v0_5_0_released`):
+    // 213 (post-M4-07) + 24 (M4-08) + 1 (M4-09) = 238.
+    assert_eq!(ALL_EVENT_NAMES.len(), 238);
 }
 
 #[test]
@@ -26,10 +27,32 @@ fn registry_entries_are_unique() {
 }
 
 #[test]
-fn registry_entries_all_use_tengu_prefix() {
+fn registry_entries_all_use_tengu_or_release_prefix() {
+    // All events use the `tengu_` prefix EXCEPT for release-marker events,
+    // which use the engine-scoped `lingxi_core_` prefix (the release marker
+    // is a one-shot init event, not a subsystem event).
     for n in ALL_EVENT_NAMES {
-        assert!(n.starts_with("tengu_"), "{n} must start with `tengu_`");
+        assert!(
+            n.starts_with("tengu_") || n.starts_with("lingxi_core_"),
+            "{n} must start with `tengu_` or `lingxi_core_`"
+        );
     }
+}
+
+#[test]
+fn lingxi_core_v0_5_0_released_is_registered() {
+    assert!(
+        ALL_EVENT_NAMES.contains(&"lingxi_core_v0_5_0_released"),
+        "v0.5.0 release-marker event must be present in ALL_EVENT_NAMES"
+    );
+}
+
+#[test]
+fn release_marker_constant_matches() {
+    assert_eq!(
+        lingxi_telemetry::tengu::release::LINGXI_CORE_V0_5_0_RELEASED,
+        "lingxi_core_v0_5_0_released"
+    );
 }
 
 #[test]
@@ -61,5 +84,11 @@ fn category_ordering_preserved() {
     }
     for n in &ALL_EVENT_NAMES[234..237] {
         assert!(n.starts_with("tengu_settings_"), "settings block: {n}");
+    }
+    for n in &ALL_EVENT_NAMES[237..238] {
+        assert!(
+            n.starts_with("lingxi_core_"),
+            "release block: {n}"
+        );
     }
 }

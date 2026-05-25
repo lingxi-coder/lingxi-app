@@ -26,6 +26,12 @@ pub mod agent;
 pub mod ask_user_question;
 pub mod bash;
 pub mod brief;
+pub mod config;
+pub mod remote_trigger;
+pub mod schedule_cron;
+pub mod skill;
+pub mod synthetic_output;
+pub mod tool_search;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -59,6 +65,12 @@ pub use agent::AgentTool;
 pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
 pub use brief::BriefTool;
+pub use config::ConfigTool;
+pub use remote_trigger::RemoteTriggerTool;
+pub use schedule_cron::ScheduleCronTool;
+pub use skill::SkillTool;
+pub use synthetic_output::SyntheticOutputTool;
+pub use tool_search::ToolSearchTool;
 pub use file_edit::FileEditTool;
 pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
@@ -203,7 +215,16 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     registry.register_builtin(Arc::new(McpAuthTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(ListMcpResourcesTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(ReadMcpResourceTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(LSPTool::new(ctx)));
+    registry.register_builtin(Arc::new(LSPTool::new(ctx.clone())));
+    // M4-08 — system tools.
+    registry.register_builtin(Arc::new(AskUserQuestionTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(BriefTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(ConfigTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(SkillTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(ScheduleCronTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(ToolSearchTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(RemoteTriggerTool::new(ctx.clone())));
+    registry.register_builtin(Arc::new(SyntheticOutputTool::new(ctx)));
 }
 
 #[cfg(test)]
@@ -255,13 +276,14 @@ mod tests {
     }
 
     #[test]
-    fn register_all_inserts_thirty_two_tools_after_m4_07() {
+    fn register_all_inserts_forty_tools_after_m4_08() {
         let mut registry = ToolRegistry::new();
         register_all_builtin_tools(&mut registry, dummy_ctx());
         let ctx = crate::tool_trait::ToolStaticContext::default();
         let tools = registry.available_tools(&ctx);
-        // M4-01 (6) + M4-02 (4) + M4-03 (2) + M4-04 (5) + M4-05 (8) + M4-06 (2) + M4-07 (5) = 32.
-        assert_eq!(tools.len(), 32);
+        // M4-01 (6) + M4-02 (4) + M4-03 (2) + M4-04 (5) + M4-05 (8)
+        // + M4-06 (2) + M4-07 (5) + M4-08 (8) = 40.
+        assert_eq!(tools.len(), 40);
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         for n in [
             "Read",
@@ -296,6 +318,14 @@ mod tests {
             "ListMcpResources",
             "ReadMcpResource",
             "LSP",
+            "AskUserQuestion",
+            "Brief",
+            "Config",
+            "Skill",
+            "ScheduleCron",
+            "ToolSearch",
+            "RemoteTrigger",
+            "SyntheticOutput",
         ] {
             assert!(names.contains(&n), "missing tool {n}: {names:?}");
         }
@@ -338,6 +368,14 @@ mod tests {
             "ListMcpResources",
             "ReadMcpResource",
             "LSP",
+            "AskUserQuestion",
+            "Brief",
+            "Config",
+            "Skill",
+            "ScheduleCron",
+            "ToolSearch",
+            "RemoteTrigger",
+            "SyntheticOutput",
         ] {
             assert!(
                 registry.find_by_name(name).is_some(),

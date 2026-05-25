@@ -271,7 +271,7 @@ impl Tool for BriefTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, HOME_LOCK};
     use lingxi_traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
@@ -310,6 +310,7 @@ mod tests {
 
     #[tokio::test]
     async fn writes_brief_under_home_dot_claude_brief() {
+        let _g = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = BriefTool::new(shell_test_ctx(dummy_out()));

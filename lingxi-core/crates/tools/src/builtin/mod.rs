@@ -23,7 +23,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub mod agent;
+pub mod ask_user_question;
 pub mod bash;
+pub mod brief;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -54,7 +56,9 @@ pub(crate) mod test_support;
 pub mod agent_test_support;
 
 pub use agent::AgentTool;
+pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
+pub use brief::BriefTool;
 pub use file_edit::FileEditTool;
 pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;

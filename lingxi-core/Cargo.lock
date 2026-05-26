@@ -1400,6 +1400,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "lingxi-orchestrator"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "lingxi-api-client",
+ "lingxi-core",
+ "lingxi-cost",
+ "lingxi-hooks",
+ "lingxi-permission",
+ "lingxi-protocol",
+ "lingxi-telemetry",
+ "lingxi-tools",
+ "lingxi-traits",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lingxi-outputstyles"
 version = "0.5.0"
 dependencies = [

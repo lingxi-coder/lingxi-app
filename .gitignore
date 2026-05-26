@@ -51,3 +51,6 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+
+# Local worktrees (created by superpowers:using-git-worktrees skill)
+.worktrees/

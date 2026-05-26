@@ -242,6 +242,11 @@ impl TaskRegistryHandle for TaskRegistry {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::map_unwrap_or,
+    clippy::unwrap_used
+)]
 mod tests {
     use super::*;
     use crate::output_manager::TaskOutputManager;
@@ -256,7 +261,7 @@ mod tests {
     use tokio::sync::Mutex as TokioMutex;
 
     /// In-memory `FileSystem` that actually preserves writes — used by the
-    /// M5-01 Task 6 output_returns_real_content_after_spool_write test.
+    /// M5-01 Task 6 `output_returns_real_content_after_spool_write` test.
     struct InMemoryFs {
         files: TokioMutex<HashMap<String, String>>,
     }

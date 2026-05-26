@@ -80,9 +80,7 @@ impl ToolInvoker for RegistryToolInvoker {
             .call(input, tool_use_ctx, progress_tx)
             .await
             .map_err(|e| match e {
-                crate::tool_trait::ToolError::InvalidInput(s) => {
-                    ToolInvokerError::InvalidInput(s)
-                }
+                crate::tool_trait::ToolError::InvalidInput(s) => ToolInvokerError::InvalidInput(s),
                 other => ToolInvokerError::Internal(format!("{other}")),
             })?;
 
@@ -95,6 +93,7 @@ impl ToolInvoker for RegistryToolInvoker {
 }
 
 #[cfg(test)]
+#[allow(clippy::option_option)]
 mod tests {
     use super::*;
     use crate::context::ToolUseContext;
@@ -121,9 +120,8 @@ mod tests {
         }
     }
 
-    static ECHO_INPUT_SCHEMA: Lazy<serde_json::Value> = Lazy::new(|| {
-        json!({ "type": "object", "additionalProperties": true })
-    });
+    static ECHO_INPUT_SCHEMA: Lazy<serde_json::Value> =
+        Lazy::new(|| json!({ "type": "object", "additionalProperties": true }));
 
     /// Minimal Tool impl returning input under {"echo": <input>}.
     /// Lives entirely under `#[cfg(test)]`.
@@ -131,12 +129,24 @@ mod tests {
 
     #[async_trait]
     impl Tool for TestEchoTool {
-        fn name(&self) -> &str { "TestEcho" }
-        fn input_schema(&self) -> &serde_json::Value { &ECHO_INPUT_SCHEMA }
-        fn is_enabled(&self, _: &ToolStaticContext) -> bool { true }
-        fn max_result_size_chars(&self) -> usize { 1024 }
-        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool { true }
-        fn is_read_only(&self, _: &serde_json::Value) -> bool { true }
+        fn name(&self) -> &str {
+            "TestEcho"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &ECHO_INPUT_SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            true
+        }
         async fn validate_input(
             &self,
             _input: &serde_json::Value,
@@ -154,7 +164,9 @@ mod tests {
         async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
             "echo".into()
         }
-        async fn prompt(&self, _: &PromptOptions) -> String { "echo tool".into() }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            "echo tool".into()
+        }
         async fn call(
             &self,
             input: serde_json::Value,
@@ -184,12 +196,24 @@ mod tests {
 
     #[async_trait]
     impl Tool for RecordingTool {
-        fn name(&self) -> &str { "RecordingTool" }
-        fn input_schema(&self) -> &serde_json::Value { &RECORDING_INPUT_SCHEMA }
-        fn is_enabled(&self, _: &ToolStaticContext) -> bool { true }
-        fn max_result_size_chars(&self) -> usize { 1024 }
-        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool { true }
-        fn is_read_only(&self, _: &serde_json::Value) -> bool { true }
+        fn name(&self) -> &str {
+            "RecordingTool"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &RECORDING_INPUT_SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            true
+        }
         async fn validate_input(
             &self,
             _: &serde_json::Value,
@@ -207,7 +231,9 @@ mod tests {
         async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
             "rec".into()
         }
-        async fn prompt(&self, _: &PromptOptions) -> String { "rec".into() }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            "rec".into()
+        }
         async fn call(
             &self,
             _: serde_json::Value,

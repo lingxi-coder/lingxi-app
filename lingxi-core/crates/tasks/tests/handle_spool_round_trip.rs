@@ -5,7 +5,11 @@
 //! upstream of `lingxi-tools` in the dependency graph; the reverse direction
 //! would create a cycle.
 
-#![allow(clippy::unwrap_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::cast_possible_truncation,
+    clippy::map_unwrap_or
+)]
 
 use lingxi_tasks::output_manager::TaskOutputManager;
 use lingxi_tasks::registry::TaskRegistry;
@@ -98,7 +102,10 @@ async fn task_registry_handle_output_round_trip_via_real_output_manager() {
         files: TokioMutex::new(HashMap::new()),
     });
     let runtime = Arc::new(lingxi_test_harness::mocks::MockRuntimeSpawner::default());
-    let out_mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+    let out_mgr = Arc::new(TaskOutputManager::new(
+        PathBuf::from(dir.path()),
+        fs.clone(),
+    ));
     let registry = Arc::new(TaskRegistry::new(runtime, fs.clone(), out_mgr.clone()));
     let h: &dyn TaskRegistryHandle = registry.as_ref();
 

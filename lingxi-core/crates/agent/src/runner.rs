@@ -72,8 +72,9 @@ pub async fn run_subagent(
     // agent definition; both are placeholders the reducer accepts.
     let model = match &ctx.agent_definition.model {
         crate::definition::AgentModel::Inherit => "inherit".to_string(),
-        crate::definition::AgentModel::Alias(n) => n.clone(),
-        crate::definition::AgentModel::Explicit(n) => n.clone(),
+        crate::definition::AgentModel::Alias(n) | crate::definition::AgentModel::Explicit(n) => {
+            n.clone()
+        }
     };
     let mut state = ConversationState::Idle {
         session: SessionState::empty(SessionId::nil(), model),
@@ -220,7 +221,7 @@ mod tests {
         }
     }
 
-    /// Drain the SubagentEvent receiver into a Vec.
+    /// Drain the `SubagentEvent` receiver into a `Vec`.
     async fn drain(mut rx: mpsc::Receiver<SubagentEvent>) -> Vec<SubagentEvent> {
         let mut out = Vec::new();
         while let Some(ev) = rx.recv().await {
@@ -449,8 +450,7 @@ mod tests {
         let (failed_aid, failed_err) = failed.unwrap();
         assert_eq!(failed_aid, agent_id);
         assert_eq!(
-            failed_err,
-            "run_subagent: event channel closed without terminal state",
+            failed_err, "run_subagent: event channel closed without terminal state",
             "byte-locked error message"
         );
 

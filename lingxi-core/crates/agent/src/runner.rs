@@ -83,6 +83,26 @@ pub async fn run_subagent(
     let mut produced_useful_work = false;
 
     while let Some(event) = event_rx.recv().await {
+        // Fast path: explicit user-termination events bypass reason-string
+        // inspection and surface as Killed directly. The reducer's reason
+        // strings are an implementation detail; the input event itself is
+        // authoritative for the Killed signal. UserInterrupt in particular
+        // does NOT reach Terminated via the M1 reducer (catch-all), so
+        // without this fast path it would never produce Killed.
+        if matches!(
+            &event,
+            lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt
+        ) {
+            // Drive the reducer anyway for state consistency, but ignore
+            // the resulting reason.
+            let (new_state, _effects) = reduce(state, event);
+            state = new_state;
+            let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
+            // Suppress the unused-assignment lint by referencing `state`.
+            let _ = &state;
+            return;
+        }
+
         // Capture whether this event represents a stream-end completion
         // BEFORE the reducer consumes it — we need to peek at the
         // final_message for the Message emit.
@@ -313,6 +333,134 @@ mod tests {
         assert_eq!(
             msg_payload.1, expected,
             "Message payload byte-equals serialized final_message"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_subagent_emits_killed_on_user_exit_terminal() {
+        let ctx = fresh_subagent_ctx();
+        let agent_id = ctx.agent_id;
+
+        let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(8);
+
+        let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+
+        // Drive directly to terminal via UserExit. The fast-path in the
+        // runner short-circuits to Killed on this input event.
+        event_tx.send(lingxi_core::Event::UserExit).await.unwrap();
+        drop(event_tx);
+
+        handle.await.unwrap();
+        let evs = drain(out_rx).await;
+
+        let killed_count = evs
+            .iter()
+            .filter(|e| matches!(e, SubagentEvent::Killed { .. }))
+            .count();
+        let completed_count = evs
+            .iter()
+            .filter(|e| matches!(e, SubagentEvent::Completed { .. }))
+            .count();
+
+        // Exactly one Killed, no Completed (Killed is the terminal here).
+        assert_eq!(
+            killed_count, 1,
+            "exactly one Killed expected on UserExit; got events: {evs:?}"
+        );
+        assert_eq!(
+            completed_count, 0,
+            "no Completed expected when terminal is UserExit; got events: {evs:?}"
+        );
+
+        // Killed carries the agent id.
+        let killed_aid = evs
+            .iter()
+            .find_map(|e| match e {
+                SubagentEvent::Killed { agent_id } => Some(*agent_id),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(killed_aid, agent_id);
+    }
+
+    #[tokio::test]
+    async fn run_subagent_emits_killed_on_user_interrupt_terminal() {
+        // UserInterrupt does NOT terminate via the M1 reducer (catch-all),
+        // so without the fast-path this would emit Failed (channel close
+        // before terminal). The fast-path makes it produce Killed instead.
+        let ctx = fresh_subagent_ctx();
+        let agent_id = ctx.agent_id;
+
+        let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(8);
+
+        let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+
+        event_tx
+            .send(lingxi_core::Event::UserInterrupt)
+            .await
+            .unwrap();
+        drop(event_tx);
+
+        handle.await.unwrap();
+        let evs = drain(out_rx).await;
+
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, SubagentEvent::Killed { agent_id: aid } if *aid == agent_id)),
+            "expected exactly one Killed on UserInterrupt; got events: {evs:?}"
+        );
+        assert!(
+            !evs.iter()
+                .any(|e| matches!(e, SubagentEvent::Failed { .. })),
+            "no Failed expected on UserInterrupt; got events: {evs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_subagent_emits_failed_on_eof_before_any_work() {
+        let ctx = fresh_subagent_ctx();
+        let agent_id = ctx.agent_id;
+
+        let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(8);
+
+        let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+
+        // Drop the sender immediately — runner sees event_rx close on the
+        // very first recv, with no prior Message or Terminated emission.
+        drop(event_tx);
+
+        handle.await.unwrap();
+        let evs = drain(out_rx).await;
+
+        let failed = evs.iter().find_map(|e| match e {
+            SubagentEvent::Failed {
+                agent_id: aid,
+                error,
+            } => Some((*aid, error.clone())),
+            _ => None,
+        });
+        assert!(
+            failed.is_some(),
+            "exactly one Failed expected on premature EOF; got events: {evs:?}"
+        );
+        let (failed_aid, failed_err) = failed.unwrap();
+        assert_eq!(failed_aid, agent_id);
+        assert_eq!(
+            failed_err,
+            "run_subagent: event channel closed without terminal state",
+            "byte-locked error message"
+        );
+
+        let completed_count = evs
+            .iter()
+            .filter(|e| matches!(e, SubagentEvent::Completed { .. }))
+            .count();
+        assert_eq!(
+            completed_count, 0,
+            "no Completed expected; got events: {evs:?}"
         );
     }
 }

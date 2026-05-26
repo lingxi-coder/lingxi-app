@@ -23,4 +23,4 @@ pub mod test_support;
 
 // pub use config::{OrchestratorConfig, MAX_TURNS_DEFAULT};      // Task 5
 // pub use conversation::{ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient};  // Task 10
-// pub use error::OrchestratorError;                              // Task 2
+pub use error::OrchestratorError;

@@ -79,6 +79,13 @@ impl TaskOutputManager {
         Ok(path)
     }
 
+    /// Test-only accessor for the backing filesystem (so M5-01 tests can
+    /// seed spool content directly without going through a handler).
+    #[doc(hidden)]
+    pub fn fs_for_test(&self) -> Arc<dyn FileSystem> {
+        self.fs.clone()
+    }
+
     /// Read a window of the task's spool file.
     pub async fn read(
         &self,

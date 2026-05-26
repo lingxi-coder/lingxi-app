@@ -209,21 +209,34 @@ impl TaskRegistryHandle for TaskRegistry {
     async fn output(
         &self,
         id: &str,
-        _offset: Option<u64>,
+        offset: Option<u64>,
     ) -> Result<TaskOutputChunk, TaskRegistryError> {
-        // M4-05 surface returns an empty spool for tasks that have not yet
-        // started accumulating output. The output_manager's spool reader
-        // lands as a follow-up — the registry currently exposes only the
-        // file path through `TaskStateBase::output_file`.
         let state = self
             .get(id)
             .await
             .ok_or_else(|| TaskRegistryError::NotFound(id.into()))?;
+        let output_file = state.base().output_file.clone();
+        let opts = crate::output_manager::OutputOptions {
+            offset,
+            limit: None,
+        };
+        let out = self
+            .output_manager
+            .read(&output_file, opts)
+            .await
+            .map_err(|e| match e {
+                crate::output_manager::OutputError::Io(s) => {
+                    TaskRegistryError::Internal(format!("io: {s}"))
+                }
+                crate::output_manager::OutputError::PathEscape(p) => {
+                    TaskRegistryError::Internal(format!("path escape: {p}"))
+                }
+            })?;
         Ok(TaskOutputChunk {
             task_id: state.base().id.clone(),
-            content: String::new(),
-            total_lines: 0,
-            truncated: false,
+            content: out.content,
+            total_lines: out.total_lines,
+            truncated: out.truncated,
         })
     }
 }
@@ -239,23 +252,57 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    struct NoopFs;
+    use std::collections::HashMap;
+    use tokio::sync::Mutex as TokioMutex;
+
+    /// In-memory `FileSystem` that actually preserves writes — used by the
+    /// M5-01 Task 6 output_returns_real_content_after_spool_write test.
+    struct InMemoryFs {
+        files: TokioMutex<HashMap<String, String>>,
+    }
+
+    impl InMemoryFs {
+        fn new() -> Self {
+            Self {
+                files: TokioMutex::new(HashMap::new()),
+            }
+        }
+    }
 
     #[async_trait]
-    impl FileSystem for NoopFs {
+    impl FileSystem for InMemoryFs {
         async fn read_file(
             &self,
-            _: &str,
-            _: Option<u64>,
-            _: Option<u64>,
+            path: &str,
+            offset: Option<u64>,
+            limit: Option<u64>,
         ) -> Result<FileContent, FsError> {
+            let map = self.files.lock().await;
+            let content = map.get(path).cloned().unwrap_or_default();
+            let off = offset.unwrap_or(0) as usize;
+            let body: String = content.chars().skip(off).collect();
+            let truncated = if let Some(lim) = limit {
+                body.len() as u64 > lim
+            } else {
+                false
+            };
+            let trimmed = if let Some(lim) = limit {
+                body.chars().take(lim as usize).collect::<String>()
+            } else {
+                body
+            };
+            let total_lines = content.lines().count() as u64;
             Ok(FileContent {
-                content: String::new(),
-                truncated: false,
-                total_lines: 0,
+                content: trimmed,
+                truncated,
+                total_lines,
             })
         }
-        async fn write_file(&self, _: &str, _: &str) -> Result<(), FsError> {
+        async fn write_file(&self, path: &str, body: &str) -> Result<(), FsError> {
+            self.files
+                .lock()
+                .await
+                .insert(path.to_string(), body.to_string());
             Ok(())
         }
         fn is_within_workspace(&self, _: &str) -> bool {
@@ -268,19 +315,28 @@ mod tests {
         {
             Err(FsError::Io("not supported".into()))
         }
-        async fn append_file(&self, _: &str, _: &str) -> Result<(), FsError> {
+        async fn append_file(&self, path: &str, body: &str) -> Result<(), FsError> {
+            let mut map = self.files.lock().await;
+            let entry = map.entry(path.to_string()).or_default();
+            entry.push_str(body);
             Ok(())
         }
-        async fn truncate(&self, _: &str, _: u64) -> Result<(), FsError> {
+        async fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {
+            let mut map = self.files.lock().await;
+            if let Some(s) = map.get_mut(path) {
+                s.truncate(len as usize);
+            }
             Ok(())
         }
         async fn file_mtime(&self, _: &str) -> Result<std::time::SystemTime, FsError> {
             Ok(std::time::SystemTime::UNIX_EPOCH)
         }
-        async fn file_size(&self, _: &str) -> Result<u64, FsError> {
-            Ok(0)
+        async fn file_size(&self, path: &str) -> Result<u64, FsError> {
+            let map = self.files.lock().await;
+            Ok(map.get(path).map(|s| s.len() as u64).unwrap_or(0))
         }
-        async fn delete_file(&self, _: &str) -> Result<(), FsError> {
+        async fn delete_file(&self, path: &str) -> Result<(), FsError> {
+            self.files.lock().await.remove(path);
             Ok(())
         }
         async fn symlink(&self, _: &str, _: &str) -> Result<(), FsError> {
@@ -296,7 +352,7 @@ mod tests {
 
     fn make_registry() -> (tempfile::TempDir, Arc<TaskRegistry>) {
         let dir = tempdir().unwrap();
-        let fs: Arc<dyn FileSystem> = Arc::new(NoopFs);
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let out_mgr = Arc::new(TaskOutputManager::new(
             PathBuf::from(dir.path()),
@@ -378,7 +434,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn output_returns_empty_for_freshly_created_task() {
+    async fn output_returns_empty_for_freshly_created_task_with_zero_byte_spool() {
         let (_d, registry) = make_registry();
         let h: &dyn TaskRegistryHandle = registry.as_ref();
         let rec = h
@@ -392,5 +448,60 @@ mod tests {
         assert_eq!(chunk.task_id, rec.task_id);
         assert_eq!(chunk.content, "");
         assert!(!chunk.truncated);
+    }
+
+    #[tokio::test]
+    async fn output_returns_real_content_after_spool_write() {
+        let (_d, registry) = make_registry();
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
+        let rec = h
+            .create(TaskCreateInput {
+                task_type: "local_bash".into(),
+                description: "echo hi".into(),
+            })
+            .await
+            .unwrap();
+
+        // Pull the spool path from the typed state, then write content
+        // directly through the registry's filesystem (simulates a handler
+        // producing output).
+        let state = registry.get(&rec.task_id).await.unwrap();
+        let path = state.base().output_file.clone();
+        let path_str = path.to_str().unwrap().to_string();
+        let fs = registry.output_manager.fs_for_test();
+        fs.write_file(&path_str, "line1\nline2\nline3\n")
+            .await
+            .unwrap();
+
+        let chunk = h.output(&rec.task_id, None).await.unwrap();
+        assert_eq!(chunk.task_id, rec.task_id);
+        assert_eq!(
+            chunk.content, "line1\nline2\nline3\n",
+            "spool content surfaces verbatim"
+        );
+        assert_eq!(chunk.total_lines, 3, "total_lines reflects the spool");
+        assert!(!chunk.truncated, "no truncation on unlimited read");
+    }
+
+    #[tokio::test]
+    async fn output_threads_offset_into_output_manager() {
+        let (_d, registry) = make_registry();
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
+        let rec = h
+            .create(TaskCreateInput {
+                task_type: "local_bash".into(),
+                description: "echo hi".into(),
+            })
+            .await
+            .unwrap();
+
+        let state = registry.get(&rec.task_id).await.unwrap();
+        let path_str = state.base().output_file.to_str().unwrap().to_string();
+        let fs = registry.output_manager.fs_for_test();
+        fs.write_file(&path_str, "abcdef").await.unwrap();
+
+        // offset=3 should drop the first 3 chars.
+        let chunk = h.output(&rec.task_id, Some(3)).await.unwrap();
+        assert_eq!(chunk.content, "def", "offset honoured");
     }
 }

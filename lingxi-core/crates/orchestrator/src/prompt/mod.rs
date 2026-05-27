@@ -14,7 +14,58 @@ pub mod tools_block;
 
 pub use memory_block::{real_provider, MemoryHierarchyProvider, RealMemoryHierarchyProvider};
 
+use crate::prompt::locked_templates::{FOOTER, HEADER, SECTION_SEP};
 use std::path::PathBuf;
+
+/// Assemble a system prompt from a [`SystemPromptContext`].
+///
+/// Section order is LOCKED:
+///
+/// 1. `HEADER`
+/// 2. `<env>...</env>` + model description + cutoff
+/// 3. `<memory>...</memory>` (elided when no files)
+/// 4. `<tools>...</tools>` (elided when no names)
+/// 5. `FOOTER`
+///
+/// Separator between sections is exactly `\n\n` (one blank line).
+/// `FOOTER` itself ends with a single `\n`; the assembler does not
+/// append further newlines.
+#[must_use]
+pub fn assemble_system_prompt(ctx: &SystemPromptContext) -> String {
+    let mut s = String::with_capacity(2048);
+    s.push_str(HEADER);
+    push_section_separator(&mut s);
+    s.push_str(&env_block::format(ctx));
+
+    let memory = memory_block::format(&ctx.memory_files);
+    if !memory.is_empty() {
+        push_section_separator(&mut s);
+        s.push_str(&memory);
+    }
+
+    let tools = tools_block::format(&ctx.tool_names);
+    if !tools.is_empty() {
+        push_section_separator(&mut s);
+        s.push_str(&tools);
+    }
+
+    push_section_separator(&mut s);
+    s.push_str(FOOTER);
+    s
+}
+
+/// Append a section separator that produces exactly one blank line
+/// between two adjacent sections, regardless of whether the previous
+/// section already ended with a single `\n` (memory_block / tools_block)
+/// or not (HEADER, env_block). One blank line = two LFs total at the
+/// boundary.
+fn push_section_separator(s: &mut String) {
+    if s.ends_with('\n') {
+        s.push('\n');
+    } else {
+        s.push_str(SECTION_SEP);
+    }
+}
 
 /// Runtime context required to assemble a system prompt.
 ///

@@ -31,6 +31,28 @@ pub enum OrchestratorError {
     /// hot path, etc.). Test stubs use this for synthetic failures.
     #[error("orchestrator internal error: {0}")]
     Internal(String),
+
+    /// Mid-stream byte-level error from the streaming transport. Surfaced
+    /// when the SSE chunk fails to decode or the HTTP body is cut.
+    ///
+    /// No `#[from]` impl — the batched `ApiCall` variant already claims
+    /// it. Convert manually at the streaming call site via
+    /// `OrchestratorError::Streaming(api_err)`.
+    #[error("streaming transport error: {0}")]
+    Streaming(ApiError),
+
+    /// Stream produced an event that violates the per-block protocol
+    /// (out-of-order delta, double stop, type mismatch, malformed
+    /// `tool_use` input JSON).
+    #[error("streaming protocol violation: {0}")]
+    StreamingProtocol(String),
+
+    /// Stream ended cleanly before a `message_stop` arrived. Mirrors
+    /// claude-code's "stream completed without `message_start`" fallback
+    /// (claude.ts:2353) — surfaced as an explicit error rather than
+    /// silently retrying.
+    #[error("stream ended without message_stop event")]
+    StreamEndedWithoutStop,
 }
 
 #[cfg(test)]
@@ -61,5 +83,31 @@ mod tests {
     fn internal_display_carries_payload() {
         let err = OrchestratorError::Internal("synthetic".into());
         assert_eq!(err.to_string(), "orchestrator internal error: synthetic");
+    }
+
+    #[test]
+    fn streaming_display_starts_with_locked_prefix() {
+        let e = OrchestratorError::Streaming(ApiError::Http(
+            lingxi_traits::HttpError::Connection("nope".into()),
+        ));
+        let s = format!("{e}");
+        assert!(s.starts_with("streaming transport error: "), "{s}");
+    }
+
+    #[test]
+    fn streaming_protocol_display_carries_inner() {
+        let e = OrchestratorError::StreamingProtocol("block 3 has no start".into());
+        assert_eq!(
+            format!("{e}"),
+            "streaming protocol violation: block 3 has no start"
+        );
+    }
+
+    #[test]
+    fn stream_ended_without_stop_display_is_locked() {
+        assert_eq!(
+            format!("{}", OrchestratorError::StreamEndedWithoutStop),
+            "stream ended without message_stop event"
+        );
     }
 }

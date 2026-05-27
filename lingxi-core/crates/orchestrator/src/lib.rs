@@ -16,6 +16,7 @@
 pub mod config;
 pub mod conversation;
 pub mod error;
+pub mod prompt;
 pub mod turn_loop;
 
 // test_support carries the HookExecutor / PermissionGate trait definitions

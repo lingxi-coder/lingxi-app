@@ -1,10 +1,204 @@
-//! Streaming turn loop. Filled in Tasks 9-13.
+//! Streaming turn loop core helpers.
 //!
 //! ## `StreamingError` → `OrchestratorError` mapping
 //!
 //! Each [`crate::sse::StreamingError`] variant is converted to
 //! [`crate::error::OrchestratorError::StreamingProtocol`] via its
 //! `Display` impl. The Display strings (locked at Task 1 step 3) are
-//! the public-facing reason carried in the orchestrator error and
-//! visible in telemetry payloads.
+//! the public-facing reason carried in the orchestrator error.
 #![forbid(unsafe_code)]
+
+use crate::error::OrchestratorError;
+use crate::sse::accumulator::BlockAccumulator;
+use crate::sse::event_router::{dispatch_event, RouterAction};
+use futures::stream::{BoxStream, StreamExt};
+use lingxi_api_client::types::StreamEvent;
+use lingxi_api_client::ApiError;
+use lingxi_protocol::{ContentBlock, ToolUseId};
+use lingxi_traits::OutputStream;
+use serde_json::Value;
+use std::sync::Arc;
+
+/// One tool dispatch request observed during the stream. Carries the
+/// id/name/input the orchestrator must invoke. The dispatch itself is
+/// performed by the streaming-loop caller (so this module stays free of
+/// `ToolRegistry` / `HookExecutor` / `PermissionGate` deps).
+#[derive(Debug, Clone)]
+pub struct ObservedToolUse {
+    /// Stable identifier echoed back in the matching `ToolResult`.
+    pub id: ToolUseId,
+    /// Tool name.
+    pub name: String,
+    /// Reassembled tool input.
+    pub input: Value,
+}
+
+/// Outcome of consuming one stream.
+#[derive(Debug, Default)]
+pub struct PumpedTurn {
+    /// Content blocks (text + thinking) accumulated during the stream,
+    /// in observation order. Used to construct the assistant message
+    /// after the stream ends.
+    pub assistant_blocks: Vec<ContentBlock>,
+    /// Tool uses observed during the stream, in observation order
+    /// (i.e. order of their `content_block_stop` events).
+    pub tool_uses: Vec<ObservedToolUse>,
+    /// Final `stop_reason` (from `message_delta`). `None` if the stream
+    /// ended without a `message_delta` carrying one.
+    pub stop_reason: Option<String>,
+}
+
+/// Consume the given stream to completion, routing events through the
+/// accumulator + output sink. Returns the per-block summary; the
+/// streaming-loop caller is responsible for tool dispatch + appending
+/// to session history.
+///
+/// # Errors
+/// - [`OrchestratorError::Streaming`] wrapping an [`ApiError`] if the
+///   underlying transport surfaces an error mid-stream.
+/// - [`OrchestratorError::StreamingProtocol`] if the wire-level event
+///   sequence violates the per-block protocol (out-of-order delta,
+///   double stop, type mismatch, malformed `tool_use` input JSON).
+/// - [`OrchestratorError::StreamEndedWithoutStop`] if the stream
+///   produced no `MessageStop` event before terminating.
+pub async fn pump_stream(
+    mut stream: BoxStream<'static, Result<StreamEvent, ApiError>>,
+    output: &Arc<dyn OutputStream>,
+) -> Result<PumpedTurn, OrchestratorError> {
+    let mut acc = BlockAccumulator::new();
+    let mut turn = PumpedTurn::default();
+
+    while let Some(item) = stream.next().await {
+        let event = item.map_err(OrchestratorError::Streaming)?;
+        let action = dispatch_event(event, &mut acc, output)
+            .await
+            .map_err(|e| OrchestratorError::StreamingProtocol(e.to_string()))?;
+        match action {
+            RouterAction::Continue => {}
+            RouterAction::AppendAssistantBlock(block) => {
+                turn.assistant_blocks.push(block);
+            }
+            RouterAction::DispatchToolUse { id, name, input } => {
+                turn.tool_uses.push(ObservedToolUse { id, name, input });
+            }
+            RouterAction::RecordStopReason(sr) => {
+                turn.stop_reason = Some(sr);
+            }
+            RouterAction::EndOfStream => {
+                return Ok(turn);
+            }
+            RouterAction::ServerError(reason) => {
+                return Err(OrchestratorError::StreamingProtocol(format!(
+                    "server-emitted error event: {reason}"
+                )));
+            }
+        }
+    }
+    // Stream ended without a MessageStop.
+    Err(OrchestratorError::StreamEndedWithoutStop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::MockOutputStream;
+    use crate::test_support_stream::{
+        content_block_start_text, content_block_start_tool_use, content_block_stop,
+        input_json_delta, message_delta_stop, message_start, message_stop, text_delta,
+    };
+    use futures::stream;
+    use lingxi_protocol::ToolUseId;
+
+    fn boxed(events: Vec<StreamEvent>) -> BoxStream<'static, Result<StreamEvent, ApiError>> {
+        stream::iter(events.into_iter().map(Ok)).boxed()
+    }
+
+    #[tokio::test]
+    async fn text_only_pump_assembles_one_text_block() {
+        let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+        let evs = vec![
+            message_start("m1", "claude-opus-4-7"),
+            content_block_start_text(0),
+            text_delta(0, "he"),
+            text_delta(0, "llo"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ];
+        let turn = pump_stream(boxed(evs), &out).await.expect("pump");
+        assert_eq!(turn.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(turn.assistant_blocks.len(), 1);
+        if let ContentBlock::Text { text } = &turn.assistant_blocks[0] {
+            assert_eq!(text, "hello");
+        } else {
+            panic!("expected Text block, got {:?}", turn.assistant_blocks[0]);
+        }
+        assert!(turn.tool_uses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_use_pump_collects_dispatch_request() {
+        let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+        let tu = ToolUseId::new();
+        let evs = vec![
+            message_start("m1", "claude-opus-4-7"),
+            content_block_start_tool_use(1, tu, "Read"),
+            input_json_delta(1, "{\"file"),
+            input_json_delta(1, "_path\":\"foo.rs\"}"),
+            content_block_stop(1),
+            message_delta_stop("tool_use"),
+            message_stop(),
+        ];
+        let turn = pump_stream(boxed(evs), &out).await.expect("pump");
+        assert_eq!(turn.tool_uses.len(), 1);
+        assert_eq!(turn.tool_uses[0].name, "Read");
+        assert_eq!(turn.tool_uses[0].input["file_path"], "foo.rs");
+        assert_eq!(turn.stop_reason.as_deref(), Some("tool_use"));
+    }
+
+    #[tokio::test]
+    async fn stream_without_message_stop_errors() {
+        let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+        let evs = vec![
+            message_start("m1", "claude-opus-4-7"),
+            content_block_start_text(0),
+            text_delta(0, "partial"),
+            content_block_stop(0),
+            // no message_stop
+        ];
+        let err = pump_stream(boxed(evs), &out).await.expect_err("no stop");
+        assert!(matches!(err, OrchestratorError::StreamEndedWithoutStop));
+    }
+
+    #[tokio::test]
+    async fn streaming_protocol_error_propagates() {
+        let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+        // delta before start → BlockNotFound
+        let evs = vec![
+            message_start("m1", "claude-opus-4-7"),
+            text_delta(0, "oops"),
+            message_stop(),
+        ];
+        let err = pump_stream(boxed(evs), &out).await.expect_err("proto");
+        match err {
+            OrchestratorError::StreamingProtocol(reason) => {
+                assert!(reason.contains("block index 0"), "{reason}");
+            }
+            other => panic!("expected StreamingProtocol, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn underlying_stream_error_surfaces_as_streaming_variant() {
+        let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+        let s: BoxStream<'static, Result<StreamEvent, ApiError>> = stream::iter(vec![
+            Ok(message_start("m1", "claude-opus-4-7")),
+            Err(ApiError::Http(lingxi_traits::HttpError::Connection(
+                "dropped".into(),
+            ))),
+        ])
+        .boxed();
+        let err = pump_stream(s, &out).await.expect_err("network");
+        assert!(matches!(err, OrchestratorError::Streaming(_)));
+    }
+}

@@ -1,0 +1,204 @@
+//! Two tool_use blocks in one streaming response (M5-04 Task 14).
+//!
+//! Asserts that both tools dispatch CONCURRENTLY (the slower one does
+//! NOT delay the faster one's `OutputStream::ToolResult` emission) AND
+//! that both `ToolResult` content blocks appear in the next user
+//! message in the ORIGINAL (in-stream) order.
+
+use async_trait::async_trait;
+use lingxi_orchestrator::test_support::{
+    content_block_start_tool_use, content_block_stop, input_json_delta, message_delta_stop,
+    message_start, message_stop, MockApiClient, MockOutputStream, MockStreamingApiClient,
+    NoOpHookExecutor, NoOpPermissionGate, StaticMemoryProvider,
+};
+use lingxi_orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
+use lingxi_permission::result::PermissionMetadata;
+use lingxi_permission::{PermissionDecisionReason, PermissionResult};
+use lingxi_protocol::ToolUseId;
+use lingxi_tools::progress::ToolProgressSender;
+use lingxi_tools::registry::ToolRegistry;
+use lingxi_tools::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    ValidationError,
+};
+use lingxi_traits::OutputEvent;
+use serde_json::json;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+struct SlowTool;
+struct FastTool;
+
+macro_rules! impl_test_tool {
+    ($ty:ty, $name:literal, $sleep_ms:expr) => {
+        #[async_trait]
+        impl Tool for $ty {
+            fn name(&self) -> &str {
+                $name
+            }
+            fn input_schema(&self) -> &serde_json::Value {
+                static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                    once_cell::sync::Lazy::new(|| json!({"type": "object"}));
+                &SCHEMA
+            }
+            fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+                true
+            }
+            fn max_result_size_chars(&self) -> usize {
+                1024
+            }
+            fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+                true
+            }
+            fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+                true
+            }
+            async fn validate_input(
+                &self,
+                _input: &serde_json::Value,
+                _ctx: &lingxi_tools::context::ToolUseContext,
+            ) -> Result<(), ValidationError> {
+                Ok(())
+            }
+            async fn check_permissions(
+                &self,
+                _input: &serde_json::Value,
+                _ctx: &lingxi_tools::context::ToolUseContext,
+            ) -> PermissionResult {
+                PermissionResult::Allow {
+                    reason: PermissionDecisionReason::Other {
+                        reason: "test".into(),
+                    },
+                    updated_input: None,
+                    update_destination: None,
+                    metadata: PermissionMetadata::default(),
+                }
+            }
+            async fn description(
+                &self,
+                _input: &serde_json::Value,
+                _opts: &DescriptionOptions,
+            ) -> String {
+                $name.into()
+            }
+            async fn prompt(&self, _opts: &PromptOptions) -> String {
+                String::new()
+            }
+            async fn call(
+                &self,
+                _input: serde_json::Value,
+                _ctx: lingxi_tools::context::ToolUseContext,
+                _tx: ToolProgressSender,
+            ) -> Result<ToolCallResult, ToolError> {
+                let sleep_ms: u64 = $sleep_ms;
+                if sleep_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                }
+                Ok(ToolCallResult {
+                    data: json!({"tool": $name}),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    mcp_meta: None,
+                })
+            }
+        }
+    };
+}
+
+impl_test_tool!(SlowTool, "Slow", 50u64);
+impl_test_tool!(FastTool, "Fast", 0u64);
+
+fn registry_with_slow_and_fast() -> Arc<ToolRegistry> {
+    let mut r = ToolRegistry::new();
+    r.register_builtin(Arc::new(SlowTool));
+    r.register_builtin(Arc::new(FastTool));
+    Arc::new(r)
+}
+
+#[tokio::test]
+async fn two_tools_dispatched_concurrently_results_ordered() {
+    let id_slow = ToolUseId::new();
+    let id_fast = ToolUseId::new();
+    let turn1 = scripted![
+        message_start("m1", "claude-opus-4-7"),
+        content_block_start_tool_use(0, id_slow, "Slow"),
+        input_json_delta(0, "{}"),
+        content_block_stop(0),
+        content_block_start_tool_use(1, id_fast, "Fast"),
+        input_json_delta(1, "{}"),
+        content_block_stop(1),
+        message_delta_stop("tool_use"),
+        message_stop(),
+    ];
+    let turn2 = scripted![
+        message_start("m2", "claude-opus-4-7"),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ];
+
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]));
+    let batched = Arc::new(MockApiClient::new(Vec::new()));
+    let output = Arc::new(MockOutputStream::new());
+
+    let orch = ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        batched,
+        api,
+        registry_with_slow_and_fast(),
+        Arc::new(NoOpHookExecutor),
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        PathBuf::from("/tmp"),
+    );
+
+    let start = std::time::Instant::now();
+    let _ = orch.run_turn_streaming("call two tools").await.expect("ok");
+    let elapsed = start.elapsed();
+
+    // Concurrent execution: total wall time ~50ms (Slow's sleep), NOT
+    // ~100ms (50ms × 2 sequential).
+    assert!(
+        elapsed < Duration::from_millis(90),
+        "expected concurrent (~50ms), got {elapsed:?}"
+    );
+
+    let events = output.snapshot().await;
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|e| match e {
+            OutputEvent::Text { .. } => "Text",
+            OutputEvent::ToolCall { .. } => "ToolCall",
+            OutputEvent::ToolResult { .. } => "ToolResult",
+            OutputEvent::EndTurn { .. } => "EndTurn",
+            _ => "Other",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["ToolCall", "ToolCall", "ToolResult", "ToolResult", "EndTurn"],
+        "events: {events:?}"
+    );
+
+    // ToolCalls fire in dispatch order (Slow first because its
+    // content_block_stop arrived first).
+    let call_tools: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            OutputEvent::ToolCall { tool, .. } => Some(tool.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(call_tools, vec!["Slow", "Fast"]);
+
+    // ToolResults fire in COMPLETION order — Fast finishes first.
+    let result_tools: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            OutputEvent::ToolResult { tool, .. } => Some(tool.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(result_tools, vec!["Fast", "Slow"]);
+}

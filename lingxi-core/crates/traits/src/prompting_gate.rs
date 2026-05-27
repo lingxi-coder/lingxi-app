@@ -73,10 +73,8 @@ pub enum PromptError {
 pub trait PromptingGate: PermissionGate {
     /// Drive one prompt round-trip. Returns `Ok(PromptDecision)` on a valid
     /// answer, `Err(PromptError::InvalidInput)` after 3 invalid inputs.
-    async fn prompt_user(
-        &self,
-        request: &PermissionRequest,
-    ) -> Result<PromptDecision, PromptError>;
+    async fn prompt_user(&self, request: &PermissionRequest)
+        -> Result<PromptDecision, PromptError>;
 }
 
 #[cfg(test)]

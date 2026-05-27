@@ -115,8 +115,14 @@ mod tests {
     fn mcp_tools_are_deny() {
         assert_eq!(tool_default("MCP"), PromptDefault::DenyByDefault);
         assert_eq!(tool_default("McpAuth"), PromptDefault::DenyByDefault);
-        assert_eq!(tool_default("ListMcpResources"), PromptDefault::DenyByDefault);
-        assert_eq!(tool_default("ReadMcpResource"), PromptDefault::DenyByDefault);
+        assert_eq!(
+            tool_default("ListMcpResources"),
+            PromptDefault::DenyByDefault
+        );
+        assert_eq!(
+            tool_default("ReadMcpResource"),
+            PromptDefault::DenyByDefault
+        );
     }
 
     #[test]

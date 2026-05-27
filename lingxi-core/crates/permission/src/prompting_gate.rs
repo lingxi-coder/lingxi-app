@@ -1,7 +1,7 @@
 //! `InteractivePromptingGate` — stdin/stderr prompt loop.
 //!
-//! Drives the byte-locked claude-code prompt UX over injectable AsyncRead /
-//! AsyncWrite endpoints. Tests pipe via `tokio::io::duplex`.
+//! Drives the byte-locked claude-code prompt UX over injectable
+//! `AsyncRead` / `AsyncWrite` endpoints. Tests pipe via `tokio::io::duplex`.
 //!
 //! M5-05 task progression:
 //! - Task 5: `format_prompt` byte-locks the prompt literals.
@@ -136,11 +136,7 @@ pub(crate) fn resolve_outcome(outcome: ParseOutcome, default: PromptDefault) -> 
 
 #[async_trait]
 impl PermissionGate for InteractivePromptingGate {
-    async fn check(
-        &self,
-        name: &str,
-        input: &serde_json::Value,
-    ) -> PermissionDecision {
+    async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
         let request = PermissionRequest {
             tool_name: name.to_string(),
             tool_input: input.clone(),
@@ -152,12 +148,12 @@ impl PermissionGate for InteractivePromptingGate {
             Err(PromptError::InvalidInput { attempts }) => PermissionDecision::Deny {
                 reason: format!("invalid permission input after {attempts} attempts"),
             },
-            Err(PromptError::Cancelled { reason }) => {
-                PermissionDecision::Deny { reason: format!("prompt cancelled: {reason}") }
-            }
-            Err(PromptError::Io(reason)) => {
-                PermissionDecision::Deny { reason: format!("prompt io: {reason}") }
-            }
+            Err(PromptError::Cancelled { reason }) => PermissionDecision::Deny {
+                reason: format!("prompt cancelled: {reason}"),
+            },
+            Err(PromptError::Io(reason)) => PermissionDecision::Deny {
+                reason: format!("prompt io: {reason}"),
+            },
         }
     }
 }
@@ -213,39 +209,34 @@ impl PromptingGate for InteractivePromptingGate {
             };
             // 3. Classify and decide.
             let outcome = parse_user_input(&line);
-            match resolve_outcome(outcome, request.default_decision) {
-                Some(allow) => {
-                    let reason = match outcome {
-                        ParseOutcome::ValidYes => "user typed 'y'".to_string(),
-                        ParseOutcome::ValidNo => "user typed 'n'".to_string(),
-                        ParseOutcome::Empty => format!(
-                            "user pressed Enter (default = {})",
-                            if allow { "allow" } else { "deny" }
-                        ),
-                        ParseOutcome::Invalid => {
-                            unreachable!("resolve_outcome returned Some for Invalid")
-                        }
-                    };
-                    // Telemetry: definitive answer (NOT fired on retry).
-                    tracing::info!(
-                        event = lingxi_telemetry::tengu::orchestrator::PERMISSION_ANSWERED,
-                        tool_name = %request.tool_name,
-                        allowed = allow,
-                        attempts = attempts + 1,
-                    );
-                    return Ok(PromptDecision {
-                        allow,
-                        reason,
-                        persist: false,
-                    });
-                }
-                None => {
-                    attempts += 1;
-                    if attempts >= MAX_RETRIES {
-                        return Err(PromptError::InvalidInput { attempts });
+            if let Some(allow) = resolve_outcome(outcome, request.default_decision) {
+                let reason = match outcome {
+                    ParseOutcome::ValidYes => "user typed 'y'".to_string(),
+                    ParseOutcome::ValidNo => "user typed 'n'".to_string(),
+                    ParseOutcome::Empty => format!(
+                        "user pressed Enter (default = {})",
+                        if allow { "allow" } else { "deny" }
+                    ),
+                    ParseOutcome::Invalid => {
+                        unreachable!("resolve_outcome returned Some for Invalid")
                     }
-                    continue;
-                }
+                };
+                // Telemetry: definitive answer (NOT fired on retry).
+                tracing::info!(
+                    event = lingxi_telemetry::tengu::orchestrator::PERMISSION_ANSWERED,
+                    tool_name = %request.tool_name,
+                    allowed = allow,
+                    attempts = attempts + 1,
+                );
+                return Ok(PromptDecision {
+                    allow,
+                    reason,
+                    persist: false,
+                });
+            }
+            attempts += 1;
+            if attempts >= MAX_RETRIES {
+                return Err(PromptError::InvalidInput { attempts });
             }
         }
     }

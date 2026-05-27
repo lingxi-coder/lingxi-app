@@ -159,7 +159,10 @@ async fn three_invalid_inputs_returns_invalid_input_error() {
     let mut printed = vec![0u8; one.len() * 3];
     stderr_reader.read_exact(&mut printed).await.unwrap();
     let occurrences = printed.windows(one.len()).filter(|w| *w == one).count();
-    assert_eq!(occurrences, 3, "prompt must render exactly 3 times before erroring");
+    assert_eq!(
+        occurrences, 3,
+        "prompt must render exactly 3 times before erroring"
+    );
 }
 
 #[tokio::test]
@@ -190,5 +193,8 @@ async fn second_attempt_valid_recovers() {
     let mut printed = vec![0u8; one.len() * 2];
     stderr_reader.read_exact(&mut printed).await.unwrap();
     let occurrences = printed.windows(one.len()).filter(|w| *w == one).count();
-    assert_eq!(occurrences, 2, "prompt must render twice — once invalid, once recovered");
+    assert_eq!(
+        occurrences, 2,
+        "prompt must render twice — once invalid, once recovered"
+    );
 }

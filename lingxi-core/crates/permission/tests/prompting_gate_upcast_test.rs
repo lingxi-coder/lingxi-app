@@ -31,9 +31,7 @@ async fn check_typing_y_returns_allow() {
         drop(w);
     });
 
-    let decision = gate
-        .check("Bash", &json!({"command": "ls"}))
-        .await;
+    let decision = gate.check("Bash", &json!({"command": "ls"})).await;
 
     assert_eq!(decision, PermissionDecision::Allow);
 
@@ -69,7 +67,7 @@ async fn check_typing_n_returns_deny() {
         PermissionDecision::Deny { reason } => {
             assert!(reason.contains("user typed 'n'"), "got reason: {reason}");
         }
-        other => panic!("expected Deny, got {other:?}"),
+        PermissionDecision::Allow => panic!("expected Deny, got Allow"),
     }
 
     writer_handle.await.unwrap();
@@ -96,7 +94,7 @@ async fn check_unknown_tool_falls_back_to_deny_default() {
     let decision = gate.check("DoesNotExist", &json!({})).await;
     match decision {
         PermissionDecision::Deny { .. } => {}
-        other => panic!("expected Deny for unknown tool, got {other:?}"),
+        PermissionDecision::Allow => panic!("expected Deny for unknown tool, got Allow"),
     }
 
     writer_handle.await.unwrap();
@@ -133,7 +131,7 @@ async fn check_after_3_invalid_inputs_returns_deny() {
                 "got reason: {reason}"
             );
         }
-        other => panic!("expected Deny after retries, got {other:?}"),
+        PermissionDecision::Allow => panic!("expected Deny after retries, got Allow"),
     }
 
     writer_handle.await.unwrap();

@@ -19,12 +19,18 @@ use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
 fn permission_prompted_constant_is_byte_locked() {
-    assert_eq!(PERMISSION_PROMPTED, "tengu_orchestrator_permission_prompted");
+    assert_eq!(
+        PERMISSION_PROMPTED,
+        "tengu_orchestrator_permission_prompted"
+    );
 }
 
 #[test]
 fn permission_answered_constant_is_byte_locked() {
-    assert_eq!(PERMISSION_ANSWERED, "tengu_orchestrator_permission_answered");
+    assert_eq!(
+        PERMISSION_ANSWERED,
+        "tengu_orchestrator_permission_answered"
+    );
 }
 
 #[test]

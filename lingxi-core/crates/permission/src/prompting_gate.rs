@@ -66,6 +66,49 @@ impl InteractivePromptingGate {
     }
 }
 
+/// One step of input parsing. `Valid*` means the user produced a definitive
+/// answer; `Invalid` means we should re-prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParseOutcome {
+    /// User typed a yes-variant (`y/Y/yes/YES/…`).
+    ValidYes,
+    /// User typed a no-variant (`n/N/no/NO/…`).
+    ValidNo,
+    /// User just pressed Enter — caller resolves against the default.
+    Empty,
+    /// Anything else.
+    Invalid,
+}
+
+/// Parse a single line of user input.
+///
+/// Trims trailing `\r?\n` and any surrounding whitespace. Empty (after
+/// trim) ⇒ [`ParseOutcome::Empty`]. Otherwise compares the lowercased
+/// token against `y` / `yes` / `n` / `no`.
+pub(crate) fn parse_user_input(line: &str) -> ParseOutcome {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return ParseOutcome::Empty;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "y" | "yes" => ParseOutcome::ValidYes,
+        "n" | "no" => ParseOutcome::ValidNo,
+        _ => ParseOutcome::Invalid,
+    }
+}
+
+/// Resolve a [`ParseOutcome`] into a definitive Allow/Deny against a
+/// default. `Invalid` is the only outcome that returns `None` (caller
+/// re-prompts).
+pub(crate) fn resolve_outcome(outcome: ParseOutcome, default: PromptDefault) -> Option<bool> {
+    match outcome {
+        ParseOutcome::ValidYes => Some(true),
+        ParseOutcome::ValidNo => Some(false),
+        ParseOutcome::Empty => Some(matches!(default, PromptDefault::AllowByDefault)),
+        ParseOutcome::Invalid => None,
+    }
+}
+
 // PromptingGate impl lands in Task 8. PermissionGate upcast lands in Task 11.
 
 #[cfg(test)]
@@ -127,6 +170,95 @@ mod tests {
         assert_eq!(
             s.as_bytes(),
             b"Agent tool requires permission to spawn sub-agents.\n[Y/n] "
+        );
+    }
+
+    // ---- parse_user_input + resolve_outcome (Task 6) ----
+
+    #[test]
+    fn parse_y_lowercase_is_valid_yes() {
+        assert_eq!(parse_user_input("y\n"), ParseOutcome::ValidYes);
+    }
+
+    #[test]
+    fn parse_y_uppercase_is_valid_yes() {
+        assert_eq!(parse_user_input("Y\n"), ParseOutcome::ValidYes);
+    }
+
+    #[test]
+    fn parse_yes_mixed_case_is_valid_yes() {
+        assert_eq!(parse_user_input("YES\n"), ParseOutcome::ValidYes);
+        assert_eq!(parse_user_input("Yes\n"), ParseOutcome::ValidYes);
+        assert_eq!(parse_user_input("yEs\n"), ParseOutcome::ValidYes);
+    }
+
+    #[test]
+    fn parse_n_lowercase_is_valid_no() {
+        assert_eq!(parse_user_input("n\n"), ParseOutcome::ValidNo);
+    }
+
+    #[test]
+    fn parse_no_uppercase_is_valid_no() {
+        assert_eq!(parse_user_input("NO\n"), ParseOutcome::ValidNo);
+    }
+
+    #[test]
+    fn parse_empty_is_empty() {
+        assert_eq!(parse_user_input("\n"), ParseOutcome::Empty);
+        assert_eq!(parse_user_input(""), ParseOutcome::Empty);
+        assert_eq!(parse_user_input("   \n"), ParseOutcome::Empty);
+    }
+
+    #[test]
+    fn parse_garbage_is_invalid() {
+        assert_eq!(parse_user_input("maybe\n"), ParseOutcome::Invalid);
+        assert_eq!(parse_user_input("42\n"), ParseOutcome::Invalid);
+        assert_eq!(parse_user_input("yy\n"), ParseOutcome::Invalid);
+    }
+
+    #[test]
+    fn parse_handles_carriage_return() {
+        assert_eq!(parse_user_input("y\r\n"), ParseOutcome::ValidYes);
+        assert_eq!(parse_user_input("\r\n"), ParseOutcome::Empty);
+    }
+
+    #[test]
+    fn resolve_empty_with_allow_default_is_true() {
+        assert_eq!(
+            resolve_outcome(ParseOutcome::Empty, PromptDefault::AllowByDefault),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn resolve_empty_with_deny_default_is_false() {
+        assert_eq!(
+            resolve_outcome(ParseOutcome::Empty, PromptDefault::DenyByDefault),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn resolve_yes_overrides_deny_default() {
+        assert_eq!(
+            resolve_outcome(ParseOutcome::ValidYes, PromptDefault::DenyByDefault),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn resolve_no_overrides_allow_default() {
+        assert_eq!(
+            resolve_outcome(ParseOutcome::ValidNo, PromptDefault::AllowByDefault),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn resolve_invalid_is_none() {
+        assert_eq!(
+            resolve_outcome(ParseOutcome::Invalid, PromptDefault::AllowByDefault),
+            None
         );
     }
 }

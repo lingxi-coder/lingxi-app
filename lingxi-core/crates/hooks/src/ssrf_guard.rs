@@ -59,7 +59,10 @@ impl SsrfGuard {
         allowed_schemes.insert("http".into());
         allowed_schemes.insert("https".into());
 
-        // Block RFC1918 + loopback (10/8, 172.16/12, 192.168/16, 127/8).
+        // Block RFC1918 + loopback (10/8, 172.16/12, 192.168/16, 127/8) +
+        // IPv4 link-local (169.254/16) which includes the cloud-metadata
+        // service at 169.254.169.254. M5-06 added 169.254/16 because M5-06
+        // routes hooks to public endpoints — link-local must be blocked.
         // IPv6 unique-local (`fc00::/7`) and link-local (`fe80::/10`) are
         // added in M2 alongside the platform DNS resolver.
         let blocked = vec![
@@ -78,6 +81,12 @@ impl SsrfGuard {
             IpRange {
                 start: "127.0.0.0".parse().unwrap(),
                 end: "127.255.255.255".parse().unwrap(),
+            },
+            // M5-06: IPv4 link-local 169.254/16 — cloud metadata at
+            // 169.254.169.254 is the canonical target.
+            IpRange {
+                start: "169.254.0.0".parse().unwrap(),
+                end: "169.254.255.255".parse().unwrap(),
             },
         ];
 
@@ -143,6 +152,16 @@ mod tests {
     fn allows_public_host() {
         let g = SsrfGuard::with_defaults();
         assert!(g.check_url("https://example.com/").is_ok());
+    }
+
+    #[test]
+    fn blocks_cloud_metadata_169_254() {
+        // M5-06: 169.254/16 (IPv4 link-local) was deferred to M2 in M1.4;
+        // M5-06 adds it because hooks dispatch to public endpoints — the
+        // cloud-metadata service at 169.254.169.254 must be blocked.
+        let g = SsrfGuard::with_defaults();
+        assert!(g.check_url("http://169.254.169.254/latest/meta-data/").is_err());
+        assert!(g.check_url("http://169.254.0.1/").is_err());
     }
 
     #[test]

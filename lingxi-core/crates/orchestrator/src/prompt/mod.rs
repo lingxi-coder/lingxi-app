@@ -54,7 +54,59 @@ pub struct SystemPromptContext {
     pub tool_names: Vec<String>,
 }
 
-// Forward refs: types defined in Task 3.
+/// Result of a git-status probe over the cwd.
+///
+/// `Some(GitStatus)` is returned by [`crate::prompt::git_status::probe`]
+/// when the cwd is inside a git repo. The fields are PII-safe (no file
+/// content, only summary).
+#[derive(Debug, Clone, Default)]
+pub struct GitStatus {
+    /// Current branch name (`main`, `feat/x`). `HEAD detached` when in
+    /// a detached state. NEVER empty.
+    pub branch: String,
+    /// `true` when both index and working tree are unmodified.
+    pub working_dir_clean: bool,
+    /// Output of `git diff --stat --cached` + `git diff --stat`,
+    /// joined by `\n`, truncated at 4 KB. Empty when clean.
+    pub file_changes_summary: String,
+}
+
+/// Snapshot of the file tree at depth ≤ 2 under cwd.
+#[derive(Debug, Clone, Default)]
+pub struct FileTree {
+    /// Entries in display order (dirs before files at each level,
+    /// alphabetic within). Populated by
+    /// [`crate::prompt::file_tree::probe`].
+    pub entries: Vec<FileTreeEntry>,
+}
+
+/// One entry in [`FileTree`].
+#[derive(Debug, Clone)]
+pub struct FileTreeEntry {
+    /// Absolute path on disk.
+    pub path: PathBuf,
+    /// `true` when this is a directory; `false` when a regular file.
+    pub is_dir: bool,
+    /// `0` = direct child of cwd; `1` = grandchild. Never above 1
+    /// for this assembler (depth limit = 2 means 0..=1).
+    pub depth: u8,
+}
+
+/// One loaded CLAUDE.md (or `CLAUDE.local.md`) file.
+///
+/// Distinct from [`lingxi_memory::claude_md::LoadedFile`] — the
+/// assembler keeps a leaner representation post-trim.
+#[derive(Debug, Clone)]
+pub struct MemoryFile {
+    /// Absolute path on disk (PII-safe — only emitted into the
+    /// system prompt, never into telemetry).
+    pub path: PathBuf,
+    /// File body, leading/trailing whitespace trimmed. NEVER empty
+    /// (whitespace-only files are filtered upstream).
+    pub body: String,
+    /// `true` when this is a `CLAUDE.local.md`; `false` for `CLAUDE.md`.
+    pub is_local_override: bool,
+}
 
 #[cfg(test)]
 mod tests {
@@ -80,5 +132,30 @@ mod tests {
         assert_eq!(ctx.cwd, PathBuf::from("/tmp"));
         assert_eq!(ctx.model, "claude-opus-4-7");
         assert!(ctx.git_status.is_none());
+    }
+
+    #[test]
+    fn git_status_default_is_empty_unclean_branch_blank() {
+        let g = GitStatus::default();
+        assert_eq!(g.branch, "");
+        assert!(!g.working_dir_clean);
+        assert_eq!(g.file_changes_summary, "");
+    }
+
+    #[test]
+    fn file_tree_default_is_empty() {
+        let t = FileTree::default();
+        assert!(t.entries.is_empty());
+    }
+
+    #[test]
+    fn memory_file_constructs() {
+        let f = MemoryFile {
+            path: PathBuf::from("/proj/CLAUDE.md"),
+            body: "# title\nbody\n".into(),
+            is_local_override: false,
+        };
+        assert!(!f.is_local_override);
+        assert!(f.body.contains("title"));
     }
 }

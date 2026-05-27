@@ -60,6 +60,7 @@ async fn streaming_text_only_three_deltas() {
 
     match outcome {
         ConversationOutcome::EndTurn { turn_count, .. } => assert_eq!(turn_count, 1),
+        _ => panic!("unexpected outcome variant"),
     }
 
     let events = output.snapshot().await;

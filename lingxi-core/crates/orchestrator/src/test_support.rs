@@ -311,7 +311,6 @@ impl crate::prompt::MemoryHierarchyProvider for StaticMemoryProvider {
 // lingxi_orchestrator::test_support::{MockStreamingApiClient, …}`
 // without importing two distinct modules.
 
-#[cfg(any(test, feature = "test-support"))]
 pub use crate::test_support_stream::{
     content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
     message_delta_stop, message_start, message_stop, ping, text_delta, MockStreamingApiClient,

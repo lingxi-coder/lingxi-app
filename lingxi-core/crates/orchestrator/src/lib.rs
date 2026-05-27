@@ -30,8 +30,9 @@ pub mod turn_loop;
 pub mod test_support;
 
 /// Streaming-path test fixtures (`MockStreamingApiClient`, `scripted!`).
-/// Gated behind `test-support` so production builds don't pull them in.
-#[cfg(any(test, feature = "test-support"))]
+/// Compiled unconditionally — mirrors `test_support` (M5-02 made that
+/// module unconditional; this one follows the same convention so
+/// integration tests can use the fixtures without a feature flag).
 pub mod test_support_stream;
 
 pub use config::{OrchestratorConfig, MAX_TURNS_DEFAULT};

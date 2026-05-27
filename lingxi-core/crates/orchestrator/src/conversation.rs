@@ -89,10 +89,16 @@ pub enum ConversationOutcome {
 
 /// The orchestrator. Owns the session, dispatches tools, drives the loop.
 ///
-/// Construction is via `new(...)`. Driven via `run_turn(prompt)`.
+/// Construction is via `new(...)` (batched-only) or `new_with_streaming(...)`
+/// (both paths). Driven via `run_turn(prompt)` or `run_turn_streaming(prompt)`.
 pub struct ConversationOrchestrator {
     pub(crate) config: OrchestratorConfig,
     pub(crate) api: Arc<dyn OrchestratorApiClient>,
+    /// Streaming-path API client. Wired by `new_with_streaming`; the
+    /// legacy `new` constructor wires a [`NoStreamingApiClient`] stub
+    /// that always errors. Both methods share `self.session` so a
+    /// caller can mix batched and streaming turns transparently.
+    pub(crate) streaming_api: Arc<dyn StreamingApiClient>,
     pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) hooks: Arc<dyn HookExecutor>,
     pub(crate) perms: Arc<dyn PermissionGate>,
@@ -110,12 +116,46 @@ pub struct ConversationOrchestrator {
 }
 
 impl ConversationOrchestrator {
-    /// Construct a new orchestrator with a fresh in-memory session.
+    /// Construct a new orchestrator with a fresh in-memory session and
+    /// BOTH batched + streaming API clients wired.
     ///
-    /// M5-03 added two trailing parameters (`memory`, `cwd`) — callers
-    /// constructed before this plan must update their `::new(...)`
-    /// invocation. For empty/no-op memory, see `StaticMemoryProvider::empty()`
-    /// in `crate::test_support`.
+    /// Argument order: same as `new`, but inserts `streaming_api` right
+    /// after `api`. Use this when the streaming path is needed
+    /// (`run_turn_streaming`); otherwise `new` is shorter.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new_with_streaming(
+        config: OrchestratorConfig,
+        api: Arc<dyn OrchestratorApiClient>,
+        streaming_api: Arc<dyn StreamingApiClient>,
+        tools: Arc<ToolRegistry>,
+        hooks: Arc<dyn HookExecutor>,
+        perms: Arc<dyn PermissionGate>,
+        output: Arc<dyn OutputStream>,
+        memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
+        cwd: std::path::PathBuf,
+    ) -> Self {
+        let session = SessionState::empty(SessionId::new(), config.model.clone());
+        Self {
+            config,
+            api,
+            streaming_api,
+            tools,
+            hooks,
+            perms,
+            output,
+            session: Arc::new(Mutex::new(session)),
+            memory,
+            cwd,
+        }
+    }
+
+    /// Construct a new orchestrator with a fresh in-memory session and
+    /// the BATCHED API client only — the streaming field is wired with
+    /// the [`NoStreamingApiClient`] stub so any `run_turn_streaming`
+    /// call surfaces "no streaming client configured" rather than
+    /// panicking. M5-02 / M5-03 callers continue to use this signature
+    /// unchanged.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
@@ -128,18 +168,17 @@ impl ConversationOrchestrator {
         memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
         cwd: std::path::PathBuf,
     ) -> Self {
-        let session = SessionState::empty(SessionId::new(), config.model.clone());
-        Self {
+        Self::new_with_streaming(
             config,
             api,
+            Arc::new(NoStreamingApiClient),
             tools,
             hooks,
             perms,
             output,
-            session: Arc::new(Mutex::new(session)),
             memory,
             cwd,
-        }
+        )
     }
 
     /// Drive one user prompt through the turn loop until `end_turn` or
@@ -213,6 +252,177 @@ impl ConversationOrchestrator {
                     };
                     self.output.emit_end_turn(&stop_reason, &cost).await;
                     final_message_id = id;
+                    break;
+                }
+            }
+        }
+
+        Ok(ConversationOutcome::EndTurn {
+            turn_count,
+            final_message_id,
+        })
+    }
+
+    /// Drive one user prompt through the STREAMING turn loop. Mirrors
+    /// the contract of [`Self::run_turn`] but consumes SSE events as
+    /// they arrive (per-token `OutputStream::emit_text`) and dispatches
+    /// `tool_use` blocks the moment their `content_block_stop` event is
+    /// received.
+    ///
+    /// Emits 2 streaming-specific telemetry events at the boundaries:
+    /// - [`orch_events::TURN_STREAMING_STARTED`] at entry.
+    /// - [`orch_events::TURN_STREAMING_COMPLETED`] after success.
+    /// On error, the existing [`orch_events::CONVERSATION_FAILED`] is
+    /// reused (no new error event in M5-04).
+    pub async fn run_turn_streaming(
+        &self,
+        prompt: &str,
+    ) -> Result<ConversationOutcome, OrchestratorError> {
+        tracing::info!(
+            event = orch_events::TURN_STREAMING_STARTED,
+            prompt_len = prompt.len()
+        );
+        let result = self.try_run_turn_streaming(prompt).await;
+        match &result {
+            Ok(ConversationOutcome::EndTurn { turn_count, .. }) => {
+                tracing::info!(
+                    event = orch_events::TURN_STREAMING_COMPLETED,
+                    turn_count = *turn_count
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    event = orch_events::CONVERSATION_FAILED,
+                    reason = %err
+                );
+            }
+        }
+        result
+    }
+
+    /// Internal streaming turn driver (no telemetry — wrapped by
+    /// `run_turn_streaming`).
+    async fn try_run_turn_streaming(
+        &self,
+        prompt: &str,
+    ) -> Result<ConversationOutcome, OrchestratorError> {
+        use crate::streaming_loop::pump_stream;
+        use crate::turn_loop::{cost_snapshot_from_session, dispatch_tool_uses};
+        use lingxi_protocol::ContentBlock;
+
+        // 0. Build the system prompt for THIS turn. Override always wins.
+        let system_prompt: Option<String> = match &self.config.system_prompt_override {
+            Some(custom) => Some(custom.clone()),
+            None => Some(self.build_system_prompt().await),
+        };
+
+        // 1. Append the user prompt to session history.
+        {
+            let mut s = self.session.lock().await;
+            let msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
+            s.history.push(msg);
+        }
+
+        let mut turn_count: u32 = 0;
+        let final_message_id;
+        loop {
+            if turn_count >= self.config.max_turns {
+                return Err(OrchestratorError::MaxTurnsReached {
+                    max_turns: self.config.max_turns,
+                });
+            }
+            turn_count = turn_count.saturating_add(1);
+
+            // 2. Open the stream for this turn.
+            let (snapshot, model) = {
+                let s = self.session.lock().await;
+                (s.history.clone(), s.model.clone())
+            };
+            let stream = self
+                .streaming_api
+                .stream(
+                    &model,
+                    system_prompt.as_deref(),
+                    snapshot,
+                    Vec::new(), // M5-09 wires the real tools schema.
+                )
+                .await
+                .map_err(OrchestratorError::Streaming)?;
+
+            // 3. Pump the stream.
+            let pumped = pump_stream(stream, &self.output).await?;
+
+            // 4. Assemble + append the assistant message.
+            let assistant_id = MessageId::new();
+            let mut blocks: Vec<ContentBlock> = pumped.assistant_blocks.clone();
+            for t in &pumped.tool_uses {
+                blocks.push(ContentBlock::ToolUse {
+                    id: t.id,
+                    name: t.name.clone(),
+                    input: t.input.clone(),
+                });
+            }
+            {
+                let mut s = self.session.lock().await;
+                s.history.push(ConversationMessage::Assistant {
+                    id: assistant_id,
+                    content: blocks,
+                    stop_reason: pumped.stop_reason.clone(),
+                });
+            }
+
+            // 5. Dispatch tools (concurrent — Task 13 promotes this to
+            //    futures::join_all). For Task 12 we reuse the batched
+            //    sequential path so the text-only happy path turns green.
+            if !pumped.tool_uses.is_empty() {
+                let tool_inputs: Vec<(lingxi_protocol::ToolUseId, String, serde_json::Value)> =
+                    pumped
+                        .tool_uses
+                        .iter()
+                        .map(|t| (t.id, t.name.clone(), t.input.clone()))
+                        .collect();
+                let results = dispatch_tool_uses(self, &tool_inputs).await?;
+                let user_id = MessageId::new();
+                let mut s = self.session.lock().await;
+                s.history.push(ConversationMessage::User {
+                    id: user_id,
+                    content: results,
+                });
+            }
+
+            // 6. Decide loop disposition.
+            match pumped.stop_reason.as_deref() {
+                Some("end_turn") => {
+                    let cost = {
+                        let s = self.session.lock().await;
+                        cost_snapshot_from_session(&s)
+                    };
+                    self.output.emit_end_turn("end_turn", &cost).await;
+                    final_message_id = assistant_id;
+                    break;
+                }
+                Some("tool_use") if !pumped.tool_uses.is_empty() => continue,
+                Some(other) => {
+                    // max_tokens / stop_sequence / pause_turn / refusal —
+                    // terminate the loop with the value as-is, mirroring
+                    // claude-code's behavior (claude.ts:2269).
+                    let cost = {
+                        let s = self.session.lock().await;
+                        cost_snapshot_from_session(&s)
+                    };
+                    self.output.emit_end_turn(other, &cost).await;
+                    final_message_id = assistant_id;
+                    break;
+                }
+                None => {
+                    // Stream ended without a stop_reason — treat as
+                    // end_turn (rare; claude.ts uses the same fallback).
+                    let cost = {
+                        let s = self.session.lock().await;
+                        cost_snapshot_from_session(&s)
+                    };
+                    self.output.emit_end_turn("end_turn", &cost).await;
+                    final_message_id = assistant_id;
                     break;
                 }
             }

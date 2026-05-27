@@ -131,7 +131,7 @@ fn translate_response_blocks(content: &[ContentBlockApi]) -> Vec<ContentBlock> {
 /// hooks. Returns a list of `ContentBlock::ToolResult` blocks for the
 /// next user message.
 #[allow(clippy::too_many_lines)]
-async fn dispatch_tool_uses(
+pub(crate) async fn dispatch_tool_uses(
     orch: &ConversationOrchestrator,
     tool_uses: &[(ToolUseId, String, serde_json::Value)],
 ) -> Result<Vec<ContentBlock>, OrchestratorError> {

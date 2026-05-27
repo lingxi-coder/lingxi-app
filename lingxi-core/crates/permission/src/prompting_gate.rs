@@ -15,10 +15,19 @@
 
 use std::sync::Arc;
 
-use tokio::io::{AsyncRead, AsyncWrite};
+use async_trait::async_trait;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
-use crate::gate::{PermissionRequest, PromptDefault};
+use crate::gate::{
+    PermissionDecision, PermissionGate, PermissionRequest, PromptDecision, PromptDefault,
+    PromptError, PromptingGate,
+};
+
+/// Maximum number of consecutive invalid inputs the gate tolerates before
+/// erroring out. Locked at 3 per claude-code's `MAX_RETRIES` constant
+/// (see plan §"Reverse-engineered byte-locks").
+const MAX_RETRIES: u32 = 3;
 
 /// Format the byte-locked prompt for a [`PermissionRequest`].
 ///
@@ -109,7 +118,103 @@ pub(crate) fn resolve_outcome(outcome: ParseOutcome, default: PromptDefault) -> 
     }
 }
 
-// PromptingGate impl lands in Task 8. PermissionGate upcast lands in Task 11.
+#[async_trait]
+impl PermissionGate for InteractivePromptingGate {
+    async fn check(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> PermissionDecision {
+        let request = PermissionRequest {
+            tool_name: name.to_string(),
+            tool_input: input.clone(),
+            default_decision: crate::defaults_per_tool::tool_default(name),
+        };
+        match self.prompt_user(&request).await {
+            Ok(d) if d.allow => PermissionDecision::Allow,
+            Ok(d) => PermissionDecision::Deny { reason: d.reason },
+            Err(PromptError::InvalidInput { attempts }) => PermissionDecision::Deny {
+                reason: format!("invalid permission input after {attempts} attempts"),
+            },
+            Err(PromptError::Cancelled { reason }) => {
+                PermissionDecision::Deny { reason: format!("prompt cancelled: {reason}") }
+            }
+            Err(PromptError::Io(reason)) => {
+                PermissionDecision::Deny { reason: format!("prompt io: {reason}") }
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl PromptingGate for InteractivePromptingGate {
+    async fn prompt_user(
+        &self,
+        request: &PermissionRequest,
+    ) -> Result<PromptDecision, PromptError> {
+        let prompt = format_prompt(request);
+        let mut attempts: u32 = 0;
+        loop {
+            // 1. Write the prompt to stderr.
+            {
+                let mut err = self.stderr.lock().await;
+                err.write_all(prompt.as_bytes())
+                    .await
+                    .map_err(|e| PromptError::Io(e.to_string()))?;
+                err.flush()
+                    .await
+                    .map_err(|e| PromptError::Io(e.to_string()))?;
+            }
+            // 2. Read one line from stdin.
+            let line = {
+                let mut in_guard = self.stdin.lock().await;
+                let mut reader = BufReader::new(&mut *in_guard);
+                let mut buf = String::new();
+                let n = reader
+                    .read_line(&mut buf)
+                    .await
+                    .map_err(|e| PromptError::Io(e.to_string()))?;
+                if n == 0 {
+                    return Err(PromptError::Cancelled {
+                        reason: "stdin closed".to_string(),
+                    });
+                }
+                buf
+            };
+            // 3. Classify and decide.
+            let outcome = parse_user_input(&line);
+            match resolve_outcome(outcome, request.default_decision) {
+                Some(allow) => {
+                    let reason = match outcome {
+                        ParseOutcome::ValidYes => "user typed 'y'".to_string(),
+                        ParseOutcome::ValidNo => "user typed 'n'".to_string(),
+                        ParseOutcome::Empty => format!(
+                            "user pressed Enter (default = {})",
+                            if allow { "allow" } else { "deny" }
+                        ),
+                        ParseOutcome::Invalid => {
+                            unreachable!("resolve_outcome returned Some for Invalid")
+                        }
+                    };
+                    return Ok(PromptDecision {
+                        allow,
+                        reason,
+                        persist: false,
+                    });
+                }
+                None => {
+                    attempts += 1;
+                    if attempts >= MAX_RETRIES {
+                        return Err(PromptError::InvalidInput { attempts });
+                    }
+                    continue;
+                }
+            }
+        }
+    }
+}
+
+// PermissionGate upcast lands in Task 11.
 
 #[cfg(test)]
 mod tests {

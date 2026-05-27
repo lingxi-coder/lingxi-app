@@ -2,10 +2,11 @@
 //! `tokio::io::duplex` to script stdin and capture stderr.
 //!
 //! Pattern: spawn a writer task that pushes the user's response onto the
-//! stdin duplex and closes it, plus a reader task that drains the stderr
-//! duplex to a `Vec<u8>` for assertion. The gate itself runs on the test's
-//! main task — the spawned writer + reader avoid deadlock on the bounded
-//! duplex buffers.
+//! stdin duplex and closes it. Read stderr with `read_exact` (NOT
+//! `read_to_end`) sized to the expected prompt — `read_to_end` would
+//! deadlock because the gate holds an `Arc<Mutex<stderr_writer>>` and
+//! only drops it at end of test scope, so the reader never sees EOF
+//! until after the assertions run.
 
 use std::sync::Arc;
 
@@ -34,22 +35,11 @@ async fn typing_y_returns_allow() {
         Arc::new(Mutex::new(stderr_writer)),
     );
 
-    // Script the user's response BEFORE awaiting prompt_user, since duplex
-    // is bounded and the gate's write to stderr would deadlock if we block
-    // the test task here. Use a background task.
     let writer_handle = tokio::spawn(async move {
         let mut w = stdin_writer;
         w.write_all(b"y\n").await.unwrap();
         // Close so read_line returns even if more bytes were expected.
         drop(w);
-    });
-
-    // Drain stderr in parallel so the duplex buffer doesn't fill up and
-    // stall the gate's write.
-    let reader_handle = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        stderr_reader.read_to_end(&mut buf).await.unwrap();
-        buf
     });
 
     let decision = gate
@@ -61,9 +51,11 @@ async fn typing_y_returns_allow() {
     assert!(!decision.persist, "M5-05 always sets persist=false");
 
     writer_handle.await.unwrap();
-    let printed = reader_handle.await.unwrap();
-    assert_eq!(
-        printed.as_slice(),
-        b"Claude needs your permission to use Bash\n[y/N] "
-    );
+
+    // Read exactly the expected prompt bytes — the gate flushed already
+    // and the duplex buffer holds the bytes verbatim.
+    let expected = b"Claude needs your permission to use Bash\n[y/N] ";
+    let mut printed = vec![0u8; expected.len()];
+    stderr_reader.read_exact(&mut printed).await.unwrap();
+    assert_eq!(printed.as_slice(), expected.as_slice());
 }

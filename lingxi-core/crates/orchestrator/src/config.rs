@@ -34,6 +34,16 @@ pub struct OrchestratorConfig {
     /// the dynamic assembly; M5-02 leaves this `None` and the API call
     /// sends NO system prompt — the model receives only `messages`).
     pub system_prompt_override: Option<String>,
+
+    /// When `true`, M5-12 CLI binary wires
+    /// [`lingxi_permission::InteractivePromptingGate`] over real stdin /
+    /// stderr; when `false` (default), it wires
+    /// [`crate::test_support::NoOpPermissionGate`]. The orchestrator
+    /// itself doesn't read this flag — the `perms: Arc<dyn PermissionGate>`
+    /// constructor argument decides; this field is the CLI's source of
+    /// truth for which gate to construct. (M5-05)
+    #[serde(default)]
+    pub interactive_permissions: bool,
 }
 
 impl Default for OrchestratorConfig {
@@ -42,6 +52,7 @@ impl Default for OrchestratorConfig {
             max_turns: MAX_TURNS_DEFAULT,
             model: DEFAULT_MODEL.to_string(),
             system_prompt_override: None,
+            interactive_permissions: false,
         }
     }
 }
@@ -74,11 +85,18 @@ mod tests {
             max_turns: 5,
             model: "x".into(),
             system_prompt_override: Some("custom".into()),
+            interactive_permissions: true,
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.max_turns, 5);
         assert_eq!(back.model, "x");
         assert_eq!(back.system_prompt_override.as_deref(), Some("custom"));
+        assert!(back.interactive_permissions);
+    }
+
+    #[test]
+    fn default_interactive_permissions_is_false() {
+        assert!(!OrchestratorConfig::default().interactive_permissions);
     }
 }

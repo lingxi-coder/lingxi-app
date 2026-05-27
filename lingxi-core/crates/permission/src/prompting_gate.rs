@@ -73,6 +73,22 @@ impl InteractivePromptingGate {
     ) -> Self {
         Self { stdin, stderr }
     }
+
+    /// Convenience constructor over the process's real stdin / stderr.
+    ///
+    /// Used by M5-12 CLI binary when
+    /// [`OrchestratorConfig::interactive_permissions`] is `true`.
+    /// Wraps `tokio::io::stdin()` and `tokio::io::stderr()` in the
+    /// `Arc<Mutex<…>>` newtype the trait surface expects.
+    ///
+    /// [`OrchestratorConfig::interactive_permissions`]: ../../lingxi_orchestrator/struct.OrchestratorConfig.html#structfield.interactive_permissions
+    #[must_use]
+    pub fn with_stdio() -> Self {
+        Self::new(
+            Arc::new(Mutex::new(tokio::io::stdin())),
+            Arc::new(Mutex::new(tokio::io::stderr())),
+        )
+    }
 }
 
 /// One step of input parsing. `Valid*` means the user produced a definitive

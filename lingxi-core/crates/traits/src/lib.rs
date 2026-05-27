@@ -17,6 +17,7 @@ pub mod http;
 pub mod lsp;
 pub mod mailbox;
 pub mod mcp;
+pub mod orchestrator;
 pub mod process;
 pub mod runtime;
 pub mod sandbox;
@@ -38,6 +39,9 @@ pub use mailbox::{
     MailboxError as RouterMailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
 };
 pub use mcp::*;
+pub use orchestrator::{
+    CompactionSummary, CostSnapshot, HandleError, OrchestratorHandle, OutputEvent, OutputStream,
+};
 pub use process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use sandbox::{

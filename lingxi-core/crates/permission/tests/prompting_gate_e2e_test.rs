@@ -59,3 +59,67 @@ async fn typing_y_returns_allow() {
     stderr_reader.read_exact(&mut printed).await.unwrap();
     assert_eq!(printed.as_slice(), expected.as_slice());
 }
+
+#[tokio::test]
+async fn empty_input_with_allow_default_returns_allow() {
+    let (stdin_writer, stdin_reader) = duplex(1024);
+    let (stderr_writer, mut stderr_reader) = duplex(1024);
+
+    let gate = InteractivePromptingGate::new(
+        Arc::new(Mutex::new(stdin_reader)),
+        Arc::new(Mutex::new(stderr_writer)),
+    );
+
+    let writer_handle = tokio::spawn(async move {
+        let mut w = stdin_writer;
+        w.write_all(b"\n").await.unwrap();
+        drop(w);
+    });
+
+    let decision = gate
+        .prompt_user(&make_request("Read", PromptDefault::AllowByDefault))
+        .await
+        .expect("prompt_user should succeed on empty input with allow default");
+
+    assert!(decision.allow);
+    assert!(decision.reason.contains("default = allow"));
+
+    writer_handle.await.unwrap();
+
+    let expected = b"Claude needs your permission to use Read\n[Y/n] ";
+    let mut printed = vec![0u8; expected.len()];
+    stderr_reader.read_exact(&mut printed).await.unwrap();
+    assert_eq!(printed.as_slice(), expected.as_slice());
+}
+
+#[tokio::test]
+async fn empty_input_with_deny_default_returns_deny() {
+    let (stdin_writer, stdin_reader) = duplex(1024);
+    let (stderr_writer, mut stderr_reader) = duplex(1024);
+
+    let gate = InteractivePromptingGate::new(
+        Arc::new(Mutex::new(stdin_reader)),
+        Arc::new(Mutex::new(stderr_writer)),
+    );
+
+    let writer_handle = tokio::spawn(async move {
+        let mut w = stdin_writer;
+        w.write_all(b"\n").await.unwrap();
+        drop(w);
+    });
+
+    let decision = gate
+        .prompt_user(&make_request("Bash", PromptDefault::DenyByDefault))
+        .await
+        .expect("prompt_user should succeed on empty input with deny default");
+
+    assert!(!decision.allow);
+    assert!(decision.reason.contains("default = deny"));
+
+    writer_handle.await.unwrap();
+
+    let expected = b"Claude needs your permission to use Bash\n[y/N] ";
+    let mut printed = vec![0u8; expected.len()];
+    stderr_reader.read_exact(&mut printed).await.unwrap();
+    assert_eq!(printed.as_slice(), expected.as_slice());
+}

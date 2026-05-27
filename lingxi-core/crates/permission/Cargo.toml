@@ -16,5 +16,9 @@ tokio = { workspace = true, features = ["io-util"] }
 tracing.workspace = true
 regex = "1"
 
+[dev-dependencies]
+lingxi-tools = { path = "../tools" }
+tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "macros"] }
+
 [lints]
 workspace = true

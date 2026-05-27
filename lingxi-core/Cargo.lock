@@ -1444,6 +1444,7 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "lingxi-protocol",
+ "lingxi-tools",
  "lingxi-traits",
  "regex",
  "serde",

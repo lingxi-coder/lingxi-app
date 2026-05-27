@@ -98,7 +98,7 @@ impl StreamingApiClient for MockStreamingApiClient {
         let next = queue.pop_front().ok_or_else(|| {
             ApiError::Http(HttpError::Connection("streaming script exhausted".into()))
         })?;
-        let s = stream::iter(next.into_iter()).boxed();
+        let s = stream::iter(next).boxed();
         Ok(s)
     }
 }
@@ -256,20 +256,26 @@ mod tests {
         assert!(matches!(collected[0], Ok(StreamEvent::MessageStart { .. })));
         assert!(matches!(collected[1], Ok(StreamEvent::MessageStop)));
 
-        let err = mock
+        let result = mock
             .stream("claude-opus-4-7", None, Vec::new(), Vec::new())
-            .await
-            .expect_err("second call exhausted");
-        assert!(matches!(err, ApiError::Http(HttpError::Connection(_))));
+            .await;
+        // `Result::expect_err` requires `Ok` to be `Debug`; `BoxStream`
+        // is not. Match on the result instead.
+        match result {
+            Ok(_) => panic!("expected exhaustion error"),
+            Err(e) => assert!(matches!(e, ApiError::Http(HttpError::Connection(_)))),
+        }
     }
 
     #[tokio::test]
     async fn captured_calls_record_model_and_system() {
         let mock = MockStreamingApiClient::with_turns(vec![scripted![message_stop()]]);
-        let _ = mock
+        let result = mock
             .stream("claude-opus-4-7", Some("sys"), Vec::new(), Vec::new())
-            .await
-            .expect("call");
+            .await;
+        // `Result::expect` requires Ok = `BoxStream` to be Debug;
+        // it is not. Discriminate via `is_ok` instead.
+        assert!(result.is_ok(), "call should succeed");
         let calls = mock.captured_calls().await;
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].model, "claude-opus-4-7");

@@ -38,6 +38,38 @@ pub trait OrchestratorApiClient: Send + Sync {
     ) -> Result<MessageResponse, ApiError>;
 }
 
+/// Streaming-API surface used by the orchestrator's streaming turn loop.
+///
+/// Mirrors [`OrchestratorApiClient`] but returns a typed
+/// `BoxStream<'static, Result<StreamEvent, ApiError>>` instead of a
+/// single `MessageResponse`. The orchestrator owns the stream and drives
+/// it to completion (or `message_stop`).
+///
+/// Production: `AnthropicProviderStreamingAdapter` (added in Task 11)
+/// wraps `AnthropicProvider::messages_create_stream` + a transport.
+/// Tests: `MockStreamingApiClient` in `test_support_stream.rs`.
+#[async_trait]
+pub trait StreamingApiClient: Send + Sync {
+    /// Open a streaming `messages.create` request. The returned stream
+    /// yields wire-decoded `StreamEvent` values until the server emits
+    /// `message_stop`. The implementation is responsible for HTTP, SSE
+    /// chunk buffering, and JSON-decoding the `data:` lines into typed
+    /// `StreamEvent` values.
+    async fn stream(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<lingxi_api_client::types::StreamEvent, ApiError>,
+        >,
+        ApiError,
+    >;
+}
+
 /// Result of `ConversationOrchestrator::run_turn` on success.
 ///
 /// Only one variant in M5-02; M5-04 may add `Cancelled { ... }` later.

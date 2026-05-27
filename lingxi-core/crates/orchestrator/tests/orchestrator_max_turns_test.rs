@@ -3,6 +3,7 @@
 use lingxi_api_client::types::ContentBlockApi;
 use lingxi_orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpHookExecutor, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use lingxi_orchestrator::{
     ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, OrchestratorError,
@@ -37,8 +38,16 @@ async fn never_ending_loop_aborts_with_max_turns_reached() {
         ..OrchestratorConfig::default()
     };
 
-    let orch =
-        ConversationOrchestrator::new(config, api.clone(), tools, hooks, perms, output.clone());
+    let orch = ConversationOrchestrator::new(
+        config,
+        api.clone(),
+        tools,
+        hooks,
+        perms,
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
 
     let err = orch.run_turn("forever").await.expect_err("must fail");
     assert!(matches!(
@@ -69,6 +78,8 @@ async fn max_turns_default_30_is_the_construction_default() {
         hooks,
         perms,
         output,
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
     );
 
     let outcome = orch.run_turn("ping").await.expect("happy");
@@ -94,6 +105,8 @@ async fn api_error_propagates_as_orchestrator_error_api_call() {
         hooks,
         perms,
         output,
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
     );
 
     let err = orch.run_turn("anything").await.expect_err("must fail");

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use lingxi_api_client::types::ContentBlockApi;
 use lingxi_orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpHookExecutor, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use lingxi_orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use lingxi_permission::result::PermissionMetadata;
@@ -112,6 +113,8 @@ async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() 
         hooks,
         perms,
         output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
     );
     let outcome = orch
         .run_turn("try the broken tool")

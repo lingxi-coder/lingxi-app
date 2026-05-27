@@ -3,6 +3,7 @@
 use lingxi_api_client::types::ContentBlockApi;
 use lingxi_orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpHookExecutor, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use lingxi_telemetry::tengu::orchestrator as orch_events;
@@ -67,6 +68,8 @@ async fn run_turn_emits_started_and_completed_in_order() {
         hooks,
         perms,
         output,
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
     );
     orch.run_turn("ping").await.expect("happy");
 
@@ -119,7 +122,16 @@ async fn run_turn_emits_failed_on_max_turns_error() {
         max_turns: 2,
         ..OrchestratorConfig::default()
     };
-    let orch = ConversationOrchestrator::new(cfg, api, tools, hooks, perms, output);
+    let orch = ConversationOrchestrator::new(
+        cfg,
+        api,
+        tools,
+        hooks,
+        perms,
+        output,
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
     let _err = orch.run_turn("loop").await.expect_err("must fail");
 
     let events = cap.events.lock().unwrap().clone();

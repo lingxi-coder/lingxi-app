@@ -4,6 +4,7 @@
 use lingxi_api_client::types::ContentBlockApi;
 use lingxi_orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpHookExecutor, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use lingxi_orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use lingxi_traits::OutputEvent;
@@ -30,6 +31,8 @@ async fn single_turn_no_tools_returns_end_turn_and_emits_text_and_end_turn() {
         hooks,
         perms,
         output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
     );
 
     let outcome = orch.run_turn("say hello").await.expect("turn must succeed");

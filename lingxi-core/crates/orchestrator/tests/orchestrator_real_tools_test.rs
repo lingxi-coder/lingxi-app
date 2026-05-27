@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use lingxi_api_client::types::ContentBlockApi;
 use lingxi_orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpHookExecutor, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use lingxi_orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use lingxi_permission::result::PermissionMetadata;
@@ -147,6 +148,8 @@ async fn orchestrator_drives_real_file_read_tool_on_a_tempfile() {
         hooks,
         perms,
         output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
     );
 
     let outcome = orch.run_turn("read greeting").await.expect("loop");

@@ -22,10 +22,18 @@ use tokio::sync::Mutex;
 /// `HttpTransport` into this shape. Tests: `MockApiClient`.
 #[async_trait]
 pub trait OrchestratorApiClient: Send + Sync {
-    /// Non-streaming `messages.create`.
+    /// Non-streaming `messages.create` with optional system prompt.
+    ///
+    /// `system` is the assembled system prompt (M5-03). `None` is a
+    /// no-op (the API call omits the `"system"` key). Callers that
+    /// want the assembled LingXi prompt populate it via
+    /// [`ConversationOrchestrator::build_system_prompt`]. Callers
+    /// with an override populate it from
+    /// `OrchestratorConfig::system_prompt_override`.
     async fn messages_create(
         &self,
         model: &str,
+        system: Option<&str>,
         msgs: Vec<ConversationMessage>,
     ) -> Result<MessageResponse, ApiError>;
 }
@@ -58,10 +66,25 @@ pub struct ConversationOrchestrator {
     pub(crate) perms: Arc<dyn PermissionGate>,
     pub(crate) output: Arc<dyn OutputStream>,
     pub(crate) session: Arc<Mutex<SessionState>>,
+    /// CLAUDE.md hierarchy provider (M5-03). The orchestrator calls
+    /// `memory.load(&cwd).await` once per `run_turn` to gather the
+    /// memory files spliced into the system prompt.
+    pub(crate) memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
+    /// Working directory used as the root for the env + file-tree +
+    /// git-status + memory probes inside `build_system_prompt`. M5-12
+    /// CLI will plumb `--cwd`; until then, callers pass the platform
+    /// caller's cwd here.
+    pub(crate) cwd: std::path::PathBuf,
 }
 
 impl ConversationOrchestrator {
     /// Construct a new orchestrator with a fresh in-memory session.
+    ///
+    /// M5-03 added two trailing parameters (`memory`, `cwd`) — callers
+    /// constructed before this plan must update their `::new(...)`
+    /// invocation. For empty/no-op memory, see `StaticMemoryProvider::empty()`
+    /// in `crate::test_support`.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         config: OrchestratorConfig,
@@ -70,6 +93,8 @@ impl ConversationOrchestrator {
         hooks: Arc<dyn HookExecutor>,
         perms: Arc<dyn PermissionGate>,
         output: Arc<dyn OutputStream>,
+        memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
+        cwd: std::path::PathBuf,
     ) -> Self {
         let session = SessionState::empty(SessionId::new(), config.model.clone());
         Self {
@@ -80,6 +105,8 @@ impl ConversationOrchestrator {
             perms,
             output,
             session: Arc::new(Mutex::new(session)),
+            memory,
+            cwd,
         }
     }
 
@@ -117,6 +144,12 @@ impl ConversationOrchestrator {
 
     /// Internal turn driver (no telemetry — wrapped by `run_turn`).
     async fn try_run_turn(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError> {
+        // 0. Build the system prompt for THIS turn. Override always wins.
+        let system_prompt: Option<String> = match &self.config.system_prompt_override {
+            Some(custom) => Some(custom.clone()),
+            None => Some(self.build_system_prompt().await),
+        };
+
         // 1. Append the user prompt to session history.
         {
             let mut s = self.session.lock().await;
@@ -135,7 +168,7 @@ impl ConversationOrchestrator {
             }
             turn_count = turn_count.saturating_add(1);
 
-            let step = execute_one_turn(self).await?;
+            let step = execute_one_turn(self, system_prompt.as_deref()).await?;
             match step {
                 TurnStepOutcome::Continue => continue,
                 TurnStepOutcome::Ended {
@@ -157,6 +190,53 @@ impl ConversationOrchestrator {
             turn_count,
             final_message_id,
         })
+    }
+
+    /// Build the per-turn system prompt by gathering cwd / git / file
+    /// tree / memory / tool-name context and calling
+    /// [`crate::prompt::assemble_system_prompt`]. Bypassed when
+    /// `OrchestratorConfig::system_prompt_override` is `Some(_)`.
+    async fn build_system_prompt(&self) -> String {
+        use crate::prompt::{
+            assemble_system_prompt, file_tree, git_status, SystemPromptContext,
+        };
+
+        let cwd = self.cwd.clone();
+        let memory_files = self.memory.load(&cwd).await;
+
+        let git = git_status::probe(&cwd);
+        let tree = file_tree::probe(&cwd, file_tree::DEFAULT_DEPTH_LIMIT);
+
+        // Tool name extraction: ToolRegistry's `all_names()` is the
+        // unfiltered set (builtin + plugin + MCP). M5-03 uses the
+        // unfiltered list because the registry's enable-filter requires
+        // a `ToolStaticContext` that's only meaningful at dispatch time.
+        // tools_block::format sorts alphabetically inside.
+        let tool_names: Vec<String> = self.tools.all_names();
+
+        let shell = std::env::var("SHELL")
+            .ok()
+            .and_then(|s| {
+                std::path::Path::new(&s)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "sh".into());
+
+        let ctx = SystemPromptContext {
+            cwd,
+            platform: std::env::consts::OS.to_string(),
+            model: self.config.model.clone(),
+            model_marketing_name: None, // M5-12 CLI fills this when known.
+            knowledge_cutoff: None,     // M5-12 CLI fills this when known.
+            shell,
+            os_version: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+            git_status: git,
+            file_tree: tree,
+            memory_files,
+            tool_names,
+        };
+        assemble_system_prompt(&ctx)
     }
 
     /// Borrow the in-memory session (read-write lock surrogate). Useful for tests.
@@ -194,10 +274,11 @@ impl<T: HttpTransport + Send + Sync + 'static> OrchestratorApiClient
     async fn messages_create(
         &self,
         model: &str,
+        system: Option<&str>,
         msgs: Vec<ConversationMessage>,
     ) -> Result<MessageResponse, ApiError> {
         self.provider
-            .messages_create_non_stream(model, msgs, self.transport.as_ref())
+            .messages_create_non_stream(model, system, msgs, self.transport.as_ref())
             .await
     }
 }

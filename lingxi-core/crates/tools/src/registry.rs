@@ -99,6 +99,26 @@ impl ToolRegistry {
     pub fn unregister_plugin(&mut self, plugin_id: &PluginId) {
         self.plugin_tools.remove(plugin_id);
     }
+
+    /// Return ALL registered tool names across every partition (builtin
+    /// + MCP + LSP + plugin), unfiltered by `Tool::is_enabled`.
+    ///
+    /// Used by `lingxi-orchestrator`'s M5-03 system prompt assembler:
+    /// the `<tools>` block emits names alphabetically so the model
+    /// knows what to call by name. Filtering by enable-flag would
+    /// require a `ToolStaticContext`, which only carries meaning at
+    /// dispatch time. The order returned here is partition iteration
+    /// order; the assembler re-sorts alphabetically for byte stability.
+    #[must_use]
+    pub fn all_names(&self) -> Vec<String> {
+        self.builtin
+            .iter()
+            .chain(self.mcp_tools.values().flatten())
+            .chain(self.lsp_tools.iter())
+            .chain(self.plugin_tools.values().flatten())
+            .map(|t| t.name().to_string())
+            .collect()
+    }
 }
 
 impl Default for ToolRegistry {

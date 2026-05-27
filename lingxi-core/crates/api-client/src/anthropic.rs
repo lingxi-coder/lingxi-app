@@ -211,6 +211,7 @@ impl AnthropicProvider {
     pub async fn messages_create_non_stream<T: HttpTransport>(
         &self,
         model: &str,
+        system: Option<&str>,
         msgs: Vec<ConversationMessage>,
         transport: &T,
     ) -> Result<MessageResponse, ApiError> {
@@ -218,11 +219,14 @@ impl AnthropicProvider {
         let started = std::time::Instant::now();
         telemetry::emit_started(&self.bus, model, &request_id, false).await;
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "max_tokens": 4096u32,
             "messages": msgs,
         });
+        if let Some(s) = system {
+            body["system"] = serde_json::Value::String(s.to_string());
+        }
 
         let resp_result = self.drive_retry_loop_with_429(&body, transport).await;
         let outcome = self

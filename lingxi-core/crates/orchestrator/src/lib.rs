@@ -32,3 +32,6 @@ pub use conversation::{
     AnthropicProviderAdapter, ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient,
 };
 pub use error::OrchestratorError;
+pub use prompt::{
+    assemble_system_prompt, FileTree, FileTreeEntry, GitStatus, MemoryFile, SystemPromptContext,
+};

@@ -21,8 +21,16 @@ pub(crate) enum TurnStepOutcome {
 }
 
 /// Execute one `messages_create_non_stream` round-trip + tool dispatches.
+///
+/// `system` is the assembled system prompt for the conversation (built
+/// once by `ConversationOrchestrator::try_run_turn`). It is passed
+/// through to every API round-trip in the conversation, NOT re-built
+/// per turn-step — the prompt is stable across the conversation lifetime
+/// (see M5-03 plan "Out of scope" note: SSE M5-04 will not re-assemble
+/// per turn-step either).
 pub(crate) async fn execute_one_turn(
     orch: &ConversationOrchestrator,
+    system: Option<&str>,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     // Snapshot the current session history for the API call.
     let (history_snapshot, model) = {
@@ -31,7 +39,10 @@ pub(crate) async fn execute_one_turn(
     };
 
     // 1. Call the API.
-    let response = orch.api.messages_create(&model, history_snapshot).await?;
+    let response = orch
+        .api
+        .messages_create(&model, system, history_snapshot)
+        .await?;
 
     // 2. Translate `MessageResponse.content` -> `ContentBlock` history entry.
     let assistant_blocks = translate_response_blocks(&response.content);

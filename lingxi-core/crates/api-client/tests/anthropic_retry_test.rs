@@ -29,7 +29,7 @@ async fn happy_path_200_succeeds_in_one_attempt() {
     let provider = AnthropicProvider::new("sk-test", Some(server.base_url.clone()));
     let transport = server.transport();
     let r = provider
-        .messages_create_non_stream("claude-opus-4-6", make_msgs(), transport.as_ref())
+        .messages_create_non_stream("claude-opus-4-6", None, make_msgs(), transport.as_ref())
         .await;
     assert!(r.is_ok(), "happy path must succeed: {r:?}");
     assert_eq!(server.attempt_count(), 1);
@@ -59,7 +59,7 @@ async fn three_5xx_yields_retry_exhausted() {
     let provider = AnthropicProvider::new("sk-test", Some(server.base_url.clone()));
     let transport = server.transport();
     let r = provider
-        .messages_create_non_stream("claude-opus-4-6", make_msgs(), transport.as_ref())
+        .messages_create_non_stream("claude-opus-4-6", None, make_msgs(), transport.as_ref())
         .await;
     match r {
         Err(ApiError::RetryExhausted { last_status }) => {
@@ -104,7 +104,7 @@ async fn four01_then_200_triggers_one_refresh() {
 
     let transport = server.transport();
     let r = provider
-        .messages_create_non_stream("claude-opus-4-6", make_msgs(), transport.as_ref())
+        .messages_create_non_stream("claude-opus-4-6", None, make_msgs(), transport.as_ref())
         .await;
     assert!(r.is_ok(), "401→refresh→200 must succeed: {r:?}");
     assert_eq!(hook.refresh_count.load(Ordering::SeqCst), 1);
@@ -136,7 +136,7 @@ async fn four01_twice_propagates_unauthorized() {
 
     let transport = server.transport();
     let r = provider
-        .messages_create_non_stream("claude-opus-4-6", make_msgs(), transport.as_ref())
+        .messages_create_non_stream("claude-opus-4-6", None, make_msgs(), transport.as_ref())
         .await;
     match r {
         Err(ApiError::Unauthorized(_)) => {}
@@ -159,7 +159,7 @@ async fn no_op_hook_does_not_retry_on_401() {
         .with_oauth_hook(Arc::new(NoOpOAuthHook));
     let transport = server.transport();
     let r = provider
-        .messages_create_non_stream("claude-opus-4-6", make_msgs(), transport.as_ref())
+        .messages_create_non_stream("claude-opus-4-6", None, make_msgs(), transport.as_ref())
         .await;
     // NoOp hook returns TokenStale → caller surfaces as Unauthorized.
     match r {
@@ -208,7 +208,7 @@ async fn matrix_429_then_401_then_200_end_to_end() {
         .with_oauth_hook(hook.clone());
     let transport = server.transport();
     let r = provider
-        .messages_create_non_stream("claude-opus-4-6", make_msgs(), transport.as_ref())
+        .messages_create_non_stream("claude-opus-4-6", None, make_msgs(), transport.as_ref())
         .await;
     assert!(r.is_ok(), "full matrix must converge: {r:?}");
     assert_eq!(hook.refresh_count.load(Ordering::SeqCst), 1);

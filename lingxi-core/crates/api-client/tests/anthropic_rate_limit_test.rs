@@ -61,7 +61,7 @@ async fn four29_with_retry_after_sleeps_and_retries() {
     let transport = server.transport();
     let start = Instant::now();
     let r = p
-        .messages_create_non_stream("claude-opus-4-6", msgs(), transport.as_ref())
+        .messages_create_non_stream("claude-opus-4-6", None, msgs(), transport.as_ref())
         .await;
     let elapsed = start.elapsed();
     assert!(r.is_ok(), "429+200 must succeed: {r:?}");
@@ -99,7 +99,7 @@ async fn four29_without_header_falls_through_to_retry_backoff() {
     let p = AnthropicProvider::new("sk-test", Some(server.base_url.clone()));
     let transport = server.transport();
     let r = p
-        .messages_create_non_stream("claude-opus-4-6", msgs(), transport.as_ref())
+        .messages_create_non_stream("claude-opus-4-6", None, msgs(), transport.as_ref())
         .await;
     assert!(r.is_ok(), "429+200 must succeed: {r:?}");
     server.shutdown().await;
@@ -133,7 +133,7 @@ async fn failure_emits_request_failed_event() {
 
     let transport = server.transport();
     let r = p
-        .messages_create_non_stream("claude-opus-4-6", msgs(), transport.as_ref())
+        .messages_create_non_stream("claude-opus-4-6", None, msgs(), transport.as_ref())
         .await;
     assert!(matches!(r, Err(ApiError::RetryExhausted { .. })));
     let names: Vec<String> = sink

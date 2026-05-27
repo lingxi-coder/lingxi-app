@@ -64,7 +64,7 @@ async fn successful_200_fires_cost_recorded_after_api_succeeded() {
         .with_cost_tracker(tracker.clone());
 
     let _ = provider
-        .messages_create_non_stream("claude-opus-4-6", msgs(), &*server.transport())
+        .messages_create_non_stream("claude-opus-4-6", None, msgs(), &*server.transport())
         .await
         .expect("happy path 200");
 
@@ -135,7 +135,7 @@ async fn cost_tracker_silently_skipped_without_bus() {
         .with_cost_tracker(tracker.clone());
 
     let _ = provider
-        .messages_create_non_stream("claude-opus-4-6", msgs(), &*server.transport())
+        .messages_create_non_stream("claude-opus-4-6", None, msgs(), &*server.transport())
         .await
         .expect("happy path 200");
 
@@ -156,7 +156,7 @@ async fn no_tracker_no_cost_recording_no_event() {
     .await;
     let provider = AnthropicProvider::new("sk-test", Some(server.base_url.clone()));
     let r = provider
-        .messages_create_non_stream("claude-opus-4-6", msgs(), &*server.transport())
+        .messages_create_non_stream("claude-opus-4-6", None, msgs(), &*server.transport())
         .await;
     assert!(r.is_ok(), "still succeeds without tracker: {r:?}");
     server.shutdown().await;

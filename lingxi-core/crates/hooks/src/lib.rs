@@ -19,6 +19,7 @@ pub mod builtin;
 pub mod definition;
 pub mod events;
 pub mod executor;
+pub mod hook_payload;
 pub mod registry;
 pub mod response;
 pub mod ssrf_guard;
@@ -27,6 +28,10 @@ pub use async_registry::AsyncHookRegistry;
 pub use definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
 pub use events::{HookEvent, HookEventType};
 pub use executor::{BuiltinHookHandler, HookExecutorImpl};
+pub use hook_payload::{
+    parse_response, HookEventEnvelope, HookEventNamePost, HookEventNamePre,
+    HookResponseParseError, PostToolUsePayload, PreToolUsePayload,
+};
 pub use registry::{HookContext, HookRegistry};
 pub use response::{AggregateHookResult, HookDecision, HookOutcome, HookResponse, HookResult};
 pub use ssrf_guard::{IpRange, SsrfError, SsrfGuard};

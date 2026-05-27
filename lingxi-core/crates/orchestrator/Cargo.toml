@@ -25,6 +25,7 @@ tracing.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
 tempfile = "3"
+once_cell = "1"
 
 [features]
 test-support = []

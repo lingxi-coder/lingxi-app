@@ -312,3 +312,79 @@ impl<T: HttpTransport + Send + Sync + 'static> OrchestratorApiClient
             .await
     }
 }
+
+/// Production adapter: wraps `AnthropicProvider` + an `HttpTransport`
+/// into the `StreamingApiClient` shape.
+///
+/// Mirrors [`AnthropicProviderAdapter`] but for the streaming endpoint.
+/// The provider is held in an `Arc` so the adapter can be cloned cheaply
+/// when the caller wants to share one provider across both the batched
+/// and streaming paths.
+pub struct AnthropicProviderStreamingAdapter<T: HttpTransport + Send + Sync + 'static> {
+    provider: Arc<AnthropicProvider>,
+    transport: Arc<T>,
+}
+
+impl<T: HttpTransport + Send + Sync + 'static> AnthropicProviderStreamingAdapter<T> {
+    /// Construct from an existing provider + transport.
+    #[must_use]
+    pub fn new(provider: Arc<AnthropicProvider>, transport: Arc<T>) -> Self {
+        Self {
+            provider,
+            transport,
+        }
+    }
+}
+
+#[async_trait]
+impl<T: HttpTransport + Send + Sync + 'static> StreamingApiClient
+    for AnthropicProviderStreamingAdapter<T>
+{
+    async fn stream(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<lingxi_api_client::types::StreamEvent, ApiError>,
+        >,
+        ApiError,
+    > {
+        self.provider
+            .messages_create_stream(model, system, messages, tools, self.transport.clone())
+            .await
+    }
+}
+
+/// Internal no-op streaming client used by [`ConversationOrchestrator::new`]
+/// when the caller doesn't supply a streaming transport. Every call to
+/// `stream` returns `ApiError::Http(HttpError::Connection("no streaming
+/// client configured"))`. Wired in Task 12 when the legacy `new()`
+/// constructor delegates to `new_with_streaming(..., NoStreamingApiClient,
+/// ...)`.
+#[allow(dead_code)]
+pub(crate) struct NoStreamingApiClient;
+
+#[async_trait]
+impl StreamingApiClient for NoStreamingApiClient {
+    async fn stream(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        _messages: Vec<ConversationMessage>,
+        _tools: Vec<serde_json::Value>,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<lingxi_api_client::types::StreamEvent, ApiError>,
+        >,
+        ApiError,
+    > {
+        Err(ApiError::Http(lingxi_traits::HttpError::Connection(
+            "no streaming client configured".into(),
+        )))
+    }
+}

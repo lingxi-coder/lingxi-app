@@ -36,7 +36,8 @@ pub mod test_support_stream;
 
 pub use config::{OrchestratorConfig, MAX_TURNS_DEFAULT};
 pub use conversation::{
-    AnthropicProviderAdapter, ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient,
+    AnthropicProviderAdapter, AnthropicProviderStreamingAdapter, ConversationOrchestrator,
+    ConversationOutcome, OrchestratorApiClient, StreamingApiClient,
 };
 pub use error::OrchestratorError;
 pub use prompt::{

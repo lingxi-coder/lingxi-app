@@ -467,6 +467,62 @@ impl AnthropicProvider {
         let _ = self; // suppress dead-code lint when impl is empty.
         token.expose_secret().clone()
     }
+
+    /// Streaming `POST /v1/messages` — opens the SSE channel and yields
+    /// wire-decoded [`StreamEvent`] values until the server emits
+    /// `message_stop` (or the transport errors).
+    ///
+    /// Unlike [`Self::messages_create_non_stream`], retry / 401-refresh /
+    /// 429-handling are NOT performed here — streaming connections that
+    /// drop mid-flight surface as `ApiError::Http(_)` and the caller
+    /// must decide. The first-connection handshake (i.e. the response
+    /// status line) IS subject to the transport's own connect timeout.
+    ///
+    /// `tools` is the wire-format tool schema array. In M5-04 callers
+    /// pass `Vec::new()`; M5-09 wires the real tools list.
+    ///
+    /// # Errors
+    /// * Connect-time failures surface as [`ApiError::Http`].
+    /// * Each subsequent decode failure surfaces as
+    ///   [`ApiError::MalformedStream`] inside the stream's items.
+    pub async fn messages_create_stream<T: HttpTransport + Send + Sync + 'static>(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<Value>,
+        transport: Arc<T>,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<crate::types::StreamEvent, ApiError>>,
+        ApiError,
+    > {
+        use futures::stream::StreamExt;
+
+        let mut body = serde_json::json!({
+            "model": model,
+            "max_tokens": 4096u32,
+            "messages": msgs,
+        });
+        if let Some(s) = system {
+            body["system"] = Value::String(s.to_string());
+        }
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(tools);
+        }
+
+        let req = self.build_streaming_request(&body);
+        let wire_stream = transport.stream_sse(req).await?;
+        let typed = wire_stream.map(|item| match item {
+            Ok(sse) => serde_json::from_str::<crate::types::StreamEvent>(&sse.data).map_err(|e| {
+                ApiError::MalformedStream(format!(
+                    "StreamEvent decode failed: {e}: data={}",
+                    sse.data
+                ))
+            }),
+            Err(e) => Err(ApiError::Http(e)),
+        });
+        Ok(typed.boxed())
+    }
 }
 
 /// Provider parameter for [`AnthropicProvider::count_tokens`]. Different

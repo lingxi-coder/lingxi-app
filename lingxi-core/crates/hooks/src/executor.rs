@@ -1,23 +1,26 @@
-//! Hook executor scaffold.
+//! Hook executor.
 //!
-//! M1.4 ships the [`BuiltinHookHandler`] trait and the [`HookExecutorImpl`]
-//! that wires the registry to the four executor kinds. The `Builtin` arm is
-//! fully functional; the `Http`, `Command`, and `Agent` arms are stubbed and
-//! filled in by Plan 09.
-//!
-//! The HTTP executor consults the [`SsrfGuard`] before issuing any request;
-//! the Command / Agent executors will use the corresponding traits in their
-//! Plan 09 implementations.
+//! M1.4 shipped [`BuiltinHookHandler`] and the [`HookExecutorImpl`] with the
+//! `Builtin` arm fully wired and the `Http` / `Command` / `Agent` arms
+//! stubbed. M5-06 fills in the HTTP and Agent arms (delegating to
+//! [`crate::http_executor::HttpExecutor`] / [`crate::agent_executor::AgentExecutor`])
+//! and leaves the Command arm as a documented stub pending stdin support
+//! on `ProcessRunner` (deferred to a future plan).
 
+use crate::agent_executor::{AgentExecutionSignal, AgentExecutor};
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
+use crate::hook_payload::{HookEventNamePost, HookEventNamePre, PostToolUsePayload, PreToolUsePayload};
+use crate::http_executor::{HttpExecutionSignal, HttpExecutor};
 use crate::registry::{HookContext, HookRegistry};
 use crate::response::{AggregateHookResult, HookOutcome, HookResult};
 use crate::ssrf_guard::SsrfGuard;
 use async_trait::async_trait;
 use lingxi_traits::{HttpTransport, RuntimeSpawner};
+use lingxi_traits::subagent_spawn::SubagentSpawner;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 /// Default HTTP hook timeout (10 minutes — matches
@@ -55,15 +58,22 @@ pub trait BuiltinHookHandler: Send + Sync {
 pub struct HookExecutorImpl {
     registry: Arc<RwLock<HookRegistry>>,
     http: Arc<dyn HttpTransport>,
-    #[allow(dead_code)] // Used by the Plan 09 Command / Agent executor bodies.
+    #[allow(dead_code)] // Command arm uses ProcessRunner not RuntimeSpawner — deferred.
     runtime: Arc<dyn RuntimeSpawner>,
     builtin_handlers: HashMap<String, Arc<dyn BuiltinHookHandler>>,
     ssrf_guard: SsrfGuard,
+    /// Optional subagent spawner — attached via [`Self::with_agent_spawner`].
+    /// When `None`, the `Agent` arm returns `HookOutcome::Error` with
+    /// `stderr: "Hook {id} failed: agent executor not wired"`. M5-06.
+    agent_spawner: Option<Arc<dyn SubagentSpawner>>,
 }
 
 impl HookExecutorImpl {
     /// Build a new executor backed by the supplied registry, HTTP transport,
     /// and runtime spawner.
+    ///
+    /// The Agent-arm is uncwired by default. Call [`Self::with_agent_spawner`]
+    /// post-construction to attach a `SubagentSpawner` for Agent hooks.
     #[must_use]
     pub fn new(
         registry: Arc<RwLock<HookRegistry>>,
@@ -76,7 +86,17 @@ impl HookExecutorImpl {
             runtime,
             builtin_handlers: HashMap::new(),
             ssrf_guard: SsrfGuard::with_defaults(),
+            agent_spawner: None,
         }
+    }
+
+    /// Attach a [`SubagentSpawner`] so the `Agent` arm can fork subagents.
+    /// Without this, `HookExecutor::Agent` hooks return a structured
+    /// "not wired" error. M5-06.
+    #[must_use]
+    pub fn with_agent_spawner(mut self, spawner: Arc<dyn SubagentSpawner>) -> Self {
+        self.agent_spawner = Some(spawner);
+        self
     }
 
     /// Register a builtin handler. Subsequent hook definitions referencing
@@ -85,7 +105,7 @@ impl HookExecutorImpl {
         self.builtin_handlers.insert(h.id().into(), h);
     }
 
-    /// Borrow the shared HTTP transport (used by Plan 09 HTTP executor body).
+    /// Borrow the shared HTTP transport.
     #[allow(dead_code)]
     pub(crate) fn http(&self) -> &Arc<dyn HttpTransport> {
         &self.http
@@ -97,9 +117,11 @@ impl HookExecutorImpl {
     /// early on the first `Block` decision.
     pub async fn execute(&self, event: HookEvent, ctx: HookContext) -> AggregateHookResult {
         let reg = self.registry.read().await;
-        let matched = reg.match_event(&event, &ctx);
+        let matched: Vec<HookDefinition> =
+            reg.match_event(&event, &ctx).into_iter().cloned().collect();
+        drop(reg);
         let mut agg = AggregateHookResult::default();
-        for hook in matched {
+        for hook in &matched {
             let result = self.execute_single(hook, &event, &ctx).await;
             Self::merge(&mut agg, hook, result);
             if matches!(agg.decision, Some(crate::response::HookDecision::Block)) {
@@ -128,44 +150,103 @@ impl HookExecutorImpl {
                     response: None,
                 }
             }
-            HookExecutor::Http { url, .. } => {
-                if self.ssrf_guard.check_url(url).is_err() {
-                    return HookResult {
-                        outcome: HookOutcome::Error,
-                        stdout: String::new(),
-                        stderr: "SSRF guard rejected url".into(),
-                        exit_code: None,
-                        response: None,
-                    };
-                }
-                // Full impl: build HttpRequest, POST event JSON, parse the
-                // body into a HookResponse. Stubbed for M1.4 — lands in
-                // Plan 09 alongside the SSE / retry plumbing.
+            HookExecutor::Http {
+                url,
+                headers,
+                timeout,
+                ..
+            } => {
+                // Resolve event-specific expected_event marker + serialize payload.
+                let (expected_event, body) = match build_envelope_body(event, ctx) {
+                    Some(pair) => pair,
+                    None => {
+                        return HookResult {
+                            outcome: HookOutcome::Error,
+                            stdout: String::new(),
+                            stderr: format!(
+                                "Hook {} failed: HTTP arm only supports PreToolUse / PostToolUse",
+                                hook.id
+                            ),
+                            exit_code: None,
+                            response: None,
+                        };
+                    }
+                };
+                let effective = if timeout.is_zero() {
+                    Duration::from_millis(HOOK_HTTP_TIMEOUT_MS)
+                } else {
+                    *timeout
+                };
+                let exec = HttpExecutor {
+                    http: self.http.clone(),
+                    ssrf_guard: self.ssrf_guard.clone(),
+                    timeout: effective,
+                };
+                let outcome = exec
+                    .execute(hook, url, headers, &body, expected_event)
+                    .await;
+                emit_http_signal(hook, &outcome.signal, effective);
+                outcome.result
+            }
+            HookExecutor::Command { .. } => {
+                // M5-06 plan deviation: `ProcessRunner` doesn't yet support
+                // stdin payload + raw command/args/env/cwd (only sandboxed
+                // commands). Command-arm hooks are deferred to a future plan
+                // that extends ProcessRunner. The stub returns a structured
+                // "not wired" error so the orchestrator surfaces it rather
+                // than silently allowing.
                 HookResult {
-                    outcome: HookOutcome::Success,
+                    outcome: HookOutcome::Error,
                     stdout: String::new(),
-                    stderr: String::new(),
+                    stderr: format!(
+                        "Hook {} failed: command executor not yet wired (stdin support deferred)",
+                        hook.id
+                    ),
                     exit_code: None,
                     response: None,
                 }
             }
-            HookExecutor::Command { .. } | HookExecutor::Agent { .. } => {
-                // Full impl: spawn process via the runtime spawner / fork
-                // agent via the agent registry. Stubbed for M1.4 — lands in
-                // Plan 09.
-                HookResult {
-                    outcome: HookOutcome::Success,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: None,
-                    response: None,
-                }
+            HookExecutor::Agent {
+                agent_type,
+                prompt,
+            } => {
+                let (expected_event, body) = match build_envelope_body(event, ctx) {
+                    Some(pair) => pair,
+                    None => {
+                        return HookResult {
+                            outcome: HookOutcome::Error,
+                            stdout: String::new(),
+                            stderr: format!(
+                                "Hook {} failed: Agent arm only supports PreToolUse / PostToolUse",
+                                hook.id
+                            ),
+                            exit_code: None,
+                            response: None,
+                        };
+                    }
+                };
+                let effective_timeout = hook
+                    .timeout
+                    .unwrap_or(Duration::from_millis(HOOK_AGENT_TIMEOUT_MS));
+                let exec = AgentExecutor {
+                    spawner: self.agent_spawner.clone(),
+                    timeout: effective_timeout,
+                };
+                let outcome = exec
+                    .execute(
+                        hook,
+                        agent_type,
+                        prompt,
+                        &body,
+                        expected_event,
+                        ctx.inherit.clone(),
+                    )
+                    .await;
+                emit_agent_signal(hook, &outcome.signal, effective_timeout);
+                outcome.result
             }
         }
     }
-
-    #[allow(dead_code)]
-    fn _constants_anchor() {}
 
     fn merge(agg: &mut AggregateHookResult, hook: &HookDefinition, r: HookResult) {
         if let Some(resp) = &r.response {
@@ -184,6 +265,91 @@ impl HookExecutorImpl {
             agg.attachments.extend(resp.attachments.clone());
         }
         agg.all_results.push((hook.id, r));
+    }
+}
+
+/// Build the serialized envelope body + expected_event marker for an event.
+///
+/// Returns `None` for event variants the HTTP / Agent arms don't yet
+/// support (everything except `PreToolUse` / `PostToolUse` in M5-06).
+fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static str, String)> {
+    match event {
+        HookEvent::PreToolUse {
+            tool_name,
+            tool_input,
+            tool_use_id,
+        } => {
+            let payload = PreToolUsePayload {
+                hook_event_name: HookEventNamePre,
+                session_id: ctx.session_id.to_string(),
+                transcript_path: ctx.transcript_path.to_string_lossy().into_owned(),
+                cwd: ctx.cwd.to_string_lossy().into_owned(),
+                permission_mode: ctx.permission_mode.clone(),
+                agent_id: ctx.agent_id.as_ref().map(ToString::to_string),
+                agent_type: ctx.agent_type.clone(),
+                tool_name: tool_name.clone(),
+                tool_input: tool_input.clone(),
+                tool_use_id: tool_use_id.to_string(),
+            };
+            Some(("PreToolUse", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::PostToolUse {
+            tool_name,
+            tool_input,
+            tool_output,
+            tool_use_id,
+        } => {
+            let payload = PostToolUsePayload {
+                hook_event_name: HookEventNamePost,
+                session_id: ctx.session_id.to_string(),
+                transcript_path: ctx.transcript_path.to_string_lossy().into_owned(),
+                cwd: ctx.cwd.to_string_lossy().into_owned(),
+                permission_mode: ctx.permission_mode.clone(),
+                agent_id: ctx.agent_id.as_ref().map(ToString::to_string),
+                agent_type: ctx.agent_type.clone(),
+                tool_name: tool_name.clone(),
+                tool_input: tool_input.clone(),
+                tool_response: tool_output.clone(),
+                tool_use_id: tool_use_id.to_string(),
+            };
+            Some(("PostToolUse", serde_json::to_string(&payload).ok()?))
+        }
+        _ => None,
+    }
+}
+
+/// Emit arm-level telemetry for an HTTP signal (SSRF / timeout). Other
+/// telemetry (HOOK_PRE_* / HOOK_POST_*) is fired by the orchestrator's
+/// `dispatch_tool_with_hooks` (M5-06 Task 14).
+fn emit_http_signal(hook: &HookDefinition, signal: &HttpExecutionSignal, timeout: Duration) {
+    match signal {
+        HttpExecutionSignal::SsrfBlocked(reason) => {
+            tracing::info!(
+                event = lingxi_telemetry::tengu::orchestrator::HOOK_HTTP_SKIPPED_SSRF,
+                hook_id = %hook.id,
+                reason = %reason,
+            );
+        }
+        HttpExecutionSignal::TimedOut => {
+            tracing::info!(
+                event = lingxi_telemetry::tengu::orchestrator::HOOK_TIMEOUT,
+                hook_id = %hook.id,
+                hook_kind = "http",
+                timeout_ms = timeout.as_millis() as u64,
+            );
+        }
+        HttpExecutionSignal::Ok => {}
+    }
+}
+
+fn emit_agent_signal(hook: &HookDefinition, signal: &AgentExecutionSignal, timeout: Duration) {
+    if matches!(signal, AgentExecutionSignal::TimedOut) {
+        tracing::info!(
+            event = lingxi_telemetry::tengu::orchestrator::HOOK_TIMEOUT,
+            hook_id = %hook.id,
+            hook_kind = "agent",
+            timeout_ms = timeout.as_millis() as u64,
+        );
     }
 }
 

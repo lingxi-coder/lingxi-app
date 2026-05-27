@@ -14,6 +14,7 @@ use thiserror::Error;
 ///
 /// Use [`Self::with_defaults`] for the standard configuration (HTTP/HTTPS
 /// only, loopback + RFC1918 blocked).
+#[derive(Clone)]
 pub struct SsrfGuard {
     allowed_schemes: HashSet<String>,
     blocked_cidrs: Vec<IpRange>,

@@ -5,7 +5,7 @@
 use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_245_entries() {
+fn registry_is_exactly_253_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
@@ -14,9 +14,11 @@ fn registry_is_exactly_245_entries() {
     // M5-02 added 3 (orchestrator conversation lifecycle: started/completed/failed),
     // M5-03 added 0,
     // M5-04 added 2 streaming events (turn_streaming_started/completed),
-    // M5-05 added 2 permission events (permission_prompted/answered):
-    // 213 (post-M4-07) + 24 (M4-08) + 1 (M4-09) + 3 (M5-02) + 0 (M5-03) + 2 (M5-04) + 2 (M5-05) = 245.
-    assert_eq!(ALL_EVENT_NAMES.len(), 245);
+    // M5-05 added 2 permission events (permission_prompted/answered),
+    // M5-06 added 8 hook events (pre/post started/completed/failed,
+    //   http_skipped_ssrf, timeout):
+    // 245 (post-M5-05) + 8 (M5-06) = 253.
+    assert_eq!(ALL_EVENT_NAMES.len(), 253);
 }
 
 #[test]
@@ -90,17 +92,18 @@ fn category_ordering_preserved() {
         assert!(n.starts_with("tengu_settings_"), "settings block: {n}");
     }
     // M5-02 grew the orchestrator block by +3 (conversation lifecycle).
-    // M5-04 grew it by +2 (streaming turn started/completed). M5-05 grew
-    // it by +2 (permission_prompted/answered). Block size is now 7;
-    // release marker still trails. Walk order is fixed by
-    // tengu::mod.rs's concat_all (settings → orchestrator → release).
-    for n in &ALL_EVENT_NAMES[237..244] {
+    // M5-04 grew it by +2 (streaming). M5-05 grew it by +2 (permission).
+    // M5-06 grew it by +8 (hook pre/post + http_skipped_ssrf + timeout).
+    // Block size is now 15; release marker still trails. Walk order is
+    // fixed by tengu::mod.rs's concat_all (settings → orchestrator →
+    // release).
+    for n in &ALL_EVENT_NAMES[237..252] {
         assert!(
             n.starts_with("tengu_orchestrator_"),
             "orchestrator block: {n}"
         );
     }
-    for n in &ALL_EVENT_NAMES[244..245] {
+    for n in &ALL_EVENT_NAMES[252..253] {
         assert!(n.starts_with("lingxi_core_"), "release block: {n}");
     }
 }

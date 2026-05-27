@@ -41,6 +41,39 @@ pub const PERMISSION_PROMPTED: &str = "tengu_orchestrator_permission_prompted";
 /// answer from a recovered one. (M5-05)
 pub const PERMISSION_ANSWERED: &str = "tengu_orchestrator_permission_answered";
 
+/// PreToolUse hook chain about to fire. Emitted by the orchestrator's
+/// `dispatch_tool_with_hooks` BEFORE consulting the executor. (M5-06)
+pub const HOOK_PRE_STARTED: &str = "tengu_orchestrator_hook_pre_started";
+
+/// PreToolUse hook chain returned. Emitted by the orchestrator AFTER the
+/// executor folds every matching hook's response into an
+/// `AggregateHookResult`. Payload carries `decision` (one of
+/// `"allow" / "block" / "approve" / "continue" / "none"`) and
+/// `duration_ms`. (M5-06)
+pub const HOOK_PRE_COMPLETED: &str = "tengu_orchestrator_hook_pre_completed";
+
+/// PreToolUse hook chain errored (executor surfaced a failure outcome).
+/// (M5-06)
+pub const HOOK_PRE_FAILED: &str = "tengu_orchestrator_hook_pre_failed";
+
+/// PostToolUse hook chain about to fire. (M5-06)
+pub const HOOK_POST_STARTED: &str = "tengu_orchestrator_hook_post_started";
+
+/// PostToolUse hook chain returned. Payload carries `duration_ms` and
+/// `mutated_response: bool`. (M5-06)
+pub const HOOK_POST_COMPLETED: &str = "tengu_orchestrator_hook_post_completed";
+
+/// PostToolUse hook chain errored. (M5-06)
+pub const HOOK_POST_FAILED: &str = "tengu_orchestrator_hook_post_failed";
+
+/// HTTP hook URL rejected by the SSRF guard. Emitted by the HTTP arm
+/// before any request is sent. (M5-06)
+pub const HOOK_HTTP_SKIPPED_SSRF: &str = "tengu_orchestrator_hook_http_skipped_ssrf";
+
+/// Hook execution exceeded its effective timeout. Emitted by the HTTP /
+/// Agent arms on `tokio::time::timeout` elapse. (M5-06)
+pub const HOOK_TIMEOUT: &str = "tengu_orchestrator_hook_timeout";
+
 /// Order-locked array of all orchestrator-lifecycle names; consumed by
 /// `tengu::ALL_EVENT_NAMES`. Append-only: never reorder or remove entries.
 pub(crate) const NAMES: &[&str] = &[
@@ -51,4 +84,12 @@ pub(crate) const NAMES: &[&str] = &[
     TURN_STREAMING_COMPLETED,
     PERMISSION_PROMPTED,
     PERMISSION_ANSWERED,
+    HOOK_PRE_STARTED,
+    HOOK_PRE_COMPLETED,
+    HOOK_PRE_FAILED,
+    HOOK_POST_STARTED,
+    HOOK_POST_COMPLETED,
+    HOOK_POST_FAILED,
+    HOOK_HTTP_SKIPPED_SSRF,
+    HOOK_TIMEOUT,
 ];

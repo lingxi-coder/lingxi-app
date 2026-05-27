@@ -12,6 +12,8 @@ pub mod locked_templates;
 pub mod memory_block;
 pub mod tools_block;
 
+pub use memory_block::{real_provider, MemoryHierarchyProvider, RealMemoryHierarchyProvider};
+
 use std::path::PathBuf;
 
 /// Runtime context required to assemble a system prompt.

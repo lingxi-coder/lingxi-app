@@ -255,6 +255,38 @@ impl PermissionGate for NoOpPermissionGate {
 }
 
 // ============================================================================
+// StaticMemoryProvider (Task 9)
+// ============================================================================
+
+/// Test fixture: returns a fixed `Vec<MemoryFile>` regardless of cwd.
+/// Used by the prompt-wiring integration tests in M5-03 so they can
+/// drive the orchestrator without touching the filesystem.
+pub struct StaticMemoryProvider {
+    files: Vec<crate::prompt::MemoryFile>,
+}
+
+impl StaticMemoryProvider {
+    /// Empty fixture — `load()` always returns `vec![]`.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self { files: Vec::new() }
+    }
+
+    /// Pre-loaded fixture — `load()` always returns the provided files.
+    #[must_use]
+    pub fn with_files(files: Vec<crate::prompt::MemoryFile>) -> Self {
+        Self { files }
+    }
+}
+
+#[async_trait]
+impl crate::prompt::MemoryHierarchyProvider for StaticMemoryProvider {
+    async fn load(&self, _cwd: &std::path::Path) -> Vec<crate::prompt::MemoryFile> {
+        self.files.clone()
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

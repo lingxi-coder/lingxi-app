@@ -8,9 +8,11 @@
 //! the public-facing reason carried in the orchestrator error.
 #![forbid(unsafe_code)]
 
+use crate::conversation::ConversationOrchestrator;
 use crate::error::OrchestratorError;
 use crate::sse::accumulator::BlockAccumulator;
 use crate::sse::event_router::{dispatch_event, RouterAction};
+use crate::turn_loop::dispatch_tool_uses;
 use futures::stream::{BoxStream, StreamExt};
 use lingxi_api_client::types::StreamEvent;
 use lingxi_api_client::ApiError;
@@ -96,6 +98,58 @@ pub async fn pump_stream(
     }
     // Stream ended without a MessageStop.
     Err(OrchestratorError::StreamEndedWithoutStop)
+}
+
+/// Dispatch N tool_use blocks concurrently. Each dispatch goes through
+/// the same pre-tool-hook → permission → tool-call → post-tool-hook
+/// pipeline as the batched path ([`crate::turn_loop::dispatch_tool_uses`]
+/// is reused per-tool to keep the byte-locked hook + permission
+/// ordering for each individual dispatch).
+///
+/// Returns the [`ContentBlock::ToolResult`] blocks IN ORIGINAL ORDER
+/// (matching the `tool_use` block order in the stream). The
+/// `OutputStream::emit_tool_call` / `emit_tool_result` events fire in
+/// COMPLETION order (not dispatch order) — that's the visible
+/// streaming behavior.
+///
+/// Concurrency model: `futures::future::join_all` polls all futures
+/// on the current task. For dispatches with `.await` points (hooks,
+/// permission checks, registry lookups, tool bodies), this yields
+/// true cooperative concurrency without `'static` requirements.
+///
+/// # Errors
+/// Returns the first [`OrchestratorError`] surfaced by any underlying
+/// dispatch; the remaining results are dropped (consistent with the
+/// batched path's fail-fast semantics).
+pub async fn dispatch_tool_uses_concurrent(
+    orch: &ConversationOrchestrator,
+    observed: &[ObservedToolUse],
+) -> Result<Vec<ContentBlock>, OrchestratorError> {
+    use futures::future::join_all;
+
+    let futures: Vec<_> = observed
+        .iter()
+        .enumerate()
+        .map(|(idx, tu)| {
+            let single = vec![(tu.id, tu.name.clone(), tu.input.clone())];
+            async move {
+                let mut result = dispatch_tool_uses(orch, &single).await?;
+                let block = result.pop().ok_or_else(|| {
+                    OrchestratorError::StreamingProtocol(format!(
+                        "dispatch returned empty for tool index {idx}"
+                    ))
+                })?;
+                Ok::<(usize, ContentBlock), OrchestratorError>((idx, block))
+            }
+        })
+        .collect();
+
+    let mut indexed: Vec<(usize, ContentBlock)> = Vec::with_capacity(observed.len());
+    for r in join_all(futures).await {
+        indexed.push(r?);
+    }
+    indexed.sort_by_key(|(idx, _)| *idx);
+    Ok(indexed.into_iter().map(|(_, b)| b).collect())
 }
 
 #[cfg(test)]

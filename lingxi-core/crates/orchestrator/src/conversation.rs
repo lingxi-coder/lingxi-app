@@ -306,8 +306,8 @@ impl ConversationOrchestrator {
         &self,
         prompt: &str,
     ) -> Result<ConversationOutcome, OrchestratorError> {
-        use crate::streaming_loop::pump_stream;
-        use crate::turn_loop::{cost_snapshot_from_session, dispatch_tool_uses};
+        use crate::streaming_loop::{dispatch_tool_uses_concurrent, pump_stream};
+        use crate::turn_loop::cost_snapshot_from_session;
         use lingxi_protocol::ContentBlock;
 
         // 0. Build the system prompt for THIS turn. Override always wins.
@@ -371,17 +371,16 @@ impl ConversationOrchestrator {
                 });
             }
 
-            // 5. Dispatch tools (concurrent — Task 13 promotes this to
-            //    futures::join_all). For Task 12 we reuse the batched
-            //    sequential path so the text-only happy path turns green.
+            // 5. Dispatch tools concurrently (M5-04 Task 13). Each
+            //    tool runs the same hook + permission + registry +
+            //    hook pipeline as the batched path; futures::join_all
+            //    polls them on the current task so I/O overlaps.
+            //    ToolResult blocks come back in ORIGINAL stream order
+            //    (sorted by the dispatch helper) so the assistant ↔
+            //    user message correlation stays deterministic; the
+            //    OutputStream events still fire in completion order.
             if !pumped.tool_uses.is_empty() {
-                let tool_inputs: Vec<(lingxi_protocol::ToolUseId, String, serde_json::Value)> =
-                    pumped
-                        .tool_uses
-                        .iter()
-                        .map(|t| (t.id, t.name.clone(), t.input.clone()))
-                        .collect();
-                let results = dispatch_tool_uses(self, &tool_inputs).await?;
+                let results = dispatch_tool_uses_concurrent(self, &pumped.tool_uses).await?;
                 let user_id = MessageId::new();
                 let mut s = self.session.lock().await;
                 s.history.push(ConversationMessage::User {

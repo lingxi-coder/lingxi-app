@@ -272,6 +272,7 @@ impl ConversationOrchestrator {
     /// Emits 2 streaming-specific telemetry events at the boundaries:
     /// - [`orch_events::TURN_STREAMING_STARTED`] at entry.
     /// - [`orch_events::TURN_STREAMING_COMPLETED`] after success.
+    ///
     /// On error, the existing [`orch_events::CONVERSATION_FAILED`] is
     /// reused (no new error event in M5-04).
     pub async fn run_turn_streaming(

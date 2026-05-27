@@ -5,8 +5,9 @@
 //! `message_delta` + `message_stop` events.
 //!
 //! The visible signal is the `OutputEvent` ordering:
-//!   Text("calling tool"), ToolCall("AlwaysOk"), ToolResult("AlwaysOk"),
-//!   Text("done"), EndTurn { stop_reason: "end_turn" }
+//!   `Text("calling tool")`, `ToolCall("AlwaysOk")`,
+//!   `ToolResult("AlwaysOk")`, `Text("done")`,
+//!   `EndTurn { stop_reason: "end_turn" }`.
 //!
 //! Fails to compile until Tasks 11-13 land the integrated
 //! `run_turn_streaming` + concurrent dispatch.
@@ -32,8 +33,8 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Always-ok test tool. Mirrors the AlwaysOkTool from
-/// orchestrator_multi_turn_test.rs verbatim — reused here so the
+/// Always-ok test tool. Mirrors the `AlwaysOkTool` from
+/// `orchestrator_multi_turn_test.rs` verbatim — reused here so the
 /// streaming path can dispatch a real tool through the existing
 /// `dispatch_tool_uses` pipeline.
 struct AlwaysOkTool;

@@ -1,4 +1,4 @@
-//! Two tool_use blocks in one streaming response (M5-04 Task 14).
+//! Two `tool_use` blocks in one streaming response (M5-04 Task 14).
 //!
 //! Asserts that both tools dispatch CONCURRENTLY (the slower one does
 //! NOT delay the faster one's `OutputStream::ToolResult` emission) AND
@@ -177,7 +177,13 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
         .collect();
     assert_eq!(
         kinds,
-        vec!["ToolCall", "ToolCall", "ToolResult", "ToolResult", "EndTurn"],
+        vec![
+            "ToolCall",
+            "ToolCall",
+            "ToolResult",
+            "ToolResult",
+            "EndTurn"
+        ],
         "events: {events:?}"
     );
 

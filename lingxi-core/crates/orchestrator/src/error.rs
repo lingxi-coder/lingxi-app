@@ -87,9 +87,9 @@ mod tests {
 
     #[test]
     fn streaming_display_starts_with_locked_prefix() {
-        let e = OrchestratorError::Streaming(ApiError::Http(
-            lingxi_traits::HttpError::Connection("nope".into()),
-        ));
+        let e = OrchestratorError::Streaming(ApiError::Http(lingxi_traits::HttpError::Connection(
+            "nope".into(),
+        )));
         let s = format!("{e}");
         assert!(s.starts_with("streaming transport error: "), "{s}");
     }

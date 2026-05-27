@@ -6,7 +6,9 @@ use lingxi_orchestrator::test_support::{
     message_delta_stop, message_start, message_stop, text_delta, MockApiClient, MockOutputStream,
     MockStreamingApiClient, NoOpHookExecutor, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use lingxi_orchestrator::{
+    scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig,
+};
 use lingxi_permission::result::PermissionMetadata;
 use lingxi_permission::{PermissionDecisionReason, PermissionResult};
 use lingxi_protocol::ToolUseId;
@@ -128,10 +130,7 @@ async fn two_streaming_turns_with_tool_in_between() {
         PathBuf::from("/tmp"),
     );
 
-    let outcome = orch
-        .run_turn_streaming("call then echo")
-        .await
-        .expect("ok");
+    let outcome = orch.run_turn_streaming("call then echo").await.expect("ok");
     match outcome {
         ConversationOutcome::EndTurn { turn_count, .. } => {
             assert_eq!(turn_count, 2);

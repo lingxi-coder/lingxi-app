@@ -109,9 +109,11 @@ pub async fn dispatch_event(
         StreamEvent::ContentBlockStop { index } => {
             let completed = acc.stop_block(index)?;
             match completed {
-                CompletedBlock::Text { text } => Ok(RouterAction::AppendAssistantBlock(
-                    ContentBlock::Text { text },
-                )),
+                CompletedBlock::Text { text } => {
+                    Ok(RouterAction::AppendAssistantBlock(ContentBlock::Text {
+                        text,
+                    }))
+                }
                 CompletedBlock::Thinking {
                     thinking,
                     signature,

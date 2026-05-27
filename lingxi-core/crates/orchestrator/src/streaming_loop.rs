@@ -100,7 +100,7 @@ pub async fn pump_stream(
     Err(OrchestratorError::StreamEndedWithoutStop)
 }
 
-/// Dispatch N tool_use blocks concurrently. Each dispatch goes through
+/// Dispatch N `tool_use` blocks concurrently. Each dispatch goes through
 /// the same pre-tool-hook → permission → tool-call → post-tool-hook
 /// pipeline as the batched path ([`crate::turn_loop::dispatch_tool_uses`]
 /// is reused per-tool to keep the byte-locked hook + permission

@@ -14,7 +14,9 @@ use lingxi_orchestrator::test_support_stream::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockStreamingApiClient,
 };
-use lingxi_orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use lingxi_orchestrator::{
+    scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig,
+};
 use lingxi_tools::registry::ToolRegistry;
 use lingxi_traits::OutputEvent;
 use std::path::PathBuf;
@@ -69,7 +71,9 @@ async fn streaming_text_only_three_deltas() {
     assert!(matches!(&events[0], OutputEvent::Text { text } if text == "hel"));
     assert!(matches!(&events[1], OutputEvent::Text { text } if text == "lo wor"));
     assert!(matches!(&events[2], OutputEvent::Text { text } if text == "ld"));
-    assert!(matches!(&events[3], OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "end_turn"));
+    assert!(
+        matches!(&events[3], OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "end_turn")
+    );
 
     // Mock observed exactly one streaming call.
     assert_eq!(api.captured_calls().await.len(), 1);

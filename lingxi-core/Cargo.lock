@@ -1405,6 +1405,7 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "dirs",
+ "futures",
  "lingxi-api-client",
  "lingxi-core",
  "lingxi-cost",

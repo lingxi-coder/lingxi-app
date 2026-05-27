@@ -17,6 +17,8 @@ pub mod config;
 pub mod conversation;
 pub mod error;
 pub mod prompt;
+pub mod sse;
+pub mod streaming_loop;
 pub mod turn_loop;
 
 // test_support carries the HookExecutor / PermissionGate trait definitions
@@ -26,6 +28,11 @@ pub mod turn_loop;
 // the traits to lingxi-permission / lingxi-hooks; until then they live in
 // test_support unconditionally.
 pub mod test_support;
+
+/// Streaming-path test fixtures (`MockStreamingApiClient`, `scripted!`).
+/// Gated behind `test-support` so production builds don't pull them in.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support_stream;
 
 pub use config::{OrchestratorConfig, MAX_TURNS_DEFAULT};
 pub use conversation::{

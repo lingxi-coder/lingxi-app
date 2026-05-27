@@ -28,7 +28,9 @@ pub mod tool;
 /// inside the `tengu` module so the path `lingxi_telemetry::tengu::ALL_EVENT_NAMES`
 /// remains the single source of truth; see `parity_tengu_events.rs`).
 pub const ALL_EVENT_NAMES: &[&str] = {
-    const TOTAL: usize = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 5 + 1;
+    // post-M5-05: orchestrator block grew from 5 to 7 (+ permission_prompted
+    // + permission_answered). All other category counts unchanged.
+    const TOTAL: usize = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 7 + 1;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;

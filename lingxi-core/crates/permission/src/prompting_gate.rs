@@ -169,6 +169,7 @@ impl PromptingGate for InteractivePromptingGate {
         request: &PermissionRequest,
     ) -> Result<PromptDecision, PromptError> {
         let prompt = format_prompt(request);
+        let default_allow = matches!(request.default_decision, PromptDefault::AllowByDefault);
         let mut attempts: u32 = 0;
         // Acquire stdin lock + wrap in BufReader ONCE for the full prompt
         // round-trip. Creating a fresh BufReader per loop iteration would
@@ -179,6 +180,13 @@ impl PromptingGate for InteractivePromptingGate {
         let mut in_guard = self.stdin.lock().await;
         let mut reader = BufReader::new(&mut *in_guard);
         loop {
+            // Telemetry: prompt about to be shown (once per attempt).
+            tracing::info!(
+                event = lingxi_telemetry::tengu::orchestrator::PERMISSION_PROMPTED,
+                tool_name = %request.tool_name,
+                default_allow,
+            );
+
             // 1. Write the prompt to stderr.
             {
                 let mut err = self.stderr.lock().await;
@@ -218,6 +226,13 @@ impl PromptingGate for InteractivePromptingGate {
                             unreachable!("resolve_outcome returned Some for Invalid")
                         }
                     };
+                    // Telemetry: definitive answer (NOT fired on retry).
+                    tracing::info!(
+                        event = lingxi_telemetry::tengu::orchestrator::PERMISSION_ANSWERED,
+                        tool_name = %request.tool_name,
+                        allowed = allow,
+                        attempts = attempts + 1,
+                    );
                     return Ok(PromptDecision {
                         allow,
                         reason,

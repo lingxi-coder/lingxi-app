@@ -244,6 +244,8 @@
     "tengu_orchestrator_conversation_failed",
     "tengu_orchestrator_turn_streaming_started",
     "tengu_orchestrator_turn_streaming_completed",
+    "tengu_orchestrator_permission_prompted",
+    "tengu_orchestrator_permission_answered",
     "lingxi_core_v0_5_0_released"
   ],
   "cost_sample_payloads": [

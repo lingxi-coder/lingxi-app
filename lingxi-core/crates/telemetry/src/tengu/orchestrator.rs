@@ -29,6 +29,18 @@ pub const TURN_STREAMING_STARTED: &str = "tengu_orchestrator_turn_streaming_star
 /// `stop_reason`. (M5-04)
 pub const TURN_STREAMING_COMPLETED: &str = "tengu_orchestrator_turn_streaming_completed";
 
+/// Permission prompt about to be shown to the user. Fired by
+/// [`lingxi_permission::InteractivePromptingGate::prompt_user`]
+/// immediately before each stderr write — once on the initial prompt and
+/// once per retry. (M5-05)
+pub const PERMISSION_PROMPTED: &str = "tengu_orchestrator_permission_prompted";
+
+/// Permission prompt answered with a definitive y/n. Fired AFTER the
+/// user's answer is parsed; NOT fired on retry / invalid input.
+/// Payload carries `attempts` so consumers can distinguish a first-try
+/// answer from a recovered one. (M5-05)
+pub const PERMISSION_ANSWERED: &str = "tengu_orchestrator_permission_answered";
+
 /// Order-locked array of all orchestrator-lifecycle names; consumed by
 /// `tengu::ALL_EVENT_NAMES`. Append-only: never reorder or remove entries.
 pub(crate) const NAMES: &[&str] = &[
@@ -37,4 +49,6 @@ pub(crate) const NAMES: &[&str] = &[
     CONVERSATION_FAILED,
     TURN_STREAMING_STARTED,
     TURN_STREAMING_COMPLETED,
+    PERMISSION_PROMPTED,
+    PERMISSION_ANSWERED,
 ];

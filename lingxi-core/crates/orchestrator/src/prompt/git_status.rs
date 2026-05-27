@@ -62,7 +62,11 @@ pub fn probe(cwd: &Path) -> Option<GitStatus> {
 /// Returns `None` on any failure (binary missing, non-zero exit, unreadable
 /// repo, …).
 fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").args(args).current_dir(cwd).output().ok()?;
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

@@ -1,4 +1,4 @@
-//! System prompt assembler — produces the byte-locked LingXi system
+//! System prompt assembler — produces the byte-locked `LingXi` system
 //! prompt by concatenating header / `<env>` / `<memory>` / `<tools>` /
 //! footer sections. See plan M5-03 for the source-of-truth byte-locks.
 //!
@@ -56,8 +56,8 @@ pub fn assemble_system_prompt(ctx: &SystemPromptContext) -> String {
 
 /// Append a section separator that produces exactly one blank line
 /// between two adjacent sections, regardless of whether the previous
-/// section already ended with a single `\n` (memory_block / tools_block)
-/// or not (HEADER, env_block). One blank line = two LFs total at the
+/// section already ended with a single `\n` (`memory_block` / `tools_block`)
+/// or not (`HEADER`, `env_block`). One blank line = two LFs total at the
 /// boundary.
 fn push_section_separator(s: &mut String) {
     if s.ends_with('\n') {
@@ -100,7 +100,7 @@ pub struct SystemPromptContext {
     /// Direct + once-recursive children of cwd (depth ≤ 2).
     pub file_tree: FileTree,
     /// CLAUDE.md hierarchy — already in spec splice order
-    /// (home → repo → repo-local override). LingXi M3-02 lock.
+    /// (home → repo → repo-local override). `LingXi` M3-02 lock.
     pub memory_files: Vec<MemoryFile>,
     /// Available tool names — alphabetic order. Sorting happens here,
     /// NOT in `tools_block::format`.

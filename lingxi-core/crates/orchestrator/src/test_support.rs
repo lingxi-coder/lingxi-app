@@ -322,8 +322,14 @@ mod tests {
             Some("end_turn"),
         );
         let mock = MockApiClient::new(vec![r1, r2]);
-        let resp1 = mock.messages_create("m", None, vec![]).await.expect("first");
-        let resp2 = mock.messages_create("m", None, vec![]).await.expect("second");
+        let resp1 = mock
+            .messages_create("m", None, vec![])
+            .await
+            .expect("first");
+        let resp2 = mock
+            .messages_create("m", None, vec![])
+            .await
+            .expect("second");
         let ContentBlockApi::Text { text: first_text } = &resp1.content[0] else {
             panic!("expected text block");
         };

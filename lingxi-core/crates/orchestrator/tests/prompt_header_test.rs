@@ -17,7 +17,11 @@ fn header_has_locked_byte_length() {
     // 57 bytes — see plan reverse-engineered byte-locks table.
     // If this fails after a claude-code rebase, re-verify with
     // `printf '%s' "..." | wc -c` against the new DEFAULT_PREFIX.
-    assert_eq!(HEADER.len(), 57, "HEADER byte length must match locked value");
+    assert_eq!(
+        HEADER.len(),
+        57,
+        "HEADER byte length must match locked value"
+    );
 }
 
 #[test]

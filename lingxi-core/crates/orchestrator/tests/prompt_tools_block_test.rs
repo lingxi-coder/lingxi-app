@@ -16,11 +16,7 @@ fn single_tool_shape() {
 
 #[test]
 fn multiple_tools_emitted_alphabetic_regardless_of_input_order() {
-    let out = tools_block::format(&[
-        "Write".to_string(),
-        "Bash".to_string(),
-        "Read".to_string(),
-    ]);
+    let out = tools_block::format(&["Write".to_string(), "Bash".to_string(), "Read".to_string()]);
     assert_eq!(out, "<tools>\n- Bash\n- Read\n- Write\n</tools>\n");
 }
 

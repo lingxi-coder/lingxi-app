@@ -11,7 +11,7 @@ fn run_git(cwd: &std::path::Path, args: &[&str]) {
         .current_dir(cwd)
         .output()
         .expect("git binary");
-    assert!(out.status.success(), "git {:?} failed: {:?}", args, out);
+    assert!(out.status.success(), "git {args:?} failed: {out:?}");
 }
 
 fn fresh_repo() -> TempDir {

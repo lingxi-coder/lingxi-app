@@ -27,8 +27,8 @@ pub trait OrchestratorApiClient: Send + Sync {
     /// `system` is the assembled system prompt (M5-03). `None` is a
     /// no-op (the API call omits the `"system"` key). Callers that
     /// want the assembled LingXi prompt populate it via
-    /// [`ConversationOrchestrator::build_system_prompt`]. Callers
-    /// with an override populate it from
+    /// `ConversationOrchestrator::build_system_prompt` (private).
+    /// Callers with an override populate it from
     /// `OrchestratorConfig::system_prompt_override`.
     async fn messages_create(
         &self,
@@ -197,9 +197,7 @@ impl ConversationOrchestrator {
     /// [`crate::prompt::assemble_system_prompt`]. Bypassed when
     /// `OrchestratorConfig::system_prompt_override` is `Some(_)`.
     async fn build_system_prompt(&self) -> String {
-        use crate::prompt::{
-            assemble_system_prompt, file_tree, git_status, SystemPromptContext,
-        };
+        use crate::prompt::{assemble_system_prompt, file_tree, git_status, SystemPromptContext};
 
         let cwd = self.cwd.clone();
         let memory_files = self.memory.load(&cwd).await;

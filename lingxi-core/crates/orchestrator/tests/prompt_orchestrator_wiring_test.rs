@@ -1,5 +1,5 @@
-//! Integration: ConversationOrchestrator::run_turn assembles a
-//! system prompt via assemble_system_prompt and passes it to the
+//! Integration: `ConversationOrchestrator::run_turn` assembles a
+//! system prompt via `assemble_system_prompt` and passes it to the
 //! API client.
 
 use lingxi_api_client::types::ContentBlockApi;

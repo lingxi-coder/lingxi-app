@@ -27,9 +27,9 @@ pub trait MemoryHierarchyProvider: Send + Sync {
     async fn load(&self, cwd: &Path) -> Vec<MemoryFile>;
 }
 
-/// Production implementation — wraps `lingxi_memory::claude_md::walk`
-/// + `load_file`. Reverses the walk order so the returned vec is in
-/// spec splice order (home → repo → local-override).
+/// Production implementation — wraps `lingxi_memory::claude_md::walk` +
+/// `load_file`. Reverses the walk order so the returned vec is in spec
+/// splice order (home → repo → local-override).
 pub struct RealMemoryHierarchyProvider;
 
 #[async_trait]

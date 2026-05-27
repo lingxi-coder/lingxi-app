@@ -55,23 +55,23 @@ pub fn format(ctx: &SystemPromptContext) -> String {
     s.push_str("</env>\n");
 
     // Model description — outside the tags, mirrors claude-code:649.
+    let model = &ctx.model;
     match &ctx.model_marketing_name {
         Some(name) => {
             write!(
                 &mut s,
-                "You are powered by the model named {}. The exact model ID is {}.",
-                name, ctx.model
+                "You are powered by the model named {name}. The exact model ID is {model}."
             )
             .unwrap();
         }
         None => {
-            write!(&mut s, "You are powered by the model {}.", ctx.model).unwrap();
+            write!(&mut s, "You are powered by the model {model}.").unwrap();
         }
     }
 
     // Knowledge cutoff — claude-code:636-638 (`\n\n` prefix).
     if let Some(cutoff) = &ctx.knowledge_cutoff {
-        write!(&mut s, "\n\nAssistant knowledge cutoff is {}.", cutoff).unwrap();
+        write!(&mut s, "\n\nAssistant knowledge cutoff is {cutoff}.").unwrap();
     }
 
     s

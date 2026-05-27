@@ -1,4 +1,4 @@
-//! file_tree::probe + format byte-locks (M5-03 Task 8).
+//! `file_tree::probe` + format byte-locks (M5-03 Task 8).
 
 use lingxi_orchestrator::prompt::file_tree;
 use std::fs;
@@ -20,11 +20,7 @@ fn probe_excludes_dotfiles_and_dot_git() {
     let t = file_tree::probe(tmp.path(), 2);
     assert_eq!(t.entries.len(), 1);
     assert_eq!(
-        t.entries[0]
-            .path
-            .file_name()
-            .unwrap()
-            .to_string_lossy(),
+        t.entries[0].path.file_name().unwrap().to_string_lossy(),
         "README.md"
     );
 }

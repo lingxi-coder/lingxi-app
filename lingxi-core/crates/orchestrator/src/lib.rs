@@ -18,10 +18,16 @@ pub mod conversation;
 pub mod error;
 pub mod turn_loop;
 
-#[cfg(any(test, feature = "test-support"))]
+// test_support carries the HookExecutor / PermissionGate trait definitions
+// that ConversationOrchestrator's signature uses; it MUST be available in
+// production builds (the plan's `#[cfg(any(test, feature = "test-support"))]`
+// guard would hide those traits from production). M5-05 / M5-06 will move
+// the traits to lingxi-permission / lingxi-hooks; until then they live in
+// test_support unconditionally.
 pub mod test_support;
 
 pub use config::{OrchestratorConfig, MAX_TURNS_DEFAULT};
-pub use conversation::OrchestratorApiClient;
-// pub use conversation::{ConversationOrchestrator, ConversationOutcome};  // Task 10
+pub use conversation::{
+    AnthropicProviderAdapter, ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient,
+};
 pub use error::OrchestratorError;

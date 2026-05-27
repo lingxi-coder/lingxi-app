@@ -154,6 +154,14 @@ impl PromptingGate for InteractivePromptingGate {
     ) -> Result<PromptDecision, PromptError> {
         let prompt = format_prompt(request);
         let mut attempts: u32 = 0;
+        // Acquire stdin lock + wrap in BufReader ONCE for the full prompt
+        // round-trip. Creating a fresh BufReader per loop iteration would
+        // silently discard any bytes BufReader had pre-fetched past the
+        // first newline — on retry inputs (`foo\nbar\nbaz\n`) only the
+        // first `foo\n` would be consumed and subsequent iterations would
+        // see EOF.
+        let mut in_guard = self.stdin.lock().await;
+        let mut reader = BufReader::new(&mut *in_guard);
         loop {
             // 1. Write the prompt to stderr.
             {
@@ -167,8 +175,6 @@ impl PromptingGate for InteractivePromptingGate {
             }
             // 2. Read one line from stdin.
             let line = {
-                let mut in_guard = self.stdin.lock().await;
-                let mut reader = BufReader::new(&mut *in_guard);
                 let mut buf = String::new();
                 let n = reader
                     .read_line(&mut buf)

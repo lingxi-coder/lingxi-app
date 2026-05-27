@@ -66,6 +66,7 @@ async fn pretooluse_block_short_circuits() {
         session_id: SessionId::nil(),
         agent_id: None,
         cwd: std::path::PathBuf::from("/tmp"),
+        ..Default::default()
     };
     let result = exec.execute(event, ctx).await;
     assert_eq!(result.decision, Some(HookDecision::Block));

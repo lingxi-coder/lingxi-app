@@ -4,15 +4,19 @@
 use crate::definition::{HookDefinition, HookSource};
 use crate::events::HookEvent;
 use lingxi_protocol::{AgentId, PluginId, SessionId};
+use lingxi_traits::SubagentInheritance;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Per-call context handed to hooks alongside the event payload.
 ///
-/// Carries the session identity, the active agent (when applicable), and
-/// the cwd at the moment of dispatch. Builtin handlers may also use it to
-/// resolve relative paths.
-#[derive(Debug, Clone)]
+/// M1.4 shape carried only `session_id`, `agent_id`, `cwd`. M5-06 extends
+/// it with `transcript_path`, `permission_mode`, `agent_type`, and
+/// `inherit` (the subagent capability bundle used by the Agent-arm
+/// executor). All new fields are `Option` (or default-empty `PathBuf`) so
+/// existing call sites adopt them with `..Default::default()` rather than
+/// having to populate everything.
+#[derive(Clone, Default)]
 pub struct HookContext {
     /// Session this event belongs to.
     pub session_id: SessionId,
@@ -21,6 +25,19 @@ pub struct HookContext {
     pub agent_id: Option<AgentId>,
     /// Engine cwd at the moment of dispatch.
     pub cwd: PathBuf,
+    /// Path to the on-disk transcript file backing this session. Used by
+    /// HTTP / command hooks to splice into their payload (`transcript_path`
+    /// per claude-code BaseHookInputSchema). M5-06.
+    pub transcript_path: PathBuf,
+    /// Current permission mode (`"default" | "plan" | "acceptEdits" | …`).
+    /// `None` when not applicable (e.g. engine-global hooks). M5-06.
+    pub permission_mode: Option<String>,
+    /// Subagent role identifier when the dispatch happened inside a
+    /// subagent context (`general-purpose`, `code-reviewer`, …). M5-06.
+    pub agent_type: Option<String>,
+    /// Subagent capability bundle the Agent-arm executor inherits when it
+    /// spawns. `None` for hooks that never reach the Agent arm. M5-06.
+    pub inherit: Option<SubagentInheritance>,
 }
 
 /// In-memory registry of hook definitions, sharded by their declared source.

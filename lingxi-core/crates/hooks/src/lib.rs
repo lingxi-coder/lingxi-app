@@ -19,6 +19,7 @@ pub mod builtin;
 pub mod definition;
 pub mod events;
 pub mod executor;
+mod agent_executor;
 pub mod hook_payload;
 mod http_executor;
 pub mod registry;

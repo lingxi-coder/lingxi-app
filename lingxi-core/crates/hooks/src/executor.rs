@@ -20,6 +20,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Default HTTP hook timeout (10 minutes — matches
+/// `claude-code/src/utils/hooks/execHttpHook.ts:12` `DEFAULT_HTTP_HOOK_TIMEOUT_MS`).
+pub const HOOK_HTTP_TIMEOUT_MS: u64 = 600_000;
+
+/// Default command hook timeout (10 minutes — matches
+/// `claude-code/src/utils/hooks.ts:166` `TOOL_HOOK_EXECUTION_TIMEOUT_MS`).
+pub const HOOK_COMMAND_TIMEOUT_MS: u64 = 600_000;
+
+/// Default agent hook timeout (60 seconds — matches
+/// `claude-code/src/utils/hooks/execAgentHook.ts:75` fall-through default).
+pub const HOOK_AGENT_TIMEOUT_MS: u64 = 60_000;
+
 /// In-process Rust handler for [`HookExecutor::Builtin`] hooks.
 ///
 /// Implementations are registered with [`HookExecutorImpl::register_builtin`]
@@ -152,6 +164,9 @@ impl HookExecutorImpl {
         }
     }
 
+    #[allow(dead_code)]
+    fn _constants_anchor() {}
+
     fn merge(agg: &mut AggregateHookResult, hook: &HookDefinition, r: HookResult) {
         if let Some(resp) = &r.response {
             if resp.decision.is_some() {
@@ -169,5 +184,23 @@ impl HookExecutorImpl {
             agg.attachments.extend(resp.attachments.clone());
         }
         agg.all_results.push((hook.id, r));
+    }
+}
+
+#[cfg(test)]
+mod constants_tests {
+    use super::*;
+
+    #[test]
+    fn http_timeout_is_10_minutes() {
+        assert_eq!(HOOK_HTTP_TIMEOUT_MS, 600_000);
+    }
+    #[test]
+    fn command_timeout_is_10_minutes() {
+        assert_eq!(HOOK_COMMAND_TIMEOUT_MS, 600_000);
+    }
+    #[test]
+    fn agent_timeout_is_60_seconds() {
+        assert_eq!(HOOK_AGENT_TIMEOUT_MS, 60_000);
     }
 }

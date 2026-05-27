@@ -236,29 +236,20 @@ impl HookExecutor for NoOpHookExecutor {
     }
 }
 
-/// Local permission gate trait. M5-05 will swap this for
-/// `lingxi_permission::PermissionGate` (or extend it with a `PromptingGate`
-/// arm). For M5-02 the orchestrator only needs an allow/deny decision.
-#[async_trait]
-pub trait PermissionGate: Send + Sync {
-    /// Return the decision for a `(tool_name, input)` pair.
-    async fn check(&self, tool_name: &str, input: &serde_json::Value) -> PermissionDecision;
-}
-
-/// Decision returned by `PermissionGate::check`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PermissionDecision {
-    /// Tool dispatch may proceed.
-    Allow,
-    /// Tool dispatch is denied. The orchestrator turns this into a
-    /// `ContentBlock::ToolResult { is_error: true, content: "Permission denied: <reason>" }`.
-    Deny {
-        /// Human-readable explanation surfaced into the tool-result block.
-        reason: String,
-    },
-}
+// M5-05 Task 2: PermissionGate + PermissionDecision are promoted to
+// lingxi-traits::permission_gate. We re-export them here so existing
+// orchestrator imports (crate::test_support::PermissionGate, …) keep
+// working unchanged.
+pub use lingxi_permission::gate::{PermissionDecision, PermissionGate};
 
 /// Allow-all permission gate. Always returns `Allow`.
+///
+/// **M5-05:** the trait surface moved to `lingxi-traits` but the impl
+/// stays here for back-compat with M5-02 / M5-04 tests that import
+/// `crate::test_support::NoOpPermissionGate`. Production wiring (M5-12
+/// CLI) chooses between this no-op and
+/// [`lingxi_permission::InteractivePromptingGate`] based on
+/// [`crate::OrchestratorConfig::interactive_permissions`].
 pub struct NoOpPermissionGate;
 
 #[async_trait]

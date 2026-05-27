@@ -1404,10 +1404,12 @@ name = "lingxi-orchestrator"
 version = "0.5.0"
 dependencies = [
  "async-trait",
+ "dirs",
  "lingxi-api-client",
  "lingxi-core",
  "lingxi-cost",
  "lingxi-hooks",
+ "lingxi-memory",
  "lingxi-permission",
  "lingxi-protocol",
  "lingxi-telemetry",

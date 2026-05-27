@@ -11,11 +11,13 @@ lingxi-core = { path = "../core" }
 lingxi-traits = { path = "../traits" }
 lingxi-api-client = { path = "../api-client" }
 lingxi-tools = { path = "../tools" }
+lingxi-memory = { path = "../memory" }
 lingxi-permission = { path = "../permission" }
 lingxi-hooks = { path = "../hooks" }
 lingxi-cost = { path = "../cost" }
 lingxi-telemetry = { path = "../telemetry" }
 async-trait.workspace = true
+dirs = "5"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

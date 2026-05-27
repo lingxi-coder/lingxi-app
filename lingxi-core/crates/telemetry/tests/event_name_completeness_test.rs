@@ -5,15 +5,17 @@
 use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_241_entries() {
+fn registry_is_exactly_243_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
     // M4-08 added 24 (8 system tools × 3 lifecycle stages),
     // M4-09 added 1 (release marker `lingxi_core_v0_5_0_released`),
-    // M5-02 added 3 (orchestrator conversation lifecycle: started/completed/failed):
-    // 213 (post-M4-07) + 24 (M4-08) + 1 (M4-09) + 3 (M5-02) = 241.
-    assert_eq!(ALL_EVENT_NAMES.len(), 241);
+    // M5-02 added 3 (orchestrator conversation lifecycle: started/completed/failed),
+    // M5-03 added 0,
+    // M5-04 added 2 streaming events (turn_streaming_started/completed):
+    // 213 (post-M4-07) + 24 (M4-08) + 1 (M4-09) + 3 (M5-02) + 0 (M5-03) + 2 (M5-04) = 243.
+    assert_eq!(ALL_EVENT_NAMES.len(), 243);
 }
 
 #[test]
@@ -86,15 +88,17 @@ fn category_ordering_preserved() {
     for n in &ALL_EVENT_NAMES[234..237] {
         assert!(n.starts_with("tengu_settings_"), "settings block: {n}");
     }
-    // M5-02 grew the list by +3 (orchestrator conversation lifecycle),
-    // inserted BEFORE the release marker per concat_all walk order.
-    for n in &ALL_EVENT_NAMES[237..240] {
+    // M5-02 grew the orchestrator block by +3 (conversation lifecycle).
+    // M5-04 grew it by +2 (streaming turn started/completed). Block size
+    // is now 5; release marker still trails. Walk order is fixed by
+    // tengu::mod.rs's concat_all (settings → orchestrator → release).
+    for n in &ALL_EVENT_NAMES[237..242] {
         assert!(
             n.starts_with("tengu_orchestrator_"),
             "orchestrator block: {n}"
         );
     }
-    for n in &ALL_EVENT_NAMES[240..241] {
+    for n in &ALL_EVENT_NAMES[242..243] {
         assert!(n.starts_with("lingxi_core_"), "release block: {n}");
     }
 }

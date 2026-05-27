@@ -1442,11 +1442,15 @@ dependencies = [
 name = "lingxi-permission"
 version = "0.5.0"
 dependencies = [
+ "async-trait",
  "lingxi-protocol",
+ "lingxi-traits",
  "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

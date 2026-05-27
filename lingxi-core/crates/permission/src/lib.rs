@@ -7,16 +7,25 @@
 
 pub mod classifier;
 pub mod dangerous_patterns;
+pub mod defaults_per_tool;
 pub mod denial_tracking;
+pub mod gate;
 pub mod mode;
 pub mod policy;
+pub mod prompting_gate;
 pub mod result;
 pub mod rule;
 pub mod shadow;
 pub mod update;
 
+pub use defaults_per_tool::tool_default;
+pub use gate::{
+    PermissionDecision, PermissionGate, PermissionRequest, PromptDecision, PromptDefault,
+    PromptError, PromptingGate,
+};
 pub use mode::PermissionMode;
 pub use policy::PermissionPolicy;
+pub use prompting_gate::InteractivePromptingGate;
 pub use result::{
     ClassifierKind, PermissionDecisionReason, PermissionResult, PermissionUpdateDestination,
     SandboxOverrideReason,

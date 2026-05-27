@@ -7,9 +7,13 @@ license.workspace = true
 
 [dependencies]
 lingxi-protocol = { path = "../protocol" }
+lingxi-traits = { path = "../traits" }
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+tracing.workspace = true
 regex = "1"
 
 [lints]

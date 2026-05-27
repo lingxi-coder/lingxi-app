@@ -18,7 +18,9 @@ pub mod lsp;
 pub mod mailbox;
 pub mod mcp;
 pub mod orchestrator;
+pub mod permission_gate;
 pub mod process;
+pub mod prompting_gate;
 pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;
@@ -42,7 +44,11 @@ pub use mcp::*;
 pub use orchestrator::{
     CompactionSummary, CostSnapshot, HandleError, OrchestratorHandle, OutputEvent, OutputStream,
 };
+pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
+pub use prompting_gate::{
+    PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
+};
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use sandbox::{
     NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend, SandboxCapability,

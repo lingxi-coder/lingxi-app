@@ -37,14 +37,8 @@ async fn never_ending_loop_aborts_with_max_turns_reached() {
         ..OrchestratorConfig::default()
     };
 
-    let orch = ConversationOrchestrator::new(
-        config,
-        api.clone(),
-        tools,
-        hooks,
-        perms,
-        output.clone(),
-    );
+    let orch =
+        ConversationOrchestrator::new(config, api.clone(), tools, hooks, perms, output.clone());
 
     let err = orch.run_turn("forever").await.expect_err("must fail");
     assert!(matches!(

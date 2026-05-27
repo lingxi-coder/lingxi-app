@@ -64,11 +64,7 @@ impl Tool for AlwaysFailingTool {
             metadata: PermissionMetadata::default(),
         }
     }
-    async fn description(
-        &self,
-        _input: &serde_json::Value,
-        _opts: &DescriptionOptions,
-    ) -> String {
+    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
         "fail".into()
     }
     async fn prompt(&self, _opts: &PromptOptions) -> String {

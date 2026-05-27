@@ -1413,12 +1413,14 @@ dependencies = [
  "lingxi-telemetry",
  "lingxi-tools",
  "lingxi-traits",
+ "once_cell",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

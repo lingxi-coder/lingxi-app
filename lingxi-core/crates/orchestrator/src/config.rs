@@ -63,7 +63,9 @@ mod tests {
 
     #[test]
     fn default_system_prompt_override_is_none() {
-        assert!(OrchestratorConfig::default().system_prompt_override.is_none());
+        assert!(OrchestratorConfig::default()
+            .system_prompt_override
+            .is_none());
     }
 
     #[test]

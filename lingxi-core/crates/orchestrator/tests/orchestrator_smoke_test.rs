@@ -32,10 +32,7 @@ async fn single_turn_no_tools_returns_end_turn_and_emits_text_and_end_turn() {
         output.clone(),
     );
 
-    let outcome = orch
-        .run_turn("say hello")
-        .await
-        .expect("turn must succeed");
+    let outcome = orch.run_turn("say hello").await.expect("turn must succeed");
 
     // ConversationOutcome is #[non_exhaustive] — wildcard arm satisfies the
     // checker even though EndTurn is the only variant in M5-02.
@@ -47,7 +44,9 @@ async fn single_turn_no_tools_returns_end_turn_and_emits_text_and_end_turn() {
     let events = output.snapshot().await;
     assert_eq!(events.len(), 2, "expected Text + EndTurn; got {events:?}");
     assert!(matches!(events[0], OutputEvent::Text { ref text } if text == "hello world"));
-    assert!(matches!(events[1], OutputEvent::EndTurn { ref stop_reason, .. } if stop_reason == "end_turn"));
+    assert!(
+        matches!(events[1], OutputEvent::EndTurn { ref stop_reason, .. } if stop_reason == "end_turn")
+    );
 
     // Mock observed exactly one API call.
     assert_eq!(api.captured_msgs().await.len(), 1);

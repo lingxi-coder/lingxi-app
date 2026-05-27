@@ -239,6 +239,9 @@
     "tengu_settings_loaded",
     "tengu_settings_invalid_env",
     "tengu_settings_parse_error",
+    "tengu_orchestrator_conversation_started",
+    "tengu_orchestrator_conversation_completed",
+    "tengu_orchestrator_conversation_failed",
     "lingxi_core_v0_5_0_released"
   ],
   "cost_sample_payloads": [

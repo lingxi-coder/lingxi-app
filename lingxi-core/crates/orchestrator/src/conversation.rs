@@ -7,11 +7,10 @@ use crate::error::OrchestratorError;
 use crate::test_support::{HookExecutor, PermissionGate};
 use crate::turn_loop::{execute_one_turn, TurnStepOutcome};
 use async_trait::async_trait;
-use lingxi_api_client::{
-    types::MessageResponse, AnthropicProvider, ApiError,
-};
+use lingxi_api_client::{types::MessageResponse, AnthropicProvider, ApiError};
 use lingxi_core::SessionState;
 use lingxi_protocol::{ConversationMessage, MessageId, SessionId};
+use lingxi_telemetry::tengu::orchestrator as orch_events;
 use lingxi_tools::registry::ToolRegistry;
 use lingxi_traits::{HttpTransport, OutputStream};
 use std::sync::Arc;
@@ -86,10 +85,38 @@ impl ConversationOrchestrator {
 
     /// Drive one user prompt through the turn loop until `end_turn` or
     /// `max_turns` is exhausted.
-    pub async fn run_turn(
-        &self,
-        prompt: &str,
-    ) -> Result<ConversationOutcome, OrchestratorError> {
+    ///
+    /// Emits 3 telemetry events:
+    /// - [`orch_events::CONVERSATION_STARTED`] at entry
+    /// - [`orch_events::CONVERSATION_COMPLETED`] on success
+    /// - [`orch_events::CONVERSATION_FAILED`] on error
+    pub async fn run_turn(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError> {
+        tracing::info!(
+            event = orch_events::CONVERSATION_STARTED,
+            prompt_len = prompt.len()
+        );
+        let result = self.try_run_turn(prompt).await;
+        // ConversationOutcome is #[non_exhaustive] so future variants will
+        // also log as Completed when the only existing variant is EndTurn.
+        match &result {
+            Ok(ConversationOutcome::EndTurn { turn_count, .. }) => {
+                tracing::info!(
+                    event = orch_events::CONVERSATION_COMPLETED,
+                    turn_count = *turn_count
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    event = orch_events::CONVERSATION_FAILED,
+                    reason = %err
+                );
+            }
+        }
+        result
+    }
+
+    /// Internal turn driver (no telemetry — wrapped by `run_turn`).
+    async fn try_run_turn(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError> {
         // 1. Append the user prompt to session history.
         {
             let mut s = self.session.lock().await;

@@ -60,9 +60,7 @@ pub(crate) async fn execute_one_turn(
     let tool_uses: Vec<(ToolUseId, String, serde_json::Value)> = assistant_blocks
         .iter()
         .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, name, input } => {
-                Some((*id, name.clone(), input.clone()))
-            }
+            ContentBlock::ToolUse { id, name, input } => Some((*id, name.clone(), input.clone())),
             _ => None,
         })
         .collect();

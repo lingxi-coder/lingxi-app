@@ -187,11 +187,7 @@ impl OutputStream for MockOutputStream {
 pub trait HookExecutor: Send + Sync {
     /// Run before a tool dispatch. Errors abort the dispatch with the
     /// returned string surfaced as a tool error.
-    async fn pre_tool_use(
-        &self,
-        tool_name: &str,
-        input: &serde_json::Value,
-    ) -> Result<(), String>;
+    async fn pre_tool_use(&self, tool_name: &str, input: &serde_json::Value) -> Result<(), String>;
 
     /// Run after a tool dispatch. Errors are logged but do NOT abort the
     /// turn — the orchestrator only inspects the returned `Result` for
@@ -232,11 +228,7 @@ impl HookExecutor for NoOpHookExecutor {
 #[async_trait]
 pub trait PermissionGate: Send + Sync {
     /// Return the decision for a `(tool_name, input)` pair.
-    async fn check(
-        &self,
-        tool_name: &str,
-        input: &serde_json::Value,
-    ) -> PermissionDecision;
+    async fn check(&self, tool_name: &str, input: &serde_json::Value) -> PermissionDecision;
 }
 
 /// Decision returned by `PermissionGate::check`.
@@ -257,11 +249,7 @@ pub struct NoOpPermissionGate;
 
 #[async_trait]
 impl PermissionGate for NoOpPermissionGate {
-    async fn check(
-        &self,
-        _tool_name: &str,
-        _input: &serde_json::Value,
-    ) -> PermissionDecision {
+    async fn check(&self, _tool_name: &str, _input: &serde_json::Value) -> PermissionDecision {
         PermissionDecision::Allow
     }
 }
@@ -313,7 +301,10 @@ mod tests {
     #[tokio::test]
     async fn mock_exhaustion_returns_server_error() {
         let mock = MockApiClient::new(vec![]);
-        let err = mock.messages_create("m", vec![]).await.expect_err("exhausted");
+        let err = mock
+            .messages_create("m", vec![])
+            .await
+            .expect_err("exhausted");
         assert!(format!("{err}").contains("mock script exhausted"));
     }
 
@@ -352,7 +343,10 @@ mod tests {
         let snap = m.snapshot().await;
         assert_eq!(snap.len(), 1);
         match &snap[0] {
-            OutputEvent::EndTurn { stop_reason, cost: c } => {
+            OutputEvent::EndTurn {
+                stop_reason,
+                cost: c,
+            } => {
                 assert_eq!(stop_reason, "end_turn");
                 assert_eq!(c, &cost);
                 assert_eq!(c.total_nano_usd, 0);

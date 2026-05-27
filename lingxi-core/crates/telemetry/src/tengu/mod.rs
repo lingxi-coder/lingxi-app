@@ -13,20 +13,22 @@ pub mod api;
 pub mod cost;
 pub mod memory;
 pub mod oauth;
+pub mod orchestrator;
 pub mod release;
 pub mod session;
 pub mod settings;
 pub mod tool;
 
 /// Flat list of every `tengu_*` event name in registration order:
-/// api → agent → session → tool → cost → oauth → memory → settings.
+/// api → agent → session → tool → cost → oauth → memory → settings →
+/// orchestrator → release.
 ///
 /// Tasks 2-9 each append their category in registration order. The list is
 /// re-exported at crate root as `lingxi_telemetry::ALL_EVENT_NAMES` (no — kept
 /// inside the `tengu` module so the path `lingxi_telemetry::tengu::ALL_EVENT_NAMES`
 /// remains the single source of truth; see `parity_tengu_events.rs`).
 pub const ALL_EVENT_NAMES: &[&str] = {
-    const TOTAL: usize = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 1;
+    const TOTAL: usize = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 3 + 1;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;
@@ -75,6 +77,12 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         let mut i = 0;
         while i < settings::NAMES.len() {
             out[idx] = settings::NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        let mut i = 0;
+        while i < orchestrator::NAMES.len() {
+            out[idx] = orchestrator::NAMES[i];
             idx += 1;
             i += 1;
         }

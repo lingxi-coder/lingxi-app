@@ -24,10 +24,11 @@ fn text_block_round_trip() {
 #[test]
 fn tool_use_partial_json_reassembles() {
     let mut acc = BlockAccumulator::new();
+    let tu_id = ToolUseId::new();
     acc.start_block(
         1,
         BlockKind::ToolUse {
-            id: ToolUseId::from("toolu_abc"),
+            id: tu_id,
             name: "Read".into(),
         },
     )
@@ -37,7 +38,7 @@ fn tool_use_partial_json_reassembles() {
     let completed = acc.stop_block(1).expect("stop");
     match completed {
         CompletedBlock::ToolUse { id, name, input } => {
-            assert_eq!(id.as_str(), "toolu_abc");
+            assert_eq!(id, tu_id);
             assert_eq!(name, "Read");
             assert_eq!(input, json!({"file_path": "foo.rs"}));
         }
@@ -54,7 +55,7 @@ fn empty_tool_use_input_parses_as_empty_object() {
     acc.start_block(
         0,
         BlockKind::ToolUse {
-            id: ToolUseId::from("toolu_xyz"),
+            id: ToolUseId::new(),
             name: "NoArgs".into(),
         },
     )
@@ -103,7 +104,7 @@ fn malformed_tool_use_json_errors_at_stop() {
     acc.start_block(
         0,
         BlockKind::ToolUse {
-            id: ToolUseId::from("toolu_x"),
+            id: ToolUseId::new(),
             name: "Bad".into(),
         },
     )

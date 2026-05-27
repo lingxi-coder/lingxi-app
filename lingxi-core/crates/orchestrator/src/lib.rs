@@ -22,5 +22,6 @@ pub mod turn_loop;
 pub mod test_support;
 
 pub use config::{OrchestratorConfig, MAX_TURNS_DEFAULT};
-// pub use conversation::{ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient};  // Task 10
+pub use conversation::OrchestratorApiClient;
+// pub use conversation::{ConversationOrchestrator, ConversationOutcome};  // Task 10
 pub use error::OrchestratorError;

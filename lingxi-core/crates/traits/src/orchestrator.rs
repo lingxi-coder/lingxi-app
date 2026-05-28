@@ -247,6 +247,13 @@ pub trait OrchestratorHandle: Send + Sync {
     /// Wired by M5-10 (`/exit` handler).
     async fn request_exit(&self);
 
+    /// Read the current value of the `should_exit` flag without mutating it.
+    ///
+    /// The REPL (M5-13) calls this after every slash-command dispatch to
+    /// decide whether to break the loop. Returns `true` iff `request_exit`
+    /// has been called at least once.
+    async fn current_should_exit(&self) -> bool;
+
     /// Open `$EDITOR` on `<config-dir>/claude/CLAUDE.md` (creating the file
     /// if it does not exist), block until the editor exits, then return the
     /// outcome.

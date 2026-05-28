@@ -89,6 +89,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
         self.should_exit.store(true, Ordering::SeqCst);
     }
 
+    async fn current_should_exit(&self) -> bool {
+        self.should_exit.load(Ordering::SeqCst)
+    }
+
     async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
         let config_dir = dirs::config_dir().ok_or_else(|| {
             HandleError::ActionFailed("config_dir unavailable on this platform".into())

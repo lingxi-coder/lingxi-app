@@ -25,11 +25,13 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "process", "fs"] }
+tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 uuid = { version = "1.10", features = ["v4", "serde"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
 tempfile = "3"
 once_cell = "1"
 lingxi-platform-posix = { path = "../../platforms/posix" }

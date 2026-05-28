@@ -596,6 +596,10 @@ impl OrchestratorHandle for MockOrchestratorHandle {
         self.exit_requested.store(true, Ordering::SeqCst);
     }
 
+    async fn current_should_exit(&self) -> bool {
+        self.exit_requested.load(Ordering::SeqCst)
+    }
+
     async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
         if let Some(reason) = self.memory_error.lock().unwrap().take() {
             return Err(HandleError::ActionFailed(reason));

@@ -16,6 +16,7 @@ use lingxi_tools::registry::ToolRegistry;
 use lingxi_traits::{HttpTransport, OutputStream};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 /// Minimal contract the orchestrator needs from the API client.
 ///
@@ -69,6 +70,26 @@ pub trait StreamingApiClient: Send + Sync {
         >,
         ApiError,
     >;
+}
+
+/// Outcome of a single REPL turn driven by
+/// [`ConversationOrchestrator::run_turn_with_cancel`]. (M5-13)
+///
+/// Distinct from [`ConversationOutcome`] because the REPL needs to react
+/// differently to each variant without inspecting the `stop_reason` string:
+/// - `EndTurn` → silent, loop back to prompt.
+/// - `MaxTurns` → print `[turn ended: reached MAX_TURNS_PER_CONVERSATION]`.
+/// - `Cancelled` → print the SIGINT feedback line + loop back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnOutcome {
+    /// Model returned `end_turn` (or any other natural stop reason).
+    EndTurn,
+    /// The orchestrator's `max_turns` limit was reached before `end_turn`.
+    MaxTurns,
+    /// A `CancellationToken` passed to [`ConversationOrchestrator::run_turn_with_cancel`]
+    /// was cancelled mid-turn (SIGINT / external cancel). The orchestrator
+    /// unwound the current API call and returned early.
+    Cancelled,
 }
 
 /// Result of `ConversationOrchestrator::run_turn` on success.
@@ -542,6 +563,91 @@ impl ConversationOrchestrator {
             turn_count,
             final_message_id,
         })
+    }
+
+    /// Drive one user prompt through a REPL turn until `end_turn`,
+    /// `max_turns`, or the given `cancel` token fires.
+    ///
+    /// Unlike [`Self::run_turn`] this method:
+    /// - returns [`TurnOutcome`] so the REPL can distinguish natural end /
+    ///   max-turns / cancellation.
+    /// - takes a [`CancellationToken`] that fires on Ctrl+C (SIGINT); the
+    ///   orchestrator checks it before each API round-trip.
+    /// - does NOT close the session — the session accumulates messages across
+    ///   REPL turns; the REPL persists via the JSONL writer when it exits.
+    ///
+    /// Telemetry: emits `CONVERSATION_STARTED` at entry; delegates to the
+    /// same turn-loop body as `run_turn` (via `try_run_turn_cancelable`).
+    pub async fn run_turn_with_cancel(
+        &self,
+        prompt: &str,
+        cancel: CancellationToken,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        tracing::info!(
+            event = orch_events::CONVERSATION_STARTED,
+            prompt_len = prompt.len()
+        );
+        self.try_run_turn_cancelable(prompt, cancel).await
+    }
+
+    /// Internal implementation of the REPL turn loop with cancellation.
+    async fn try_run_turn_cancelable(
+        &self,
+        prompt: &str,
+        cancel: CancellationToken,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        // 0. Build the system prompt (same as non-cancelable path).
+        let system_prompt: Option<String> = match &self.config.system_prompt_override {
+            Some(custom) => Some(custom.clone()),
+            None => Some(self.build_system_prompt().await),
+        };
+
+        // 1. Append the user prompt to session history.
+        let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
+        {
+            let mut s = self.session.lock().await;
+            s.history.push(user_msg.clone());
+        }
+        self.persist_message_to_jsonl(&user_msg).await;
+
+        // 2. Turn-by-turn loop — check cancel before each API call.
+        let mut turn_count: u32 = 0;
+        loop {
+            if cancel.is_cancelled() {
+                return Ok(TurnOutcome::Cancelled);
+            }
+            if turn_count >= self.config.max_turns {
+                return Ok(TurnOutcome::MaxTurns);
+            }
+            turn_count = turn_count.saturating_add(1);
+
+            // Race the API call against the cancellation token.
+            let step = tokio::select! {
+                r = execute_one_turn(self, system_prompt.as_deref()) => r?,
+                () = cancel.cancelled() => return Ok(TurnOutcome::Cancelled),
+            };
+            match step {
+                TurnStepOutcome::Continue => continue,
+                TurnStepOutcome::Ended { stop_reason, .. } => {
+                    let cost = {
+                        let s = self.session.lock().await;
+                        crate::turn_loop::cost_snapshot_from_session(&s)
+                    };
+                    self.output.emit_end_turn(&stop_reason, &cost).await;
+                    return Ok(TurnOutcome::EndTurn);
+                }
+            }
+        }
+    }
+
+    /// Read the `should_exit` flag set by `/exit` (M5-10 / M5-13).
+    ///
+    /// The REPL checks this after each dispatch and breaks the loop if
+    /// `true`. The flag is set via
+    /// [`lingxi_traits::OrchestratorHandle::request_exit`]; once set it
+    /// never resets (idempotent `/exit`).
+    pub fn current_should_exit(&self) -> bool {
+        self.should_exit.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Build the per-turn system prompt by gathering cwd / git / file

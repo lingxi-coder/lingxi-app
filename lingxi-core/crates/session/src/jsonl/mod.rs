@@ -39,7 +39,9 @@ pub use uuid::validate_uuid;
 pub use writer::JsonlWriter;
 
 // New M5-08 public surface.
-pub use loader::{list_recent_sessions, load_session, LoaderError, SessionMetadata};
+pub use loader::{
+    list_recent_sessions, load_session, select_session_interactive, LoaderError, SessionMetadata,
+};
 pub use title::extract_title;
 
 /// Size of the head buffer for lite metadata reads — 64 KiB.

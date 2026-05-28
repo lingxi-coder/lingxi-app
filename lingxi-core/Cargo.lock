@@ -1651,6 +1651,8 @@ name = "lingxi-session"
 version = "0.5.0"
 dependencies = [
  "async-trait",
+ "chrono",
+ "filetime",
  "lingxi-core",
  "lingxi-filestate",
  "lingxi-platform-posix",

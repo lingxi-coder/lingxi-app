@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 use thiserror::Error;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
 /// Metadata for one resumable session row (uuid + title + mtime + line count).
@@ -227,6 +228,134 @@ pub async fn load_session(
     })?;
     validate_chain(&messages, session_id, &arg)?;
     Ok(messages)
+}
+
+/// Interactive line-based session picker (OQ-6 stdio fallback for the Ink TUI).
+///
+/// Renders:
+/// ```text
+/// Resume which session?
+///   1. {title} [{modified}]
+///   2. {title} [{modified}]
+///   ...
+/// >
+/// ```
+///
+/// Behavior:
+/// - Empty input line → `Ok(None)` (cancel).
+/// - `1..=sessions.len()` (1-indexed) → `Ok(Some(uuid))`.
+/// - Non-numeric, out-of-range, or `> sessions.len()` → print retry feedback,
+///   try again up to **3 total attempts** (initial + 2 retries).
+/// - After 3 failed attempts → `Err(LoaderError::InvalidSelection)`.
+/// - EOF (zero-byte read) → `Ok(None)` (cancel).
+///
+/// `stdin` is any `AsyncBufRead`, `stdout` is any `AsyncWrite` — both passed
+/// in so tests can supply `tokio::io::duplex` pairs (mirrors M5-05 permission
+/// UX pattern).
+///
+/// Errors:
+/// - [`LoaderError::EmptyDirectory`] if `sessions` is empty.
+/// - [`LoaderError::InvalidSelection`] after 3 invalid inputs.
+/// - [`LoaderError::Io`] on stdio read/write/flush failure.
+pub async fn select_session_interactive<R, W>(
+    sessions: &[SessionMetadata],
+    stdin: &mut BufReader<R>,
+    stdout: &mut W,
+) -> Result<Option<Uuid>, LoaderError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    if sessions.is_empty() {
+        return Err(LoaderError::EmptyDirectory);
+    }
+    let limit = sessions.len();
+
+    // Render header + rows once.
+    let mut out_buf = String::from("Resume which session?\n");
+    for (i, row) in sessions.iter().enumerate() {
+        let modified_rfc3339 = format_rfc3339_seconds(row.modified);
+        out_buf.push_str(&format!(
+            "  {}. {} [{}]\n",
+            i + 1,
+            row.title,
+            modified_rfc3339
+        ));
+    }
+    stdout
+        .write_all(out_buf.as_bytes())
+        .await
+        .map_err(|source| LoaderError::Io {
+            arg: "stdout".into(),
+            source,
+        })?;
+
+    for _attempt in 0..3 {
+        stdout
+            .write_all(b"> ")
+            .await
+            .map_err(|source| LoaderError::Io {
+                arg: "stdout".into(),
+                source,
+            })?;
+        stdout.flush().await.map_err(|source| LoaderError::Io {
+            arg: "stdout".into(),
+            source,
+        })?;
+
+        let mut line = String::new();
+        let n = stdin
+            .read_line(&mut line)
+            .await
+            .map_err(|source| LoaderError::Io {
+                arg: "stdin".into(),
+                source,
+            })?;
+        if n == 0 {
+            // EOF — treat as cancel.
+            return Ok(None);
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        match trimmed.parse::<usize>() {
+            Ok(n) if (1..=limit).contains(&n) => {
+                return Ok(Some(sessions[n - 1].uuid));
+            }
+            _ => {
+                let msg = format!(
+                    "Please enter a number from 1 to {limit}, or empty to cancel.\n"
+                );
+                stdout
+                    .write_all(msg.as_bytes())
+                    .await
+                    .map_err(|source| LoaderError::Io {
+                        arg: "stdout".into(),
+                        source,
+                    })?;
+            }
+        }
+    }
+    Err(LoaderError::InvalidSelection)
+}
+
+/// RFC 3339 with second precision and `Z` suffix — e.g. `2026-05-24T19:03:12Z`.
+fn format_rfc3339_seconds(t: SystemTime) -> String {
+    use std::time::UNIX_EPOCH;
+    let secs = t
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Cast to i64; pre-1970 timestamps are not produced by the OS for files we
+    // care about (mtime). The session picker only ever sees positive offsets.
+    #[allow(clippy::cast_possible_wrap)]
+    let secs_i64 = secs as i64;
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs_i64, 0)
+        .map_or_else(
+            || "1970-01-01T00:00:00Z".to_string(),
+            |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        )
 }
 
 fn validate_chain(

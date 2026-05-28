@@ -36,12 +36,8 @@ pub struct ScrollbackProps {
 /// Scrollback component.
 #[component]
 pub fn Scrollback(props: &ScrollbackProps) -> impl Into<AnyElement<'static>> {
-    let visible: Vec<RenderedMessage> = visible_slice(
-        &props.messages,
-        props.scroll_offset,
-        props.viewport_height,
-    )
-    .to_vec();
+    let visible: Vec<RenderedMessage> =
+        visible_slice(&props.messages, props.scroll_offset, props.viewport_height).to_vec();
     element! {
         View(flex_direction: FlexDirection::Column, flex_grow: 1.0) {
             #(visible.into_iter().map(render_message))
@@ -54,11 +50,11 @@ pub fn Scrollback(props: &ScrollbackProps) -> impl Into<AnyElement<'static>> {
 /// Returns a borrow into `messages` for the viewport. Empty buffer or
 /// zero viewport → empty slice.
 #[must_use]
-pub fn visible_slice<'a>(
-    messages: &'a [RenderedMessage],
+pub fn visible_slice(
+    messages: &[RenderedMessage],
     scroll_offset: usize,
     viewport_height: usize,
-) -> &'a [RenderedMessage] {
+) -> &[RenderedMessage] {
     if messages.is_empty() || viewport_height == 0 {
         return &[];
     }
@@ -71,6 +67,11 @@ pub fn visible_slice<'a>(
 /// Clamp a requested scroll offset to `[0, max]` where
 /// `max = total_messages.saturating_sub(viewport_height)`.
 #[must_use]
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 pub fn clamp_offset(requested: i64, total_messages: usize, viewport_height: usize) -> usize {
     let max = total_messages.saturating_sub(viewport_height) as i64;
     requested.clamp(0, max) as usize

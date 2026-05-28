@@ -1,5 +1,5 @@
-//! Behavior tests (M6-02 T12) for PgUp / PgDn / g / G against the
-//! `scroll_with_viewport` helper.
+//! Behavior tests (M6-02 T12) for `PgUp` / `PgDn` / `g` / `G` against
+//! the `scroll_with_viewport` helper.
 
 use lingxi_tui::app::scroll_with_viewport;
 use lingxi_tui::events::keymap::ScrollDir;

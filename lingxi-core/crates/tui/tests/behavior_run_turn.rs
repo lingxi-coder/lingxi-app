@@ -3,9 +3,7 @@
 //! and the prompt was cleared.
 
 use async_trait::async_trait;
-use lingxi_tui::app::{
-    dispatch, run_one_submit, ConversationOrchestratorTrait, TurnTextOutcome,
-};
+use lingxi_tui::app::{dispatch, run_one_submit, ConversationOrchestratorTrait, TurnTextOutcome};
 use lingxi_tui::events::keymap::KeyAction;
 use lingxi_tui::state::{AppState, RenderedMessage};
 use tokio_util::sync::CancellationToken;
@@ -55,5 +53,8 @@ async fn feed_h_i_enter_runs_one_turn() {
         &st.messages[1],
         RenderedMessage::AssistantText { body, .. } if body == "Hello!"
     ));
-    assert!(st.in_flight_turn.is_none(), "in-flight turn must be cleared");
+    assert!(
+        st.in_flight_turn.is_none(),
+        "in-flight turn must be cleared"
+    );
 }

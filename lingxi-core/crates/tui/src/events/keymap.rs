@@ -84,9 +84,7 @@ pub enum KeyAction {
 /// the vim-style scroll bindings (`j`/`k`/`g`/`G`).
 #[must_use]
 pub fn map_key(evt: KeyEvent, prompt_empty: bool) -> Option<KeyAction> {
-    use KeyAction::{
-        Backspace, Cancel, HistoryStep, InsertChar, MoveCursor, ScrollStep, Submit,
-    };
+    use KeyAction::{Backspace, Cancel, HistoryStep, InsertChar, MoveCursor, ScrollStep, Submit};
     match (evt.code, evt.modifiers) {
         (KeyCode::Enter, _) => Some(Submit),
         (KeyCode::Backspace, _) => Some(Backspace),

@@ -17,9 +17,7 @@ pub struct AssistantTextMessageProps {
 
 /// Render an assistant text body in cyan with the locked `"● "` prefix.
 #[component]
-pub fn AssistantTextMessage(
-    props: &AssistantTextMessageProps,
-) -> impl Into<AnyElement<'static>> {
+pub fn AssistantTextMessage(props: &AssistantTextMessageProps) -> impl Into<AnyElement<'static>> {
     let content = format!("● {}", props.body);
     element! {
         View(flex_direction: FlexDirection::Column) {

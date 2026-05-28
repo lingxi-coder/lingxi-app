@@ -48,8 +48,7 @@ pub fn apply_backspace(text: &str, cursor: usize) -> (String, usize) {
     let prev = text[..cursor]
         .char_indices()
         .last()
-        .map(|(i, _)| i)
-        .unwrap_or(0);
+        .map_or(0, |(i, _)| i);
     let mut out = String::with_capacity(text.len());
     out.push_str(&text[..prev]);
     out.push_str(&text[cursor..]);
@@ -69,8 +68,7 @@ pub fn apply_move(text: &str, cursor: usize, m: CursorMove) -> usize {
                 text[..cursor]
                     .char_indices()
                     .last()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0)
+                    .map_or(0, |(i, _)| i)
             }
         }
         CursorMove::Right => {
@@ -78,7 +76,7 @@ pub fn apply_move(text: &str, cursor: usize, m: CursorMove) -> usize {
                 text.len()
             } else {
                 let rest = &text[cursor..];
-                let ch_len = rest.chars().next().map(char::len_utf8).unwrap_or(0);
+                let ch_len = rest.chars().next().map_or(0, char::len_utf8);
                 cursor + ch_len
             }
         }

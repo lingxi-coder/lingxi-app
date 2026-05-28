@@ -7,7 +7,7 @@
 //!
 //! 1. `pub fn dispatch(KeyAction, &mut AppState) -> bool` — the pure
 //!    state-transition for a single user keystroke. Heavy I/O (slash
-//!    dispatch, run_turn) is handled by `app::handle_submit_line` and
+//!    dispatch, `run_turn`) is handled by `app::handle_submit_line` and
 //!    `app::run_one_submit` which call `dispatch` first and then act on
 //!    the returned `should_run_turn` flag.
 //! 2. `pub fn scroll_with_viewport(&mut AppState, ScrollDir, vh)` — the
@@ -85,6 +85,7 @@ impl TuiApp {
 /// [`run_one_submit`]). All other branches return `false`.
 ///
 /// The function is pure with respect to I/O — it only mutates `st`.
+#[allow(clippy::needless_pass_by_value)]
 pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
     match action {
         KeyAction::InsertChar(c) => {
@@ -157,6 +158,7 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             if st.history.is_empty() {
                 return false;
             }
+            #[allow(clippy::match_same_arms)]
             let new_cursor: Option<usize> = match (st.history_cursor, delta) {
                 (None, -1) => Some(st.history.len() - 1),
                 (None, 1) => None,
@@ -242,7 +244,7 @@ pub async fn handle_submit_line(
 /// the given viewport height. Used by the per-frame render path; tests
 /// also exercise it to verify the screen composes without panicking.
 ///
-/// The full reactive event-loop wiring (use_state hooks, key event →
+/// The full reactive event-loop wiring (`use_state` hooks, key event →
 /// dispatch, re-render on terminal resize) lands in M6-03 along with
 /// the streaming spinner. M6-02 ships the pure render function so
 /// downstream tasks have a stable assembly point.
@@ -290,7 +292,7 @@ pub trait ConversationOrchestratorTrait: Send + Sync {
     ) -> Result<TurnTextOutcome, String>;
 }
 
-/// Process one submitted line end-to-end: slash dispatch OR run_turn.
+/// Process one submitted line end-to-end: slash dispatch OR `run_turn`.
 ///
 /// The caller (per-frame loop) has already pushed the user message and
 /// cleared the prompt via `dispatch(KeyAction::Submit, ...)`. This fn
@@ -342,6 +344,14 @@ fn next_turn_id() -> u64 {
 /// Apply a scroll direction with a known viewport height. Called per
 /// frame for PageUp/PageDown, where the viewport is known; line-step
 /// (`j`/`k`) reuses this with `height=1`.
+///
+/// Internally widens to `i64` so that "scroll past the top/bottom" is
+/// expressible as a signed value before clamping back into `usize`.
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 pub fn scroll_with_viewport(st: &mut AppState, dir: ScrollDir, viewport_height: usize) {
     let total = st.messages.len();
     let max = total.saturating_sub(viewport_height) as i64;
@@ -426,9 +436,7 @@ mod dispatch_tests {
         dispatch(KeyAction::Submit, &mut st);
         assert_eq!(st.prompt_text, "");
         assert_eq!(st.messages.len(), 1);
-        assert!(
-            matches!(&st.messages[0], RenderedMessage::UserText { body, .. } if body == "hi")
-        );
+        assert!(matches!(&st.messages[0], RenderedMessage::UserText { body, .. } if body == "hi"));
         assert_eq!(st.history.last().map(String::as_str), Some("hi"));
     }
 

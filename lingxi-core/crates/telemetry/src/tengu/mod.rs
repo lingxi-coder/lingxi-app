@@ -34,7 +34,9 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     // M5-07: session block grew 15 -> 18 (+3 session_appended/rotated/corrupted).
     // M5-08: session block grows 18 -> 20 (+2 session_resume_started/completed).
     // M5-10: + 18 command events (6 commands × 3 phases) -> 276 total.
-    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 15 + 1 + 18;
+    // M5-11: command block grows 18 -> 54 (+36 new events for 12 batch-2 commands)
+    //        -> 312 total.
+    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 15 + 1 + 54;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;

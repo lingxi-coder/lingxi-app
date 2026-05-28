@@ -5,7 +5,7 @@
 use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_276_entries() {
+fn registry_is_exactly_312_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
@@ -19,9 +19,10 @@ fn registry_is_exactly_276_entries() {
     //   http_skipped_ssrf, timeout),
     // M5-07 added 3 session-jsonl events (appended/rotated/corrupted),
     // M5-08 added 2 session-resume events (resume_started/completed),
-    // M5-10 added 18 command events (6 batch-1 commands × 3 phases):
-    // 258 (post-M5-08) + 18 (M5-10) = 276.
-    assert_eq!(ALL_EVENT_NAMES.len(), 276);
+    // M5-10 added 18 command events (6 batch-1 commands × 3 phases),
+    // M5-11 added 36 command events (12 batch-2 commands × 3 phases):
+    // 276 (post-M5-10) + 36 (M5-11) = 312.
+    assert_eq!(ALL_EVENT_NAMES.len(), 312);
 }
 
 #[test]
@@ -113,9 +114,10 @@ fn category_ordering_preserved() {
     for n in &ALL_EVENT_NAMES[257..258] {
         assert!(n.starts_with("lingxi_core_"), "release block: {n}");
     }
-    // M5-10: command block (18 events) follows the release marker. Walk order
-    // (per tengu::mod.rs concat_all): … → release → command.
-    for n in &ALL_EVENT_NAMES[258..276] {
+    // M5-10/M5-11: command block (54 events: 18 batch-1 + 36 batch-2) follows
+    // the release marker. Walk order (per tengu::mod.rs concat_all):
+    // … → release → command.
+    for n in &ALL_EVENT_NAMES[258..312] {
         assert!(n.starts_with("tengu_command_"), "command block: {n}");
     }
 }

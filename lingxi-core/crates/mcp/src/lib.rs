@@ -18,6 +18,7 @@ pub mod connection;
 pub mod identity;
 pub mod inbound;
 pub mod initialize_params;
+pub mod json_config;
 pub mod oauth;
 pub mod registry;
 
@@ -28,4 +29,5 @@ pub use identity::{
 };
 pub use inbound::{ElicitationCreateHandler, RootsListHandler};
 pub use initialize_params::{ClientCapabilities, InitializeParams};
+pub use json_config::{load_mcp_json_with_precedence, parse_mcp_json_string, McpJsonError};
 pub use registry::McpRegistry;

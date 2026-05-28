@@ -1,0 +1,80 @@
+//! M6-07 — `list_agents` reads the wired `Arc<RwLock<Vec<AgentDefinition>>>`.
+
+use lingxi_agent::definition::{
+    AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
+};
+use lingxi_orchestrator::test_support::{
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+};
+use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use lingxi_traits::OrchestratorHandle;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+fn mk(name: &str, desc: &str, tools: Vec<String>) -> AgentDefinition {
+    AgentDefinition {
+        agent_type: name.into(),
+        when_to_use: desc.into(),
+        tools: AgentToolPolicy::Explicit(tools.clone()),
+        max_turns: 100,
+        model: AgentModel::Inherit,
+        permission_mode: AgentPermissionMode::Bubble,
+        source: AgentSource::UserDefined,
+        base_dir: std::path::PathBuf::from("/tmp"),
+        system_prompt: None,
+        mcp_servers: vec![],
+        frontmatter_hooks: vec![],
+        icon: None,
+        allowed_tools: tools,
+        worktree_requirement: None,
+    }
+}
+
+fn build_orch() -> ConversationOrchestrator {
+    ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(lingxi_tools::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+}
+
+#[tokio::test]
+async fn list_agents_returns_empty_when_no_catalog() {
+    let orch = Arc::new(build_orch());
+    assert!(orch.list_agents().await.is_empty());
+}
+
+#[tokio::test]
+async fn list_agents_returns_one_entry() {
+    let cat = Arc::new(RwLock::new(vec![mk(
+        "reviewer",
+        "Reviews code",
+        vec!["Read".into(), "Grep".into()],
+    )]));
+    let orch = Arc::new(build_orch().with_agent_catalog(cat));
+    let v = orch.list_agents().await;
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].name, "reviewer");
+    assert_eq!(v[0].description, "Reviews code");
+    assert_eq!(
+        v[0].tools_allowed,
+        vec!["Read".to_string(), "Grep".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn list_agents_sorts_by_name() {
+    let cat = Arc::new(RwLock::new(vec![
+        mk("zeta", "z", vec![]),
+        mk("alpha", "a", vec![]),
+    ]));
+    let orch = Arc::new(build_orch().with_agent_catalog(cat));
+    let v = orch.list_agents().await;
+    assert_eq!(v[0].name, "alpha");
+    assert_eq!(v[1].name, "zeta");
+}

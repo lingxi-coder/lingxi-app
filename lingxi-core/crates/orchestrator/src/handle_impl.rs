@@ -97,26 +97,58 @@ impl OrchestratorHandle for ConversationOrchestrator {
     // M5-11 additions:
 
     async fn list_mcp_servers(&self) -> Vec<McpServerInfo> {
-        // ConversationOrchestrator does not yet carry an MCP registry field
-        // (M2-02 registry lives in `lingxi-mcp`, but the orchestrator's
-        // production struct isn't wired to it as of M5-11). Returning an
-        // empty list is the honest answer for the v0.6.0 surface; the CLI
-        // (M5-12) will plumb the real registry through.
-        Vec::new()
+        // M6-07: read the wired McpRegistry (Task 7); falls back to
+        // `vec![]` when no registry was attached so unit tests / library
+        // callers remain unaffected.
+        let Some(reg) = self.mcp_registry.as_ref() else {
+            return Vec::new();
+        };
+        reg.snapshot().await
     }
 
     async fn list_hooks(&self) -> Vec<HookInfo> {
-        // Same shape as `list_mcp_servers` — the orchestrator carries a
-        // `HookExecutorImpl` field, but its registry is private. Until
-        // M5-12 wires a public accessor on `HookExecutorImpl`, return an
-        // empty list.
-        Vec::new()
+        // M6-07: read the wired HookRegistry (Task 7).
+        let Some(reg) = self.hook_registry.as_ref() else {
+            return Vec::new();
+        };
+        let g = reg.read().await;
+        let mut out: Vec<HookInfo> = g
+            .all_hooks()
+            .into_iter()
+            .map(|h| HookInfo {
+                name: h.name.clone(),
+                event: h
+                    .events
+                    .first()
+                    .map(event_str)
+                    .unwrap_or("Unknown")
+                    .to_string(),
+                matcher: h.if_condition.as_ref().map(|c| c.pattern.clone()),
+                timeout_ms: h.timeout.map_or(60_000_u64, |d| {
+                    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+                }),
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
     }
 
     async fn list_agents(&self) -> Vec<AgentInfo> {
-        // Subagent registry lives in `lingxi-agent`; orchestrator does
-        // not yet hold a handle. Empty until M5-12 wiring.
-        Vec::new()
+        // M6-07: read the wired agent catalog (Task 7).
+        let Some(cat) = self.agent_catalog.as_ref() else {
+            return Vec::new();
+        };
+        let g = cat.read().await;
+        let mut out: Vec<AgentInfo> = g
+            .iter()
+            .map(|a| AgentInfo {
+                name: a.agent_type.clone(),
+                description: a.when_to_use.clone(),
+                tools_allowed: a.allowed_tools.clone(),
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
     }
 
     async fn run_doctor_checks(&self) -> DoctorReport {
@@ -199,6 +231,43 @@ impl OrchestratorHandle for ConversationOrchestrator {
             }
             Err(e) => Err(HandleError::ActionFailed(e.to_string())),
         }
+    }
+}
+
+/// Stable string label for a `HookEventType`, used by [`list_hooks`] to
+/// populate [`lingxi_traits::HookInfo::event`]. Avoids `Debug` derive
+/// drift — the locked names are part of the M6-07 surface and the
+/// claude-code parity. (M6-07)
+fn event_str(et: &lingxi_hooks::events::HookEventType) -> &'static str {
+    use lingxi_hooks::events::HookEventType as E;
+    match et {
+        E::PreToolUse => "PreToolUse",
+        E::PostToolUse => "PostToolUse",
+        E::PostToolUseFailure => "PostToolUseFailure",
+        E::SessionStart => "SessionStart",
+        E::SessionEnd => "SessionEnd",
+        E::Setup => "Setup",
+        E::UserPromptSubmit => "UserPromptSubmit",
+        E::Stop => "Stop",
+        E::StopFailure => "StopFailure",
+        E::SubagentStart => "SubagentStart",
+        E::SubagentStop => "SubagentStop",
+        E::PreCompact => "PreCompact",
+        E::PostCompact => "PostCompact",
+        E::PermissionRequest => "PermissionRequest",
+        E::PermissionDenied => "PermissionDenied",
+        E::TeammateIdle => "TeammateIdle",
+        E::TaskCreated => "TaskCreated",
+        E::TaskCompleted => "TaskCompleted",
+        E::Elicitation => "Elicitation",
+        E::ElicitationResult => "ElicitationResult",
+        E::ConfigChange => "ConfigChange",
+        E::WorktreeCreate => "WorktreeCreate",
+        E::WorktreeRemove => "WorktreeRemove",
+        E::InstructionsLoaded => "InstructionsLoaded",
+        E::CwdChanged => "CwdChanged",
+        E::FileChanged => "FileChanged",
+        E::Notification => "Notification",
     }
 }
 

@@ -1,6 +1,7 @@
-//! Exit-code coverage for argv parse errors + cwd validation + REPL stub.
+//! Exit-code coverage for argv parse errors + cwd validation + REPL entry.
 //!
-//! Locks per plan M5-12 Task 0 step 2.
+//! Locks per plan M5-12 Task 0 step 2.  M5-13 updated the REPL stub to real
+//! behaviour: an empty stdin now exits 0 (EOF) instead of 64 (NOT_IMPLEMENTED).
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -25,13 +26,17 @@ fn cwd_to_nonexistent_path_exits_1() {
         .stderr(predicate::str::contains("--cwd path does not exist"));
 }
 
+/// M5-13: the REPL is real now.  Empty stdin → EOF → exits 0.
+/// The `"> "` prompt appears on stderr; stdout gets the EOF newline.
 #[test]
-fn empty_prompt_with_no_resume_enters_repl_then_exits_64() {
+fn empty_prompt_with_no_resume_enters_repl_and_exits_0_on_eof() {
     Command::cargo_bin("lingxi-cli")
         .unwrap()
+        .env("ANTHROPIC_API_KEY", "sk-ant-test-fake")
+        .write_stdin("") // immediate EOF
         .assert()
-        .code(64)
-        .stderr(predicate::str::contains("REPL mode not yet wired"));
+        .code(0)
+        .stderr(predicate::str::contains("> "));
 }
 
 #[test]

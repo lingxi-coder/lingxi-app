@@ -18,11 +18,29 @@
 //! $ lingxi-cli --resume     # interactive picker over 5 most-recent
 //! ```
 //!
-//! # REPL mode
+//! # REPL mode (M5-13)
+//!
+//! Invoking `lingxi-cli` without a positional prompt drops into a
+//! line-based REPL:
 //!
 //! ```text
-//! $ lingxi-cli           # → REPL (M5-13)
+//! $ lingxi-cli
+//! > /version
+//! lingxi-cli 0.5.0 (abc1234)
+//! > hello, claude
+//! Hi! How can I help?
+//! > /exit
+//! Exiting.
 //! ```
+//!
+//! - **Prompt**: `"> "` printed to stderr (so stdout stays parseable in
+//!   `--json` mode).
+//! - **EOF (Ctrl+D)**: persists the session and exits 0.
+//! - **First Ctrl+C during a turn**: cancels the turn, returns to prompt.
+//! - **First Ctrl+C at idle prompt**: arms a flag; second Ctrl+C within
+//!   2 seconds exits with code 130.
+//! - **`/exit`**: flips the orchestrator's `should_exit` flag; REPL
+//!   detects it after the dispatcher returns and exits 0.
 //!
 //! # Exit codes
 //!
@@ -30,7 +48,8 @@
 //!
 //! # Plan reference
 //!
-//! `docs/superpowers/plans/2026-05-25-m5-12-cli-binary.md`.
+//! `docs/superpowers/plans/2026-05-25-m5-12-cli-binary.md` (one-shot),
+//! `docs/superpowers/plans/2026-05-25-m5-13-repl-mode.md` (REPL).
 
 #![forbid(unsafe_code)]
 

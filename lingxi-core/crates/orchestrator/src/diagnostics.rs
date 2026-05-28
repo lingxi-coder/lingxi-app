@@ -170,7 +170,8 @@ async fn check_git() -> DoctorCheck {
 
 fn check_telemetry_schema() -> DoctorCheck {
     let actual = lingxi_telemetry::tengu::ALL_EVENT_NAMES.len();
-    let expected = 312;
+    // M5-13: orchestrator block grew 15 → 17 (+2 REPL events) → 314 total.
+    let expected = 314;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {
@@ -193,7 +194,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn check_telemetry_schema_passes_at_312() {
+    fn check_telemetry_schema_passes_at_314() {
         let c = check_telemetry_schema();
         assert_eq!(c.name, "telemetry-schema");
         assert!(matches!(c.status, CheckStatus::Pass));

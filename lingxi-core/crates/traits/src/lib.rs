@@ -44,7 +44,8 @@ pub use mailbox::{
 };
 pub use mcp::*;
 pub use orchestrator::{
-    CompactionSummary, CostSnapshot, HandleError, OrchestratorHandle, OutputEvent, OutputStream,
+    CompactionSummary, CostSnapshot, HandleError, MemoryEditorOutcome, OrchestratorHandle,
+    OutputEvent, OutputStream,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};

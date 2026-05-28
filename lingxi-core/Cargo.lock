@@ -1198,6 +1198,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -1770,6 +1771,7 @@ dependencies = [
  "hyper-util",
  "lingxi-anthropic-oauth",
  "lingxi-api-client",
+ "lingxi-commands",
  "lingxi-compaction",
  "lingxi-coordinator",
  "lingxi-core",

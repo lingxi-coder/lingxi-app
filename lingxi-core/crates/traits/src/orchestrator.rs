@@ -10,6 +10,7 @@
 use async_trait::async_trait;
 use lingxi_protocol::SessionId;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Snapshot of cumulative cost at a single point in time.
@@ -54,6 +55,21 @@ pub enum HandleError {
     ActionFailed(String),
 }
 
+/// Result of [`OrchestratorHandle::open_memory_editor`] (M5-10).
+///
+/// Returned to `/memory`'s handler so it can render the locked
+/// `"Edited {path} (exit {code})."` template. Carries the path the editor
+/// was launched against (which may have been created if absent) and the
+/// editor process's exit code (0 on success; non-zero on user cancel /
+/// editor error).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryEditorOutcome {
+    /// The CLAUDE.md path that was edited (may have been created if absent).
+    pub edited_path: PathBuf,
+    /// Exit code of the spawned `$EDITOR` process. 0 = success.
+    pub exit_code: i32,
+}
+
 /// Public handle to the orchestrator that slash commands operate against.
 ///
 /// Wired in M5-09 (slash-command surface). M5-02 only defines the trait —
@@ -74,6 +90,27 @@ pub trait OrchestratorHandle: Send + Sync {
 
     /// Switch the active model. Subsequent turns use the new model.
     async fn switch_model(&self, model: &str) -> Result<(), HandleError>;
+
+    // M5-10 additions:
+
+    /// Set the orchestrator's internal `should_exit` flag.
+    ///
+    /// The REPL (M5-13) checks this after each turn and breaks out of the
+    /// loop. The flag is one-way: once set, it cannot be cleared (so a
+    /// double-`/exit` is idempotent).
+    ///
+    /// Wired by M5-10 (`/exit` handler).
+    async fn request_exit(&self);
+
+    /// Open `$EDITOR` on `<config-dir>/claude/CLAUDE.md` (creating the file
+    /// if it does not exist), block until the editor exits, then return the
+    /// outcome.
+    ///
+    /// The editor lookup order is `EDITOR` → `VISUAL` → `"vi"` (Unix) /
+    /// `"notepad.exe"` (Windows). Empty env values are treated as missing.
+    ///
+    /// Wired by M5-10 (`/memory` handler).
+    async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError>;
 }
 
 /// Captured output emission. Useful for tests and (M5-13) the stdio sink.

@@ -120,6 +120,11 @@ pub struct ConversationOrchestrator {
     /// Cached UUID of the last persisted JSONL entry — used to populate
     /// `parentUuid` on the next append. Reset to `None` for fresh sessions.
     pub(crate) last_jsonl_uuid: Mutex<Option<String>>,
+    /// Set by [`lingxi_traits::OrchestratorHandle::request_exit`] (M5-10).
+    /// The REPL (M5-13) checks this flag at the start of each iteration
+    /// and breaks the loop. Wraps `AtomicBool` so reads are lock-free.
+    /// Once `true`, this flag is never cleared (idempotent `/exit`).
+    pub(crate) should_exit: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ConversationOrchestrator {
@@ -156,6 +161,7 @@ impl ConversationOrchestrator {
             cwd,
             jsonl_writer: None,
             last_jsonl_uuid: Mutex::new(None),
+            should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 

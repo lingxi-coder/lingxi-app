@@ -339,6 +339,185 @@ pub use crate::test_support_stream::{
 };
 
 // ============================================================================
+// MockOrchestratorHandle (M5-10 Task 2)
+// ============================================================================
+//
+// Scripted mock of `lingxi_traits::OrchestratorHandle` for the M5-10/M5-11
+// slash-command handler tests. Captures every call as a flag/counter and
+// returns whatever the test pre-loaded via setter methods.
+
+use lingxi_protocol::SessionId;
+use lingxi_traits::{CompactionSummary, HandleError, MemoryEditorOutcome, OrchestratorHandle};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+
+/// Test double for `OrchestratorHandle`.
+///
+/// Defaults: `current_session_id` returns a stable v4 UUID; all mutators
+/// return `Ok(())` (or appropriate success defaults); flags are recorded
+/// for later assertion via `was_*_called()` accessors.
+pub struct MockOrchestratorHandle {
+    /// Stable session id returned by `current_session_id`.
+    session_id: SessionId,
+    /// Number of `clear_session` calls.
+    clear_calls: AtomicUsize,
+    /// If `Some`, `clear_session` returns `ActionFailed(_)` instead of `Ok(())`.
+    clear_error: tokio::sync::Mutex<Option<String>>,
+    /// Pre-loaded `CompactionSummary` returned by `force_compact`. If not
+    /// set, defaults to `CompactionSummary::default()`.
+    compact_summary: tokio::sync::Mutex<Option<CompactionSummary>>,
+    /// If `Some`, `force_compact` returns `ActionFailed(_)`.
+    compact_error: tokio::sync::Mutex<Option<String>>,
+    /// Bumped each `switch_model` call. Records the most-recent value too.
+    switch_model_calls: AtomicUsize,
+    switch_model_last: tokio::sync::Mutex<Option<String>>,
+    /// Set by `request_exit`. Readable via `was_exit_requested`.
+    exit_requested: AtomicBool,
+    /// Pre-loaded path for `open_memory_editor`.
+    memory_path: tokio::sync::Mutex<Option<PathBuf>>,
+    /// Pre-loaded exit code for `open_memory_editor`.
+    editor_exit_code: AtomicI32,
+    /// If `Some`, `open_memory_editor` returns `ActionFailed(_)`.
+    memory_error: tokio::sync::Mutex<Option<String>>,
+    /// Cost snapshot fields (rarely exercised in M5-10).
+    cost_nano_usd: AtomicU64,
+    cost_tokens: AtomicU64,
+}
+
+impl MockOrchestratorHandle {
+    /// Construct a fresh mock with sane defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            session_id: SessionId::new(),
+            clear_calls: AtomicUsize::new(0),
+            clear_error: tokio::sync::Mutex::new(None),
+            compact_summary: tokio::sync::Mutex::new(None),
+            compact_error: tokio::sync::Mutex::new(None),
+            switch_model_calls: AtomicUsize::new(0),
+            switch_model_last: tokio::sync::Mutex::new(None),
+            exit_requested: AtomicBool::new(false),
+            memory_path: tokio::sync::Mutex::new(None),
+            editor_exit_code: AtomicI32::new(0),
+            memory_error: tokio::sync::Mutex::new(None),
+            cost_nano_usd: AtomicU64::new(0),
+            cost_tokens: AtomicU64::new(0),
+        }
+    }
+
+    /// Make the next `clear_session` call return `ActionFailed(reason)`.
+    pub fn set_clear_session_error(&self, reason: String) {
+        *self.clear_error.blocking_lock() = Some(reason);
+    }
+    /// True if `clear_session` was called at least once.
+    pub fn was_clear_session_called(&self) -> bool {
+        self.clear_calls.load(Ordering::SeqCst) > 0
+    }
+
+    /// Pre-load the `CompactionSummary` returned by `force_compact`.
+    pub fn set_compact_summary(&self, s: CompactionSummary) {
+        *self.compact_summary.blocking_lock() = Some(s);
+    }
+    /// Make the next `force_compact` call return `ActionFailed(reason)`.
+    pub fn set_compact_error(&self, reason: String) {
+        *self.compact_error.blocking_lock() = Some(reason);
+    }
+
+    /// True if `request_exit` was called.
+    pub fn was_exit_requested(&self) -> bool {
+        self.exit_requested.load(Ordering::SeqCst)
+    }
+
+    /// Pre-load the path `open_memory_editor` reports.
+    pub fn set_memory_path(&self, p: PathBuf) {
+        *self.memory_path.blocking_lock() = Some(p);
+    }
+    /// Pre-load the exit code `open_memory_editor` reports.
+    pub fn set_editor_exit_code(&self, c: i32) {
+        self.editor_exit_code.store(c, Ordering::SeqCst);
+    }
+    /// Make the next `open_memory_editor` call return `ActionFailed(reason)`.
+    pub fn set_memory_editor_error(&self, reason: String) {
+        *self.memory_error.blocking_lock() = Some(reason);
+    }
+
+    /// Number of `switch_model` calls so far.
+    pub fn switch_model_call_count(&self) -> usize {
+        self.switch_model_calls.load(Ordering::SeqCst)
+    }
+    /// Most-recent model passed to `switch_model`, or `None`.
+    pub fn last_switched_model(&self) -> Option<String> {
+        self.switch_model_last.blocking_lock().clone()
+    }
+}
+
+impl Default for MockOrchestratorHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl OrchestratorHandle for MockOrchestratorHandle {
+    async fn current_session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    async fn clear_session(&self) -> Result<(), HandleError> {
+        self.clear_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(reason) = self.clear_error.lock().await.take() {
+            return Err(HandleError::ActionFailed(reason));
+        }
+        Ok(())
+    }
+
+    async fn force_compact(&self) -> Result<CompactionSummary, HandleError> {
+        if let Some(reason) = self.compact_error.lock().await.take() {
+            return Err(HandleError::ActionFailed(reason));
+        }
+        Ok(self
+            .compact_summary
+            .lock()
+            .await
+            .clone()
+            .unwrap_or_default())
+    }
+
+    async fn snapshot_cost(&self) -> lingxi_traits::CostSnapshot {
+        lingxi_traits::CostSnapshot {
+            session_id: self.session_id,
+            total_nano_usd: self.cost_nano_usd.load(Ordering::SeqCst),
+            total_tokens: self.cost_tokens.load(Ordering::SeqCst),
+        }
+    }
+
+    async fn switch_model(&self, model: &str) -> Result<(), HandleError> {
+        self.switch_model_calls.fetch_add(1, Ordering::SeqCst);
+        *self.switch_model_last.lock().await = Some(model.to_string());
+        Ok(())
+    }
+
+    async fn request_exit(&self) {
+        self.exit_requested.store(true, Ordering::SeqCst);
+    }
+
+    async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
+        if let Some(reason) = self.memory_error.lock().await.take() {
+            return Err(HandleError::ActionFailed(reason));
+        }
+        Ok(MemoryEditorOutcome {
+            edited_path: self
+                .memory_path
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("/dev/null/CLAUDE.md")),
+            exit_code: self.editor_exit_code.load(Ordering::SeqCst),
+        })
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

@@ -5,7 +5,7 @@
 use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_319_entries() {
+fn registry_is_exactly_321_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
@@ -28,7 +28,9 @@ fn registry_is_exactly_319_entries() {
     // 314 + 1 = 315.
     // M6-01 added 4 TUI lifecycle events (session_started/ended,
     // first_render, resize): 315 + 4 = 319.
-    assert_eq!(ALL_EVENT_NAMES.len(), 319);
+    // M6-03 added 2 TUI streaming render events (streaming_render_started/ended):
+    // 319 + 2 = 321.
+    assert_eq!(ALL_EVENT_NAMES.len(), 321);
 }
 
 #[test]
@@ -141,7 +143,14 @@ fn category_ordering_preserved() {
         assert!(n.starts_with("tengu_command_"), "command block: {n}");
     }
     // M6-01: tui block (4 events) trails command.
-    for n in &ALL_EVENT_NAMES[315..319] {
+    // M6-03: tui block grows to 6 events (+streaming_render_{started,ended}).
+    for n in &ALL_EVENT_NAMES[315..321] {
         assert!(n.starts_with("tengu_tui_"), "tui block: {n}");
     }
+}
+
+#[test]
+fn m6_03_streaming_render_events_registered() {
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_tui_streaming_render_started"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_tui_streaming_render_ended"));
 }

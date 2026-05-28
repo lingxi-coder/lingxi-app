@@ -172,7 +172,8 @@ fn check_telemetry_schema() -> DoctorCheck {
     let actual = lingxi_telemetry::tengu::ALL_EVENT_NAMES.len();
     // M5-14: +1 release marker (lingxi_core_v0_6_0_released) → 315 total.
     // M6-01: +4 TUI lifecycle events (tengu_tui_*) → 319 total.
-    let expected = 319;
+    // M6-03: +2 TUI streaming render events → 321 total.
+    let expected = 321;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {
@@ -195,7 +196,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn check_telemetry_schema_passes_at_319() {
+    fn check_telemetry_schema_passes_at_321() {
         let c = check_telemetry_schema();
         assert_eq!(c.name, "telemetry-schema");
         assert!(matches!(c.status, CheckStatus::Pass));

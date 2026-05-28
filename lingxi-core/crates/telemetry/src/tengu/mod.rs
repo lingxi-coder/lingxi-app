@@ -42,7 +42,9 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     //        entries; the comments above understate by 1 — see audit log
     //        in the M6-01 plan execution.)
     // M6-01: TUI lifecycle events (+4 -> 319).
-    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 2 + 54 + 4;
+    // M6-03: +2 streaming render events (streaming_render_{started,ended})
+    //        → tui block grows 4 → 6 → 321 total.
+    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 2 + 54 + 6;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;

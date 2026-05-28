@@ -320,7 +320,9 @@
     "tengu_tui_session_started",
     "tengu_tui_session_ended",
     "tengu_tui_first_render",
-    "tengu_tui_resize"
+    "tengu_tui_resize",
+    "tengu_tui_streaming_render_started",
+    "tengu_tui_streaming_render_ended"
   ],
   "cost_sample_payloads": [
     {

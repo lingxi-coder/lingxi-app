@@ -15,7 +15,7 @@ use std::io::IsTerminal;
 /// The resolved execution mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
-    /// One-shot print mode: prompt is set, exit after first end_turn.
+    /// One-shot print mode: prompt is set, exit after first `end_turn`.
     /// Carries the prompt string so the caller doesn't re-clone argv.
     Print(String),
     /// Fullscreen iocraft TUI (default when no prompt + TTY + no `--no-tui`).
@@ -52,6 +52,59 @@ pub fn decide_mode_with(argv: &Argv, is_tty: bool) -> Mode {
 
 fn is_full_tty() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+use crate::exit_codes;
+use crate::init::Runtime;
+use crate::output::OutputSink;
+use lingxi_traits::OrchestratorHandle;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
+
+/// Execute the chosen mode. Returns the process exit code.
+///
+/// `Mode::Print` and `Mode::StdioRepl` call into the existing v0.6.0
+/// code paths unchanged. `Mode::Tui` calls into the new `lingxi-tui`
+/// entry point.
+pub async fn dispatch(
+    mode: Mode,
+    argv: &Argv,
+    runtime: &Runtime,
+    sink: Arc<dyn OutputSink>,
+) -> i32 {
+    match mode {
+        Mode::Print(_) => {
+            // run_oneshot reads the prompt directly from argv.prompt;
+            // the captured-prompt copy in Mode::Print(prompt) exists for
+            // test introspection only.
+            crate::run::run_oneshot(argv, runtime, sink.as_ref()).await
+        }
+        Mode::StdioRepl => {
+            // v0.6.0 REPL path. `repl::run_repl` rebuilds the runtime
+            // internally (it owns its own sink/orchestrator construction
+            // for the streaming-stdout case). Pass argv through and
+            // ignore the `runtime` arg in this arm.
+            let _ = runtime; // intentionally unused in this arm
+            let _ = sink; // intentionally unused (repl mints its own)
+            crate::repl::run_repl(argv).await
+        }
+        Mode::Tui => {
+            // M6-01 baseline: build a minimal `lingxi_tui::Runtime` from
+            // the orchestrator's session id, run a single TUI loop, exit.
+            // M6-02 widens `lingxi_tui::Runtime` to carry the full
+            // OrchestratorHandle + dispatcher.
+            let session_id = runtime.orchestrator.clone().current_session_id().await;
+            let tui_runtime = lingxi_tui::session::Runtime::new(session_id);
+            let cancel = CancellationToken::new();
+            match lingxi_tui::run_tui_session(tui_runtime, cancel).await {
+                Ok(()) => exit_codes::SUCCESS,
+                Err(e) => {
+                    eprintln!("lingxi-cli: tui session failed: {e}");
+                    exit_codes::RUNTIME_ERROR
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

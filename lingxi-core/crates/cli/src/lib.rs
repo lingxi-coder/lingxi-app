@@ -94,10 +94,6 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return exit_codes::RUNTIME_ERROR;
     }
 
-    if parsed.is_repl_mode() {
-        return repl::run_repl(&parsed).await;
-    }
-
     // Pick the sink first so we can install it on the orchestrator at
     // construction time. For `--json` the session id used in `turn_start`
     // is minted afresh (synchronous mint via `SessionId::new`); for
@@ -110,6 +106,10 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     let adapter: Arc<dyn lingxi_traits::OutputStream> =
         Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
 
+    // For `Mode::Print` we still need the runtime; for `Mode::StdioRepl`
+    // and `Mode::Tui` we also build it once so `mode::dispatch` can pass
+    // the orchestrator's session id into the TUI. Building the runtime
+    // is cheap (no API calls until `run_turn`).
     let runtime = match init::build_runtime(&parsed, adapter).await {
         Ok(r) => r,
         Err(e) => {
@@ -118,9 +118,12 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
     };
 
+    // --resume still routes through run::run_resume (v0.6.0 behaviour
+    // unchanged). M7 wires resume into the TUI.
     if parsed.resume.is_some() {
-        run::run_resume(&parsed, &runtime, sink.as_ref()).await
-    } else {
-        run::run_oneshot(&parsed, &runtime, sink.as_ref()).await
+        return run::run_resume(&parsed, &runtime, sink.as_ref()).await;
     }
+
+    let chosen = mode::decide_mode(&parsed);
+    mode::dispatch(chosen, &parsed, &runtime, sink).await
 }

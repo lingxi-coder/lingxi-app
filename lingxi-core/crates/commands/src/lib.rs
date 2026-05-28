@@ -7,11 +7,13 @@
 
 pub mod argument_substitution;
 pub mod builtin;
+pub mod dispatcher;
 pub mod model;
 pub mod parser;
 pub mod registry;
 
 pub use argument_substitution::substitute_arguments;
+pub use dispatcher::RegistrySlashDispatcher;
 pub use model::*;
 pub use parser::{parse_slash_command, ParsedSlashCommand};
 pub use registry::{register_all_builtin_commands, CommandRegistry};

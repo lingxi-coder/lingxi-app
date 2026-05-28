@@ -11,6 +11,7 @@
 pub mod bridge;
 pub mod budget;
 pub mod clock;
+pub mod commands;
 pub mod effect_handler;
 pub mod filesystem;
 pub mod http;
@@ -33,6 +34,7 @@ pub mod worktree;
 pub use bridge::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 pub use budget::{BudgetEnforcerHandle, BudgetError};
 pub use clock::Clock;
+pub use commands::{SlashCommandDispatcher, SlashDispatchResult};
 pub use effect_handler::EffectHandler;
 pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
 pub use http::{HttpError, HttpTransport};

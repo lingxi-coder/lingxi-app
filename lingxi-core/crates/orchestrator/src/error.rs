@@ -53,6 +53,15 @@ pub enum OrchestratorError {
     /// silently retrying.
     #[error("stream ended without message_stop event")]
     StreamEndedWithoutStop,
+
+    /// Compaction layer surfaced an error. (M6-08)
+    #[error("compaction failed: {0}")]
+    Compaction(#[from] lingxi_compaction::CompactionError),
+
+    /// `force_compact` was cancelled mid-run by the supplied
+    /// `CancellationToken`. (M6-08)
+    #[error("compaction cancelled")]
+    CompactionCancelled,
 }
 
 #[cfg(test)]
@@ -109,5 +118,21 @@ mod tests {
             format!("{}", OrchestratorError::StreamEndedWithoutStop),
             "stream ended without message_stop event"
         );
+    }
+
+    #[test]
+    fn compaction_variant_projects_to_string() {
+        let api_err =
+            lingxi_api_client::ApiError::Http(lingxi_traits::HttpError::Connection("nope".into()));
+        let compact_err = lingxi_compaction::CompactionError::Api(api_err);
+        let e = OrchestratorError::Compaction(compact_err);
+        let s = e.to_string();
+        assert!(s.contains("compaction"), "got: {s}");
+    }
+
+    #[test]
+    fn compaction_cancelled_renders() {
+        let e = OrchestratorError::CompactionCancelled;
+        assert_eq!(e.to_string(), "compaction cancelled");
     }
 }

@@ -17,6 +17,7 @@ lingxi-hooks = { path = "../hooks" }
 lingxi-mcp = { path = "../mcp" }
 lingxi-agent = { path = "../agent" }
 lingxi-cost = { path = "../cost" }
+lingxi-compaction = { path = "../compaction" }
 lingxi-session = { path = "../session" }
 lingxi-telemetry = { path = "../telemetry" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

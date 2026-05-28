@@ -652,6 +652,50 @@ impl ConversationOrchestrator {
         self.should_exit.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Streaming twin of [`Self::run_turn_with_cancel`] (M6-03).
+    ///
+    /// Race [`Self::try_run_turn_streaming`] against the `cancel` token:
+    /// - natural completion (`ConversationOutcome::EndTurn`) → `TurnOutcome::EndTurn`.
+    /// - `cancel.cancelled()` fires → `TurnOutcome::Cancelled` (the SSE
+    ///   stream is dropped, which closes the HTTP request and flushes any
+    ///   already-buffered `emit_text` calls to the output sink).
+    /// - `OrchestratorError::MaxTurnsReached` → `TurnOutcome::MaxTurns`.
+    /// - any other API/streaming error → propagated as `Err`.
+    ///
+    /// This is the entry point the M6 TUI calls. M5-13 stdio REPL keeps
+    /// using `run_turn_with_cancel` (batched) until M6 makes streaming
+    /// the default.
+    pub async fn run_turn_streaming_with_cancel(
+        &self,
+        prompt: &str,
+        cancel: CancellationToken,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        tracing::info!(
+            event = orch_events::TURN_STREAMING_STARTED,
+            prompt_len = prompt.len()
+        );
+        if cancel.is_cancelled() {
+            return Ok(TurnOutcome::Cancelled);
+        }
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Ok(TurnOutcome::Cancelled),
+            r = self.try_run_turn_streaming(prompt) => match r {
+                Ok(ConversationOutcome::EndTurn { turn_count, .. }) => {
+                    tracing::info!(
+                        event = orch_events::TURN_STREAMING_COMPLETED,
+                        turn_count
+                    );
+                    Ok(TurnOutcome::EndTurn)
+                }
+                Err(OrchestratorError::MaxTurnsReached { .. }) => {
+                    Ok(TurnOutcome::MaxTurns)
+                }
+                Err(e) => Err(e),
+            },
+        }
+    }
+
     /// Build the per-turn system prompt by gathering cwd / git / file
     /// tree / memory / tool-name context and calling
     /// [`crate::prompt::assemble_system_prompt`]. Bypassed when

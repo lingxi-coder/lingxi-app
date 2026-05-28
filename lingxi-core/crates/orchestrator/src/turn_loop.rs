@@ -48,6 +48,32 @@ pub(crate) async fn execute_one_turn(
         .messages_create(&model, system, history_snapshot)
         .await?;
 
+    // 1.5 M6-06: record this response's usage into the wired CostTracker (if any).
+    // We pass `Duration::ZERO` (the api-client adapter does not currently
+    // surface per-call wall-clock duration) and `retries = 0` (retries are
+    // swallowed internally). Both inaccuracies are documented in v0.7.0
+    // release notes; M7 wires through real timing.
+    if let Some(tracker) = orch.cost_tracker.as_ref() {
+        let usage = crate::cost_wiring::usage_api_to_cost_usage(&response.usage);
+        let cache_read = response.usage.cache_read_input_tokens;
+        let cache_create = response.usage.cache_creation_input_tokens;
+        let model_ref = crate::cost_wiring::model_ref_from_string(&model);
+        let _cost_for_this_call = tracker
+            .record_api_response_v2(
+                model_ref,
+                usage,
+                std::time::Duration::ZERO,
+                0,    // retries — not exposed from api-client adapter today
+                cache_read,
+                cache_create,
+                false, // is_batch_request — M6 always false
+                None,  // bus — orchestrator does not yet carry an AnalyticsBus (M7 work)
+            )
+            .await;
+        orch.api_calls_recorded
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
     // 2. Translate `MessageResponse.content` -> `ContentBlock` history entry.
     let assistant_blocks = translate_response_blocks(&response.content);
 

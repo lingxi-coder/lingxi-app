@@ -48,5 +48,8 @@ assert_cmd = "=2.0.16"
 predicates = "3"
 tempfile = "3"
 
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [lints]
 workspace = true

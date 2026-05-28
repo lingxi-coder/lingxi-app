@@ -1,5 +1,6 @@
-//! M6-06 — after a successful turn, the wired CostTracker must have
+//! M6-06 — after a successful turn, the wired `CostTracker` must have
 //! recorded the response's token usage and computed a non-zero cost.
+#![allow(clippy::field_reassign_with_default)]
 
 use lingxi_api_client::types::{MessageResponse, UsageApi};
 use lingxi_cost::pricing::PricingCatalog;
@@ -13,7 +14,7 @@ use lingxi_tools::registry::ToolRegistry;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Build a `MessageResponse` that emulates a single end_turn API reply with
+/// Build a `MessageResponse` that emulates a single `end_turn` API reply with
 /// the given token usage.
 fn end_turn_response_with_usage(input: u64, output: u64) -> MessageResponse {
     MessageResponse {

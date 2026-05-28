@@ -71,6 +71,7 @@ fn format_duration(d: Duration) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default, clippy::manual_let_else)]
 mod tests {
     use super::*;
     use lingxi_orchestrator::test_support::MockOrchestratorHandle;

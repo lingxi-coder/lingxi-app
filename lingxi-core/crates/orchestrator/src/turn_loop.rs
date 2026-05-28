@@ -61,7 +61,7 @@ pub(crate) async fn execute_one_turn(
                 model_ref,
                 usage,
                 std::time::Duration::ZERO,
-                0,    // retries — not exposed from api-client adapter today
+                0, // retries — not exposed from api-client adapter today
                 cache_read,
                 cache_create,
                 false, // is_batch_request — M6 always false
@@ -378,4 +378,3 @@ pub(crate) async fn dispatch_tool_uses(
     }
     Ok(results)
 }
-

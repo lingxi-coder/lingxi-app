@@ -1,4 +1,9 @@
-//! M6-06 — `snapshot_cost` reads real numbers from the wired CostTracker.
+//! M6-06 — `snapshot_cost` reads real numbers from the wired `CostTracker`.
+#![allow(
+    clippy::field_reassign_with_default,
+    clippy::float_cmp,
+    clippy::unused_async
+)]
 
 use lingxi_api_client::types::{MessageResponse, UsageApi};
 use lingxi_cost::pricing::PricingCatalog;
@@ -29,14 +34,16 @@ fn end_turn_response_with_usage(input: u64, output: u64) -> MessageResponse {
 }
 
 /// Construct an orchestrator pre-loaded with N priced responses (each
-/// `input=1000, output=500`) and a fresh CostTracker.
+/// `input=1000, output=500`) and a fresh `CostTracker`.
 async fn make_orch_with_n_responses(
     n: usize,
 ) -> (
     Arc<ConversationOrchestrator>,
     mpsc::Receiver<lingxi_cost::CostState>,
 ) {
-    let responses: Vec<_> = (0..n).map(|_| end_turn_response_with_usage(1_000, 500)).collect();
+    let responses: Vec<_> = (0..n)
+        .map(|_| end_turn_response_with_usage(1_000, 500))
+        .collect();
     let api = Arc::new(MockApiClient::new(responses));
 
     let (tx, rx) = mpsc::channel(64);

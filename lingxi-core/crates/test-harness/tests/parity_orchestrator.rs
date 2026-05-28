@@ -5,6 +5,7 @@
 //! Uses `MockApiClient` from `lingxi_orchestrator::test_support`.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-14-release-v0.6.0.md` Task 2.
+#![allow(clippy::field_reassign_with_default)]
 
 use lingxi_api_client::types::ContentBlockApi;
 use lingxi_orchestrator::test_support::{

@@ -73,7 +73,10 @@ mod tests {
 
     #[test]
     fn provider_always_anthropic_in_v070() {
-        assert_eq!(provider_from_model("claude-opus-4-7"), ProviderId::Anthropic);
+        assert_eq!(
+            provider_from_model("claude-opus-4-7"),
+            ProviderId::Anthropic
+        );
         assert_eq!(provider_from_model("gpt-5"), ProviderId::Anthropic);
         assert_eq!(provider_from_model(""), ProviderId::Anthropic);
     }

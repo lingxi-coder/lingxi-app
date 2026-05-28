@@ -1,4 +1,4 @@
-//! M6-06 — StatusLine renders the cost string passed via props verbatim
+//! M6-06 — `StatusLine` renders the cost string passed via props verbatim
 //! (4-decimal claude-code parity).
 //!
 //! The component takes `cost: String` (pre-formatted by the producer).

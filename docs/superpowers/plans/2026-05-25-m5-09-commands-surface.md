@@ -1,4 +1,8 @@
-# M5-09 Slash Commands Surface — 102 Names Registered, 84 Stubs + 18 Core Placeholders
+# M5-09 Slash Commands Surface — 99 Names Registered, 81 Stubs + 18 Core Placeholders
+
+**Status:** ✅ Complete (tagged `m5.9` on 2026-05-28)
+
+> **2026-05-28 ADDENDUM (count reconciliation):** The original plan prose locked `102` total commands, but T0 step 2's enumerated list yields exactly **99 names**. The runtime aggregator in claude-code (`commands.ts::COMMANDS`) has additional entries with directory→runtime-name normalisation, but matching that adds plan churn out of proportion to value. **Decision: lock at 99 = 18 core + 81 unimplemented.** Throughout the rest of this file, wherever the prose or code says `102`, read `99`; wherever it says `84`, read `81`. The constant declarations `BUILTIN_COMMAND_NAMES: &[&str; 102]` become `&[&str; 99]`. The parity fixture filename stays `parity_slash_commands_102.json` for git-history continuity but its `total_count_lock` and `unimplemented_count_lock` fields hold `99` and `81` respectively. The byte-locked literals (L1–L4) are unchanged.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

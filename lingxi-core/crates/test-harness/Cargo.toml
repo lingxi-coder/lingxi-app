@@ -78,6 +78,9 @@ sha2 = "0.10"
 # ConversationOrchestrator turn loop + TurnOutcome + run_turn_with_cancel.
 lingxi-orchestrator = { path = "../orchestrator" }
 tokio-util = { workspace = true, features = ["rt"] }
+# Used by the M5-14 parity driver (parity_session_jsonl) to exercise the
+# orchestrator → JsonlWriter → JsonlReader round-trip byte-equivalence.
+lingxi-session = { path = "../session" }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 lingxi-platform-posix = { path = "../../platforms/posix" }

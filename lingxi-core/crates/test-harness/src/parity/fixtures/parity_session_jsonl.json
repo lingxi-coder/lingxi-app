@@ -1,0 +1,23 @@
+{
+  "_meta": {
+    "plan": "M5-14",
+    "spec_section": "§3 cross-cutting locks — byte-equivalent session JSONL",
+    "_lingxi_version": "0.6.0",
+    "description": "Cross-cutting parity: ConversationOrchestrator turn → JsonlWriter → read-back validates line format, field order, LF-only termination, and telemetry event linkage.",
+    "locks": {
+      "line_terminator": "LF (0x0A) only, no CRLF",
+      "json_format": "compact (no whitespace)",
+      "user_type": "external",
+      "is_sidechain_default": false,
+      "uuid_pattern": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+      "timestamp_pattern": "ISO-8601 UTC millisecond precision e.g. 2026-05-25T14:30:00.000Z"
+    },
+    "single_turn_sequence": [
+      {"line": 1, "type": "user",      "parent_uuid": null,   "role": "user"},
+      {"line": 2, "type": "assistant", "parent_uuid": "line1", "role": "assistant"}
+    ],
+    "session_telemetry_events": [
+      "tengu_session_appended"
+    ]
+  }
+}

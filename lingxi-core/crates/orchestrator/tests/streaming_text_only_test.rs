@@ -8,7 +8,7 @@
 //! Fails to compile until Tasks 6, 8, 9, 12 land the streaming surface.
 
 use lingxi_orchestrator::test_support::{
-    MockApiClient, MockOutputStream, NoOpHookExecutor, NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use lingxi_orchestrator::test_support_stream::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
@@ -39,7 +39,7 @@ async fn streaming_text_only_three_deltas() {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     let output = Arc::new(MockOutputStream::new());
     let tools = Arc::new(ToolRegistry::new());
-    let hooks = Arc::new(NoOpHookExecutor);
+    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
 

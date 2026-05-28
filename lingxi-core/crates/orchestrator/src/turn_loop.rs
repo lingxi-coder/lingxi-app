@@ -5,7 +5,11 @@ use crate::error::OrchestratorError;
 use crate::test_support::PermissionDecision;
 use lingxi_api_client::types::ContentBlockApi;
 use lingxi_core::SessionState;
+use lingxi_hooks::events::HookEvent;
+use lingxi_hooks::registry::HookContext;
+use lingxi_hooks::response::HookDecision;
 use lingxi_protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+use lingxi_telemetry::tengu::orchestrator as orch_events;
 use lingxi_tools::context::{ToolUseContext, ToolUseOptions};
 use lingxi_traits::CostSnapshot;
 
@@ -139,8 +143,39 @@ pub(crate) async fn dispatch_tool_uses(
     for (tool_use_id, name, input) in tool_uses {
         orch.output.emit_tool_call(name, input).await;
 
-        // Pre-tool hook.
-        if let Err(reason) = orch.hooks.pre_tool_use(name, input).await {
+        // M5-06 Task 14: PreToolUse hook chain. Build the event + context,
+        // call the executor, and either Block (turn the response into an
+        // error ToolResult), apply modified_input, or continue.
+        let session_id = { orch.session.lock().await.session_id };
+        let hook_ctx = HookContext {
+            session_id,
+            cwd: orch.cwd.clone(),
+            ..Default::default()
+        };
+        let pre_event = HookEvent::PreToolUse {
+            tool_name: name.clone(),
+            tool_input: input.clone(),
+            tool_use_id: *tool_use_id,
+        };
+        let pre_started = std::time::Instant::now();
+        tracing::info!(
+            event = orch_events::HOOK_PRE_STARTED,
+            tool_name = %name,
+        );
+        let pre_agg = orch.hooks.execute(pre_event, hook_ctx.clone()).await;
+        let pre_dur_ms = pre_started.elapsed().as_millis() as u64;
+
+        if matches!(pre_agg.decision, Some(HookDecision::Block)) {
+            let reason = pre_agg
+                .reason
+                .clone()
+                .unwrap_or_else(|| "blocked by hook".into());
+            tracing::info!(
+                event = orch_events::HOOK_PRE_COMPLETED,
+                tool_name = %name,
+                decision = "block",
+                duration_ms = pre_dur_ms,
+            );
             let result_block = ContentBlock::ToolResult {
                 tool_use_id: *tool_use_id,
                 content: format!("Hook blocked: {reason}"),
@@ -156,8 +191,25 @@ pub(crate) async fn dispatch_tool_uses(
             continue;
         }
 
-        // Permission gate.
-        match orch.perms.check(name, input).await {
+        // Apply modified_input if any hook mutated the tool input.
+        let effective_input = pre_agg.modified_input.clone().unwrap_or_else(|| input.clone());
+        tracing::info!(
+            event = orch_events::HOOK_PRE_COMPLETED,
+            tool_name = %name,
+            decision = match pre_agg.decision {
+                Some(HookDecision::Allow) => "allow",
+                Some(HookDecision::Approve) => "approve",
+                Some(HookDecision::Continue) => "continue",
+                Some(HookDecision::Block) => "block",
+                None => "none",
+            },
+            duration_ms = pre_dur_ms,
+        );
+
+        // Permission gate. Use the post-hook effective_input so a Pre
+        // hook can rewrite a tool argument before the permission check
+        // sees it.
+        match orch.perms.check(name, &effective_input).await {
             PermissionDecision::Allow => {}
             PermissionDecision::Deny { reason } => {
                 let result_block = ContentBlock::ToolResult {
@@ -221,7 +273,7 @@ pub(crate) async fn dispatch_tool_uses(
         let (progress_tx, _progress_rx) =
             tokio::sync::mpsc::channel::<lingxi_tools::progress::ToolProgress>(8);
 
-        let tool_outcome = tool_handle.call(input.clone(), ctx, progress_tx).await;
+        let tool_outcome = tool_handle.call(effective_input.clone(), ctx, progress_tx).await;
 
         let (content, is_error, emit_payload) = match tool_outcome {
             Ok(result) => {
@@ -237,16 +289,45 @@ pub(crate) async fn dispatch_tool_uses(
 
         orch.output.emit_tool_result(name, &emit_payload).await;
 
-        // Post-tool hook (best-effort — failures are surfaced only via the
-        // hook executor's own telemetry; the tool result is preserved).
-        let _ = orch
-            .hooks
-            .post_tool_use(name, &emit_payload, is_error)
-            .await;
+        // M5-06 Task 14: PostToolUse hook chain. Best-effort — a Post
+        // hook's system_messages are appended to the result text, but
+        // failures do NOT mutate `content` or `is_error`.
+        let post_event = HookEvent::PostToolUse {
+            tool_name: name.clone(),
+            tool_input: effective_input.clone(),
+            tool_output: emit_payload.clone(),
+            tool_use_id: *tool_use_id,
+        };
+        let post_started = std::time::Instant::now();
+        tracing::info!(
+            event = orch_events::HOOK_POST_STARTED,
+            tool_name = %name,
+        );
+        let post_agg = orch.hooks.execute(post_event, hook_ctx).await;
+        let post_dur_ms = post_started.elapsed().as_millis() as u64;
+
+        let mutated = !post_agg.system_messages.is_empty();
+        let final_content = if mutated {
+            let mut out = content.clone();
+            for msg in &post_agg.system_messages {
+                out.push('\n');
+                out.push_str(msg);
+            }
+            out
+        } else {
+            content
+        };
+
+        tracing::info!(
+            event = orch_events::HOOK_POST_COMPLETED,
+            tool_name = %name,
+            duration_ms = post_dur_ms,
+            mutated_response = mutated,
+        );
 
         results.push(ContentBlock::ToolResult {
             tool_use_id: *tool_use_id,
-            content,
+            content: final_content,
             is_error,
         });
     }

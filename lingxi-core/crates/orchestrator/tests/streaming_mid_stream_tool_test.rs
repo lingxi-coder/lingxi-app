@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use lingxi_orchestrator::test_support::{
     content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
     message_delta_stop, message_start, message_stop, text_delta, MockApiClient, MockOutputStream,
-    MockStreamingApiClient, NoOpHookExecutor, NoOpPermissionGate, StaticMemoryProvider,
+    MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use lingxi_orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
 use lingxi_permission::result::PermissionMetadata;
@@ -135,7 +135,7 @@ async fn tool_use_dispatched_before_message_stop() {
     let mut registry = ToolRegistry::new();
     registry.register_builtin(Arc::new(AlwaysOkTool));
     let tools = Arc::new(registry);
-    let hooks = Arc::new(NoOpHookExecutor);
+    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
 

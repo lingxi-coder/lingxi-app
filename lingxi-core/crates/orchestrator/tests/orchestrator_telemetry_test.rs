@@ -2,7 +2,7 @@
 
 use lingxi_api_client::types::ContentBlockApi;
 use lingxi_orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpHookExecutor, NoOpPermissionGate,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
@@ -57,7 +57,7 @@ async fn run_turn_emits_started_and_completed_in_order() {
     );
     let api = Arc::new(MockApiClient::new(vec![resp]));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = Arc::new(NoOpHookExecutor);
+    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let tools = Arc::new(ToolRegistry::new());
 
@@ -114,7 +114,7 @@ async fn run_turn_emits_failed_on_max_turns_error() {
             .collect(),
     ));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = Arc::new(NoOpHookExecutor);
+    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let tools = Arc::new(ToolRegistry::new());
 

@@ -3,7 +3,7 @@
 use lingxi_api_client::ApiError;
 use lingxi_orchestrator::test_support::{
     content_block_start_text, message_start, text_delta, MockApiClient, MockOutputStream,
-    MockStreamingApiClient, NoOpHookExecutor, NoOpPermissionGate, StaticMemoryProvider,
+    MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig, OrchestratorError};
 use lingxi_tools::registry::ToolRegistry;
@@ -31,7 +31,7 @@ async fn mid_stream_err_surfaces_as_streaming_variant() {
         batched,
         api,
         Arc::new(ToolRegistry::new()),
-        Arc::new(NoOpHookExecutor),
+        lingxi_orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         output,
         Arc::new(StaticMemoryProvider::empty()),

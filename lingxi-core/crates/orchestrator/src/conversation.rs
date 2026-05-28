@@ -100,7 +100,7 @@ pub struct ConversationOrchestrator {
     /// caller can mix batched and streaming turns transparently.
     pub(crate) streaming_api: Arc<dyn StreamingApiClient>,
     pub(crate) tools: Arc<ToolRegistry>,
-    pub(crate) hooks: Arc<dyn HookExecutor>,
+    pub(crate) hooks: Arc<HookExecutor>, // = lingxi_hooks::HookExecutorImpl (M5-06)
     pub(crate) perms: Arc<dyn PermissionGate>,
     pub(crate) output: Arc<dyn OutputStream>,
     pub(crate) session: Arc<Mutex<SessionState>>,
@@ -129,7 +129,7 @@ impl ConversationOrchestrator {
         api: Arc<dyn OrchestratorApiClient>,
         streaming_api: Arc<dyn StreamingApiClient>,
         tools: Arc<ToolRegistry>,
-        hooks: Arc<dyn HookExecutor>,
+        hooks: Arc<HookExecutor>,
         perms: Arc<dyn PermissionGate>,
         output: Arc<dyn OutputStream>,
         memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
@@ -162,7 +162,7 @@ impl ConversationOrchestrator {
         config: OrchestratorConfig,
         api: Arc<dyn OrchestratorApiClient>,
         tools: Arc<ToolRegistry>,
-        hooks: Arc<dyn HookExecutor>,
+        hooks: Arc<HookExecutor>,
         perms: Arc<dyn PermissionGate>,
         output: Arc<dyn OutputStream>,
         memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,

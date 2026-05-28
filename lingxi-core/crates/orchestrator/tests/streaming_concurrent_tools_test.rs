@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use lingxi_orchestrator::test_support::{
     content_block_start_tool_use, content_block_stop, input_json_delta, message_delta_stop,
     message_start, message_stop, MockApiClient, MockOutputStream, MockStreamingApiClient,
-    NoOpHookExecutor, NoOpPermissionGate, StaticMemoryProvider,
+    NoOpPermissionGate, StaticMemoryProvider,
 };
 use lingxi_orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
 use lingxi_permission::result::PermissionMetadata;
@@ -146,7 +146,7 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
         batched,
         api,
         registry_with_slow_and_fast(),
-        Arc::new(NoOpHookExecutor),
+        lingxi_orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),

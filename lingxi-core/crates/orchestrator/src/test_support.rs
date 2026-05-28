@@ -194,47 +194,79 @@ impl OutputStream for MockOutputStream {
 // be constructed in tests without dragging in the full hooks/permission
 // machinery.
 
-/// Local hook executor trait used by `ConversationOrchestrator` until
-/// M5-06 wires the real 4-arm executor from `lingxi-hooks`. Lives here
-/// (not in `lingxi-traits`) because M5-06 will move it.
-#[async_trait]
-pub trait HookExecutor: Send + Sync {
-    /// Run before a tool dispatch. Errors abort the dispatch with the
-    /// returned string surfaced as a tool error.
-    async fn pre_tool_use(&self, tool_name: &str, input: &serde_json::Value) -> Result<(), String>;
+// M5-06 Task 14: the local `HookExecutor` trait that M5-02 introduced is
+// replaced by the real `lingxi_hooks::HookExecutorImpl`. We re-export the
+// concrete type so existing imports (crate::test_support::HookExecutor)
+// keep working as a type alias.
+pub use lingxi_hooks::HookExecutorImpl as HookExecutor;
 
-    /// Run after a tool dispatch. Errors are logged but do NOT abort the
-    /// turn — the orchestrator only inspects the returned `Result` for
-    /// post-side hook failures.
-    async fn post_tool_use(
-        &self,
-        tool_name: &str,
-        output: &serde_json::Value,
-        is_error: bool,
-    ) -> Result<(), String>;
+/// Construct an empty `HookExecutorImpl` suitable for tests + the
+/// orchestrator's "no hooks configured" path. The registry is empty so
+/// `execute()` always returns a fresh `AggregateHookResult::default()`
+/// without ever calling the supplied http/runtime stubs.
+///
+/// M5-06 Task 14: replaces the M5-02 `NoOpHookExecutor` unit struct so
+/// the orchestrator can carry an `Arc<HookExecutorImpl>` instead of an
+/// `Arc<dyn local::HookExecutor>` trait object.
+#[must_use]
+pub fn noop_hook_executor() -> Arc<lingxi_hooks::HookExecutorImpl> {
+    use lingxi_hooks::registry::HookRegistry;
+
+    struct UnusedHttp;
+    #[async_trait]
+    impl lingxi_traits::HttpTransport for UnusedHttp {
+        async fn request(
+            &self,
+            _req: lingxi_protocol::HttpRequest,
+        ) -> Result<lingxi_protocol::HttpResponse, lingxi_traits::HttpError> {
+            Err(lingxi_traits::HttpError::InvalidRequest(
+                "noop hook executor — http arm is never called with an empty registry".into(),
+            ))
+        }
+        async fn stream_sse(
+            &self,
+            _req: lingxi_protocol::HttpRequest,
+        ) -> Result<lingxi_traits::http::SseStream, lingxi_traits::HttpError> {
+            Err(lingxi_traits::HttpError::InvalidRequest(
+                "noop hook executor — sse arm is never called".into(),
+            ))
+        }
+    }
+
+    struct UnusedRuntime;
+    #[async_trait]
+    impl lingxi_traits::RuntimeSpawner for UnusedRuntime {
+        async fn spawn(
+            &self,
+            _name: &str,
+            _task: std::pin::Pin<
+                Box<dyn std::future::Future<Output = ()> + Send + 'static>,
+            >,
+        ) -> Result<lingxi_traits::BackgroundTaskHandle, lingxi_traits::RuntimeError> {
+            Err(lingxi_traits::RuntimeError::Internal(
+                "noop hook executor — runtime arm is never called".into(),
+            ))
+        }
+        async fn sleep(&self, _duration: std::time::Duration) {}
+        async fn cancel(
+            &self,
+            _handle: &lingxi_traits::BackgroundTaskHandle,
+        ) -> Result<(), lingxi_traits::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    let registry = Arc::new(tokio::sync::RwLock::new(HookRegistry::new()));
+    let http: Arc<dyn lingxi_traits::HttpTransport> = Arc::new(UnusedHttp);
+    let runtime: Arc<dyn lingxi_traits::RuntimeSpawner> = Arc::new(UnusedRuntime);
+    Arc::new(lingxi_hooks::HookExecutorImpl::new(registry, http, runtime))
 }
 
-/// Allow-all hook executor. Does nothing on pre/post.
-pub struct NoOpHookExecutor;
-
-#[async_trait]
-impl HookExecutor for NoOpHookExecutor {
-    async fn pre_tool_use(
-        &self,
-        _tool_name: &str,
-        _input: &serde_json::Value,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-    async fn post_tool_use(
-        &self,
-        _tool_name: &str,
-        _output: &serde_json::Value,
-        _is_error: bool,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-}
+// M5-06 Task 14: M5-02's `pub struct NoOpHookExecutor;` is gone — the
+// orchestrator now carries `Arc<HookExecutorImpl>` directly. Call sites
+// previously using `Arc::new(NoOpHookExecutor)` should now call
+// `crate::test_support::noop_hook_executor()` (which returns the Arc
+// directly).
 
 // M5-05 Task 2: PermissionGate + PermissionDecision are promoted to
 // lingxi-traits::permission_gate. We re-export them here so existing
@@ -419,12 +451,18 @@ mod tests {
     // -------- NoOp hooks + permission (Task 8) --------
 
     #[tokio::test]
-    async fn noop_hook_executor_always_succeeds() {
-        let h = NoOpHookExecutor;
-        let v = serde_json::json!({});
-        assert!(h.pre_tool_use("Read", &v).await.is_ok());
-        assert!(h.post_tool_use("Read", &v, false).await.is_ok());
-        assert!(h.post_tool_use("Read", &v, true).await.is_ok());
+    async fn noop_hook_executor_returns_empty_aggregate() {
+        let h = noop_hook_executor();
+        let event = lingxi_hooks::events::HookEvent::PreToolUse {
+            tool_name: "Read".into(),
+            tool_input: serde_json::json!({}),
+            tool_use_id: lingxi_protocol::ToolUseId::new(),
+        };
+        let ctx = lingxi_hooks::registry::HookContext::default();
+        let agg = h.execute(event, ctx).await;
+        assert!(agg.decision.is_none());
+        assert!(agg.modified_input.is_none());
+        assert!(agg.system_messages.is_empty());
     }
 
     #[tokio::test]

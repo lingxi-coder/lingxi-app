@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use lingxi_orchestrator::test_support::{
     content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
     message_delta_stop, message_start, message_stop, text_delta, MockApiClient, MockOutputStream,
-    MockStreamingApiClient, NoOpHookExecutor, NoOpPermissionGate, StaticMemoryProvider,
+    MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use lingxi_orchestrator::{
     scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig,
@@ -123,7 +123,7 @@ async fn two_streaming_turns_with_tool_in_between() {
         batched,
         api.clone(),
         registry_with_always_ok(),
-        Arc::new(NoOpHookExecutor),
+        lingxi_orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),

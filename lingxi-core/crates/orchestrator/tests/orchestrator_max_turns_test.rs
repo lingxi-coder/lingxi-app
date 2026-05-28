@@ -2,7 +2,7 @@
 
 use lingxi_api_client::types::ContentBlockApi;
 use lingxi_orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpHookExecutor, NoOpPermissionGate,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use lingxi_orchestrator::{
@@ -29,7 +29,7 @@ async fn never_ending_loop_aborts_with_max_turns_reached() {
         make_resp(),
     ]));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = Arc::new(NoOpHookExecutor);
+    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let tools = Arc::new(ToolRegistry::new());
 
@@ -67,7 +67,7 @@ async fn max_turns_default_30_is_the_construction_default() {
         Some("end_turn"),
     )]));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = Arc::new(NoOpHookExecutor);
+    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let tools = Arc::new(ToolRegistry::new());
 
@@ -94,7 +94,7 @@ async fn api_error_propagates_as_orchestrator_error_api_call() {
     // Empty mock → first call returns ApiError::Server (mock-exhaustion shape).
     let api = Arc::new(MockApiClient::new(vec![]));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = Arc::new(NoOpHookExecutor);
+    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let tools = Arc::new(ToolRegistry::new());
 

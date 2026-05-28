@@ -8,7 +8,7 @@
 use lingxi_api_client::types::{ContentBlockApi, MessageResponse, UsageApi};
 use lingxi_orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
-    text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpHookExecutor,
+    text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient,
     NoOpPermissionGate, StaticMemoryProvider,
 };
 use lingxi_orchestrator::{
@@ -40,7 +40,7 @@ async fn batched_and_streaming_produce_same_assistant_text() {
         batched_mock,
         streaming_stub,
         Arc::new(ToolRegistry::new()),
-        Arc::new(NoOpHookExecutor),
+        lingxi_orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         output_b.clone(),
         Arc::new(StaticMemoryProvider::empty()),
@@ -65,7 +65,7 @@ async fn batched_and_streaming_produce_same_assistant_text() {
         batched_stub,
         streaming_mock,
         Arc::new(ToolRegistry::new()),
-        Arc::new(NoOpHookExecutor),
+        lingxi_orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         output_s.clone(),
         Arc::new(StaticMemoryProvider::empty()),

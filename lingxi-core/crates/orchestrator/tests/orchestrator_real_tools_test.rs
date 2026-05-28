@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use lingxi_api_client::types::ContentBlockApi;
 use lingxi_orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpHookExecutor, NoOpPermissionGate,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use lingxi_orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
@@ -135,7 +135,7 @@ async fn orchestrator_drives_real_file_read_tool_on_a_tempfile() {
     );
     let api = Arc::new(MockApiClient::new(vec![r1, r2]));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = Arc::new(NoOpHookExecutor);
+    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let mut registry = ToolRegistry::new();
     registry.register_builtin(Arc::new(SimpleReadTool));

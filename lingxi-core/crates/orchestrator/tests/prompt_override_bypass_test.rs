@@ -3,7 +3,7 @@
 
 use lingxi_api_client::types::ContentBlockApi;
 use lingxi_orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpHookExecutor, NoOpPermissionGate,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
 use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
@@ -28,7 +28,7 @@ async fn override_is_forwarded_verbatim_bypassing_assembler() {
         cfg,
         api.clone(),
         Arc::new(ToolRegistry::new()),
-        Arc::new(NoOpHookExecutor),
+        lingxi_orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
@@ -52,7 +52,7 @@ async fn default_config_uses_assembler() {
         OrchestratorConfig::default(),
         api.clone(),
         Arc::new(ToolRegistry::new()),
-        Arc::new(NoOpHookExecutor),
+        lingxi_orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),

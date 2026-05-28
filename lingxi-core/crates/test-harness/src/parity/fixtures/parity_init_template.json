@@ -1,0 +1,17 @@
+{
+  "_meta": {
+    "plan": "M5-10",
+    "source": "claude-code/src/commands/init.ts:6-26 (OLD_INIT_PROMPT)",
+    "_claude_code_version": "see CHANGELOG v0.6.0 baseline"
+  },
+  "byte_length": 1592,
+  "line_count": 21,
+  "sha256": "cfdedaa2c59770dce2afbc73047805cda7078d961cc650463e39125197b55a39",
+  "first_sentence": "Please analyze this codebase and create a CLAUDE.md file, which will be given to future instances of Claude Code to operate in this repository.",
+  "must_contain_substrings": [
+    "# CLAUDE.md",
+    "This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.",
+    "If there's already a CLAUDE.md, suggest improvements to it.",
+    "Be sure to prefix the file with the following text:"
+  ]
+}

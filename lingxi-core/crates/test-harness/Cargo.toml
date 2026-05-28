@@ -71,6 +71,9 @@ regex = "1"
 # 99-name CommandRegistry + RegistrySlashDispatcher end-to-end against the
 # locked fixture. Dev-only.
 lingxi-commands = { path = "../commands" }
+# Used by the M5-10 parity driver (parity_init_template) to assert the
+# OLD_INIT_PROMPT sha256/length/lines lock against the fixture. Dev-only.
+sha2 = "0.10"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 lingxi-platform-posix = { path = "../../platforms/posix" }

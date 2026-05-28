@@ -11,6 +11,7 @@
 pub mod argv;
 pub mod cwd;
 pub mod exit_codes;
+pub mod logging;
 
 use crate::argv::Argv;
 use clap::error::ErrorKind;
@@ -33,6 +34,9 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             };
         }
     };
+
+    logging::init(parsed.debug);
+    tracing::debug!(?parsed, "argv parsed");
 
     if let Err(e) = cwd::apply_cwd(parsed.cwd.as_deref()) {
         eprintln!("lingxi-cli: {e}");

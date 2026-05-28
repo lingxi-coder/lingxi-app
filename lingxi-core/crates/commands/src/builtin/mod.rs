@@ -6,6 +6,7 @@
 //! can swap each one's body independently.
 
 pub mod compact;
+pub mod core_placeholders;
 pub mod cost;
 pub mod help;
 pub mod memory;

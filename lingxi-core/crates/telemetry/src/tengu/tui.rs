@@ -1,7 +1,7 @@
 //! `tengu_tui_*` lifecycle events emitted by `lingxi-tui::run_tui_session`.
 //!
-//! M6-01 ships 4 events. M6-03 adds streaming_render_{started,ended};
-//! M6-05 adds permission_dialog_{shown,resolved}. Full inventory locked
+//! M6-01 ships 4 events. M6-03 adds `streaming_render_{started,ended}`;
+//! M6-05 adds `permission_dialog_{shown,resolved}`. Full inventory locked
 //! at M6-09 release time.
 
 /// Fired by `run_tui_session` after `RawGuard::enter()` succeeds and

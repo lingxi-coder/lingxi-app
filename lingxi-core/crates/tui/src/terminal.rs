@@ -26,8 +26,6 @@ pub(crate) struct RawGuard {
     entered: bool,
 }
 
-// `enter`/`exit` are first called from `session::run_tui_session` in Task 7.
-#[allow(dead_code)]
 impl RawGuard {
     /// Install the panic hook (once) and enter raw mode + alt screen.
     pub(crate) fn enter() -> io::Result<Self> {

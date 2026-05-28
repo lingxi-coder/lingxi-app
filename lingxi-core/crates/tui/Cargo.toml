@@ -17,7 +17,7 @@ lingxi-telemetry = { path = "../telemetry" }
 lingxi-core = { path = "../core" }
 
 iocraft = "=0.8.3"
-crossterm = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tokio-stream = { workspace = true }

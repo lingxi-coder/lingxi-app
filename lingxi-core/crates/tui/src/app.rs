@@ -1,6 +1,6 @@
 //! Root iocraft component. M6-01 ships only a single `View` with a fixed
 //! placeholder line. M6-02 expands this into the three-zone REPL screen
-//! (StatusLine / Scrollback / PromptInput).
+//! (`StatusLine` / `Scrollback` / `PromptInput`).
 //!
 //! Plan §Task 5 originally referenced iocraft 0.6's `<Box>` element; the
 //! pinned `iocraft = "=0.8.3"` renames that to `<View>`. The structure

@@ -38,8 +38,9 @@ pub use schema::JsonlMessage;
 pub use uuid::validate_uuid;
 pub use writer::JsonlWriter;
 
-// New M5-08 public surface. `extract_title` is wired in T2.
+// New M5-08 public surface.
 pub use loader::{LoaderError, SessionMetadata};
+pub use title::extract_title;
 
 /// Size of the head buffer for lite metadata reads — 64 KiB.
 /// Byte-locked to `claude-code/src/utils/sessionStoragePortable.ts:17`

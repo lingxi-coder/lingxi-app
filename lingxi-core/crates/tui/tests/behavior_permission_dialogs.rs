@@ -79,3 +79,45 @@ async fn feed_esc_sends_deny() {
     let resp = rx.await.unwrap();
     assert_eq!(resp, PermissionResponse::Deny);
 }
+
+fn open_bypass_dialog(state: &mut AppState) -> oneshot::Receiver<PermissionResponse> {
+    let (tx, rx) = oneshot::channel();
+    state.pending_permission = Some(PendingPermission {
+        request: PermissionRequest::BypassPermissionsMode,
+    });
+    state.pending_permission_resp_tx = Some(tx);
+    state.pending_permission_started_at = Some(std::time::Instant::now());
+    rx
+}
+
+#[tokio::test]
+async fn bypass_requires_typed_yes_then_enter() {
+    let mut state = AppState::new(StatusSnapshot::default());
+    let rx = open_bypass_dialog(&mut state);
+
+    // Step 1: feed `y`, `e`, `s` — no resolution yet.
+    handle_key(&mut state, k(KeyCode::Char('y')));
+    assert!(state.pending_permission.is_some());
+    handle_key(&mut state, k(KeyCode::Char('e')));
+    assert!(state.pending_permission.is_some());
+    handle_key(&mut state, k(KeyCode::Char('s')));
+    assert!(state.pending_permission.is_some());
+
+    // Step 2: feed Enter — now resolves to AllowOnce.
+    handle_key(&mut state, k(KeyCode::Enter));
+    let resp = rx.await.unwrap();
+    assert_eq!(resp, PermissionResponse::AllowOnce);
+    assert!(state.pending_permission.is_none());
+}
+
+#[tokio::test]
+async fn bypass_enter_before_yes_does_not_resolve() {
+    let mut state = AppState::new(StatusSnapshot::default());
+    let _rx = open_bypass_dialog(&mut state);
+    handle_key(&mut state, k(KeyCode::Char('y')));
+    handle_key(&mut state, k(KeyCode::Enter));
+    assert!(
+        state.pending_permission.is_some(),
+        "Enter before full 'yes' must not resolve"
+    );
+}

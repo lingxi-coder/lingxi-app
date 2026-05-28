@@ -42,6 +42,7 @@ pub mod logging;
 pub mod output;
 pub mod output_adapter;
 pub mod repl;
+pub mod repl_loop;
 pub mod run;
 pub mod sigint;
 

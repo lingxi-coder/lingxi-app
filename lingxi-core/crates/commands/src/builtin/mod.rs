@@ -5,14 +5,14 @@
 //! get per-name placeholder structs (see [`core_placeholders`]) so M5-10 / M5-11
 //! can swap each one's body independently.
 
-pub mod compact;
 pub mod core_placeholders;
-pub mod cost;
-pub mod help;
-pub mod memory;
 pub mod names;
-pub mod resume;
 pub mod unimplemented;
 
+pub use core_placeholders::{
+    AgentsHandler, ClearHandler, CompactHandler, ConfigHandler, CostHandler, DoctorHandler,
+    ExitHandler, HelpHandler, HooksHandler, InitHandler, LoginHandler, LogoutHandler, McpHandler,
+    MemoryHandler, ModelHandler, PermissionsHandler, StatusHandler, VersionHandler,
+};
 pub use names::{core_description, BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES};
 pub use unimplemented::UnimplementedCommandHandler;

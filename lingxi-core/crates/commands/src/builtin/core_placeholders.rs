@@ -53,20 +53,18 @@ macro_rules! core_placeholder {
     };
 }
 
+// M5-10 batch 1 removed 6 placeholders from this file (Clear, Compact,
+// Exit, Help, Init, Memory). The real handlers live in dedicated modules:
+// `builtin::{clear, compact, exit, help, init, memory}`. The remaining 12
+// names below stay as placeholders until M5-11 batch 2 lights them up.
 core_placeholder!(AgentsHandler, "agents");
-core_placeholder!(ClearHandler, "clear");
-core_placeholder!(CompactHandler, "compact");
 core_placeholder!(ConfigHandler, "config");
 core_placeholder!(CostHandler, "cost");
 core_placeholder!(DoctorHandler, "doctor");
-core_placeholder!(ExitHandler, "exit");
-core_placeholder!(HelpHandler, "help");
 core_placeholder!(HooksHandler, "hooks");
-core_placeholder!(InitHandler, "init");
 core_placeholder!(LoginHandler, "login");
 core_placeholder!(LogoutHandler, "logout");
 core_placeholder!(McpHandler, "mcp");
-core_placeholder!(MemoryHandler, "memory");
 core_placeholder!(ModelHandler, "model");
 core_placeholder!(PermissionsHandler, "permissions");
 core_placeholder!(StatusHandler, "status");
@@ -79,20 +77,20 @@ core_placeholder!(VersionHandler, "version");
 /// M5-11 can replace the bodies one name at a time without touching registry
 /// wiring or the other 17 placeholders.
 pub fn register_core_placeholders(reg: &mut CommandRegistry) {
+    // M5-10 batch 1: the 6 commands (clear, compact, exit, help, init,
+    // memory) are NOT registered here — the CLI binary (M5-12) calls
+    // [`crate::registry::register_core_batch_1`] afterwards to install
+    // their real handlers. Until then, those 6 names continue to resolve
+    // through the shared `UnimplementedCommandHandler` registered in
+    // `register_all_builtin_commands`'s pass-1 loop.
     reg.register_builtin_handler(Arc::new(AgentsHandler::new()));
-    reg.register_builtin_handler(Arc::new(ClearHandler::new()));
-    reg.register_builtin_handler(Arc::new(CompactHandler::new()));
     reg.register_builtin_handler(Arc::new(ConfigHandler::new()));
     reg.register_builtin_handler(Arc::new(CostHandler::new()));
     reg.register_builtin_handler(Arc::new(DoctorHandler::new()));
-    reg.register_builtin_handler(Arc::new(ExitHandler::new()));
-    reg.register_builtin_handler(Arc::new(HelpHandler::new()));
     reg.register_builtin_handler(Arc::new(HooksHandler::new()));
-    reg.register_builtin_handler(Arc::new(InitHandler::new()));
     reg.register_builtin_handler(Arc::new(LoginHandler::new()));
     reg.register_builtin_handler(Arc::new(LogoutHandler::new()));
     reg.register_builtin_handler(Arc::new(McpHandler::new()));
-    reg.register_builtin_handler(Arc::new(MemoryHandler::new()));
     reg.register_builtin_handler(Arc::new(ModelHandler::new()));
     reg.register_builtin_handler(Arc::new(PermissionsHandler::new()));
     reg.register_builtin_handler(Arc::new(StatusHandler::new()));
@@ -173,29 +171,23 @@ mod tests {
     #[test]
     fn core_placeholder_struct_is_distinct_from_unimplemented() {
         use std::any::Any;
-        // Construct each placeholder directly and check its TypeId is different
-        // from UnimplementedCommandHandler.
+        // Construct each remaining-12 placeholder directly and check its
+        // TypeId is different from UnimplementedCommandHandler. The 6
+        // batch-1 placeholders were removed by M5-10; their real handlers
+        // (ClearHandler, CompactHandler, ExitHandler, HelpHandler,
+        // InitHandler, MemoryHandler) live in dedicated modules and are
+        // verified for distinct TypeId by the batch-1 unit tests.
         let unimpl = UnimplementedCommandHandler::new("test", "");
         let unimpl_tid = (&unimpl as &dyn Any).type_id();
 
-        let clear = ClearHandler::new();
-        assert_ne!(
-            (&clear as &dyn Any).type_id(),
-            unimpl_tid,
-            "ClearHandler must be a distinct type"
-        );
+        // Spot-check 12 remaining placeholders.
+        let agents = AgentsHandler::new();
+        assert_ne!((&agents as &dyn Any).type_id(), unimpl_tid);
 
-        let help = HelpHandler::new();
-        assert_ne!(
-            (&help as &dyn Any).type_id(),
-            unimpl_tid,
-            "HelpHandler must be a distinct type"
-        );
-
-        // Spot-check a couple more.
         let cost = CostHandler::new();
         assert_ne!((&cost as &dyn Any).type_id(), unimpl_tid);
-        let init = InitHandler::new();
-        assert_ne!((&init as &dyn Any).type_id(), unimpl_tid);
+
+        let version = VersionHandler::new();
+        assert_ne!((&version as &dyn Any).type_id(), unimpl_tid);
     }
 }

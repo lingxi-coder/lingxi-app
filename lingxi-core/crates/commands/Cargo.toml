@@ -10,6 +10,7 @@ lingxi-protocol = { path = "../protocol" }
 lingxi-traits = { path = "../traits" }
 lingxi-core = { path = "../core" }
 lingxi-tools = { path = "../tools" }
+lingxi-telemetry = { path = "../telemetry" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
@@ -20,6 +21,8 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+lingxi-orchestrator = { path = "../orchestrator" }
+sha2 = "0.10"
 
 [lints]
 workspace = true

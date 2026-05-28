@@ -83,10 +83,11 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
         match result {
             // M5-09 placeholders only ever return Done — but route the
             // other variants safely anyway so M5-10/M5-11 can extend.
-            CommandResult::Done { display }
-            | CommandResult::EmitEffects { display, .. } => SlashDispatchResult::Handled {
-                display: display.unwrap_or_default(),
-            },
+            CommandResult::Done { display } | CommandResult::EmitEffects { display, .. } => {
+                SlashDispatchResult::Handled {
+                    display: display.unwrap_or_default(),
+                }
+            }
             CommandResult::InjectMessage { content } => {
                 SlashDispatchResult::Handled { display: content }
             }

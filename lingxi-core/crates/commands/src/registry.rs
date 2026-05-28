@@ -118,9 +118,40 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
         reg.register_builtin_handler(h);
     }
 
-    // Pass 2: overwrite the 18 core entries with their per-name placeholders.
-    // (Implemented in Task 4 — until then this is a documented no-op.)
+    // Pass 2: overwrite the 12 non-batch-1 core entries with their per-name
+    // placeholders. (M5-10 removed the 6 batch-1 placeholders from this
+    // pass; their real handlers are wired by `register_core_batch_1`.)
     register_core_placeholders(reg);
+}
+
+/// Overwrite the 6 batch-1 entries (`clear`, `compact`, `exit`, `help`,
+/// `init`, `memory`) with their handle-bound real handlers from M5-10.
+///
+/// Call **after** [`register_all_builtin_commands`]. The function is
+/// idempotent — calling it twice with the same `handle` produces the same
+/// final state.
+///
+/// [`crate::builtin::HelpHandler`] and [`crate::builtin::InitHandler`] are
+/// constructed without `handle` because they don't need orchestrator
+/// state.
+///
+/// M5-12 (the CLI binary) calls this immediately after
+/// `register_all_builtin_commands` during boot, threading the live
+/// `Arc<dyn OrchestratorHandle>`.
+pub fn register_core_batch_1(
+    reg: &mut CommandRegistry,
+    handle: Arc<dyn lingxi_traits::OrchestratorHandle>,
+) {
+    use crate::builtin::{
+        ClearHandler, CompactHandler, ExitHandler, HelpHandler, InitHandler, MemoryHandler,
+    };
+
+    reg.register_builtin_handler(Arc::new(ClearHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(CompactHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(ExitHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(HelpHandler::new()));
+    reg.register_builtin_handler(Arc::new(InitHandler::new()));
+    reg.register_builtin_handler(Arc::new(MemoryHandler::new(handle)));
 }
 
 #[cfg(test)]
@@ -184,6 +215,77 @@ mod registry_tests {
         register_all_builtin_commands(&mut reg); // call twice
         for name in BUILTIN_COMMAND_NAMES {
             assert!(reg.resolve(name).is_some());
+        }
+    }
+}
+
+#[cfg(test)]
+mod batch_1_tests {
+    use super::*;
+    use crate::model::CommandResult;
+    use crate::parser::ParsedSlashCommand;
+    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
+
+    #[tokio::test]
+    async fn clear_after_batch_1_returns_real_literal() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        register_core_batch_1(&mut reg, handle.clone());
+
+        let h = reg.get_handler("clear").expect("clear handler missing");
+        let args = ParsedSlashCommand {
+            name: "clear".to_string(),
+            raw_args: String::new(),
+            positional_args: vec![],
+        };
+        match h.handle(&args).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, "Conversation cleared.");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+        assert!(handle.was_clear_session_called());
+    }
+
+    #[tokio::test]
+    async fn non_batch_1_command_still_returns_stub() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        register_core_batch_1(&mut reg, handle);
+
+        // x402 is not in the batch-1 list → still returns the M5-09 stub.
+        let h = reg.get_handler("x402").expect("x402 handler missing");
+        let args = ParsedSlashCommand {
+            name: "x402".to_string(),
+            raw_args: String::new(),
+            positional_args: vec![],
+        };
+        match h.handle(&args).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, "x402: not implemented in v0.6.0 (M5)");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn batch_1_size_is_6() {
+        let names = ["clear", "compact", "exit", "help", "init", "memory"];
+        assert_eq!(names.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn all_6_batch_1_names_resolve_after_overwrite() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        register_core_batch_1(&mut reg, handle);
+
+        for name in ["clear", "compact", "exit", "help", "init", "memory"] {
+            assert!(reg.resolve(name).is_some(), "/{name} missing");
+            assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
         }
     }
 }

@@ -59,3 +59,26 @@ pub fn emit_session_corrupted(session_id: &str, error: &str) {
         error = %error,
     );
 }
+
+// -- M5-10 emit helpers for the 6 batch-1 slash commands ---------------------
+//
+// Each command emits three lifecycle events: `_started`, `_completed`, and
+// (on failure) `_failed`. The transport mirrors the M5-07 pattern: a
+// `tracing::info!` line carrying the event name + structured fields. See
+// `crate::tengu::command::*` for the locked event-name strings.
+
+/// Emit a `tengu_command_<name>_started` event.
+pub fn emit_command_started(event: &'static str) {
+    tracing::info!(event = event);
+}
+
+/// Emit a `tengu_command_<name>_completed` event with optional structured
+/// fields encoded as a single JSON string `details`.
+pub fn emit_command_completed(event: &'static str, details: &str) {
+    tracing::info!(event = event, details = %details);
+}
+
+/// Emit a `tengu_command_<name>_failed` event with the error string.
+pub fn emit_command_failed(event: &'static str, error: &str) {
+    tracing::error!(event = event, error = %error);
+}

@@ -350,6 +350,7 @@ use lingxi_protocol::SessionId;
 use lingxi_traits::{CompactionSummary, HandleError, MemoryEditorOutcome, OrchestratorHandle};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex as StdMutex;
 
 /// Test double for `OrchestratorHandle`.
 ///
@@ -362,23 +363,27 @@ pub struct MockOrchestratorHandle {
     /// Number of `clear_session` calls.
     clear_calls: AtomicUsize,
     /// If `Some`, `clear_session` returns `ActionFailed(_)` instead of `Ok(())`.
-    clear_error: tokio::sync::Mutex<Option<String>>,
+    ///
+    /// Uses `std::sync::Mutex` (NOT `tokio::sync::Mutex`) so test code can
+    /// set the value synchronously without an `await` and without
+    /// `blocking_lock()` (which would panic inside the tokio runtime).
+    clear_error: StdMutex<Option<String>>,
     /// Pre-loaded `CompactionSummary` returned by `force_compact`. If not
     /// set, defaults to `CompactionSummary::default()`.
-    compact_summary: tokio::sync::Mutex<Option<CompactionSummary>>,
+    compact_summary: StdMutex<Option<CompactionSummary>>,
     /// If `Some`, `force_compact` returns `ActionFailed(_)`.
-    compact_error: tokio::sync::Mutex<Option<String>>,
+    compact_error: StdMutex<Option<String>>,
     /// Bumped each `switch_model` call. Records the most-recent value too.
     switch_model_calls: AtomicUsize,
-    switch_model_last: tokio::sync::Mutex<Option<String>>,
+    switch_model_last: StdMutex<Option<String>>,
     /// Set by `request_exit`. Readable via `was_exit_requested`.
     exit_requested: AtomicBool,
     /// Pre-loaded path for `open_memory_editor`.
-    memory_path: tokio::sync::Mutex<Option<PathBuf>>,
+    memory_path: StdMutex<Option<PathBuf>>,
     /// Pre-loaded exit code for `open_memory_editor`.
     editor_exit_code: AtomicI32,
     /// If `Some`, `open_memory_editor` returns `ActionFailed(_)`.
-    memory_error: tokio::sync::Mutex<Option<String>>,
+    memory_error: StdMutex<Option<String>>,
     /// Cost snapshot fields (rarely exercised in M5-10).
     cost_nano_usd: AtomicU64,
     cost_tokens: AtomicU64,
@@ -391,15 +396,15 @@ impl MockOrchestratorHandle {
         Self {
             session_id: SessionId::new(),
             clear_calls: AtomicUsize::new(0),
-            clear_error: tokio::sync::Mutex::new(None),
-            compact_summary: tokio::sync::Mutex::new(None),
-            compact_error: tokio::sync::Mutex::new(None),
+            clear_error: StdMutex::new(None),
+            compact_summary: StdMutex::new(None),
+            compact_error: StdMutex::new(None),
             switch_model_calls: AtomicUsize::new(0),
-            switch_model_last: tokio::sync::Mutex::new(None),
+            switch_model_last: StdMutex::new(None),
             exit_requested: AtomicBool::new(false),
-            memory_path: tokio::sync::Mutex::new(None),
+            memory_path: StdMutex::new(None),
             editor_exit_code: AtomicI32::new(0),
-            memory_error: tokio::sync::Mutex::new(None),
+            memory_error: StdMutex::new(None),
             cost_nano_usd: AtomicU64::new(0),
             cost_tokens: AtomicU64::new(0),
         }
@@ -407,7 +412,7 @@ impl MockOrchestratorHandle {
 
     /// Make the next `clear_session` call return `ActionFailed(reason)`.
     pub fn set_clear_session_error(&self, reason: String) {
-        *self.clear_error.blocking_lock() = Some(reason);
+        *self.clear_error.lock().unwrap() = Some(reason);
     }
     /// True if `clear_session` was called at least once.
     pub fn was_clear_session_called(&self) -> bool {
@@ -416,11 +421,11 @@ impl MockOrchestratorHandle {
 
     /// Pre-load the `CompactionSummary` returned by `force_compact`.
     pub fn set_compact_summary(&self, s: CompactionSummary) {
-        *self.compact_summary.blocking_lock() = Some(s);
+        *self.compact_summary.lock().unwrap() = Some(s);
     }
     /// Make the next `force_compact` call return `ActionFailed(reason)`.
     pub fn set_compact_error(&self, reason: String) {
-        *self.compact_error.blocking_lock() = Some(reason);
+        *self.compact_error.lock().unwrap() = Some(reason);
     }
 
     /// True if `request_exit` was called.
@@ -430,7 +435,7 @@ impl MockOrchestratorHandle {
 
     /// Pre-load the path `open_memory_editor` reports.
     pub fn set_memory_path(&self, p: PathBuf) {
-        *self.memory_path.blocking_lock() = Some(p);
+        *self.memory_path.lock().unwrap() = Some(p);
     }
     /// Pre-load the exit code `open_memory_editor` reports.
     pub fn set_editor_exit_code(&self, c: i32) {
@@ -438,7 +443,7 @@ impl MockOrchestratorHandle {
     }
     /// Make the next `open_memory_editor` call return `ActionFailed(reason)`.
     pub fn set_memory_editor_error(&self, reason: String) {
-        *self.memory_error.blocking_lock() = Some(reason);
+        *self.memory_error.lock().unwrap() = Some(reason);
     }
 
     /// Number of `switch_model` calls so far.
@@ -447,7 +452,7 @@ impl MockOrchestratorHandle {
     }
     /// Most-recent model passed to `switch_model`, or `None`.
     pub fn last_switched_model(&self) -> Option<String> {
-        self.switch_model_last.blocking_lock().clone()
+        self.switch_model_last.lock().unwrap().clone()
     }
 }
 
@@ -465,20 +470,20 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
     async fn clear_session(&self) -> Result<(), HandleError> {
         self.clear_calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(reason) = self.clear_error.lock().await.take() {
+        if let Some(reason) = self.clear_error.lock().unwrap().take() {
             return Err(HandleError::ActionFailed(reason));
         }
         Ok(())
     }
 
     async fn force_compact(&self) -> Result<CompactionSummary, HandleError> {
-        if let Some(reason) = self.compact_error.lock().await.take() {
+        if let Some(reason) = self.compact_error.lock().unwrap().take() {
             return Err(HandleError::ActionFailed(reason));
         }
         Ok(self
             .compact_summary
             .lock()
-            .await
+            .unwrap()
             .clone()
             .unwrap_or_default())
     }
@@ -493,7 +498,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
     async fn switch_model(&self, model: &str) -> Result<(), HandleError> {
         self.switch_model_calls.fetch_add(1, Ordering::SeqCst);
-        *self.switch_model_last.lock().await = Some(model.to_string());
+        *self.switch_model_last.lock().unwrap() = Some(model.to_string());
         Ok(())
     }
 
@@ -502,14 +507,14 @@ impl OrchestratorHandle for MockOrchestratorHandle {
     }
 
     async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
-        if let Some(reason) = self.memory_error.lock().await.take() {
+        if let Some(reason) = self.memory_error.lock().unwrap().take() {
             return Err(HandleError::ActionFailed(reason));
         }
         Ok(MemoryEditorOutcome {
             edited_path: self
                 .memory_path
                 .lock()
-                .await
+                .unwrap()
                 .clone()
                 .unwrap_or_else(|| PathBuf::from("/dev/null/CLAUDE.md")),
             exit_code: self.editor_exit_code.load(Ordering::SeqCst),

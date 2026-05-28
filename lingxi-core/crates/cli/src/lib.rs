@@ -58,6 +58,7 @@ pub mod cwd;
 pub mod exit_codes;
 pub mod init;
 pub mod logging;
+pub mod mode;
 pub mod output;
 pub mod output_adapter;
 pub mod repl;

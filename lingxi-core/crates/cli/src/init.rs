@@ -177,6 +177,7 @@ mod tests {
             no_stream: true,
             json: false,
             debug: false,
+            no_tui: false,
         };
         let output: Arc<dyn OutputStream> =
             Arc::new(lingxi_orchestrator::test_support::MockOutputStream::new());

@@ -1395,6 +1395,7 @@ dependencies = [
  "lingxi-telemetry",
  "lingxi-tools",
  "lingxi-traits",
+ "lingxi-tui",
  "predicates",
  "serde",
  "serde_json",

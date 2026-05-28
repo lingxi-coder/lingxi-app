@@ -48,6 +48,10 @@ pub struct Argv {
     /// Enable verbose logging to stderr
     #[arg(long = "debug")]
     pub debug: bool,
+
+    /// Disable TUI; use stdio REPL (line-editing fallback)
+    #[arg(long = "no-tui")]
+    pub no_tui: bool,
 }
 
 impl Argv {
@@ -161,6 +165,18 @@ mod tests {
     }
 
     #[test]
+    fn no_tui_flag() {
+        let a = Argv::from_iter(["lingxi-cli", "--no-tui"]).unwrap();
+        assert!(a.no_tui);
+    }
+
+    #[test]
+    fn no_tui_flag_default_false() {
+        let a = Argv::from_iter(["lingxi-cli"]).unwrap();
+        assert!(!a.no_tui);
+    }
+
+    #[test]
     fn unknown_flag_errors() {
         let r = Argv::from_iter(["lingxi-cli", "--nonexistent"]);
         assert!(r.is_err());
@@ -174,6 +190,7 @@ mod tests {
             "--no-stream",
             "--json",
             "--debug",
+            "--no-tui",
             "--cwd",
             "/r",
             "--model",
@@ -183,7 +200,7 @@ mod tests {
             "fix it",
         ])
         .unwrap();
-        assert!(a.print && a.no_stream && a.json && a.debug);
+        assert!(a.print && a.no_stream && a.json && a.debug && a.no_tui);
         assert_eq!(a.cwd, Some(PathBuf::from("/r")));
         assert_eq!(a.model.as_deref(), Some("claude-opus-4-7"));
         assert_eq!(

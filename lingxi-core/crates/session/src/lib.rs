@@ -11,8 +11,17 @@ pub mod resumer;
 pub mod storage;
 pub mod transcript;
 
+// Pre-existing surface — preserved bit-for-bit so M1-M4 downstream compiles.
 pub use jsonl::{read_recover, RecoveryResult, StorageError};
 pub use metadata::SessionMetadata;
 pub use resumer::{ResumeError, ResumedSession, SessionResumer};
 pub use storage::{LoadedSession, SessionStorage};
 pub use transcript::TranscriptEntry;
+
+// New M5-07 surface — distinct name (`JsonlSessionMetadata`) so it does NOT
+// collide with the pre-existing `metadata::SessionMetadata` re-export.
+pub use jsonl::reader::SessionMetadata as JsonlSessionMetadata;
+pub use jsonl::{
+    project_dir_name, session_path, validate_uuid, JsonlMessage, JsonlReader, JsonlWriter,
+    LITE_READ_BUF_SIZE,
+};

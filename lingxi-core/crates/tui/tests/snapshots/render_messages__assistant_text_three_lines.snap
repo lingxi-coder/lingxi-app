@@ -1,0 +1,8 @@
+---
+source: crates/tui/tests/render_messages.rs
+assertion_line: 22
+expression: element.to_string()
+---
+● line one
+line two
+line three

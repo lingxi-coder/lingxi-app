@@ -1,0 +1,6 @@
+---
+source: crates/tui/tests/render_messages.rs
+assertion_line: 14
+expression: element.to_string()
+---
+> hi

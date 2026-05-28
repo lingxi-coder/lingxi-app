@@ -5,7 +5,7 @@
 use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_323_entries() {
+fn registry_is_exactly_326_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
@@ -32,7 +32,12 @@ fn registry_is_exactly_323_entries() {
     // 319 + 2 = 321.
     // M6-05 added 2 TUI permission-dialog events
     // (permission_dialog_shown/resolved): 321 + 2 = 323.
-    assert_eq!(ALL_EVENT_NAMES.len(), 323);
+    // M6-06/07/08 added 0 (engine wiring reused existing M3/M4/M5 events).
+    // M6-09 added 3: lingxi_core_v0_7_0_released (release marker) +
+    // tengu_tui_scroll_started/scroll_ended (real emit sites in
+    // app::scroll_with_viewport). tengu_tui_key_pressed deferred to M7
+    // (no aggregator infra). 323 + 3 = 326.
+    assert_eq!(ALL_EVENT_NAMES.len(), 326);
 }
 
 #[test]
@@ -76,6 +81,14 @@ fn lingxi_core_v0_6_0_released_is_registered() {
 }
 
 #[test]
+fn lingxi_core_v0_7_0_released_is_registered() {
+    assert!(
+        ALL_EVENT_NAMES.contains(&"lingxi_core_v0_7_0_released"),
+        "v0.7.0 release-marker event must be present in ALL_EVENT_NAMES"
+    );
+}
+
+#[test]
 fn release_marker_constant_matches() {
     assert_eq!(
         lingxi_telemetry::tengu::release::LINGXI_CORE_V0_5_0_RELEASED,
@@ -84,6 +97,10 @@ fn release_marker_constant_matches() {
     assert_eq!(
         lingxi_telemetry::tengu::release::LINGXI_CORE_V0_6_0_RELEASED,
         "lingxi_core_v0_6_0_released"
+    );
+    assert_eq!(
+        lingxi_telemetry::tengu::release::LINGXI_CORE_V0_7_0_RELEASED,
+        "lingxi_core_v0_7_0_released"
     );
 }
 
@@ -135,19 +152,22 @@ fn category_ordering_preserved() {
         );
     }
     // M5-14 grew the release block from 1 to 2 (+lingxi_core_v0_6_0_released).
-    for n in &ALL_EVENT_NAMES[259..261] {
+    // M6-09 grew it from 2 to 3 (+lingxi_core_v0_7_0_released): 259..262.
+    for n in &ALL_EVENT_NAMES[259..262] {
         assert!(n.starts_with("lingxi_core_"), "release block: {n}");
     }
     // M5-10/M5-11: command block (54 events: 18 batch-1 + 36 batch-2) follows
     // the release markers. Walk order (per tengu::mod.rs concat_all):
-    // … → release → command.
-    for n in &ALL_EVENT_NAMES[261..315] {
+    // … → release → command. M6-09 shifted the start by +1 (release 2→3).
+    for n in &ALL_EVENT_NAMES[262..316] {
         assert!(n.starts_with("tengu_command_"), "command block: {n}");
     }
     // M6-01: tui block (4 events) trails command.
     // M6-03: tui block grows to 6 events (+streaming_render_{started,ended}).
     // M6-05: tui block grows to 8 events (+permission_dialog_{shown,resolved}).
-    for n in &ALL_EVENT_NAMES[315..323] {
+    // M6-09: tui block grows to 10 events (+scroll_started/scroll_ended).
+    //        Block shifted by +1 (release 2→3): 316..326.
+    for n in &ALL_EVENT_NAMES[316..326] {
         assert!(n.starts_with("tengu_tui_"), "tui block: {n}");
     }
 }
@@ -162,4 +182,10 @@ fn m6_03_streaming_render_events_registered() {
 fn m6_05_permission_dialog_events_registered() {
     assert!(ALL_EVENT_NAMES.contains(&"tengu_tui_permission_dialog_shown"));
     assert!(ALL_EVENT_NAMES.contains(&"tengu_tui_permission_dialog_resolved"));
+}
+
+#[test]
+fn m6_09_scroll_events_registered() {
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_tui_scroll_started"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_tui_scroll_ended"));
 }

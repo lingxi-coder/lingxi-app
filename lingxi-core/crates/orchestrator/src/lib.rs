@@ -15,6 +15,7 @@
 
 pub mod config;
 pub mod conversation;
+pub mod diagnostics;
 pub mod error;
 pub mod handle_impl;
 pub mod prompt;

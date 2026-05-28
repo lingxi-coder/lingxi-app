@@ -18,14 +18,34 @@ use thiserror::Error;
 /// Lightweight echo of `lingxi_cost::SessionCostSummary` — see that type for
 /// the canonical session-scope rollup. We keep a leaf-friendly mirror here
 /// so `lingxi-traits` does not need to depend on `lingxi-cost`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// M5-11 added the `total_usd`, `input_tokens`, `output_tokens`, `api_calls`,
+/// and `session_duration` fields used by the `/cost` slash command's
+/// locked render template. The legacy `total_nano_usd` and `total_tokens`
+/// fields remain for back-compat with M5-02's `EndTurn` output event.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CostSnapshot {
     /// Session whose cost this snapshot describes.
     pub session_id: SessionId,
-    /// Cumulative cost in nano-USD.
+    /// Cumulative cost in nano-USD (legacy field — still consumed by `EndTurn`).
     pub total_nano_usd: u64,
-    /// Cumulative tokens (input + output across all models).
+    /// Cumulative tokens (input + output across all models — legacy field).
     pub total_tokens: u64,
+    /// Cumulative cost in USD (4-decimal precision in displays).
+    #[serde(default)]
+    pub total_usd: f64,
+    /// Cumulative input tokens across all turns.
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// Cumulative output tokens across all turns.
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// Cumulative successful `messages_create` calls.
+    #[serde(default)]
+    pub api_calls: u32,
+    /// Elapsed time since the session started.
+    #[serde(default)]
+    pub session_duration: std::time::Duration,
 }
 
 /// Result of a `force_compact` operation. M5-10 wires `/compact` against
@@ -70,6 +90,131 @@ pub struct MemoryEditorOutcome {
     pub exit_code: i32,
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// M5-11 info structs (used by `/mcp`, `/hooks`, `/agents`, `/status`, `/doctor`)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// One MCP server entry returned by [`OrchestratorHandle::list_mcp_servers`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerInfo {
+    /// Server name as registered in settings.
+    pub name: String,
+    /// Connection status at snapshot time.
+    pub status: McpStatus,
+    /// Transport kind: `"stdio"`, `"sse"`, or `"http"`.
+    pub transport: String,
+}
+
+/// Connection status for an MCP server in [`McpServerInfo`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpStatus {
+    /// Connected and healthy.
+    Connected,
+    /// Disconnected — either never connected or cleanly shut down.
+    Disconnected,
+    /// Connection failed with the wrapped reason.
+    Error(String),
+}
+
+/// One hook entry returned by [`OrchestratorHandle::list_hooks`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookInfo {
+    /// Hook identifier.
+    pub name: String,
+    /// Hook event (e.g. `"PreToolUse"`, `"PostToolUse"`, `"Stop"`, `"Notification"`).
+    pub event: String,
+    /// Optional matcher regex (tool-name pattern).
+    pub matcher: Option<String>,
+    /// Timeout in milliseconds (default `60_000` if unset).
+    pub timeout_ms: u64,
+}
+
+/// One subagent entry returned by [`OrchestratorHandle::list_agents`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentInfo {
+    /// Agent name (matches the markdown filename without extension).
+    pub name: String,
+    /// Human-readable description (may be truncated by callers).
+    pub description: String,
+    /// Tool allow-list (empty = all tools).
+    pub tools_allowed: Vec<String>,
+}
+
+/// Aggregate diagnostic report returned by [`OrchestratorHandle::run_doctor_checks`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DoctorReport {
+    /// Individual check results in execution order.
+    pub checks: Vec<DoctorCheck>,
+    /// Summary tallies (pass/warn/fail counts).
+    pub summary: DoctorSummary,
+}
+
+/// One `/doctor` check result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorCheck {
+    /// Check identifier (`"config-dir"`, `"api-key"`, etc.).
+    pub name: String,
+    /// Pass/warn/fail outcome.
+    pub status: CheckStatus,
+    /// Optional detail string (rendered on a second indented line if `Some`).
+    pub detail: Option<String>,
+}
+
+/// Outcome of a single [`DoctorCheck`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckStatus {
+    /// Check succeeded.
+    Pass,
+    /// Check produced a warning (non-fatal anomaly).
+    Warn,
+    /// Check failed.
+    Fail,
+}
+
+/// Pass/warn/fail tallies in a [`DoctorReport`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DoctorSummary {
+    /// Number of checks that returned [`CheckStatus::Pass`].
+    pub passed: u32,
+    /// Number of checks that returned [`CheckStatus::Warn`].
+    pub warnings: u32,
+    /// Number of checks that returned [`CheckStatus::Fail`].
+    pub failed: u32,
+}
+
+/// Snapshot returned by [`OrchestratorHandle::get_status_snapshot`] for the
+/// `/status` panel. All fields are populated synchronously at snapshot time.
+///
+/// Note: `Eq` is intentionally not derived because `total_cost_usd: f64` does
+/// not implement `Eq`. Use `PartialEq` for assertions.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StatusSnapshot {
+    /// Current session id (as a stable string for display).
+    pub session_id: String,
+    /// Active model name (e.g. `"claude-opus-4-7"`).
+    pub model: String,
+    /// Total messages in the session history.
+    pub n_messages: u32,
+    /// Cumulative cost in USD.
+    pub total_cost_usd: f64,
+    /// Cumulative input tokens.
+    pub input_tokens: u64,
+    /// Cumulative output tokens.
+    pub output_tokens: u64,
+    /// MCP servers currently in `Connected` state.
+    pub n_mcp_connected: u32,
+    /// MCP servers configured (any state).
+    pub n_mcp_total: u32,
+    /// Hooks registered.
+    pub n_hooks: u32,
+    /// Subagents available.
+    pub n_agents: u32,
+    /// Session start time, RFC 3339 (`"YYYY-MM-DDTHH:MM:SSZ"`, UTC).
+    pub started_at: String,
+    /// Working directory used to launch the session.
+    pub cwd: PathBuf,
+}
+
 /// Public handle to the orchestrator that slash commands operate against.
 ///
 /// Wired in M5-09 (slash-command surface). M5-02 only defines the trait —
@@ -111,13 +256,52 @@ pub trait OrchestratorHandle: Send + Sync {
     ///
     /// Wired by M5-10 (`/memory` handler).
     async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError>;
+
+    // M5-11 additions:
+
+    /// Enumerate currently registered MCP servers + their connection state.
+    /// Used by `/mcp` and `/status`. Returns an empty vector when no MCP
+    /// servers are configured.
+    async fn list_mcp_servers(&self) -> Vec<McpServerInfo>;
+
+    /// Enumerate registered hooks (built-in + user). Used by `/hooks` and
+    /// `/status`.
+    async fn list_hooks(&self) -> Vec<HookInfo>;
+
+    /// Enumerate registered subagents (markdown-defined + built-in). Used
+    /// by `/agents` and `/status`.
+    async fn list_agents(&self) -> Vec<AgentInfo>;
+
+    /// Run the 6 doctor checks and return the aggregated report. Used by
+    /// `/doctor`.
+    async fn run_doctor_checks(&self) -> DoctorReport;
+
+    /// Snapshot the full status panel. Used by `/status`.
+    async fn get_status_snapshot(&self) -> StatusSnapshot;
+
+    /// Open `$EDITOR` on `<config-dir>/claude/config.json` (creating if
+    /// absent). Used by `/config`.
+    async fn edit_config_file(&self) -> Result<MemoryEditorOutcome, HandleError>;
+
+    /// Open `$EDITOR` on `<config-dir>/claude/permissions.json` (creating
+    /// if absent). Used by `/permissions`.
+    async fn edit_permissions_file(&self) -> Result<MemoryEditorOutcome, HandleError>;
+
+    /// Enumerate model names the orchestrator will accept via
+    /// [`Self::switch_model`]. Used by `/model` (no-arg list mode).
+    async fn list_available_models(&self) -> Vec<String>;
 }
 
 /// Captured output emission. Useful for tests and (M5-13) the stdio sink.
 ///
 /// The enum is `non_exhaustive` so M5-04 can add a `StreamingDelta` variant
 /// without a breaking change.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// M5-11: `Eq` was dropped (and replaced with `PartialEq` only) because
+/// `CostSnapshot` now carries `f64` + `Duration` fields whose `Eq` impl is
+/// not defined. Callers that need set semantics should bucket by the
+/// `session_id` or other integer fields instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum OutputEvent {
     /// Plain text from the assistant.
@@ -199,6 +383,9 @@ mod tests {
         let s = CostSnapshot::default();
         assert_eq!(s.total_nano_usd, 0);
         assert_eq!(s.total_tokens, 0);
+        assert!((s.total_usd - 0.0).abs() < f64::EPSILON);
+        assert_eq!(s.api_calls, 0);
+        assert_eq!(s.session_duration, std::time::Duration::ZERO);
     }
 
     #[test]
@@ -207,5 +394,74 @@ mod tests {
         assert_eq!(s.messages_before, 0);
         assert_eq!(s.messages_after, 0);
         assert_eq!(s.bytes_saved, 0);
+    }
+
+    // M5-11 trait extension tests
+
+    #[allow(dead_code)]
+    fn _handle_remains_object_safe_after_m5_11() {
+        let _: Option<Box<dyn OrchestratorHandle>> = None;
+    }
+
+    #[test]
+    fn mcp_server_info_fields() {
+        let info = McpServerInfo {
+            name: "memory".to_string(),
+            status: McpStatus::Connected,
+            transport: "stdio".to_string(),
+        };
+        assert_eq!(info.name, "memory");
+        assert!(matches!(info.status, McpStatus::Connected));
+        assert_eq!(info.transport, "stdio");
+    }
+
+    #[test]
+    fn hook_info_fields() {
+        let info = HookInfo {
+            name: "fmt-on-write".to_string(),
+            event: "PostToolUse".to_string(),
+            matcher: Some("Write|Edit".to_string()),
+            timeout_ms: 60_000,
+        };
+        assert_eq!(info.timeout_ms, 60_000);
+        assert_eq!(info.matcher.as_deref(), Some("Write|Edit"));
+    }
+
+    #[test]
+    fn agent_info_fields() {
+        let info = AgentInfo {
+            name: "reviewer".to_string(),
+            description: "review code".to_string(),
+            tools_allowed: vec!["Read".to_string(), "Grep".to_string()],
+        };
+        assert_eq!(info.tools_allowed.len(), 2);
+    }
+
+    #[test]
+    fn doctor_report_default_is_empty() {
+        let r = DoctorReport::default();
+        assert_eq!(r.checks.len(), 0);
+        assert_eq!(r.summary.passed, 0);
+        assert_eq!(r.summary.warnings, 0);
+        assert_eq!(r.summary.failed, 0);
+    }
+
+    #[test]
+    fn status_snapshot_default_is_zero() {
+        let s = StatusSnapshot::default();
+        assert_eq!(s.n_messages, 0);
+        assert_eq!(s.n_mcp_connected, 0);
+        assert_eq!(s.n_mcp_total, 0);
+        assert_eq!(s.n_hooks, 0);
+        assert_eq!(s.n_agents, 0);
+    }
+
+    #[test]
+    fn check_status_variants() {
+        let pass = CheckStatus::Pass;
+        let warn = CheckStatus::Warn;
+        let fail = CheckStatus::Fail;
+        assert_ne!(pass, warn);
+        assert_ne!(warn, fail);
     }
 }

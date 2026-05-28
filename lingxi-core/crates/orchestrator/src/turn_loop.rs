@@ -361,5 +361,6 @@ pub(crate) fn cost_snapshot_from_session(s: &SessionState) -> CostSnapshot {
             .0
             .input_tokens
             .saturating_add(s.usage.0.output_tokens),
+        ..CostSnapshot::default()
     }
 }

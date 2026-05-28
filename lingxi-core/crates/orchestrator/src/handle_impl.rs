@@ -25,8 +25,10 @@
 use crate::ConversationOrchestrator;
 use async_trait::async_trait;
 use lingxi_traits::{
-    CompactionSummary, CostSnapshot, HandleError, MemoryEditorOutcome, OrchestratorHandle,
+    AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo, McpServerInfo,
+    MemoryEditorOutcome, OrchestratorHandle, StatusSnapshot,
 };
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use tokio::process::Command;
 
@@ -64,13 +66,16 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn snapshot_cost(&self) -> CostSnapshot {
-        // M5-10: minimal stub. M5-12 will promote a `CostTracker` field
+        // M5-10/M5-11: minimal stub. M5-12 will promote a `CostTracker` field
         // and read from it. For now return a zeroed snapshot keyed to the
-        // current session id.
+        // current session id. The new M5-11 fields (`total_usd`,
+        // `input_tokens`, `output_tokens`, `api_calls`, `session_duration`)
+        // default to 0/Zero — the `/cost` handler renders these as
+        // `"Cost: $0.0000 (0 calls, 0+0 tokens, 0s session time)"` until
+        // M5-12 wires real cost data.
         CostSnapshot {
             session_id: self.session.lock().await.session_id,
-            total_nano_usd: 0,
-            total_tokens: 0,
+            ..CostSnapshot::default()
         }
     }
 
@@ -85,40 +90,123 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn open_memory_editor(&self) -> Result<MemoryEditorOutcome, HandleError> {
-        // 1. Resolve target path: <config-dir>/claude/CLAUDE.md.
         let config_dir = dirs::config_dir().ok_or_else(|| {
             HandleError::ActionFailed("config_dir unavailable on this platform".into())
         })?;
         let target = config_dir.join("claude").join("CLAUDE.md");
-
-        // 2. Ensure parent dir + file exist (touch with empty body if missing).
-        if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| HandleError::ActionFailed(format!("mkdir {parent:?}: {e}")))?;
-        }
-        if !target.exists() {
-            tokio::fs::write(&target, "")
-                .await
-                .map_err(|e| HandleError::ActionFailed(format!("touch {target:?}: {e}")))?;
-        }
-
-        // 3. Resolve editor: EDITOR → VISUAL → platform default.
-        let editor = resolve_editor();
-
-        // 4. Spawn + wait. Inherits stdin/stdout/stderr so the user can
-        //    interact with their TUI editor.
-        let status = Command::new(&editor)
-            .arg(&target)
-            .status()
-            .await
-            .map_err(|e| HandleError::ActionFailed(format!("spawn {editor}: {e}")))?;
-
-        Ok(MemoryEditorOutcome {
-            edited_path: target,
-            exit_code: status.code().unwrap_or(-1),
-        })
+        spawn_editor_on(target, "").await
     }
+
+    // M5-11 additions:
+
+    async fn list_mcp_servers(&self) -> Vec<McpServerInfo> {
+        // ConversationOrchestrator does not yet carry an MCP registry field
+        // (M2-02 registry lives in `lingxi-mcp`, but the orchestrator's
+        // production struct isn't wired to it as of M5-11). Returning an
+        // empty list is the honest answer for the v0.6.0 surface; the CLI
+        // (M5-12) will plumb the real registry through.
+        Vec::new()
+    }
+
+    async fn list_hooks(&self) -> Vec<HookInfo> {
+        // Same shape as `list_mcp_servers` — the orchestrator carries a
+        // `HookExecutorImpl` field, but its registry is private. Until
+        // M5-12 wires a public accessor on `HookExecutorImpl`, return an
+        // empty list.
+        Vec::new()
+    }
+
+    async fn list_agents(&self) -> Vec<AgentInfo> {
+        // Subagent registry lives in `lingxi-agent`; orchestrator does
+        // not yet hold a handle. Empty until M5-12 wiring.
+        Vec::new()
+    }
+
+    async fn run_doctor_checks(&self) -> DoctorReport {
+        // Use `dirs::config_dir()/claude` as the canonical config dir for
+        // probes (matches what `/memory` and `/config` write to).
+        let config_dir =
+            dirs::config_dir().map_or_else(|| std::path::PathBuf::from("."), |d| d.join("claude"));
+        crate::diagnostics::run_all(&config_dir).await
+    }
+
+    async fn get_status_snapshot(&self) -> StatusSnapshot {
+        let s = self.session.lock().await;
+        let cost = CostSnapshot {
+            session_id: s.session_id,
+            ..CostSnapshot::default()
+        };
+        StatusSnapshot {
+            session_id: s.session_id.to_string(),
+            model: s.model.clone(),
+            n_messages: u32::try_from(s.history.len()).unwrap_or(u32::MAX),
+            total_cost_usd: cost.total_usd,
+            input_tokens: cost.input_tokens,
+            output_tokens: cost.output_tokens,
+            n_mcp_connected: 0,
+            n_mcp_total: 0,
+            n_hooks: 0,
+            n_agents: 0,
+            started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            cwd: self.cwd.clone(),
+        }
+    }
+
+    async fn edit_config_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
+        let config_dir = dirs::config_dir().ok_or_else(|| {
+            HandleError::ActionFailed("config_dir unavailable on this platform".into())
+        })?;
+        let target = config_dir.join("claude").join("config.json");
+        spawn_editor_on(target, "{}\n").await
+    }
+
+    async fn edit_permissions_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
+        let config_dir = dirs::config_dir().ok_or_else(|| {
+            HandleError::ActionFailed("config_dir unavailable on this platform".into())
+        })?;
+        let target = config_dir.join("claude").join("permissions.json");
+        spawn_editor_on(target, "{}\n").await
+    }
+
+    async fn list_available_models(&self) -> Vec<String> {
+        // Hardcoded list from M3-03's model catalog. The orchestrator does
+        // NOT validate names against this list — `switch_model` accepts
+        // arbitrary strings. The list is purely informational for the
+        // `/model` (no-arg) display.
+        vec![
+            "claude-opus-4-7".to_string(),
+            "claude-sonnet-4-6".to_string(),
+            "claude-haiku-4-5".to_string(),
+        ]
+    }
+}
+
+/// Touch + spawn an editor on `target`. If the target does not yet exist,
+/// it is created with `default_body` as its initial content.
+async fn spawn_editor_on(
+    target: PathBuf,
+    default_body: &str,
+) -> Result<MemoryEditorOutcome, HandleError> {
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| HandleError::ActionFailed(format!("mkdir {parent:?}: {e}")))?;
+    }
+    if !target.exists() {
+        tokio::fs::write(&target, default_body)
+            .await
+            .map_err(|e| HandleError::ActionFailed(format!("touch {target:?}: {e}")))?;
+    }
+    let editor = resolve_editor();
+    let status = Command::new(&editor)
+        .arg(&target)
+        .status()
+        .await
+        .map_err(|e| HandleError::ActionFailed(format!("spawn {editor}: {e}")))?;
+    Ok(MemoryEditorOutcome {
+        edited_path: target,
+        exit_code: status.code().unwrap_or(-1),
+    })
 }
 
 #[cfg(unix)]

@@ -347,7 +347,10 @@ pub use crate::test_support_stream::{
 // returns whatever the test pre-loaded via setter methods.
 
 use lingxi_protocol::SessionId;
-use lingxi_traits::{CompactionSummary, HandleError, MemoryEditorOutcome, OrchestratorHandle};
+use lingxi_traits::{
+    AgentInfo, CompactionSummary, DoctorReport, HandleError, HookInfo, McpServerInfo,
+    MemoryEditorOutcome, OrchestratorHandle, StatusSnapshot,
+};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
@@ -376,6 +379,8 @@ pub struct MockOrchestratorHandle {
     /// Bumped each `switch_model` call. Records the most-recent value too.
     switch_model_calls: AtomicUsize,
     switch_model_last: StdMutex<Option<String>>,
+    /// If `Some`, `switch_model` returns `ActionFailed(_)`.
+    switch_model_error: StdMutex<Option<String>>,
     /// Set by `request_exit`. Readable via `was_exit_requested`.
     exit_requested: AtomicBool,
     /// Pre-loaded path for `open_memory_editor`.
@@ -387,6 +392,26 @@ pub struct MockOrchestratorHandle {
     /// Cost snapshot fields (rarely exercised in M5-10).
     cost_nano_usd: AtomicU64,
     cost_tokens: AtomicU64,
+    /// Optional pre-loaded full cost snapshot returned by `snapshot_cost`.
+    /// If `Some`, used verbatim (with `session_id` overwritten to mock's id).
+    cost_snapshot: StdMutex<Option<lingxi_traits::CostSnapshot>>,
+    // M5-11 additions:
+    /// Pre-loaded MCP server list returned by `list_mcp_servers`.
+    mcp_servers: StdMutex<Vec<McpServerInfo>>,
+    /// Pre-loaded hooks list returned by `list_hooks`.
+    hooks_list: StdMutex<Vec<HookInfo>>,
+    /// Pre-loaded agents list returned by `list_agents`.
+    agents_list: StdMutex<Vec<AgentInfo>>,
+    /// Pre-loaded doctor report returned by `run_doctor_checks`.
+    doctor_report: StdMutex<DoctorReport>,
+    /// Pre-loaded status snapshot returned by `get_status_snapshot`.
+    status_snapshot: StdMutex<StatusSnapshot>,
+    /// If `Some`, `edit_config_file` returns `ActionFailed(_)`.
+    config_editor_error: StdMutex<Option<String>>,
+    /// If `Some`, `edit_permissions_file` returns `ActionFailed(_)`.
+    permissions_editor_error: StdMutex<Option<String>>,
+    /// Pre-loaded available models list returned by `list_available_models`.
+    available_models: StdMutex<Vec<String>>,
 }
 
 impl MockOrchestratorHandle {
@@ -401,12 +426,22 @@ impl MockOrchestratorHandle {
             compact_error: StdMutex::new(None),
             switch_model_calls: AtomicUsize::new(0),
             switch_model_last: StdMutex::new(None),
+            switch_model_error: StdMutex::new(None),
             exit_requested: AtomicBool::new(false),
             memory_path: StdMutex::new(None),
             editor_exit_code: AtomicI32::new(0),
             memory_error: StdMutex::new(None),
             cost_nano_usd: AtomicU64::new(0),
             cost_tokens: AtomicU64::new(0),
+            cost_snapshot: StdMutex::new(None),
+            mcp_servers: StdMutex::new(Vec::new()),
+            hooks_list: StdMutex::new(Vec::new()),
+            agents_list: StdMutex::new(Vec::new()),
+            doctor_report: StdMutex::new(DoctorReport::default()),
+            status_snapshot: StdMutex::new(StatusSnapshot::default()),
+            config_editor_error: StdMutex::new(None),
+            permissions_editor_error: StdMutex::new(None),
+            available_models: StdMutex::new(Vec::new()),
         }
     }
 
@@ -454,6 +489,49 @@ impl MockOrchestratorHandle {
     pub fn last_switched_model(&self) -> Option<String> {
         self.switch_model_last.lock().unwrap().clone()
     }
+    /// Make the next `switch_model` call return `ActionFailed(reason)`.
+    pub fn set_switch_model_error(&self, reason: String) {
+        *self.switch_model_error.lock().unwrap() = Some(reason);
+    }
+    /// Pre-load the full `CostSnapshot` returned by `snapshot_cost`. If set,
+    /// the snapshot is returned verbatim (with `session_id` overwritten to
+    /// the mock's stable id).
+    pub fn set_cost_snapshot(&self, s: lingxi_traits::CostSnapshot) {
+        *self.cost_snapshot.lock().unwrap() = Some(s);
+    }
+    // M5-11 setters:
+    /// Pre-load the MCP server list returned by `list_mcp_servers`.
+    pub fn set_mcp_servers(&self, v: Vec<McpServerInfo>) {
+        *self.mcp_servers.lock().unwrap() = v;
+    }
+    /// Pre-load the hooks list returned by `list_hooks`.
+    pub fn set_hooks(&self, v: Vec<HookInfo>) {
+        *self.hooks_list.lock().unwrap() = v;
+    }
+    /// Pre-load the agents list returned by `list_agents`.
+    pub fn set_agents(&self, v: Vec<AgentInfo>) {
+        *self.agents_list.lock().unwrap() = v;
+    }
+    /// Pre-load the doctor report returned by `run_doctor_checks`.
+    pub fn set_doctor_report(&self, r: DoctorReport) {
+        *self.doctor_report.lock().unwrap() = r;
+    }
+    /// Pre-load the status snapshot returned by `get_status_snapshot`.
+    pub fn set_status_snapshot(&self, s: StatusSnapshot) {
+        *self.status_snapshot.lock().unwrap() = s;
+    }
+    /// Make the next `edit_config_file` call return `ActionFailed(reason)`.
+    pub fn set_config_editor_error(&self, e: String) {
+        *self.config_editor_error.lock().unwrap() = Some(e);
+    }
+    /// Make the next `edit_permissions_file` call return `ActionFailed(reason)`.
+    pub fn set_permissions_editor_error(&self, e: String) {
+        *self.permissions_editor_error.lock().unwrap() = Some(e);
+    }
+    /// Pre-load the list returned by `list_available_models`.
+    pub fn set_available_models(&self, m: Vec<String>) {
+        *self.available_models.lock().unwrap() = m;
+    }
 }
 
 impl Default for MockOrchestratorHandle {
@@ -489,16 +567,28 @@ impl OrchestratorHandle for MockOrchestratorHandle {
     }
 
     async fn snapshot_cost(&self) -> lingxi_traits::CostSnapshot {
+        if let Some(s) = self.cost_snapshot.lock().unwrap().clone() {
+            // Force the session id to match the mock's stable id for
+            // consistency with other handle methods.
+            return lingxi_traits::CostSnapshot {
+                session_id: self.session_id,
+                ..s
+            };
+        }
         lingxi_traits::CostSnapshot {
             session_id: self.session_id,
             total_nano_usd: self.cost_nano_usd.load(Ordering::SeqCst),
             total_tokens: self.cost_tokens.load(Ordering::SeqCst),
+            ..lingxi_traits::CostSnapshot::default()
         }
     }
 
     async fn switch_model(&self, model: &str) -> Result<(), HandleError> {
         self.switch_model_calls.fetch_add(1, Ordering::SeqCst);
         *self.switch_model_last.lock().unwrap() = Some(model.to_string());
+        if let Some(reason) = self.switch_model_error.lock().unwrap().take() {
+            return Err(HandleError::ActionFailed(reason));
+        }
         Ok(())
     }
 
@@ -519,6 +609,52 @@ impl OrchestratorHandle for MockOrchestratorHandle {
                 .unwrap_or_else(|| PathBuf::from("/dev/null/CLAUDE.md")),
             exit_code: self.editor_exit_code.load(Ordering::SeqCst),
         })
+    }
+
+    // M5-11 additions:
+
+    async fn list_mcp_servers(&self) -> Vec<McpServerInfo> {
+        self.mcp_servers.lock().unwrap().clone()
+    }
+
+    async fn list_hooks(&self) -> Vec<HookInfo> {
+        self.hooks_list.lock().unwrap().clone()
+    }
+
+    async fn list_agents(&self) -> Vec<AgentInfo> {
+        self.agents_list.lock().unwrap().clone()
+    }
+
+    async fn run_doctor_checks(&self) -> DoctorReport {
+        self.doctor_report.lock().unwrap().clone()
+    }
+
+    async fn get_status_snapshot(&self) -> StatusSnapshot {
+        self.status_snapshot.lock().unwrap().clone()
+    }
+
+    async fn edit_config_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
+        if let Some(e) = self.config_editor_error.lock().unwrap().take() {
+            return Err(HandleError::ActionFailed(e));
+        }
+        Ok(MemoryEditorOutcome {
+            edited_path: PathBuf::from("/tmp/mock/config.json"),
+            exit_code: 0,
+        })
+    }
+
+    async fn edit_permissions_file(&self) -> Result<MemoryEditorOutcome, HandleError> {
+        if let Some(e) = self.permissions_editor_error.lock().unwrap().take() {
+            return Err(HandleError::ActionFailed(e));
+        }
+        Ok(MemoryEditorOutcome {
+            edited_path: PathBuf::from("/tmp/mock/permissions.json"),
+            exit_code: 0,
+        })
+    }
+
+    async fn list_available_models(&self) -> Vec<String> {
+        self.available_models.lock().unwrap().clone()
     }
 }
 

@@ -44,8 +44,9 @@ pub use mailbox::{
 };
 pub use mcp::*;
 pub use orchestrator::{
-    CompactionSummary, CostSnapshot, HandleError, MemoryEditorOutcome, OrchestratorHandle,
-    OutputEvent, OutputStream,
+    AgentInfo, CheckStatus, CompactionSummary, CostSnapshot, DoctorCheck, DoctorReport,
+    DoctorSummary, HandleError, HookInfo, McpServerInfo, McpStatus, MemoryEditorOutcome,
+    OrchestratorHandle, OutputEvent, OutputStream, StatusSnapshot,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};

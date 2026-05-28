@@ -1,5 +1,5 @@
-//! `tengu_session_*` event schemas — 15 events emitted by the session layer
-//! (M5 owner; M3-06 schema lock).
+//! `tengu_session_*` event schemas — 18 events emitted by the session layer
+//! (M5 owner; M3-06 schema lock + M5-07 jsonl-persistence triplet).
 //!
 //! Spec §7 line 763-767. Covers session lifecycle (start/resume/complete/abort),
 //! persistence (load/save), clear, and export/import round-trips. User-derived
@@ -41,8 +41,14 @@ pub const IMPORT_STARTED: &str = "tengu_session_import_started";
 pub const IMPORT_COMPLETED: &str = "tengu_session_import_completed";
 /// `tengu_session_import_failed` — `/import` errored mid-flight.
 pub const IMPORT_FAILED: &str = "tengu_session_import_failed";
+/// `tengu_session_appended` — one message was appended to the on-disk JSONL.
+pub const APPENDED: &str = "tengu_session_appended";
+/// `tengu_session_rotated` — the JSONL file rolled over (size cap, manual rotate).
+pub const ROTATED: &str = "tengu_session_rotated";
+/// `tengu_session_corrupted` — writer or reader detected an unrecoverable I/O / parse error.
+pub const CORRUPTED: &str = "tengu_session_corrupted";
 
-/// Order-locked array of all 15 names; consumed by `tengu::ALL_EVENT_NAMES`.
+/// Order-locked array of all 18 names; consumed by `tengu::ALL_EVENT_NAMES`.
 pub(crate) const NAMES: &[&str] = &[
     STARTED,
     RESUMED,
@@ -59,6 +65,9 @@ pub(crate) const NAMES: &[&str] = &[
     IMPORT_STARTED,
     IMPORT_COMPLETED,
     IMPORT_FAILED,
+    APPENDED,
+    ROTATED,
+    CORRUPTED,
 ];
 
 // -- Payload structs (deny_unknown_fields locked) -----------------------------
@@ -218,6 +227,36 @@ pub struct ImportCompletedPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImportFailedPayload {
+    /// Stable identifier for this session.
+    pub session_id: Verified,
+    /// Whitelisted error description (no PII).
+    pub error: Verified,
+}
+
+/// Payload for [`APPENDED`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppendedPayload {
+    /// Stable identifier for this session.
+    pub session_id: Verified,
+    /// UUID of the message just appended.
+    pub message_uuid: Verified,
+}
+
+/// Payload for [`ROTATED`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RotatedPayload {
+    /// Stable identifier for this session.
+    pub session_id: Verified,
+    /// File size at the moment of rotation, in bytes.
+    pub bytes_before_rotation: u64,
+}
+
+/// Payload for [`CORRUPTED`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorruptedPayload {
     /// Stable identifier for this session.
     pub session_id: Verified,
     /// Whitelisted error description (no PII).

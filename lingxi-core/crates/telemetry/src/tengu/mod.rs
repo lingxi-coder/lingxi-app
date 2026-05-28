@@ -30,7 +30,8 @@ pub mod tool;
 pub const ALL_EVENT_NAMES: &[&str] = {
     // post-M5-06: orchestrator block grew from 7 to 15 (+ 6 hook lifecycle
     // events + hook_http_skipped_ssrf + hook_timeout).
-    const TOTAL: usize = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 15 + 1;
+    // M5-07: session block grows 15 -> 18 (+3 session_appended/rotated/corrupted).
+    const TOTAL: usize = 25 + 30 + 18 + 134 + 10 + 8 + 12 + 3 + 15 + 1;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;

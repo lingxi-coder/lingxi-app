@@ -176,6 +176,11 @@ pub struct ConversationOrchestrator {
     /// then returns `vec![]`. The CLI binary populates from
     /// `~/.claude/agents/` + project `.claude/agents/`.
     pub(crate) agent_catalog: Option<Arc<tokio::sync::RwLock<Vec<lingxi_agent::AgentDefinition>>>>,
+    /// Compaction engine (M3-05) wired by `with_compaction`. `None` when
+    /// not configured — `force_compact` then falls back to the legacy
+    /// no-op semantics. The CLI binary (M6-08 init.rs) always populates
+    /// this. (M6-08)
+    pub(crate) compaction: Option<Arc<lingxi_compaction::CompactionOrchestrator>>,
 }
 
 impl ConversationOrchestrator {
@@ -221,6 +226,7 @@ impl ConversationOrchestrator {
             mcp_registry: None,
             hook_registry: None,
             agent_catalog: None,
+            compaction: None,
         }
     }
 
@@ -300,6 +306,25 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn has_agent_catalog(&self) -> bool {
         self.agent_catalog.is_some()
+    }
+
+    /// Attach a [`lingxi_compaction::CompactionOrchestrator`] so
+    /// `force_compact` performs real history compaction. Without this,
+    /// `force_compact` retains the M5-10 no-op shape. (M6-08)
+    #[must_use]
+    pub fn with_compaction(
+        mut self,
+        compactor: Arc<lingxi_compaction::CompactionOrchestrator>,
+    ) -> Self {
+        self.compaction = Some(compactor);
+        self
+    }
+
+    /// Whether a [`lingxi_compaction::CompactionOrchestrator`] has been
+    /// wired via [`Self::with_compaction`]. (M6-08)
+    #[must_use]
+    pub fn has_compaction(&self) -> bool {
+        self.compaction.is_some()
     }
 
     /// Read the current cost state from the wired tracker, if any.

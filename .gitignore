@@ -54,3 +54,6 @@ __pycache__/
 
 # Local worktrees (created by superpowers:using-git-worktrees skill)
 .worktrees/
+
+# Visual brainstorming sessions (superpowers:brainstorming skill)
+.superpowers/

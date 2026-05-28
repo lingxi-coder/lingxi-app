@@ -6,17 +6,20 @@
 //! 3. 100ms `tokio::time::interval` → `TuiEvent::Tick`.
 
 pub mod keymap;
+pub mod orchestrator_bridge;
 
 use crossterm::event::KeyEvent;
 use lingxi_traits::OutputEvent;
 
-/// Newtype around `OutputEvent` so the locked `TuiEvent` variant name
-/// (`OrchestratorMessage(TurnEvent)`) stays stable as orchestrator-side
-/// types evolve. M6-02+ may extend this enum with TUI-only variants.
+/// Newtype around `OutputEvent` retained from M6-01 for the legacy
+/// `TuiEvent::OrchestratorMessage` payload. M6-03 introduces the richer
+/// [`orchestrator_bridge::TurnEvent`] enum that the render loop actually
+/// consumes; this newtype remains so the locked `TuiEvent` variant shape
+/// stays stable for downstream tests.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TurnEvent(pub OutputEvent);
+pub struct OrchestratorOutputEvent(pub OutputEvent);
 
-impl From<OutputEvent> for TurnEvent {
+impl From<OutputEvent> for OrchestratorOutputEvent {
     fn from(e: OutputEvent) -> Self {
         Self(e)
     }
@@ -31,7 +34,7 @@ pub enum TuiEvent {
     /// Terminal resize: (cols, rows).
     Resize(u16, u16),
     /// A message from the orchestrator (text delta, tool call, end-of-turn).
-    OrchestratorMessage(TurnEvent),
+    OrchestratorMessage(OrchestratorOutputEvent),
     /// 100ms animation tick (used by spinner/streaming throttle in later sub-plans).
     Tick,
 }
@@ -74,14 +77,14 @@ mod tests {
     }
 
     #[test]
-    fn turn_event_wraps_output_event() {
+    fn output_event_wraps_into_orchestrator_message() {
         let out = OutputEvent::Text {
             text: "hello".into(),
         };
-        let te: TurnEvent = out.into();
+        let te: OrchestratorOutputEvent = out.into();
         let e = TuiEvent::OrchestratorMessage(te);
         match e {
-            TuiEvent::OrchestratorMessage(TurnEvent(OutputEvent::Text { text })) => {
+            TuiEvent::OrchestratorMessage(OrchestratorOutputEvent(OutputEvent::Text { text })) => {
                 assert_eq!(text, "hello");
             }
             _ => panic!("expected OrchestratorMessage(Text)"),

@@ -30,6 +30,7 @@ thiserror = { workspace = true }
 tracing = "0.1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+uuid = { version = "1.10", features = ["v4"] }
 
 [dev-dependencies]
 insta = { version = "1.40", features = ["yaml"] }

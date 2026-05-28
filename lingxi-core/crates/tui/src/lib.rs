@@ -22,7 +22,8 @@ pub mod theme;
 
 pub use app::TuiApp;
 pub use error::TuiError;
-pub use events::{TuiEvent, TurnEvent};
+pub use events::orchestrator_bridge::{BridgeOutputStream, TurnEvent};
+pub use events::{OrchestratorOutputEvent, TuiEvent};
 pub use session::{run_tui_session, Runtime};
 
 // Re-export points are filled in by later tasks; the stubs above keep the

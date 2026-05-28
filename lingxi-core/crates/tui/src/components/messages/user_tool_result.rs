@@ -5,11 +5,12 @@
 //!     source: claude-code/src/components/messages/UserToolResultMessage/UserToolSuccessMessage.tsx
 //!   - truncation footer: `[output truncated, {N} more lines]`
 //!     source: claude-code/src/utils/messages.ts
-//!   - MAX_LINES = 100, MAX_BYTES = 4000
+//!   - `MAX_LINES` = 100, `MAX_BYTES` = 4000
 //!     source: claude-code/src/utils/messages.ts
 //!     (`MAX_LINES_PRINTED_PER_TOOL_USE_RESULT`,
 //!     `MAX_CHARACTERS_PRINTED_PER_TOOL_USE_RESULT`)
 //!   - focus prefix: `> ` (ASCII)
+#![allow(clippy::needless_pass_by_value)]
 
 use iocraft::prelude::*;
 use lingxi_protocol::ToolUseId;
@@ -45,10 +46,11 @@ pub struct UserToolResultProps {
 
 /// Extract the human-displayable body from a tool result JSON.
 ///
-/// M5-04 turn_loop emits results in three shapes:
+/// M5-04 `turn_loop` emits results in three shapes:
 ///   `{"content": "..."}`                      — string body (Read, Bash, Grep)
 ///   `{"content": [{"type":"text","text":""}]}` — block-array (some MCP tools)
 ///   any other shape                            — fall back to pretty-printed JSON
+#[must_use]
 pub fn body_text(result: &serde_json::Value) -> String {
     if let Some(s) = result.get("content").and_then(|c| c.as_str()) {
         return s.to_string();
@@ -291,7 +293,8 @@ mod tests {
 
     #[test]
     fn body_text_extracts_block_array() {
-        let v = serde_json::json!({"content": [{"type":"text","text":"a"},{"type":"text","text":"b"}]});
+        let v =
+            serde_json::json!({"content": [{"type":"text","text":"a"},{"type":"text","text":"b"}]});
         assert_eq!(body_text(&v), "a\nb");
     }
 }

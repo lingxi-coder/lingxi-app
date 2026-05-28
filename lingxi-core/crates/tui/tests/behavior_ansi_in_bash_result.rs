@@ -20,7 +20,7 @@ fn bash_result_with_red_err_yields_red_span() {
     let has_red_err = spans
         .iter()
         .any(|s| s.text.contains("ERR") && s.style.fg == AnsiColor::Red);
-    assert!(has_red_err, "expected a red ERR span, got {:?}", spans);
+    assert!(has_red_err, "expected a red ERR span, got {spans:?}");
 }
 
 #[test]

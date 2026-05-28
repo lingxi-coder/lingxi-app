@@ -85,7 +85,7 @@ impl TuiApp {
 /// [`run_one_submit`]). All other branches return `false`.
 ///
 /// The function is pure with respect to I/O — it only mutates `st`.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
     match action {
         KeyAction::InsertChar(c) => {

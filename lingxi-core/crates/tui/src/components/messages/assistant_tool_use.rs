@@ -2,9 +2,10 @@
 //!
 //! Literal locks (byte-for-byte from claude-code):
 //!   - marker: `●` (U+25CF, 3-byte UTF-8 `0xE2 0x97 0x8F`)
-//!     source: claude-code/src/constants/figures.ts BLACK_CIRCLE
+//!     source: claude-code/src/constants/figures.ts `BLACK_CIRCLE`
 //!   - focus prefix: `> ` (ASCII, 2 bytes)
 //!     source: claude-code/src/components/MessageSelector.tsx
+#![allow(clippy::needless_pass_by_value)]
 
 use iocraft::prelude::*;
 use lingxi_protocol::ToolUseId;
@@ -76,9 +77,7 @@ fn single_line_json_preview(input: &serde_json::Value) -> String {
 /// iocraft component — wraps [`render_assistant_tool_use_to_string`] in a
 /// cyan `Text` element (assistant theme).
 #[component]
-pub fn AssistantToolUseMessage(
-    props: &AssistantToolUseProps,
-) -> impl Into<AnyElement<'static>> {
+pub fn AssistantToolUseMessage(props: &AssistantToolUseProps) -> impl Into<AnyElement<'static>> {
     let body = render_assistant_tool_use_to_string(props.clone());
     element! {
         View(flex_direction: FlexDirection::Column) {

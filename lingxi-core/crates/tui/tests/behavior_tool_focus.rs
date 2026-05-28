@@ -52,9 +52,8 @@ fn e_keypress_toggles_expanded_for_focused_tool() {
     // Focus the first tool.
     let action = map_key(k(KeyCode::Down), true, true).unwrap();
     dispatch(action, &mut st);
-    assert_eq!(
-        st.expanded.get(&a).copied().unwrap_or(false),
-        false,
+    assert!(
+        !st.expanded.get(&a).copied().unwrap_or(false),
         "default is collapsed"
     );
     // Toggle once → expanded.

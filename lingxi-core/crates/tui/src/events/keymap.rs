@@ -101,10 +101,7 @@ pub fn map_key(evt: KeyEvent, prompt_empty: bool, focus_active: bool) -> Option<
         match (evt.code, evt.modifiers) {
             (KeyCode::Up, _) => return Some(FocusToolStep(-1)),
             (KeyCode::Down, _) => return Some(FocusToolStep(1)),
-            (KeyCode::Char('e'), KeyModifiers::NONE) if prompt_empty => {
-                return Some(ToggleExpanded);
-            }
-            (KeyCode::Enter, _) if prompt_empty => {
+            (KeyCode::Char('e'), KeyModifiers::NONE) | (KeyCode::Enter, _) if prompt_empty => {
                 return Some(ToggleExpanded);
             }
             _ => {}
@@ -236,7 +233,10 @@ mod m6_02_tests {
     #[test]
     fn ctrl_c_maps_to_cancel() {
         let evt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert!(matches!(map_key(evt, false, false), Some(KeyAction::Cancel)));
+        assert!(matches!(
+            map_key(evt, false, false),
+            Some(KeyAction::Cancel)
+        ));
     }
 
     /// M6-04 T10: with `focus_active`, Up/Down walks tool focus instead

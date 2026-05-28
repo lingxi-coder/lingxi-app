@@ -361,7 +361,7 @@ pub enum OutputEvent {
     },
     /// A tool invocation about to dispatch.
     ToolCall {
-        /// Stable id (the `tool_use_id` echoed in the matching ToolResult).
+        /// Stable id (the `tool_use_id` echoed in the matching `ToolResult`).
         /// Added in M6-04 so the TUI can correlate calls with results and
         /// key the per-tool expanded-state map.
         id: lingxi_protocol::ToolUseId,
@@ -372,7 +372,7 @@ pub enum OutputEvent {
     },
     /// A tool result returning to the conversation.
     ToolResult {
-        /// Correlator with the matching ToolCall.
+        /// Correlator with the matching `ToolCall`.
         id: lingxi_protocol::ToolUseId,
         /// Name of the tool that returned.
         tool: String,

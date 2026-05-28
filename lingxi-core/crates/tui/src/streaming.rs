@@ -42,18 +42,14 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
         TurnEvent::ToolUseStart { id, tool, input } => {
             // M6-04: rich tool-use block. Per-id expanded state lives in
             // `state.expanded` (default false → collapsed header).
-            state.messages.push(RenderedMessage::AssistantToolUse {
-                id,
-                tool,
-                input,
-            });
+            state
+                .messages
+                .push(RenderedMessage::AssistantToolUse { id, tool, input });
         }
         TurnEvent::ToolUseResult { id, tool, result } => {
-            state.messages.push(RenderedMessage::UserToolResult {
-                id,
-                tool,
-                result,
-            });
+            state
+                .messages
+                .push(RenderedMessage::UserToolResult { id, tool, result });
         }
         TurnEvent::PermissionRequest { tool, input } => {
             state.pending_permission = Some(PendingPermission { tool, input });

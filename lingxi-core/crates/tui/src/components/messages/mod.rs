@@ -22,11 +22,7 @@ use user_tool_result::{render_user_tool_result_to_string, UserToolResultProps};
 /// `AppState.focused_tool_id`. `expanded` is `AppState.expanded.get(&id)`
 /// (default `false`).
 #[must_use]
-pub fn render_entry_to_string(
-    entry: &RenderedMessage,
-    focused: bool,
-    expanded: bool,
-) -> String {
+pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: bool) -> String {
     match entry {
         RenderedMessage::UserText { body, .. } => format!("> {body}"),
         RenderedMessage::AssistantText { body, .. } => format!("● {body}"),

@@ -334,7 +334,7 @@ mod tests {
 
     /// M6-04 Task 2: `RenderedMessage` gains `AssistantToolUse` and
     /// `UserToolResult` variants so the scrollback can carry rich tool
-    /// blocks (not the M6-03 SystemText placeholders).
+    /// blocks (not the M6-03 `SystemText` placeholders).
     #[test]
     fn rendered_message_carries_tool_use_and_result() {
         use lingxi_protocol::ToolUseId;
@@ -399,7 +399,7 @@ mod tests {
         use lingxi_protocol::ToolUseId;
         let mut st = AppState::new(fake_status());
         let id = ToolUseId::new();
-        assert!(st.expanded.get(&id).is_none());
+        assert!(!st.expanded.contains_key(&id));
         st.toggle_expanded(&id);
         assert_eq!(st.expanded.get(&id), Some(&true));
         st.toggle_expanded(&id);

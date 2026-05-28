@@ -38,6 +38,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 tempfile = "3"
 once_cell = "1"
 lingxi-platform-posix = { path = "../../platforms/posix" }
+lingxi-sidequery = { path = "../sidequery" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 

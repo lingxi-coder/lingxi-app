@@ -135,6 +135,87 @@ async fn cancel_during_compaction_leaves_history_unchanged() {
     assert_eq!(len_before, len_after);
 }
 
+/// Build a `CompactionOrchestrator` whose `Autocompactor` is wired with
+/// an empty `CacheSafeParamsSlot`. The autocompact layer's
+/// `slot.get_last().await` returns `None`, surfacing
+/// `CompactionError::Internal("no cache-safe params")`.
+fn errored_compactor() -> Arc<CompactionOrchestrator> {
+    use lingxi_compaction::autocompact::Autocompactor;
+    use lingxi_compaction::microcompact::{Microcompactor, TimeBasedMCConfig};
+    use lingxi_compaction::snip::SnipCompactor;
+    use lingxi_sidequery::{CacheSafeParamsSlot, ForkedAgentRunner, SubagentSlotProvider};
+
+    // Marker pool — `SubagentSlotProvider` is intentionally an empty
+    // marker trait (M1.14); the forked-agent stub never touches it.
+    struct NeverProvider;
+    impl SubagentSlotProvider for NeverProvider {}
+
+    let runner = Arc::new(ForkedAgentRunner::new(Arc::new(NeverProvider)));
+    let slot = Arc::new(CacheSafeParamsSlot::new()); // empty — triggers Internal err
+
+    let orch = CompactionOrchestrator {
+        snip: SnipCompactor,
+        micro: Microcompactor {
+            config: TimeBasedMCConfig::default(),
+        },
+        auto: Autocompactor::with_forked_runner(runner, slot),
+        // Threshold 1 token → autocompact ALWAYS fires.
+        autocompact_threshold: 1,
+    };
+    Arc::new(orch)
+}
+
+#[tokio::test]
+async fn failure_leaves_history_unchanged() {
+    let api = Arc::new(MockApiClient::new(vec![]));
+    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+    let hooks = noop_hook_executor();
+    let perms = Arc::new(NoOpPermissionGate);
+    let output = Arc::new(MockOutputStream::new());
+    let memory = Arc::new(StaticMemoryProvider::empty());
+
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api,
+        tools,
+        hooks,
+        perms,
+        output,
+        memory,
+        std::env::temp_dir(),
+    )
+    .with_compaction(errored_compactor());
+
+    // Seed 5 padded messages so estimate_tokens_for_range exceeds the
+    // 1-token threshold and autocompact actually fires.
+    {
+        let session = orch.session();
+        let mut s = session.lock().await;
+        for i in 0..5 {
+            s.history.push(ConversationMessage::user(
+                MessageId::new(),
+                format!("m{i} body padded with filler text to ensure token estimate > 1"),
+            ));
+        }
+    }
+    let len_before = {
+        let session = orch.session();
+        let s = session.lock().await;
+        s.history.len()
+    };
+
+    let err = orch.force_compact().await.expect_err("must fail");
+    let s = err.to_string();
+    assert!(s.contains("compaction failed"), "got: {s}");
+
+    let len_after = {
+        let session = orch.session();
+        let s = session.lock().await;
+        s.history.len()
+    };
+    assert_eq!(len_before, len_after, "history must be untouched on failure");
+}
+
 #[tokio::test]
 async fn five_consecutive_force_compact_calls_do_not_explode() {
     let orch = make_orch();

@@ -2,13 +2,16 @@
 
 Platform-agnostic Rust engine for an AI coding assistant with 1:1 behavioral
 parity to claude-code (2026-03-31 TypeScript reference) on desktop OSes.
-v0.5.0 (M4) completes the Tools 全集 surface: **40 tools** (File ×5,
+v0.6.0 (M5) completes the Execution Engine 全集: `ConversationOrchestrator`
+batched turn loop, streaming SSE, interactive permission gate, Hooks 4-arm
+runtime, byte-equivalent session JSONL, `--resume` session loading, 18
+implemented slash commands, `lingxi-cli` binary, and stdio REPL mode.
+v0.5.0 (M4) completed the Tools 全集 surface: **40 tools** (File ×5,
 Search ×1, Shell ×4, Web ×2, Workflow ×5, Agent+Task ×8, Team ×2,
 MCP+LSP ×5, System ×8) all wired with byte-aligned schemas, telemetry
 events (`tengu_tool_*_{started,completed,failed}`), and permission gating.
 The v0.4.0 (M3) engine surface — Settings/Memory/API client/OAuth/cost
-events/telemetry, 238 events — remains intact underneath. M5 delivers
-slash commands, hooks, and prompt templates on top.
+events/telemetry, 238 events — remains intact underneath.
 
 ## Quickstart
 
@@ -38,17 +41,20 @@ subsystems (Settings, Memory, API client, OAuth refresh, cost events,
 telemetry schema) identically. See `docs/PLATFORMS.md` for the per-OS
 setup notes + the "M3 engine subsystems" section.
 
-## Subsystem status (v0.5.0)
+## Subsystem status (v0.6.0)
 
 | Subsystem | Status | Milestone |
 |---|---|---|
 | Settings / Memory / API client / OAuth | Complete | M3 / v0.4.0 |
 | Tools (40 builtins, 9 categories) | Complete | M4 / v0.5.0 |
-| Slash commands (/clear /compact /memory ...) | M5 | M5 |
-| Hooks lifecycle (PreToolUse / PostToolUse / ...) | M5 (M4 emits the trigger surface only) | M5 |
-| Agent prompt templates byte-aligned | M5 | M5 |
+| ConversationOrchestrator (turn loop + streaming SSE) | Complete | M5 / v0.6.0 |
+| Permission gate UX | Complete | M5 / v0.6.0 |
+| Hooks 4-arm runtime (Builtin/Http/Command/Agent) | Complete (Command stub) | M5 / v0.6.0 |
+| Session JSONL byte-equivalent | Complete | M5 / v0.6.0 |
+| `--resume` session loading | Complete | M5 / v0.6.0 |
+| Slash commands (99 registered, 18 implemented) | Complete | M5 / v0.6.0 |
+| `lingxi-cli` binary + stdio REPL | Complete | M5 / v0.6.0 |
 | Plugin marketplace + MCP server | M6 | M6 |
-| `/doctor` command | M6 (uses M4 tool registry) | M6 |
 | UI / Terminal rendering | Out of scope | — |
 | Mobile real-device binding | Out of scope (compile-only gates remain) | — |
 

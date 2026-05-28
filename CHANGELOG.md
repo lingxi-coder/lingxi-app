@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.6.0] — M5 Execution Engine 全集
+
+Lands the **complete execution engine**: a `ConversationOrchestrator`
+batched turn loop, streaming SSE, interactive permission gate, Hooks
+4-arm runtime (Builtin/Http/Command/Agent), byte-equivalent session JSONL,
+`--resume` session loading, 18 implemented slash commands (out of 99
+registered), `lingxi-cli` binary, stdio REPL mode, and 4 cross-cutting
+parity fixtures locking the v0.6.0 surface. 14 sub-plans M5-01..M5-14
+delivered these components.
+
+### Major components (M5 milestone)
+
+- **M5-01** — Engine wiring close-out: runner pump + TaskOutput spool +
+  RegistryToolInvoker connected end-to-end.
+- **M5-02** — `ConversationOrchestrator` core: batched turn loop
+  (`run_turn` / `run_turn_with_cancel`), `TurnOutcome` enum, new
+  `lingxi-orchestrator` crate.
+- **M5-03** — System-prompt dynamic assembly: env block + memory block +
+  tools block + `SystemPromptAssembler`.
+- **M5-04** — Streaming SSE: mid-stream text deltas + tool-dispatch
+  + `tengu_orchestrator_turn_streaming_{started,completed}` events.
+- **M5-05** — Permission gate UX: y/N stderr prompts + `NoOpPermissionGate`
+  + `tengu_orchestrator_permission_{prompted,answered}` events.
+- **M5-06** — Hooks 4-arm runtime: Builtin (in-process), Http (SSRF-guarded
+  POST), Command (deferred stub), Agent (subagent spawner). 8 hook events.
+- **M5-07** — Session JSONL byte-equivalent: djb2 hash + UUID v4 lowercase +
+  `JsonlWriter`/`JsonlReader` + 3 golden session fixtures.
+- **M5-08** — `--resume` session loading: chain validate + interactive
+  picker + `tengu_session_resume_{started,completed}` events.
+- **M5-09** — 99 slash commands surface: `BUILTIN_COMMAND_NAMES` const +
+  `register_all_builtin_commands` + `RegistrySlashDispatcher` + stub
+  literal `"{name}: not implemented in v0.6.0 (M5)"`.
+- **M5-10** — Commands batch 1: `/clear /compact /help /exit /memory /init`
+  (6 commands, 18 telemetry events).
+- **M5-11** — Commands batch 2: `/cost /config /model /permissions /mcp
+  /hooks /agents /login /logout /version /status /doctor`
+  (12 commands, 36 telemetry events).
+- **M5-12** — `lingxi-cli` binary: clap argv + one-shot dispatch + `--resume`
+  + `--json` flags.
+- **M5-13** — Stdio REPL mode: read-line loop + SIGINT + EOF + 2 REPL
+  lifecycle events.
+- **M5-14** — Cross-cutting parity + release: 4 parity drivers
+  (`parity_orchestrator.rs`, `parity_slash_commands.rs` extension,
+  `parity_session_jsonl.rs`, `parity_hooks_runtime.rs`), version bump,
+  CHANGELOG/README/release docs, annotated tags.
+
+### Cross-cutting locks (M5-14)
+
+- **Turn loop**: `run_turn("prompt") -> ConversationOutcome::EndTurn` for
+  single-turn; `run_turn(...)` with `max_turns=0` produces
+  `OrchestratorError::MaxTurnsReached`; `run_turn_with_cancel` with
+  pre-cancelled token returns `Ok(TurnOutcome::Cancelled)`.
+- **Slash commands**: 99 commands registered via
+  `register_all_builtin_commands`; 18 implemented (batch 1 + batch 2);
+  81 stubs return `"{name}: not implemented in v0.6.0 (M5)"`.
+- **Session JSONL**: `JsonlWriter` produces LF-only, compact-JSON lines;
+  user line has `userType: "external"`, `isSidechain: false`;
+  `parentUuid` chain is user→assistant.
+- **Hooks matrix**: Builtin arm fires handlers; Http arm applies SSRF guard
+  before dispatch; Command arm is a documented stub; Agent arm returns error
+  without spawner.
+- **Telemetry**: `ALL_EVENT_NAMES.len() == 315` including 1 new release
+  marker `lingxi_core_v0_6_0_released` (emitted on first `Engine::init()`
+  after upgrade).
+
 ## [0.5.0] — M4 Tools 全集
 
 Lands the **40-tool** parity surface: every concrete `Tool` implementation

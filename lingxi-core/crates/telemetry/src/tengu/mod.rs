@@ -19,6 +19,7 @@ pub mod release;
 pub mod session;
 pub mod settings;
 pub mod tool;
+pub mod tui;
 
 /// Flat list of every `tengu_*` event name in registration order:
 /// api → agent → session → tool → cost → oauth → memory → settings →
@@ -37,8 +38,11 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     // M5-11: command block grows 18 -> 54 (+36 new events for 12 batch-2 commands)
     //        -> 312 total.
     // M5-13: orchestrator block grows 15 -> 17 (+2 REPL session started/ended)
-    //        -> 314 total.
-    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 2 + 54;
+    //        -> 314 total. (Note: baseline observed at M6-01 start was 315
+    //        entries; the comments above understate by 1 — see audit log
+    //        in the M6-01 plan execution.)
+    // M6-01: TUI lifecycle events (+4 -> 319).
+    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 2 + 54 + 4;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;
@@ -105,6 +109,12 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         let mut i = 0;
         while i < command::NAMES.len() {
             out[idx] = command::NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        let mut i = 0;
+        while i < tui::NAMES.len() {
+            out[idx] = tui::NAMES[i];
             idx += 1;
             i += 1;
         }

@@ -5,7 +5,7 @@
 use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_315_entries() {
+fn registry_is_exactly_319_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
@@ -26,7 +26,9 @@ fn registry_is_exactly_315_entries() {
     // 312 + 2 = 314.
     // M5-14 added 1 release marker `lingxi_core_v0_6_0_released`:
     // 314 + 1 = 315.
-    assert_eq!(ALL_EVENT_NAMES.len(), 315);
+    // M6-01 added 4 TUI lifecycle events (session_started/ended,
+    // first_render, resize): 315 + 4 = 319.
+    assert_eq!(ALL_EVENT_NAMES.len(), 319);
 }
 
 #[test]
@@ -137,5 +139,9 @@ fn category_ordering_preserved() {
     // … → release → command.
     for n in &ALL_EVENT_NAMES[261..315] {
         assert!(n.starts_with("tengu_command_"), "command block: {n}");
+    }
+    // M6-01: tui block (4 events) trails command.
+    for n in &ALL_EVENT_NAMES[315..319] {
+        assert!(n.starts_with("tengu_tui_"), "tui block: {n}");
     }
 }

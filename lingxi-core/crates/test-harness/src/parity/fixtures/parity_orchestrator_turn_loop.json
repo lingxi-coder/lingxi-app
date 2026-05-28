@@ -1,0 +1,35 @@
+{
+  "_meta": {
+    "plan": "M5-14",
+    "spec_section": "§3 M5-02 row + §5 testing matrix",
+    "_lingxi_version": "0.6.0",
+    "description": "End-to-end turn loop locks: prompt → API call → optional tool dispatch → response back to model → end_turn. Uses MockApiClient (scripted batched responses)."
+  },
+  "scenarios": [
+    {
+      "name": "single_turn_no_tools",
+      "user_prompt": "say hi",
+      "expected_turn_count": 1,
+      "expected_session_messages": 2,
+      "expected_outcome": "EndTurn"
+    },
+    {
+      "name": "max_turns_cap",
+      "user_prompt": "loop forever",
+      "max_turns_override": 2,
+      "expected_outcome": "MaxTurnsReached"
+    },
+    {
+      "name": "cancel_before_first_turn",
+      "user_prompt": "do something",
+      "pre_cancel": true,
+      "expected_outcome": "Cancelled"
+    }
+  ],
+  "telemetry_invariants": {
+    "events_fired_per_normal_turn": [
+      "tengu_orchestrator_conversation_started",
+      "tengu_orchestrator_conversation_completed"
+    ]
+  }
+}

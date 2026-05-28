@@ -54,14 +54,18 @@ pub(crate) async fn execute_one_turn(
     // 3. Append the assistant message to the session. We need the
     //    `final_message_id` to return to the caller.
     let assistant_id = MessageId::new();
+    let assistant_msg = ConversationMessage::Assistant {
+        id: assistant_id,
+        content: assistant_blocks.clone(),
+        stop_reason: response.stop_reason.clone(),
+    };
     {
         let mut s = orch.session.lock().await;
-        s.history.push(ConversationMessage::Assistant {
-            id: assistant_id,
-            content: assistant_blocks.clone(),
-            stop_reason: response.stop_reason.clone(),
-        });
+        s.history.push(assistant_msg.clone());
     }
+    // M5-07 T13: mirror the in-memory append to the optional JSONL writer.
+    // Best-effort — write failures never fail the turn.
+    orch.persist_message_to_jsonl(&assistant_msg).await;
 
     // 4. Emit each Text block to the output stream (whole-body in M5-02;
     //    M5-04 will switch to per-delta).
@@ -84,13 +88,16 @@ pub(crate) async fn execute_one_turn(
         let tool_results = dispatch_tool_uses(orch, &tool_uses).await?;
         // Append a fresh user message carrying the tool results.
         let user_id = MessageId::new();
+        let tool_results_msg = ConversationMessage::User {
+            id: user_id,
+            content: tool_results,
+        };
         {
             let mut s = orch.session.lock().await;
-            s.history.push(ConversationMessage::User {
-                id: user_id,
-                content: tool_results,
-            });
+            s.history.push(tool_results_msg.clone());
         }
+        // M5-07 T13: persist the tool_result user message. Best-effort.
+        orch.persist_message_to_jsonl(&tool_results_msg).await;
     }
 
     // 6. Decide loop disposition.

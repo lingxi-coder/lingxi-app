@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use lingxi_api_client::{types::MessageResponse, AnthropicProvider, ApiError};
 use lingxi_core::SessionState;
 use lingxi_protocol::{ConversationMessage, MessageId, SessionId};
+use lingxi_session::JsonlWriter;
 use lingxi_telemetry::tengu::orchestrator as orch_events;
 use lingxi_tools::registry::ToolRegistry;
 use lingxi_traits::{HttpTransport, OutputStream};
@@ -113,6 +114,12 @@ pub struct ConversationOrchestrator {
     /// CLI will plumb `--cwd`; until then, callers pass the platform
     /// caller's cwd here.
     pub(crate) cwd: std::path::PathBuf,
+    /// Optional on-disk JSONL persistence (M5-07). `None` for in-memory
+    /// tests; `Some` when the CLI binary wires `~/.claude/projects/.../<uuid>.jsonl`.
+    pub(crate) jsonl_writer: Option<Arc<JsonlWriter>>,
+    /// Cached UUID of the last persisted JSONL entry — used to populate
+    /// `parentUuid` on the next append. Reset to `None` for fresh sessions.
+    pub(crate) last_jsonl_uuid: Mutex<Option<String>>,
 }
 
 impl ConversationOrchestrator {
@@ -147,6 +154,94 @@ impl ConversationOrchestrator {
             session: Arc::new(Mutex::new(session)),
             memory,
             cwd,
+            jsonl_writer: None,
+            last_jsonl_uuid: Mutex::new(None),
+        }
+    }
+
+    /// Attach a [`JsonlWriter`] for byte-equivalent session persistence.
+    /// Builder-style — used by the CLI binary (M5-12) and integration tests.
+    #[must_use]
+    pub fn with_jsonl_writer(mut self, writer: Arc<JsonlWriter>) -> Self {
+        self.jsonl_writer = Some(writer);
+        self
+    }
+
+    /// Convert an in-memory `ConversationMessage` into a `JsonlMessage`.
+    ///
+    /// `parent_uuid` is the UUID of the prior persisted entry (None for the
+    /// first turn). `cwd` is taken from `self.cwd`. The `message` payload
+    /// is the Anthropic-shaped inner object: for user/assistant we splat
+    /// the content blocks via `serde_json::to_value` of the
+    /// `ConversationMessage` and pull out the `content` array.
+    pub(crate) fn to_jsonl_message(
+        &self,
+        msg: &ConversationMessage,
+        session_id: &str,
+        parent_uuid: Option<String>,
+    ) -> lingxi_session::JsonlMessage {
+        let (kind, inner_message) = match msg {
+            ConversationMessage::User { content, .. } => (
+                "user",
+                serde_json::json!({ "role": "user", "content": content }),
+            ),
+            ConversationMessage::Assistant { content, .. } => (
+                "assistant",
+                serde_json::json!({ "role": "assistant", "content": content }),
+            ),
+            ConversationMessage::System { content, .. } => (
+                "system",
+                serde_json::json!({ "role": "system", "content": content }),
+            ),
+        };
+        // Use the raw UUID (8-4-4-4-12 lowercase), NOT the `msg.id().to_string()`
+        // form which carries the `"msg:"` prefix — that prefix would break the
+        // byte-equivalent JSONL schema (see `JsonlMessage::uuid` doc) and the
+        // `validate_uuid` regex.
+        lingxi_session::JsonlMessage {
+            message_type: kind.to_string(),
+            uuid: msg.id().as_uuid().to_string(),
+            parent_uuid,
+            session_id: session_id.to_string(),
+            timestamp: chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string(),
+            cwd: self.cwd.to_string_lossy().into_owned(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            message: inner_message,
+            is_sidechain: false,
+            user_type: Some("external".to_string()),
+            git_branch: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    /// Persist a single message to the optional JSONL writer.
+    ///
+    /// Best-effort: write failures are logged via the telemetry
+    /// `tengu_session_corrupted` event but never fail the turn. On
+    /// success, emits `tengu_session_appended` and updates the
+    /// `last_jsonl_uuid` cache.
+    pub(crate) async fn persist_message_to_jsonl(&self, msg: &ConversationMessage) {
+        let Some(writer) = self.jsonl_writer.as_ref() else {
+            return;
+        };
+        let (session_id_str, parent_uuid) = {
+            let session_id = self.session.lock().await.session_id;
+            let parent = self.last_jsonl_uuid.lock().await.clone();
+            (session_id.to_string(), parent)
+        };
+        let jmsg = self.to_jsonl_message(msg, &session_id_str, parent_uuid);
+        let uuid_for_chain = jmsg.uuid.clone();
+        match writer.append(&jmsg).await {
+            Ok(()) => {
+                *self.last_jsonl_uuid.lock().await = Some(uuid_for_chain.clone());
+                lingxi_telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "jsonl writer append failed");
+                lingxi_telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
+            }
         }
     }
 
@@ -222,11 +317,12 @@ impl ConversationOrchestrator {
         };
 
         // 1. Append the user prompt to session history.
+        let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
         {
             let mut s = self.session.lock().await;
-            let msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
-            s.history.push(msg);
+            s.history.push(user_msg.clone());
         }
+        self.persist_message_to_jsonl(&user_msg).await;
 
         // 2. Turn-by-turn driver.
         let mut turn_count: u32 = 0;
@@ -303,6 +399,7 @@ impl ConversationOrchestrator {
 
     /// Internal streaming turn driver (no telemetry — wrapped by
     /// `run_turn_streaming`).
+    #[allow(clippy::too_many_lines)]
     async fn try_run_turn_streaming(
         &self,
         prompt: &str,
@@ -318,11 +415,12 @@ impl ConversationOrchestrator {
         };
 
         // 1. Append the user prompt to session history.
+        let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
         {
             let mut s = self.session.lock().await;
-            let msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
-            s.history.push(msg);
+            s.history.push(user_msg.clone());
         }
+        self.persist_message_to_jsonl(&user_msg).await;
 
         let mut turn_count: u32 = 0;
         let final_message_id;
@@ -363,14 +461,16 @@ impl ConversationOrchestrator {
                     input: t.input.clone(),
                 });
             }
+            let assistant_msg = ConversationMessage::Assistant {
+                id: assistant_id,
+                content: blocks,
+                stop_reason: pumped.stop_reason.clone(),
+            };
             {
                 let mut s = self.session.lock().await;
-                s.history.push(ConversationMessage::Assistant {
-                    id: assistant_id,
-                    content: blocks,
-                    stop_reason: pumped.stop_reason.clone(),
-                });
+                s.history.push(assistant_msg.clone());
             }
+            self.persist_message_to_jsonl(&assistant_msg).await;
 
             // 5. Dispatch tools concurrently (M5-04 Task 13). Each
             //    tool runs the same hook + permission + registry +
@@ -383,11 +483,15 @@ impl ConversationOrchestrator {
             if !pumped.tool_uses.is_empty() {
                 let results = dispatch_tool_uses_concurrent(self, &pumped.tool_uses).await?;
                 let user_id = MessageId::new();
-                let mut s = self.session.lock().await;
-                s.history.push(ConversationMessage::User {
+                let tool_results_msg = ConversationMessage::User {
                     id: user_id,
                     content: results,
-                });
+                };
+                {
+                    let mut s = self.session.lock().await;
+                    s.history.push(tool_results_msg.clone());
+                }
+                self.persist_message_to_jsonl(&tool_results_msg).await;
             }
 
             // 6. Decide loop disposition.

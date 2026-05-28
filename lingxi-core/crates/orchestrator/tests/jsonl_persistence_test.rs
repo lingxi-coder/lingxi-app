@@ -1,0 +1,155 @@
+//! M5-07 Task 13: integration test for `ConversationOrchestrator::with_jsonl_writer`.
+//!
+//! Drives turns through the public `run_turn` API with a `JsonlWriter`
+//! attached, then reads the file back via `JsonlReader` and asserts the
+//! `parentUuid` chain — proves on-disk persistence is wired correctly and
+//! the chain is monotonic.
+
+use lingxi_api_client::types::ContentBlockApi;
+use lingxi_orchestrator::test_support::{
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
+};
+use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use lingxi_platform_posix::fs::PosixFileSystem;
+use lingxi_session::jsonl::reader::JsonlReader;
+use lingxi_session::jsonl::writer::JsonlWriter;
+use lingxi_traits::FileSystem;
+use std::sync::Arc;
+use tempfile::tempdir;
+
+#[tokio::test]
+async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
+    let dir = tempdir().expect("tempdir");
+    let session_path = dir.path().join("session.jsonl");
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
+    let writer = Arc::new(JsonlWriter::new(session_path.clone(), fs.clone()));
+
+    // Two scripted batched responses, both `end_turn` — drives two independent
+    // run_turn calls that share the same orchestrator (and thus the same
+    // `last_jsonl_uuid` chain).
+    let r1 = mock_message_response(
+        vec![ContentBlockApi::Text {
+            text: "first reply".into(),
+        }],
+        Some("end_turn"),
+    );
+    let r2 = mock_message_response(
+        vec![ContentBlockApi::Text {
+            text: "second reply".into(),
+        }],
+        Some("end_turn"),
+    );
+    let api = Arc::new(MockApiClient::new(vec![r1, r2]));
+    let output = Arc::new(MockOutputStream::new());
+    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let perms = Arc::new(NoOpPermissionGate);
+    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        tools,
+        hooks,
+        perms,
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    )
+    .with_jsonl_writer(writer);
+
+    // Drive two turns through the public API.
+    let _ = orch.run_turn("prompt one").await.expect("turn 1");
+    let _ = orch.run_turn("prompt two").await.expect("turn 2");
+
+    // Read back the JSONL.
+    let reader = JsonlReader::new(session_path, fs);
+    let msgs = reader.read_all().await.expect("read_all");
+
+    // 2 user + 2 assistant = 4 entries (no tool_use turns in this script).
+    assert_eq!(
+        msgs.len(),
+        4,
+        "expected 4 JSONL entries (2 user + 2 assistant), got {} — entries: {:?}",
+        msgs.len(),
+        msgs.iter().map(|m| &m.message_type).collect::<Vec<_>>(),
+    );
+
+    // Order: user, assistant, user, assistant.
+    assert_eq!(msgs[0].message_type, "user", "entry 0 type");
+    assert_eq!(msgs[1].message_type, "assistant", "entry 1 type");
+    assert_eq!(msgs[2].message_type, "user", "entry 2 type");
+    assert_eq!(msgs[3].message_type, "assistant", "entry 3 type");
+
+    // First entry's parent_uuid is None (start of chain).
+    assert_eq!(msgs[0].parent_uuid, None, "first parent_uuid must be None");
+
+    // Every subsequent entry's parent_uuid equals the previous entry's uuid.
+    for i in 1..msgs.len() {
+        assert_eq!(
+            msgs[i].parent_uuid.as_deref(),
+            Some(msgs[i - 1].uuid.as_str()),
+            "broken chain at index {i}: prev.uuid={:?}, this.parent_uuid={:?}",
+            msgs[i - 1].uuid,
+            msgs[i].parent_uuid,
+        );
+    }
+
+    // Sanity: every UUID must match the schema's expected format
+    // (8-4-4-4-12 lowercase hex — see `jsonl::uuid::validate_uuid`).
+    for (i, m) in msgs.iter().enumerate() {
+        assert!(
+            lingxi_session::jsonl::uuid::validate_uuid(&m.uuid),
+            "entry {i} uuid {:?} fails validate_uuid",
+            m.uuid,
+        );
+    }
+
+    // Outcome sanity: both turns reached end_turn.
+    let snap = output.snapshot().await;
+    let end_turns = snap
+        .iter()
+        .filter(|e| matches!(e, lingxi_traits::OutputEvent::EndTurn { .. }))
+        .count();
+    assert_eq!(end_turns, 2, "expected 2 EndTurn events; got snap {snap:?}");
+}
+
+#[tokio::test]
+async fn orchestrator_without_writer_creates_no_file() {
+    // Sanity: with `None` for jsonl_writer (the default constructor),
+    // the orchestrator does NOT touch the filesystem under tempdir.
+    let dir = tempdir().expect("tempdir");
+
+    let response = mock_message_response(
+        vec![ContentBlockApi::Text {
+            text: "hello".into(),
+        }],
+        Some("end_turn"),
+    );
+    let api = Arc::new(MockApiClient::new(vec![response]));
+    let output = Arc::new(MockOutputStream::new());
+    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let perms = Arc::new(NoOpPermissionGate);
+    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        tools,
+        hooks,
+        perms,
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    );
+    // NOTE: no `.with_jsonl_writer(...)` call.
+
+    let _ = orch.run_turn("hi").await.expect("turn");
+
+    // Walk the temp dir — must be empty (orchestrator created no files).
+    let count = std::fs::read_dir(dir.path()).expect("readdir").count();
+    assert_eq!(
+        count, 0,
+        "orchestrator without writer must not create any files; found {count}"
+    );
+}

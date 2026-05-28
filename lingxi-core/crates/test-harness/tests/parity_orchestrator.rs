@@ -59,6 +59,21 @@ struct Scenario {
     #[serde(default)]
     #[allow(dead_code)]
     expected_cost_after_turn: Option<serde_json::Value>,
+    // M6-08 force_compact_50_messages scenario fields. The dedicated
+    // `parity_force_compact_50_messages` test below wires the assertion
+    // directly; these #[serde(default)] fields just confirm the fixture
+    // parses cleanly.
+    #[serde(default)]
+    seed_history_size: Option<usize>,
+    #[serde(default)]
+    expected_messages_before: Option<u32>,
+    #[serde(default)]
+    expected_messages_after_max: Option<u32>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    expected_marker_present: Option<bool>,
+    #[serde(default)]
+    expected_marker_prefix: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -346,4 +361,88 @@ async fn parity_cost_after_one_turn() {
     assert_eq!(snap.input_tokens, 1_000);
     assert_eq!(snap.output_tokens, 500);
     assert_eq!(snap.api_calls, 1);
+}
+
+// ============================================================================
+// M6-08 — scenario: force_compact_50_messages (real CompactionOrchestrator)
+// ============================================================================
+
+#[tokio::test]
+async fn parity_force_compact_50_messages() {
+    use lingxi_compaction::CompactionOrchestrator;
+    use lingxi_protocol::{ConversationMessage, MessageId};
+    use lingxi_traits::OrchestratorHandle;
+
+    // Drive the assertion from the fixture so the scenario fields are
+    // load-bearing (matches the cost_after_one_turn convention).
+    let f = load();
+    let s = f
+        .scenarios
+        .iter()
+        .find(|s| s.name == "force_compact_50_messages")
+        .expect("force_compact_50_messages scenario present");
+    let seed = s.seed_history_size.expect("seed_history_size");
+    let expected_before = s.expected_messages_before.expect("expected_messages_before");
+    let after_max = s
+        .expected_messages_after_max
+        .expect("expected_messages_after_max");
+    let marker_prefix = s
+        .expected_marker_prefix
+        .clone()
+        .expect("expected_marker_prefix");
+
+    let orch = Arc::new(
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(lingxi_tools::registry::ToolRegistry::new()),
+            lingxi_orchestrator::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        // Tiny threshold (100 tokens ≈ 400 text chars) so the autocompact
+        // layer reliably fires under the M3 stub Autocompactor regardless of
+        // per-message body length — the history collapse is real even though
+        // the summary body is the [stub-summary …] placeholder (M7 wires a
+        // real ForkedAgentRunner). estimate_tokens_for_range is
+        // text_content().len()/4 per message, so 50 short messages clear 100
+        // tokens with margin.
+        .with_compaction(Arc::new(CompactionOrchestrator::new(100))),
+    );
+
+    // Seed `seed` user messages.
+    {
+        let session = orch.session();
+        let mut hist = session.lock().await;
+        for i in 0..seed {
+            hist.history.push(ConversationMessage::user(
+                MessageId::new(),
+                format!("turn-{i} padding to push token count past the autocompact threshold"),
+            ));
+        }
+    }
+
+    let summary = orch.force_compact().await.expect("force_compact ok");
+    // COUNTS are real (asserted); the summary body is the M3 stub.
+    assert_eq!(summary.messages_before, expected_before);
+    assert!(
+        summary.messages_after <= after_max,
+        "messages_after={} must be <= {after_max} (collapse happened)",
+        summary.messages_after
+    );
+
+    let session = orch.session();
+    let hist = session.lock().await;
+    let last = hist.history.last().expect("history non-empty after compact");
+    match last {
+        ConversationMessage::System { content, .. } => {
+            assert!(
+                content.starts_with(&marker_prefix),
+                "marker prefix {marker_prefix:?} missing; got: {content}"
+            );
+        }
+        other => panic!("expected System marker; got {other:?}"),
+    }
 }

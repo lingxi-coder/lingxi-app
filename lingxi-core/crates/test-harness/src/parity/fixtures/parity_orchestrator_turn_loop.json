@@ -36,6 +36,14 @@
         "output_tokens": 500,
         "api_calls": 1
       }
+    },
+    {
+      "name": "force_compact_50_messages",
+      "seed_history_size": 50,
+      "expected_messages_before": 50,
+      "expected_messages_after_max": 49,
+      "expected_marker_present": true,
+      "expected_marker_prefix": "[Compacted 50 → "
     }
   ],
   "telemetry_invariants": {

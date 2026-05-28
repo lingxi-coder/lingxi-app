@@ -148,6 +148,22 @@ pub async fn build_runtime(
     // unused-field warning) and proceed.
     let _ = argv.no_stream;
 
+    // (4.5) M6-06: Construct one CostTracker per process. The persist
+    //       channel drains into a fire-and-forget task that discards
+    //       snapshots in v0.7.0 — on-disk cost-state persistence is M7
+    //       work. Channel depth 64 absorbs short bursts without blocking
+    //       record_api_response_v2.
+    let (cost_persist_tx, mut cost_persist_rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move {
+        // Discard snapshots — v0.7.0 does not persist cost.
+        while cost_persist_rx.recv().await.is_some() {}
+    });
+    let cost_tracker = Arc::new(lingxi_cost::CostTracker::new(
+        lingxi_protocol::SessionId::new(),
+        Arc::new(lingxi_cost::PricingCatalog::builtin_reference()),
+        cost_persist_tx,
+    ));
+
     // (5) Build the orchestrator using test_support fillers for the
     //     hook/permission/memory slots. These are the documented inherited
     //     M5-10/M5-11 gaps — production constructors land in M5-13+.
@@ -158,9 +174,10 @@ pub async fn build_runtime(
         Arc::new(StaticMemoryProvider::empty());
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-    let orch = Arc::new(ConversationOrchestrator::new(
-        cfg, api_client, tools, hooks, perms, output, memory, cwd,
-    ));
+    let orch = Arc::new(
+        ConversationOrchestrator::new(cfg, api_client, tools, hooks, perms, output, memory, cwd)
+            .with_cost_tracker(cost_tracker),
+    );
 
     // (6) Build the command registry. The orchestrator implements
     //     `OrchestratorHandle` via M5-10 + M5-11.
@@ -212,7 +229,12 @@ mod tests {
         let output: Arc<dyn OutputStream> =
             Arc::new(lingxi_orchestrator::test_support::MockOutputStream::new());
         let r = build_runtime(&argv, output).await;
-        assert!(r.is_ok(), "build_runtime failed: {:?}", r.err());
+        let r = r.expect("build_runtime failed");
+        // M6-06: cost tracker must be wired.
+        assert!(
+            r.orchestrator.has_cost_tracker(),
+            "build_runtime did not wire CostTracker"
+        );
     }
 
     #[test]

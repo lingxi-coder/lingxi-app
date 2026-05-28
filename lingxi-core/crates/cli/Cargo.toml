@@ -19,6 +19,7 @@ lingxi-traits = { path = "../traits" }
 lingxi-api-client = { path = "../api-client" }
 lingxi-commands = { path = "../commands" }
 lingxi-orchestrator = { path = "../orchestrator" }
+lingxi-cost = { path = "../cost" }
 lingxi-tui = { path = "../tui" }
 lingxi-session = { path = "../session" }
 lingxi-anthropic-oauth = { path = "../anthropic-oauth" }

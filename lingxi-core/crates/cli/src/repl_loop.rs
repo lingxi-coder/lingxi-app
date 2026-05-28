@@ -41,9 +41,9 @@ pub async fn step<R, W>(
     sink: Arc<dyn OutputSink>,
     sigint: &SigintSource,
     run_turn_fn: impl Fn(
-        &str,
+        String,
         CancellationToken,
-    ) -> BoxFuture<'_, Result<TurnOutcome, OrchestratorError>>,
+    ) -> BoxFuture<'static, Result<TurnOutcome, OrchestratorError>>,
 ) -> StepOutcome
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -128,7 +128,7 @@ where
     // when this scope exits, ensuring the next iteration gets a fresh one.
     let _sigint_guard = sigint.arm_for_turn(token.clone());
     sink.turn_start().await;
-    let outcome = run_turn_fn(input, token).await;
+    let outcome = run_turn_fn(input.to_string(), token).await;
     match outcome {
         Ok(TurnOutcome::EndTurn) => {}
         Ok(TurnOutcome::MaxTurns) => {

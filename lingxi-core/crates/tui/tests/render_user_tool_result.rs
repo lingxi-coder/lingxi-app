@@ -28,3 +28,42 @@ fn short_5_line_result_renders_full() {
       line5
     ");
 }
+
+#[test]
+fn long_200_line_result_shows_truncation_footer() {
+    let body = (1..=200)
+        .map(|i| format!("line{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let s = render_user_tool_result_to_string(UserToolResultProps {
+        id: id(),
+        tool: "Bash".into(),
+        result: serde_json::json!({"content": body}),
+        expanded: true,
+        focused: false,
+    });
+    // First 100 lines render; lines 101..=200 are dropped.
+    assert!(s.starts_with("└ line1\n"), "got: {s}");
+    assert!(s.contains("\n  line100\n"), "got tail: {s}");
+    assert!(!s.contains("line101"), "should not include line101");
+    assert!(
+        s.ends_with("[output truncated, 100 more lines]"),
+        "got: {s}"
+    );
+}
+
+#[test]
+fn collapsed_long_result_shows_first_line_plus_lines_suffix() {
+    let body = (1..=10)
+        .map(|i| format!("line{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let s = render_user_tool_result_to_string(UserToolResultProps {
+        id: id(),
+        tool: "Bash".into(),
+        result: serde_json::json!({"content": body}),
+        expanded: false,
+        focused: false,
+    });
+    assert_eq!(s, "└ line1 (+9 lines)");
+}

@@ -1,0 +1,9 @@
+---
+source: crates/tui/tests/render_repl_screen.rs
+assertion_line: 60
+expression: element.to_string()
+---
+claude-sonnet-4.5 /a/b $0.000 42% default
+> hi
+● Hello!
+> next

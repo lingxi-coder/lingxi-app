@@ -13,6 +13,7 @@ pub mod app;
 pub mod components;
 pub mod error;
 pub mod events;
+pub mod screens;
 pub mod session;
 pub mod state;
 pub mod telemetry;

@@ -44,6 +44,14 @@ pub struct OrchestratorConfig {
     /// truth for which gate to construct. (M5-05)
     #[serde(default)]
     pub interactive_permissions: bool,
+
+    /// If `Some(id)`, the orchestrator was started via `--resume <id>` or
+    /// `/resume <id>` (M5-08) and must replay messages from the on-disk
+    /// JSONL before running the first turn. The same `id` is re-used for
+    /// new appends so the chain continues uninterrupted. `None` = fresh
+    /// session.
+    #[serde(default)]
+    pub resume_session_id: Option<uuid::Uuid>,
 }
 
 impl Default for OrchestratorConfig {
@@ -53,6 +61,7 @@ impl Default for OrchestratorConfig {
             model: DEFAULT_MODEL.to_string(),
             system_prompt_override: None,
             interactive_permissions: false,
+            resume_session_id: None,
         }
     }
 }
@@ -86,6 +95,7 @@ mod tests {
             model: "x".into(),
             system_prompt_override: Some("custom".into()),
             interactive_permissions: true,
+            resume_session_id: None,
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
@@ -93,10 +103,28 @@ mod tests {
         assert_eq!(back.model, "x");
         assert_eq!(back.system_prompt_override.as_deref(), Some("custom"));
         assert!(back.interactive_permissions);
+        assert!(back.resume_session_id.is_none());
     }
 
     #[test]
     fn default_interactive_permissions_is_false() {
         assert!(!OrchestratorConfig::default().interactive_permissions);
+    }
+
+    #[test]
+    fn default_resume_session_id_is_none() {
+        assert!(OrchestratorConfig::default().resume_session_id.is_none());
+    }
+
+    #[test]
+    fn resume_session_id_round_trips_through_json() {
+        let sid = uuid::Uuid::from_bytes([7u8; 16]);
+        let cfg = OrchestratorConfig {
+            resume_session_id: Some(sid),
+            ..OrchestratorConfig::default()
+        };
+        let s = serde_json::to_string(&cfg).unwrap();
+        let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.resume_session_id, Some(sid));
     }
 }

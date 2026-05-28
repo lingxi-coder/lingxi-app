@@ -4,6 +4,7 @@
 //! components) plus its `Props` struct.
 
 pub mod messages;
+pub mod permissions;
 pub mod prompt_input;
 pub mod scrollback;
 pub mod spinner;

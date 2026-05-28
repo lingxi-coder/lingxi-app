@@ -259,12 +259,20 @@ pub async fn build_runtime(
     .await;
     let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
 
+    // (5.4) M6-08: Real compaction. Threshold defaults to 150_000 tokens —
+    //       matches M3's design lock for the Anthropic prod context
+    //       window. Default Autocompactor (no `with_forked_runner`)
+    //       returns a stub summary string; real LLM summarization lands
+    //       in M7 when the ForkedAgentRunner pool is wired.
+    let compactor = Arc::new(lingxi_compaction::CompactionOrchestrator::new(150_000));
+
     let orch = Arc::new(
         ConversationOrchestrator::new(cfg, api_client, tools, hooks, perms, output, memory, cwd)
             .with_cost_tracker(cost_tracker)
             .with_mcp_registry(mcp_registry)
             .with_hook_registry(hook_registry)
-            .with_agent_catalog(agent_catalog),
+            .with_agent_catalog(agent_catalog)
+            .with_compaction(compactor),
     );
 
     // (6) Build the command registry. The orchestrator implements
@@ -335,6 +343,11 @@ mod tests {
         assert!(
             r.orchestrator.has_agent_catalog(),
             "build_runtime did not wire agent catalog"
+        );
+        // M6-08: compactor must be wired.
+        assert!(
+            r.orchestrator.has_compaction(),
+            "build_runtime did not wire CompactionOrchestrator"
         );
     }
 

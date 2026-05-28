@@ -80,6 +80,21 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
             // pass shows the post-turn dollar amount in the status line.
             state.status.cost = cost_str;
         }
+        TurnEvent::CompactionCompleted {
+            messages_before,
+            messages_after,
+            ..
+        } => {
+            // M6-08: append a `[Compacted N → M messages]` SystemText
+            // line so the user sees the boundary marker. Proper
+            // CompactBoundaryMessage rendering with a summary preview
+            // lands in M7.
+            state.messages.push(RenderedMessage::SystemText {
+                body: format!("[Compacted {messages_before} → {messages_after} messages]"),
+                timestamp: chrono::Utc::now().timestamp(),
+                is_error: false,
+            });
+        }
     }
     notify.notify_one();
 }

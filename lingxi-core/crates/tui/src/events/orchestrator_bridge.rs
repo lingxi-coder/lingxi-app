@@ -68,6 +68,18 @@ pub enum TurnEvent {
     /// `apply_event` writes the value into `state.status.cost`, refreshing
     /// the status-line render.
     CostUpdated(String),
+    /// A successful `force_compact` finished. The TUI appends a
+    /// `[Compacted N → M messages]` SystemText line to scrollback so
+    /// users see the boundary marker. Proper `CompactBoundaryMessage`
+    /// rendering with summary preview lands in M7. (M6-08)
+    CompactionCompleted {
+        /// Message count BEFORE compaction.
+        messages_before: u32,
+        /// Message count AFTER compaction.
+        messages_after: u32,
+        /// UX estimate of bytes freed.
+        bytes_saved: u64,
+    },
 }
 
 /// `OutputStream` impl that forwards every callback as a `TurnEvent` on
@@ -116,6 +128,19 @@ impl OutputStream for BridgeOutputStream {
             id: *id,
             tool: tool.to_string(),
             result: result.clone(),
+        });
+    }
+
+    async fn emit_compaction_completed(
+        &self,
+        messages_before: u32,
+        messages_after: u32,
+        bytes_saved: u64,
+    ) {
+        let _ = self.tx.send(TurnEvent::CompactionCompleted {
+            messages_before,
+            messages_after,
+            bytes_saved,
         });
     }
 

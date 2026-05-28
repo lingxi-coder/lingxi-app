@@ -4,14 +4,12 @@ use crate::conversation::ConversationOrchestrator;
 use crate::error::OrchestratorError;
 use crate::test_support::PermissionDecision;
 use lingxi_api_client::types::ContentBlockApi;
-use lingxi_core::SessionState;
 use lingxi_hooks::events::HookEvent;
 use lingxi_hooks::registry::HookContext;
 use lingxi_hooks::response::HookDecision;
 use lingxi_protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use lingxi_telemetry::tengu::orchestrator as orch_events;
 use lingxi_tools::context::{ToolUseContext, ToolUseOptions};
-use lingxi_traits::CostSnapshot;
 
 /// What one turn step decided.
 pub(crate) enum TurnStepOutcome {
@@ -381,17 +379,3 @@ pub(crate) async fn dispatch_tool_uses(
     Ok(results)
 }
 
-/// Project a `SessionState` into a `CostSnapshot`. M5-02 reports zero cost;
-/// M5-05/M5-11 will plug in `lingxi-cost`.
-pub(crate) fn cost_snapshot_from_session(s: &SessionState) -> CostSnapshot {
-    CostSnapshot {
-        session_id: s.session_id,
-        total_nano_usd: 0,
-        total_tokens: s
-            .usage
-            .0
-            .input_tokens
-            .saturating_add(s.usage.0.output_tokens),
-        ..CostSnapshot::default()
-    }
-}

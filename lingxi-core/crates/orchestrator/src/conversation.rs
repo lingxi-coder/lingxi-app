@@ -460,10 +460,7 @@ impl ConversationOrchestrator {
                     final_message_id: id,
                     stop_reason,
                 } => {
-                    let cost = {
-                        let s = self.session.lock().await;
-                        crate::turn_loop::cost_snapshot_from_session(&s)
-                    };
+                    let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn(&stop_reason, &cost).await;
                     final_message_id = id;
                     break;
@@ -523,7 +520,6 @@ impl ConversationOrchestrator {
         prompt: &str,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         use crate::streaming_loop::{dispatch_tool_uses_concurrent, pump_stream};
-        use crate::turn_loop::cost_snapshot_from_session;
         use lingxi_protocol::ContentBlock;
 
         // 0. Build the system prompt for THIS turn. Override always wins.
@@ -615,10 +611,7 @@ impl ConversationOrchestrator {
             // 6. Decide loop disposition.
             match pumped.stop_reason.as_deref() {
                 Some("end_turn") => {
-                    let cost = {
-                        let s = self.session.lock().await;
-                        cost_snapshot_from_session(&s)
-                    };
+                    let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn("end_turn", &cost).await;
                     final_message_id = assistant_id;
                     break;
@@ -628,10 +621,7 @@ impl ConversationOrchestrator {
                     // max_tokens / stop_sequence / pause_turn / refusal —
                     // terminate the loop with the value as-is, mirroring
                     // claude-code's behavior (claude.ts:2269).
-                    let cost = {
-                        let s = self.session.lock().await;
-                        cost_snapshot_from_session(&s)
-                    };
+                    let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn(other, &cost).await;
                     final_message_id = assistant_id;
                     break;
@@ -639,10 +629,7 @@ impl ConversationOrchestrator {
                 None => {
                     // Stream ended without a stop_reason — treat as
                     // end_turn (rare; claude.ts uses the same fallback).
-                    let cost = {
-                        let s = self.session.lock().await;
-                        cost_snapshot_from_session(&s)
-                    };
+                    let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn("end_turn", &cost).await;
                     final_message_id = assistant_id;
                     break;
@@ -720,10 +707,7 @@ impl ConversationOrchestrator {
             match step {
                 TurnStepOutcome::Continue => continue,
                 TurnStepOutcome::Ended { stop_reason, .. } => {
-                    let cost = {
-                        let s = self.session.lock().await;
-                        crate::turn_loop::cost_snapshot_from_session(&s)
-                    };
+                    let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn(&stop_reason, &cost).await;
                     return Ok(TurnOutcome::EndTurn);
                 }

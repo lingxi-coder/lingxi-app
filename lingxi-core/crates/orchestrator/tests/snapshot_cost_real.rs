@@ -113,6 +113,63 @@ async fn two_turns_accumulate() {
 }
 
 #[tokio::test]
+async fn emit_end_turn_carries_real_cost() {
+    // Build a fresh wiring where we can inspect the captured events.
+    let response = end_turn_response_with_usage(1_000, 500);
+    let api = Arc::new(MockApiClient::new(vec![response]));
+
+    let (tx, _rx) = mpsc::channel(64);
+    let tracker = Arc::new(CostTracker::new(
+        SessionId::new(),
+        Arc::new(PricingCatalog::builtin_reference()),
+        tx,
+    ));
+
+    let tools = Arc::new(ToolRegistry::new());
+    let hooks = noop_hook_executor();
+    let perms = Arc::new(NoOpPermissionGate);
+    let output_capture = Arc::new(MockOutputStream::new());
+    let memory = Arc::new(StaticMemoryProvider::empty());
+
+    let mut cfg = OrchestratorConfig::default();
+    cfg.model = "claude-opus-4-6".into();
+    let orch = Arc::new(
+        ConversationOrchestrator::new(
+            cfg,
+            api,
+            tools,
+            hooks,
+            perms,
+            output_capture.clone(),
+            memory,
+            std::env::temp_dir(),
+        )
+        .with_cost_tracker(tracker),
+    );
+    orch.run_turn("hi").await.unwrap();
+
+    let events = output_capture.snapshot().await;
+    let end_turn_cost = events
+        .iter()
+        .find_map(|e| match e {
+            lingxi_traits::OutputEvent::EndTurn { cost, .. } => Some(cost.clone()),
+            _ => None,
+        })
+        .expect("end_turn event present");
+
+    // The cost embedded in emit_end_turn must reflect the real numbers,
+    // not the legacy zeros from cost_snapshot_from_session.
+    assert!(
+        (end_turn_cost.total_usd - 0.0175).abs() < 1e-9,
+        "got: {}",
+        end_turn_cost.total_usd
+    );
+    assert_eq!(end_turn_cost.input_tokens, 1_000);
+    assert_eq!(end_turn_cost.output_tokens, 500);
+    assert_eq!(end_turn_cost.api_calls, 1);
+}
+
+#[tokio::test]
 async fn no_tracker_returns_zeroed_snapshot() {
     // Backward compat — library users who don't wire a tracker still get
     // a valid (zero) snapshot with the correct session_id.

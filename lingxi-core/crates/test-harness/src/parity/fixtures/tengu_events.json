@@ -1,6 +1,6 @@
 {
   "_source": "lingxi-telemetry::tengu::ALL_EVENT_NAMES (lingxi-core/crates/telemetry/src/tengu/mod.rs) — M3-06 schema lock against claude-code @ 6a25909 src/services/statsig.ts::logStatsigEvent wire shape.",
-  "_note": "213 tengu_* event names in registration order: api (25) -> agent (30) -> session (15) -> tool (110) -> cost (10) -> oauth (8) -> memory (12) -> settings (3). The tool block is 40 (M3-06 baseline) + 9 (M4-02 powershell/repl/sleep) + 3 (M4-03 web_search) + 15 (M4-04 workflow: todo_write/{enter,exit}_plan_mode/{enter,exit}_worktree) + 24 (M4-05 agent/task: agent/task_{create,get,list,update,stop,output}/send_message) + 6 (M4-06 team: team_{create,delete}) + 13 (M4-07 mcp/lsp: mcp_started + mcp_auth/list_mcp_resources/read_mcp_resource/lsp × started/completed/failed; MCP_COMPLETED + MCP_FAILED were already in the M3-06 baseline). Order is append-only per spec §7 line 787-789; adding a name MUST extend the list and bump the count. Removing a name is a v0.5+ breaking change. Field-set changes to existing events use sibling tengu_<name>_v2 names with a 2-minor deprecation cycle.",
+  "_note": "213 tengu_* event names in registration order: api (25) -> agent (30) -> session (15) -> tool (110) -> cost (10) -> oauth (8) -> memory (12) -> settings (3). The tool block is 40 (M3-06 baseline) + 9 (M4-02 powershell/repl/sleep) + 3 (M4-03 web_search) + 15 (M4-04 workflow: todo_write/{enter,exit}_plan_mode/{enter,exit}_worktree) + 24 (M4-05 agent/task: agent/task_{create,get,list,update,stop,output}/send_message) + 6 (M4-06 team: team_{create,delete}) + 13 (M4-07 mcp/lsp: mcp_started + mcp_auth/list_mcp_resources/read_mcp_resource/lsp × started/completed/failed; MCP_COMPLETED + MCP_FAILED were already in the M3-06 baseline). Order is append-only per spec §7 line 787-789; adding a name MUST extend the list and bump the count. Removing a name is a v0.5+ breaking change. Field-set changes to existing events use sibling tengu_<name>_v2 names with a 2-minor deprecation cycle. M5-13: orchestrator block grows 15 -> 17 (+2 tengu_repl_session_started/ended). Total: 314.",
   "event_names": [
     "tengu_api_request_started",
     "tengu_api_request_succeeded",
@@ -259,6 +259,8 @@
     "tengu_orchestrator_hook_post_failed",
     "tengu_orchestrator_hook_http_skipped_ssrf",
     "tengu_orchestrator_hook_timeout",
+    "tengu_repl_session_started",
+    "tengu_repl_session_ended",
     "lingxi_core_v0_5_0_released",
     "tengu_command_agents_completed",
     "tengu_command_agents_failed",

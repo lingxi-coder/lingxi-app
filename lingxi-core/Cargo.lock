@@ -1857,11 +1857,13 @@ dependencies = [
  "lingxi-lsp",
  "lingxi-mcp",
  "lingxi-memory",
+ "lingxi-orchestrator",
  "lingxi-platform-posix",
  "lingxi-platform-posix-minimal",
  "lingxi-platform-windows",
  "lingxi-protocol",
  "lingxi-sandbox",
+ "lingxi-session",
  "lingxi-telemetry",
  "lingxi-tools",
  "lingxi-traits",
@@ -1872,6 +1874,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

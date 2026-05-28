@@ -55,6 +55,22 @@ pub struct Runtime {
     pub auth: Arc<dyn AuthHandle>,
 }
 
+/// Build-result for the TUI startup path. (M6-03)
+///
+/// Returns the standard [`Runtime`] plus the bridge receiver the TUI
+/// drains for streaming events. The orchestrator inside `runtime` is
+/// constructed with a [`lingxi_tui::BridgeOutputStream`] as its `output`,
+/// so every `emit_text` / `emit_tool_call` / `emit_end_turn` lands on
+/// `bridge_rx` as a [`lingxi_tui::TurnEvent`].
+pub struct TuiBuild {
+    /// Standard runtime bundle.
+    pub runtime: Runtime,
+    /// Bridge receiver — the TUI render loop drains this into
+    /// `lingxi_tui::streaming::apply_event`.
+    pub bridge_rx:
+        tokio::sync::mpsc::UnboundedReceiver<lingxi_tui::events::orchestrator_bridge::TurnEvent>,
+}
+
 /// Errors surfaced while building a [`Runtime`].
 #[derive(Debug, thiserror::Error)]
 pub enum InitError {
@@ -160,6 +176,21 @@ pub async fn build_runtime(
         dispatcher,
         auth,
     })
+}
+
+/// TUI variant of [`build_runtime`]. (M6-03)
+///
+/// Constructs the orchestrator with [`lingxi_tui::BridgeOutputStream`] as
+/// its `output` so streaming `emit_text` calls route into the bridge
+/// channel returned alongside the runtime. The TUI render loop drains
+/// this channel through `lingxi_tui::streaming::apply_event`.
+#[allow(clippy::unused_async)]
+pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
+    let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
+    let bridge: Arc<dyn OutputStream> =
+        Arc::new(lingxi_tui::BridgeOutputStream::new(bridge_tx));
+    let runtime = build_runtime(argv, bridge).await?;
+    Ok(TuiBuild { runtime, bridge_rx })
 }
 
 #[cfg(test)]

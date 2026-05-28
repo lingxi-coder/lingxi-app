@@ -341,6 +341,72 @@ fn next_turn_id() -> u64 {
     N.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Ctrl-C handler during streaming. (M6-03 T8)
+///
+/// Idempotent if `streaming.is_none()` (caller delegates to M6-02's
+/// prompt-clear / second-Ctrl-C logic in that case). When streaming, fires
+/// the cancel token; the orchestrator task will return
+/// `TurnOutcome::Cancelled` and the bridge will emit `TurnEnded`, which
+/// `apply_event` translates into `streaming = None`.
+///
+/// We do NOT clear `state.streaming` here — we wait for the bridge's
+/// `TurnEnded` event so the spinner stays up until the orchestrator
+/// actually unwinds.
+pub fn handle_ctrl_c(state: &mut AppState) {
+    if let Some(token) = state.cancel_token.take() {
+        token.cancel();
+    }
+}
+
+/// Spawn a streaming turn. (M6-03 T8)
+///
+/// Synchronously emits `TurnEvent::TurnStarted` on the provided sender
+/// (so the spinner appears immediately on Enter), then spawns a task that
+/// awaits `handle.run_turn_streaming_with_cancel(prompt, cancel)` and
+/// sends a final `TurnEvent::TurnEnded(outcome)` once it completes.
+///
+/// Returns the [`CancellationToken`] the caller should store in
+/// `state.cancel_token`. Per-turn text/tool events flow through the
+/// orchestrator's `OutputStream` (the BridgeOutputStream wired at
+/// construction) — this helper does NOT see them.
+///
+/// [`CancellationToken`]: tokio_util::sync::CancellationToken
+#[must_use]
+pub fn spawn_streaming_turn(
+    handle: std::sync::Arc<dyn lingxi_traits::OrchestratorHandle>,
+    prompt: String,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::events::orchestrator_bridge::TurnEvent>,
+) -> tokio_util::sync::CancellationToken {
+    use crate::events::orchestrator_bridge::TurnEvent;
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let tx_clone = tx.clone();
+
+    // Emit TurnStarted SYNCHRONOUSLY before spawning so the UI shows
+    // the spinner immediately on Enter, not after the first network
+    // roundtrip.
+    let _ = tx.send(TurnEvent::TurnStarted);
+
+    tokio::spawn(async move {
+        let outcome = handle
+            .run_turn_streaming_with_cancel(&prompt, cancel_clone)
+            .await;
+        let ev = match outcome {
+            Ok(o) => TurnEvent::TurnEnded(o),
+            Err(e) => {
+                tracing::error!(error = ?e, "streaming turn failed");
+                // Surface error completion as a clean EndTurn for now;
+                // M7 may introduce a dedicated TurnEnded(Error) variant.
+                TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::EndTurn)
+            }
+        };
+        let _ = tx_clone.send(ev);
+    });
+
+    cancel
+}
+
 /// Apply a scroll direction with a known viewport height. Called per
 /// frame for PageUp/PageDown, where the viewport is known; line-step
 /// (`j`/`k`) reuses this with `height=1`.

@@ -1,0 +1,71 @@
+//! Tiny extension helper: estimate the "useful payload" byte size of a
+//! [`ConversationMessage`]. Used by M6-08 to compute the `bytes_saved`
+//! field of `CompactionSummary` (UX estimate only — the exact cost
+//! accounting lives in `lingxi-cost`).
+
+use crate::{ContentBlock, ConversationMessage};
+
+/// Returns the sum, in bytes, of every text payload carried by `msg`.
+///
+/// Tool-use input JSON and tool-result content are sized as the
+/// serialized JSON length (best-effort; falls back to 0 on serializer
+/// error).
+#[must_use]
+pub fn text_byte_size(msg: &ConversationMessage) -> u64 {
+    match msg {
+        ConversationMessage::User { content, .. }
+        | ConversationMessage::Assistant { content, .. } => {
+            content.iter().map(content_block_size).sum()
+        }
+        ConversationMessage::System { content, .. } => content.len() as u64,
+    }
+}
+
+fn content_block_size(b: &ContentBlock) -> u64 {
+    match b {
+        ContentBlock::Text { text, .. } => text.len() as u64,
+        ContentBlock::ToolUse { input, .. } => serde_json::to_string(input)
+            .map(|s| s.len() as u64)
+            .unwrap_or(0),
+        ContentBlock::ToolResult { content, .. } => serde_json::to_string(content)
+            .map(|s| s.len() as u64)
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+
+    #[test]
+    fn user_text_message_returns_string_byte_length() {
+        let m = ConversationMessage::user(MessageId::new(), "hello".into());
+        assert_eq!(text_byte_size(&m), 5);
+    }
+
+    #[test]
+    fn system_message_returns_content_length() {
+        let m = ConversationMessage::System {
+            id: MessageId::new(),
+            content: "abc".into(),
+        };
+        assert_eq!(text_byte_size(&m), 3);
+    }
+
+    #[test]
+    fn tool_use_block_sized_as_json() {
+        let m = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolUse {
+                id: ToolUseId::new(),
+                name: "Read".into(),
+                input: serde_json::json!({"path": "/a"}),
+            }],
+            stop_reason: Some("tool_use".into()),
+        };
+        // {"path":"/a"} → 13 bytes
+        assert_eq!(text_byte_size(&m), 13);
+    }
+}

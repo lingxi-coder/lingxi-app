@@ -13,6 +13,7 @@ pub mod capabilities;
 pub mod effect_result;
 pub mod effects;
 pub mod ids;
+pub mod message_size;
 pub mod messages;
 pub mod secret;
 pub mod transport;
@@ -27,6 +28,7 @@ pub use ids::{
     AgentId, HookId, McpConnectionId, MessageId, PluginId, PrefetchId, RequestId, SessionId,
     SnapshotId, ToolUseId,
 };
+pub use message_size::text_byte_size;
 pub use messages::{ContentBlock, ConversationMessage, MemoryEntry, MemoryEntryTier, MessageRole};
 pub use secret::{
     RedactableContent, Secret, SecretKindDto, SecureStorageData, SecureStorageMetadata,

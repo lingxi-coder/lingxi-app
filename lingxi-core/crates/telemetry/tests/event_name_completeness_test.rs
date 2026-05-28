@@ -5,7 +5,7 @@
 use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_312_entries() {
+fn registry_is_exactly_314_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
@@ -22,7 +22,9 @@ fn registry_is_exactly_312_entries() {
     // M5-10 added 18 command events (6 batch-1 commands × 3 phases),
     // M5-11 added 36 command events (12 batch-2 commands × 3 phases):
     // 276 (post-M5-10) + 36 (M5-11) = 312.
-    assert_eq!(ALL_EVENT_NAMES.len(), 312);
+    // M5-13 added 2 REPL session lifecycle events (repl_session_started/ended):
+    // 312 + 2 = 314.
+    assert_eq!(ALL_EVENT_NAMES.len(), 314);
 }
 
 #[test]
@@ -102,22 +104,23 @@ fn category_ordering_preserved() {
     // M5-02 grew the orchestrator block by +3 (conversation lifecycle).
     // M5-04 grew it by +2 (streaming). M5-05 grew it by +2 (permission).
     // M5-06 grew it by +8 (hook pre/post + http_skipped_ssrf + timeout).
-    // Block size is now 15; release marker still trails. Walk order is
+    // M5-13 grew it by +2 (REPL session started/ended).
+    // Block size is now 17; release marker still trails. Walk order is
     // fixed by tengu::mod.rs's concat_all (settings → orchestrator →
     // release).
-    for n in &ALL_EVENT_NAMES[242..257] {
+    for n in &ALL_EVENT_NAMES[242..259] {
         assert!(
-            n.starts_with("tengu_orchestrator_"),
+            n.starts_with("tengu_orchestrator_") || n.starts_with("tengu_repl_"),
             "orchestrator block: {n}"
         );
     }
-    for n in &ALL_EVENT_NAMES[257..258] {
+    for n in &ALL_EVENT_NAMES[259..260] {
         assert!(n.starts_with("lingxi_core_"), "release block: {n}");
     }
     // M5-10/M5-11: command block (54 events: 18 batch-1 + 36 batch-2) follows
     // the release marker. Walk order (per tengu::mod.rs concat_all):
     // … → release → command.
-    for n in &ALL_EVENT_NAMES[258..312] {
+    for n in &ALL_EVENT_NAMES[260..314] {
         assert!(n.starts_with("tengu_command_"), "command block: {n}");
     }
 }

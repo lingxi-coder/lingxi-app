@@ -18,10 +18,10 @@ fn all_3_settings_event_names_are_locked() {
 }
 
 #[test]
-fn registry_has_exactly_312_entries_after_m5_11() {
+fn registry_is_exactly_314_entries() {
     assert_eq!(
         lingxi_telemetry::tengu::ALL_EVENT_NAMES.len(),
-        312,
-        "M3-06 baseline 143 + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 + M4-09 1 + M5-02 3 + M5-03 0 + M5-04 2 + M5-05 2 + M5-06 8 hooks + M5-07 3 jsonl + M5-08 2 resume + M5-10 18 commands + M5-11 36 commands = 312",
+        314,
+        "M3-06 baseline 143 + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 + M4-09 1 + M5-02 3 + M5-03 0 + M5-04 2 + M5-05 2 + M5-06 8 hooks + M5-07 3 jsonl + M5-08 2 resume + M5-10 18 commands + M5-11 36 commands + M5-13 2 repl = 314",
     );
 }

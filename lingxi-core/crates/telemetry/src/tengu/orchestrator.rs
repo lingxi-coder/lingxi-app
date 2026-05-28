@@ -74,6 +74,18 @@ pub const HOOK_HTTP_SKIPPED_SSRF: &str = "tengu_orchestrator_hook_http_skipped_s
 /// Agent arms on `tokio::time::timeout` elapse. (M5-06)
 pub const HOOK_TIMEOUT: &str = "tengu_orchestrator_hook_timeout";
 
+// M5-13 additions: REPL session lifecycle.
+
+/// REPL session started — fired once by `run_repl` immediately after the
+/// telemetry session is opened, before the first prompt is printed. (M5-13)
+pub const REPL_SESSION_STARTED: &str = "tengu_repl_session_started";
+
+/// REPL session ended — fired once by `run_repl` just before process exit,
+/// regardless of exit reason (`"eof"` / `"exit_command"` / `"double_sigint"`).
+/// Payload carries `session_id`, `duration_secs`, `turn_count`, `ended_via`.
+/// (M5-13)
+pub const REPL_SESSION_ENDED: &str = "tengu_repl_session_ended";
+
 /// Order-locked array of all orchestrator-lifecycle names; consumed by
 /// `tengu::ALL_EVENT_NAMES`. Append-only: never reorder or remove entries.
 pub(crate) const NAMES: &[&str] = &[
@@ -92,4 +104,30 @@ pub(crate) const NAMES: &[&str] = &[
     HOOK_POST_FAILED,
     HOOK_HTTP_SKIPPED_SSRF,
     HOOK_TIMEOUT,
+    // M5-13: REPL session lifecycle (appended last to preserve existing ordering)
+    REPL_SESSION_STARTED,
+    REPL_SESSION_ENDED,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repl_events_present() {
+        assert!(NAMES.contains(&REPL_SESSION_STARTED));
+        assert!(NAMES.contains(&REPL_SESSION_ENDED));
+    }
+
+    #[test]
+    fn repl_event_names_locked() {
+        assert_eq!(REPL_SESSION_STARTED, "tengu_repl_session_started");
+        assert_eq!(REPL_SESSION_ENDED, "tengu_repl_session_ended");
+    }
+
+    #[test]
+    fn names_has_17_entries_after_m5_13() {
+        // 15 (M5-02..M5-06) + 2 (M5-13 REPL) = 17.
+        assert_eq!(NAMES.len(), 17);
+    }
+}

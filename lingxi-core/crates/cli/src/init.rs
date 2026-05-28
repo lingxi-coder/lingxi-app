@@ -37,10 +37,10 @@ use lingxi_orchestrator::test_support::{
 use lingxi_orchestrator::{
     AnthropicProviderAdapter, ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig,
 };
-use lingxi_platform_posix_minimal::{PlainTextSecureStorage, PosixClock, PosixHttp};
+use lingxi_platform_posix_minimal::{PlainTextSecureStorage, PosixClock, PosixHttp, PosixMcp};
 use lingxi_secret::CredentialManager;
 use lingxi_tools::registry::ToolRegistry;
-use lingxi_traits::{AuthHandle, OrchestratorHandle, OutputStream};
+use lingxi_traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -174,9 +174,93 @@ pub async fn build_runtime(
         Arc::new(StaticMemoryProvider::empty());
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
+    // (5.1) M6-07: Load `.mcp.json` (project preferred over user-global) and
+    //       pre-populate the McpRegistry with `Disconnected` state entries
+    //       so `/mcp` can list them. Real connect / health-check is M7 work.
+    let global_mcp_path = dirs::config_dir()
+        .map(|d| d.join("lingxi").join("mcp.json"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+    let project_mcp_path = cwd.join(".mcp.json");
+    let mcp_configs = lingxi_mcp::load_mcp_json_with_precedence(&project_mcp_path, &global_mcp_path);
+    let mcp_transport: Arc<dyn McpTransport> = Arc::new(PosixMcp::new());
+    let mcp_registry = Arc::new(lingxi_mcp::McpRegistry::new(mcp_transport));
+    {
+        let mut conns = mcp_registry.connections.write().await;
+        for cfg_entry in mcp_configs {
+            let name = cfg_entry.name.clone();
+            conns.insert(
+                name,
+                lingxi_mcp::McpConnectionState::Disconnected {
+                    config: cfg_entry,
+                    last_error: None,
+                },
+            );
+        }
+    }
+
+    // (5.2) M6-07: HookRegistry — read settings.json hooks block from
+    //       project (cwd/.claude/settings.json) and user (~/.claude/settings.json
+    //       or platform config_dir equivalent), in that order so project
+    //       wins on identical command registration (the registry currently
+    //       de-dupes by HookId, not name — both register; /hooks lists both).
+    let mut hook_registry = lingxi_hooks::HookRegistry::new();
+    let project_settings_path = cwd.join(".claude").join("settings.json");
+    let user_settings_path = dirs::config_dir()
+        .map(|d| d.join("claude").join("settings.json"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+    for (path, source) in [
+        (
+            user_settings_path,
+            lingxi_hooks::definition::HookSource::User,
+        ),
+        (
+            project_settings_path,
+            lingxi_hooks::definition::HookSource::Project,
+        ),
+    ] {
+        if let Ok(raw) = tokio::fs::read_to_string(&path).await {
+            match lingxi_hooks::parse_hooks_from_settings_json(&raw, source) {
+                Ok(hooks_vec) => {
+                    for h in hooks_vec {
+                        hook_registry.register(h);
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "skipping malformed settings hooks"
+                ),
+            }
+        }
+    }
+    let hook_registry = Arc::new(tokio::sync::RwLock::new(hook_registry));
+
+    // (5.3) M6-07: Agent catalog — load from project + user agents/.
+    //       Project wins on agent_type collision because it is passed
+    //       SECOND to load_agents_from_dirs (later paths win).
+    let project_agents_dir = cwd.join(".claude").join("agents");
+    let user_agents_dir = dirs::home_dir()
+        .map(|h| h.join(".claude").join("agents"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+    let agents = lingxi_agent::load_agents_from_dirs(&[
+        (
+            user_agents_dir,
+            lingxi_agent::definition::AgentSource::UserDefined,
+        ),
+        (
+            project_agents_dir,
+            lingxi_agent::definition::AgentSource::Project,
+        ),
+    ])
+    .await;
+    let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
+
     let orch = Arc::new(
         ConversationOrchestrator::new(cfg, api_client, tools, hooks, perms, output, memory, cwd)
-            .with_cost_tracker(cost_tracker),
+            .with_cost_tracker(cost_tracker)
+            .with_mcp_registry(mcp_registry)
+            .with_hook_registry(hook_registry)
+            .with_agent_catalog(agent_catalog),
     );
 
     // (6) Build the command registry. The orchestrator implements
@@ -234,6 +318,19 @@ mod tests {
         assert!(
             r.orchestrator.has_cost_tracker(),
             "build_runtime did not wire CostTracker"
+        );
+        // M6-07: three registries must be wired.
+        assert!(
+            r.orchestrator.has_mcp_registry(),
+            "build_runtime did not wire McpRegistry"
+        );
+        assert!(
+            r.orchestrator.has_hook_registry(),
+            "build_runtime did not wire HookRegistry"
+        );
+        assert!(
+            r.orchestrator.has_agent_catalog(),
+            "build_runtime did not wire agent catalog"
         );
     }
 

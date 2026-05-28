@@ -19,7 +19,11 @@ lingxi-traits = { path = "../traits" }
 lingxi-api-client = { path = "../api-client" }
 lingxi-commands = { path = "../commands" }
 lingxi-orchestrator = { path = "../orchestrator" }
+lingxi-mcp = { path = "../mcp" }
+lingxi-hooks = { path = "../hooks" }
+lingxi-agent = { path = "../agent" }
 lingxi-cost = { path = "../cost" }
+dirs = "5"
 lingxi-tui = { path = "../tui" }
 lingxi-session = { path = "../session" }
 lingxi-anthropic-oauth = { path = "../anthropic-oauth" }

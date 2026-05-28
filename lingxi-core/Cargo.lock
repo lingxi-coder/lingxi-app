@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-agent"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lingxi-core",
@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-anthropic-oauth"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-api-client"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1188,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-bridge"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "dirs",
@@ -1212,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1246,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-cli-demo"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1260,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-commands"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lingxi-core",
@@ -1280,7 +1280,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-compaction"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lingxi-api-client",
@@ -1299,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-coordinator"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lingxi-agent",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "figment",
@@ -1336,7 +1336,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-cost"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-cron"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -1369,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-filestate"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "lingxi-traits",
  "serde",
@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-hooks"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lingxi-core",
@@ -1398,7 +1398,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-jsonrpc"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1414,7 +1414,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-lsp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1437,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-memory"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "filetime",
@@ -1476,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-msgqueue"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "lingxi-protocol",
  "serde",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-orchestrator"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1518,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-outputstyles"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lingxi-protocol",
@@ -1530,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-permission"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lingxi-protocol",
@@ -1547,7 +1547,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-platform-common"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-platform-posix"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-platform-posix-minimal"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "fs2",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-platform-windows"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1657,7 +1657,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-plugin"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lingxi-agent",
@@ -1683,7 +1683,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-protocol"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "secrecy",
  "serde",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-sandbox"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lingxi-permission",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-secret"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lingxi-protocol",
@@ -1727,7 +1727,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-session"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1751,7 +1751,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-sidequery"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lingxi-api-client",
@@ -1769,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-skills"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lingxi-agent",
@@ -1790,7 +1790,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-tasks"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1812,7 +1812,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-telemetry"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "lingxi-protocol",
@@ -1827,7 +1827,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-telemetry-macros"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-test-harness"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "filetime",
@@ -1880,7 +1880,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-tools"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1918,7 +1918,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-traits"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -1930,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "lingxi-uniffi-bridge"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "lingxi-core",
  "lingxi-protocol",
@@ -2049,7 +2049,7 @@ dependencies = [
 
 [[package]]
 name = "mock_stdio_mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",

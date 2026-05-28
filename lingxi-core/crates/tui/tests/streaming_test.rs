@@ -92,3 +92,11 @@ async fn streaming_state_started_at_is_recent() {
     let elapsed = s.started_at.elapsed();
     assert!(elapsed < std::time::Duration::from_secs(1));
 }
+
+#[test]
+fn repl_render_includes_spinner_when_streaming() {
+    let mut state = new_state();
+    assert!(!lingxi_tui::screens::repl::should_render_spinner(&state));
+    state.streaming = Some(StreamingState::new());
+    assert!(lingxi_tui::screens::repl::should_render_spinner(&state));
+}

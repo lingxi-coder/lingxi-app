@@ -250,12 +250,13 @@ pub async fn handle_submit_line(
 /// downstream tasks have a stable assembly point.
 #[must_use]
 pub fn render_screen(state: &AppState, viewport_height: usize) -> AnyElement<'static> {
-    use crate::screens::repl::ReplScreen;
+    use crate::screens::repl::{should_render_spinner, ReplScreen};
     let status = state.status.clone();
     let messages = state.messages.clone();
     let prompt_text = state.prompt_text.clone();
     let prompt_cursor = state.prompt_cursor;
     let scroll_offset = state.scroll_offset;
+    let show_spinner = should_render_spinner(state);
     element! {
         ReplScreen(
             status: status,
@@ -264,6 +265,7 @@ pub fn render_screen(state: &AppState, viewport_height: usize) -> AnyElement<'st
             prompt_cursor: prompt_cursor,
             scroll_offset: scroll_offset,
             viewport_height: viewport_height,
+            show_spinner: show_spinner,
         )
     }
     .into_any()

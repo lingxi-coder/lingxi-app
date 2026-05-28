@@ -1,16 +1,26 @@
-//! REPL screen — the only screen in M6-02.
+//! REPL screen — the M6-02 layout, extended with M6-03 streaming spinner.
 //!
-//! Composes three vertical zones (top → bottom):
-//!   1. `StatusLine`   — height 1
-//!   2. `Scrollback`   — flex-grow 1
-//!   3. `PromptInput`  — height 1 (multi-line wrap arrives in M7)
+//! Composes vertical zones (top → bottom):
+//!   1. `StatusLine`       — height 1
+//!   2. `Scrollback`       — flex-grow 1
+//!   3. `SpinnerWithVerb`  — height 1, conditional on `streaming`
+//!   4. `PromptInput`      — height 1 (multi-line wrap arrives in M7)
 
 use iocraft::prelude::*;
 
 use crate::components::prompt_input::PromptInput;
 use crate::components::scrollback::Scrollback;
+use crate::components::spinner::SpinnerWithVerb;
 use crate::components::status_line::StatusLine;
-use crate::state::{RenderedMessage, StatusSnapshot};
+use crate::state::{AppState, RenderedMessage, StatusSnapshot};
+
+/// Predicate exposed for tests + the renderer's conditional mount.
+/// Returns `true` iff the spinner should be visible (a turn is streaming).
+#[inline]
+#[must_use]
+pub fn should_render_spinner(state: &AppState) -> bool {
+    state.streaming.is_some()
+}
 
 /// Props for `ReplScreen`. All fields are clones of the current
 /// `AppState`; iocraft's reactive model handles re-rendering on
@@ -29,9 +39,12 @@ pub struct ReplScreenProps {
     pub scroll_offset: usize,
     /// Live viewport height (rows available for the scrollback).
     pub viewport_height: usize,
+    /// Whether to render the streaming spinner between scrollback and
+    /// prompt input. Wired from `AppState.streaming.is_some()`.
+    pub show_spinner: bool,
 }
 
-/// Compose the three vertical zones of the M6-02 REPL screen.
+/// Compose the vertical zones of the M6-03 REPL screen.
 #[component]
 pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let model = props.status.model.clone();
@@ -44,6 +57,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let prompt_cursor = props.prompt_cursor;
     let scroll_offset = props.scroll_offset;
     let viewport_height = props.viewport_height;
+    let show_spinner = props.show_spinner;
     element! {
         View(flex_direction: FlexDirection::Column, width: 100pct, height: 100pct) {
             StatusLine(
@@ -58,6 +72,11 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 scroll_offset: scroll_offset,
                 viewport_height: viewport_height,
             )
+            #(if show_spinner {
+                element!(SpinnerWithVerb).into_any()
+            } else {
+                element!(View).into_any()
+            })
             PromptInput(
                 text: prompt_text,
                 cursor: prompt_cursor,

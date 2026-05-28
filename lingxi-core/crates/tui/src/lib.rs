@@ -15,6 +15,7 @@ pub mod events;
 pub mod session;
 pub mod telemetry;
 pub(crate) mod terminal;
+pub mod theme;
 
 pub use app::TuiApp;
 pub use error::TuiError;

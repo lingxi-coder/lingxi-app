@@ -47,7 +47,28 @@ pub const PERMISSION_DIALOG_SHOWN: &str = "tengu_tui_permission_dialog_shown";
 /// `persist` (bool), `elapsed_ms` (u64). (M6-05)
 pub const PERMISSION_DIALOG_RESOLVED: &str = "tengu_tui_permission_dialog_resolved";
 
-/// Order-locked array; appended into `tengu::ALL_EVENT_NAMES`.
+// M6-09 additions: scrollback scroll-mode lifecycle.
+
+/// Emitted when the scrollback enters scroll mode (`scroll_offset` transitions
+/// `0 → non-zero` — the user scrolled up away from the bottom). Payload:
+/// `session_id`, `offset` (`Verified<usize>`). Emit site:
+/// `lingxi-tui::app::scroll_with_viewport`. (M6-09)
+pub const SCROLL_STARTED: &str = "tengu_tui_scroll_started";
+
+/// Emitted when the scrollback exits scroll mode (`scroll_offset` transitions
+/// `non-zero → 0` — the user returned to the bottom). Payload: `session_id`.
+/// Emit site: `lingxi-tui::app::scroll_with_viewport`. (M6-09)
+pub const SCROLL_ENDED: &str = "tengu_tui_scroll_ended";
+
+// NOTE (M6-09): `tengu_tui_key_pressed` was specced (§2.6) as an aggregated
+// once-per-second counter event. It is intentionally NOT registered here:
+// the aggregation infrastructure (a windowed `KeyPressedAggregator` with a
+// timer flush wired into the iocraft event loop) does not exist yet, and a
+// raw per-key emit would violate the aggregation contract. Registering a
+// dead name with no emit site would break the "every registered name has a
+// call site" discipline. Deferred to M7. See M6-09 plan T0 audit.
+
+/// Order-locked array; appended into `tengu::ALL_EVENT_NAMES`. Append-only.
 pub(crate) const NAMES: &[&str] = &[
     SESSION_STARTED,
     SESSION_ENDED,
@@ -57,6 +78,8 @@ pub(crate) const NAMES: &[&str] = &[
     STREAMING_RENDER_ENDED,
     PERMISSION_DIALOG_SHOWN,
     PERMISSION_DIALOG_RESOLVED,
+    SCROLL_STARTED,
+    SCROLL_ENDED,
 ];
 
 #[cfg(test)]
@@ -64,10 +87,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn names_has_8_entries_after_m6_05() {
+    fn names_has_10_entries_after_m6_09() {
         // 4 (M6-01) + 2 (M6-03 streaming render) + 2 (M6-05 permission
-        // dialog shown/resolved) = 8.
-        assert_eq!(NAMES.len(), 8);
+        // dialog shown/resolved) + 2 (M6-09 scroll started/ended) = 10.
+        // key_pressed deferred to M7 (no emit site — see module note).
+        assert_eq!(NAMES.len(), 10);
     }
 
     #[test]
@@ -86,5 +110,13 @@ mod tests {
             PERMISSION_DIALOG_RESOLVED,
             "tengu_tui_permission_dialog_resolved"
         );
+        assert_eq!(SCROLL_STARTED, "tengu_tui_scroll_started");
+        assert_eq!(SCROLL_ENDED, "tengu_tui_scroll_ended");
+    }
+
+    #[test]
+    fn m6_09_appends_scroll_events_at_end() {
+        let last2: &[&str] = &NAMES[NAMES.len() - 2..];
+        assert_eq!(last2, &[SCROLL_STARTED, SCROLL_ENDED]);
     }
 }

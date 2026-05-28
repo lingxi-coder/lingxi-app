@@ -492,7 +492,15 @@ pub fn scroll_with_viewport(st: &mut AppState, dir: ScrollDir, viewport_height: 
         ScrollDir::Top => max,
         ScrollDir::Bottom => 0,
     };
+    let prev_offset = st.scroll_offset;
     st.scroll_offset = new.clamp(0, max) as usize;
+    // (M6-09) Emit scroll-mode lifecycle on the offset transition: 0 →
+    // non-zero opens scroll mode; non-zero → 0 closes it (back at bottom).
+    if prev_offset == 0 && st.scroll_offset != 0 {
+        crate::telemetry::scroll_started(st.scroll_offset);
+    } else if prev_offset != 0 && st.scroll_offset == 0 {
+        crate::telemetry::scroll_ended();
+    }
 }
 
 #[cfg(test)]

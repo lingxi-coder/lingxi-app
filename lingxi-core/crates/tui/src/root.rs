@@ -65,8 +65,22 @@ pub struct TuiRootProps {
 /// table is intentionally kept in sync byte-for-byte with `keymap::map_key`;
 /// see that file for the canonical bindings.
 #[allow(clippy::too_many_lines)]
-fn map_iocraft_key(evt: &KeyEvent, prompt_empty: bool) -> Option<KeyAction> {
-    use KeyAction::{Backspace, Cancel, HistoryStep, InsertChar, MoveCursor, ScrollStep, Submit};
+fn map_iocraft_key(evt: &KeyEvent, prompt_empty: bool, focus_active: bool) -> Option<KeyAction> {
+    use KeyAction::{
+        Backspace, Cancel, FocusToolStep, HistoryStep, InsertChar, MoveCursor, ScrollStep, Submit,
+        ToggleExpanded,
+    };
+    if focus_active {
+        match (&evt.code, evt.modifiers) {
+            (KeyCode::Up, _) => return Some(FocusToolStep(-1)),
+            (KeyCode::Down, _) => return Some(FocusToolStep(1)),
+            (KeyCode::Char('e'), m) if m == KeyModifiers::NONE && prompt_empty => {
+                return Some(ToggleExpanded);
+            }
+            (KeyCode::Enter, _) if prompt_empty => return Some(ToggleExpanded),
+            _ => {}
+        }
+    }
     match (&evt.code, evt.modifiers) {
         (KeyCode::Enter, _) => Some(Submit),
         (KeyCode::Backspace, _) => Some(Backspace),
@@ -194,7 +208,13 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                     return;
                 };
                 let prompt_empty = st.prompt_text.is_empty();
-                if let Some(action) = map_iocraft_key(&k, prompt_empty) {
+                // Focus mode activates when there's at least one tool
+                // block in scrollback AND the prompt is empty.
+                let focus_active = prompt_empty
+                    && st.messages.iter().any(|m| {
+                        matches!(m, crate::state::RenderedMessage::AssistantToolUse { .. })
+                    });
+                if let Some(action) = map_iocraft_key(&k, prompt_empty, focus_active) {
                     if let KeyAction::ScrollStep(dir) = action {
                         scroll_with_viewport(&mut st, dir, viewport);
                     } else {
@@ -311,7 +331,7 @@ mod tests {
     fn map_iocraft_key_char_inserts() {
         let k = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('h'));
         assert!(matches!(
-            map_iocraft_key(&k, false),
+            map_iocraft_key(&k, false, false),
             Some(KeyAction::InsertChar('h'))
         ));
     }
@@ -319,13 +339,28 @@ mod tests {
     #[test]
     fn map_iocraft_key_enter_submits() {
         let k = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
-        assert!(matches!(map_iocraft_key(&k, false), Some(KeyAction::Submit)));
+        assert!(matches!(
+            map_iocraft_key(&k, false, false),
+            Some(KeyAction::Submit)
+        ));
     }
 
     #[test]
     fn map_iocraft_key_ctrl_c_cancels() {
         let mut k = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('c'));
         k.modifiers = KeyModifiers::CONTROL;
-        assert!(matches!(map_iocraft_key(&k, false), Some(KeyAction::Cancel)));
+        assert!(matches!(
+            map_iocraft_key(&k, false, false),
+            Some(KeyAction::Cancel)
+        ));
+    }
+
+    #[test]
+    fn map_iocraft_key_focus_active_routes_e_to_toggle() {
+        let k = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('e'));
+        assert!(matches!(
+            map_iocraft_key(&k, true, true),
+            Some(KeyAction::ToggleExpanded)
+        ));
     }
 }

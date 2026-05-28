@@ -183,6 +183,21 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             scroll_with_viewport(st, dir, 1);
             false
         }
+        // M6-04 T10: focus walking + expand toggle.
+        KeyAction::FocusToolStep(delta) => {
+            if delta < 0 {
+                st.focus_prev_tool();
+            } else {
+                st.focus_next_tool();
+            }
+            false
+        }
+        KeyAction::ToggleExpanded => {
+            if let Some(id) = st.focused_tool_id {
+                st.toggle_expanded(&id);
+            }
+            false
+        }
     }
 }
 

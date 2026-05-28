@@ -78,13 +78,38 @@ pub enum KeyAction {
     HistoryStep(i8),
     /// Scroll the scrollback by the given direction.
     ScrollStep(ScrollDir),
+    /// (M6-04) Up/Down in scrollback mode — walk the focused tool block.
+    /// `-1` = previous, `+1` = next.
+    FocusToolStep(i8),
+    /// (M6-04) `e` / Enter on a focused tool block — toggle expanded.
+    ToggleExpanded,
 }
 
 /// Map a crossterm `KeyEvent` into a `KeyAction`. `prompt_empty` toggles
-/// the vim-style scroll bindings (`j`/`k`/`g`/`G`).
+/// the vim-style scroll bindings (`j`/`k`/`g`/`G`). `focus_active` (M6-04)
+/// promotes Up/Down to tool-focus walking and `e`/Enter to expanded toggle
+/// — used when at least one tool block exists in the scrollback AND the
+/// prompt is empty.
 #[must_use]
-pub fn map_key(evt: KeyEvent, prompt_empty: bool) -> Option<KeyAction> {
-    use KeyAction::{Backspace, Cancel, HistoryStep, InsertChar, MoveCursor, ScrollStep, Submit};
+pub fn map_key(evt: KeyEvent, prompt_empty: bool, focus_active: bool) -> Option<KeyAction> {
+    use KeyAction::{
+        Backspace, Cancel, FocusToolStep, HistoryStep, InsertChar, MoveCursor, ScrollStep, Submit,
+        ToggleExpanded,
+    };
+    // M6-04 focus-mode bindings take priority when focus is active.
+    if focus_active {
+        match (evt.code, evt.modifiers) {
+            (KeyCode::Up, _) => return Some(FocusToolStep(-1)),
+            (KeyCode::Down, _) => return Some(FocusToolStep(1)),
+            (KeyCode::Char('e'), KeyModifiers::NONE) if prompt_empty => {
+                return Some(ToggleExpanded);
+            }
+            (KeyCode::Enter, _) if prompt_empty => {
+                return Some(ToggleExpanded);
+            }
+            _ => {}
+        }
+    }
     match (evt.code, evt.modifiers) {
         (KeyCode::Enter, _) => Some(Submit),
         (KeyCode::Backspace, _) => Some(Backspace),
@@ -159,7 +184,7 @@ mod m6_02_tests {
     #[test]
     fn char_h_maps_to_insert() {
         assert!(matches!(
-            map_key(k(KeyCode::Char('h')), false),
+            map_key(k(KeyCode::Char('h')), false, false),
             Some(KeyAction::InsertChar('h'))
         ));
     }
@@ -167,7 +192,7 @@ mod m6_02_tests {
     #[test]
     fn backspace_maps() {
         assert!(matches!(
-            map_key(k(KeyCode::Backspace), false),
+            map_key(k(KeyCode::Backspace), false, false),
             Some(KeyAction::Backspace)
         ));
     }
@@ -175,7 +200,7 @@ mod m6_02_tests {
     #[test]
     fn enter_maps_to_submit() {
         assert!(matches!(
-            map_key(k(KeyCode::Enter), false),
+            map_key(k(KeyCode::Enter), false, false),
             Some(KeyAction::Submit)
         ));
     }
@@ -183,11 +208,11 @@ mod m6_02_tests {
     #[test]
     fn j_scrolls_only_when_prompt_empty() {
         assert!(matches!(
-            map_key(k(KeyCode::Char('j')), true),
+            map_key(k(KeyCode::Char('j')), true, false),
             Some(KeyAction::ScrollStep(ScrollDir::LineDown))
         ));
         assert!(matches!(
-            map_key(k(KeyCode::Char('j')), false),
+            map_key(k(KeyCode::Char('j')), false, false),
             Some(KeyAction::InsertChar('j'))
         ));
     }
@@ -195,7 +220,7 @@ mod m6_02_tests {
     #[test]
     fn pgup_scrolls_pageup_always() {
         assert!(matches!(
-            map_key(k(KeyCode::PageUp), false),
+            map_key(k(KeyCode::PageUp), false, false),
             Some(KeyAction::ScrollStep(ScrollDir::PageUp))
         ));
     }
@@ -203,7 +228,7 @@ mod m6_02_tests {
     #[test]
     fn arrow_up_maps_to_history() {
         assert!(matches!(
-            map_key(k(KeyCode::Up), false),
+            map_key(k(KeyCode::Up), false, false),
             Some(KeyAction::HistoryStep(-1))
         ));
     }
@@ -211,6 +236,33 @@ mod m6_02_tests {
     #[test]
     fn ctrl_c_maps_to_cancel() {
         let evt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert!(matches!(map_key(evt, false), Some(KeyAction::Cancel)));
+        assert!(matches!(map_key(evt, false, false), Some(KeyAction::Cancel)));
+    }
+
+    /// M6-04 T10: with `focus_active`, Up/Down walks tool focus instead
+    /// of history.
+    #[test]
+    fn arrow_up_walks_focus_when_focus_active() {
+        assert!(matches!(
+            map_key(k(KeyCode::Up), true, true),
+            Some(KeyAction::FocusToolStep(-1))
+        ));
+        assert!(matches!(
+            map_key(k(KeyCode::Down), true, true),
+            Some(KeyAction::FocusToolStep(1))
+        ));
+    }
+
+    /// M6-04 T10: `e` and Enter (in focus mode with empty prompt) toggle.
+    #[test]
+    fn e_and_enter_toggle_when_focus_active() {
+        assert!(matches!(
+            map_key(k(KeyCode::Char('e')), true, true),
+            Some(KeyAction::ToggleExpanded)
+        ));
+        assert!(matches!(
+            map_key(k(KeyCode::Enter), true, true),
+            Some(KeyAction::ToggleExpanded)
+        ));
     }
 }

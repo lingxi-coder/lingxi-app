@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod catalog;
 pub mod color_manager;
 pub mod context;
 pub mod definition;
@@ -24,6 +25,7 @@ pub mod tool_resolver;
 pub mod transcript;
 pub mod worktree_policy;
 
+pub use catalog::{load_agents_from_dirs, parse_agent_markdown, AgentLoadError};
 pub use color_manager::AgentColorManager;
 pub use context::SubagentContext;
 pub use definition::*;

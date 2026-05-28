@@ -11,7 +11,7 @@ use iocraft::prelude::*;
 
 use super::{DialogFocus, DialogResolution};
 
-/// Mutable state for the ExitPlanMode dialog.
+/// Mutable state for the `ExitPlanMode` dialog.
 #[derive(Debug, Clone, Default)]
 pub struct ExitPlanModeState {
     /// Which button is currently highlighted.

@@ -11,7 +11,7 @@
 //! M6-05 adds [`handle_key`], a top-level dispatcher that owns the
 //! focus-trap branch: when a permission dialog is open, ALL keystrokes
 //! route into the active dialog's `handle_key` helper instead of
-//! `map_key` / `dispatch`. This keeps the PromptInput text buffer
+//! `map_key` / `dispatch`. This keeps the `PromptInput` text buffer
 //! untouched and the scrollback keybinds inert while the dialog owns
 //! the screen.
 
@@ -158,7 +158,7 @@ pub fn map_key(evt: KeyEvent, prompt_empty: bool, focus_active: bool) -> Option<
 /// When `state.pending_permission.is_some()`, this routes the key event
 /// to the appropriate dialog's `handle_key` and (on resolution) ships the
 /// `PermissionResponse` back over `pending_permission_resp_tx`. The
-/// PromptInput buffer and scrollback keys are never touched.
+/// `PromptInput` buffer and scrollback keys are never touched.
 ///
 /// When no dialog is open, this falls through to `map_key` + `dispatch`
 /// (the existing M6-02 pipeline). Returns `true` iff the user submitted
@@ -166,7 +166,7 @@ pub fn map_key(evt: KeyEvent, prompt_empty: bool, focus_active: bool) -> Option<
 ///
 /// Telemetry: when a resolution is produced, fires
 /// `tengu_tui_permission_dialog_resolved` with the decision, the
-/// `persist` flag, and elapsed_ms since the dialog opened.
+/// `persist` flag, and `elapsed_ms` since the dialog opened.
 pub fn handle_key(state: &mut AppState, key: KeyEvent) -> bool {
     // === FOCUS TRAP (M6-05) ===
     if state.pending_permission.is_some() {
@@ -189,27 +189,33 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) -> bool {
     }
     // === end focus trap ===
 
-    if let Some(action) = map_key(key, state.prompt_text.is_empty(), state.focused_tool_id.is_some()) {
+    if let Some(action) = map_key(
+        key,
+        state.prompt_text.is_empty(),
+        state.focused_tool_id.is_some(),
+    ) {
         crate::app::dispatch(action, state)
     } else {
         false
     }
 }
 
-/// (M6-05) Apply a [`DialogResolution`] to the AppState: ship the
-/// response back to the orchestrator (if a resp_tx is attached), fire
+/// (M6-05) Apply a [`DialogResolution`] to the `AppState`: ship the
+/// response back to the orchestrator (if a `resp_tx` is attached), fire
 /// the resolved-telemetry event, and clear the dialog slot.
 fn resolve_pending_permission(state: &mut AppState, resolution: DialogResolution) {
+    use crate::components::permissions::bypass_permissions::BypassPermissionsState;
+    use crate::components::permissions::exit_plan_mode::ExitPlanModeState;
+    use crate::components::permissions::tool_use_confirm::ToolUseConfirmState;
     let kind = match state.pending_permission.as_ref().map(|p| &p.request) {
         Some(PermissionRequest::ToolUseConfirm { .. }) => "tool_use",
         Some(PermissionRequest::ExitPlanMode { .. }) => "exit_plan_mode",
         Some(PermissionRequest::BypassPermissionsMode) => "bypass_permissions",
         None => return,
     };
-    let elapsed_ms = state
-        .pending_permission_started_at
-        .map(|t| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0);
+    let elapsed_ms = state.pending_permission_started_at.map_or(0, |t| {
+        u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX)
+    });
     crate::telemetry::permission_dialog_resolved(
         kind,
         resolution.response,
@@ -221,9 +227,9 @@ fn resolve_pending_permission(state: &mut AppState, resolution: DialogResolution
     }
     state.pending_permission = None;
     state.pending_permission_started_at = None;
-    state.tool_use_dialog_state = Default::default();
-    state.exit_plan_dialog_state = Default::default();
-    state.bypass_dialog_state = Default::default();
+    state.tool_use_dialog_state = ToolUseConfirmState::default();
+    state.exit_plan_dialog_state = ExitPlanModeState::default();
+    state.bypass_dialog_state = BypassPermissionsState::default();
 }
 
 #[cfg(test)]

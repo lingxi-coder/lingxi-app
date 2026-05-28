@@ -138,7 +138,9 @@ async fn parity_tool_use_confirm_bindings_round_trip() {
         handle_key(&mut state, key_from_str(key_str));
         match expected {
             Some(want) => {
-                let got = rx.await.unwrap_or_else(|_| panic!("no response for {key_str}"));
+                let got = rx
+                    .await
+                    .unwrap_or_else(|_| panic!("no response for {key_str}"));
                 assert_eq!(got, want, "tool_use_confirm key {key_str}");
             }
             None => panic!("no-resolution not used in tool_use_confirm"),
@@ -160,7 +162,9 @@ async fn parity_exit_plan_mode_bindings_round_trip() {
         handle_key(&mut state, key_from_str(key_str));
         match expected {
             Some(want) => {
-                let got = rx.await.unwrap_or_else(|_| panic!("no response for {key_str}"));
+                let got = rx
+                    .await
+                    .unwrap_or_else(|_| panic!("no response for {key_str}"));
                 assert_eq!(got, want, "exit_plan_mode key {key_str}");
             }
             None => panic!("no-resolution not used in exit_plan_mode"),
@@ -188,19 +192,22 @@ async fn parity_bypass_permissions_sequences_round_trip() {
         for k in &keys {
             handle_key(&mut state, key_from_str(k));
         }
-        match expected {
-            Some(want) => {
-                let got = rx
-                    .await
-                    .unwrap_or_else(|_| panic!("no response for {:?}", keys));
-                assert_eq!(got, want, "bypass keys {keys:?}");
-            }
-            None => {
-                // Must NOT have resolved: dialog still pending, rx still
-                // un-fulfilled (try_recv).
-                assert!(state.pending_permission.is_some(), "expected unresolved for {keys:?}");
-                assert!(rx.try_recv().is_err(), "expected no oneshot send for {keys:?}");
-            }
+        if let Some(want) = expected {
+            let got = rx
+                .await
+                .unwrap_or_else(|_| panic!("no response for {keys:?}"));
+            assert_eq!(got, want, "bypass keys {keys:?}");
+        } else {
+            // Must NOT have resolved: dialog still pending, rx still
+            // un-fulfilled (try_recv).
+            assert!(
+                state.pending_permission.is_some(),
+                "expected unresolved for {keys:?}"
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "expected no oneshot send for {keys:?}"
+            );
         }
     }
 }

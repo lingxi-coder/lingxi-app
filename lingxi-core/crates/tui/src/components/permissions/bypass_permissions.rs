@@ -2,9 +2,9 @@
 //!
 //! Body literals are byte-locked from
 //! `claude-code/src/components/BypassPermissionsModeDialog.tsx` (lines 53,
-//! 73). The typed-`yes` confirmation is a LingXi divergence from
-//! claude-code's React `<Select>`; the M6-05 task brief locks this stricter
-//! friction step intentionally. See the M6-05 plan §"LingXi divergence".
+//! 73). The typed-`yes` confirmation is a `LingXi` divergence from
+//! claude-code's React `Select`; the M6-05 task brief locks this stricter
+//! friction step intentionally. See the M6-05 plan §"`LingXi` divergence".
 //!
 //! Bindings:
 //! - Typing letters → buffered into `state.typed` (lowercased).
@@ -44,10 +44,7 @@ pub struct BypassPermissionsProps {
 /// Wrong letters are accepted into the buffer so the user sees the typo
 /// and can correct it via Backspace.
 #[must_use]
-pub fn handle_key(
-    state: &mut BypassPermissionsState,
-    key: KeyEvent,
-) -> Option<DialogResolution> {
+pub fn handle_key(state: &mut BypassPermissionsState, key: KeyEvent) -> Option<DialogResolution> {
     match key.code {
         KeyCode::Esc | KeyCode::Char('n' | 'N') => Some(DialogResolution::deny()),
         KeyCode::Enter => {
@@ -73,14 +70,15 @@ pub fn handle_key(
 
 /// iocraft component rendering the warning dialog.
 #[component]
-pub fn BypassPermissionsMode(
-    props: &BypassPermissionsProps,
-) -> impl Into<AnyElement<'static>> {
+pub fn BypassPermissionsMode(props: &BypassPermissionsProps) -> impl Into<AnyElement<'static>> {
     // Byte-locked literals from BypassPermissionsModeDialog.tsx (lines 53, 73).
     let title = "WARNING: Claude Code running in Bypass Permissions mode".to_string();
     let body1 = "In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.\nThis mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged.".to_string();
     let body2 = "By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.".to_string();
-    let prompt_line = format!("Type \"yes\" + Enter to enable, Esc to cancel: {}", props.typed);
+    let prompt_line = format!(
+        "Type \"yes\" + Enter to enable, Esc to cancel: {}",
+        props.typed
+    );
     element! {
         View(
             flex_direction: FlexDirection::Column,
@@ -135,7 +133,7 @@ mod tests {
     #[test]
     fn esc_returns_deny_even_with_partial_input() {
         let mut state = BypassPermissionsState::default();
-        handle_key(&mut state, kc('y'));
+        let _ = handle_key(&mut state, kc('y'));
         let res = handle_key(&mut state, k(KeyCode::Esc));
         assert_eq!(res.unwrap().response, PermissionResponse::Deny);
     }
@@ -150,8 +148,8 @@ mod tests {
     #[test]
     fn typing_wrong_letters_buffers_and_does_not_resolve() {
         let mut state = BypassPermissionsState::default();
-        handle_key(&mut state, kc('y'));
-        handle_key(&mut state, kc('o'));
+        let _ = handle_key(&mut state, kc('y'));
+        let _ = handle_key(&mut state, kc('o'));
         // `o` is accepted into buffer (user can backspace), but Enter does
         // not resolve because the buffer is not "yes".
         assert_eq!(state.typed, "yo");
@@ -162,18 +160,18 @@ mod tests {
     #[test]
     fn backspace_pops_typed_buffer() {
         let mut state = BypassPermissionsState::default();
-        handle_key(&mut state, kc('y'));
-        handle_key(&mut state, kc('e'));
-        handle_key(&mut state, k(KeyCode::Backspace));
+        let _ = handle_key(&mut state, kc('y'));
+        let _ = handle_key(&mut state, kc('e'));
+        let _ = handle_key(&mut state, k(KeyCode::Backspace));
         assert_eq!(state.typed, "y");
     }
 
     #[test]
     fn typed_is_case_insensitive() {
         let mut state = BypassPermissionsState::default();
-        handle_key(&mut state, kc('Y'));
-        handle_key(&mut state, kc('E'));
-        handle_key(&mut state, kc('S'));
+        let _ = handle_key(&mut state, kc('Y'));
+        let _ = handle_key(&mut state, kc('E'));
+        let _ = handle_key(&mut state, kc('S'));
         // Buffer keeps lowercase form internally.
         assert_eq!(state.typed, "yes");
         let res = handle_key(&mut state, k(KeyCode::Enter));

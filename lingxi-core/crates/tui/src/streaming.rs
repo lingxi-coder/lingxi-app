@@ -67,7 +67,8 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
                 },
             });
             state.pending_permission_started_at = Some(std::time::Instant::now());
-            state.tool_use_dialog_state = Default::default();
+            state.tool_use_dialog_state =
+                crate::components::permissions::tool_use_confirm::ToolUseConfirmState::default();
             crate::telemetry::permission_dialog_shown("tool_use");
         }
         TurnEvent::TurnEnded(_outcome) => {

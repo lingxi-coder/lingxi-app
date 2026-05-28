@@ -1,7 +1,7 @@
 //! M6-05 focus-trap behaviour tests.
 //!
 //! When `pending_permission.is_some()`, ALL key events route into the
-//! active dialog and PromptInput / scrollback bindings are inert.
+//! active dialog and `PromptInput` / scrollback bindings are inert.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lingxi_permission::gate::{PermissionRequest, PromptDefault};

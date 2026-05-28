@@ -93,13 +93,10 @@ impl PermissionGate for TuiPermissionGate {
                 reason: "TUI permission bridge closed".to_string(),
             };
         }
-        let response = match rx.await {
-            Ok(r) => r,
-            Err(_) => {
-                return PermissionDecision::Deny {
-                    reason: "TUI permission response dropped".to_string(),
-                };
-            }
+        let Ok(response) = rx.await else {
+            return PermissionDecision::Deny {
+                reason: "TUI permission response dropped".to_string(),
+            };
         };
 
         // Step 4: persist if AllowAlways.
@@ -200,7 +197,7 @@ mod tests {
             PermissionDecision::Deny { reason } => {
                 assert!(reason.contains("user denied"), "got: {reason}");
             }
-            _ => panic!("expected Deny"),
+            PermissionDecision::Allow => panic!("expected Deny"),
         }
         tui_task.await.unwrap();
     }
@@ -221,7 +218,7 @@ mod tests {
             PermissionDecision::Deny { reason } => {
                 assert!(reason.contains("dropped"), "got: {reason}");
             }
-            _ => panic!("expected Deny"),
+            PermissionDecision::Allow => panic!("expected Deny"),
         }
         tui_task.await.unwrap();
     }

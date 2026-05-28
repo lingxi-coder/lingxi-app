@@ -81,10 +81,7 @@ mod tests {
             "tengu_tui_streaming_render_started"
         );
         assert_eq!(STREAMING_RENDER_ENDED, "tengu_tui_streaming_render_ended");
-        assert_eq!(
-            PERMISSION_DIALOG_SHOWN,
-            "tengu_tui_permission_dialog_shown"
-        );
+        assert_eq!(PERMISSION_DIALOG_SHOWN, "tengu_tui_permission_dialog_shown");
         assert_eq!(
             PERMISSION_DIALOG_RESOLVED,
             "tengu_tui_permission_dialog_resolved"

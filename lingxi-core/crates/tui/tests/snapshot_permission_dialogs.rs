@@ -35,8 +35,8 @@ fn snapshot_tool_use_confirm_default_state() {
 
 #[test]
 fn snapshot_exit_plan_mode_with_5_line_plan() {
-    let plan = "1. Read foo.rs\n2. Refactor bar()\n3. Add tests\n4. Run cargo test\n5. Commit"
-        .to_string();
+    let plan =
+        "1. Read foo.rs\n2. Refactor bar()\n3. Add tests\n4. Run cargo test\n5. Commit".to_string();
     let mut element = element! {
         ExitPlanMode(
             plan: plan,

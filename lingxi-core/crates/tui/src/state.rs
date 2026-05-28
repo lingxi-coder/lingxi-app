@@ -224,8 +224,7 @@ pub struct AppState {
     pub tool_use_dialog_state:
         crate::components::permissions::tool_use_confirm::ToolUseConfirmState,
     /// (M6-05) Per-dialog state for the `ExitPlanMode` dialog.
-    pub exit_plan_dialog_state:
-        crate::components::permissions::exit_plan_mode::ExitPlanModeState,
+    pub exit_plan_dialog_state: crate::components::permissions::exit_plan_mode::ExitPlanModeState,
     /// (M6-05) Per-dialog state for the `BypassPermissionsMode` dialog.
     pub bypass_dialog_state:
         crate::components::permissions::bypass_permissions::BypassPermissionsState,
@@ -253,9 +252,13 @@ impl AppState {
             expanded: HashMap::new(),
             pending_permission_resp_tx: None,
             pending_permission_started_at: None,
-            tool_use_dialog_state: Default::default(),
-            exit_plan_dialog_state: Default::default(),
-            bypass_dialog_state: Default::default(),
+            tool_use_dialog_state:
+                crate::components::permissions::tool_use_confirm::ToolUseConfirmState::default(),
+            exit_plan_dialog_state:
+                crate::components::permissions::exit_plan_mode::ExitPlanModeState::default(),
+            bypass_dialog_state:
+                crate::components::permissions::bypass_permissions::BypassPermissionsState::default(
+                ),
         }
     }
 

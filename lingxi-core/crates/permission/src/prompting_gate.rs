@@ -42,10 +42,7 @@ const MAX_RETRIES: u32 = 3;
 /// Only meaningful for `ToolUseConfirm` — the other variants
 /// (`ExitPlanMode`, `BypassPermissionsMode`) are TUI-only and return
 /// `PromptError::Cancelled` at the `PromptingGate` layer.
-pub(crate) fn format_prompt_tool_use(
-    tool_name: &str,
-    default_decision: PromptDefault,
-) -> String {
+pub(crate) fn format_prompt_tool_use(tool_name: &str, default_decision: PromptDefault) -> String {
     let suffix = match default_decision {
         PromptDefault::AllowByDefault => "[Y/n] ",
         PromptDefault::DenyByDefault => "[y/N] ",
@@ -179,8 +176,7 @@ impl PromptingGate for InteractivePromptingGate {
                 default_decision,
                 ..
             } => (tool_name.as_str(), *default_decision),
-            PermissionRequest::ExitPlanMode { .. }
-            | PermissionRequest::BypassPermissionsMode => {
+            PermissionRequest::ExitPlanMode { .. } | PermissionRequest::BypassPermissionsMode => {
                 return Err(PromptError::Cancelled {
                     reason: "stdio gate cannot render multiline permission dialogs".to_string(),
                 });
@@ -269,7 +265,6 @@ impl PromptingGate for InteractivePromptingGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn format_prompt_generic_allow_default_byte_locked() {

@@ -1,7 +1,7 @@
 //! Exit-code coverage for argv parse errors + cwd validation + REPL entry.
 //!
 //! Locks per plan M5-12 Task 0 step 2.  M5-13 updated the REPL stub to real
-//! behaviour: an empty stdin now exits 0 (EOF) instead of 64 (NOT_IMPLEMENTED).
+//! behaviour: an empty stdin now exits 0 (EOF) instead of 64 (`NOT_IMPLEMENTED`).
 
 use assert_cmd::Command;
 use predicates::prelude::*;

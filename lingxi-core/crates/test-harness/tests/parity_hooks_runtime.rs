@@ -1,9 +1,9 @@
 //! Parity: M5-06 hooks executor 4-arm matrix.
 //!
 //! Locks the behaviour of each executor arm (Builtin / Http / Command / Agent)
-//! under PreToolUse + PostToolUse events. Known deferred gap: the Command arm
+//! under `PreToolUse` + `PostToolUse` events. Known deferred gap: the Command arm
 //! is stubbed (stdin payload support deferred from M5-06); the test locks the
-//! documented stub behaviour (HookOutcome::Error + stderr containing the
+//! documented stub behaviour (`HookOutcome::Error` + stderr containing the
 //! deferred-gap message).
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-14-release-v0.6.0.md` Task 5.
@@ -13,15 +13,14 @@ use lingxi_hooks::{
     BuiltinHookHandler, HookContext, HookDefinition, HookEvent, HookEventType, HookExecutor,
     HookExecutorImpl, HookOutcome, HookRegistry, HookResult, HookSource,
 };
-use lingxi_protocol::{HttpResponse, HookId, SessionId, ToolUseId};
+use lingxi_protocol::{HookId, HttpResponse, SessionId, ToolUseId};
 use lingxi_test_harness::mocks::{MockHttpTransport, MockRuntimeSpawner, ScriptedResponse};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-const FIXTURE: &str =
-    include_str!("../src/parity/fixtures/parity_hooks_runtime.json");
+const FIXTURE: &str = include_str!("../src/parity/fixtures/parity_hooks_runtime.json");
 
 // ============================================================================
 // Fixture types
@@ -176,8 +175,15 @@ async fn builtin_arm_pretooluse_returns_success() {
     // aggregate contains one result; no decision means no block/approve
     assert!(agg.decision.is_none());
     // stdout of last result is propagated through
-    let stdout: String = agg.all_results.iter().map(|(_, r)| r.stdout.as_str()).collect();
-    assert!(stdout.contains("builtin-ran"), "builtin stdout must be 'builtin-ran'; got {stdout:?}");
+    let stdout: String = agg
+        .all_results
+        .iter()
+        .map(|(_, r)| r.stdout.as_str())
+        .collect();
+    assert!(
+        stdout.contains("builtin-ran"),
+        "builtin stdout must be 'builtin-ran'; got {stdout:?}"
+    );
 }
 
 // ============================================================================
@@ -223,7 +229,11 @@ async fn http_arm_pretooluse_with_mock_transport_succeeds() {
         "200 OK with empty body must not produce a Block decision"
     );
     // No error stderr from the single result.
-    let stderr: String = agg.all_results.iter().map(|(_, r)| r.stderr.as_str()).collect();
+    let stderr: String = agg
+        .all_results
+        .iter()
+        .map(|(_, r)| r.stderr.as_str())
+        .collect();
     assert!(
         !stderr.contains("SSRF guard rejected") && !stderr.contains("http error"),
         "200 OK must not produce error stderr; got {stderr:?}"
@@ -262,7 +272,11 @@ async fn http_arm_ssrf_guard_blocks_loopback_url() {
 
     let agg = exec.execute(pre_tool_use_event(), dummy_ctx()).await;
     // SSRF guard should have produced an Error result with the rejection message.
-    let stderr: String = agg.all_results.iter().map(|(_, r)| r.stderr.as_str()).collect();
+    let stderr: String = agg
+        .all_results
+        .iter()
+        .map(|(_, r)| r.stderr.as_str())
+        .collect();
     assert!(
         stderr.contains("SSRF guard rejected url"),
         "expected SSRF guard rejection in stderr, got: {stderr:?}"
@@ -305,7 +319,11 @@ async fn command_arm_deferred_stub_returns_error() {
     let agg = exec.execute(pre_tool_use_event(), dummy_ctx()).await;
     // The Command arm is a documented stub — it returns an Error with a
     // specific message (deferred gap from M5-06).
-    let stderr: String = agg.all_results.iter().map(|(_, r)| r.stderr.as_str()).collect();
+    let stderr: String = agg
+        .all_results
+        .iter()
+        .map(|(_, r)| r.stderr.as_str())
+        .collect();
     assert!(
         stderr.contains("command executor not yet wired"),
         "Command arm must return the documented deferred-stub error; got: {stderr:?}"
@@ -341,7 +359,11 @@ async fn agent_arm_without_spawner_returns_error() {
 
     let agg = exec.execute(pre_tool_use_event(), dummy_ctx()).await;
     // Without a spawner, the agent arm returns an error.
-    let stderr: String = agg.all_results.iter().map(|(_, r)| r.stderr.as_str()).collect();
+    let stderr: String = agg
+        .all_results
+        .iter()
+        .map(|(_, r)| r.stderr.as_str())
+        .collect();
     assert!(
         stderr.contains("agent executor not wired"),
         "Agent arm without spawner must return the documented error; got: {stderr:?}"
@@ -376,6 +398,13 @@ async fn builtin_arm_posttooluse_fires_correctly() {
 
     let agg = exec.execute(post_tool_use_event(), dummy_ctx()).await;
     assert!(agg.decision.is_none(), "no decision for noop builtin");
-    let stdout: String = agg.all_results.iter().map(|(_, r)| r.stdout.as_str()).collect();
-    assert!(stdout.contains("builtin-ran"), "builtin stdout must be 'builtin-ran'; got {stdout:?}");
+    let stdout: String = agg
+        .all_results
+        .iter()
+        .map(|(_, r)| r.stdout.as_str())
+        .collect();
+    assert!(
+        stdout.contains("builtin-ran"),
+        "builtin stdout must be 'builtin-ran'; got {stdout:?}"
+    );
 }

@@ -386,6 +386,16 @@ pub enum OutputEvent {
         /// Cumulative cost snapshot at end of turn.
         cost: CostSnapshot,
     },
+    /// Emitted once a successful `force_compact` finishes. (M6-08)
+    CompactionCompleted {
+        /// Message count BEFORE compaction.
+        messages_before: u32,
+        /// Message count AFTER compaction (including the appended
+        /// `[Compacted]` boundary marker).
+        messages_after: u32,
+        /// UX estimate of bytes freed.
+        bytes_saved: u64,
+    },
 }
 
 /// Sink for orchestrator-emitted output events.
@@ -421,6 +431,17 @@ pub trait OutputStream: Send + Sync {
 
     /// Emit the end-of-turn marker with the cost snapshot.
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot);
+
+    /// Emit a compaction-completed event. Default no-op for adapters
+    /// that don't care (e.g. NDJSON sink may flush a one-line marker).
+    /// (M6-08)
+    async fn emit_compaction_completed(
+        &self,
+        _messages_before: u32,
+        _messages_after: u32,
+        _bytes_saved: u64,
+    ) {
+    }
 }
 
 #[cfg(test)]

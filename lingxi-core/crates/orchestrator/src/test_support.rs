@@ -194,6 +194,21 @@ impl OutputStream for MockOutputStream {
             cost: cost.clone(),
         });
     }
+    async fn emit_compaction_completed(
+        &self,
+        messages_before: u32,
+        messages_after: u32,
+        bytes_saved: u64,
+    ) {
+        self.events
+            .lock()
+            .await
+            .push(OutputEvent::CompactionCompleted {
+                messages_before,
+                messages_after,
+                bytes_saved,
+            });
+    }
 }
 
 // ============================================================================
@@ -806,5 +821,25 @@ mod tests {
         let v = serde_json::json!({});
         assert_eq!(g.check("Read", &v).await, PermissionDecision::Allow);
         assert_eq!(g.check("Bash", &v).await, PermissionDecision::Allow);
+    }
+
+    // M6-08 Task 4: MockOutputStream must capture CompactionCompleted.
+    #[tokio::test]
+    async fn mock_output_records_compaction_completed() {
+        let m = MockOutputStream::new();
+        m.emit_compaction_completed(42, 7, 1234).await;
+        let events = m.snapshot().await;
+        let last = events.last().expect("at least one event");
+        assert!(
+            matches!(
+                last,
+                OutputEvent::CompactionCompleted {
+                    messages_before: 42,
+                    messages_after: 7,
+                    bytes_saved: 1234
+                }
+            ),
+            "got: {last:?}"
+        );
     }
 }

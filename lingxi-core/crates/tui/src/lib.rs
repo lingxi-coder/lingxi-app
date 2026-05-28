@@ -20,3 +20,6 @@ pub use app::TuiApp;
 pub use error::TuiError;
 pub use events::{TuiEvent, TurnEvent};
 pub use session::run_tui_session;
+
+// Re-export points are filled in by later tasks; the stubs above keep the
+// crate compiling task-by-task.

@@ -183,6 +183,28 @@ impl OrchestratorHandle for ConversationOrchestrator {
             "claude-haiku-4-5".to_string(),
         ]
     }
+
+    async fn run_turn_streaming_with_cancel(
+        &self,
+        prompt: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<lingxi_traits::TurnOutcome, HandleError> {
+        // Delegate to the inherent method on `ConversationOrchestrator`
+        // (M6-03 T1). Disambiguate via fully-qualified call syntax since
+        // the trait method has the same name.
+        match crate::ConversationOrchestrator::run_turn_streaming_with_cancel(self, prompt, cancel)
+            .await
+        {
+            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(lingxi_traits::TurnOutcome::EndTurn),
+            Ok(crate::conversation::TurnOutcome::MaxTurns) => {
+                Ok(lingxi_traits::TurnOutcome::MaxTurns)
+            }
+            Ok(crate::conversation::TurnOutcome::Cancelled) => {
+                Ok(lingxi_traits::TurnOutcome::Cancelled)
+            }
+            Err(e) => Err(HandleError::ActionFailed(e.to_string())),
+        }
+    }
 }
 
 /// Touch + spawn an editor on `target`. If the target does not yet exist,

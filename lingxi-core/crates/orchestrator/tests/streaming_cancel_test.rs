@@ -77,3 +77,27 @@ async fn run_turn_streaming_with_cancel_returns_cancelled_when_token_fires_befor
         .unwrap();
     assert_eq!(outcome, TurnOutcome::Cancelled);
 }
+
+#[tokio::test]
+async fn handle_trait_run_turn_streaming_with_cancel_pre_cancelled_returns_cancelled() {
+    // Exercise via the OrchestratorHandle trait surface (M6-03 T2) — the
+    // TUI consumes this trait, not the concrete orchestrator type.
+    let stream = scripted![
+        message_start("msg_01", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "ok"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ];
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![stream]));
+    let orch = Arc::new(build_orch(api));
+    let handle: Arc<dyn lingxi_traits::OrchestratorHandle> = orch;
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let outcome = handle
+        .run_turn_streaming_with_cancel("hi", cancel)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, lingxi_traits::TurnOutcome::Cancelled));
+}

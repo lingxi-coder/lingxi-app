@@ -73,6 +73,29 @@ pub enum HandleError {
     /// turn-in-flight). The payload is a human-readable reason.
     #[error("handle action failed: {0}")]
     ActionFailed(String),
+    /// The requested operation is not implemented on this handle.
+    /// Used by the default `OrchestratorHandle::run_turn_streaming_with_cancel`
+    /// impl (M6-03) so existing handle implementations (M5-13 stdio REPL
+    /// path) don't need to override.
+    #[error("operation not implemented: {0}")]
+    Unimplemented(String),
+}
+
+/// Outcome of a TUI-driven turn invoked via
+/// [`OrchestratorHandle::run_turn_streaming_with_cancel`]. (M6-03)
+///
+/// Mirrors `lingxi_orchestrator::TurnOutcome` so the trait surface in
+/// `lingxi-traits` does not depend on the orchestrator crate. Map between
+/// the two in `lingxi_orchestrator::handle_impl`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnOutcome {
+    /// Model returned a natural stop reason and the turn loop ended.
+    EndTurn,
+    /// The orchestrator's `max_turns` budget was reached before `end_turn`.
+    MaxTurns,
+    /// The cancel token fired mid-turn; the orchestrator unwound the
+    /// current API call and returned early.
+    Cancelled,
 }
 
 /// Result of [`OrchestratorHandle::open_memory_editor`] (M5-10).
@@ -297,6 +320,26 @@ pub trait OrchestratorHandle: Send + Sync {
     /// Enumerate model names the orchestrator will accept via
     /// [`Self::switch_model`]. Used by `/model` (no-arg list mode).
     async fn list_available_models(&self) -> Vec<String>;
+
+    // M6-03 addition:
+
+    /// Streaming twin of the M5-13 cancel-aware turn entry point. The
+    /// TUI calls this so Ctrl-C aborts the in-flight SSE stream cleanly.
+    ///
+    /// Default impl returns `Err(HandleError::Unimplemented(..))` so
+    /// existing stdio REPL implementations (M5-13) need no override.
+    /// `OrchestratorHandleImpl` (M6-03) overrides this to delegate to
+    /// `ConversationOrchestrator::run_turn_streaming_with_cancel`.
+    async fn run_turn_streaming_with_cancel(
+        &self,
+        prompt: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<TurnOutcome, HandleError> {
+        let _ = (prompt, cancel);
+        Err(HandleError::Unimplemented(
+            "run_turn_streaming_with_cancel".into(),
+        ))
+    }
 }
 
 /// Captured output emission. Useful for tests and (M5-13) the stdio sink.

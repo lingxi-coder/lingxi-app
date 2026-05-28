@@ -113,6 +113,103 @@ fn map_iocraft_key(evt: &KeyEvent, prompt_empty: bool, focus_active: bool) -> Op
     }
 }
 
+/// Convert an iocraft (crossterm-0.29) `KeyEvent` into a workspace
+/// (crossterm-0.28) `KeyEvent`, as consumed by `keymap::handle_key` and the
+/// per-dialog `handle_key` helpers.
+///
+/// Only the key codes and modifiers the dialog state machines and `map_key`
+/// actually inspect are mapped (`Char`, `Enter`, `Backspace`, `Esc`, arrows,
+/// `Home`/`End`, `PageUp`/`PageDown`, `Tab`/`BackTab`, plus `CONTROL`/`SHIFT`
+/// modifiers). Anything unmapped becomes `KeyCode::Null`, which every dialog
+/// handler treats as an inert no-op — so an exotic key can never accidentally
+/// resolve a permission dialog.
+fn iocraft_to_crossterm028_key(k: &KeyEvent) -> crossterm::event::KeyEvent {
+    use crossterm::event::{KeyCode as Ct, KeyEvent as CtEvent, KeyModifiers as CtMods};
+
+    let code = match k.code {
+        KeyCode::Char(c) => Ct::Char(c),
+        KeyCode::Enter => Ct::Enter,
+        KeyCode::Backspace => Ct::Backspace,
+        KeyCode::Esc => Ct::Esc,
+        KeyCode::Up => Ct::Up,
+        KeyCode::Down => Ct::Down,
+        KeyCode::Left => Ct::Left,
+        KeyCode::Right => Ct::Right,
+        KeyCode::Home => Ct::Home,
+        KeyCode::End => Ct::End,
+        KeyCode::PageUp => Ct::PageUp,
+        KeyCode::PageDown => Ct::PageDown,
+        KeyCode::Tab => Ct::Tab,
+        KeyCode::BackTab => Ct::BackTab,
+        KeyCode::Delete => Ct::Delete,
+        KeyCode::Insert => Ct::Insert,
+        // Codes the keymap / dialogs never act on collapse to Null (no-op).
+        _ => Ct::Null,
+    };
+
+    // Preserve the modifiers the keymap inspects. Iocraft's KeyModifiers
+    // share the same CONTROL/SHIFT/ALT bit semantics as crossterm-0.28.
+    let mut mods = CtMods::NONE;
+    if k.modifiers.contains(KeyModifiers::CONTROL) {
+        mods |= CtMods::CONTROL;
+    }
+    if k.modifiers.contains(KeyModifiers::SHIFT) {
+        mods |= CtMods::SHIFT;
+    }
+    if k.modifiers.contains(KeyModifiers::ALT) {
+        mods |= CtMods::ALT;
+    }
+
+    CtEvent::new(code, mods)
+}
+
+/// Route a single LIVE key event into the `AppState`.
+///
+/// This is THE function the live `use_terminal_events` closure invokes, and
+/// it is the seam between M6-04's iocraft mount and M6-05's permission
+/// dialogs. The live mount receives an `iocraft::KeyEvent` (crossterm-0.29
+/// re-export), whereas `keymap::handle_key` and the per-dialog handlers
+/// consume crossterm-0.28 events. We bridge the skew here.
+///
+/// **Focus trap (M6-05 final-review fix):** when a permission dialog is open
+/// (`state.pending_permission.is_some()`), the key is converted and routed
+/// through `keymap::handle_key`, which owns the dialog state machines and
+/// fires the `resp_tx` oneshot back to the orchestrator's
+/// `TuiPermissionGate`. This guarantees the prompt buffer stays untouched and
+/// the dialog actually resolves in the real binary. Before this fix the live
+/// path went straight to `map_iocraft_key` + `dispatch`, so dialog keystrokes
+/// silently mutated the hidden prompt and the gate await hung forever.
+///
+/// When no dialog is open, this falls through to the M6-02/M6-04 pipeline
+/// (`map_iocraft_key` → `dispatch` / `scroll_with_viewport`).
+///
+/// `viewport` is the scrollback viewport height (rows minus reserved chrome).
+pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
+    // === FOCUS TRAP: a permission dialog owns all keys while open. ===
+    if st.pending_permission.is_some() {
+        let ct_key = iocraft_to_crossterm028_key(k);
+        let _ = crate::events::keymap::handle_key(st, ct_key);
+        return;
+    }
+    // === end focus trap ===
+
+    let prompt_empty = st.prompt_text.is_empty();
+    // Focus mode activates when there's at least one tool block in scrollback
+    // AND the prompt is empty.
+    let focus_active = prompt_empty
+        && st
+            .messages
+            .iter()
+            .any(|m| matches!(m, crate::state::RenderedMessage::AssistantToolUse { .. }));
+    if let Some(action) = map_iocraft_key(k, prompt_empty, focus_active) {
+        if let KeyAction::ScrollStep(dir) = action {
+            scroll_with_viewport(st, dir, viewport);
+        } else {
+            let _ = dispatch(action, st);
+        }
+    }
+}
+
 /// Top-level iocraft component. Drives the REPL screen and signals exit on
 /// `state.should_exit`.
 #[component]
@@ -196,31 +293,20 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         });
     }
 
-    // ---- Terminal events: keystrokes route through dispatch ------------
+    // ---- Terminal events: keystrokes route through `handle_live_key` ---
     {
         let state = state.clone();
         let mut tick_for_keys = tick;
         let viewport = viewport_height(rows);
         hooks.use_terminal_events(move |ev| match ev {
             TerminalEvent::Key(k) if k.kind != KeyEventKind::Release => {
-                // Lock briefly to check prompt_empty + dispatch.
+                // Lock briefly to route the key. `try_lock` because we're in
+                // iocraft's synchronous event callback and the mutex is only
+                // held momentarily by the bridge pump.
                 let Ok(mut st) = state.try_lock() else {
                     return;
                 };
-                let prompt_empty = st.prompt_text.is_empty();
-                // Focus mode activates when there's at least one tool
-                // block in scrollback AND the prompt is empty.
-                let focus_active = prompt_empty
-                    && st.messages.iter().any(|m| {
-                        matches!(m, crate::state::RenderedMessage::AssistantToolUse { .. })
-                    });
-                if let Some(action) = map_iocraft_key(&k, prompt_empty, focus_active) {
-                    if let KeyAction::ScrollStep(dir) = action {
-                        scroll_with_viewport(&mut st, dir, viewport);
-                    } else {
-                        let _ = dispatch(action, &mut st);
-                    }
-                }
+                handle_live_key(&mut st, &k, viewport);
                 drop(st);
                 tick_for_keys.set(tick_for_keys.get().wrapping_add(1));
             }

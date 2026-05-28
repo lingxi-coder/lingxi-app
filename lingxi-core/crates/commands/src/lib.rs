@@ -52,14 +52,34 @@
 //! [`lingxi_telemetry::tengu::command`]. The total tengu registry grew
 //! from 258 → 276 events.
 //!
-//! M5-11 will light up the remaining 12 core commands (batch 2) with the
-//! same pattern: `register_core_batch_2(reg, handle)` overwrites the
-//! placeholders left in [`builtin::core_placeholders`].
+//! # Batch 2 (M5-11)
+//!
+//! After [`register_core_batch_2`] runs, the remaining 12 core commands are
+//! wired:
+//!
+//! - `/cost`        — `OrchestratorHandle::snapshot_cost`
+//! - `/config`      — `edit_config_file` ($EDITOR on config.json)
+//! - `/model`       — list (no arg) / switch (arg) via `list_available_models` + `switch_model`
+//! - `/permissions` — `edit_permissions_file`
+//! - `/mcp`         — `list_mcp_servers`
+//! - `/hooks`       — `list_hooks`
+//! - `/agents`      — `list_agents`
+//! - `/login`       — `AuthHandle::login` (interactive OAuth)
+//! - `/logout`      — `AuthHandle::logout`
+//! - `/version`     — `CARGO_PKG_VERSION` + git SHA
+//! - `/status`      — `get_status_snapshot` → 11-line panel
+//! - `/doctor`      — `run_doctor_checks` → 6-check report
+//!
+//! Each command emits 3 telemetry events
+//! (`tengu_command_<name>_{started,completed,failed}`) defined in
+//! [`lingxi_telemetry::tengu::command`]. The total tengu registry grew
+//! from 276 → **312** events (+36 for the 12 batch-2 commands × 3 phases).
 //!
 //! # Plan reference
 //!
-//! See `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md` and
-//! `docs/superpowers/plans/2026-05-25-m5-10-commands-batch-1.md`.
+//! See `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`,
+//! `docs/superpowers/plans/2026-05-25-m5-10-commands-batch-1.md`, and
+//! `docs/superpowers/plans/2026-05-25-m5-11-commands-batch-2.md`.
 //!
 //! See spec §19 for the broader slash-command design.
 

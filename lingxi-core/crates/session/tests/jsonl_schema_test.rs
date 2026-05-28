@@ -1,8 +1,8 @@
-//! Round-trip parity for JsonlMessage — every byte we read we re-emit.
+//! Round-trip parity for `JsonlMessage` — every byte we read we re-emit.
 
 use lingxi_session::jsonl::schema::JsonlMessage;
 use pretty_assertions::assert_eq;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 #[test]
 fn user_message_round_trip_is_byte_equivalent() {
@@ -56,7 +56,7 @@ fn parent_uuid_null_serializes_as_null_not_missing() {
         is_sidechain: false,
         user_type: None,
         git_branch: None,
-        extra: Default::default(),
+        extra: Map::default(),
     };
     let s = serde_json::to_string(&msg).expect("ser");
     assert!(

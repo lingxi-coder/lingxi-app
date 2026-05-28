@@ -27,7 +27,7 @@ pub struct HookContext {
     pub cwd: PathBuf,
     /// Path to the on-disk transcript file backing this session. Used by
     /// HTTP / command hooks to splice into their payload (`transcript_path`
-    /// per claude-code BaseHookInputSchema). M5-06.
+    /// per claude-code `BaseHookInputSchema`). M5-06.
     pub transcript_path: PathBuf,
     /// Current permission mode (`"default" | "plan" | "acceptEdits" | …`).
     /// `None` when not applicable (e.g. engine-global hooks). M5-06.

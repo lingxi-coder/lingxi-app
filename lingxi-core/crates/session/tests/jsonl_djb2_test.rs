@@ -1,4 +1,4 @@
-//! djb2_hash 1:1 byte-for-byte parity with claude-code/src/utils/hash.ts.
+//! `djb2_hash` 1:1 byte-for-byte parity with claude-code/src/utils/hash.ts.
 //! Reference values computed by running the TS function in Node.js
 //! (see plan T2 step 1).
 

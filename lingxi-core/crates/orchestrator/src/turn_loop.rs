@@ -170,6 +170,8 @@ pub(crate) async fn dispatch_tool_uses(
             tool_name = %name,
         );
         let pre_agg = orch.hooks.execute(pre_event, hook_ctx.clone()).await;
+        // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
+        #[allow(clippy::cast_possible_truncation)]
         let pre_dur_ms = pre_started.elapsed().as_millis() as u64;
 
         if matches!(pre_agg.decision, Some(HookDecision::Block)) {
@@ -316,6 +318,8 @@ pub(crate) async fn dispatch_tool_uses(
             tool_name = %name,
         );
         let post_agg = orch.hooks.execute(post_event, hook_ctx).await;
+        // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
+        #[allow(clippy::cast_possible_truncation)]
         let post_dur_ms = post_started.elapsed().as_millis() as u64;
 
         let mutated = !post_agg.system_messages.is_empty();

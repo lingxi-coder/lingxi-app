@@ -59,7 +59,10 @@ impl<'de> Deserialize<'de> for HookEventNamePost {
 }
 
 /// Wire-format `PreToolUse` payload (1:1 with `coreSchemas.ts:414-423`).
+///
+/// Field meanings track claude-code exactly; see the schema reference above.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct PreToolUsePayload {
     pub hook_event_name: HookEventNamePre,
     pub session_id: String,
@@ -77,7 +80,10 @@ pub struct PreToolUsePayload {
 }
 
 /// Wire-format `PostToolUse` payload (1:1 with `coreSchemas.ts:436-446`).
+///
+/// Field meanings track claude-code exactly; see the schema reference above.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct PostToolUsePayload {
     pub hook_event_name: HookEventNamePost,
     pub session_id: String,
@@ -98,6 +104,7 @@ pub struct PostToolUsePayload {
 /// Envelope used to send one of either payload kind across the wire.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+#[allow(missing_docs, reason = "variants delegate to documented payload types")]
 pub enum HookEventEnvelope {
     Pre(PreToolUsePayload),
     Post(PostToolUsePayload),
@@ -168,7 +175,7 @@ pub fn parse_response(
             }
         }
         Some("deny") => resp.decision = Some(HookDecision::Block),
-        Some("ask") => { /* leave alone */ }
+        // "ask" and any other value fall through — preserve the existing decision.
         _ => {}
     }
     if let Some(r) = obj.get("permissionDecisionReason").and_then(Value::as_str) {

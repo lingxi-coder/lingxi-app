@@ -1,11 +1,11 @@
-//! JsonlWriter raw-byte assertion — three appends produce three lines, one
+//! `JsonlWriter` raw-byte assertion — three appends produce three lines, one
 //! `\n` per line, no extra whitespace.
 
 use lingxi_platform_posix::fs::PosixFileSystem;
 use lingxi_session::jsonl::schema::JsonlMessage;
 use lingxi_session::jsonl::writer::JsonlWriter;
 use lingxi_traits::FileSystem;
-use serde_json::json;
+use serde_json::{json, Map};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -22,7 +22,7 @@ fn make_msg(uuid: &str, parent: Option<&str>, n: u8) -> JsonlMessage {
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
-        extra: Default::default(),
+        extra: Map::default(),
     }
 }
 

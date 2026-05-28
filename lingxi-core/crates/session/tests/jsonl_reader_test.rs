@@ -1,28 +1,28 @@
-//! JsonlReader full + lite parity.
+//! `JsonlReader` full + lite parity.
 
 use lingxi_platform_posix::fs::PosixFileSystem;
 use lingxi_session::jsonl::reader::{JsonlReader, SessionMetadata};
 use lingxi_session::jsonl::schema::JsonlMessage;
 use lingxi_session::jsonl::writer::JsonlWriter;
 use lingxi_traits::FileSystem;
-use serde_json::json;
+use serde_json::{json, Map};
 use std::sync::Arc;
 use tempfile::tempdir;
 
 fn user_msg(n: u8) -> JsonlMessage {
     JsonlMessage {
         message_type: "user".into(),
-        uuid: format!("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa{:02x}", n),
+        uuid: format!("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaa{n:02x}"),
         parent_uuid: None,
         session_id: "11111111-2222-3333-4444-555555555555".into(),
-        timestamp: format!("2026-05-25T14:30:0{}.000Z", n),
+        timestamp: format!("2026-05-25T14:30:0{n}.000Z"),
         cwd: "/tmp/proj".into(),
         version: "0.6.0".into(),
-        message: json!({"role":"user","content":format!("msg {}", n)}),
+        message: json!({"role":"user","content":format!("msg {n}")}),
         is_sidechain: false,
         user_type: Some("external".into()),
         git_branch: None,
-        extra: Default::default(),
+        extra: Map::default(),
     }
 }
 
@@ -41,7 +41,7 @@ async fn read_all_round_trips_writer_output() {
     let got = reader.read_all().await.expect("read_all");
     assert_eq!(got.len(), 3);
     for (n, msg) in got.iter().enumerate() {
-        assert_eq!(msg.timestamp, format!("2026-05-25T14:30:0{}.000Z", n));
+        assert_eq!(msg.timestamp, format!("2026-05-25T14:30:0{n}.000Z"));
     }
 }
 

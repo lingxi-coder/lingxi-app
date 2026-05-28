@@ -1,4 +1,4 @@
-//! End-to-end orchestrator turn with PreToolUse + PostToolUse hooks
+//! End-to-end orchestrator turn with `PreToolUse` + `PostToolUse` hooks
 //! registered through `lingxi_hooks::HookExecutorImpl`.
 //!
 //! Exercises the M5-06 Task 14 swap: the orchestrator now consults the
@@ -6,9 +6,9 @@
 //! resulting `AggregateHookResult` into the dispatch loop.
 //!
 //! Two scenarios:
-//! 1. PreToolUse hook decides Block → tool dispatch short-circuits with
-//!    a hook-blocked ToolResult (`is_error: true`).
-//! 2. PostToolUse hook returns `system_message` → the orchestrator
+//! 1. `PreToolUse` hook decides Block → tool dispatch short-circuits with
+//!    a hook-blocked `ToolResult` (`is_error: true`).
+//! 2. `PostToolUse` hook returns `system_message` → the orchestrator
 //!    appends it to the result content.
 
 use async_trait::async_trait;
@@ -102,7 +102,7 @@ impl BuiltinHookHandler for BlockBashHandler {
     }
 }
 
-/// Post hook that appends a fixed system_message to every successful
+/// Post hook that appends a fixed `system_message` to every successful
 /// Read result.
 struct AppendNoteOnReadHandler;
 #[async_trait]

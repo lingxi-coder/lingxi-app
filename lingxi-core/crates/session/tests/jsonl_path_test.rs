@@ -46,7 +46,7 @@ fn over_max_length_gets_djb2_suffix() {
     assert!(
         suffix
             .chars()
-            .all(|c| c.is_ascii_digit() || ('a'..='z').contains(&c)),
+            .all(|c: char| c.is_ascii_digit() || c.is_ascii_lowercase()),
         "suffix must be base36 lowercase: {suffix:?}"
     );
     assert!(!suffix.is_empty(), "suffix must be non-empty");
@@ -55,7 +55,11 @@ fn over_max_length_gets_djb2_suffix() {
 #[test]
 fn session_path_layout_matches_claude_code() {
     let home = Path::new("/home/user/.claude");
-    let p = session_path(home, "/Users/foo/proj", "0a1b2c3d-4e5f-6789-abcd-ef0123456789");
+    let p = session_path(
+        home,
+        "/Users/foo/proj",
+        "0a1b2c3d-4e5f-6789-abcd-ef0123456789",
+    );
     assert_eq!(
         p,
         Path::new(

@@ -63,8 +63,8 @@ impl JsonlReader {
             if line.is_empty() {
                 continue;
             }
-            let msg: JsonlMessage = serde_json::from_str(line)
-                .map_err(|e| ReaderError::Parse(idx, e.to_string()))?;
+            let msg: JsonlMessage =
+                serde_json::from_str(line).map_err(|e| ReaderError::Parse(idx, e.to_string()))?;
             out.push(msg);
         }
         Ok(out)
@@ -92,10 +92,9 @@ impl JsonlReader {
         let line1 = head.split('\n').next().unwrap_or("");
         let session_id = extract_json_string_field(line1, "sessionId")
             .ok_or(ReaderError::LiteMissing("sessionId"))?;
-        let cwd = extract_json_string_field(line1, "cwd")
-            .ok_or(ReaderError::LiteMissing("cwd"))?;
-        let first_type = extract_json_string_field(line1, "type")
-            .ok_or(ReaderError::LiteMissing("type"))?;
+        let cwd = extract_json_string_field(line1, "cwd").ok_or(ReaderError::LiteMissing("cwd"))?;
+        let first_type =
+            extract_json_string_field(line1, "type").ok_or(ReaderError::LiteMissing("type"))?;
         Ok(SessionMetadata {
             session_id,
             cwd,

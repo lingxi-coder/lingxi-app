@@ -133,6 +133,10 @@ impl HookExecutorImpl {
         agg
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "arm dispatch fan-out — splitting hurts readability"
+    )]
     async fn execute_single(
         &self,
         hook: &HookDefinition,
@@ -159,20 +163,17 @@ impl HookExecutorImpl {
                 ..
             } => {
                 // Resolve event-specific expected_event marker + serialize payload.
-                let (expected_event, body) = match build_envelope_body(event, ctx) {
-                    Some(pair) => pair,
-                    None => {
-                        return HookResult {
-                            outcome: HookOutcome::Error,
-                            stdout: String::new(),
-                            stderr: format!(
-                                "Hook {} failed: HTTP arm only supports PreToolUse / PostToolUse",
-                                hook.id
-                            ),
-                            exit_code: None,
-                            response: None,
-                        };
-                    }
+                let Some((expected_event, body)) = build_envelope_body(event, ctx) else {
+                    return HookResult {
+                        outcome: HookOutcome::Error,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "Hook {} failed: HTTP arm only supports PreToolUse / PostToolUse",
+                            hook.id
+                        ),
+                        exit_code: None,
+                        response: None,
+                    };
                 };
                 let effective = if timeout.is_zero() {
                     Duration::from_millis(HOOK_HTTP_TIMEOUT_MS)
@@ -209,20 +210,17 @@ impl HookExecutorImpl {
                 }
             }
             HookExecutor::Agent { agent_type, prompt } => {
-                let (expected_event, body) = match build_envelope_body(event, ctx) {
-                    Some(pair) => pair,
-                    None => {
-                        return HookResult {
-                            outcome: HookOutcome::Error,
-                            stdout: String::new(),
-                            stderr: format!(
-                                "Hook {} failed: Agent arm only supports PreToolUse / PostToolUse",
-                                hook.id
-                            ),
-                            exit_code: None,
-                            response: None,
-                        };
-                    }
+                let Some((expected_event, body)) = build_envelope_body(event, ctx) else {
+                    return HookResult {
+                        outcome: HookOutcome::Error,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "Hook {} failed: Agent arm only supports PreToolUse / PostToolUse",
+                            hook.id
+                        ),
+                        exit_code: None,
+                        response: None,
+                    };
                 };
                 let effective_timeout = hook
                     .timeout
@@ -267,7 +265,7 @@ impl HookExecutorImpl {
     }
 }
 
-/// Build the serialized envelope body + expected_event marker for an event.
+/// Build the serialized envelope body + `expected_event` marker for an event.
 ///
 /// Returns `None` for event variants the HTTP / Agent arms don't yet
 /// support (everything except `PreToolUse` / `PostToolUse` in M5-06).
@@ -318,7 +316,7 @@ fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static
 }
 
 /// Emit arm-level telemetry for an HTTP signal (SSRF / timeout). Other
-/// telemetry (HOOK_PRE_* / HOOK_POST_*) is fired by the orchestrator's
+/// telemetry (`HOOK_PRE_*` / `HOOK_POST_*`) is fired by the orchestrator's
 /// `dispatch_tool_with_hooks` (M5-06 Task 14).
 fn emit_http_signal(hook: &HookDefinition, signal: &HttpExecutionSignal, timeout: Duration) {
     match signal {
@@ -330,11 +328,14 @@ fn emit_http_signal(hook: &HookDefinition, signal: &HttpExecutionSignal, timeout
             );
         }
         HttpExecutionSignal::TimedOut => {
+            // hook timeout bounded to seconds — u128 ms cannot exceed u64::MAX
+            #[allow(clippy::cast_possible_truncation)]
+            let timeout_ms = timeout.as_millis() as u64;
             tracing::info!(
                 event = lingxi_telemetry::tengu::orchestrator::HOOK_TIMEOUT,
                 hook_id = %hook.id,
                 hook_kind = "http",
-                timeout_ms = timeout.as_millis() as u64,
+                timeout_ms = timeout_ms,
             );
         }
         HttpExecutionSignal::Ok => {}
@@ -343,11 +344,14 @@ fn emit_http_signal(hook: &HookDefinition, signal: &HttpExecutionSignal, timeout
 
 fn emit_agent_signal(hook: &HookDefinition, signal: &AgentExecutionSignal, timeout: Duration) {
     if matches!(signal, AgentExecutionSignal::TimedOut) {
+        // hook timeout bounded to seconds — u128 ms cannot exceed u64::MAX
+        #[allow(clippy::cast_possible_truncation)]
+        let timeout_ms = timeout.as_millis() as u64;
         tracing::info!(
             event = lingxi_telemetry::tengu::orchestrator::HOOK_TIMEOUT,
             hook_id = %hook.id,
             hook_kind = "agent",
-            timeout_ms = timeout.as_millis() as u64,
+            timeout_ms = timeout_ms,
         );
     }
 }

@@ -41,29 +41,29 @@ pub const PERMISSION_PROMPTED: &str = "tengu_orchestrator_permission_prompted";
 /// answer from a recovered one. (M5-05)
 pub const PERMISSION_ANSWERED: &str = "tengu_orchestrator_permission_answered";
 
-/// PreToolUse hook chain about to fire. Emitted by the orchestrator's
+/// `PreToolUse` hook chain about to fire. Emitted by the orchestrator's
 /// `dispatch_tool_with_hooks` BEFORE consulting the executor. (M5-06)
 pub const HOOK_PRE_STARTED: &str = "tengu_orchestrator_hook_pre_started";
 
-/// PreToolUse hook chain returned. Emitted by the orchestrator AFTER the
+/// `PreToolUse` hook chain returned. Emitted by the orchestrator AFTER the
 /// executor folds every matching hook's response into an
 /// `AggregateHookResult`. Payload carries `decision` (one of
 /// `"allow" / "block" / "approve" / "continue" / "none"`) and
 /// `duration_ms`. (M5-06)
 pub const HOOK_PRE_COMPLETED: &str = "tengu_orchestrator_hook_pre_completed";
 
-/// PreToolUse hook chain errored (executor surfaced a failure outcome).
+/// `PreToolUse` hook chain errored (executor surfaced a failure outcome).
 /// (M5-06)
 pub const HOOK_PRE_FAILED: &str = "tengu_orchestrator_hook_pre_failed";
 
-/// PostToolUse hook chain about to fire. (M5-06)
+/// `PostToolUse` hook chain about to fire. (M5-06)
 pub const HOOK_POST_STARTED: &str = "tengu_orchestrator_hook_post_started";
 
-/// PostToolUse hook chain returned. Payload carries `duration_ms` and
+/// `PostToolUse` hook chain returned. Payload carries `duration_ms` and
 /// `mutated_response: bool`. (M5-06)
 pub const HOOK_POST_COMPLETED: &str = "tengu_orchestrator_hook_post_completed";
 
-/// PostToolUse hook chain errored. (M5-06)
+/// `PostToolUse` hook chain errored. (M5-06)
 pub const HOOK_POST_FAILED: &str = "tengu_orchestrator_hook_post_failed";
 
 /// HTTP hook URL rejected by the SSRF guard. Emitted by the HTTP arm

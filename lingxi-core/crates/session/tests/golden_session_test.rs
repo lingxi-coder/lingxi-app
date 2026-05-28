@@ -1,5 +1,5 @@
 //! Golden-fixture byte-equivalent write/read tests.
-//! The writer's output, given the same JsonlMessage sequence, MUST be
+//! The writer's output, given the same `JsonlMessage` sequence, MUST be
 //! byte-for-byte identical to the on-disk fixture after token substitution.
 
 use lingxi_platform_posix::fs::PosixFileSystem;
@@ -254,10 +254,7 @@ async fn writer_output_equals_compacted_fixture() {
     // via `extra`. Build the extra Map in the same insertion order as the
     // fixture: subtype first, compactMetadata second.
     let mut boundary_extra: Map<String, Value> = Map::new();
-    boundary_extra.insert(
-        "subtype".into(),
-        Value::String("compact_boundary".into()),
-    );
+    boundary_extra.insert("subtype".into(), Value::String("compact_boundary".into()));
     boundary_extra.insert(
         "compactMetadata".into(),
         json!({"preservedSegment": false, "compactedMessageCount": 50}),

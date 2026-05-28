@@ -1,4 +1,4 @@
-//! extract_json_string_field + unescape_json_string parity with
+//! `extract_json_string_field` + `unescape_json_string` parity with
 //! sessionStoragePortable.ts:39-46, 53-76.
 
 use lingxi_session::jsonl::reader::{extract_json_string_field, unescape_json_string};
@@ -55,7 +55,7 @@ fn unescape_passthrough_when_no_backslash() {
 
 #[test]
 fn unescape_decodes_common_sequences() {
-    assert_eq!(unescape_json_string(r#"a\nb"#), "a\nb");
+    assert_eq!(unescape_json_string(r"a\nb"), "a\nb");
     assert_eq!(unescape_json_string(r#"a\"b"#), "a\"b");
-    assert_eq!(unescape_json_string(r#"a\\b"#), "a\\b");
+    assert_eq!(unescape_json_string(r"a\\b"), "a\\b");
 }

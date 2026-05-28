@@ -57,7 +57,11 @@ impl AgentExecutor {
     /// recursion-lock invariant — `Arc::ptr_eq` assertion in
     /// `lingxi-tools/tests/agent_tool_recursion_lock_test.rs` must keep
     /// passing).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "single execute path threads many params + spans subagent spawn → poll → response parse"
+    )]
     pub(crate) async fn execute(
         &self,
         hook: &HookDefinition,

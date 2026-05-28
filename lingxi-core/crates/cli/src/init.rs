@@ -32,7 +32,7 @@ use lingxi_commands::registry::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2, CommandRegistry,
 };
 use lingxi_orchestrator::test_support::{
-    noop_hook_executor, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    noop_hook_executor, NoOpPermissionGate, StaticMemoryProvider,
 };
 use lingxi_orchestrator::{
     AnthropicProviderAdapter, ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig,
@@ -53,9 +53,6 @@ pub struct Runtime {
     pub dispatcher: RegistrySlashDispatcher,
     /// Auth handle for `/login` and `/logout`.
     pub auth: Arc<dyn AuthHandle>,
-    /// Output stream the orchestrator pushes turn events to. Held so the
-    /// CLI can attach a replacement sink (M5-12 Task 9).
-    pub output: Arc<dyn OutputStream>,
 }
 
 /// Errors surfaced while building a [`Runtime`].
@@ -76,13 +73,21 @@ pub fn resolve_api_base() -> String {
     std::env::var("LINGXI_API_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
 }
 
-/// Build the full runtime from parsed argv.
+/// Build the full runtime from parsed argv + the chosen output stream.
+///
+/// `output` is the sink the orchestrator will push turn events to (plain
+/// stdout or NDJSON, projected from `crate::output::OutputSink` through
+/// `crate::output_adapter::SinkAdapter`). M5-12 Task 9 wires this end-to-end
+/// so `--json` produces NDJSON `text` / `tool_call` / `turn_end` lines.
 ///
 /// Currently no `.await` is needed inside the constructor, but the signature
 /// remains `async` so future iterations (real OAuth token bootstrap, MCP
 /// server connect) can plug in without changing every call site.
 #[allow(clippy::unused_async)]
-pub async fn build_runtime(argv: &Argv) -> Result<Runtime, InitError> {
+pub async fn build_runtime(
+    argv: &Argv,
+    output: Arc<dyn OutputStream>,
+) -> Result<Runtime, InitError> {
     let api_base = resolve_api_base();
     let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
 
@@ -133,20 +138,12 @@ pub async fn build_runtime(argv: &Argv) -> Result<Runtime, InitError> {
     let tools = Arc::new(ToolRegistry::new());
     let hooks = noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
-    let output: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
     let memory: Arc<dyn lingxi_orchestrator::prompt::MemoryHierarchyProvider> =
         Arc::new(StaticMemoryProvider::empty());
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
     let orch = Arc::new(ConversationOrchestrator::new(
-        cfg,
-        api_client,
-        tools,
-        hooks,
-        perms,
-        output.clone(),
-        memory,
-        cwd,
+        cfg, api_client, tools, hooks, perms, output, memory, cwd,
     ));
 
     // (6) Build the command registry. The orchestrator implements
@@ -162,7 +159,6 @@ pub async fn build_runtime(argv: &Argv) -> Result<Runtime, InitError> {
         orchestrator: orch,
         dispatcher,
         auth,
-        output,
     })
 }
 
@@ -182,7 +178,9 @@ mod tests {
             json: false,
             debug: false,
         };
-        let r = build_runtime(&argv).await;
+        let output: Arc<dyn OutputStream> =
+            Arc::new(lingxi_orchestrator::test_support::MockOutputStream::new());
+        let r = build_runtime(&argv, output).await;
         assert!(r.is_ok(), "build_runtime failed: {:?}", r.err());
     }
 

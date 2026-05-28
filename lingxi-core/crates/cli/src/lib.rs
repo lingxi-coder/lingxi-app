@@ -36,12 +36,12 @@ pub mod exit_codes;
 pub mod init;
 pub mod logging;
 pub mod output;
+pub mod output_adapter;
 pub mod repl;
 pub mod run;
 
 use crate::argv::Argv;
 use clap::error::ErrorKind;
-use lingxi_traits::OrchestratorHandle;
 use std::ffi::OsString;
 use std::sync::Arc;
 
@@ -72,21 +72,24 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         return repl::run_repl(&parsed).await;
     }
 
-    let runtime = match init::build_runtime(&parsed).await {
+    // Pick the sink first so we can install it on the orchestrator at
+    // construction time. For `--json` the session id used in `turn_start`
+    // is minted afresh (synchronous mint via `SessionId::new`); for
+    // plain mode the id is unused.
+    let sink: Arc<dyn output::OutputSink> = if parsed.json {
+        Arc::new(output::JsonSink::new(lingxi_protocol::SessionId::new()))
+    } else {
+        Arc::new(output::PlainSink::new())
+    };
+    let adapter: Arc<dyn lingxi_traits::OutputStream> =
+        Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
+
+    let runtime = match init::build_runtime(&parsed, adapter).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("lingxi-cli: {e}");
             return exit_codes::RUNTIME_ERROR;
         }
-    };
-
-    // Pick the sink. JSON mode emits NDJSON; plain mode writes friendly
-    // text to stdout / errors to stderr.
-    let sink: Arc<dyn output::OutputSink> = if parsed.json {
-        let sid = runtime.orchestrator.current_session_id().await;
-        Arc::new(output::JsonSink::new(sid))
-    } else {
-        Arc::new(output::PlainSink::new())
     };
 
     if parsed.resume.is_some() {

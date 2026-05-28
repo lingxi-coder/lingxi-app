@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod argv;
+pub mod cwd;
 pub mod exit_codes;
 
 use crate::argv::Argv;
@@ -32,6 +33,11 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
             };
         }
     };
+
+    if let Err(e) = cwd::apply_cwd(parsed.cwd.as_deref()) {
+        eprintln!("lingxi-cli: {e}");
+        return exit_codes::RUNTIME_ERROR;
+    }
 
     if parsed.is_repl_mode() {
         eprintln!("lingxi-cli: REPL mode not yet wired (M5-13)");

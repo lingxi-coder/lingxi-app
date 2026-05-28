@@ -7,8 +7,21 @@
 //! `App::dispatch` state-machine consumes. Both enums coexist so that
 //! M6-01's loop continues to work without modification — the new
 //! `map_key` is layered on top.
+//!
+//! M6-05 adds [`handle_key`], a top-level dispatcher that owns the
+//! focus-trap branch: when a permission dialog is open, ALL keystrokes
+//! route into the active dialog's `handle_key` helper instead of
+//! `map_key` / `dispatch`. This keeps the PromptInput text buffer
+//! untouched and the scrollback keybinds inert while the dialog owns
+//! the screen.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use crate::components::permissions::{
+    bypass_permissions, exit_plan_mode, tool_use_confirm, DialogResolution,
+};
+use crate::state::AppState;
+use lingxi_permission::gate::PermissionRequest;
 
 /// Legacy M6-01 quit classifier. Retained for the existing event-loop
 /// behaviour test.
@@ -140,8 +153,81 @@ pub fn map_key(evt: KeyEvent, prompt_empty: bool, focus_active: bool) -> Option<
     }
 }
 
+/// (M6-05) Top-level key dispatcher with the focus-trap branch.
+///
+/// When `state.pending_permission.is_some()`, this routes the key event
+/// to the appropriate dialog's `handle_key` and (on resolution) ships the
+/// `PermissionResponse` back over `pending_permission_resp_tx`. The
+/// PromptInput buffer and scrollback keys are never touched.
+///
+/// When no dialog is open, this falls through to `map_key` + `dispatch`
+/// (the existing M6-02 pipeline). Returns `true` iff the user submitted
+/// a prompt line that should drive an orchestrator turn.
+///
+/// Telemetry: when a resolution is produced, fires
+/// `tengu_tui_permission_dialog_resolved` with the decision, the
+/// `persist` flag, and elapsed_ms since the dialog opened.
+pub fn handle_key(state: &mut AppState, key: KeyEvent) -> bool {
+    // === FOCUS TRAP (M6-05) ===
+    if state.pending_permission.is_some() {
+        let resolution = match state.pending_permission.as_ref().map(|p| &p.request) {
+            Some(PermissionRequest::ToolUseConfirm { .. }) => {
+                tool_use_confirm::handle_key(&mut state.tool_use_dialog_state, key)
+            }
+            Some(PermissionRequest::ExitPlanMode { .. }) => {
+                exit_plan_mode::handle_key(&mut state.exit_plan_dialog_state, key)
+            }
+            Some(PermissionRequest::BypassPermissionsMode) => {
+                bypass_permissions::handle_key(&mut state.bypass_dialog_state, key)
+            }
+            None => unreachable!("pending_permission is_some() but variant missing"),
+        };
+        if let Some(resolution) = resolution {
+            resolve_pending_permission(state, resolution);
+        }
+        return false;
+    }
+    // === end focus trap ===
+
+    if let Some(action) = map_key(key, state.prompt_text.is_empty(), state.focused_tool_id.is_some()) {
+        crate::app::dispatch(action, state)
+    } else {
+        false
+    }
+}
+
+/// (M6-05) Apply a [`DialogResolution`] to the AppState: ship the
+/// response back to the orchestrator (if a resp_tx is attached), fire
+/// the resolved-telemetry event, and clear the dialog slot.
+fn resolve_pending_permission(state: &mut AppState, resolution: DialogResolution) {
+    let kind = match state.pending_permission.as_ref().map(|p| &p.request) {
+        Some(PermissionRequest::ToolUseConfirm { .. }) => "tool_use",
+        Some(PermissionRequest::ExitPlanMode { .. }) => "exit_plan_mode",
+        Some(PermissionRequest::BypassPermissionsMode) => "bypass_permissions",
+        None => return,
+    };
+    let elapsed_ms = state
+        .pending_permission_started_at
+        .map(|t| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    crate::telemetry::permission_dialog_resolved(
+        kind,
+        resolution.response,
+        resolution.persist,
+        elapsed_ms,
+    );
+    if let Some(tx) = state.pending_permission_resp_tx.take() {
+        let _ = tx.send(resolution.response);
+    }
+    state.pending_permission = None;
+    state.pending_permission_started_at = None;
+    state.tool_use_dialog_state = Default::default();
+    state.exit_plan_dialog_state = Default::default();
+    state.bypass_dialog_state = Default::default();
+}
+
 #[cfg(test)]
-mod tests {
+mod classify_tests {
     use super::*;
 
     #[test]

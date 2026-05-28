@@ -266,6 +266,46 @@ pub async fn handle_submit_line(
 #[must_use]
 pub fn render_screen(state: &AppState, viewport_height: usize) -> AnyElement<'static> {
     use crate::screens::repl::{should_render_spinner, ReplScreen};
+    // M6-05 focus-trap render path: when a permission dialog is open,
+    // it owns the screen. Iocraft 0.8 doesn't expose a portable z-index
+    // overlay primitive, so we render the dialog INSTEAD OF the
+    // 3-zone layout (documented plan fallback). PromptInput isn't shown
+    // at all while the dialog is up — coupled with the keymap focus
+    // trap, this guarantees the prompt buffer is untouched.
+    if let Some(pp) = &state.pending_permission {
+        use crate::components::permissions::bypass_permissions::BypassPermissionsMode;
+        use crate::components::permissions::exit_plan_mode::ExitPlanMode;
+        use crate::components::permissions::tool_use_confirm::ToolUseConfirm;
+        use lingxi_permission::gate::PermissionRequest;
+        return match &pp.request {
+            PermissionRequest::ToolUseConfirm {
+                tool_name,
+                tool_input,
+                ..
+            } => {
+                let pretty = serde_json::to_string_pretty(tool_input).unwrap_or_default();
+                let tool_name = tool_name.clone();
+                let focus = state.tool_use_dialog_state.focus;
+                element! {
+                    ToolUseConfirm(
+                        tool_name: tool_name,
+                        tool_input_pretty: pretty,
+                        focus: focus,
+                    )
+                }
+                .into_any()
+            }
+            PermissionRequest::ExitPlanMode { plan } => {
+                let plan = plan.clone();
+                let focus = state.exit_plan_dialog_state.focus;
+                element! { ExitPlanMode(plan: plan, focus: focus) }.into_any()
+            }
+            PermissionRequest::BypassPermissionsMode => {
+                let typed = state.bypass_dialog_state.typed.clone();
+                element! { BypassPermissionsMode(typed: typed) }.into_any()
+            }
+        };
+    }
     let status = state.status.clone();
     let messages = state.messages.clone();
     let prompt_text = state.prompt_text.clone();

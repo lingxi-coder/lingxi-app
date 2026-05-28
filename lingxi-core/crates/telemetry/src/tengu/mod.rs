@@ -44,7 +44,9 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     // M6-01: TUI lifecycle events (+4 -> 319).
     // M6-03: +2 streaming render events (streaming_render_{started,ended})
     //        → tui block grows 4 → 6 → 321 total.
-    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 2 + 54 + 6;
+    // M6-05: +2 permission dialog events (permission_dialog_{shown,resolved})
+    //        → tui block grows 6 → 8 → 323 total.
+    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 2 + 54 + 8;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;

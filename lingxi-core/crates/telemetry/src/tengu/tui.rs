@@ -35,6 +35,18 @@ pub const STREAMING_RENDER_STARTED: &str = "tengu_tui_streaming_render_started";
 /// `Some → None`). Payload: `session_id`, `outcome`. (M6-03)
 pub const STREAMING_RENDER_ENDED: &str = "tengu_tui_streaming_render_ended";
 
+// M6-05 additions: permission dialog lifecycle.
+
+/// Emitted when a permission dialog transitions from `None` to `Some(_)`
+/// in the TUI app state. Payload: `kind` (one of `"tool_use"`,
+/// `"exit_plan_mode"`, `"bypass_permissions"`). (M6-05)
+pub const PERMISSION_DIALOG_SHOWN: &str = "tengu_tui_permission_dialog_shown";
+
+/// Emitted when the user resolves a permission dialog. Payload: `kind`,
+/// `decision` (one of `"allow_once"`, `"allow_always"`, `"deny"`),
+/// `persist` (bool), `elapsed_ms` (u64). (M6-05)
+pub const PERMISSION_DIALOG_RESOLVED: &str = "tengu_tui_permission_dialog_resolved";
+
 /// Order-locked array; appended into `tengu::ALL_EVENT_NAMES`.
 pub(crate) const NAMES: &[&str] = &[
     SESSION_STARTED,
@@ -43,6 +55,8 @@ pub(crate) const NAMES: &[&str] = &[
     RESIZE,
     STREAMING_RENDER_STARTED,
     STREAMING_RENDER_ENDED,
+    PERMISSION_DIALOG_SHOWN,
+    PERMISSION_DIALOG_RESOLVED,
 ];
 
 #[cfg(test)]
@@ -50,9 +64,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn names_has_6_entries_after_m6_03() {
-        // 4 (M6-01) + 2 (M6-03 streaming render) = 6.
-        assert_eq!(NAMES.len(), 6);
+    fn names_has_8_entries_after_m6_05() {
+        // 4 (M6-01) + 2 (M6-03 streaming render) + 2 (M6-05 permission
+        // dialog shown/resolved) = 8.
+        assert_eq!(NAMES.len(), 8);
     }
 
     #[test]
@@ -66,5 +81,13 @@ mod tests {
             "tengu_tui_streaming_render_started"
         );
         assert_eq!(STREAMING_RENDER_ENDED, "tengu_tui_streaming_render_ended");
+        assert_eq!(
+            PERMISSION_DIALOG_SHOWN,
+            "tengu_tui_permission_dialog_shown"
+        );
+        assert_eq!(
+            PERMISSION_DIALOG_RESOLVED,
+            "tengu_tui_permission_dialog_resolved"
+        );
     }
 }

@@ -322,7 +322,9 @@
     "tengu_tui_first_render",
     "tengu_tui_resize",
     "tengu_tui_streaming_render_started",
-    "tengu_tui_streaming_render_ended"
+    "tengu_tui_streaming_render_ended",
+    "tengu_tui_permission_dialog_shown",
+    "tengu_tui_permission_dialog_resolved"
   ],
   "cost_sample_payloads": [
     {

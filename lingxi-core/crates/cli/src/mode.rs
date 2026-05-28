@@ -89,12 +89,42 @@ pub async fn dispatch(
             crate::repl::run_repl(argv).await
         }
         Mode::Tui => {
-            // M6-01 baseline: build a minimal `lingxi_tui::Runtime` from
-            // the orchestrator's session id, run a single TUI loop, exit.
-            // M6-02 widens `lingxi_tui::Runtime` to carry the full
-            // OrchestratorHandle + dispatcher.
-            let session_id = runtime.orchestrator.clone().current_session_id().await;
-            let tui_runtime = lingxi_tui::session::Runtime::new(session_id);
+            // M6-03 path: rebuild the runtime with `BridgeOutputStream` as
+            // the orchestrator's output, then pass the bridge_rx into
+            // `run_tui_session` so streaming events route into AppState.
+            //
+            // The `runtime` arg here was built with the standard
+            // sink-adapter output (for one-shot / NDJSON modes); we
+            // discard it and construct a TUI-specific build. The original
+            // sink is therefore unused in this arm.
+            let _ = runtime; // intentionally unused — we mint a TUI build
+            let _ = sink; // intentionally unused
+            let tui_build = match crate::init::build_runtime_for_tui(argv).await {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("lingxi-cli: tui init failed: {e}");
+                    return exit_codes::RUNTIME_ERROR;
+                }
+            };
+            let session_id = tui_build
+                .runtime
+                .orchestrator
+                .clone()
+                .current_session_id()
+                .await;
+            let bridge = lingxi_tui::session::TuiBridge {
+                rx: tui_build.bridge_rx,
+            };
+            // Status snapshot — model from argv (if set), cwd from current
+            // dir, cost placeholder. Full status wiring lands in M6-06.
+            let mut status = lingxi_tui::state::StatusSnapshot::default();
+            if let Some(m) = &argv.model {
+                status.model.clone_from(m);
+            }
+            if let Ok(cwd) = std::env::current_dir() {
+                status.cwd = cwd;
+            }
+            let tui_runtime = lingxi_tui::session::Runtime::with_bridge(session_id, bridge, status);
             let cancel = CancellationToken::new();
             match lingxi_tui::run_tui_session(tui_runtime, cancel).await {
                 Ok(()) => exit_codes::SUCCESS,

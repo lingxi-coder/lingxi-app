@@ -17,8 +17,7 @@ pub enum KeyAction {
 #[must_use]
 pub fn classify(key: &KeyEvent) -> KeyAction {
     match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => KeyAction::Quit,
-        (KeyCode::Char('d'), KeyModifiers::CONTROL) => KeyAction::Quit,
+        (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL) => KeyAction::Quit,
         _ => KeyAction::Other,
     }
 }

@@ -30,9 +30,36 @@
 //! re-locked at **99 = 18 core + 81 unimplemented** after auditing the plan's
 //! enumerated list against `claude-code/src/commands/`.
 //!
+//! # Batch 1 (M5-10)
+//!
+//! After [`register_core_batch_1`] runs against a fully-initialised registry,
+//! the 6 batch-1 commands are wired to real implementations:
+//!
+//! - `/clear` — calls [`lingxi_traits::OrchestratorHandle::clear_session`]
+//! - `/compact` — calls [`lingxi_traits::OrchestratorHandle::force_compact`]
+//! - `/help` — renders the locked 100-line table via
+//!   [`builtin::help_render::render_help_screen`]
+//! - `/exit` — calls [`lingxi_traits::OrchestratorHandle::request_exit`]
+//! - `/memory` — calls
+//!   [`lingxi_traits::OrchestratorHandle::open_memory_editor`] which spawns
+//!   `$EDITOR` (with `VISUAL` fallback, then `vi`/`notepad.exe`)
+//! - `/init` — emits [`crate::CommandResult::InjectMessage`] carrying the
+//!   byte-locked [`builtin::OLD_INIT_PROMPT`] template (1592 bytes, 21
+//!   lines, sha256 `cfdedaa2…b55a39`)
+//!
+//! Each command emits 3 telemetry events
+//! (`tengu_command_<name>_{started,completed,failed}`) defined in
+//! [`lingxi_telemetry::tengu::command`]. The total tengu registry grew
+//! from 258 → 276 events.
+//!
+//! M5-11 will light up the remaining 12 core commands (batch 2) with the
+//! same pattern: `register_core_batch_2(reg, handle)` overwrites the
+//! placeholders left in [`builtin::core_placeholders`].
+//!
 //! # Plan reference
 //!
-//! See `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`.
+//! See `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md` and
+//! `docs/superpowers/plans/2026-05-25-m5-10-commands-batch-1.md`.
 //!
 //! See spec §19 for the broader slash-command design.
 

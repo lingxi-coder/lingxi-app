@@ -39,9 +39,7 @@ async fn empty_states_match_fixture() {
         other => panic!("got {other:?}"),
     }
 
-    let r = HooksHandler::new(mock.clone())
-        .handle(&args("hooks"))
-        .await;
+    let r = HooksHandler::new(mock.clone()).handle(&args("hooks")).await;
     match r {
         CommandResult::Done { display: Some(s) } => {
             assert_eq!(s, empty["hooks"].as_str().unwrap());

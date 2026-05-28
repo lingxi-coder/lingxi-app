@@ -175,8 +175,7 @@ pub struct ConversationOrchestrator {
     /// Subagent catalog (M6-07). `None` when not wired — `list_agents`
     /// then returns `vec![]`. The CLI binary populates from
     /// `~/.claude/agents/` + project `.claude/agents/`.
-    pub(crate) agent_catalog:
-        Option<Arc<tokio::sync::RwLock<Vec<lingxi_agent::AgentDefinition>>>>,
+    pub(crate) agent_catalog: Option<Arc<tokio::sync::RwLock<Vec<lingxi_agent::AgentDefinition>>>>,
 }
 
 impl ConversationOrchestrator {

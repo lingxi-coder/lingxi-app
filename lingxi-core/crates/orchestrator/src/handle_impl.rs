@@ -117,12 +117,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .into_iter()
             .map(|h| HookInfo {
                 name: h.name.clone(),
-                event: h
-                    .events
-                    .first()
-                    .map(event_str)
-                    .unwrap_or("Unknown")
-                    .to_string(),
+                event: h.events.first().map_or("Unknown", event_str).to_string(),
                 matcher: h.if_condition.as_ref().map(|c| c.pattern.clone()),
                 timeout_ms: h.timeout.map_or(60_000_u64, |d| {
                     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)

@@ -209,7 +209,7 @@ mod tests {
         let err = parse_mcp_json_string(raw, ConfigScope::Project).unwrap_err();
         match err {
             McpJsonError::UnknownTransport(name) => assert_eq!(name, "bogus"),
-            other => panic!("got {other:?}"),
+            McpJsonError::Json(e) => panic!("expected UnknownTransport, got Json({e})"),
         }
     }
 

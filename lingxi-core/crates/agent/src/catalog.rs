@@ -152,9 +152,9 @@ pub async fn load_agents_from_dirs(paths: &[(PathBuf, AgentSource)]) -> Vec<Agen
     use std::collections::HashMap;
     let mut by_name: HashMap<String, AgentDefinition> = HashMap::new();
     for (dir, source) in paths {
-        let mut entries = match tokio::fs::read_dir(dir).await {
-            Ok(e) => e,
-            Err(_) => continue, // missing dir = empty contribution
+        // missing dir = empty contribution
+        let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+            continue;
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
             let p = entry.path();
@@ -287,11 +287,9 @@ mod tests {
 
     #[tokio::test]
     async fn load_agents_from_missing_dir_yields_empty() {
-        let defs = load_agents_from_dirs(&[(
-            PathBuf::from("/does/not/exist"),
-            AgentSource::UserDefined,
-        )])
-        .await;
+        let defs =
+            load_agents_from_dirs(&[(PathBuf::from("/does/not/exist"), AgentSource::UserDefined)])
+                .await;
         assert!(defs.is_empty());
     }
 }

@@ -99,7 +99,7 @@ pub fn resolve_api_base() -> String {
 /// Currently no `.await` is needed inside the constructor, but the signature
 /// remains `async` so future iterations (real OAuth token bootstrap, MCP
 /// server connect) can plug in without changing every call site.
-#[allow(clippy::unused_async)]
+#[allow(clippy::unused_async, clippy::too_many_lines)]
 pub async fn build_runtime(
     argv: &Argv,
     output: Arc<dyn OutputStream>,
@@ -177,11 +177,13 @@ pub async fn build_runtime(
     // (5.1) M6-07: Load `.mcp.json` (project preferred over user-global) and
     //       pre-populate the McpRegistry with `Disconnected` state entries
     //       so `/mcp` can list them. Real connect / health-check is M7 work.
-    let global_mcp_path = dirs::config_dir()
-        .map(|d| d.join("lingxi").join("mcp.json"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+    let global_mcp_path = dirs::config_dir().map_or_else(
+        || std::path::PathBuf::from("/dev/null"),
+        |d| d.join("lingxi").join("mcp.json"),
+    );
     let project_mcp_path = cwd.join(".mcp.json");
-    let mcp_configs = lingxi_mcp::load_mcp_json_with_precedence(&project_mcp_path, &global_mcp_path);
+    let mcp_configs =
+        lingxi_mcp::load_mcp_json_with_precedence(&project_mcp_path, &global_mcp_path);
     let mcp_transport: Arc<dyn McpTransport> = Arc::new(PosixMcp::new());
     let mcp_registry = Arc::new(lingxi_mcp::McpRegistry::new(mcp_transport));
     {
@@ -205,9 +207,10 @@ pub async fn build_runtime(
     //       de-dupes by HookId, not name — both register; /hooks lists both).
     let mut hook_registry = lingxi_hooks::HookRegistry::new();
     let project_settings_path = cwd.join(".claude").join("settings.json");
-    let user_settings_path = dirs::config_dir()
-        .map(|d| d.join("claude").join("settings.json"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+    let user_settings_path = dirs::config_dir().map_or_else(
+        || std::path::PathBuf::from("/dev/null"),
+        |d| d.join("claude").join("settings.json"),
+    );
     for (path, source) in [
         (
             user_settings_path,
@@ -239,9 +242,10 @@ pub async fn build_runtime(
     //       Project wins on agent_type collision because it is passed
     //       SECOND to load_agents_from_dirs (later paths win).
     let project_agents_dir = cwd.join(".claude").join("agents");
-    let user_agents_dir = dirs::home_dir()
-        .map(|h| h.join(".claude").join("agents"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+    let user_agents_dir = dirs::home_dir().map_or_else(
+        || std::path::PathBuf::from("/dev/null"),
+        |h| h.join(".claude").join("agents"),
+    );
     let agents = lingxi_agent::load_agents_from_dirs(&[
         (
             user_agents_dir,

@@ -250,10 +250,7 @@ mod snapshot_tests {
         ) -> Result<Vec<McpResourceDto>, McpError> {
             unreachable!()
         }
-        async fn list_prompts(
-            &self,
-            _c: &McpRawConnection,
-        ) -> Result<Vec<McpPromptDto>, McpError> {
+        async fn list_prompts(&self, _c: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
             unreachable!()
         }
         async fn call_tool(
@@ -301,7 +298,7 @@ mod snapshot_tests {
             spec: McpTransportSpec::Stdio {
                 command: "echo".into(),
                 args: vec![],
-                env: Default::default(),
+                env: std::collections::HashMap::new(),
             },
             scope: ConfigScope::Project,
             disabled: false,

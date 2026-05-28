@@ -153,16 +153,8 @@ mod all_hooks_tests {
     #[test]
     fn all_hooks_unions_source_and_plugin_buckets() {
         let mut r = HookRegistry::new();
-        r.register(hk(
-            "user-fmt",
-            HookEventType::PostToolUse,
-            HookSource::User,
-        ));
-        r.register(hk(
-            "project-lint",
-            HookEventType::Stop,
-            HookSource::Project,
-        ));
+        r.register(hk("user-fmt", HookEventType::PostToolUse, HookSource::User));
+        r.register(hk("project-lint", HookEventType::Stop, HookSource::Project));
         r.register_plugin_hooks(
             lingxi_protocol::PluginId::new(),
             vec![hk(

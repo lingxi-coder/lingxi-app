@@ -149,7 +149,8 @@ mod tests {
 
     #[test]
     fn unknown_event_is_skipped() {
-        let raw = r#"{ "hooks": { "Bogus": [{ "hooks": [{ "type": "command", "command": "x" }]}]}}"#;
+        let raw =
+            r#"{ "hooks": { "Bogus": [{ "hooks": [{ "type": "command", "command": "x" }]}]}}"#;
         let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
         assert!(hooks.is_empty());
     }

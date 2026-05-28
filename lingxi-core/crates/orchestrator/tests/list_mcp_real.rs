@@ -23,19 +23,13 @@ impl McpTransport for StubTransport {
     async fn connect(&self, _s: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
         unreachable!()
     }
-    async fn initialize(
-        &self,
-        _c: &McpRawConnection,
-    ) -> Result<ServerCapabilitiesDto, McpError> {
+    async fn initialize(&self, _c: &McpRawConnection) -> Result<ServerCapabilitiesDto, McpError> {
         unreachable!()
     }
     async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
         unreachable!()
     }
-    async fn list_resources(
-        &self,
-        _c: &McpRawConnection,
-    ) -> Result<Vec<McpResourceDto>, McpError> {
+    async fn list_resources(&self, _c: &McpRawConnection) -> Result<Vec<McpResourceDto>, McpError> {
         unreachable!()
     }
     async fn list_prompts(&self, _c: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
@@ -86,7 +80,7 @@ fn stdio_cfg(name: &str) -> McpServerConfig {
         spec: McpTransportSpec::Stdio {
             command: "echo".into(),
             args: vec![],
-            env: Default::default(),
+            env: std::collections::HashMap::new(),
         },
         scope: ConfigScope::Project,
         disabled: false,

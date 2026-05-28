@@ -2,4 +2,4 @@
 source: crates/tui/tests/render_placeholder.rs
 expression: line
 ---
-lingxi-tui v0.6.0
+lingxi-tui v0.7.0

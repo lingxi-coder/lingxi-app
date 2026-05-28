@@ -161,7 +161,9 @@ mod tests {
         // M5-06 adds it because hooks dispatch to public endpoints — the
         // cloud-metadata service at 169.254.169.254 must be blocked.
         let g = SsrfGuard::with_defaults();
-        assert!(g.check_url("http://169.254.169.254/latest/meta-data/").is_err());
+        assert!(g
+            .check_url("http://169.254.169.254/latest/meta-data/")
+            .is_err());
         assert!(g.check_url("http://169.254.0.1/").is_err());
     }
 

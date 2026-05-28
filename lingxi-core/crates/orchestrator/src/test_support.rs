@@ -239,9 +239,7 @@ pub fn noop_hook_executor() -> Arc<lingxi_hooks::HookExecutorImpl> {
         async fn spawn(
             &self,
             _name: &str,
-            _task: std::pin::Pin<
-                Box<dyn std::future::Future<Output = ()> + Send + 'static>,
-            >,
+            _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
         ) -> Result<lingxi_traits::BackgroundTaskHandle, lingxi_traits::RuntimeError> {
             Err(lingxi_traits::RuntimeError::Internal(
                 "noop hook executor — runtime arm is never called".into(),

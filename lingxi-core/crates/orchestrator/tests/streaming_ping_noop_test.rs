@@ -2,8 +2,8 @@
 
 use lingxi_orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
-    ping, text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient,
-    NoOpPermissionGate, StaticMemoryProvider,
+    ping, text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use lingxi_orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
 use lingxi_tools::registry::ToolRegistry;

@@ -103,8 +103,10 @@ impl HttpExecutor {
 
         // 3. Build the request. Inject Content-Type: application/json if the
         //    caller didn't supply one.
-        let mut req_headers: Vec<(String, String)> =
-            headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut req_headers: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let has_content_type = req_headers
             .iter()
             .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
@@ -294,7 +296,10 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(outcome.signal, HttpExecutionSignal::SsrfBlocked(_)));
+        assert!(matches!(
+            outcome.signal,
+            HttpExecutionSignal::SsrfBlocked(_)
+        ));
         assert!(matches!(outcome.result.outcome, HookOutcome::Error));
         assert_eq!(
             http.recorded.lock().unwrap().len(),

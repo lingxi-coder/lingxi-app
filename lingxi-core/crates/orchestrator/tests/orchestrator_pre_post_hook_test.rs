@@ -20,7 +20,8 @@ use lingxi_hooks::registry::{HookContext, HookRegistry};
 use lingxi_hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
 use lingxi_hooks::HookExecutorImpl;
 use lingxi_orchestrator::test_support::{
-    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use lingxi_orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use lingxi_protocol::{HookId, HttpRequest, HttpResponse, ToolUseId};
@@ -156,11 +157,7 @@ async fn make_hook_executor_with(
 ) -> Arc<HookExecutorImpl> {
     let registry = Arc::new(RwLock::new(HookRegistry::new()));
     registry.write().await.register(hook);
-    let mut exec = HookExecutorImpl::new(
-        registry,
-        Arc::new(UnusedHttp),
-        Arc::new(UnusedRuntime),
-    );
+    let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
     exec.register_builtin(handler);
     Arc::new(exec)
 }

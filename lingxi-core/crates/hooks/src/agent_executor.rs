@@ -185,9 +185,7 @@ mod tests {
     use lingxi_protocol::HookId;
     use lingxi_traits::budget::{BudgetEnforcerHandle, BudgetError};
     use lingxi_traits::subagent_spawn::{SubagentResult, SubagentSpawnError, SubagentUsage};
-    use lingxi_traits::tool_invoker::{
-        SubagentInvocationContext, ToolInvoker, ToolInvokerError,
-    };
+    use lingxi_traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
     use serde_json::json;
     use std::sync::Mutex;
 

@@ -14,12 +14,12 @@
 
 #![forbid(unsafe_code)]
 
+mod agent_executor;
 pub mod async_registry;
 pub mod builtin;
 pub mod definition;
 pub mod events;
 pub mod executor;
-mod agent_executor;
 pub mod hook_payload;
 mod http_executor;
 pub mod registry;
@@ -34,8 +34,8 @@ pub use executor::{
     HOOK_HTTP_TIMEOUT_MS,
 };
 pub use hook_payload::{
-    parse_response, HookEventEnvelope, HookEventNamePost, HookEventNamePre,
-    HookResponseParseError, PostToolUsePayload, PreToolUsePayload,
+    parse_response, HookEventEnvelope, HookEventNamePost, HookEventNamePre, HookResponseParseError,
+    PostToolUsePayload, PreToolUsePayload,
 };
 pub use registry::{HookContext, HookRegistry};
 pub use response::{AggregateHookResult, HookDecision, HookOutcome, HookResponse, HookResult};

@@ -10,14 +10,16 @@
 use crate::agent_executor::{AgentExecutionSignal, AgentExecutor};
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
-use crate::hook_payload::{HookEventNamePost, HookEventNamePre, PostToolUsePayload, PreToolUsePayload};
+use crate::hook_payload::{
+    HookEventNamePost, HookEventNamePre, PostToolUsePayload, PreToolUsePayload,
+};
 use crate::http_executor::{HttpExecutionSignal, HttpExecutor};
 use crate::registry::{HookContext, HookRegistry};
 use crate::response::{AggregateHookResult, HookOutcome, HookResult};
 use crate::ssrf_guard::SsrfGuard;
 use async_trait::async_trait;
-use lingxi_traits::{HttpTransport, RuntimeSpawner};
 use lingxi_traits::subagent_spawn::SubagentSpawner;
+use lingxi_traits::{HttpTransport, RuntimeSpawner};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -206,10 +208,7 @@ impl HookExecutorImpl {
                     response: None,
                 }
             }
-            HookExecutor::Agent {
-                agent_type,
-                prompt,
-            } => {
+            HookExecutor::Agent { agent_type, prompt } => {
                 let (expected_event, body) = match build_envelope_body(event, ctx) {
                     Some(pair) => pair,
                     None => {

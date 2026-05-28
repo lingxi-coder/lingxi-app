@@ -192,7 +192,10 @@ pub(crate) async fn dispatch_tool_uses(
         }
 
         // Apply modified_input if any hook mutated the tool input.
-        let effective_input = pre_agg.modified_input.clone().unwrap_or_else(|| input.clone());
+        let effective_input = pre_agg
+            .modified_input
+            .clone()
+            .unwrap_or_else(|| input.clone());
         tracing::info!(
             event = orch_events::HOOK_PRE_COMPLETED,
             tool_name = %name,
@@ -273,7 +276,9 @@ pub(crate) async fn dispatch_tool_uses(
         let (progress_tx, _progress_rx) =
             tokio::sync::mpsc::channel::<lingxi_tools::progress::ToolProgress>(8);
 
-        let tool_outcome = tool_handle.call(effective_input.clone(), ctx, progress_tx).await;
+        let tool_outcome = tool_handle
+            .call(effective_input.clone(), ctx, progress_tx)
+            .await;
 
         let (content, is_error, emit_payload) = match tool_outcome {
             Ok(result) => {

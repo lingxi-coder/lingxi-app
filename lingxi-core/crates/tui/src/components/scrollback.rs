@@ -21,9 +21,9 @@ use lingxi_protocol::ToolUseId;
 
 use crate::components::messages::{
     assistant_text::AssistantTextMessage,
-    assistant_tool_use::{AssistantToolUseMessage, AssistantToolUseProps},
+    assistant_tool_use::AssistantToolUseMessage,
     user_text::UserTextMessage,
-    user_tool_result::{UserToolResultMessage, UserToolResultProps},
+    user_tool_result::UserToolResultMessage,
 };
 use crate::state::RenderedMessage;
 use crate::theme::TuiTheme;

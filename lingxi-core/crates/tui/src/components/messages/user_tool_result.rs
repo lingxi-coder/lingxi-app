@@ -14,6 +14,7 @@
 use iocraft::prelude::*;
 use lingxi_protocol::ToolUseId;
 
+use crate::ansi::{parse_ansi, AnsiColor, AnsiSpan};
 use crate::theme::TuiTheme;
 
 /// Indent marker glyph + space. 4-byte UTF-8.
@@ -146,11 +147,99 @@ pub fn render_user_tool_result_to_string(props: UserToolResultProps) -> String {
     out
 }
 
+/// Produce the styled spans for the body. Only Bash output runs through
+/// the ANSI parser; everything else is a single default-styled span over
+/// the result body text. (M6-04 Task 12.)
+///
+/// Note: this is the body-only span pipeline. The marker / focus prefix
+/// from [`render_user_tool_result_to_string`] is added separately by
+/// the iocraft component (so a colored Bash run still gets a dim leading
+/// `└ ` marker).
+#[must_use]
+pub fn render_user_tool_result_body_spans(props: &UserToolResultProps) -> Vec<AnsiSpan> {
+    let body = body_text(&props.result);
+    let (truncated, _dropped) = truncate(&body);
+    if props.tool == "Bash" {
+        parse_ansi(&truncated)
+    } else {
+        vec![AnsiSpan {
+            style: AnsiStyle::default(),
+            text: truncated,
+        }]
+    }
+}
+
+/// Map an [`AnsiColor`] to an iocraft [`Color`].
+///
+/// The 8-color palette maps to crossterm's "dark" range (`DarkRed` etc.)
+/// to match terminal defaults where SGR 31 is darker than SGR 91. Bright
+/// variants map to the non-dark range. `Default` becomes `Color::Reset`.
+fn ansi_to_iocraft_color(c: AnsiColor) -> Color {
+    match c {
+        AnsiColor::Default => Color::Reset,
+        AnsiColor::Black => Color::Black,
+        AnsiColor::Red => Color::DarkRed,
+        AnsiColor::Green => Color::DarkGreen,
+        AnsiColor::Yellow => Color::DarkYellow,
+        AnsiColor::Blue => Color::DarkBlue,
+        AnsiColor::Magenta => Color::DarkMagenta,
+        AnsiColor::Cyan => Color::DarkCyan,
+        AnsiColor::White => Color::Grey,
+        AnsiColor::BrightBlack => Color::DarkGrey,
+        AnsiColor::BrightRed => Color::Red,
+        AnsiColor::BrightGreen => Color::Green,
+        AnsiColor::BrightYellow => Color::Yellow,
+        AnsiColor::BrightBlue => Color::Blue,
+        AnsiColor::BrightMagenta => Color::Magenta,
+        AnsiColor::BrightCyan => Color::Cyan,
+        AnsiColor::BrightWhite => Color::White,
+    }
+}
+
+// Re-export the default style helper for ansi_to_iocraft_color callers.
+use crate::ansi::AnsiStyle;
+
 /// iocraft component — wraps [`render_user_tool_result_to_string`] in a
-/// dim-grey `Text` element. Bash output passes through the ANSI parser in
-/// Task 12; until then non-Bash and Bash render identically.
+/// dim-grey `Text` element. Bash output passes through the ANSI parser
+/// (Task 12): the result body is decomposed into styled spans, each
+/// rendered as a child `Text` element with the mapped color.
 #[component]
 pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElement<'static>> {
+    // For Bash + expanded: render colored spans. Otherwise: fall back to
+    // the pure string renderer (faster + already tested).
+    if props.tool == "Bash" && props.expanded {
+        let header = {
+            // Reuse the string renderer to compute the prefix + marker
+            // for the first line, then strip the body and replace it with
+            // the colored span sequence.
+            let prefix = if props.focused { FOCUS_PREFIX } else { "" };
+            format!("{prefix}{MARKER}")
+        };
+        let spans = render_user_tool_result_body_spans(props);
+        let span_elements: Vec<AnyElement<'static>> = spans
+            .into_iter()
+            .map(|s| {
+                let color = ansi_to_iocraft_color(s.style.fg);
+                let weight = if s.style.bold {
+                    Weight::Bold
+                } else {
+                    Weight::Normal
+                };
+                element! {
+                    Text(content: s.text, color: color, weight: weight)
+                }
+                .into_any()
+            })
+            .collect();
+        return element! {
+            View(flex_direction: FlexDirection::Column) {
+                Text(content: header, color: TuiTheme::DIM)
+                View(flex_direction: FlexDirection::Row) {
+                    #(span_elements)
+                }
+            }
+        };
+    }
     let body = render_user_tool_result_to_string(props.clone());
     element! {
         View(flex_direction: FlexDirection::Column) {

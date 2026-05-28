@@ -21,6 +21,7 @@
 pub mod callback;
 pub mod client;
 pub mod config;
+pub mod handle;
 pub mod limits;
 pub mod pkce;
 pub mod refresh;
@@ -31,6 +32,7 @@ pub mod scope_upgrade;
 pub use callback::{await_callback, CallbackError, CallbackParams};
 pub use client::{ClaudeAiOAuthClient, OAuthError};
 pub use config::{ClaudeAiOAuthConfig, CLAUDE_CODE_OAUTH_SCOPES, REFRESH_GRANT_TYPE};
+pub use handle::OAuthHandle;
 pub use limits::{ClaudeAiLimitsState, ClaudeAiLimitsTracker, SubscriptionType};
 pub use pkce::{generate_pkce, generate_state_token};
 pub use refresh::{AuthState, RefreshDriver};

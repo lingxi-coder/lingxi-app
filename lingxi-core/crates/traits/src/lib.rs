@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod bridge;
 pub mod budget;
 pub mod clock;
@@ -31,6 +32,7 @@ pub mod task_registry;
 pub mod tool_invoker;
 pub mod worktree;
 
+pub use auth::{AuthError, AuthHandle, LoginInfo};
 pub use bridge::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 pub use budget::{BudgetEnforcerHandle, BudgetError};
 pub use clock::Clock;

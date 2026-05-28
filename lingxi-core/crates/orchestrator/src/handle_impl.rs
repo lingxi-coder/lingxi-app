@@ -66,17 +66,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn snapshot_cost(&self) -> CostSnapshot {
-        // M5-10/M5-11: minimal stub. M5-12 will promote a `CostTracker` field
-        // and read from it. For now return a zeroed snapshot keyed to the
-        // current session id. The new M5-11 fields (`total_usd`,
-        // `input_tokens`, `output_tokens`, `api_calls`, `session_duration`)
-        // default to 0/Zero — the `/cost` handler renders these as
-        // `"Cost: $0.0000 (0 calls, 0+0 tokens, 0s session time)"` until
-        // M5-12 wires real cost data.
-        CostSnapshot {
-            session_id: self.session.lock().await.session_id,
-            ..CostSnapshot::default()
-        }
+        // M6-06: delegate to the inherent helper that reads from the wired
+        // CostTracker. Returns zero-valued snapshot if no tracker is wired
+        // (library callers — production CLI always wires one via init.rs).
+        self.snapshot_cost_real().await
     }
 
     async fn switch_model(&self, model: &str) -> Result<(), HandleError> {

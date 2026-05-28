@@ -243,6 +243,48 @@ impl ConversationOrchestrator {
         Some(t.snapshot().await)
     }
 
+    /// Project the wired [`lingxi_cost::CostTracker`] state onto the
+    /// leaf-friendly [`lingxi_traits::CostSnapshot`]. Used by both the
+    /// trait method `snapshot_cost` and the per-turn end-of-turn emitter
+    /// (`OutputStream::emit_end_turn`). (M6-06)
+    ///
+    /// If no tracker is wired, returns a zero-valued snapshot keyed to
+    /// the current session id (backward-compat shape).
+    pub async fn snapshot_cost_real(&self) -> lingxi_traits::CostSnapshot {
+        let session_id = self.session.lock().await.session_id;
+        let Some(tracker) = self.cost_tracker.as_ref() else {
+            return lingxi_traits::CostSnapshot {
+                session_id,
+                ..lingxi_traits::CostSnapshot::default()
+            };
+        };
+        let state = tracker.snapshot().await;
+        // Sum per-model usage into aggregate token counters. api_calls comes
+        // from our own counter because lingxi_cost::Usage does not carry a
+        // per-call count (its `add()` merges token totals only).
+        let (mut input_tokens, mut output_tokens) = (0u64, 0u64);
+        for entry in state.per_model_usage.values() {
+            input_tokens = input_tokens.saturating_add(entry.usage.tokens.input);
+            output_tokens = output_tokens.saturating_add(entry.usage.tokens.output);
+        }
+        let api_calls = self
+            .api_calls_recorded
+            .load(std::sync::atomic::Ordering::SeqCst);
+        #[allow(clippy::cast_precision_loss)]
+        let total_usd = (state.total_nano_usd as f64) / 1_000_000_000.0;
+        let session_duration = self.session_started_at.elapsed();
+        lingxi_traits::CostSnapshot {
+            session_id,
+            total_nano_usd: state.total_nano_usd,
+            total_tokens: input_tokens.saturating_add(output_tokens),
+            total_usd,
+            input_tokens,
+            output_tokens,
+            api_calls,
+            session_duration,
+        }
+    }
+
     /// Convert an in-memory `ConversationMessage` into a `JsonlMessage`.
     ///
     /// `parent_uuid` is the UUID of the prior persisted entry (None for the

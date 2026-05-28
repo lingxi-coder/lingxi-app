@@ -5,7 +5,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lingxi_tui::{
-    events::keymap::{classify, KeyAction},
+    events::keymap::{classify, KeyClass},
     TuiApp, TuiEvent,
 };
 
@@ -17,7 +17,7 @@ fn esc_does_not_quit_in_m6_01() {
     let k = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
     let ev = TuiEvent::Key(k);
     match ev {
-        TuiEvent::Key(k) => assert_eq!(classify(&k), KeyAction::Other),
+        TuiEvent::Key(k) => assert_eq!(classify(&k), KeyClass::Other),
         _ => panic!("expected Key"),
     }
 }
@@ -27,7 +27,7 @@ fn ctrl_c_classifies_as_quit() {
     let k = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     let ev = TuiEvent::Key(k);
     match ev {
-        TuiEvent::Key(k) => assert_eq!(classify(&k), KeyAction::Quit),
+        TuiEvent::Key(k) => assert_eq!(classify(&k), KeyClass::Quit),
         _ => panic!("expected Key"),
     }
 }
@@ -37,7 +37,7 @@ fn ctrl_d_classifies_as_quit() {
     let k = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
     let ev = TuiEvent::Key(k);
     match ev {
-        TuiEvent::Key(k) => assert_eq!(classify(&k), KeyAction::Quit),
+        TuiEvent::Key(k) => assert_eq!(classify(&k), KeyClass::Quit),
         _ => panic!("expected Key"),
     }
 }
@@ -47,7 +47,7 @@ fn quit_action_flips_app_state() {
     let mut app = TuiApp::new();
     assert!(!app.should_quit);
     let k = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    if classify(&k) == KeyAction::Quit {
+    if classify(&k) == KeyClass::Quit {
         app.request_quit();
     }
     assert!(app.should_quit);

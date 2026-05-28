@@ -23,7 +23,7 @@
 
 use crate::app::TuiApp;
 use crate::error::TuiError;
-use crate::events::keymap::{classify, KeyAction};
+use crate::events::keymap::{classify, KeyClass};
 use crate::telemetry::{FIRST_RENDER, RESIZE, SESSION_ENDED, SESSION_STARTED};
 use crate::terminal::RawGuard;
 use crossterm::event::{Event as CtEvent, EventStream};
@@ -92,7 +92,7 @@ pub async fn run_tui_session(runtime: Runtime, cancel: CancellationToken) -> Res
             maybe_ev = event_stream.next() => {
                 match maybe_ev {
                     Some(Ok(CtEvent::Key(k))) => {
-                        if classify(&k) == KeyAction::Quit {
+                        if classify(&k) == KeyClass::Quit {
                             app.request_quit();
                         }
                     }

@@ -6,5 +6,6 @@
 
 pub use lingxi_traits::permission_gate::{PermissionDecision, PermissionGate};
 pub use lingxi_traits::prompting_gate::{
-    PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
+    PermissionRequest, PermissionResponse, PromptDecision, PromptDefault, PromptError,
+    PromptingGate,
 };

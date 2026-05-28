@@ -20,8 +20,8 @@ pub mod update;
 
 pub use defaults_per_tool::tool_default;
 pub use gate::{
-    PermissionDecision, PermissionGate, PermissionRequest, PromptDecision, PromptDefault,
-    PromptError, PromptingGate,
+    PermissionDecision, PermissionGate, PermissionRequest, PermissionResponse, PromptDecision,
+    PromptDefault, PromptError, PromptingGate,
 };
 pub use mode::PermissionMode;
 pub use policy::PermissionPolicy;

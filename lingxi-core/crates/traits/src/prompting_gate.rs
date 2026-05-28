@@ -22,16 +22,54 @@ pub enum PromptDefault {
     DenyByDefault,
 }
 
-/// Inputs to a single permission prompt.
+/// A single permission prompt — three variants (M6-05).
+///
+/// - `ToolUseConfirm` is the M5-05 stdio-prompt case (preserved, bit-identical
+///   to the M5-05 struct fields).
+/// - `ExitPlanMode` asks the user to approve a plan-mode exit.
+/// - `BypassPermissionsMode` asks the user to opt in to dangerous mode.
 #[derive(Debug, Clone)]
-pub struct PermissionRequest {
-    /// Canonical tool name (e.g. `"Bash"`, `"Agent"`).
-    pub tool_name: String,
-    /// The model's `tool_input` JSON (preserved for context; not currently
-    /// shown in the M5-05 prompt — M5-06 hooks may use it).
-    pub tool_input: Value,
-    /// Default decision when the user presses Enter only.
-    pub default_decision: PromptDefault,
+pub enum PermissionRequest {
+    /// Generic per-tool permission confirmation — the M5-05 case, preserved.
+    ToolUseConfirm {
+        /// Canonical tool name (e.g. `"Bash"`, `"Agent"`).
+        tool_name: String,
+        /// The model's `tool_input` JSON (preserved for context; not currently
+        /// shown in the M5-05 prompt — M5-06 hooks may use it).
+        tool_input: Value,
+        /// Default decision when the user presses Enter only.
+        default_decision: PromptDefault,
+    },
+    /// Plan-mode exit — user must approve a proposed plan markdown body.
+    ExitPlanMode {
+        /// Plan markdown body, rendered as a multi-line block in the dialog.
+        plan: String,
+    },
+    /// Dangerous-mode toggle — user must explicitly type `yes` to enable.
+    BypassPermissionsMode,
+}
+
+/// Outcome of a TUI permission-dialog round-trip (M6-05).
+///
+/// Maps to [`crate::permission_gate::PermissionDecision`] in the TUI gate:
+/// `AllowOnce` and `AllowAlways` both → `Allow`; `Deny` → `Deny { reason }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionResponse {
+    /// Allow this single tool call. Does not persist a session rule.
+    AllowOnce,
+    /// Allow this tool for the rest of the session (a session rule is
+    /// appended to the orchestrator's in-memory rule list).
+    AllowAlways,
+    /// Reject the tool call.
+    Deny,
+}
+
+impl PermissionResponse {
+    /// Whether the response should be persisted as a session rule.
+    #[must_use]
+    pub fn persist(self) -> bool {
+        matches!(self, Self::AllowAlways)
+    }
 }
 
 /// Outcome of one prompt round-trip.
@@ -84,24 +122,77 @@ mod tests {
 
     #[test]
     fn permission_request_constructs_with_allow_default() {
-        let req = PermissionRequest {
+        let req = PermissionRequest::ToolUseConfirm {
             tool_name: "Read".to_string(),
             tool_input: json!({ "path": "/tmp/foo" }),
             default_decision: PromptDefault::AllowByDefault,
         };
-        assert_eq!(req.tool_name, "Read");
-        assert_eq!(req.default_decision, PromptDefault::AllowByDefault);
+        match req {
+            PermissionRequest::ToolUseConfirm {
+                tool_name,
+                default_decision,
+                ..
+            } => {
+                assert_eq!(tool_name, "Read");
+                assert_eq!(default_decision, PromptDefault::AllowByDefault);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]
     fn permission_request_constructs_with_deny_default() {
-        let req = PermissionRequest {
+        let req = PermissionRequest::ToolUseConfirm {
             tool_name: "Bash".to_string(),
             tool_input: json!({ "command": "rm -rf /" }),
             default_decision: PromptDefault::DenyByDefault,
         };
-        assert_eq!(req.tool_name, "Bash");
-        assert_eq!(req.default_decision, PromptDefault::DenyByDefault);
+        match req {
+            PermissionRequest::ToolUseConfirm {
+                tool_name,
+                default_decision,
+                ..
+            } => {
+                assert_eq!(tool_name, "Bash");
+                assert_eq!(default_decision, PromptDefault::DenyByDefault);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    // M6-05 Task 1: new enum variants.
+    #[test]
+    fn permission_request_enum_exit_plan_mode_variant() {
+        let req = PermissionRequest::ExitPlanMode {
+            plan: "1. Foo\n2. Bar".to_string(),
+        };
+        match req {
+            PermissionRequest::ExitPlanMode { plan } => assert!(plan.contains("Foo")),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn permission_request_enum_bypass_permissions_variant() {
+        let req = PermissionRequest::BypassPermissionsMode;
+        assert!(matches!(req, PermissionRequest::BypassPermissionsMode));
+    }
+
+    #[test]
+    fn permission_response_three_variants() {
+        assert_eq!(PermissionResponse::AllowOnce, PermissionResponse::AllowOnce);
+        assert_ne!(
+            PermissionResponse::AllowOnce,
+            PermissionResponse::AllowAlways
+        );
+        assert_ne!(PermissionResponse::AllowOnce, PermissionResponse::Deny);
+    }
+
+    #[test]
+    fn permission_response_persist_only_for_allow_always() {
+        assert!(!PermissionResponse::AllowOnce.persist());
+        assert!(PermissionResponse::AllowAlways.persist());
+        assert!(!PermissionResponse::Deny.persist());
     }
 
     #[test]

@@ -95,6 +95,25 @@ pub enum McpTransportKind {
     SdkControl,
 }
 
+impl McpTransportSpec {
+    /// Short transport-kind label for display (`"stdio"`, `"sse"`, `"http"`,
+    /// `"websocket"`, `"inprocess"`, `"sse-ide"`, `"sdk-control"`). Used by
+    /// `OrchestratorHandle::list_mcp_servers` (M6-07) to populate
+    /// `McpServerInfo::transport`.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Stdio { .. } => "stdio",
+            Self::Sse { .. } => "sse",
+            Self::Http { .. } => "http",
+            Self::WebSocket { .. } => "websocket",
+            Self::InProcess { .. } => "inprocess",
+            Self::SseIde { .. } => "sse-ide",
+            Self::SdkControl { .. } => "sdk-control",
+        }
+    }
+}
+
 /// OAuth 2.1 PKCE configuration carried in [`McpTransportSpec`].
 ///
 /// Full handshake state machine lives in `lingxi-mcp::oauth`; this DTO is

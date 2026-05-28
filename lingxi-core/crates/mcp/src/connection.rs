@@ -129,4 +129,22 @@ impl McpConnectionState {
             | Self::Stopped { config } => &config.name,
         }
     }
+
+    /// Transport-kind label of the connection's config — `"stdio"`,
+    /// `"sse"`, `"http"`, etc. Used by [`crate::registry::McpRegistry::snapshot`]
+    /// (M6-07) to populate `McpServerInfo::transport`.
+    #[must_use]
+    pub fn transport_kind(&self) -> &'static str {
+        let cfg = match self {
+            Self::Disconnected { config, .. }
+            | Self::Connecting { config, .. }
+            | Self::AwaitingOAuth { config, .. }
+            | Self::Connected { config, .. }
+            | Self::HealthChecking { config, .. }
+            | Self::Reconnecting { config, .. }
+            | Self::Failed { config, .. }
+            | Self::Stopped { config } => config,
+        };
+        cfg.spec.kind()
+    }
 }

@@ -16,7 +16,11 @@ use tokio::sync::RwLock;
 /// In-memory registry of every known MCP connection.
 pub struct McpRegistry {
     /// Map of server name to current state.
-    connections: RwLock<HashMap<String, McpConnectionState>>,
+    ///
+    /// `pub` so the CLI binary (M6-07 init.rs) can pre-populate
+    /// `Disconnected` entries read from `.mcp.json` before the engine
+    /// connects, and so engine-side tests can seed states directly.
+    pub connections: RwLock<HashMap<String, McpConnectionState>>,
     /// Side-channel cache of [`McpClient`] handles per server name.
     ///
     /// Populated by [`Self::register_client`] (M4-07) — production wiring
@@ -160,9 +164,214 @@ impl McpRegistry {
         }
         Ok(())
     }
+
+    /// Project every known connection into the trait-facing
+    /// [`lingxi_traits::McpServerInfo`] shape. Used by
+    /// `OrchestratorHandle::list_mcp_servers` (M6-07) so `/mcp` can list
+    /// the registry without exposing the internal state-machine enum.
+    ///
+    /// Returned list is sorted by `name` for stable display order.
+    pub async fn snapshot(&self) -> Vec<lingxi_traits::McpServerInfo> {
+        let conns = self.connections.read().await;
+        let mut out: Vec<lingxi_traits::McpServerInfo> = conns
+            .values()
+            .map(|s| lingxi_traits::McpServerInfo {
+                name: s.name().to_string(),
+                status: project_status(s),
+                transport: s.transport_kind().to_string(),
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+}
+
+/// Project a [`McpConnectionState`] variant onto the trait-facing
+/// [`lingxi_traits::McpStatus`] (M6-07).
+fn project_status(state: &McpConnectionState) -> lingxi_traits::McpStatus {
+    use lingxi_traits::McpStatus;
+    match state {
+        McpConnectionState::Connected { .. } => McpStatus::Connected,
+        McpConnectionState::Disconnected {
+            last_error: Some(e),
+            ..
+        } => McpStatus::Error(e.clone()),
+        McpConnectionState::Disconnected { .. }
+        | McpConnectionState::Connecting { .. }
+        | McpConnectionState::AwaitingOAuth { .. }
+        | McpConnectionState::HealthChecking { .. }
+        | McpConnectionState::Reconnecting { .. }
+        | McpConnectionState::Stopped { .. } => McpStatus::Disconnected,
+        McpConnectionState::Failed { error, .. } => McpStatus::Error(error.clone()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     // Full mock-transport test lives in test-harness/tests/mcp_lifecycle.rs.
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::connection::{ConfigScope, McpServerConfig};
+    use async_trait::async_trait;
+    use lingxi_protocol::McpConnectionId as ConnId;
+    use lingxi_traits::{
+        ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+        McpRawConnection, McpResourceContentDto, McpResourceDto, McpServerInfo, McpStatus,
+        McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
+        ServerCapabilitiesDto,
+    };
+    use serde_json::Value;
+    use std::sync::Arc;
+
+    /// Minimal in-crate stub transport — only `connections` matters for
+    /// `snapshot`, so every method panics if called.
+    struct StubTransport;
+
+    #[async_trait]
+    impl McpTransport for StubTransport {
+        async fn connect(&self, _s: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            unreachable!()
+        }
+        async fn initialize(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<ServerCapabilitiesDto, McpError> {
+            unreachable!()
+        }
+        async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+            unreachable!()
+        }
+        async fn list_resources(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<Vec<McpResourceDto>, McpError> {
+            unreachable!()
+        }
+        async fn list_prompts(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<Vec<McpPromptDto>, McpError> {
+            unreachable!()
+        }
+        async fn call_tool(
+            &self,
+            _c: &McpRawConnection,
+            _t: &str,
+            _i: Value,
+        ) -> Result<McpToolResultDto, McpError> {
+            unreachable!()
+        }
+        async fn read_resource(
+            &self,
+            _c: &McpRawConnection,
+            _u: &str,
+        ) -> Result<McpResourceContentDto, McpError> {
+            unreachable!()
+        }
+        async fn ping(&self, _id: ConnId) -> Result<(), McpError> {
+            unreachable!()
+        }
+        async fn notifications(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<McpNotificationStream, McpError> {
+            unreachable!()
+        }
+        async fn handle_elicitation(
+            &self,
+            _c: &McpRawConnection,
+            _r: ElicitRequestDto,
+        ) -> Result<ElicitResultDto, McpError> {
+            unreachable!()
+        }
+        async fn disconnect(&self, _id: ConnId) -> Result<(), McpError> {
+            unreachable!()
+        }
+        fn supported_transports(&self) -> Vec<McpTransportKind> {
+            vec![McpTransportKind::Stdio]
+        }
+    }
+
+    fn stdio_cfg(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.into(),
+            spec: McpTransportSpec::Stdio {
+                command: "echo".into(),
+                args: vec![],
+                env: Default::default(),
+            },
+            scope: ConfigScope::Project,
+            disabled: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_empty_registry() {
+        let r = McpRegistry::new(Arc::new(StubTransport));
+        assert_eq!(r.snapshot().await, Vec::<McpServerInfo>::new());
+    }
+
+    #[tokio::test]
+    async fn snapshot_disconnected_server_no_error() {
+        let r = McpRegistry::new(Arc::new(StubTransport));
+        r.connections.write().await.insert(
+            "memory".into(),
+            McpConnectionState::Disconnected {
+                config: stdio_cfg("memory"),
+                last_error: None,
+            },
+        );
+        let snap = r.snapshot().await;
+        assert_eq!(
+            snap,
+            vec![McpServerInfo {
+                name: "memory".into(),
+                status: McpStatus::Disconnected,
+                transport: "stdio".into(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_disconnected_with_error_becomes_error_status() {
+        let r = McpRegistry::new(Arc::new(StubTransport));
+        r.connections.write().await.insert(
+            "memory".into(),
+            McpConnectionState::Disconnected {
+                config: stdio_cfg("memory"),
+                last_error: Some("boom".into()),
+            },
+        );
+        let snap = r.snapshot().await;
+        assert_eq!(snap[0].status, McpStatus::Error("boom".into()));
+    }
+
+    #[tokio::test]
+    async fn snapshot_sorts_by_name() {
+        let r = McpRegistry::new(Arc::new(StubTransport));
+        {
+            let mut c = r.connections.write().await;
+            c.insert(
+                "memory".into(),
+                McpConnectionState::Disconnected {
+                    config: stdio_cfg("memory"),
+                    last_error: None,
+                },
+            );
+            c.insert(
+                "filesystem".into(),
+                McpConnectionState::Disconnected {
+                    config: stdio_cfg("filesystem"),
+                    last_error: None,
+                },
+            );
+        }
+        let snap = r.snapshot().await;
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].name, "filesystem");
+        assert_eq!(snap[1].name, "memory");
+    }
 }

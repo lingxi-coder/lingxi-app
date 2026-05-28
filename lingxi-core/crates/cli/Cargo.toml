@@ -1,0 +1,46 @@
+[package]
+name = "lingxi-cli"
+version = "0.5.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "lingxi-cli"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+lingxi-protocol = { path = "../protocol" }
+lingxi-traits = { path = "../traits" }
+lingxi-commands = { path = "../commands" }
+lingxi-orchestrator = { path = "../orchestrator" }
+lingxi-session = { path = "../session" }
+lingxi-anthropic-oauth = { path = "../anthropic-oauth" }
+lingxi-telemetry = { path = "../telemetry" }
+
+# clap 4.6+ requires edition2024; pin to a release compatible with Rust 1.82.
+clap = { version = "=4.5.20", features = ["derive", "env"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "io-std", "io-util"] }
+async-trait = { workspace = true }
+anyhow = "1"
+thiserror = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# Pinned: assert_cmd 2.0.x is the last MSRV-1.82-compatible series.
+# 2.2.0+ requires edition2024 (Rust 1.85+).
+assert_cmd = "=2.0.16"
+predicates = "3"
+tempfile = "3"
+
+[lints]
+workspace = true

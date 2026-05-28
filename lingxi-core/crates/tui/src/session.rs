@@ -57,10 +57,7 @@ impl Runtime {
 /// because stdout isn't a TTY — the caller should have routed to the
 /// stdio REPL via `cli::mode::decide_mode` instead). Returns
 /// `TuiError::Cancelled` if `cancel` trips before the user quits.
-pub async fn run_tui_session(
-    runtime: Runtime,
-    cancel: CancellationToken,
-) -> Result<(), TuiError> {
+pub async fn run_tui_session(runtime: Runtime, cancel: CancellationToken) -> Result<(), TuiError> {
     let guard = RawGuard::enter()?;
     let started = Instant::now();
 

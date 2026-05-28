@@ -1,7 +1,7 @@
 //! Integration smoke test for M6-01 TUI routing.
 //!
 //! When `lingxi-cli` is invoked with stdin redirected from `/dev/null`
-//! (i.e. non-TTY) and no prompt, it must fall back to StdioRepl, NOT
+//! (i.e. non-TTY) and no prompt, it must fall back to `StdioRepl`, NOT
 //! enter the TUI (which would deadlock on `crossterm::event::EventStream`
 //! in a non-TTY context). The PTY smoke proves the routing decision —
 //! it does NOT exercise the iocraft render loop (that's M6-09).
@@ -28,7 +28,7 @@ fn non_tty_stdin_routes_to_stdio_repl_and_exits() {
     );
 }
 
-/// `--no-tui` with an empty prompt also routes to StdioRepl even if a
+/// `--no-tui` with an empty prompt also routes to `StdioRepl` even if a
 /// TTY were detected. We can't easily fake a TTY in `assert_cmd`, but
 /// the `--no-tui` flag short-circuits TTY detection.
 #[test]

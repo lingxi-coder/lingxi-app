@@ -146,6 +146,24 @@ pub struct ConversationOrchestrator {
     /// and breaks the loop. Wraps `AtomicBool` so reads are lock-free.
     /// Once `true`, this flag is never cleared (idempotent `/exit`).
     pub(crate) should_exit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Cost tracker wired by [`Self::with_cost_tracker`] (M6-06). `None`
+    /// when not configured — `snapshot_cost` then falls back to the M5-10
+    /// zero-shaped stub. The CLI binary (M6-06 init.rs) always populates
+    /// this so production `lingxi-cli` reports real cost; library callers
+    /// (e.g. unit tests) may leave it `None`.
+    pub(crate) cost_tracker: Option<Arc<lingxi_cost::CostTracker>>,
+    /// Monotonic timestamp captured at orchestrator construction. Used by
+    /// `snapshot_cost` to compute the `session_duration` field of the
+    /// returned [`lingxi_traits::CostSnapshot`]. Stored as `std::time::Instant`
+    /// (not `tokio::time::Instant`) so the orchestrator can be constructed
+    /// outside a tokio runtime if needed.
+    pub(crate) session_started_at: std::time::Instant,
+    /// Count of API responses successfully recorded into `cost_tracker`.
+    /// Used to populate `CostSnapshot::api_calls`. Lives on the orchestrator
+    /// (rather than `lingxi_cost::CostState`) because `lingxi_cost::Usage`
+    /// does not carry a per-call counter; `ModelUsage::usage.add()` merges
+    /// the token totals but not "how many times we recorded".
+    pub(crate) api_calls_recorded: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl ConversationOrchestrator {
@@ -185,6 +203,9 @@ impl ConversationOrchestrator {
             jsonl_writer: None,
             last_jsonl_uuid: Mutex::new(None),
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cost_tracker: None,
+            session_started_at: std::time::Instant::now(),
+            api_calls_recorded: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -194,6 +215,32 @@ impl ConversationOrchestrator {
     pub fn with_jsonl_writer(mut self, writer: Arc<JsonlWriter>) -> Self {
         self.jsonl_writer = Some(writer);
         self
+    }
+
+    /// Attach a [`lingxi_cost::CostTracker`] so `snapshot_cost` returns
+    /// real numbers. Without this, `snapshot_cost` keeps the M5-10
+    /// zero-shaped stub shape. (M6-06)
+    #[must_use]
+    pub fn with_cost_tracker(mut self, tracker: Arc<lingxi_cost::CostTracker>) -> Self {
+        self.cost_tracker = Some(tracker);
+        self
+    }
+
+    /// Whether a [`lingxi_cost::CostTracker`] has been wired via
+    /// [`Self::with_cost_tracker`]. (M6-06)
+    #[must_use]
+    pub fn has_cost_tracker(&self) -> bool {
+        self.cost_tracker.is_some()
+    }
+
+    /// Read the current cost state from the wired tracker, if any.
+    /// Returns `None` if no tracker was attached. Exposed so future M7
+    /// renderers (per-model breakdown view) can access
+    /// `CostState.per_model_usage` without going through the leaf-friendly
+    /// [`lingxi_traits::CostSnapshot`] projection. (M6-06)
+    pub async fn cost_state(&self) -> Option<lingxi_cost::CostState> {
+        let t = self.cost_tracker.as_ref()?;
+        Some(t.snapshot().await)
     }
 
     /// Convert an in-memory `ConversationMessage` into a `JsonlMessage`.

@@ -46,7 +46,14 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     //        → tui block grows 4 → 6 → 321 total.
     // M6-05: +2 permission dialog events (permission_dialog_{shown,resolved})
     //        → tui block grows 6 → 8 → 323 total.
-    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 2 + 54 + 8;
+    // M6-09: release block grows 2 → 3 (+lingxi_core_v0_7_0_released);
+    //        tui block grows 8 → 10 (+scroll_started/scroll_ended). The
+    //        specced tengu_tui_key_pressed is deferred to M7 (no emit site),
+    //        so M6-09 adds 3 (not the spec's stale §2.6 estimate of ~15/330).
+    //        → 326 total. Cumulative across releases:
+    //          v0.4.0 (M3-06): 196 · v0.5.0 (M4-09): 238 ·
+    //          v0.6.0 (M5-14): 315 · v0.7.0 (M6-09): 326.
+    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 3 + 54 + 8;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;

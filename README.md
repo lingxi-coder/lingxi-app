@@ -2,7 +2,12 @@
 
 Platform-agnostic Rust engine for an AI coding assistant with 1:1 behavioral
 parity to claude-code (2026-03-31 TypeScript reference) on desktop OSes.
-v0.6.0 (M5) completes the Execution Engine 全集: `ConversationOrchestrator`
+v0.7.0 (M6) ships the **TUI Foundation**: the first iocraft-based terminal
+UI — a 3-zone layout (StatusLine / Scrollback / PromptInput) with streaming,
+4 message renderers, 3 permission dialogs, and real cost + MCP/Hooks/Agents
+listings + `/compact` wired into the surface. `--no-tui` and non-TTY fall
+back byte-for-byte to the v0.6.0 stdio REPL.
+v0.6.0 (M5) completed the Execution Engine 全集: `ConversationOrchestrator`
 batched turn loop, streaming SSE, interactive permission gate, Hooks 4-arm
 runtime, byte-equivalent session JSONL, `--resume` session loading, 18
 implemented slash commands, `lingxi-cli` binary, and stdio REPL mode.
@@ -41,7 +46,7 @@ subsystems (Settings, Memory, API client, OAuth refresh, cost events,
 telemetry schema) identically. See `docs/PLATFORMS.md` for the per-OS
 setup notes + the "M3 engine subsystems" section.
 
-## Subsystem status (v0.6.0)
+## Subsystem status (v0.7.0)
 
 | Subsystem | Status | Milestone |
 |---|---|---|
@@ -54,8 +59,10 @@ setup notes + the "M3 engine subsystems" section.
 | `--resume` session loading | Complete | M5 / v0.6.0 |
 | Slash commands (99 registered, 18 implemented) | Complete | M5 / v0.6.0 |
 | `lingxi-cli` binary + stdio REPL | Complete | M5 / v0.6.0 |
+| TUI foundation (iocraft 3-zone, streaming, 4 renderers, 3 dialogs) | Complete | M6 / v0.7.0 |
+| TUI engine wiring (real cost / MCP-Hooks-Agents lists / `/compact`) | Complete (summary stub) | M6 / v0.7.0 |
 | Plugin marketplace + MCP server | M6 | M6 |
-| UI / Terminal rendering | Out of scope | — |
+| Advanced TUI screens (Doctor / Resume / Settings / vim / palette / themes) | Out of scope | M7 |
 | Mobile real-device binding | Out of scope (compile-only gates remain) | — |
 
 ## Architecture

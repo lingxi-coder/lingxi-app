@@ -168,6 +168,8 @@ impl ConversationOrchestrator {
         memory: Arc<dyn crate::prompt::MemoryHierarchyProvider>,
         cwd: std::path::PathBuf,
     ) -> Self {
+        // M5-14 Task 10: emit release markers once per process lifetime.
+        lingxi_telemetry::emit_release_markers_once();
         let session = SessionState::empty(SessionId::new(), config.model.clone());
         Self {
             config,

@@ -82,3 +82,31 @@ pub fn emit_command_completed(event: &'static str, details: &str) {
 pub fn emit_command_failed(event: &'static str, error: &str) {
     tracing::error!(event = event, error = %error);
 }
+
+// -- M5-14 Task 10: release-marker emit-once helpers -------------------------
+
+/// Emit `lingxi_core_v0_6_0_released` exactly once per process lifetime.
+///
+/// Guarded by `std::sync::Once` so re-constructing a `ConversationOrchestrator`
+/// in long-running processes (e.g. tests, REPL) does not emit duplicate events.
+/// Also emits the v0.5.0 marker for upgrade-chain continuity (both fire on the
+/// first `ConversationOrchestrator::new*` after the binary starts).
+pub fn emit_release_markers_once() {
+    use std::sync::Once;
+
+    static V0_5_0_ONCE: Once = Once::new();
+    static V0_6_0_ONCE: Once = Once::new();
+
+    V0_5_0_ONCE.call_once(|| {
+        tracing::info!(
+            event = crate::tengu::release::LINGXI_CORE_V0_5_0_RELEASED,
+            version = "0.5.0",
+        );
+    });
+    V0_6_0_ONCE.call_once(|| {
+        tracing::info!(
+            event = crate::tengu::release::LINGXI_CORE_V0_6_0_RELEASED,
+            version = "0.6.0",
+        );
+    });
+}

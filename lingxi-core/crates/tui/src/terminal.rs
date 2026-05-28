@@ -7,6 +7,14 @@
 //! terminal in raw mode + alt screen (broken shell). The `install_panic_hook`
 //! function wraps the existing panic hook to restore the terminal first.
 //! Installed exactly once per process via `std::sync::Once`.
+//!
+//! **Post-M6-04**: iocraft 0.8.3's `Element::fullscreen().await` owns raw
+//! mode + alt screen + a panic-safe restore handler. This module is no
+//! longer in the live path; the types are kept compiled (and the
+//! `install_panic_hook_is_once` test still runs) so future fallback paths
+//! that need a hand-rolled terminal guard can lift the implementation back
+//! into use without churn.
+#![allow(dead_code)]
 
 use crossterm::{
     execute,

@@ -1,46 +1,31 @@
-// This module documents wire-level event names + variant identifiers that
-// are intentionally kept un-backticked in prose; suppress the lint to
-// avoid noisy markdown markers.
 #![allow(clippy::doc_markdown)]
 
 //! Public entry point: `run_tui_session(runtime, cancel)`.
 //!
-//! Lifecycle:
-//! 1. Construct `RawGuard` (enables raw mode + alt screen).
-//! 2. Spawn the crossterm `EventStream` adapter task.
-//! 3. If `runtime.bridge` is `Some(_)` (M6-03+), drain `bridge.rx` into
-//!    `streaming::apply_event` on the shared `AppState` and emit
-//!    streaming-render telemetry when `state.streaming` transitions.
-//! 4. Build a 100ms `tokio::time::interval` ticker for the spinner +
-//!    keep-alive renders. A `tokio::sync::Notify` debounces the
-//!    bridge-driven redraws to ~30fps.
-//! 5. Loop: `tokio::select!` over (events, ticker, notify, cancel).
-//! 6. Drop `RawGuard` (restores terminal).
+//! **Architecture (post M6-04 prerequisite fix):**
 //!
-//! M6-03 wires the bridge + apply_event + rate-limit; the iocraft
-//! reactive runtime mount is still incomplete (the loop here renders
-//! through `app.render()` once per tick rather than driving iocraft's
-//! reconciler reactively). The Streaming Gate in T12 manually checks
-//! the result on real Anthropic SSE; if the manual gate fails the
-//! plan's R3 mitigation directs us into M6-03b (ratatui pivot).
+//! iocraft's `Element::fullscreen().await` (a `RenderLoopFuture`) owns the
+//! terminal — raw mode, alt-screen, crossterm event pump, panic-safe restore.
+//! External events (the orchestrator-bridge mpsc `Receiver<TurnEvent>`,
+//! the external `CancellationToken`) are routed into the iocraft component
+//! tree via `crate::root::TuiRoot`'s hooks (`use_future` for bridge pump +
+//! ticker + cancel watch; `use_terminal_events` for keystrokes).
+//!
+//! M6-01..M6-03 ran a hand-rolled `tokio::select!` loop and dropped the
+//! iocraft element tree every frame — nothing actually painted. This module
+//! now constructs the root element, hands ownership of `Arc<Mutex<AppState>>`
+//! and the bridge receiver into its props, and delegates to iocraft's
+//! reconciler.
 
-use crate::app::TuiApp;
 use crate::error::TuiError;
-use crate::events::keymap::{classify, KeyClass};
-use crate::events::orchestrator_bridge::TurnEvent;
+use crate::root::{BridgeRxSlot, TuiRoot};
 use crate::state::{AppState, StatusSnapshot};
-use crate::streaming::apply_event;
-use crate::telemetry::{
-    FIRST_RENDER, RESIZE, SESSION_ENDED, SESSION_STARTED, STREAMING_RENDER_ENDED,
-    STREAMING_RENDER_STARTED,
-};
-use crate::terminal::RawGuard;
-use crossterm::event::{Event as CtEvent, EventStream};
-use futures::StreamExt;
+use crate::telemetry::SESSION_STARTED;
+use iocraft::prelude::*;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex, Notify};
-use tokio::time::interval;
+use std::time::Instant;
+use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 /// Bridge handle the CLI passes into [`run_tui_session`]. Wires the
@@ -48,28 +33,24 @@ use tokio_util::sync::CancellationToken;
 ///
 /// [`BridgeOutputStream`]: crate::events::orchestrator_bridge::BridgeOutputStream
 pub struct TuiBridge {
-    /// Receiver drained by the render loop. Each event is passed to
-    /// `crate::streaming::apply_event`.
-    pub rx: mpsc::UnboundedReceiver<TurnEvent>,
+    /// Receiver drained by the root component's `use_future`. Each event
+    /// is passed to `crate::streaming::apply_event`.
+    pub rx: mpsc::UnboundedReceiver<crate::events::orchestrator_bridge::TurnEvent>,
 }
 
 /// Opaque runtime handle that the CLI passes in.
-///
-/// M6-01 only carried a session id. M6-03 widens to optionally carry a
-/// [`TuiBridge`] so the streaming + render-loop wiring is end-to-end.
 pub struct Runtime {
     /// Session UUID for telemetry correlation.
     pub session_id: lingxi_protocol::SessionId,
-    /// Optional bridge for streaming events. `None` falls back to M6-01's
-    /// static placeholder behaviour (no events drained).
+    /// Optional bridge for streaming events. `None` falls back to a static
+    /// REPL with no orchestrator wiring (smoke / manual gates).
     pub bridge: Option<TuiBridge>,
-    /// Initial status snapshot (model / cwd / cost). Defaults are
-    /// acceptable for the placeholder rendering path.
+    /// Initial status snapshot (model / cwd / cost).
     pub status: StatusSnapshot,
 }
 
 impl Runtime {
-    /// Construct from a session id. M6-01 shape — no bridge, default status.
+    /// Construct from a session id. No bridge, default status.
     #[must_use]
     pub fn new(session_id: lingxi_protocol::SessionId) -> Self {
         Self {
@@ -79,7 +60,7 @@ impl Runtime {
         }
     }
 
-    /// Construct with a streaming bridge + status snapshot. (M6-03)
+    /// Construct with a streaming bridge + status snapshot.
     #[must_use]
     pub fn with_bridge(
         session_id: lingxi_protocol::SessionId,
@@ -98,16 +79,17 @@ impl Runtime {
 ///
 /// # Errors
 ///
-/// Returns `TuiError::Terminal` if raw-mode toggling fails (most often
+/// Returns `TuiError::Terminal` if iocraft's render loop fails (most often
 /// because stdout isn't a TTY — the caller should have routed to the
 /// stdio REPL via `cli::mode::decide_mode` instead). Returns
-/// `TuiError::Cancelled` if `cancel` trips before the user quits.
-#[allow(clippy::too_many_lines)]
+/// `TuiError::Cancelled` if `cancel` trips before the user quits — that's
+/// surfaced as a clean exit via `SystemContext::exit()`, so this path
+/// returns `Ok(())` and the caller distinguishes the two via the
+/// `state.should_exit` flag (not currently exposed; M6-09 polish).
 pub async fn run_tui_session(
     mut runtime: Runtime,
     cancel: CancellationToken,
 ) -> Result<(), TuiError> {
-    let guard = RawGuard::enter()?;
     let started = Instant::now();
 
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -118,142 +100,32 @@ pub async fn run_tui_session(
         rows = rows,
     );
 
-    let mut app = TuiApp::new();
-    let mut first_render_emitted = false;
-    let mut prev_streaming = false;
-    let ended_via;
+    // Shared AppState — the bridge pump task + key handlers mutate it,
+    // the render path reads it. Wrapped in a tokio Mutex so the pump
+    // can await locks across .await points.
+    let state = Arc::new(Mutex::new(AppState::new(runtime.status.clone())));
 
-    // Shared AppState for the render path. Drained by both the bridge
-    // pumper and the keyboard handlers (only the latter actually mutates
-    // it in M6-03; permission/key dispatch lands in later sub-plans).
-    let app_state: Arc<Mutex<AppState>> =
-        Arc::new(Mutex::new(AppState::new(runtime.status.clone())));
+    // Move the bridge receiver into an `Arc<std::sync::Mutex<Option<...>>>`
+    // slot so the iocraft root's first `use_future` can `take()` it once.
+    let rx_slot: BridgeRxSlot =
+        Arc::new(std::sync::Mutex::new(runtime.bridge.take().map(|b| b.rx)));
 
-    // Render-debounce notify. The bridge pumper calls `notify.notify_one`
-    // after each `apply_event`; the render loop awaits `notify.notified`
-    // and sleeps 33ms after each redraw to cap at ~30fps.
-    let notify = Arc::new(Notify::new());
+    let result = element! {
+        TuiRoot(
+            state: Some(state.clone()),
+            bridge_rx: Some(rx_slot),
+            cancel: Some(cancel.clone()),
+            session_id: Some(runtime.session_id),
+            started_at: Some(started),
+        )
+    }
+    .fullscreen()
+    .await;
 
-    // If a bridge is present, spawn a task that drains it into AppState.
-    let bridge_task: Option<tokio::task::JoinHandle<()>> = if let Some(b) = runtime.bridge.take() {
-        let state = app_state.clone();
-        let notify = notify.clone();
-        let mut rx = b.rx;
-        Some(tokio::spawn(async move {
-            while let Some(ev) = rx.recv().await {
-                let mut st = state.lock().await;
-                apply_event(&mut st, ev, &notify);
-            }
-        }))
-    } else {
-        None
-    };
-
-    let mut event_stream = EventStream::new();
-    // The orchestrator-bridge channel from M6-01 is now obsolete; we keep
-    // an unused sender so the receiver doesn't immediately close.
-    let (_orch_tx, mut orch_rx) = mpsc::channel::<crate::events::TuiEvent>(64);
-    let mut ticker = interval(Duration::from_millis(100));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    loop {
-        tokio::select! {
-            biased;
-
-            () = cancel.cancelled() => {
-                ended_via = "cancelled";
-                break;
-            }
-
-            // Bridge-driven redraw: drain accumulated state, emit
-            // streaming transition telemetry, then sleep 33ms to enforce
-            // the 30fps cap.
-            () = notify.notified() => {
-                let cur_streaming = app_state.lock().await.streaming.is_some();
-                if cur_streaming && !prev_streaming {
-                    tracing::info!(
-                        event = STREAMING_RENDER_STARTED,
-                        session_id = %runtime.session_id,
-                    );
-                } else if !cur_streaming && prev_streaming {
-                    tracing::info!(
-                        event = STREAMING_RENDER_ENDED,
-                        session_id = %runtime.session_id,
-                    );
-                }
-                prev_streaming = cur_streaming;
-                // The actual iocraft reactive re-render hookup is M6-04
-                // work — for M6-03 we render `TuiApp::render()` (placeholder)
-                // so the loop touches the same code path the M6-04 mount
-                // will replace.
-                let _ = app.render();
-                tokio::time::sleep(Duration::from_millis(33)).await;
-            }
-
-            maybe_ev = event_stream.next() => {
-                match maybe_ev {
-                    Some(Ok(CtEvent::Key(k))) => {
-                        if classify(&k) == KeyClass::Quit {
-                            app.request_quit();
-                        }
-                    }
-                    Some(Ok(CtEvent::Resize(c, r))) => {
-                        tracing::info!(
-                            event = RESIZE,
-                            session_id = %runtime.session_id,
-                            cols = c,
-                            rows = r,
-                        );
-                    }
-                    Some(Ok(_)) => { /* M6-04+: mouse, paste, focus events */ }
-                    Some(Err(e)) => {
-                        return Err(TuiError::Terminal(e));
-                    }
-                    None => {
-                        // crossterm stream closed (stdin EOF) — exit cleanly.
-                        ended_via = "stream_eof";
-                        break;
-                    }
-                }
-            }
-
-            maybe_orch = orch_rx.recv() => {
-                if let Some(ev) = maybe_orch {
-                    tracing::debug!(?ev, "orchestrator event (legacy channel, dropped)");
-                }
-            }
-
-            _ = ticker.tick() => {
-                if !first_render_emitted {
-                    let _el = app.render();
-                    tracing::info!(
-                        event = FIRST_RENDER,
-                        session_id = %runtime.session_id,
-                        latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    );
-                    first_render_emitted = true;
-                }
-            }
-        }
-
-        if app.should_quit {
-            ended_via = "quit_key";
-            break;
-        }
+    if let Err(e) = result {
+        return Err(TuiError::Terminal(e));
     }
 
-    if let Some(h) = bridge_task {
-        h.abort();
-    }
-    drop(orch_rx); // explicit cleanup
-    tracing::info!(
-        event = SESSION_ENDED,
-        session_id = %runtime.session_id,
-        duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        ended_via = ended_via,
-    );
-
-    guard.exit()?;
     Ok(())
 }
 
@@ -263,8 +135,7 @@ mod tests {
 
     /// Pre-tripped cancel tokens resolve immediately. The full
     /// `run_tui_session` cannot be driven from CI (no TTY), so we assert
-    /// the token contract directly; the real-terminal exercise lives in
-    /// Task 14 Step 3 (manual smoke).
+    /// the token contract directly.
     #[tokio::test]
     async fn cancel_token_triggers_exit() {
         let token = CancellationToken::new();

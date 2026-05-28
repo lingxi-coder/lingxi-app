@@ -62,6 +62,12 @@ pub enum TurnEvent {
     TurnStarted,
     /// Fired when the orchestrator returns. Carries the [`TurnOutcome`].
     TurnEnded(TurnOutcome),
+    /// Updated session-cumulative cost, formatted as `$0.0000` (4-decimal
+    /// claude-code parity). M6-06: fired by [`BridgeOutputStream::emit_end_turn`]
+    /// using the `CostSnapshot` the orchestrator now populates. The TUI
+    /// `apply_event` writes the value into `state.status.cost`, refreshing
+    /// the status-line render.
+    CostUpdated(String),
 }
 
 /// `OutputStream` impl that forwards every callback as a `TurnEvent` on
@@ -113,7 +119,13 @@ impl OutputStream for BridgeOutputStream {
         });
     }
 
-    async fn emit_end_turn(&self, stop_reason: &str, _cost: &CostSnapshot) {
+    async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {
+        // M6-06: emit a CostUpdated event before TurnEnded so the
+        // status-line refreshes to the post-turn cost in the next
+        // render pass. Format follows claude-code's `toFixed(4)` parity.
+        let cost_str = format!("${:.4}", cost.total_usd);
+        let _ = self.tx.send(TurnEvent::CostUpdated(cost_str));
+
         // Map stop_reason → TurnOutcome. Mirrors the M5-13 stdio REPL
         // mapping. Unknown/unrecognised reasons fall back to EndTurn.
         let outcome = match stop_reason {
@@ -166,6 +178,11 @@ mod tests {
         let bridge = BridgeOutputStream::new(tx);
         let cost = lingxi_traits::CostSnapshot::default();
         bridge.emit_end_turn("end_turn", &cost).await;
+        // M6-06: emit_end_turn now precedes TurnEnded with a CostUpdated event.
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            TurnEvent::CostUpdated(ref s) if s == "$0.0000"
+        ));
         assert!(matches!(
             rx.recv().await.unwrap(),
             TurnEvent::TurnEnded(TurnOutcome::EndTurn)
@@ -180,8 +197,27 @@ mod tests {
         bridge.emit_end_turn("max_tokens", &cost).await;
         assert!(matches!(
             rx.recv().await.unwrap(),
+            TurnEvent::CostUpdated(_)
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
             TurnEvent::TurnEnded(TurnOutcome::MaxTurns)
         ));
+    }
+
+    #[tokio::test]
+    async fn emit_end_turn_formats_real_cost_4dp() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bridge = BridgeOutputStream::new(tx);
+        let cost = lingxi_traits::CostSnapshot {
+            total_usd: 0.0234,
+            ..lingxi_traits::CostSnapshot::default()
+        };
+        bridge.emit_end_turn("end_turn", &cost).await;
+        match rx.recv().await.unwrap() {
+            TurnEvent::CostUpdated(s) => assert_eq!(s, "$0.0234"),
+            other => panic!("expected CostUpdated($0.0234), got: {other:?}"),
+        }
     }
 
     #[tokio::test]

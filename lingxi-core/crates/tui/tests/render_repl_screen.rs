@@ -14,7 +14,7 @@ fn status() -> StatusSnapshot {
     StatusSnapshot {
         model: "claude-sonnet-4.5".into(),
         cwd: PathBuf::from("/a/b"),
-        cost: "$0.000".to_string(),
+        cost: "$0.0000".to_string(),
         context_pct: 0.42_f32,
         permission_mode: PermissionMode::Default,
     }

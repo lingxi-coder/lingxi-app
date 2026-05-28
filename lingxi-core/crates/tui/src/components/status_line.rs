@@ -3,9 +3,9 @@
 //! Field order (left → right, space-separated per byte-lock L1):
 //!     model  cwd  $cost  ctx%  mode
 //!
-//! Locked literals (plan §T0):
+//! Locked literals:
 //!   L1 separator = " "
-//!   L2 cost placeholder = "$0.000" (held as a `String` in `StatusSnapshot`)
+//!   L2 zero-cost = "$0.0000" (M6-06 — claude-code 4-decimal parity)
 //!   L3 context% = "{:.0}%"
 
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ pub struct StatusLineProps {
     pub model: String,
     /// Working directory for the session.
     pub cwd: PathBuf,
-    /// Pre-formatted cost string (e.g. `"$0.000"`).
+    /// Pre-formatted cost string (e.g. `"$0.0000"`).
     pub cost: String,
     /// Context window utilisation in `[0.0, 1.0]`.
     pub context_pct: f32,
@@ -33,7 +33,7 @@ impl Default for StatusLineProps {
         Self {
             model: String::new(),
             cwd: PathBuf::from("."),
-            cost: "$0.000".to_string(),
+            cost: "$0.0000".to_string(),
             context_pct: 0.0,
             permission_mode: PermissionMode::Default,
         }
@@ -100,11 +100,11 @@ mod tests {
         let s = format_status_line(
             "claude-sonnet-4.5",
             &PathBuf::from("/a/b"),
-            "$0.000",
+            "$0.0000",
             0.42,
             PermissionMode::Default,
         );
-        assert_eq!(s, "claude-sonnet-4.5 /a/b $0.000 42% default");
+        assert_eq!(s, "claude-sonnet-4.5 /a/b $0.0000 42% default");
     }
 
     #[test]

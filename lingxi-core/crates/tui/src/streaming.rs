@@ -75,6 +75,11 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
             state.streaming = None;
             state.cancel_token = None;
         }
+        TurnEvent::CostUpdated(cost_str) => {
+            // M6-06: update the StatusSnapshot cost so the next render
+            // pass shows the post-turn dollar amount in the status line.
+            state.status.cost = cost_str;
+        }
     }
     notify.notify_one();
 }

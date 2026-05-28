@@ -1387,6 +1387,7 @@ dependencies = [
  "lingxi-anthropic-oauth",
  "lingxi-api-client",
  "lingxi-commands",
+ "lingxi-cost",
  "lingxi-orchestrator",
  "lingxi-platform-posix-minimal",
  "lingxi-protocol",
@@ -1427,7 +1428,9 @@ name = "lingxi-commands"
 version = "0.6.0"
 dependencies = [
  "async-trait",
+ "lingxi-api-client",
  "lingxi-core",
+ "lingxi-cost",
  "lingxi-orchestrator",
  "lingxi-protocol",
  "lingxi-telemetry",

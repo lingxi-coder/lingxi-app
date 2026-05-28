@@ -11,7 +11,7 @@
 //!
 //! - `Money` doesn't exist anywhere in `lingxi-*`; cost is tracked as
 //!   `nano_usd: u64` plus an optional formatter (`nano_usd_to_dollars_format`).
-//!   M6-02 surfaces cost as a pre-formatted `String` ("$0.000" until M6-06).
+//!   M6-02 surfaces cost as a pre-formatted `String` ("$0.0000" until M6-06).
 //! - `PermissionMode` lives in `lingxi-permission` with variant `Default`
 //!   (not `Normal`).
 
@@ -87,7 +87,7 @@ pub struct StatusSnapshot {
     pub model: String,
     /// Current working directory.
     pub cwd: PathBuf,
-    /// Pre-formatted cost ("$0.000" until M6-06 wires real Money).
+    /// Pre-formatted cost ("$0.0000" until M6-06 wires real Money).
     pub cost: String,
     /// Context window utilisation in [0.0, 1.0]; rendered as `{:.0}%`.
     pub context_pct: f32,
@@ -100,7 +100,7 @@ impl Default for StatusSnapshot {
         Self {
             model: String::new(),
             cwd: PathBuf::from("."),
-            cost: "$0.000".to_string(),
+            cost: "$0.0000".to_string(),
             context_pct: 0.0,
             permission_mode: PermissionMode::Default,
         }
@@ -339,7 +339,7 @@ mod tests {
         StatusSnapshot {
             model: "claude-sonnet-4.5".into(),
             cwd: PathBuf::from("/a/b"),
-            cost: "$0.000".to_string(),
+            cost: "$0.0000".to_string(),
             context_pct: 0.42,
             permission_mode: PermissionMode::Default,
         }

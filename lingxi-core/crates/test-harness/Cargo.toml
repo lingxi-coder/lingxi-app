@@ -81,6 +81,11 @@ tokio-util = { workspace = true, features = ["rt"] }
 # Used by the M5-14 parity driver (parity_session_jsonl) to exercise the
 # orchestrator → JsonlWriter → JsonlReader round-trip byte-equivalence.
 lingxi-session = { path = "../session" }
+# Used by the M6-05 parity driver (parity_tui_permission_dialogs) to drive
+# `events::keymap::handle_key` end-to-end against the locked fixture. Dev-only.
+lingxi-tui = { path = "../tui" }
+lingxi-permission = { path = "../permission" }
+crossterm = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
 lingxi-platform-posix = { path = "../../platforms/posix" }

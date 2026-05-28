@@ -1,12 +1,17 @@
-//! build.rs — capture the short git SHA at compile time for `/version`.
+//! build.rs — capture the short git SHA at compile time for the `/version`
+//! slash-command handler in `src/builtin/version.rs`.
+//!
+//! Mirrors `lingxi-cli/build.rs`. The slash-command crate has its own
+//! build.rs because `option_env!("LINGXI_GIT_SHA_SHORT")` reads the env
+//! at the *consumer's* compile time (here, the commands crate), not the
+//! binary's; without a local build.rs the env var would always be unset
+//! when the version handler was compiled and the SHA would render as
+//! `"unknown"`.
 //!
 //! Falls back to "unknown" when:
 //! - the workspace isn't inside a git repo (e.g. tarball install)
 //! - the `git` command isn't on `$PATH`
 //! - any other failure
-//!
-//! The captured value is read by `lingxi-commands/src/builtin/version.rs`
-//! via `option_env!("LINGXI_GIT_SHA_SHORT")`.
 
 use std::process::Command;
 
@@ -25,7 +30,6 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
 
     println!("cargo:rustc-env=LINGXI_GIT_SHA_SHORT={sha}");
-    // Re-run if HEAD moves.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs/heads");
     println!("cargo:rerun-if-changed=build.rs");

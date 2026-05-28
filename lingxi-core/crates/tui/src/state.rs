@@ -15,10 +15,12 @@
 //! - `PermissionMode` lives in `lingxi-permission` with variant `Default`
 //!   (not `Normal`).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use lingxi_permission::PermissionMode;
+use lingxi_protocol::ToolUseId;
 
 /// Maximum number of messages retained in the scrollback. Excess messages
 /// are evicted FIFO.
@@ -189,6 +191,13 @@ pub struct AppState {
     pub sigint_armed_at: Option<Instant>,
     /// Set by `/exit` (or second Ctrl-C within the arming window).
     pub should_exit: bool,
+    /// (M6-04) Currently focused tool block (Up/Down in scroll mode walks
+    /// this through the `AssistantToolUse` entries in scrollback order).
+    pub focused_tool_id: Option<ToolUseId>,
+    /// (M6-04) Per-tool expanded state (default false → collapsed). Keyed
+    /// by the `ToolUseId` carried on `AssistantToolUse` / `UserToolResult`
+    /// entries.
+    pub expanded: HashMap<ToolUseId, bool>,
 }
 
 impl AppState {
@@ -209,7 +218,62 @@ impl AppState {
             in_flight_turn: None,
             sigint_armed_at: None,
             should_exit: false,
+            focused_tool_id: None,
+            expanded: HashMap::new(),
         }
+    }
+
+    /// All tool ids in scrollback order. Iterates `messages` once.
+    fn tool_ids(&self) -> Vec<ToolUseId> {
+        self.messages
+            .iter()
+            .filter_map(|m| match m {
+                RenderedMessage::AssistantToolUse { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// (M6-04) Advance focus to the next tool block in scrollback order.
+    /// First call with `focused_tool_id == None` focuses the first tool;
+    /// past the end stays on the last (no wrap-around).
+    pub fn focus_next_tool(&mut self) {
+        let ids = self.tool_ids();
+        if ids.is_empty() {
+            return;
+        }
+        self.focused_tool_id = match self.focused_tool_id {
+            None => Some(ids[0]),
+            Some(cur) => {
+                let pos = ids.iter().position(|i| *i == cur).unwrap_or(0);
+                let next = (pos + 1).min(ids.len() - 1);
+                Some(ids[next])
+            }
+        };
+    }
+
+    /// (M6-04) Step focus back through tool blocks. Past the start stays
+    /// on the first.
+    pub fn focus_prev_tool(&mut self) {
+        let ids = self.tool_ids();
+        if ids.is_empty() {
+            return;
+        }
+        self.focused_tool_id = match self.focused_tool_id {
+            None => Some(ids[0]),
+            Some(cur) => {
+                let pos = ids.iter().position(|i| *i == cur).unwrap_or(0);
+                let prev = pos.saturating_sub(1);
+                Some(ids[prev])
+            }
+        };
+    }
+
+    /// (M6-04) Flip the expanded state for the given tool id. Inserts the
+    /// flipped value (default starts at `false`, first toggle → `true`).
+    pub fn toggle_expanded(&mut self, id: &ToolUseId) {
+        let entry = self.expanded.entry(*id).or_insert(false);
+        *entry = !*entry;
     }
 
     /// Construct a default `AppState` with an empty status snapshot.
@@ -287,5 +351,58 @@ mod tests {
         };
         assert!(matches!(call, RenderedMessage::AssistantToolUse { .. }));
         assert!(matches!(result, RenderedMessage::UserToolResult { .. }));
+    }
+
+    /// M6-04 Task 9: focus walks through `AssistantToolUse` entries in
+    /// scrollback order; past either end stays put (no wrap-around).
+    #[test]
+    fn focus_walks_through_tool_calls_in_order() {
+        use lingxi_protocol::ToolUseId;
+        let mut st = AppState::new(fake_status());
+        let a = ToolUseId::new();
+        let b = ToolUseId::new();
+        st.push_message(RenderedMessage::UserText {
+            body: "hi".into(),
+            timestamp: 0,
+        });
+        st.push_message(RenderedMessage::AssistantToolUse {
+            id: a,
+            tool: "Read".into(),
+            input: serde_json::json!({}),
+        });
+        st.push_message(RenderedMessage::AssistantText {
+            body: "ok".into(),
+            timestamp: 0,
+        });
+        st.push_message(RenderedMessage::AssistantToolUse {
+            id: b,
+            tool: "Bash".into(),
+            input: serde_json::json!({}),
+        });
+        assert_eq!(st.focused_tool_id, None);
+        st.focus_next_tool();
+        assert_eq!(st.focused_tool_id, Some(a));
+        st.focus_next_tool();
+        assert_eq!(st.focused_tool_id, Some(b));
+        st.focus_next_tool(); // past end — stays on last
+        assert_eq!(st.focused_tool_id, Some(b));
+        st.focus_prev_tool();
+        assert_eq!(st.focused_tool_id, Some(a));
+        st.focus_prev_tool(); // past start — stays on first
+        assert_eq!(st.focused_tool_id, Some(a));
+    }
+
+    /// `toggle_expanded` flips the per-id boolean, defaulting to `true`
+    /// on the first toggle.
+    #[test]
+    fn toggle_expanded_flips_per_id() {
+        use lingxi_protocol::ToolUseId;
+        let mut st = AppState::new(fake_status());
+        let id = ToolUseId::new();
+        assert!(st.expanded.get(&id).is_none());
+        st.toggle_expanded(&id);
+        assert_eq!(st.expanded.get(&id), Some(&true));
+        st.toggle_expanded(&id);
+        assert_eq!(st.expanded.get(&id), Some(&false));
     }
 }

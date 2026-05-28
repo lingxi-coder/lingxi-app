@@ -4,4 +4,5 @@
 //! components) plus its `Props` struct.
 
 pub mod messages;
+pub mod scrollback;
 pub mod status_line;

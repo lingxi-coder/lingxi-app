@@ -176,7 +176,9 @@ mod tests {
             for i in 0..40 {
                 s.history.push(ConversationMessage::user(
                     MessageId::new(),
-                    format!("msg-{i} body padding to push token count past the autocompact threshold"),
+                    format!(
+                        "msg-{i} body padding to push token count past the autocompact threshold"
+                    ),
                 ));
             }
         }

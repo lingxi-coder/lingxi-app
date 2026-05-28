@@ -1,5 +1,5 @@
 //! M6-08 — TUI handles `CompactionCompleted` by appending a
-//! `[Compacted N → M messages]` SystemText to scrollback.
+//! `[Compacted N → M messages]` `SystemText` to scrollback.
 
 use lingxi_tui::events::orchestrator_bridge::TurnEvent;
 use lingxi_tui::state::{AppState, RenderedMessage, StatusSnapshot};
@@ -27,7 +27,7 @@ async fn compaction_completed_event_appends_marker_to_scrollback() {
             assert!(!*is_error, "compact marker should not be error-styled");
             assert!(body.contains("Compacted"), "got: {body}");
             assert!(body.contains("50"), "got: {body}");
-            assert!(body.contains("2"), "got: {body}");
+            assert!(body.contains('2'), "got: {body}");
         }
         other => panic!("expected SystemText marker; got {other:?}"),
     }

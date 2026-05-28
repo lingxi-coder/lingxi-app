@@ -382,7 +382,9 @@ async fn parity_force_compact_50_messages() {
         .find(|s| s.name == "force_compact_50_messages")
         .expect("force_compact_50_messages scenario present");
     let seed = s.seed_history_size.expect("seed_history_size");
-    let expected_before = s.expected_messages_before.expect("expected_messages_before");
+    let expected_before = s
+        .expected_messages_before
+        .expect("expected_messages_before");
     let after_max = s
         .expected_messages_after_max
         .expect("expected_messages_after_max");
@@ -435,7 +437,10 @@ async fn parity_force_compact_50_messages() {
 
     let session = orch.session();
     let hist = session.lock().await;
-    let last = hist.history.last().expect("history non-empty after compact");
+    let last = hist
+        .history
+        .last()
+        .expect("history non-empty after compact");
     match last {
         ConversationMessage::System { content, .. } => {
             assert!(

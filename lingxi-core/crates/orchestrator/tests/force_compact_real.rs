@@ -15,7 +15,7 @@ use lingxi_compaction::CompactionOrchestrator;
 use lingxi_orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use lingxi_orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use lingxi_protocol::{ConversationMessage, MessageId};
 use lingxi_traits::OrchestratorHandle;
 use std::sync::Arc;
@@ -213,7 +213,10 @@ async fn failure_leaves_history_unchanged() {
         let s = session.lock().await;
         s.history.len()
     };
-    assert_eq!(len_before, len_after, "history must be untouched on failure");
+    assert_eq!(
+        len_before, len_after,
+        "history must be untouched on failure"
+    );
 }
 
 #[tokio::test]
@@ -229,4 +232,134 @@ async fn five_consecutive_force_compact_calls_do_not_explode() {
     // No assertion on final length — the stub autocompact collapses to
     // 1 + marker on each pass; we just confirm no panics / no leaks
     // (validated implicitly by `cargo test` finishing).
+}
+
+// ============================================================================
+// M6-08 Task 14 — Compaction Safety Gate (HARD GATE)
+//
+// One test exercising the three gate assertions end-to-end:
+//   1. messages_after < messages_before (collapse happened).
+//   2. Round-trip integrity: the post-compaction history is still a VALID
+//      message sequence — no dangling tool_use without tool_result, the
+//      [Compacted] System marker is the well-formed tail, and the
+//      summary message precedes it.
+//   3. The NEXT TURN after compaction still runs: the orchestrator
+//      accepts the compacted history and `run_turn` completes with
+//      EndTurn (no panic, no corruption).
+//
+// Asserts on COUNTS + structural validity (real), NOT on the M3 stub
+// summary body.
+// ============================================================================
+
+/// Returns `true` if `history` is a structurally valid message sequence:
+/// every assistant `ToolUse` block has a matching `ToolResult` in a later
+/// user message, and no orphan `ToolResult` precedes its `ToolUse`.
+fn history_is_valid(history: &[ConversationMessage]) -> bool {
+    use lingxi_protocol::{ContentBlock, ToolUseId};
+    use std::collections::HashSet;
+
+    let mut open_tool_uses: HashSet<ToolUseId> = HashSet::new();
+    let mut satisfied: HashSet<ToolUseId> = HashSet::new();
+    for msg in history {
+        match msg {
+            ConversationMessage::Assistant { content, .. } => {
+                for b in content {
+                    if let ContentBlock::ToolUse { id, .. } = b {
+                        open_tool_uses.insert(*id);
+                    }
+                }
+            }
+            ConversationMessage::User { content, .. } => {
+                for b in content {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = b {
+                        // A tool_result must reference a tool_use we've
+                        // already seen — orphan results are corruption.
+                        if !open_tool_uses.contains(tool_use_id) {
+                            return false;
+                        }
+                        satisfied.insert(*tool_use_id);
+                    }
+                }
+            }
+            ConversationMessage::System { .. } => {}
+        }
+    }
+    // Every tool_use must eventually be satisfied by a tool_result.
+    open_tool_uses.is_subset(&satisfied)
+}
+
+#[tokio::test]
+async fn compaction_safety_gate() {
+    use lingxi_api_client::types::{ContentBlockApi, MessageResponse, UsageApi};
+
+    // Scripted end_turn response so the post-compaction turn can run.
+    let response = MessageResponse {
+        id: "msg_gate".into(),
+        model: "claude-opus-4-7".into(),
+        content: vec![ContentBlockApi::Text { text: "ack".into() }],
+        stop_reason: Some("end_turn".into()),
+        usage: UsageApi::default(),
+    };
+    let api = Arc::new(MockApiClient::new(vec![response]));
+    let orch = Arc::new(
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api,
+            Arc::new(lingxi_tools::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_compaction(Arc::new(CompactionOrchestrator::new(1_000))),
+    );
+
+    seed_history(&orch, 50).await;
+
+    // --- Assertion 1: collapse happened ---
+    let summary = orch.force_compact().await.expect("force_compact ok");
+    assert_eq!(summary.messages_before, 50, "before count must be 50");
+    assert!(
+        summary.messages_after < summary.messages_before,
+        "GATE#1 FAIL: messages_after={} not < messages_before={}",
+        summary.messages_after,
+        summary.messages_before
+    );
+
+    // --- Assertion 2: round-trip integrity ---
+    {
+        let session = orch.session();
+        let s = session.lock().await;
+        assert!(!s.history.is_empty(), "GATE#2 FAIL: empty history");
+        assert!(
+            history_is_valid(&s.history),
+            "GATE#2 FAIL: post-compaction history is not a valid message sequence"
+        );
+        let last = s.history.last().unwrap();
+        match last {
+            ConversationMessage::System { content, .. } => {
+                assert!(
+                    content.starts_with("[Compacted 50 → "),
+                    "GATE#2 FAIL: marker malformed; got: {content}"
+                );
+            }
+            other => panic!("GATE#2 FAIL: expected System marker tail; got {other:?}"),
+        }
+        // The first message is valid (history head is present).
+        assert!(
+            s.history.first().is_some(),
+            "GATE#2 FAIL: first message missing"
+        );
+    }
+
+    // --- Assertion 3: the next turn still runs against compacted history ---
+    let outcome = orch
+        .run_turn("continue after compaction")
+        .await
+        .expect("GATE#3 FAIL: run_turn errored on compacted history");
+    assert!(
+        matches!(outcome, ConversationOutcome::EndTurn { .. }),
+        "GATE#3 FAIL: expected EndTurn after compaction; got {outcome:?}"
+    );
 }

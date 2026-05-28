@@ -30,7 +30,7 @@ fn content_block_size(b: &ContentBlock) -> u64 {
         ContentBlock::ToolResult { content, .. } => serde_json::to_string(content)
             .map(|s| s.len() as u64)
             .unwrap_or(0),
-        _ => 0,
+        ContentBlock::Thinking { .. } => 0,
     }
 }
 

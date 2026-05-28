@@ -43,10 +43,36 @@ struct ParityCommand {
     description: Option<String>,
 }
 
+// ============================================================================
+// T3 — V2 fixture types: adds `implemented` field (M5-14)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct ParityFileV2 {
+    #[serde(rename = "_meta")]
+    #[allow(dead_code)]
+    meta: ParityMeta,
+    commands: Vec<ParityCommandV2>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ParityCommandV2 {
+    name: String,
+    is_core: bool,
+    implemented: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
+    description: Option<String>,
+}
+
 fn fixture() -> ParityFile {
     // Fixture filename retained as `parity_slash_commands_102` for git-history
     // continuity; the counts inside reflect the 99-name lock per the
     // 2026-05-28 addendum.
+    load_fixture("parity_slash_commands_102")
+}
+
+fn fixture_v2() -> ParityFileV2 {
     load_fixture("parity_slash_commands_102")
 }
 
@@ -161,4 +187,62 @@ fn core_command_description_matches_fixture() {
             entry.name
         );
     }
+}
+
+// ============================================================================
+// T3 — M5-14: `implemented` field coverage (18 implemented / 81 unimplemented)
+// ============================================================================
+
+#[test]
+fn exactly_18_commands_marked_implemented() {
+    let f = fixture_v2();
+    let n_impl = f.commands.iter().filter(|c| c.implemented).count();
+    assert_eq!(
+        n_impl, 18,
+        "expected exactly 18 implemented commands; got {n_impl}"
+    );
+}
+
+#[test]
+fn exactly_81_commands_marked_unimplemented() {
+    let f = fixture_v2();
+    let n_unimpl = f.commands.iter().filter(|c| !c.implemented).count();
+    assert_eq!(
+        n_unimpl, 81,
+        "expected exactly 81 unimplemented commands; got {n_unimpl}"
+    );
+}
+
+#[test]
+fn implemented_set_matches_is_core_set() {
+    let f = fixture_v2();
+    // Every command where `implemented = true` must also have `is_core = true`,
+    // and vice versa — the two fields must be in perfect agreement.
+    for c in &f.commands {
+        assert_eq!(
+            c.implemented, c.is_core,
+            "/{}: `implemented` ({}) != `is_core` ({}); fields must agree",
+            c.name, c.implemented, c.is_core
+        );
+    }
+}
+
+#[test]
+fn implemented_names_match_builtin_core_names_constant() {
+    let f = fixture_v2();
+    let mut fixture_impl: Vec<&str> = f
+        .commands
+        .iter()
+        .filter(|c| c.implemented)
+        .map(|c| c.name.as_str())
+        .collect();
+    fixture_impl.sort_unstable();
+
+    let mut const_core: Vec<&str> = lingxi_commands::builtin::BUILTIN_CORE_NAMES.to_vec();
+    const_core.sort_unstable();
+
+    assert_eq!(
+        fixture_impl, const_core,
+        "fixture `implemented` names do not match BUILTIN_CORE_NAMES constant"
+    );
 }

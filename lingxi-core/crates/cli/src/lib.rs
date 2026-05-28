@@ -43,6 +43,7 @@ pub mod output;
 pub mod output_adapter;
 pub mod repl;
 pub mod run;
+pub mod sigint;
 
 use crate::argv::Argv;
 use clap::error::ErrorKind;

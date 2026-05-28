@@ -22,6 +22,7 @@ pub mod events;
 pub mod executor;
 pub mod hook_payload;
 mod http_executor;
+pub mod loader;
 pub mod registry;
 pub mod response;
 pub mod ssrf_guard;
@@ -37,6 +38,7 @@ pub use hook_payload::{
     parse_response, HookEventEnvelope, HookEventNamePost, HookEventNamePre, HookResponseParseError,
     PostToolUsePayload, PreToolUsePayload,
 };
+pub use loader::parse_hooks_from_settings_json;
 pub use registry::{HookContext, HookRegistry};
 pub use response::{AggregateHookResult, HookDecision, HookOutcome, HookResponse, HookResult};
 pub use ssrf_guard::{IpRange, SsrfError, SsrfGuard};

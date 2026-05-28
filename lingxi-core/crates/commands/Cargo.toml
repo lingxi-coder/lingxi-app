@@ -16,6 +16,10 @@ serde_yaml = "0.9"
 thiserror.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 
 [lints]
 workspace = true

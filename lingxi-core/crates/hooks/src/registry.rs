@@ -98,10 +98,84 @@ impl HookRegistry {
         matched.sort_by(|a, b| b.priority.cmp(&a.priority));
         matched
     }
+
+    /// Snapshot every registered hook across all sources (user / project /
+    /// local / managed / plugin / frontmatter / session / skill).
+    ///
+    /// Used by `OrchestratorHandle::list_hooks` (M6-07) so `/hooks` can
+    /// list the registry without exposing the source-sharded internals.
+    /// Returned in unspecified order — callers that need stable order
+    /// should sort by `name`.
+    #[must_use]
+    pub fn all_hooks(&self) -> Vec<&HookDefinition> {
+        let mut out: Vec<&HookDefinition> = self.sources.values().flatten().collect();
+        out.extend(self.plugin.values().flatten());
+        out.extend(self.frontmatter.values().flatten());
+        out
+    }
 }
 
 impl Default for HookRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod all_hooks_tests {
+    use super::*;
+    use crate::definition::{HookExecutor, HookSource};
+    use crate::events::HookEventType;
+    use lingxi_protocol::HookId;
+
+    fn hk(name: &str, event: HookEventType, source: HookSource) -> HookDefinition {
+        HookDefinition {
+            id: HookId::new(),
+            name: name.into(),
+            events: vec![event],
+            if_condition: None,
+            executor: HookExecutor::Builtin {
+                handler_id: "noop".into(),
+            },
+            source,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+        }
+    }
+
+    #[test]
+    fn all_hooks_returns_empty_for_fresh_registry() {
+        let r = HookRegistry::new();
+        assert!(r.all_hooks().is_empty());
+    }
+
+    #[test]
+    fn all_hooks_unions_source_and_plugin_buckets() {
+        let mut r = HookRegistry::new();
+        r.register(hk(
+            "user-fmt",
+            HookEventType::PostToolUse,
+            HookSource::User,
+        ));
+        r.register(hk(
+            "project-lint",
+            HookEventType::Stop,
+            HookSource::Project,
+        ));
+        r.register_plugin_hooks(
+            lingxi_protocol::PluginId::new(),
+            vec![hk(
+                "plugin-x",
+                HookEventType::PreToolUse,
+                HookSource::Plugin,
+            )],
+        );
+
+        let names: Vec<&str> = r.all_hooks().iter().map(|h| h.name.as_str()).collect();
+        assert!(names.contains(&"user-fmt"));
+        assert!(names.contains(&"project-lint"));
+        assert!(names.contains(&"plugin-x"));
+        assert_eq!(names.len(), 3);
     }
 }

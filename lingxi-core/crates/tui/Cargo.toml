@@ -15,6 +15,9 @@ lingxi-traits = { path = "../traits" }
 lingxi-orchestrator = { path = "../orchestrator" }
 lingxi-telemetry = { path = "../telemetry" }
 lingxi-core = { path = "../core" }
+lingxi-permission = { path = "../permission" }
+lingxi-commands = { path = "../commands" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 iocraft = "=0.8.3"
 crossterm = { workspace = true, features = ["event-stream"] }

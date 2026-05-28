@@ -13,6 +13,7 @@ pub mod app;
 pub mod error;
 pub mod events;
 pub mod session;
+pub mod state;
 pub mod telemetry;
 pub(crate) mod terminal;
 pub mod theme;

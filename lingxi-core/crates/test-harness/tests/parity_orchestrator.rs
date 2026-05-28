@@ -32,17 +32,32 @@ struct Fixture {
 #[derive(Debug, Deserialize)]
 struct Scenario {
     name: String,
+    #[serde(default)]
     #[allow(dead_code)]
-    user_prompt: String,
+    user_prompt: Option<String>,
     #[serde(default)]
     expected_turn_count: Option<u32>,
     #[serde(default)]
     expected_session_messages: Option<usize>,
-    expected_outcome: String,
+    #[serde(default)]
+    expected_outcome: Option<String>,
     #[serde(default)]
     max_turns_override: Option<u32>,
     #[serde(default)]
     pre_cancel: bool,
+    // M6-06 cost_after_one_turn scenario fields. Unused at the loader
+    // level — the new `parity_cost_after_one_turn` test below wires the
+    // assertion directly. These #[serde(default)] fields just confirm the
+    // fixture parses cleanly.
+    #[serde(default)]
+    #[allow(dead_code)]
+    model: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    response_usage: Option<serde_json::Value>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    expected_cost_after_turn: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,7 +121,7 @@ async fn single_turn_no_tools_completes_with_end_turn() {
     let orch = build_orchestrator_with_api(api.clone(), None);
 
     let outcome = orch
-        .run_turn(&s.user_prompt)
+        .run_turn(s.user_prompt.as_deref().unwrap())
         .await
         .expect("turn must succeed");
 
@@ -135,7 +150,7 @@ async fn single_turn_no_tools_completes_with_end_turn() {
         "API receives only user messages (before assistant appended)"
     );
 
-    assert_eq!(s.expected_outcome, "EndTurn");
+    assert_eq!(s.expected_outcome.as_deref(), Some("EndTurn"));
 }
 
 // ============================================================================
@@ -188,7 +203,7 @@ async fn max_turns_cap_returns_max_turns_reached_error() {
     let orch = build_orchestrator_with_api(api, Some(0));
 
     let err = orch
-        .run_turn(&s.user_prompt)
+        .run_turn(s.user_prompt.as_deref().unwrap())
         .await
         .expect_err("should fail with MaxTurnsReached when max_turns=0");
 
@@ -196,7 +211,7 @@ async fn max_turns_cap_returns_max_turns_reached_error() {
         matches!(err, OrchestratorError::MaxTurnsReached { .. }),
         "expected MaxTurnsReached but got {err:?}"
     );
-    assert_eq!(s.expected_outcome, "MaxTurnsReached");
+    assert_eq!(s.expected_outcome.as_deref(), Some("MaxTurnsReached"));
 }
 
 // ============================================================================
@@ -222,12 +237,12 @@ async fn cancel_before_first_turn_returns_cancelled() {
     cancel.cancel();
 
     let outcome = orch
-        .run_turn_with_cancel(&s.user_prompt, cancel)
+        .run_turn_with_cancel(s.user_prompt.as_deref().unwrap(), cancel)
         .await
         .expect("cancelled turn must return Ok(Cancelled), not Err");
 
     assert_eq!(outcome, TurnOutcome::Cancelled);
-    assert_eq!(s.expected_outcome, "Cancelled");
+    assert_eq!(s.expected_outcome.as_deref(), Some("Cancelled"));
 }
 
 // ============================================================================
@@ -262,11 +277,72 @@ fn fixture_scenarios_names_unique_and_outcomes_valid() {
             "duplicate scenario name {}",
             s.name
         );
-        assert!(
-            valid_outcomes.contains(&s.expected_outcome.as_str()),
-            "scenario {}: unknown expected_outcome {:?}",
-            s.name,
-            s.expected_outcome
-        );
+        // M6-06 cost_after_one_turn scenario has no expected_outcome — its
+        // assertion is the dedicated `parity_cost_after_one_turn` test below.
+        if let Some(outcome) = s.expected_outcome.as_deref() {
+            assert!(
+                valid_outcomes.contains(&outcome),
+                "scenario {}: unknown expected_outcome {:?}",
+                s.name,
+                outcome
+            );
+        }
     }
+}
+
+// ============================================================================
+// M6-06 — scenario: cost_after_one_turn (real CostTracker wiring)
+// ============================================================================
+
+#[tokio::test]
+async fn parity_cost_after_one_turn() {
+    use lingxi_api_client::types::{MessageResponse, UsageApi};
+    use lingxi_cost::pricing::PricingCatalog;
+    use lingxi_cost::CostTracker;
+    use lingxi_protocol::SessionId;
+    use lingxi_traits::OrchestratorHandle;
+    use tokio::sync::mpsc;
+
+    let response = MessageResponse {
+        id: "msg_mock".into(),
+        model: "claude-opus-4-6".into(),
+        content: Vec::new(),
+        stop_reason: Some("end_turn".into()),
+        usage: UsageApi {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        },
+    };
+    let api = Arc::new(MockApiClient::new(vec![response]));
+    let (tx, _rx) = mpsc::channel(64);
+    let tracker = Arc::new(CostTracker::new(
+        SessionId::new(),
+        Arc::new(PricingCatalog::builtin_reference()),
+        tx,
+    ));
+    let mut cfg = OrchestratorConfig::default();
+    cfg.model = "claude-opus-4-6".into();
+    let orch = Arc::new(
+        ConversationOrchestrator::new(
+            cfg,
+            api,
+            Arc::new(lingxi_tools::registry::ToolRegistry::new()),
+            lingxi_orchestrator::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_cost_tracker(tracker),
+    );
+    orch.run_turn("hi").await.unwrap();
+
+    let snap = orch.snapshot_cost().await;
+    assert_eq!(snap.total_nano_usd, 17_500_000);
+    assert!((snap.total_usd - 0.0175).abs() < 1e-9);
+    assert_eq!(snap.input_tokens, 1_000);
+    assert_eq!(snap.output_tokens, 500);
+    assert_eq!(snap.api_calls, 1);
 }

@@ -24,6 +24,18 @@
       "user_prompt": "do something",
       "pre_cancel": true,
       "expected_outcome": "Cancelled"
+    },
+    {
+      "name": "cost_after_one_turn",
+      "model": "claude-opus-4-6",
+      "response_usage": { "input_tokens": 1000, "output_tokens": 500 },
+      "expected_cost_after_turn": {
+        "total_nano_usd": 17500000,
+        "total_usd": 0.0175,
+        "input_tokens": 1000,
+        "output_tokens": 500,
+        "api_calls": 1
+      }
     }
   ],
   "telemetry_invariants": {

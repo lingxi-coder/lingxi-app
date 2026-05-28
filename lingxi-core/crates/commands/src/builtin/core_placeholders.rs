@@ -1,114 +1,44 @@
-//! Per-name placeholder handler structs for the 18 core commands.
+//! Per-name placeholder handler stubs for the M5-09 18-core-command surface.
 //!
-//! In M5-09 each placeholder returns the same locked stub literal as
-//! [`super::unimplemented::UnimplementedCommandHandler`]. M5-10 / M5-11
-//! replace each placeholder's body with the real implementation, one
-//! struct at a time, without touching registry wiring.
+//! M5-10 removed the 6 batch-1 placeholders; their real handlers ship under
+//! `builtin::{clear, compact, exit, help, init, memory}`.
 //!
-//! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
-//! Task 4.
+//! M5-11 removed the remaining 12 batch-2 placeholders; their real handlers
+//! ship under `builtin::{agents, config, cost, doctor, hooks, login, logout,
+//! mcp, model, permissions, status, version}`.
+//!
+//! Until [`crate::registry::register_core_batch_1`] /
+//! [`crate::registry::register_core_batch_2`] are called, the 18 core names
+//! resolve to the shared [`super::unimplemented::UnimplementedCommandHandler`]
+//! that returns the locked literal `"{name}: not implemented in v0.6.0 (M5)"`.
+//!
+//! See plans M5-09 T4, M5-10 T13, M5-11 T13.
 
-use crate::builtin::names::core_description;
-use crate::builtin::unimplemented::UnimplementedCommandHandler;
-use crate::model::{BuiltinCommandHandler, CommandResult};
-use crate::parser::ParsedSlashCommand;
 use crate::registry::CommandRegistry;
-use async_trait::async_trait;
-use std::sync::Arc;
 
-/// Generate a per-name placeholder struct + `BuiltinCommandHandler` impl.
+/// No-op shim retained for back-compat with the M5-09 entry-point sequence
+/// (`register_all_builtin_commands` calls this after the pass-1 loop).
 ///
-/// In M5-09 every per-name placeholder's body simply returns
-/// `UnimplementedCommandHandler::stub_literal(name)`. M5-10 / M5-11 replace
-/// the macro-generated `handle` body with the real implementation by
-/// changing the macro call to a hand-written impl for the affected names.
-macro_rules! core_placeholder {
-    ($struct_name:ident, $name_literal:literal) => {
-        #[doc = concat!("Placeholder for /", $name_literal, " — body returns the M5-09 stub literal until M5-10/M5-11 lands the real implementation.")]
-        #[derive(Debug, Default)]
-        pub struct $struct_name;
-
-        impl $struct_name {
-            #[doc = concat!("Construct a new ", stringify!($struct_name), " placeholder.")]
-            #[must_use]
-            pub fn new() -> Self {
-                Self
-            }
-        }
-
-        #[async_trait]
-        impl BuiltinCommandHandler for $struct_name {
-            async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-                CommandResult::Done {
-                    display: Some(UnimplementedCommandHandler::stub_literal($name_literal)),
-                }
-            }
-            fn name(&self) -> &str {
-                $name_literal
-            }
-            fn description(&self) -> &str {
-                core_description($name_literal)
-            }
-        }
-    };
-}
-
-// M5-10 batch 1 removed 6 placeholders from this file (Clear, Compact,
-// Exit, Help, Init, Memory). The real handlers live in dedicated modules:
-// `builtin::{clear, compact, exit, help, init, memory}`. The remaining 12
-// names below stay as placeholders until M5-11 batch 2 lights them up.
-core_placeholder!(AgentsHandler, "agents");
-core_placeholder!(ConfigHandler, "config");
-core_placeholder!(CostHandler, "cost");
-core_placeholder!(DoctorHandler, "doctor");
-core_placeholder!(HooksHandler, "hooks");
-core_placeholder!(LoginHandler, "login");
-core_placeholder!(LogoutHandler, "logout");
-core_placeholder!(McpHandler, "mcp");
-core_placeholder!(ModelHandler, "model");
-core_placeholder!(PermissionsHandler, "permissions");
-core_placeholder!(StatusHandler, "status");
-core_placeholder!(VersionHandler, "version");
-
-/// Register the 18 per-name core placeholders, overwriting the shared
-/// unimplemented entries put down by [`crate::register_all_builtin_commands`].
-///
-/// Each placeholder is a distinct struct (with its own `TypeId`) so M5-10 and
-/// M5-11 can replace the bodies one name at a time without touching registry
-/// wiring or the other 17 placeholders.
-pub fn register_core_placeholders(reg: &mut CommandRegistry) {
-    // M5-10 batch 1: the 6 commands (clear, compact, exit, help, init,
-    // memory) are NOT registered here — the CLI binary (M5-12) calls
-    // [`crate::registry::register_core_batch_1`] afterwards to install
-    // their real handlers. Until then, those 6 names continue to resolve
-    // through the shared `UnimplementedCommandHandler` registered in
-    // `register_all_builtin_commands`'s pass-1 loop.
-    reg.register_builtin_handler(Arc::new(AgentsHandler::new()));
-    reg.register_builtin_handler(Arc::new(ConfigHandler::new()));
-    reg.register_builtin_handler(Arc::new(CostHandler::new()));
-    reg.register_builtin_handler(Arc::new(DoctorHandler::new()));
-    reg.register_builtin_handler(Arc::new(HooksHandler::new()));
-    reg.register_builtin_handler(Arc::new(LoginHandler::new()));
-    reg.register_builtin_handler(Arc::new(LogoutHandler::new()));
-    reg.register_builtin_handler(Arc::new(McpHandler::new()));
-    reg.register_builtin_handler(Arc::new(ModelHandler::new()));
-    reg.register_builtin_handler(Arc::new(PermissionsHandler::new()));
-    reg.register_builtin_handler(Arc::new(StatusHandler::new()));
-    reg.register_builtin_handler(Arc::new(VersionHandler::new()));
+/// Post-M5-11 there are zero per-name placeholders to install; this function
+/// exists solely so the call site in
+/// [`crate::registry::register_all_builtin_commands`] keeps compiling
+/// without churn while M5-12 boots the CLI binary.
+pub fn register_core_placeholders(_reg: &mut CommandRegistry) {
+    // Intentionally empty: M5-11 replaced all 12 remaining placeholders
+    // with their real handlers. The CLI binary (M5-12) wires the real
+    // handlers via `register_core_batch_1` + `register_core_batch_2`.
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::builtin::names::BUILTIN_CORE_NAMES;
     use crate::model::CommandResult;
+    use crate::parser::ParsedSlashCommand;
 
     #[test]
-    fn all_18_core_placeholders_have_distinct_type_ids() {
-        let mut reg = CommandRegistry::new();
+    fn all_18_core_names_resolve_after_register_all() {
+        let mut reg = crate::CommandRegistry::new();
         crate::register_all_builtin_commands(&mut reg);
-
-        // After overwrite, each of the 18 core names still resolves.
         for name in BUILTIN_CORE_NAMES {
             assert!(reg.resolve(name).is_some(), "core /{name} disappeared");
             assert!(
@@ -119,11 +49,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn core_placeholder_returns_same_locked_literal_in_m5_09() {
-        let mut reg = CommandRegistry::new();
+    async fn core_name_returns_m5_09_stub_before_batch_overwrites() {
+        // Without batch_1/batch_2 wiring, every core name still resolves
+        // through the shared UnimplementedCommandHandler.
+        let mut reg = crate::CommandRegistry::new();
         crate::register_all_builtin_commands(&mut reg);
-
-        // Pick a core command — its placeholder returns the M5-09 stub.
         let h = reg.get_handler("clear").expect("clear handler missing");
         let args = ParsedSlashCommand {
             name: "clear".to_string(),
@@ -139,16 +69,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn core_placeholder_carries_real_description() {
-        let mut reg = CommandRegistry::new();
+    async fn core_name_carries_real_description_after_register_all() {
+        let mut reg = crate::CommandRegistry::new();
         crate::register_all_builtin_commands(&mut reg);
         let h = reg.get_handler("help").expect("help handler missing");
         assert_eq!(h.description(), "Show help and available commands");
     }
 
     #[tokio::test]
-    async fn all_18_core_placeholders_return_locked_literal() {
-        let mut reg = CommandRegistry::new();
+    async fn all_18_core_names_return_locked_literal_before_batch_overwrites() {
+        let mut reg = crate::CommandRegistry::new();
         crate::register_all_builtin_commands(&mut reg);
         for name in BUILTIN_CORE_NAMES {
             let h = reg
@@ -166,28 +96,5 @@ mod tests {
                 other => panic!("/{name} did not return Done, got {other:?}"),
             }
         }
-    }
-
-    #[test]
-    fn core_placeholder_struct_is_distinct_from_unimplemented() {
-        use std::any::Any;
-        // Construct each remaining-12 placeholder directly and check its
-        // TypeId is different from UnimplementedCommandHandler. The 6
-        // batch-1 placeholders were removed by M5-10; their real handlers
-        // (ClearHandler, CompactHandler, ExitHandler, HelpHandler,
-        // InitHandler, MemoryHandler) live in dedicated modules and are
-        // verified for distinct TypeId by the batch-1 unit tests.
-        let unimpl = UnimplementedCommandHandler::new("test", "");
-        let unimpl_tid = (&unimpl as &dyn Any).type_id();
-
-        // Spot-check 12 remaining placeholders.
-        let agents = AgentsHandler::new();
-        assert_ne!((&agents as &dyn Any).type_id(), unimpl_tid);
-
-        let cost = CostHandler::new();
-        assert_ne!((&cost as &dyn Any).type_id(), unimpl_tid);
-
-        let version = VersionHandler::new();
-        assert_ne!((&version as &dyn Any).type_id(), unimpl_tid);
     }
 }

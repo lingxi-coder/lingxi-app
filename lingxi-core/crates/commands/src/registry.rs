@@ -154,6 +154,45 @@ pub fn register_core_batch_1(
     reg.register_builtin_handler(Arc::new(MemoryHandler::new(handle)));
 }
 
+/// Overwrite the 12 batch-2 entries (`agents`, `config`, `cost`, `doctor`,
+/// `hooks`, `login`, `logout`, `mcp`, `model`, `permissions`, `status`,
+/// `version`) with their handle/auth-bound real handlers from M5-11.
+///
+/// Call **after** [`register_all_builtin_commands`] and (optionally) after
+/// [`register_core_batch_1`]. The function is idempotent — calling it twice
+/// with the same `handle`/`auth` produces the same final state.
+///
+/// [`crate::builtin::VersionHandler`] takes no parameters because it only
+/// reads compile-time constants. All other batch-2 handlers consume the
+/// orchestrator handle; `/login` and `/logout` consume the auth handle.
+///
+/// M5-12 (the CLI binary) calls this immediately after `register_core_batch_1`
+/// during boot, threading the live `Arc<dyn OrchestratorHandle>` and
+/// `Arc<dyn AuthHandle>` instances.
+pub fn register_core_batch_2(
+    reg: &mut CommandRegistry,
+    handle: Arc<dyn lingxi_traits::OrchestratorHandle>,
+    auth: Arc<dyn lingxi_traits::AuthHandle>,
+) {
+    use crate::builtin::{
+        AgentsHandler, ConfigHandler, CostHandler, DoctorHandler, HooksHandler, LoginHandler,
+        LogoutHandler, McpHandler, ModelHandler, PermissionsHandler, StatusHandler, VersionHandler,
+    };
+
+    reg.register_builtin_handler(Arc::new(AgentsHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(ConfigHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(CostHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(DoctorHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(HooksHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(LoginHandler::new(auth.clone())));
+    reg.register_builtin_handler(Arc::new(LogoutHandler::new(auth)));
+    reg.register_builtin_handler(Arc::new(McpHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(ModelHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(PermissionsHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(StatusHandler::new(handle)));
+    reg.register_builtin_handler(Arc::new(VersionHandler::new()));
+}
+
 #[cfg(test)]
 mod registry_tests {
     use super::*;

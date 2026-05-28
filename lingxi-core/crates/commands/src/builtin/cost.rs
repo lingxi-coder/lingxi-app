@@ -151,4 +151,157 @@ mod tests {
             "Show total cost and duration of the current session"
         );
     }
+
+    // M6-06 T7: end-to-end smoke against a real ConversationOrchestrator
+    // with a wired CostTracker — confirms the /cost slash command reflects
+    // real numbers (not the M5-10 zero stub).
+    fn end_turn_response_with_usage(
+        input: u64,
+        output: u64,
+    ) -> lingxi_api_client::types::MessageResponse {
+        lingxi_api_client::types::MessageResponse {
+            id: "msg_mock".to_string(),
+            model: "claude-opus-4-6".to_string(),
+            content: Vec::new(),
+            stop_reason: Some("end_turn".to_string()),
+            usage: lingxi_api_client::types::UsageApi {
+                input_tokens: input,
+                output_tokens: output,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn real_orchestrator_renders_non_zero_cost() {
+        use lingxi_cost::pricing::PricingCatalog;
+        use lingxi_cost::CostTracker;
+        use lingxi_orchestrator::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+        use lingxi_protocol::SessionId;
+        use tokio::sync::mpsc;
+
+        let api = Arc::new(MockApiClient::new(vec![end_turn_response_with_usage(
+            1_000, 500,
+        )]));
+        let (tx, _rx) = mpsc::channel(64);
+        let tracker = Arc::new(CostTracker::new(
+            SessionId::new(),
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        ));
+
+        let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+        let hooks = noop_hook_executor();
+        let perms = Arc::new(NoOpPermissionGate);
+        let output = Arc::new(MockOutputStream::new());
+        let memory = Arc::new(StaticMemoryProvider::empty());
+
+        let mut cfg = OrchestratorConfig::default();
+        cfg.model = "claude-opus-4-6".into();
+
+        let orch = Arc::new(
+            ConversationOrchestrator::new(
+                cfg,
+                api,
+                tools,
+                hooks,
+                perms,
+                output,
+                memory,
+                std::env::temp_dir(),
+            )
+            .with_cost_tracker(tracker),
+        );
+        orch.run_turn("hi").await.unwrap();
+
+        let handle: Arc<dyn lingxi_traits::OrchestratorHandle> = orch.clone();
+        let h = CostHandler::new(handle);
+
+        match h.handle(&args()).await {
+            CommandResult::Done { display: Some(s) } => {
+                // 1000*5000 + 500*25000 = 17_500_000 nano-USD = $0.0175
+                assert!(
+                    s.starts_with("Cost: $0.0175 (1 calls, 1000+500 tokens, "),
+                    "got: {s}"
+                );
+                // session_duration is non-deterministic; just assert the
+                // suffix shape ends with " session time)".
+                assert!(s.ends_with(" session time)"), "got: {s}");
+                // No-op rendering must NOT match: $0.0000 + 0 calls.
+                assert!(!s.contains("$0.0000 (0 calls"), "stub leaked: {s}");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cost_command_matches_snapshot_cost_value() {
+        // Locks the invariant that the slash command and the trait method
+        // read from the same source. (`/cost` already calls `snapshot_cost`
+        // — this test wires real numbers and confirms identity.)
+        use lingxi_cost::pricing::PricingCatalog;
+        use lingxi_cost::CostTracker;
+        use lingxi_orchestrator::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+        use lingxi_protocol::SessionId;
+        use tokio::sync::mpsc;
+
+        let api = Arc::new(MockApiClient::new(vec![end_turn_response_with_usage(
+            2_000, 1_000,
+        )]));
+        let (tx, _rx) = mpsc::channel(64);
+        let tracker = Arc::new(CostTracker::new(
+            SessionId::new(),
+            Arc::new(PricingCatalog::builtin_reference()),
+            tx,
+        ));
+        let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+        let hooks = noop_hook_executor();
+        let perms = Arc::new(NoOpPermissionGate);
+        let output = Arc::new(MockOutputStream::new());
+        let memory = Arc::new(StaticMemoryProvider::empty());
+        let mut cfg = OrchestratorConfig::default();
+        cfg.model = "claude-opus-4-6".into();
+        let orch = Arc::new(
+            ConversationOrchestrator::new(
+                cfg,
+                api,
+                tools,
+                hooks,
+                perms,
+                output,
+                memory,
+                std::env::temp_dir(),
+            )
+            .with_cost_tracker(tracker),
+        );
+        orch.run_turn("hi").await.unwrap();
+
+        let snap = orch.snapshot_cost().await;
+        let handle: Arc<dyn lingxi_traits::OrchestratorHandle> = orch.clone();
+        let h = CostHandler::new(handle);
+        let display = match h.handle(&args()).await {
+            CommandResult::Done { display: Some(s) } => s,
+            _ => panic!("expected Done"),
+        };
+        // Cost handler renders `${total:.4}` — extract and compare.
+        assert!(
+            display.contains(&format!("${:.4}", snap.total_usd)),
+            "display={display}, snap.total_usd={}",
+            snap.total_usd
+        );
+        assert!(
+            display.contains(&format!("({} calls", snap.api_calls)),
+            "display={display}, snap.api_calls={}",
+            snap.api_calls
+        );
+    }
 }

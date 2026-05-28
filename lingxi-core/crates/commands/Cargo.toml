@@ -22,6 +22,8 @@ tokio = { workspace = true, features = ["sync"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 lingxi-orchestrator = { path = "../orchestrator" }
+lingxi-cost = { path = "../cost" }
+lingxi-api-client = { path = "../api-client" }
 sha2 = "0.10"
 
 [lints]

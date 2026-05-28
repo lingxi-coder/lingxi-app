@@ -5,7 +5,7 @@
 use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_256_entries() {
+fn registry_is_exactly_258_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
@@ -17,9 +17,10 @@ fn registry_is_exactly_256_entries() {
     // M5-05 added 2 permission events (permission_prompted/answered),
     // M5-06 added 8 hook events (pre/post started/completed/failed,
     //   http_skipped_ssrf, timeout),
-    // M5-07 added 3 session-jsonl events (appended/rotated/corrupted):
-    // 253 (post-M5-06) + 3 (M5-07) = 256.
-    assert_eq!(ALL_EVENT_NAMES.len(), 256);
+    // M5-07 added 3 session-jsonl events (appended/rotated/corrupted),
+    // M5-08 added 2 session-resume events (resume_started/completed):
+    // 253 (post-M5-06) + 3 (M5-07) + 2 (M5-08) = 258.
+    assert_eq!(ALL_EVENT_NAMES.len(), 258);
 }
 
 #[test]
@@ -72,26 +73,28 @@ fn category_ordering_preserved() {
         assert!(n.starts_with("tengu_agent_"), "agent block: {n}");
     }
     // M5-07 grew the session block by +3 (appended/rotated/corrupted): 15 -> 18.
-    for n in &ALL_EVENT_NAMES[55..73] {
+    // M5-08 grew it by +2 (resume_started/completed): 18 -> 20.
+    for n in &ALL_EVENT_NAMES[55..75] {
         assert!(n.starts_with("tengu_session_"), "session block: {n}");
     }
     // M4-05 grew the tool block by +24 (67 → 91); M4-06 grew it by +6 (91 → 97);
     // M4-07 grew it by +13 (97 → 110); M4-08 grew it by +24 (110 → 134),
     // shifting downstream offsets by +24.
     // M5-07 shifts all post-session offsets by +3.
-    for n in &ALL_EVENT_NAMES[73..207] {
+    // M5-08 shifts all post-session offsets by another +2.
+    for n in &ALL_EVENT_NAMES[75..209] {
         assert!(n.starts_with("tengu_tool_"), "tool block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[207..217] {
+    for n in &ALL_EVENT_NAMES[209..219] {
         assert!(n.starts_with("tengu_cost_"), "cost block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[217..225] {
+    for n in &ALL_EVENT_NAMES[219..227] {
         assert!(n.starts_with("tengu_oauth_"), "oauth block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[225..237] {
+    for n in &ALL_EVENT_NAMES[227..239] {
         assert!(n.starts_with("tengu_memory_"), "memory block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[237..240] {
+    for n in &ALL_EVENT_NAMES[239..242] {
         assert!(n.starts_with("tengu_settings_"), "settings block: {n}");
     }
     // M5-02 grew the orchestrator block by +3 (conversation lifecycle).
@@ -100,13 +103,13 @@ fn category_ordering_preserved() {
     // Block size is now 15; release marker still trails. Walk order is
     // fixed by tengu::mod.rs's concat_all (settings → orchestrator →
     // release).
-    for n in &ALL_EVENT_NAMES[240..255] {
+    for n in &ALL_EVENT_NAMES[242..257] {
         assert!(
             n.starts_with("tengu_orchestrator_"),
             "orchestrator block: {n}"
         );
     }
-    for n in &ALL_EVENT_NAMES[255..256] {
+    for n in &ALL_EVENT_NAMES[257..258] {
         assert!(n.starts_with("lingxi_core_"), "release block: {n}");
     }
 }

@@ -1,5 +1,6 @@
-//! `tengu_session_*` event schemas — 18 events emitted by the session layer
-//! (M5 owner; M3-06 schema lock + M5-07 jsonl-persistence triplet).
+//! `tengu_session_*` event schemas — 20 events emitted by the session layer
+//! (M5 owner; M3-06 schema lock + M5-07 jsonl-persistence triplet + M5-08
+//! resume pair).
 //!
 //! Spec §7 line 763-767. Covers session lifecycle (start/resume/complete/abort),
 //! persistence (load/save), clear, and export/import round-trips. User-derived
@@ -52,7 +53,7 @@ pub const RESUME_STARTED: &str = "tengu_session_resume_started";
 /// `tengu_session_resume_completed` — resume successfully replayed all messages into the orchestrator.
 pub const RESUME_COMPLETED: &str = "tengu_session_resume_completed";
 
-/// Order-locked array of all 18 names; consumed by `tengu::ALL_EVENT_NAMES`.
+/// Order-locked array of all 20 names; consumed by `tengu::ALL_EVENT_NAMES`.
 pub(crate) const NAMES: &[&str] = &[
     STARTED,
     RESUMED,
@@ -69,9 +70,11 @@ pub(crate) const NAMES: &[&str] = &[
     IMPORT_STARTED,
     IMPORT_COMPLETED,
     IMPORT_FAILED,
-    APPENDED,
-    ROTATED,
-    CORRUPTED,
+    APPENDED,         // M5-07
+    ROTATED,          // M5-07
+    CORRUPTED,        // M5-07
+    RESUME_STARTED,   // M5-08
+    RESUME_COMPLETED, // M5-08
 ];
 
 // -- Payload structs (deny_unknown_fields locked) -----------------------------
@@ -265,4 +268,22 @@ pub struct CorruptedPayload {
     pub session_id: Verified,
     /// Whitelisted error description (no PII).
     pub error: Verified,
+}
+
+/// Payload for [`RESUME_STARTED`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeStartedPayload {
+    /// Session UUID being resumed.
+    pub session_id: Verified,
+}
+
+/// Payload for [`RESUME_COMPLETED`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeCompletedPayload {
+    /// Session UUID that was resumed.
+    pub session_id: Verified,
+    /// Number of messages replayed from the on-disk JSONL.
+    pub message_count: u64,
 }

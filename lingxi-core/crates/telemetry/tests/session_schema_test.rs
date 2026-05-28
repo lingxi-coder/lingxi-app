@@ -1,7 +1,7 @@
 use lingxi_telemetry::tengu::session;
 
 #[test]
-fn all_18_session_event_names_are_locked() {
+fn all_20_session_event_names_are_locked() {
     let names: &[&str] = &[
         session::STARTED,
         session::RESUMED,
@@ -21,11 +21,13 @@ fn all_18_session_event_names_are_locked() {
         session::APPENDED,
         session::ROTATED,
         session::CORRUPTED,
+        session::RESUME_STARTED,
+        session::RESUME_COMPLETED,
     ];
     assert_eq!(
         names.len(),
-        18,
-        "session category must declare exactly 18 events"
+        20,
+        "session category must declare exactly 20 events"
     );
     for n in names {
         assert!(
@@ -38,6 +40,9 @@ fn all_18_session_event_names_are_locked() {
     assert_eq!(session::APPENDED, "tengu_session_appended");
     assert_eq!(session::ROTATED, "tengu_session_rotated");
     assert_eq!(session::CORRUPTED, "tengu_session_corrupted");
+    // M5-08 resume pair.
+    assert_eq!(session::RESUME_STARTED, "tengu_session_resume_started");
+    assert_eq!(session::RESUME_COMPLETED, "tengu_session_resume_completed");
 }
 
 #[test]
@@ -96,4 +101,34 @@ fn three_new_names_have_correct_prefixes() {
     assert_eq!(session::APPENDED, "tengu_session_appended");
     assert_eq!(session::ROTATED, "tengu_session_rotated");
     assert_eq!(session::CORRUPTED, "tengu_session_corrupted");
+}
+
+#[test]
+fn resume_started_payload_round_trips() {
+    use lingxi_telemetry::Verified;
+    let p = session::ResumeStartedPayload {
+        session_id: Verified::assert_safe("11111111-2222-3333-4444-555555555555".into()),
+    };
+    let s = serde_json::to_string(&p).expect("ser");
+    let back: session::ResumeStartedPayload = serde_json::from_str(&s).expect("de");
+    assert_eq!(back.session_id.as_str(), p.session_id.as_str());
+}
+
+#[test]
+fn resume_completed_payload_round_trips() {
+    use lingxi_telemetry::Verified;
+    let p = session::ResumeCompletedPayload {
+        session_id: Verified::assert_safe("11111111-2222-3333-4444-555555555555".into()),
+        message_count: 7,
+    };
+    let s = serde_json::to_string(&p).expect("ser");
+    let back: session::ResumeCompletedPayload = serde_json::from_str(&s).expect("de");
+    assert_eq!(back.session_id.as_str(), p.session_id.as_str());
+    assert_eq!(back.message_count, 7);
+}
+
+#[test]
+fn two_resume_names_have_correct_prefixes() {
+    assert_eq!(session::RESUME_STARTED, "tengu_session_resume_started");
+    assert_eq!(session::RESUME_COMPLETED, "tengu_session_resume_completed");
 }

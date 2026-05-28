@@ -75,6 +75,8 @@
     "tengu_session_appended",
     "tengu_session_rotated",
     "tengu_session_corrupted",
+    "tengu_session_resume_started",
+    "tengu_session_resume_completed",
     "tengu_tool_started",
     "tengu_tool_completed",
     "tengu_tool_failed",

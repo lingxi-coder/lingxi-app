@@ -90,22 +90,64 @@ pub struct TurnInFlight {
     pub cancel: tokio_util::sync::CancellationToken,
 }
 
-/// Reserved permission-prompt slot. Filled by M6-05.
+/// Permission-prompt slot. Reserved (M6-03), populated in M6-05.
+///
+/// M6-03 wires the `apply_event` path to set this to `Some(_)` on
+/// `TurnEvent::PermissionRequest`, but the renderer does not yet display
+/// it — that's the M6-05 dialog.
 #[derive(Debug, Clone)]
-pub struct PendingPermission;
+pub struct PendingPermission {
+    /// The tool the permission gate is asking about.
+    pub tool: String,
+    /// JSON input the permission gate is being asked to approve.
+    pub input: serde_json::Value,
+}
 
-/// Reserved streaming-turn slot. Filled by M6-03.
+/// Per-turn streaming state. Created on `TurnStarted`, dropped on
+/// `TurnEnded`. Currently carries only the start instant for debugging;
+/// M6-04 may add a tool-use map.
 #[derive(Debug, Clone)]
-pub struct StreamingTurn;
+pub struct StreamingState {
+    /// Wall-clock instant the turn began (for latency telemetry).
+    pub started_at: Instant,
+}
+
+impl StreamingState {
+    /// Mint a fresh streaming state at `Instant::now()`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+        }
+    }
+}
+
+impl Default for StreamingState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Backwards-compat alias for M6-01/M6-02 imports. The canonical M6-03
+/// name is `StreamingState`. Remove in M7 once downstream callers
+/// migrate.
+pub type StreamingTurn = StreamingState;
 
 /// Root TUI state. Owned by the `App` root component.
 pub struct AppState {
     /// Scrollback buffer (cap 500, FIFO eviction).
     pub messages: Vec<RenderedMessage>,
-    /// Reserved for M6-05 (permission dialogs).
+    /// Reserved for M6-05 (permission dialogs). Set on
+    /// `TurnEvent::PermissionRequest` (M6-03) but not yet rendered.
     pub pending_permission: Option<PendingPermission>,
-    /// Reserved for M6-03 (streaming spinner / partial assistant text).
-    pub streaming: Option<StreamingTurn>,
+    /// `Some(_)` while a turn is streaming; `None` between turns.
+    /// Spinner mount predicate. Set on `TurnEvent::TurnStarted`, cleared
+    /// on `TurnEvent::TurnEnded(_)`.
+    pub streaming: Option<StreamingState>,
+    /// Cancel token threaded into `run_turn_streaming_with_cancel`.
+    /// `Some(_)` mirrors `streaming.is_some()`. Reset to `None` once
+    /// `TurnEnded` propagates through the bridge.
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
     /// Prompt buffer (UTF-8 string; cursor is a byte index).
     pub prompt_text: String,
     /// Cursor byte-index into `prompt_text`. Always at a char boundary.
@@ -134,6 +176,7 @@ impl AppState {
             messages: Vec::with_capacity(SCROLLBACK_CAP),
             pending_permission: None,
             streaming: None,
+            cancel_token: None,
             prompt_text: String::new(),
             prompt_cursor: 0,
             history: Vec::new(),
@@ -144,6 +187,13 @@ impl AppState {
             sigint_armed_at: None,
             should_exit: false,
         }
+    }
+
+    /// Construct a default `AppState` with an empty status snapshot.
+    /// Used by tests that don't care about model/cwd/cost.
+    #[must_use]
+    pub fn default_for_tests() -> Self {
+        Self::new(StatusSnapshot::default())
     }
 
     /// Push a message; evict the oldest if cap exceeded (FIFO).

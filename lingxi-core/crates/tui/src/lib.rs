@@ -16,6 +16,7 @@ pub mod events;
 pub mod screens;
 pub mod session;
 pub mod state;
+pub mod streaming;
 pub mod telemetry;
 pub(crate) mod terminal;
 pub mod theme;

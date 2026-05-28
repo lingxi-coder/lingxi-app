@@ -148,7 +148,24 @@ pub fn parse_ansi(input: &str) -> Vec<AnsiSpan> {
     if !buf.is_empty() {
         spans.push(AnsiSpan { style, text: buf });
     }
-    spans
+    // Merge consecutive spans with identical styles. Skipped CSI/OSC
+    // sequences (cursor movement, OSC titles, etc.) end up here as two
+    // adjacent same-style spans — collapse them so callers see a single
+    // run of plain text.
+    coalesce(spans)
+}
+
+fn coalesce(spans: Vec<AnsiSpan>) -> Vec<AnsiSpan> {
+    let mut out: Vec<AnsiSpan> = Vec::with_capacity(spans.len());
+    for span in spans {
+        match out.last_mut() {
+            Some(prev) if prev.style == span.style => {
+                prev.text.push_str(&span.text);
+            }
+            _ => out.push(span),
+        }
+    }
+    out
 }
 
 fn apply_sgr(params: &str, style: &mut AnsiStyle) {
@@ -211,5 +228,72 @@ mod tests {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].text, "ERR");
         assert_eq!(v[0].style.fg, AnsiColor::Red);
+    }
+
+    #[test]
+    fn three_spans_red_bold_default() {
+        let v = parse_ansi("\x1b[31mERR\x1b[0m\x1b[1mBOLD\x1b[0m tail");
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[0].text, "ERR");
+        assert_eq!(v[0].style.fg, AnsiColor::Red);
+        assert!(!v[0].style.bold);
+        assert_eq!(v[1].text, "BOLD");
+        assert_eq!(v[1].style.fg, AnsiColor::Default);
+        assert!(v[1].style.bold);
+        assert_eq!(v[2].text, " tail");
+        assert_eq!(v[2].style, AnsiStyle::default());
+    }
+
+    #[test]
+    fn unsupported_csi_is_skipped_without_panic() {
+        // Bracketed-paste enable — NOT an SGR.
+        let v = parse_ansi("a\x1b[?2004hb");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].text, "ab");
+    }
+
+    #[test]
+    fn cursor_movement_is_skipped() {
+        // ED (erase display) — not SGR.
+        let v = parse_ansi("x\x1b[2Jy");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].text, "xy");
+    }
+
+    #[test]
+    fn osc_is_skipped() {
+        // OSC 0; set title, BEL-terminated.
+        let v = parse_ansi("a\x1b]0;title\x07b");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].text, "ab");
+    }
+
+    #[test]
+    fn empty_string_parses_to_empty_vec() {
+        assert!(parse_ansi("").is_empty());
+    }
+
+    #[test]
+    fn malformed_unterminated_csi_does_not_panic() {
+        // ESC[31 with no final byte — must not panic.
+        let _v = parse_ansi("\x1b[31");
+    }
+
+    #[test]
+    fn malformed_lone_esc_does_not_panic() {
+        let v = parse_ansi("a\x1bb");
+        // Lone ESC followed by `b` is consumed as a 2-byte ESC-sequence
+        // and dropped.
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].text, "a");
+    }
+
+    #[test]
+    fn multi_param_sgr_bold_red() {
+        let v = parse_ansi("\x1b[1;31mhi\x1b[0m");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].text, "hi");
+        assert_eq!(v[0].style.fg, AnsiColor::Red);
+        assert!(v[0].style.bold);
     }
 }

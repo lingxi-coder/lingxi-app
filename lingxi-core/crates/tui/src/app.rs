@@ -238,6 +238,78 @@ pub async fn handle_submit_line(
     true // plain text — caller runs `orchestrator.run_turn`
 }
 
+/// Outcome of a turn from the TUI's vantage point. M6-02 only needs the
+/// accumulated assistant text; richer fields (tool calls, cost, stop
+/// reason) arrive in M6-03+.
+#[derive(Debug, Clone, Default)]
+pub struct TurnTextOutcome {
+    /// Accumulated assistant text body for this turn.
+    pub text: String,
+}
+
+/// Local trait the TUI uses to invoke a turn. Mirrors the upstream
+/// `ConversationOrchestrator::run_turn_with_cancel` contract but lets
+/// tests pass a fake orchestrator without coupling to the real type.
+#[async_trait::async_trait]
+pub trait ConversationOrchestratorTrait: Send + Sync {
+    /// Drive one user prompt through the orchestrator and return the
+    /// accumulated assistant text once the turn ends.
+    async fn run_turn(
+        &self,
+        prompt: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<TurnTextOutcome, String>;
+}
+
+/// Process one submitted line end-to-end: slash dispatch OR run_turn.
+///
+/// The caller (per-frame loop) has already pushed the user message and
+/// cleared the prompt via `dispatch(KeyAction::Submit, ...)`. This fn
+/// then either routes the line to `handle_submit_line` (for slash
+/// commands) or to `orch.run_turn`, pushing the resulting assistant
+/// text (or error) into the scrollback.
+pub async fn run_one_submit(
+    st: &mut AppState,
+    submitted: &str,
+    orch: &dyn ConversationOrchestratorTrait,
+    dispatcher: &dyn lingxi_traits::SlashCommandDispatcher,
+) {
+    let should_run = handle_submit_line(st, submitted, dispatcher).await;
+    if !should_run {
+        return;
+    }
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let turn_id = next_turn_id();
+    st.in_flight_turn = Some(crate::state::TurnInFlight {
+        turn_id,
+        cancel: cancel.clone(),
+    });
+
+    let outcome = orch.run_turn(submitted, cancel).await;
+    st.in_flight_turn = None;
+    match outcome {
+        Ok(TurnTextOutcome { text }) => {
+            st.push_message(RenderedMessage::AssistantText {
+                body: text,
+                timestamp: chrono::Utc::now().timestamp(),
+            });
+        }
+        Err(e) => {
+            st.push_message(RenderedMessage::SystemText {
+                body: format!("error: {e}"),
+                timestamp: chrono::Utc::now().timestamp(),
+                is_error: true,
+            });
+        }
+    }
+}
+
+fn next_turn_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    N.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Apply a scroll direction with a known viewport height. Called per
 /// frame for PageUp/PageDown, where the viewport is known; line-step
 /// (`j`/`k`) reuses this with `height=1`.

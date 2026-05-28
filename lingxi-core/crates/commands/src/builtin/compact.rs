@@ -132,4 +132,63 @@ mod tests {
         assert_eq!(h.name(), "compact");
         assert_eq!(h.description(), "Compact the conversation to a summary");
     }
+
+    /// M6-08 Task 12: end-to-end smoke through the real
+    /// `ConversationOrchestrator` (not the mock). Confirms `/compact`
+    /// renders a *real* non-zero delta — `40 → N` with `N < 40` — proving
+    /// the trait, handler, and template are wired to the live compactor.
+    ///
+    /// Asserts on the COUNTS (real history collapse), NOT on the summary
+    /// body (which is the M3 `[stub-summary …]` placeholder until M7
+    /// wires a real `ForkedAgentRunner`).
+    #[tokio::test]
+    async fn real_orchestrator_renders_non_zero_delta() {
+        use lingxi_compaction::CompactionOrchestrator;
+        use lingxi_orchestrator::test_support::{
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
+        };
+        use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+        use lingxi_protocol::{ConversationMessage, MessageId};
+
+        let api = Arc::new(MockApiClient::new(vec![]));
+        let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+        let hooks = noop_hook_executor();
+        let perms = Arc::new(NoOpPermissionGate);
+        let output = Arc::new(MockOutputStream::new());
+        let memory = Arc::new(StaticMemoryProvider::empty());
+        let orch = Arc::new(
+            ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                api,
+                tools,
+                hooks,
+                perms,
+                output,
+                memory,
+                std::env::temp_dir(),
+            )
+            .with_compaction(Arc::new(CompactionOrchestrator::new(1_000))),
+        );
+        {
+            let session = orch.session();
+            let mut s = session.lock().await;
+            for i in 0..40 {
+                s.history.push(ConversationMessage::user(
+                    MessageId::new(),
+                    format!("msg-{i} body padding to push token count past the autocompact threshold"),
+                ));
+            }
+        }
+
+        let handle: Arc<dyn OrchestratorHandle> = orch.clone();
+        let h = CompactHandler::new(handle);
+        match h.handle(&args()).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert!(s.starts_with("Compacted: 40 → "), "got: {s}");
+                assert!(!s.contains("Compacted: 40 → 40 "), "no-op detected: {s}");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
 }

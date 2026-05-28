@@ -14,6 +14,8 @@ lingxi-tools = { path = "../tools" }
 lingxi-memory = { path = "../memory" }
 lingxi-permission = { path = "../permission" }
 lingxi-hooks = { path = "../hooks" }
+lingxi-mcp = { path = "../mcp" }
+lingxi-agent = { path = "../agent" }
 lingxi-cost = { path = "../cost" }
 lingxi-session = { path = "../session" }
 lingxi-telemetry = { path = "../telemetry" }

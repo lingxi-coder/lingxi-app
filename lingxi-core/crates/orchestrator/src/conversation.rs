@@ -164,6 +164,19 @@ pub struct ConversationOrchestrator {
     /// does not carry a per-call counter; `ModelUsage::usage.add()` merges
     /// the token totals but not "how many times we recorded".
     pub(crate) api_calls_recorded: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// MCP registry (M2-02b). `None` when not wired — `list_mcp_servers`
+    /// then returns `vec![]`. The CLI binary (M6-07 init.rs) populates
+    /// this from `.mcp.json` + `~/.config/lingxi/mcp.json`.
+    pub(crate) mcp_registry: Option<Arc<lingxi_mcp::McpRegistry>>,
+    /// Hook registry (M5-06). `None` when not wired — `list_hooks` then
+    /// returns `vec![]`. The CLI binary populates from settings + plugin
+    /// sources at startup.
+    pub(crate) hook_registry: Option<Arc<tokio::sync::RwLock<lingxi_hooks::HookRegistry>>>,
+    /// Subagent catalog (M6-07). `None` when not wired — `list_agents`
+    /// then returns `vec![]`. The CLI binary populates from
+    /// `~/.claude/agents/` + project `.claude/agents/`.
+    pub(crate) agent_catalog:
+        Option<Arc<tokio::sync::RwLock<Vec<lingxi_agent::AgentDefinition>>>>,
 }
 
 impl ConversationOrchestrator {
@@ -206,6 +219,9 @@ impl ConversationOrchestrator {
             cost_tracker: None,
             session_started_at: std::time::Instant::now(),
             api_calls_recorded: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            mcp_registry: None,
+            hook_registry: None,
+            agent_catalog: None,
         }
     }
 
@@ -231,6 +247,60 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn has_cost_tracker(&self) -> bool {
         self.cost_tracker.is_some()
+    }
+
+    /// Attach an MCP registry so `list_mcp_servers` reports real data.
+    /// Without this, the trait method returns `vec![]`. (M6-07)
+    #[must_use]
+    pub fn with_mcp_registry(mut self, mcp: Arc<lingxi_mcp::McpRegistry>) -> Self {
+        self.mcp_registry = Some(mcp);
+        self
+    }
+
+    /// Attach a hook registry so `list_hooks` reports real data.
+    /// Wrapped in `RwLock` because `HookRegistry::register` is `&mut self`
+    /// and the CLI binary may register hooks past the initial load.
+    /// (M6-07)
+    #[must_use]
+    pub fn with_hook_registry(
+        mut self,
+        hooks: Arc<tokio::sync::RwLock<lingxi_hooks::HookRegistry>>,
+    ) -> Self {
+        self.hook_registry = Some(hooks);
+        self
+    }
+
+    /// Attach an agent catalog so `list_agents` reports real data.
+    /// Wrapped in `RwLock` so the CLI binary can append/reload agents
+    /// without rebuilding the orchestrator. (M6-07)
+    #[must_use]
+    pub fn with_agent_catalog(
+        mut self,
+        agents: Arc<tokio::sync::RwLock<Vec<lingxi_agent::AgentDefinition>>>,
+    ) -> Self {
+        self.agent_catalog = Some(agents);
+        self
+    }
+
+    /// Whether an MCP registry has been wired via
+    /// [`Self::with_mcp_registry`]. (M6-07)
+    #[must_use]
+    pub fn has_mcp_registry(&self) -> bool {
+        self.mcp_registry.is_some()
+    }
+
+    /// Whether a hook registry has been wired via
+    /// [`Self::with_hook_registry`]. (M6-07)
+    #[must_use]
+    pub fn has_hook_registry(&self) -> bool {
+        self.hook_registry.is_some()
+    }
+
+    /// Whether an agent catalog has been wired via
+    /// [`Self::with_agent_catalog`]. (M6-07)
+    #[must_use]
+    pub fn has_agent_catalog(&self) -> bool {
+        self.agent_catalog.is_some()
     }
 
     /// Read the current cost state from the wired tracker, if any.

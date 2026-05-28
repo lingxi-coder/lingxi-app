@@ -38,7 +38,7 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     //        -> 312 total.
     // M5-13: orchestrator block grows 15 -> 17 (+2 REPL session started/ended)
     //        -> 314 total.
-    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 1 + 54;
+    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 2 + 54;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;

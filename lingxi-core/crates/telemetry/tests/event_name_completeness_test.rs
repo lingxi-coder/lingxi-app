@@ -5,7 +5,7 @@
 use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_314_entries() {
+fn registry_is_exactly_315_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
@@ -24,7 +24,9 @@ fn registry_is_exactly_314_entries() {
     // 276 (post-M5-10) + 36 (M5-11) = 312.
     // M5-13 added 2 REPL session lifecycle events (repl_session_started/ended):
     // 312 + 2 = 314.
-    assert_eq!(ALL_EVENT_NAMES.len(), 314);
+    // M5-14 added 1 release marker `lingxi_core_v0_6_0_released`:
+    // 314 + 1 = 315.
+    assert_eq!(ALL_EVENT_NAMES.len(), 315);
 }
 
 #[test]
@@ -60,10 +62,22 @@ fn lingxi_core_v0_5_0_released_is_registered() {
 }
 
 #[test]
+fn lingxi_core_v0_6_0_released_is_registered() {
+    assert!(
+        ALL_EVENT_NAMES.contains(&"lingxi_core_v0_6_0_released"),
+        "v0.6.0 release-marker event must be present in ALL_EVENT_NAMES"
+    );
+}
+
+#[test]
 fn release_marker_constant_matches() {
     assert_eq!(
         lingxi_telemetry::tengu::release::LINGXI_CORE_V0_5_0_RELEASED,
         "lingxi_core_v0_5_0_released"
+    );
+    assert_eq!(
+        lingxi_telemetry::tengu::release::LINGXI_CORE_V0_6_0_RELEASED,
+        "lingxi_core_v0_6_0_released"
     );
 }
 
@@ -114,13 +128,14 @@ fn category_ordering_preserved() {
             "orchestrator block: {n}"
         );
     }
-    for n in &ALL_EVENT_NAMES[259..260] {
+    // M5-14 grew the release block from 1 to 2 (+lingxi_core_v0_6_0_released).
+    for n in &ALL_EVENT_NAMES[259..261] {
         assert!(n.starts_with("lingxi_core_"), "release block: {n}");
     }
     // M5-10/M5-11: command block (54 events: 18 batch-1 + 36 batch-2) follows
-    // the release marker. Walk order (per tengu::mod.rs concat_all):
+    // the release markers. Walk order (per tengu::mod.rs concat_all):
     // … → release → command.
-    for n in &ALL_EVENT_NAMES[260..314] {
+    for n in &ALL_EVENT_NAMES[261..315] {
         assert!(n.starts_with("tengu_command_"), "command block: {n}");
     }
 }

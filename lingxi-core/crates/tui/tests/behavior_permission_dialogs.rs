@@ -43,3 +43,39 @@ async fn feed_1_sends_allow_once() {
     assert!(state.pending_permission.is_none());
     assert!(state.pending_permission_resp_tx.is_none());
 }
+
+#[tokio::test]
+async fn feed_2_sends_allow_always() {
+    let mut state = AppState::new(StatusSnapshot::default());
+    let rx = open_tool_use_dialog(&mut state);
+    handle_key(&mut state, k(KeyCode::Char('2')));
+    let resp = rx.await.unwrap();
+    assert_eq!(resp, PermissionResponse::AllowAlways);
+}
+
+#[tokio::test]
+async fn feed_lowercase_n_sends_deny() {
+    let mut state = AppState::new(StatusSnapshot::default());
+    let rx = open_tool_use_dialog(&mut state);
+    handle_key(&mut state, k(KeyCode::Char('n')));
+    let resp = rx.await.unwrap();
+    assert_eq!(resp, PermissionResponse::Deny);
+}
+
+#[tokio::test]
+async fn feed_uppercase_n_sends_deny() {
+    let mut state = AppState::new(StatusSnapshot::default());
+    let rx = open_tool_use_dialog(&mut state);
+    handle_key(&mut state, k(KeyCode::Char('N')));
+    let resp = rx.await.unwrap();
+    assert_eq!(resp, PermissionResponse::Deny);
+}
+
+#[tokio::test]
+async fn feed_esc_sends_deny() {
+    let mut state = AppState::new(StatusSnapshot::default());
+    let rx = open_tool_use_dialog(&mut state);
+    handle_key(&mut state, k(KeyCode::Esc));
+    let resp = rx.await.unwrap();
+    assert_eq!(resp, PermissionResponse::Deny);
+}

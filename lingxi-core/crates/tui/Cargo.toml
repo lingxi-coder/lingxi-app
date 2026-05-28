@@ -1,0 +1,39 @@
+[package]
+name = "lingxi-tui"
+version = "0.6.0"   # bumped to 0.7.0 in M6-09
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+lingxi-protocol = { path = "../protocol" }
+lingxi-traits = { path = "../traits" }
+lingxi-orchestrator = { path = "../orchestrator" }
+lingxi-telemetry = { path = "../telemetry" }
+lingxi-core = { path = "../core" }
+
+iocraft = "=0.8.3"
+crossterm = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = "0.1"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+insta = { version = "1.40", features = ["yaml"] }
+assert_cmd = "=2.0.16"
+predicates = "3"
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

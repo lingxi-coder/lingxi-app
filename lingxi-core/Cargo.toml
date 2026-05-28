@@ -36,6 +36,7 @@ members = [
     "crates/plugin",
     "crates/uniffi-bridge",
     "crates/cli",
+    "crates/tui",
     "platforms/common",
     "platforms/posix-minimal",
     "platforms/posix",
@@ -83,6 +84,7 @@ default-members = [
     "crates/plugin",
     "crates/uniffi-bridge",
     "crates/cli",
+    "crates/tui",
     "platforms/common",
     "platforms/posix-minimal",
     "platforms/posix",
@@ -119,6 +121,8 @@ tokio-util = { version = "0.7", features = ["codec", "io", "rt"] }
 bytes = "1"
 dashmap = "6"
 futures = "0.3"
+crossterm = "0.28"
+tokio-stream = "0.1"
 
 [workspace.lints.rust]
 # Workspace-wide default: `deny` (not `forbid`) so the one module in

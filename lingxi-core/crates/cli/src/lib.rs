@@ -27,6 +27,10 @@
 //! # Exit codes
 //!
 //! See [`exit_codes`].
+//!
+//! # Plan reference
+//!
+//! `docs/superpowers/plans/2026-05-25-m5-12-cli-binary.md`.
 
 #![forbid(unsafe_code)]
 

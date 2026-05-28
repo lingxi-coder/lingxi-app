@@ -21,3 +21,33 @@ fn collapsed_read_with_file_path() {
     });
     assert_snapshot!(s, @r#"● Read({"file_path": "/tmp/x.rs"})"#);
 }
+
+#[test]
+fn expanded_read_shows_pretty_json() {
+    let s = render_assistant_tool_use_to_string(AssistantToolUseProps {
+        id: id(),
+        tool: "Read".into(),
+        input: serde_json::json!({"file_path": "/tmp/x.rs", "limit": 100}),
+        expanded: true,
+        focused: false,
+    });
+    assert_snapshot!(s, @r#"
+    ● Read({"file_path": "/tmp/x.rs", "limit": 100})
+    {
+      "file_path": "/tmp/x.rs",
+      "limit": 100
+    }
+    "#);
+}
+
+#[test]
+fn focused_collapsed_has_arrow_prefix() {
+    let s = render_assistant_tool_use_to_string(AssistantToolUseProps {
+        id: id(),
+        tool: "Read".into(),
+        input: serde_json::json!({"file_path": "/tmp/x.rs"}),
+        expanded: false,
+        focused: true,
+    });
+    assert_snapshot!(s, @r#"> ● Read({"file_path": "/tmp/x.rs"})"#);
+}

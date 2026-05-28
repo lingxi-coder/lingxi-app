@@ -1,0 +1,86 @@
+//! JsonlWriter raw-byte assertion — three appends produce three lines, one
+//! `\n` per line, no extra whitespace.
+
+use lingxi_platform_posix::fs::PosixFileSystem;
+use lingxi_session::jsonl::schema::JsonlMessage;
+use lingxi_session::jsonl::writer::JsonlWriter;
+use lingxi_traits::FileSystem;
+use serde_json::json;
+use std::sync::Arc;
+use tempfile::tempdir;
+
+fn make_msg(uuid: &str, parent: Option<&str>, n: u8) -> JsonlMessage {
+    JsonlMessage {
+        message_type: "user".into(),
+        uuid: uuid.into(),
+        parent_uuid: parent.map(str::to_string),
+        session_id: "11111111-2222-3333-4444-555555555555".into(),
+        timestamp: format!("2026-05-25T14:30:0{n}.000Z"),
+        cwd: "/tmp/proj".into(),
+        version: "0.6.0".into(),
+        message: json!({"role":"user","content":format!("hello {n}")}),
+        is_sidechain: false,
+        user_type: Some("external".into()),
+        git_branch: None,
+        extra: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn three_appends_produce_three_lines_one_lf_each() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join("nested")
+        .join("subdir")
+        .join("11111111-2222-3333-4444-555555555555.jsonl");
+    let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
+    let writer = JsonlWriter::new(path.clone(), fs.clone());
+
+    writer
+        .append(&make_msg("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", None, 0))
+        .await
+        .expect("append 0");
+    writer
+        .append(&make_msg(
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            1,
+        ))
+        .await
+        .expect("append 1");
+    writer
+        .append(&make_msg(
+            "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            Some("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+            2,
+        ))
+        .await
+        .expect("append 2");
+
+    // Direct OS read — we want the RAW bytes, not whatever FileSystem trait
+    // returns. We open the file directly and assert byte-for-byte.
+    let raw = std::fs::read(&path).expect("file written");
+    let text = std::string::String::from_utf8(raw).expect("UTF-8");
+
+    // `split('\n')` on "a\nb\nc\n" yields ["a","b","c",""].
+    let lines: Vec<&str> = text.split('\n').collect();
+    assert_eq!(
+        lines.len(),
+        4,
+        "expected 3 lines + trailing empty, got {lines:?}"
+    );
+    assert_eq!(lines[3], "");
+
+    for (idx, line) in lines[..3].iter().enumerate() {
+        let parsed: JsonlMessage = serde_json::from_str(line).expect("parse");
+        assert_eq!(parsed.timestamp, format!("2026-05-25T14:30:0{idx}.000Z"));
+    }
+
+    // Total bytes = 3 lines + 3 LF.
+    let expected_byte_count: usize = lines[..3].iter().map(|l| l.len() + 1).sum();
+    assert_eq!(text.len(), expected_byte_count, "no extra whitespace");
+
+    // No CRLF anywhere.
+    assert!(!text.contains("\r\n"), "writer must use LF, not CRLF");
+}

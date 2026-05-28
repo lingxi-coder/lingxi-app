@@ -83,6 +83,34 @@ impl PermissionRuleSource {
     }
 }
 
+impl PermissionRule {
+    /// (M6-05) Construct a session-scoped allow rule for the given tool.
+    /// Used by `TuiPermissionGate` when the user picks `AllowAlways` in a
+    /// permission dialog — the rule lives until the orchestrator session
+    /// ends. M7 wires `/permissions` to surface and edit these rules.
+    #[must_use]
+    pub fn allow_tool_session(tool: &str) -> Self {
+        Self {
+            value: PermissionRuleValue {
+                tool_name: tool.to_string(),
+                rule_content: None,
+            },
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::Session,
+        }
+    }
+
+    /// (M6-05) Whether this rule matches the bare tool name with an
+    /// `Allow` behavior. Used by the session-rule lookup in
+    /// `TuiPermissionGate::check` before the dialog opens.
+    #[must_use]
+    pub fn matches_tool(&self, tool: &str) -> bool {
+        self.value.tool_name == tool
+            && self.value.rule_content.is_none()
+            && matches!(self.behavior, PermissionBehavior::Allow)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +121,49 @@ mod tests {
             PermissionRuleSource::Session.priority()
                 > PermissionRuleSource::UserSettings.priority()
         );
+    }
+
+    // M6-05 Task 7: PermissionRule::allow_tool_session + matches_tool.
+
+    #[test]
+    fn allow_tool_session_marks_source_session() {
+        let r = PermissionRule::allow_tool_session("Bash");
+        assert_eq!(r.value.tool_name, "Bash");
+        assert!(r.value.rule_content.is_none());
+        assert!(matches!(r.behavior, PermissionBehavior::Allow));
+        assert!(matches!(r.source, PermissionRuleSource::Session));
+    }
+
+    #[test]
+    fn matches_tool_returns_true_for_same_tool_name() {
+        let r = PermissionRule::allow_tool_session("Bash");
+        assert!(r.matches_tool("Bash"));
+        assert!(!r.matches_tool("Read"));
+    }
+
+    #[test]
+    fn matches_tool_returns_false_when_rule_content_is_some() {
+        let r = PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "Bash".to_string(),
+                rule_content: Some("ls".to_string()),
+            },
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::Session,
+        };
+        assert!(!r.matches_tool("Bash"));
+    }
+
+    #[test]
+    fn matches_tool_returns_false_when_behavior_is_deny() {
+        let r = PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "Bash".to_string(),
+                rule_content: None,
+            },
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::Session,
+        };
+        assert!(!r.matches_tool("Bash"));
     }
 }

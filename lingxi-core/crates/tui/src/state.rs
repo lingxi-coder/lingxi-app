@@ -19,8 +19,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use lingxi_permission::gate::{PermissionRequest, PermissionResponse};
 use lingxi_permission::PermissionMode;
 use lingxi_protocol::ToolUseId;
+use tokio::sync::oneshot;
 
 /// Maximum number of messages retained in the scrollback. Excess messages
 /// are evicted FIFO.
@@ -115,17 +117,28 @@ pub struct TurnInFlight {
     pub cancel: tokio_util::sync::CancellationToken,
 }
 
-/// Permission-prompt slot. Reserved (M6-03), populated in M6-05.
+/// Permission-prompt slot — populated in M6-05.
 ///
-/// M6-03 wires the `apply_event` path to set this to `Some(_)` on
-/// `TurnEvent::PermissionRequest`, but the renderer does not yet display
-/// it — that's the M6-05 dialog.
+/// M6-03 reserved a placeholder shape `{tool, input}`. M6-05 promotes it
+/// to carry the full [`PermissionRequest`] enum (which covers
+/// `ToolUseConfirm`, `ExitPlanMode`, and `BypassPermissionsMode`).
 #[derive(Debug, Clone)]
 pub struct PendingPermission {
-    /// The tool the permission gate is asking about.
-    pub tool: String,
-    /// JSON input the permission gate is being asked to approve.
-    pub input: serde_json::Value,
+    /// The full request the orchestrator is awaiting an answer for.
+    pub request: PermissionRequest,
+}
+
+impl PendingPermission {
+    /// Convenience accessor — the tool name for `ToolUseConfirm`
+    /// variants, or a synthetic descriptor for the other two variants.
+    #[must_use]
+    pub fn tool(&self) -> &str {
+        match &self.request {
+            PermissionRequest::ToolUseConfirm { tool_name, .. } => tool_name.as_str(),
+            PermissionRequest::ExitPlanMode { .. } => "exit_plan_mode",
+            PermissionRequest::BypassPermissionsMode => "bypass_permissions",
+        }
+    }
 }
 
 /// Per-turn streaming state. Created on `TurnStarted`, dropped on
@@ -198,6 +211,24 @@ pub struct AppState {
     /// by the `ToolUseId` carried on `AssistantToolUse` / `UserToolResult`
     /// entries.
     pub expanded: HashMap<ToolUseId, bool>,
+    /// (M6-05) Oneshot back-channel to the orchestrator for the active
+    /// permission round-trip. `Some(_)` whenever `pending_permission`
+    /// holds a real request that arrived over the bridge; `None` for
+    /// stub requests synthesized by `apply_event` (M6-03) or while no
+    /// dialog is open.
+    pub pending_permission_resp_tx: Option<oneshot::Sender<PermissionResponse>>,
+    /// (M6-05) Instant the active dialog opened — used to compute
+    /// `elapsed_ms` in the resolved-telemetry event.
+    pub pending_permission_started_at: Option<Instant>,
+    /// (M6-05) Per-dialog state for the `ToolUseConfirm` dialog.
+    pub tool_use_dialog_state:
+        crate::components::permissions::tool_use_confirm::ToolUseConfirmState,
+    /// (M6-05) Per-dialog state for the `ExitPlanMode` dialog.
+    pub exit_plan_dialog_state:
+        crate::components::permissions::exit_plan_mode::ExitPlanModeState,
+    /// (M6-05) Per-dialog state for the `BypassPermissionsMode` dialog.
+    pub bypass_dialog_state:
+        crate::components::permissions::bypass_permissions::BypassPermissionsState,
 }
 
 impl AppState {
@@ -220,6 +251,11 @@ impl AppState {
             should_exit: false,
             focused_tool_id: None,
             expanded: HashMap::new(),
+            pending_permission_resp_tx: None,
+            pending_permission_started_at: None,
+            tool_use_dialog_state: Default::default(),
+            exit_plan_dialog_state: Default::default(),
+            bypass_dialog_state: Default::default(),
         }
     }
 

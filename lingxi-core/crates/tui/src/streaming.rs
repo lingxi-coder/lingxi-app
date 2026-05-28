@@ -52,7 +52,20 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
                 .push(RenderedMessage::UserToolResult { id, tool, result });
         }
         TurnEvent::PermissionRequest { tool, input } => {
-            state.pending_permission = Some(PendingPermission { tool, input });
+            // M6-03 bridge variant still carries the legacy {tool, input}
+            // shape — translate to the M6-05 enum's `ToolUseConfirm`
+            // arm. The richer bridge variant that ships the full
+            // `PermissionRequest` enum lives on the dedicated
+            // `mpsc<PermissionExchange>` channel owned by
+            // `TuiPermissionGate` (see `permission_bridge.rs`).
+            let default_decision = lingxi_permission::tool_default(&tool);
+            state.pending_permission = Some(PendingPermission {
+                request: lingxi_permission::gate::PermissionRequest::ToolUseConfirm {
+                    tool_name: tool,
+                    tool_input: input,
+                    default_decision,
+                },
+            });
         }
         TurnEvent::TurnEnded(_outcome) => {
             state.streaming = None;
@@ -146,6 +159,6 @@ mod tests {
             &n,
         );
         assert!(s.pending_permission.is_some());
-        assert_eq!(s.pending_permission.as_ref().unwrap().tool, "Bash");
+        assert_eq!(s.pending_permission.as_ref().unwrap().tool(), "Bash");
     }
 }

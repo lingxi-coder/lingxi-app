@@ -14,6 +14,7 @@ pub mod app;
 pub mod components;
 pub mod error;
 pub mod events;
+pub mod permission_bridge;
 pub mod root;
 pub mod screens;
 pub mod session;

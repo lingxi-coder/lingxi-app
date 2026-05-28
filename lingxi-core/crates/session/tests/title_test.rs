@@ -1,5 +1,7 @@
 //! T2 tests — byte-lock `extract_title` against the cases in plan T0 step 3.
 
+#![allow(clippy::needless_pass_by_value)]
+
 use lingxi_session::jsonl::{extract_title, JsonlMessage};
 use serde_json::json;
 

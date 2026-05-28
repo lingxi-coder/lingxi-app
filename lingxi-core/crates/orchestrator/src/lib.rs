@@ -42,7 +42,7 @@ pub use conversation::{
     ConversationOutcome, OrchestratorApiClient, StreamingApiClient,
 };
 pub use error::OrchestratorError;
-pub use resume::{replay_session_state, ReplayedSession, ResumeError};
 pub use prompt::{
     assemble_system_prompt, FileTree, FileTreeEntry, GitStatus, MemoryFile, SystemPromptContext,
 };
+pub use resume::{replay_session_state, ReplayedSession, ResumeError};

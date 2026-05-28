@@ -9,9 +9,10 @@ use uuid::Uuid;
 fn rows(n: usize) -> Vec<SessionMetadata> {
     (0..n)
         .map(|i| SessionMetadata {
-            uuid: Uuid::from_bytes([(i + 1) as u8; 16]),
+            uuid: Uuid::from_bytes([u8::try_from(i + 1).unwrap_or(0); 16]),
             title: format!("title-{i}"),
-            modified: UNIX_EPOCH + Duration::from_secs(1_700_000_000 + i as u64),
+            modified: UNIX_EPOCH
+                + Duration::from_secs(1_700_000_000 + u64::try_from(i).unwrap_or(0)),
             message_count: 3,
             path: PathBuf::from(format!("s{i}.jsonl")),
         })

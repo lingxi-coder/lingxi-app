@@ -1,4 +1,4 @@
-//! T5 tests — load_session validates chain + sessionId consistency.
+//! T5 tests — `load_session` validates chain + `sessionId` consistency.
 
 use lingxi_platform_posix::fs::PosixFileSystem;
 use lingxi_session::jsonl::{load_session, project_dir_name, LoaderError};
@@ -30,17 +30,17 @@ fn json_line(uuid: &str, parent: Option<&str>, session: &str) -> String {
     let mut v = serde_json::Map::new();
     v.insert("type".into(), json!("user"));
     v.insert("uuid".into(), json!(uuid));
-    v.insert("parentUuid".into(), parent.map_or(json!(null), |p| json!(p)));
+    v.insert(
+        "parentUuid".into(),
+        parent.map_or(json!(null), |p| json!(p)),
+    );
     v.insert("sessionId".into(), json!(session));
     v.insert("timestamp".into(), json!("2026-05-25T12:00:00.000Z"));
     v.insert("cwd".into(), json!("/proj"));
     v.insert("version".into(), json!("0.6.0"));
     v.insert("isSidechain".into(), json!(false));
     v.insert("userType".into(), json!("external"));
-    v.insert(
-        "message".into(),
-        json!({"role": "user", "content": "hi"}),
-    );
+    v.insert("message".into(), json!({"role": "user", "content": "hi"}));
     format!("{}\n", serde_json::to_string(&v).unwrap())
 }
 

@@ -1,4 +1,4 @@
-//! T6 tests — exact-string Display locks for LoaderError variants.
+//! T6 tests — exact-string Display locks for `LoaderError` variants.
 
 use lingxi_session::jsonl::LoaderError;
 use uuid::Uuid;

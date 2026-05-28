@@ -1,4 +1,4 @@
-//! T3 tests — confirm SessionMetadata Ord is mtime-desc with filename-asc tiebreaker.
+//! T3 tests — confirm `SessionMetadata` `Ord` is mtime-desc with filename-asc tiebreaker.
 
 use lingxi_session::jsonl::SessionMetadata;
 use std::path::PathBuf;

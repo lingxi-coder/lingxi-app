@@ -1,6 +1,6 @@
-//! T10 interop — write via JsonlWriter, load via replay_session_state,
+//! T10 interop — write via `JsonlWriter`, load via `replay_session_state`,
 //! append a 3rd message using the replayed `last_message_uuid` as parent,
-//! re-read via JsonlReader, confirm the full 3-link chain.
+//! re-read via `JsonlReader`, confirm the full 3-link chain.
 
 use lingxi_orchestrator::replay_session_state;
 use lingxi_platform_posix::fs::PosixFileSystem;

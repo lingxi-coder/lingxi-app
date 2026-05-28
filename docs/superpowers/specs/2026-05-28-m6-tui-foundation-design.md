@@ -610,7 +610,7 @@ Each sub-plan ends with an annotated tag `m6.N` and is reviewed before the next 
 | M6-01 | iocraft + crate split + event loop foundation | `m6.1` |
 | M6-02 | Minimal working REPL (StatusLine + PromptInput + 2 message types) | `m6.2` |
 | M6-03 | Streaming + SpinnerWithVerb | `m6.3` |
-| M6-04 | Tool use + tool result rendering | `m6.4` |
+| M6-04 | ✅ Tool use + tool result rendering | `m6.4` |
 | M6-05 | 3 permission dialogs + focus-trap | `m6.5` |
 | M6-06 | Engine wiring: real cost | `m6.6` |
 | M6-07 | Engine wiring: MCP/Hooks/Agents listings | `m6.7` |

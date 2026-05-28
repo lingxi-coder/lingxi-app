@@ -85,17 +85,19 @@ pub fn emit_command_failed(event: &'static str, error: &str) {
 
 // -- M5-14 Task 10: release-marker emit-once helpers -------------------------
 
-/// Emit `lingxi_core_v0_6_0_released` exactly once per process lifetime.
+/// Emit the release markers exactly once per process lifetime.
 ///
 /// Guarded by `std::sync::Once` so re-constructing a `ConversationOrchestrator`
 /// in long-running processes (e.g. tests, REPL) does not emit duplicate events.
-/// Also emits the v0.5.0 marker for upgrade-chain continuity (both fire on the
-/// first `ConversationOrchestrator::new*` after the binary starts).
+/// Emits the v0.5.0 + v0.6.0 markers for upgrade-chain continuity and the
+/// current v0.7.0 marker (all fire on the first
+/// `ConversationOrchestrator::new*` after the binary starts).
 pub fn emit_release_markers_once() {
     use std::sync::Once;
 
     static V0_5_0_ONCE: Once = Once::new();
     static V0_6_0_ONCE: Once = Once::new();
+    static V0_7_0_ONCE: Once = Once::new();
 
     V0_5_0_ONCE.call_once(|| {
         tracing::info!(
@@ -109,4 +111,35 @@ pub fn emit_release_markers_once() {
             version = "0.6.0",
         );
     });
+    V0_7_0_ONCE.call_once(|| {
+        tracing::info!(
+            event = crate::tengu::release::LINGXI_CORE_V0_7_0_RELEASED,
+            version = "0.7.0",
+        );
+    });
+}
+
+#[cfg(test)]
+mod release_marker_tests {
+    use super::*;
+
+    #[test]
+    fn emit_release_markers_once_is_idempotent_and_wires_v0_7_0() {
+        // The helper is `Once`-guarded per release; calling it repeatedly must
+        // not panic. The v0.7.0 marker is wired alongside v0.5.0/v0.6.0.
+        emit_release_markers_once();
+        emit_release_markers_once();
+        emit_release_markers_once();
+
+        // The marker the helper emits is the registered, locked wire string.
+        assert_eq!(
+            crate::tengu::release::LINGXI_CORE_V0_7_0_RELEASED,
+            "lingxi_core_v0_7_0_released"
+        );
+        assert!(
+            crate::tengu::ALL_EVENT_NAMES
+                .contains(&crate::tengu::release::LINGXI_CORE_V0_7_0_RELEASED),
+            "the v0.7.0 marker the helper emits must be registered in ALL_EVENT_NAMES"
+        );
+    }
 }

@@ -18,7 +18,7 @@ use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 fn make_request(tool_name: &str, default: PromptDefault) -> PermissionRequest {
-    PermissionRequest {
+    PermissionRequest::ToolUseConfirm {
         tool_name: tool_name.to_string(),
         tool_input: json!({}),
         default_decision: default,

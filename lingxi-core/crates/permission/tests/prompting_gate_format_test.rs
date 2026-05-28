@@ -12,20 +12,30 @@ use serde_json::json;
 
 #[test]
 fn allow_by_default_round_trips() {
-    let r = PermissionRequest {
+    let r = PermissionRequest::ToolUseConfirm {
         tool_name: "Read".to_string(),
         tool_input: json!({}),
         default_decision: PromptDefault::AllowByDefault,
     };
-    assert_eq!(r.default_decision, PromptDefault::AllowByDefault);
+    match r {
+        PermissionRequest::ToolUseConfirm {
+            default_decision, ..
+        } => assert_eq!(default_decision, PromptDefault::AllowByDefault),
+        _ => panic!("wrong variant"),
+    }
 }
 
 #[test]
 fn deny_by_default_round_trips() {
-    let r = PermissionRequest {
+    let r = PermissionRequest::ToolUseConfirm {
         tool_name: "Bash".to_string(),
         tool_input: json!({}),
         default_decision: PromptDefault::DenyByDefault,
     };
-    assert_eq!(r.default_decision, PromptDefault::DenyByDefault);
+    match r {
+        PermissionRequest::ToolUseConfirm {
+            default_decision, ..
+        } => assert_eq!(default_decision, PromptDefault::DenyByDefault),
+        _ => panic!("wrong variant"),
+    }
 }

@@ -29,7 +29,8 @@ use crate::gate::{
 /// (see plan §"Reverse-engineered byte-locks").
 const MAX_RETRIES: u32 = 3;
 
-/// Format the byte-locked prompt for a [`PermissionRequest`].
+/// Format the byte-locked prompt for the stdio path's
+/// `PermissionRequest::ToolUseConfirm` variant.
 ///
 /// - Generic tools: `"Claude needs your permission to use {tool_name}\n[Y/n] "`
 ///   or `[y/N]` depending on the tool's default.
@@ -37,18 +38,22 @@ const MAX_RETRIES: u32 = 3;
 ///   `"Agent tool requires permission to spawn sub-agents.\n[Y/n] "`.
 ///
 /// The suffix bracket pair is always followed by a single space.
-pub(crate) fn format_prompt(request: &PermissionRequest) -> String {
-    let suffix = match request.default_decision {
+///
+/// Only meaningful for `ToolUseConfirm` — the other variants
+/// (`ExitPlanMode`, `BypassPermissionsMode`) are TUI-only and return
+/// `PromptError::Cancelled` at the `PromptingGate` layer.
+pub(crate) fn format_prompt_tool_use(
+    tool_name: &str,
+    default_decision: PromptDefault,
+) -> String {
+    let suffix = match default_decision {
         PromptDefault::AllowByDefault => "[Y/n] ",
         PromptDefault::DenyByDefault => "[y/N] ",
     };
-    if request.tool_name == "Agent" || request.tool_name == "Task" {
+    if tool_name == "Agent" || tool_name == "Task" {
         format!("Agent tool requires permission to spawn sub-agents.\n{suffix}")
     } else {
-        format!(
-            "Claude needs your permission to use {}\n{suffix}",
-            request.tool_name
-        )
+        format!("Claude needs your permission to use {tool_name}\n{suffix}")
     }
 }
 
@@ -137,7 +142,7 @@ pub(crate) fn resolve_outcome(outcome: ParseOutcome, default: PromptDefault) -> 
 #[async_trait]
 impl PermissionGate for InteractivePromptingGate {
     async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
-        let request = PermissionRequest {
+        let request = PermissionRequest::ToolUseConfirm {
             tool_name: name.to_string(),
             tool_input: input.clone(),
             default_decision: crate::defaults_per_tool::tool_default(name),
@@ -164,8 +169,25 @@ impl PromptingGate for InteractivePromptingGate {
         &self,
         request: &PermissionRequest,
     ) -> Result<PromptDecision, PromptError> {
-        let prompt = format_prompt(request);
-        let default_allow = matches!(request.default_decision, PromptDefault::AllowByDefault);
+        // M6-05: the stdio gate only handles the ToolUseConfirm variant.
+        // ExitPlanMode and BypassPermissionsMode require multiline dialogs
+        // that the TUI gate owns; the stdio path returns a structured
+        // cancellation so the orchestrator falls through to Deny.
+        let (tool_name, default_decision) = match request {
+            PermissionRequest::ToolUseConfirm {
+                tool_name,
+                default_decision,
+                ..
+            } => (tool_name.as_str(), *default_decision),
+            PermissionRequest::ExitPlanMode { .. }
+            | PermissionRequest::BypassPermissionsMode => {
+                return Err(PromptError::Cancelled {
+                    reason: "stdio gate cannot render multiline permission dialogs".to_string(),
+                });
+            }
+        };
+        let prompt = format_prompt_tool_use(tool_name, default_decision);
+        let default_allow = matches!(default_decision, PromptDefault::AllowByDefault);
         let mut attempts: u32 = 0;
         // Acquire stdin lock + wrap in BufReader ONCE for the full prompt
         // round-trip. Creating a fresh BufReader per loop iteration would
@@ -179,7 +201,7 @@ impl PromptingGate for InteractivePromptingGate {
             // Telemetry: prompt about to be shown (once per attempt).
             tracing::info!(
                 event = lingxi_telemetry::tengu::orchestrator::PERMISSION_PROMPTED,
-                tool_name = %request.tool_name,
+                tool_name = %tool_name,
                 default_allow,
             );
 
@@ -209,7 +231,7 @@ impl PromptingGate for InteractivePromptingGate {
             };
             // 3. Classify and decide.
             let outcome = parse_user_input(&line);
-            if let Some(allow) = resolve_outcome(outcome, request.default_decision) {
+            if let Some(allow) = resolve_outcome(outcome, default_decision) {
                 let reason = match outcome {
                     ParseOutcome::ValidYes => "user typed 'y'".to_string(),
                     ParseOutcome::ValidNo => "user typed 'n'".to_string(),
@@ -224,7 +246,7 @@ impl PromptingGate for InteractivePromptingGate {
                 // Telemetry: definitive answer (NOT fired on retry).
                 tracing::info!(
                     event = lingxi_telemetry::tengu::orchestrator::PERMISSION_ANSWERED,
-                    tool_name = %request.tool_name,
+                    tool_name = %tool_name,
                     allowed = allow,
                     attempts = attempts + 1,
                 );
@@ -251,12 +273,7 @@ mod tests {
 
     #[test]
     fn format_prompt_generic_allow_default_byte_locked() {
-        let req = PermissionRequest {
-            tool_name: "Read".to_string(),
-            tool_input: json!({}),
-            default_decision: PromptDefault::AllowByDefault,
-        };
-        let s = format_prompt(&req);
+        let s = format_prompt_tool_use("Read", PromptDefault::AllowByDefault);
         assert_eq!(
             s.as_bytes(),
             b"Claude needs your permission to use Read\n[Y/n] "
@@ -265,12 +282,7 @@ mod tests {
 
     #[test]
     fn format_prompt_generic_deny_default_byte_locked() {
-        let req = PermissionRequest {
-            tool_name: "Bash".to_string(),
-            tool_input: json!({}),
-            default_decision: PromptDefault::DenyByDefault,
-        };
-        let s = format_prompt(&req);
+        let s = format_prompt_tool_use("Bash", PromptDefault::DenyByDefault);
         assert_eq!(
             s.as_bytes(),
             b"Claude needs your permission to use Bash\n[y/N] "
@@ -279,12 +291,7 @@ mod tests {
 
     #[test]
     fn format_prompt_agent_special_byte_locked() {
-        let req = PermissionRequest {
-            tool_name: "Agent".to_string(),
-            tool_input: json!({}),
-            default_decision: PromptDefault::AllowByDefault,
-        };
-        let s = format_prompt(&req);
+        let s = format_prompt_tool_use("Agent", PromptDefault::AllowByDefault);
         assert_eq!(
             s.as_bytes(),
             b"Agent tool requires permission to spawn sub-agents.\n[Y/n] "
@@ -294,16 +301,52 @@ mod tests {
     #[test]
     fn format_prompt_task_alias_also_uses_agent_message() {
         // `Task` is the legacy alias for the Agent tool.
-        let req = PermissionRequest {
-            tool_name: "Task".to_string(),
-            tool_input: json!({}),
-            default_decision: PromptDefault::AllowByDefault,
-        };
-        let s = format_prompt(&req);
+        let s = format_prompt_tool_use("Task", PromptDefault::AllowByDefault);
         assert_eq!(
             s.as_bytes(),
             b"Agent tool requires permission to spawn sub-agents.\n[Y/n] "
         );
+    }
+
+    // M6-05 Task 2: ExitPlanMode and BypassPermissionsMode variants return
+    // PromptError::Cancelled at the stdio gate (TUI dialog owns them).
+
+    #[tokio::test]
+    async fn stdio_gate_returns_cancelled_for_exit_plan_mode() {
+        use std::sync::Arc;
+        use tokio::io::{duplex, AsyncWriteExt};
+        use tokio::sync::Mutex;
+
+        let (mut script, in_end) = duplex(64);
+        script.write_all(b"").await.unwrap();
+        drop(script);
+        let (out_end, _drain) = duplex(64);
+        let gate = InteractivePromptingGate::new(
+            Arc::new(Mutex::new(in_end)),
+            Arc::new(Mutex::new(out_end)),
+        );
+        let req = PermissionRequest::ExitPlanMode {
+            plan: "x".to_string(),
+        };
+        let err = gate.prompt_user(&req).await.unwrap_err();
+        assert!(matches!(err, PromptError::Cancelled { .. }));
+    }
+
+    #[tokio::test]
+    async fn stdio_gate_returns_cancelled_for_bypass_permissions() {
+        use std::sync::Arc;
+        use tokio::io::duplex;
+        use tokio::sync::Mutex;
+
+        let (_script, in_end) = duplex(64);
+        let (out_end, _drain) = duplex(64);
+        let gate = InteractivePromptingGate::new(
+            Arc::new(Mutex::new(in_end)),
+            Arc::new(Mutex::new(out_end)),
+        );
+        let req = PermissionRequest::BypassPermissionsMode;
+        let err = gate.prompt_user(&req).await.unwrap_err();
+        assert!(matches!(err, PromptError::Cancelled { .. }));
     }
 
     // ---- parse_user_input + resolve_outcome (Task 6) ----

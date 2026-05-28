@@ -17,6 +17,7 @@ pub mod config;
 pub mod conversation;
 pub mod error;
 pub mod prompt;
+pub mod resume;
 pub mod sse;
 pub mod streaming_loop;
 pub mod turn_loop;
@@ -41,6 +42,7 @@ pub use conversation::{
     ConversationOutcome, OrchestratorApiClient, StreamingApiClient,
 };
 pub use error::OrchestratorError;
+pub use resume::{replay_session_state, ReplayedSession, ResumeError};
 pub use prompt::{
     assemble_system_prompt, FileTree, FileTreeEntry, GitStatus, MemoryFile, SystemPromptContext,
 };

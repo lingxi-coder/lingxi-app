@@ -47,6 +47,10 @@ pub const APPENDED: &str = "tengu_session_appended";
 pub const ROTATED: &str = "tengu_session_rotated";
 /// `tengu_session_corrupted` — writer or reader detected an unrecoverable I/O / parse error.
 pub const CORRUPTED: &str = "tengu_session_corrupted";
+/// `tengu_session_resume_started` — `/resume` or `--resume <id>` began loading the JSONL.
+pub const RESUME_STARTED: &str = "tengu_session_resume_started";
+/// `tengu_session_resume_completed` — resume successfully replayed all messages into the orchestrator.
+pub const RESUME_COMPLETED: &str = "tengu_session_resume_completed";
 
 /// Order-locked array of all 18 names; consumed by `tengu::ALL_EVENT_NAMES`.
 pub(crate) const NAMES: &[&str] = &[

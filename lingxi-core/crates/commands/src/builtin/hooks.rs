@@ -34,7 +34,7 @@ impl BuiltinCommandHandler for HooksHandler {
         lingxi_telemetry::emit_command_started(cmd_evt::HOOKS_STARTED);
         let hooks = self.handle.list_hooks().await;
         let rows: Vec<String> = hooks.iter().map(format_row).collect();
-        let s = render_list("Hooks", rows);
+        let s = render_list("Hooks", rows, "No hooks configured");
         lingxi_telemetry::emit_command_completed(cmd_evt::HOOKS_COMPLETED, "");
         CommandResult::Done { display: Some(s) }
     }
@@ -68,7 +68,7 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = HooksHandler::new(mock);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "Hooks (0):\n");
+            assert_eq!(s, "No hooks configured\n");
         } else {
             panic!();
         }

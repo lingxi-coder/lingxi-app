@@ -35,7 +35,7 @@ impl BuiltinCommandHandler for AgentsHandler {
         lingxi_telemetry::emit_command_started(cmd_evt::AGENTS_STARTED);
         let agents = self.handle.list_agents().await;
         let rows: Vec<String> = agents.iter().map(format_row).collect();
-        let s = render_list("Agents", rows);
+        let s = render_list("Agents", rows, "No subagents configured");
         lingxi_telemetry::emit_command_completed(cmd_evt::AGENTS_COMPLETED, "");
         CommandResult::Done { display: Some(s) }
     }
@@ -87,7 +87,7 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = AgentsHandler::new(mock);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "Agents (0):\n");
+            assert_eq!(s, "No subagents configured\n");
         } else {
             panic!();
         }

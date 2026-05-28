@@ -162,7 +162,7 @@ async fn orchestrator_drives_real_file_read_tool_on_a_tempfile() {
     let tool_result_payload = events
         .iter()
         .find_map(|e| match e {
-            OutputEvent::ToolResult { tool, result } if tool == "Read" => Some(result.clone()),
+            OutputEvent::ToolResult { tool, result, .. } if tool == "Read" => Some(result.clone()),
             _ => None,
         })
         .expect("Read ToolResult present");

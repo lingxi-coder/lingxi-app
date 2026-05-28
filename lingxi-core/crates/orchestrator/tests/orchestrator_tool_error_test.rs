@@ -128,7 +128,7 @@ async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() 
     let tool_result = events
         .iter()
         .find_map(|e| match e {
-            OutputEvent::ToolResult { tool, result } if tool == "AlwaysFail" => {
+            OutputEvent::ToolResult { tool, result, .. } if tool == "AlwaysFail" => {
                 Some(result.clone())
             }
             _ => None,

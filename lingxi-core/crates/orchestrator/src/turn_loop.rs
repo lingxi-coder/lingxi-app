@@ -148,7 +148,7 @@ pub(crate) async fn dispatch_tool_uses(
 ) -> Result<Vec<ContentBlock>, OrchestratorError> {
     let mut results = Vec::with_capacity(tool_uses.len());
     for (tool_use_id, name, input) in tool_uses {
-        orch.output.emit_tool_call(name, input).await;
+        orch.output.emit_tool_call(tool_use_id, name, input).await;
 
         // M5-06 Task 14: PreToolUse hook chain. Build the event + context,
         // call the executor, and either Block (turn the response into an
@@ -192,6 +192,7 @@ pub(crate) async fn dispatch_tool_uses(
             };
             orch.output
                 .emit_tool_result(
+                    tool_use_id,
                     name,
                     &serde_json::json!({ "error": format!("Hook blocked: {reason}") }),
                 )
@@ -231,6 +232,7 @@ pub(crate) async fn dispatch_tool_uses(
                 };
                 orch.output
                     .emit_tool_result(
+                        tool_use_id,
                         name,
                         &serde_json::json!({ "error": format!("Permission denied: {reason}") }),
                     )
@@ -249,6 +251,7 @@ pub(crate) async fn dispatch_tool_uses(
             };
             orch.output
                 .emit_tool_result(
+                    tool_use_id,
                     name,
                     &serde_json::json!({ "error": format!("tool not found: {name}") }),
                 )
@@ -301,7 +304,9 @@ pub(crate) async fn dispatch_tool_uses(
             }
         };
 
-        orch.output.emit_tool_result(name, &emit_payload).await;
+        orch.output
+            .emit_tool_result(tool_use_id, name, &emit_payload)
+            .await;
 
         // M5-06 Task 14: PostToolUse hook chain. Best-effort — a Post
         // hook's system_messages are appended to the result text, but

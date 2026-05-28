@@ -144,7 +144,7 @@ impl MockOutputStream {
             .await
             .iter()
             .filter_map(|e| match e {
-                OutputEvent::ToolCall { tool, input } => Some((tool.clone(), input.clone())),
+                OutputEvent::ToolCall { tool, input, .. } => Some((tool.clone(), input.clone())),
                 _ => None,
             })
             .collect()
@@ -164,14 +164,26 @@ impl OutputStream for MockOutputStream {
             text: text.to_string(),
         });
     }
-    async fn emit_tool_call(&self, tool: &str, input: &serde_json::Value) {
+    async fn emit_tool_call(
+        &self,
+        id: &lingxi_protocol::ToolUseId,
+        tool: &str,
+        input: &serde_json::Value,
+    ) {
         self.events.lock().await.push(OutputEvent::ToolCall {
+            id: *id,
             tool: tool.to_string(),
             input: input.clone(),
         });
     }
-    async fn emit_tool_result(&self, tool: &str, result: &serde_json::Value) {
+    async fn emit_tool_result(
+        &self,
+        id: &lingxi_protocol::ToolUseId,
+        tool: &str,
+        result: &serde_json::Value,
+    ) {
         self.events.lock().await.push(OutputEvent::ToolResult {
+            id: *id,
             tool: tool.to_string(),
             result: result.clone(),
         });
@@ -736,14 +748,15 @@ mod tests {
     #[tokio::test]
     async fn mock_output_stream_captures_tool_lifecycle() {
         let m = MockOutputStream::new();
+        let id = lingxi_protocol::ToolUseId::new();
         let input = serde_json::json!({"file_path": "/tmp/x"});
         let result = serde_json::json!({"content": "ok"});
-        m.emit_tool_call("Read", &input).await;
-        m.emit_tool_result("Read", &result).await;
+        m.emit_tool_call(&id, "Read", &input).await;
+        m.emit_tool_result(&id, "Read", &result).await;
         let snap = m.snapshot().await;
         assert_eq!(snap.len(), 2);
-        assert!(matches!(snap[0], OutputEvent::ToolCall { .. }));
-        assert!(matches!(snap[1], OutputEvent::ToolResult { .. }));
+        assert!(matches!(snap[0], OutputEvent::ToolCall { id: gid, .. } if gid == id));
+        assert!(matches!(snap[1], OutputEvent::ToolResult { id: gid, .. } if gid == id));
     }
 
     #[tokio::test]

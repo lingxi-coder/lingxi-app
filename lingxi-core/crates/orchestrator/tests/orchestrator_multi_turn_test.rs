@@ -148,7 +148,7 @@ async fn two_turns_with_one_tool_use_drives_loop_to_end_turn() {
         _ => panic!("event 1 expected ToolCall"),
     }
     match &events[2] {
-        OutputEvent::ToolResult { tool, result } => {
+        OutputEvent::ToolResult { tool, result, .. } => {
             assert_eq!(tool, "AlwaysOk");
             assert_eq!(result, &json!({"ok": true}));
         }

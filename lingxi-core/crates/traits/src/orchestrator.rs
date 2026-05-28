@@ -361,6 +361,10 @@ pub enum OutputEvent {
     },
     /// A tool invocation about to dispatch.
     ToolCall {
+        /// Stable id (the `tool_use_id` echoed in the matching ToolResult).
+        /// Added in M6-04 so the TUI can correlate calls with results and
+        /// key the per-tool expanded-state map.
+        id: lingxi_protocol::ToolUseId,
         /// Name of the tool being invoked.
         tool: String,
         /// JSON input passed to the tool.
@@ -368,6 +372,8 @@ pub enum OutputEvent {
     },
     /// A tool result returning to the conversation.
     ToolResult {
+        /// Correlator with the matching ToolCall.
+        id: lingxi_protocol::ToolUseId,
         /// Name of the tool that returned.
         tool: String,
         /// JSON result payload.
@@ -395,10 +401,23 @@ pub trait OutputStream: Send + Sync {
     async fn emit_text(&self, text: &str);
 
     /// Emit a tool-call notification immediately before dispatch.
-    async fn emit_tool_call(&self, tool: &str, input: &serde_json::Value);
+    ///
+    /// `id` is the `tool_use_id` echoed in the matching ToolResult. Added
+    /// in M6-04 so consumers can correlate calls with results.
+    async fn emit_tool_call(
+        &self,
+        id: &lingxi_protocol::ToolUseId,
+        tool: &str,
+        input: &serde_json::Value,
+    );
 
     /// Emit a tool-result notification immediately after dispatch.
-    async fn emit_tool_result(&self, tool: &str, result: &serde_json::Value);
+    async fn emit_tool_result(
+        &self,
+        id: &lingxi_protocol::ToolUseId,
+        tool: &str,
+        result: &serde_json::Value,
+    );
 
     /// Emit the end-of-turn marker with the cost snapshot.
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot);
@@ -422,6 +441,38 @@ mod tests {
     fn output_event_round_trips_through_json() {
         let ev = OutputEvent::Text {
             text: "hello".into(),
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        let back: OutputEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(ev, back);
+    }
+
+    /// M6-04 Task 1: `OutputEvent::ToolCall` must carry a `ToolUseId` so the
+    /// TUI can correlate calls with their results and key the per-tool
+    /// expanded-state map.
+    #[test]
+    fn output_event_tool_call_carries_tool_use_id() {
+        use lingxi_protocol::ToolUseId;
+        let id = ToolUseId::new();
+        let ev = OutputEvent::ToolCall {
+            id,
+            tool: "Read".into(),
+            input: serde_json::json!({"file_path": "/tmp/x.rs"}),
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        let back: OutputEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(ev, back);
+    }
+
+    /// M6-04 Task 1: same for `OutputEvent::ToolResult`.
+    #[test]
+    fn output_event_tool_result_carries_tool_use_id() {
+        use lingxi_protocol::ToolUseId;
+        let id = ToolUseId::new();
+        let ev = OutputEvent::ToolResult {
+            id,
+            tool: "Read".into(),
+            result: serde_json::json!({"content": "fn main() {}"}),
         };
         let s = serde_json::to_string(&ev).unwrap();
         let back: OutputEvent = serde_json::from_str(&s).unwrap();

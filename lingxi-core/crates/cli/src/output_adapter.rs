@@ -30,10 +30,24 @@ impl OutputStream for SinkAdapter {
     async fn emit_text(&self, text: &str) {
         self.sink.text(text).await;
     }
-    async fn emit_tool_call(&self, tool: &str, input: &serde_json::Value) {
+    async fn emit_tool_call(
+        &self,
+        _id: &lingxi_protocol::ToolUseId,
+        tool: &str,
+        input: &serde_json::Value,
+    ) {
+        // CLI sinks (plain stdout + NDJSON) do not surface the tool_use_id
+        // today — they're orientated on the wire-level event stream where
+        // the id is implicit in dispatch order. M6-04 keeps the parameter
+        // for forward compatibility; M6-09 may wire it into NDJSON.
         self.sink.tool_call(tool, input).await;
     }
-    async fn emit_tool_result(&self, tool: &str, result: &serde_json::Value) {
+    async fn emit_tool_result(
+        &self,
+        _id: &lingxi_protocol::ToolUseId,
+        tool: &str,
+        result: &serde_json::Value,
+    ) {
         self.sink.tool_result(tool, result).await;
     }
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {

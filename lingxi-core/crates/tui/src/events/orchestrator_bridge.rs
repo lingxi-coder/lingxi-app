@@ -85,19 +85,33 @@ impl OutputStream for BridgeOutputStream {
         let _ = self.tx.send(TurnEvent::TextDelta(text.to_string()));
     }
 
-    async fn emit_tool_call(&self, tool: &str, input: &serde_json::Value) {
+    async fn emit_tool_call(
+        &self,
+        id: &lingxi_protocol::ToolUseId,
+        tool: &str,
+        input: &serde_json::Value,
+    ) {
+        // M6-04: use the real ToolUseId from the orchestrator instead of
+        // a UUID-per-emission. The string form (`tu:<uuid>`) is what the
+        // TUI scrollback keys its expanded-state HashMap by.
         let _ = self.tx.send(TurnEvent::ToolUseStart {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: id.to_string(),
             tool: tool.to_string(),
             input: input.clone(),
         });
     }
 
-    async fn emit_tool_result(&self, tool: &str, result: &serde_json::Value) {
-        // M6-03 uses tool name as a poor-man's correlator. M6-04 will
-        // thread a real id through ToolUseStart → ToolUseResult.
+    async fn emit_tool_result(
+        &self,
+        id: &lingxi_protocol::ToolUseId,
+        tool: &str,
+        result: &serde_json::Value,
+    ) {
+        // M6-04: tool name no longer doubles as the correlator — use the
+        // real ToolUseId from emit_tool_call's pair.
+        let _ = tool; // kept for symmetry / future use (per-tool styling)
         let _ = self.tx.send(TurnEvent::ToolUseResult {
-            id: tool.to_string(),
+            id: id.to_string(),
             result: result.clone(),
         });
     }
@@ -131,11 +145,17 @@ mod tests {
     async fn emit_tool_call_translates_to_tool_use_start() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
+        let id = lingxi_protocol::ToolUseId::new();
         bridge
-            .emit_tool_call("Read", &serde_json::json!({"file_path": "/tmp/x"}))
+            .emit_tool_call(&id, "Read", &serde_json::json!({"file_path": "/tmp/x"}))
             .await;
         match rx.recv().await.unwrap() {
-            TurnEvent::ToolUseStart { tool, input, .. } => {
+            TurnEvent::ToolUseStart {
+                id: gid,
+                tool,
+                input,
+            } => {
+                assert_eq!(gid, id.to_string());
                 assert_eq!(tool, "Read");
                 assert_eq!(input["file_path"], "/tmp/x");
             }

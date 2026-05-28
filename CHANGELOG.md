@@ -1,5 +1,85 @@
 # Changelog
 
+## [0.7.0] — M6 TUI Foundation
+
+The first iocraft-based terminal UI for LingXi. Replaces the v0.6.0 stdio
+REPL with a three-zone layout (StatusLine / Scrollback / PromptInput) that
+streams tokens, surfaces tool use + tool results inline, shows interactive
+permission dialogs (`[1] Allow Once` / `[2] Allow Always` / `[N] Deny`), and
+wires real cost + MCP/Hooks/Agents listings + `/compact` into the TUI
+surface. Non-TTY and `--no-tui` fall back byte-for-byte to v0.6.0 stdio REPL
+behavior. 9 sub-plans M6-01..M6-09 delivered these components.
+
+### Sub-plans delivered (9 total)
+
+- **M6-01** — iocraft foundation: new `lingxi-tui` crate, event loop,
+  panic-safe terminal restore, placeholder render.
+- **M6-02** — Minimal working REPL: StatusLine + Scrollback + PromptInput +
+  2 message renderers (UserText / AssistantText).
+- **M6-03** — Streaming + `SpinnerWithVerb` (12-frame braille, batched).
+- **M6-04** — Tool use rendering: `AssistantToolUseMessage` +
+  `UserToolResultMessage` + minimal ANSI parser for Bash output.
+- **M6-05** — 3 permission dialogs (tool_use / exit_plan_mode /
+  bypass_permissions) + focus-trap.
+- **M6-06** — Engine wiring: real cost in StatusLine.
+- **M6-07** — Engine wiring: real MCP / Hooks / Agents listings (empty-state
+  surfaces parity match).
+- **M6-08** — Engine wiring: real `force_compact` through the compactor.
+- **M6-09** — TUI parity fixtures + literal-lock catalog + v0.7.0 release
+  tag (this plan).
+
+### Cross-cutting locks (M6-09)
+
+- **TUI parity fixtures (2 new)**: `tui_renderers.json` +
+  `parity_tui_renderers.rs` (6 tests: StatusLine + 3 spinner frames + 4
+  message renderers) and `tui_repl_loop.json` + `parity_tui_repl_loop.rs`
+  (3 scripted interactive scenarios).
+- **Literal lock catalog**: every user-visible TUI string indexed against
+  its claude-code TSX source at `docs/superpowers/literals/m6-tui-literals.md`.
+- **v0.6.0 parity fixtures**: all prior parity fixtures continue passing
+  unchanged.
+- **Release marker**: `lingxi_core_v0_7_0_released` emitted once on first
+  `ConversationOrchestrator::new` after upgrade via `std::sync::Once`.
+
+### Telemetry events added (M6-01..M6-09)
+
+| Plan | Count | Events |
+|---|---|---|
+| M6-01 | 4 | `tengu_tui_session_started/ended`, `tengu_tui_first_render`, `tengu_tui_resize` |
+| M6-03 | 2 | `tengu_tui_streaming_render_started/ended` |
+| M6-05 | 2 | `tengu_tui_permission_dialog_shown/resolved` |
+| M6-06/07/08 | 0 | (engine wiring reused existing M3/M4/M5 event names) |
+| M6-09 | 2 | `tengu_tui_scroll_started/ended` (emit sites in `app::scroll_with_viewport`) |
+| M6-09 | 1 | `lingxi_core_v0_7_0_released` |
+| **Total added** | **11** | (315 baseline + 11 = **326**) |
+
+> **Telemetry count reconciliation**: the M6 design spec §2.6 estimated
+> ~15 new events → 330. The actual M6 total is **326**. The 4-event gap is
+> `tengu_tui_key_pressed` (spec'd as an aggregated once-per-second counter —
+> deferred to M7 because the windowed aggregator infrastructure does not yet
+> exist) plus the spec's over-estimate of engine-wiring events (M6-02/04/06/07/08
+> reused existing M3/M4/M5 event names rather than registering new ones).
+> `ALL_EVENT_NAMES.len() == 326` is locked in `registry_is_exactly_326_entries`.
+
+### Known deferred gaps (carry to M7)
+
+| Gap | Status | Planned fix |
+|---|---|---|
+| `force_compact` summary text | Stub (`[forked-agent-stub]`); collapse + counts real | M7 real LLM summarization |
+| `CostTracker` → AnalyticsBus | Not wired (`tengu_cost_recorded` doesn't fire); `total_api_duration_ms` reads 0; single-provider (`Anthropic` hardcoded) | M7 |
+| MCP servers from `.mcp.json` | Loaded as `Disconnected` (no auto-connect) | M7 |
+| `OAuthHandle::login` real flow | Stub | M7 OAuth UI |
+| Manual real-terminal TUI smoke | Deferred to human (headless agent env) | human verification |
+| iocraft 0.8.3 crossterm 0.29 vs workspace 0.28 | Parallel `map_iocraft_key` mapper in `root.rs` | tracked |
+| Per-model cost breakdown | Flat totals only in `CostSnapshot` | M7 |
+| `tengu_tui_key_pressed` | Deferred (no windowed aggregator) | M7 |
+| Vim mode / command palette autocomplete / theme picker / syntax highlight / structured diff / full ANSI parser / mouse mode | Off | M7/M8 |
+
+### Version bump
+
+All 42 `Cargo.toml` files: `0.6.0 → 0.7.0`. New entry:
+`lingxi-core/crates/tui/Cargo.toml` (introduced by M6-01).
+
 ## [0.6.0] — M5 Execution Engine 全集
 
 Lands the **complete execution engine**: a `ConversationOrchestrator`

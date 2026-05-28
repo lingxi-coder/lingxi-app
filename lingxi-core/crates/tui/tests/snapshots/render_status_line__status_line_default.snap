@@ -1,0 +1,6 @@
+---
+source: crates/tui/tests/render_status_line.rs
+assertion_line: 23
+expression: rendered
+---
+claude-sonnet-4.5 /a/b $0.000 42% default

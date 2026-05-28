@@ -10,6 +10,7 @@
 
 pub mod agent;
 pub mod api;
+pub mod command;
 pub mod cost;
 pub mod memory;
 pub mod oauth;
@@ -32,7 +33,8 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     // events + hook_http_skipped_ssrf + hook_timeout).
     // M5-07: session block grew 15 -> 18 (+3 session_appended/rotated/corrupted).
     // M5-08: session block grows 18 -> 20 (+2 session_resume_started/completed).
-    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 15 + 1;
+    // M5-10: + 18 command events (6 commands × 3 phases) -> 276 total.
+    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 15 + 1 + 18;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;
@@ -93,6 +95,12 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         let mut i = 0;
         while i < release::NAMES.len() {
             out[idx] = release::NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        let mut i = 0;
+        while i < command::NAMES.len() {
+            out[idx] = command::NAMES[i];
             idx += 1;
             i += 1;
         }

@@ -259,7 +259,25 @@
     "tengu_orchestrator_hook_post_failed",
     "tengu_orchestrator_hook_http_skipped_ssrf",
     "tengu_orchestrator_hook_timeout",
-    "lingxi_core_v0_5_0_released"
+    "lingxi_core_v0_5_0_released",
+    "tengu_command_clear_completed",
+    "tengu_command_clear_failed",
+    "tengu_command_clear_started",
+    "tengu_command_compact_completed",
+    "tengu_command_compact_failed",
+    "tengu_command_compact_started",
+    "tengu_command_exit_completed",
+    "tengu_command_exit_failed",
+    "tengu_command_exit_started",
+    "tengu_command_help_completed",
+    "tengu_command_help_failed",
+    "tengu_command_help_started",
+    "tengu_command_init_completed",
+    "tengu_command_init_failed",
+    "tengu_command_init_started",
+    "tengu_command_memory_completed",
+    "tengu_command_memory_failed",
+    "tengu_command_memory_started"
   ],
   "cost_sample_payloads": [
     {

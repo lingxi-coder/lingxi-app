@@ -50,19 +50,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn force_compact(&self) -> Result<CompactionSummary, HandleError> {
-        // M5-10: minimal stub. The orchestrator's compaction subsystem is
-        // not yet wired into the production struct; M5-11/M5-12 will
-        // promote `CompactionOrchestrator` into a field and dispatch here.
-        // For now report the current history length unchanged so `/compact`
-        // returns a stable success result that downstream callers can
-        // render.
-        let s = self.session.lock().await;
-        let count = u32::try_from(s.history.len()).unwrap_or(u32::MAX);
-        Ok(CompactionSummary {
-            messages_before: count,
-            messages_after: count,
-            bytes_saved: 0,
-        })
+        // M6-08: dispatch to the cancelable inherent method with a fresh
+        // (un-cancelled) token. The REPL/TUI can call
+        // `force_compact_with_cancel` directly to provide a Ctrl-C token.
+        self.force_compact_with_cancel(tokio_util::sync::CancellationToken::new())
+            .await
     }
 
     async fn snapshot_cost(&self) -> CostSnapshot {

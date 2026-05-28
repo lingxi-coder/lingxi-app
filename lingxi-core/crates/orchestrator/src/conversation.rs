@@ -327,6 +327,115 @@ impl ConversationOrchestrator {
         self.compaction.is_some()
     }
 
+    /// Real `force_compact` body — cancelable via a [`CancellationToken`].
+    ///
+    /// Behavior:
+    /// 1. Snapshot `session.history` (clone — we don't hold the lock
+    ///    across `process_iteration`).
+    /// 2. Race `compactor.process_iteration(snapshot, 0)` against
+    ///    `cancel.cancelled()`. On cancel, drop the future and return
+    ///    `HandleError::ActionFailed("compaction cancelled")` —
+    ///    history is left untouched.
+    /// 3. On success: append a `[Compacted N → M messages]` System
+    ///    marker, swap history under the same lock, emit
+    ///    `OutputEvent::CompactionCompleted`, return a
+    ///    `CompactionSummary` with real numbers.
+    ///
+    /// When no compactor is wired (`compaction == None`), falls back
+    /// to the M5-10 no-op shape — returns the current history length
+    /// as both `messages_before` and `messages_after`.
+    ///
+    /// (M6-08)
+    pub async fn force_compact_with_cancel(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<lingxi_traits::CompactionSummary, lingxi_traits::HandleError> {
+        let Some(compactor) = self.compaction.clone() else {
+            // No compactor wired — fall back to the M5-10 no-op shape so
+            // pre-M6-08 callers do not break.
+            let s = self.session.lock().await;
+            let count = u32::try_from(s.history.len()).unwrap_or(u32::MAX);
+            return Ok(lingxi_traits::CompactionSummary {
+                messages_before: count,
+                messages_after: count,
+                bytes_saved: 0,
+            });
+        };
+
+        // Snapshot history (clone — we don't hold the lock across the
+        // network call inside `process_iteration`).
+        let history_before = {
+            let s = self.session.lock().await;
+            s.history.clone()
+        };
+        let messages_before = u32::try_from(history_before.len()).unwrap_or(u32::MAX);
+        let bytes_before: u64 = history_before
+            .iter()
+            .map(lingxi_protocol::text_byte_size)
+            .sum();
+
+        // Fast-path: if already cancelled, exit without invoking the
+        // compactor. tokio::select! random-polls between ready arms,
+        // so this explicit check keeps the cancel-first contract
+        // deterministic even when process_iteration completes synchronously
+        // (e.g. the M3 stub Autocompactor path).
+        if cancel.is_cancelled() {
+            return Err(lingxi_traits::HandleError::ActionFailed(
+                "compaction cancelled".into(),
+            ));
+        }
+
+        // Run the 5-layer compactor, racing against the cancel token.
+        // process_iteration takes no CancellationToken; drop-on-cancel
+        // leaves history untouched because we have not written back.
+        // `biased` so the cancel arm wins a tie — preferred when both
+        // arms are immediately ready.
+        let result = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Err(lingxi_traits::HandleError::ActionFailed(
+                    "compaction cancelled".into(),
+                ));
+            }
+            r = compactor.process_iteration(history_before, 0) => r
+                .map_err(|e| lingxi_traits::HandleError::ActionFailed(format!("compaction failed: {e}")))?,
+        };
+
+        let mut history_after = result.messages;
+        // Append the boundary marker so the TUI scrollback and the next
+        // turn's system-prompt assembly see the compaction transition.
+        let n_after_summary = history_after.len();
+        let marker = ConversationMessage::System {
+            id: MessageId::new(),
+            content: format!("[Compacted {messages_before} → {n_after_summary} messages]"),
+        };
+        history_after.push(marker);
+
+        let messages_after = u32::try_from(history_after.len()).unwrap_or(u32::MAX);
+        let bytes_after: u64 = history_after
+            .iter()
+            .map(lingxi_protocol::text_byte_size)
+            .sum();
+        let bytes_saved = bytes_before.saturating_sub(bytes_after);
+
+        // Swap history under the same lock.
+        {
+            let mut s = self.session.lock().await;
+            s.history = history_after;
+        }
+
+        // Best-effort emit so the TUI hears about it.
+        self.output
+            .emit_compaction_completed(messages_before, messages_after, bytes_saved)
+            .await;
+
+        Ok(lingxi_traits::CompactionSummary {
+            messages_before,
+            messages_after,
+            bytes_saved,
+        })
+    }
+
     /// Read the current cost state from the wired tracker, if any.
     /// Returns `None` if no tracker was attached. Exposed so future M7
     /// renderers (per-model breakdown view) can access

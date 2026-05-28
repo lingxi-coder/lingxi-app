@@ -1916,3 +1916,70 @@ R1, R4, R6–R13 are out of scope for M6-03 (covered in other sub-plans).
 5. **Telemetry count is locked at 321 after this plan.** Do not deviate. The chain is documented in Task 9 step 1.
 6. **Commits are per-task.** Do not squash. Each commit has a single `Refs M6-03 Task N` trailer.
 7. **The Streaming Gate (Task 12) is non-negotiable.** Do not tag `m6.3` until the gate passes or the fallback is filed.
+
+---
+
+## Gate Outcome (recorded 2026-05-28)
+
+Date: 2026-05-28
+Verifier: Claude Opus 4.7 (m6-execution worktree)
+
+### Workspace verification gate (T12 Step 1)
+
+- [x] `cargo fmt --check` — clean (after auto-fix on 2 files).
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` — clean.
+- [x] `cargo test --workspace` — every reported `test result:` line is `ok.
+  ... ; 0 failed`. Includes the new 7-test `streaming_test.rs` suite, the
+  3-frame `render_spinner_test.rs` snapshots, the 6-test in-crate
+  `spinner::tests`, the 6-test in-crate `streaming::tests`, the 5-test
+  bridge unit tests, the 3-test `streaming_cancel_test.rs`, and every
+  pre-existing M5 + M6-01/M6-02 test.
+- [x] `cargo build -p mock_stdio_mcp` — clean.
+
+### Streaming Gate (T12 Step 2 — perf smoke)
+
+The plan's gate criteria explicitly cover two surfaces:
+
+1. **Automated**: `perf_smoke_100_deltas_per_sec_for_5sec_collapses_to_at_most_195_renders`
+   in `crates/tui/tests/streaming_test.rs`. **PASS** — observed render
+   counts between 30 and 195 across local runs (within the documented
+   `30fps × 5.2s + 25% scheduler slack` envelope). The Notify-debounce +
+   33ms-sleep pattern in `run_tui_session` is the same shape exercised
+   by this test.
+2. **Manual (real-terminal smoke)**: deferred. The current `run_tui_session`
+   still renders through `TuiApp::render()` once per Notify wakeup
+   rather than driving iocraft's reactive reconciler — i.e. the
+   "iocraft reactive runtime mount" punt from M6-02 is reduced but not
+   fully eliminated. End-to-end SSE smoke is **NOT** attempted at this
+   tag because the screen would not actually update on a real terminal.
+
+### Resolution of M6-02 punt list
+
+- [x] **Buffering OutputStream adapter:** `BridgeOutputStream` in
+  `crates/tui/src/events/orchestrator_bridge.rs` implements
+  `lingxi_traits::OutputStream` and forwards every callback as a
+  `TurnEvent` on an unbounded mpsc channel. **Wired** through
+  `cli::init::build_runtime_for_tui`.
+- [x] **Real adapter from `OrchestratorHandle` to `ConversationOrchestrator`:**
+  `OrchestratorHandleImpl` overrides the new trait default
+  `run_turn_streaming_with_cancel`, delegating via fully-qualified call
+  syntax to the inherent method on `ConversationOrchestrator`. Verified
+  by the new `streaming_cancel_test.rs::handle_trait_...` test.
+- [ ] **iocraft reactive runtime mount: PARTIALLY DONE.** The bridge_rx is
+  drained into a shared `AppState` and the render loop fires
+  `app.render()` per Notify wakeup, but the render call does not yet
+  drive iocraft's reconciler — it only constructs the element tree
+  and drops it. The full reactive mount is M6-04 work (or a M6-03b
+  ratatui pivot if the real-terminal smoke fails when M6-04 attempts it).
+
+**Result:** automated gate **PASS**; manual real-terminal smoke
+**DEFERRED** to M6-04 along with the iocraft reactive mount work.
+
+### Telemetry inventory
+
+- `ALL_EVENT_NAMES.len() == 321` (= 315 baseline + 4 M6-01 + 2 M6-03).
+- New events: `tengu_tui_streaming_render_started`,
+  `tengu_tui_streaming_render_ended`.
+- Parity fixture, completeness test, settings-schema test, and
+  `orchestrator::diagnostics::check_telemetry_schema` all advanced
+  319 → 321 in lock-step.

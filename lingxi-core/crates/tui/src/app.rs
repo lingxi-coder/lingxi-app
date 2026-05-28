@@ -369,11 +369,12 @@ pub fn handle_ctrl_c(state: &mut AppState) {
 ///
 /// Returns the [`CancellationToken`] the caller should store in
 /// `state.cancel_token`. Per-turn text/tool events flow through the
-/// orchestrator's `OutputStream` (the BridgeOutputStream wired at
+/// orchestrator's `OutputStream` (the `BridgeOutputStream` wired at
 /// construction) — this helper does NOT see them.
 ///
 /// [`CancellationToken`]: tokio_util::sync::CancellationToken
 #[must_use]
+#[allow(clippy::needless_pass_by_value)]
 pub fn spawn_streaming_turn(
     handle: std::sync::Arc<dyn lingxi_traits::OrchestratorHandle>,
     prompt: String,

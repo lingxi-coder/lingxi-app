@@ -126,7 +126,8 @@ pub async fn run_tui_session(
     // Shared AppState for the render path. Drained by both the bridge
     // pumper and the keyboard handlers (only the latter actually mutates
     // it in M6-03; permission/key dispatch lands in later sub-plans).
-    let app_state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::new(runtime.status.clone())));
+    let app_state: Arc<Mutex<AppState>> =
+        Arc::new(Mutex::new(AppState::new(runtime.status.clone())));
 
     // Render-debounce notify. The bridge pumper calls `notify.notify_one`
     // after each `apply_event`; the render loop awaits `notify.notified`

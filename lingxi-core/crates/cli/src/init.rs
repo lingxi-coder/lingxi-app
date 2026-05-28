@@ -187,8 +187,7 @@ pub async fn build_runtime(
 #[allow(clippy::unused_async)]
 pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
-    let bridge: Arc<dyn OutputStream> =
-        Arc::new(lingxi_tui::BridgeOutputStream::new(bridge_tx));
+    let bridge: Arc<dyn OutputStream> = Arc::new(lingxi_tui::BridgeOutputStream::new(bridge_tx));
     let runtime = build_runtime(argv, bridge).await?;
     Ok(TuiBuild { runtime, bridge_rx })
 }

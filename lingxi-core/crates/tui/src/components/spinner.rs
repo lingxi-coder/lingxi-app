@@ -14,9 +14,7 @@ use iocraft::prelude::*;
 
 /// 12-frame asterisk animation (forward+reverse cycle). claude-code's
 /// darwin default characters from `Spinner/utils.ts`.
-pub const SPINNER_FRAMES: &[&str] = &[
-    "·", "✢", "✳", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·",
-];
+pub const SPINNER_FRAMES: &[&str] = &["·", "✢", "✳", "✶", "✻", "✽", "✽", "✻", "✶", "✳", "✢", "·"];
 
 /// The 3-verb subset M6 uses (deterministically cycled every 4s for
 /// testability). claude-code's full pool of 100+ verbs (see
@@ -88,8 +86,7 @@ pub fn SpinnerWithVerb(
         frame.set(f);
     } else {
         hooks.use_future(async move {
-            let mut tick =
-                tokio::time::interval(std::time::Duration::from_millis(FRAME_TICK_MS));
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(FRAME_TICK_MS));
             tick.tick().await; // first tick fires immediately; discard
             loop {
                 tick.tick().await;
@@ -102,8 +99,7 @@ pub fn SpinnerWithVerb(
         verb.set(v);
     } else {
         hooks.use_future(async move {
-            let mut tick =
-                tokio::time::interval(std::time::Duration::from_millis(VERB_ROTATE_MS));
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(VERB_ROTATE_MS));
             tick.tick().await;
             loop {
                 tick.tick().await;

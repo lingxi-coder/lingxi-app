@@ -1,4 +1,4 @@
-//! Snapshot tests for SpinnerWithVerb rendered output. (M6-03 Task 6)
+//! Snapshot tests for `SpinnerWithVerb` rendered output. (M6-03 Task 6)
 //!
 //! Locks the rendered glyph + verb for frame indices 0, 5, 9 — covering
 //! the start, midpoint, and second-cycle position of the 12-frame loop.

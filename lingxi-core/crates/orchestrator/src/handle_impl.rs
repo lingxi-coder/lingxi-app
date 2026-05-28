@@ -195,7 +195,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
         match crate::ConversationOrchestrator::run_turn_streaming_with_cancel(self, prompt, cancel)
             .await
         {
-            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(lingxi_traits::TurnOutcome::EndTurn),
+            Ok(crate::conversation::TurnOutcome::EndTurn) => {
+                Ok(lingxi_traits::TurnOutcome::EndTurn)
+            }
             Ok(crate::conversation::TurnOutcome::MaxTurns) => {
                 Ok(lingxi_traits::TurnOutcome::MaxTurns)
             }

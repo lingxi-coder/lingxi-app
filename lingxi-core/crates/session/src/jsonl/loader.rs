@@ -5,8 +5,14 @@
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-08-resume.md` Task 0 for byte-locks.
 
+use crate::jsonl::path::{project_dir_name, session_path};
+use crate::jsonl::reader::JsonlReader;
+use crate::jsonl::schema::JsonlMessage;
+use crate::jsonl::title::extract_title;
+use lingxi_traits::FileSystem;
 use std::cmp::Ordering;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 use thiserror::Error;
 use uuid::Uuid;
@@ -93,4 +99,188 @@ pub enum LoaderError {
         #[source]
         source: serde_json::Error,
     },
+}
+
+/// Resolve `<claude_home>/projects/<sanitize(cwd)>[-djb2]` for a given cwd.
+fn project_dir_for_cwd(claude_home: &Path, cwd: &str) -> PathBuf {
+    claude_home.join("projects").join(project_dir_name(cwd))
+}
+
+/// Resolve the project dir for `cwd` and return up to `limit` most-recently-modified
+/// `.jsonl` files as [`SessionMetadata`] rows, sorted by mtime desc (filename asc on tie).
+///
+/// Errors:
+/// - [`LoaderError::EmptyDirectory`] if the project dir doesn't exist OR contains no `.jsonl`.
+/// - [`LoaderError::Io`] on any other I/O failure.
+///
+/// Each row's `title` is read via [`crate::jsonl::title::extract_title`] from the **full**
+/// JSONL content (we open + parse every candidate, then sort + truncate). This is O(N * lines)
+/// for N sessions; for the typical N ≤ 5 case (the picker limit) the cost is trivial.
+///
+/// Locked against `claude-code/src/utils/sessionStorage.ts::loadSameRepoMessageLogs` — except:
+/// - claude-code uses a 16-KiB head-only `enrichLogs` scan for the first user message; we
+///   open + fully-parse because our `JsonlReader::read_all` is already in hand from M5-07.
+/// - claude-code includes worktrees; we list ONLY the exact cwd's project dir (cross-worktree
+///   resume is deferred to a follow-up — spec §3 M5-08 row does not require it).
+pub async fn list_recent_sessions(
+    claude_home: &Path,
+    cwd: &str,
+    limit: usize,
+    fs: Arc<dyn FileSystem>,
+) -> Result<Vec<SessionMetadata>, LoaderError> {
+    let project_dir = project_dir_for_cwd(claude_home, cwd);
+    let mut entries = match tokio::fs::read_dir(&project_dir).await {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LoaderError::EmptyDirectory);
+        }
+        Err(source) => {
+            return Err(LoaderError::Io {
+                arg: project_dir.display().to_string(),
+                source,
+            });
+        }
+    };
+
+    let mut rows: Vec<SessionMetadata> = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|source| LoaderError::Io {
+            arg: project_dir.display().to_string(),
+            source,
+        })?
+    {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let metadata = entry.metadata().await.map_err(|source| LoaderError::Io {
+            arg: path.display().to_string(),
+            source,
+        })?;
+        let modified = metadata.modified().map_err(|source| LoaderError::Io {
+            arg: path.display().to_string(),
+            source,
+        })?;
+
+        // Parse uuid from filename stem; silently skip non-UUID files.
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(uuid) = Uuid::parse_str(stem) else {
+            continue;
+        };
+
+        let reader = JsonlReader::new(path.clone(), fs.clone());
+        let messages = reader.read_all().await.map_err(|e| LoaderError::Io {
+            arg: path.display().to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+        })?;
+        let title = extract_title(&messages);
+        rows.push(SessionMetadata {
+            uuid,
+            title,
+            modified,
+            message_count: messages.len(),
+            path,
+        });
+    }
+
+    if rows.is_empty() {
+        return Err(LoaderError::EmptyDirectory);
+    }
+
+    rows.sort();
+    rows.truncate(limit);
+    Ok(rows)
+}
+
+/// Load a session by UUID, validate its `parentUuid` chain + `sessionId` consistency,
+/// and return the deserialized `Vec<JsonlMessage>` in file order.
+///
+/// Validation rules (spec §4.x):
+/// 1. The first message's `parent_uuid` is `None` (root of the chain).
+/// 2. Every subsequent message's `parent_uuid` MUST equal the previous message's `uuid`.
+/// 3. All messages MUST share the same `session_id` (matching the requested `session_id` arg).
+///
+/// Errors:
+/// - [`LoaderError::SessionNotFound`] if the file doesn't exist.
+/// - [`LoaderError::ChainBroken`] if rule 1 or 2 fails.
+/// - [`LoaderError::SessionIdMismatch`] if rule 3 fails.
+/// - [`LoaderError::Io`] on disk-or-format issues.
+pub async fn load_session(
+    claude_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+) -> Result<Vec<JsonlMessage>, LoaderError> {
+    let arg = session_id.to_string();
+    let path = session_path(claude_home, cwd, &arg);
+    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        return Err(LoaderError::SessionNotFound { arg });
+    }
+    let reader = JsonlReader::new(path, fs);
+    let messages = reader.read_all().await.map_err(|e| LoaderError::Io {
+        arg: arg.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+    })?;
+    validate_chain(&messages, session_id, &arg)?;
+    Ok(messages)
+}
+
+fn validate_chain(
+    messages: &[JsonlMessage],
+    expected_session_id: Uuid,
+    arg: &str,
+) -> Result<(), LoaderError> {
+    let mut prev_uuid: Option<Uuid> = None;
+    for (i, m) in messages.iter().enumerate() {
+        // (Rule 3) session_id consistency.
+        let msg_session =
+            Uuid::parse_str(&m.session_id).map_err(|_| LoaderError::SessionIdMismatch {
+                arg: arg.to_string(),
+                expected: expected_session_id,
+                got: Uuid::nil(),
+            })?;
+        if msg_session != expected_session_id {
+            return Err(LoaderError::SessionIdMismatch {
+                arg: arg.to_string(),
+                expected: expected_session_id,
+                got: msg_session,
+            });
+        }
+        let msg_uuid = Uuid::parse_str(&m.uuid).map_err(|_| LoaderError::ChainBroken {
+            arg: arg.to_string(),
+            at_uuid: Uuid::nil(),
+        })?;
+        let msg_parent = m
+            .parent_uuid
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|_| LoaderError::ChainBroken {
+                arg: arg.to_string(),
+                at_uuid: msg_uuid,
+            })?;
+        if i == 0 {
+            // (Rule 1) first message must have parent_uuid == None.
+            if msg_parent.is_some() {
+                return Err(LoaderError::ChainBroken {
+                    arg: arg.to_string(),
+                    at_uuid: msg_uuid,
+                });
+            }
+        } else {
+            // (Rule 2) parent_uuid must equal previous message's uuid.
+            if msg_parent != prev_uuid {
+                return Err(LoaderError::ChainBroken {
+                    arg: arg.to_string(),
+                    at_uuid: msg_uuid,
+                });
+            }
+        }
+        prev_uuid = Some(msg_uuid);
+    }
+    Ok(())
 }

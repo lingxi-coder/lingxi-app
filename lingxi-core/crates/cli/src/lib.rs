@@ -11,6 +11,7 @@
 pub mod argv;
 pub mod cwd;
 pub mod exit_codes;
+pub mod init;
 pub mod logging;
 
 use crate::argv::Argv;

@@ -51,6 +51,29 @@ pub enum RenderedMessage {
         /// `true` → render red; `false` → render dim grey.
         is_error: bool,
     },
+    /// Assistant tool-use block (M6-04). Renders as `● Tool({input_preview})`
+    /// when collapsed, or as `● Tool(...)\n<pretty json>` when expanded.
+    /// Per-id expanded state lives in `AppState.expanded`.
+    AssistantToolUse {
+        /// Correlator (model-supplied `tool_use_id`).
+        id: lingxi_protocol::ToolUseId,
+        /// Tool name (e.g. `"Read"`, `"Bash"`).
+        tool: String,
+        /// JSON input the tool was invoked with.
+        input: serde_json::Value,
+    },
+    /// User-side tool result (M6-04). Renders with `└ ` prefix and
+    /// dim-colored body. Line/byte truncation (100 lines / 4000 bytes)
+    /// kicks in when expanded; the collapsed form shows only the first
+    /// line plus a `(+N lines)` suffix.
+    UserToolResult {
+        /// Correlator matching the paired `AssistantToolUse.id`.
+        id: lingxi_protocol::ToolUseId,
+        /// Tool name (used to gate Bash → ANSI parser).
+        tool: String,
+        /// JSON result payload.
+        result: serde_json::Value,
+    },
 }
 
 /// Snapshot of the status-line fields. Recomputed once per frame.
@@ -243,5 +266,26 @@ mod tests {
         assert_eq!(s.scroll_offset, 0);
         assert_eq!(s.prompt_cursor, 0);
         assert!(!s.should_exit);
+    }
+
+    /// M6-04 Task 2: `RenderedMessage` gains `AssistantToolUse` and
+    /// `UserToolResult` variants so the scrollback can carry rich tool
+    /// blocks (not the M6-03 SystemText placeholders).
+    #[test]
+    fn rendered_message_carries_tool_use_and_result() {
+        use lingxi_protocol::ToolUseId;
+        let id = ToolUseId::new();
+        let call = RenderedMessage::AssistantToolUse {
+            id,
+            tool: "Read".into(),
+            input: serde_json::json!({"file_path": "/tmp/x.rs"}),
+        };
+        let result = RenderedMessage::UserToolResult {
+            id,
+            tool: "Read".into(),
+            result: serde_json::json!({"content": "fn main() {}"}),
+        };
+        assert!(matches!(call, RenderedMessage::AssistantToolUse { .. }));
+        assert!(matches!(result, RenderedMessage::UserToolResult { .. }));
     }
 }

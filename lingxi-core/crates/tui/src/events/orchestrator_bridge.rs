@@ -30,11 +30,11 @@ use tokio::sync::mpsc::UnboundedSender;
 pub enum TurnEvent {
     /// Streaming text chunk from the assistant.
     TextDelta(String),
-    /// A tool invocation is about to dispatch. `id` is a UUID v4 the
-    /// bridge synthesizes so the TUI can correlate Start/Result.
+    /// A tool invocation is about to dispatch.
     ToolUseStart {
-        /// Stable id (UUID v4) so the TUI can correlate Start/Result.
-        id: String,
+        /// Stable id (the model-supplied `tool_use_id`) — correlates with
+        /// the matching `ToolUseResult`.
+        id: lingxi_protocol::ToolUseId,
         /// Name of the tool being invoked.
         tool: String,
         /// JSON input passed to the tool.
@@ -42,8 +42,10 @@ pub enum TurnEvent {
     },
     /// A tool result has returned.
     ToolUseResult {
-        /// Correlator (poor-man's: tool name in M6-03; real id in M6-04).
-        id: String,
+        /// Correlator with the paired `ToolUseStart`.
+        id: lingxi_protocol::ToolUseId,
+        /// Tool name (used to gate Bash → ANSI parser at render time).
+        tool: String,
         /// JSON result payload.
         result: serde_json::Value,
     },
@@ -91,11 +93,8 @@ impl OutputStream for BridgeOutputStream {
         tool: &str,
         input: &serde_json::Value,
     ) {
-        // M6-04: use the real ToolUseId from the orchestrator instead of
-        // a UUID-per-emission. The string form (`tu:<uuid>`) is what the
-        // TUI scrollback keys its expanded-state HashMap by.
         let _ = self.tx.send(TurnEvent::ToolUseStart {
-            id: id.to_string(),
+            id: *id,
             tool: tool.to_string(),
             input: input.clone(),
         });
@@ -107,11 +106,9 @@ impl OutputStream for BridgeOutputStream {
         tool: &str,
         result: &serde_json::Value,
     ) {
-        // M6-04: tool name no longer doubles as the correlator — use the
-        // real ToolUseId from emit_tool_call's pair.
-        let _ = tool; // kept for symmetry / future use (per-tool styling)
         let _ = self.tx.send(TurnEvent::ToolUseResult {
-            id: id.to_string(),
+            id: *id,
+            tool: tool.to_string(),
             result: result.clone(),
         });
     }
@@ -155,7 +152,7 @@ mod tests {
                 tool,
                 input,
             } => {
-                assert_eq!(gid, id.to_string());
+                assert_eq!(gid, id);
                 assert_eq!(tool, "Read");
                 assert_eq!(input["file_path"], "/tmp/x");
             }

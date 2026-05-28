@@ -98,6 +98,16 @@ fn render_message(m: RenderedMessage) -> AnyElement<'static> {
             }
             .into_any()
         }
+        // M6-04 Task 11 replaces these placeholders with the real
+        // dispatch via AssistantToolUseMessage / UserToolResultMessage.
+        RenderedMessage::AssistantToolUse { tool, input, .. } => element! {
+            Text(content: format!("● {tool}({input})"), color: TuiTheme::ASSISTANT)
+        }
+        .into_any(),
+        RenderedMessage::UserToolResult { result, .. } => element! {
+            Text(content: format!("└ {result}"), color: TuiTheme::DIM)
+        }
+        .into_any(),
     }
 }
 

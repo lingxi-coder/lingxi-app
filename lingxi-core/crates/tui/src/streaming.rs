@@ -40,20 +40,19 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
             }
         }
         TurnEvent::ToolUseStart { id, tool, input } => {
-            // M6-04 will introduce a dedicated `AssistantToolUse` variant
-            // with rich rendering. For now surface as a SystemText placeholder
-            // so the user still sees something during multi-tool turns.
-            state.messages.push(RenderedMessage::SystemText {
-                body: format!("→ {tool} ({id}) input={input}"),
-                timestamp: chrono::Utc::now().timestamp(),
-                is_error: false,
+            // M6-04: rich tool-use block. Per-id expanded state lives in
+            // `state.expanded` (default false → collapsed header).
+            state.messages.push(RenderedMessage::AssistantToolUse {
+                id,
+                tool,
+                input,
             });
         }
-        TurnEvent::ToolUseResult { id, result } => {
-            state.messages.push(RenderedMessage::SystemText {
-                body: format!("← {id} result={result}"),
-                timestamp: chrono::Utc::now().timestamp(),
-                is_error: false,
+        TurnEvent::ToolUseResult { id, tool, result } => {
+            state.messages.push(RenderedMessage::UserToolResult {
+                id,
+                tool,
+                result,
             });
         }
         TurnEvent::PermissionRequest { tool, input } => {

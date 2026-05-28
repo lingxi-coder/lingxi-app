@@ -238,6 +238,35 @@ pub async fn handle_submit_line(
     true // plain text — caller runs `orchestrator.run_turn`
 }
 
+/// Build the full `ReplScreen` element from an `AppState` snapshot for
+/// the given viewport height. Used by the per-frame render path; tests
+/// also exercise it to verify the screen composes without panicking.
+///
+/// The full reactive event-loop wiring (use_state hooks, key event →
+/// dispatch, re-render on terminal resize) lands in M6-03 along with
+/// the streaming spinner. M6-02 ships the pure render function so
+/// downstream tasks have a stable assembly point.
+#[must_use]
+pub fn render_screen(state: &AppState, viewport_height: usize) -> AnyElement<'static> {
+    use crate::screens::repl::ReplScreen;
+    let status = state.status.clone();
+    let messages = state.messages.clone();
+    let prompt_text = state.prompt_text.clone();
+    let prompt_cursor = state.prompt_cursor;
+    let scroll_offset = state.scroll_offset;
+    element! {
+        ReplScreen(
+            status: status,
+            messages: messages,
+            prompt_text: prompt_text,
+            prompt_cursor: prompt_cursor,
+            scroll_offset: scroll_offset,
+            viewport_height: viewport_height,
+        )
+    }
+    .into_any()
+}
+
 /// Outcome of a turn from the TUI's vantage point. M6-02 only needs the
 /// accumulated assistant text; richer fields (tool calls, cost, stop
 /// reason) arrive in M6-03+.
@@ -460,6 +489,19 @@ mod dispatch_tests {
         let disp = dispatcher();
         handle_submit_line(&mut st, "/exit", &disp).await;
         assert!(st.should_exit);
+    }
+
+    #[test]
+    fn render_screen_smoke() {
+        let mut st = s();
+        st.push_message(RenderedMessage::AssistantText {
+            body: "hi".into(),
+            timestamp: 0,
+        });
+        let mut element = render_screen(&st, 5);
+        let rendered = element.to_string();
+        assert!(rendered.contains("● hi"), "got: {rendered}");
+        assert!(rendered.contains("claude-sonnet-4.5"));
     }
 
     #[tokio::test]

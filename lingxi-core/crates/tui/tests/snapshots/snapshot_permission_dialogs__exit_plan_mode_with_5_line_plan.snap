@@ -1,0 +1,19 @@
+---
+source: crates/tui/tests/snapshot_permission_dialogs.rs
+expression: "&frame"
+---
+╭──────────────────────────────────────────────╮
+│                                              │
+│ Claude Code needs your approval for the plan │
+│                                              │
+│ 1. Read foo.rs                               │
+│ 2. Refactor bar()                            │
+│ 3. Add tests                                 │
+│ 4. Run cargo test                            │
+│ 5. Commit                                    │
+│                                              │
+│ > [1] Allow Once                             │
+│   [2] Allow Always                           │
+│   [N] Deny                                   │
+│                                              │
+╰──────────────────────────────────────────────╯

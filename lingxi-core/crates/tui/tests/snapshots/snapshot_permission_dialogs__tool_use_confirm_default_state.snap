@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/snapshot_permission_dialogs.rs
+expression: "&frame"
+---
+╭──────────────────────────────────────────╮
+│                                          │
+│ Claude needs your permission to use Bash │
+│ Input: {"command":"ls -la"}              │
+│                                          │
+│ > [1] Allow Once                         │
+│   [2] Allow Always                       │
+│   [N] Deny                               │
+│                                          │
+╰──────────────────────────────────────────╯

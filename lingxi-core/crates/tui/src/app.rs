@@ -184,6 +184,60 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
     }
 }
 
+/// Process a submitted line. If `/`-prefixed → slash dispatch (with TUI
+/// intercept of `/clear` and `/exit`). Otherwise the caller is expected
+/// to route the line into the orchestrator's `run_turn`. Returns `true`
+/// iff a turn should run.
+///
+/// ### Deviation from plan
+///
+/// The plan assumed `RegistrySlashDispatcher::dispatch` would return a
+/// rich `SlashOutcome::{Cleared, Exit, Message, ...}` variant. The
+/// actual M5-09 dispatcher returns `SlashDispatchResult::{Handled |
+/// Unknown | NotASlashCommand}` where `/clear` and `/exit` are stubs
+/// that resolve to `Handled { display: "<name>: not implemented" }`.
+/// We therefore intercept `/clear` and `/exit` *before* the dispatcher
+/// for the M6-02 contract, and let everything else fall through.
+pub async fn handle_submit_line(
+    st: &mut AppState,
+    line: &str,
+    dispatcher: &dyn lingxi_traits::SlashCommandDispatcher,
+) -> bool {
+    if let Some(cmd) = line.strip_prefix('/') {
+        // Local intercepts (M5-09 stubs don't yet do these).
+        let trimmed = cmd.split_whitespace().next().unwrap_or("");
+        match trimmed {
+            "clear" => {
+                st.messages.clear();
+                st.scroll_offset = 0;
+                return false;
+            }
+            "exit" | "quit" => {
+                st.should_exit = true;
+                return false;
+            }
+            _ => {}
+        }
+        // Fall through to the registry for everything else.
+        let outcome = dispatcher.dispatch(line).await;
+        match outcome {
+            lingxi_traits::SlashDispatchResult::Handled { display }
+            | lingxi_traits::SlashDispatchResult::Unknown { display, .. } => {
+                st.push_message(RenderedMessage::SystemText {
+                    body: display,
+                    timestamp: chrono::Utc::now().timestamp(),
+                    is_error: false,
+                });
+            }
+            lingxi_traits::SlashDispatchResult::NotASlashCommand => {
+                // Shouldn't happen — we stripped the leading "/" already.
+            }
+        }
+        return false;
+    }
+    true // plain text — caller runs `orchestrator.run_turn`
+}
+
 /// Apply a scroll direction with a known viewport height. Called per
 /// frame for PageUp/PageDown, where the viewport is known; line-step
 /// (`j`/`k`) reuses this with `height=1`.
@@ -300,5 +354,52 @@ mod dispatch_tests {
         dispatch(KeyAction::Cancel, &mut st);
         assert_eq!(st.prompt_text, "");
         assert!(st.sigint_armed_at.is_none());
+    }
+
+    /// Build a `RegistrySlashDispatcher` seeded with the M5-09 built-ins.
+    fn dispatcher() -> lingxi_commands::dispatcher::RegistrySlashDispatcher {
+        use lingxi_commands::dispatcher::RegistrySlashDispatcher;
+        use lingxi_commands::registry::{register_all_builtin_commands, CommandRegistry};
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+    }
+
+    #[tokio::test]
+    async fn slash_clear_empties_messages() {
+        let mut st = s();
+        st.push_message(RenderedMessage::AssistantText {
+            body: "old".into(),
+            timestamp: 0,
+        });
+        assert_eq!(st.messages.len(), 1);
+
+        let disp = dispatcher();
+        let should_run = handle_submit_line(&mut st, "/clear", &disp).await;
+        assert!(!should_run);
+        assert!(st.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn slash_exit_sets_should_exit() {
+        let mut st = s();
+        let disp = dispatcher();
+        handle_submit_line(&mut st, "/exit", &disp).await;
+        assert!(st.should_exit);
+    }
+
+    #[tokio::test]
+    async fn slash_help_pushes_system_message() {
+        let mut st = s();
+        let disp = dispatcher();
+        // /help is a M5-09 stub returning a "not implemented" display string.
+        // The TUI renders that display as a SystemText regardless.
+        handle_submit_line(&mut st, "/help", &disp).await;
+        assert!(matches!(
+            st.messages.last(),
+            Some(RenderedMessage::SystemText { .. })
+        ));
     }
 }

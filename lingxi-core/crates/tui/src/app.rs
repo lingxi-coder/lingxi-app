@@ -272,6 +272,8 @@ pub fn render_screen(state: &AppState, viewport_height: usize) -> AnyElement<'st
     let prompt_cursor = state.prompt_cursor;
     let scroll_offset = state.scroll_offset;
     let show_spinner = should_render_spinner(state);
+    let expanded = state.expanded.clone();
+    let focused_tool_id = state.focused_tool_id;
     element! {
         ReplScreen(
             status: status,
@@ -281,6 +283,8 @@ pub fn render_screen(state: &AppState, viewport_height: usize) -> AnyElement<'st
             scroll_offset: scroll_offset,
             viewport_height: viewport_height,
             show_spinner: show_spinner,
+            expanded: expanded,
+            focused_tool_id: focused_tool_id,
         )
     }
     .into_any()

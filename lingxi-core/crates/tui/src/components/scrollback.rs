@@ -14,10 +14,16 @@
 //! - `g`    = `max`
 //! - `G`    = `0`
 
+use std::collections::HashMap;
+
 use iocraft::prelude::*;
+use lingxi_protocol::ToolUseId;
 
 use crate::components::messages::{
-    assistant_text::AssistantTextMessage, user_text::UserTextMessage,
+    assistant_text::AssistantTextMessage,
+    assistant_tool_use::{AssistantToolUseMessage, AssistantToolUseProps},
+    user_text::UserTextMessage,
+    user_tool_result::{UserToolResultMessage, UserToolResultProps},
 };
 use crate::state::RenderedMessage;
 use crate::theme::TuiTheme;
@@ -31,6 +37,12 @@ pub struct ScrollbackProps {
     pub scroll_offset: usize,
     /// Number of message rows visible.
     pub viewport_height: usize,
+    /// (M6-04) Per-tool expanded flags (clone of `AppState::expanded`).
+    /// Missing keys default to `false` (collapsed).
+    pub expanded: HashMap<ToolUseId, bool>,
+    /// (M6-04) Currently focused tool id (clone of
+    /// `AppState::focused_tool_id`).
+    pub focused_tool_id: Option<ToolUseId>,
 }
 
 /// Scrollback component.
@@ -38,9 +50,15 @@ pub struct ScrollbackProps {
 pub fn Scrollback(props: &ScrollbackProps) -> impl Into<AnyElement<'static>> {
     let visible: Vec<RenderedMessage> =
         visible_slice(&props.messages, props.scroll_offset, props.viewport_height).to_vec();
+    let expanded = props.expanded.clone();
+    let focused_tool_id = props.focused_tool_id;
+    let rendered: Vec<AnyElement<'static>> = visible
+        .into_iter()
+        .map(|m| render_message(m, &expanded, focused_tool_id))
+        .collect();
     element! {
         View(flex_direction: FlexDirection::Column, flex_grow: 1.0) {
-            #(visible.into_iter().map(render_message))
+            #(rendered)
         }
     }
 }
@@ -77,7 +95,11 @@ pub fn clamp_offset(requested: i64, total_messages: usize, viewport_height: usiz
     requested.clamp(0, max) as usize
 }
 
-fn render_message(m: RenderedMessage) -> AnyElement<'static> {
+fn render_message(
+    m: RenderedMessage,
+    expanded: &HashMap<ToolUseId, bool>,
+    focused_tool_id: Option<ToolUseId>,
+) -> AnyElement<'static> {
     match m {
         RenderedMessage::UserText { body, .. } => element! {
             UserTextMessage(body: body)
@@ -98,16 +120,36 @@ fn render_message(m: RenderedMessage) -> AnyElement<'static> {
             }
             .into_any()
         }
-        // M6-04 Task 11 replaces these placeholders with the real
-        // dispatch via AssistantToolUseMessage / UserToolResultMessage.
-        RenderedMessage::AssistantToolUse { tool, input, .. } => element! {
-            Text(content: format!("● {tool}({input})"), color: TuiTheme::ASSISTANT)
+        // M6-04 T11: dispatch the two tool variants through the real
+        // components, threading per-id expanded + focused state.
+        RenderedMessage::AssistantToolUse { id, tool, input } => {
+            let is_expanded = expanded.get(&id).copied().unwrap_or(false);
+            let is_focused = focused_tool_id == Some(id);
+            element! {
+                AssistantToolUseMessage(
+                    id: id,
+                    tool: tool,
+                    input: input,
+                    expanded: is_expanded,
+                    focused: is_focused,
+                )
+            }
+            .into_any()
         }
-        .into_any(),
-        RenderedMessage::UserToolResult { result, .. } => element! {
-            Text(content: format!("└ {result}"), color: TuiTheme::DIM)
+        RenderedMessage::UserToolResult { id, tool, result } => {
+            let is_expanded = expanded.get(&id).copied().unwrap_or(false);
+            let is_focused = focused_tool_id == Some(id);
+            element! {
+                UserToolResultMessage(
+                    id: id,
+                    tool: tool,
+                    result: result,
+                    expanded: is_expanded,
+                    focused: is_focused,
+                )
+            }
+            .into_any()
         }
-        .into_any(),
     }
 }
 

@@ -6,7 +6,10 @@
 //!   3. `SpinnerWithVerb`  — height 1, conditional on `streaming`
 //!   4. `PromptInput`      — height 1 (multi-line wrap arrives in M7)
 
+use std::collections::HashMap;
+
 use iocraft::prelude::*;
+use lingxi_protocol::ToolUseId;
 
 use crate::components::prompt_input::PromptInput;
 use crate::components::scrollback::Scrollback;
@@ -42,6 +45,10 @@ pub struct ReplScreenProps {
     /// Whether to render the streaming spinner between scrollback and
     /// prompt input. Wired from `AppState.streaming.is_some()`.
     pub show_spinner: bool,
+    /// (M6-04) Per-tool expanded flags (clone of `AppState.expanded`).
+    pub expanded: HashMap<ToolUseId, bool>,
+    /// (M6-04) Focused tool id (clone of `AppState.focused_tool_id`).
+    pub focused_tool_id: Option<ToolUseId>,
 }
 
 /// Compose the vertical zones of the M6-03 REPL screen.
@@ -58,6 +65,8 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let scroll_offset = props.scroll_offset;
     let viewport_height = props.viewport_height;
     let show_spinner = props.show_spinner;
+    let expanded = props.expanded.clone();
+    let focused_tool_id = props.focused_tool_id;
     element! {
         View(flex_direction: FlexDirection::Column, width: 100pct, height: 100pct) {
             StatusLine(
@@ -71,6 +80,8 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 messages: messages,
                 scroll_offset: scroll_offset,
                 viewport_height: viewport_height,
+                expanded: expanded,
+                focused_tool_id: focused_tool_id,
             )
             #(if show_spinner {
                 element!(SpinnerWithVerb).into_any()

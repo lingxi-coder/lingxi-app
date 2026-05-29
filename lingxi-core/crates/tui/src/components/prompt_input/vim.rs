@@ -878,6 +878,74 @@ fn delete_char_x(cursor: VimCursor<'_>, count: usize) -> (VimEffect, Register) {
     )
 }
 
+/// claude-code `operators.ts::executePaste`. `after`=p, `!after`=P. `count` repeats.
+#[must_use]
+fn paste(after: bool, count: usize, register: &Register, cursor: VimCursor<'_>) -> VimEffect {
+    if register.text.is_empty() {
+        return VimEffect::None;
+    }
+    let count = count.max(1);
+    let text = cursor.text;
+
+    if register.linewise {
+        // Content sans the single trailing '\n', split into its lines.
+        let content = register.text.strip_suffix('\n').unwrap_or(&register.text);
+        let lines: Vec<&str> = text.split('\n').collect();
+        let current_line = text[..cursor.offset].matches('\n').count();
+        let insert_line = if after { current_line + 1 } else { current_line };
+
+        let content_lines: Vec<&str> = content.split('\n').collect();
+        let mut repeated: Vec<&str> = Vec::with_capacity(content_lines.len() * count);
+        for _ in 0..count {
+            repeated.extend_from_slice(&content_lines);
+        }
+
+        let mut new_lines: Vec<&str> = Vec::with_capacity(lines.len() + repeated.len());
+        new_lines.extend_from_slice(&lines[..insert_line]);
+        new_lines.extend_from_slice(&repeated);
+        new_lines.extend_from_slice(&lines[insert_line..]);
+
+        let new_text = new_lines.join("\n");
+        let cursor_off = line_start_offset(&new_lines, insert_line);
+        VimEffect::Edit {
+            text: new_text,
+            cursor: cursor_off,
+        }
+    } else {
+        let to_insert = register.text.repeat(count);
+        let insert_point = if after && cursor.offset < text.len() {
+            cursor.next_off(cursor.offset)
+        } else {
+            cursor.offset
+        };
+        let new_text = format!(
+            "{}{}{}",
+            &text[..insert_point],
+            to_insert,
+            &text[insert_point..]
+        );
+        let last_gr = last_char_len(&to_insert);
+        let new_off = (insert_point + to_insert.len()).saturating_sub(last_gr);
+        VimEffect::Edit {
+            text: new_text,
+            cursor: new_off.max(insert_point),
+        }
+    }
+}
+
+/// Byte offset of the start of `line_index` within `lines` joined by '\n'.
+/// (claude-code `operators.ts::getLineStartOffset`: `lines.slice(0, lineIndex)
+/// .join('\n').length + (lineIndex > 0 ? 1 : 0)` = sum(len) + one '\n' per
+/// preceding line.)
+#[must_use]
+fn line_start_offset(lines: &[&str], line_index: usize) -> usize {
+    if line_index == 0 {
+        return 0;
+    }
+    let body: usize = lines[..line_index].iter().map(|l| l.len()).sum();
+    body + line_index // one '\n' per preceding line
+}
+
 /// The i/a/o/I/A/O mode-entry effect. Returns the cursor placement (Move) or
 /// the buffer edit (Edit, for o/O). Caller flips mode to Insert.
 #[must_use]
@@ -2091,5 +2159,111 @@ mod x_tests {
                 cursor: 0
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+    fn cur(text: &str, off: usize) -> VimCursor<'_> {
+        VimCursor { text, offset: off }
+    }
+    fn reg_char(s: &str) -> Register {
+        Register {
+            text: s.into(),
+            linewise: false,
+        }
+    }
+    fn reg_line(s: &str) -> Register {
+        Register {
+            text: s.into(),
+            linewise: true,
+        }
+    }
+
+    #[test]
+    fn charwise_p_inserts_after_cursor() {
+        // p with register "X" on "ab" at 0: insert after 'a' -> "aXb", cursor on 'X' (1).
+        let effect = paste(true, 1, &reg_char("X"), cur("ab", 0));
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: "aXb".into(),
+                cursor: 1
+            }
+        );
+    }
+
+    #[test]
+    fn charwise_cap_p_inserts_before_cursor() {
+        // P with register "X" on "ab" at 1: insert at cursor -> "aXb", cursor on 'X' (1).
+        let effect = paste(false, 1, &reg_char("X"), cur("ab", 1));
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: "aXb".into(),
+                cursor: 1
+            }
+        );
+    }
+
+    #[test]
+    fn charwise_p_repeats_count_times() {
+        // 3p with register "X" on "ab" at 0: "aXXXb", cursor on last 'X' (3).
+        let effect = paste(true, 3, &reg_char("X"), cur("ab", 0));
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: "aXXXb".into(),
+                cursor: 3
+            }
+        );
+    }
+
+    #[test]
+    fn charwise_p_at_eof_inserts_at_cursor() {
+        // p with register "X" on "ab" at 2 (EOF): insert at cursor -> "abX", cursor on 'X' (2).
+        let effect = paste(true, 1, &reg_char("X"), cur("ab", 2));
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: "abX".into(),
+                cursor: 2
+            }
+        );
+    }
+
+    #[test]
+    fn linewise_p_opens_line_below() {
+        // p with linewise register "x\n" on "a\nb" at 0 (line0): new line below -> "a\nx\nb",
+        // cursor at start of pasted line (2).
+        let effect = paste(true, 1, &reg_line("x\n"), cur("a\nb", 0));
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: "a\nx\nb".into(),
+                cursor: 2
+            }
+        );
+    }
+
+    #[test]
+    fn linewise_cap_p_opens_line_above() {
+        // P with linewise register "x\n" on "a\nb" at 2 (line1): new line above -> "a\nx\nb",
+        // cursor at start of pasted line (2).
+        let effect = paste(false, 1, &reg_line("x\n"), cur("a\nb", 2));
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: "a\nx\nb".into(),
+                cursor: 2
+            }
+        );
+    }
+
+    #[test]
+    fn empty_register_is_noop() {
+        let effect = paste(true, 1, &Register::default(), cur("ab", 0));
+        assert_eq!(effect, VimEffect::None);
     }
 }

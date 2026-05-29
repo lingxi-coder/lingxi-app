@@ -17,8 +17,8 @@ use crate::components::messages::{
     hook_progress::HookProgressMessage, plan_approval::PlanApprovalMessage,
     rate_limit::RateLimitMessage, redacted_thinking::AssistantRedactedThinkingMessage,
     shutdown::ShutdownMessage, system_api_error::SystemApiErrorMessage,
-    system_text::SystemTextMessage, thinking::AssistantThinkingMessage,
-    user_text::UserTextMessage, user_tool_result::UserToolResultMessage,
+    system_text::SystemTextMessage, thinking::AssistantThinkingMessage, user_text::UserTextMessage,
+    user_tool_result::UserToolResultMessage,
 };
 use crate::state::RenderedMessage;
 use crate::theme::TuiTheme;

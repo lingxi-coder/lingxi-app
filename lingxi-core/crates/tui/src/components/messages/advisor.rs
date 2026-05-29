@@ -25,8 +25,7 @@ use crate::theme::TuiTheme;
 /// `figures.tick`. U+2714 (0xE2 0x9C 0x94).
 pub const TICK: &str = "\u{2714}";
 /// Locked review line (non-verbose result + redacted result).
-pub const REVIEWED_LINE: &str =
-    "Advisor has reviewed the conversation and will apply the feedback";
+pub const REVIEWED_LINE: &str = "Advisor has reviewed the conversation and will apply the feedback";
 
 /// Props for [`AdvisorMessage`].
 #[derive(Debug, Clone, Default, Props)]

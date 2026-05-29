@@ -49,6 +49,17 @@ fn kind_of(m: &RenderedMessage) -> &'static str {
         RenderedMessage::SystemText { .. } => "SystemText",
         RenderedMessage::AssistantToolUse { .. } => "AssistantToolUse",
         RenderedMessage::UserToolResult { .. } => "UserToolResult",
+        // (M7-04) batch-1 system/assistant variants.
+        RenderedMessage::AssistantThinking { .. } => "AssistantThinking",
+        RenderedMessage::AssistantRedactedThinking => "AssistantRedactedThinking",
+        RenderedMessage::CompactBoundary { .. } => "CompactBoundary",
+        RenderedMessage::SystemTextRich { .. } => "SystemTextRich",
+        RenderedMessage::SystemApiError { .. } => "SystemApiError",
+        RenderedMessage::RateLimit { .. } => "RateLimit",
+        RenderedMessage::Shutdown { .. } => "Shutdown",
+        RenderedMessage::Advisor { .. } => "Advisor",
+        RenderedMessage::HookProgress { .. } => "HookProgress",
+        RenderedMessage::PlanApproval { .. } => "PlanApproval",
     }
 }
 

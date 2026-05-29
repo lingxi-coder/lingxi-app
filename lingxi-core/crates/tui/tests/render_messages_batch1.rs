@@ -13,7 +13,9 @@ use lingxi_tui::components::messages::shutdown::{render_shutdown_to_string, Shut
 use lingxi_tui::components::messages::system_api_error::{
     render_system_api_error_to_string, SystemApiErrorProps,
 };
-use lingxi_tui::components::messages::system_text::{render_system_text_to_string, SystemTextProps};
+use lingxi_tui::components::messages::system_text::{
+    render_system_text_to_string, SystemTextProps,
+};
 use lingxi_tui::components::messages::thinking::{render_thinking_to_string, ThinkingProps};
 use lingxi_tui::state::{AdvisorKind, PlanApprovalKind, SystemLevel};
 

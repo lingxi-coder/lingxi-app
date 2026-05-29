@@ -407,7 +407,7 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     // still win above. No parallel key path — the single `handle_live_key`. ===
     if st.message_selector.open {
         use crate::components::message_selector::{
-            handle_message_selector_key, message_line_offset, SelectorAction,
+            export_transcript, handle_message_selector_key, message_line_offset, SelectorAction,
         };
         let ct_key = iocraft_to_crossterm028_key(k);
         let messages = st.messages.clone();
@@ -419,6 +419,18 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
                 st.refresh_height_cache(st.viewport_width.max(1));
                 let cache = st.height_cache.clone();
                 st.scroll_offset = message_line_offset(&messages, &cache, message_index, viewport);
+            }
+            // (M7-14 review) The export flow confirmed: run the actual write
+            // here (the live caller owns the messages + resolves the export
+            // dir, keeping the key handler pure), then fold the outcome back
+            // into the sub-state. §4 R10: `overwrite=false` on the first
+            // attempt → `Exists` arms the overwrite-confirm prompt (no silent
+            // clobber); `overwrite=true` only after the user pressed `y`.
+            SelectorAction::Export { overwrite } => {
+                let dir = st.message_selector.resolved_export_dir();
+                let filename = st.message_selector.export.filename.clone();
+                let outcome = export_transcript(&messages, &dir, &filename, overwrite);
+                st.message_selector.report_export(&outcome);
             }
             SelectorAction::Close | SelectorAction::None => {}
         }

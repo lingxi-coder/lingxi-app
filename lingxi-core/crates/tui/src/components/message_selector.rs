@@ -185,6 +185,49 @@ pub enum SelectorAction {
         /// Index into `AppState.messages`.
         message_index: usize,
     },
+    /// (M7-14 review) The export flow confirmed: the caller must run
+    /// [`export_transcript`] for the current `filename` with the given
+    /// `overwrite` flag, then report the outcome back via
+    /// [`MessageSelectorState::report_export`]. The key handler only mutates
+    /// the editable buffer / overwrite-confirm sub-state — the actual
+    /// filesystem write stays in the live caller (which owns the messages +
+    /// resolves the export dir), keeping `handle_message_selector_key` pure.
+    Export {
+        /// Whether the user has explicitly confirmed an overwrite (§4 R10).
+        /// `false` on the first Enter (write only if the target is absent);
+        /// `true` once the overwrite-confirm prompt was answered `y`.
+        overwrite: bool,
+    },
+}
+
+/// Which sub-flow the overlay is showing. `/export` opens [`SelectorMode::Export`]
+/// directly (claude-code's `ExportDialog` is a filename prompt, NOT a search
+/// box); Ctrl-T opens [`SelectorMode::Search`] (the search/jump list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectorMode {
+    /// Search the scrollback + jump to a message (Ctrl-T).
+    #[default]
+    Search,
+    /// Export the transcript: a filename prompt + overwrite confirm (`/export`).
+    Export,
+}
+
+/// Export sub-state: the editable filename buffer, the overwrite-confirm
+/// latch, and the last status line (success/failure/cancel message). Lives
+/// inside [`MessageSelectorState`] while [`SelectorMode::Export`] is active.
+#[derive(Debug, Clone, Default)]
+pub struct ExportFlowState {
+    /// Editable filename buffer, pre-filled with [`default_export_filename`].
+    pub filename: String,
+    /// `true` once the resolved path already existed and we are awaiting an
+    /// explicit `y`/`n` overwrite decision (§4 R10: no silent clobber).
+    pub awaiting_overwrite: bool,
+    /// Status line surfaced after a write attempt or cancel (one of the
+    /// literal-locked strings). `None` while still editing the filename.
+    pub status: Option<String>,
+    /// `true` once a write succeeded (or the user cancelled): the flow is
+    /// done and the next key (any) closes the overlay.
+    pub done: bool,
 }
 
 /// Overlay state for the message search / jump selector. Lives on
@@ -194,29 +237,93 @@ pub enum SelectorAction {
 pub struct MessageSelectorState {
     /// `true` while the search overlay is shown (priority-3 focus).
     pub open: bool,
+    /// Which sub-flow is active (search/jump vs. export).
+    pub mode: SelectorMode,
     /// Live search query.
     pub query: String,
     /// Matching message indices (into `AppState.messages`).
     pub filtered: Vec<usize>,
     /// Cursor into `filtered`.
     pub selected_filtered: usize,
+    /// Export sub-state, meaningful only while `mode == Export`.
+    pub export: ExportFlowState,
+    /// Override for the export directory. `None` → [`default_export_dir`]
+    /// (`~/.lingxi/exports/`). Tests inject a temp dir here so the export
+    /// flow never touches the real home directory.
+    pub export_dir_override: Option<PathBuf>,
 }
 
 impl MessageSelectorState {
-    /// Open the overlay with an empty query (matches all).
+    /// Open the SEARCH overlay with an empty query (matches all). Ctrl-T.
     pub fn open(&mut self) {
         self.open = true;
+        self.mode = SelectorMode::Search;
         self.query.clear();
         self.filtered.clear();
         self.selected_filtered = 0;
     }
 
-    /// Close the overlay and reset.
-    pub fn close(&mut self) {
-        self.open = false;
+    /// (M7-14 review) Open the EXPORT overlay directly (the `/export`
+    /// `ExportDialog`: a filename prompt, not a search box). Pre-fills the
+    /// editable buffer with [`default_export_filename`].
+    pub fn open_export(&mut self) {
+        self.open = true;
+        self.mode = SelectorMode::Export;
         self.query.clear();
         self.filtered.clear();
         self.selected_filtered = 0;
+        self.export = ExportFlowState {
+            filename: default_export_filename(),
+            awaiting_overwrite: false,
+            status: None,
+            done: false,
+        };
+    }
+
+    /// Close the overlay and reset.
+    pub fn close(&mut self) {
+        self.open = false;
+        self.mode = SelectorMode::Search;
+        self.query.clear();
+        self.filtered.clear();
+        self.selected_filtered = 0;
+        self.export = ExportFlowState::default();
+    }
+
+    /// Resolve the export directory: the test override if set, else the
+    /// default `~/.lingxi/exports/` (§4 R10).
+    #[must_use]
+    pub fn resolved_export_dir(&self) -> PathBuf {
+        self.export_dir_override
+            .clone()
+            .unwrap_or_else(default_export_dir)
+    }
+
+    /// (M7-14 review) Fold an export attempt's outcome back into the sub-state
+    /// after the live caller ran [`export_transcript`]. On success surface
+    /// `"Conversation exported to: {path}"` and mark the flow `done`. On
+    /// [`ExportError::Exists`] arm the overwrite-confirm prompt (do NOT mark
+    /// done — §4 R10: wait for explicit `y`). On [`ExportError::Io`] surface
+    /// `"Failed to export conversation: {err}"` and mark done.
+    pub fn report_export(&mut self, outcome: &Result<PathBuf, ExportError>) {
+        match outcome {
+            Ok(path) => {
+                self.export.status = Some(format!("Conversation exported to: {}", path.display()));
+                self.export.awaiting_overwrite = false;
+                self.export.done = true;
+            }
+            Err(ExportError::Exists(_)) => {
+                // The target exists and we have not confirmed — prompt y/n.
+                self.export.awaiting_overwrite = true;
+                self.export.status = None;
+                self.export.done = false;
+            }
+            Err(ExportError::Io(err)) => {
+                self.export.status = Some(format!("Failed to export conversation: {err}"));
+                self.export.awaiting_overwrite = false;
+                self.export.done = true;
+            }
+        }
     }
 
     /// Re-run the filter against `messages` and clamp the selection.
@@ -237,11 +344,16 @@ impl MessageSelectorState {
 }
 
 /// Route one key into the selector overlay. Returns a [`SelectorAction`].
+/// Dispatches by [`SelectorMode`]: the export flow owns keys while
+/// `mode == Export`; otherwise the original search/jump routing runs.
 pub fn handle_message_selector_key(
     st: &mut MessageSelectorState,
     messages: &[RenderedMessage],
     key: KeyEvent,
 ) -> SelectorAction {
+    if st.mode == SelectorMode::Export {
+        return handle_export_key(st, key);
+    }
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) => {
             st.close();
@@ -279,16 +391,83 @@ pub fn handle_message_selector_key(
     }
 }
 
+/// Route one key into the EXPORT sub-flow (`mode == Export`). Owns every key
+/// while open (focus-trap). State machine:
+///   - **done** (success/IO-failure shown): any key closes the overlay.
+///   - **awaiting overwrite** (target exists): `y` → [`SelectorAction::Export`]
+///     with `overwrite = true`; `n`/Esc → cancel; other keys ignored.
+///   - **editing** the filename: printable chars + Backspace edit the buffer;
+///     Enter → [`SelectorAction::Export`] with `overwrite = false` (the live
+///     caller writes only if the target is absent, else reports `Exists` which
+///     arms the overwrite prompt); Esc → cancel.
+///
+/// Esc anywhere surfaces `"Export cancelled"` and closes after the next key
+/// (the caller closes on a [`SelectorAction::Close`]).
+fn handle_export_key(st: &mut MessageSelectorState, key: KeyEvent) -> SelectorAction {
+    // Terminal state: the write finished (or IO-failed). Any key dismisses.
+    if st.export.done {
+        st.close();
+        return SelectorAction::Close;
+    }
+    // Overwrite-confirm gate (§4 R10: no silent clobber).
+    if st.export.awaiting_overwrite {
+        return match key.code {
+            KeyCode::Char('y' | 'Y') => {
+                // Explicit confirm → ask the caller to write with overwrite.
+                SelectorAction::Export { overwrite: true }
+            }
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                st.export.status = Some("Export cancelled".to_string());
+                st.export.awaiting_overwrite = false;
+                st.export.done = true;
+                SelectorAction::None
+            }
+            _ => SelectorAction::None,
+        };
+    }
+    // Editing the filename.
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, _) => {
+            st.export.status = Some("Export cancelled".to_string());
+            st.export.done = true;
+            SelectorAction::None
+        }
+        (KeyCode::Enter, _) => {
+            if st.export.filename.trim().is_empty() {
+                // Nothing to write to; keep editing.
+                SelectorAction::None
+            } else {
+                // First attempt never silently clobbers (overwrite = false).
+                SelectorAction::Export { overwrite: false }
+            }
+        }
+        (KeyCode::Backspace, _) => {
+            st.export.filename.pop();
+            SelectorAction::None
+        }
+        (KeyCode::Char(c), m) if m == KeyModifiers::NONE || m == KeyModifiers::SHIFT => {
+            st.export.filename.push(c);
+            SelectorAction::None
+        }
+        _ => SelectorAction::None,
+    }
+}
+
 /// Props for [`MessageSelector`]. Cloned from `AppState` each frame.
 #[derive(Default, Props)]
 pub struct MessageSelectorProps {
-    /// Live query string.
+    /// Which sub-flow to render (search/jump vs. export).
+    pub mode: SelectorMode,
+    /// Live search query (search mode).
     pub query: String,
     /// Result labels (one per filtered match), in `filtered` order. The
     /// caller projects each matched message to a one-line preview.
     pub result_labels: Vec<String>,
     /// Cursor into `result_labels`.
     pub selected: usize,
+    /// Export sub-state (export mode): editable filename, overwrite-confirm
+    /// latch, and the status line.
+    pub export: ExportFlowState,
 }
 
 /// One-line preview of a message for the result list (≤ 60 cols).
@@ -299,10 +478,17 @@ pub fn preview_label(msg: &RenderedMessage) -> String {
     first.chars().take(60).collect()
 }
 
-/// The search/jump overlay. Renders the query line and up to the visible
-/// window of results with the selected one marked.
+/// The selector overlay. In [`SelectorMode::Search`] it renders the query
+/// line + the result window; in [`SelectorMode::Export`] it renders the
+/// `ExportDialog` (filename prompt → overwrite confirm → status). All the
+/// export literals (`"Export Conversation"`, `"Enter filename:"`,
+/// `"Conversation exported to: …"`, `"Failed to export conversation: …"`,
+/// `"Export cancelled"`) are surfaced here.
 #[component]
 pub fn MessageSelector(props: &MessageSelectorProps) -> impl Into<AnyElement<'static>> {
+    if props.mode == SelectorMode::Export {
+        return render_export(&props.export);
+    }
     let selected = props.selected;
     let rows: Vec<AnyElement<'static>> = props
         .result_labels
@@ -318,6 +504,46 @@ pub fn MessageSelector(props: &MessageSelectorProps) -> impl Into<AnyElement<'st
             Text(content: format!("Search: {}", props.query))
             #(rows)
             Text(content: "↑/↓ select · Enter jump · Esc cancel")
+        }
+    }
+    .into_any()
+}
+
+/// Render the `ExportDialog` body for the given export sub-state.
+fn render_export(export: &ExportFlowState) -> AnyElement<'static> {
+    // Once a status line is set (success / IO-failure / cancel), show it +
+    // the dismiss hint. Otherwise show the filename prompt (or the overwrite
+    // confirm when the target already exists).
+    let body: AnyElement<'static> = if let Some(status) = &export.status {
+        element! {
+            View(flex_direction: FlexDirection::Column, width: 100pct) {
+                Text(content: status.clone())
+                Text(content: "Press any key to dismiss")
+            }
+        }
+        .into_any()
+    } else if export.awaiting_overwrite {
+        element! {
+            View(flex_direction: FlexDirection::Column, width: 100pct) {
+                Text(content: format!("{} already exists. Overwrite? (y/n)", export.filename))
+                Text(content: "y confirm · n/Esc cancel")
+            }
+        }
+        .into_any()
+    } else {
+        element! {
+            View(flex_direction: FlexDirection::Column, width: 100pct) {
+                Text(content: "Enter filename:")
+                Text(content: format!("> {}", export.filename))
+                Text(content: "Enter export · Esc cancel")
+            }
+        }
+        .into_any()
+    };
+    element! {
+        View(flex_direction: FlexDirection::Column, width: 100pct) {
+            Text(content: "Export Conversation")
+            #(vec![body])
         }
     }
     .into_any()

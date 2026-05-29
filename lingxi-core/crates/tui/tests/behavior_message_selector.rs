@@ -2,7 +2,7 @@
 
 use lingxi_tui::components::message_selector::{
     export_transcript, handle_message_selector_key, message_line_offset, ExportError,
-    SelectorAction,
+    SelectorAction, SelectorMode,
 };
 use lingxi_tui::components::virtual_message_list::HeightCache;
 use lingxi_tui::state::{AppState, RenderedMessage};
@@ -15,6 +15,23 @@ fn push(st: &mut AppState, body: &str) {
         body: body.into(),
         timestamp: 0,
     });
+}
+
+/// Build an iocraft (crossterm-0.29) key-press event — the exact event type
+/// the live `use_terminal_events` closure feeds `handle_live_key`.
+fn live_key(code: iocraft::prelude::KeyCode) -> iocraft::prelude::KeyEvent {
+    use iocraft::prelude::{KeyEvent, KeyEventKind, KeyModifiers};
+    let mut k = KeyEvent::new(KeyEventKind::Press, code);
+    k.modifiers = KeyModifiers::NONE;
+    k
+}
+
+/// Render the live overlay to a string via the real `render_screen` seam,
+/// so assertions exercise the same component the binary draws.
+fn render_overlay(st: &AppState) -> String {
+    use iocraft::ElementExt;
+    let mut el = lingxi_tui::app::render_screen(st, 20, 80);
+    el.to_string()
 }
 
 #[test]
@@ -89,4 +106,230 @@ fn export_default_path_and_overwrite_confirm() {
         other => panic!("expected Exists, got {other:?}"),
     }
     assert_eq!(fs::read_to_string(&p).unwrap(), original);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// M7-14 REVIEW: the export flow must be REACHABLE and actually export.
+// These drive the REAL seams (`dispatch` for the `/export` submit-intercept,
+// `handle_live_key` for the priority-3 overlay key path). They FAIL against
+// the pre-fix code where `/export` opened the plain search box and no key
+// path ever called `export_transcript`.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Type a string into the live export flow via `handle_live_key`.
+fn type_live(st: &mut AppState, text: &str) {
+    for c in text.chars() {
+        lingxi_tui::root::handle_live_key(st, &live_key(iocraft::prelude::KeyCode::Char(c)), 20);
+    }
+}
+
+/// (1) `/export` submit-intercept opens the export flow DIRECTLY (export
+/// mode, "Export Conversation" + "Enter filename:" rendered) — NOT the plain
+/// search box. Pre-fix this opened `MessageSelectorState::open()` (search).
+#[test]
+fn slash_export_opens_export_flow_not_search() {
+    use lingxi_tui::app::dispatch;
+    use lingxi_tui::events::keymap::KeyAction;
+    let mut st = AppState::new(fake_status());
+    push(&mut st, "hello");
+
+    st.prompt_text = "/export".to_string();
+    st.prompt_cursor = "/export".len();
+    let should_run = dispatch(KeyAction::Submit, &mut st);
+    assert!(!should_run, "/export opens a flow, never runs a turn");
+    assert!(st.message_selector.open, "overlay must be open");
+    assert_eq!(
+        st.message_selector.mode,
+        SelectorMode::Export,
+        "/export opens the EXPORT flow, not the search box"
+    );
+    assert!(
+        st.prompt_text.is_empty(),
+        "prompt cleared on the intercepted slash"
+    );
+    // The default filename is pre-filled, ready to edit.
+    assert!(
+        std::path::Path::new(&st.message_selector.export.filename)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("txt")),
+        "default filename pre-filled, got {:?}",
+        st.message_selector.export.filename
+    );
+
+    let rendered = render_overlay(&st);
+    assert!(
+        rendered.contains("Export Conversation"),
+        "title shown, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("Enter filename:"),
+        "filename prompt shown, got: {rendered}"
+    );
+}
+
+/// (2) Export flow → edit filename → Enter writes the file to the (injected
+/// temp) export dir with the transcript content, and surfaces
+/// "Conversation exported to: {path}". Drives the live key path end-to-end.
+#[test]
+fn export_flow_enter_writes_file_and_reports_path() {
+    use std::fs;
+    use tempfile::TempDir;
+    let tmp = TempDir::new().unwrap();
+
+    let mut st = AppState::new(fake_status());
+    push(&mut st, "what is 2+2");
+    st.push_message(RenderedMessage::AssistantText {
+        body: "4".into(),
+        timestamp: 0,
+    });
+
+    // Open the export flow + inject the temp export dir (no `~` touch).
+    st.message_selector.open_export();
+    st.message_selector.export_dir_override = Some(tmp.path().to_path_buf());
+    // Replace the timestamped default with a deterministic name.
+    st.message_selector.export.filename.clear();
+    type_live(&mut st, "myexport.txt");
+    assert_eq!(st.message_selector.export.filename, "myexport.txt");
+
+    // Enter confirms → write happens on the live key path.
+    lingxi_tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Enter), 20);
+
+    let target = tmp.path().join("myexport.txt");
+    assert!(target.exists(), "file must be written to the export dir");
+    let body = fs::read_to_string(&target).unwrap();
+    assert!(body.contains("what is 2+2"), "transcript content present");
+    assert!(body.contains('4'), "assistant text present");
+
+    // Success status surfaces the literal-locked string with the path.
+    let status = st.message_selector.export.status.clone().unwrap();
+    assert_eq!(
+        status,
+        format!("Conversation exported to: {}", target.display())
+    );
+    let rendered = render_overlay(&st);
+    assert!(
+        rendered.contains("Conversation exported to:"),
+        "success line rendered, got: {rendered}"
+    );
+}
+
+/// (3) §4 R10: exporting onto an EXISTING file shows the overwrite-confirm
+/// prompt; WITHOUT confirm the file is unchanged; WITH `y` it is overwritten.
+#[test]
+fn export_flow_overwrite_confirm_protects_existing_file() {
+    use std::fs;
+    use tempfile::TempDir;
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("dup.txt");
+    fs::write(&target, b"ORIGINAL").unwrap();
+
+    let mut st = AppState::new(fake_status());
+    push(&mut st, "new transcript content");
+
+    st.message_selector.open_export();
+    st.message_selector.export_dir_override = Some(tmp.path().to_path_buf());
+    st.message_selector.export.filename.clear();
+    type_live(&mut st, "dup.txt");
+
+    // First Enter → target exists, write REFUSED, overwrite prompt armed.
+    lingxi_tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Enter), 20);
+    assert!(
+        st.message_selector.export.awaiting_overwrite,
+        "must arm the overwrite-confirm prompt"
+    );
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "ORIGINAL",
+        "§4 R10: file must be UNCHANGED before explicit confirm"
+    );
+    let rendered = render_overlay(&st);
+    assert!(
+        rendered.contains("already exists") && rendered.contains("Overwrite?"),
+        "overwrite prompt rendered, got: {rendered}"
+    );
+
+    // Pressing 'n' cancels on a fresh state armed at the same prompt — the
+    // file stays unchanged (AppState isn't Clone, so rebuild the scenario).
+    {
+        let mut st_no = AppState::new(fake_status());
+        push(&mut st_no, "different content");
+        st_no.message_selector.open_export();
+        st_no.message_selector.export_dir_override = Some(tmp.path().to_path_buf());
+        st_no.message_selector.export.filename.clear();
+        type_live(&mut st_no, "dup.txt");
+        lingxi_tui::root::handle_live_key(
+            &mut st_no,
+            &live_key(iocraft::prelude::KeyCode::Enter),
+            20,
+        );
+        assert!(st_no.message_selector.export.awaiting_overwrite);
+        lingxi_tui::root::handle_live_key(
+            &mut st_no,
+            &live_key(iocraft::prelude::KeyCode::Char('n')),
+            20,
+        );
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "ORIGINAL",
+            "declining overwrite leaves the file untouched"
+        );
+        assert_eq!(
+            st_no.message_selector.export.status.as_deref(),
+            Some("Export cancelled"),
+            "declining surfaces the cancel literal"
+        );
+    }
+
+    // Pressing 'y' confirms → now it is overwritten.
+    lingxi_tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Char('y')), 20);
+    let body = fs::read_to_string(&target).unwrap();
+    assert!(
+        body.contains("new transcript content"),
+        "confirmed overwrite replaces the file, got: {body:?}"
+    );
+    assert!(
+        st.message_selector
+            .export
+            .status
+            .as_deref()
+            .unwrap()
+            .starts_with("Conversation exported to:"),
+        "success after confirm"
+    );
+}
+
+/// (4) Esc cancels the export flow: nothing is written and "Export cancelled"
+/// is surfaced.
+#[test]
+fn export_flow_esc_cancels_and_writes_nothing() {
+    use tempfile::TempDir;
+    let tmp = TempDir::new().unwrap();
+
+    let mut st = AppState::new(fake_status());
+    push(&mut st, "secret");
+    st.message_selector.open_export();
+    st.message_selector.export_dir_override = Some(tmp.path().to_path_buf());
+    st.message_selector.export.filename.clear();
+    type_live(&mut st, "wont-write.txt");
+
+    // Esc cancels.
+    lingxi_tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Esc), 20);
+    assert_eq!(
+        st.message_selector.export.status.as_deref(),
+        Some("Export cancelled"),
+        "Esc surfaces the cancel literal"
+    );
+    let rendered = render_overlay(&st);
+    assert!(
+        rendered.contains("Export cancelled"),
+        "cancel line rendered, got: {rendered}"
+    );
+    // No file was created in the export dir.
+    assert!(
+        !tmp.path().join("wont-write.txt").exists(),
+        "Esc must write nothing"
+    );
+    // The next key dismisses the overlay (closes).
+    lingxi_tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Char(' ')), 20);
+    assert!(!st.message_selector.open, "overlay closed after dismiss");
 }

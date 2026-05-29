@@ -164,16 +164,19 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.open_memory();
                 return false;
             }
-            // (M7-14) `/export` opens the message search/jump overlay, which is
-            // where the export action lives (avoids a second modal). This
-            // replaces the M5-11 `/export` unimplemented stub on the TUI surface
-            // (no echo, no turn). Registers NO telemetry event (M7-16 audit).
+            // (M7-14 review) `/export` opens the export flow DIRECTLY (the
+            // claude-code ExportDialog: a filename prompt, not a search box).
+            // `open_export` pre-fills the editable filename with
+            // `default_export_filename()`; the live key path (priority-3
+            // overlay branch in `root::handle_live_key`) drives the flow and
+            // runs `export_transcript` on confirm (§4 R10 overwrite-confirm).
+            // Ctrl-T still opens the search/jump overlay. This replaces the
+            // M5-11 `/export` unimplemented stub on the TUI surface (no echo,
+            // no turn). Registers NO telemetry event (M7-16 audit).
             if st.prompt_text.trim() == "/export" {
                 st.prompt_text.clear();
                 st.prompt_cursor = 0;
-                st.message_selector.open();
-                let messages = st.messages.clone();
-                st.message_selector.refilter_all(&messages);
+                st.message_selector.open_export();
                 return false;
             }
             // (M7-13 review) `/config` / `/status` open the Settings screen on
@@ -468,9 +471,11 @@ pub fn render_screen(
             .collect();
         return element! {
             MessageSelector(
+                mode: sel.mode,
                 query: sel.query.clone(),
                 result_labels: result_labels,
                 selected: sel.selected_filtered,
+                export: sel.export.clone(),
             )
         }
         .into_any();

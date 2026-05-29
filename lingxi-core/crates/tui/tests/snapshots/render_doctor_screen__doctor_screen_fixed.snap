@@ -1,0 +1,18 @@
+---
+source: crates/tui/tests/render_doctor_screen.rs
+expression: rendered
+---
+
+ Diagnostics
+ └ Version: lingxi-cli v0.8.0
+ └ Rust toolchain: 1.82.0
+ └ Claude home: /home/u/.claude
+ └ Working dir: /work/proj
+ └ MCP servers: 2 configured, not connected
+ └ Auth: unknown
+
+ Updates
+ └ Truecolor: yes
+ └ Terminal size: 120x40
+
+ Press Esc or q to return

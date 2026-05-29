@@ -575,6 +575,10 @@ pub struct AppState {
     /// parallel top-level `Option<…State>` field per screen to keep in sync —
     /// `open_*` sets the variant, `close_screen` is a single `= None`.
     pub active_screen: Option<crate::screens::Screen>,
+    /// (M7-14) Message search/jump overlay state. A priority-3 input overlay
+    /// (mutually exclusive with the M7-07 palette/completion + M7-10
+    /// history-search overlays); `open` ⇒ it owns all live keys.
+    pub message_selector: crate::components::message_selector::MessageSelectorState,
 }
 
 impl AppState {
@@ -619,6 +623,7 @@ impl AppState {
             history_search: None,
             paste: crate::components::prompt_input::PasteState::default(),
             active_screen: None,
+            message_selector: crate::components::message_selector::MessageSelectorState::default(),
         }
     }
 

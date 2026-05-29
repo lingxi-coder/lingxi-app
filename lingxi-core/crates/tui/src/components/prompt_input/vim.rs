@@ -234,6 +234,116 @@ impl<'a> VimCursor<'a> {
     }
 }
 
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+fn is_space(c: char) -> bool {
+    c.is_whitespace()
+}
+fn is_punct(c: char) -> bool {
+    !is_space(c) && !is_word_char(c)
+}
+
+impl<'a> VimCursor<'a> {
+    fn char_at(&self, off: usize) -> Option<char> {
+        if off >= self.text.len() {
+            return None;
+        }
+        self.text[off..].chars().next()
+    }
+
+    /// Byte offset of the char after `off` (clamped to len).
+    fn next_off(&self, off: usize) -> usize {
+        self.char_at(off).map_or(off, |c| off + c.len_utf8())
+    }
+    /// Byte offset of the char before `off` (clamped to 0).
+    fn prev_off(&self, off: usize) -> usize {
+        if off == 0 {
+            return 0;
+        }
+        self.text[..off].char_indices().last().map_or(0, |(i, _)| i)
+    }
+
+    #[must_use]
+    pub fn next_vim_word(&self) -> Self {
+        if self.is_at_end() {
+            return *self;
+        }
+        let mut pos = self.offset;
+        let c = self.char_at(pos).unwrap();
+        if is_word_char(c) {
+            while pos < self.text.len() && self.char_at(pos).is_some_and(is_word_char) {
+                pos = self.next_off(pos);
+            }
+        } else if is_punct(c) {
+            while pos < self.text.len() && self.char_at(pos).is_some_and(is_punct) {
+                pos = self.next_off(pos);
+            }
+        }
+        while pos < self.text.len() && self.char_at(pos).is_some_and(is_space) {
+            pos = self.next_off(pos);
+        }
+        Self { text: self.text, offset: pos }
+    }
+
+    #[must_use]
+    pub fn prev_vim_word(&self) -> Self {
+        if self.offset == 0 {
+            return *self;
+        }
+        let mut pos = self.prev_off(self.offset);
+        while pos > 0 && self.char_at(pos).is_some_and(is_space) {
+            pos = self.prev_off(pos);
+        }
+        if pos == 0 && self.char_at(0).is_some_and(is_space) {
+            return Self { text: self.text, offset: 0 };
+        }
+        let c = self.char_at(pos).unwrap();
+        if is_word_char(c) {
+            while pos > 0 {
+                let p = self.prev_off(pos);
+                if !self.char_at(p).is_some_and(is_word_char) {
+                    break;
+                }
+                pos = p;
+            }
+        } else if is_punct(c) {
+            while pos > 0 {
+                let p = self.prev_off(pos);
+                if !self.char_at(p).is_some_and(is_punct) {
+                    break;
+                }
+                pos = p;
+            }
+        }
+        Self { text: self.text, offset: pos }
+    }
+
+    #[must_use]
+    pub fn end_vim_word(&self) -> Self {
+        if self.is_at_end() {
+            return *self;
+        }
+        let mut pos = self.next_off(self.offset);
+        while pos < self.text.len() && self.char_at(pos).is_some_and(is_space) {
+            pos = self.next_off(pos);
+        }
+        if pos >= self.text.len() {
+            return Self { text: self.text, offset: self.text.len() };
+        }
+        let c = self.char_at(pos).unwrap();
+        let pred: fn(char) -> bool = if is_word_char(c) { is_word_char } else { is_punct };
+        loop {
+            let nxt = self.next_off(pos);
+            if nxt >= self.text.len() || !self.char_at(nxt).is_some_and(pred) {
+                break;
+            }
+            pos = nxt;
+        }
+        Self { text: self.text, offset: pos }
+    }
+}
+
 /// Footer mode-indicator literal. Matches the well-known vim convention
 /// (claude-code surfaces the mode via PromptInputModeIndicator; the literal
 /// status-line text is the standard vim `-- MODE --`).
@@ -314,5 +424,51 @@ mod cursor_tests {
         assert_eq!(cur(t, 0).start_of_last_line().offset, 8);  // 'three'
         assert_eq!(cur(t, 0).go_to_line(2).offset, 4);          // 'two' (1-indexed)
         assert_eq!(cur(t, 0).go_to_line(99).offset, 8);         // clamp to last
+    }
+}
+
+#[cfg(test)]
+mod word_tests {
+    use super::*;
+    fn cur(text: &str, off: usize) -> VimCursor<'_> {
+        VimCursor { text, offset: off }
+    }
+
+    #[test]
+    fn next_word_skips_to_next_word_start() {
+        let t = "foo bar baz";
+        assert_eq!(cur(t, 0).next_vim_word().offset, 4); // 'b' of bar
+        assert_eq!(cur(t, 4).next_vim_word().offset, 8); // 'b' of baz
+        assert_eq!(cur(t, 8).next_vim_word().offset, 11); // end (no next)
+    }
+
+    #[test]
+    fn next_word_treats_punctuation_as_its_own_word() {
+        let t = "foo.bar";
+        // from 'f': over the word "foo" then land on '.'
+        assert_eq!(cur(t, 0).next_vim_word().offset, 3); // '.'
+        // from '.': over the punctuation run then land on "bar"
+        assert_eq!(cur(t, 3).next_vim_word().offset, 4); // 'b'
+    }
+
+    #[test]
+    fn prev_word_goes_to_word_start() {
+        let t = "foo bar baz";
+        assert_eq!(cur(t, 8).prev_vim_word().offset, 4); // start of 'bar'
+        assert_eq!(cur(t, 5).prev_vim_word().offset, 4); // inside 'bar' -> its start
+        assert_eq!(cur(t, 2).prev_vim_word().offset, 0); // inside 'foo' -> 0
+    }
+
+    #[test]
+    fn end_word_lands_on_last_char_of_word() {
+        let t = "foo bar";
+        assert_eq!(cur(t, 0).end_vim_word().offset, 2); // 'o' (last of foo)
+        assert_eq!(cur(t, 2).end_vim_word().offset, 6); // 'r' (last of bar)
+    }
+
+    #[test]
+    fn word_motions_handle_punctuation_boundaries() {
+        let t = "a, b";
+        assert_eq!(cur(t, 0).end_vim_word().offset, 1); // ',' is end of next "word"
     }
 }

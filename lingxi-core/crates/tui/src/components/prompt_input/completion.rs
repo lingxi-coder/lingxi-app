@@ -6,6 +6,8 @@
 //! Literal lock (design §2.8): inserts `@<path> ` (trailing space), mirroring
 //! claude-code QuickOpenDialog handleInsert. Empty-state strings copied below.
 
+use std::path::Path;
+
 use iocraft::prelude::KeyCode;
 
 use super::fuzzy::filtered_ranked;
@@ -87,6 +89,102 @@ impl CompletionState {
     }
 }
 
+/// Outcome of a completion key. `Accept` carries the rewritten prompt + cursor
+/// because inserting a path edits the buffer in place (replacing the `@token`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompletionKeyOutcome {
+    /// Navigation handled; key swallowed.
+    Consumed,
+    /// Commit the selected path. The dispatcher sets `new_prompt`/`new_cursor`.
+    Accept {
+        /// The full prompt buffer after inserting `@<path> `.
+        new_prompt: String,
+        /// The new cursor byte index (end of the inserted token).
+        new_cursor: usize,
+    },
+    /// `Esc` — close; key swallowed.
+    Dismiss,
+    /// Nothing actionable — fall through to default input.
+    PassThrough,
+}
+
+impl CompletionState {
+    /// Navigation-only handler (no prompt rewrite). Used for Up/Down/Esc.
+    pub fn handle_key(&mut self, code: KeyCode) -> CompletionKeyOutcome {
+        let len = self.rows().len();
+        match code {
+            KeyCode::Down => {
+                if len > 0 && self.selected + 1 < len {
+                    self.selected += 1;
+                }
+                CompletionKeyOutcome::Consumed
+            }
+            KeyCode::Up => {
+                self.selected = self.selected.saturating_sub(1);
+                CompletionKeyOutcome::Consumed
+            }
+            KeyCode::Esc => {
+                self.open = false;
+                self.filter.clear();
+                self.selected = 0;
+                self.candidates.clear();
+                CompletionKeyOutcome::Dismiss
+            }
+            _ => CompletionKeyOutcome::PassThrough,
+        }
+    }
+
+    /// Tab/Enter handler that rewrites the prompt in place: replaces the active
+    /// `@token` (located via `active_at_token`) with `@<selected> `.
+    pub fn handle_key_with_prompt(
+        &mut self,
+        code: KeyCode,
+        prompt: &str,
+        cursor: usize,
+    ) -> CompletionKeyOutcome {
+        match code {
+            KeyCode::Tab | KeyCode::Enter => {
+                let rows = self.rows();
+                let Some(sel) = rows.get(self.selected).cloned() else {
+                    return CompletionKeyOutcome::PassThrough;
+                };
+                let Some((at, _)) = active_at_token(prompt, cursor) else {
+                    return CompletionKeyOutcome::PassThrough;
+                };
+                let cursor = cursor.min(prompt.len());
+                let insert = format!("@{sel} ");
+                let mut new_prompt = String::with_capacity(prompt.len() + insert.len());
+                new_prompt.push_str(&prompt[..at]);
+                new_prompt.push_str(&insert);
+                let new_cursor = new_prompt.len();
+                new_prompt.push_str(&prompt[cursor..]);
+                self.open = false;
+                self.filter.clear();
+                self.selected = 0;
+                self.candidates.clear();
+                CompletionKeyOutcome::Accept { new_prompt, new_cursor }
+            }
+            _ => self.handle_key(code),
+        }
+    }
+}
+
+/// Read the immediate (non-recursive) entries of `dir`, excluding dotfiles,
+/// returned as file names sorted ASCII-ascending. The only fs-touching fn in
+/// this module. Errors → empty list (the overlay just shows the empty state).
+#[must_use]
+pub fn read_cwd_entries(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    out.sort_unstable();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +231,54 @@ mod tests {
         assert!(c.open);
         c.sync("plain", 5, &cands());
         assert!(!c.open);
+    }
+
+    #[test]
+    fn down_up_move_and_clamp() {
+        let mut c = CompletionState::default();
+        c.sync("@src", 4, &cands()); // 2 rows
+        assert_eq!(c.selected, 0);
+        c.handle_key(KeyCode::Down);
+        assert_eq!(c.selected, 1);
+        c.handle_key(KeyCode::Down); // clamp at last
+        assert_eq!(c.selected, 1);
+        c.handle_key(KeyCode::Up);
+        assert_eq!(c.selected, 0);
+    }
+
+    #[test]
+    fn tab_inserts_path_with_at_and_trailing_space() {
+        let mut c = CompletionState::default();
+        // prompt is "@s", cursor 2; selecting replaces the @token in place.
+        c.sync("@s", 2, &cands());
+        let sel = c.rows()[c.selected].clone();
+        let outcome = c.handle_key_with_prompt(KeyCode::Tab, "@s", 2);
+        match outcome {
+            CompletionKeyOutcome::Accept { new_prompt, new_cursor } => {
+                let expected = format!("@{sel} ");
+                assert_eq!(new_prompt, expected);
+                assert_eq!(new_cursor, expected.len());
+            }
+            other => panic!("expected Accept, got {other:?}"),
+        }
+        assert!(!c.open);
+    }
+
+    #[test]
+    fn esc_dismisses() {
+        let mut c = CompletionState::default();
+        c.sync("@src", 4, &cands());
+        assert!(matches!(c.handle_key(KeyCode::Esc), CompletionKeyOutcome::Dismiss));
+        assert!(!c.open);
+    }
+
+    #[test]
+    fn read_cwd_entries_excludes_dotfiles_and_is_sorted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("b.txt"), "").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "").unwrap();
+        std::fs::write(dir.path().join(".hidden"), "").unwrap();
+        let entries = read_cwd_entries(dir.path());
+        assert_eq!(entries, vec!["a.txt".to_string(), "b.txt".to_string()]);
     }
 }

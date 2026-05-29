@@ -163,6 +163,102 @@ pub enum RenderedMessage {
         /// Request/approved/rejected content.
         kind: PlanApprovalKind,
     },
+    /// (M7-05) User bash-mode command line (`!` prefix). Body is the
+    /// command text already extracted from the `<bash-input>` engine tag.
+    UserBashInput {
+        /// The command line the user typed in `!` bash mode.
+        command: String,
+    },
+    /// (M7-05) Bash tool output. stdout/stderr already extracted from the
+    /// `<bash-stdout>`/`<bash-stderr>` engine tags. Body carries ANSI SGR
+    /// codes and is parsed through the ANSI parser at render time.
+    UserBashOutput {
+        /// Standard output (ANSI-coded).
+        stdout: String,
+        /// Standard error (ANSI-coded).
+        stderr: String,
+    },
+    /// (M7-05) Slash-command echo. `❯ /{command} {args}` or `❯ Skill(name)`.
+    UserCommand {
+        /// Command name (without leading slash).
+        command: String,
+        /// Argument string (may be empty).
+        args: String,
+        /// `true` → render `Skill(name)` form instead of `/name args`.
+        is_skill: bool,
+    },
+    /// (M7-05) Output of a local (slash) command. stdout/stderr already
+    /// extracted; body rendered as markdown under a `  ⎿  ` gutter.
+    UserLocalCommandOutput {
+        /// Local-command stdout.
+        stdout: String,
+        /// Local-command stderr.
+        stderr: String,
+    },
+    /// (M7-05) Memory write (`# {input}`) + a saving acknowledgement line.
+    UserMemoryInput {
+        /// Text the user added to memory (from `<user-memory-input>`).
+        input: String,
+    },
+    /// (M7-05) Plan-mode plan body, rendered as bordered markdown under a
+    /// "Plan to implement" header.
+    UserPlan {
+        /// Markdown plan content.
+        plan_content: String,
+    },
+    /// (M7-05) A user prompt echoed into scrollback. Long bodies are
+    /// head+tail truncated (claude-code parity, 10k char cap).
+    UserPrompt {
+        /// The prompt body text.
+        text: String,
+    },
+    /// (M7-05) MCP resource/polling update lines (`↻ server: target · reason`).
+    UserResourceUpdate {
+        /// Parsed update triples (server, target, optional reason).
+        updates: Vec<(String, String, Option<String>)>,
+    },
+    /// (M7-05) Image attachment placeholder. Terminal image protocols are M8;
+    /// this renders `[Image #N]`/`[Image]` + optional metadata only.
+    UserImage {
+        /// Stored image id, if any (drives `#N` suffix).
+        image_id: Option<u64>,
+        /// Optional metadata suffix (dims/name) shown in parens.
+        metadata: Option<String>,
+    },
+    /// (M7-05) A non-tool attachment summary line (directory listing, file
+    /// read, PDF/resource reference, etc.). Carries the parsed attachment
+    /// kind; team/swarm/hook kinds defer to M8.
+    Attachment {
+        /// The parsed attachment kind.
+        attachment: crate::components::messages::attachment::Attachment,
+    },
+    /// (M7-05) A fold of consecutive same-tool tool-use blocks. Collapsed →
+    /// `● {tool} (×N)`; expanded → header + each child input/result pair.
+    /// `group_id` (the first child's id) keys `AppState.expanded`.
+    GroupedToolUse {
+        /// Shared tool name for the group.
+        tool: String,
+        /// First child's id — the per-group expanded-map key.
+        group_id: lingxi_protocol::ToolUseId,
+        /// `(input, result)` pairs in group order.
+        entries: Vec<(serde_json::Value, serde_json::Value)>,
+    },
+    /// (M7-05) A fold of Read/Search/List tool runs into one count summary.
+    /// Scope: read/search/list counts (git/PR/bash/mcp/memory parts → M8).
+    CollapsedReadSearch {
+        /// Number of search (Grep/Glob) tool uses.
+        search_count: u64,
+        /// Number of file reads.
+        read_count: u64,
+        /// Number of directory listings.
+        list_count: u64,
+        /// `true` while the group is still streaming (present-tense verbs).
+        is_active: bool,
+        /// Expanded-map key (first child's id).
+        group_id: lingxi_protocol::ToolUseId,
+        /// Per-entry display lines, shown when expanded.
+        entries: Vec<String>,
+    },
 }
 
 /// (M7-04) System message severity → marker/color mapping.

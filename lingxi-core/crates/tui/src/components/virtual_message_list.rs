@@ -84,7 +84,7 @@ pub fn measured_height(msg: &RenderedMessage, width: usize) -> usize {
 /// you MUST update this function to match and extend the
 /// `measured_height_pins_*` lock tests below. Drift here corrupts the
 /// line-based scroll math.
-#[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (15 variants)
+#[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (27 variants)
 fn render_text_for_measure(msg: &RenderedMessage) -> String {
     match msg {
         RenderedMessage::UserText { body, .. }
@@ -242,6 +242,99 @@ fn render_text_for_measure(msg: &RenderedMessage) -> String {
                 out
             }
         },
+        // ---- (M7-05) batch-2 user renderers --------------------------------
+        //
+        // Each arm reproduces the line layout `render_message` draws for the
+        // variant. For markdown/ANSI-bodied variants (plan, local-command
+        // output, bash output) the arm routes THROUGH the renderer's own string
+        // oracle so measurement counts the SAME flattened/parsed lines the
+        // component draws (raw bodies over-count dropped ``` fence rows /
+        // trailing blanks / ANSI escapes). Pinned by the
+        // `measured_height_pins_*_m7_05` lock tests below.
+        RenderedMessage::UserBashInput { command } => {
+            crate::components::messages::bash_input::render_bash_input_to_string(command)
+        }
+        // Measurement == render: route through the ANSI span pipeline and rejoin
+        // the span texts so the row count matches the parsed (escape-stripped)
+        // body the component draws.
+        RenderedMessage::UserBashOutput { stdout, stderr } => {
+            crate::components::messages::bash_output::render_bash_output_spans(stdout, stderr)
+                .into_iter()
+                .map(|s| s.text)
+                .collect::<String>()
+        }
+        RenderedMessage::UserCommand {
+            command,
+            args,
+            is_skill,
+        } => {
+            crate::components::messages::command::render_command_to_string(command, args, *is_skill)
+        }
+        // Measurement == render: route through the markdown-flattening oracle so
+        // the gutter-prefixed body counts the SAME rows the component draws.
+        RenderedMessage::UserLocalCommandOutput { stdout, stderr } => {
+            crate::components::messages::local_command_output::render_local_output_to_string(
+                stdout, stderr,
+            )
+        }
+        RenderedMessage::UserMemoryInput { input } => {
+            crate::components::messages::memory_input::render_memory_to_string(input)
+        }
+        // Measurement == render: route through the plan markdown oracle (header
+        // + flattened body); the round border adds no body rows here.
+        RenderedMessage::UserPlan { plan_content } => {
+            crate::components::messages::plan::render_plan_to_string(plan_content)
+        }
+        RenderedMessage::UserPrompt { text } => {
+            crate::components::messages::prompt::render_prompt_to_string(text)
+        }
+        RenderedMessage::UserResourceUpdate { updates } => {
+            let parsed: Vec<crate::components::messages::resource_update::ResourceUpdate> = updates
+                .iter()
+                .map(
+                    |(s, t, r)| crate::components::messages::resource_update::ResourceUpdate {
+                        server: s.clone(),
+                        target: t.clone(),
+                        reason: r.clone(),
+                    },
+                )
+                .collect();
+            crate::components::messages::resource_update::render_resource_update_to_string(&parsed)
+        }
+        RenderedMessage::UserImage { image_id, metadata } => {
+            crate::components::messages::image::render_image_label(*image_id, metadata.as_deref())
+        }
+        RenderedMessage::Attachment { attachment } => {
+            crate::components::messages::attachment::render_attachment_to_string(attachment)
+        }
+        // Collapsed → header line only; expanded → header + children (the proxy
+        // mirrors `render_grouped_to_string`'s default-collapsed string since
+        // `measured_height`/the cache do not have the per-id expanded flag here;
+        // matches the M7-03 proxy convention for fold variants).
+        RenderedMessage::GroupedToolUse { tool, entries, .. } => {
+            crate::components::messages::grouped_tool_use::render_grouped_to_string(
+                tool, entries, false,
+            )
+        }
+        RenderedMessage::CollapsedReadSearch {
+            search_count,
+            read_count,
+            list_count,
+            is_active,
+            ..
+        } => {
+            let counts = crate::components::messages::collapsed_read_search::CollapsedCounts {
+                search: *search_count,
+                read: *read_count,
+                list: *list_count,
+                is_active: *is_active,
+            };
+            crate::components::messages::collapsed_read_search::render_collapsed_to_string(
+                &counts,
+                &[],
+                false,
+            )
+        }
     }
 }
 
@@ -920,6 +1013,188 @@ mod tests {
             },
         };
         assert_eq!(measured_height(&rejected, 80), 3);
+    }
+
+    // ---- (M7-05) Per-variant measurement lock tests --------------------
+    //
+    // Pin `measured_height` for each of the 12 batch-2 user variants so the
+    // proxy stays in lock-step with the `render_*_to_string` renderers. For the
+    // markdown/ANSI-bodied variants (plan, local-command output, bash output)
+    // the EXPECTED row count is derived from the renderer's OWN string oracle —
+    // not a raw `.lines()` recount — so measurement == render BY CONSTRUCTION
+    // (the M7-04 fenced-code / trailing-blank desync class can't recur). Those
+    // tests include a fenced code block / trailing blank in the body to pin it.
+
+    #[test]
+    fn measured_height_pins_user_bash_input_m7_05() {
+        // `! {command}` — single line (prefix adds columns, not rows).
+        let m = RenderedMessage::UserBashInput {
+            command: "ls -la".into(),
+        };
+        assert_eq!(measured_height(&m, 80), 1);
+    }
+
+    #[test]
+    fn measured_height_bash_output_matches_renderer_ansi() {
+        use crate::components::messages::bash_output::render_bash_output_spans;
+        // ANSI-coded multi-line body: the parser strips escape codes, so the
+        // measured row count must equal the parsed (escape-free) row count, not
+        // the raw byte body's `.lines()`.
+        let stdout = "\x1b[31mred line\x1b[0m\nplain line";
+        let m = RenderedMessage::UserBashOutput {
+            stdout: stdout.into(),
+            stderr: String::new(),
+        };
+        let rendered: String = render_bash_output_spans(stdout, "")
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(measured_height(&m, 80), rendered.lines().count());
+        // Sanity: 2 visual lines.
+        assert_eq!(measured_height(&m, 80), 2);
+    }
+
+    #[test]
+    fn measured_height_pins_user_command_m7_05() {
+        let m = RenderedMessage::UserCommand {
+            command: "model".into(),
+            args: "sonnet".into(),
+            is_skill: false,
+        };
+        assert_eq!(measured_height(&m, 80), 1);
+    }
+
+    #[test]
+    fn measured_height_local_output_matches_renderer_fenced_code() {
+        use crate::components::messages::local_command_output::render_local_output_to_string;
+        // Fenced code block in the markdown body: flattening drops the ```
+        // fence lines, so measurement must equal the renderer's flattened row
+        // count, NOT the raw `.lines()` of the input.
+        let stdout = "intro\n```rust\nlet x = 1;\n```\noutro";
+        let m = RenderedMessage::UserLocalCommandOutput {
+            stdout: stdout.into(),
+            stderr: String::new(),
+        };
+        let rendered = render_local_output_to_string(stdout, "");
+        assert_eq!(
+            measured_height(&m, 80),
+            rendered.lines().count(),
+            "local-output measurement must equal the renderer's flattened row count"
+        );
+    }
+
+    #[test]
+    fn measured_height_pins_user_memory_input_m7_05() {
+        // `# {input}` (1) + saving line (1) = 2 rows.
+        let m = RenderedMessage::UserMemoryInput {
+            input: "prefer tabs".into(),
+        };
+        assert_eq!(measured_height(&m, 80), 2);
+    }
+
+    #[test]
+    fn measured_height_plan_matches_renderer_trailing_blank() {
+        use crate::components::messages::plan::render_plan_to_string;
+        // Trailing blank line in the markdown body: flattening drops it, so the
+        // measured row count must equal the renderer's flattened output (header
+        // + flattened body), not a raw `.lines()` recount.
+        let body = "step one\n\n";
+        let m = RenderedMessage::UserPlan {
+            plan_content: body.into(),
+        };
+        let rendered = render_plan_to_string(body);
+        assert_eq!(
+            measured_height(&m, 80),
+            rendered.lines().count(),
+            "plan measurement must equal the renderer's flattened row count"
+        );
+    }
+
+    #[test]
+    fn measured_height_pins_user_prompt_m7_05() {
+        // Short prompt → body verbatim (3 lines → 3 rows).
+        let m = RenderedMessage::UserPrompt {
+            text: "a\nb\nc".into(),
+        };
+        assert_eq!(measured_height(&m, 80), 3);
+    }
+
+    #[test]
+    fn measured_height_pins_user_resource_update_m7_05() {
+        // One update line; with reason still one line.
+        let m = RenderedMessage::UserResourceUpdate {
+            updates: vec![("fs".into(), "x.rs".into(), Some("changed".into()))],
+        };
+        assert_eq!(measured_height(&m, 80), 1);
+        // Two updates → two lines.
+        let m2 = RenderedMessage::UserResourceUpdate {
+            updates: vec![
+                ("a".into(), "x".into(), None),
+                ("b".into(), "y".into(), None),
+            ],
+        };
+        assert_eq!(measured_height(&m2, 80), 2);
+    }
+
+    #[test]
+    fn measured_height_pins_user_image_m7_05() {
+        // `[Image #N]` — single line.
+        let m = RenderedMessage::UserImage {
+            image_id: Some(3),
+            metadata: None,
+        };
+        assert_eq!(measured_height(&m, 80), 1);
+    }
+
+    #[test]
+    fn measured_height_pins_attachment_m7_05() {
+        // Single dim summary line.
+        let m = RenderedMessage::Attachment {
+            attachment: crate::components::messages::attachment::Attachment::File {
+                display_path: "a.rs".into(),
+                num_lines: 10,
+                truncated: false,
+            },
+        };
+        assert_eq!(measured_height(&m, 80), 1);
+    }
+
+    #[test]
+    fn measured_height_pins_grouped_tool_use_m7_05() {
+        // Proxy uses the collapsed form → single `● {tool} (×N)` header line.
+        let m = RenderedMessage::GroupedToolUse {
+            tool: "Read".into(),
+            group_id: ToolUseId::new(),
+            entries: vec![
+                (serde_json::json!({}), serde_json::json!({"content": "a"})),
+                (serde_json::json!({}), serde_json::json!({"content": "b"})),
+            ],
+        };
+        assert_eq!(measured_height(&m, 80), 1);
+    }
+
+    #[test]
+    fn measured_height_pins_collapsed_read_search_m7_05() {
+        // Single gutter+summary line.
+        let m = RenderedMessage::CollapsedReadSearch {
+            search_count: 2,
+            read_count: 1,
+            list_count: 0,
+            is_active: false,
+            group_id: ToolUseId::new(),
+            entries: vec![],
+        };
+        assert_eq!(measured_height(&m, 80), 1);
+        // All-zero counts → empty proxy text → 1 row (a blank logical line).
+        let empty = RenderedMessage::CollapsedReadSearch {
+            search_count: 0,
+            read_count: 0,
+            list_count: 0,
+            is_active: false,
+            group_id: ToolUseId::new(),
+            entries: vec![],
+        };
+        assert_eq!(measured_height(&empty, 80), 1);
     }
 
     #[test]

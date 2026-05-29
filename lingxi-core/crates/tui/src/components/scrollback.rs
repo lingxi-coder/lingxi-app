@@ -12,12 +12,31 @@ use iocraft::prelude::*;
 use lingxi_protocol::ToolUseId;
 
 use crate::components::messages::{
-    advisor::AdvisorMessage, assistant_text::AssistantTextMessage,
-    assistant_tool_use::AssistantToolUseMessage, compact_boundary::CompactBoundaryMessage,
-    hook_progress::HookProgressMessage, plan_approval::PlanApprovalMessage,
-    rate_limit::RateLimitMessage, redacted_thinking::AssistantRedactedThinkingMessage,
-    shutdown::ShutdownMessage, system_api_error::SystemApiErrorMessage,
-    system_text::SystemTextMessage, thinking::AssistantThinkingMessage, user_text::UserTextMessage,
+    advisor::AdvisorMessage,
+    assistant_text::AssistantTextMessage,
+    assistant_tool_use::AssistantToolUseMessage,
+    attachment::AttachmentMessage,
+    bash_input::UserBashInputMessage,
+    bash_output::UserBashOutputMessage,
+    collapsed_read_search::{CollapsedCounts, CollapsedReadSearchContent},
+    command::UserCommandMessage,
+    compact_boundary::CompactBoundaryMessage,
+    grouped_tool_use::GroupedToolUseContent,
+    hook_progress::HookProgressMessage,
+    image::UserImageMessage,
+    local_command_output::UserLocalCommandOutputMessage,
+    memory_input::UserMemoryInputMessage,
+    plan::UserPlanMessage,
+    plan_approval::PlanApprovalMessage,
+    prompt::UserPromptMessage,
+    rate_limit::RateLimitMessage,
+    redacted_thinking::AssistantRedactedThinkingMessage,
+    resource_update::UserResourceUpdateMessage,
+    shutdown::ShutdownMessage,
+    system_api_error::SystemApiErrorMessage,
+    system_text::SystemTextMessage,
+    thinking::AssistantThinkingMessage,
+    user_text::UserTextMessage,
     user_tool_result::UserToolResultMessage,
 };
 use crate::state::RenderedMessage;
@@ -30,7 +49,7 @@ use crate::theme::TuiTheme;
 /// `virtual_message_list::render_message`).
 #[must_use]
 #[allow(clippy::implicit_hasher)] // always called with `AppState.expanded`'s std hasher
-#[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (15 variants)
+#[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (27 variants)
 pub fn render_message(
     m: RenderedMessage,
     expanded: &HashMap<ToolUseId, bool>,
@@ -163,5 +182,81 @@ pub fn render_message(
             PlanApprovalMessage(kind: kind)
         }
         .into_any(),
+        // ---- (M7-05) batch-2 user renderers ----------------------------
+        RenderedMessage::UserBashInput { command } => element! {
+            UserBashInputMessage(command: command)
+        }
+        .into_any(),
+        RenderedMessage::UserBashOutput { stdout, stderr } => element! {
+            UserBashOutputMessage(stdout: stdout, stderr: stderr)
+        }
+        .into_any(),
+        RenderedMessage::UserCommand {
+            command,
+            args,
+            is_skill,
+        } => element! {
+            UserCommandMessage(command: command, args: args, is_skill: is_skill)
+        }
+        .into_any(),
+        RenderedMessage::UserLocalCommandOutput { stdout, stderr } => element! {
+            UserLocalCommandOutputMessage(stdout: stdout, stderr: stderr)
+        }
+        .into_any(),
+        RenderedMessage::UserMemoryInput { input } => element! {
+            UserMemoryInputMessage(input: input)
+        }
+        .into_any(),
+        RenderedMessage::UserPlan { plan_content } => element! {
+            UserPlanMessage(plan_content: plan_content)
+        }
+        .into_any(),
+        RenderedMessage::UserPrompt { text } => element! {
+            UserPromptMessage(text: text)
+        }
+        .into_any(),
+        RenderedMessage::UserResourceUpdate { updates } => element! {
+            UserResourceUpdateMessage(updates: updates)
+        }
+        .into_any(),
+        RenderedMessage::UserImage { image_id, metadata } => element! {
+            UserImageMessage(image_id: image_id, metadata: metadata)
+        }
+        .into_any(),
+        RenderedMessage::Attachment { attachment } => element! {
+            AttachmentMessage(attachment: attachment)
+        }
+        .into_any(),
+        RenderedMessage::GroupedToolUse {
+            tool,
+            group_id,
+            entries,
+        } => {
+            let is_expanded = expanded.get(&group_id).copied().unwrap_or(false);
+            element! {
+                GroupedToolUseContent(tool: tool, entries: entries, expanded: is_expanded)
+            }
+            .into_any()
+        }
+        RenderedMessage::CollapsedReadSearch {
+            search_count,
+            read_count,
+            list_count,
+            is_active,
+            group_id,
+            entries,
+        } => {
+            let is_expanded = expanded.get(&group_id).copied().unwrap_or(false);
+            let counts = CollapsedCounts {
+                search: search_count,
+                read: read_count,
+                list: list_count,
+                is_active,
+            };
+            element! {
+                CollapsedReadSearchContent(counts: counts, entries: entries, expanded: is_expanded)
+            }
+            .into_any()
+        }
     }
 }

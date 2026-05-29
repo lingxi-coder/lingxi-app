@@ -8,11 +8,23 @@
 pub mod advisor;
 pub mod assistant_text;
 pub mod assistant_tool_use;
+pub mod attachment;
+pub mod bash_input;
+pub mod bash_output;
+pub mod collapsed_read_search;
+pub mod command;
 pub mod compact_boundary;
+pub mod grouped_tool_use;
 pub mod hook_progress;
+pub mod image;
+pub mod local_command_output;
+pub mod memory_input;
+pub mod plan;
 pub mod plan_approval;
+pub mod prompt;
 pub mod rate_limit;
 pub mod redacted_thinking;
+pub mod resource_update;
 pub mod shutdown;
 pub mod system_api_error;
 pub mod system_text;
@@ -32,6 +44,7 @@ use user_tool_result::{render_user_tool_result_to_string, UserToolResultProps};
 /// `AppState.focused_tool_id`. `expanded` is `AppState.expanded.get(&id)`
 /// (default `false`).
 #[must_use]
+#[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (27 variants)
 pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: bool) -> String {
     match entry {
         RenderedMessage::UserText { body, .. } => format!("> {body}"),
@@ -132,6 +145,67 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             plan_approval::render_plan_approval_to_string(plan_approval::PlanApprovalProps {
                 kind: kind.clone(),
             })
+        }
+        // ---- (M7-05) batch-2 user renderers ----------------------------
+        RenderedMessage::UserBashInput { command } => {
+            bash_input::render_bash_input_to_string(command)
+        }
+        RenderedMessage::UserBashOutput { stdout, stderr } => {
+            // String form strips ANSI: the parser drops escape codes, so join
+            // the span texts.
+            bash_output::render_bash_output_spans(stdout, stderr)
+                .into_iter()
+                .map(|s| s.text)
+                .collect::<String>()
+        }
+        RenderedMessage::UserCommand {
+            command,
+            args,
+            is_skill,
+        } => command::render_command_to_string(command, args, *is_skill),
+        RenderedMessage::UserLocalCommandOutput { stdout, stderr } => {
+            local_command_output::render_local_output_to_string(stdout, stderr)
+        }
+        RenderedMessage::UserMemoryInput { input } => memory_input::render_memory_to_string(input),
+        RenderedMessage::UserPlan { plan_content } => plan::render_plan_to_string(plan_content),
+        RenderedMessage::UserPrompt { text } => prompt::render_prompt_to_string(text),
+        RenderedMessage::UserResourceUpdate { updates } => {
+            let parsed: Vec<resource_update::ResourceUpdate> = updates
+                .iter()
+                .map(|(s, t, r)| resource_update::ResourceUpdate {
+                    server: s.clone(),
+                    target: t.clone(),
+                    reason: r.clone(),
+                })
+                .collect();
+            resource_update::render_resource_update_to_string(&parsed)
+        }
+        RenderedMessage::UserImage { image_id, metadata } => {
+            image::render_image_label(*image_id, metadata.as_deref())
+        }
+        RenderedMessage::Attachment { attachment } => {
+            attachment::render_attachment_to_string(attachment)
+        }
+        RenderedMessage::GroupedToolUse { tool, entries, .. } => {
+            // This dispatcher already receives `expanded: bool` as a parameter
+            // (keyed by the group's id upstream) — reuse it.
+            grouped_tool_use::render_grouped_to_string(tool, entries, expanded)
+        }
+        RenderedMessage::CollapsedReadSearch {
+            search_count,
+            read_count,
+            list_count,
+            is_active,
+            entries,
+            ..
+        } => {
+            let counts = collapsed_read_search::CollapsedCounts {
+                search: *search_count,
+                read: *read_count,
+                list: *list_count,
+                is_active: *is_active,
+            };
+            collapsed_read_search::render_collapsed_to_string(&counts, entries, expanded)
         }
     }
 }

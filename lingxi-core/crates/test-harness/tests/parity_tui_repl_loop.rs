@@ -60,6 +60,20 @@ fn kind_of(m: &RenderedMessage) -> &'static str {
         RenderedMessage::Advisor { .. } => "Advisor",
         RenderedMessage::HookProgress { .. } => "HookProgress",
         RenderedMessage::PlanApproval { .. } => "PlanApproval",
+        // (M7-05) batch-2 user variants (name-only; no fixture-expectation
+        // change — these aren't exercised by the parity fixtures yet).
+        RenderedMessage::UserBashInput { .. } => "UserBashInput",
+        RenderedMessage::UserBashOutput { .. } => "UserBashOutput",
+        RenderedMessage::UserCommand { .. } => "UserCommand",
+        RenderedMessage::UserLocalCommandOutput { .. } => "UserLocalCommandOutput",
+        RenderedMessage::UserMemoryInput { .. } => "UserMemoryInput",
+        RenderedMessage::UserPlan { .. } => "UserPlan",
+        RenderedMessage::UserPrompt { .. } => "UserPrompt",
+        RenderedMessage::UserResourceUpdate { .. } => "UserResourceUpdate",
+        RenderedMessage::UserImage { .. } => "UserImage",
+        RenderedMessage::Attachment { .. } => "Attachment",
+        RenderedMessage::GroupedToolUse { .. } => "GroupedToolUse",
+        RenderedMessage::CollapsedReadSearch { .. } => "CollapsedReadSearch",
     }
 }
 

@@ -7,6 +7,7 @@
 //! dark and light — that is the point: switching theme must not shift layout).
 //! COLOR divergence — the actual M7-15 deliverable — is asserted separately
 //! via the styled-line debug of the code block under the two themes.
+#![allow(clippy::doc_markdown)]
 
 use lingxi_permission::PermissionMode;
 use lingxi_tui::components::messages::render_entry_to_string;

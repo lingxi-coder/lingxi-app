@@ -65,3 +65,26 @@ fn jk_gg_keys_move_offset_line_based() {
     scroll_with_viewport(&mut st, ScrollDir::Bottom, vh);
     assert_eq!(st.scroll_offset, 0);
 }
+
+#[test]
+fn scroll_telemetry_transitions_fire_on_0_to_nonzero_and_back() {
+    let mut st = AppState::new(fake_status());
+    for i in 0..40 {
+        push_line(&mut st, &format!("t{i}"));
+    }
+    st.refresh_height_cache(80);
+    let vh = 10;
+    assert_eq!(st.scroll_offset, 0); // start at bottom
+
+    // 0 → non-zero: scroll_started fires (offset becomes 10).
+    scroll_with_viewport(&mut st, ScrollDir::PageUp, vh);
+    assert_ne!(st.scroll_offset, 0);
+
+    // non-zero → non-zero: no lifecycle emit (still scrolling).
+    scroll_with_viewport(&mut st, ScrollDir::LineUp, vh);
+    assert_ne!(st.scroll_offset, 0);
+
+    // non-zero → 0: scroll_ended fires (back at bottom).
+    scroll_with_viewport(&mut st, ScrollDir::Bottom, vh);
+    assert_eq!(st.scroll_offset, 0);
+}

@@ -43,6 +43,37 @@ pub enum Operator {
     Yank,
 }
 
+/// The unnamed register: yanked/deleted text + whether it is linewise.
+/// Replaces M7-08's `register: Option<String>` scaffold. Empty `text` = nothing
+/// to paste. claude-code models linewise as "string ends with '\n'"; we make it
+/// explicit (`operators.ts::executePaste` detects `register.endsWith('\n')`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Register {
+    /// The yanked/deleted content (linewise content always ends with `\n`).
+    pub text: String,
+    /// Whether the content is linewise (paste opens new lines) vs charwise.
+    pub linewise: bool,
+}
+
+/// Visual-mode selection. `anchor` is the byte offset where `v`/`V` was pressed;
+/// the live end is the current cursor. `linewise` distinguishes `V` from `v`.
+/// claude-code has NO visual mode — this is standard vim semantics (GATE note).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisualState {
+    /// Byte offset where `v`/`V` was pressed (one end of the selection).
+    pub anchor: usize,
+    /// `true` for `V` (line-visual), `false` for `v` (char-visual).
+    pub linewise: bool,
+}
+
+/// Byte length of the last `char` of `text`, or 1 if empty. The char-level
+/// analogue of claude-code's `lastGrapheme(text).length || 1`, used to clamp a
+/// Normal-mode cursor so it never rests past the last char of the buffer.
+#[must_use]
+fn last_char_len(text: &str) -> usize {
+    text.chars().next_back().map_or(1, char::len_utf8)
+}
+
 /// f/F/t/T find direction+stop kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindKind {
@@ -79,6 +110,39 @@ pub enum CommandState {
         /// The resolved count prefix (`Ngg` → line N).
         count: usize,
     },
+    // ---- M7-09 additions (port of claude-code `types.ts::CommandState`) ----
+    /// After 'd'/'c'/'y' — waiting for a motion / doubled key / count / find / g.
+    Operator {
+        /// The chosen operator.
+        op: Operator,
+        /// The resolved (leading) count prefix.
+        count: usize,
+    },
+    /// After an operator then a digit, e.g. `d3w` — accumulating the inner count.
+    OperatorCount {
+        /// The chosen operator.
+        op: Operator,
+        /// The resolved leading count (multiplies the inner count).
+        count: usize,
+        /// The inner-count digits typed so far.
+        digits: String,
+    },
+    /// After an operator then f/F/t/T, e.g. `df` — waiting for the target char.
+    OperatorFind {
+        /// The chosen operator.
+        op: Operator,
+        /// The resolved count prefix (Nth occurrence).
+        count: usize,
+        /// Which find variant.
+        kind: FindKind,
+    },
+    /// After an operator then 'g', e.g. `dg` — waiting for the second 'g' (dgg).
+    OperatorG {
+        /// The chosen operator.
+        op: Operator,
+        /// The resolved count prefix (`Ndgg` → line N).
+        count: usize,
+    },
 }
 
 /// PromptInput-local vim state (parent spec §2.3). Scaffold fields
@@ -90,13 +154,16 @@ pub struct VimState {
     pub mode: VimMode,
     /// NORMAL-mode command-parse sub-state.
     pub command: CommandState,
-    /// Scaffold for M7-09 operators; always `None` in M7-08.
+    /// (M7-08 scaffold; M7-09 superseded by `CommandState::Operator`.)
+    /// Retained for struct stability; always `None`. Remove in a future cleanup.
     pub pending_operator: Option<Operator>,
-    /// Scaffold for M7-09 registers; never written in M7-08.
-    pub register: Option<String>,
+    /// The unnamed yank/delete register (M7-09). `Register::default()` = empty.
+    pub register: Register,
     /// Last f/F/t/T (kind, char) for ';'/',' — scaffold; M7-08 records it
     /// but does not implement ';'/',' (those are M7-09 polish).
     pub last_find: Option<(FindKind, char)>,
+    /// Visual-mode selection (M7-09). `Some(..)` iff `mode == VimMode::Visual`.
+    pub visual: Option<VisualState>,
 }
 
 impl Default for VimState {
@@ -106,8 +173,9 @@ impl Default for VimState {
             mode: VimMode::Insert,
             command: CommandState::Idle,
             pending_operator: None,
-            register: None,
+            register: Register::default(),
             last_find: None,
+            visual: None,
         }
     }
 }
@@ -702,6 +770,15 @@ pub fn handle_vim_key(
             }
             let count = digits.parse::<usize>().unwrap_or(1).max(1);
             return dispatch_normal(state, cursor, count, key);
+        }
+        // M7-09 operator-pending arms — wired in Task 7. Until then they reset
+        // to Idle and no-op (placeholder; Task 7 replaces these with the real
+        // operator dispatch). They are unreachable in Task 1 (nothing sets them).
+        CommandState::Operator { .. }
+        | CommandState::OperatorCount { .. }
+        | CommandState::OperatorFind { .. }
+        | CommandState::OperatorG { .. } => {
+            return VimOutcome::Effect(VimEffect::None);
         }
         CommandState::Idle => {}
     }
@@ -1390,5 +1467,60 @@ mod dispatch_tests {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
         );
         assert_eq!(out, VimOutcome::PassThrough);
+    }
+}
+
+#[cfg(test)]
+mod m7_09_types_tests {
+    use super::*;
+
+    #[test]
+    fn default_register_is_empty_charwise() {
+        let s = VimState::default();
+        assert_eq!(s.register, Register::default());
+        assert!(s.register.text.is_empty());
+        assert!(!s.register.linewise);
+        assert!(s.visual.is_none());
+    }
+
+    #[test]
+    fn operator_command_states_constructible() {
+        let a = CommandState::Operator {
+            op: Operator::Delete,
+            count: 1,
+        };
+        let b = CommandState::OperatorCount {
+            op: Operator::Change,
+            count: 1,
+            digits: "3".into(),
+        };
+        let c = CommandState::OperatorFind {
+            op: Operator::Yank,
+            count: 2,
+            kind: FindKind::F,
+        };
+        let d = CommandState::OperatorG {
+            op: Operator::Delete,
+            count: 1,
+        };
+        assert_ne!(a, b);
+        assert_ne!(c, d);
+    }
+
+    #[test]
+    fn visual_state_records_anchor_and_kind() {
+        let v = VisualState {
+            anchor: 3,
+            linewise: true,
+        };
+        assert_eq!(v.anchor, 3);
+        assert!(v.linewise);
+    }
+
+    #[test]
+    fn last_char_len_handles_utf8_and_empty() {
+        assert_eq!(last_char_len("hi"), 1);
+        assert_eq!(last_char_len("hé"), 2); // 'é' is 2 bytes
+        assert_eq!(last_char_len(""), 1); // empty -> 1
     }
 }

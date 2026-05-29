@@ -40,7 +40,7 @@ pub struct DoctorDiagnostics {
 /// `true` iff `$COLORTERM` is `truecolor` or `24bit`.
 #[must_use]
 pub fn truecolor_from_env(colorterm: Option<&str>) -> bool {
-    matches!(colorterm, Some("truecolor") | Some("24bit"))
+    matches!(colorterm, Some("truecolor" | "24bit"))
 }
 
 impl DoctorDiagnostics {
@@ -125,7 +125,10 @@ pub fn DoctorScreen(props: &DoctorScreenProps) -> impl Into<AnyElement<'static>>
         // (MCP auto-connect is M8). Parent spec accepts this for v0.8.0.
         format!("{} configured, not connected", d.mcp_configured)
     } else {
-        format!("{} configured, {} connected", d.mcp_configured, d.mcp_connected)
+        format!(
+            "{} configured, {} connected",
+            d.mcp_configured, d.mcp_connected
+        )
     };
     let truecolor = if d.truecolor { "yes" } else { "no" };
     let size = format!("{}x{}", d.term_size.0, d.term_size.1);

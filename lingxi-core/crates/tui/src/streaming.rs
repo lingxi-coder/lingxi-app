@@ -101,14 +101,13 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
             messages_after,
             ..
         } => {
-            // M6-08: append a `[Compacted N → M messages]` SystemText
-            // line so the user sees the boundary marker. Proper
-            // CompactBoundaryMessage rendering with a summary preview
-            // lands in M7.
-            state.messages.push(RenderedMessage::SystemText {
-                body: format!("[Compacted {messages_before} → {messages_after} messages]"),
-                timestamp: chrono::Utc::now().timestamp(),
-                is_error: false,
+            // M7-04: real CompactBoundaryMessage (replaces M6-08's
+            // `[Compacted N → M messages]` SystemText placeholder). Renders
+            // `✻ Conversation compacted (ctrl+o for history)` (counts retained
+            // on the variant for debug/telemetry parity but not rendered).
+            state.messages.push(RenderedMessage::CompactBoundary {
+                messages_before,
+                messages_after,
             });
         }
     }

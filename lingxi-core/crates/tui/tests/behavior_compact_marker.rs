@@ -1,5 +1,7 @@
-//! M6-08 — TUI handles `CompactionCompleted` by appending a
-//! `[Compacted N → M messages]` `SystemText` to scrollback.
+//! M7-04 T4 — TUI handles `CompactionCompleted` by appending a real
+//! `CompactBoundary` variant (rendered `✻ Conversation compacted
+//! (ctrl+o for history)`), replacing M6-08's `[Compacted N → M messages]`
+//! `SystemText` placeholder.
 
 use lingxi_tui::events::orchestrator_bridge::TurnEvent;
 use lingxi_tui::state::{AppState, RenderedMessage, StatusSnapshot};
@@ -15,22 +17,28 @@ async fn compaction_completed_event_appends_marker_to_scrollback() {
         &mut state,
         TurnEvent::CompactionCompleted {
             messages_before: 50,
-            messages_after: 2,
-            bytes_saved: 12_345,
+            messages_after: 5,
+            bytes_saved: 4096,
         },
         &notify,
     );
 
-    let last = state.messages.last().expect("scrollback non-empty");
-    match last {
-        RenderedMessage::SystemText { body, is_error, .. } => {
-            assert!(!*is_error, "compact marker should not be error-styled");
-            assert!(body.contains("Compacted"), "got: {body}");
-            assert!(body.contains("50"), "got: {body}");
-            assert!(body.contains('2'), "got: {body}");
-        }
-        other => panic!("expected SystemText marker; got {other:?}"),
-    }
+    // M7-04 T4: CompactionCompleted now pushes a CompactBoundary variant,
+    // not a SystemText `[Compacted …]` placeholder.
+    let last = state.messages.last().expect("a message was pushed");
+    assert!(
+        matches!(
+            last,
+            RenderedMessage::CompactBoundary {
+                messages_before: 50,
+                messages_after: 5
+            }
+        ),
+        "expected CompactBoundary, got: {last:?}",
+    );
+    // The rendered line is the locked boundary string (no counts).
+    let rendered = lingxi_tui::components::messages::render_entry_to_string(last, false, false);
+    assert_eq!(rendered, "✻ Conversation compacted (ctrl+o for history)");
 }
 
 #[tokio::test]

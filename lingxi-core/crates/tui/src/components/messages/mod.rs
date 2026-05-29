@@ -65,9 +65,12 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             new_string: new_string.clone(),
             file_path: file_path.clone(),
         }),
-        // (M7-04) TEMPORARY catch-all for the 10 batch-1 variants until each
-        // task wires its real arm; the dispatch test in Task 11 makes its
-        // removal verifiable (the match becomes exhaustive).
+        RenderedMessage::CompactBoundary { .. } => {
+            compact_boundary::render_compact_boundary_to_string()
+        }
+        // (M7-04) TEMPORARY catch-all for the remaining batch-1 variants until
+        // Task 11 wires their real arms; the dispatch test in Task 11 makes
+        // this removal verifiable (the match becomes exhaustive).
         _ => String::new(),
     }
 }

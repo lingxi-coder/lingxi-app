@@ -69,9 +69,10 @@ pub enum TurnEvent {
     /// the status-line render.
     CostUpdated(String),
     /// A successful `force_compact` finished. The TUI appends a
-    /// `[Compacted N → M messages]` `SystemText` line to scrollback so
-    /// users see the boundary marker. Proper `CompactBoundaryMessage`
-    /// rendering with summary preview lands in M7. (M6-08)
+    /// `CompactBoundary` variant, rendered by `CompactBoundaryMessage`
+    /// (M7-04) as `✻ Conversation compacted (ctrl+o for history)`. (M6-08
+    /// emitted a `[Compacted N → M messages]` `SystemText` placeholder;
+    /// M7-04 replaced it.)
     CompactionCompleted {
         /// Message count BEFORE compaction.
         messages_before: u32,

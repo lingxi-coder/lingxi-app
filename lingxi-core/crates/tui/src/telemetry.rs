@@ -7,6 +7,10 @@
 //! - M6-03: `STREAMING_RENDER_STARTED`, `STREAMING_RENDER_ENDED`.
 //! - M6-05: `PERMISSION_DIALOG_SHOWN`, `PERMISSION_DIALOG_RESOLVED`.
 //! - M6-09: `SCROLL_STARTED`, `SCROLL_ENDED`.
+//! - M7-11: screen lifecycle events (`tengu_tui_screen_opened` /
+//!   `_closed`) are a CANDIDATE but DEFERRED to the M7-16 telemetry audit.
+//!   M7-11 adds 0 new events (baseline stays 326). Do not register a name
+//!   here without a real emit site — that is the M6 "330 vs 326" lesson.
 
 use lingxi_permission::gate::PermissionResponse;
 

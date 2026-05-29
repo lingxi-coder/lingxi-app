@@ -152,6 +152,30 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.open_doctor(diag);
                 return false;
             }
+            // (M7-14) `/memory` opens the in-TUI Memory editor screen instead of
+            // echoing / running a turn or shelling out to $EDITOR. Like
+            // `/doctor` the open is fully synchronous (the tier list is resolved
+            // each frame from `hierarchy::walk` — no handle, no `.await`), so we
+            // open the screen directly here on the live submit path. The
+            // `crates/commands` `MemoryHandler` stays the `--no-tui` $EDITOR path.
+            if st.prompt_text.trim() == "/memory" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.open_memory();
+                return false;
+            }
+            // (M7-14) `/export` opens the message search/jump overlay, which is
+            // where the export action lives (avoids a second modal). This
+            // replaces the M5-11 `/export` unimplemented stub on the TUI surface
+            // (no echo, no turn). Registers NO telemetry event (M7-16 audit).
+            if st.prompt_text.trim() == "/export" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.message_selector.open();
+                let messages = st.messages.clone();
+                st.message_selector.refilter_all(&messages);
+                return false;
+            }
             // (M7-13 review) `/config` / `/status` open the Settings screen on
             // the matching tab. Unlike `/doctor` (whose diagnostics capture is
             // synchronous + handle-free), the Settings open needs an async

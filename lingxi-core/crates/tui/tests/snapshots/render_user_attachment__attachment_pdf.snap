@@ -1,0 +1,6 @@
+---
+source: crates/tui/tests/render_user_attachment.rs
+assertion_line: 73
+expression: e.to_string()
+---
+Referenced PDF doc.pdf (5 pages)

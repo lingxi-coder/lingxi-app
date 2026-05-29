@@ -82,6 +82,13 @@ pub struct ReplScreenProps {
     /// `AppState.history_search`). Rendered as a row ABOVE the prompt when
     /// `Some(_)`, mirroring claude-code's `HistorySearchInput` box.
     pub history_search: Option<HistorySearchState>,
+    /// (M7-15) Active render palette (clone of `AppState.theme`). Threaded into
+    /// the scrollback (`VirtualMessageList`), `StatusLine`, and the
+    /// palette/completion overlays so the whole REPL recolors on theme change.
+    pub theme: crate::theme::Theme,
+    /// (M7-15) Active theme name (clone of `AppState.theme_setting.resolve()`).
+    /// Drives syntect-colored diffs in scrollback.
+    pub theme_name: crate::theme::ThemeName,
 }
 
 impl Default for ReplScreenProps {
@@ -104,6 +111,8 @@ impl Default for ReplScreenProps {
             vim_mode: VimMode::Insert,
             vim_visual_linewise: false,
             history_search: None,
+            theme: crate::theme::Theme::dark(),
+            theme_name: crate::theme::ThemeName::Dark,
         }
     }
 }
@@ -133,6 +142,8 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let vim_mode = props.vim_mode;
     let vim_visual_linewise = props.vim_visual_linewise;
     let history_search = props.history_search.clone();
+    let theme = props.theme;
+    let theme_name = props.theme_name;
     element! {
         View(flex_direction: FlexDirection::Column, width: 100pct, height: 100pct) {
             StatusLine(
@@ -141,6 +152,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 cost: cost,
                 context_pct: context_pct,
                 permission_mode: permission_mode,
+                theme: theme,
             )
             VirtualMessageList(
                 messages: messages,
@@ -149,6 +161,8 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 viewport_height: viewport_height,
                 expanded: expanded,
                 focused_tool_id: focused_tool_id,
+                theme: theme,
+                theme_name: theme_name,
             )
             #(if show_spinner {
                 element!(SpinnerWithVerb).into_any()
@@ -162,14 +176,14 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             #(palette.as_ref().filter(|p| p.open).map(|p| {
                 let rows: Vec<_> = p.rows().into_iter().take(OVERLAY_MAX_ITEMS).collect();
                 element! {
-                    PaletteOverlay(rows: rows, selected: p.selected)
+                    PaletteOverlay(rows: rows, selected: p.selected, theme: theme)
                 }
             }))
             #(completion.as_ref().filter(|c| c.open).map(|c| {
                 let rows = c.rows();
                 let empty_query = c.filter.is_empty();
                 element! {
-                    CompletionOverlay(rows: rows, selected: c.selected, empty_query: empty_query)
+                    CompletionOverlay(rows: rows, selected: c.selected, empty_query: empty_query, theme: theme)
                 }
             }))
             // (M7-10) History-search overlay row, drawn ABOVE the prompt when

@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use iocraft::prelude::*;
 use lingxi_permission::PermissionMode;
 
+use crate::theme::Theme;
+
 /// Props for `StatusLine`.
 #[derive(Props)]
 pub struct StatusLineProps {
@@ -26,6 +28,9 @@ pub struct StatusLineProps {
     pub context_pct: f32,
     /// Active permission mode.
     pub permission_mode: PermissionMode,
+    /// (M7-15) Active palette — the status line text color reads from
+    /// `theme.text`, so it recolors with the picker.
+    pub theme: Theme,
 }
 
 impl Default for StatusLineProps {
@@ -36,6 +41,7 @@ impl Default for StatusLineProps {
             cost: "$0.0000".to_string(),
             context_pct: 0.0,
             permission_mode: PermissionMode::Default,
+            theme: Theme::dark(),
         }
     }
 }
@@ -85,7 +91,7 @@ pub fn StatusLine(props: &StatusLineProps) -> impl Into<AnyElement<'static>> {
     );
     element! {
         View(flex_direction: FlexDirection::Row, height: 1) {
-            Text(content: line)
+            Text(content: line, color: props.theme.text)
         }
     }
 }
@@ -105,6 +111,13 @@ mod tests {
             PermissionMode::Default,
         );
         assert_eq!(s, "claude-sonnet-4.5 /a/b $0.0000 42% default");
+    }
+
+    #[test]
+    fn status_line_props_carry_theme() {
+        // (M7-15) StatusLineProps gains a `theme` field; default is dark.
+        let props = StatusLineProps::default();
+        assert_eq!(props.theme, Theme::dark());
     }
 
     #[test]

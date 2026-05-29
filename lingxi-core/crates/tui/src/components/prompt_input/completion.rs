@@ -11,7 +11,7 @@ use std::path::Path;
 use iocraft::prelude::*;
 
 use super::fuzzy::filtered_ranked;
-use crate::theme::TuiTheme;
+use crate::theme::Theme;
 
 /// Max dropdown rows (shared with the palette; claude-code `OVERLAY_MAX_ITEMS`).
 pub const OVERLAY_MAX_ITEMS: usize = 5;
@@ -202,6 +202,9 @@ pub struct CompletionOverlayProps {
     /// Whether the active `@` token has no partial text yet (drives the
     /// empty-state literal).
     pub empty_query: bool,
+    /// (M7-15) Active palette — the selected-row `suggestion` accent + dim
+    /// rest are centralized here.
+    pub theme: Theme,
 }
 
 /// Render the `@` completion dropdown. Each row is `+ <path>` (claude-code
@@ -209,6 +212,7 @@ pub struct CompletionOverlayProps {
 #[component]
 pub fn CompletionOverlay(props: &CompletionOverlayProps) -> impl Into<AnyElement<'static>> {
     let selected = props.selected;
+    let theme = props.theme;
     if props.rows.is_empty() {
         let msg = if props.empty_query {
             EMPTY_NO_QUERY
@@ -216,7 +220,7 @@ pub fn CompletionOverlay(props: &CompletionOverlayProps) -> impl Into<AnyElement
             EMPTY_WITH_QUERY
         };
         return element! {
-            View(height: 1) { Text(content: msg.to_string(), color: TuiTheme::DIM) }
+            View(height: 1) { Text(content: msg.to_string(), color: theme.dim) }
         }
         .into_any();
     }
@@ -225,9 +229,9 @@ pub fn CompletionOverlay(props: &CompletionOverlayProps) -> impl Into<AnyElement
         View(flex_direction: FlexDirection::Column) {
             #(rows.into_iter().enumerate().map(|(i, path)| {
                 let line = format!("+ {path}");
-                // TODO(M7-15): theme picker adds a dedicated "suggestion" token;
-                // until then the selected row reuses ASSISTANT and others DIM.
-                let color = if i == selected { TuiTheme::ASSISTANT } else { TuiTheme::DIM };
+                // (M7-15) Centralized: selected row uses the theme's `suggestion`
+                // accent, the rest dim.
+                let color = if i == selected { theme.suggestion } else { theme.dim };
                 element! {
                     View(height: 1) { Text(content: line, color: color) }
                 }

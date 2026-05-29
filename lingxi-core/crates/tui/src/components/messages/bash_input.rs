@@ -1,11 +1,12 @@
 //! `UserBashInputMessage` — `! ` prefix + command text.
 //!
 //! Literal locks (byte-for-byte from claude-code):
-//!   - prefix: `! ` (color `bashBorder` → mapped to TuiTheme::DIM here;
-//!     M7-15 may introduce a dedicated bash-border color)
-//!     // TODO(M7-15): `bashBorder` → dedicated bash-border color
-//!   - command text color: `text` → TuiTheme::USER
-//!     // TODO(M7-15): `text` is the userMessageBackground foreground; revisit
+//!   - prefix: `! ` (claude-code `bashBorder`). The lingxi `Theme` ports only
+//!     the keys it renders and has no dedicated `bashBorder` field; the prefix
+//!     stays `TuiTheme::DIM` (= `Theme::dark().dim`). A dedicated bash-border
+//!     `Theme` field is re-deferred — TODO(M8).
+//!   - command text color: `text` → `TuiTheme::USER` (terminal default;
+//!     claude renders the bash command line uncolored).
 //!   source: claude-code/src/components/messages/UserBashInputMessage.tsx
 #![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
 

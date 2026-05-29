@@ -13,7 +13,7 @@
 use iocraft::prelude::*;
 
 use crate::state::PlanApprovalKind;
-use crate::theme::TuiTheme;
+use crate::theme::Theme;
 
 /// U+2713 check mark (claude-code `✓`).
 pub const CHECK: &str = "\u{2713}";
@@ -31,6 +31,8 @@ pub const REJECTED_TAIL: &str =
 pub struct PlanApprovalProps {
     /// Request/approved/rejected content.
     pub kind: PlanApprovalKind,
+    /// (M7-15) Active palette — `plan_mode`/success/error colors centralized.
+    pub theme: Theme,
 }
 
 /// Pure-string renderer.
@@ -69,18 +71,32 @@ pub fn render_plan_approval_to_string(props: PlanApprovalProps) -> String {
 }
 
 /// iocraft component.
+///
+/// (M7-15) Colors centralized into the active [`Theme`] and the claude-code
+/// round borders restored: request → `theme.plan_mode` (header + border),
+/// approved → `theme.success`, rejected → `theme.error`. The header line is
+/// bold; the body follows in the same accent color.
 #[component]
 pub fn PlanApprovalMessage(props: &PlanApprovalProps) -> impl Into<AnyElement<'static>> {
     let body = render_plan_approval_to_string(props.clone());
-    // TODO(M7-15): planMode/success/error round borders via theme.
-    let color = match &props.kind {
-        PlanApprovalKind::Request { .. } => Color::Magenta,
-        PlanApprovalKind::Approved { .. } => Color::Green,
-        PlanApprovalKind::Rejected { .. } => TuiTheme::ERROR,
+    let theme = props.theme;
+    let accent = match &props.kind {
+        PlanApprovalKind::Request { .. } => theme.plan_mode,
+        PlanApprovalKind::Approved { .. } => theme.success,
+        PlanApprovalKind::Rejected { .. } => theme.error,
     };
+    // Header is the first line (bold); the remaining lines are the body.
+    let mut lines = body.lines();
+    let header = lines.next().unwrap_or("").to_string();
+    let body_text = lines.collect::<Vec<_>>().join("\n");
     element! {
-        View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: color)
+        View(
+            flex_direction: FlexDirection::Column,
+            border_style: BorderStyle::Round,
+            border_color: accent,
+        ) {
+            Text(content: header, color: accent, weight: Weight::Bold)
+            Text(content: body_text, color: accent)
         }
     }
 }

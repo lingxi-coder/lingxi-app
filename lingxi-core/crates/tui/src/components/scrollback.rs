@@ -40,13 +40,18 @@ use crate::components::messages::{
     user_tool_result::UserToolResultMessage,
 };
 use crate::state::RenderedMessage;
-use crate::theme::TuiTheme;
+use crate::theme::{Theme, ThemeName};
 
 /// Dispatch one [`RenderedMessage`] to its per-variant renderer, threading
 /// the per-id `expanded` flags and `focused_tool_id` into the tool blocks
 /// (including M7-02's `StructuredDiff` branch for `UserToolResult`). Shared
 /// by the M7-03 `VirtualMessageList` (re-exported as
 /// `virtual_message_list::render_message`).
+///
+/// (M7-15) `theme` is the active render palette and `theme_name` the active
+/// theme (for syntect-colored diffs). Both come from `AppState.theme` /
+/// `theme_setting.resolve()`; the theme picker's live preview re-renders the
+/// whole list, so message colors follow the highlighted theme.
 #[must_use]
 #[allow(clippy::implicit_hasher)] // always called with `AppState.expanded`'s std hasher
 #[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (27 variants)
@@ -54,6 +59,8 @@ pub fn render_message(
     m: RenderedMessage,
     expanded: &HashMap<ToolUseId, bool>,
     focused_tool_id: Option<ToolUseId>,
+    theme: Theme,
+    theme_name: ThemeName,
 ) -> AnyElement<'static> {
     match m {
         RenderedMessage::UserText { body, .. } => element! {
@@ -65,11 +72,7 @@ pub fn render_message(
         }
         .into_any(),
         RenderedMessage::SystemText { body, is_error, .. } => {
-            let color = if is_error {
-                TuiTheme::ERROR
-            } else {
-                TuiTheme::DIM
-            };
+            let color = if is_error { theme.error } else { theme.dim };
             element! {
                 Text(content: body, color: color)
             }
@@ -113,6 +116,8 @@ pub fn render_message(
                     old_string: old_string,
                     new_string: new_string,
                     file_path: file_path,
+                    // (M7-15) active theme → diff syntax follows the picker.
+                    theme_name: theme_name,
                 )
             }
             .into_any()
@@ -131,7 +136,7 @@ pub fn render_message(
         }
         .into_any(),
         RenderedMessage::SystemTextRich { body, level } => element! {
-            SystemTextMessage(body: body, level: level)
+            SystemTextMessage(body: body, level: level, theme: theme)
         }
         .into_any(),
         RenderedMessage::SystemApiError {
@@ -159,11 +164,11 @@ pub fn render_message(
             reason,
             rejected,
         } => element! {
-            ShutdownMessage(from: from, reason: reason, rejected: rejected)
+            ShutdownMessage(from: from, reason: reason, rejected: rejected, theme: theme)
         }
         .into_any(),
         RenderedMessage::Advisor { kind, verbose } => element! {
-            AdvisorMessage(kind: kind, verbose: verbose)
+            AdvisorMessage(kind: kind, verbose: verbose, theme: theme)
         }
         .into_any(),
         RenderedMessage::HookProgress {
@@ -175,11 +180,12 @@ pub fn render_message(
                 event: event,
                 count: count,
                 transcript_summary: transcript_summary,
+                theme: theme,
             )
         }
         .into_any(),
         RenderedMessage::PlanApproval { kind } => element! {
-            PlanApprovalMessage(kind: kind)
+            PlanApprovalMessage(kind: kind, theme: theme)
         }
         .into_any(),
         // ---- (M7-05) batch-2 user renderers ----------------------------
@@ -208,7 +214,7 @@ pub fn render_message(
         }
         .into_any(),
         RenderedMessage::UserPlan { plan_content } => element! {
-            UserPlanMessage(plan_content: plan_content)
+            UserPlanMessage(plan_content: plan_content, theme: theme)
         }
         .into_any(),
         RenderedMessage::UserPrompt { text } => element! {

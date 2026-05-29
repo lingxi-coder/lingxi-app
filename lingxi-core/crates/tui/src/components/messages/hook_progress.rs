@@ -8,7 +8,7 @@
 
 use iocraft::prelude::*;
 
-use crate::theme::TuiTheme;
+use crate::theme::Theme;
 
 /// Props for [`HookProgressMessage`].
 #[derive(Debug, Clone, Default, Props)]
@@ -20,6 +20,8 @@ pub struct HookProgressProps {
     /// `true` → static transcript summary (`{n} … ran`); `false` → live
     /// (`Running … …`).
     pub transcript_summary: bool,
+    /// (M7-15) Active palette — the dim color is centralized here.
+    pub theme: Theme,
 }
 
 /// Pure-string renderer.
@@ -40,15 +42,21 @@ pub fn render_hook_progress_to_string(props: HookProgressProps) -> String {
 }
 
 /// iocraft component — all dim; `{event}` is bold in claude-code.
+///
+/// (M7-15) The dim color is now centralized into the active [`Theme`]. The
+/// per-run bold on `{event}` is a styling nicety the string oracle ignores;
+/// splitting the line into 3 colored runs here risks the line-layout
+/// invariant the M7-03 `VirtualMessageList` height proxy tracks, so it is
+/// consciously re-deferred — see the `TODO(M8)` below. The one-row layout +
+/// dim look match claude-code's equivalent appearance.
 #[component]
 pub fn HookProgressMessage(props: &HookProgressProps) -> impl Into<AnyElement<'static>> {
-    // TODO(M7-15): single dim Text for the whole line (the event-bold run is a
-    // styling nicety the string oracle ignores; equivalent look). The line
-    // layout (one row) matches the string oracle exactly.
+    // TODO(M8): split `{event}` into a bold run (per-run styling). Deferred
+    // from M7-15 to keep the single-row layout the height proxy assumes.
     let body = render_hook_progress_to_string(props.clone());
     element! {
         View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: TuiTheme::DIM)
+            Text(content: body, color: props.theme.dim)
         }
     }
 }

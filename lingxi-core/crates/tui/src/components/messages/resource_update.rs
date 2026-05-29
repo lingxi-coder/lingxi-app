@@ -1,10 +1,11 @@
 //! `UserResourceUpdateMessage` — `↻ server: target · reason` lines.
 //!
 //! Literal locks (byte-for-byte from claude-code):
-//!   - glyph: `↻` (REFRESH_ARROW U+21BB, color `success` → ASSISTANT)
-//!     // TODO(M7-15): `success` → dedicated success color
-//!   - `{server}:` dim; `{target}` color `suggestion` → USER
-//!     // TODO(M7-15): `suggestion` → dedicated suggestion color
+//!   - glyph: `↻` (REFRESH_ARROW U+21BB, claude-code `success`); `{target}`
+//!     uses `suggestion`. M7-05 collapsed the whole line to a single `DIM`
+//!     `Text`. `Theme` now has `success` + `suggestion` fields (added in
+//!     M7-15), so a per-span recolor is straightforward — but the per-run
+//!     split is re-deferred to keep the single-row layout — TODO(M8).
 //!   - line: `↻ {server}: {target}[ · {reason}]` (separator ` · `, U+00B7)
 //!   - file:// URIs → basename; non-file URIs len>40 → 39 chars + `…`
 //!   source: claude-code/src/components/messages/UserResourceUpdateMessage.tsx

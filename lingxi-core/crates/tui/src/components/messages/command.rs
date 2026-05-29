@@ -1,12 +1,13 @@
 //! `UserCommandMessage` — `❯ /cmd args` or `❯ Skill(name)`.
 //!
 //! Literal locks (byte-for-byte from claude-code):
-//!   - prefix: `❯ ` (figures.pointer U+276F + space, color `subtle` → DIM)
-//!     // TODO(M7-15): `subtle` → dedicated subtle color
+//!   - prefix: `❯ ` (figures.pointer U+276F + space, claude-code `subtle`).
+//!     The lingxi `Theme` has no dedicated `subtle` key; the whole line uses
+//!     `TuiTheme::USER` (terminal default), matching M7-05's single-color
+//!     simplification. A per-span `subtle` prefix is re-deferred — TODO(M8).
 //!   - slash form: `/{command} {args}` (args omitted when empty)
 //!   - skill form: `Skill({command})`
-//!   - body text color: `text` → TuiTheme::USER
-//!     // TODO(M7-15): `text` → userMessageBackground foreground
+//!   - body text color: `text` → `TuiTheme::USER` (terminal default).
 //!   source: claude-code/src/components/messages/UserCommandMessage.tsx
 #![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
 

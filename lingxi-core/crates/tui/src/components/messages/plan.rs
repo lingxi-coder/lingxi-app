@@ -1,10 +1,9 @@
 //! `UserPlanMessage` — bordered "Plan to implement" + markdown body.
 //!
 //! Literal locks (byte-for-byte from claude-code):
-//!   - header: `Plan to implement` (bold, color `planMode` → ASSISTANT)
-//!     // TODO(M7-15): `planMode` → dedicated plan-mode color (header + border)
+//!   - header: `Plan to implement` (bold, color `planMode` → `theme.plan_mode`)
 //!   - body: markdown (`render::markdown`), round-bordered box, borderColor
-//!     `planMode` → ASSISTANT.
+//!     `planMode` → `theme.plan_mode`.
 //!   source: claude-code/src/components/messages/UserPlanMessage.tsx
 #![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
 
@@ -12,7 +11,7 @@ use iocraft::prelude::*;
 
 use crate::render::markdown::{render as render_markdown, MarkdownTheme};
 use crate::render::{StyleColor, StyledLine};
-use crate::theme::TuiTheme;
+use crate::theme::Theme;
 
 /// Exact header literal.
 pub const HEADER: &str = "Plan to implement";
@@ -22,6 +21,8 @@ pub const HEADER: &str = "Plan to implement";
 pub struct UserPlanProps {
     /// Markdown plan content.
     pub plan_content: String,
+    /// (M7-15) Active palette — `plan_mode` accent centralized here.
+    pub theme: Theme,
 }
 
 /// Flatten the markdown plan body → plain text (one line per visual line).
@@ -51,7 +52,12 @@ pub fn render_plan_to_string(plan_content: &str) -> String {
 }
 
 /// iocraft component. Body routes through `render::markdown`; border is a
-/// `round`-style View (borderColor `planMode` → ASSISTANT).
+/// `round`-style View (borderColor `planMode` → `theme.plan_mode`).
+///
+/// (M7-15) The header + border accent is centralized into the active
+/// [`Theme`]'s `plan_mode` color (was the dark-only `TuiTheme::ASSISTANT`
+/// shim); the body stays terminal-default (claude-code renders plan body
+/// uncolored).
 #[component]
 pub fn UserPlanMessage(props: &UserPlanProps) -> impl Into<AnyElement<'static>> {
     let body = render_plan_to_string(&props.plan_content);
@@ -59,14 +65,15 @@ pub fn UserPlanMessage(props: &UserPlanProps) -> impl Into<AnyElement<'static>> 
     let mut lines = body.lines();
     let _ = lines.next(); // skip header (drawn separately, bold)
     let body_text = lines.collect::<Vec<_>>().join("\n");
+    let accent = props.theme.plan_mode;
     element! {
         View(
             flex_direction: FlexDirection::Column,
             border_style: BorderStyle::Round,
-            border_color: TuiTheme::ASSISTANT,
+            border_color: accent,
         ) {
-            Text(content: HEADER, color: TuiTheme::ASSISTANT, weight: Weight::Bold)
-            Text(content: body_text, color: TuiTheme::USER)
+            Text(content: HEADER, color: accent, weight: Weight::Bold)
+            Text(content: body_text, color: Color::Reset)
         }
     }
 }

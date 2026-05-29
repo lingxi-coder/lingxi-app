@@ -20,7 +20,7 @@ use iocraft::prelude::*;
 use crate::render::markdown::{render as render_markdown, MarkdownTheme};
 use crate::render::StyleColor;
 use crate::state::AdvisorKind;
-use crate::theme::TuiTheme;
+use crate::theme::Theme;
 
 /// `figures.tick`. U+2714 (0xE2 0x9C 0x94).
 pub const TICK: &str = "\u{2714}";
@@ -34,6 +34,8 @@ pub struct AdvisorProps {
     pub kind: AdvisorKind,
     /// `true` → render the full result text (markdown via `render::markdown`).
     pub verbose: bool,
+    /// (M7-15) Active palette — error/dim colors centralized here.
+    pub theme: Theme,
 }
 
 /// Flatten markdown → plain text for the string oracle (verbose result body).
@@ -77,21 +79,40 @@ pub fn render_advisor_to_string(props: AdvisorProps) -> String {
 }
 
 /// iocraft component.
+///
+/// (M7-15) Colors centralized into the active [`Theme`]: error→`theme.error`,
+/// everything else→`theme.dim`. The `server_tool_use` block restores the
+/// claude-code per-span styling — `Advising` is bold, the ` using {model}
+/// · {input}` descriptor dim — by splitting the line into two runs on one row.
 #[component]
 pub fn AdvisorMessage(props: &AdvisorProps) -> impl Into<AnyElement<'static>> {
     let body = render_advisor_to_string(props.clone());
+    let theme = props.theme;
+    // server_tool_use: bold `Advising` + dim descriptor (per-span, on one row).
+    if let AdvisorKind::ServerToolUse { .. } = &props.kind {
+        // `body` is "Advising[ using {model}][ · {input}]"; split off the bold
+        // leading "Advising" word, the remainder is the dim descriptor.
+        let descriptor = body.strip_prefix("Advising").unwrap_or("").to_string();
+        return element! {
+            View(flex_direction: FlexDirection::Column) {
+                View(flex_direction: FlexDirection::Row) {
+                    Text(content: "Advising".to_string(), color: theme.dim, weight: Weight::Bold)
+                    Text(content: descriptor, color: theme.dim)
+                }
+            }
+        }
+        .into_any();
+    }
     let color = match &props.kind {
-        AdvisorKind::Error { .. } => TuiTheme::ERROR,
-        // TODO(M7-15): `Advising` is bold in claude-code; the descriptor parts
-        // are dim. We render the whole block dim here (bold inline-runs land
-        // with M7-15's styled-span rendering).
-        _ => TuiTheme::DIM,
+        AdvisorKind::Error { .. } => theme.error,
+        _ => theme.dim,
     };
     element! {
         View(flex_direction: FlexDirection::Column) {
             Text(content: body, color: color)
         }
     }
+    .into_any()
 }
 
 #[cfg(test)]

@@ -55,6 +55,7 @@ fn system_text_info_plain() {
     let s = render_system_text_to_string(SystemTextProps {
         body: "Saved settings.".into(),
         level: SystemLevel::Info,
+        ..Default::default()
     });
     insta::assert_snapshot!("system_text_info_plain", s);
 }
@@ -64,6 +65,7 @@ fn system_text_warning_dotted() {
     let s = render_system_text_to_string(SystemTextProps {
         body: "Approaching context limit.".into(),
         level: SystemLevel::Warning,
+        ..Default::default()
     });
     insta::assert_snapshot!("system_text_warning_dotted", s);
 }
@@ -116,6 +118,7 @@ fn shutdown_request_with_reason() {
         from: "agent-2".into(),
         reason: Some("task done".into()),
         rejected: false,
+        ..Default::default()
     });
     insta::assert_snapshot!("shutdown_request_with_reason", s);
 }
@@ -126,6 +129,7 @@ fn shutdown_rejected() {
         from: "agent-2".into(),
         reason: Some("still working".into()),
         rejected: true,
+        ..Default::default()
     });
     insta::assert_snapshot!("shutdown_rejected", s);
 }
@@ -137,6 +141,7 @@ fn advisor_result_collapsed() {
             text: "Looks good.".into(),
         },
         verbose: false,
+        ..Default::default()
     });
     insta::assert_snapshot!("advisor_result_collapsed", s);
 }
@@ -148,6 +153,7 @@ fn advisor_unavailable() {
             error_code: "503".into(),
         },
         verbose: false,
+        ..Default::default()
     });
     insta::assert_snapshot!("advisor_unavailable", s);
 }
@@ -158,6 +164,7 @@ fn hook_progress_running_plural() {
         event: "SessionStart".into(),
         count: 3,
         transcript_summary: false,
+        ..Default::default()
     });
     insta::assert_snapshot!("hook_progress_running_plural", s);
 }
@@ -168,6 +175,7 @@ fn hook_progress_transcript_singular() {
         event: "PreToolUse".into(),
         count: 1,
         transcript_summary: true,
+        ..Default::default()
     });
     insta::assert_snapshot!("hook_progress_transcript_singular", s);
 }
@@ -180,6 +188,7 @@ fn plan_approval_request() {
             plan_content: "1. Do X\n2. Do Y".into(),
             plan_file_path: Some("/tmp/plan.md".into()),
         },
+        ..Default::default()
     });
     insta::assert_snapshot!("plan_approval_request", s);
 }
@@ -188,6 +197,7 @@ fn plan_approval_request() {
 fn plan_approval_approved() {
     let s = render_plan_approval_to_string(PlanApprovalProps {
         kind: PlanApprovalKind::Approved { name: "you".into() },
+        ..Default::default()
     });
     insta::assert_snapshot!("plan_approval_approved", s);
 }
@@ -199,6 +209,7 @@ fn plan_approval_rejected() {
             name: "you".into(),
             feedback: Some("too risky".into()),
         },
+        ..Default::default()
     });
     insta::assert_snapshot!("plan_approval_rejected", s);
 }

@@ -10,7 +10,7 @@ use iocraft::prelude::*;
 use lingxi_commands::builtin::{core_description, BUILTIN_COMMAND_NAMES};
 
 use super::fuzzy::filtered_ranked;
-use crate::theme::TuiTheme;
+use crate::theme::Theme;
 
 /// Max dropdown rows shown at once (claude-code `OVERLAY_MAX_ITEMS`).
 pub const OVERLAY_MAX_ITEMS: usize = 5;
@@ -155,6 +155,9 @@ pub struct PaletteOverlayProps {
     pub rows: Vec<PaletteRow>,
     /// Index of the highlighted row within `rows`.
     pub selected: usize,
+    /// (M7-15) Active palette — the selected-row `suggestion` accent + dim
+    /// rest are centralized here.
+    pub theme: Theme,
 }
 
 /// Render the palette dropdown: up to `OVERLAY_MAX_ITEMS` rows, each
@@ -165,13 +168,14 @@ pub struct PaletteOverlayProps {
 pub fn PaletteOverlay(props: &PaletteOverlayProps) -> impl Into<AnyElement<'static>> {
     let rows: Vec<_> = props.rows.iter().take(OVERLAY_MAX_ITEMS).cloned().collect();
     let selected = props.selected;
+    let theme = props.theme;
     element! {
         View(flex_direction: FlexDirection::Column) {
             #(rows.into_iter().enumerate().map(|(i, row)| {
                 let line = format!("/{} \u{2013} {}", row.name, row.description);
-                // TODO(M7-15): theme picker adds a dedicated "suggestion" token;
-                // until then the selected row reuses ASSISTANT and others DIM.
-                let color = if i == selected { TuiTheme::ASSISTANT } else { TuiTheme::DIM };
+                // (M7-15) Centralized: selected row uses the theme's `suggestion`
+                // accent (claude-code's completion highlight), the rest dim.
+                let color = if i == selected { theme.suggestion } else { theme.dim };
                 element! {
                     View(height: 1) {
                         Text(content: line, color: color)

@@ -190,6 +190,7 @@ fn render_text_for_measure(msg: &RenderedMessage) -> String {
                 crate::components::messages::advisor::AdvisorProps {
                     kind: kind.clone(),
                     verbose: *verbose,
+                    ..Default::default()
                 },
             )
         }
@@ -617,6 +618,13 @@ pub struct VirtualMessageListProps {
     pub expanded: HashMap<ToolUseId, bool>,
     /// Focused tool id (clone of `AppState::focused_tool_id`).
     pub focused_tool_id: Option<ToolUseId>,
+    /// (M7-15) Active render palette (clone of `AppState::theme`). Threaded
+    /// into every windowed `render_message` so messages recolor on theme
+    /// change.
+    pub theme: crate::theme::Theme,
+    /// (M7-15) Active theme name (clone of `AppState::theme_setting.resolve()`)
+    /// — drives syntect-colored diffs.
+    pub theme_name: crate::theme::ThemeName,
 }
 
 /// Windowed scrollback component. Renders only the messages whose line
@@ -634,12 +642,14 @@ pub fn VirtualMessageList(props: &VirtualMessageListProps) -> impl Into<AnyEleme
 
     let expanded = props.expanded.clone();
     let focused_tool_id = props.focused_tool_id;
+    let theme = props.theme;
+    let theme_name = props.theme_name;
     let rendered: Vec<AnyElement<'static>> = if win.is_empty() {
         Vec::new()
     } else {
         win.indices()
             .filter_map(|i| props.messages.get(i).cloned())
-            .map(|m| render_message(m, &expanded, focused_tool_id))
+            .map(|m| render_message(m, &expanded, focused_tool_id, theme, theme_name))
             .collect()
     };
     element! {
@@ -958,6 +968,7 @@ mod tests {
         let rendered = render_advisor_to_string(AdvisorProps {
             kind,
             verbose: true,
+            ..Default::default()
         });
         assert_eq!(
             measured_height(&msg, 80),

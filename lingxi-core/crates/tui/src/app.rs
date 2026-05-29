@@ -564,6 +564,9 @@ pub fn render_screen(
             vim_mode: vim_mode,
             vim_visual_linewise: vim_visual_linewise,
             history_search: history_search,
+            // (M7-15) active palette + theme name → whole REPL recolors live.
+            theme: state.theme,
+            theme_name: state.theme_setting.resolve(),
         )
     }
     .into_any()

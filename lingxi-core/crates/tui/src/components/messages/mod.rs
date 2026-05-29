@@ -97,6 +97,7 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             system_text::render_system_text_to_string(system_text::SystemTextProps {
                 body: body.clone(),
                 level: *level,
+                ..Default::default()
             })
         }
         RenderedMessage::SystemApiError {
@@ -128,11 +129,13 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             from: from.clone(),
             reason: reason.clone(),
             rejected: *rejected,
+            ..Default::default()
         }),
         RenderedMessage::Advisor { kind, verbose } => {
             advisor::render_advisor_to_string(advisor::AdvisorProps {
                 kind: kind.clone(),
                 verbose: *verbose,
+                ..Default::default()
             })
         }
         RenderedMessage::HookProgress {
@@ -143,10 +146,12 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             event: event.clone(),
             count: *count,
             transcript_summary: *transcript_summary,
+            ..Default::default()
         }),
         RenderedMessage::PlanApproval { kind } => {
             plan_approval::render_plan_approval_to_string(plan_approval::PlanApprovalProps {
                 kind: kind.clone(),
+                ..Default::default()
             })
         }
         // ---- (M7-05) batch-2 user renderers ----------------------------

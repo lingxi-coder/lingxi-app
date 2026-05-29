@@ -9,7 +9,7 @@
 use iocraft::prelude::*;
 
 use crate::state::SystemLevel;
-use crate::theme::TuiTheme;
+use crate::theme::Theme;
 
 /// `● ` marker (`BLACK_CIRCLE`, non-darwin form). U+25CF + ASCII space.
 pub const MARKER: &str = "\u{25CF} ";
@@ -21,6 +21,8 @@ pub struct SystemTextProps {
     pub body: String,
     /// Severity → marker/color.
     pub level: SystemLevel,
+    /// (M7-15) Active palette — warning/error/dim colors centralized here.
+    pub theme: Theme,
 }
 
 /// Pure-string renderer.
@@ -36,11 +38,11 @@ pub fn render_system_text_to_string(props: SystemTextProps) -> String {
 #[component]
 pub fn SystemTextMessage(props: &SystemTextProps) -> impl Into<AnyElement<'static>> {
     let body = render_system_text_to_string(props.clone());
+    // (M7-15) Centralized: info→dim, warning→theme.warning, error→theme.error.
     let color = match props.level {
-        SystemLevel::Info => TuiTheme::DIM,
-        // TODO(M7-15): theme constants for warning/error.
-        SystemLevel::Warning => Color::Yellow,
-        SystemLevel::Error => TuiTheme::ERROR,
+        SystemLevel::Info => props.theme.dim,
+        SystemLevel::Warning => props.theme.warning,
+        SystemLevel::Error => props.theme.error,
     };
     element! {
         View(flex_direction: FlexDirection::Column) {

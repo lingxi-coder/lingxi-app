@@ -9,7 +9,7 @@
 
 use iocraft::prelude::*;
 
-use crate::theme::TuiTheme;
+use crate::theme::Theme;
 
 /// Locked tail line for rejected shutdowns.
 pub const REJECTED_TAIL: &str =
@@ -24,6 +24,8 @@ pub struct ShutdownProps {
     pub reason: Option<String>,
     /// `true` → rejected response; `false` → request.
     pub rejected: bool,
+    /// (M7-15) Active palette — warning/dim colors centralized here.
+    pub theme: Theme,
 }
 
 /// Pure-string renderer.
@@ -46,19 +48,32 @@ pub fn render_shutdown_to_string(props: ShutdownProps) -> String {
 }
 
 /// iocraft component. Warning header for requests, subtle (dim) for rejected.
+///
+/// (M7-15) Colors centralized into the active [`Theme`]: requests use
+/// `theme.warning` + a round warning border (claude-code), rejected use
+/// `theme.dim` (subtle) with no border.
 #[component]
 pub fn ShutdownMessage(props: &ShutdownProps) -> impl Into<AnyElement<'static>> {
     let body = render_shutdown_to_string(props.clone());
-    // TODO(M7-15): warning/subtle round border via theme; for now color the
-    // whole block (warning yellow for requests, subtle/dim for rejected).
-    let color = if props.rejected {
-        TuiTheme::DIM
-    } else {
-        Color::Yellow
-    };
-    element! {
-        View(flex_direction: FlexDirection::Column) {
-            Text(content: body, color: color)
+    let theme = props.theme;
+    if props.rejected {
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                Text(content: body, color: theme.dim)
+            }
         }
+        .into_any()
+    } else {
+        // Request: warning color + round warning border (M7-04 deferred → restored).
+        element! {
+            View(
+                flex_direction: FlexDirection::Column,
+                border_style: BorderStyle::Round,
+                border_color: theme.warning,
+            ) {
+                Text(content: body, color: theme.warning)
+            }
+        }
+        .into_any()
     }
 }

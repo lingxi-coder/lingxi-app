@@ -1,8 +1,10 @@
 //! `UserMemoryInputMessage` — `# {input}` + a saving acknowledgement line.
 //!
 //! Literal locks (byte-for-byte from claude-code):
-//!   - prefix glyph: `#` (color `remember` → USER)
-//!     // TODO(M7-15): `remember` + `memoryBackgroundColor` → dedicated colors
+//!   - prefix glyph: `#` (claude-code `remember`). The lingxi `Theme` ports
+//!     only the keys it renders and has no `remember` / `memoryBackgroundColor`
+//!     fields; the glyph stays `TuiTheme::USER` (terminal default). Dedicated
+//!     `remember` / memory-background `Theme` fields are re-deferred — TODO(M8).
 //!   - saving line: claude-code samples ['Got it.', 'Good to know.', 'Noted.']
 //!     at random; M7-05 PINS the first ("Got it.") for snapshot determinism
 //!     (documented divergence — recorded in the M7-16 literal-lock catalog).

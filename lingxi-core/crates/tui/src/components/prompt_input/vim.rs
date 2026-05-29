@@ -757,6 +757,94 @@ fn apply_operator(
     }
 }
 
+/// claude-code `operators.ts::executeLineOp` — dd/cc/yy over `count` logical lines.
+#[must_use]
+fn line_op(op: Operator, cursor: VimCursor<'_>, count: usize) -> (VimEffect, Register, bool) {
+    let text = cursor.text;
+    let count = count.max(1);
+    let lines: Vec<&str> = text.split('\n').collect();
+    // Logical line index = number of '\n' before the cursor offset.
+    let current_line = text[..cursor.offset].matches('\n').count();
+    let lines_to_affect = count.min(lines.len().saturating_sub(current_line));
+
+    let line_start = cursor.start_of_logical_line().offset;
+    let mut line_end = line_start;
+    for _ in 0..lines_to_affect {
+        match text[line_end..].find('\n') {
+            None => {
+                line_end = text.len();
+                break;
+            }
+            Some(rel) => line_end += rel + 1, // include the newline
+        }
+    }
+
+    let mut content = text[line_start..line_end].to_string();
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    let register = Register {
+        text: content,
+        linewise: true,
+    };
+
+    match op {
+        Operator::Yank => (VimEffect::Move(line_start), register, false),
+        Operator::Delete => {
+            let mut delete_start = line_start;
+            let delete_end = line_end;
+            // Deleting to EOF with a preceding newline: consume it (no orphan '\n').
+            if delete_end == text.len()
+                && delete_start > 0
+                && text.as_bytes()[delete_start - 1] == b'\n'
+            {
+                delete_start -= 1;
+            }
+            let new_text = format!("{}{}", &text[..delete_start], &text[delete_end..]);
+            let max_off = new_text.len().saturating_sub(last_char_len(&new_text));
+            let cursor_off = delete_start.min(max_off);
+            (
+                VimEffect::Edit {
+                    text: new_text,
+                    cursor: cursor_off,
+                },
+                register,
+                false,
+            )
+        }
+        Operator::Change => {
+            if lines.len() == 1 {
+                (
+                    VimEffect::Edit {
+                        text: String::new(),
+                        cursor: 0,
+                    },
+                    register,
+                    true,
+                )
+            } else {
+                let before = &lines[..current_line];
+                let after = &lines[(current_line + lines_to_affect)..];
+                let new_lines: Vec<&str> = before
+                    .iter()
+                    .chain(std::iter::once(&""))
+                    .chain(after.iter())
+                    .copied()
+                    .collect();
+                let new_text = new_lines.join("\n");
+                (
+                    VimEffect::Edit {
+                        text: new_text,
+                        cursor: line_start,
+                    },
+                    register,
+                    true,
+                )
+            }
+        }
+    }
+}
+
 /// The i/a/o/I/A/O mode-entry effect. Returns the cursor placement (Move) or
 /// the buffer edit (Edit, for o/O). Caller flips mode to Insert.
 #[must_use]
@@ -1803,5 +1891,96 @@ mod apply_op_tests {
                 cursor: 0
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod line_op_tests {
+    use super::*;
+    fn cur(text: &str, off: usize) -> VimCursor<'_> {
+        VimCursor { text, offset: off }
+    }
+
+    #[test]
+    fn dd_deletes_current_line_register_linewise() {
+        // dd on line 1 ('b') of "a\nb\nc": delete "b\n", register linewise.
+        let (effect, reg, enter_insert) = line_op(Operator::Delete, cur("a\nb\nc", 2), 1);
+        assert!(reg.linewise);
+        assert_eq!(reg.text, "b\n");
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: "a\nc".into(),
+                cursor: 2
+            }
+        );
+        assert!(!enter_insert);
+    }
+
+    #[test]
+    fn dd_last_line_consumes_preceding_newline() {
+        // dd on last line ('c') of "a\nb\nc": delete to EOF; preceding '\n' consumed
+        // so no orphan trailing newline. Result "a\nb".
+        let (effect, _reg, _) = line_op(Operator::Delete, cur("a\nb\nc", 4), 1);
+        match effect {
+            VimEffect::Edit { text, .. } => assert_eq!(text, "a\nb"),
+            other => panic!("expected Edit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn count_dd_deletes_n_lines() {
+        // 2dd on "a\nb\nc\nd" from line0: delete "a\nb\n" -> "c\nd".
+        let (effect, reg, _) = line_op(Operator::Delete, cur("a\nb\nc\nd", 0), 2);
+        assert_eq!(reg.text, "a\nb\n");
+        match effect {
+            VimEffect::Edit { text, cursor } => {
+                assert_eq!(text, "c\nd");
+                assert_eq!(cursor, 0);
+            }
+            other => panic!("expected Edit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn yy_yanks_keeps_buffer_cursor_to_line_start() {
+        // yy on line1 of "a\nb\nc": register "b\n" linewise, buffer unchanged, cursor->line start (2).
+        let (effect, reg, enter_insert) = line_op(Operator::Yank, cur("a\nb\nc", 3), 1);
+        assert_eq!(
+            reg,
+            Register {
+                text: "b\n".into(),
+                linewise: true
+            }
+        );
+        assert_eq!(effect, VimEffect::Move(2));
+        assert!(!enter_insert);
+    }
+
+    #[test]
+    fn cc_clears_line_enters_insert_at_line_start() {
+        // cc on line1 of "ab\ncd\nef": clear "cd" -> "ab\n\nef", enter insert at line start (3).
+        let (effect, _reg, enter_insert) = line_op(Operator::Change, cur("ab\ncd\nef", 4), 1);
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: "ab\n\nef".into(),
+                cursor: 3
+            }
+        );
+        assert!(enter_insert);
+    }
+
+    #[test]
+    fn cc_single_line_buffer_clears_to_empty() {
+        let (effect, _reg, enter_insert) = line_op(Operator::Change, cur("hello", 2), 1);
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: String::new(),
+                cursor: 0
+            }
+        );
+        assert!(enter_insert);
     }
 }

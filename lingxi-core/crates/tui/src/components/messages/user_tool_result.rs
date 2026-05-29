@@ -16,7 +16,7 @@ use iocraft::prelude::*;
 use lingxi_protocol::ToolUseId;
 
 use crate::render::ansi::parse_ansi;
-use crate::render::{diff, StyledLine, StyledSpan};
+use crate::render::{diff, split_spans_into_line_rows, StyledLine, StyledSpan};
 use crate::theme::TuiTheme;
 
 /// Indent marker glyph + space. 4-byte UTF-8.
@@ -278,18 +278,34 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
             let prefix = if props.focused { FOCUS_PREFIX } else { "" };
             format!("{prefix}{MARKER}")
         };
+        // One row per parsed line. The flat span stream rejoins lines with
+        // `\n` delimiter spans; `split_spans_into_line_rows` recovers the
+        // per-line groups so multi-line Bash output renders on multiple visual
+        // rows (a single flex Row of every span — including the delimiters —
+        // collapsed them onto one). Color/weight preserved per span.
         let spans = render_user_tool_result_body_spans(props);
-        let span_elements: Vec<AnyElement<'static>> = spans
+        let body_rows: Vec<AnyElement<'static>> = split_spans_into_line_rows(spans)
             .into_iter()
-            .map(|s| {
-                let color = s.style.fg.to_iocraft();
-                let weight = if s.style.bold {
-                    Weight::Bold
-                } else {
-                    Weight::Normal
-                };
+            .map(|line_spans| {
+                let span_elements: Vec<AnyElement<'static>> = line_spans
+                    .into_iter()
+                    .map(|s| {
+                        let color = s.style.fg.to_iocraft();
+                        let weight = if s.style.bold {
+                            Weight::Bold
+                        } else {
+                            Weight::Normal
+                        };
+                        element! {
+                            Text(content: s.text, color: color, weight: weight)
+                        }
+                        .into_any()
+                    })
+                    .collect();
                 element! {
-                    Text(content: s.text, color: color, weight: weight)
+                    View(flex_direction: FlexDirection::Row) {
+                        #(span_elements)
+                    }
                 }
                 .into_any()
             })
@@ -297,9 +313,7 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
         return element! {
             View(flex_direction: FlexDirection::Column) {
                 Text(content: header, color: TuiTheme::DIM)
-                View(flex_direction: FlexDirection::Row) {
-                    #(span_elements)
-                }
+                #(body_rows)
             }
         };
     }

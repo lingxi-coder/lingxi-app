@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/render_user_bash.rs
-assertion_line: 37
 expression: element.to_string()
 ---
-helloworld
+hello
+world

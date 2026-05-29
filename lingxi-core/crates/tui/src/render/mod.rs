@@ -256,6 +256,67 @@ impl StyledLine {
     }
 }
 
+/// Split a flat span stream into per-visual-line groups, consuming the
+/// `\n`-only delimiter spans that [`render::ansi`](crate::render::ansi)-style
+/// flatteners insert between parsed lines.
+///
+/// `render_bash_output_spans` / `render_user_tool_result_body_spans` produce a
+/// single `Vec<StyledSpan>` where parsed lines are rejoined with plain `"\n"`
+/// spans. A flex **Row** of those children lays everything out horizontally —
+/// collapsing N lines onto one visual row. Renderers that want one row per line
+/// call this helper to recover the per-line span groups, then wrap each group
+/// in its own row inside a `FlexDirection::Column`.
+///
+/// Behavior:
+///   - Splits at every span whose `text` is exactly `"\n"` (the delimiter the
+///     flatteners emit). Those delimiter spans are consumed, not rendered.
+///   - A span carrying an embedded `\n` (not a pure delimiter) is split on its
+///     newlines too, so the result never contains an embedded newline.
+///   - An empty input yields an empty `Vec` (no spurious blank line) so callers
+///     reproduce their prior empty-body behavior. A single-line input yields a
+///     single group (one row — no behavior change for the common case).
+#[must_use]
+pub fn split_spans_into_line_rows(spans: Vec<StyledSpan>) -> Vec<Vec<StyledSpan>> {
+    let mut lines: Vec<Vec<StyledSpan>> = Vec::new();
+    let mut current: Vec<StyledSpan> = Vec::new();
+    let mut started = false;
+
+    for span in spans {
+        // Pure newline delimiter span → close the current line.
+        if span.text == "\n" {
+            lines.push(std::mem::take(&mut current));
+            started = true;
+            continue;
+        }
+        // Defensive: a span may carry embedded newlines (e.g. a placeholder).
+        // Split it so no rendered span ever contains a `\n`.
+        if span.text.contains('\n') {
+            let mut parts = span.text.split('\n').peekable();
+            while let Some(part) = parts.next() {
+                if !part.is_empty() {
+                    current.push(StyledSpan {
+                        text: part.to_string(),
+                        style: span.style,
+                        kind: span.kind.clone(),
+                    });
+                }
+                if parts.peek().is_some() {
+                    lines.push(std::mem::take(&mut current));
+                    started = true;
+                }
+            }
+            continue;
+        }
+        started = true;
+        current.push(span);
+    }
+
+    if started || !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +389,65 @@ mod tests {
             StyleColor::Indexed(196).to_iocraft(),
             Color::Rgb { .. }
         ));
+    }
+
+    #[test]
+    fn split_spans_empty_yields_no_lines() {
+        assert!(split_spans_into_line_rows(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn split_spans_single_line_one_group() {
+        let rows = split_spans_into_line_rows(vec![
+            StyledSpan::plain("hello "),
+            StyledSpan::plain("world"),
+        ]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 2);
+        let joined: String = rows[0].iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, "hello world");
+    }
+
+    #[test]
+    fn split_spans_splits_at_newline_delimiters() {
+        // "a" \n "b" \n "c" — delimiter spans consumed, three line groups.
+        let rows = split_spans_into_line_rows(vec![
+            StyledSpan::plain("a"),
+            StyledSpan::plain("\n"),
+            StyledSpan::plain("b"),
+            StyledSpan::plain("\n"),
+            StyledSpan::plain("c"),
+        ]);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0][0].text, "a");
+        assert_eq!(rows[1][0].text, "b");
+        assert_eq!(rows[2][0].text, "c");
+        // No rendered span carries a newline.
+        assert!(rows.iter().flatten().all(|s| !s.text.contains('\n')));
+    }
+
+    #[test]
+    fn split_spans_preserves_per_span_style() {
+        let red = SpanStyle {
+            fg: StyleColor::Named(NamedColor::Red),
+            ..SpanStyle::default()
+        };
+        let rows = split_spans_into_line_rows(vec![
+            StyledSpan::styled("err", red),
+            StyledSpan::plain("\n"),
+            StyledSpan::plain("ok"),
+        ]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].style.fg, StyleColor::Named(NamedColor::Red));
+        assert_eq!(rows[1][0].style.fg, StyleColor::Default);
+    }
+
+    #[test]
+    fn split_spans_handles_embedded_newline_in_span() {
+        // A single span carrying an embedded `\n` is split too.
+        let rows = split_spans_into_line_rows(vec![StyledSpan::plain("a\nb")]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].text, "a");
+        assert_eq!(rows[1][0].text, "b");
     }
 }

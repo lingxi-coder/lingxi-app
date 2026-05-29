@@ -16,7 +16,7 @@
 use iocraft::prelude::*;
 
 use crate::render::ansi::parse_ansi;
-use crate::render::StyledSpan;
+use crate::render::{split_spans_into_line_rows, StyledSpan};
 
 /// Props for [`UserBashOutputMessage`].
 #[derive(Debug, Clone, Default, Props)]
@@ -62,25 +62,45 @@ pub fn render_bash_output_spans(stdout: &str, stderr: &str) -> Vec<StyledSpan> {
     spans
 }
 
-/// iocraft component — each ANSI span becomes a styled `Text` child.
+/// iocraft component — one row per parsed line, each span a styled `Text`.
+///
+/// The flat span stream from [`render_bash_output_spans`] rejoins parsed lines
+/// with `\n` delimiter spans. [`split_spans_into_line_rows`] recovers the
+/// per-line groups; each group becomes its own `FlexDirection::Row` inside a
+/// `FlexDirection::Column`, so N-line output renders on N visual rows (a flex
+/// **Row** of every span — including the delimiters — collapsed them onto one).
+/// An empty body yields an empty Column (no spurious blank row), matching the
+/// prior behavior for empty output.
 #[component]
 pub fn UserBashOutputMessage(props: &UserBashOutputProps) -> impl Into<AnyElement<'static>> {
     let spans = render_bash_output_spans(&props.stdout, &props.stderr);
-    let children: Vec<AnyElement<'static>> = spans
+    let line_rows = split_spans_into_line_rows(spans);
+    let rows: Vec<AnyElement<'static>> = line_rows
         .into_iter()
-        .map(|s| {
-            let color = s.style.fg.to_iocraft();
-            let weight = if s.style.bold {
-                Weight::Bold
-            } else {
-                Weight::Normal
-            };
-            element! { Text(content: s.text, color: color, weight: weight) }.into_any()
+        .map(|line_spans| {
+            let span_elements: Vec<AnyElement<'static>> = line_spans
+                .into_iter()
+                .map(|s| {
+                    let color = s.style.fg.to_iocraft();
+                    let weight = if s.style.bold {
+                        Weight::Bold
+                    } else {
+                        Weight::Normal
+                    };
+                    element! { Text(content: s.text, color: color, weight: weight) }.into_any()
+                })
+                .collect();
+            element! {
+                View(flex_direction: FlexDirection::Row) {
+                    #(span_elements)
+                }
+            }
+            .into_any()
         })
         .collect();
     element! {
-        View(flex_direction: FlexDirection::Row) {
-            #(children)
+        View(flex_direction: FlexDirection::Column) {
+            #(rows)
         }
     }
 }

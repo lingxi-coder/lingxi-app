@@ -3,6 +3,6 @@ source: crates/tui/tests/render_memory_screen.rs
 expression: out
 ---
 Memory files
-❯ Project memory
-  User memory (new)
+❯ Project memory  Checked in at ./CLAUDE.md
+  User memory (new)  Saved in ~/.claude/CLAUDE.md
 ↑/↓ select · Enter edit · Esc close

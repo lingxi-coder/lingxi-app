@@ -121,6 +121,27 @@ pub fn default_export_filename() -> String {
     format!("lingxi-transcript-{secs}.txt")
 }
 
+/// Resolve a user-typed export filename to a safe `<basename>.txt`,
+/// guaranteeing the export lands INSIDE the resolved export dir (M7-14 review:
+/// path-traversal). The input is first clamped to its final path component via
+/// [`Path::file_name`] — which drops directory parts and parent refs
+/// (`"/etc/passwd"` → `passwd`, `"../../foo"` → `foo`, `"a/b/c"` → `c`) — so a
+/// later `dir.join(...)` can never escape `dir`. Inputs with no usable basename
+/// (`".."`, `""`, a trailing `/`) fall back to [`default_export_filename`].
+/// The resulting stem then gets the forced `.txt` extension (claude-code
+/// `ExportDialog` parity).
+#[must_use]
+fn resolve_export_filename(input: &str) -> String {
+    // Basename-clamp: keep only the final component, never directory parts.
+    let basename = Path::new(input)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map_or_else(default_export_filename, str::to_string);
+    // Force the .txt extension on the (now directory-free) basename.
+    let stem = basename.rsplit_once('.').map_or(&*basename, |(s, _)| s);
+    format!("{stem}.txt")
+}
+
 /// Render the scrollback to a plain-text transcript.
 fn render_transcript(messages: &[RenderedMessage]) -> String {
     let mut out = String::new();
@@ -159,9 +180,9 @@ pub fn export_transcript(
     filename: &str,
     overwrite: bool,
 ) -> Result<PathBuf, ExportError> {
-    // Force the .txt extension (claude-code ExportDialog parity).
-    let stem = filename.rsplit_once('.').map_or(filename, |(s, _)| s);
-    let final_name = format!("{stem}.txt");
+    // Basename-clamp + force the .txt extension (M7-14 review: path-traversal —
+    // the result CANNOT escape `dir`; claude-code ExportDialog parity).
+    let final_name = resolve_export_filename(filename);
     let target = dir.join(final_name);
     if target.exists() && !overwrite {
         return Err(ExportError::Exists(target));
@@ -662,6 +683,78 @@ mod tests {
         // collide with `notes.txt` above and trip the overwrite guard).
         let p2 = export_transcript(&msgs, tmp.path(), "other.md", false).unwrap();
         assert_eq!(p2.file_name().unwrap(), "other.txt");
+    }
+
+    // (M7-14 review) Path-traversal: the user-typed filename is clamped to its
+    // BASENAME so the export can never escape the resolved export dir. Drive
+    // the pure resolver directly with an injected temp dir.
+
+    #[test]
+    fn export_absolute_path_is_clamped_to_basename() {
+        let tmp = TempDir::new().unwrap();
+        let msgs = vec![user("x")];
+        // "/etc/passwd" MUST NOT write outside the dir — it lands as
+        // <dir>/passwd.txt, never /etc/passwd.txt.
+        let p = export_transcript(&msgs, tmp.path(), "/etc/passwd", false).unwrap();
+        assert_eq!(p.parent().unwrap(), tmp.path());
+        assert_eq!(p.file_name().unwrap(), "passwd.txt");
+    }
+
+    #[test]
+    fn export_parent_traversal_is_clamped_to_basename() {
+        let tmp = TempDir::new().unwrap();
+        let msgs = vec![user("x")];
+        // "../../escape" must not climb out of the dir.
+        let p = export_transcript(&msgs, tmp.path(), "../../escape", false).unwrap();
+        assert_eq!(p.parent().unwrap(), tmp.path());
+        assert_eq!(p.file_name().unwrap(), "escape.txt");
+    }
+
+    #[test]
+    fn export_nested_relative_path_keeps_only_final_component() {
+        let tmp = TempDir::new().unwrap();
+        let msgs = vec![user("x")];
+        // "sub/dir/name" → only the final component survives.
+        let p = export_transcript(&msgs, tmp.path(), "sub/dir/name", false).unwrap();
+        assert_eq!(p.parent().unwrap(), tmp.path());
+        assert_eq!(p.file_name().unwrap(), "name.txt");
+    }
+
+    #[test]
+    fn export_pure_parent_ref_falls_back_to_default_filename() {
+        let tmp = TempDir::new().unwrap();
+        let msgs = vec![user("x")];
+        // ".." has no usable basename → fall back to the default filename.
+        let p = export_transcript(&msgs, tmp.path(), "..", false).unwrap();
+        assert_eq!(p.parent().unwrap(), tmp.path());
+        let name = p.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("lingxi-transcript-"));
+        assert_eq!(p.extension().and_then(|e| e.to_str()), Some("txt"));
+    }
+
+    #[test]
+    fn export_normal_filename_still_works() {
+        let tmp = TempDir::new().unwrap();
+        let msgs = vec![user("x")];
+        let p = export_transcript(&msgs, tmp.path(), "session", false).unwrap();
+        assert_eq!(p.parent().unwrap(), tmp.path());
+        assert_eq!(p.file_name().unwrap(), "session.txt");
+    }
+
+    #[test]
+    fn resolve_export_filename_clamps_and_forces_txt() {
+        // Drive the pure resolver: absolute / parent / nested all clamp to the
+        // basename, then get the `.txt` rule; a bare ".." falls back.
+        assert_eq!(resolve_export_filename("/etc/passwd"), "passwd.txt");
+        assert_eq!(resolve_export_filename("../../escape"), "escape.txt");
+        assert_eq!(resolve_export_filename("sub/dir/name"), "name.txt");
+        assert_eq!(resolve_export_filename("notes.md"), "notes.txt");
+        let fallback = resolve_export_filename("..");
+        assert!(fallback.starts_with("lingxi-transcript-"));
+        assert_eq!(
+            Path::new(&fallback).extension().and_then(|e| e.to_str()),
+            Some("txt")
+        );
     }
 
     #[test]

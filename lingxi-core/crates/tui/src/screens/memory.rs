@@ -277,7 +277,16 @@ pub fn MemoryScreen(props: &MemoryScreenProps) -> impl Into<AnyElement<'static>>
             let marker = if i == selected { "❯ " } else { "  " };
             let new_suffix = if t.exists { "" } else { " (new)" };
             let line = format!("{marker}{}{new_suffix}", t.label);
-            element! { Text(content: line) }.into_any()
+            // Render the literal-locked tier description dimmed beside the
+            // label (claude-code MemoryFileSelector layout intent).
+            let description = t.description.clone();
+            element! {
+                View(flex_direction: FlexDirection::Row) {
+                    Text(content: line)
+                    Text(content: format!("  {description}"), color: Color::DarkGrey)
+                }
+            }
+            .into_any()
         })
         .collect();
     element! {

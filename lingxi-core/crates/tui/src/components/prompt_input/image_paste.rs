@@ -219,6 +219,10 @@ pub const BURST_WINDOW: Duration = Duration::from_millis(50);
 /// event — see `root.rs`) into one block. Pure over `(char, Instant)`.
 #[derive(Debug, Default)]
 pub struct PasteCoalescer {
+    // NOTE: the burst buffer is intentionally uncapped for M7-10. claude-code's
+    // `PASTE_THRESHOLD` / `maybeTruncateInput` truncation (replacing a large
+    // paste with a `[Pasted text #N +M lines]` reference) is deferred to M8, so
+    // a multi-MB paste grows this buffer unbounded — accepted for v0.8.0.
     buf: String,
     last: Option<Instant>,
 }

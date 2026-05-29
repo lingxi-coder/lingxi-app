@@ -402,8 +402,16 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     }
 
     // === Re-sync overlays after a default-path edit (M7-07). ===
-    // Palette wins when the buffer is a `/command` token; otherwise check the
-    // `@` token against a fresh cwd listing. Only one overlay is open at a time.
+    resync_overlays(st);
+}
+
+/// Re-sync the `/` palette and `@` completion overlays against the current
+/// prompt text/cursor after an edit (typed char or pasted block). Mirrors the
+/// edit-tail logic so paste and typing drive the overlays identically.
+///
+/// Palette wins when the buffer is a `/command` token; otherwise check the
+/// `@` token against a fresh cwd listing. Only one overlay is open at a time.
+fn resync_overlays(st: &mut AppState) {
     st.palette.sync_from_prompt(&st.prompt_text);
     if st.palette.open {
         st.completion.open = false;
@@ -444,22 +452,7 @@ fn apply_block(st: &mut AppState, block: &str) {
     st.paste = r.state;
     // Re-sync overlays against the pasted buffer (mirrors the default-edit tail
     // in `handle_live_key`). Palette wins when the buffer is a `/command`.
-    st.palette.sync_from_prompt(&st.prompt_text);
-    if st.palette.open {
-        st.completion.open = false;
-    } else if crate::components::prompt_input::completion::active_at_token(
-        &st.prompt_text,
-        st.prompt_cursor,
-    )
-    .is_some()
-    {
-        let cwd_entries =
-            crate::components::prompt_input::completion::read_cwd_entries(&st.status.cwd);
-        st.completion
-            .sync(&st.prompt_text, st.prompt_cursor, &cwd_entries);
-    } else {
-        st.completion.sync(&st.prompt_text, st.prompt_cursor, &[]);
-    }
+    resync_overlays(st);
 }
 
 /// Top-level iocraft component. Drives the REPL screen and signals exit on
@@ -622,6 +615,17 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
 
                 if !overlay_active && printable {
                     if let KeyCode::Char(c) = k.code {
+                        // NOTE: timing-tradeoff (M7-10). A printable that
+                        // CONTINUES a burst (arrives within the 50ms
+                        // BURST_WINDOW of the previous char) is buffered —
+                        // invisibly — until flush (the quiet idle tick ~100ms,
+                        // or the next non-printable key). So genuinely fast
+                        // typing renders in chunks rather than per-char; normal-
+                        // cadence typing (>50ms inter-key) flushes the prior
+                        // buffer and echoes immediately. Inherent to timing-
+                        // based paste detection under iocraft 0.8.3's
+                        // no-paste-event constraint; M8 may use bracketed-paste
+                        // markers to echo every keystroke instantly.
                         if let Some(block) = coalescer.write().push_char(c, now) {
                             apply_block(&mut st, &block);
                         }
@@ -637,6 +641,16 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // through to flush + dispatch. This single rule preserves the
                 // M5/M6 single-Enter submit while preventing per-line submit on
                 // a multi-line paste.
+                //
+                // NOTE: timing-tradeoff (M7-10). A deliberate Enter arriving
+                // within the 50ms BURST_WINDOW of a preceding char — genuinely
+                // sub-50ms fast typing, or held-Enter autorepeat right after a
+                // char — is buffered as a literal newline rather than submitting.
+                // This is an inherent limitation of timing-based paste detection
+                // under iocraft 0.8.3's no-paste-event constraint: chars are
+                // never lost, and normal (>50ms inter-key) typing submits
+                // normally. M8 may enable bracketed-paste markers for exact
+                // detection, removing the timing heuristic entirely.
                 if !overlay_active && plain_enter && coalescer.read().would_continue_burst(now) {
                     let _ = coalescer.write().push_char('\n', now);
                     drop(st);

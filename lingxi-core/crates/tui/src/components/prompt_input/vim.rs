@@ -660,6 +660,103 @@ pub fn resolve_motion(m: Motion, cursor: VimCursor<'_>, count: usize) -> VimCurs
     result
 }
 
+/// Resolved operator byte range over the buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperatorRange {
+    /// Inclusive lower bound (byte offset).
+    pub from: usize,
+    /// Exclusive upper bound (byte offset).
+    pub to: usize,
+    /// Whether the range covers whole lines (linewise) vs chars (charwise).
+    pub linewise: bool,
+}
+
+/// claude-code `operators.ts::getOperatorRange`. `cursor` is the start; `target`
+/// is where the motion landed; `motion_key` classifies inclusivity/linewiseness;
+/// `count` feeds the `cw`->`ce` special case.
+#[must_use]
+fn operator_range(
+    cursor: VimCursor<'_>,
+    target: usize,
+    motion_key: char,
+    op: Operator,
+    count: usize,
+) -> OperatorRange {
+    let text = cursor.text;
+    let mut from = cursor.offset.min(target);
+    let mut to = cursor.offset.max(target);
+    let mut linewise = false;
+
+    if op == Operator::Change && motion_key == 'w' {
+        // cw -> ce: change to end of (count-th) word, not start of next word.
+        let mut wc = cursor;
+        for _ in 0..count.saturating_sub(1) {
+            wc = wc.next_vim_word();
+        }
+        let word_end = wc.end_vim_word();
+        to = word_end.next_off(word_end.offset); // inclusive: through the last char
+    } else if is_linewise_motion(motion_key.encode_utf8(&mut [0u8; 4])) {
+        linewise = true;
+        match text[to..].find('\n') {
+            None => {
+                to = text.len();
+                if from > 0 && text.as_bytes()[from - 1] == b'\n' {
+                    from -= 1;
+                }
+            }
+            Some(rel) => {
+                to += rel + 1; // include the newline
+            }
+        }
+    } else if is_inclusive_motion(motion_key) && cursor.offset <= target {
+        let c = VimCursor { text, offset: to };
+        to = c.next_off(to);
+    }
+
+    OperatorRange { from, to, linewise }
+}
+
+/// claude-code `operators.ts::applyOperator`. Returns the effect to apply, the
+/// register to store, and whether the caller should enter Insert (change only).
+#[must_use]
+fn apply_operator(
+    op: Operator,
+    text: &str,
+    from: usize,
+    to: usize,
+    linewise: bool,
+) -> (VimEffect, Register, bool) {
+    let mut content = text[from..to].to_string();
+    if linewise && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    let register = Register {
+        text: content,
+        linewise,
+    };
+
+    match op {
+        Operator::Yank => (VimEffect::Move(from), register, false),
+        Operator::Delete => {
+            let new_text = format!("{}{}", &text[..from], &text[to..]);
+            let max_off = new_text.len().saturating_sub(last_char_len(&new_text));
+            let cursor = from.min(max_off);
+            (VimEffect::Edit { text: new_text, cursor }, register, false)
+        }
+        Operator::Change => {
+            let new_text = format!("{}{}", &text[..from], &text[to..]);
+            (
+                VimEffect::Edit {
+                    text: new_text,
+                    cursor: from,
+                },
+                register,
+                true,
+            )
+        }
+    }
+}
+
 /// The i/a/o/I/A/O mode-entry effect. Returns the cursor placement (Move) or
 /// the buffer edit (Edit, for o/O). Caller flips mode to Insert.
 #[must_use]
@@ -1595,5 +1692,116 @@ mod motion_class_tests {
         assert_eq!(motion_for_operator_key('j'), Some(Motion::Down));
         assert_eq!(motion_for_operator_key('k'), Some(Motion::Up));
         assert_eq!(motion_for_operator_key('z'), None);
+    }
+}
+
+#[cfg(test)]
+mod apply_op_tests {
+    use super::*;
+    fn cur(text: &str, off: usize) -> VimCursor<'_> {
+        VimCursor { text, offset: off }
+    }
+
+    #[test]
+    fn range_exclusive_for_w() {
+        // dw on "foo bar": w moves 0->4, range [0,4) exclusive (not inclusive).
+        let r = operator_range(cur("foo bar", 0), 4, 'w', Operator::Delete, 1);
+        assert_eq!((r.from, r.to, r.linewise), (0, 4, false));
+    }
+
+    #[test]
+    fn range_inclusive_for_e_and_dollar() {
+        // de on "foo bar": e moves 0->2 ('o'), inclusive -> to = 3.
+        let r = operator_range(cur("foo bar", 0), 2, 'e', Operator::Delete, 1);
+        assert_eq!((r.from, r.to, r.linewise), (0, 3, false));
+        // d$ on "foo": $ moves 0->3 (== len), inclusive but already at end -> to stays 3.
+        let r2 = operator_range(cur("foo", 0), 3, '$', Operator::Delete, 1);
+        assert_eq!((r2.from, r2.to, r2.linewise), (0, 3, false));
+    }
+
+    #[test]
+    fn range_cw_changes_to_end_of_word_like_ce() {
+        // cw on "foo bar" from 0: special-cased to end-of-word -> through 'o' (to=3),
+        // NOT to start of next word (4). This is the claude-code cw->ce rule.
+        let r = operator_range(cur("foo bar", 0), 4, 'w', Operator::Change, 1);
+        assert_eq!((r.from, r.to, r.linewise), (0, 3, false));
+    }
+
+    #[test]
+    fn range_linewise_for_j() {
+        // dj on "a\nb\nc" from offset 0: j is linewise, deletes lines 0..1 incl
+        // trailing newline of line1 -> [0, 4) ("a\nb\n").
+        let r = operator_range(cur("a\nb\nc", 0), 2, 'j', Operator::Delete, 1);
+        assert!(r.linewise);
+        assert_eq!((r.from, r.to), (0, 4));
+    }
+
+    #[test]
+    fn apply_delete_sets_register_and_edits() {
+        let (effect, reg, enter_insert) = apply_operator(Operator::Delete, "foo bar", 0, 4, false);
+        assert_eq!(
+            reg,
+            Register {
+                text: "foo ".into(),
+                linewise: false
+            }
+        );
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: "bar".into(),
+                cursor: 0
+            }
+        );
+        assert!(!enter_insert);
+    }
+
+    #[test]
+    fn apply_yank_keeps_text_moves_cursor_to_from() {
+        let (effect, reg, enter_insert) = apply_operator(Operator::Yank, "foo bar", 4, 7, false);
+        assert_eq!(
+            reg,
+            Register {
+                text: "bar".into(),
+                linewise: false
+            }
+        );
+        assert_eq!(effect, VimEffect::Move(4)); // buffer unchanged, cursor to range start
+        assert!(!enter_insert);
+    }
+
+    #[test]
+    fn apply_change_edits_and_requests_insert() {
+        let (effect, reg, enter_insert) = apply_operator(Operator::Change, "foo bar", 0, 3, false);
+        assert_eq!(
+            reg,
+            Register {
+                text: "foo".into(),
+                linewise: false
+            }
+        );
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: " bar".into(),
+                cursor: 0
+            }
+        );
+        assert!(enter_insert);
+    }
+
+    #[test]
+    fn apply_linewise_delete_tags_register_linewise() {
+        // delete "a\n" (line 0) from "a\nb": register linewise, text "a\nb" -> "b".
+        let (effect, reg, _) = apply_operator(Operator::Delete, "a\nb", 0, 2, true);
+        assert!(reg.linewise);
+        assert_eq!(reg.text, "a\n");
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: "b".into(),
+                cursor: 0
+            }
+        );
     }
 }

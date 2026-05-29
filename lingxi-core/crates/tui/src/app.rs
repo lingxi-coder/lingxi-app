@@ -318,15 +318,33 @@ pub fn render_screen(
     let show_spinner = should_render_spinner(state);
     let expanded = state.expanded.clone();
     let focused_tool_id = state.focused_tool_id;
+    // (M7-03 review) Thread the already-width-synced height cache instead of
+    // rebuilding it inside `VirtualMessageList` every frame (that was
+    // O(total messages) per frame). The live render path keeps
+    // `state.height_cache` fresh via `root.rs`'s
+    // `refresh_height_cache(viewport_width)` immediately before this call,
+    // so the common case is a cheap O(1) clone. As a defensive guard
+    // against any path that renders without first refreshing (e.g. unit
+    // tests building an `AppState` directly), rebuild locally only when the
+    // cache is stale vs. the width/length we're asked to render at — the
+    // cache can therefore never be stale relative to `viewport_width`.
+    let vp_width = viewport_width.max(1);
+    let cache = if state.height_cache.width() == vp_width
+        && state.height_cache.len() == state.messages.len()
+    {
+        state.height_cache.clone()
+    } else {
+        crate::components::virtual_message_list::HeightCache::build(&state.messages, vp_width)
+    };
     element! {
         ReplScreen(
             status: status,
             messages: messages,
+            cache: cache,
             prompt_text: prompt_text,
             prompt_cursor: prompt_cursor,
             scroll_offset: scroll_offset,
             viewport_height: viewport_height,
-            viewport_width: viewport_width,
             show_spinner: show_spinner,
             expanded: expanded,
             focused_tool_id: focused_tool_id,

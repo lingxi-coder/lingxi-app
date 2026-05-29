@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use iocraft::prelude::*;
 use lingxi_permission::PermissionMode;
+use lingxi_tui::components::virtual_message_list::HeightCache;
 use lingxi_tui::screens::repl::ReplScreen;
 use lingxi_tui::state::{RenderedMessage, StatusSnapshot};
 
@@ -26,6 +27,7 @@ fn repl_screen_default_empty() {
         ReplScreen(
             status: status(),
             messages: Vec::<RenderedMessage>::new(),
+            cache: HeightCache::default(),
             prompt_text: String::new(),
             prompt_cursor: 0_usize,
             scroll_offset: 0_usize,
@@ -47,10 +49,16 @@ fn repl_screen_with_one_user_one_assistant() {
             timestamp: 0,
         },
     ];
+    // (M7-03 review) `ReplScreen` now takes a threaded `HeightCache`. This
+    // test previously left `viewport_width` unset (defaulted to 0 → the
+    // component clamped to width 1 before building); build the cache at the
+    // same width 1 so the snapshot output stays byte-identical.
+    let cache = HeightCache::build(&messages, 1);
     let mut element = element! {
         ReplScreen(
             status: status(),
             messages: messages,
+            cache: cache,
             prompt_text: "next".to_string(),
             prompt_cursor: 4_usize,
             scroll_offset: 0_usize,

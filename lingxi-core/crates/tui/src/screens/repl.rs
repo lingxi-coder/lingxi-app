@@ -14,7 +14,7 @@ use lingxi_protocol::ToolUseId;
 use crate::components::prompt_input::PromptInput;
 use crate::components::spinner::SpinnerWithVerb;
 use crate::components::status_line::StatusLine;
-use crate::components::virtual_message_list::VirtualMessageList;
+use crate::components::virtual_message_list::{HeightCache, VirtualMessageList};
 use crate::state::{AppState, RenderedMessage, StatusSnapshot};
 
 /// Predicate exposed for tests + the renderer's conditional mount.
@@ -34,6 +34,10 @@ pub struct ReplScreenProps {
     pub status: StatusSnapshot,
     /// Scrollback messages (most recent at end).
     pub messages: Vec<RenderedMessage>,
+    /// Pre-built, width-synced height cache (clone of
+    /// `AppState::height_cache`). Threaded straight through to
+    /// `VirtualMessageList` so the windowed renderer never rebuilds it.
+    pub cache: HeightCache,
     /// Current prompt text.
     pub prompt_text: String,
     /// Cursor byte index in `prompt_text`.
@@ -42,8 +46,6 @@ pub struct ReplScreenProps {
     pub scroll_offset: usize,
     /// Live viewport height (rows available for the scrollback).
     pub viewport_height: usize,
-    /// Live viewport width (columns) for the height cache.
-    pub viewport_width: usize,
     /// Whether to render the streaming spinner between scrollback and
     /// prompt input. Wired from `AppState.streaming.is_some()`.
     pub show_spinner: bool,
@@ -62,11 +64,11 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let context_pct = props.status.context_pct;
     let permission_mode = props.status.permission_mode;
     let messages = props.messages.clone();
+    let cache = props.cache.clone();
     let prompt_text = props.prompt_text.clone();
     let prompt_cursor = props.prompt_cursor;
     let scroll_offset = props.scroll_offset;
     let viewport_height = props.viewport_height;
-    let viewport_width = props.viewport_width;
     let show_spinner = props.show_spinner;
     let expanded = props.expanded.clone();
     let focused_tool_id = props.focused_tool_id;
@@ -81,9 +83,9 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             )
             VirtualMessageList(
                 messages: messages,
+                cache: cache,
                 scroll_offset: scroll_offset,
                 viewport_height: viewport_height,
-                viewport_width: viewport_width,
                 expanded: expanded,
                 focused_tool_id: focused_tool_id,
             )

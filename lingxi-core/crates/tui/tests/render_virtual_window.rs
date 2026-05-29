@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use iocraft::prelude::*;
-use lingxi_tui::components::virtual_message_list::VirtualMessageList;
+use lingxi_tui::components::virtual_message_list::{HeightCache, VirtualMessageList};
 use lingxi_tui::state::RenderedMessage;
 
 #[test]
@@ -23,12 +23,16 @@ fn window_three_mixed_messages_fixed_offset() {
             is_error: false,
         },
     ];
+    // (M7-03 review) The component no longer rebuilds the cache; callers
+    // thread the already-width-synced `HeightCache` in. Build it here at the
+    // same width (40) the prior `viewport_width` prop used.
+    let cache = HeightCache::build(&messages, 40);
     let mut element = element! {
         VirtualMessageList(
             messages: messages,
+            cache: cache,
             scroll_offset: 0_usize,
             viewport_height: 8_usize,
-            viewport_width: 40_usize,
             expanded: HashMap::new(),
             focused_tool_id: Option::<lingxi_protocol::ToolUseId>::None,
         )

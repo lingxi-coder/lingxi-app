@@ -1,7 +1,9 @@
 //! M7-03 behavior tests: line-based scroll, windowing, telemetry, cache.
 
 use lingxi_tui::app::scroll_with_viewport;
-use lingxi_tui::components::virtual_message_list::{render_window, HeightCache};
+use lingxi_tui::components::virtual_message_list::{
+    render_window, render_window_counted, HeightCache,
+};
 use lingxi_tui::events::keymap::ScrollDir;
 use lingxi_tui::state::{AppState, RenderedMessage};
 
@@ -143,6 +145,79 @@ fn gate_5k_exact_first_last_visible_at_offset() {
     assert_eq!(win.first_index, 2490);
     assert_eq!(win.last_index, 2490);
     assert_eq!(win.skip_top_lines, 10); // top_line - span_start = (start+10) - start
+}
+
+/// (M7-03 review) Strengthened perf gate: prove the per-frame WINDOWING
+/// WORK is sub-linear, not just that the rendered COUNT is bounded.
+///
+/// The original `gate_5k_render_count_bounded_by_viewport` only checks how
+/// many messages end up in the slice — it would still pass if `render_window`
+/// scanned all 5000 entries from index 0 to find them (the exact O(n)-per-
+/// frame regression the code review flagged). This gate instead measures the
+/// ACTUAL WORK via `render_window_counted`, which returns the number of
+/// messages the forward walk visited after the binary-search jump, and
+/// asserts that count is O(window + log n), never O(total):
+///
+///   1. The window start is found by binary search over the prefix sum:
+///      `render_window`'s `first_index` equals
+///      `cache.message_index_at_line(top_line)`, and that index is deep in
+///      the tail (≈ 4990 of 5000).
+///   2. The forward walk *visited* only window-many messages (the `walked`
+///      count from `render_window_counted`), NOT ~5000. A regression to the
+///      old "loop from index 0 accumulating spans" walk would visit
+///      `last_index + 1` (~5000) messages, blowing this bound.
+///
+/// Combined with the `message_index_at_line_matches_linear_scan_*` unit
+/// test (which pins the binary search to the brute-force reference for every
+/// line), this makes the O(window + log n) cost a hard, non-timing contract.
+#[test]
+fn gate_window_walk_is_sublinear() {
+    let (msgs, total) = mixed_5k();
+    let cache = HeightCache::build(&msgs, 80);
+    assert_eq!(cache.total_lines(), total);
+    let vh = 30;
+
+    // Bottom-anchored (offset 0): the visible window is the last `vh` lines.
+    let (win, walked) = render_window_counted(&msgs, &cache, 0, vh);
+    // Public `render_window` must agree with the counted variant.
+    assert_eq!(render_window(&msgs, &cache, 0, vh), win);
+
+    // (1) The start is located by the O(log n) binary search — not a scan
+    //     from index 0 — and lands deep in the tail.
+    let top_line = total - vh; // bottom_line(total) - vh, offset 0
+    let bsearch_index = cache.message_index_at_line(top_line);
+    assert_eq!(
+        win.first_index, bsearch_index,
+        "render_window must locate first_index via binary search"
+    );
+    assert!(
+        win.first_index > 4900,
+        "first_index {} should be near the 5000-message tail",
+        win.first_index
+    );
+
+    // (2) THE LOAD-BEARING ASSERTION: the forward walk visited only
+    //     window-many messages. A from-index-0 linear walk would visit
+    //     ~5000; here it must be <= viewport + a small constant. This is the
+    //     assertion that fails the moment someone reintroduces the O(n) walk.
+    assert!(
+        walked <= vh + 2,
+        "window walk VISITED {walked} messages, expected <= {} (O(window)); \
+         a value near {} means the O(n) walk-from-0 regressed",
+        vh + 2,
+        msgs.len()
+    );
+    assert_eq!(win.last_index, 4999, "offset 0 → tail is the last message");
+
+    // Sanity: binary-search depth (ceil(log2 n) ≈ 13) + walk is far below
+    // O(n) = 5000. Integer log2 via bit width avoids a lossy float cast.
+    let log2_n = usize::BITS - (msgs.len() - 1).leading_zeros(); // ceil(log2 n)
+    assert!(
+        log2_n as usize + walked < msgs.len() / 10,
+        "O(log n + window) = {} must be well under O(n) = {}",
+        log2_n as usize + walked,
+        msgs.len()
+    );
 }
 
 #[test]

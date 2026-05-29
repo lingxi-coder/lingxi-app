@@ -177,7 +177,12 @@ fn check_telemetry_schema() -> DoctorCheck {
     // M6-09: +1 release marker (lingxi_core_v0_7_0_released) +
     //        2 TUI scroll events (scroll_started/ended) → 326 total.
     //        (tengu_tui_key_pressed deferred to M7.)
-    let expected = 326;
+    // M7-01..M7-15: +0 (every TUI event candidate deferred to the M7-16 audit).
+    // M7-16: +1 release marker (lingxi_core_v0_8_0_released) +
+    //        3 TUI events (screen_opened/screen_closed/search_opened, real
+    //        emit sites) → 330 total. (command_palette_opened/vim_mode_entered/
+    //        key_pressed deferred to M8 — no clean/aggregated emit site.)
+    let expected = 330;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {
@@ -200,7 +205,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn check_telemetry_schema_passes_at_326() {
+    fn check_telemetry_schema_passes_at_330() {
         let c = check_telemetry_schema();
         assert_eq!(c.name, "telemetry-schema");
         assert!(matches!(c.status, CheckStatus::Pass));

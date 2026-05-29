@@ -5,7 +5,7 @@
 use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_326_entries() {
+fn registry_is_exactly_330_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),
@@ -37,7 +37,14 @@ fn registry_is_exactly_326_entries() {
     // tengu_tui_scroll_started/scroll_ended (real emit sites in
     // app::scroll_with_viewport). tengu_tui_key_pressed deferred to M7
     // (no aggregator infra). 323 + 3 = 326.
-    assert_eq!(ALL_EVENT_NAMES.len(), 326);
+    // M7-01..M7-15 added 0 (every TUI event candidate was deferred to the
+    // M7-16 audit; the renderer/screen/vim/palette sub-plans registered none).
+    // M7-16 added 4: lingxi_core_v0_8_0_released (release marker) +
+    // tengu_tui_screen_opened/screen_closed/search_opened (real emit sites in
+    // AppState::open_*/close_screen + MessageSelectorState::open/open_export).
+    // tengu_tui_command_palette_opened/vim_mode_entered/key_pressed stay
+    // deferred to M8 (no clean/aggregated emit site). 326 + 4 = 330.
+    assert_eq!(ALL_EVENT_NAMES.len(), 330);
 }
 
 #[test]
@@ -89,6 +96,39 @@ fn lingxi_core_v0_7_0_released_is_registered() {
 }
 
 #[test]
+fn lingxi_core_v0_8_0_released_is_registered() {
+    assert!(
+        ALL_EVENT_NAMES.contains(&"lingxi_core_v0_8_0_released"),
+        "v0.8.0 release-marker event must be present in ALL_EVENT_NAMES"
+    );
+}
+
+#[test]
+fn m7_16_screen_opened_registered() {
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_tui_screen_opened"));
+}
+
+#[test]
+fn m7_16_screen_closed_registered() {
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_tui_screen_closed"));
+}
+
+#[test]
+fn m7_16_search_opened_registered() {
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_tui_search_opened"));
+}
+
+/// The three §2.7 candidates that stayed deferred (no clean/aggregated emit
+/// site) MUST NOT be registered — registering a name with no call site mints a
+/// dead name (the M6 "330-vs-326" lesson).
+#[test]
+fn m7_16_deferred_candidates_not_registered() {
+    assert!(!ALL_EVENT_NAMES.contains(&"tengu_tui_command_palette_opened"));
+    assert!(!ALL_EVENT_NAMES.contains(&"tengu_tui_vim_mode_entered"));
+    assert!(!ALL_EVENT_NAMES.contains(&"tengu_tui_key_pressed"));
+}
+
+#[test]
 fn release_marker_constant_matches() {
     assert_eq!(
         lingxi_telemetry::tengu::release::LINGXI_CORE_V0_5_0_RELEASED,
@@ -101,6 +141,10 @@ fn release_marker_constant_matches() {
     assert_eq!(
         lingxi_telemetry::tengu::release::LINGXI_CORE_V0_7_0_RELEASED,
         "lingxi_core_v0_7_0_released"
+    );
+    assert_eq!(
+        lingxi_telemetry::tengu::release::LINGXI_CORE_V0_8_0_RELEASED,
+        "lingxi_core_v0_8_0_released"
     );
 }
 
@@ -152,22 +196,26 @@ fn category_ordering_preserved() {
         );
     }
     // M5-14 grew the release block from 1 to 2 (+lingxi_core_v0_6_0_released).
-    // M6-09 grew it from 2 to 3 (+lingxi_core_v0_7_0_released): 259..262.
-    for n in &ALL_EVENT_NAMES[259..262] {
+    // M6-09 grew it from 2 to 3 (+lingxi_core_v0_7_0_released).
+    // M7-16 grew it from 3 to 4 (+lingxi_core_v0_8_0_released): 259..263.
+    for n in &ALL_EVENT_NAMES[259..263] {
         assert!(n.starts_with("lingxi_core_"), "release block: {n}");
     }
     // M5-10/M5-11: command block (54 events: 18 batch-1 + 36 batch-2) follows
     // the release markers. Walk order (per tengu::mod.rs concat_all):
-    // … → release → command. M6-09 shifted the start by +1 (release 2→3).
-    for n in &ALL_EVENT_NAMES[262..316] {
+    // … → release → command. M6-09 shifted the start by +1 (release 2→3);
+    // M7-16 shifts it another +1 (release 3→4): 263..317.
+    for n in &ALL_EVENT_NAMES[263..317] {
         assert!(n.starts_with("tengu_command_"), "command block: {n}");
     }
     // M6-01: tui block (4 events) trails command.
     // M6-03: tui block grows to 6 events (+streaming_render_{started,ended}).
     // M6-05: tui block grows to 8 events (+permission_dialog_{shown,resolved}).
     // M6-09: tui block grows to 10 events (+scroll_started/scroll_ended).
-    //        Block shifted by +1 (release 2→3): 316..326.
-    for n in &ALL_EVENT_NAMES[316..326] {
+    // M7-16: tui block grows to 13 events
+    //        (+screen_opened/screen_closed/search_opened). Block shifted by +2
+    //        total vs M6-09 (release 2→3→4): 317..330.
+    for n in &ALL_EVENT_NAMES[317..330] {
         assert!(n.starts_with("tengu_tui_"), "tui block: {n}");
     }
 }

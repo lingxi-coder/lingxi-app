@@ -97,6 +97,19 @@ fn clamp_to_char_boundary(text: &str, cursor: usize) -> usize {
     }
 }
 
+/// Byte indices at which each logical line begins. Always non-empty:
+/// `line_starts("")` is `[0]`. A trailing `\n` opens an empty final line.
+#[must_use]
+pub fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    starts
+}
+
 /// Props for `PromptInput`.
 #[derive(Default, Props)]
 pub struct PromptInputProps {
@@ -122,6 +135,24 @@ pub fn PromptInput(props: &PromptInputProps) -> impl Into<AnyElement<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_starts_single_line() {
+        assert_eq!(line_starts("hello"), vec![0]);
+        assert_eq!(line_starts(""), vec![0]);
+    }
+
+    #[test]
+    fn line_starts_multi_line() {
+        // "ab\ncd\ne" — line starts at byte 0, 3, 6.
+        assert_eq!(line_starts("ab\ncd\ne"), vec![0, 3, 6]);
+    }
+
+    #[test]
+    fn line_starts_trailing_newline() {
+        // A trailing "\n" opens an empty final line.
+        assert_eq!(line_starts("ab\n"), vec![0, 3]);
+    }
 
     #[test]
     fn insert_at_end() {

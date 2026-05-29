@@ -22,31 +22,38 @@ pub fn parse_ansi(input: &str) -> Vec<StyledLine> {
     let mut lines: Vec<StyledLine> = Vec::new();
     let mut current: Vec<StyledSpan> = Vec::new();
     let mut style = SpanStyle::default();
-    let mut buf = String::new();
     let bytes = input.as_bytes();
     let mut i = 0;
+    // Start byte index of the current text run. Text bytes are accumulated by
+    // index (not pushed byte-by-byte) so the run is sliced out of the original
+    // `&str` as a UTF-8 string. Escape sequences only ever start/end on ASCII
+    // byte boundaries, so `start` and `i` always land on char boundaries.
+    let mut run_start = 0usize;
 
-    // Flush `buf` into `current` as a span with the active style.
-    macro_rules! flush_buf {
-        () => {
-            if !buf.is_empty() {
-                current.push(StyledSpan::styled(std::mem::take(&mut buf), style));
+    // Flush the pending text run `[run_start, end)` into `current` as a span
+    // with the active style, decoding it as UTF-8 (never byte-as-char).
+    macro_rules! flush_run {
+        ($end:expr) => {{
+            let end = $end;
+            if end > run_start {
+                current.push(StyledSpan::styled(&input[run_start..end], style));
             }
-        };
+        }};
     }
 
     while i < bytes.len() {
         let b = bytes[i];
         if b == b'\n' {
-            flush_buf!();
+            flush_run!(i);
             lines.push(StyledLine {
                 spans: coalesce(std::mem::take(&mut current)),
             });
             i += 1;
+            run_start = i;
             continue;
         }
         if b == 0x1b && i + 1 < bytes.len() {
-            flush_buf!();
+            flush_run!(i);
             let next = bytes[i + 1];
             if next == b'[' {
                 // CSI — read params until a final byte in 0x40..=0x7E.
@@ -61,7 +68,10 @@ pub fn parse_ansi(input: &str) -> Vec<StyledLine> {
                     j += 1;
                 }
                 if j >= bytes.len() {
-                    // Unterminated CSI — drop it; flush what we have.
+                    // Unterminated CSI — drop it. The pre-ESC text was already
+                    // flushed above; mark the run consumed so the post-loop
+                    // flush does not re-emit the dropped escape bytes as text.
+                    run_start = bytes.len();
                     break;
                 }
                 let final_byte = bytes[j];
@@ -71,6 +81,7 @@ pub fn parse_ansi(input: &str) -> Vec<StyledLine> {
                 // Else: non-SGR CSI (cursor/erase/mode) — skipped (Task 5
                 // makes the skip explicit + tested).
                 i = j + 1;
+                run_start = i;
                 continue;
             } else if next == b']' {
                 // OSC — read to BEL (0x07) or ST (ESC \).
@@ -87,17 +98,20 @@ pub fn parse_ansi(input: &str) -> Vec<StyledLine> {
                     j += 1;
                 }
                 i = j;
+                run_start = i;
                 continue;
             }
             // Other ESC-prefixed sequence (ESC c, ESC =, …). Skip 2 bytes.
             i += 2;
+            run_start = i;
             continue;
         }
-        buf.push(b as char);
+        // Text byte (ASCII or part of a multi-byte UTF-8 sequence) — leave it
+        // in the run; it is decoded when the run is flushed.
         i += 1;
     }
 
-    flush_buf!();
+    flush_run!(bytes.len());
     if !current.is_empty() {
         lines.push(StyledLine {
             spans: coalesce(current),
@@ -348,6 +362,40 @@ mod tests {
     fn osc_title_skipped() {
         let line = first_line("a\x1b]0;title\x07b");
         assert_eq!(line.plain_text(), "ab");
+    }
+
+    #[test]
+    fn multibyte_plain_text_roundtrips() {
+        // Accented Latin must decode as UTF-8, not Latin-1 (no mojibake).
+        let line = first_line("café");
+        assert_eq!(line.plain_text(), "café");
+    }
+
+    #[test]
+    fn multibyte_text_with_sgr_keeps_style_and_text() {
+        // Red "café" then reset — span text exact, style red.
+        let line = first_line("\x1b[31mcafé\x1b[0m");
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].text, "café");
+        assert_eq!(line.spans[0].style.fg, StyleColor::Named(NamedColor::Red));
+    }
+
+    #[test]
+    fn cjk_text_roundtrips_byte_for_byte() {
+        let line = first_line("日本語");
+        assert_eq!(line.plain_text(), "日本語");
+    }
+
+    #[test]
+    fn box_drawing_text_roundtrips_byte_for_byte() {
+        let line = first_line("│─┐");
+        assert_eq!(line.plain_text(), "│─┐");
+    }
+
+    #[test]
+    fn emoji_text_roundtrips() {
+        let line = first_line("✓ 🚀 done");
+        assert_eq!(line.plain_text(), "✓ 🚀 done");
     }
 
     #[test]

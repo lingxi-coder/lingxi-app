@@ -13,6 +13,8 @@
 //! are logical-line motions. Grapheme-cluster motion (claude-code's
 //! `Intl.Segmenter`) is deferred to M8; motions step by `char` here.
 
+use crossterm::event::{KeyCode, KeyEvent};
+
 /// Vim editing mode. Visual is a scaffold for M7-09 (never constructed here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VimMode {
@@ -460,6 +462,149 @@ pub fn esc_clamp(text: &str, offset: usize) -> usize {
     }
 }
 
+/// What `handle_vim_key` decided. `PassThrough` means "this key is ordinary
+/// Insert-mode input — run the M6 default editing pipeline." `Pending` means
+/// "consumed, awaiting more keys (count/find/g), no effect yet."
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VimOutcome {
+    Effect(VimEffect),
+    Pending,
+    PassThrough,
+}
+
+/// Consume one key against the vim state. `text`/`offset` are the current
+/// buffer + byte cursor. Mutates `state.mode`/`state.command`; returns the
+/// outcome. Pure aside from the `&mut VimState`.
+pub fn handle_vim_key(
+    state: &mut VimState,
+    text: &str,
+    offset: usize,
+    key: KeyEvent,
+) -> VimOutcome {
+    // ----- INSERT mode: Esc -> Normal; everything else passes through. -----
+    if state.mode == VimMode::Insert {
+        if key.code == KeyCode::Esc {
+            state.mode = VimMode::Normal;
+            state.command = CommandState::Idle;
+            return VimOutcome::Effect(VimEffect::Move(esc_clamp(text, offset)));
+        }
+        return VimOutcome::PassThrough;
+    }
+
+    // ----- NORMAL mode (and Visual scaffold, treated as Normal for M7-08). --
+    // Esc in Normal cancels any pending command.
+    if key.code == KeyCode::Esc {
+        state.command = CommandState::Idle;
+        return VimOutcome::Effect(VimEffect::None);
+    }
+
+    let cursor = VimCursor { text, offset };
+
+    // Literal-char states (Find target, G second key) consume the raw char.
+    match std::mem::replace(&mut state.command, CommandState::Idle) {
+        CommandState::Find { kind, count } => {
+            if let KeyCode::Char(ch) = key.code {
+                state.last_find = Some((kind, ch));
+                return match cursor.find_character(ch, kind, count) {
+                    Some(off) => VimOutcome::Effect(VimEffect::Move(off)),
+                    None => VimOutcome::Effect(VimEffect::None),
+                };
+            }
+            return VimOutcome::Effect(VimEffect::None);
+        }
+        CommandState::G { count } => {
+            if let KeyCode::Char('g') = key.code {
+                let dest = if count > 1 {
+                    cursor.go_to_line(count)
+                } else {
+                    cursor.start_of_first_line()
+                };
+                return VimOutcome::Effect(VimEffect::Move(dest.offset));
+            }
+            // any other key cancels the g-prefix
+            return VimOutcome::Effect(VimEffect::None);
+        }
+        CommandState::Count { digits } => {
+            // Continue count, or execute with the parsed count.
+            if let KeyCode::Char(c @ '0'..='9') = key.code {
+                let mut d = digits;
+                d.push(c);
+                state.command = CommandState::Count { digits: d };
+                return VimOutcome::Pending;
+            }
+            let count = digits.parse::<usize>().unwrap_or(1).max(1);
+            return dispatch_normal(state, cursor, count, key);
+        }
+        CommandState::Idle => {}
+    }
+
+    // From Idle: a 1-9 starts a count; everything else dispatches with count 1.
+    if let KeyCode::Char(c @ '1'..='9') = key.code {
+        state.command = CommandState::Count { digits: c.to_string() };
+        return VimOutcome::Pending;
+    }
+    dispatch_normal(state, cursor, 1, key)
+}
+
+/// Handle a Normal-mode key that is NOT a count digit, with `count` resolved.
+fn dispatch_normal(
+    state: &mut VimState,
+    cursor: VimCursor<'_>,
+    count: usize,
+    key: KeyEvent,
+) -> VimOutcome {
+    let KeyCode::Char(ch) = key.code else {
+        return VimOutcome::Effect(VimEffect::None);
+    };
+
+    // Mode-entry keys.
+    if matches!(ch, 'i' | 'a' | 'I' | 'A' | 'o' | 'O') {
+        state.mode = VimMode::Insert;
+        return VimOutcome::Effect(enter_insert_effect(ch, cursor));
+    }
+
+    // Simple motions.
+    let motion = match ch {
+        'h' => Some(Motion::Left),
+        'l' => Some(Motion::Right),
+        'j' => Some(Motion::Down),
+        'k' => Some(Motion::Up),
+        'w' => Some(Motion::NextWord),
+        'b' => Some(Motion::PrevWord),
+        'e' => Some(Motion::EndWord),
+        '0' => Some(Motion::LineStart),
+        '^' => Some(Motion::FirstNonBlank),
+        '$' => Some(Motion::LineEnd),
+        'G' => Some(Motion::LastLine),
+        _ => None,
+    };
+    if let Some(m) = motion {
+        let dest = resolve_motion(m, cursor, count);
+        return VimOutcome::Effect(VimEffect::Move(dest.offset));
+    }
+
+    // Find prefixes.
+    let find_kind = match ch {
+        'f' => Some(FindKind::F),
+        'F' => Some(FindKind::BigF),
+        't' => Some(FindKind::T),
+        'T' => Some(FindKind::BigT),
+        _ => None,
+    };
+    if let Some(kind) = find_kind {
+        state.command = CommandState::Find { kind, count };
+        return VimOutcome::Pending;
+    }
+
+    // g-prefix.
+    if ch == 'g' {
+        state.command = CommandState::G { count };
+        return VimOutcome::Pending;
+    }
+
+    VimOutcome::Effect(VimEffect::None)
+}
+
 /// Footer mode-indicator literal. Matches the well-known vim convention
 /// (claude-code surfaces the mode via PromptInputModeIndicator; the literal
 /// status-line text is the standard vim `-- MODE --`).
@@ -717,5 +862,129 @@ mod transition_tests {
         assert_eq!(esc_clamp("hello", 3), 3); // already valid
         assert_eq!(esc_clamp("", 0), 0);       // empty line: stay
         assert_eq!(esc_clamp("ab\ncd", 2), 1); // end of line0 -> clamp to 'b'
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+    fn esc() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn esc_from_insert_enters_normal_and_clamps() {
+        let mut s = VimState::default(); // Insert
+        let out = handle_vim_key(&mut s, "hello", 5, esc());
+        assert_eq!(s.mode, VimMode::Normal);
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(4)));
+    }
+
+    #[test]
+    fn insert_mode_passes_through_chars() {
+        let mut s = VimState::default(); // Insert
+        let out = handle_vim_key(&mut s, "hi", 2, key('x'));
+        assert_eq!(s.mode, VimMode::Insert);
+        assert_eq!(out, VimOutcome::PassThrough); // default editing inserts 'x'
+    }
+
+    #[test]
+    fn normal_h_l_move() {
+        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        assert_eq!(handle_vim_key(&mut s, "hello", 2, key('l')), VimOutcome::Effect(VimEffect::Move(3)));
+        assert_eq!(handle_vim_key(&mut s, "hello", 2, key('h')), VimOutcome::Effect(VimEffect::Move(1)));
+    }
+
+    #[test]
+    fn normal_i_enters_insert() {
+        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        let out = handle_vim_key(&mut s, "hello", 2, key('i'));
+        assert_eq!(s.mode, VimMode::Insert);
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(2)));
+    }
+
+    #[test]
+    fn count_then_motion() {
+        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        // "3w" on "a b c d e" -> 4th word
+        assert_eq!(handle_vim_key(&mut s, "a b c d e", 0, key('3')), VimOutcome::Pending);
+        assert_eq!(s.command, CommandState::Count { digits: "3".into() });
+        let out = handle_vim_key(&mut s, "a b c d e", 0, key('w'));
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(6))); // 'd'
+        assert_eq!(s.command, CommandState::Idle); // reset after execute
+    }
+
+    #[test]
+    fn zero_is_line_start_not_count() {
+        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        let out = handle_vim_key(&mut s, "  hello", 4, key('0'));
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(0)));
+    }
+
+    #[test]
+    fn caret_first_non_blank() {
+        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        let out = handle_vim_key(&mut s, "  hello", 4, key('^'));
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(2)));
+    }
+
+    #[test]
+    fn gg_goes_to_first_line() {
+        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        assert_eq!(handle_vim_key(&mut s, "a\nb\nc", 4, key('g')), VimOutcome::Pending);
+        assert_eq!(s.command, CommandState::G { count: 1 });
+        let out = handle_vim_key(&mut s, "a\nb\nc", 4, key('g'));
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(0)));
+    }
+
+    #[test]
+    fn count_gg_goes_to_line_n() {
+        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        handle_vim_key(&mut s, "a\nb\nc", 0, key('2'));
+        handle_vim_key(&mut s, "a\nb\nc", 0, key('g'));
+        let out = handle_vim_key(&mut s, "a\nb\nc", 0, key('g'));
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(2))); // line 2 = 'b'
+    }
+
+    #[test]
+    fn cap_g_goes_to_last_line() {
+        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        let out = handle_vim_key(&mut s, "a\nb\nc", 0, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(4))); // 'c'
+    }
+
+    #[test]
+    fn f_char_finds() {
+        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        assert_eq!(handle_vim_key(&mut s, "abcdc", 0, key('f')), VimOutcome::Pending);
+        assert_eq!(handle_vim_key(&mut s, "abcdc", 0, key('c')), VimOutcome::Effect(VimEffect::Move(2)));
+    }
+
+    #[test]
+    fn count_f_finds_nth() {
+        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        handle_vim_key(&mut s, "abcdc", 0, key('2'));
+        handle_vim_key(&mut s, "abcdc", 0, key('f'));
+        let out = handle_vim_key(&mut s, "abcdc", 0, key('c'));
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(4))); // 2nd 'c'
+    }
+
+    #[test]
+    fn find_not_found_is_noop() {
+        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        handle_vim_key(&mut s, "abc", 0, key('f'));
+        assert_eq!(handle_vim_key(&mut s, "abc", 0, key('z')), VimOutcome::Effect(VimEffect::None));
+        assert_eq!(s.command, CommandState::Idle);
+    }
+
+    #[test]
+    fn unknown_normal_key_is_noop() {
+        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        assert_eq!(handle_vim_key(&mut s, "abc", 0, key('q')), VimOutcome::Effect(VimEffect::None));
     }
 }

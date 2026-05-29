@@ -1,6 +1,9 @@
 //! M7-04 batch-1 renderer snapshots.
 use lingxi_tui::components::messages::compact_boundary::render_compact_boundary_to_string;
 use lingxi_tui::components::messages::redacted_thinking::render_redacted_thinking_to_string;
+use lingxi_tui::components::messages::system_api_error::{
+    render_system_api_error_to_string, SystemApiErrorProps,
+};
 use lingxi_tui::components::messages::system_text::{render_system_text_to_string, SystemTextProps};
 use lingxi_tui::components::messages::thinking::{render_thinking_to_string, ThinkingProps};
 use lingxi_tui::state::SystemLevel;
@@ -52,4 +55,28 @@ fn system_text_warning_dotted() {
         level: SystemLevel::Warning,
     });
     insta::assert_snapshot!("system_text_warning_dotted", s);
+}
+
+#[test]
+fn system_api_error_with_retry() {
+    let s = render_system_api_error_to_string(SystemApiErrorProps {
+        error: "529 Overloaded".into(),
+        retry_attempt: 4,
+        retry_in_seconds: 3,
+        max_retries: 10,
+        truncated: false,
+    });
+    insta::assert_snapshot!("system_api_error_with_retry", s);
+}
+
+#[test]
+fn system_api_error_singular_second_and_truncated() {
+    let s = render_system_api_error_to_string(SystemApiErrorProps {
+        error: "boom".into(),
+        retry_attempt: 5,
+        retry_in_seconds: 1,
+        max_retries: 10,
+        truncated: true,
+    });
+    insta::assert_snapshot!("system_api_error_singular_second_and_truncated", s);
 }

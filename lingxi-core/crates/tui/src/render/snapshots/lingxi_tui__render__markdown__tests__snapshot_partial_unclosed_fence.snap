@@ -1,0 +1,25 @@
+---
+source: crates/tui/src/render/markdown.rs
+expression: "render(\"text\\n```python\\nprint(1)\", &theme())"
+---
+- spans:
+    - text: text
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind: Text
+- spans: []
+- spans:
+    - text: print(1)
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind:
+        CodePlaceholder:
+          lang: python

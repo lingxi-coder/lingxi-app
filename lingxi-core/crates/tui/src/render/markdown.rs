@@ -458,4 +458,49 @@ mod tests {
         let _ = render("*_`#>[](", &theme());
         let _ = render("```", &theme());
     }
+
+    #[test]
+    fn snapshot_heading() {
+        insta::assert_yaml_snapshot!(render("# Title\n\n## Sub", &theme()));
+    }
+
+    #[test]
+    fn snapshot_bold_italic() {
+        insta::assert_yaml_snapshot!(render("normal **bold** and *italic* mix", &theme()));
+    }
+
+    #[test]
+    fn snapshot_nested_list() {
+        insta::assert_yaml_snapshot!(render("- a\n  - b\n  - c\n- d", &theme()));
+    }
+
+    #[test]
+    fn snapshot_ordered_list() {
+        insta::assert_yaml_snapshot!(render("1. first\n2. second\n3. third", &theme()));
+    }
+
+    #[test]
+    fn snapshot_blockquote() {
+        insta::assert_yaml_snapshot!(render("> quoted line\n> second", &theme()));
+    }
+
+    #[test]
+    fn snapshot_inline_code() {
+        insta::assert_yaml_snapshot!(render("run `cargo test --workspace` now", &theme()));
+    }
+
+    #[test]
+    fn snapshot_link() {
+        insta::assert_yaml_snapshot!(render("see [the docs](https://example.io/guide)", &theme()));
+    }
+
+    #[test]
+    fn snapshot_fenced_code_placeholder() {
+        insta::assert_yaml_snapshot!(render("```rust\nfn main() {}\n```", &theme()));
+    }
+
+    #[test]
+    fn snapshot_partial_unclosed_fence() {
+        insta::assert_yaml_snapshot!(render("text\n```python\nprint(1)", &theme()));
+    }
 }

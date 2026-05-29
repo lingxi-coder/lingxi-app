@@ -1,0 +1,15 @@
+---
+source: crates/tui/src/render/markdown.rs
+expression: "render(\"```rust\\nfn main() {}\\n```\", &theme())"
+---
+- spans:
+    - text: "fn main() {}\n"
+      style:
+        fg: Default
+        bg: Default
+        bold: false
+        italic: false
+        underline: false
+      kind:
+        CodePlaceholder:
+          lang: rust

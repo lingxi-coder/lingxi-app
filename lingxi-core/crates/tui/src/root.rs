@@ -226,6 +226,22 @@ fn apply_vim_effect(st: &mut AppState, effect: crate::components::prompt_input::
     }
 }
 
+/// Route a key to the active full-page screen (M7-11). Esc / `q` close the
+/// screen (back to the REPL); every other key is swallowed so it cannot leak
+/// to `PromptInput` (the M7-11 no-leak guarantee). Per-screen interactive keys
+/// (arrow-select, Enter) are added by M7-12/13/14 as `match`-on-`Screen` arms
+/// here.
+fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
+    match k.code {
+        KeyCode::Esc => st.close_screen(),
+        KeyCode::Char('q') if k.modifiers == KeyModifiers::NONE => st.close_screen(),
+        // (M7-16) screen-close telemetry (`tengu_tui_screen_closed`) would emit
+        // here once the M7-16 audit registers it. M7-11 adds 0 events.
+        // Doctor is read-only; other keys are inert. Future screens add arms.
+        _ => {}
+    }
+}
+
 /// `viewport` is the scrollback viewport height (rows minus reserved chrome).
 #[allow(clippy::too_many_lines)]
 pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
@@ -239,9 +255,20 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     }
     // === end priority 1 ===
 
-    // === Priority 2: active screen (M7-11+). ===
-    // NOTE: if a screen branch has already landed it lives here, before the
-    // overlay branch. Leave it untouched. (Not present until M7-11.)
+    // === PRIORITY 2: a full-page screen owns all keys while open (M7-11). ===
+    // Priority order (parent spec §2.5): permission (1, above) → screen (2,
+    // here) → input/scroll (below). The permission check above STILL fires
+    // first and returns, so a screen can never steal a permission key. When a
+    // screen is active it is MODAL: `handle_screen_key` consumes the key
+    // (Esc/`q` close; everything else is swallowed) and we return before the
+    // history-search / palette / completion overlays (priority 3) or vim
+    // (priority 4) ever run — no key leaks to `PromptInput`. Reused by
+    // M7-12/13/14 (they add `match`-on-`Screen` arms in `handle_screen_key`).
+    if st.active_screen.is_some() {
+        handle_screen_key(st, k);
+        return;
+    }
+    // === end priority 2 ===
 
     // === Priority 3 (input overlay A): Ctrl-R history search (M7-10). When the
     // overlay is open it owns EVERY key until Enter/Esc — exactly the focus-trap

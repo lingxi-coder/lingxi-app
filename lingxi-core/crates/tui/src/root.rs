@@ -396,6 +396,34 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     }
     // === end priority 3 (input overlay A) ===
 
+    // === Priority 3 (input overlay C): message search/jump selector (M7-14).
+    // Same focus-trap discipline as the history-search (3A) and palette/
+    // completion (3B) overlays, in the SAME priority-3 region and MUTUALLY
+    // EXCLUSIVE with them: the Ctrl-T open binding below only fires when no
+    // other overlay is active, and while `message_selector.open` we return here
+    // before the palette/completion branch runs. Permission (1) and screen (2)
+    // still win above. No parallel key path — the single `handle_live_key`. ===
+    if st.message_selector.open {
+        use crate::components::message_selector::{
+            handle_message_selector_key, message_line_offset, SelectorAction,
+        };
+        let ct_key = iocraft_to_crossterm028_key(k);
+        let messages = st.messages.clone();
+        match handle_message_selector_key(&mut st.message_selector, &messages, ct_key) {
+            SelectorAction::Jump { message_index } => {
+                // Set the line-based scroll offset (M7-03 model) so the chosen
+                // message sits at the top of the viewport. Refresh the height
+                // cache against the live width first so the offset is accurate.
+                st.refresh_height_cache(st.viewport_width.max(1));
+                let cache = st.height_cache.clone();
+                st.scroll_offset = message_line_offset(&messages, &cache, message_index, viewport);
+            }
+            SelectorAction::Close | SelectorAction::None => {}
+        }
+        return;
+    }
+    // === end priority 3 (input overlay C) ===
+
     // === Priority 3 (input overlay B): palette / completion overlay focus-trap
     // (M7-07). While an
     // overlay is open it owns EVERY key until Esc/accept; consumed/navigation
@@ -455,6 +483,24 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
         return;
     }
     // === end Ctrl-R open binding ===
+
+    // === Priority 3 open binding: Ctrl-T opens the message search/jump
+    // selector (M7-14). Same mutual-exclusion gating as Ctrl-R: only fires when
+    // no other priority-3 overlay (palette/completion/history-search) is open,
+    // so the four overlays stay mutually exclusive. We refilter immediately so
+    // the overlay shows the full scrollback on open. ===
+    if !st.palette.open
+        && !st.completion.open
+        && st.history_search.is_none()
+        && matches!(k.code, KeyCode::Char('t'))
+        && k.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        st.message_selector.open();
+        let messages = st.messages.clone();
+        st.message_selector.refilter_all(&messages);
+        return;
+    }
+    // === end Ctrl-T open binding ===
 
     // === PRIORITY 3.5: vim toggle (M7-08 review). The Ctrl-Alt-V binding must
     // be modal-independent — it flips `vim_enabled` from ANY vim mode (Normal or

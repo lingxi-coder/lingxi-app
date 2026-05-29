@@ -15,7 +15,7 @@
 //! uses `~` for "approximately"); HTML/definitions render to nothing.
 
 use crate::render::{SpanStyle, StyleColor, StyledLine, StyledSpan};
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// Dim vertical bar prefixing blockquote lines. Matches claude-code's
 /// `BLOCKQUOTE_BAR` (`src/constants/figures.ts`).
@@ -55,6 +55,13 @@ impl InlineState {
     }
 }
 
+/// Buffered fenced/indented code-block content awaiting M7-02 highlighting.
+#[derive(Debug, Default)]
+struct CodeBlockState {
+    lang: Option<String>,
+    text: String,
+}
+
 /// Render CommonMark `text` to styled lines using `theme`. Strikethrough is
 /// disabled to match claude-code; tables and footnotes are enabled by
 /// `pulldown-cmark` defaults but only paragraph/heading/list/quote/code are
@@ -87,6 +94,9 @@ struct Builder<'a> {
     list_stack: Vec<Option<u64>>,
     /// True while inside a blockquote (prefix lines with the bar + italic).
     in_blockquote: bool,
+    /// When inside a fenced/indented code block: accumulates raw text and
+    /// the language hint. `Some` between `Start(CodeBlock)`/`End(CodeBlock)`.
+    code_block: Option<CodeBlockState>,
 }
 
 impl<'a> Builder<'a> {
@@ -100,6 +110,7 @@ impl<'a> Builder<'a> {
             heading: None,
             list_stack: Vec::new(),
             in_blockquote: false,
+            code_block: None,
         }
     }
 
@@ -155,7 +166,13 @@ impl<'a> Builder<'a> {
                     self.push_text(&format!(" ({url})"));
                 }
             }
-            Event::Text(text) => self.push_text(&text),
+            Event::Text(text) => {
+                if let Some(cb) = self.code_block.as_mut() {
+                    cb.text.push_str(&text);
+                } else {
+                    self.push_text(&text);
+                }
+            }
             Event::SoftBreak | Event::HardBreak => {
                 self.flush();
             }
@@ -212,6 +229,32 @@ impl<'a> Builder<'a> {
             Event::End(TagEnd::BlockQuote(_)) => {
                 self.in_blockquote = false;
                 self.inline.italic = false;
+            }
+            Event::Start(Tag::CodeBlock(kind)) => {
+                self.flush();
+                let lang = match kind {
+                    CodeBlockKind::Fenced(info) => {
+                        let trimmed = info.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            // info-string may be "rust ignore" — take first word.
+                            Some(trimmed.split_whitespace().next().unwrap().to_string())
+                        }
+                    }
+                    CodeBlockKind::Indented => None,
+                };
+                self.code_block = Some(CodeBlockState {
+                    lang,
+                    text: String::new(),
+                });
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(cb) = self.code_block.take() {
+                    self.lines.push(StyledLine {
+                        spans: vec![StyledSpan::code_placeholder(cb.text, cb.lang.as_deref())],
+                    });
+                }
             }
             _ => {}
         }
@@ -326,5 +369,48 @@ mod tests {
         assert!(line.plain_text().starts_with("│ "));
         let text_span = line.spans.iter().find(|s| s.text.contains("quoted")).unwrap();
         assert!(text_span.style.italic);
+    }
+
+    #[test]
+    fn fenced_code_emits_placeholder_with_lang() {
+        let md = "```rust\nfn main() {}\n```";
+        let lines = render(md, &theme());
+        // exactly one placeholder span carrying the raw code + lang hint.
+        let ph = lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .find(|s| matches!(s.kind, crate::render::SpanKind::CodePlaceholder { .. }))
+            .expect("a CodePlaceholder span");
+        assert_eq!(ph.text, "fn main() {}\n");
+        assert_eq!(
+            ph.kind,
+            crate::render::SpanKind::CodePlaceholder { lang: Some("rust".to_string()) }
+        );
+    }
+
+    #[test]
+    fn fenced_code_without_lang_has_none() {
+        let md = "```\nplain code\n```";
+        let lines = render(md, &theme());
+        let ph = lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .find(|s| matches!(s.kind, crate::render::SpanKind::CodePlaceholder { .. }))
+            .unwrap();
+        assert_eq!(ph.kind, crate::render::SpanKind::CodePlaceholder { lang: None });
+    }
+
+    #[test]
+    fn fenced_code_is_not_styled_as_inline() {
+        let md = "```js\nconst x = 1;\n```";
+        let lines = render(md, &theme());
+        let ph = lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .find(|s| matches!(s.kind, crate::render::SpanKind::CodePlaceholder { .. }))
+            .unwrap();
+        // placeholder text is raw — no bold/italic leaked in.
+        assert!(!ph.style.bold);
+        assert!(!ph.style.italic);
     }
 }

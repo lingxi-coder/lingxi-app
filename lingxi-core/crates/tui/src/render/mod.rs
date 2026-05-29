@@ -111,6 +111,7 @@ fn named_to_iocraft(n: NamedColor) -> Color {
 /// Resolve an xterm 256-color palette index to an 8-bit RGB triple.
 /// 0..=15 are the system colors, 16..=231 the 6×6×6 cube, 232..=255 the
 /// grayscale ramp. (Standard xterm mapping.)
+#[allow(clippy::many_single_char_names)]
 fn xterm256_to_rgb(i: u8) -> (u8, u8, u8) {
     match i {
         0 => (0, 0, 0),

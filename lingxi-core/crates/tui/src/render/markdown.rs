@@ -14,6 +14,10 @@
 //! Per claude-code: strikethrough is intentionally NOT parsed (the model
 //! uses `~` for "approximately"); HTML/definitions render to nothing.
 
+// `CommonMark`, `pulldown-cmark`, `claude-code` etc. read better unquoted in
+// the module prose; suppress the doc-markdown nudge crate-wide for this file.
+#![allow(clippy::doc_markdown)]
+
 use crate::render::{SpanStyle, StyleColor, StyledLine, StyledSpan};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
@@ -32,6 +36,7 @@ pub struct MarkdownTheme {
 
 /// Mutable inline styling state threaded through the event walk.
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct InlineState {
     bold: bool,
     italic: bool,
@@ -40,7 +45,7 @@ struct InlineState {
 }
 
 impl InlineState {
-    fn to_style(self, theme: &MarkdownTheme) -> SpanStyle {
+    fn to_style(self, theme: MarkdownTheme) -> SpanStyle {
         SpanStyle {
             fg: if self.code {
                 theme.inline_code
@@ -141,9 +146,10 @@ impl<'a> Builder<'a> {
             return;
         }
         self.pending
-            .push(StyledSpan::styled(text, self.inline.to_style(self.theme)));
+            .push(StyledSpan::styled(text, self.inline.to_style(*self.theme)));
     }
 
+    #[allow(clippy::too_many_lines, clippy::match_same_arms)]
     fn handle(&mut self, event: Event<'_>) {
         match event {
             Event::Start(Tag::Strong) => self.inline.bold = true,
@@ -356,7 +362,7 @@ mod tests {
     #[test]
     fn unordered_list_marker() {
         let lines = render("- one\n- two", &theme());
-        let texts: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
+        let texts: Vec<String> = lines.iter().map(StyledLine::plain_text).collect();
         assert!(texts.iter().any(|t| t == "- one"));
         assert!(texts.iter().any(|t| t == "- two"));
     }
@@ -364,7 +370,7 @@ mod tests {
     #[test]
     fn ordered_list_marker() {
         let lines = render("1. first\n2. second", &theme());
-        let texts: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
+        let texts: Vec<String> = lines.iter().map(StyledLine::plain_text).collect();
         assert!(texts.iter().any(|t| t == "1. first"));
         assert!(texts.iter().any(|t| t == "2. second"));
     }
@@ -372,7 +378,7 @@ mod tests {
     #[test]
     fn nested_list_indents() {
         let lines = render("- a\n  - b", &theme());
-        let texts: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
+        let texts: Vec<String> = lines.iter().map(StyledLine::plain_text).collect();
         assert!(texts.iter().any(|t| t == "- a"));
         assert!(texts.iter().any(|t| t == "  - b"));
     }

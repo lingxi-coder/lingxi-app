@@ -5,9 +5,8 @@
 //! Components (`StatusLine`, `PromptInput`, `Scrollback`, message
 //! renderers, permission dialogs) land in M6-02..M6-05.
 //!
-//!
-//! M7-01 adds the `render` module: a full ANSI parser (16-color + 256-color
-//! + truecolor, cursor/erase skipped) and a CommonMark markdown renderer
+//! M7-01 adds the `render` module: a full ANSI parser (16-color, 256-color,
+//! truecolor; cursor/erase skipped) and a `CommonMark` markdown renderer
 //! (`pulldown-cmark`), both producing the shared `render::StyledLine` model.
 //! See plan `docs/superpowers/plans/2026-05-29-m7-01-ansi-markdown.md`.
 //! See plan `docs/superpowers/plans/2026-05-28-m6-01-foundation.md`.

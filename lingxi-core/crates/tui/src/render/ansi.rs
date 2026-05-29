@@ -169,6 +169,11 @@ fn apply_sgr(params: &str, style: &mut SpanStyle) {
 /// introducer (`38`/`48`); on success it is advanced past the consumed
 /// sub-parameters. Returns `None` (consuming nothing extra) on a truncated
 /// or unrecognized form.
+///
+/// SGR color sub-parameters are defined in 0..=255; the `as u8` casts narrow
+/// the parsed `u16` to that byte range (out-of-range values wrap, matching
+/// terminal leniency).
+#[allow(clippy::cast_possible_truncation)]
 fn parse_extended_color(parts: &[u16], idx: &mut usize) -> Option<StyleColor> {
     match parts.get(*idx + 1) {
         Some(5) => {

@@ -41,3 +41,20 @@ fn completion_empty_state_no_query() {
     });
     insta::assert_snapshot!(out);
 }
+
+use lingxi_tui::app::render_screen;
+use lingxi_tui::state::{AppState, StatusSnapshot};
+
+#[test]
+fn repl_screen_shows_palette_above_prompt() {
+    let mut st = AppState::new(StatusSnapshot::default());
+    // Open the palette via the public sync the live path uses.
+    st.prompt_text = "/co".into();
+    st.prompt_cursor = 3;
+    st.palette.sync_from_prompt(&st.prompt_text);
+    // render_screen(state, viewport_height, viewport_width) — 3 args (M7-03+).
+    let el = render_screen(&st, 10, 60);
+    let out = render(el);
+    assert!(out.contains('\u{2013}'), "palette rows use the en-dash separator");
+    insta::assert_snapshot!(out);
+}

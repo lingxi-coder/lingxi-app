@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use iocraft::prelude::*;
 use lingxi_protocol::ToolUseId;
 
+use crate::components::prompt_input::completion::{CompletionOverlay, CompletionState};
+use crate::components::prompt_input::palette::{PaletteOverlay, PaletteState, OVERLAY_MAX_ITEMS};
 use crate::components::prompt_input::{PromptInput, PromptInputFooter};
 use crate::components::spinner::SpinnerWithVerb;
 use crate::components::status_line::StatusLine;
@@ -55,6 +57,13 @@ pub struct ReplScreenProps {
     pub expanded: HashMap<ToolUseId, bool>,
     /// (M6-04) Focused tool id (clone of `AppState.focused_tool_id`).
     pub focused_tool_id: Option<ToolUseId>,
+    /// (M7-07) Slash-command palette overlay state (clone of `AppState.palette`).
+    /// Rendered as a dropdown ABOVE `PromptInput` when `open`. `None` collapses
+    /// to a no-op via `Option::default`.
+    pub palette: Option<PaletteState>,
+    /// (M7-07) `@` file-ref completion overlay state (clone of
+    /// `AppState.completion`). Rendered above `PromptInput` when `open`.
+    pub completion: Option<CompletionState>,
 }
 
 /// Compose the vertical zones of the M6-03 REPL screen.
@@ -76,6 +85,8 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let show_spinner = props.show_spinner;
     let expanded = props.expanded.clone();
     let focused_tool_id = props.focused_tool_id;
+    let palette = props.palette.clone();
+    let completion = props.completion.clone();
     element! {
         View(flex_direction: FlexDirection::Column, width: 100pct, height: 100pct) {
             StatusLine(
@@ -98,6 +109,23 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             } else {
                 element!(View).into_any()
             })
+            // (M7-07) Active overlay (palette OR completion) renders as a
+            // dropdown ABOVE the prompt row. iocraft 0.8 has no z-index, so
+            // this draws inline in the bottom zone (design D4). Only one is
+            // ever open at a time (the dispatcher enforces palette-wins-on-`/`).
+            #(palette.as_ref().filter(|p| p.open).map(|p| {
+                let rows: Vec<_> = p.rows().into_iter().take(OVERLAY_MAX_ITEMS).collect();
+                element! {
+                    PaletteOverlay(rows: rows, selected: p.selected)
+                }
+            }))
+            #(completion.as_ref().filter(|c| c.open).map(|c| {
+                let rows = c.rows();
+                let empty_query = c.filter.is_empty();
+                element! {
+                    CompletionOverlay(rows: rows, selected: c.selected, empty_query: empty_query)
+                }
+            }))
             PromptInput(
                 text: prompt_text,
                 cursor: prompt_cursor,

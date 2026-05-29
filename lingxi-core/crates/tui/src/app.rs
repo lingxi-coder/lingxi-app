@@ -340,6 +340,10 @@ pub fn render_screen(
     let show_spinner = should_render_spinner(state);
     let expanded = state.expanded.clone();
     let focused_tool_id = state.focused_tool_id;
+    // (M7-07) Thread the overlay state so the REPL screen can draw the active
+    // palette/completion dropdown above the prompt.
+    let palette = Some(state.palette.clone());
+    let completion = Some(state.completion.clone());
     // (M7-03 review) Thread the already-width-synced height cache instead of
     // rebuilding it inside `VirtualMessageList` every frame (that was
     // O(total messages) per frame). The live render path keeps
@@ -371,6 +375,8 @@ pub fn render_screen(
             show_spinner: show_spinner,
             expanded: expanded,
             focused_tool_id: focused_tool_id,
+            palette: palette,
+            completion: completion,
         )
     }
     .into_any()

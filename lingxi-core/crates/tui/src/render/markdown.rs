@@ -17,6 +17,10 @@
 use crate::render::{SpanStyle, StyleColor, StyledLine, StyledSpan};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
+/// Dim vertical bar prefixing blockquote lines. Matches claude-code's
+/// `BLOCKQUOTE_BAR` (`src/constants/figures.ts`).
+const BLOCKQUOTE_BAR: &str = "│";
+
 /// Theme colors the markdown renderer needs. Kept minimal and decoupled
 /// from iocraft so the renderer is a pure value function. Expand in M7-15.
 #[derive(Debug, Clone, Copy)]
@@ -76,6 +80,13 @@ struct Builder<'a> {
     pending: Vec<StyledSpan>,
     inline: InlineState,
     link_url: Option<String>,
+    /// Active heading level, set between `Start(Heading)`/`End(Heading)`.
+    heading: Option<HeadingLevel>,
+    /// Stack of list contexts (outer to inner). `Some(n)` = ordered list at
+    /// next item number `n`; `None` = unordered.
+    list_stack: Vec<Option<u64>>,
+    /// True while inside a blockquote (prefix lines with the bar + italic).
+    in_blockquote: bool,
 }
 
 impl<'a> Builder<'a> {
@@ -86,16 +97,30 @@ impl<'a> Builder<'a> {
             pending: Vec::new(),
             inline: InlineState::default(),
             link_url: None,
+            heading: None,
+            list_stack: Vec::new(),
+            in_blockquote: false,
         }
     }
 
     /// Flush the in-progress line (if any) into `lines`.
     fn flush(&mut self) {
-        if !self.pending.is_empty() {
-            self.lines.push(StyledLine {
-                spans: std::mem::take(&mut self.pending),
-            });
+        if self.pending.is_empty() {
+            return;
         }
+        let mut spans = std::mem::take(&mut self.pending);
+        if self.in_blockquote {
+            let mut prefixed = vec![StyledSpan::styled(
+                format!("{BLOCKQUOTE_BAR} "),
+                SpanStyle {
+                    fg: StyleColor::Named(crate::render::NamedColor::BrightBlack),
+                    ..SpanStyle::default()
+                },
+            )];
+            prefixed.append(&mut spans);
+            spans = prefixed;
+        }
+        self.lines.push(StyledLine { spans });
     }
 
     /// Append a styled-text span to the current line using current inline
@@ -138,7 +163,57 @@ impl<'a> Builder<'a> {
                 self.flush();
                 self.lines.push(StyledLine::empty());
             }
-            _ => { /* block elements handled in Task 8 */ }
+            Event::Start(Tag::Heading { level, .. }) => {
+                self.flush();
+                self.heading = Some(level);
+                match level {
+                    HeadingLevel::H1 => {
+                        self.inline.bold = true;
+                        self.inline.italic = true;
+                        self.inline.underline = true;
+                    }
+                    _ => self.inline.bold = true,
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                self.flush();
+                self.inline = InlineState::default();
+                self.heading = None;
+                self.lines.push(StyledLine::empty());
+            }
+            Event::Start(Tag::List(first)) => {
+                self.list_stack.push(first);
+            }
+            Event::End(TagEnd::List(_)) => {
+                self.list_stack.pop();
+            }
+            Event::Start(Tag::Item) => {
+                self.flush();
+                let depth = self.list_stack.len().saturating_sub(1);
+                let indent = "  ".repeat(depth);
+                let marker = match self.list_stack.last_mut() {
+                    Some(Some(n)) => {
+                        let m = format!("{n}. ");
+                        *n += 1;
+                        m
+                    }
+                    _ => "- ".to_string(),
+                };
+                self.pending
+                    .push(StyledSpan::plain(format!("{indent}{marker}")));
+            }
+            Event::End(TagEnd::Item) => {
+                self.flush();
+            }
+            Event::Start(Tag::BlockQuote(_)) => {
+                self.in_blockquote = true;
+                self.inline.italic = true;
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                self.in_blockquote = false;
+                self.inline.italic = false;
+            }
+            _ => {}
         }
     }
 
@@ -199,5 +274,57 @@ mod tests {
         let joined = lines[0].plain_text();
         assert!(joined.contains("docs"));
         assert!(joined.contains("https://x.io"));
+    }
+
+    #[test]
+    fn h1_is_bold_italic_underline() {
+        let lines = render("# Title", &theme());
+        let span = &lines[0].spans[0];
+        assert_eq!(span.text, "Title");
+        assert!(span.style.bold);
+        assert!(span.style.italic);
+        assert!(span.style.underline);
+    }
+
+    #[test]
+    fn h2_is_bold_only() {
+        let lines = render("## Sub", &theme());
+        let span = &lines[0].spans[0];
+        assert!(span.style.bold);
+        assert!(!span.style.italic);
+        assert!(!span.style.underline);
+    }
+
+    #[test]
+    fn unordered_list_marker() {
+        let lines = render("- one\n- two", &theme());
+        let texts: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
+        assert!(texts.iter().any(|t| t == "- one"));
+        assert!(texts.iter().any(|t| t == "- two"));
+    }
+
+    #[test]
+    fn ordered_list_marker() {
+        let lines = render("1. first\n2. second", &theme());
+        let texts: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
+        assert!(texts.iter().any(|t| t == "1. first"));
+        assert!(texts.iter().any(|t| t == "2. second"));
+    }
+
+    #[test]
+    fn nested_list_indents() {
+        let lines = render("- a\n  - b", &theme());
+        let texts: Vec<String> = lines.iter().map(|l| l.plain_text()).collect();
+        assert!(texts.iter().any(|t| t == "- a"));
+        assert!(texts.iter().any(|t| t == "  - b"));
+    }
+
+    #[test]
+    fn blockquote_has_bar_prefix() {
+        let lines = render("> quoted", &theme());
+        let line = lines.iter().find(|l| l.plain_text().contains("quoted")).unwrap();
+        assert!(line.plain_text().starts_with("│ "));
+        let text_span = line.spans.iter().find(|s| s.text.contains("quoted")).unwrap();
+        assert!(text_span.style.italic);
     }
 }

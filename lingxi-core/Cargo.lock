@@ -2189,6 +2189,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "crossterm 0.28.1",
+ "dirs",
  "futures",
  "insta",
  "iocraft",

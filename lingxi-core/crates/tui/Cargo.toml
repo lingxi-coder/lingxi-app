@@ -44,6 +44,10 @@ unicode-width = "=0.1.14"
 # (M7-06) Grapheme-correct cursor/column geometry for the multi-line editor.
 # Exact-pinned to the version already resolved in the workspace lockfile.
 unicode-segmentation = "=1.12.0"
+# (M7-11) Config-home resolution for the Doctor screen (`~/.claude`). Already
+# a direct dep of bridge/cli/orchestrator at the same major (5.0.1 in the
+# workspace lockfile) — no new major introduced.
+dirs = "5"
 
 [dev-dependencies]
 insta = { version = "1.40", features = ["yaml"] }

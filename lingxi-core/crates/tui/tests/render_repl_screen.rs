@@ -18,6 +18,7 @@ fn status() -> StatusSnapshot {
         cost: "$0.0000".to_string(),
         context_pct: 0.42_f32,
         permission_mode: PermissionMode::Default,
+        ..StatusSnapshot::default()
     }
 }
 

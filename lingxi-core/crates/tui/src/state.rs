@@ -358,6 +358,19 @@ pub struct StatusSnapshot {
     pub context_pct: f32,
     /// Active permission mode (rendered as short label).
     pub permission_mode: PermissionMode,
+    /// (M7-11) MCP servers configured (any state). Consumed by the Doctor
+    /// screen's `DoctorDiagnostics::capture`. Defaults to `0` until M6-07's
+    /// orchestrator MCP counts are surfaced onto the TUI status (M8 wires
+    /// auto-connect); the parent spec accepts "configured, not connected"/`0`
+    /// for v0.8.0.
+    pub mcp_configured: u32,
+    /// (M7-11) MCP servers currently connected. Defaults to `0` (auto-connect
+    /// is M8).
+    pub mcp_connected: u32,
+    /// (M7-11) Terminal size (cols, rows) at the moment a screen opens.
+    /// Defaults to `(0, 0)`; the live mount may refresh it before opening a
+    /// screen (M7-16 / M8).
+    pub term_size: (u16, u16),
 }
 
 impl Default for StatusSnapshot {
@@ -368,6 +381,9 @@ impl Default for StatusSnapshot {
             cost: "$0.0000".to_string(),
             context_pct: 0.0,
             permission_mode: PermissionMode::Default,
+            mcp_configured: 0,
+            mcp_connected: 0,
+            term_size: (0, 0),
         }
     }
 }
@@ -526,6 +542,13 @@ pub struct AppState {
     pub history_search: Option<crate::components::prompt_input::HistorySearchState>,
     /// (M7-10) Paste attachment registry + next `[Image #N]` id.
     pub paste: crate::components::prompt_input::PasteState,
+    /// (M7-11) Active full-page screen overlay. `None` ⇒ REPL is live.
+    /// Routed at priority 2 in `handle_live_key` (after permission,
+    /// before input). Reused by M7-12/13/14.
+    pub active_screen: Option<crate::screens::Screen>,
+    /// (M7-11) Diagnostics captured when the Doctor screen opens. `Some`
+    /// only while `active_screen == Some(Screen::Doctor)`.
+    pub doctor_diagnostics: Option<crate::screens::doctor::DoctorDiagnostics>,
 }
 
 impl AppState {
@@ -566,7 +589,22 @@ impl AppState {
             vim: crate::components::prompt_input::VimState::default(),
             history_search: None,
             paste: crate::components::prompt_input::PasteState::default(),
+            active_screen: None,
+            doctor_diagnostics: None,
         }
+    }
+
+    /// (M7-11) Open the Doctor screen with captured diagnostics.
+    pub fn open_doctor(&mut self, diag: crate::screens::doctor::DoctorDiagnostics) {
+        self.active_screen = Some(crate::screens::Screen::Doctor);
+        self.doctor_diagnostics = Some(diag);
+    }
+
+    /// (M7-11) Close any active screen, returning to the REPL. Clears
+    /// per-screen captured state. Reused by every M7 screen's close path.
+    pub fn close_screen(&mut self) {
+        self.active_screen = None;
+        self.doctor_diagnostics = None;
     }
 
     /// All tool ids in scrollback order. Iterates `messages` once.
@@ -657,7 +695,30 @@ mod tests {
             cost: "$0.0000".to_string(),
             context_pct: 0.42,
             permission_mode: PermissionMode::Default,
+            ..StatusSnapshot::default()
         }
+    }
+
+    #[test]
+    fn active_screen_defaults_none_and_open_close_toggles() {
+        use crate::screens::doctor::DoctorDiagnostics;
+        use crate::screens::Screen;
+        let mut st = AppState::default_for_tests();
+        assert_eq!(st.active_screen, None, "REPL is live by default");
+        st.open_doctor(DoctorDiagnostics::capture(
+            std::path::Path::new("/work"),
+            0,
+            0,
+            (80, 24),
+        ));
+        assert_eq!(st.active_screen, Some(Screen::Doctor));
+        assert!(st.doctor_diagnostics.is_some(), "open captures diagnostics");
+        st.close_screen();
+        assert_eq!(st.active_screen, None, "close_screen returns to REPL");
+        assert!(
+            st.doctor_diagnostics.is_none(),
+            "close clears captured diagnostics"
+        );
     }
 
     #[test]

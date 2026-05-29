@@ -1,5 +1,6 @@
 //! M7-04 batch-1 renderer snapshots.
 use lingxi_tui::components::messages::compact_boundary::render_compact_boundary_to_string;
+use lingxi_tui::components::messages::rate_limit::{render_rate_limit_to_string, RateLimitProps};
 use lingxi_tui::components::messages::redacted_thinking::render_redacted_thinking_to_string;
 use lingxi_tui::components::messages::system_api_error::{
     render_system_api_error_to_string, SystemApiErrorProps,
@@ -79,4 +80,22 @@ fn system_api_error_singular_second_and_truncated() {
         truncated: true,
     });
     insta::assert_snapshot!("system_api_error_singular_second_and_truncated", s);
+}
+
+#[test]
+fn rate_limit_with_upsell() {
+    let s = render_rate_limit_to_string(RateLimitProps {
+        text: "You've hit your usage limit.".into(),
+        upsell: Some("/upgrade to increase your usage limit.".into()),
+    });
+    insta::assert_snapshot!("rate_limit_with_upsell", s);
+}
+
+#[test]
+fn rate_limit_no_upsell() {
+    let s = render_rate_limit_to_string(RateLimitProps {
+        text: "You've hit your usage limit.".into(),
+        upsell: None,
+    });
+    insta::assert_snapshot!("rate_limit_no_upsell", s);
 }

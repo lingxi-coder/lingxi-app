@@ -195,6 +195,21 @@ fn iocraft_to_crossterm028_key(k: &KeyEvent) -> crossterm::event::KeyEvent {
 /// When no dialog is open, this falls through to the M6-02/M6-04 pipeline
 /// (`map_iocraft_key` → `dispatch` / `scroll_with_viewport`).
 ///
+/// Apply a `VimEffect` to the prompt buffer + cursor in `AppState` (M7-08).
+fn apply_vim_effect(st: &mut AppState, effect: crate::components::prompt_input::vim::VimEffect) {
+    use crate::components::prompt_input::vim::VimEffect;
+    match effect {
+        VimEffect::Move(off) => {
+            st.prompt_cursor = off.min(st.prompt_text.len());
+        }
+        VimEffect::Edit { text, cursor } => {
+            st.prompt_text = text;
+            st.prompt_cursor = cursor.min(st.prompt_text.len());
+        }
+        VimEffect::None => {}
+    }
+}
+
 /// `viewport` is the scrollback viewport height (rows minus reserved chrome).
 #[allow(clippy::too_many_lines)]
 pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
@@ -250,6 +265,35 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
         }
     }
     // === end priority 3 ===
+
+    // === PRIORITY 4: vim input (M7-08), only when enabled. ===
+    // Sits AFTER the M7-07 overlay focus-trap (priority 3) so palette/completion
+    // still win, and gates the entire branch on `st.vim_enabled` so M6 default
+    // editing is byte-identical when vim is off. `PassThrough` (Insert-mode
+    // typing, Enter, Ctrl-C, etc.) falls through to the existing
+    // `map_iocraft_key` + `dispatch` pipeline below — NOT a parallel key path.
+    if st.vim_enabled {
+        let ct_key = iocraft_to_crossterm028_key(k);
+        let outcome = crate::components::prompt_input::vim::handle_vim_key(
+            &mut st.vim,
+            &st.prompt_text,
+            st.prompt_cursor,
+            ct_key,
+        );
+        match outcome {
+            crate::components::prompt_input::vim::VimOutcome::Effect(effect) => {
+                apply_vim_effect(st, effect);
+                return;
+            }
+            crate::components::prompt_input::vim::VimOutcome::Pending => {
+                return; // consumed; awaiting more keys
+            }
+            crate::components::prompt_input::vim::VimOutcome::PassThrough => {
+                // fall through to default editing (Insert-mode typing, Enter, etc.)
+            }
+        }
+    }
+    // === end vim ===
 
     let prompt_empty = st.prompt_text.is_empty();
     // Multi-line buffers route Up/Down to vertical cursor motion (Task 9).
@@ -579,6 +623,37 @@ mod tests {
         // The 2-row footer is baked into FIXED_CHROME_ROWS: single-row prompt
         // reserves status(1)+spinner(1)+footer(2)+prompt(1) = 5.
         assert_eq!(single, usize::from(rows) - 5);
+    }
+
+    /// (M7-08) Build an iocraft `KeyEvent` for a printable char (Press).
+    fn iocraft_char_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyEventKind::Press, KeyCode::Char(c))
+    }
+
+    #[test]
+    fn vim_normal_motion_moves_prompt_cursor() {
+        use crate::components::prompt_input::VimMode;
+        let mut st = AppState::new(Default::default());
+        st.vim_enabled = true;
+        st.vim.mode = VimMode::Normal;
+        st.prompt_text = "hello".into();
+        st.prompt_cursor = 0;
+        // 'l' moves right
+        let k = iocraft_char_key('l');
+        handle_live_key(&mut st, &k, 24);
+        assert_eq!(st.prompt_cursor, 1);
+        assert_eq!(st.prompt_text, "hello"); // unchanged
+    }
+
+    #[test]
+    fn vim_disabled_typing_is_default_editing() {
+        let mut st = AppState::new(Default::default());
+        st.vim_enabled = false;
+        st.prompt_text = "h".into();
+        st.prompt_cursor = 1;
+        handle_live_key(&mut st, &iocraft_char_key('i'), 24);
+        assert_eq!(st.prompt_text, "hi"); // default insert, NOT vim 'i'
+        assert_eq!(st.prompt_cursor, 2);
     }
 
     #[test]

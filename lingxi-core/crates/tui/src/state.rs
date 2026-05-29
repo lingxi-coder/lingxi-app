@@ -521,6 +521,9 @@ pub struct AppState {
     /// (M7-08) PromptInput-local vim state (M7 design §2.3). Only consulted
     /// when `vim_enabled` is true.
     pub vim: crate::components::prompt_input::VimState,
+    /// (M7-10) Active Ctrl-R history-search overlay. `Some(_)` means the
+    /// overlay owns all live keys (parent spec §2.5 priority 3).
+    pub history_search: Option<crate::components::prompt_input::HistorySearchState>,
 }
 
 impl AppState {
@@ -559,6 +562,7 @@ impl AppState {
             completion: CompletionState::default(),
             vim_enabled: false,
             vim: crate::components::prompt_input::VimState::default(),
+            history_search: None,
         }
     }
 

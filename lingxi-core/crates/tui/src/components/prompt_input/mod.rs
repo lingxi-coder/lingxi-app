@@ -27,6 +27,13 @@ pub mod completion;
 pub mod fuzzy;
 pub mod palette;
 
+pub mod history_search;
+pub use history_search::{
+    handle_history_search_key, hs_accept, hs_backspace, hs_cycle, hs_open, hs_push_char,
+    recompute_match, HistorySearchOverlay, HistorySearchOverlayProps, HistorySearchState,
+    HsKeyOutcome,
+};
+
 pub mod vim;
 pub use vim::{mode_indicator, VimMode, VimState};
 

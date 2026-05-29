@@ -1,6 +1,7 @@
 //! M7-03 behavior tests: line-based scroll, windowing, telemetry, cache.
 
 use lingxi_tui::app::scroll_with_viewport;
+use lingxi_tui::components::virtual_message_list::{render_window, HeightCache};
 use lingxi_tui::events::keymap::ScrollDir;
 use lingxi_tui::state::{AppState, RenderedMessage};
 
@@ -87,4 +88,76 @@ fn scroll_telemetry_transitions_fire_on_0_to_nonzero_and_back() {
     // non-zero → 0: scroll_ended fires (back at bottom).
     scroll_with_viewport(&mut st, ScrollDir::Bottom, vh);
     assert_eq!(st.scroll_offset, 0);
+}
+
+/// Build 5000 mixed-height messages: every 10th is 50 lines tall, the
+/// rest are 1 line. Returns (messages, total_lines).
+fn mixed_5k() -> (Vec<RenderedMessage>, usize) {
+    let msgs: Vec<RenderedMessage> = (0..5000)
+        .map(|i| {
+            let body = if i % 10 == 0 {
+                vec!["x"; 50].join("\n") // 50 lines
+            } else {
+                format!("m{i}") // 1 line
+            };
+            RenderedMessage::UserText { body, timestamp: 0 }
+        })
+        .collect();
+    // 500 tall (×50) + 4500 short (×1) = 25_000 + 4_500 = 29_500 lines.
+    (msgs, 29_500)
+}
+
+#[test]
+fn gate_5k_render_count_bounded_by_viewport() {
+    let (msgs, total) = mixed_5k();
+    let cache = HeightCache::build(&msgs, 80);
+    assert_eq!(cache.total_lines(), total);
+    let vh = 30;
+    // At the bottom (offset 0) the window must be a tiny slice, never 5000.
+    let win = render_window(&msgs, &cache, 0, vh);
+    let count = win.indices().count();
+    assert!(count < 100, "render count {count} not bounded by viewport");
+    // The last visible message is the final one (offset 0 = tail).
+    assert_eq!(win.last_index, 4999);
+}
+
+#[test]
+fn gate_5k_exact_first_last_visible_at_offset() {
+    let (msgs, total) = mixed_5k();
+    let cache = HeightCache::build(&msgs, 80);
+    assert_eq!(total, 29_500);
+    let vh = 20;
+    // Scroll so the viewport sits entirely inside the tall message at
+    // index 2490 (i % 10 == 0). Compute its absolute start line:
+    //   short msgs before any tall one... derive the start of msg 2490.
+    let mut start = 0usize;
+    for i in 0..2490 {
+        start += cache.height_at(i);
+    }
+    // msg 2490 spans [start, start+50). Put the viewport at [start+10, start+30).
+    // bottom_line = start + 30  ⇒  offset = total - bottom_line.
+    let bottom_line = start + 30;
+    let offset = total - bottom_line;
+    let win = render_window(&msgs, &cache, offset, vh);
+    // Entirely inside one tall message.
+    assert_eq!(win.first_index, 2490);
+    assert_eq!(win.last_index, 2490);
+    assert_eq!(win.skip_top_lines, 10); // top_line - span_start = (start+10) - start
+}
+
+#[test]
+fn gate_5k_offset_zero_first_visible_is_correct() {
+    let (msgs, _total) = mixed_5k();
+    let cache = HeightCache::build(&msgs, 80);
+    let vh = 30;
+    // offset 0 → top_line = total - 30. Tail messages 4970..4999 are all
+    // 1-line except 4990 (i%10==0, 50 lines). Last 30 lines walk back:
+    //   4999..4991 = 9 one-line msgs (9 lines), 4990 = 50 lines.
+    // 9 + (need 21 more lines from msg 4990's 50) → first_index = 4990.
+    let win = render_window(&msgs, &cache, 0, vh);
+    assert_eq!(win.last_index, 4999);
+    assert_eq!(win.first_index, 4990);
+    // 50-line msg 4990 spans [total-9-50, total-9). top_line = total-30.
+    // skip_top_lines = top_line - span_start = (total-30) - (total-59) = 29.
+    assert_eq!(win.skip_top_lines, 29);
 }

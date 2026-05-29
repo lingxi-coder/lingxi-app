@@ -203,6 +203,13 @@ pub struct AppState {
     pub history_cursor: Option<usize>,
     /// Scroll position. `0` = bottom (latest); higher = older.
     pub scroll_offset: usize,
+    /// (M7-03) Per-message rendered-height cache backing line-based scroll
+    /// math. Rebuilt by [`Self::refresh_height_cache`] when the log grows
+    /// or the viewport width changes.
+    pub height_cache: crate::components::virtual_message_list::HeightCache,
+    /// (M7-03) Viewport width (terminal columns) the cache was last built
+    /// for. A change here triggers a recompute.
+    pub viewport_width: usize,
     /// Status-line snapshot (model, cwd, cost, ctx%, mode).
     pub status: StatusSnapshot,
     /// `Some` while a turn is being driven by the orchestrator.
@@ -258,6 +265,8 @@ impl AppState {
             history: Vec::new(),
             history_cursor: None,
             scroll_offset: 0,
+            height_cache: crate::components::virtual_message_list::HeightCache::default(),
+            viewport_width: 0,
             status,
             in_flight_turn: None,
             sigint_armed_at: None,
@@ -342,6 +351,17 @@ impl AppState {
     pub fn push_message(&mut self, msg: RenderedMessage) {
         self.messages.push(msg);
     }
+
+    /// (M7-03) Rebuild the height cache if the log or `width` changed.
+    /// Idempotent: a no-op when nothing changed (cheap len + width check).
+    pub fn refresh_height_cache(&mut self, width: usize) {
+        let stale =
+            self.viewport_width != width || self.height_cache.len() != self.messages.len();
+        if stale {
+            self.height_cache.recompute(&self.messages, width);
+            self.viewport_width = width;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -377,6 +397,31 @@ mod tests {
             RenderedMessage::UserText { body, .. } => assert_eq!(body, "msg4999"),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn height_cache_refresh_tracks_messages_and_width() {
+        use crate::components::virtual_message_list::HeightCache;
+        let mut s = AppState::new(fake_status());
+        s.push_message(RenderedMessage::UserText {
+            body: "a\nb".into(),
+            timestamp: 0,
+        });
+        s.push_message(RenderedMessage::UserText {
+            body: "c".into(),
+            timestamp: 0,
+        });
+        s.refresh_height_cache(80);
+        assert_eq!(s.height_cache.total_lines(), 3); // 2 + 1
+        assert_eq!(s.viewport_width, 80);
+        // Width change recomputes.
+        s.push_message(RenderedMessage::UserText {
+            body: "x".repeat(20),
+            timestamp: 0,
+        });
+        s.refresh_height_cache(10); // "xxxxxxxxxxxxxxxxxxxx" → ceil(20/10)=2
+        assert_eq!(s.height_cache.total_lines(), 5); // 2 + 1 + 2
+        let _ = HeightCache::default(); // type is reachable
     }
 
     #[test]

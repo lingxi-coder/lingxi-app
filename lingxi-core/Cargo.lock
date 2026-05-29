@@ -2198,6 +2198,7 @@ dependencies = [
  "lingxi-orchestrator",
  "lingxi-permission",
  "lingxi-protocol",
+ "lingxi-session",
  "lingxi-telemetry",
  "lingxi-traits",
  "predicates",

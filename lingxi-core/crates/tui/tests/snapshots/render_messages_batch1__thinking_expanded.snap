@@ -1,0 +1,7 @@
+---
+source: crates/tui/tests/render_messages_batch1.rs
+expression: s
+---
+∴ Thinking…
+  Step one.
+  Step two.

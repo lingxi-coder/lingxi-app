@@ -23,6 +23,7 @@ use unicode_width::UnicodeWidthStr;
 pub mod footer;
 pub use footer::{FooterMode, PromptInputFooter, PromptInputFooterProps};
 
+pub mod completion;
 pub mod fuzzy;
 pub mod palette;
 

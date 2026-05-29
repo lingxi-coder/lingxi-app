@@ -3,7 +3,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lingxi_tui::components::prompt_input::vim::{
-    handle_vim_key, VimEffect, VimMode, VimOutcome, VimState,
+    handle_vim_key, Register, VimEffect, VimMode, VimOutcome, VimState,
 };
 
 /// Build a `KeyEvent` for a single char. 'G' carries SHIFT (so map back-ends
@@ -322,4 +322,137 @@ fn vim_disabled_is_unchanged_m6_editing() {
     }
     assert_eq!(st.prompt_text, "ihj");
     assert_eq!(st.prompt_cursor, 3);
+}
+
+// ===== Task 10: operator×motion matrix + register/paste roundtrips =====
+
+#[test]
+fn operator_motion_matrix() {
+    // (start_text, start_offset, keys, expected_text, expected_offset)
+    let cases: &[(&str, usize, &str, &str, usize)] = &[
+        // ---- d × motions ----
+        ("foo bar", 0, "dw", "bar", 0), // delete word + trailing space
+        ("foo bar", 0, "de", " bar", 0), // delete to end of word (inclusive)
+        ("foo bar", 4, "d$", "foo ", 3), // delete to end of line
+        // d0 from the first 'l' (offset 4) deletes "  he" -> "llo" (cursor 0).
+        ("  hello", 4, "d0", "llo", 0), // delete to line start (exclusive)
+        ("foo bar baz", 0, "dl", "oo bar baz", 0), // dl == x: delete one char right
+        ("abcde", 0, "dfc", "de", 0),   // delete through find 'c' (inclusive)
+        ("abcde", 0, "dtc", "cde", 0),  // delete up-to 'c' (t: stops before)
+        ("a\nb\nc", 0, "dj", "c", 0),   // linewise: delete lines 0..1
+        ("a\nb\nc", 0, "dG", "", 0),    // linewise: delete to last line
+        ("a\nb\nc", 4, "dgg", "", 0),   // linewise: delete to first line
+        // ---- c × motions ----
+        ("foo bar", 0, "cw", " bar", 0), // cw -> ce (end of word), enter insert
+        // c$ deletes "bar" and enters Insert at `from`=4 (end of "foo "); unlike
+        // d$ the cursor is NOT clamped to the last char — you are now typing.
+        ("foo bar", 4, "c$", "foo ", 4), // change to EOL (Insert at offset 4)
+        // ---- y (buffer unchanged; cursor moves) ----
+        ("foo bar", 0, "yw", "foo bar", 0), // yank word: buffer unchanged
+        ("foo bar", 4, "y$", "foo bar", 4), // yank to EOL: cursor at range start
+        // ---- doubled ops ----
+        ("a\nb\nc", 2, "dd", "a\nc", 2), // delete line1
+        ("a\nb\nc", 0, "yy", "a\nb\nc", 0), // yank line: buffer unchanged
+        ("ab\ncd", 0, "cc", "\ncd", 0),  // clear line, enter insert
+        // ---- counts ----
+        ("a b c d e", 0, "3dw", "d e", 0), // 3 words
+        ("a b c d e", 0, "d3w", "d e", 0), // inner count, same result
+        ("a\nb\nc\nd", 0, "2dd", "c\nd", 0), // 2 lines
+        ("a\nb\nc", 0, "2yy", "a\nb\nc", 0), // yank 2 lines: buffer unchanged
+    ];
+    for (i, (text, off, keys, want_text, want_off)) in cases.iter().enumerate() {
+        let (got_text, got_off) = run_normal(text, *off, keys);
+        assert_eq!(&got_text, want_text, "case {i}: text after {keys:?} on {text:?}");
+        assert_eq!(got_off, *want_off, "case {i}: offset after {keys:?} on {text:?}");
+    }
+}
+
+/// Issue #2 (carry-forward from M7-08): operator endpoints at the BUFFER TAIL /
+/// end-of-line / last word must produce correct (non-overflowing) ranges. These
+/// lock that inclusive motions (`e`/`$`) extend exactly one char past the target
+/// and never over-delete past `len`, and that `x` at the last char clamps right.
+#[test]
+fn operator_buffer_tail_matrix() {
+    let cases: &[(&str, usize, &str, &str, usize)] = &[
+        // de on the LAST word: cursor on 'b' of "bar", e lands on 'r' (last char,
+        // offset 6, NOT len 7); inclusive +1 -> [4,7) deletes "bar" -> "foo ".
+        ("foo bar", 4, "de", "foo ", 3),
+        // dw on the LAST word: w from 'b' lands at len (no next word); range [4,7)
+        // deletes "bar" -> "foo " (cursor clamps to last char of "foo " = 3).
+        ("foo bar", 4, "dw", "foo ", 3),
+        // d$ at end-of-line: $ lands at len for the last line; inclusive +1 is a
+        // no-op at len (no overflow) -> [4,7) deletes "bar" -> "foo ".
+        ("foo bar", 4, "d$", "foo ", 3),
+        // de on a single trailing word that is the whole buffer.
+        ("hello", 0, "de", "", 0),
+        // x on the LAST char: delete 'o', cursor clamps left to 'l' (offset 3).
+        ("hello", 4, "x", "hell", 3),
+        // x on a 1-char buffer -> "" cursor 0 (max_off floors at 0).
+        ("a", 0, "x", "", 0),
+        // dd on the last line consumes the preceding '\n' (no orphan newline).
+        ("a\nb\nc", 4, "dd", "a\nb", 2),
+        // ye on the last word: yank "bar", buffer unchanged, cursor at range start.
+        ("foo bar", 4, "ye", "foo bar", 4),
+    ];
+    for (i, (text, off, keys, want_text, want_off)) in cases.iter().enumerate() {
+        let (got_text, got_off) = run_normal(text, *off, keys);
+        assert_eq!(&got_text, want_text, "tail case {i}: text after {keys:?} on {text:?}");
+        assert_eq!(got_off, *want_off, "tail case {i}: offset after {keys:?} on {text:?}");
+    }
+}
+
+#[test]
+fn yank_then_paste_roundtrip() {
+    // yy then p: yank line0, paste below -> duplicated line.
+    let (text, _off) = run_normal("hello\nworld", 0, "yyp");
+    assert_eq!(text, "hello\nhello\nworld");
+}
+
+#[test]
+fn delete_then_paste_charwise() {
+    // x on "abc" -> "bc" reg "a"; p pastes "a" after cursor -> "bac".
+    let (text, off) = run_normal("abc", 0, "xp");
+    assert_eq!(text, "bac");
+    assert_eq!(off, 1); // cursor on pasted 'a'
+}
+
+#[test]
+fn register_holds_last_yank_or_delete() {
+    // After dw the register holds "foo "; it survives a later paste elsewhere.
+    let (text, _off) = run_normal("foo bar", 0, "dw$p");
+    assert!(text.contains("foo "));
+}
+
+/// Direct register-content check: dw stores "foo " charwise; yy stores "a\n"
+/// linewise. Confirms the register tagging the matrix relies on.
+#[test]
+fn register_linewise_tagging() {
+    let mut state = VimState {
+        mode: VimMode::Normal,
+        ..VimState::default()
+    };
+    // dw -> charwise register "foo ".
+    handle_vim_key(&mut state, "foo bar", 0, k('d'));
+    handle_vim_key(&mut state, "foo bar", 0, k('w'));
+    assert_eq!(
+        state.register,
+        Register {
+            text: "foo ".into(),
+            linewise: false
+        }
+    );
+    // yy -> linewise register "a\n".
+    let mut state2 = VimState {
+        mode: VimMode::Normal,
+        ..VimState::default()
+    };
+    handle_vim_key(&mut state2, "a\nb", 0, k('y'));
+    handle_vim_key(&mut state2, "a\nb", 0, k('y'));
+    assert_eq!(
+        state2.register,
+        Register {
+            text: "a\n".into(),
+            linewise: true
+        }
+    );
 }

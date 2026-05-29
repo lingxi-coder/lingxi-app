@@ -92,3 +92,36 @@ fn permission_pending_beats_open_palette() {
     assert_eq!(st.palette.selected, 0, "permission owns keys; palette unchanged");
     assert!(st.pending_permission.is_some());
 }
+
+#[test]
+fn enter_with_no_palette_match_submits_normally() {
+    // "/zzzz" matches nothing → Enter must PassThrough to Submit (clears prompt).
+    let mut st = AppState::new(StatusSnapshot::default());
+    for ch in "/zzzznomatch".chars() {
+        handle_live_key(&mut st, &key(KeyCode::Char(ch)), 24);
+    }
+    assert!(st.palette.open);
+    assert!(st.palette.rows().is_empty());
+    handle_live_key(&mut st, &key(KeyCode::Enter), 24);
+    assert!(st.prompt_text.is_empty(), "Enter submitted the line");
+}
+
+#[test]
+fn backspacing_the_slash_closes_palette() {
+    let mut st = AppState::new(StatusSnapshot::default());
+    handle_live_key(&mut st, &key(KeyCode::Char('/')), 24);
+    assert!(st.palette.open);
+    handle_live_key(&mut st, &key(KeyCode::Backspace), 24);
+    assert_eq!(st.prompt_text, "");
+    assert!(!st.palette.open, "removing the / closes the palette");
+}
+
+#[test]
+fn at_token_after_text_opens_completion_not_palette() {
+    let mut st = AppState::new(StatusSnapshot::default());
+    for ch in "look @".chars() {
+        handle_live_key(&mut st, &key(KeyCode::Char(ch)), 24);
+    }
+    assert!(!st.palette.open, "no leading / → palette stays closed");
+    assert!(st.completion.open, "@ after text opens completion");
+}

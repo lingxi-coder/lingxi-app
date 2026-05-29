@@ -1,0 +1,8 @@
+---
+source: crates/tui/tests/render_messages_batch1.rs
+expression: s
+---
+Plan Approval Request from agent-3
+1. Do X
+2. Do Y
+Plan file: /tmp/plan.md

@@ -4,6 +4,9 @@ use lingxi_tui::components::messages::compact_boundary::render_compact_boundary_
 use lingxi_tui::components::messages::hook_progress::{
     render_hook_progress_to_string, HookProgressProps,
 };
+use lingxi_tui::components::messages::plan_approval::{
+    render_plan_approval_to_string, PlanApprovalProps,
+};
 use lingxi_tui::components::messages::rate_limit::{render_rate_limit_to_string, RateLimitProps};
 use lingxi_tui::components::messages::redacted_thinking::render_redacted_thinking_to_string;
 use lingxi_tui::components::messages::shutdown::{render_shutdown_to_string, ShutdownProps};
@@ -12,7 +15,7 @@ use lingxi_tui::components::messages::system_api_error::{
 };
 use lingxi_tui::components::messages::system_text::{render_system_text_to_string, SystemTextProps};
 use lingxi_tui::components::messages::thinking::{render_thinking_to_string, ThinkingProps};
-use lingxi_tui::state::{AdvisorKind, SystemLevel};
+use lingxi_tui::state::{AdvisorKind, PlanApprovalKind, SystemLevel};
 
 #[test]
 fn thinking_collapsed() {
@@ -165,4 +168,35 @@ fn hook_progress_transcript_singular() {
         transcript_summary: true,
     });
     insta::assert_snapshot!("hook_progress_transcript_singular", s);
+}
+
+#[test]
+fn plan_approval_request() {
+    let s = render_plan_approval_to_string(PlanApprovalProps {
+        kind: PlanApprovalKind::Request {
+            from: "agent-3".into(),
+            plan_content: "1. Do X\n2. Do Y".into(),
+            plan_file_path: Some("/tmp/plan.md".into()),
+        },
+    });
+    insta::assert_snapshot!("plan_approval_request", s);
+}
+
+#[test]
+fn plan_approval_approved() {
+    let s = render_plan_approval_to_string(PlanApprovalProps {
+        kind: PlanApprovalKind::Approved { name: "you".into() },
+    });
+    insta::assert_snapshot!("plan_approval_approved", s);
+}
+
+#[test]
+fn plan_approval_rejected() {
+    let s = render_plan_approval_to_string(PlanApprovalProps {
+        kind: PlanApprovalKind::Rejected {
+            name: "you".into(),
+            feedback: Some("too risky".into()),
+        },
+    });
+    insta::assert_snapshot!("plan_approval_rejected", s);
 }

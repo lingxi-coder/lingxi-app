@@ -1,0 +1,7 @@
+---
+source: crates/tui/tests/render_messages_batch1.rs
+expression: s
+---
+✗ Plan Rejected by you
+Feedback: too risky
+Please revise your plan based on the feedback and call ExitPlanMode again.

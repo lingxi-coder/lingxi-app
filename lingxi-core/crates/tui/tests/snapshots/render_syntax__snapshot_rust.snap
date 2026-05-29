@@ -1,0 +1,7 @@
+---
+source: crates/tui/tests/render_syntax.rs
+expression: s
+---
+[C]fn[C] [C]main[C]([C])[C] [C]{[C]
+[C]    [C]let[C] x [C]=[C] [C]1[C];[C]
+[C]}[C]

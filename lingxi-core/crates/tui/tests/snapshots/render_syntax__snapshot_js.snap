@@ -1,0 +1,5 @@
+---
+source: crates/tui/tests/render_syntax.rs
+expression: s
+---
+[C]const[C] [C]a[C] [C]=[C] [C]([C])[C] [C]=>[C] [C]42[C];[C]

@@ -73,7 +73,11 @@ fn snapshot_empty_diff() {
 
 #[test]
 fn snapshot_large_diff_truncation() {
-    let new = (0..160).map(|n| format!("L{n}")).collect::<Vec<_>>().join("\n") + "\n";
+    let new = (0..160)
+        .map(|n| format!("L{n}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
     let s = structure(&render("", &new, Some("x.txt"), &TuiTheme));
     assert!(s.contains("more lines"), "truncation footer in snapshot");
     insta::assert_snapshot!(s);

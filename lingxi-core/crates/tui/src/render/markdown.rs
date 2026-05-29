@@ -607,11 +607,17 @@ mod tests {
     #[test]
     fn snapshot_fenced_code_highlighted() {
         // M7-02: ```rust fence is syntect-highlighted (structure, not color).
-        insta::assert_snapshot!(fence_structure(&render("```rust\nfn main() {}\n```", &theme())));
+        insta::assert_snapshot!(fence_structure(&render(
+            "```rust\nfn main() {}\n```",
+            &theme()
+        )));
     }
 
     #[test]
     fn snapshot_partial_unclosed_fence() {
-        insta::assert_snapshot!(fence_structure(&render("text\n```python\nprint(1)", &theme())));
+        insta::assert_snapshot!(fence_structure(&render(
+            "text\n```python\nprint(1)",
+            &theme()
+        )));
     }
 }

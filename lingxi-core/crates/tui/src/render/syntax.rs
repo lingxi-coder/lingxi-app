@@ -207,7 +207,10 @@ mod tests {
         assert_eq!(lines.len(), 3, "one StyledLine per source line");
         // At least one span on the keyword line is non-default colored.
         let any_colored = lines.iter().flat_map(|l| &l.spans).any(is_colored);
-        assert!(any_colored, "rust highlight produced at least one colored span");
+        assert!(
+            any_colored,
+            "rust highlight produced at least one colored span"
+        );
     }
 
     #[test]

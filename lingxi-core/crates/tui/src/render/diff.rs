@@ -138,12 +138,7 @@ fn sigil(kind: LineKind) -> char {
 /// Build the gutter span ("  12 + ") for a row: right-aligned line number +
 /// space + sigil + space, dim-colored, carrying the line background.
 fn gutter_span(row: &DiffRow, gutter_w: usize, bg: StyleColor) -> StyledSpan {
-    let text = format!(
-        "{:>w$} {} ",
-        row.line_no,
-        sigil(row.kind),
-        w = gutter_w
-    );
+    let text = format!("{:>w$} {} ", row.line_no, sigil(row.kind), w = gutter_w);
     StyledSpan::styled(
         text,
         SpanStyle {
@@ -156,7 +151,12 @@ fn gutter_span(row: &DiffRow, gutter_w: usize, bg: StyleColor) -> StyledSpan {
 
 /// Syntax-highlight `text` as a single line and overlay `bg` onto every
 /// content span (keep the syntect fg, force the diff background).
-fn content_spans(text: &str, lang: Option<&str>, bg: StyleColor, theme: &TuiTheme) -> Vec<StyledSpan> {
+fn content_spans(
+    text: &str,
+    lang: Option<&str>,
+    bg: StyleColor,
+    theme: &TuiTheme,
+) -> Vec<StyledSpan> {
     let highlighted = syntax::highlight(text, lang, theme);
     if let Some(first) = highlighted.into_iter().next() {
         first
@@ -253,7 +253,12 @@ fn plain_row(row: &DiffRow, gutter_w: usize, lang: Option<&str>, theme: &TuiThem
 }
 
 /// Layout a word-diffed row: gutter + per-word emphasis spans.
-fn word_row(row: &DiffRow, gutter_w: usize, content: Vec<StyledSpan>, theme: &TuiTheme) -> StyledLine {
+fn word_row(
+    row: &DiffRow,
+    gutter_w: usize,
+    content: Vec<StyledSpan>,
+    theme: &TuiTheme,
+) -> StyledLine {
     let bg = match row.kind {
         LineKind::Add => add_bg(theme),
         LineKind::Remove => remove_bg(theme),
@@ -321,17 +326,13 @@ fn grouped_hunks(old: &str, new: &str) -> Vec<(HunkHeader, Vec<DiffRow>)> {
             for change in diff.iter_changes(op) {
                 let text = change.value().trim_end_matches('\n').to_string();
                 let (kind, line_no) = match change.tag() {
-                    ChangeTag::Delete => (
-                        LineKind::Remove,
-                        change.old_index().map_or(0, |i| i + 1),
-                    ),
-                    ChangeTag::Insert => {
-                        (LineKind::Add, change.new_index().map_or(0, |i| i + 1))
+                    ChangeTag::Delete => {
+                        (LineKind::Remove, change.old_index().map_or(0, |i| i + 1))
                     }
-                    ChangeTag::Equal => (
-                        LineKind::Context,
-                        change.new_index().map_or(0, |i| i + 1),
-                    ),
+                    ChangeTag::Insert => (LineKind::Add, change.new_index().map_or(0, |i| i + 1)),
+                    ChangeTag::Equal => {
+                        (LineKind::Context, change.new_index().map_or(0, |i| i + 1))
+                    }
                 };
                 rows.push(DiffRow {
                     kind,
@@ -617,14 +618,21 @@ mod tests {
     fn render_with_separated_changes_emits_hunk_header() {
         // Two change clusters separated by a long unchanged run -> the second
         // cluster is preceded by a hunk header "@@ ... @@".
-        let old = (1..=40).map(|n| format!("line{n}")).collect::<Vec<_>>().join("\n") + "\n";
+        let old = (1..=40)
+            .map(|n| format!("line{n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
         let mut new_lines: Vec<String> = (1..=40).map(|n| format!("line{n}")).collect();
         new_lines[2] = "CHANGED_TOP".into();
         new_lines[37] = "CHANGED_BOTTOM".into();
         let new = new_lines.join("\n") + "\n";
         let lines = render(&old, &new, Some("x.txt"), &TuiTheme);
         let headers = lines.iter().filter(|l| rowline(l).contains("@@")).count();
-        assert!(headers >= 1, "separated change clusters produce hunk header(s)");
+        assert!(
+            headers >= 1,
+            "separated change clusters produce hunk header(s)"
+        );
     }
 
     #[test]
@@ -644,6 +652,9 @@ mod tests {
             lines.len()
         );
         let last = rowline(lines.last().unwrap());
-        assert!(last.contains("more lines"), "truncation footer present: {last:?}");
+        assert!(
+            last.contains("more lines"),
+            "truncation footer present: {last:?}"
+        );
     }
 }

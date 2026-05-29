@@ -220,9 +220,7 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
     // M7-02: Edit/Write diff tools render a StructuredDiff when the paired
     // call inputs are present. Each StyledLine becomes a Row; each span a
     // Text wrapped in a View carrying its diff background.
-    if is_diff_tool(&props.tool)
-        && (props.old_string.is_some() || props.new_string.is_some())
-    {
+    if is_diff_tool(&props.tool) && (props.old_string.is_some() || props.new_string.is_some()) {
         let lines = render_edit_write_diff_lines(
             &props.tool,
             props.old_string.as_deref(),

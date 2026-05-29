@@ -121,16 +121,20 @@ fn coalesce(spans: Vec<StyledSpan>) -> Vec<StyledSpan> {
     out
 }
 
-/// Apply a semicolon-separated SGR parameter string to `style`. Empty
-/// params (`\x1b[m`) reset. Unsupported codes are ignored. (256/truecolor
-/// extended forms land in Task 4.)
+/// Apply a semicolon-separated SGR parameter string to `style`. Walks the
+/// parameter list by index so the extended `38`/`48` color introducers can
+/// pull their `5;N` (indexed) or `2;r;g;b` (truecolor) sub-parameters.
+/// Empty params reset. Unsupported / truncated codes are ignored without
+/// panicking.
 fn apply_sgr(params: &str, style: &mut SpanStyle) {
     if params.is_empty() {
         *style = SpanStyle::default();
         return;
     }
-    for tok in params.split(';') {
-        let n: u16 = tok.parse().unwrap_or(0);
+    let parts: Vec<u16> = params.split(';').map(|t| t.parse().unwrap_or(0)).collect();
+    let mut idx = 0;
+    while idx < parts.len() {
+        let n = parts[idx];
         match n {
             0 => *style = SpanStyle::default(),
             1 => style.bold = true,
@@ -139,42 +143,75 @@ fn apply_sgr(params: &str, style: &mut SpanStyle) {
             22 => style.bold = false,
             23 => style.italic = false,
             24 => style.underline = false,
-            30 => style.fg = StyleColor::Named(NamedColor::Black),
-            31 => style.fg = StyleColor::Named(NamedColor::Red),
-            32 => style.fg = StyleColor::Named(NamedColor::Green),
-            33 => style.fg = StyleColor::Named(NamedColor::Yellow),
-            34 => style.fg = StyleColor::Named(NamedColor::Blue),
-            35 => style.fg = StyleColor::Named(NamedColor::Magenta),
-            36 => style.fg = StyleColor::Named(NamedColor::Cyan),
-            37 => style.fg = StyleColor::Named(NamedColor::White),
+            30..=37 => style.fg = StyleColor::Named(named_from_offset(n - 30)),
             39 => style.fg = StyleColor::Default,
-            40 => style.bg = StyleColor::Named(NamedColor::Black),
-            41 => style.bg = StyleColor::Named(NamedColor::Red),
-            42 => style.bg = StyleColor::Named(NamedColor::Green),
-            43 => style.bg = StyleColor::Named(NamedColor::Yellow),
-            44 => style.bg = StyleColor::Named(NamedColor::Blue),
-            45 => style.bg = StyleColor::Named(NamedColor::Magenta),
-            46 => style.bg = StyleColor::Named(NamedColor::Cyan),
-            47 => style.bg = StyleColor::Named(NamedColor::White),
+            40..=47 => style.bg = StyleColor::Named(named_from_offset(n - 40)),
             49 => style.bg = StyleColor::Default,
-            90 => style.fg = StyleColor::Named(NamedColor::BrightBlack),
-            91 => style.fg = StyleColor::Named(NamedColor::BrightRed),
-            92 => style.fg = StyleColor::Named(NamedColor::BrightGreen),
-            93 => style.fg = StyleColor::Named(NamedColor::BrightYellow),
-            94 => style.fg = StyleColor::Named(NamedColor::BrightBlue),
-            95 => style.fg = StyleColor::Named(NamedColor::BrightMagenta),
-            96 => style.fg = StyleColor::Named(NamedColor::BrightCyan),
-            97 => style.fg = StyleColor::Named(NamedColor::BrightWhite),
-            100 => style.bg = StyleColor::Named(NamedColor::BrightBlack),
-            101 => style.bg = StyleColor::Named(NamedColor::BrightRed),
-            102 => style.bg = StyleColor::Named(NamedColor::BrightGreen),
-            103 => style.bg = StyleColor::Named(NamedColor::BrightYellow),
-            104 => style.bg = StyleColor::Named(NamedColor::BrightBlue),
-            105 => style.bg = StyleColor::Named(NamedColor::BrightMagenta),
-            106 => style.bg = StyleColor::Named(NamedColor::BrightCyan),
-            107 => style.bg = StyleColor::Named(NamedColor::BrightWhite),
-            _ => { /* unsupported / extended (38/48) — handled in Task 4 */ }
+            90..=97 => style.fg = StyleColor::Named(bright_from_offset(n - 90)),
+            100..=107 => style.bg = StyleColor::Named(bright_from_offset(n - 100)),
+            38 => {
+                if let Some(color) = parse_extended_color(&parts, &mut idx) {
+                    style.fg = color;
+                }
+            }
+            48 => {
+                if let Some(color) = parse_extended_color(&parts, &mut idx) {
+                    style.bg = color;
+                }
+            }
+            _ => { /* unsupported code — ignore */ }
         }
+        idx += 1;
+    }
+}
+
+/// Parse the sub-parameters of a `38`/`48` introducer. `idx` points at the
+/// introducer (`38`/`48`); on success it is advanced past the consumed
+/// sub-parameters. Returns `None` (consuming nothing extra) on a truncated
+/// or unrecognized form.
+fn parse_extended_color(parts: &[u16], idx: &mut usize) -> Option<StyleColor> {
+    match parts.get(*idx + 1) {
+        Some(5) => {
+            let n = *parts.get(*idx + 2)?;
+            *idx += 2;
+            Some(StyleColor::Indexed(n as u8))
+        }
+        Some(2) => {
+            let r = *parts.get(*idx + 2)?;
+            let g = *parts.get(*idx + 3)?;
+            let b = *parts.get(*idx + 4)?;
+            *idx += 4;
+            Some(StyleColor::Rgb(r as u8, g as u8, b as u8))
+        }
+        _ => None,
+    }
+}
+
+/// Map an offset 0..=7 to the standard named color (SGR 30..=37 / 40..=47).
+fn named_from_offset(off: u16) -> NamedColor {
+    match off {
+        0 => NamedColor::Black,
+        1 => NamedColor::Red,
+        2 => NamedColor::Green,
+        3 => NamedColor::Yellow,
+        4 => NamedColor::Blue,
+        5 => NamedColor::Magenta,
+        6 => NamedColor::Cyan,
+        _ => NamedColor::White,
+    }
+}
+
+/// Map an offset 0..=7 to the bright named color (SGR 90..=97 / 100..=107).
+fn bright_from_offset(off: u16) -> NamedColor {
+    match off {
+        0 => NamedColor::BrightBlack,
+        1 => NamedColor::BrightRed,
+        2 => NamedColor::BrightGreen,
+        3 => NamedColor::BrightYellow,
+        4 => NamedColor::BrightBlue,
+        5 => NamedColor::BrightMagenta,
+        6 => NamedColor::BrightCyan,
+        _ => NamedColor::BrightWhite,
     }
 }
 
@@ -226,5 +263,45 @@ mod tests {
     #[test]
     fn malformed_unterminated_csi_does_not_panic() {
         let _ = parse_ansi("\x1b[31");
+    }
+
+    #[test]
+    fn fg_256_color_indexed() {
+        // 38;5;196 = bright red in the 256 palette.
+        let line = first_line("\x1b[38;5;196mX\x1b[0m");
+        assert_eq!(line.spans[0].text, "X");
+        assert_eq!(line.spans[0].style.fg, StyleColor::Indexed(196));
+    }
+
+    #[test]
+    fn bg_256_color_indexed() {
+        let line = first_line("\x1b[48;5;21mX\x1b[0m");
+        assert_eq!(line.spans[0].style.bg, StyleColor::Indexed(21));
+    }
+
+    #[test]
+    fn fg_truecolor_rgb() {
+        let line = first_line("\x1b[38;2;10;20;30mX\x1b[0m");
+        assert_eq!(line.spans[0].style.fg, StyleColor::Rgb(10, 20, 30));
+    }
+
+    #[test]
+    fn bg_truecolor_rgb() {
+        let line = first_line("\x1b[48;2;200;100;50mX\x1b[0m");
+        assert_eq!(line.spans[0].style.bg, StyleColor::Rgb(200, 100, 50));
+    }
+
+    #[test]
+    fn truecolor_mixed_with_bold() {
+        // bold + truecolor fg in one SGR.
+        let line = first_line("\x1b[1;38;2;1;2;3mX\x1b[0m");
+        assert!(line.spans[0].style.bold);
+        assert_eq!(line.spans[0].style.fg, StyleColor::Rgb(1, 2, 3));
+    }
+
+    #[test]
+    fn truncated_256_sequence_does_not_panic() {
+        // 38;5 with no index — must not panic, must not corrupt.
+        let _ = first_line("\x1b[38;5mtail");
     }
 }

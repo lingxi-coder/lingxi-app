@@ -1,0 +1,5 @@
+---
+source: crates/tui/tests/render_messages_batch1.rs
+expression: render_redacted_thinking_to_string()
+---
+✻ Thinking…

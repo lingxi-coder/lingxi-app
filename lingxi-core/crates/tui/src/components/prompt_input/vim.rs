@@ -595,6 +595,40 @@ impl<'a> VimCursor<'a> {
     }
 }
 
+/// claude-code `motions.ts::isInclusiveMotion` — `e E $` include the dest char.
+/// (`E` is a WORD-motion, deferred; kept in the set for parity but never reached
+/// because `motion_for_operator_key` does not map `E`.)
+#[must_use]
+fn is_inclusive_motion(key: char) -> bool {
+    matches!(key, 'e' | 'E' | '$')
+}
+
+/// claude-code `motions.ts::isLinewiseMotion` — `j k G` and the digraph `gg`.
+#[must_use]
+fn is_linewise_motion(key: &str) -> bool {
+    matches!(key, "j" | "k" | "G" | "gg")
+}
+
+/// Map an operator-pending motion key to its `Motion`. Returns `None` for keys
+/// that are not operator-eligible motions (those are handled elsewhere: 'f'/'g'
+/// start sub-states; the doubled op key is a line op).
+#[must_use]
+fn motion_for_operator_key(ch: char) -> Option<Motion> {
+    match ch {
+        'h' => Some(Motion::Left),
+        'l' => Some(Motion::Right),
+        'j' => Some(Motion::Down),
+        'k' => Some(Motion::Up),
+        'w' => Some(Motion::NextWord),
+        'b' => Some(Motion::PrevWord),
+        'e' => Some(Motion::EndWord),
+        '0' => Some(Motion::LineStart),
+        '^' => Some(Motion::FirstNonBlank),
+        '$' => Some(Motion::LineEnd),
+        _ => None,
+    }
+}
+
 fn apply_single_motion(m: Motion, c: VimCursor<'_>) -> VimCursor<'_> {
     match m {
         Motion::Left => c.left(),
@@ -1522,5 +1556,44 @@ mod m7_09_types_tests {
         assert_eq!(last_char_len("hi"), 1);
         assert_eq!(last_char_len("hé"), 2); // 'é' is 2 bytes
         assert_eq!(last_char_len(""), 1); // empty -> 1
+    }
+}
+
+#[cfg(test)]
+mod motion_class_tests {
+    use super::*;
+
+    #[test]
+    fn inclusive_motions_are_e_and_dollar() {
+        assert!(is_inclusive_motion('e'));
+        assert!(is_inclusive_motion('$'));
+        assert!(!is_inclusive_motion('w'));
+        assert!(!is_inclusive_motion('0'));
+        assert!(!is_inclusive_motion('h'));
+    }
+
+    #[test]
+    fn linewise_motions_are_jk_and_g() {
+        assert!(is_linewise_motion("j"));
+        assert!(is_linewise_motion("k"));
+        assert!(is_linewise_motion("G"));
+        assert!(is_linewise_motion("gg"));
+        assert!(!is_linewise_motion("w"));
+        assert!(!is_linewise_motion("$"));
+    }
+
+    #[test]
+    fn operator_motion_map_covers_required_keys() {
+        assert_eq!(motion_for_operator_key('w'), Some(Motion::NextWord));
+        assert_eq!(motion_for_operator_key('b'), Some(Motion::PrevWord));
+        assert_eq!(motion_for_operator_key('e'), Some(Motion::EndWord));
+        assert_eq!(motion_for_operator_key('$'), Some(Motion::LineEnd));
+        assert_eq!(motion_for_operator_key('0'), Some(Motion::LineStart));
+        assert_eq!(motion_for_operator_key('^'), Some(Motion::FirstNonBlank));
+        assert_eq!(motion_for_operator_key('h'), Some(Motion::Left));
+        assert_eq!(motion_for_operator_key('l'), Some(Motion::Right));
+        assert_eq!(motion_for_operator_key('j'), Some(Motion::Down));
+        assert_eq!(motion_for_operator_key('k'), Some(Motion::Up));
+        assert_eq!(motion_for_operator_key('z'), None);
     }
 }

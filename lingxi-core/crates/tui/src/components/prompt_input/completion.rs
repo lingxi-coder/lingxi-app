@@ -8,9 +8,10 @@
 
 use std::path::Path;
 
-use iocraft::prelude::KeyCode;
+use iocraft::prelude::*;
 
 use super::fuzzy::filtered_ranked;
+use crate::theme::TuiTheme;
 
 /// Max dropdown rows (shared with the palette; claude-code `OVERLAY_MAX_ITEMS`).
 pub const OVERLAY_MAX_ITEMS: usize = 5;
@@ -183,6 +184,47 @@ pub fn read_cwd_entries(dir: &Path) -> Vec<String> {
         .collect();
     out.sort_unstable();
     out
+}
+
+/// Props for the completion dropdown overlay.
+#[derive(Default, Props)]
+pub struct CompletionOverlayProps {
+    /// Filtered candidate paths.
+    pub rows: Vec<String>,
+    /// Highlighted row index.
+    pub selected: usize,
+    /// Whether the active `@` token has no partial text yet (drives the
+    /// empty-state literal).
+    pub empty_query: bool,
+}
+
+/// Render the `@` completion dropdown. Each row is `+ <path>` (claude-code
+/// file icon `+`). The empty state shows the QuickOpenDialog literal.
+#[component]
+pub fn CompletionOverlay(props: &CompletionOverlayProps) -> impl Into<AnyElement<'static>> {
+    let selected = props.selected;
+    if props.rows.is_empty() {
+        let msg = if props.empty_query { EMPTY_NO_QUERY } else { EMPTY_WITH_QUERY };
+        return element! {
+            View(height: 1) { Text(content: msg.to_string(), color: TuiTheme::DIM) }
+        }
+        .into_any();
+    }
+    let rows: Vec<_> = props.rows.iter().take(OVERLAY_MAX_ITEMS).cloned().collect();
+    element! {
+        View(flex_direction: FlexDirection::Column) {
+            #(rows.into_iter().enumerate().map(|(i, path)| {
+                let line = format!("+ {path}");
+                // TODO(M7-15): theme picker adds a dedicated "suggestion" token;
+                // until then the selected row reuses ASSISTANT and others DIM.
+                let color = if i == selected { TuiTheme::ASSISTANT } else { TuiTheme::DIM };
+                element! {
+                    View(height: 1) { Text(content: line, color: color) }
+                }
+            }))
+        }
+    }
+    .into_any()
 }
 
 #[cfg(test)]

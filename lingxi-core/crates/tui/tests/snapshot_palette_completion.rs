@@ -18,3 +18,26 @@ fn palette_dropdown_three_filtered_commands() {
     let out = render(element! { PaletteOverlay(rows: rows, selected: 0usize) });
     insta::assert_snapshot!(out);
 }
+
+use lingxi_tui::components::prompt_input::completion::CompletionOverlay;
+
+#[test]
+fn completion_dropdown_three_paths() {
+    let rows = vec![
+        "src/lib.rs".to_string(),
+        "src/main.rs".to_string(),
+        "README.md".to_string(),
+    ];
+    let out = render(element! {
+        CompletionOverlay(rows: rows, selected: 1usize, empty_query: false)
+    });
+    insta::assert_snapshot!(out);
+}
+
+#[test]
+fn completion_empty_state_no_query() {
+    let out = render(element! {
+        CompletionOverlay(rows: Vec::<String>::new(), selected: 0usize, empty_query: true)
+    });
+    insta::assert_snapshot!(out);
+}

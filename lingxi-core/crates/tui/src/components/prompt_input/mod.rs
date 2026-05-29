@@ -150,6 +150,34 @@ pub fn visual_row_count(text: &str, width: usize) -> usize {
     rows.max(1)
 }
 
+/// Move the cursor `delta` logical lines (`-1` up, `+1` down), preserving the
+/// grapheme column (clamped to the destination line). Returns the new byte
+/// cursor. At the top/bottom edge the cursor stays on its current line.
+#[must_use]
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+pub fn apply_move_vertical(text: &str, cursor: usize, delta: i32) -> usize {
+    let starts = line_starts(text);
+    let (line, col) = cursor_line_col(text, cursor);
+    let target_line = (line as i32 + delta).clamp(0, starts.len() as i32 - 1) as usize;
+    let line_start = starts[target_line];
+    let line_end = starts.get(target_line + 1).map_or(text.len(), |&s| s - 1); // drop the trailing '\n'
+    // Walk `col` graphemes into the destination line, clamping at its end.
+    let mut byte = line_start;
+    let dest = &text[line_start..line_end];
+    for (i, (off, g)) in dest.grapheme_indices(true).enumerate() {
+        if i == col {
+            byte = line_start + off;
+            break;
+        }
+        byte = line_start + off + g.len();
+    }
+    byte
+}
+
 /// Props for `PromptInput`.
 #[derive(Default, Props)]
 pub struct PromptInputProps {
@@ -254,6 +282,36 @@ mod tests {
     fn visual_rows_wrap_plus_newline() {
         // "0123456789" wraps to 3 (width 6 → usable 4), then "x" is 1 → 4 total.
         assert_eq!(visual_row_count("0123456789\nx", 6), 4);
+    }
+
+    #[test]
+    fn move_down_preserves_column() {
+        // "abc\ndef", cursor at line0 col2 (byte 2) → down → line1 col2 (byte 6).
+        assert_eq!(apply_move_vertical("abc\ndef", 2, 1), 6);
+    }
+
+    #[test]
+    fn move_up_preserves_column() {
+        // line1 col1 (byte 5) → up → line0 col1 (byte 1).
+        assert_eq!(apply_move_vertical("abc\ndef", 5, -1), 1);
+    }
+
+    #[test]
+    fn move_down_clamps_to_shorter_line() {
+        // line0 col3 (byte 3, end of "abc") → down → "de" only has col 0..2 → byte 6 (col2).
+        assert_eq!(apply_move_vertical("abc\nde", 3, 1), 6);
+    }
+
+    #[test]
+    fn move_up_at_top_is_noop_to_target_col_on_line0() {
+        // Already on line 0 → up clamps to line 0 (same line), column preserved.
+        assert_eq!(apply_move_vertical("abc\ndef", 1, -1), 1);
+    }
+
+    #[test]
+    fn move_down_at_bottom_is_noop() {
+        // Already on last line → down stays (column preserved on same line).
+        assert_eq!(apply_move_vertical("abc\ndef", 5, 1), 5);
     }
 
     #[test]

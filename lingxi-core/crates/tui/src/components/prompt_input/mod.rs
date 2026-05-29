@@ -24,6 +24,7 @@ pub mod footer;
 pub use footer::{FooterMode, PromptInputFooter, PromptInputFooterProps};
 
 pub mod fuzzy;
+pub mod palette;
 
 /// Cursor movement primitive for the line editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

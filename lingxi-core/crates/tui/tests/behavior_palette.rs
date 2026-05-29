@@ -125,3 +125,16 @@ fn at_token_after_text_opens_completion_not_palette() {
     assert!(!st.palette.open, "no leading / → palette stays closed");
     assert!(st.completion.open, "@ after text opens completion");
 }
+
+#[test]
+fn m7_07_registers_no_new_telemetry_events() {
+    // Decision D2: tengu_tui_command_palette_opened is DEFERRED to M7-16.
+    // M7-07 must not register it. If this fails, an event leaked in early —
+    // remove it (the count audit happens once, in M7-16).
+    let names = lingxi_telemetry::tengu::ALL_EVENT_NAMES;
+    assert_eq!(names.len(), 326, "M7-07 adds zero events (D2)");
+    assert!(
+        !names.contains(&"tengu_tui_command_palette_opened"),
+        "palette telemetry is deferred to M7-16"
+    );
+}

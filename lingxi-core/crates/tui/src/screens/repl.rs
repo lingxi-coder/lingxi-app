@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use iocraft::prelude::*;
 use lingxi_protocol::ToolUseId;
 
-use crate::components::prompt_input::PromptInput;
+use crate::components::prompt_input::{PromptInput, PromptInputFooter};
 use crate::components::spinner::SpinnerWithVerb;
 use crate::components::status_line::StatusLine;
 use crate::components::virtual_message_list::{HeightCache, VirtualMessageList};
@@ -42,6 +42,8 @@ pub struct ReplScreenProps {
     pub prompt_text: String,
     /// Cursor byte index in `prompt_text`.
     pub prompt_cursor: usize,
+    /// Total terminal width — drives the prompt's wrap + content height.
+    pub prompt_width: usize,
     /// Scroll offset (0 = latest at bottom).
     pub scroll_offset: usize,
     /// Live viewport height (rows available for the scrollback).
@@ -67,6 +69,8 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let cache = props.cache.clone();
     let prompt_text = props.prompt_text.clone();
     let prompt_cursor = props.prompt_cursor;
+    let prompt_width = props.prompt_width;
+    let prompt_is_empty = props.prompt_text.is_empty();
     let scroll_offset = props.scroll_offset;
     let viewport_height = props.viewport_height;
     let show_spinner = props.show_spinner;
@@ -97,6 +101,12 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             PromptInput(
                 text: prompt_text,
                 cursor: prompt_cursor,
+                width: prompt_width,
+            )
+            PromptInputFooter(
+                mode: crate::components::prompt_input::FooterMode::Prompt,
+                placeholder: None,
+                is_empty: prompt_is_empty,
             )
         }
     }

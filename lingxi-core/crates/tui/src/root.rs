@@ -319,7 +319,8 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
     {
         let state = state.clone();
         let mut tick_for_keys = tick;
-        let viewport = viewport_height(rows);
+        let key_rows = rows;
+        let key_cols = cols;
         hooks.use_terminal_events(move |ev| match ev {
             TerminalEvent::Key(k) if k.kind != KeyEventKind::Release => {
                 // Lock briefly to route the key. `try_lock` because we're in
@@ -328,6 +329,15 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 let Ok(mut st) = state.try_lock() else {
                     return;
                 };
+                // (M7-06) Compute the scrollback viewport from the LIVE prompt
+                // height so the scroll math shrinks as the prompt grows. The
+                // prompt is content-driven (1 → N rows) + a 2-row footer, so
+                // the viewport is `rows - (FIXED_CHROME_ROWS + prompt rows)`.
+                let prompt_rows = crate::components::prompt_input::visual_row_count(
+                    &st.prompt_text,
+                    viewport_width(key_cols),
+                );
+                let viewport = viewport_height(key_rows, prompt_rows);
                 handle_live_key(&mut st, &k, viewport);
                 drop(st);
                 tick_for_keys.set(tick_for_keys.get().wrapping_add(1));
@@ -387,8 +397,16 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
             prev_streaming.set(cur_streaming);
         }
         let should_quit = st.should_exit;
-        let viewport = viewport_height(rows);
         let vp_width = viewport_width(cols);
+        // (M7-06) The scrollback viewport shrinks as the prompt grows: the
+        // prompt zone is content-driven (1 → N rows) and a 2-row footer sits
+        // below it, so reserve `FIXED_CHROME_ROWS + prompt rows`. Computing
+        // `viewport` from the SAME `visual_row_count` the `PromptInput`
+        // component uses keeps M7-03's `render_window` clamp in lock-step with
+        // the real layout (no scrollback/prompt overlap or gap).
+        let prompt_rows =
+            crate::components::prompt_input::visual_row_count(&st.prompt_text, vp_width);
+        let viewport = viewport_height(rows, prompt_rows);
         // (M7-03) Refresh the line-height cache to the live width before
         // rendering so windowing + scroll clamp math agree on `total_lines`.
         st.refresh_height_cache(vp_width);
@@ -420,12 +438,26 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
     element
 }
 
-/// Compute the viewport height for the scrollback given the live terminal
-/// `rows`. The REPL screen reserves: 1 row for the status line + 1 for the
-/// prompt + 1 for the optional spinner. We deliberately reserve the spinner
-/// row even when it's hidden so the scrollback doesn't jitter on `TurnStart`.
-fn viewport_height(rows: u16) -> usize {
-    usize::from(rows.saturating_sub(3))
+/// Fixed (non-prompt) chrome rows the REPL screen reserves around the
+/// scrollback: 1 status line + 1 spinner row (always reserved so the
+/// scrollback doesn't jitter on `TurnStart`) + 2 footer rows (the
+/// mode-indicator/placeholder row + the help/newline hint row from
+/// [`crate::components::prompt_input::PromptInputFooter`]).
+const FIXED_CHROME_ROWS: usize = 4;
+
+/// Compute the scrollback viewport height given the live terminal `rows` and
+/// the **current prompt height** (`prompt_visual_rows`, from
+/// [`crate::components::prompt_input::visual_row_count`]).
+///
+/// (M7-06) The prompt zone is now content-driven (1 → N rows) and a 2-row
+/// footer sits below it, so the scrollback's available height is
+/// `rows - (FIXED_CHROME_ROWS + prompt_visual_rows)`, NOT the old fixed
+/// `rows - 3`. Feeding the stale `rows - 3` to M7-03's `render_window` /
+/// `scroll_with_viewport` while the prompt is N rows tall would overlap or
+/// gap the scrollback against the prompt; this keeps the windowing math in
+/// lock-step with the real layout.
+fn viewport_height(rows: u16, prompt_visual_rows: usize) -> usize {
+    usize::from(rows).saturating_sub(FIXED_CHROME_ROWS + prompt_visual_rows)
 }
 
 /// Columns available to the scrollback. The REPL reserves no horizontal
@@ -439,10 +471,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn viewport_height_subtracts_three_rows() {
-        assert_eq!(viewport_height(24), 21);
-        assert_eq!(viewport_height(3), 0);
-        assert_eq!(viewport_height(0), 0);
+    fn viewport_height_reserves_fixed_chrome_plus_single_prompt_row() {
+        // Single-line prompt (1 visual row) → reserve FIXED_CHROME_ROWS(4) + 1
+        // = 5 rows. 24 rows → 19 visible; saturates to 0 below the floor.
+        assert_eq!(viewport_height(24, 1), 19);
+        assert_eq!(viewport_height(5, 1), 0);
+        assert_eq!(viewport_height(0, 1), 0);
+    }
+
+    /// (M7-06 viewport seam) When the prompt grows to N visual rows, the
+    /// scrollback viewport height drops by exactly (N-1) versus the single-row
+    /// case — the prompt zone eats into the scrollback, and the footer's 2
+    /// fixed rows are already counted by `FIXED_CHROME_ROWS`. This pins the
+    /// scroll/window math (`render_window` / `scroll_with_viewport`) against
+    /// the now-variable prompt+footer height so they never overlap or gap.
+    #[test]
+    fn viewport_height_shrinks_as_prompt_grows() {
+        let rows = 24u16;
+        let single = viewport_height(rows, 1);
+        // A 3-line prompt steals 2 extra rows from the scrollback.
+        let three = viewport_height(rows, 3);
+        assert_eq!(single - three, 2, "3-row prompt drops viewport by (3-1)=2");
+        // Generalised: N rows drops the viewport by (N-1) vs. the 1-row case.
+        for n in 1..=10usize {
+            assert_eq!(
+                viewport_height(rows, n),
+                single.saturating_sub(n - 1),
+                "prompt of {n} rows must drop viewport by {} vs single-line",
+                n - 1
+            );
+        }
+        // The 2-row footer is baked into FIXED_CHROME_ROWS: single-row prompt
+        // reserves status(1)+spinner(1)+footer(2)+prompt(1) = 5.
+        assert_eq!(single, usize::from(rows) - 5);
     }
 
     #[test]

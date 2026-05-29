@@ -365,6 +365,7 @@ pub fn render_screen(
             cache: cache,
             prompt_text: prompt_text,
             prompt_cursor: prompt_cursor,
+            prompt_width: vp_width,
             scroll_offset: scroll_offset,
             viewport_height: viewport_height,
             show_spinner: show_spinner,

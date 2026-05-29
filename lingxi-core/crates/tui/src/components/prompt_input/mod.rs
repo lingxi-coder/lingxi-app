@@ -184,21 +184,48 @@ pub fn apply_move_vertical(text: &str, cursor: usize, delta: i32) -> usize {
 /// Props for `PromptInput`.
 #[derive(Default, Props)]
 pub struct PromptInputProps {
-    /// Current text in the prompt buffer.
+    /// Current text in the prompt buffer (may contain `\n`).
     pub text: String,
-    /// Byte-index cursor position (unused visually in M6-02 — wraps in M7).
+    /// Byte-index cursor position (always at a char boundary).
     pub cursor: usize,
+    /// Total terminal column width (drives wrap + height). 0 → treat as 80.
+    pub width: usize,
 }
 
-/// Render the prompt line. M6-02 emits a single row with `"> "` marker;
-/// multi-line wrapping arrives in M7.
+/// Render the prompt zone. M7-06 emits one `Text` row per logical line: the
+/// first carries the `"> "` marker, the rest are indented 2 columns to align
+/// under it. The outer `View`'s height grows with [`visual_row_count`].
 #[component]
+#[allow(clippy::cast_possible_truncation)]
 pub fn PromptInput(props: &PromptInputProps) -> impl Into<AnyElement<'static>> {
-    let _ = props.cursor; // cursor visualisation is a M7 enhancement
-    let display = format!("> {}", props.text);
+    let _ = props.cursor; // cursor glyph rendering remains an M7-08 (vim) enhancement
+    let width = if props.width == 0 { 80 } else { props.width };
+    let starts = line_starts(&props.text);
+    let height = visual_row_count(&props.text, width);
+    // One Text per logical line; first line carries the "> " marker, the rest
+    // are indented by 2 columns to align under it.
+    let lines: Vec<(usize, String)> = starts
+        .iter()
+        .enumerate()
+        .map(|(i, &start)| {
+            let end = starts.get(i + 1).map_or(props.text.len(), |&s| s - 1);
+            (i, props.text[start..end].to_string())
+        })
+        .collect();
     element! {
-        View(flex_direction: FlexDirection::Row, height: 1) {
-            Text(content: display)
+        View(flex_direction: FlexDirection::Column, height: height as u16) {
+            #(lines.into_iter().map(|(i, content)| {
+                let display = if i == 0 {
+                    format!("> {content}")
+                } else {
+                    format!("  {content}")
+                };
+                element! {
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: display)
+                    }
+                }
+            }))
         }
     }
 }
@@ -361,5 +388,23 @@ mod tests {
         assert_eq!(c, 3); // skipped 'é' as a whole.
         let c = apply_move(text, 3, CursorMove::Left);
         assert_eq!(c, 1);
+    }
+
+    #[test]
+    fn prompt_input_renders_three_lines() {
+        let mut el =
+            element! { PromptInput(text: "a\nb\nc".to_string(), cursor: 0usize, width: 80usize) };
+        let out = el.to_string();
+        assert!(out.contains("> a"), "got: {out}");
+        assert!(out.contains("  b"), "got: {out}");
+        assert!(out.contains("  c"), "got: {out}");
+    }
+
+    #[test]
+    fn prompt_input_single_line_unchanged() {
+        let mut el =
+            element! { PromptInput(text: "hi".to_string(), cursor: 0usize, width: 80usize) };
+        let out = el.to_string();
+        assert!(out.contains("> hi"), "got: {out}");
     }
 }

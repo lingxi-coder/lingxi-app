@@ -27,6 +27,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{dispatch, scroll_with_viewport};
+use crate::components::prompt_input::completion::CompletionKeyOutcome;
+use crate::components::prompt_input::palette::PaletteKeyOutcome;
 use crate::events::keymap::{CursorMove, KeyAction, ScrollDir};
 use crate::events::orchestrator_bridge::TurnEvent;
 use crate::state::AppState;
@@ -194,14 +196,60 @@ fn iocraft_to_crossterm028_key(k: &KeyEvent) -> crossterm::event::KeyEvent {
 /// (`map_iocraft_key` → `dispatch` / `scroll_with_viewport`).
 ///
 /// `viewport` is the scrollback viewport height (rows minus reserved chrome).
+#[allow(clippy::too_many_lines)]
 pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
-    // === FOCUS TRAP: a permission dialog owns all keys while open. ===
+    // === Priority 1: permission focus-trap (M6-05). A permission dialog owns
+    // all keys while open — it MUST win even over an open palette/completion
+    // overlay (priority 3 below), so it returns first. ===
     if st.pending_permission.is_some() {
         let ct_key = iocraft_to_crossterm028_key(k);
         let _ = crate::events::keymap::handle_key(st, ct_key);
         return;
     }
-    // === end focus trap ===
+    // === end priority 1 ===
+
+    // === Priority 2: active screen (M7-11+). ===
+    // NOTE: if a screen branch has already landed it lives here, before the
+    // overlay branch. Leave it untouched. (Not present until M7-11.)
+
+    // === Priority 3: palette / completion overlay focus-trap (M7-07). While an
+    // overlay is open it owns EVERY key until Esc/accept; consumed/navigation
+    // keys `return` so they never reach the default editor path. PassThrough
+    // falls through (e.g. a printable char re-runs the editor, then the tail
+    // re-sync re-opens/refilters the overlay). Only one overlay is open at a
+    // time (palette wins on `/`). ===
+    if st.palette.open {
+        match st.palette.handle_key(k.code) {
+            PaletteKeyOutcome::Consumed | PaletteKeyOutcome::Dismiss => return,
+            PaletteKeyOutcome::Accept(text) => {
+                st.prompt_cursor = text.len();
+                st.prompt_text = text;
+                st.palette.sync_from_prompt(&st.prompt_text);
+                return;
+            }
+            PaletteKeyOutcome::PassThrough => { /* fall through to default edit */ }
+        }
+    } else if st.completion.open {
+        match st
+            .completion
+            .handle_key_with_prompt(k.code, &st.prompt_text, st.prompt_cursor)
+        {
+            CompletionKeyOutcome::Consumed | CompletionKeyOutcome::Dismiss => return,
+            CompletionKeyOutcome::Accept {
+                new_prompt,
+                new_cursor,
+            } => {
+                st.prompt_text = new_prompt;
+                st.prompt_cursor = new_cursor;
+                let candidates = st.completion.candidates.clone();
+                st.completion
+                    .sync(&st.prompt_text, st.prompt_cursor, &candidates);
+                return;
+            }
+            CompletionKeyOutcome::PassThrough => { /* fall through */ }
+        }
+    }
+    // === end priority 3 ===
 
     let prompt_empty = st.prompt_text.is_empty();
     // Multi-line buffers route Up/Down to vertical cursor motion (Task 9).
@@ -229,6 +277,19 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
         } else {
             let _ = dispatch(action, st);
         }
+    }
+
+    // === Re-sync overlays after a default-path edit (M7-07). ===
+    // Palette wins when the buffer is a `/command` token; otherwise check the
+    // `@` token against a fresh cwd listing. Only one overlay is open at a time.
+    st.palette.sync_from_prompt(&st.prompt_text);
+    if st.palette.open {
+        st.completion.open = false;
+    } else {
+        let cwd_entries =
+            crate::components::prompt_input::completion::read_cwd_entries(&st.status.cwd);
+        st.completion
+            .sync(&st.prompt_text, st.prompt_cursor, &cwd_entries);
     }
 }
 

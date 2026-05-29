@@ -1,0 +1,8 @@
+---
+source: crates/tui/tests/render_diff.rs
+expression: "structure(&render(\"foo\\nkeep\\n\", \"bar\\nkeep\\n\", Some(\"x.rs\"), &TuiTheme))"
+---
+[C]@@ -1,2 +1,2 @@
+[C]1 - [C]foo
+[C]1 + [C]bar
+[C]2   [C]keep

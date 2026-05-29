@@ -1,0 +1,5 @@
+---
+source: crates/tui/tests/render_diff.rs
+expression: s
+---
+

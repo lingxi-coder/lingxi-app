@@ -1,4 +1,4 @@
-//! Structure snapshots for render::syntax (M7-02).
+//! Structure snapshots for `render::syntax` (M7-02).
 //! PARITY (design §0 Q3): we snapshot STRUCTURE — line count, and per span
 //! whether it is "colored" (fg != default) or "plain" — NOT exact colors.
 //! Concrete colors are normalized so a syntect theme bump never breaks us.
@@ -9,23 +9,24 @@ use lingxi_tui::theme::TuiTheme;
 /// Render each line as "C"/"P" per span (Colored / Plain) + the text, so the
 /// snapshot captures structure without baking in concrete ANSI colors.
 fn structure(lines: &[StyledLine]) -> String {
-    lines
-        .iter()
-        .map(|l| {
-            l.spans
-                .iter()
-                .map(|s| {
-                    let flag = if s.style.fg != StyleColor::Default {
-                        'C'
-                    } else {
-                        'P'
-                    };
-                    format!("[{flag}]{}", s.text)
-                })
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut out = String::new();
+    for (i, l) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        for s in &l.spans {
+            let flag = if s.style.fg == StyleColor::Default {
+                'P'
+            } else {
+                'C'
+            };
+            out.push('[');
+            out.push(flag);
+            out.push(']');
+            out.push_str(&s.text);
+        }
+    }
+    out
 }
 
 #[test]

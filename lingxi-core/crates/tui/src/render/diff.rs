@@ -264,20 +264,140 @@ fn word_row(row: &DiffRow, gutter_w: usize, content: Vec<StyledSpan>, theme: &Tu
     StyledLine { spans }
 }
 
+/// Hard cap on rendered diff body lines (claude-code shows a "… N more lines"
+/// footer past a budget). Mirrors the M6 UserToolResult MAX_LINES intent.
+pub const MAX_DIFF_LINES: usize = 100;
+
+/// Context radius for grouped (unified-diff) hunks — 3 lines, matching the
+/// unified-diff default.
+const CONTEXT_RADIUS: usize = 3;
+
+/// Build a "@@ -oldStart,oldLen +newStart,newLen @@" header line. claude-code
+/// renders hunk headers dim/cyan.
+fn hunk_header(old_start: usize, old_len: usize, new_start: usize, new_len: usize) -> StyledLine {
+    StyledLine {
+        spans: vec![StyledSpan::styled(
+            format!("@@ -{old_start},{old_len} +{new_start},{new_len} @@"),
+            SpanStyle {
+                fg: StyleColor::Named(NamedColor::BrightBlack),
+                ..SpanStyle::default()
+            },
+        )],
+    }
+}
+
+/// A "… {n} more lines" truncation footer (dim).
+fn truncation_footer(n: usize) -> StyledLine {
+    StyledLine {
+        spans: vec![StyledSpan::styled(
+            format!("… {n} more lines"),
+            SpanStyle {
+                fg: StyleColor::Named(NamedColor::BrightBlack),
+                ..SpanStyle::default()
+            },
+        )],
+    }
+}
+
+/// A unified-diff hunk header quadruple: `(old_start, old_len, new_start,
+/// new_len)` with 1-based starts.
+type HunkHeader = (usize, usize, usize, usize);
+
+/// Group the diff into unified-diff hunks. Returns, per hunk, the header
+/// quadruple and the rows of that hunk.
+fn grouped_hunks(old: &str, new: &str) -> Vec<(HunkHeader, Vec<DiffRow>)> {
+    let diff = TextDiff::from_lines(old, new);
+    let mut hunks = Vec::new();
+    for group in diff.grouped_ops(CONTEXT_RADIUS) {
+        if group.is_empty() {
+            continue;
+        }
+        let old_start = group.first().map_or(0, |op| op.old_range().start);
+        let old_end = group.last().map_or(0, |op| op.old_range().end);
+        let new_start = group.first().map_or(0, |op| op.new_range().start);
+        let new_end = group.last().map_or(0, |op| op.new_range().end);
+        let mut rows = Vec::new();
+        for op in &group {
+            for change in diff.iter_changes(op) {
+                let text = change.value().trim_end_matches('\n').to_string();
+                let (kind, line_no) = match change.tag() {
+                    ChangeTag::Delete => (
+                        LineKind::Remove,
+                        change.old_index().map_or(0, |i| i + 1),
+                    ),
+                    ChangeTag::Insert => {
+                        (LineKind::Add, change.new_index().map_or(0, |i| i + 1))
+                    }
+                    ChangeTag::Equal => (
+                        LineKind::Context,
+                        change.new_index().map_or(0, |i| i + 1),
+                    ),
+                };
+                rows.push(DiffRow {
+                    kind,
+                    text,
+                    line_no,
+                });
+            }
+        }
+        hunks.push((
+            (
+                old_start + 1,
+                old_end - old_start,
+                new_start + 1,
+                new_end - new_start,
+            ),
+            rows,
+        ));
+    }
+    hunks
+}
+
 /// Render a structured diff of `old` → `new`. `path` drives syntax language
-/// detection (claude-code's `filePath` prop). Never panics.
+/// detection (claude-code's `filePath` prop). Hunks are separated by unified
+/// `@@` headers; output past `MAX_DIFF_LINES` body rows is truncated with a
+/// "… N more lines" footer. Never panics.
 #[must_use]
 pub fn render(old: &str, new: &str, path: Option<&str>, theme: &TuiTheme) -> Vec<StyledLine> {
-    let rows = diff_rows(old, new);
-    if rows.is_empty() {
+    let hunks = grouped_hunks(old, new);
+    if hunks.is_empty() {
         return Vec::new();
     }
-    // Gutter width = widest line number, right-aligned.
-    let max_no = rows.iter().map(|r| r.line_no).max().unwrap_or(1);
+    // Gutter width = widest line number across all hunks, right-aligned.
+    let max_no = hunks
+        .iter()
+        .flat_map(|(_, rows)| rows.iter().map(|r| r.line_no))
+        .max()
+        .unwrap_or(1);
     let gutter_w = max_no.to_string().len();
     let lang = syntax::detect_language(None, path);
 
-    layout_rows(&rows, gutter_w, lang.as_deref(), theme)
+    // Total body rows across all hunks (excludes headers) — used for the
+    // truncation footer count.
+    let total_body: usize = hunks.iter().map(|(_, rows)| rows.len()).sum();
+
+    let mut out: Vec<StyledLine> = Vec::new();
+    let mut body_emitted = 0usize;
+    let mut truncated = false;
+    'hunks: for (header, rows) in hunks {
+        let (os, ol, ns, nl) = header;
+        out.push(hunk_header(os, ol, ns, nl));
+        let laid = layout_rows(&rows, gutter_w, lang.as_deref(), theme);
+        // `laid` has one line per row (word-diff pairs are 1:1 with rows), so
+        // body_emitted tracks row count directly.
+        for line in laid {
+            if body_emitted >= MAX_DIFF_LINES {
+                truncated = true;
+                break 'hunks;
+            }
+            out.push(line);
+            body_emitted += 1;
+        }
+    }
+    if truncated {
+        out.push(truncation_footer(total_body - body_emitted));
+    }
+    out
 }
 
 /// Lay out a slice of diff rows into styled lines, pairing adjacent
@@ -313,19 +433,16 @@ fn layout_rows(
                 let add = &adds[k];
                 let rb = remove_bg(theme);
                 let ab = add_bg(theme);
-                match (
+                if let (Some(rem_spans), Some(add_spans)) = (
                     word_diff_spans(&rem.text, &add.text, false, theme, rb),
                     word_diff_spans(&rem.text, &add.text, true, theme, ab),
                 ) {
-                    (Some(rem_spans), Some(add_spans)) => {
-                        out.push(word_row(rem, gutter_w, rem_spans, theme));
-                        out.push(word_row(add, gutter_w, add_spans, theme));
-                    }
-                    _ => {
-                        // Too dissimilar — whole-line coloring for both.
-                        out.push(plain_row(rem, gutter_w, lang, theme));
-                        out.push(plain_row(add, gutter_w, lang, theme));
-                    }
+                    out.push(word_row(rem, gutter_w, rem_spans, theme));
+                    out.push(word_row(add, gutter_w, add_spans, theme));
+                } else {
+                    // Too dissimilar — whole-line coloring for both.
+                    out.push(plain_row(rem, gutter_w, lang, theme));
+                    out.push(plain_row(add, gutter_w, lang, theme));
                 }
             }
             for rem in &removes[pairs..] {
@@ -349,6 +466,16 @@ mod tests {
     /// Render a row to its concatenated text for structural assertion.
     fn rowline(l: &StyledLine) -> String {
         l.spans.iter().map(|s| s.text.clone()).collect()
+    }
+
+    /// Is this a `@@ ... @@` hunk header line?
+    fn is_header(l: &StyledLine) -> bool {
+        rowline(l).contains("@@")
+    }
+
+    /// Body (non-header) lines only.
+    fn body(lines: &[StyledLine]) -> Vec<&StyledLine> {
+        lines.iter().filter(|l| !is_header(l)).collect()
     }
 
     #[test]
@@ -389,12 +516,13 @@ mod tests {
     #[test]
     fn render_pure_add_has_plus_sigil_and_green_bg() {
         let lines = render("a\n", "a\nb\n", Some("x.txt"), &TuiTheme);
-        assert_eq!(lines.len(), 2);
-        // The add line's rendered text contains "+" sigil and the content "b".
-        let add = &lines[1];
+        // The add line carries a "+" sigil and the content "b", over green bg.
+        let add = lines
+            .iter()
+            .find(|l| !is_header(l) && rowline(l).contains('+'))
+            .expect("an add line");
         let joined = rowline(add);
-        assert!(joined.contains('+'), "add line carries + sigil: {joined:?}");
-        assert!(joined.contains('b'));
+        assert!(joined.contains('b'), "add line content: {joined:?}");
         // At least one span on the add line has the green add background.
         assert!(
             add.spans.iter().any(|s| s.style.bg == add_bg(&TuiTheme)),
@@ -407,7 +535,7 @@ mod tests {
         let lines = render("a\nb\n", "a\n", Some("x.txt"), &TuiTheme);
         let rem = lines
             .iter()
-            .find(|l| rowline(l).contains('-'))
+            .find(|l| !is_header(l) && rowline(l).contains('-'))
             .expect("a - line");
         assert!(rowline(rem).contains('b'));
         assert!(
@@ -419,22 +547,17 @@ mod tests {
     #[test]
     fn render_gutter_has_line_numbers() {
         let lines = render("a\n", "a\nb\n", Some("x.txt"), &TuiTheme);
+        let rows = body(&lines);
         // Context line "a" is line 1, add line "b" is line 2.
-        assert!(rowline(&lines[0]).contains('1'));
-        assert!(rowline(&lines[1]).contains('2'));
+        assert!(rows.iter().any(|l| rowline(l).contains('1')));
+        assert!(rows.iter().any(|l| rowline(l).contains('2')));
     }
 
     #[test]
-    fn render_empty_diff_all_context_no_sigils() {
+    fn render_empty_diff_is_empty() {
+        // No changes -> no hunks -> empty output (claude-code renders nothing).
         let lines = render("a\nb\n", "a\nb\n", Some("x.txt"), &TuiTheme);
-        assert_eq!(lines.len(), 2);
-        for l in &lines {
-            let j = rowline(l);
-            assert!(
-                !j.contains('+') && !j.contains('-'),
-                "context lines carry neither + nor - sigil: {j:?}"
-            );
-        }
+        assert!(lines.is_empty());
     }
 
     #[test]
@@ -447,9 +570,15 @@ mod tests {
             Some("x.js"),
             &TuiTheme,
         );
-        // One remove row + one add row.
-        let rem = lines.iter().find(|l| rowline(l).contains('-')).unwrap();
-        let add = lines.iter().find(|l| rowline(l).contains('+')).unwrap();
+        // One remove row + one add row (skip the @@ header).
+        let rem = lines
+            .iter()
+            .find(|l| !is_header(l) && rowline(l).contains('-'))
+            .unwrap();
+        let add = lines
+            .iter()
+            .find(|l| !is_header(l) && rowline(l).contains('+'))
+            .unwrap();
         // The changed-word span ("oldName"/"newName") carries the EMPHASIS bg,
         // while the unchanged "function "/"(param)" spans carry the line bg.
         assert!(rem
@@ -472,12 +601,49 @@ mod tests {
         // Wildly different lines (> CHANGE_THRESHOLD changed) fall back to
         // whole-line coloring: no word-emphasis spans.
         let lines = render("aaaaaaaa\n", "zzzzzzzz\n", Some("x.txt"), &TuiTheme);
-        let add = lines.iter().find(|l| rowline(l).contains('+')).unwrap();
+        let add = lines
+            .iter()
+            .find(|l| !is_header(l) && rowline(l).contains('+'))
+            .unwrap();
         assert!(
             add.spans
                 .iter()
                 .all(|s| s.style.bg != add_word_bg(&TuiTheme)),
             "dissimilar lines use whole-line coloring, not word emphasis"
         );
+    }
+
+    #[test]
+    fn render_with_separated_changes_emits_hunk_header() {
+        // Two change clusters separated by a long unchanged run -> the second
+        // cluster is preceded by a hunk header "@@ ... @@".
+        let old = (1..=40).map(|n| format!("line{n}")).collect::<Vec<_>>().join("\n") + "\n";
+        let mut new_lines: Vec<String> = (1..=40).map(|n| format!("line{n}")).collect();
+        new_lines[2] = "CHANGED_TOP".into();
+        new_lines[37] = "CHANGED_BOTTOM".into();
+        let new = new_lines.join("\n") + "\n";
+        let lines = render(&old, &new, Some("x.txt"), &TuiTheme);
+        let headers = lines.iter().filter(|l| rowline(l).contains("@@")).count();
+        assert!(headers >= 1, "separated change clusters produce hunk header(s)");
+    }
+
+    #[test]
+    fn render_truncates_large_diff_with_footer() {
+        // A diff with > MAX_DIFF_LINES changed lines is truncated with a footer.
+        let old = String::new();
+        let new = (0..(MAX_DIFF_LINES + 50))
+            .map(|n| format!("add{n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let lines = render(&old, &new, Some("x.txt"), &TuiTheme);
+        // Body capped at MAX_DIFF_LINES; total = 1 header + cap + 1 footer.
+        assert!(
+            lines.len() <= MAX_DIFF_LINES + 2,
+            "truncated to header + cap + footer, got {}",
+            lines.len()
+        );
+        let last = rowline(lines.last().unwrap());
+        assert!(last.contains("more lines"), "truncation footer present: {last:?}");
     }
 }

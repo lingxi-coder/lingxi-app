@@ -1,0 +1,7 @@
+---
+source: crates/tui/tests/render_messages_batch1.rs
+expression: s
+---
+Shutdown rejected by agent-2
+Reason: still working
+Teammate is continuing to work. You may request shutdown again later.

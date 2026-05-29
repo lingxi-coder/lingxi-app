@@ -1,0 +1,6 @@
+---
+source: crates/tui/tests/render_messages_batch1.rs
+expression: s
+---
+Shutdown request from agent-2
+Reason: task done

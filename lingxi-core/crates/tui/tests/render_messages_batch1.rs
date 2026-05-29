@@ -1,13 +1,15 @@
 //! M7-04 batch-1 renderer snapshots.
+use lingxi_tui::components::messages::advisor::{render_advisor_to_string, AdvisorProps};
 use lingxi_tui::components::messages::compact_boundary::render_compact_boundary_to_string;
 use lingxi_tui::components::messages::rate_limit::{render_rate_limit_to_string, RateLimitProps};
 use lingxi_tui::components::messages::redacted_thinking::render_redacted_thinking_to_string;
+use lingxi_tui::components::messages::shutdown::{render_shutdown_to_string, ShutdownProps};
 use lingxi_tui::components::messages::system_api_error::{
     render_system_api_error_to_string, SystemApiErrorProps,
 };
 use lingxi_tui::components::messages::system_text::{render_system_text_to_string, SystemTextProps};
 use lingxi_tui::components::messages::thinking::{render_thinking_to_string, ThinkingProps};
-use lingxi_tui::state::SystemLevel;
+use lingxi_tui::state::{AdvisorKind, SystemLevel};
 
 #[test]
 fn thinking_collapsed() {
@@ -98,4 +100,46 @@ fn rate_limit_no_upsell() {
         upsell: None,
     });
     insta::assert_snapshot!("rate_limit_no_upsell", s);
+}
+
+#[test]
+fn shutdown_request_with_reason() {
+    let s = render_shutdown_to_string(ShutdownProps {
+        from: "agent-2".into(),
+        reason: Some("task done".into()),
+        rejected: false,
+    });
+    insta::assert_snapshot!("shutdown_request_with_reason", s);
+}
+
+#[test]
+fn shutdown_rejected() {
+    let s = render_shutdown_to_string(ShutdownProps {
+        from: "agent-2".into(),
+        reason: Some("still working".into()),
+        rejected: true,
+    });
+    insta::assert_snapshot!("shutdown_rejected", s);
+}
+
+#[test]
+fn advisor_result_collapsed() {
+    let s = render_advisor_to_string(AdvisorProps {
+        kind: AdvisorKind::Result {
+            text: "Looks good.".into(),
+        },
+        verbose: false,
+    });
+    insta::assert_snapshot!("advisor_result_collapsed", s);
+}
+
+#[test]
+fn advisor_unavailable() {
+    let s = render_advisor_to_string(AdvisorProps {
+        kind: AdvisorKind::Error {
+            error_code: "503".into(),
+        },
+        verbose: false,
+    });
+    insta::assert_snapshot!("advisor_unavailable", s);
 }

@@ -337,8 +337,14 @@ mod m6_02_tests {
     #[test]
     fn toggle_vim_action_exists() {
         // Ctrl-Alt-V -> ToggleVim. Placed before the printable-char catch-all.
-        let evt = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL | KeyModifiers::ALT);
-        assert!(matches!(map_key(evt, true, false), Some(KeyAction::ToggleVim)));
+        let evt = KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert!(matches!(
+            map_key(evt, true, false),
+            Some(KeyAction::ToggleVim)
+        ));
     }
 
     #[test]

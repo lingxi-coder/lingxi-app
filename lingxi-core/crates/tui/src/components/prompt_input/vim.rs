@@ -2,7 +2,7 @@
 //!
 //! Pure functional state machine modelled on claude-code `src/vim/`
 //! (types.ts / motions.ts / transitions.ts) and `src/utils/Cursor.ts`.
-//! No iocraft, no async, no AppState coupling — vim is PromptInput-local
+//! No iocraft, no async, no `AppState` coupling — vim is PromptInput-local
 //! state (M7 design §2.3). Operators + visual + registers are M7-09;
 //! `pending_operator`/`register`/`Visual` are scaffold here.
 //!
@@ -24,7 +24,9 @@ use crossterm::event::{KeyCode, KeyEvent};
 /// Vim editing mode. Visual is a scaffold for M7-09 (never constructed here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VimMode {
+    /// Normal mode — keys are motions/commands, not literal text.
     Normal,
+    /// Insert mode — keys insert text (the M6 default editing path).
     Insert,
     /// Scaffold only — M7-09 implements Visual. M7-08 never enters this.
     Visual,
@@ -33,31 +35,50 @@ pub enum VimMode {
 /// Operator scaffold for M7-09. M7-08 never sets a non-None pending operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operator {
+    /// `d` — delete (M7-09).
     Delete,
+    /// `c` — change (M7-09).
     Change,
+    /// `y` — yank (M7-09).
     Yank,
 }
 
 /// f/F/t/T find direction+stop kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindKind {
-    F, // forward, land on
-    BigF, // backward, land on   (key 'F')
-    T, // forward, land before
-    BigT, // backward, land before (key 'T')
+    /// `f` — forward, land on the target char.
+    F,
+    /// `F` — backward, land on the target char.
+    BigF,
+    /// `t` — forward, land one char before the target.
+    T,
+    /// `T` — backward, land one char after the target.
+    BigT,
 }
 
-/// NORMAL-mode command-parse sub-state. Mirrors claude-code CommandState,
+/// NORMAL-mode command-parse sub-state. Mirrors claude-code `CommandState`,
 /// M7-08 subset (no operator*, replace, indent — those are M7-09).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandState {
+    /// No pending prefix.
     Idle,
     /// Accumulating a count prefix, e.g. after "3".
-    Count { digits: String },
+    Count {
+        /// The digits typed so far (e.g. `"10"` for `10j`).
+        digits: String,
+    },
     /// After 'f'/'F'/'t'/'T' — waiting for the target char.
-    Find { kind: FindKind, count: usize },
+    Find {
+        /// Which find variant (forward/backward, land-on/land-before).
+        kind: FindKind,
+        /// The resolved count prefix (Nth occurrence).
+        count: usize,
+    },
     /// After 'g' — waiting for the second key (gg, etc.).
-    G { count: usize },
+    G {
+        /// The resolved count prefix (`Ngg` → line N).
+        count: usize,
+    },
 }
 
 /// PromptInput-local vim state (parent spec §2.3). Scaffold fields
@@ -65,9 +86,13 @@ pub enum CommandState {
 /// them None/empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VimState {
+    /// Current editing mode.
     pub mode: VimMode,
+    /// NORMAL-mode command-parse sub-state.
     pub command: CommandState,
+    /// Scaffold for M7-09 operators; always `None` in M7-08.
     pub pending_operator: Option<Operator>,
+    /// Scaffold for M7-09 registers; never written in M7-08.
     pub register: Option<String>,
     /// Last f/F/t/T (kind, char) for ';'/',' — scaffold; M7-08 records it
     /// but does not implement ';'/',' (those are M7-09 polish).
@@ -75,7 +100,7 @@ pub struct VimState {
 }
 
 impl Default for VimState {
-    /// claude-code createInitialVimState(): start in INSERT.
+    /// claude-code `createInitialVimState()`: start in INSERT.
     fn default() -> Self {
         Self {
             mode: VimMode::Insert,
@@ -90,10 +115,30 @@ impl Default for VimState {
 /// Single-step motion keys M7-08 resolves. (W/B/E WORD-motions deferred.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Motion {
-    Left, Right, Down, Up,        // h l j k
-    NextWord, PrevWord, EndWord,  // w b e
-    LineStart, FirstNonBlank, LineEnd, // 0 ^ $
-    FileStart, LastLine,          // gg  G
+    /// `h` — one char left.
+    Left,
+    /// `l` — one char right.
+    Right,
+    /// `j` — one logical line down (column-preserving).
+    Down,
+    /// `k` — one logical line up (column-preserving).
+    Up,
+    /// `w` — start of the next vim word.
+    NextWord,
+    /// `b` — start of the previous vim word.
+    PrevWord,
+    /// `e` — end of the current/next vim word.
+    EndWord,
+    /// `0` — start of the logical line.
+    LineStart,
+    /// `^` — first non-blank of the logical line.
+    FirstNonBlank,
+    /// `$` — end of the logical line.
+    LineEnd,
+    /// `gg` (bare) — start of the first line.
+    FileStart,
+    /// `G` (bare) — start of the last line.
+    LastLine,
 }
 
 /// What a key did to the buffer/cursor. The caller (root.rs) applies it.
@@ -102,7 +147,12 @@ pub enum VimEffect {
     /// Cursor moved to this byte offset; buffer text unchanged.
     Move(usize),
     /// Buffer replaced and cursor set (used by o/O which insert a newline).
-    Edit { text: String, cursor: usize },
+    Edit {
+        /// The new buffer contents.
+        text: String,
+        /// The new byte cursor (on a char boundary).
+        cursor: usize,
+    },
     /// No-op (unrecognized key in Normal, or motion that didn't move).
     None,
 }
@@ -111,7 +161,9 @@ pub enum VimEffect {
 /// a char boundary. Pure; every method returns a new offset.
 #[derive(Debug, Clone, Copy)]
 pub struct VimCursor<'a> {
+    /// The buffer being navigated.
     pub text: &'a str,
+    /// Byte offset into `text`, always on a char boundary.
     pub offset: usize,
 }
 
@@ -129,6 +181,7 @@ impl<'a> VimCursor<'a> {
         }
     }
 
+    /// One char left (saturating at byte 0).
     #[must_use]
     pub fn left(&self) -> Self {
         if self.offset == 0 {
@@ -138,9 +191,13 @@ impl<'a> VimCursor<'a> {
             .char_indices()
             .last()
             .map_or(0, |(i, _)| i);
-        Self { text: self.text, offset: prev }
+        Self {
+            text: self.text,
+            offset: prev,
+        }
     }
 
+    /// One char right (saturating at end of buffer).
     #[must_use]
     pub fn right(&self) -> Self {
         if self.offset >= self.text.len() {
@@ -150,7 +207,10 @@ impl<'a> VimCursor<'a> {
             .chars()
             .next()
             .map_or(0, char::len_utf8);
-        Self { text: self.text, offset: self.offset + ch_len }
+        Self {
+            text: self.text,
+            offset: self.offset + ch_len,
+        }
     }
 
     fn logical_line_start(&self, from: usize) -> usize {
@@ -158,26 +218,40 @@ impl<'a> VimCursor<'a> {
     }
 
     fn logical_line_end(&self, from: usize) -> usize {
-        self.text[from..].find('\n').map_or(self.text.len(), |i| from + i)
+        self.text[from..]
+            .find('\n')
+            .map_or(self.text.len(), |i| from + i)
     }
 
+    /// Start (byte offset) of the logical line containing the cursor.
     #[must_use]
     pub fn start_of_logical_line(&self) -> Self {
-        Self { text: self.text, offset: self.logical_line_start(self.offset) }
+        Self {
+            text: self.text,
+            offset: self.logical_line_start(self.offset),
+        }
     }
 
+    /// End (byte offset of the trailing `\n` or buffer end) of the logical line.
     #[must_use]
     pub fn end_of_logical_line(&self) -> Self {
-        Self { text: self.text, offset: self.logical_line_end(self.offset) }
+        Self {
+            text: self.text,
+            offset: self.logical_line_end(self.offset),
+        }
     }
 
+    /// First non-blank char of the logical line (`^`), or line start if blank.
     #[must_use]
     pub fn first_non_blank(&self) -> Self {
         let start = self.logical_line_start(self.offset);
         let end = self.logical_line_end(self.offset);
         let line = &self.text[start..end];
         let rel = line.find(|c: char| !c.is_whitespace()).unwrap_or(0);
-        Self { text: self.text, offset: start + rel }
+        Self {
+            text: self.text,
+            offset: start + rel,
+        }
     }
 
     /// Column = byte distance from logical-line start, clamped to dest line.
@@ -186,9 +260,14 @@ impl<'a> VimCursor<'a> {
         let col = self.offset - cur_start;
         let line_len = target_end - target_start;
         let raw = target_start + col.min(line_len);
-        Self { text: self.text, offset: self.clamp(raw) }
+        Self {
+            text: self.text,
+            offset: self.clamp(raw),
+        }
     }
 
+    /// One logical line down (`j`), preserving the byte column clamped to the
+    /// destination line. No-op on the last line.
     #[must_use]
     pub fn down_logical_line(&self) -> Self {
         let end = self.logical_line_end(self.offset);
@@ -200,6 +279,8 @@ impl<'a> VimCursor<'a> {
         self.move_to_line(next_start, next_end)
     }
 
+    /// One logical line up (`k`), preserving the byte column clamped to the
+    /// destination line. No-op on the first line.
     #[must_use]
     pub fn up_logical_line(&self) -> Self {
         let start = self.logical_line_start(self.offset);
@@ -211,15 +292,23 @@ impl<'a> VimCursor<'a> {
         self.move_to_line(prev_start, prev_end)
     }
 
+    /// Start of the first logical line (`gg` bare → offset 0).
     #[must_use]
     pub fn start_of_first_line(&self) -> Self {
-        Self { text: self.text, offset: 0 }
+        Self {
+            text: self.text,
+            offset: 0,
+        }
     }
 
+    /// Start of the last logical line (`G` bare).
     #[must_use]
     pub fn start_of_last_line(&self) -> Self {
         let off = self.text.rfind('\n').map_or(0, |i| i + 1);
-        Self { text: self.text, offset: off }
+        Self {
+            text: self.text,
+            offset: off,
+        }
     }
 
     /// 1-indexed logical line, clamped (vim `Ngg` / `G`).
@@ -229,7 +318,10 @@ impl<'a> VimCursor<'a> {
         let mut off = 0usize;
         for (i, l) in self.text.split('\n').enumerate() {
             if i == target {
-                return Self { text: self.text, offset: off };
+                return Self {
+                    text: self.text,
+                    offset: off,
+                };
             }
             off += l.len() + 1; // +1 for '\n'
         }
@@ -272,6 +364,8 @@ impl<'a> VimCursor<'a> {
         self.text[..off].char_indices().last().map_or(0, |(i, _)| i)
     }
 
+    /// Start of the next vim word (`w`): skip the current word/punct run, then
+    /// skip whitespace.
     #[must_use]
     pub fn next_vim_word(&self) -> Self {
         if self.is_at_end() {
@@ -291,9 +385,14 @@ impl<'a> VimCursor<'a> {
         while pos < self.text.len() && self.char_at(pos).is_some_and(is_space) {
             pos = self.next_off(pos);
         }
-        Self { text: self.text, offset: pos }
+        Self {
+            text: self.text,
+            offset: pos,
+        }
     }
 
+    /// Start of the previous vim word (`b`): skip whitespace backward, then to
+    /// the start of the word/punct run under the resulting position.
     #[must_use]
     pub fn prev_vim_word(&self) -> Self {
         if self.offset == 0 {
@@ -304,7 +403,10 @@ impl<'a> VimCursor<'a> {
             pos = self.prev_off(pos);
         }
         if pos == 0 && self.char_at(0).is_some_and(is_space) {
-            return Self { text: self.text, offset: 0 };
+            return Self {
+                text: self.text,
+                offset: 0,
+            };
         }
         let c = self.char_at(pos).unwrap();
         if is_word_char(c) {
@@ -324,9 +426,14 @@ impl<'a> VimCursor<'a> {
                 pos = p;
             }
         }
-        Self { text: self.text, offset: pos }
+        Self {
+            text: self.text,
+            offset: pos,
+        }
     }
 
+    /// End of the current/next vim word (`e`): the last char of the word/punct
+    /// run at/after the next position.
     #[must_use]
     pub fn end_vim_word(&self) -> Self {
         if self.is_at_end() {
@@ -337,10 +444,17 @@ impl<'a> VimCursor<'a> {
             pos = self.next_off(pos);
         }
         if pos >= self.text.len() {
-            return Self { text: self.text, offset: self.text.len() };
+            return Self {
+                text: self.text,
+                offset: self.text.len(),
+            };
         }
         let c = self.char_at(pos).unwrap();
-        let pred: fn(char) -> bool = if is_word_char(c) { is_word_char } else { is_punct };
+        let pred: fn(char) -> bool = if is_word_char(c) {
+            is_word_char
+        } else {
+            is_punct
+        };
         loop {
             let nxt = self.next_off(pos);
             if nxt >= self.text.len() || !self.char_at(nxt).is_some_and(pred) {
@@ -348,7 +462,10 @@ impl<'a> VimCursor<'a> {
             }
             pos = nxt;
         }
-        Self { text: self.text, offset: pos }
+        Self {
+            text: self.text,
+            offset: pos,
+        }
     }
 }
 
@@ -366,7 +483,11 @@ impl<'a> VimCursor<'a> {
                 if self.char_at(pos) == Some(ch) {
                     found += 1;
                     if found == count {
-                        return Some(if till { self.prev_off(pos).max(self.offset) } else { pos });
+                        return Some(if till {
+                            self.prev_off(pos).max(self.offset)
+                        } else {
+                            pos
+                        });
                     }
                 }
                 pos = self.next_off(pos);
@@ -380,7 +501,11 @@ impl<'a> VimCursor<'a> {
                 if self.char_at(pos) == Some(ch) {
                     found += 1;
                     if found == count {
-                        return Some(if till { self.next_off(pos).min(self.offset) } else { pos });
+                        return Some(if till {
+                            self.next_off(pos).min(self.offset)
+                        } else {
+                            pos
+                        });
                     }
                 }
                 if pos == 0 {
@@ -412,7 +537,7 @@ fn apply_single_motion(m: Motion, c: VimCursor<'_>) -> VimCursor<'_> {
 
 /// Apply `m` exactly `count` times, breaking when a step does not move.
 #[must_use]
-pub fn resolve_motion<'a>(m: Motion, cursor: VimCursor<'a>, count: usize) -> VimCursor<'a> {
+pub fn resolve_motion(m: Motion, cursor: VimCursor<'_>, count: usize) -> VimCursor<'_> {
     let mut result = cursor;
     for _ in 0..count.max(1) {
         let next = apply_single_motion(m, result);
@@ -430,7 +555,11 @@ pub fn resolve_motion<'a>(m: Motion, cursor: VimCursor<'a>, count: usize) -> Vim
 pub fn enter_insert_effect(key: char, c: VimCursor<'_>) -> VimEffect {
     match key {
         'i' => VimEffect::Move(c.offset),
-        'a' => VimEffect::Move(if c.is_at_end() { c.offset } else { c.right().offset }),
+        'a' => VimEffect::Move(if c.is_at_end() {
+            c.offset
+        } else {
+            c.right().offset
+        }),
         'I' => VimEffect::Move(c.first_non_blank().offset),
         'A' => VimEffect::Move(c.end_of_logical_line().offset),
         'o' => {
@@ -439,7 +568,10 @@ pub fn enter_insert_effect(key: char, c: VimCursor<'_>) -> VimEffect {
             text.push_str(&c.text[..end]);
             text.push('\n');
             text.push_str(&c.text[end..]);
-            VimEffect::Edit { text, cursor: end + 1 }
+            VimEffect::Edit {
+                text,
+                cursor: end + 1,
+            }
         }
         'O' => {
             let start = c.start_of_logical_line().offset;
@@ -447,7 +579,10 @@ pub fn enter_insert_effect(key: char, c: VimCursor<'_>) -> VimEffect {
             text.push_str(&c.text[..start]);
             text.push('\n');
             text.push_str(&c.text[start..]);
-            VimEffect::Edit { text, cursor: start }
+            VimEffect::Edit {
+                text,
+                cursor: start,
+            }
         }
         _ => VimEffect::None,
     }
@@ -473,8 +608,11 @@ pub fn esc_clamp(text: &str, offset: usize) -> usize {
 /// "consumed, awaiting more keys (count/find/g), no effect yet."
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VimOutcome {
+    /// The key produced a buffer/cursor effect the caller must apply.
     Effect(VimEffect),
+    /// Consumed; awaiting more keys (count/find/g) — no effect yet.
     Pending,
+    /// Ordinary Insert-mode input — run the M6 default editing pipeline.
     PassThrough,
 }
 
@@ -546,7 +684,9 @@ pub fn handle_vim_key(
 
     // From Idle: a 1-9 starts a count; everything else dispatches with count 1.
     if let KeyCode::Char(c @ '1'..='9') = key.code {
-        state.command = CommandState::Count { digits: c.to_string() };
+        state.command = CommandState::Count {
+            digits: c.to_string(),
+        };
         return VimOutcome::Pending;
     }
     dispatch_normal(state, cursor, 1, key)
@@ -612,7 +752,7 @@ fn dispatch_normal(
 }
 
 /// Footer mode-indicator literal. Matches the well-known vim convention
-/// (claude-code surfaces the mode via PromptInputModeIndicator; the literal
+/// (claude-code surfaces the mode via `PromptInputModeIndicator`; the literal
 /// status-line text is the standard vim `-- MODE --`).
 #[must_use]
 pub fn mode_indicator(mode: VimMode) -> &'static str {
@@ -662,11 +802,11 @@ mod cursor_tests {
     #[test]
     fn left_right_clamp_and_utf8() {
         // "héllo": 'é' is 2 bytes (offsets 1..3).
-        assert_eq!(cur("héllo", 0).left().offset, 0);          // clamp at 0
+        assert_eq!(cur("héllo", 0).left().offset, 0); // clamp at 0
         assert_eq!(cur("héllo", 0).right().offset, 1);
-        assert_eq!(cur("héllo", 1).right().offset, 3);          // skip whole 'é'
+        assert_eq!(cur("héllo", 1).right().offset, 3); // skip whole 'é'
         assert_eq!(cur("héllo", 3).left().offset, 1);
-        assert_eq!(cur("hi", 2).right().offset, 2);             // clamp at end
+        assert_eq!(cur("hi", 2).right().offset, 2); // clamp at end
     }
 
     #[test]
@@ -674,9 +814,9 @@ mod cursor_tests {
         let t = "abc\ndefg\nhi";
         // cursor in middle of line 2 (offset 6 = 'f')
         assert_eq!(cur(t, 6).start_of_logical_line().offset, 4); // 'd'
-        assert_eq!(cur(t, 6).end_of_logical_line().offset, 8);   // after 'g' (the \n)
-        // line 1 has no leading blanks -> first_non_blank == start
-        assert_eq!(cur("  xy", 3).first_non_blank().offset, 2);  // 'x'
+        assert_eq!(cur(t, 6).end_of_logical_line().offset, 8); // after 'g' (the \n)
+                                                               // line 1 has no leading blanks -> first_non_blank == start
+        assert_eq!(cur("  xy", 3).first_non_blank().offset, 2); // 'x'
     }
 
     #[test]
@@ -685,7 +825,7 @@ mod cursor_tests {
         // on line0 col3 ('d'), down -> line1 but line1 len 2 -> clamp to end (col2 = after 'f')
         let c = cur(t, 3).down_logical_line();
         assert_eq!(c.offset, 7); // line1 = "ef" at 5..7, end is 7
-        // from there, down -> line2 col2 = 'i' (offset 8+2=10)
+                                 // from there, down -> line2 col2 = 'i' (offset 8+2=10)
         let c2 = cur(t, 7).down_logical_line();
         assert_eq!(c2.offset, 10);
         // up from line2 col2 -> line1 clamp end = 7
@@ -696,9 +836,9 @@ mod cursor_tests {
     fn first_last_line_and_goto() {
         let t = "one\ntwo\nthree";
         assert_eq!(cur(t, 9).start_of_first_line().offset, 0);
-        assert_eq!(cur(t, 0).start_of_last_line().offset, 8);  // 'three'
-        assert_eq!(cur(t, 0).go_to_line(2).offset, 4);          // 'two' (1-indexed)
-        assert_eq!(cur(t, 0).go_to_line(99).offset, 8);         // clamp to last
+        assert_eq!(cur(t, 0).start_of_last_line().offset, 8); // 'three'
+        assert_eq!(cur(t, 0).go_to_line(2).offset, 4); // 'two' (1-indexed)
+        assert_eq!(cur(t, 0).go_to_line(99).offset, 8); // clamp to last
     }
 }
 
@@ -722,7 +862,7 @@ mod word_tests {
         let t = "foo.bar";
         // from 'f': over the word "foo" then land on '.'
         assert_eq!(cur(t, 0).next_vim_word().offset, 3); // '.'
-        // from '.': over the punctuation run then land on "bar"
+                                                         // from '.': over the punctuation run then land on "bar"
         assert_eq!(cur(t, 3).next_vim_word().offset, 4); // 'b'
     }
 
@@ -795,14 +935,23 @@ mod resolve_tests {
     fn single_step_motions() {
         assert_eq!(resolve_motion(Motion::Right, cur("hello", 0), 1).offset, 1);
         assert_eq!(resolve_motion(Motion::Left, cur("hello", 3), 1).offset, 2);
-        assert_eq!(resolve_motion(Motion::LineEnd, cur("hello", 0), 1).offset, 5);
-        assert_eq!(resolve_motion(Motion::LineStart, cur("hello", 3), 1).offset, 0);
+        assert_eq!(
+            resolve_motion(Motion::LineEnd, cur("hello", 0), 1).offset,
+            5
+        );
+        assert_eq!(
+            resolve_motion(Motion::LineStart, cur("hello", 3), 1).offset,
+            0
+        );
     }
 
     #[test]
     fn count_repeats_motion() {
         assert_eq!(resolve_motion(Motion::Right, cur("hello", 0), 3).offset, 3);
-        assert_eq!(resolve_motion(Motion::NextWord, cur("a b c d", 0), 2).offset, 4); // 'c'
+        assert_eq!(
+            resolve_motion(Motion::NextWord, cur("a b c d", 0), 2).offset,
+            4
+        ); // 'c'
     }
 
     #[test]
@@ -830,14 +979,23 @@ mod transition_tests {
 
     #[test]
     fn i_inserts_at_cursor() {
-        assert_eq!(enter_insert_effect('i', cur("hello", 2)), VimEffect::Move(2));
+        assert_eq!(
+            enter_insert_effect('i', cur("hello", 2)),
+            VimEffect::Move(2)
+        );
     }
 
     #[test]
     fn a_inserts_after_cursor() {
-        assert_eq!(enter_insert_effect('a', cur("hello", 2)), VimEffect::Move(3));
+        assert_eq!(
+            enter_insert_effect('a', cur("hello", 2)),
+            VimEffect::Move(3)
+        );
         // at end: stays
-        assert_eq!(enter_insert_effect('a', cur("hello", 5)), VimEffect::Move(5));
+        assert_eq!(
+            enter_insert_effect('a', cur("hello", 5)),
+            VimEffect::Move(5)
+        );
     }
 
     #[test]
@@ -847,7 +1005,10 @@ mod transition_tests {
 
     #[test]
     fn cap_a_end_of_line() {
-        assert_eq!(enter_insert_effect('A', cur("ab\ncd", 0)), VimEffect::Move(2)); // end of line0
+        assert_eq!(
+            enter_insert_effect('A', cur("ab\ncd", 0)),
+            VimEffect::Move(2)
+        ); // end of line0
     }
 
     #[test]
@@ -855,7 +1016,10 @@ mod transition_tests {
         // "ab\ncd", cursor on line0 -> newline after line0, cursor at its start (offset 3)
         assert_eq!(
             enter_insert_effect('o', cur("ab\ncd", 1)),
-            VimEffect::Edit { text: "ab\n\ncd".to_string(), cursor: 3 }
+            VimEffect::Edit {
+                text: "ab\n\ncd".to_string(),
+                cursor: 3
+            }
         );
     }
 
@@ -864,7 +1028,10 @@ mod transition_tests {
         // "ab\ncd", cursor on line1 ('c' @3) -> newline before line1, cursor at its start (offset 3)
         assert_eq!(
             enter_insert_effect('O', cur("ab\ncd", 3)),
-            VimEffect::Edit { text: "ab\n\ncd".to_string(), cursor: 3 }
+            VimEffect::Edit {
+                text: "ab\n\ncd".to_string(),
+                cursor: 3
+            }
         );
     }
 
@@ -874,7 +1041,7 @@ mod transition_tests {
         // non-empty line; clamp left by one char.
         assert_eq!(esc_clamp("hello", 5), 4);
         assert_eq!(esc_clamp("hello", 3), 3); // already valid
-        assert_eq!(esc_clamp("", 0), 0);       // empty line: stay
+        assert_eq!(esc_clamp("", 0), 0); // empty line: stay
         assert_eq!(esc_clamp("ab\ncd", 2), 1); // end of line0 -> clamp to 'b'
     }
 }
@@ -909,14 +1076,26 @@ mod dispatch_tests {
 
     #[test]
     fn normal_h_l_move() {
-        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
-        assert_eq!(handle_vim_key(&mut s, "hello", 2, key('l')), VimOutcome::Effect(VimEffect::Move(3)));
-        assert_eq!(handle_vim_key(&mut s, "hello", 2, key('h')), VimOutcome::Effect(VimEffect::Move(1)));
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
+        assert_eq!(
+            handle_vim_key(&mut s, "hello", 2, key('l')),
+            VimOutcome::Effect(VimEffect::Move(3))
+        );
+        assert_eq!(
+            handle_vim_key(&mut s, "hello", 2, key('h')),
+            VimOutcome::Effect(VimEffect::Move(1))
+        );
     }
 
     #[test]
     fn normal_i_enters_insert() {
-        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
         let out = handle_vim_key(&mut s, "hello", 2, key('i'));
         assert_eq!(s.mode, VimMode::Insert);
         assert_eq!(out, VimOutcome::Effect(VimEffect::Move(2)));
@@ -924,9 +1103,15 @@ mod dispatch_tests {
 
     #[test]
     fn count_then_motion() {
-        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
         // "3w" on "a b c d e" -> 4th word
-        assert_eq!(handle_vim_key(&mut s, "a b c d e", 0, key('3')), VimOutcome::Pending);
+        assert_eq!(
+            handle_vim_key(&mut s, "a b c d e", 0, key('3')),
+            VimOutcome::Pending
+        );
         assert_eq!(s.command, CommandState::Count { digits: "3".into() });
         let out = handle_vim_key(&mut s, "a b c d e", 0, key('w'));
         assert_eq!(out, VimOutcome::Effect(VimEffect::Move(6))); // 'd'
@@ -935,22 +1120,34 @@ mod dispatch_tests {
 
     #[test]
     fn zero_is_line_start_not_count() {
-        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
         let out = handle_vim_key(&mut s, "  hello", 4, key('0'));
         assert_eq!(out, VimOutcome::Effect(VimEffect::Move(0)));
     }
 
     #[test]
     fn caret_first_non_blank() {
-        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
         let out = handle_vim_key(&mut s, "  hello", 4, key('^'));
         assert_eq!(out, VimOutcome::Effect(VimEffect::Move(2)));
     }
 
     #[test]
     fn gg_goes_to_first_line() {
-        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
-        assert_eq!(handle_vim_key(&mut s, "a\nb\nc", 4, key('g')), VimOutcome::Pending);
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
+        assert_eq!(
+            handle_vim_key(&mut s, "a\nb\nc", 4, key('g')),
+            VimOutcome::Pending
+        );
         assert_eq!(s.command, CommandState::G { count: 1 });
         let out = handle_vim_key(&mut s, "a\nb\nc", 4, key('g'));
         assert_eq!(out, VimOutcome::Effect(VimEffect::Move(0)));
@@ -958,7 +1155,10 @@ mod dispatch_tests {
 
     #[test]
     fn count_gg_goes_to_line_n() {
-        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
         handle_vim_key(&mut s, "a\nb\nc", 0, key('2'));
         handle_vim_key(&mut s, "a\nb\nc", 0, key('g'));
         let out = handle_vim_key(&mut s, "a\nb\nc", 0, key('g'));
@@ -967,21 +1167,41 @@ mod dispatch_tests {
 
     #[test]
     fn cap_g_goes_to_last_line() {
-        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
-        let out = handle_vim_key(&mut s, "a\nb\nc", 0, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
+        let out = handle_vim_key(
+            &mut s,
+            "a\nb\nc",
+            0,
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+        );
         assert_eq!(out, VimOutcome::Effect(VimEffect::Move(4))); // 'c'
     }
 
     #[test]
     fn f_char_finds() {
-        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
-        assert_eq!(handle_vim_key(&mut s, "abcdc", 0, key('f')), VimOutcome::Pending);
-        assert_eq!(handle_vim_key(&mut s, "abcdc", 0, key('c')), VimOutcome::Effect(VimEffect::Move(2)));
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
+        assert_eq!(
+            handle_vim_key(&mut s, "abcdc", 0, key('f')),
+            VimOutcome::Pending
+        );
+        assert_eq!(
+            handle_vim_key(&mut s, "abcdc", 0, key('c')),
+            VimOutcome::Effect(VimEffect::Move(2))
+        );
     }
 
     #[test]
     fn count_f_finds_nth() {
-        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
         handle_vim_key(&mut s, "abcdc", 0, key('2'));
         handle_vim_key(&mut s, "abcdc", 0, key('f'));
         let out = handle_vim_key(&mut s, "abcdc", 0, key('c'));
@@ -990,15 +1210,27 @@ mod dispatch_tests {
 
     #[test]
     fn find_not_found_is_noop() {
-        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
         handle_vim_key(&mut s, "abc", 0, key('f'));
-        assert_eq!(handle_vim_key(&mut s, "abc", 0, key('z')), VimOutcome::Effect(VimEffect::None));
+        assert_eq!(
+            handle_vim_key(&mut s, "abc", 0, key('z')),
+            VimOutcome::Effect(VimEffect::None)
+        );
         assert_eq!(s.command, CommandState::Idle);
     }
 
     #[test]
     fn unknown_normal_key_is_noop() {
-        let mut s = VimState { mode: VimMode::Normal, ..VimState::default() };
-        assert_eq!(handle_vim_key(&mut s, "abc", 0, key('q')), VimOutcome::Effect(VimEffect::None));
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
+        assert_eq!(
+            handle_vim_key(&mut s, "abc", 0, key('q')),
+            VimOutcome::Effect(VimEffect::None)
+        );
     }
 }

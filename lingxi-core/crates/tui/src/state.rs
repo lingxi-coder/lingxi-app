@@ -657,10 +657,7 @@ mod tests {
     fn vim_defaults_off_and_insert() {
         let s = AppState::new(StatusSnapshot::default());
         assert!(!s.vim_enabled);
-        assert_eq!(
-            s.vim.mode,
-            crate::components::prompt_input::VimMode::Insert
-        );
+        assert_eq!(s.vim.mode, crate::components::prompt_input::VimMode::Insert);
     }
 
     #[test]

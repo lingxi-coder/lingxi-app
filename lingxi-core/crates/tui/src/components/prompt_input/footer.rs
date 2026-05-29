@@ -126,8 +126,14 @@ mod vim_indicator_tests {
 
     #[test]
     fn indicator_shown_when_vim_enabled() {
-        assert_eq!(footer_mode_label(true, VimMode::Normal), Some("-- NORMAL --"));
-        assert_eq!(footer_mode_label(true, VimMode::Insert), Some("-- INSERT --"));
+        assert_eq!(
+            footer_mode_label(true, VimMode::Normal),
+            Some("-- NORMAL --")
+        );
+        assert_eq!(
+            footer_mode_label(true, VimMode::Insert),
+            Some("-- INSERT --")
+        );
     }
 
     #[test]

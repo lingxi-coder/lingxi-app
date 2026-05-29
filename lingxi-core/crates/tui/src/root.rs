@@ -633,7 +633,7 @@ mod tests {
     #[test]
     fn vim_normal_motion_moves_prompt_cursor() {
         use crate::components::prompt_input::VimMode;
-        let mut st = AppState::new(Default::default());
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
         st.vim_enabled = true;
         st.vim.mode = VimMode::Normal;
         st.prompt_text = "hello".into();
@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn vim_disabled_typing_is_default_editing() {
-        let mut st = AppState::new(Default::default());
+        let mut st = AppState::new(crate::state::StatusSnapshot::default());
         st.vim_enabled = false;
         st.prompt_text = "h".into();
         st.prompt_cursor = 1;

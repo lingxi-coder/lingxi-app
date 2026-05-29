@@ -13,8 +13,8 @@ use lingxi_protocol::ToolUseId;
 
 use crate::components::prompt_input::PromptInput;
 use crate::components::spinner::SpinnerWithVerb;
-use crate::components::virtual_message_list::VirtualMessageList;
 use crate::components::status_line::StatusLine;
+use crate::components::virtual_message_list::VirtualMessageList;
 use crate::state::{AppState, RenderedMessage, StatusSnapshot};
 
 /// Predicate exposed for tests + the renderer's conditional mount.

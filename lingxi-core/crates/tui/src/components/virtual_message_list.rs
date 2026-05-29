@@ -206,7 +206,7 @@ pub fn render_window(
         let h = cache.height_at(i);
         let span_start = acc;
         let span_end = acc + h; // exclusive
-        // Intersects the viewport if span_end > top_line && span_start < bottom_line.
+                                // Intersects the viewport if span_end > top_line && span_start < bottom_line.
         if span_end > top_line && span_start < bottom_line {
             if !found_first {
                 first_index = i;
@@ -432,7 +432,10 @@ mod tests {
         assert_eq!(cache.total_lines(), 5000);
         let win = render_window(&msgs, &cache, 0, 20);
         let count = win.indices().count();
-        assert!(count <= 21, "window rendered {count} messages, expected <= 21");
+        assert!(
+            count <= 21,
+            "window rendered {count} messages, expected <= 21"
+        );
         assert!(count >= 20, "window should fill the viewport, got {count}");
     }
 }

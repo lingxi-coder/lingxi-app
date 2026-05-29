@@ -355,8 +355,7 @@ impl AppState {
     /// (M7-03) Rebuild the height cache if the log or `width` changed.
     /// Idempotent: a no-op when nothing changed (cheap len + width check).
     pub fn refresh_height_cache(&mut self, width: usize) {
-        let stale =
-            self.viewport_width != width || self.height_cache.len() != self.messages.len();
+        let stale = self.viewport_width != width || self.height_cache.len() != self.messages.len();
         if stale {
             self.height_cache.recompute(&self.messages, width);
             self.viewport_width = width;

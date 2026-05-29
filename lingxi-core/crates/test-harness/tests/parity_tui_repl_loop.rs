@@ -165,6 +165,10 @@ fn turn_with_tool_use_and_permission() {
         id: ToolUseId::new(),
         tool: tr["tool"].as_str().unwrap().to_string(),
         result: tr["result"].clone(),
+        // (M7-02) Non-diff tool result — no Edit/Write diff inputs.
+        old_string: None,
+        new_string: None,
+        file_path: None,
     });
 
     let kinds: Vec<&str> = state.messages.iter().map(kind_of).collect();

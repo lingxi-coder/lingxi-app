@@ -91,7 +91,7 @@ fn scroll_telemetry_transitions_fire_on_0_to_nonzero_and_back() {
 }
 
 /// Build 5000 mixed-height messages: every 10th is 50 lines tall, the
-/// rest are 1 line. Returns (messages, total_lines).
+/// rest are 1 line. Returns `(messages, total_lines)`.
 fn mixed_5k() -> (Vec<RenderedMessage>, usize) {
     let msgs: Vec<RenderedMessage> = (0..5000)
         .map(|i| {

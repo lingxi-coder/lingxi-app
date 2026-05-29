@@ -127,6 +127,10 @@ fn user_tool_result_collapsed_renders_to_locked_text() {
         id: ToolUseId::new(),
         tool: m["tool"].as_str().unwrap().to_string(),
         result: m["result"].clone(),
+        // (M7-02) Non-diff tool result — no Edit/Write diff inputs.
+        old_string: None,
+        new_string: None,
+        file_path: None,
     };
     assert_eq!(
         render_entry_to_string(&entry, false, false),

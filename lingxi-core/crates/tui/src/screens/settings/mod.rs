@@ -13,6 +13,23 @@
 //! handoff (§4 R7 — no new persistence/validation/schema logic; there is no
 //! settings write API in `lingxi-*`, so the Config/Settings tabs are read-only
 //! display surfaces). Usage shows FLAT cost (per-model breakdown is M8).
+//!
+//! # Open path & the `/config` `/status` command hook (DEFERRED to M7-16)
+//!
+//! The screen opens via [`crate::state::AppState::open_settings`] with a
+//! pre-read [`SettingsData`] (built by the async [`SettingsData::snapshot`] in a
+//! context that holds the `OrchestratorHandle` — the bridge/command path, NOT
+//! the synchronous `app::dispatch`). M7-13 ships that seam (exercised by tests).
+//!
+//! The `/config`→Config-tab and `/status`→Status-tab command hooks are
+//! **DEFERRED to M7-16**: unlike `/doctor` (whose `DoctorDiagnostics::capture`
+//! is synchronous and handle-free, so it opens inline from the sync `dispatch`
+//! `Submit` arm), `SettingsData::snapshot` needs an async `OrchestratorHandle`
+//! call + a `Settings::load`, and the sync `dispatch` seam holds NEITHER the
+//! handle nor async-color. Threading the handle into a new async submit seam is
+//! a structural change beyond M7-13's surface-only scope, so the convenience
+//! hook lands with the M7-16 screen-lifecycle/command cluster. The M5-11
+//! `/config` `/status` handlers stay the `--no-tui` path, untouched.
 #![forbid(unsafe_code)]
 
 use std::sync::Arc;

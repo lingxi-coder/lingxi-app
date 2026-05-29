@@ -101,8 +101,17 @@ pub fn parse_ansi(input: &str) -> Vec<StyledLine> {
                 run_start = i;
                 continue;
             }
-            // Other ESC-prefixed sequence (ESC c, ESC =, …). Skip 2 bytes.
-            i += 2;
+            // Other ESC-prefixed sequence (ESC c, ESC =, …). The byte after ESC
+            // is an ASCII intermediate/final; consume it too. But if it is
+            // non-ASCII it is the start of a real char (not part of the escape)
+            // — skip only the ESC byte so run_start stays on a UTF-8 char
+            // boundary (this fn must never panic). The `i + 1` access is safe:
+            // this branch is guarded by `i + 1 < bytes.len()` above.
+            if bytes[i + 1] < 0x80 {
+                i += 2;
+            } else {
+                i += 1;
+            }
             run_start = i;
             continue;
         }
@@ -396,6 +405,38 @@ mod tests {
     fn emoji_text_roundtrips() {
         let line = first_line("✓ 🚀 done");
         assert_eq!(line.plain_text(), "✓ 🚀 done");
+    }
+
+    #[test]
+    fn esc_then_multibyte_char_does_not_panic() {
+        // Bare ESC followed by a 2-byte UTF-8 char ('é'). The ESC has no
+        // recognized CSI/OSC second byte; the multibyte char is a real char,
+        // not part of the escape, and must survive intact (no mid-char slice).
+        let line = first_line("\u{1b}é");
+        assert!(line.plain_text().contains('é'));
+    }
+
+    #[test]
+    fn esc_then_multibyte_char_then_ascii_does_not_panic() {
+        let line = first_line("\u{1b}éx");
+        let plain = line.plain_text();
+        assert!(plain.contains('é'));
+        assert!(plain.contains('x'));
+    }
+
+    #[test]
+    fn esc_then_emoji_does_not_panic() {
+        // 4-byte UTF-8 lead byte after ESC must not be mis-skipped.
+        let line = first_line("\u{1b}🚀tail");
+        let plain = line.plain_text();
+        assert!(plain.contains('🚀'));
+        assert!(plain.contains("tail"));
+    }
+
+    #[test]
+    fn trailing_lone_esc_does_not_panic() {
+        let line = first_line("ab\u{1b}");
+        assert!(line.plain_text().contains("ab"));
     }
 
     #[test]

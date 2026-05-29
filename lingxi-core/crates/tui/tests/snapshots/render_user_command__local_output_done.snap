@@ -1,0 +1,6 @@
+---
+source: crates/tui/tests/render_user_command.rs
+assertion_line: 44
+expression: e.to_string()
+---
+  ⎿  done

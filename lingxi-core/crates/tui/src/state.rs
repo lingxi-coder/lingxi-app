@@ -24,10 +24,6 @@ use lingxi_permission::PermissionMode;
 use lingxi_protocol::ToolUseId;
 use tokio::sync::oneshot;
 
-/// Maximum number of messages retained in the scrollback. Excess messages
-/// are evicted FIFO.
-pub const SCROLLBACK_CAP: usize = 500;
-
 /// A rendered message in the scrollback buffer.
 #[derive(Debug, Clone)]
 pub enum RenderedMessage {
@@ -183,7 +179,8 @@ pub type StreamingTurn = StreamingState;
 
 /// Root TUI state. Owned by the `App` root component.
 pub struct AppState {
-    /// Scrollback buffer (cap 500, FIFO eviction).
+    /// Scrollback buffer. (M7-03) Full log retained — no eviction; the
+    /// `VirtualMessageList` windows the viewport.
     pub messages: Vec<RenderedMessage>,
     /// Reserved for M6-05 (permission dialogs). Set on
     /// `TurnEvent::PermissionRequest` (M6-03) but not yet rendered.
@@ -252,7 +249,7 @@ impl AppState {
     #[must_use]
     pub fn new(status: StatusSnapshot) -> Self {
         Self {
-            messages: Vec::with_capacity(SCROLLBACK_CAP),
+            messages: Vec::new(),
             pending_permission: None,
             streaming: None,
             cancel_token: None,
@@ -340,12 +337,10 @@ impl AppState {
         Self::new(StatusSnapshot::default())
     }
 
-    /// Push a message; evict the oldest if cap exceeded (FIFO).
+    /// Push a message. The full log is retained (M7-03 VirtualMessageList
+    /// windows the viewport — no FIFO eviction).
     pub fn push_message(&mut self, msg: RenderedMessage) {
         self.messages.push(msg);
-        if self.messages.len() > SCROLLBACK_CAP {
-            self.messages.remove(0);
-        }
     }
 }
 
@@ -364,18 +359,22 @@ mod tests {
     }
 
     #[test]
-    fn push_evicts_oldest_at_cap() {
+    fn push_retains_full_log_no_eviction() {
         let mut s = AppState::new(fake_status());
-        for i in 0..(SCROLLBACK_CAP + 5) {
+        for i in 0..5000 {
             s.push_message(RenderedMessage::UserText {
                 body: format!("msg{i}"),
                 timestamp: 0,
             });
         }
-        assert_eq!(s.messages.len(), SCROLLBACK_CAP);
-        // First retained = msg5 (msg0..=msg4 were evicted).
+        // Full retention: every message is kept, in order.
+        assert_eq!(s.messages.len(), 5000);
         match &s.messages[0] {
-            RenderedMessage::UserText { body, .. } => assert_eq!(body, "msg5"),
+            RenderedMessage::UserText { body, .. } => assert_eq!(body, "msg0"),
+            _ => panic!("wrong variant"),
+        }
+        match &s.messages[4999] {
+            RenderedMessage::UserText { body, .. } => assert_eq!(body, "msg4999"),
             _ => panic!("wrong variant"),
         }
     }

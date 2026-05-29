@@ -314,4 +314,60 @@ mod tests {
         let win = render_window(&msgs, &cache, 0, 0);
         assert!(win.is_empty());
     }
+
+    // Heights: m0=1, m1=50, m2=1, m3=1  → total = 53 lines.
+    fn mixed_log() -> Vec<RenderedMessage> {
+        vec![
+            user("m0"),                      // 1 line
+            user(&vec!["x"; 50].join("\n")), // 50 lines
+            user("m2"),                      // 1 line
+            user("m3"),                      // 1 line
+        ]
+    }
+
+    #[test]
+    fn mixed_offset_zero_shows_tail_into_tall_message() {
+        let msgs = mixed_log();
+        let cache = HeightCache::build(&msgs, 80);
+        assert_eq!(cache.total_lines(), 53);
+        // viewport 10, offset 0 → top_line = 43, bottom_line = 53.
+        // m1 spans [1,51), m2 [51,52), m3 [52,53).
+        let win = render_window(&msgs, &cache, 0, 10);
+        assert_eq!(win.first_index, 1); // tall message is partly visible
+        assert_eq!(win.last_index, 3);
+        assert_eq!(win.skip_top_lines, 42); // hide first 42 of m1's 50 lines
+    }
+
+    #[test]
+    fn mixed_scrolled_into_tall_message_middle() {
+        let msgs = mixed_log();
+        let cache = HeightCache::build(&msgs, 80);
+        // offset 20 → bottom_line = 33, top_line = 23. Only m1 (spans [1,51)).
+        let win = render_window(&msgs, &cache, 20, 10);
+        assert_eq!(win.first_index, 1);
+        assert_eq!(win.last_index, 1);
+        assert_eq!(win.skip_top_lines, 22); // top_line(23) - span_start(1) = 22
+    }
+
+    #[test]
+    fn mixed_scrolled_to_top_shows_first_message() {
+        let msgs = mixed_log();
+        let cache = HeightCache::build(&msgs, 80);
+        // max_offset = 53 - 10 = 43. offset 43 → top_line 0, bottom_line 10.
+        let win = render_window(&msgs, &cache, 43, 10);
+        assert_eq!(win.first_index, 0);
+        assert_eq!(win.skip_top_lines, 0);
+        // m0 [0,1), m1 [1,51) → window covers m0 and start of m1.
+        assert_eq!(win.last_index, 1);
+    }
+
+    #[test]
+    fn mixed_offset_over_max_is_clamped() {
+        let msgs = mixed_log();
+        let cache = HeightCache::build(&msgs, 80);
+        // offset 9999 clamps to max_offset 43 → identical to the top window.
+        let win = render_window(&msgs, &cache, 9999, 10);
+        assert_eq!(win.first_index, 0);
+        assert_eq!(win.skip_top_lines, 0);
+    }
 }

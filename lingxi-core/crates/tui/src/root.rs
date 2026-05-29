@@ -243,7 +243,36 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     // NOTE: if a screen branch has already landed it lives here, before the
     // overlay branch. Leave it untouched. (Not present until M7-11.)
 
-    // === Priority 3: palette / completion overlay focus-trap (M7-07). While an
+    // === Priority 3 (input overlay A): Ctrl-R history search (M7-10). When the
+    // overlay is open it owns EVERY key until Enter/Esc — exactly the focus-trap
+    // discipline the permission dialog (priority 1) established. It sits in the
+    // SAME priority-3 region as the M7-07 palette/completion overlays and is
+    // MUTUALLY EXCLUSIVE with them: opening Ctrl-R (the fall-through binding
+    // below) only fires when no other overlay is active, and while
+    // `history_search.is_some()` we return here before the palette/completion
+    // branch ever runs. No parallel key path — this is the single dispatcher. ===
+    if st.history_search.is_some() {
+        use crate::components::prompt_input::{handle_history_search_key, HsKeyOutcome};
+        let ct_key = iocraft_to_crossterm028_key(k);
+        let hs = st.history_search.take().expect("checked is_some");
+        match handle_history_search_key(hs, &ct_key, &st.history) {
+            HsKeyOutcome::Continue(next) => st.history_search = Some(next),
+            HsKeyOutcome::Accept(text) => {
+                st.prompt_cursor = text.len();
+                st.prompt_text = text;
+                st.history_cursor = None;
+            }
+            HsKeyOutcome::Cancel(prompt, cursor) => {
+                st.prompt_text = prompt;
+                st.prompt_cursor = cursor;
+            }
+        }
+        return;
+    }
+    // === end priority 3 (input overlay A) ===
+
+    // === Priority 3 (input overlay B): palette / completion overlay focus-trap
+    // (M7-07). While an
     // overlay is open it owns EVERY key until Esc/accept; consumed/navigation
     // keys `return` so they never reach the default editor path. PassThrough
     // falls through (e.g. a printable char re-runs the editor, then the tail
@@ -281,6 +310,26 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
         }
     }
     // === end priority 3 ===
+
+    // === Priority 3 open binding: Ctrl-R opens the history-search overlay
+    // (M7-10). We reach here only when NO overlay/dialog is already active — the
+    // permission trap (1) and the history-search trap (3A) returned above. We
+    // additionally gate on palette/completion being closed so the three
+    // priority-3 overlays stay MUTUALLY EXCLUSIVE (an open palette owns `r` as a
+    // filter char; Ctrl-R does not preempt it). Opening snapshots the current
+    // prompt so Esc can restore it. ===
+    if !st.palette.open
+        && !st.completion.open
+        && matches!(k.code, KeyCode::Char('r'))
+        && k.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        st.history_search = Some(crate::components::prompt_input::hs_open(
+            &st.prompt_text,
+            st.prompt_cursor,
+        ));
+        return;
+    }
+    // === end Ctrl-R open binding ===
 
     // === PRIORITY 3.5: vim toggle (M7-08 review). The Ctrl-Alt-V binding must
     // be modal-independent — it flips `vim_enabled` from ANY vim mode (Normal or

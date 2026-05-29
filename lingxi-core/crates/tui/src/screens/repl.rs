@@ -13,7 +13,9 @@ use lingxi_protocol::ToolUseId;
 
 use crate::components::prompt_input::completion::{CompletionOverlay, CompletionState};
 use crate::components::prompt_input::palette::{PaletteOverlay, PaletteState, OVERLAY_MAX_ITEMS};
-use crate::components::prompt_input::{PromptInput, PromptInputFooter, VimMode};
+use crate::components::prompt_input::{
+    HistorySearchOverlay, HistorySearchState, PromptInput, PromptInputFooter, VimMode,
+};
 use crate::components::spinner::SpinnerWithVerb;
 use crate::components::status_line::StatusLine;
 use crate::components::virtual_message_list::{HeightCache, VirtualMessageList};
@@ -76,6 +78,10 @@ pub struct ReplScreenProps {
     /// (M7-09) Whether the active Visual selection is linewise (`V`). Selects
     /// `-- VISUAL LINE --` over `-- VISUAL --` in the footer.
     pub vim_visual_linewise: bool,
+    /// (M7-10) Active Ctrl-R history-search overlay (clone of
+    /// `AppState.history_search`). Rendered as a row ABOVE the prompt when
+    /// `Some(_)`, mirroring claude-code's `HistorySearchInput` box.
+    pub history_search: Option<HistorySearchState>,
 }
 
 impl Default for ReplScreenProps {
@@ -97,6 +103,7 @@ impl Default for ReplScreenProps {
             vim_enabled: false,
             vim_mode: VimMode::Insert,
             vim_visual_linewise: false,
+            history_search: None,
         }
     }
 }
@@ -125,6 +132,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let vim_enabled = props.vim_enabled;
     let vim_mode = props.vim_mode;
     let vim_visual_linewise = props.vim_visual_linewise;
+    let history_search = props.history_search.clone();
     element! {
         View(flex_direction: FlexDirection::Column, width: 100pct, height: 100pct) {
             StatusLine(
@@ -162,6 +170,19 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 let empty_query = c.filter.is_empty();
                 element! {
                     CompletionOverlay(rows: rows, selected: c.selected, empty_query: empty_query)
+                }
+            }))
+            // (M7-10) History-search overlay row, drawn ABOVE the prompt when
+            // active (mirrors claude-code `HistorySearchInput`). Mutually
+            // exclusive with palette/completion — the dispatcher only opens one
+            // priority-3 overlay at a time. `failed_match` selects the
+            // `no matching prompt:` label (a non-empty query that resolved to
+            // no match).
+            #(history_search.as_ref().map(|hs| {
+                let query = hs.query.clone();
+                let failed_match = !hs.query.is_empty() && hs.match_index.is_none();
+                element! {
+                    HistorySearchOverlay(query: query, failed_match: failed_match)
                 }
             }))
             PromptInput(

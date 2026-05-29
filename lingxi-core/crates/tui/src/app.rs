@@ -358,6 +358,9 @@ pub fn render_screen(
     // (M7-09) Whether the active Visual selection is linewise (`V`) — picks
     // `-- VISUAL LINE --` over `-- VISUAL --`.
     let vim_visual_linewise = state.vim.visual.is_some_and(|v| v.linewise);
+    // (M7-10) Thread the active Ctrl-R history-search overlay so the REPL
+    // screen can draw its row above the prompt.
+    let history_search = state.history_search.clone();
     // (M7-03 review) Thread the already-width-synced height cache instead of
     // rebuilding it inside `VirtualMessageList` every frame (that was
     // O(total messages) per frame). The live render path keeps
@@ -394,6 +397,7 @@ pub fn render_screen(
             vim_enabled: vim_enabled,
             vim_mode: vim_mode,
             vim_visual_linewise: vim_visual_linewise,
+            history_search: history_search,
         )
     }
     .into_any()

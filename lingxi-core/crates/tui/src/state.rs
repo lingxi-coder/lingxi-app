@@ -26,6 +26,7 @@ use tokio::sync::oneshot;
 
 use crate::components::prompt_input::completion::CompletionState;
 use crate::components::prompt_input::palette::PaletteState;
+use crate::theme::{theme_for, Theme, ThemeSetting};
 
 /// A rendered message in the scrollback buffer.
 #[derive(Debug, Clone)]
@@ -487,6 +488,13 @@ pub struct AppState {
     pub viewport_width: usize,
     /// Status-line snapshot (model, cwd, cost, ctx%, mode).
     pub status: StatusSnapshot,
+    /// (M7-15) Active resolved render palette. Read by StatusLine, message
+    /// renderers, and diff coloring. Mutated only via [`AppState::set_theme`]
+    /// (or, for live preview, the theme picker writes `theme` directly).
+    pub theme: Theme,
+    /// (M7-15) Stored theme *preference* (`auto` + 6 names). `Auto` resolves
+    /// to a concrete `ThemeName` for `theme`. Persisted to settings.json.
+    pub theme_setting: ThemeSetting,
     /// `Some` while a turn is being driven by the orchestrator.
     pub in_flight_turn: Option<TurnInFlight>,
     /// Timestamp of the first Ctrl-C while idle; cleared after 2s.
@@ -598,6 +606,8 @@ impl AppState {
             height_cache: crate::components::virtual_message_list::HeightCache::default(),
             viewport_width: 0,
             status,
+            theme: theme_for(ThemeSetting::Auto.resolve()),
+            theme_setting: ThemeSetting::Auto,
             in_flight_turn: None,
             sigint_armed_at: None,
             should_exit: false,
@@ -651,6 +661,13 @@ impl AppState {
         self.active_screen = Some(crate::screens::Screen::Memory(
             crate::screens::memory::MemoryScreenState::default(),
         ));
+    }
+
+    /// (M7-15) Apply a theme preference: store it and resolve the active
+    /// palette. The caller persists the choice separately (Task 9).
+    pub fn set_theme(&mut self, setting: ThemeSetting) {
+        self.theme_setting = setting;
+        self.theme = theme_for(setting.resolve());
     }
 
     /// (M7-11) Close any active screen, returning to the REPL. Generic — every
@@ -751,6 +768,19 @@ mod tests {
             permission_mode: PermissionMode::Default,
             ..StatusSnapshot::default()
         }
+    }
+
+    #[test]
+    fn app_state_carries_theme_and_set_theme_applies() {
+        use crate::theme::{Theme, ThemeName, ThemeSetting};
+        let mut s = AppState::new(fake_status());
+        // Default: auto → resolves dark.
+        assert_eq!(s.theme_setting, ThemeSetting::Auto);
+        assert_eq!(s.theme, Theme::dark());
+        // Switching applies both fields.
+        s.set_theme(ThemeSetting::Named(ThemeName::Light));
+        assert_eq!(s.theme_setting, ThemeSetting::Named(ThemeName::Light));
+        assert_eq!(s.theme, Theme::light());
     }
 
     #[test]

@@ -49,6 +49,9 @@ lingxi-lsp = { path = "../lsp" }
 # Used by the M2-07 contract drivers that need a real on-disk root
 # (worktree, secure_storage). Dev-only — never reaches production builds.
 tempfile = "3.13"
+# Used by the M7-16 parity_tui_screens driver to build ResumeRow values
+# (ResumeRow.uuid is a uuid::Uuid). Dev-only.
+uuid = { version = "1.10", features = ["v4"] }
 # Used by the M3-01 parity driver to exercise
 # `Settings::load_with_telemetry` against a capture sink. Dev-only.
 lingxi-telemetry = { path = "../telemetry" }

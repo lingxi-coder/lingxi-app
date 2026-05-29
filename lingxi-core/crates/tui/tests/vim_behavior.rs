@@ -164,6 +164,118 @@ fn live_char(c: char) -> iocraft::KeyEvent {
 fn live_esc() -> iocraft::KeyEvent {
     iocraft::KeyEvent::new(iocraft::KeyEventKind::Press, iocraft::KeyCode::Esc)
 }
+/// A live (iocraft) char key carrying the given modifiers.
+fn live_char_mods(c: char, mods: iocraft::KeyModifiers) -> iocraft::KeyEvent {
+    let mut ev = iocraft::KeyEvent::new(iocraft::KeyEventKind::Press, iocraft::KeyCode::Char(c));
+    ev.modifiers = mods;
+    ev
+}
+/// Ctrl-Alt-V — the `KeyAction::ToggleVim` binding.
+fn live_ctrl_alt_v() -> iocraft::KeyEvent {
+    live_char_mods(
+        'v',
+        iocraft::KeyModifiers::CONTROL | iocraft::KeyModifiers::ALT,
+    )
+}
+/// Ctrl-C — the `KeyAction::Cancel` binding.
+fn live_ctrl_c() -> iocraft::KeyEvent {
+    live_char_mods('c', iocraft::KeyModifiers::CONTROL)
+}
+
+// ===== (M7-08 review) vim toggle must be modal-independent =====
+
+#[test]
+fn toggle_vim_off_from_normal_mode() {
+    // The reported usability bug: in Normal mode, Ctrl-Alt-V was swallowed by
+    // the priority-4 vim branch and never reached the ToggleVim binding.
+    let mut st = AppState::new(StatusSnapshot::default());
+    st.vim_enabled = true;
+    st.vim.mode = VimMode::Normal;
+    handle_live_key(&mut st, &live_ctrl_alt_v(), 24);
+    assert!(
+        !st.vim_enabled,
+        "Ctrl-Alt-V must toggle vim OFF from Normal"
+    );
+}
+
+#[test]
+fn toggle_vim_off_from_insert_mode() {
+    // Regression guard: toggling off from Insert still works.
+    let mut st = AppState::new(StatusSnapshot::default());
+    st.vim_enabled = true;
+    st.vim.mode = VimMode::Insert;
+    handle_live_key(&mut st, &live_ctrl_alt_v(), 24);
+    assert!(
+        !st.vim_enabled,
+        "Ctrl-Alt-V must toggle vim OFF from Insert"
+    );
+}
+
+#[test]
+fn ctrl_c_in_normal_mode_still_cancels() {
+    // Normal mode previously swallowed Ctrl-C (returned Effect(None) and the
+    // key never reached the Cancel binding). With a non-empty prompt, Cancel
+    // clears the buffer — that is the observable contract here.
+    let mut st = AppState::new(StatusSnapshot::default());
+    st.vim_enabled = true;
+    st.vim.mode = VimMode::Normal;
+    st.prompt_text = "draft".into();
+    st.prompt_cursor = 5;
+    handle_live_key(&mut st, &live_ctrl_c(), 24);
+    assert_eq!(st.prompt_text, "", "Ctrl-C in Normal must cancel/clear");
+    assert_eq!(st.prompt_cursor, 0);
+}
+
+#[test]
+fn plain_normal_motion_keys_still_move_cursor() {
+    // Guard against over-broad pass-through: plain h/j/k/l in Normal must still
+    // route to vim motion, not be inserted as text.
+    let mut st = AppState::new(StatusSnapshot::default());
+    st.vim_enabled = true;
+    st.vim.mode = VimMode::Normal;
+    st.prompt_text = "hello".into();
+    st.prompt_cursor = 0;
+    handle_live_key(&mut st, &live_char('l'), 24);
+    assert_eq!(st.prompt_cursor, 1, "'l' moves right");
+    handle_live_key(&mut st, &live_char('l'), 24);
+    assert_eq!(st.prompt_cursor, 2);
+    handle_live_key(&mut st, &live_char('h'), 24);
+    assert_eq!(st.prompt_cursor, 1, "'h' moves left");
+    assert_eq!(st.prompt_text, "hello", "motion keys must not edit text");
+}
+
+#[test]
+fn permission_dialog_wins_over_ctrl_alt_v() {
+    // Priority order guard: a pending permission (priority 1) must consume
+    // Ctrl-Alt-V before the toggle ever fires. vim stays enabled.
+    use lingxi_permission::gate::PermissionRequest;
+    let mut st = AppState::new(StatusSnapshot::default());
+    st.vim_enabled = true;
+    st.vim.mode = VimMode::Normal;
+    st.pending_permission = Some(lingxi_tui::state::PendingPermission {
+        request: PermissionRequest::BypassPermissionsMode,
+    });
+    handle_live_key(&mut st, &live_ctrl_alt_v(), 24);
+    assert!(
+        st.vim_enabled,
+        "permission focus-trap must consume the key; vim stays enabled"
+    );
+}
+
+#[test]
+fn open_palette_wins_over_ctrl_alt_v() {
+    // Priority order guard: an open palette (priority 3) consumes Ctrl-Alt-V
+    // before the vim branch / toggle. vim stays enabled.
+    let mut st = AppState::new(StatusSnapshot::default());
+    st.vim_enabled = true;
+    st.vim.mode = VimMode::Normal;
+    st.palette.open = true;
+    handle_live_key(&mut st, &live_ctrl_alt_v(), 24);
+    assert!(
+        st.vim_enabled,
+        "open palette must consume the key; vim stays enabled"
+    );
+}
 
 #[test]
 fn multiline_jk_cross_lines_via_live_key() {

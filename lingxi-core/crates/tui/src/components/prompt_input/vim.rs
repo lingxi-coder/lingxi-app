@@ -19,7 +19,7 @@
 //! telemetry audit — see M7 design §2.7. Do not register it here without an
 //! emit site (M6 discipline: every registered name has a real emit site).
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Vim editing mode. Visual is a scaffold for M7-09 (never constructed here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -645,6 +645,21 @@ pub fn handle_vim_key(
     }
 
     // ----- NORMAL mode (and Visual scaffold, treated as Normal for M7-08). --
+    // (M7-08 review) CONTROL/ALT combos are app-level bindings, NOT vim
+    // commands: Ctrl-C (cancel), Ctrl-Alt-V (vim toggle), and any other ctrl
+    // binding. Pass them through so `handle_live_key` falls to the
+    // `map_iocraft_key` + `dispatch` pipeline. Without this, Normal mode
+    // swallowed EVERY ctrl/alt combo — you could not cancel with Ctrl-C nor
+    // toggle vim off from Normal. Pending command state is left intact (the
+    // combo is not a vim key, so it neither advances nor cancels it). SHIFT is
+    // deliberately NOT passed through — `G`/`$`/`^`/`A` are real vim motions.
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return VimOutcome::PassThrough;
+    }
+
     // Esc in Normal cancels any pending command.
     if key.code == KeyCode::Esc {
         state.command = CommandState::Idle;
@@ -1274,5 +1289,106 @@ mod dispatch_tests {
             handle_vim_key(&mut s, "abc", 0, key('q')),
             VimOutcome::Effect(VimEffect::None)
         );
+    }
+
+    // (M7-08 review) Normal mode must NOT swallow CONTROL/ALT key combos: they
+    // are app-level bindings (Ctrl-C cancel, Ctrl-Alt-V vim toggle, …) that the
+    // dispatcher owns. Returning `PassThrough` lets `handle_live_key` fall
+    // through to `map_iocraft_key` + `dispatch`. Plain (NONE/SHIFT) keys still
+    // route to vim so motions like `h`/`G`/`$` keep working.
+
+    #[test]
+    fn normal_ctrl_combo_passes_through() {
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
+        // Ctrl-C in Normal mode must pass through to the cancel binding.
+        let out = handle_vim_key(
+            &mut s,
+            "abc",
+            0,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(out, VimOutcome::PassThrough);
+        assert_eq!(s.mode, VimMode::Normal, "mode must be untouched");
+    }
+
+    #[test]
+    fn normal_ctrl_alt_v_passes_through() {
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
+        // Ctrl-Alt-V (the vim toggle) must pass through, not be swallowed.
+        let out = handle_vim_key(
+            &mut s,
+            "abc",
+            0,
+            KeyEvent::new(
+                KeyCode::Char('v'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+        );
+        assert_eq!(out, VimOutcome::PassThrough);
+    }
+
+    #[test]
+    fn normal_alt_combo_passes_through() {
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
+        let out = handle_vim_key(
+            &mut s,
+            "abc",
+            0,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT),
+        );
+        assert_eq!(out, VimOutcome::PassThrough);
+    }
+
+    #[test]
+    fn normal_plain_and_shift_keys_still_route_to_vim() {
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
+        // Plain 'l' is a vim motion, NOT a pass-through.
+        assert_eq!(
+            handle_vim_key(&mut s, "hello", 0, key('l')),
+            VimOutcome::Effect(VimEffect::Move(1))
+        );
+        // SHIFT 'G' (last line) is a vim motion, NOT a pass-through.
+        assert_eq!(
+            handle_vim_key(
+                &mut s,
+                "a\nb",
+                0,
+                KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)
+            ),
+            VimOutcome::Effect(VimEffect::Move(2))
+        );
+    }
+
+    #[test]
+    fn ctrl_combo_passes_through_even_in_pending_count() {
+        // A pending count must not trap a ctrl combo either — Ctrl-C should
+        // still reach the cancel binding mid-count.
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
+        assert_eq!(
+            handle_vim_key(&mut s, "abc", 0, key('2')),
+            VimOutcome::Pending
+        );
+        let out = handle_vim_key(
+            &mut s,
+            "abc",
+            0,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(out, VimOutcome::PassThrough);
     }
 }

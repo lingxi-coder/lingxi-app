@@ -125,6 +125,22 @@ fn map_iocraft_key(
     }
 }
 
+/// (M7-08 review) Is this key the `KeyAction::ToggleVim` binding (Ctrl-Alt-V)?
+///
+/// The toggle must be modal-independent: it flips `vim_enabled` regardless of
+/// vim mode (Normal/Insert) or whether vim is even enabled. `handle_live_key`
+/// checks this AFTER the permission focus-trap (priority 1) and the overlay
+/// focus-trap (priority 3) but BEFORE the priority-4 vim branch, so a pending
+/// permission or an open overlay still wins — yet Ctrl-Alt-V toggles vim off
+/// from ANY vim mode. The live `map_iocraft_key` deliberately does NOT map
+/// `ToggleVim` (an open overlay passes a printable through to the editor, and
+/// routing the toggle there would let it preempt the overlay).
+fn is_toggle_vim_key(k: &KeyEvent) -> bool {
+    matches!(k.code, KeyCode::Char('v'))
+        && k.modifiers.contains(KeyModifiers::CONTROL)
+        && k.modifiers.contains(KeyModifiers::ALT)
+}
+
 /// Convert an iocraft (crossterm-0.29) `KeyEvent` into a workspace
 /// (crossterm-0.28) `KeyEvent`, as consumed by `keymap::handle_key` and the
 /// per-dialog `handle_key` helpers.
@@ -265,6 +281,19 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
         }
     }
     // === end priority 3 ===
+
+    // === PRIORITY 3.5: vim toggle (M7-08 review). The Ctrl-Alt-V binding must
+    // be modal-independent — it flips `vim_enabled` from ANY vim mode (Normal or
+    // Insert) or when vim is off. It sits AFTER the permission (1) and overlay
+    // (3) focus-traps so those still win: when an overlay is open it owns the
+    // key (a printable `v` passes through to the editor, NOT the toggle), so we
+    // gate on no overlay being open. Placed BEFORE the priority-4 vim branch so
+    // Normal mode can no longer swallow the toggle. ===
+    if !st.palette.open && !st.completion.open && is_toggle_vim_key(k) {
+        let _ = dispatch(KeyAction::ToggleVim, st);
+        return;
+    }
+    // === end priority 3.5 ===
 
     // === PRIORITY 4: vim input (M7-08), only when enabled. ===
     // Sits AFTER the M7-07 overlay focus-trap (priority 3) so palette/completion
@@ -719,5 +748,30 @@ mod tests {
             map_iocraft_key(&k, true, true, false),
             Some(KeyAction::ToggleExpanded)
         ));
+    }
+
+    /// (M7-08 review) Ctrl-Alt-V is recognised as the vim-toggle binding.
+    #[test]
+    fn is_toggle_vim_key_matches_ctrl_alt_v() {
+        let mut k = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('v'));
+        k.modifiers = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert!(is_toggle_vim_key(&k));
+    }
+
+    /// Plain 'v', Ctrl-only 'v', and Alt-only 'v' are NOT the toggle.
+    #[test]
+    fn is_toggle_vim_key_rejects_partial_modifiers() {
+        let plain = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('v'));
+        assert!(!is_toggle_vim_key(&plain));
+        let mut ctrl = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('v'));
+        ctrl.modifiers = KeyModifiers::CONTROL;
+        assert!(!is_toggle_vim_key(&ctrl));
+        let mut alt = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('v'));
+        alt.modifiers = KeyModifiers::ALT;
+        assert!(!is_toggle_vim_key(&alt));
+        // Different char with Ctrl-Alt is not the toggle.
+        let mut other = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('x'));
+        other.modifiers = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert!(!is_toggle_vim_key(&other));
     }
 }

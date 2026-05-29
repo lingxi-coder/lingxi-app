@@ -1,0 +1,12 @@
+---
+source: crates/tui/tests/render_settings_screen.rs
+expression: "&f"
+---
+
+  Config  [Settings]  Status   Usage
+
+ Settings
+ model: source=user
+ trustedDirectories: source=(default)
+ telemetryEnabled: source=(default)
+ Read-only · edit via Config tab ($EDITOR) · Esc to close

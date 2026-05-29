@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/render_settings_screen.rs
+expression: "&f"
+---
+
+ [Config]  Settings   Status   Usage
+
+ Config
+ Model: claude-opus-4-8
+ Telemetry enabled: true
+ Trusted directories: /home/u/proj
+ Enabled tools: (none)
+ e to edit config in $EDITOR · Esc to close

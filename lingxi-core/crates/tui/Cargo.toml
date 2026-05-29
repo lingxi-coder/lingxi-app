@@ -56,6 +56,10 @@ assert_cmd = "=2.0.16"
 predicates = "3"
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
+# (M7-13) Internal path-dep for `MockOrchestratorHandle` in the Settings
+# read-real-values + edit-through-handle behavior tests. Not a new workspace
+# dep; no cycle (orchestrator does not depend on tui).
+lingxi-orchestrator = { path = "../orchestrator" }
 
 [lints]
 workspace = true

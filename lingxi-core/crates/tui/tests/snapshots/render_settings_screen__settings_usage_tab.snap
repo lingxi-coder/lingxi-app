@@ -1,0 +1,15 @@
+---
+source: crates/tui/tests/render_settings_screen.rs
+expression: "&f"
+---
+
+  Config   Settings   Status  [Usage]
+
+ Usage
+ Total cost: $0.1234
+ Input tokens: 5000
+ Output tokens: 2000
+ API calls: 7
+ Session duration: 125s
+ Per-model cost breakdown is not available yet (M8).
+ Esc to close

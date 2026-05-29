@@ -1,6 +1,9 @@
 //! M7-04 batch-1 renderer snapshots.
 use lingxi_tui::components::messages::advisor::{render_advisor_to_string, AdvisorProps};
 use lingxi_tui::components::messages::compact_boundary::render_compact_boundary_to_string;
+use lingxi_tui::components::messages::hook_progress::{
+    render_hook_progress_to_string, HookProgressProps,
+};
 use lingxi_tui::components::messages::rate_limit::{render_rate_limit_to_string, RateLimitProps};
 use lingxi_tui::components::messages::redacted_thinking::render_redacted_thinking_to_string;
 use lingxi_tui::components::messages::shutdown::{render_shutdown_to_string, ShutdownProps};
@@ -142,4 +145,24 @@ fn advisor_unavailable() {
         verbose: false,
     });
     insta::assert_snapshot!("advisor_unavailable", s);
+}
+
+#[test]
+fn hook_progress_running_plural() {
+    let s = render_hook_progress_to_string(HookProgressProps {
+        event: "SessionStart".into(),
+        count: 3,
+        transcript_summary: false,
+    });
+    insta::assert_snapshot!("hook_progress_running_plural", s);
+}
+
+#[test]
+fn hook_progress_transcript_singular() {
+    let s = render_hook_progress_to_string(HookProgressProps {
+        event: "PreToolUse".into(),
+        count: 1,
+        transcript_summary: true,
+    });
+    insta::assert_snapshot!("hook_progress_transcript_singular", s);
 }

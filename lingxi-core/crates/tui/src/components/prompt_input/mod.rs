@@ -23,6 +23,8 @@ use unicode_width::UnicodeWidthStr;
 pub mod footer;
 pub use footer::{FooterMode, PromptInputFooter, PromptInputFooterProps};
 
+pub mod fuzzy;
+
 /// Cursor movement primitive for the line editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorMove {

@@ -385,6 +385,37 @@ impl<'a> VimCursor<'a> {
     }
 }
 
+fn apply_single_motion(m: Motion, c: VimCursor<'_>) -> VimCursor<'_> {
+    match m {
+        Motion::Left => c.left(),
+        Motion::Right => c.right(),
+        Motion::Down => c.down_logical_line(),
+        Motion::Up => c.up_logical_line(),
+        Motion::NextWord => c.next_vim_word(),
+        Motion::PrevWord => c.prev_vim_word(),
+        Motion::EndWord => c.end_vim_word(),
+        Motion::LineStart => c.start_of_logical_line(),
+        Motion::FirstNonBlank => c.first_non_blank(),
+        Motion::LineEnd => c.end_of_logical_line(),
+        Motion::FileStart => c.start_of_first_line(),
+        Motion::LastLine => c.start_of_last_line(),
+    }
+}
+
+/// Apply `m` exactly `count` times, breaking when a step does not move.
+#[must_use]
+pub fn resolve_motion<'a>(m: Motion, cursor: VimCursor<'a>, count: usize) -> VimCursor<'a> {
+    let mut result = cursor;
+    for _ in 0..count.max(1) {
+        let next = apply_single_motion(m, result);
+        if next.offset == result.offset {
+            break;
+        }
+        result = next;
+    }
+    result
+}
+
 /// Footer mode-indicator literal. Matches the well-known vim convention
 /// (claude-code surfaces the mode via PromptInputModeIndicator; the literal
 /// status-line text is the standard vim `-- MODE --`).
@@ -547,5 +578,42 @@ mod find_tests {
         let t = "abcdabcd";
         // from offset 7 ('d'), backward till 'a' (at 4) -> land just after it = 5
         assert_eq!(cur(t, 7).find_character('a', FindKind::BigT, 1), Some(5));
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    fn cur(text: &str, off: usize) -> VimCursor<'_> {
+        VimCursor { text, offset: off }
+    }
+
+    #[test]
+    fn single_step_motions() {
+        assert_eq!(resolve_motion(Motion::Right, cur("hello", 0), 1).offset, 1);
+        assert_eq!(resolve_motion(Motion::Left, cur("hello", 3), 1).offset, 2);
+        assert_eq!(resolve_motion(Motion::LineEnd, cur("hello", 0), 1).offset, 5);
+        assert_eq!(resolve_motion(Motion::LineStart, cur("hello", 3), 1).offset, 0);
+    }
+
+    #[test]
+    fn count_repeats_motion() {
+        assert_eq!(resolve_motion(Motion::Right, cur("hello", 0), 3).offset, 3);
+        assert_eq!(resolve_motion(Motion::NextWord, cur("a b c d", 0), 2).offset, 4); // 'c'
+    }
+
+    #[test]
+    fn count_breaks_early_at_bound() {
+        // Right 100 times on "hi" stops at end (offset 2), not panic.
+        assert_eq!(resolve_motion(Motion::Right, cur("hi", 0), 100).offset, 2);
+        // Up on first line is a no-op; count doesn't matter.
+        assert_eq!(resolve_motion(Motion::Up, cur("abc", 1), 5).offset, 1);
+    }
+
+    #[test]
+    fn down_crosses_logical_lines() {
+        let t = "abc\ndef\nghi";
+        assert_eq!(resolve_motion(Motion::Down, cur(t, 1), 1).offset, 5); // line2 col1 = 'e'
+        assert_eq!(resolve_motion(Motion::Down, cur(t, 1), 2).offset, 9); // line3 col1 = 'h'
     }
 }

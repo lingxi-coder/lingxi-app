@@ -1,4 +1,4 @@
-//! MessageSelector (M7-14) — search the scrollback, jump back to a message,
+//! `MessageSelector` (M7-14) — search the scrollback, jump back to a message,
 //! and export the transcript.
 //!
 //! Searches [`crate::state::AppState::messages`] by substring, sets
@@ -17,6 +17,10 @@ use crate::state::RenderedMessage;
 /// Covers the text-bearing variants; structural/marker-only variants (e.g.
 /// compaction boundaries, redacted thinking) project to an empty string and
 /// so never match a non-empty query.
+// Several single-field text variants share an identical `clone()` body but bind
+// distinct field names — keeping the arms separate documents the per-variant
+// projection, so the `match_same_arms` collapse hint is intentionally allowed.
+#[allow(clippy::match_same_arms)]
 fn searchable_text(msg: &RenderedMessage) -> String {
     match msg {
         RenderedMessage::UserText { body, .. }
@@ -453,7 +457,14 @@ mod tests {
 
     #[test]
     fn default_filename_ends_in_txt() {
-        assert!(default_export_filename().ends_with(".txt"));
+        let name = default_export_filename();
+        assert_eq!(
+            Path::new(&name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase),
+            Some("txt".to_string())
+        );
     }
 
     #[test]
@@ -490,7 +501,7 @@ mod tests {
         let mut st = MessageSelectorState::default();
         st.open();
         handle_message_selector_key(&mut st, &msgs, k(KeyCode::Char('a'))); // matches 0,1,2
-        // "a" matches alpha(0), beta(1), alpaca(2) → pick the 3rd.
+                                                                            // "a" matches alpha(0), beta(1), alpaca(2) → pick the 3rd.
         st.selected_filtered = 2;
         let action = handle_message_selector_key(&mut st, &msgs, k(KeyCode::Enter));
         assert_eq!(action, SelectorAction::Jump { message_index: 2 });

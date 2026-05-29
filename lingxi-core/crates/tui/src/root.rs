@@ -318,7 +318,9 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
             //     (§4 R7 — the ONLY write); Esc never produces Save, so a cancel
             //     never writes.
             //   - BackToSelector / None → keep the screen open.
-            use crate::screens::memory::{handle_memory_key, memory_tiers, save_tier_body, MemoryAction};
+            use crate::screens::memory::{
+                handle_memory_key, memory_tiers, save_tier_body, MemoryAction,
+            };
             let ct = iocraft_to_crossterm028_key(k);
             let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
             let tiers = memory_tiers(&st.status.cwd, &home);

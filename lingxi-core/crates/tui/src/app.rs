@@ -364,6 +364,7 @@ pub async fn handle_submit_line(
 /// the streaming spinner. M6-02 ships the pure render function so
 /// downstream tasks have a stable assembly point.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn render_screen(
     state: &AppState,
     viewport_height: usize,

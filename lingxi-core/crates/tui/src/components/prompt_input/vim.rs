@@ -107,6 +107,133 @@ pub struct VimCursor<'a> {
     pub offset: usize,
 }
 
+impl<'a> VimCursor<'a> {
+    fn clamp(&self, off: usize) -> usize {
+        let off = off.min(self.text.len());
+        if self.text.is_char_boundary(off) {
+            off
+        } else {
+            let mut c = off;
+            while c > 0 && !self.text.is_char_boundary(c) {
+                c -= 1;
+            }
+            c
+        }
+    }
+
+    #[must_use]
+    pub fn left(&self) -> Self {
+        if self.offset == 0 {
+            return *self;
+        }
+        let prev = self.text[..self.offset]
+            .char_indices()
+            .last()
+            .map_or(0, |(i, _)| i);
+        Self { text: self.text, offset: prev }
+    }
+
+    #[must_use]
+    pub fn right(&self) -> Self {
+        if self.offset >= self.text.len() {
+            return *self;
+        }
+        let ch_len = self.text[self.offset..]
+            .chars()
+            .next()
+            .map_or(0, char::len_utf8);
+        Self { text: self.text, offset: self.offset + ch_len }
+    }
+
+    fn logical_line_start(&self, from: usize) -> usize {
+        self.text[..from].rfind('\n').map_or(0, |i| i + 1)
+    }
+
+    fn logical_line_end(&self, from: usize) -> usize {
+        self.text[from..].find('\n').map_or(self.text.len(), |i| from + i)
+    }
+
+    #[must_use]
+    pub fn start_of_logical_line(&self) -> Self {
+        Self { text: self.text, offset: self.logical_line_start(self.offset) }
+    }
+
+    #[must_use]
+    pub fn end_of_logical_line(&self) -> Self {
+        Self { text: self.text, offset: self.logical_line_end(self.offset) }
+    }
+
+    #[must_use]
+    pub fn first_non_blank(&self) -> Self {
+        let start = self.logical_line_start(self.offset);
+        let end = self.logical_line_end(self.offset);
+        let line = &self.text[start..end];
+        let rel = line.find(|c: char| !c.is_whitespace()).unwrap_or(0);
+        Self { text: self.text, offset: start + rel }
+    }
+
+    /// Column = byte distance from logical-line start, clamped to dest line.
+    fn move_to_line(&self, target_start: usize, target_end: usize) -> Self {
+        let cur_start = self.logical_line_start(self.offset);
+        let col = self.offset - cur_start;
+        let line_len = target_end - target_start;
+        let raw = target_start + col.min(line_len);
+        Self { text: self.text, offset: self.clamp(raw) }
+    }
+
+    #[must_use]
+    pub fn down_logical_line(&self) -> Self {
+        let end = self.logical_line_end(self.offset);
+        if end >= self.text.len() {
+            return *self; // last line: no-op
+        }
+        let next_start = end + 1; // skip the '\n'
+        let next_end = self.logical_line_end(next_start);
+        self.move_to_line(next_start, next_end)
+    }
+
+    #[must_use]
+    pub fn up_logical_line(&self) -> Self {
+        let start = self.logical_line_start(self.offset);
+        if start == 0 {
+            return *self; // first line: no-op
+        }
+        let prev_end = start - 1; // the '\n' itself
+        let prev_start = self.logical_line_start(prev_end);
+        self.move_to_line(prev_start, prev_end)
+    }
+
+    #[must_use]
+    pub fn start_of_first_line(&self) -> Self {
+        Self { text: self.text, offset: 0 }
+    }
+
+    #[must_use]
+    pub fn start_of_last_line(&self) -> Self {
+        let off = self.text.rfind('\n').map_or(0, |i| i + 1);
+        Self { text: self.text, offset: off }
+    }
+
+    /// 1-indexed logical line, clamped (vim `Ngg` / `G`).
+    #[must_use]
+    pub fn go_to_line(&self, line_1indexed: usize) -> Self {
+        let target = line_1indexed.saturating_sub(1);
+        let mut off = 0usize;
+        for (i, l) in self.text.split('\n').enumerate() {
+            if i == target {
+                return Self { text: self.text, offset: off };
+            }
+            off += l.len() + 1; // +1 for '\n'
+        }
+        // clamp to last line start
+        self.start_of_last_line()
+    }
+
+    fn is_at_end(&self) -> bool {
+        self.offset >= self.text.len()
+    }
+}
+
 /// Footer mode-indicator literal. Matches the well-known vim convention
 /// (claude-code surfaces the mode via PromptInputModeIndicator; the literal
 /// status-line text is the standard vim `-- MODE --`).
@@ -136,5 +263,56 @@ mod tests {
         assert_eq!(mode_indicator(VimMode::Normal), "-- NORMAL --");
         assert_eq!(mode_indicator(VimMode::Insert), "-- INSERT --");
         assert_eq!(mode_indicator(VimMode::Visual), "-- VISUAL --");
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    fn cur(text: &str, off: usize) -> VimCursor<'_> {
+        VimCursor { text, offset: off }
+    }
+
+    #[test]
+    fn left_right_clamp_and_utf8() {
+        // "héllo": 'é' is 2 bytes (offsets 1..3).
+        assert_eq!(cur("héllo", 0).left().offset, 0);          // clamp at 0
+        assert_eq!(cur("héllo", 0).right().offset, 1);
+        assert_eq!(cur("héllo", 1).right().offset, 3);          // skip whole 'é'
+        assert_eq!(cur("héllo", 3).left().offset, 1);
+        assert_eq!(cur("hi", 2).right().offset, 2);             // clamp at end
+    }
+
+    #[test]
+    fn logical_line_bounds() {
+        let t = "abc\ndefg\nhi";
+        // cursor in middle of line 2 (offset 6 = 'f')
+        assert_eq!(cur(t, 6).start_of_logical_line().offset, 4); // 'd'
+        assert_eq!(cur(t, 6).end_of_logical_line().offset, 8);   // after 'g' (the \n)
+        // line 1 has no leading blanks -> first_non_blank == start
+        assert_eq!(cur("  xy", 3).first_non_blank().offset, 2);  // 'x'
+    }
+
+    #[test]
+    fn down_up_preserve_column_clamped() {
+        let t = "abcd\nef\nghij";
+        // on line0 col3 ('d'), down -> line1 but line1 len 2 -> clamp to end (col2 = after 'f')
+        let c = cur(t, 3).down_logical_line();
+        assert_eq!(c.offset, 7); // line1 = "ef" at 5..7, end is 7
+        // from there, down -> line2 col2 = 'i' (offset 8+2=10)
+        let c2 = cur(t, 7).down_logical_line();
+        assert_eq!(c2.offset, 10);
+        // up from line2 col2 -> line1 clamp end = 7
+        assert_eq!(cur(t, 10).up_logical_line().offset, 7);
+    }
+
+    #[test]
+    fn first_last_line_and_goto() {
+        let t = "one\ntwo\nthree";
+        assert_eq!(cur(t, 9).start_of_first_line().offset, 0);
+        assert_eq!(cur(t, 0).start_of_last_line().offset, 8);  // 'three'
+        assert_eq!(cur(t, 0).go_to_line(2).offset, 4);          // 'two' (1-indexed)
+        assert_eq!(cur(t, 0).go_to_line(99).offset, 8);         // clamp to last
     }
 }

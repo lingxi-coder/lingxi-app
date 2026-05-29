@@ -124,6 +124,13 @@ pub fn cursor_line_col(text: &str, cursor: usize) -> (usize, usize) {
     (line, col)
 }
 
+/// Insert a `\n` at byte index `cursor`, returning `(new_text, new_cursor)`.
+/// Mirrors `apply_insert` but for the newline char.
+#[must_use]
+pub fn apply_newline(text: &str, cursor: usize) -> (String, usize) {
+    apply_insert(text, cursor, '\n')
+}
+
 /// Props for `PromptInput`.
 #[derive(Default, Props)]
 pub struct PromptInputProps {
@@ -181,6 +188,28 @@ mod tests {
     fn cursor_line_col_grapheme_column() {
         // "é" is 2 bytes but column 1. "éb\nx": byte 3 is after "éb" → col 2.
         assert_eq!(cursor_line_col("éb\nx", 3), (0, 2));
+    }
+
+    #[test]
+    fn newline_at_end() {
+        let (t, c) = apply_newline("hi", 2);
+        assert_eq!(t, "hi\n");
+        assert_eq!(c, 3);
+    }
+
+    #[test]
+    fn newline_in_middle_splits_line() {
+        let (t, c) = apply_newline("abcd", 2);
+        assert_eq!(t, "ab\ncd");
+        assert_eq!(c, 3); // cursor after the inserted '\n'
+    }
+
+    #[test]
+    fn newline_respects_char_boundary() {
+        // "é" is 2 bytes; a mid-codepoint cursor saturates left to byte 0.
+        let (t, c) = apply_newline("é", 1);
+        assert_eq!(t, "\né");
+        assert_eq!(c, 1);
     }
 
     #[test]

@@ -1,5 +1,102 @@
 # Changelog
 
+## [0.8.0] — M7 TUI Surface
+
+The full single-user TUI surface. Builds on the v0.7.0 iocraft foundation with
+rich rendering primitives (full ANSI 16/256/truecolor, markdown via
+`pulldown-cmark`, syntect syntax highlighting, `similar`-backed StructuredDiff),
+~22 message renderers, a windowed `VirtualMessageList` scrollback (replacing the
+capped buffer), an advanced multi-line `PromptInput` (vim Normal/Insert/Visual +
+motions/operators/counts, command palette, `@`-completion, history search, image
+paste), four full-page screens (Doctor / Resume / Settings / Memory), a message
+search/jump/export selector, and a 6-theme picker with live preview. Non-TTY and
+`--no-tui` continue to fall back byte-for-byte to the stdio REPL. 16 sub-plans
+M7-01..M7-16 delivered the surface.
+
+### Sub-plans delivered (16 total)
+
+| Plan | Component |
+|---|---|
+| **M7-01** | ANSI 16/256/truecolor parser + markdown rendering (`render::ansi` / `render::markdown`, `StyledLine`/`StyledSpan`). |
+| **M7-02** | syntect syntax highlighting + `similar`-backed StructuredDiff (`render::syntax` / `render::diff`). |
+| **M7-03** | `VirtualMessageList` windowed scrollback + line-height cache + scroll math. |
+| **M7-04** | System/assistant message renderers (thinking, compact-boundary, system-text/api-error, rate-limit, shutdown, advisor, hook-progress, plan-approval). |
+| **M7-05** | User message renderers (bash-input/output, command, local-command-output, memory-input, plan, prompt, resource-update, image, attachment, grouped-tool-use, collapsed-read-search). |
+| **M7-06** | Multi-line `PromptInput` (content-driven height, vertical cursor, footer). |
+| **M7-07** | Command palette (`/`) + `@`-path completion overlays. |
+| **M7-08** | Vim Normal/Insert + motions (w/b/e, f/t, counts) + mode indicator. |
+| **M7-09** | Vim operators (d/c/y × motions), Visual/Visual-line, registers/paste. |
+| **M7-10** | History search (Ctrl-R) + image-paste coalescer. |
+| **M7-11** | Doctor screen + `active_screen` route-state foundation. |
+| **M7-12** | Resume picker screen (interactive list → select). |
+| **M7-13** | Settings screens (Config / Settings / Status / Usage tabs). |
+| **M7-14** | Memory editor screen + MessageSelector (search / jump / export). |
+| **M7-15** | 6-theme picker with live preview + persistence; syntect theme follows. |
+| **M7-16** | Parity fixtures + telemetry lock + v0.8.0 release (this plan). |
+
+### Cross-cutting locks (M7-16)
+
+- **TUI parity fixtures (2 new)**: `parity_tui_renderers_m7.json` +
+  `parity_tui_renderers_m7.rs` (8 tests: 4 M7-04/05 renderers + 6 markdown
+  element structures + 3 syntax cases + 1 multi-hunk diff) and
+  `parity_tui_screens.json` + `parity_tui_screens.rs` (5 scripted screen
+  flows through the live dispatcher). Structure-asserting (not per-token color).
+- **Cross-state-seam review**: `cross_state_seam_test.rs` (7 tests) — the named
+  M6-lesson safety net probing the single `handle_live_key` priority chain
+  (permission > screen > overlay > vim > scroll).
+- **Literal-lock catalog**: `docs/superpowers/literals/m7-tui-literals.md` —
+  every M7 renderer + screen string indexed to its claude-code source.
+- **v0.7.0 parity fixtures**: all prior fixtures continue passing unchanged.
+- **Release marker**: `lingxi_core_v0_8_0_released` emitted once on first
+  `ConversationOrchestrator::new` after upgrade via `std::sync::Once`.
+
+### Telemetry events added (M7-01..M7-16)
+
+| Plan | Count | Events |
+|---|---|---|
+| M7-01..M7-15 | 0 | (every TUI event candidate deferred to the M7-16 audit) |
+| M7-16 | 3 | `tengu_tui_screen_opened/screen_closed` (emit sites in `AppState::open_*`/`close_screen`), `tengu_tui_search_opened` (`MessageSelectorState::open`/`open_export`) |
+| M7-16 | 1 | `lingxi_core_v0_8_0_released` |
+| **Total added** | **4** | (326 baseline + 4 = **330**) |
+
+> **Telemetry count reconciliation** (the M6 "330-vs-326, report the real
+> number" discipline): M7-01..M7-15 registered **0** new events — every
+> palette/screen/vim/search candidate was deferred to this audit. M7-16 adds
+> only the candidates with a REAL emit site: `screen_opened`, `screen_closed`,
+> `search_opened`, plus the `lingxi_core_v0_8_0_released` marker → **330**.
+> `tengu_tui_command_palette_opened` (per-keystroke open/close churn — no clean
+> once-per-open transition), `tengu_tui_vim_mode_entered` (Esc-from-Insert
+> churn; the spec wants an aggregated entry), and `tengu_tui_key_pressed` (still
+> no windowed aggregator) stay DEFERRED to M8 — registering them would mint dead
+> names. `ALL_EVENT_NAMES.len() == 330` is locked in
+> `registry_is_exactly_330_entries`.
+
+### Known deferred gaps (carry to M8)
+
+| Gap | Status | Planned fix |
+|---|---|---|
+| Live assistant text → markdown/syntect (#211) | `AssistantTextMessage` renders the body as plain `● {body}`; markdown/syntect wired only into secondary renderers (advisor/local-output/plan) | M8 — streaming-aware measurement makes it riskier than a closeout commit |
+| Height-cache expanded-aware measurement (#207) | `render_text_for_measure` proxy can drift on expanded UserToolResult | M8 |
+| Resume picker corrupt-`.jsonl` (#208) | one corrupt session file aborts the whole listing | M8 |
+| `JsonlWriter::append` ordering (#209) | golden-test flake root cause | M8 |
+| Config tab `$EDITOR` edit handoff (#210) | `pending_config_edit` raised; terminal suspend/resume not wired | M8 |
+| `force_compact` real LLM summary | Stub (`ForkedAgentRunner` not wired) | M8 |
+| `CostTracker` → AnalyticsBus / per-model cost | Flat totals only | M8 |
+| MCP auto-connect from `.mcp.json` | Loaded `Disconnected` | M8 |
+| `OAuthHandle::login` real PKCE flow | Stub (Doctor `auth_state` = `"unknown"`) | M8 |
+| Team / Coordinator / Swarm renderers | Off (UserTeammate/Channel/TaskAssignment/AgentNotification, teamMem collapsed/saved) | M8 |
+| Voice / `grove` / FPS metrics / IDE-bridge dialogs / Anthropic-internal banners | Off | M8 |
+| Mouse mode | Off (keyboard-only) | M8 |
+| Inline terminal image display (kitty/iTerm2/sixel) | Detect + `[Image #N]` ref-insert only | M8 |
+| Vim obscure cases (`.` repeat, macros, ex-commands, `/`-search) | Deferred per the M7-09 "vim parity subset" gate; `/` is consumed as a no-op in Normal | M8 |
+| `tengu_tui_command_palette_opened` / `vim_mode_entered` / `key_pressed` | Deferred (no clean/aggregated emit site) | M8 |
+| Manual real-terminal TUI smoke | Deferred to human (headless agent env) — same as v0.7.0 gap #5 | human verification |
+
+### Version bump
+
+All 42 `Cargo.toml` files: `0.7.0 → 0.8.0`. No new workspace crates in M7 — all
+TUI modules live inside the existing `lingxi-tui` crate.
+
 ## [0.7.0] — M6 TUI Foundation
 
 The first iocraft-based terminal UI for LingXi. Replaces the v0.6.0 stdio

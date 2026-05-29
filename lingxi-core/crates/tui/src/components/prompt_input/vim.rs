@@ -845,6 +845,39 @@ fn line_op(op: Operator, cursor: VimCursor<'_>, count: usize) -> (VimEffect, Reg
     }
 }
 
+/// claude-code `operators.ts::executeX` — delete `count` chars forward from the
+/// cursor. Register charwise. No-op (and register untouched) if at EOF.
+#[must_use]
+fn delete_char_x(cursor: VimCursor<'_>, count: usize) -> (VimEffect, Register) {
+    let text = cursor.text;
+    let from = cursor.offset;
+    if from >= text.len() {
+        return (VimEffect::None, Register::default());
+    }
+    let mut end = cursor;
+    for _ in 0..count.max(1) {
+        if end.is_at_end() {
+            break;
+        }
+        end = end.right();
+    }
+    let to = end.offset;
+    let deleted = text[from..to].to_string();
+    let new_text = format!("{}{}", &text[..from], &text[to..]);
+    let max_off = new_text.len().saturating_sub(last_char_len(&new_text));
+    let cursor_off = from.min(max_off);
+    (
+        VimEffect::Edit {
+            text: new_text,
+            cursor: cursor_off,
+        },
+        Register {
+            text: deleted,
+            linewise: false,
+        },
+    )
+}
+
 /// The i/a/o/I/A/O mode-entry effect. Returns the cursor placement (Move) or
 /// the buffer edit (Edit, for o/O). Caller flips mode to Insert.
 #[must_use]
@@ -1982,5 +2015,81 @@ mod line_op_tests {
             }
         );
         assert!(enter_insert);
+    }
+}
+
+#[cfg(test)]
+mod x_tests {
+    use super::*;
+    fn cur(text: &str, off: usize) -> VimCursor<'_> {
+        VimCursor { text, offset: off }
+    }
+
+    #[test]
+    fn x_deletes_char_under_cursor() {
+        // x on "hello" at 0: delete 'h' -> "ello", register "h", cursor 0.
+        let (effect, reg) = delete_char_x(cur("hello", 0), 1);
+        assert_eq!(
+            reg,
+            Register {
+                text: "h".into(),
+                linewise: false
+            }
+        );
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: "ello".into(),
+                cursor: 0
+            }
+        );
+    }
+
+    #[test]
+    fn count_x_deletes_n_chars() {
+        // 3x on "hello" at 0: delete "hel" -> "lo", cursor 0.
+        let (effect, reg) = delete_char_x(cur("hello", 0), 3);
+        assert_eq!(reg.text, "hel");
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: "lo".into(),
+                cursor: 0
+            }
+        );
+    }
+
+    #[test]
+    fn x_clamps_cursor_to_last_char() {
+        // x on last char of "ab" at 1: delete 'b' -> "a"; cursor clamps to 0.
+        let (effect, _reg) = delete_char_x(cur("ab", 1), 1);
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: "a".into(),
+                cursor: 0
+            }
+        );
+    }
+
+    #[test]
+    fn x_at_eof_is_noop() {
+        let (effect, reg) = delete_char_x(cur("ab", 2), 1);
+        assert_eq!(effect, VimEffect::None);
+        assert_eq!(reg, Register::default()); // unchanged
+    }
+
+    #[test]
+    fn count_x_overshoot_clamps_at_eof() {
+        // 9x on "ab" at 0: delete both -> "", cursor 0.
+        let (effect, reg) = delete_char_x(cur("ab", 0), 9);
+        assert_eq!(reg.text, "ab");
+        assert_eq!(
+            effect,
+            VimEffect::Edit {
+                text: String::new(),
+                cursor: 0
+            }
+        );
     }
 }

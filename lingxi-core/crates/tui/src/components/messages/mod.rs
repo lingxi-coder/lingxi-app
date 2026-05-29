@@ -77,6 +77,9 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             old_string: old_string.clone(),
             new_string: new_string.clone(),
             file_path: file_path.clone(),
+            // (M7-15) String oracle drops color; the syntect theme is
+            // immaterial here. The live component path threads the real theme.
+            theme_name: crate::theme::ThemeName::default(),
         }),
         RenderedMessage::AssistantThinking { thinking, expanded } => {
             thinking::render_thinking_to_string(thinking::ThinkingProps {

@@ -30,6 +30,8 @@ pub struct UserPlanProps {
 fn markdown_plain(text: &str) -> String {
     let theme = MarkdownTheme {
         inline_code: StyleColor::Default,
+        // (M7-15) oracle flattens to plain text; code-block theme is immaterial.
+        code_theme: crate::theme::ThemeName::Dark,
     };
     render_markdown(text, &theme)
         .iter()

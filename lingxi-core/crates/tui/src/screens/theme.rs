@@ -168,12 +168,7 @@ pub fn render_theme_picker_to_string(state: &ThemePickerState) -> String {
     }
     // Preview: the locked diff snippet flattened to plain text (the colors live
     // in the component; the oracle keeps the text for layout regressions).
-    let preview = diff::render(
-        PREVIEW_OLD,
-        PREVIEW_NEW,
-        Some("greet.js"),
-        &crate::theme::TuiTheme,
-    );
+    let preview = diff::render(PREVIEW_OLD, PREVIEW_NEW, Some("greet.js"), ThemeName::Dark);
     for line in preview {
         out.push_str(&line.plain_text());
         out.push('\n');
@@ -214,17 +209,10 @@ pub fn ThemePickerScreen(props: &ThemePickerScreenProps) -> impl Into<AnyElement
         })
         .collect();
 
-    // Preview: the locked diff snippet rendered as a `StructuredDiff`. Task 6
-    // threads `props.theme_name` into the syntect highlighter so the code
-    // recolors with the live theme; until then the M7-02 default tmTheme is
-    // used. `theme_name` is consumed here to keep the prop live.
-    let _ = props.theme_name;
-    let preview = diff::render(
-        PREVIEW_OLD,
-        PREVIEW_NEW,
-        Some("greet.js"),
-        &crate::theme::TuiTheme,
-    );
+    // Preview: the locked diff snippet rendered as a `StructuredDiff`. The
+    // active `theme_name` flows into the syntect highlighter so the preview
+    // code recolors live with the highlighted theme.
+    let preview = diff::render(PREVIEW_OLD, PREVIEW_NEW, Some("greet.js"), props.theme_name);
     let preview_rows: Vec<AnyElement<'static>> = preview
         .into_iter()
         .map(|line| {

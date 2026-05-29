@@ -53,6 +53,10 @@ pub struct UserToolResultProps {
     /// M7-02: file path of the edited file (`file_path` input), drives syntax
     /// language detection in the diff.
     pub file_path: Option<String>,
+    /// (M7-15) Active theme — drives the syntect `.tmTheme` of the diff's
+    /// syntax coloring (the diff recolors with the picker). Threaded from
+    /// `scrollback::render_message`. Defaults to dark.
+    pub theme_name: crate::theme::ThemeName,
 }
 
 /// Extract the human-displayable body from a tool result JSON.
@@ -100,7 +104,7 @@ pub fn render_edit_write_diff_lines(
     old_string: Option<&str>,
     new_string: Option<&str>,
     path: Option<&str>,
-    theme: &TuiTheme,
+    theme: crate::theme::ThemeName,
 ) -> Vec<StyledLine> {
     let old = old_string.unwrap_or("");
     let new = new_string.unwrap_or("");
@@ -226,7 +230,7 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
             props.old_string.as_deref(),
             props.new_string.as_deref(),
             props.file_path.as_deref(),
-            &TuiTheme,
+            props.theme_name,
         );
         let prefix = if props.focused { FOCUS_PREFIX } else { "" };
         let header = format!("{prefix}{MARKER}");

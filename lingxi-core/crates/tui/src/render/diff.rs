@@ -28,7 +28,7 @@ use similar::{ChangeTag, TextDiff};
 
 use crate::render::syntax;
 use crate::render::{NamedColor, SpanStyle, StyleColor, StyledLine, StyledSpan};
-use crate::theme::TuiTheme;
+use crate::theme::ThemeName;
 
 /// Classification of one rendered diff line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,16 +53,22 @@ pub struct DiffRow {
 }
 
 /// Green background for added lines (claude-code `diffAdded`). Dark + low
-/// saturation so syntax fg stays readable. M7-15 will source these from the
-/// active Theme.
+/// saturation so syntax fg stays readable.
+///
+/// (M7-15) The diff *line* backgrounds stay these locked dark/desaturated
+/// values (independent of the active theme) so the syntect fg — which DOES
+/// follow the theme via [`syntax::highlight`] — stays readable on every theme;
+/// the `theme` arg now carries the active [`ThemeName`] for that fg lookup.
+/// `Theme.diff_added` (the claude-code line bg) is brighter and would wash out
+/// the fg here, so it is intentionally NOT used for the terminal diff bg.
 #[must_use]
-pub fn add_bg(_theme: &TuiTheme) -> StyleColor {
+pub fn add_bg(_theme: ThemeName) -> StyleColor {
     StyleColor::Rgb(0x00, 0x40, 0x00)
 }
 
 /// Red background for removed lines (claude-code `diffRemoved`).
 #[must_use]
-pub fn remove_bg(_theme: &TuiTheme) -> StyleColor {
+pub fn remove_bg(_theme: ThemeName) -> StyleColor {
     StyleColor::Rgb(0x40, 0x00, 0x00)
 }
 
@@ -73,14 +79,14 @@ const CHANGE_THRESHOLD: f64 = 0.4;
 /// Brighter emphasis background for the changed *words* of a paired add line
 /// (claude-code `diffAddedWord`).
 #[must_use]
-pub fn add_word_bg(_theme: &TuiTheme) -> StyleColor {
+pub fn add_word_bg(_theme: ThemeName) -> StyleColor {
     StyleColor::Rgb(0x00, 0x80, 0x00)
 }
 
 /// Brighter emphasis background for the changed *words* of a paired remove
 /// line (claude-code `diffRemovedWord`).
 #[must_use]
-pub fn remove_word_bg(_theme: &TuiTheme) -> StyleColor {
+pub fn remove_word_bg(_theme: ThemeName) -> StyleColor {
     StyleColor::Rgb(0x80, 0x00, 0x00)
 }
 
@@ -134,7 +140,7 @@ fn content_spans(
     text: &str,
     lang: Option<&str>,
     bg: StyleColor,
-    theme: &TuiTheme,
+    theme: ThemeName,
 ) -> Vec<StyledSpan> {
     let highlighted = syntax::highlight(text, lang, theme);
     if let Some(first) = highlighted.into_iter().next() {
@@ -165,7 +171,7 @@ fn word_diff_spans(
     remove_text: &str,
     add_text: &str,
     is_add: bool,
-    theme: &TuiTheme,
+    theme: ThemeName,
     line_bg: StyleColor,
 ) -> Option<Vec<StyledSpan>> {
     let wd = TextDiff::from_words(remove_text, add_text);
@@ -220,7 +226,7 @@ fn word_diff_spans(
 
 /// Layout a single non-word-diffed row (context, or unpaired/too-dissimilar
 /// add/remove): gutter + whole-line syntax-colored content over the line bg.
-fn plain_row(row: &DiffRow, gutter_w: usize, lang: Option<&str>, theme: &TuiTheme) -> StyledLine {
+fn plain_row(row: &DiffRow, gutter_w: usize, lang: Option<&str>, theme: ThemeName) -> StyledLine {
     let bg = match row.kind {
         LineKind::Add => add_bg(theme),
         LineKind::Remove => remove_bg(theme),
@@ -236,7 +242,7 @@ fn word_row(
     row: &DiffRow,
     gutter_w: usize,
     content: Vec<StyledSpan>,
-    theme: &TuiTheme,
+    theme: ThemeName,
 ) -> StyledLine {
     let bg = match row.kind {
         LineKind::Add => add_bg(theme),
@@ -324,7 +330,7 @@ fn grouped_hunks(old: &str, new: &str) -> Vec<(HunkHeader, Vec<DiffRow>)> {
 /// `@@` headers; output past `MAX_DIFF_LINES` body rows is truncated with a
 /// "… N more lines" footer. Never panics.
 #[must_use]
-pub fn render(old: &str, new: &str, path: Option<&str>, theme: &TuiTheme) -> Vec<StyledLine> {
+pub fn render(old: &str, new: &str, path: Option<&str>, theme: ThemeName) -> Vec<StyledLine> {
     let hunks = grouped_hunks(old, new);
     if hunks.is_empty() {
         return Vec::new();
@@ -372,7 +378,7 @@ fn layout_rows(
     rows: &[DiffRow],
     gutter_w: usize,
     lang: Option<&str>,
-    theme: &TuiTheme,
+    theme: ThemeName,
 ) -> Vec<StyledLine> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -494,7 +500,7 @@ mod tests {
 
     #[test]
     fn render_pure_add_has_plus_sigil_and_green_bg() {
-        let lines = render("a\n", "a\nb\n", Some("x.txt"), &TuiTheme);
+        let lines = render("a\n", "a\nb\n", Some("x.txt"), ThemeName::Dark);
         // The add line carries a "+" sigil and the content "b", over green bg.
         let add = lines
             .iter()
@@ -504,28 +510,32 @@ mod tests {
         assert!(joined.contains('b'), "add line content: {joined:?}");
         // At least one span on the add line has the green add background.
         assert!(
-            add.spans.iter().any(|s| s.style.bg == add_bg(&TuiTheme)),
+            add.spans
+                .iter()
+                .any(|s| s.style.bg == add_bg(ThemeName::Dark)),
             "add line has green background"
         );
     }
 
     #[test]
     fn render_pure_remove_has_minus_sigil_and_red_bg() {
-        let lines = render("a\nb\n", "a\n", Some("x.txt"), &TuiTheme);
+        let lines = render("a\nb\n", "a\n", Some("x.txt"), ThemeName::Dark);
         let rem = lines
             .iter()
             .find(|l| !is_header(l) && rowline(l).contains('-'))
             .expect("a - line");
         assert!(rowline(rem).contains('b'));
         assert!(
-            rem.spans.iter().any(|s| s.style.bg == remove_bg(&TuiTheme)),
+            rem.spans
+                .iter()
+                .any(|s| s.style.bg == remove_bg(ThemeName::Dark)),
             "remove line has red background"
         );
     }
 
     #[test]
     fn render_gutter_has_line_numbers() {
-        let lines = render("a\n", "a\nb\n", Some("x.txt"), &TuiTheme);
+        let lines = render("a\n", "a\nb\n", Some("x.txt"), ThemeName::Dark);
         let rows = body(&lines);
         // Context line "a" is line 1, add line "b" is line 2.
         assert!(rows.iter().any(|l| rowline(l).contains('1')));
@@ -535,7 +545,7 @@ mod tests {
     #[test]
     fn render_empty_diff_is_empty() {
         // No changes -> no hunks -> empty output (claude-code renders nothing).
-        let lines = render("a\nb\n", "a\nb\n", Some("x.txt"), &TuiTheme);
+        let lines = render("a\nb\n", "a\nb\n", Some("x.txt"), ThemeName::Dark);
         assert!(lines.is_empty());
     }
 
@@ -547,7 +557,7 @@ mod tests {
             "function oldName(param)\n",
             "function newName(param)\n",
             Some("x.js"),
-            &TuiTheme,
+            ThemeName::Dark,
         );
         // One remove row + one add row (skip the @@ header).
         let rem = lines
@@ -563,23 +573,23 @@ mod tests {
         assert!(rem
             .spans
             .iter()
-            .any(|s| s.text.contains("oldName") && s.style.bg == remove_word_bg(&TuiTheme)));
+            .any(|s| s.text.contains("oldName") && s.style.bg == remove_word_bg(ThemeName::Dark)));
         assert!(add
             .spans
             .iter()
-            .any(|s| s.text.contains("newName") && s.style.bg == add_word_bg(&TuiTheme)));
+            .any(|s| s.text.contains("newName") && s.style.bg == add_word_bg(ThemeName::Dark)));
         // The shared word "function" is NOT emphasized.
         assert!(add
             .spans
             .iter()
-            .any(|s| s.text.contains("function") && s.style.bg != add_word_bg(&TuiTheme)));
+            .any(|s| s.text.contains("function") && s.style.bg != add_word_bg(ThemeName::Dark)));
     }
 
     #[test]
     fn word_diff_skipped_when_lines_too_dissimilar() {
         // Wildly different lines (> CHANGE_THRESHOLD changed) fall back to
         // whole-line coloring: no word-emphasis spans.
-        let lines = render("aaaaaaaa\n", "zzzzzzzz\n", Some("x.txt"), &TuiTheme);
+        let lines = render("aaaaaaaa\n", "zzzzzzzz\n", Some("x.txt"), ThemeName::Dark);
         let add = lines
             .iter()
             .find(|l| !is_header(l) && rowline(l).contains('+'))
@@ -587,7 +597,7 @@ mod tests {
         assert!(
             add.spans
                 .iter()
-                .all(|s| s.style.bg != add_word_bg(&TuiTheme)),
+                .all(|s| s.style.bg != add_word_bg(ThemeName::Dark)),
             "dissimilar lines use whole-line coloring, not word emphasis"
         );
     }
@@ -605,7 +615,7 @@ mod tests {
         new_lines[2] = "CHANGED_TOP".into();
         new_lines[37] = "CHANGED_BOTTOM".into();
         let new = new_lines.join("\n") + "\n";
-        let lines = render(&old, &new, Some("x.txt"), &TuiTheme);
+        let lines = render(&old, &new, Some("x.txt"), ThemeName::Dark);
         let headers = lines.iter().filter(|l| rowline(l).contains("@@")).count();
         assert!(
             headers >= 1,
@@ -622,7 +632,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
-        let lines = render(&old, &new, Some("x.txt"), &TuiTheme);
+        let lines = render(&old, &new, Some("x.txt"), ThemeName::Dark);
         // Body capped at MAX_DIFF_LINES; total = 1 header + cap + 1 footer.
         assert!(
             lines.len() <= MAX_DIFF_LINES + 2,

@@ -26,12 +26,16 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 const BLOCKQUOTE_BAR: &str = "│";
 
 /// Theme colors the markdown renderer needs. Kept minimal and decoupled
-/// from iocraft so the renderer is a pure value function. Expand in M7-15.
+/// from iocraft so the renderer is a pure value function.
 #[derive(Debug, Clone, Copy)]
 pub struct MarkdownTheme {
     /// Inline-code (`codespan`) foreground — claude-code uses the
     /// `permission` theme color here.
     pub inline_code: StyleColor,
+    /// (M7-15) Active theme for fenced-code-block syntect highlighting — the
+    /// `.tmTheme` follows the picker. Plain-text oracles ignore it (they drop
+    /// color); only the styled code-block path consumes it.
+    pub code_theme: crate::theme::ThemeName,
 }
 
 /// Mutable inline styling state threaded through the event walk.
@@ -275,7 +279,7 @@ impl<'a> Builder<'a> {
     fn emit_code_block(&mut self, cb: &CodeBlockState) {
         let lang = crate::render::syntax::detect_language(cb.lang.as_deref(), None);
         let highlighted =
-            crate::render::syntax::highlight(&cb.text, lang.as_deref(), &crate::theme::TuiTheme);
+            crate::render::syntax::highlight(&cb.text, lang.as_deref(), self.theme.code_theme);
         if highlighted.is_empty() {
             // Preserve the previous behavior of an empty block still yielding a
             // (now empty-text) line so spacing/structure is stable.
@@ -311,6 +315,7 @@ mod tests {
     fn theme() -> MarkdownTheme {
         MarkdownTheme {
             inline_code: StyleColor::Named(crate::render::NamedColor::Magenta),
+            code_theme: crate::theme::ThemeName::Dark,
         }
     }
 

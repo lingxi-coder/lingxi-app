@@ -4,7 +4,7 @@
 //! per-token colors. Concrete colors are normalized to C/P/E flags.
 use lingxi_tui::render::diff::{add_word_bg, remove_word_bg, render};
 use lingxi_tui::render::{StyleColor, StyledLine};
-use lingxi_tui::theme::TuiTheme;
+use lingxi_tui::theme::ThemeName;
 
 /// Flag each span: 'E' if it carries a word-emphasis bg, 'C' if fg colored,
 /// else 'P'. Prefix each span with the flag + its literal text so the snapshot
@@ -16,8 +16,8 @@ fn structure(lines: &[StyledLine]) -> String {
             out.push('\n');
         }
         for s in &l.spans {
-            let emph =
-                s.style.bg == add_word_bg(&TuiTheme) || s.style.bg == remove_word_bg(&TuiTheme);
+            let emph = s.style.bg == add_word_bg(ThemeName::Dark)
+                || s.style.bg == remove_word_bg(ThemeName::Dark);
             let flag = if emph {
                 'E'
             } else if s.style.fg == StyleColor::Default {
@@ -36,12 +36,22 @@ fn structure(lines: &[StyledLine]) -> String {
 
 #[test]
 fn snapshot_pure_add() {
-    insta::assert_snapshot!(structure(&render("a\n", "a\nb\n", Some("x.rs"), &TuiTheme)));
+    insta::assert_snapshot!(structure(&render(
+        "a\n",
+        "a\nb\n",
+        Some("x.rs"),
+        ThemeName::Dark
+    )));
 }
 
 #[test]
 fn snapshot_pure_remove() {
-    insta::assert_snapshot!(structure(&render("a\nb\n", "a\n", Some("x.rs"), &TuiTheme)));
+    insta::assert_snapshot!(structure(&render(
+        "a\nb\n",
+        "a\n",
+        Some("x.rs"),
+        ThemeName::Dark
+    )));
 }
 
 #[test]
@@ -50,7 +60,7 @@ fn snapshot_modify_mixed() {
         "foo\nkeep\n",
         "bar\nkeep\n",
         Some("x.rs"),
-        &TuiTheme
+        ThemeName::Dark
     )));
 }
 
@@ -60,13 +70,13 @@ fn snapshot_word_level_intraline() {
         "function oldName(p)\n",
         "function newName(p)\n",
         Some("x.js"),
-        &TuiTheme
+        ThemeName::Dark
     )));
 }
 
 #[test]
 fn snapshot_empty_diff() {
-    let s = structure(&render("a\nb\n", "a\nb\n", Some("x.rs"), &TuiTheme));
+    let s = structure(&render("a\nb\n", "a\nb\n", Some("x.rs"), ThemeName::Dark));
     assert!(!s.contains('+') && !s.contains('-'));
     insta::assert_snapshot!(s);
 }
@@ -78,7 +88,7 @@ fn snapshot_large_diff_truncation() {
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
-    let s = structure(&render("", &new, Some("x.txt"), &TuiTheme));
+    let s = structure(&render("", &new, Some("x.txt"), ThemeName::Dark));
     assert!(s.contains("more lines"), "truncation footer in snapshot");
     insta::assert_snapshot!(s);
 }

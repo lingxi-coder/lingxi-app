@@ -2,7 +2,7 @@
 use lingxi_tui::components::messages::user_tool_result::{
     is_diff_tool, render_edit_write_diff_lines,
 };
-use lingxi_tui::theme::TuiTheme;
+use lingxi_tui::theme::ThemeName;
 
 #[test]
 fn edit_result_renders_structured_diff() {
@@ -11,7 +11,7 @@ fn edit_result_renders_structured_diff() {
         Some("foo()"),
         Some("bar()"),
         Some("src/a.rs"),
-        &TuiTheme,
+        ThemeName::Dark,
     );
     let joined: String = lines
         .iter()
@@ -31,7 +31,7 @@ fn write_result_renders_as_pure_add() {
         None, // no prior content
         Some("new line 1\nnew line 2"),
         Some("src/b.rs"),
-        &TuiTheme,
+        ThemeName::Dark,
     );
     // The diff body (excluding the @@ header) must carry only add sigils.
     let body: String = lines

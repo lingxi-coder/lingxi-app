@@ -16,12 +16,14 @@
 use std::sync::OnceLock;
 
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Color as SynColor, FontStyle, Style as SynStyle, ThemeSet};
+use syntect::highlighting::{
+    Color as SynColor, FontStyle, Style as SynStyle, Theme as SynTheme, ThemeSet,
+};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
 use crate::render::{SpanStyle, StyleColor, StyledLine, StyledSpan};
-use crate::theme::TuiTheme;
+use crate::theme::ThemeName;
 
 fn syntax_set() -> &'static SyntaxSet {
     static SS: OnceLock<SyntaxSet> = OnceLock::new();
@@ -33,17 +35,34 @@ fn theme_set() -> &'static ThemeSet {
     TS.get_or_init(ThemeSet::load_defaults)
 }
 
-/// Map the active TUI theme to a bundled syntect `.tmTheme` name. Today
-/// `TuiTheme` is the M6 unit struct (one fixed palette), so this returns the
-/// single dark default. M7-15 (theme picker) expands `TuiTheme` into a
-/// registry and generalizes this to a per-theme lookup (light themes map to
-/// "InspiredGitHub", etc.). The returned name MUST exist in
+/// (M7-15) Map the active [`ThemeName`] to its bundled syntect `.tmTheme`
+/// NAME. Dark themes (incl. dark-daltonized + dark-ansi) → a dark tmTheme;
+/// light themes → a light one. ANSI themes reuse the dark/light mapping (the
+/// terminal handles the ANSI palette). The returned name MUST exist in
 /// `ThemeSet::load_defaults().themes` (default set ships base16-ocean.dark,
 /// base16-ocean.light, base16-eighties.dark, base16-mocha.dark,
 /// InspiredGitHub, Solarized (dark), Solarized (light)).
 #[must_use]
-pub fn tm_theme_for(_theme: &TuiTheme) -> &'static str {
-    "base16-ocean.dark"
+fn tm_theme_name(name: ThemeName) -> &'static str {
+    match name {
+        ThemeName::Dark | ThemeName::DarkDaltonized | ThemeName::DarkAnsi => "base16-ocean.dark",
+        ThemeName::Light | ThemeName::LightDaltonized | ThemeName::LightAnsi => {
+            "base16-ocean.light"
+        }
+    }
+}
+
+/// (M7-15) Pick the bundled syntect `.tmTheme` for the active TUI theme.
+/// Lazy-loaded via the shared `ThemeSet` (§4 R9 — no extra `.tmTheme` files;
+/// the default set is enough). Falls back to the dark theme if the mapped name
+/// is somehow absent (cannot happen with the bundled set, but avoids a panic).
+#[must_use]
+pub fn tm_theme_for(name: ThemeName) -> &'static SynTheme {
+    let ts = theme_set();
+    let key = tm_theme_name(name);
+    ts.themes
+        .get(key)
+        .unwrap_or_else(|| &ts.themes["base16-ocean.dark"])
 }
 
 /// Resolve a language token from a fence info-string (preferred) or a file
@@ -86,10 +105,14 @@ fn plain_lines(code: &str) -> Vec<StyledLine> {
 }
 
 /// Highlight `code` for `lang` (a fence info-string token or detected
-/// language), themed by `theme`. Unknown/None lang → one plain StyledLine
-/// per input line. Never panics.
+/// language), themed by the active [`ThemeName`]'s syntect `.tmTheme`.
+/// Unknown/None lang → one plain StyledLine per input line. Never panics.
+///
+/// (M7-15) Takes the active `ThemeName` (was `&TuiTheme`) so the bundled
+/// `.tmTheme` follows the picker: switching the theme switches the syntect
+/// palette for code blocks + diff previews.
 #[must_use]
-pub fn highlight(code: &str, lang: Option<&str>, theme: &TuiTheme) -> Vec<StyledLine> {
+pub fn highlight(code: &str, lang: Option<&str>, theme: ThemeName) -> Vec<StyledLine> {
     if code.is_empty() {
         return Vec::new();
     }
@@ -102,7 +125,7 @@ pub fn highlight(code: &str, lang: Option<&str>, theme: &TuiTheme) -> Vec<Styled
     let Some(syntax) = syntax else {
         return plain_lines(code);
     };
-    let tm = &theme_set().themes[tm_theme_for(theme)];
+    let tm = tm_theme_for(theme);
     let mut hl = HighlightLines::new(syntax, tm);
     let mut out = Vec::new();
     for line in LinesWithEndings::from(code) {
@@ -209,9 +232,8 @@ mod tests {
 
     #[test]
     fn highlight_rust_keeps_line_count_and_colors_some_spans() {
-        let theme = TuiTheme;
         let code = "fn main() {\n    let x = 1;\n}\n";
-        let lines = highlight(code, Some("rust"), &theme);
+        let lines = highlight(code, Some("rust"), ThemeName::Dark);
         // STRUCTURE assertion (parity = equivalent look, not exact colors):
         assert_eq!(lines.len(), 3, "one StyledLine per source line");
         // At least one span on the keyword line is non-default colored.
@@ -224,8 +246,7 @@ mod tests {
 
     #[test]
     fn highlight_unknown_lang_is_plain_one_span_per_line() {
-        let theme = TuiTheme;
-        let lines = highlight("alpha\nbeta\n", Some("not-a-language"), &theme);
+        let lines = highlight("alpha\nbeta\n", Some("not-a-language"), ThemeName::Dark);
         assert_eq!(lines.len(), 2);
         for l in &lines {
             assert_eq!(l.spans.len(), 1, "plain fallback = single span per line");
@@ -235,16 +256,14 @@ mod tests {
 
     #[test]
     fn highlight_none_lang_is_plain() {
-        let theme = TuiTheme;
-        let lines = highlight("just text\n", None, &theme);
+        let lines = highlight("just text\n", None, ThemeName::Dark);
         assert_eq!(lines.len(), 1);
         assert!(!is_colored(&lines[0].spans[0]));
     }
 
     #[test]
     fn highlight_empty_is_empty() {
-        let theme = TuiTheme;
-        assert!(highlight("", Some("rust"), &theme).is_empty());
+        assert!(highlight("", Some("rust"), ThemeName::Dark).is_empty());
     }
 
     #[test]
@@ -252,9 +271,8 @@ mod tests {
         // syntect yields a final range for the trailing "\n"; after trimming it
         // becomes a zero-length span carrying the line's fg. None of those may
         // survive: no highlighted line may contain an empty-text span.
-        let theme = TuiTheme;
         let code = "fn main() {\n    let x = 1;\n}\n";
-        let lines = highlight(code, Some("rust"), &theme);
+        let lines = highlight(code, Some("rust"), ThemeName::Dark);
         for l in &lines {
             assert!(
                 l.spans.iter().all(|s| !s.text.is_empty()),
@@ -269,9 +287,8 @@ mod tests {
         // A blank line between two code lines must still produce its own
         // (possibly empty-span) StyledLine so line counts / gutter numbering
         // stay correct — it must not be dropped.
-        let theme = TuiTheme;
         let code = "let a = 1;\n\nlet b = 2;\n";
-        let lines = highlight(code, Some("rust"), &theme);
+        let lines = highlight(code, Some("rust"), ThemeName::Dark);
         assert_eq!(lines.len(), 3, "blank middle line still counts as a line");
         // The blank middle line carries no non-empty content spans.
         assert!(
@@ -282,13 +299,24 @@ mod tests {
     }
 
     #[test]
-    fn tm_theme_for_returns_a_bundled_theme_name() {
-        let name = tm_theme_for(&TuiTheme);
-        // The default syntect ThemeSet must contain whatever name we map to,
-        // or HighlightLines::new would panic on the index in `highlight`.
-        assert!(
-            theme_set().themes.contains_key(name),
-            "{name} is a bundled theme"
-        );
+    fn tm_theme_name_maps_to_bundled_names() {
+        // The default syntect ThemeSet must contain whatever names we map to,
+        // or HighlightLines::new would panic on the lookup in `highlight`.
+        for n in ThemeName::ALL {
+            let name = tm_theme_name(n);
+            assert!(
+                theme_set().themes.contains_key(name),
+                "{name} is a bundled theme"
+            );
+        }
+    }
+
+    #[test]
+    fn tm_theme_for_dark_and_light_differ() {
+        // (M7-15) dark and light themes select DIFFERENT bundled tmThemes, so
+        // the same code recolors when the picker switches.
+        let d = tm_theme_for(ThemeName::Dark);
+        let l = tm_theme_for(ThemeName::Light);
+        assert_ne!(d.name, l.name);
     }
 }

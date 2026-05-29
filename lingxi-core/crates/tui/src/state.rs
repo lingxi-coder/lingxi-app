@@ -24,6 +24,9 @@ use lingxi_permission::PermissionMode;
 use lingxi_protocol::ToolUseId;
 use tokio::sync::oneshot;
 
+use crate::components::prompt_input::completion::CompletionState;
+use crate::components::prompt_input::palette::PaletteState;
+
 /// A rendered message in the scrollback buffer.
 #[derive(Debug, Clone)]
 pub enum RenderedMessage {
@@ -505,6 +508,12 @@ pub struct AppState {
     /// (M6-05) Per-dialog state for the `BypassPermissionsMode` dialog.
     pub bypass_dialog_state:
         crate::components::permissions::bypass_permissions::BypassPermissionsState,
+    /// (M7-07) `/` slash-command palette overlay state. `open == false`
+    /// between uses; the live dispatcher routes keys here at priority 3.
+    pub palette: PaletteState,
+    /// (M7-07) `@` file-ref completion overlay state. Priority 3, same as
+    /// the palette — only one can be open at a time (palette wins on `/`).
+    pub completion: CompletionState,
 }
 
 impl AppState {
@@ -539,6 +548,8 @@ impl AppState {
             bypass_dialog_state:
                 crate::components::permissions::bypass_permissions::BypassPermissionsState::default(
                 ),
+            palette: PaletteState::default(),
+            completion: CompletionState::default(),
         }
     }
 
@@ -686,6 +697,15 @@ mod tests {
         assert_eq!(s.scroll_offset, 0);
         assert_eq!(s.prompt_cursor, 0);
         assert!(!s.should_exit);
+    }
+
+    #[test]
+    fn new_state_has_closed_palette_and_completion() {
+        let s = AppState::new(fake_status());
+        assert!(!s.palette.open);
+        assert!(s.palette.filter.is_empty());
+        assert!(!s.completion.open);
+        assert!(s.completion.filter.is_empty());
     }
 
     /// M6-04 Task 2: `RenderedMessage` gains `AssistantToolUse` and

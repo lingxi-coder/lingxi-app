@@ -1,0 +1,10 @@
+---
+source: crates/tui/tests/theme_snapshots.rs
+expression: render_textual()
+---
+claude-sonnet-4.5 /repo $0.0000 42% default
+> hi
+● Here is code:
+```rust
+fn main() { let x = 1; }
+```

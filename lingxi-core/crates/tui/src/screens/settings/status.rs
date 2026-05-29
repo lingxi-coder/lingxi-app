@@ -8,7 +8,7 @@
 //! is `System Diagnostics`. Account/IDE/sandbox rows are omitted — they need
 //! engine surfaces that do not exist yet (noted, not dead-coded).
 //!
-//! LingXi has no session-title surface, so `Session name` is always the
+//! `LingXi` has no session-title surface, so `Session name` is always the
 //! placeholder for v0.8.0 (degradation accepted, like the Doctor screen).
 
 use iocraft::prelude::*;
@@ -25,7 +25,10 @@ pub const SESSION_NAME_PLACEHOLDER: &str = "/rename to add a name";
 pub fn render_status_to_string(data: &SettingsData) -> String {
     let s = &data.status;
     let mut out = String::new();
-    out.push_str(&format!("Version: lingxi-cli v{}\n", env!("CARGO_PKG_VERSION")));
+    out.push_str(&format!(
+        "Version: lingxi-cli v{}\n",
+        env!("CARGO_PKG_VERSION")
+    ));
     // No session-title surface in LingXi yet → always the dim placeholder.
     out.push_str(&format!("Session name: {SESSION_NAME_PLACEHOLDER}\n"));
     out.push_str(&format!("Session ID: {}\n", s.session_id));

@@ -41,12 +41,16 @@ use lingxi_traits::{CostSnapshot, OrchestratorHandle, StatusSnapshot};
 use crate::theme::TuiTheme;
 
 pub mod config;
+// (M7-13) The "Settings" tab module is intentionally named `settings` inside
+// the `settings` screen module — the four sub-tabs are Config/Settings/Status/
+// Usage and each is its own file. `module_inception` is the expected shape here.
+#[allow(clippy::module_inception)]
 pub mod settings;
 pub mod status;
 pub mod usage;
 
 /// Which sub-screen is selected. Tab order is Config → Settings → Status →
-/// Usage (LingXi order; see plan "Tab-order decision").
+/// Usage (`LingXi` order; see plan "Tab-order decision").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
     /// Read-only effective config-file values + the `$EDITOR` handoff (`e`).
@@ -90,7 +94,7 @@ impl SettingsTab {
         all[(i + 1) % all.len()]
     }
 
-    /// Previous tab with wrap-around (Left/`h`/BackTab).
+    /// Previous tab with wrap-around (Left/`h`/`BackTab`).
     #[must_use]
     pub fn prev(self) -> SettingsTab {
         let all = SettingsTab::all();

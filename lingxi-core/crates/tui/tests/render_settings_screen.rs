@@ -14,8 +14,8 @@ use std::time::Duration;
 use iocraft::prelude::*;
 use lingxi_core::settings::tracer::{ProvenanceTrace, Source};
 use lingxi_core::settings::{EffectiveSettings, SettingsJson};
-use lingxi_tui::screens::settings::{SettingsData, SettingsScreen, SettingsState, SettingsTab};
 use lingxi_traits::{CostSnapshot, StatusSnapshot};
+use lingxi_tui::screens::settings::{SettingsData, SettingsScreen, SettingsState, SettingsTab};
 
 fn fixture() -> SettingsData {
     let mut trace = ProvenanceTrace::default();
@@ -87,8 +87,14 @@ fn snapshot_status_tab() {
     let f = frame(SettingsTab::Status);
     insta::assert_snapshot!("settings_status_tab", &f);
     assert!(f.contains("[Status]"), "got: {f}");
-    assert!(f.contains("Session name: /rename to add a name"), "got: {f}");
-    assert!(f.contains("MCP servers: 1 connected / 3 configured"), "got: {f}");
+    assert!(
+        f.contains("Session name: /rename to add a name"),
+        "got: {f}"
+    );
+    assert!(
+        f.contains("MCP servers: 1 connected / 3 configured"),
+        "got: {f}"
+    );
 }
 
 #[test]

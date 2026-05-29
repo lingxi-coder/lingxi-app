@@ -10,13 +10,13 @@ use iocraft::prelude::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use lingxi_core::settings::tracer::ProvenanceTrace;
 use lingxi_core::settings::{EffectiveSettings, SettingsJson};
 use lingxi_orchestrator::test_support::MockOrchestratorHandle;
+use lingxi_traits::{CostSnapshot, OrchestratorHandle, StatusSnapshot};
 use lingxi_tui::root::handle_live_key;
 use lingxi_tui::screens::settings::{
     apply_settings_key, SettingsData, SettingsOutcome, SettingsState, SettingsTab,
 };
 use lingxi_tui::screens::Screen;
 use lingxi_tui::state::{AppState, StatusSnapshot as TuiStatus};
-use lingxi_traits::{CostSnapshot, OrchestratorHandle, StatusSnapshot};
 
 fn key(code: KeyCode) -> KeyEvent {
     let mut k = KeyEvent::new(KeyEventKind::Press, code);
@@ -98,7 +98,10 @@ fn text_key_does_not_leak_to_prompt_while_settings_open() {
     app.open_settings(fixture_state(SettingsTab::Status));
     // `x` is inert on the Status tab (no nav, no close).
     handle_live_key(&mut app, &key(KeyCode::Char('x')), 24);
-    assert_eq!(app.prompt_text, "draft", "text key must NOT reach PromptInput");
+    assert_eq!(
+        app.prompt_text, "draft",
+        "text key must NOT reach PromptInput"
+    );
     assert!(matches!(app.active_screen, Some(Screen::Settings(_))));
 }
 
@@ -110,7 +113,10 @@ fn config_edit_key_raises_pending_config_edit_flag() {
     let mut app = AppState::new(TuiStatus::default());
     app.open_settings(fixture_state(SettingsTab::Config));
     handle_live_key(&mut app, &key(KeyCode::Char('e')), 24);
-    assert!(app.pending_config_edit, "Config `e` raises the edit handoff");
+    assert!(
+        app.pending_config_edit,
+        "Config `e` raises the edit handoff"
+    );
     assert!(
         matches!(app.active_screen, Some(Screen::Settings(_))),
         "screen stays open during the $EDITOR handoff"
@@ -142,9 +148,15 @@ async fn settings_read_shows_real_values_from_handle() {
         trace: ProvenanceTrace::default(),
     };
     let data = SettingsData::snapshot(&handle, eff).await;
-    assert_eq!(data.status.model, "claude-opus-4-8", "status read from handle");
+    assert_eq!(
+        data.status.model, "claude-opus-4-8",
+        "status read from handle"
+    );
     assert_eq!(data.status.n_mcp_total, 5);
-    assert!((data.cost.total_usd - 0.4242).abs() < 1e-9, "cost read from handle");
+    assert!(
+        (data.cost.total_usd - 0.4242).abs() < 1e-9,
+        "cost read from handle"
+    );
     assert_eq!(data.cost.api_calls, 9);
     assert_eq!(
         data.effective.settings.model.as_deref(),

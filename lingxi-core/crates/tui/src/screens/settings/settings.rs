@@ -11,7 +11,7 @@ use crate::screens::settings::SettingsData;
 use crate::theme::TuiTheme;
 
 /// Camel-case wire keys surfaced in the provenance table, in display order.
-/// These are the JSON keys (NOT the Rust snake_case names) that
+/// These are the JSON keys (NOT the Rust `snake_case` names) that
 /// `EffectiveSettings::effective_for` looks up.
 const PROVENANCE_FIELDS: &[&str] = &["model", "trustedDirectories", "telemetryEnabled"];
 

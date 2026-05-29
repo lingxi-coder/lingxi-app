@@ -67,8 +67,8 @@ pub struct TuiRootProps {
 #[allow(clippy::too_many_lines)]
 fn map_iocraft_key(evt: &KeyEvent, prompt_empty: bool, focus_active: bool) -> Option<KeyAction> {
     use KeyAction::{
-        Backspace, Cancel, FocusToolStep, HistoryStep, InsertChar, MoveCursor, ScrollStep, Submit,
-        ToggleExpanded,
+        Backspace, Cancel, FocusToolStep, HistoryStep, InsertChar, InsertNewline, MoveCursor,
+        ScrollStep, Submit, ToggleExpanded,
     };
     if focus_active {
         match (&evt.code, evt.modifiers) {
@@ -82,6 +82,7 @@ fn map_iocraft_key(evt: &KeyEvent, prompt_empty: bool, focus_active: bool) -> Op
         }
     }
     match (&evt.code, evt.modifiers) {
+        (KeyCode::Enter, m) if m.contains(KeyModifiers::SHIFT) => Some(InsertNewline),
         (KeyCode::Enter, _) => Some(Submit),
         (KeyCode::Backspace, _) => Some(Backspace),
         (KeyCode::Char('c'), m) if m == KeyModifiers::CONTROL => Some(Cancel),
@@ -201,7 +202,17 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
             .messages
             .iter()
             .any(|m| matches!(m, crate::state::RenderedMessage::AssistantToolUse { .. }));
-    if let Some(action) = map_iocraft_key(k, prompt_empty, focus_active) {
+    if let Some(mut action) = map_iocraft_key(k, prompt_empty, focus_active) {
+        // Backslash-return fallback: a plain-Enter Submit becomes InsertNewline
+        // when the char before the cursor is a lone '\' (terminals that can't
+        // distinguish Shift+Enter from Enter). Runs only AFTER the permission
+        // focus-trap branch returns, so §2.5 priority order is preserved.
+        if matches!(action, KeyAction::Submit)
+            && st.prompt_cursor > 0
+            && st.prompt_text[..st.prompt_cursor].ends_with('\\')
+        {
+            action = KeyAction::InsertNewline;
+        }
         if let KeyAction::ScrollStep(dir) = action {
             scroll_with_viewport(st, dir, viewport);
         } else {
@@ -434,6 +445,25 @@ mod tests {
 
     #[test]
     fn map_iocraft_key_enter_submits() {
+        let k = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
+        assert!(matches!(
+            map_iocraft_key(&k, false, false),
+            Some(KeyAction::Submit)
+        ));
+    }
+
+    #[test]
+    fn map_iocraft_key_shift_enter_inserts_newline() {
+        let mut k = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
+        k.modifiers = KeyModifiers::SHIFT;
+        assert!(matches!(
+            map_iocraft_key(&k, false, false),
+            Some(KeyAction::InsertNewline)
+        ));
+    }
+
+    #[test]
+    fn map_iocraft_key_plain_enter_submits() {
         let k = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
         assert!(matches!(
             map_iocraft_key(&k, false, false),

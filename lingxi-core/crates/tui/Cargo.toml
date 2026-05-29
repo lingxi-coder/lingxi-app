@@ -18,6 +18,9 @@ lingxi-core = { path = "../core" }
 lingxi-permission = { path = "../permission" }
 lingxi-commands = { path = "../commands" }
 lingxi-session = { path = "../session" }
+# (M7-14) CLAUDE.md hierarchy walker + loader — the M3 store the Memory editor
+# reads through and writes back to (§4 R7: no new persistence layer).
+lingxi-memory = { path = "../memory" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 iocraft = "=0.8.3"

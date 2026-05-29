@@ -5,6 +5,7 @@
 //! `Resume` (M7-12), `Settings` (M7-13), `Memory` (M7-14).
 
 pub mod doctor;
+pub mod memory;
 pub mod repl;
 pub mod resume;
 pub mod settings;

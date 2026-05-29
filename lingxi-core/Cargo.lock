@@ -2196,6 +2196,7 @@ dependencies = [
  "iocraft",
  "lingxi-commands",
  "lingxi-core",
+ "lingxi-memory",
  "lingxi-orchestrator",
  "lingxi-permission",
  "lingxi-protocol",

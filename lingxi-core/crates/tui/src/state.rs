@@ -636,6 +636,18 @@ impl AppState {
         self.active_screen = Some(crate::screens::Screen::Settings(state));
     }
 
+    /// (M7-14) Open the Memory file editor on a fresh selector, carrying the
+    /// per-screen state inside the `Screen::Memory` variant. Unlike Settings
+    /// (whose snapshot read is async), the Memory open is fully synchronous —
+    /// the tier list is re-resolved each frame from `hierarchy::walk` and the
+    /// body is loaded lazily on Enter — so this can be called directly from the
+    /// sync key/submit path (no async open pump needed).
+    pub fn open_memory(&mut self) {
+        self.active_screen = Some(crate::screens::Screen::Memory(
+            crate::screens::memory::MemoryScreenState::default(),
+        ));
+    }
+
     /// (M7-11) Close any active screen, returning to the REPL. Generic — every
     /// screen's per-screen state lives INSIDE its `Screen` variant, so dropping
     /// `active_screen` clears it. Reused by every M7 screen's close path; no
@@ -758,6 +770,21 @@ mod tests {
             st.active_screen, None,
             "close_screen returns to REPL (generic — drops the variant + its state)"
         );
+    }
+
+    #[test]
+    fn open_memory_sets_active_screen_and_close_clears() {
+        use crate::screens::Screen;
+        let mut st = AppState::default_for_tests();
+        assert_eq!(st.active_screen, None);
+        st.open_memory();
+        // (M7-14) The Memory variant carries its (default) editor state inline.
+        assert!(
+            matches!(&st.active_screen, Some(Screen::Memory(ms)) if !ms.editing && ms.selected == 0),
+            "open_memory carries a fresh MemoryScreenState inside the variant"
+        );
+        st.close_screen();
+        assert_eq!(st.active_screen, None);
     }
 
     #[test]

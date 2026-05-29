@@ -423,6 +423,97 @@ fn register_holds_last_yank_or_delete() {
     assert!(text.contains("foo "));
 }
 
+// ===== Task 11: visual-mode behavior (charwise + linewise via the seam) =====
+
+/// Drive a key sequence starting in NORMAL, where `v`/`V` flips to Visual and
+/// subsequent motions move the cursor (selection end). Applies each effect.
+fn run_visual(text: &str, offset: usize, keys: &str) -> (String, usize, VimMode) {
+    let mut state = VimState {
+        mode: VimMode::Normal,
+        ..VimState::default()
+    };
+    let mut buf = text.to_string();
+    let mut off = offset;
+    for ch in keys.chars() {
+        let key = if ch == '⎋' {
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+        } else {
+            k(ch)
+        };
+        match handle_vim_key(&mut state, &buf, off, key) {
+            VimOutcome::Effect(VimEffect::Move(o)) => off = o.min(buf.len()),
+            VimOutcome::Effect(VimEffect::Edit { text, cursor }) => {
+                buf = text;
+                off = cursor.min(buf.len());
+            }
+            VimOutcome::Effect(VimEffect::None) | VimOutcome::Pending | VimOutcome::PassThrough => {}
+        }
+    }
+    (buf, off, state.mode)
+}
+
+#[test]
+fn visual_charwise_delete_matrix() {
+    // (start_text, start_offset, keys, expected_text, expected_offset)
+    let cases: &[(&str, usize, &str, &str, usize)] = &[
+        ("hello", 0, "vlld", "lo", 0),    // v + ll (cursor->2) + d -> delete "hel"
+        ("hello", 0, "vlly", "hello", 0), // yank: buffer unchanged, cursor to start
+        ("hello", 0, "v$d", "", 0),       // v + $ + d -> delete whole line "hello"
+        ("hello", 1, "vlld", "ho", 1),    // v from 1 + ll (cursor->3) + d -> delete "ell"
+    ];
+    for (i, (text, off, keys, want_text, want_off)) in cases.iter().enumerate() {
+        let (got_text, got_off, mode) = run_visual(text, *off, keys);
+        assert_eq!(&got_text, want_text, "case {i}: {keys:?} on {text:?}");
+        assert_eq!(got_off, *want_off, "case {i}");
+        // d/y return to Normal.
+        assert_eq!(mode, VimMode::Normal, "case {i}: should be back in Normal");
+    }
+}
+
+#[test]
+fn visual_linewise_delete() {
+    // V + j (cursor to line1) + d on "a\nb\nc": delete lines 0..1 -> "c".
+    let (text, off, mode) = run_visual("a\nb\nc", 0, "Vjd");
+    assert_eq!(text, "c");
+    assert_eq!(off, 0);
+    assert_eq!(mode, VimMode::Normal);
+}
+
+#[test]
+fn visual_c_enters_insert() {
+    let (text, _off, mode) = run_visual("hello", 0, "vlc");
+    // v + l (cursor->1) + c -> delete "he" (inclusive of cursor char) -> "llo", Insert.
+    assert_eq!(text, "llo");
+    assert_eq!(mode, VimMode::Insert);
+}
+
+#[test]
+fn visual_esc_returns_to_normal_no_edit() {
+    let (text, _off, mode) = run_visual("hello", 0, "vll⎋");
+    assert_eq!(text, "hello"); // no edit
+    assert_eq!(mode, VimMode::Normal);
+}
+
+#[test]
+fn visual_count_motion_then_delete() {
+    // v + 2l (cursor->2) + d on "hello": delete "hel" -> "lo".
+    let (text, _off, mode) = run_visual("hello", 0, "v2ld");
+    assert_eq!(text, "lo");
+    assert_eq!(mode, VimMode::Normal);
+}
+
+#[test]
+fn visual_gg_and_cap_g_extend_selection() {
+    // V then G (cursor to last line) then d on "a\nb\nc": delete all lines -> "".
+    let (text, _off, mode) = run_visual("a\nb\nc", 0, "VGd");
+    assert_eq!(text, "");
+    assert_eq!(mode, VimMode::Normal);
+    // V on last line then gg (cursor to first line) then d -> delete all -> "".
+    let (text2, _off2, mode2) = run_visual("a\nb\nc", 4, "Vggd");
+    assert_eq!(text2, "");
+    assert_eq!(mode2, VimMode::Normal);
+}
+
 /// Direct register-content check: dw stores "foo " charwise; yy stores "a\n"
 /// linewise. Confirms the register tagging the matrix relies on.
 #[test]

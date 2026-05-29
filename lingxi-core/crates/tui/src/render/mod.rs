@@ -18,7 +18,7 @@ use iocraft::Color;
 
 /// The 16 named SGR colors (8 standard + 8 bright). Carried over from M6's
 /// `AnsiColor`; lives inside [`StyleColor::Named`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum NamedColor {
     /// SGR 30 / 40.
     Black,
@@ -55,7 +55,7 @@ pub enum NamedColor {
 }
 
 /// A foreground or background color slot. Supersedes M6's `AnsiColor`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub enum StyleColor {
     /// Terminal default — no override.
     #[default]
@@ -145,7 +145,7 @@ fn xterm256_to_rgb(i: u8) -> (u8, u8, u8) {
 }
 
 /// Visual attributes applied to a [`StyledSpan`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct SpanStyle {
     /// Foreground color.
     pub fg: StyleColor,
@@ -165,7 +165,7 @@ pub struct SpanStyle {
 ///
 /// [`Text`]: SpanKind::Text
 /// [`CodePlaceholder`]: SpanKind::CodePlaceholder
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum SpanKind {
     /// Ordinary styled text.
     Text,
@@ -179,7 +179,7 @@ pub enum SpanKind {
 
 /// One styled run of text. `text` never contains a newline — lines are
 /// split into separate [`StyledLine`] values.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct StyledSpan {
     /// UTF-8 text content of the run.
     pub text: String,
@@ -224,7 +224,7 @@ impl StyledSpan {
 }
 
 /// A single visual line: an ordered list of styled spans, no embedded `\n`.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub struct StyledLine {
     /// The spans composing this line, left to right.
     pub spans: Vec<StyledSpan>,

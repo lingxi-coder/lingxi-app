@@ -304,4 +304,74 @@ mod tests {
         // 38;5 with no index — must not panic, must not corrupt.
         let _ = first_line("\x1b[38;5mtail");
     }
+
+    #[test]
+    fn cursor_up_is_skipped_without_corruption() {
+        // CUU (cursor up) between two letters — text must remain "ab".
+        let line = first_line("a\x1b[3Ab");
+        assert_eq!(line.plain_text(), "ab");
+        assert_eq!(line.spans.len(), 1);
+    }
+
+    #[test]
+    fn cursor_forward_back_skipped() {
+        let line = first_line("a\x1b[2Cb\x1b[1Dc");
+        assert_eq!(line.plain_text(), "abc");
+    }
+
+    #[test]
+    fn erase_display_skipped() {
+        let line = first_line("x\x1b[2Jy");
+        assert_eq!(line.plain_text(), "xy");
+    }
+
+    #[test]
+    fn erase_line_skipped() {
+        let line = first_line("x\x1b[Ky");
+        assert_eq!(line.plain_text(), "xy");
+    }
+
+    #[test]
+    fn cursor_skip_preserves_surrounding_color() {
+        // Color set, cursor move, then text — color must still apply.
+        let line = first_line("\x1b[31m\x1b[2Aerr\x1b[0m");
+        assert_eq!(line.plain_text(), "err");
+        assert_eq!(line.spans[0].style.fg, StyleColor::Named(NamedColor::Red));
+    }
+
+    #[test]
+    fn osc_title_skipped() {
+        let line = first_line("a\x1b]0;title\x07b");
+        assert_eq!(line.plain_text(), "ab");
+    }
+
+    #[test]
+    fn snapshot_16_color() {
+        insta::assert_yaml_snapshot!(parse_ansi("\x1b[31mERR\x1b[0m\x1b[1mB\x1b[0m tail"));
+    }
+
+    #[test]
+    fn snapshot_256_color() {
+        insta::assert_yaml_snapshot!(parse_ansi("\x1b[38;5;196mhot\x1b[48;5;21m bg\x1b[0m"));
+    }
+
+    #[test]
+    fn snapshot_truecolor() {
+        insta::assert_yaml_snapshot!(parse_ansi("\x1b[38;2;255;128;0morange\x1b[0m"));
+    }
+
+    #[test]
+    fn snapshot_reset_midline() {
+        insta::assert_yaml_snapshot!(parse_ansi("\x1b[1;32mok\x1b[0m done"));
+    }
+
+    #[test]
+    fn snapshot_malformed_unterminated() {
+        insta::assert_yaml_snapshot!(parse_ansi("before\x1b[38;5"));
+    }
+
+    #[test]
+    fn snapshot_cursor_move_skipped() {
+        insta::assert_yaml_snapshot!(parse_ansi("\x1b[31ma\x1b[2A\x1b[2Jb\x1b[0m"));
+    }
 }

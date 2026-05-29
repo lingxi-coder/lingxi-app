@@ -1,6 +1,11 @@
-//! `PromptInput` — the 1-3 row bottom zone.
+//! `PromptInput` — the content-driven multi-line bottom zone.
 //!
-//! M6-02 supports a single-line editor with:
+//! M6-02 shipped a single-line editor; M7-06 refactors this file into the
+//! `prompt_input/` submodule (`mod.rs` = editor core, `footer.rs` = footer
+//! surface) and adds multi-line editing. The single-line behaviour is
+//! preserved exactly when the buffer has no `\n`.
+//!
+//! M6-02 single-line editor supported:
 //! - `InsertChar(char)` — any printable Unicode char
 //! - `Backspace`
 //! - `MoveCursor(CursorMove)` — `Left | Right | Home | End`

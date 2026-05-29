@@ -15,7 +15,8 @@
 use iocraft::prelude::*;
 use lingxi_protocol::ToolUseId;
 
-use crate::ansi::{parse_ansi, AnsiColor, AnsiSpan};
+use crate::render::ansi::parse_ansi;
+use crate::render::StyledSpan;
 use crate::theme::TuiTheme;
 
 /// Indent marker glyph + space. 4-byte UTF-8.
@@ -149,57 +150,32 @@ pub fn render_user_tool_result_to_string(props: UserToolResultProps) -> String {
     out
 }
 
-/// Produce the styled spans for the body. Only Bash output runs through
-/// the ANSI parser; everything else is a single default-styled span over
-/// the result body text. (M6-04 Task 12.)
+/// Produce the styled spans for the body. Only Bash output runs through the
+/// ANSI parser; everything else is a single default-styled span over the
+/// result body text. (Migrated to `render::ansi` in M7-01.)
 ///
-/// Note: this is the body-only span pipeline. The marker / focus prefix
-/// from [`render_user_tool_result_to_string`] is added separately by
-/// the iocraft component (so a colored Bash run still gets a dim leading
-/// `└ ` marker).
+/// The ANSI parser returns one `StyledLine` per visual line; this flattens
+/// them into a single span vector, re-inserting `\n` between lines so the
+/// existing single-`Row` renderer reproduces M6 behavior for one-line Bash
+/// output (the only case M6 exercised).
 #[must_use]
-pub fn render_user_tool_result_body_spans(props: &UserToolResultProps) -> Vec<AnsiSpan> {
+pub fn render_user_tool_result_body_spans(props: &UserToolResultProps) -> Vec<StyledSpan> {
     let body = body_text(&props.result);
     let (truncated, _dropped) = truncate(&body);
     if props.tool == "Bash" {
-        parse_ansi(&truncated)
+        let lines = parse_ansi(&truncated);
+        let mut spans: Vec<StyledSpan> = Vec::new();
+        for (li, line) in lines.into_iter().enumerate() {
+            if li > 0 {
+                spans.push(StyledSpan::plain("\n"));
+            }
+            spans.extend(line.spans);
+        }
+        spans
     } else {
-        vec![AnsiSpan {
-            style: AnsiStyle::default(),
-            text: truncated,
-        }]
+        vec![StyledSpan::plain(truncated)]
     }
 }
-
-/// Map an [`AnsiColor`] to an iocraft [`Color`].
-///
-/// The 8-color palette maps to crossterm's "dark" range (`DarkRed` etc.)
-/// to match terminal defaults where SGR 31 is darker than SGR 91. Bright
-/// variants map to the non-dark range. `Default` becomes `Color::Reset`.
-fn ansi_to_iocraft_color(c: AnsiColor) -> Color {
-    match c {
-        AnsiColor::Default => Color::Reset,
-        AnsiColor::Black => Color::Black,
-        AnsiColor::Red => Color::DarkRed,
-        AnsiColor::Green => Color::DarkGreen,
-        AnsiColor::Yellow => Color::DarkYellow,
-        AnsiColor::Blue => Color::DarkBlue,
-        AnsiColor::Magenta => Color::DarkMagenta,
-        AnsiColor::Cyan => Color::DarkCyan,
-        AnsiColor::White => Color::Grey,
-        AnsiColor::BrightBlack => Color::DarkGrey,
-        AnsiColor::BrightRed => Color::Red,
-        AnsiColor::BrightGreen => Color::Green,
-        AnsiColor::BrightYellow => Color::Yellow,
-        AnsiColor::BrightBlue => Color::Blue,
-        AnsiColor::BrightMagenta => Color::Magenta,
-        AnsiColor::BrightCyan => Color::Cyan,
-        AnsiColor::BrightWhite => Color::White,
-    }
-}
-
-// Re-export the default style helper for ansi_to_iocraft_color callers.
-use crate::ansi::AnsiStyle;
 
 /// iocraft component — wraps [`render_user_tool_result_to_string`] in a
 /// dim-grey `Text` element. Bash output passes through the ANSI parser
@@ -221,7 +197,7 @@ pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElemen
         let span_elements: Vec<AnyElement<'static>> = spans
             .into_iter()
             .map(|s| {
-                let color = ansi_to_iocraft_color(s.style.fg);
+                let color = s.style.fg.to_iocraft();
                 let weight = if s.style.bold {
                     Weight::Bold
                 } else {

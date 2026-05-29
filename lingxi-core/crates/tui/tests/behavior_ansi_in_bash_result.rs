@@ -2,10 +2,10 @@
 //! tools keep the bytes literal.
 
 use lingxi_protocol::ToolUseId;
-use lingxi_tui::ansi::AnsiColor;
 use lingxi_tui::components::messages::user_tool_result::{
     render_user_tool_result_body_spans, UserToolResultProps,
 };
+use lingxi_tui::render::{NamedColor, StyleColor};
 
 #[test]
 fn bash_result_with_red_err_yields_red_span() {
@@ -19,7 +19,7 @@ fn bash_result_with_red_err_yields_red_span() {
     });
     let has_red_err = spans
         .iter()
-        .any(|s| s.text.contains("ERR") && s.style.fg == AnsiColor::Red);
+        .any(|s| s.text.contains("ERR") && s.style.fg == StyleColor::Named(NamedColor::Red));
     assert!(has_red_err, "expected a red ERR span, got {spans:?}");
 }
 
@@ -40,5 +40,5 @@ fn read_result_is_not_ansi_parsed() {
     // One span, raw literal text.
     assert_eq!(spans.len(), 1);
     assert!(spans[0].text.contains("\x1b[31m"));
-    assert_eq!(spans[0].style.fg, AnsiColor::Default);
+    assert_eq!(spans[0].style.fg, StyleColor::Default);
 }

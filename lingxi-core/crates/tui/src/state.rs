@@ -655,51 +655,56 @@ mod tests {
         assert_eq!(st.focused_tool_id, Some(a));
     }
 
-    /// M7-04 Task 1: RenderedMessage carries the 10 batch-1 variants.
+    /// M7-04 Task 1: `RenderedMessage` carries the 10 batch-1 variants.
     #[test]
     fn rendered_message_carries_batch1_variants() {
-        let _t = RenderedMessage::AssistantThinking {
-            thinking: "x".into(),
-            expanded: false,
-        };
-        let _r = RenderedMessage::AssistantRedactedThinking;
-        let _c = RenderedMessage::CompactBoundary {
-            messages_before: 50,
-            messages_after: 5,
-        };
-        let _s = RenderedMessage::SystemTextRich {
-            body: "hi".into(),
-            level: SystemLevel::Warning,
-        };
-        let _e = RenderedMessage::SystemApiError {
-            error: "boom".into(),
-            retry_attempt: 4,
-            retry_in_seconds: 3,
-            max_retries: 10,
-            truncated: false,
-        };
-        let _l = RenderedMessage::RateLimit {
-            text: "limited".into(),
-            upsell: None,
-        };
-        let _sd = RenderedMessage::Shutdown {
-            from: "agent-1".into(),
-            reason: Some("done".into()),
-            rejected: false,
-        };
-        let _a = RenderedMessage::Advisor {
-            kind: AdvisorKind::Result { text: "ok".into() },
-            verbose: false,
-        };
-        let _h = RenderedMessage::HookProgress {
-            event: "PreToolUse".into(),
-            count: 2,
-            transcript_summary: false,
-        };
-        let _p = RenderedMessage::PlanApproval {
-            kind: PlanApprovalKind::Approved { name: "you".into() },
-        };
-        assert!(matches!(_c, RenderedMessage::CompactBoundary { .. }));
+        let variants = [
+            RenderedMessage::AssistantThinking {
+                thinking: "x".into(),
+                expanded: false,
+            },
+            RenderedMessage::AssistantRedactedThinking,
+            RenderedMessage::CompactBoundary {
+                messages_before: 50,
+                messages_after: 5,
+            },
+            RenderedMessage::SystemTextRich {
+                body: "hi".into(),
+                level: SystemLevel::Warning,
+            },
+            RenderedMessage::SystemApiError {
+                error: "boom".into(),
+                retry_attempt: 4,
+                retry_in_seconds: 3,
+                max_retries: 10,
+                truncated: false,
+            },
+            RenderedMessage::RateLimit {
+                text: "limited".into(),
+                upsell: None,
+            },
+            RenderedMessage::Shutdown {
+                from: "agent-1".into(),
+                reason: Some("done".into()),
+                rejected: false,
+            },
+            RenderedMessage::Advisor {
+                kind: AdvisorKind::Result { text: "ok".into() },
+                verbose: false,
+            },
+            RenderedMessage::HookProgress {
+                event: "PreToolUse".into(),
+                count: 2,
+                transcript_summary: false,
+            },
+            RenderedMessage::PlanApproval {
+                kind: PlanApprovalKind::Approved { name: "you".into() },
+            },
+        ];
+        assert_eq!(variants.len(), 10);
+        assert!(variants
+            .iter()
+            .any(|m| matches!(m, RenderedMessage::CompactBoundary { .. })));
     }
 
     /// `toggle_expanded` flips the per-id boolean, defaulting to `true`

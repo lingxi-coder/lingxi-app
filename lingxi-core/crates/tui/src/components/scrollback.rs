@@ -12,9 +12,13 @@ use iocraft::prelude::*;
 use lingxi_protocol::ToolUseId;
 
 use crate::components::messages::{
-    assistant_text::AssistantTextMessage, assistant_tool_use::AssistantToolUseMessage,
-    compact_boundary::CompactBoundaryMessage, user_text::UserTextMessage,
-    user_tool_result::UserToolResultMessage,
+    advisor::AdvisorMessage, assistant_text::AssistantTextMessage,
+    assistant_tool_use::AssistantToolUseMessage, compact_boundary::CompactBoundaryMessage,
+    hook_progress::HookProgressMessage, plan_approval::PlanApprovalMessage,
+    rate_limit::RateLimitMessage, redacted_thinking::AssistantRedactedThinkingMessage,
+    shutdown::ShutdownMessage, system_api_error::SystemApiErrorMessage,
+    system_text::SystemTextMessage, thinking::AssistantThinkingMessage,
+    user_text::UserTextMessage, user_tool_result::UserToolResultMessage,
 };
 use crate::state::RenderedMessage;
 use crate::theme::TuiTheme;
@@ -26,6 +30,7 @@ use crate::theme::TuiTheme;
 /// `virtual_message_list::render_message`).
 #[must_use]
 #[allow(clippy::implicit_hasher)] // always called with `AppState.expanded`'s std hasher
+#[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (15 variants)
 pub fn render_message(
     m: RenderedMessage,
     expanded: &HashMap<ToolUseId, bool>,
@@ -97,9 +102,66 @@ pub fn render_message(
             CompactBoundaryMessage()
         }
         .into_any(),
-        // (M7-04) TEMPORARY catch-all for the remaining batch-1 variants until
-        // Task 11 wires their real iocraft-component arms; removed in Task 11
-        // once the match is exhaustive (Task 11's dispatch test verifies it).
-        _ => element! { Text(content: String::new()) }.into_any(),
+        // (M7-04) batch-1 system/assistant renderers.
+        RenderedMessage::AssistantThinking { thinking, expanded } => element! {
+            AssistantThinkingMessage(thinking: thinking, expanded: expanded)
+        }
+        .into_any(),
+        RenderedMessage::AssistantRedactedThinking => element! {
+            AssistantRedactedThinkingMessage()
+        }
+        .into_any(),
+        RenderedMessage::SystemTextRich { body, level } => element! {
+            SystemTextMessage(body: body, level: level)
+        }
+        .into_any(),
+        RenderedMessage::SystemApiError {
+            error,
+            retry_attempt,
+            retry_in_seconds,
+            max_retries,
+            truncated,
+        } => element! {
+            SystemApiErrorMessage(
+                error: error,
+                retry_attempt: retry_attempt,
+                retry_in_seconds: retry_in_seconds,
+                max_retries: max_retries,
+                truncated: truncated,
+            )
+        }
+        .into_any(),
+        RenderedMessage::RateLimit { text, upsell } => element! {
+            RateLimitMessage(text: text, upsell: upsell)
+        }
+        .into_any(),
+        RenderedMessage::Shutdown {
+            from,
+            reason,
+            rejected,
+        } => element! {
+            ShutdownMessage(from: from, reason: reason, rejected: rejected)
+        }
+        .into_any(),
+        RenderedMessage::Advisor { kind, verbose } => element! {
+            AdvisorMessage(kind: kind, verbose: verbose)
+        }
+        .into_any(),
+        RenderedMessage::HookProgress {
+            event,
+            count,
+            transcript_summary,
+        } => element! {
+            HookProgressMessage(
+                event: event,
+                count: count,
+                transcript_summary: transcript_summary,
+            )
+        }
+        .into_any(),
+        RenderedMessage::PlanApproval { kind } => element! {
+            PlanApprovalMessage(kind: kind)
+        }
+        .into_any(),
     }
 }

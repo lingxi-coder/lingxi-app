@@ -65,12 +65,73 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             new_string: new_string.clone(),
             file_path: file_path.clone(),
         }),
+        RenderedMessage::AssistantThinking { thinking, expanded } => {
+            thinking::render_thinking_to_string(thinking::ThinkingProps {
+                thinking: thinking.clone(),
+                expanded: *expanded,
+            })
+        }
+        RenderedMessage::AssistantRedactedThinking => {
+            redacted_thinking::render_redacted_thinking_to_string()
+        }
         RenderedMessage::CompactBoundary { .. } => {
             compact_boundary::render_compact_boundary_to_string()
         }
-        // (M7-04) TEMPORARY catch-all for the remaining batch-1 variants until
-        // Task 11 wires their real arms; the dispatch test in Task 11 makes
-        // this removal verifiable (the match becomes exhaustive).
-        _ => String::new(),
+        RenderedMessage::SystemTextRich { body, level } => {
+            system_text::render_system_text_to_string(system_text::SystemTextProps {
+                body: body.clone(),
+                level: *level,
+            })
+        }
+        RenderedMessage::SystemApiError {
+            error,
+            retry_attempt,
+            retry_in_seconds,
+            max_retries,
+            truncated,
+        } => system_api_error::render_system_api_error_to_string(
+            system_api_error::SystemApiErrorProps {
+                error: error.clone(),
+                retry_attempt: *retry_attempt,
+                retry_in_seconds: *retry_in_seconds,
+                max_retries: *max_retries,
+                truncated: *truncated,
+            },
+        ),
+        RenderedMessage::RateLimit { text, upsell } => {
+            rate_limit::render_rate_limit_to_string(rate_limit::RateLimitProps {
+                text: text.clone(),
+                upsell: upsell.clone(),
+            })
+        }
+        RenderedMessage::Shutdown {
+            from,
+            reason,
+            rejected,
+        } => shutdown::render_shutdown_to_string(shutdown::ShutdownProps {
+            from: from.clone(),
+            reason: reason.clone(),
+            rejected: *rejected,
+        }),
+        RenderedMessage::Advisor { kind, verbose } => {
+            advisor::render_advisor_to_string(advisor::AdvisorProps {
+                kind: kind.clone(),
+                verbose: *verbose,
+            })
+        }
+        RenderedMessage::HookProgress {
+            event,
+            count,
+            transcript_summary,
+        } => hook_progress::render_hook_progress_to_string(hook_progress::HookProgressProps {
+            event: event.clone(),
+            count: *count,
+            transcript_summary: *transcript_summary,
+        }),
+        RenderedMessage::PlanApproval { kind } => {
+            plan_approval::render_plan_approval_to_string(plan_approval::PlanApprovalProps {
+                kind: kind.clone(),
+            })
+        }
     }
 }

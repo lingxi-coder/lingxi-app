@@ -20,12 +20,19 @@ pub const LINGXI_CORE_V0_6_0_RELEASED: &str = "lingxi_core_v0_6_0_released";
 /// `ConversationOrchestrator::new` via `std::sync::Once`.
 pub const LINGXI_CORE_V0_7_0_RELEASED: &str = "lingxi_core_v0_7_0_released";
 
+/// v0.8.0 release marker — emitted once on first init after the M7 upgrade.
+/// Wire string locked: appears byte-for-byte in test assertions + downstream
+/// Statsig analytics schema. M7-16 emits it from
+/// `ConversationOrchestrator::new` via `std::sync::Once`.
+pub const LINGXI_CORE_V0_8_0_RELEASED: &str = "lingxi_core_v0_8_0_released";
+
 /// Order-locked array of all release-marker names; consumed by
 /// `tengu::ALL_EVENT_NAMES`. Append-only: never reorder or remove entries.
 pub(crate) const NAMES: &[&str] = &[
     LINGXI_CORE_V0_5_0_RELEASED,
     LINGXI_CORE_V0_6_0_RELEASED,
     LINGXI_CORE_V0_7_0_RELEASED,
+    LINGXI_CORE_V0_8_0_RELEASED,
 ];
 
 #[cfg(test)]
@@ -48,8 +55,13 @@ mod tests {
     }
 
     #[test]
-    fn names_slice_length_3() {
-        assert_eq!(NAMES.len(), 3);
+    fn v0_8_0_constant_locked() {
+        assert_eq!(LINGXI_CORE_V0_8_0_RELEASED, "lingxi_core_v0_8_0_released");
+    }
+
+    #[test]
+    fn names_slice_length_4() {
+        assert_eq!(NAMES.len(), 4);
     }
 
     #[test]
@@ -58,5 +70,6 @@ mod tests {
         assert_eq!(NAMES[0], LINGXI_CORE_V0_5_0_RELEASED);
         assert_eq!(NAMES[1], LINGXI_CORE_V0_6_0_RELEASED);
         assert_eq!(NAMES[2], LINGXI_CORE_V0_7_0_RELEASED);
+        assert_eq!(NAMES[3], LINGXI_CORE_V0_8_0_RELEASED);
     }
 }

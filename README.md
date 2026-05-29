@@ -2,11 +2,18 @@
 
 Platform-agnostic Rust engine for an AI coding assistant with 1:1 behavioral
 parity to claude-code (2026-03-31 TypeScript reference) on desktop OSes.
-v0.7.0 (M6) ships the **TUI Foundation**: the first iocraft-based terminal
+v0.8.0 (M7) ships the **TUI Surface**: the full single-user terminal UI on top
+of the v0.7.0 foundation — full ANSI/markdown/syntect rendering + StructuredDiff,
+~22 message renderers, a windowed `VirtualMessageList` scrollback, an advanced
+multi-line `PromptInput` (vim Normal/Insert/Visual + command palette +
+`@`-completion + history search + image paste), four full-page screens
+(Doctor / Resume / Settings / Memory), a message search/jump/export selector,
+and a 6-theme picker. `--no-tui` and non-TTY fall back byte-for-byte to the
+v0.6.0 stdio REPL.
+v0.7.0 (M6) shipped the **TUI Foundation**: the first iocraft-based terminal
 UI — a 3-zone layout (StatusLine / Scrollback / PromptInput) with streaming,
 4 message renderers, 3 permission dialogs, and real cost + MCP/Hooks/Agents
-listings + `/compact` wired into the surface. `--no-tui` and non-TTY fall
-back byte-for-byte to the v0.6.0 stdio REPL.
+listings + `/compact` wired into the surface.
 v0.6.0 (M5) completed the Execution Engine 全集: `ConversationOrchestrator`
 batched turn loop, streaming SSE, interactive permission gate, Hooks 4-arm
 runtime, byte-equivalent session JSONL, `--resume` session loading, 18
@@ -46,7 +53,7 @@ subsystems (Settings, Memory, API client, OAuth refresh, cost events,
 telemetry schema) identically. See `docs/PLATFORMS.md` for the per-OS
 setup notes + the "M3 engine subsystems" section.
 
-## Subsystem status (v0.7.0)
+## Subsystem status (v0.8.0)
 
 | Subsystem | Status | Milestone |
 |---|---|---|
@@ -62,7 +69,13 @@ setup notes + the "M3 engine subsystems" section.
 | TUI foundation (iocraft 3-zone, streaming, 4 renderers, 3 dialogs) | Complete | M6 / v0.7.0 |
 | TUI engine wiring (real cost / MCP-Hooks-Agents lists / `/compact`) | Complete (summary stub) | M6 / v0.7.0 |
 | Plugin marketplace + MCP server | M6 | M6 |
-| Advanced TUI screens (Doctor / Resume / Settings / vim / palette / themes) | Out of scope | M7 |
+| TUI rendering primitives (ANSI 16/256/truecolor, markdown, syntect, StructuredDiff) | Complete | M7 / v0.8.0 |
+| TUI message renderers (~22 system/assistant/user) + VirtualMessageList scrollback | Complete | M7 / v0.8.0 |
+| Advanced PromptInput (vim Normal/Insert/Visual, command palette, `@`-completion, history search, image paste) | Complete (vim parity subset) | M7 / v0.8.0 |
+| TUI full-page screens (Doctor / Resume / Settings / Memory) + theme picker + message selector | Complete | M7 / v0.8.0 |
+| Live assistant text → markdown/syntect (#211) | Plain text (markdown wired only into secondary renderers) | M8 |
+| Advanced engine wiring (real `/compact` summary, CostTracker→AnalyticsBus, MCP auto-connect, OAuth PKCE, per-model cost) | Deferred | M8 |
+| Team / Coordinator / Swarm renderers, voice, mouse mode, inline image display | Out of scope | M8 |
 | Mobile real-device binding | Out of scope (compile-only gates remain) | — |
 
 ## Architecture

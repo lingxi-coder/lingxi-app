@@ -1091,13 +1091,49 @@ pub fn handle_vim_key(
             let count = digits.parse::<usize>().unwrap_or(1).max(1);
             return dispatch_normal(state, cursor, count, key);
         }
-        // M7-09 operator-pending arms — wired in Task 7. Until then they reset
-        // to Idle and no-op (placeholder; Task 7 replaces these with the real
-        // operator dispatch). They are unreachable in Task 1 (nothing sets them).
-        CommandState::Operator { .. }
-        | CommandState::OperatorCount { .. }
-        | CommandState::OperatorFind { .. }
-        | CommandState::OperatorG { .. } => {
+        // ---- M7-09 operator-pending arms (port of claude-code operators.ts). --
+        CommandState::Operator { op, count } => {
+            return dispatch_operator_pending(state, cursor, op, count, key);
+        }
+        CommandState::OperatorCount { op, count, digits } => {
+            if let KeyCode::Char(c @ '0'..='9') = key.code {
+                let mut d = digits;
+                d.push(c);
+                state.command = CommandState::OperatorCount { op, count, digits: d };
+                return VimOutcome::Pending;
+            }
+            let inner = digits.parse::<usize>().unwrap_or(1).max(1);
+            return dispatch_operator_pending(state, cursor, op, count * inner, key);
+        }
+        CommandState::OperatorFind { op, count, kind } => {
+            if let KeyCode::Char(ch) = key.code {
+                state.last_find = Some((kind, ch));
+                return match cursor.find_character(ch, kind, count) {
+                    Some(target) => {
+                        // find ranges are inclusive (operators.ts::getOperatorRangeForFind).
+                        let from = cursor.offset.min(target);
+                        let to_raw = cursor.offset.max(target);
+                        let to = VimCursor {
+                            text: cursor.text,
+                            offset: to_raw,
+                        }
+                        .next_off(to_raw);
+                        finish_operator(state, op, cursor.text, from, to, false)
+                    }
+                    None => VimOutcome::Effect(VimEffect::None),
+                };
+            }
+            return VimOutcome::Effect(VimEffect::None);
+        }
+        CommandState::OperatorG { op, count } => {
+            if let KeyCode::Char('g') = key.code {
+                let target = if count > 1 {
+                    cursor.go_to_line(count)
+                } else {
+                    cursor.start_of_first_line()
+                };
+                return operator_over_lines(state, op, cursor, target.offset);
+            }
             return VimOutcome::Effect(VimEffect::None);
         }
         CommandState::Idle => {}
@@ -1128,6 +1164,35 @@ fn dispatch_normal(
     if matches!(ch, 'i' | 'a' | 'I' | 'A' | 'o' | 'O') {
         state.mode = VimMode::Insert;
         return VimOutcome::Effect(enter_insert_effect(ch, cursor));
+    }
+
+    // Operators (M7-09): enter operator-pending. A leading count (already
+    // resolved into `count`) seeds the operator's count; an inner count after
+    // the operator (`d3w`) multiplies via `OperatorCount`.
+    let op = match ch {
+        'd' => Some(Operator::Delete),
+        'c' => Some(Operator::Change),
+        'y' => Some(Operator::Yank),
+        _ => None,
+    };
+    if let Some(op) = op {
+        state.command = CommandState::Operator { op, count };
+        return VimOutcome::Pending;
+    }
+
+    // x: delete count chars under/after the cursor.
+    if ch == 'x' {
+        let (effect, register) = delete_char_x(cursor, count);
+        if effect != VimEffect::None {
+            state.register = register;
+        }
+        return VimOutcome::Effect(effect);
+    }
+
+    // p / P: paste the unnamed register.
+    if ch == 'p' || ch == 'P' {
+        let effect = paste(ch == 'p', count, &state.register, cursor);
+        return VimOutcome::Effect(effect);
     }
 
     // Simple motions.
@@ -1170,6 +1235,145 @@ fn dispatch_normal(
     }
 
     VimOutcome::Effect(VimEffect::None)
+}
+
+/// One key in operator-pending state (op already chosen, count resolved).
+fn dispatch_operator_pending(
+    state: &mut VimState,
+    cursor: VimCursor<'_>,
+    op: Operator,
+    count: usize,
+    key: KeyEvent,
+) -> VimOutcome {
+    // Esc cancels.
+    if key.code == KeyCode::Esc {
+        state.command = CommandState::Idle;
+        return VimOutcome::Effect(VimEffect::None);
+    }
+    let KeyCode::Char(ch) = key.code else {
+        state.command = CommandState::Idle;
+        return VimOutcome::Effect(VimEffect::None);
+    };
+
+    // Inner count: a digit 1-9 seeds OperatorCount. ('0' is the LineStart motion,
+    // not a count seed — mirrors M7-08's "`0` is a motion from Idle.")
+    if let '1'..='9' = ch {
+        state.command = CommandState::OperatorCount {
+            op,
+            count,
+            digits: ch.to_string(),
+        };
+        return VimOutcome::Pending;
+    }
+
+    // Doubled operator key -> line op (dd/cc/yy).
+    let op_char = match op {
+        Operator::Delete => 'd',
+        Operator::Change => 'c',
+        Operator::Yank => 'y',
+    };
+    if ch == op_char {
+        let (effect, register, enter_insert) = line_op(op, cursor, count);
+        state.register = register;
+        state.command = CommandState::Idle;
+        if enter_insert {
+            state.mode = VimMode::Insert;
+        }
+        return VimOutcome::Effect(effect);
+    }
+
+    // Find prefix -> OperatorFind.
+    let find_kind = match ch {
+        'f' => Some(FindKind::F),
+        'F' => Some(FindKind::BigF),
+        't' => Some(FindKind::T),
+        'T' => Some(FindKind::BigT),
+        _ => None,
+    };
+    if let Some(kind) = find_kind {
+        state.command = CommandState::OperatorFind { op, count, kind };
+        return VimOutcome::Pending;
+    }
+
+    // g -> OperatorG (dgg).
+    if ch == 'g' {
+        state.command = CommandState::OperatorG { op, count };
+        return VimOutcome::Pending;
+    }
+
+    // G -> operator over lines to last/Nth line.
+    if ch == 'G' {
+        let target = if count > 1 {
+            cursor.go_to_line(count)
+        } else {
+            cursor.start_of_last_line()
+        };
+        return operator_over_lines(state, op, cursor, target.offset);
+    }
+
+    // Simple motion.
+    if let Some(motion) = motion_for_operator_key(ch) {
+        let target = resolve_motion(motion, cursor, count);
+        if target.offset == cursor.offset {
+            // motion didn't move -> operator no-op (operators.ts: target.equals(cursor)).
+            state.command = CommandState::Idle;
+            return VimOutcome::Effect(VimEffect::None);
+        }
+        let range = operator_range(cursor, target.offset, ch, op, count);
+        return finish_operator(state, op, cursor.text, range.from, range.to, range.linewise);
+    }
+
+    // Text objects (iw/aw...) and any other key: DEFERRED (GATE) -> cancel, no-op.
+    state.command = CommandState::Idle;
+    VimOutcome::Effect(VimEffect::None)
+}
+
+/// Apply an operator over a resolved byte range; store register; reset command;
+/// enter Insert for change. A zero-width range is a no-op (register untouched).
+fn finish_operator(
+    state: &mut VimState,
+    op: Operator,
+    text: &str,
+    from: usize,
+    to: usize,
+    linewise: bool,
+) -> VimOutcome {
+    state.command = CommandState::Idle;
+    if from == to {
+        return VimOutcome::Effect(VimEffect::None);
+    }
+    let (effect, register, enter_insert) = apply_operator(op, text, from, to, linewise);
+    state.register = register;
+    if enter_insert {
+        state.mode = VimMode::Insert;
+    }
+    VimOutcome::Effect(effect)
+}
+
+/// Operator over whole lines from cursor's line to `target_offset`'s line
+/// (dG / dgg / NdG). Always linewise. Mirrors `executeOperatorG`/`Gg` + line range.
+fn operator_over_lines(
+    state: &mut VimState,
+    op: Operator,
+    cursor: VimCursor<'_>,
+    target_offset: usize,
+) -> VimOutcome {
+    let text = cursor.text;
+    let from_line_start = VimCursor {
+        text,
+        offset: cursor.offset.min(target_offset),
+    }
+    .start_of_logical_line()
+    .offset;
+    let to_line = VimCursor {
+        text,
+        offset: cursor.offset.max(target_offset),
+    };
+    let to_line_end = match text[to_line.offset..].find('\n') {
+        None => text.len(),
+        Some(rel) => to_line.offset + rel + 1,
+    };
+    finish_operator(state, op, text, from_line_start, to_line_end, true)
 }
 
 /// Footer mode-indicator literal. Matches the well-known vim convention
@@ -2265,5 +2469,301 @@ mod paste_tests {
     fn empty_register_is_noop() {
         let effect = paste(true, 1, &Register::default(), cur("ab", 0));
         assert_eq!(effect, VimEffect::None);
+    }
+}
+
+#[cfg(test)]
+mod op_dispatch_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    fn key(c: char) -> KeyEvent {
+        let m = if c.is_uppercase() {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::NONE
+        };
+        KeyEvent::new(KeyCode::Char(c), m)
+    }
+    fn esc() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    }
+    fn normal() -> VimState {
+        VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        }
+    }
+
+    #[test]
+    fn d_enters_operator_pending() {
+        let mut s = normal();
+        assert_eq!(
+            handle_vim_key(&mut s, "foo bar", 0, key('d')),
+            VimOutcome::Pending
+        );
+        assert_eq!(
+            s.command,
+            CommandState::Operator {
+                op: Operator::Delete,
+                count: 1
+            }
+        );
+    }
+
+    #[test]
+    fn dw_deletes_word() {
+        let mut s = normal();
+        handle_vim_key(&mut s, "foo bar", 0, key('d'));
+        let out = handle_vim_key(&mut s, "foo bar", 0, key('w'));
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: "bar".into(),
+                cursor: 0
+            })
+        );
+        assert_eq!(s.command, CommandState::Idle);
+        assert_eq!(s.register.text, "foo ");
+    }
+
+    #[test]
+    fn de_deletes_to_end_of_word_inclusive() {
+        let mut s = normal();
+        handle_vim_key(&mut s, "foo bar", 0, key('d'));
+        let out = handle_vim_key(&mut s, "foo bar", 0, key('e'));
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: " bar".into(),
+                cursor: 0
+            })
+        );
+    }
+
+    #[test]
+    fn d_dollar_deletes_to_eol() {
+        let mut s = normal();
+        handle_vim_key(&mut s, "foo bar", 4, key('d'));
+        let out = handle_vim_key(&mut s, "foo bar", 4, key('$'));
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: "foo ".into(),
+                cursor: 3
+            })
+        );
+    }
+
+    #[test]
+    fn dd_deletes_line() {
+        let mut s = normal();
+        handle_vim_key(&mut s, "a\nb\nc", 2, key('d'));
+        let out = handle_vim_key(&mut s, "a\nb\nc", 2, key('d'));
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: "a\nc".into(),
+                cursor: 2
+            })
+        );
+        assert!(s.register.linewise);
+    }
+
+    #[test]
+    fn cc_clears_line_and_enters_insert() {
+        let mut s = normal();
+        handle_vim_key(&mut s, "ab\ncd", 0, key('c'));
+        let out = handle_vim_key(&mut s, "ab\ncd", 0, key('c'));
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: "\ncd".into(),
+                cursor: 0
+            })
+        );
+        assert_eq!(s.mode, VimMode::Insert);
+    }
+
+    #[test]
+    fn cw_changes_to_end_of_word_and_enters_insert() {
+        let mut s = normal();
+        handle_vim_key(&mut s, "foo bar", 0, key('c'));
+        let out = handle_vim_key(&mut s, "foo bar", 0, key('w'));
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: " bar".into(),
+                cursor: 0
+            })
+        );
+        assert_eq!(s.mode, VimMode::Insert);
+    }
+
+    #[test]
+    fn yy_yanks_line_keeps_buffer() {
+        let mut s = normal();
+        handle_vim_key(&mut s, "a\nb\nc", 2, key('y'));
+        let out = handle_vim_key(&mut s, "a\nb\nc", 2, key('y'));
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(2)));
+        assert_eq!(
+            s.register,
+            Register {
+                text: "b\n".into(),
+                linewise: true
+            }
+        );
+    }
+
+    #[test]
+    fn count_dw_multiplies() {
+        // 3dw on "a b c d e" from 0: delete 3 words -> "d e".
+        let mut s = normal();
+        handle_vim_key(&mut s, "a b c d e", 0, key('3'));
+        handle_vim_key(&mut s, "a b c d e", 0, key('d'));
+        let out = handle_vim_key(&mut s, "a b c d e", 0, key('w'));
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: "d e".into(),
+                cursor: 0
+            })
+        );
+    }
+
+    #[test]
+    fn d_count_w_inner_count_multiplies() {
+        // d3w on "a b c d e" from 0: same as 3dw -> "d e".
+        let mut s = normal();
+        handle_vim_key(&mut s, "a b c d e", 0, key('d'));
+        handle_vim_key(&mut s, "a b c d e", 0, key('3'));
+        let out = handle_vim_key(&mut s, "a b c d e", 0, key('w'));
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: "d e".into(),
+                cursor: 0
+            })
+        );
+    }
+
+    #[test]
+    fn count_yy_yanks_n_lines() {
+        // 2yy on "a\nb\nc" from 0: register "a\nb\n".
+        let mut s = normal();
+        handle_vim_key(&mut s, "a\nb\nc", 0, key('2'));
+        handle_vim_key(&mut s, "a\nb\nc", 0, key('y'));
+        let out = handle_vim_key(&mut s, "a\nb\nc", 0, key('y'));
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(0)));
+        assert_eq!(s.register.text, "a\nb\n");
+    }
+
+    #[test]
+    fn df_char_deletes_through_find() {
+        // df_c on "abcde" from 0: find 'c' at 2, inclusive -> delete "abc" -> "de".
+        let mut s = normal();
+        handle_vim_key(&mut s, "abcde", 0, key('d'));
+        handle_vim_key(&mut s, "abcde", 0, key('f'));
+        assert_eq!(
+            s.command,
+            CommandState::OperatorFind {
+                op: Operator::Delete,
+                count: 1,
+                kind: FindKind::F
+            }
+        );
+        let out = handle_vim_key(&mut s, "abcde", 0, key('c'));
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: "de".into(),
+                cursor: 0
+            })
+        );
+    }
+
+    #[test]
+    fn d_cap_g_deletes_to_last_line() {
+        // dG on "a\nb\nc" from 0: linewise delete all -> "".
+        let mut s = normal();
+        handle_vim_key(&mut s, "a\nb\nc", 0, key('d'));
+        let out = handle_vim_key(&mut s, "a\nb\nc", 0, key('G'));
+        match out {
+            VimOutcome::Effect(VimEffect::Edit { text, .. }) => assert_eq!(text, ""),
+            other => panic!("expected Edit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dgg_deletes_to_first_line() {
+        // dgg on "a\nb\nc" from offset 4 (line2 'c'): linewise delete lines 0..2 -> "".
+        let mut s = normal();
+        handle_vim_key(&mut s, "a\nb\nc", 4, key('d'));
+        assert_eq!(
+            handle_vim_key(&mut s, "a\nb\nc", 4, key('g')),
+            VimOutcome::Pending
+        );
+        assert_eq!(
+            s.command,
+            CommandState::OperatorG {
+                op: Operator::Delete,
+                count: 1
+            }
+        );
+        let out = handle_vim_key(&mut s, "a\nb\nc", 4, key('g'));
+        match out {
+            VimOutcome::Effect(VimEffect::Edit { text, .. }) => assert_eq!(text, ""),
+            other => panic!("expected Edit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn x_deletes_char() {
+        let mut s = normal();
+        let out = handle_vim_key(&mut s, "hello", 0, key('x'));
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: "ello".into(),
+                cursor: 0
+            })
+        );
+        assert_eq!(s.register.text, "h");
+    }
+
+    #[test]
+    fn p_pastes_after() {
+        let mut s = normal();
+        s.register = Register {
+            text: "X".into(),
+            linewise: false,
+        };
+        let out = handle_vim_key(&mut s, "ab", 0, key('p'));
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: "aXb".into(),
+                cursor: 1
+            })
+        );
+    }
+
+    #[test]
+    fn esc_cancels_operator_pending() {
+        let mut s = normal();
+        handle_vim_key(&mut s, "foo", 0, key('d'));
+        let out = handle_vim_key(&mut s, "foo", 0, esc());
+        assert_eq!(out, VimOutcome::Effect(VimEffect::None));
+        assert_eq!(s.command, CommandState::Idle);
+    }
+
+    #[test]
+    fn operator_motion_noop_when_motion_does_not_move() {
+        // dh at offset 0: h is a no-op -> operator no-op, register untouched.
+        let mut s = normal();
+        handle_vim_key(&mut s, "abc", 0, key('d'));
+        let out = handle_vim_key(&mut s, "abc", 0, key('h'));
+        assert_eq!(out, VimOutcome::Effect(VimEffect::None));
+        assert_eq!(s.register, Register::default());
+        assert_eq!(s.command, CommandState::Idle);
     }
 }

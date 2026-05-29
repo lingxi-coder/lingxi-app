@@ -1,0 +1,7 @@
+---
+source: crates/tui/tests/prompt_input_footer_snapshot.rs
+expression: el.to_string()
+---
+> first
+  second
+  third

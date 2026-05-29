@@ -2,7 +2,7 @@
 //! placeholder, the collapsed help hint, the newline hint, and a (M7-06
 //! empty) suggestions area. Live suggestion filtering arrives in M7-07.
 //!
-//! Literal lock (claude-code PromptInput*): the prompt glyph is `❯ `
+//! Literal lock (claude-code `PromptInput*`): the prompt glyph is `❯ `
 //! (figures.pointer + space), the newline hint is `shift + ⏎ for newline`,
 //! and the help hint is `? for shortcuts`.
 

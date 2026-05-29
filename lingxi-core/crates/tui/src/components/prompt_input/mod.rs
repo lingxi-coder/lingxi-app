@@ -167,7 +167,8 @@ pub fn apply_move_vertical(text: &str, cursor: usize, delta: i32) -> usize {
     let (line, col) = cursor_line_col(text, cursor);
     let target_line = (line as i32 + delta).clamp(0, starts.len() as i32 - 1) as usize;
     let line_start = starts[target_line];
-    let line_end = starts.get(target_line + 1).map_or(text.len(), |&s| s - 1); // drop the trailing '\n'
+    // Destination line end drops the trailing '\n'.
+    let line_end = starts.get(target_line + 1).map_or(text.len(), |&s| s - 1);
     // Walk `col` graphemes into the destination line, clamping at its end.
     let mut byte = line_start;
     let dest = &text[line_start..line_end];

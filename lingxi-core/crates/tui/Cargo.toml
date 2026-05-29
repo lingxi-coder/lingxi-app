@@ -22,6 +22,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 iocraft = "=0.8.3"
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 crossterm = { workspace = true, features = ["event-stream"] }
+# Syntax highlighting — pure-Rust fancy-regex backend (NO onig C dep). MSRV 1.82
+# verified in M7-02 Task 1 with the transitive pins below.
+syntect = { version = "=5.3.0", default-features = false, features = ["default-fancy"] }
+# Line- + word-level diff for StructuredDiff. Reuses the version already in
+# the workspace lockfile (2.7.0); 3.x requires Rust 1.85 > our MSRV 1.82.
+similar = "=2.7.0"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tokio-stream = { workspace = true }

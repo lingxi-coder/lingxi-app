@@ -1048,6 +1048,72 @@ pub fn handle_vim_key(
         return VimOutcome::PassThrough;
     }
 
+    // ----- VISUAL mode (M7-09). claude-code has no visual mode; standard vim. --
+    // Placed after the ctrl/alt passthrough (so Ctrl-Alt-V / Ctrl-C still escape
+    // a Visual selection) and before the Normal Esc-cancel.
+    if state.mode == VimMode::Visual {
+        let visual = state.visual.expect("Visual mode without VisualState");
+        let vcursor = VimCursor { text, offset };
+
+        // Esc -> Normal (clamp the cursor as Normal mode requires).
+        if key.code == KeyCode::Esc {
+            state.mode = VimMode::Normal;
+            state.visual = None;
+            state.command = CommandState::Idle;
+            return VimOutcome::Effect(VimEffect::Move(esc_clamp(text, offset)));
+        }
+
+        let KeyCode::Char(ch) = key.code else {
+            return VimOutcome::Effect(VimEffect::None);
+        };
+
+        // d/c/y operate on the selection, then return to Normal/Insert.
+        if matches!(ch, 'd' | 'c' | 'y') {
+            let op = match ch {
+                'd' => Operator::Delete,
+                'c' => Operator::Change,
+                _ => Operator::Yank,
+            };
+            let (from, to, linewise) = visual_range(text, visual, offset);
+            state.mode = VimMode::Normal;
+            state.visual = None;
+            return finish_operator(state, op, text, from, to, linewise);
+        }
+
+        // Pending count / g-prefix inside Visual reuse the Count / G sub-states.
+        match std::mem::replace(&mut state.command, CommandState::Idle) {
+            CommandState::Count { digits } => {
+                if let '0'..='9' = ch {
+                    let mut d = digits;
+                    d.push(ch);
+                    state.command = CommandState::Count { digits: d };
+                    return VimOutcome::Pending;
+                }
+                let count = digits.parse::<usize>().unwrap_or(1).max(1);
+                return visual_motion(state, vcursor, count, ch);
+            }
+            CommandState::G { count: _ } => {
+                if ch == 'g' {
+                    return VimOutcome::Effect(VimEffect::Move(
+                        vcursor.start_of_first_line().offset,
+                    ));
+                }
+                return VimOutcome::Effect(VimEffect::None);
+            }
+            CommandState::Idle => {}
+            other => {
+                state.command = other; // shouldn't happen in Visual; keep
+            }
+        }
+        if let '1'..='9' = ch {
+            state.command = CommandState::Count {
+                digits: ch.to_string(),
+            };
+            return VimOutcome::Pending;
+        }
+        return visual_motion(state, vcursor, 1, ch);
+    }
+
     // Esc in Normal cancels any pending command.
     if key.code == KeyCode::Esc {
         state.command = CommandState::Idle;
@@ -1193,6 +1259,16 @@ fn dispatch_normal(
     if ch == 'p' || ch == 'P' {
         let effect = paste(ch == 'p', count, &state.register, cursor);
         return VimOutcome::Effect(effect);
+    }
+
+    // v / V: enter Visual / Visual-line (M7-09).
+    if ch == 'v' || ch == 'V' {
+        state.mode = VimMode::Visual;
+        state.visual = Some(VisualState {
+            anchor: cursor.offset,
+            linewise: ch == 'V',
+        });
+        return VimOutcome::Effect(VimEffect::None);
     }
 
     // Simple motions.
@@ -1374,6 +1450,46 @@ fn operator_over_lines(
         Some(rel) => to_line.offset + rel + 1,
     };
     finish_operator(state, op, text, from_line_start, to_line_end, true)
+}
+
+/// Byte range + linewise flag for a Visual selection from anchor to cursor.
+/// Charwise: inclusive of the cursor char (+1 char on the high end).
+/// Linewise: whole logical lines spanning anchor..cursor.
+#[must_use]
+fn visual_range(text: &str, visual: VisualState, cursor_offset: usize) -> (usize, usize, bool) {
+    let lo = visual.anchor.min(cursor_offset);
+    let hi = visual.anchor.max(cursor_offset);
+    if visual.linewise {
+        let from = VimCursor { text, offset: lo }.start_of_logical_line().offset;
+        let to = match text[hi..].find('\n') {
+            None => text.len(),
+            Some(rel) => hi + rel + 1,
+        };
+        (from, to, true)
+    } else {
+        // charwise inclusive: extend one char past the high offset (clamped to len).
+        let to = VimCursor { text, offset: hi }.next_off(hi);
+        (lo, to, false)
+    }
+}
+
+/// A motion key inside Visual mode: move the cursor (selection end). Anchor stays.
+/// `gg`/`G` are linewise navigation; supported as selection extenders.
+fn visual_motion(state: &mut VimState, cursor: VimCursor<'_>, count: usize, ch: char) -> VimOutcome {
+    let dest = match ch {
+        'g' => {
+            // Need a second 'g'; stash a G-pending. The Visual block's `G` arm
+            // resolves `gg` to file-start on the next key.
+            state.command = CommandState::G { count };
+            return VimOutcome::Pending;
+        }
+        'G' => return VimOutcome::Effect(VimEffect::Move(cursor.start_of_last_line().offset)),
+        _ => match motion_for_operator_key(ch) {
+            Some(m) => resolve_motion(m, cursor, count),
+            None => return VimOutcome::Effect(VimEffect::None),
+        },
+    };
+    VimOutcome::Effect(VimEffect::Move(dest.offset))
 }
 
 /// Footer mode-indicator literal. Matches the well-known vim convention
@@ -2765,5 +2881,169 @@ mod op_dispatch_tests {
         assert_eq!(out, VimOutcome::Effect(VimEffect::None));
         assert_eq!(s.register, Register::default());
         assert_eq!(s.command, CommandState::Idle);
+    }
+}
+
+#[cfg(test)]
+mod visual_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    fn key(c: char) -> KeyEvent {
+        let m = if c.is_uppercase() {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::NONE
+        };
+        KeyEvent::new(KeyCode::Char(c), m)
+    }
+    fn esc() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    }
+    fn normal() -> VimState {
+        VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        }
+    }
+
+    #[test]
+    fn v_enters_visual_sets_anchor() {
+        let mut s = normal();
+        let out = handle_vim_key(&mut s, "hello", 2, key('v'));
+        assert_eq!(s.mode, VimMode::Visual);
+        assert_eq!(
+            s.visual,
+            Some(VisualState {
+                anchor: 2,
+                linewise: false
+            })
+        );
+        assert_eq!(out, VimOutcome::Effect(VimEffect::None));
+    }
+
+    #[test]
+    fn cap_v_enters_visual_linewise() {
+        let mut s = normal();
+        handle_vim_key(&mut s, "a\nb", 0, key('V'));
+        assert_eq!(s.mode, VimMode::Visual);
+        assert_eq!(
+            s.visual,
+            Some(VisualState {
+                anchor: 0,
+                linewise: true
+            })
+        );
+    }
+
+    #[test]
+    fn visual_motion_moves_selection_end() {
+        // v then l l on "hello" from 0: cursor moves to 2 (anchor stays 0).
+        let mut s = normal();
+        handle_vim_key(&mut s, "hello", 0, key('v'));
+        let out = handle_vim_key(&mut s, "hello", 0, key('l'));
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(1)));
+        let out2 = handle_vim_key(&mut s, "hello", 1, key('l'));
+        assert_eq!(out2, VimOutcome::Effect(VimEffect::Move(2)));
+        assert_eq!(
+            s.visual,
+            Some(VisualState {
+                anchor: 0,
+                linewise: false
+            })
+        );
+    }
+
+    #[test]
+    fn visual_d_deletes_inclusive_selection() {
+        // v (anchor 0) then d on "hello" with cursor at 2: charwise inclusive ->
+        // delete [0,3) "hel" -> "lo", back to Normal.
+        let mut s = normal();
+        handle_vim_key(&mut s, "hello", 0, key('v')); // anchor 0
+        let out = handle_vim_key(&mut s, "hello", 2, key('d'));
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: "lo".into(),
+                cursor: 0
+            })
+        );
+        assert_eq!(s.mode, VimMode::Normal);
+        assert!(s.visual.is_none());
+        assert_eq!(s.register.text, "hel");
+    }
+
+    #[test]
+    fn visual_y_yanks_selection_keeps_buffer() {
+        let mut s = normal();
+        handle_vim_key(&mut s, "hello", 0, key('v'));
+        let out = handle_vim_key(&mut s, "hello", 2, key('y'));
+        // yank moves cursor to range start, buffer unchanged.
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(0)));
+        assert_eq!(
+            s.register,
+            Register {
+                text: "hel".into(),
+                linewise: false
+            }
+        );
+        assert_eq!(s.mode, VimMode::Normal);
+    }
+
+    #[test]
+    fn visual_c_deletes_and_enters_insert() {
+        let mut s = normal();
+        handle_vim_key(&mut s, "hello", 0, key('v'));
+        let out = handle_vim_key(&mut s, "hello", 2, key('c'));
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: "lo".into(),
+                cursor: 0
+            })
+        );
+        assert_eq!(s.mode, VimMode::Insert);
+        assert!(s.visual.is_none());
+    }
+
+    #[test]
+    fn visual_line_d_deletes_whole_lines() {
+        // V then cursor on line1 ('b' @2) then d on "a\nb\nc":
+        // linewise delete lines 0..1 -> "c".
+        let mut s = normal();
+        handle_vim_key(&mut s, "a\nb\nc", 0, key('V')); // anchor 0, linewise
+        let out = handle_vim_key(&mut s, "a\nb\nc", 2, key('d')); // cursor on line1
+        assert_eq!(
+            out,
+            VimOutcome::Effect(VimEffect::Edit {
+                text: "c".into(),
+                cursor: 0
+            })
+        );
+        assert!(s.register.linewise);
+        assert_eq!(s.register.text, "a\nb\n");
+        assert_eq!(s.mode, VimMode::Normal);
+    }
+
+    #[test]
+    fn visual_esc_returns_to_normal() {
+        let mut s = normal();
+        handle_vim_key(&mut s, "hello", 2, key('v'));
+        let out = handle_vim_key(&mut s, "hello", 4, esc());
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(4))); // 4 < len 5 -> no clamp
+        assert_eq!(s.mode, VimMode::Normal);
+        assert!(s.visual.is_none());
+    }
+
+    #[test]
+    fn visual_count_motion_extends() {
+        // v then 2l on "hello" from 0: cursor -> 2.
+        let mut s = normal();
+        handle_vim_key(&mut s, "hello", 0, key('v'));
+        assert_eq!(
+            handle_vim_key(&mut s, "hello", 0, key('2')),
+            VimOutcome::Pending
+        );
+        let out = handle_vim_key(&mut s, "hello", 0, key('l'));
+        assert_eq!(out, VimOutcome::Effect(VimEffect::Move(2)));
     }
 }

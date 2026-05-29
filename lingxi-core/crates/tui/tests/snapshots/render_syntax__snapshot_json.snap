@@ -2,6 +2,6 @@
 source: crates/tui/tests/render_syntax.rs
 expression: s
 ---
-[C]{[C]
-[C]  [C]"[C]k[C]"[C]:[C] [C]1[C]
-[C]}[C]
+[C]{
+[C]  [C]"[C]k[C]"[C]:[C] [C]1
+[C]}

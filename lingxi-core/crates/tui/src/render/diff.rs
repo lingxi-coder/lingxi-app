@@ -84,46 +84,25 @@ pub fn remove_word_bg(_theme: &TuiTheme) -> StyleColor {
     StyleColor::Rgb(0x80, 0x00, 0x00)
 }
 
-/// Run a line-level diff and classify each change. Line numbers follow
-/// claude-code: removed lines number against the old file, added/context
-/// against the new file.
-#[must_use]
-pub fn diff_rows(old: &str, new: &str) -> Vec<DiffRow> {
-    let diff = TextDiff::from_lines(old, new);
-    let mut rows = Vec::new();
-    let mut old_no = 1usize;
-    let mut new_no = 1usize;
-    for change in diff.iter_all_changes() {
-        let text = change.value().trim_end_matches('\n').to_string();
-        match change.tag() {
-            ChangeTag::Delete => {
-                rows.push(DiffRow {
-                    kind: LineKind::Remove,
-                    text,
-                    line_no: old_no,
-                });
-                old_no += 1;
-            }
-            ChangeTag::Insert => {
-                rows.push(DiffRow {
-                    kind: LineKind::Add,
-                    text,
-                    line_no: new_no,
-                });
-                new_no += 1;
-            }
-            ChangeTag::Equal => {
-                rows.push(DiffRow {
-                    kind: LineKind::Context,
-                    text,
-                    line_no: new_no,
-                });
-                old_no += 1;
-                new_no += 1;
-            }
-        }
+/// Classify a single `similar` line change into a [`DiffRow`] — the ONE source
+/// of truth for diff line classification. Maps the change tag to a [`LineKind`],
+/// strips the trailing newline, and derives the line number from the change's
+/// file index (claude-code numbering: removed lines against the old file,
+/// added/context against the new file). The `grouped_hunks` production path is
+/// the sole caller; keeping classification here means there is exactly one
+/// place that decides add/remove/context + line number.
+fn classify_change(change: &similar::Change<&str>) -> DiffRow {
+    let text = change.value().trim_end_matches('\n').to_string();
+    let (kind, line_no) = match change.tag() {
+        ChangeTag::Delete => (LineKind::Remove, change.old_index().map_or(0, |i| i + 1)),
+        ChangeTag::Insert => (LineKind::Add, change.new_index().map_or(0, |i| i + 1)),
+        ChangeTag::Equal => (LineKind::Context, change.new_index().map_or(0, |i| i + 1)),
+    };
+    DiffRow {
+        kind,
+        text,
+        line_no,
     }
-    rows
 }
 
 /// Sigil character for a line kind: '+' / '-' / ' '.
@@ -324,21 +303,7 @@ fn grouped_hunks(old: &str, new: &str) -> Vec<(HunkHeader, Vec<DiffRow>)> {
         let mut rows = Vec::new();
         for op in &group {
             for change in diff.iter_changes(op) {
-                let text = change.value().trim_end_matches('\n').to_string();
-                let (kind, line_no) = match change.tag() {
-                    ChangeTag::Delete => {
-                        (LineKind::Remove, change.old_index().map_or(0, |i| i + 1))
-                    }
-                    ChangeTag::Insert => (LineKind::Add, change.new_index().map_or(0, |i| i + 1)),
-                    ChangeTag::Equal => {
-                        (LineKind::Context, change.new_index().map_or(0, |i| i + 1))
-                    }
-                };
-                rows.push(DiffRow {
-                    kind,
-                    text,
-                    line_no,
-                });
+                rows.push(classify_change(&change));
             }
         }
         hunks.push((
@@ -479,9 +444,20 @@ mod tests {
         lines.iter().filter(|l| !is_header(l)).collect()
     }
 
+    /// Classified rows from the PRODUCTION path (`grouped_hunks`) flattened
+    /// across hunks. The `classify_*` tests assert against this so they
+    /// validate the same classification the renderer uses — there is now a
+    /// single classification code path (`classify_change`).
+    fn classified_rows(old: &str, new: &str) -> Vec<DiffRow> {
+        grouped_hunks(old, new)
+            .into_iter()
+            .flat_map(|(_, rows)| rows)
+            .collect()
+    }
+
     #[test]
     fn classify_pure_add() {
-        let rows = diff_rows("a\n", "a\nb\n");
+        let rows = classified_rows("a\n", "a\nb\n");
         // a = context, b = add
         assert_eq!(
             rows.iter().map(|r| r.kind).collect::<Vec<_>>(),
@@ -491,7 +467,7 @@ mod tests {
 
     #[test]
     fn classify_pure_remove() {
-        let rows = diff_rows("a\nb\n", "a\n");
+        let rows = classified_rows("a\nb\n", "a\n");
         assert_eq!(
             rows.iter().map(|r| r.kind).collect::<Vec<_>>(),
             vec![LineKind::Context, LineKind::Remove]
@@ -500,7 +476,7 @@ mod tests {
 
     #[test]
     fn classify_modify_is_remove_then_add() {
-        let rows = diff_rows("foo\n", "bar\n");
+        let rows = classified_rows("foo\n", "bar\n");
         assert_eq!(
             rows.iter().map(|r| r.kind).collect::<Vec<_>>(),
             vec![LineKind::Remove, LineKind::Add]
@@ -508,10 +484,12 @@ mod tests {
     }
 
     #[test]
-    fn classify_empty_diff_is_all_context() {
-        let rows = diff_rows("a\nb\n", "a\nb\n");
-        assert!(rows.iter().all(|r| r.kind == LineKind::Context));
-        assert_eq!(rows.len(), 2);
+    fn classify_empty_diff_yields_no_hunks() {
+        // No changes -> `grouped_ops` produces no groups -> no rows. (The
+        // matching `render` behavior — empty output — is covered by
+        // `render_empty_diff_is_empty`.)
+        let rows = classified_rows("a\nb\n", "a\nb\n");
+        assert!(rows.is_empty());
     }
 
     #[test]

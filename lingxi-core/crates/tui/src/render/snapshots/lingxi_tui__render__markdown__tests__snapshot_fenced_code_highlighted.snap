@@ -2,4 +2,4 @@
 source: crates/tui/src/render/markdown.rs
 expression: "fence_structure(&render(\"```rust\\nfn main() {}\\n```\", &theme()))"
 ---
-[C]fn[C] [C]main[C]([C])[C] [C]{[C]}[C]
+[C]fn[C] [C]main[C]([C])[C] [C]{[C]}

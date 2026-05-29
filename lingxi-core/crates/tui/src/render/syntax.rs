@@ -112,9 +112,18 @@ pub fn highlight(code: &str, lang: Option<&str>, theme: &TuiTheme) -> Vec<Styled
         let spans = if ranges.is_empty() {
             vec![StyledSpan::plain(line.trim_end_matches('\n'))]
         } else {
+            // syntect's `LinesWithEndings` keeps the trailing "\n" as its own
+            // final range; once `syn_span_to_styled` strips it that span is
+            // zero-length but still carries the line's fg color. Drop those
+            // empty-text spans so no highlighted line ends with a stray colored
+            // empty span (which would inflate span counts / clutter snapshots).
+            // A genuinely blank source line trims away to zero spans, leaving a
+            // valid empty `StyledLine` so line counts / gutter numbering stay
+            // correct.
             ranges
                 .into_iter()
                 .map(|(st, text)| syn_span_to_styled(st, text))
+                .filter(|s| !s.text.is_empty())
                 .collect()
         };
         out.push(StyledLine { spans });
@@ -236,6 +245,40 @@ mod tests {
     fn highlight_empty_is_empty() {
         let theme = TuiTheme;
         assert!(highlight("", Some("rust"), &theme).is_empty());
+    }
+
+    #[test]
+    fn highlight_drops_trailing_empty_spans() {
+        // syntect yields a final range for the trailing "\n"; after trimming it
+        // becomes a zero-length span carrying the line's fg. None of those may
+        // survive: no highlighted line may contain an empty-text span.
+        let theme = TuiTheme;
+        let code = "fn main() {\n    let x = 1;\n}\n";
+        let lines = highlight(code, Some("rust"), &theme);
+        for l in &lines {
+            assert!(
+                l.spans.iter().all(|s| !s.text.is_empty()),
+                "no highlighted span should have empty text: {:?}",
+                l.spans
+            );
+        }
+    }
+
+    #[test]
+    fn highlight_blank_line_still_yields_a_line() {
+        // A blank line between two code lines must still produce its own
+        // (possibly empty-span) StyledLine so line counts / gutter numbering
+        // stay correct — it must not be dropped.
+        let theme = TuiTheme;
+        let code = "let a = 1;\n\nlet b = 2;\n";
+        let lines = highlight(code, Some("rust"), &theme);
+        assert_eq!(lines.len(), 3, "blank middle line still counts as a line");
+        // The blank middle line carries no non-empty content spans.
+        assert!(
+            lines[1].spans.iter().all(|s| s.text.is_empty()),
+            "blank line has no non-empty spans: {:?}",
+            lines[1].spans
+        );
     }
 
     #[test]

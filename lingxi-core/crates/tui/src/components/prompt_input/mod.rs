@@ -115,8 +115,22 @@ pub fn line_starts(text: &str) -> Vec<usize> {
     starts
 }
 
-/// Map a byte `cursor` into `(line_index, grapheme_column)`.
-/// Column counts grapheme clusters from the line start (not bytes).
+/// The COLUMN CONTRACT for the prompt editor (M7-06, foundation for the
+/// M7-08/09 vim vertical-motion `j`/`k`/`gg`/`G`):
+///
+/// > **A "column" is a DISPLAY width** — the sum of
+/// > [`unicode_width`](UnicodeWidthStr) cell widths of the graphemes from the
+/// > line start up to the cursor.
+///
+/// This is the SAME unit the soft-wrap/height path ([`visual_row_count`]) and
+/// the terminal renderer use, so the height metric and the motion metric agree.
+/// Vertical motion preserves the *visual* column the user sees, not a
+/// grapheme index — on lines with wide (CJK, 2-cell) characters the two
+/// diverge, and a grapheme-index metric would drift the caret horizontally.
+/// All offsets remain grapheme/UTF-8 safe: we walk graphemes, accumulate
+/// display width, and only ever land on a grapheme boundary.
+///
+/// Map a byte `cursor` into `(line_index, display_column)`.
 #[must_use]
 pub fn cursor_line_col(text: &str, cursor: usize) -> (usize, usize) {
     let cursor = clamp_to_char_boundary(text, cursor);
@@ -124,7 +138,9 @@ pub fn cursor_line_col(text: &str, cursor: usize) -> (usize, usize) {
     // Largest line start <= cursor.
     let line = starts.iter().rposition(|&s| s <= cursor).unwrap_or(0);
     let line_start = starts[line];
-    let col = text[line_start..cursor].graphemes(true).count();
+    // Column == cumulative DISPLAY width (not grapheme count) of the text
+    // between the line start and the cursor. See the column contract above.
+    let col = UnicodeWidthStr::width(&text[line_start..cursor]);
     (line, col)
 }
 
@@ -136,8 +152,27 @@ pub fn apply_newline(text: &str, cursor: usize) -> (String, usize) {
 }
 
 /// Number of terminal rows the buffer occupies at the given total column
-/// `width`, accounting for the 2-column `"> "` marker and soft-wrapping each
+/// `width`, accounting for the 2-column prompt marker (`"❯ "` on the first
+/// logical line, a matching 2-space indent on the rest) and soft-wrapping each
 /// logical line. Always at least 1 (an empty buffer shows one row).
+///
+/// Column width is measured with [`UnicodeWidthStr`] — the same DISPLAY-width
+/// unit as the column contract on [`cursor_line_col`] and the terminal
+/// renderer, so the height metric and the motion metric agree.
+///
+/// NOTE (M7-06 budget-vs-render skew — within a single LOGICAL line): this
+/// function budgets `usable = width - 2` cells per row for EVERY logical line,
+/// modelling a 2-col continuation indent on wrapped rows. For the
+/// multi-LOGICAL-line case this is exact: [`PromptInput`] emits one `Text` per
+/// logical line and indents continuation logical lines 2 cols, so
+/// budget == render (pinned by `budget_equals_rendered_rows_for_logical_lines`).
+/// But when a SINGLE logical line is long enough to soft-wrap, iocraft wraps it
+/// at the FULL `width` (no continuation indent on the wrapped rows), while this
+/// budget assumed `width - 2`. So for within-logical-line wrap the budget can
+/// over-count rows by up to one per wrap. This is a deliberate M7-06
+/// simplification (a slightly conservative height is safe — it never clips
+/// text); a future pass (M7-16) can render true continuation-indented wraps to
+/// close the skew. The same NOTE lives at the [`PromptInput`] render site.
 #[must_use]
 pub fn visual_row_count(text: &str, width: usize) -> usize {
     let usable = width.saturating_sub(2).max(1);
@@ -154,8 +189,18 @@ pub fn visual_row_count(text: &str, width: usize) -> usize {
 }
 
 /// Move the cursor `delta` logical lines (`-1` up, `+1` down), preserving the
-/// grapheme column (clamped to the destination line). Returns the new byte
+/// DISPLAY column (clamped to the destination line). Returns the new byte
 /// cursor. At the top/bottom edge the cursor stays on its current line.
+///
+/// "Column" here is the display-width unit defined by the column contract on
+/// [`cursor_line_col`] — the same unit [`visual_row_count`] budgets with, so
+/// `j`/`k` land where the user *visually* sees the caret even on lines with
+/// wide (CJK, 2-cell) characters. We walk the destination line's graphemes
+/// accumulating cell width and land on the first grapheme boundary whose
+/// cumulative width is `>=` the target column (i.e. `==` it, or — when the
+/// target falls inside a wide char — just past it). When the target exceeds
+/// the line's width we clamp to the line end. The result is always a grapheme
+/// boundary, never a mid-codepoint byte index.
 #[must_use]
 #[allow(
     clippy::cast_possible_wrap,
@@ -164,20 +209,24 @@ pub fn visual_row_count(text: &str, width: usize) -> usize {
 )]
 pub fn apply_move_vertical(text: &str, cursor: usize, delta: i32) -> usize {
     let starts = line_starts(text);
-    let (line, col) = cursor_line_col(text, cursor);
+    let (line, target_col) = cursor_line_col(text, cursor);
     let target_line = (line as i32 + delta).clamp(0, starts.len() as i32 - 1) as usize;
     let line_start = starts[target_line];
     // Destination line end drops the trailing '\n'.
     let line_end = starts.get(target_line + 1).map_or(text.len(), |&s| s - 1);
-    // Walk `col` graphemes into the destination line, clamping at its end.
-    let mut byte = line_start;
     let dest = &text[line_start..line_end];
-    for (i, (off, g)) in dest.grapheme_indices(true).enumerate() {
-        if i == col {
+    // Walk graphemes accumulating display width; stop at the first boundary
+    // whose cumulative width reaches the target column. Each boundary's column
+    // is the width of everything BEFORE it, so we test before adding `g`'s
+    // width. Falls through to the line end when the target is past the line.
+    let mut acc_width = 0usize;
+    let mut byte = line_end;
+    for (off, g) in dest.grapheme_indices(true) {
+        if acc_width >= target_col {
             byte = line_start + off;
             break;
         }
-        byte = line_start + off + g.len();
+        acc_width += UnicodeWidthStr::width(g);
     }
     byte
 }
@@ -194,8 +243,18 @@ pub struct PromptInputProps {
 }
 
 /// Render the prompt zone. M7-06 emits one `Text` row per logical line: the
-/// first carries the `"> "` marker, the rest are indented 2 columns to align
-/// under it. The outer `View`'s height grows with [`visual_row_count`].
+/// first carries the `"❯ "` marker (claude-code `PromptInputModeIndicator`'s
+/// `figures.pointer` + space), the rest are indented 2 columns to align under
+/// it. The outer `View`'s height grows with [`visual_row_count`].
+///
+/// NOTE (M7-06 budget-vs-render skew): [`visual_row_count`] budgets one row per
+/// `width - 2` cells for every logical line (modelling a 2-col continuation
+/// indent). That is exact for the multi-LOGICAL-line case below — each logical
+/// line is one `Text` row, first prefixed `"❯ "`, the rest indented 2 cols. But
+/// each `Text` is left to iocraft to soft-wrap WITHIN a logical line, and
+/// iocraft wraps at the FULL `width` with no continuation indent, so a long
+/// single logical line renders slightly differently from the `width - 2`
+/// budget. See the matching NOTE on [`visual_row_count`]; deferred to M7-16.
 #[component]
 #[allow(clippy::cast_possible_truncation)]
 pub fn PromptInput(props: &PromptInputProps) -> impl Into<AnyElement<'static>> {
@@ -203,8 +262,9 @@ pub fn PromptInput(props: &PromptInputProps) -> impl Into<AnyElement<'static>> {
     let width = if props.width == 0 { 80 } else { props.width };
     let starts = line_starts(&props.text);
     let height = visual_row_count(&props.text, width);
-    // One Text per logical line; first line carries the "> " marker, the rest
-    // are indented by 2 columns to align under it.
+    // One Text per logical line; first line carries the "❯ " marker, the rest
+    // are indented by 2 columns to align under it. "❯ " is display-width 2, the
+    // same as the indent, so the `usable = width - 2` budget is unchanged.
     let lines: Vec<(usize, String)> = starts
         .iter()
         .enumerate()
@@ -217,7 +277,7 @@ pub fn PromptInput(props: &PromptInputProps) -> impl Into<AnyElement<'static>> {
         View(flex_direction: FlexDirection::Column, height: height as u16) {
             #(lines.into_iter().map(|(i, content)| {
                 let display = if i == 0 {
-                    format!("> {content}")
+                    format!("❯ {content}")
                 } else {
                     format!("  {content}")
                 };
@@ -269,6 +329,17 @@ mod tests {
     }
 
     #[test]
+    fn cursor_line_col_wide_char_display_width() {
+        // Column == DISPLAY width (not grapheme count). "中" is 3 bytes, 1
+        // grapheme, but display width 2. "中b\nxyz": byte 4 is after "中b" →
+        // display col 2 + 1 = 3 (NOT grapheme count 2). This pins the
+        // display-width column contract that apply_move_vertical relies on.
+        assert_eq!(cursor_line_col("中b\nxyz", 4), (0, 3));
+        // After just "中" (byte 3) → display col 2.
+        assert_eq!(cursor_line_col("中b\nxyz", 3), (0, 2));
+    }
+
+    #[test]
     fn newline_at_end() {
         let (t, c) = apply_newline("hi", 2);
         assert_eq!(t, "hi\n");
@@ -292,7 +363,7 @@ mod tests {
 
     #[test]
     fn visual_rows_single_short_line() {
-        // "hi" with the "> " marker, width 80 → 1 row.
+        // "hi" with the "❯ " marker, width 80 → 1 row.
         assert_eq!(visual_row_count("hi", 80), 1);
         assert_eq!(visual_row_count("", 80), 1); // empty buffer still 1 row
     }
@@ -304,7 +375,7 @@ mod tests {
 
     #[test]
     fn visual_rows_wraps_long_line() {
-        // 10 graphemes, usable width 4 (after the 2-col "> " marker) → ceil(10/4)=3.
+        // 10 graphemes, usable width 4 (after the 2-col "❯ " marker) → ceil(10/4)=3.
         // width arg is the TOTAL column count; usable = width - 2.
         assert_eq!(visual_row_count("0123456789", 6), 3);
     }
@@ -343,6 +414,38 @@ mod tests {
     fn move_down_at_bottom_is_noop() {
         // Already on last line → down stays (column preserved on same line).
         assert_eq!(apply_move_vertical("abc\ndef", 5, 1), 5);
+    }
+
+    #[test]
+    fn move_down_preserves_display_column_over_wide_char() {
+        // "中b\nxyz": "中" is display-width 2, "b" is 1. Cursor after "中b"
+        // (byte 4) is at DISPLAY column 3. Down → line 1 "xyz": the boundary
+        // whose cumulative display width is >= 3 is the end (after "z"),
+        // grapheme offset 3 within the line. Line 1 starts at byte 5 (中=3 +
+        // b=1 + \n=1), so byte = 5 + 3 = 8 = text.len(). A grapheme-index
+        // metric (col 2) would have landed at byte 7 instead — the drift this
+        // fix removes.
+        assert_eq!(apply_move_vertical("中b\nxyz", 4, 1), 8);
+    }
+
+    #[test]
+    fn move_down_lands_just_past_wide_char_boundary() {
+        // "ab\n中d": cursor after "a" (byte 1) is DISPLAY column 1. Down →
+        // line 1 "中d": boundary display columns are 0 (before 中), 2 (after
+        // 中), 3 (after d). The first boundary >= 1 is the one after "中"
+        // (display col 2), at grapheme offset 3 within the line. Line 1
+        // starts at byte 3 (ab=2 + \n=1), so byte = 3 + 3 = 6. The caret
+        // lands just past the wide char rather than splitting it.
+        assert_eq!(apply_move_vertical("ab\n中d", 1, 1), 6);
+    }
+
+    #[test]
+    fn move_up_preserves_display_column_over_wide_char() {
+        // Inverse of the down case. "中b\nxyz": cursor on line 1 after "xyz"
+        // (byte 8) is DISPLAY column 3. Up → line 0 "中b": boundary display
+        // columns 0, 2 (after 中), 3 (after b). First >= 3 is after "b"
+        // (offset 4), byte 0 + 4 = 4.
+        assert_eq!(apply_move_vertical("中b\nxyz", 8, -1), 4);
     }
 
     #[test]
@@ -396,9 +499,29 @@ mod tests {
         let mut el =
             element! { PromptInput(text: "a\nb\nc".to_string(), cursor: 0usize, width: 80usize) };
         let out = el.to_string();
-        assert!(out.contains("> a"), "got: {out}");
+        assert!(out.contains("❯ a"), "got: {out}");
         assert!(out.contains("  b"), "got: {out}");
         assert!(out.contains("  c"), "got: {out}");
+    }
+
+    #[test]
+    fn budget_equals_rendered_rows_for_logical_lines() {
+        // For a multi-LOGICAL-line buffer where no single logical line is long
+        // enough to soft-wrap, `visual_row_count` (the height budget the cache
+        // relies on) MUST equal the number of rows the component renders. The
+        // component emits exactly one Text row per logical line, so we count
+        // the non-empty rendered lines and assert equality with the budget.
+        let text = "line one\nline two\nline three";
+        let width = 80usize;
+        let budget = visual_row_count(text, width);
+        let mut el = element! { PromptInput(text: text.to_string(), cursor: 0usize, width: width) };
+        let out = el.to_string();
+        let rendered_rows = out.lines().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(
+            budget, rendered_rows,
+            "budget {budget} must equal rendered rows {rendered_rows} for logical-line buffer; got:\n{out}"
+        );
+        assert_eq!(budget, 3, "three logical lines → 3 rows");
     }
 
     #[test]
@@ -406,6 +529,6 @@ mod tests {
         let mut el =
             element! { PromptInput(text: "hi".to_string(), cursor: 0usize, width: 80usize) };
         let out = el.to_string();
-        assert!(out.contains("> hi"), "got: {out}");
+        assert!(out.contains("❯ hi"), "got: {out}");
     }
 }

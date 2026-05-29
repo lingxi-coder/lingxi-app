@@ -227,6 +227,14 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) -> bool {
         // Backslash-return fallback: a plain-Enter Submit becomes InsertNewline
         // when the char before the cursor is a lone '\' (terminals that can't
         // distinguish Shift+Enter from Enter). The dispatcher strips the '\'.
+        //
+        // NOTE: this branch is DEAD in the live binary — the live key path is
+        // `root.rs::handle_live_key` (crossterm-0.29), which carries its own
+        // copy of this fallback. `keymap::handle_key` (crossterm-0.28) runs
+        // only behind the focus-trap above, which returns before reaching here,
+        // so this copy is exercised solely by its unit test. It is kept as a
+        // deliberate mirror of `root.rs` for crossterm-0.28/0.29 version-skew
+        // symmetry; if you change one fallback, change BOTH.
         if matches!(action, KeyAction::Submit)
             && state.prompt_cursor > 0
             && state.prompt_text[..state.prompt_cursor].ends_with('\\')

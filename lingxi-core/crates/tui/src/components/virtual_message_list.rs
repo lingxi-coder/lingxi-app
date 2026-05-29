@@ -19,6 +19,11 @@
 use crate::state::RenderedMessage;
 use unicode_width::UnicodeWidthStr;
 
+// Re-export the per-variant message dispatch from `scrollback` so the
+// windowed renderer (Task 8) reuses the exact same per-variant rendering
+// (including M7-02's StructuredDiff branch) without duplicating it.
+pub use crate::components::scrollback::render_message;
+
 /// Overscan: render this many extra lines above and below the viewport so
 /// a fast line-step doesn't flash blank rows.
 pub const OVERSCAN_LINES: usize = 3;
@@ -58,6 +63,66 @@ fn render_text_for_measure(msg: &RenderedMessage) -> String {
     }
 }
 
+/// Per-message rendered-height cache. Maps message-index → line count at a
+/// fixed viewport width. Backs all scroll-offset math. Rebuilt on width
+/// change; appended to as new messages arrive (callers may simply rebuild
+/// — `build` is O(n) over a 5k log and runs at most once per width change).
+#[derive(Debug, Clone, Default)]
+pub struct HeightCache {
+    heights: Vec<usize>,
+    total: usize,
+    width: usize,
+}
+
+impl HeightCache {
+    /// Build the cache for `messages` at `width` columns.
+    #[must_use]
+    pub fn build(messages: &[RenderedMessage], width: usize) -> Self {
+        let heights: Vec<usize> = messages.iter().map(|m| measured_height(m, width)).collect();
+        let total = heights.iter().sum();
+        Self {
+            heights,
+            total,
+            width,
+        }
+    }
+
+    /// Rebuild in place at a new width (or after the log changed).
+    pub fn recompute(&mut self, messages: &[RenderedMessage], width: usize) {
+        *self = Self::build(messages, width);
+    }
+
+    /// Line count for the message at `index`, or 0 if out of range.
+    #[must_use]
+    pub fn height_at(&self, index: usize) -> usize {
+        self.heights.get(index).copied().unwrap_or(0)
+    }
+
+    /// Sum of all message heights (total rendered lines).
+    #[must_use]
+    pub fn total_lines(&self) -> usize {
+        self.total
+    }
+
+    /// Number of cached messages.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.heights.len()
+    }
+
+    /// True when no messages are cached.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.heights.is_empty()
+    }
+
+    /// Width the cache was last built for.
+    #[must_use]
+    pub fn width(&self) -> usize {
+        self.width
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +155,32 @@ mod tests {
     #[test]
     fn empty_body_measures_one() {
         assert_eq!(measured_height(&user(""), 80), 1);
+    }
+
+    #[test]
+    fn height_cache_builds_per_index_and_total() {
+        let msgs = vec![user("one"), user("a\nb\nc"), user("two")];
+        let cache = HeightCache::build(&msgs, 80);
+        assert_eq!(cache.height_at(0), 1);
+        assert_eq!(cache.height_at(1), 3);
+        assert_eq!(cache.height_at(2), 1);
+        assert_eq!(cache.total_lines(), 5);
+        assert_eq!(cache.width(), 80);
+    }
+
+    #[test]
+    fn height_cache_recomputes_on_width_change() {
+        let msgs = vec![user(&"x".repeat(20))]; // 20 cols
+        let mut cache = HeightCache::build(&msgs, 80); // ceil(20/80) = 1
+        assert_eq!(cache.total_lines(), 1);
+        cache.recompute(&msgs, 10); // ceil(20/10) = 2
+        assert_eq!(cache.total_lines(), 2);
+        assert_eq!(cache.width(), 10);
+    }
+
+    #[test]
+    fn height_cache_empty_is_zero_total() {
+        let cache = HeightCache::build(&[], 80);
+        assert_eq!(cache.total_lines(), 0);
     }
 }

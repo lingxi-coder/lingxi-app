@@ -93,7 +93,7 @@ pub fn clamp_offset(requested: i64, total_messages: usize, viewport_height: usiz
     requested.clamp(0, max) as usize
 }
 
-fn render_message(
+pub fn render_message(
     m: RenderedMessage,
     expanded: &HashMap<ToolUseId, bool>,
     focused_tool_id: Option<ToolUseId>,

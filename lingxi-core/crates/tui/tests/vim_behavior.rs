@@ -120,3 +120,68 @@ fn dollar_on_wrapped_line_is_logical_line_end() {
     let (_t, off) = run_normal(long, 5, "$");
     assert_eq!(off, long.len());
 }
+
+// ===== Task 12: full handle_live_key seam (multi-line + vim-disabled) =====
+
+use lingxi_tui::root::handle_live_key;
+use lingxi_tui::state::AppState;
+
+// iocraft's KeyEvent is `KeyEvent::new(kind, code)` with a public `modifiers`
+// field; build a Press event for a char, carrying SHIFT for capitals.
+fn live_char(c: char) -> iocraft::KeyEvent {
+    let mut ev = iocraft::KeyEvent::new(iocraft::KeyEventKind::Press, iocraft::KeyCode::Char(c));
+    if c.is_uppercase() {
+        ev.modifiers = iocraft::KeyModifiers::SHIFT;
+    }
+    ev
+}
+fn live_esc() -> iocraft::KeyEvent {
+    iocraft::KeyEvent::new(iocraft::KeyEventKind::Press, iocraft::KeyCode::Esc)
+}
+
+#[test]
+fn multiline_jk_cross_lines_via_live_key() {
+    let mut st = AppState::new(Default::default());
+    st.vim_enabled = true;
+    st.vim.mode = VimMode::Normal;
+    st.prompt_text = "abc\ndef\nghi".into();
+    st.prompt_cursor = 1; // line0 col1
+    handle_live_key(&mut st, &live_char('j'), 24);
+    assert_eq!(st.prompt_cursor, 5); // line1 col1 = 'e'
+    handle_live_key(&mut st, &live_char('j'), 24);
+    assert_eq!(st.prompt_cursor, 9); // line2 col1 = 'h'
+    handle_live_key(&mut st, &live_char('k'), 24);
+    assert_eq!(st.prompt_cursor, 5);
+    handle_live_key(&mut st, &live_char('$'), 24);
+    assert_eq!(st.prompt_cursor, 7); // end of "def"
+}
+
+#[test]
+fn insert_mode_typing_flows_through_passthrough() {
+    let mut st = AppState::new(Default::default());
+    st.vim_enabled = true;
+    st.vim.mode = VimMode::Normal;
+    st.prompt_text = "ac".into();
+    st.prompt_cursor = 1; // on 'c'
+    handle_live_key(&mut st, &live_char('i'), 24); // enter insert before 'c'
+    assert_eq!(st.vim.mode, VimMode::Insert);
+    handle_live_key(&mut st, &live_char('b'), 24); // type 'b'
+    assert_eq!(st.prompt_text, "abc");
+    assert_eq!(st.prompt_cursor, 2);
+    handle_live_key(&mut st, &live_esc(), 24); // back to Normal
+    assert_eq!(st.vim.mode, VimMode::Normal);
+}
+
+#[test]
+fn vim_disabled_is_unchanged_m6_editing() {
+    let mut st = AppState::new(Default::default());
+    st.vim_enabled = false; // OFF
+    st.prompt_text = String::new();
+    st.prompt_cursor = 0;
+    // Type "ihj" — with vim OFF these are literal inserts, NOT vim commands.
+    for c in ['i', 'h', 'j'] {
+        handle_live_key(&mut st, &live_char(c), 24);
+    }
+    assert_eq!(st.prompt_text, "ihj");
+    assert_eq!(st.prompt_cursor, 3);
+}

@@ -164,6 +164,18 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.open_memory();
                 return false;
             }
+            // (M7-15) `/theme` opens the in-TUI theme picker screen instead of
+            // echoing / running a turn. Like `/doctor` / `/memory` the open is
+            // fully synchronous: the theme registry is static (no handle, no
+            // `.await`), so the picker opens directly here on the live submit
+            // path, focused on the currently-active setting. The `crates/commands`
+            // theme handler stays the `--no-tui` path. No echo, no turn.
+            if st.prompt_text.trim() == "/theme" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.open_theme_picker();
+                return false;
+            }
             // (M7-14 review) `/export` opens the export flow DIRECTLY (the
             // claude-code ExportDialog: a filename prompt, not a search box).
             // `open_export` pre-fills the editable filename with
@@ -451,6 +463,20 @@ pub fn render_screen(
                         buffer: ms.buffer.clone(),
                         dirty: ms.dirty,
                         status: ms.status.clone(),
+                    )
+                }
+                .into_any()
+            }
+            Screen::Theme(ps) => {
+                // (M7-15) The picker renders under the LIVE palette
+                // (`state.theme` — which the Up/Down preview mutates), so the
+                // header/preview recolor with the highlighted theme each frame.
+                use crate::screens::theme::ThemePickerScreen;
+                element! {
+                    ThemePickerScreen(
+                        state: ps.clone(),
+                        theme: state.theme,
+                        theme_name: state.theme_setting.resolve(),
                     )
                 }
                 .into_any()

@@ -9,6 +9,7 @@ pub mod memory;
 pub mod repl;
 pub mod resume;
 pub mod settings;
+pub mod theme;
 
 /// Which full-page screen currently overlays the REPL. `None` ⇒ REPL is live.
 /// Established by M7-11; M7-12/13/14 add `Resume`/`Settings`/`Memory`.
@@ -51,4 +52,14 @@ pub enum Screen {
     /// to the SAME `HierarchyEntry.path` atomically (§4 R7 — no new
     /// persistence layer).
     Memory(memory::MemoryScreenState),
+    /// (M7-15) The theme picker — claude-code `ThemePicker.tsx`. Carries its
+    /// own highlight + restore-on-cancel state. Interactive like
+    /// Resume/Settings/Memory: `root::handle_screen_key` runs the pure
+    /// `theme::theme_picker_handle_key` (↑/↓ live-preview, Enter commit + persist,
+    /// Esc/`q` cancel-restore). Up/Down LIVE-PREVIEW the highlighted theme by
+    /// writing `AppState.theme` directly (the whole UI re-renders); Enter
+    /// commits via `set_theme` + best-effort persist; Esc restores the prior
+    /// setting. Persists through the existing `~/.claude/settings.json` `theme`
+    /// field (§4 R7 — best-effort, session-only on failure).
+    Theme(theme::ThemePickerState),
 }

@@ -488,12 +488,12 @@ pub struct AppState {
     pub viewport_width: usize,
     /// Status-line snapshot (model, cwd, cost, ctx%, mode).
     pub status: StatusSnapshot,
-    /// (M7-15) Active resolved render palette. Read by StatusLine, message
+    /// (M7-15) Active resolved render palette. Read by `StatusLine`, message
     /// renderers, and diff coloring. Mutated only via [`AppState::set_theme`]
     /// (or, for live preview, the theme picker writes `theme` directly).
     pub theme: Theme,
     /// (M7-15) Stored theme *preference* (`auto` + 6 names). `Auto` resolves
-    /// to a concrete `ThemeName` for `theme`. Persisted to settings.json.
+    /// to a concrete `ThemeName` for `theme`. Persisted to `settings.json`.
     pub theme_setting: ThemeSetting,
     /// `Some` while a turn is being driven by the orchestrator.
     pub in_flight_turn: Option<TurnInFlight>,
@@ -668,6 +668,17 @@ impl AppState {
     pub fn set_theme(&mut self, setting: ThemeSetting) {
         self.theme_setting = setting;
         self.theme = theme_for(setting.resolve());
+    }
+
+    /// (M7-15) Open the theme picker focused on the currently-active setting,
+    /// carrying the picker state inside the `Screen::Theme` variant. Like
+    /// `/memory` (and unlike `/config`'s async snapshot) the open is fully
+    /// synchronous — the theme registry is static — so this is callable
+    /// directly from the sync `/theme` submit path.
+    pub fn open_theme_picker(&mut self) {
+        self.active_screen = Some(crate::screens::Screen::Theme(
+            crate::screens::theme::ThemePickerState::new(self.theme_setting),
+        ));
     }
 
     /// (M7-11) Close any active screen, returning to the REPL. Generic — every

@@ -338,6 +338,38 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 MemoryAction::BackToSelector | MemoryAction::None => {}
             }
         }
+        Some(Screen::Theme(_)) => {
+            // (M7-15) Theme picker. Up/Down LIVE-PREVIEW the highlighted theme
+            // (writing `st.theme` so the whole UI re-renders), Enter commits +
+            // best-effort persists, Esc/`q` cancels and restores the prior
+            // theme. `theme_picker_handle_key` needs BOTH `&mut ThemePickerState`
+            // (inside the `Screen` variant) AND `&mut AppState` — a
+            // double-mut-borrow if taken in place. We TAKE the screen out of
+            // `active_screen` first (mirroring the M6 `pending_permission`
+            // focus-trap discipline of owning the state for the duration), run
+            // the pure reducer, then put it back only when the screen stays
+            // open. No parallel key path: this is the sole priority-2 entry.
+            use crate::screens::theme::{theme_picker_handle_key, ThemePickerOutcome};
+            let Some(Screen::Theme(mut picker)) = st.active_screen.take() else {
+                return;
+            };
+            let ct = iocraft_to_crossterm028_key(k);
+            match theme_picker_handle_key(&mut picker, st, ct) {
+                ThemePickerOutcome::Stay => {
+                    // Preview applied to `st.theme`; keep the screen open.
+                    st.active_screen = Some(Screen::Theme(picker));
+                }
+                ThemePickerOutcome::Commit => {
+                    // `set_theme` already applied; best-effort persist, then
+                    // close (screen already taken out by `.take()` above).
+                    crate::theme_persist::save_theme_setting(st.theme_setting);
+                }
+                ThemePickerOutcome::Cancel => {
+                    // Prior theme/setting restored by the reducer; close (screen
+                    // already taken out).
+                }
+            }
+        }
         None => {}
     }
 }

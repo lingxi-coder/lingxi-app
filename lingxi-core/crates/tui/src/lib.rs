@@ -27,6 +27,7 @@ pub mod streaming;
 pub mod telemetry;
 pub(crate) mod terminal;
 pub mod theme;
+pub mod theme_persist;
 
 pub use app::TuiApp;
 pub use error::TuiError;

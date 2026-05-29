@@ -27,6 +27,13 @@ pub enum ThemeName {
     DarkAnsi,
 }
 
+impl Default for ThemeName {
+    /// Headless default: dark (matches `ThemeSetting::Auto.resolve()`).
+    fn default() -> Self {
+        ThemeName::Dark
+    }
+}
+
 impl ThemeName {
     /// All renderable theme names, in `THEME_NAMES` order.
     pub const ALL: [ThemeName; 6] = [
@@ -172,6 +179,13 @@ pub struct Theme {
     pub diff_added_word: Color,
     /// Diff removed word-level (`diffRemovedWord`).
     pub diff_removed_word: Color,
+}
+
+impl Default for Theme {
+    /// Headless default palette: dark (matches `AppState`'s default).
+    fn default() -> Self {
+        Theme::dark()
+    }
 }
 
 impl Theme {
@@ -381,7 +395,10 @@ mod tests {
     #[test]
     fn auto_resolves_to_dark_headless() {
         assert_eq!(ThemeSetting::Auto.resolve(), ThemeName::Dark);
-        assert_eq!(ThemeSetting::Named(ThemeName::Light).resolve(), ThemeName::Light);
+        assert_eq!(
+            ThemeSetting::Named(ThemeName::Light).resolve(),
+            ThemeName::Light
+        );
     }
 
     #[test]
@@ -389,18 +406,46 @@ mod tests {
         let dark = theme_for(ThemeName::Dark);
         let light = theme_for(ThemeName::Light);
         // dark.text = rgb(255,255,255); light.text = rgb(0,0,0)  (theme.ts).
-        assert_eq!(dark.text, Color::Rgb { r: 255, g: 255, b: 255 });
+        assert_eq!(
+            dark.text,
+            Color::Rgb {
+                r: 255,
+                g: 255,
+                b: 255
+            }
+        );
         assert_eq!(light.text, Color::Rgb { r: 0, g: 0, b: 0 });
         // dark.error = rgb(255,107,128); light.error = rgb(171,43,63).
-        assert_eq!(dark.error, Color::Rgb { r: 255, g: 107, b: 128 });
-        assert_eq!(light.error, Color::Rgb { r: 171, g: 43, b: 63 });
+        assert_eq!(
+            dark.error,
+            Color::Rgb {
+                r: 255,
+                g: 107,
+                b: 128
+            }
+        );
+        assert_eq!(
+            light.error,
+            Color::Rgb {
+                r: 171,
+                g: 43,
+                b: 63
+            }
+        );
         // dark.claude = rgb(215,119,87)  (the Claude orange accent).
-        assert_eq!(dark.claude, Color::Rgb { r: 215, g: 119, b: 87 });
+        assert_eq!(
+            dark.claude,
+            Color::Rgb {
+                r: 215,
+                g: 119,
+                b: 87
+            }
+        );
         // ANSI theme uses named colors, not Rgb.
         let dark_ansi = theme_for(ThemeName::DarkAnsi);
         assert_eq!(dark_ansi.error, Color::Red); // ansi:redBright
         assert_eq!(dark_ansi.success, Color::Green); // ansi:greenBright
-        // Every theme resolves (no panic) and is Copy.
+                                                     // Every theme resolves (no panic) and is Copy.
         for n in ThemeName::ALL {
             let _t: Theme = theme_for(n);
         }

@@ -1,0 +1,6 @@
+---
+source: crates/tui/tests/render_history_search.rs
+assertion_line: 24
+expression: "render_row(\"cargo\", false)"
+---
+search prompts: cargo

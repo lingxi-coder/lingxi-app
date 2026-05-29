@@ -1,0 +1,6 @@
+---
+source: crates/tui/tests/render_history_search.rs
+assertion_line: 29
+expression: "render_row(\"zzz\", true)"
+---
+no matching prompt: zzz

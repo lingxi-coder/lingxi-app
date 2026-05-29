@@ -16,6 +16,13 @@ pub use lingxi_telemetry::tengu::tui::{
     STREAMING_RENDER_STARTED,
 };
 
+// M7-10 (history search + image paste) adds ZERO telemetry events. Baseline
+// stays 326 (`registry_is_exactly_326_entries` holds). The
+// `tengu_tui_search_opened` candidate (Ctrl-R open count) is DEFERRED to the
+// M7-16 telemetry audit, which locks the real total — per the M6
+// "330-vs-326, report the real number" lesson (parent spec §2.7). Do NOT mint
+// it here.
+
 /// (M6-05) Fire when a permission dialog transitions from `None` to
 /// `Some(_)`. `kind` is one of `"tool_use" / "exit_plan_mode" /
 /// "bypass_permissions"`.

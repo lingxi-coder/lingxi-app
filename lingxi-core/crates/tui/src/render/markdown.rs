@@ -261,6 +261,14 @@ impl<'a> Builder<'a> {
     }
 
     fn finish(mut self) -> Vec<StyledLine> {
+        // Defensive: an unterminated fence (streaming) leaves `code_block`
+        // set with no `End(CodeBlock)` event — emit its placeholder so the
+        // partial code still renders rather than vanishing.
+        if let Some(cb) = self.code_block.take() {
+            self.lines.push(StyledLine {
+                spans: vec![StyledSpan::code_placeholder(cb.text, cb.lang.as_deref())],
+            });
+        }
         self.flush();
         // Drop a trailing blank line for tidy output.
         if matches!(self.lines.last(), Some(l) if l.spans.is_empty()) {
@@ -412,5 +420,42 @@ mod tests {
         // placeholder text is raw — no bold/italic leaked in.
         assert!(!ph.style.bold);
         assert!(!ph.style.italic);
+    }
+
+    #[test]
+    fn unclosed_code_fence_does_not_panic_and_emits_placeholder() {
+        // No closing ``` — streaming mid-block.
+        let md = "intro\n```rust\nfn main() {";
+        let lines = render(md, &theme());
+        // intro paragraph present.
+        assert!(lines.iter().any(|l| l.plain_text().contains("intro")));
+        // the partial code still becomes a placeholder.
+        let ph = lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .find(|s| matches!(s.kind, crate::render::SpanKind::CodePlaceholder { .. }));
+        assert!(ph.is_some(), "unclosed fence should still emit a placeholder");
+    }
+
+    #[test]
+    fn unclosed_bold_does_not_panic() {
+        let lines = render("text **still bold", &theme());
+        assert!(lines.iter().any(|l| l.plain_text().contains("still bold")));
+    }
+
+    #[test]
+    fn dangling_list_item_does_not_panic() {
+        let _ = render("- a\n- ", &theme());
+    }
+
+    #[test]
+    fn empty_input_yields_no_lines() {
+        assert!(render("", &theme()).is_empty());
+    }
+
+    #[test]
+    fn lone_special_chars_do_not_panic() {
+        let _ = render("*_`#>[](", &theme());
+        let _ = render("```", &theme());
     }
 }

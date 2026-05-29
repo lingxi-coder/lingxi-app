@@ -34,6 +34,12 @@ pub use history_search::{
     HsKeyOutcome,
 };
 
+pub mod image_paste;
+pub use image_paste::{
+    apply_paste_block, format_image_ref, is_image_path, process_paste, Attachment, AttachmentKind,
+    PasteApply, PasteCoalescer, PasteOutcome, PasteState, BURST_WINDOW,
+};
+
 pub mod vim;
 pub use vim::{mode_indicator, VimMode, VimState};
 

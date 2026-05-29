@@ -524,6 +524,8 @@ pub struct AppState {
     /// (M7-10) Active Ctrl-R history-search overlay. `Some(_)` means the
     /// overlay owns all live keys (parent spec §2.5 priority 3).
     pub history_search: Option<crate::components::prompt_input::HistorySearchState>,
+    /// (M7-10) Paste attachment registry + next `[Image #N]` id.
+    pub paste: crate::components::prompt_input::PasteState,
 }
 
 impl AppState {
@@ -563,6 +565,7 @@ impl AppState {
             vim_enabled: false,
             vim: crate::components::prompt_input::VimState::default(),
             history_search: None,
+            paste: crate::components::prompt_input::PasteState::default(),
         }
     }
 

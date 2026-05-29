@@ -44,3 +44,24 @@ fn pgup_pgdn_step_by_viewport_lines() {
     scroll_with_viewport(&mut st, ScrollDir::PageDown, vh);
     assert_eq!(st.scroll_offset, 8);
 }
+
+#[test]
+fn jk_gg_keys_move_offset_line_based() {
+    let mut st = AppState::new(fake_status());
+    for i in 0..40 {
+        push_line(&mut st, &format!("l{i}")); // 40 one-line msgs = 40 lines
+    }
+    st.refresh_height_cache(80);
+    let vh = 10;
+    // Per keymap.rs: k == LineUp (toward older, +offset); j == LineDown
+    // (toward newer, -offset). LineUp first → offset 1.
+    scroll_with_viewport(&mut st, ScrollDir::LineUp, vh);
+    assert_eq!(st.scroll_offset, 1);
+    scroll_with_viewport(&mut st, ScrollDir::LineDown, vh);
+    assert_eq!(st.scroll_offset, 0);
+    // g == Top → max_offset = 40 - 10 = 30. G == Bottom → 0.
+    scroll_with_viewport(&mut st, ScrollDir::Top, vh);
+    assert_eq!(st.scroll_offset, 30);
+    scroll_with_viewport(&mut st, ScrollDir::Bottom, vh);
+    assert_eq!(st.scroll_offset, 0);
+}

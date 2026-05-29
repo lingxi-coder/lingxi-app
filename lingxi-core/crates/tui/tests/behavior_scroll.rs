@@ -16,6 +16,7 @@ fn buf_30() -> AppState {
             timestamp: 0,
         });
     }
+    st.refresh_height_cache(80); // line-based scroll needs the cache populated
     st
 }
 

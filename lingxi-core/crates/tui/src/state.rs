@@ -346,7 +346,7 @@ impl AppState {
         Self::new(StatusSnapshot::default())
     }
 
-    /// Push a message. The full log is retained (M7-03 VirtualMessageList
+    /// Push a message. The full log is retained (M7-03 `VirtualMessageList`
     /// windows the viewport — no FIFO eviction).
     pub fn push_message(&mut self, msg: RenderedMessage) {
         self.messages.push(msg);

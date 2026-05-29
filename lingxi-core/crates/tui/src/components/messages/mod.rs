@@ -5,8 +5,18 @@
 //! `render_entry_to_string` string-form dispatcher used by snapshot tests
 //! and the iocraft `Scrollback` component.
 
+pub mod advisor;
 pub mod assistant_text;
 pub mod assistant_tool_use;
+pub mod compact_boundary;
+pub mod hook_progress;
+pub mod plan_approval;
+pub mod rate_limit;
+pub mod redacted_thinking;
+pub mod shutdown;
+pub mod system_api_error;
+pub mod system_text;
+pub mod thinking;
 pub mod user_text;
 pub mod user_tool_result;
 
@@ -55,5 +65,9 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             new_string: new_string.clone(),
             file_path: file_path.clone(),
         }),
+        // (M7-04) TEMPORARY catch-all for the 10 batch-1 variants until each
+        // task wires its real arm; the dispatch test in Task 11 makes its
+        // removal verifiable (the match becomes exhaustive).
+        _ => String::new(),
     }
 }

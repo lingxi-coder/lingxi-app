@@ -84,6 +84,7 @@ pub fn measured_height(msg: &RenderedMessage, width: usize) -> usize {
 /// you MUST update this function to match and extend the
 /// `measured_height_pins_*` lock tests below. Drift here corrupts the
 /// line-based scroll math.
+#[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (15 variants)
 fn render_text_for_measure(msg: &RenderedMessage) -> String {
     match msg {
         RenderedMessage::UserText { body, .. }
@@ -93,6 +94,173 @@ fn render_text_for_measure(msg: &RenderedMessage) -> String {
         RenderedMessage::UserToolResult { result, .. } => result
             .as_str()
             .map_or_else(|| result.to_string(), str::to_string),
+        // ---- (M7-04) batch-1 system/assistant renderers ----------------
+        // Each arm reproduces the line layout that `render_message` draws for
+        // the variant (via its `render_*_to_string` pure renderer). Markers
+        // (`∴ `/`✻ `/`● `) add columns, not rows. Kept in lock-step with the
+        // renderers in `components::messages::*`; pinned by the
+        // `measured_height_pins_*_m7_04` lock tests below.
+        RenderedMessage::AssistantThinking { thinking, expanded } => {
+            if *expanded {
+                // Header `∴ Thinking…` + body lines indented 2 (markdown body
+                // flattened to its plain projection).
+                let mut out = "\u{2234} Thinking\u{2026}".to_string();
+                for line in thinking.lines() {
+                    out.push('\n');
+                    out.push_str("  ");
+                    out.push_str(line);
+                }
+                out
+            } else {
+                // Collapsed header + expand hint — single line.
+                "\u{2234} Thinking (ctrl+o to expand)".to_string()
+            }
+        }
+        // Single dim+italic line `✻ Thinking…`.
+        RenderedMessage::AssistantRedactedThinking => "\u{273B} Thinking\u{2026}".to_string(),
+        // Single dim boundary line (counts not rendered — claude-code parity).
+        RenderedMessage::CompactBoundary { .. } => {
+            "\u{273B} Conversation compacted (ctrl+o for history)".to_string()
+        }
+        // Info → body verbatim; warning/error → `● ` marker (cols) + body.
+        RenderedMessage::SystemTextRich { body, level } => match level {
+            crate::state::SystemLevel::Info => body.clone(),
+            crate::state::SystemLevel::Warning | crate::state::SystemLevel::Error => {
+                format!("\u{25CF} {body}")
+            }
+        },
+        // error body (+ optional `…` + expand-hint line when truncated) then a
+        // retry-countdown footer line.
+        RenderedMessage::SystemApiError {
+            error,
+            retry_attempt,
+            retry_in_seconds,
+            max_retries,
+            truncated,
+        } => {
+            let mut out = error.clone();
+            if *truncated {
+                out.push('\u{2026}');
+                out.push('\n');
+                out.push_str("(ctrl+o to expand)");
+            }
+            let unit = if *retry_in_seconds == 1 {
+                "second"
+            } else {
+                "seconds"
+            };
+            out.push('\n');
+            out.push_str(&format!(
+                "Retrying in {retry_in_seconds} {unit}\u{2026} (attempt {retry_attempt}/{max_retries})"
+            ));
+            out
+        }
+        // error text + optional dim upsell line.
+        RenderedMessage::RateLimit { text, upsell } => match upsell {
+            Some(u) => format!("{text}\n{u}"),
+            None => text.clone(),
+        },
+        // header + optional `Reason:` line + (rejected) tail line.
+        RenderedMessage::Shutdown {
+            from,
+            reason,
+            rejected,
+        } => {
+            let mut out = if *rejected {
+                format!("Shutdown rejected by {from}")
+            } else {
+                format!("Shutdown request from {from}")
+            };
+            if let Some(r) = reason {
+                out.push('\n');
+                out.push_str(&format!("Reason: {r}"));
+            }
+            if *rejected {
+                out.push('\n');
+                out.push_str(
+                    "Teammate is continuing to work. You may request shutdown again later.",
+                );
+            }
+            out
+        }
+        // Mirrors `render_advisor_to_string`. Verbose Result renders the raw
+        // markdown body (flattened); other kinds are fixed one-liners.
+        RenderedMessage::Advisor { kind, verbose } => match kind {
+            crate::state::AdvisorKind::ServerToolUse { model, input } => {
+                let mut out = "Advising".to_string();
+                if let Some(m) = model {
+                    out.push_str(&format!(" using {m}"));
+                }
+                if let Some(i) = input {
+                    out.push_str(&format!(" \u{00B7} {i}"));
+                }
+                out
+            }
+            crate::state::AdvisorKind::Result { text } => {
+                if *verbose {
+                    text.clone()
+                } else {
+                    "\u{2714} Advisor has reviewed the conversation and will apply the feedback"
+                        .to_string()
+                }
+            }
+            crate::state::AdvisorKind::RedactedResult => {
+                "\u{2714} Advisor has reviewed the conversation and will apply the feedback"
+                    .to_string()
+            }
+            crate::state::AdvisorKind::Error { error_code } => {
+                format!("Advisor unavailable ({error_code})")
+            }
+        },
+        // Single dim line (running or transcript summary).
+        RenderedMessage::HookProgress {
+            event,
+            count,
+            transcript_summary,
+        } => {
+            if *transcript_summary {
+                let unit = if *count == 1 { "hook" } else { "hooks" };
+                format!("{count} {event} {unit} ran")
+            } else {
+                let unit = if *count == 1 {
+                    "hook\u{2026}"
+                } else {
+                    "hooks\u{2026}"
+                };
+                format!("Running {event} {unit}")
+            }
+        }
+        // Mirrors `render_plan_approval_to_string`.
+        RenderedMessage::PlanApproval { kind } => match kind {
+            crate::state::PlanApprovalKind::Request {
+                from,
+                plan_content,
+                plan_file_path,
+            } => {
+                let mut out = format!("Plan Approval Request from {from}\n");
+                out.push_str(plan_content);
+                if let Some(p) = plan_file_path {
+                    out.push('\n');
+                    out.push_str(&format!("Plan file: {p}"));
+                }
+                out
+            }
+            crate::state::PlanApprovalKind::Approved { name } => {
+                format!("\u{2713} Plan Approved by {name}\nYou can now proceed with implementation. Your plan mode restrictions have been lifted.")
+            }
+            crate::state::PlanApprovalKind::Rejected { name, feedback } => {
+                let mut out = format!("\u{2717} Plan Rejected by {name}");
+                if let Some(f) = feedback {
+                    out.push('\n');
+                    out.push_str(&format!("Feedback: {f}"));
+                }
+                out.push('\n');
+                out.push_str(
+                    "Please revise your plan based on the feedback and call ExitPlanMode again.",
+                );
+                out
+            }
+        },
     }
 }
 
@@ -514,6 +682,188 @@ mod tests {
         // Proxy text == "applied" (str body) → 1 row. The 2-line old / 3-line
         // new diff body is NOT counted by today's proxy — documented above.
         assert_eq!(measured_height(&m, 80), 1);
+    }
+
+    // ---- (M7-04) Per-variant measurement lock tests --------------------
+    //
+    // Pin `measured_height` for each of the 10 batch-1 variants so the proxy
+    // stays in lock-step with the `render_*_to_string` renderers. When a
+    // renderer changes how a variant lays out rows you MUST update both the
+    // proxy arm in `render_text_for_measure` AND the pin here.
+
+    #[test]
+    fn measured_height_pins_assistant_thinking_m7_04() {
+        // Collapsed → single header+hint line.
+        let collapsed = RenderedMessage::AssistantThinking {
+            thinking: "anything".into(),
+            expanded: false,
+        };
+        assert_eq!(measured_height(&collapsed, 80), 1);
+        // Expanded → header `∴ Thinking…` (1) + 2 body lines (indented 2) = 3.
+        let expanded = RenderedMessage::AssistantThinking {
+            thinking: "Step one.\nStep two.".into(),
+            expanded: true,
+        };
+        assert_eq!(measured_height(&expanded, 80), 3);
+    }
+
+    #[test]
+    fn measured_height_pins_redacted_thinking_m7_04() {
+        // `✻ Thinking…` — single line.
+        assert_eq!(
+            measured_height(&RenderedMessage::AssistantRedactedThinking, 80),
+            1
+        );
+    }
+
+    #[test]
+    fn measured_height_pins_compact_boundary_m7_04() {
+        // Single boundary line; counts are not rendered.
+        let m = RenderedMessage::CompactBoundary {
+            messages_before: 50,
+            messages_after: 5,
+        };
+        assert_eq!(measured_height(&m, 80), 1);
+    }
+
+    #[test]
+    fn measured_height_pins_system_text_rich_m7_04() {
+        // Info → body verbatim (3 lines). Warning → `● ` marker (cols) + body
+        // (1 line). Both: marker adds columns, not rows.
+        let info = RenderedMessage::SystemTextRich {
+            body: "a\nb\nc".into(),
+            level: crate::state::SystemLevel::Info,
+        };
+        assert_eq!(measured_height(&info, 80), 3);
+        let warn = RenderedMessage::SystemTextRich {
+            body: "Approaching context limit.".into(),
+            level: crate::state::SystemLevel::Warning,
+        };
+        assert_eq!(measured_height(&warn, 80), 1);
+    }
+
+    #[test]
+    fn measured_height_pins_system_api_error_m7_04() {
+        // Not truncated → error body (1) + retry footer (1) = 2 lines.
+        let plain = RenderedMessage::SystemApiError {
+            error: "529 Overloaded".into(),
+            retry_attempt: 4,
+            retry_in_seconds: 3,
+            max_retries: 10,
+            truncated: false,
+        };
+        assert_eq!(measured_height(&plain, 80), 2);
+        // Truncated → error+`…` (1) + expand-hint (1) + retry footer (1) = 3.
+        let trunc = RenderedMessage::SystemApiError {
+            error: "boom".into(),
+            retry_attempt: 5,
+            retry_in_seconds: 1,
+            max_retries: 10,
+            truncated: true,
+        };
+        assert_eq!(measured_height(&trunc, 80), 3);
+    }
+
+    #[test]
+    fn measured_height_pins_rate_limit_m7_04() {
+        // No upsell → 1 line. With upsell → 2 lines.
+        let no_upsell = RenderedMessage::RateLimit {
+            text: "You've hit your usage limit.".into(),
+            upsell: None,
+        };
+        assert_eq!(measured_height(&no_upsell, 80), 1);
+        let with_upsell = RenderedMessage::RateLimit {
+            text: "You've hit your usage limit.".into(),
+            upsell: Some("/upgrade to increase your usage limit.".into()),
+        };
+        assert_eq!(measured_height(&with_upsell, 80), 2);
+    }
+
+    #[test]
+    fn measured_height_pins_shutdown_m7_04() {
+        // Request + reason → header (1) + Reason (1) = 2 lines.
+        let request = RenderedMessage::Shutdown {
+            from: "agent-2".into(),
+            reason: Some("task done".into()),
+            rejected: false,
+        };
+        assert_eq!(measured_height(&request, 80), 2);
+        // Rejected + reason → header (1) + Reason (1) + tail (1) = 3 lines.
+        let rejected = RenderedMessage::Shutdown {
+            from: "agent-2".into(),
+            reason: Some("still working".into()),
+            rejected: true,
+        };
+        assert_eq!(measured_height(&rejected, 80), 3);
+    }
+
+    #[test]
+    fn measured_height_pins_advisor_m7_04() {
+        // Non-verbose result → single review line.
+        let result = RenderedMessage::Advisor {
+            kind: crate::state::AdvisorKind::Result {
+                text: "Looks good.".into(),
+            },
+            verbose: false,
+        };
+        assert_eq!(measured_height(&result, 80), 1);
+        // Error → single `Advisor unavailable (…)` line.
+        let err = RenderedMessage::Advisor {
+            kind: crate::state::AdvisorKind::Error {
+                error_code: "503".into(),
+            },
+            verbose: false,
+        };
+        assert_eq!(measured_height(&err, 80), 1);
+    }
+
+    #[test]
+    fn measured_height_pins_hook_progress_m7_04() {
+        // Running plural → single line.
+        let running = RenderedMessage::HookProgress {
+            event: "SessionStart".into(),
+            count: 3,
+            transcript_summary: false,
+        };
+        assert_eq!(measured_height(&running, 80), 1);
+        // Transcript singular → single line.
+        let transcript = RenderedMessage::HookProgress {
+            event: "PreToolUse".into(),
+            count: 1,
+            transcript_summary: true,
+        };
+        assert_eq!(measured_height(&transcript, 80), 1);
+    }
+
+    #[test]
+    fn measured_height_pins_plan_approval_m7_04() {
+        // Request → header (1) + 2 plan-content lines (1+1) + Plan file (1) = 4.
+        let request = RenderedMessage::PlanApproval {
+            kind: crate::state::PlanApprovalKind::Request {
+                from: "agent-3".into(),
+                plan_content: "1. Do X\n2. Do Y".into(),
+                plan_file_path: Some("/tmp/plan.md".into()),
+            },
+        };
+        assert_eq!(measured_height(&request, 80), 4);
+        // Approved → header (1) + tail. The tail line
+        // "You can now proceed with implementation. Your plan mode
+        // restrictions have been lifted." is 86 cols → wraps to 2 rows at
+        // width 80, so total = 3 rows. (At a wider width it would be 2.)
+        let approved = RenderedMessage::PlanApproval {
+            kind: crate::state::PlanApprovalKind::Approved { name: "you".into() },
+        };
+        assert_eq!(measured_height(&approved, 80), 3);
+        // Sanity: at a width that holds the tail on one line, total = 2 rows.
+        assert_eq!(measured_height(&approved, 120), 2);
+        // Rejected + feedback → header (1) + Feedback (1) + tail (1) = 3 lines.
+        let rejected = RenderedMessage::PlanApproval {
+            kind: crate::state::PlanApprovalKind::Rejected {
+                name: "you".into(),
+                feedback: Some("too risky".into()),
+            },
+        };
+        assert_eq!(measured_height(&rejected, 80), 3);
     }
 
     #[test]

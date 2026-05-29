@@ -92,5 +92,9 @@ pub fn render_message(
             }
             .into_any()
         }
+        // (M7-04) TEMPORARY catch-all for the 10 batch-1 variants until each
+        // task wires its real iocraft-component arm; removed in Task 11 once
+        // the match is exhaustive (Task 11's dispatch test verifies removal).
+        _ => element! { Text(content: String::new()) }.into_any(),
     }
 }

@@ -84,6 +84,166 @@ pub enum RenderedMessage {
         /// non-diff tools.
         file_path: Option<String>,
     },
+    /// (M7-04) Assistant thinking block. Collapsed → `∴ Thinking` + expand hint;
+    /// expanded → `∴ Thinking…` + markdown body. `expanded` mirrors
+    /// `AppState.expanded`-style state (default false → collapsed).
+    AssistantThinking {
+        /// The thinking text (markdown when expanded).
+        thinking: String,
+        /// `true` → render the full markdown body; `false` → header + hint only.
+        expanded: bool,
+    },
+    /// (M7-04) Redacted thinking. Single dim+italic line `✻ Thinking…`.
+    AssistantRedactedThinking,
+    /// (M7-04) Compaction boundary. REPLACES M6-08's `[Compacted …]` `SystemText`.
+    /// Renders `✻ Conversation compacted (ctrl+o for history)` (dim). Counts are
+    /// retained for telemetry/debug parity though the rendered line omits them
+    /// (claude-code parity — the boundary line carries no numbers).
+    CompactBoundary {
+        /// Message count before compaction (debug/telemetry parity; not rendered).
+        messages_before: u32,
+        /// Message count after compaction (debug/telemetry parity; not rendered).
+        messages_after: u32,
+    },
+    /// (M7-04) Level-aware system text. info → plain dim body; warning/error →
+    /// `●` marker + colored body.
+    SystemTextRich {
+        /// Message body.
+        body: String,
+        /// Severity → marker/color.
+        level: SystemLevel,
+    },
+    /// (M7-04) API error with retry countdown footer.
+    SystemApiError {
+        /// Formatted API error text.
+        error: String,
+        /// 1-based retry attempt.
+        retry_attempt: u32,
+        /// Seconds until the next retry.
+        retry_in_seconds: u32,
+        /// Max retry attempts.
+        max_retries: u32,
+        /// `true` → error body was clipped; append `…` + expand hint.
+        truncated: bool,
+    },
+    /// (M7-04) Rate-limit notice (error text + optional dim upsell line).
+    RateLimit {
+        /// The rate-limit notice text (error-colored).
+        text: String,
+        /// Optional dim upsell line.
+        upsell: Option<String>,
+    },
+    /// (M7-04) Teammate shutdown request/rejected notice.
+    Shutdown {
+        /// Originating teammate id.
+        from: String,
+        /// Optional reason.
+        reason: Option<String>,
+        /// `true` → rejected response; `false` → request.
+        rejected: bool,
+    },
+    /// (M7-04) Advisor block.
+    Advisor {
+        /// Advisor block content kind.
+        kind: AdvisorKind,
+        /// `true` → render the full result text (markdown).
+        verbose: bool,
+    },
+    /// (M7-04) Hook-progress line.
+    HookProgress {
+        /// Hook event name (e.g. `"PreToolUse"`).
+        event: String,
+        /// In-progress hook count for this event.
+        count: u32,
+        /// `true` → static transcript summary; `false` → live running line.
+        transcript_summary: bool,
+    },
+    /// (M7-04) Plan approval request/response.
+    PlanApproval {
+        /// Request/approved/rejected content.
+        kind: PlanApprovalKind,
+    },
+}
+
+/// (M7-04) System message severity → marker/color mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemLevel {
+    /// Plain dim body, no marker.
+    Info,
+    /// `●` marker + yellow body.
+    Warning,
+    /// `●` marker + red body.
+    Error,
+}
+
+impl Default for SystemLevel {
+    fn default() -> Self {
+        Self::Info
+    }
+}
+
+/// (M7-04) Advisor block content kinds (claude-code `AdvisorMessage` subtypes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdvisorKind {
+    /// `Advising` header (+ optional model / input descriptor).
+    ServerToolUse {
+        /// Optional advising model name.
+        model: Option<String>,
+        /// Optional input descriptor.
+        input: Option<String>,
+    },
+    /// Advisor reviewed-and-applied result; `text` is the full feedback.
+    Result {
+        /// The advisor feedback text (markdown when verbose).
+        text: String,
+    },
+    /// Redacted result — no expandable body.
+    RedactedResult,
+    /// `Advisor unavailable ({error_code})`.
+    Error {
+        /// The error code reported by the advisor service.
+        error_code: String,
+    },
+}
+
+impl Default for AdvisorKind {
+    fn default() -> Self {
+        Self::RedactedResult
+    }
+}
+
+/// (M7-04) Plan-approval request/response kinds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanApprovalKind {
+    /// Approval request from a teammate.
+    Request {
+        /// Originating teammate id.
+        from: String,
+        /// Markdown plan content.
+        plan_content: String,
+        /// Optional plan file path.
+        plan_file_path: Option<String>,
+    },
+    /// Approved by `{name}`.
+    Approved {
+        /// Approver display name.
+        name: String,
+    },
+    /// Rejected by `{name}` with optional feedback.
+    Rejected {
+        /// Rejector display name.
+        name: String,
+        /// Optional feedback text.
+        feedback: Option<String>,
+    },
+}
+
+impl Default for PlanApprovalKind {
+    fn default() -> Self {
+        Self::Approved {
+            name: String::new(),
+        }
+    }
 }
 
 /// Snapshot of the status-line fields. Recomputed once per frame.
@@ -493,6 +653,53 @@ mod tests {
         assert_eq!(st.focused_tool_id, Some(a));
         st.focus_prev_tool(); // past start — stays on first
         assert_eq!(st.focused_tool_id, Some(a));
+    }
+
+    /// M7-04 Task 1: RenderedMessage carries the 10 batch-1 variants.
+    #[test]
+    fn rendered_message_carries_batch1_variants() {
+        let _t = RenderedMessage::AssistantThinking {
+            thinking: "x".into(),
+            expanded: false,
+        };
+        let _r = RenderedMessage::AssistantRedactedThinking;
+        let _c = RenderedMessage::CompactBoundary {
+            messages_before: 50,
+            messages_after: 5,
+        };
+        let _s = RenderedMessage::SystemTextRich {
+            body: "hi".into(),
+            level: SystemLevel::Warning,
+        };
+        let _e = RenderedMessage::SystemApiError {
+            error: "boom".into(),
+            retry_attempt: 4,
+            retry_in_seconds: 3,
+            max_retries: 10,
+            truncated: false,
+        };
+        let _l = RenderedMessage::RateLimit {
+            text: "limited".into(),
+            upsell: None,
+        };
+        let _sd = RenderedMessage::Shutdown {
+            from: "agent-1".into(),
+            reason: Some("done".into()),
+            rejected: false,
+        };
+        let _a = RenderedMessage::Advisor {
+            kind: AdvisorKind::Result { text: "ok".into() },
+            verbose: false,
+        };
+        let _h = RenderedMessage::HookProgress {
+            event: "PreToolUse".into(),
+            count: 2,
+            transcript_summary: false,
+        };
+        let _p = RenderedMessage::PlanApproval {
+            kind: PlanApprovalKind::Approved { name: "you".into() },
+        };
+        assert!(matches!(_c, RenderedMessage::CompactBoundary { .. }));
     }
 
     /// `toggle_expanded` flips the per-id boolean, defaulting to `true`

@@ -6,10 +6,11 @@
 //! Literal lock (design §2.8): rows show `name` + ` – ` (en-dash, U+2013) +
 //! description, mirroring claude-code PromptInputFooterSuggestions.tsx.
 
-use iocraft::prelude::KeyCode;
+use iocraft::prelude::*;
 use lingxi_commands::builtin::{core_description, BUILTIN_COMMAND_NAMES};
 
 use super::fuzzy::filtered_ranked;
+use crate::theme::TuiTheme;
 
 /// Max dropdown rows shown at once (claude-code `OVERLAY_MAX_ITEMS`).
 pub const OVERLAY_MAX_ITEMS: usize = 5;
@@ -142,6 +143,40 @@ impl PaletteState {
 #[cfg(test)]
 fn handle_key(state: &mut PaletteState, code: KeyCode) -> PaletteKeyOutcome {
     state.handle_key(code)
+}
+
+/// Props for the palette dropdown overlay.
+#[derive(Default, Props)]
+pub struct PaletteOverlayProps {
+    /// The filtered rows to display (caller truncates to `OVERLAY_MAX_ITEMS`).
+    pub rows: Vec<PaletteRow>,
+    /// Index of the highlighted row within `rows`.
+    pub selected: usize,
+}
+
+/// Render the palette dropdown: up to `OVERLAY_MAX_ITEMS` rows, each
+/// `name – description`. The selected row is highlighted; the rest are dim.
+/// Literal lock: `" – "` is U+2013 with surrounding spaces (claude-code
+/// PromptInputFooterSuggestions row format).
+#[component]
+pub fn PaletteOverlay(props: &PaletteOverlayProps) -> impl Into<AnyElement<'static>> {
+    let rows: Vec<_> = props.rows.iter().take(OVERLAY_MAX_ITEMS).cloned().collect();
+    let selected = props.selected;
+    element! {
+        View(flex_direction: FlexDirection::Column) {
+            #(rows.into_iter().enumerate().map(|(i, row)| {
+                let line = format!("/{} \u{2013} {}", row.name, row.description);
+                // TODO(M7-15): theme picker adds a dedicated "suggestion" token;
+                // until then the selected row reuses ASSISTANT and others DIM.
+                let color = if i == selected { TuiTheme::ASSISTANT } else { TuiTheme::DIM };
+                element! {
+                    View(height: 1) {
+                        Text(content: line, color: color)
+                    }
+                }
+            }))
+        }
+    }
 }
 
 #[cfg(test)]

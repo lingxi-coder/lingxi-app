@@ -43,6 +43,7 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
                 result: result.clone(),
                 expanded,
                 focused,
+                ..UserToolResultProps::default()
             })
         }
     }

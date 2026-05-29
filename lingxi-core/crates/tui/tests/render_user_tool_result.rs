@@ -19,6 +19,7 @@ fn short_5_line_result_renders_full() {
         result: serde_json::json!({"content": body}),
         expanded: true,
         focused: false,
+        ..Default::default()
     });
     assert_snapshot!(s, @r"
     └ line1
@@ -41,6 +42,7 @@ fn long_200_line_result_shows_truncation_footer() {
         result: serde_json::json!({"content": body}),
         expanded: true,
         focused: false,
+        ..Default::default()
     });
     // First 100 lines render; lines 101..=200 are dropped.
     assert!(s.starts_with("└ line1\n"), "got: {s}");
@@ -64,6 +66,7 @@ fn collapsed_long_result_shows_first_line_plus_lines_suffix() {
         result: serde_json::json!({"content": body}),
         expanded: false,
         focused: false,
+        ..Default::default()
     });
     assert_eq!(s, "└ line1 (+9 lines)");
 }

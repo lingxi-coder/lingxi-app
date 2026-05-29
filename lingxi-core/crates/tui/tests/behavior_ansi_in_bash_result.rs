@@ -16,6 +16,7 @@ fn bash_result_with_red_err_yields_red_span() {
         result: serde_json::json!({"content": body}),
         expanded: true,
         focused: false,
+        ..Default::default()
     });
     let has_red_err = spans
         .iter()
@@ -36,6 +37,7 @@ fn read_result_is_not_ansi_parsed() {
         result: serde_json::json!({"content": body}),
         expanded: true,
         focused: false,
+        ..Default::default()
     });
     // One span, raw literal text.
     assert_eq!(spans.len(), 1);

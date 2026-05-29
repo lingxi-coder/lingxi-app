@@ -16,7 +16,7 @@ use iocraft::prelude::*;
 use lingxi_protocol::ToolUseId;
 
 use crate::render::ansi::parse_ansi;
-use crate::render::StyledSpan;
+use crate::render::{diff, StyledLine, StyledSpan};
 use crate::theme::TuiTheme;
 
 /// Indent marker glyph + space. 4-byte UTF-8.
@@ -43,6 +43,16 @@ pub struct UserToolResultProps {
     pub expanded: bool,
     /// `true` → render the `> ` focus prefix on the first line.
     pub focused: bool,
+    /// M7-02: for Edit/Write diff tools, the pre-edit text (`old_string` for
+    /// Edit; `None`/empty for Write). Populated by the dispatcher from the
+    /// paired `AssistantToolUse.input`. `None` → no diff rendering.
+    pub old_string: Option<String>,
+    /// M7-02: for Edit/Write diff tools, the post-edit text (`new_string` for
+    /// Edit; `content` for Write). `None` → no diff rendering.
+    pub new_string: Option<String>,
+    /// M7-02: file path of the edited file (`file_path` input), drives syntax
+    /// language detection in the diff.
+    pub file_path: Option<String>,
 }
 
 /// Extract the human-displayable body from a tool result JSON.
@@ -71,6 +81,30 @@ pub fn body_text(result: &serde_json::Value) -> String {
         }
     }
     serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
+}
+
+/// True for tools whose result is shown as a `StructuredDiff` (claude-code
+/// `FileEditToolDiff`). Edit/MultiEdit/NotebookEdit show old→new; Write shows
+/// a pure-add diff (no prior content).
+#[must_use]
+pub fn is_diff_tool(tool: &str) -> bool {
+    matches!(tool, "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
+}
+
+/// Build the `StructuredDiff` lines for an Edit/Write tool. Write = pure add
+/// (old = ""); Edit = `old_string` → `new_string`. `path` drives syntax lang.
+/// Both sides `None`/empty → empty diff (no lines).
+#[must_use]
+pub fn render_edit_write_diff_lines(
+    _tool: &str,
+    old_string: Option<&str>,
+    new_string: Option<&str>,
+    path: Option<&str>,
+    theme: &TuiTheme,
+) -> Vec<StyledLine> {
+    let old = old_string.unwrap_or("");
+    let new = new_string.unwrap_or("");
+    diff::render(old, new, path, theme)
 }
 
 /// Apply both the line cap and the byte cap. Returns the truncated body
@@ -183,6 +217,59 @@ pub fn render_user_tool_result_body_spans(props: &UserToolResultProps) -> Vec<St
 /// rendered as a child `Text` element with the mapped color.
 #[component]
 pub fn UserToolResultMessage(props: &UserToolResultProps) -> impl Into<AnyElement<'static>> {
+    // M7-02: Edit/Write diff tools render a StructuredDiff when the paired
+    // call inputs are present. Each StyledLine becomes a Row; each span a
+    // Text wrapped in a View carrying its diff background.
+    if is_diff_tool(&props.tool)
+        && (props.old_string.is_some() || props.new_string.is_some())
+    {
+        let lines = render_edit_write_diff_lines(
+            &props.tool,
+            props.old_string.as_deref(),
+            props.new_string.as_deref(),
+            props.file_path.as_deref(),
+            &TuiTheme,
+        );
+        let prefix = if props.focused { FOCUS_PREFIX } else { "" };
+        let header = format!("{prefix}{MARKER}");
+        let row_elements: Vec<AnyElement<'static>> = lines
+            .into_iter()
+            .map(|line| {
+                let span_elements: Vec<AnyElement<'static>> = line
+                    .spans
+                    .into_iter()
+                    .map(|s| {
+                        let color = s.style.fg.to_iocraft();
+                        let bg = s.style.bg.to_iocraft();
+                        let weight = if s.style.bold {
+                            Weight::Bold
+                        } else {
+                            Weight::Normal
+                        };
+                        element! {
+                            View(background_color: bg) {
+                                Text(content: s.text, color: color, weight: weight)
+                            }
+                        }
+                        .into_any()
+                    })
+                    .collect();
+                element! {
+                    View(flex_direction: FlexDirection::Row) {
+                        #(span_elements)
+                    }
+                }
+                .into_any()
+            })
+            .collect();
+        return element! {
+            View(flex_direction: FlexDirection::Column) {
+                Text(content: header, color: TuiTheme::DIM)
+                #(row_elements)
+            }
+        };
+    }
+
     // For Bash + expanded: render colored spans. Otherwise: fall back to
     // the pure string renderer (faster + already tested).
     if props.tool == "Bash" && props.expanded {

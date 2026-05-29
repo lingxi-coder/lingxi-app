@@ -180,6 +180,10 @@ pub async fn run_resume_picker(
     let display: Vec<ResumeRow> = rows.iter().map(ResumeRow::from_meta).collect();
     let mut app = AppState::new(StatusSnapshot::default());
     app.active_screen = Some(Screen::Resume(ResumeState::new(display)));
+    // (M7-16) The resume picker seeds `active_screen` directly (not via an
+    // `open_*` helper), so emit the screen-opened event here to keep the
+    // `None → Some(_)` transition instrumented like every other screen.
+    crate::telemetry::screen_opened("resume");
     let state = Arc::new(Mutex::new(app));
 
     let result = element! {

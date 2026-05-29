@@ -2,30 +2,33 @@
 //! `lingxi-telemetry`. Internal callers in `session.rs` use these
 //! constants in `tracing::info!(event = ...)` lines.
 //!
-//! Inventory (10 events at M6-09):
+//! Inventory (13 events at M7-16):
 //! - M6-01: `SESSION_STARTED`, `SESSION_ENDED`, `FIRST_RENDER`, `RESIZE`.
 //! - M6-03: `STREAMING_RENDER_STARTED`, `STREAMING_RENDER_ENDED`.
 //! - M6-05: `PERMISSION_DIALOG_SHOWN`, `PERMISSION_DIALOG_RESOLVED`.
 //! - M6-09: `SCROLL_STARTED`, `SCROLL_ENDED`.
-//! - M7-11: screen lifecycle events (`tengu_tui_screen_opened` /
-//!   `_closed`) are a CANDIDATE but DEFERRED to the M7-16 telemetry audit.
-//!   M7-11 adds 0 new events (baseline stays 326). Do not register a name
-//!   here without a real emit site — that is the M6 "330 vs 326" lesson.
+//! - M7-16: `SCREEN_OPENED`, `SCREEN_CLOSED`, `SEARCH_OPENED` — the §2.7
+//!   candidates that gained REAL emit sites this milestone (screen open/close
+//!   on `active_screen None↔Some`; MessageSelector open). The remaining
+//!   candidates (`command_palette_opened`, `vim_mode_entered`, `key_pressed`)
+//!   stay DEFERRED — no clean/aggregated emit site, so registering them would
+//!   mint dead names (the M6 "330 vs 326" lesson).
 
 use lingxi_permission::gate::PermissionResponse;
 
 pub use lingxi_telemetry::tengu::tui::{
-    FIRST_RENDER, PERMISSION_DIALOG_RESOLVED, PERMISSION_DIALOG_SHOWN, RESIZE, SCROLL_ENDED,
-    SCROLL_STARTED, SESSION_ENDED, SESSION_STARTED, STREAMING_RENDER_ENDED,
-    STREAMING_RENDER_STARTED,
+    FIRST_RENDER, PERMISSION_DIALOG_RESOLVED, PERMISSION_DIALOG_SHOWN, RESIZE, SCREEN_CLOSED,
+    SCREEN_OPENED, SCROLL_ENDED, SCROLL_STARTED, SEARCH_OPENED, SESSION_ENDED, SESSION_STARTED,
+    STREAMING_RENDER_ENDED, STREAMING_RENDER_STARTED,
 };
 
-// M7-10 (history search + image paste) adds ZERO telemetry events. Baseline
-// stays 326 (`registry_is_exactly_326_entries` holds). The
-// `tengu_tui_search_opened` candidate (Ctrl-R open count) is DEFERRED to the
-// M7-16 telemetry audit, which locks the real total — per the M6
-// "330-vs-326, report the real number" lesson (parent spec §2.7). Do NOT mint
-// it here.
+// M7-16: the `tengu_tui_search_opened` candidate is now REGISTERED + emitted
+// (`search_opened` below, called from `MessageSelectorState::open` /
+// `open_export` — the Ctrl-T / `/export` overlay open). Note: the search this
+// event names is the MessageSelector message-search overlay, NOT the M7-10
+// Ctrl-R history search (which remains a 0-event input overlay). The total is
+// locked at 330 in the M7-16 audit — per the M6 "report the real number"
+// lesson (parent spec §2.7).
 
 /// (M6-05) Fire when a permission dialog transitions from `None` to
 /// `Some(_)`. `kind` is one of `"tool_use" / "exit_plan_mode" /
@@ -76,5 +79,38 @@ pub fn scroll_ended() {
     tracing::info!(
         target: "lingxi.tengu",
         event = SCROLL_ENDED,
+    );
+}
+
+/// (M7-16) Fire when a full-page screen opens (`AppState.active_screen`
+/// transitions `None → Some(_)`). `screen` is one of `"doctor"`, `"resume"`,
+/// `"settings"`, `"memory"`, `"theme"`. Called from each `AppState::open_*`
+/// helper.
+pub fn screen_opened(screen: &str) {
+    tracing::info!(
+        target: "lingxi.tengu",
+        event = SCREEN_OPENED,
+        screen = screen,
+    );
+}
+
+/// (M7-16) Fire when the active screen closes back to the REPL
+/// (`AppState.active_screen` transitions `Some(_) → None`). Called from
+/// `AppState::close_screen`, guarded so it fires only when a screen was open.
+pub fn screen_closed() {
+    tracing::info!(
+        target: "lingxi.tengu",
+        event = SCREEN_CLOSED,
+    );
+}
+
+/// (M7-16) Fire when the MessageSelector search/jump/export overlay opens
+/// (Ctrl-T or `/export`). `mode` is one of `"search"`, `"export"`. Called from
+/// `MessageSelectorState::open` / `open_export`.
+pub fn search_opened(mode: &str) {
+    tracing::info!(
+        target: "lingxi.tengu",
+        event = SEARCH_OPENED,
+        mode = mode,
     );
 }

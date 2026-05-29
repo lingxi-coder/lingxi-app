@@ -641,6 +641,7 @@ impl AppState {
     /// inside the `Screen::Doctor` variant.
     pub fn open_doctor(&mut self, diag: crate::screens::doctor::DoctorDiagnostics) {
         self.active_screen = Some(crate::screens::Screen::Doctor(diag));
+        crate::telemetry::screen_opened("doctor");
     }
 
     /// (M7-13) Open the Settings screen on a given tab with a pre-read data
@@ -649,6 +650,7 @@ impl AppState {
     /// render/key callbacks stay synchronous.
     pub fn open_settings(&mut self, state: crate::screens::settings::SettingsState) {
         self.active_screen = Some(crate::screens::Screen::Settings(state));
+        crate::telemetry::screen_opened("settings");
     }
 
     /// (M7-14) Open the Memory file editor on a fresh selector, carrying the
@@ -661,6 +663,7 @@ impl AppState {
         self.active_screen = Some(crate::screens::Screen::Memory(
             crate::screens::memory::MemoryScreenState::default(),
         ));
+        crate::telemetry::screen_opened("memory");
     }
 
     /// (M7-15) Apply a theme preference: store it and resolve the active
@@ -679,6 +682,7 @@ impl AppState {
         self.active_screen = Some(crate::screens::Screen::Theme(
             crate::screens::theme::ThemePickerState::new(self.theme_setting),
         ));
+        crate::telemetry::screen_opened("theme");
     }
 
     /// (M7-11) Close any active screen, returning to the REPL. Generic — every
@@ -686,7 +690,13 @@ impl AppState {
     /// `active_screen` clears it. Reused by every M7 screen's close path; no
     /// per-screen clear line to add as M7-12/13/14 land new variants.
     pub fn close_screen(&mut self) {
-        self.active_screen = None;
+        // (M7-16) Emit `tengu_tui_screen_closed` only on a real `Some → None`
+        // transition — calling `close_screen` with no active screen is a no-op
+        // and must not mint a spurious event.
+        if self.active_screen.is_some() {
+            self.active_screen = None;
+            crate::telemetry::screen_closed();
+        }
     }
 
     /// All tool ids in scrollback order. Iterates `messages` once.

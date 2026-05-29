@@ -60,13 +60,50 @@ pub const SCROLL_STARTED: &str = "tengu_tui_scroll_started";
 /// Emit site: `lingxi-tui::app::scroll_with_viewport`. (M6-09)
 pub const SCROLL_ENDED: &str = "tengu_tui_scroll_ended";
 
-// NOTE (M6-09): `tengu_tui_key_pressed` was specced (§2.6) as an aggregated
-// once-per-second counter event. It is intentionally NOT registered here:
-// the aggregation infrastructure (a windowed `KeyPressedAggregator` with a
-// timer flush wired into the iocraft event loop) does not exist yet, and a
-// raw per-key emit would violate the aggregation contract. Registering a
-// dead name with no emit site would break the "every registered name has a
-// call site" discipline. Deferred to M7. See M6-09 plan T0 audit.
+// M7-16 additions: screen + message-search lifecycle (only those with real
+// emit sites — see the M7-16 plan T0 audit). The screen open/close events fire
+// on `AppState.active_screen` `None ↔ Some(_)` transitions; `search_opened`
+// fires when the MessageSelector overlay opens. The remaining §2.7 candidates
+// (`command_palette_opened`, `vim_mode_entered`, `key_pressed`) are DEFERRED —
+// see the NOTE below.
+
+/// Emitted when `AppState.active_screen` transitions `None → Some(_)` — a
+/// full-page screen opens. Payload: `screen` (one of `"doctor"`, `"resume"`,
+/// `"settings"`, `"memory"`, `"theme"`). Emit site:
+/// `lingxi-tui::telemetry::screen_opened`, called from `AppState::open_doctor`
+/// / `open_settings` / `open_memory` / `open_theme_picker` and the Resume open
+/// path. (M7-16)
+pub const SCREEN_OPENED: &str = "tengu_tui_screen_opened";
+
+/// Emitted when `AppState.active_screen` transitions `Some(_) → None` — the
+/// active screen closes back to the REPL. Payload: none (the screen kind is no
+/// longer known once cleared). Emit site:
+/// `lingxi-tui::telemetry::screen_closed`, called from `AppState::close_screen`
+/// guarded so it fires only when a screen was actually open. (M7-16)
+pub const SCREEN_CLOSED: &str = "tengu_tui_screen_closed";
+
+/// Emitted when the MessageSelector search/jump/export overlay opens (Ctrl-T or
+/// `/export`). Payload: `mode` (one of `"search"`, `"export"`). Emit site:
+/// `lingxi-tui::telemetry::search_opened`, called from
+/// `MessageSelectorState::open` / `open_export`. (M7-16)
+pub const SEARCH_OPENED: &str = "tengu_tui_search_opened";
+
+// NOTE (M6-09, carried + extended at M7-16): three §2.7 TUI candidates remain
+// DEFERRED — each lacks a clean/aggregated emit site, so registering them would
+// mint dead names (the M6 "330-vs-326, every registered name has a call site"
+// lesson):
+//   - `tengu_tui_key_pressed`: still no windowed `KeyPressedAggregator` (a
+//     timer-flushed counter wired into the iocraft event loop). A raw per-key
+//     emit violates the aggregation contract. Carried to M8.
+//   - `tengu_tui_command_palette_opened`: `PaletteState::sync_from_prompt`
+//     flips `open` false↔true on EVERY `/`-prefixed keystroke (and back on
+//     Backspace), so there is no single once-per-open transition to hook — a
+//     clean emit needs edge-detection across the whole `resync_overlays` flow.
+//     Deferred to M8.
+//   - `tengu_tui_vim_mode_entered`: Normal mode is (re)entered on the
+//     Ctrl-Alt-V toggle AND on every Esc-from-Insert; the spec wants an
+//     AGGREGATED entry, not per-Esc churn, and no aggregator exists. Deferred
+//     to M8.
 
 /// Order-locked array; appended into `tengu::ALL_EVENT_NAMES`. Append-only.
 pub(crate) const NAMES: &[&str] = &[
@@ -80,6 +117,9 @@ pub(crate) const NAMES: &[&str] = &[
     PERMISSION_DIALOG_RESOLVED,
     SCROLL_STARTED,
     SCROLL_ENDED,
+    SCREEN_OPENED,
+    SCREEN_CLOSED,
+    SEARCH_OPENED,
 ];
 
 #[cfg(test)]
@@ -87,11 +127,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn names_has_10_entries_after_m6_09() {
+    fn names_has_13_entries_after_m7_16() {
         // 4 (M6-01) + 2 (M6-03 streaming render) + 2 (M6-05 permission
-        // dialog shown/resolved) + 2 (M6-09 scroll started/ended) = 10.
-        // key_pressed deferred to M7 (no emit site — see module note).
-        assert_eq!(NAMES.len(), 10);
+        // dialog shown/resolved) + 2 (M6-09 scroll started/ended) + 3 (M7-16:
+        // screen_opened / screen_closed / search_opened — the candidates with
+        // real emit sites) = 13. command_palette_opened / vim_mode_entered /
+        // key_pressed stay deferred to M8 (no clean/aggregated emit site — see
+        // module note).
+        assert_eq!(NAMES.len(), 13);
     }
 
     #[test]
@@ -112,11 +155,23 @@ mod tests {
         );
         assert_eq!(SCROLL_STARTED, "tengu_tui_scroll_started");
         assert_eq!(SCROLL_ENDED, "tengu_tui_scroll_ended");
+        assert_eq!(SCREEN_OPENED, "tengu_tui_screen_opened");
+        assert_eq!(SCREEN_CLOSED, "tengu_tui_screen_closed");
+        assert_eq!(SEARCH_OPENED, "tengu_tui_search_opened");
     }
 
     #[test]
-    fn m6_09_appends_scroll_events_at_end() {
-        let last2: &[&str] = &NAMES[NAMES.len() - 2..];
-        assert_eq!(last2, &[SCROLL_STARTED, SCROLL_ENDED]);
+    fn m6_09_appends_scroll_events_before_m7_16_block() {
+        // The M6-09 scroll pair sits immediately before the M7-16 block.
+        let scroll: &[&str] = &NAMES[NAMES.len() - 5..NAMES.len() - 3];
+        assert_eq!(scroll, &[SCROLL_STARTED, SCROLL_ENDED]);
+    }
+
+    #[test]
+    fn m7_16_appends_screen_and_search_events_at_end() {
+        // Append-only: the three M7-16 events are the tail, in registration
+        // order.
+        let last3: &[&str] = &NAMES[NAMES.len() - 3..];
+        assert_eq!(last3, &[SCREEN_OPENED, SCREEN_CLOSED, SEARCH_OPENED]);
     }
 }

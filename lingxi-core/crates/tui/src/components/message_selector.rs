@@ -282,6 +282,9 @@ impl MessageSelectorState {
         self.query.clear();
         self.filtered.clear();
         self.selected_filtered = 0;
+        // (M7-16) `tengu_tui_search_opened` — the overlay just transitioned
+        // closed → open in SEARCH mode.
+        crate::telemetry::search_opened("search");
     }
 
     /// (M7-14 review) Open the EXPORT overlay directly (the `/export`
@@ -293,6 +296,9 @@ impl MessageSelectorState {
         self.query.clear();
         self.filtered.clear();
         self.selected_filtered = 0;
+        // (M7-16) `tengu_tui_search_opened` — the same overlay opens in EXPORT
+        // mode here; `mode` distinguishes the two entry points.
+        crate::telemetry::search_opened("export");
         self.export = ExportFlowState {
             filename: default_export_filename(),
             awaiting_overwrite: false,

@@ -269,10 +269,11 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
         Some(Screen::Doctor(_)) => {
             // (M7-11) Read-only screen: Esc / `q` close; everything else inert.
             match k.code {
+                // (M7-16) `close_screen` emits `tengu_tui_screen_closed` on the
+                // real `Some → None` transition, so the close telemetry is wired
+                // through the shared close path (not duplicated per screen).
                 KeyCode::Esc => st.close_screen(),
                 KeyCode::Char('q') if k.modifiers == KeyModifiers::NONE => st.close_screen(),
-                // (M7-16) screen-close telemetry (`tengu_tui_screen_closed`)
-                // would emit here once the M7-16 audit registers it. 0 events.
                 _ => {}
             }
         }

@@ -123,6 +123,108 @@ impl HeightCache {
     }
 }
 
+/// The result of windowing: which messages intersect the viewport and how
+/// many lines of the first/last message to skip/take. `skip_top_lines` are
+/// the lines of `first_index`'s message hidden above the viewport top;
+/// `take_lines` is the total number of rendered lines the viewport holds
+/// (after `skip_top_lines`), spanning `first_index..=last_index`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WindowSlice {
+    /// First message index intersecting the viewport (inclusive).
+    pub first_index: usize,
+    /// Last message index intersecting the viewport (inclusive).
+    pub last_index: usize,
+    /// Lines of `first_index`'s message hidden above the viewport top.
+    pub skip_top_lines: usize,
+    /// Total visible line budget across the window.
+    pub take_lines: usize,
+    /// True when nothing is visible (empty log / zero viewport).
+    pub empty: bool,
+}
+
+impl WindowSlice {
+    /// Inclusive range of message indices in the window. Empty iterator
+    /// when [`Self::is_empty`].
+    pub fn indices(&self) -> impl Iterator<Item = usize> {
+        let (lo, hi) = if self.empty {
+            (1usize, 0usize) // empty range
+        } else {
+            (self.first_index, self.last_index)
+        };
+        lo..=hi
+    }
+
+    /// True when the window holds no messages.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.empty
+    }
+}
+
+/// Core windowing function. Given the full `messages`, their `cache`d
+/// heights, a line-based `scroll_offset`, and the `viewport_height` in
+/// lines, return the contiguous message slice intersecting the viewport
+/// plus the first-message top-skip and the total visible line budget.
+///
+/// `scroll_offset` is clamped here defensively, but callers
+/// ([`crate::app::scroll_with_viewport`]) clamp it on input.
+#[must_use]
+pub fn render_window(
+    messages: &[RenderedMessage],
+    cache: &HeightCache,
+    scroll_offset: usize,
+    viewport_height: usize,
+) -> WindowSlice {
+    if messages.is_empty() || viewport_height == 0 || cache.total_lines() == 0 {
+        return WindowSlice {
+            empty: true,
+            ..WindowSlice::default()
+        };
+    }
+    let total = cache.total_lines();
+    let max_offset = total.saturating_sub(viewport_height);
+    let offset = scroll_offset.min(max_offset);
+
+    // The visible line range is [top_line, bottom_line) in absolute lines
+    // from the top of the log.
+    let bottom_line = total - offset;
+    let top_line = bottom_line.saturating_sub(viewport_height);
+
+    // Walk messages accumulating line spans; find the first/last whose
+    // span intersects [top_line, bottom_line).
+    let mut acc = 0usize; // absolute line at the start of the current msg
+    let mut first_index = 0usize;
+    let mut skip_top_lines = 0usize;
+    let mut last_index = 0usize;
+    let mut found_first = false;
+    for (i, _m) in messages.iter().enumerate() {
+        let h = cache.height_at(i);
+        let span_start = acc;
+        let span_end = acc + h; // exclusive
+        // Intersects the viewport if span_end > top_line && span_start < bottom_line.
+        if span_end > top_line && span_start < bottom_line {
+            if !found_first {
+                first_index = i;
+                skip_top_lines = top_line.saturating_sub(span_start);
+                found_first = true;
+            }
+            last_index = i;
+        }
+        acc = span_end;
+        if span_start >= bottom_line {
+            break;
+        }
+    }
+
+    WindowSlice {
+        first_index,
+        last_index,
+        skip_top_lines,
+        take_lines: viewport_height.min(total),
+        empty: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +284,34 @@ mod tests {
     fn height_cache_empty_is_zero_total() {
         let cache = HeightCache::build(&[], 80);
         assert_eq!(cache.total_lines(), 0);
+    }
+
+    #[test]
+    fn window_at_offset_zero_shows_tail_lines() {
+        // 4 messages of height [1,1,1,1] = 4 total lines; viewport 3.
+        let msgs = vec![user("m0"), user("m1"), user("m2"), user("m3")];
+        let cache = HeightCache::build(&msgs, 80);
+        let win = render_window(&msgs, &cache, 0, 3);
+        // bottom_line = 4, top_line = 1 → messages 1..=3 visible (m1,m2,m3).
+        assert_eq!(win.first_index, 1);
+        assert_eq!(win.last_index, 3);
+        assert_eq!(win.skip_top_lines, 0);
+        assert_eq!(win.take_lines, 3);
+        assert_eq!(win.indices().collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn window_empty_log_is_empty() {
+        let cache = HeightCache::build(&[], 80);
+        let win = render_window(&[], &cache, 0, 5);
+        assert!(win.is_empty());
+    }
+
+    #[test]
+    fn window_zero_viewport_is_empty() {
+        let msgs = vec![user("m0")];
+        let cache = HeightCache::build(&msgs, 80);
+        let win = render_window(&msgs, &cache, 0, 0);
+        assert!(win.is_empty());
     }
 }

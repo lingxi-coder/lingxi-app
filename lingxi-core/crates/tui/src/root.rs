@@ -429,6 +429,39 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     }
 }
 
+/// (M7-10) Apply a coalesced paste block to the prompt buffer in-place,
+/// reusing the pure `apply_paste_block` (image lines → `[Image #N]` + recorded
+/// attachment, text verbatim, the whole block one insertion — no per-line
+/// submit). After inserting we re-sync the M7-07 overlays so a pasted
+/// `/command` / `@token` still drives the palette/completion the same way
+/// typing would. We do NOT clear `history_search` here: the coalescer is gated
+/// off while the overlay owns keys, so a block never lands mid-search.
+fn apply_block(st: &mut AppState, block: &str) {
+    use crate::components::prompt_input::apply_paste_block;
+    let r = apply_paste_block(&st.prompt_text, st.prompt_cursor, block, st.paste.clone());
+    st.prompt_text = r.prompt;
+    st.prompt_cursor = r.cursor;
+    st.paste = r.state;
+    // Re-sync overlays against the pasted buffer (mirrors the default-edit tail
+    // in `handle_live_key`). Palette wins when the buffer is a `/command`.
+    st.palette.sync_from_prompt(&st.prompt_text);
+    if st.palette.open {
+        st.completion.open = false;
+    } else if crate::components::prompt_input::completion::active_at_token(
+        &st.prompt_text,
+        st.prompt_cursor,
+    )
+    .is_some()
+    {
+        let cwd_entries =
+            crate::components::prompt_input::completion::read_cwd_entries(&st.status.cwd);
+        st.completion
+            .sync(&st.prompt_text, st.prompt_cursor, &cwd_entries);
+    } else {
+        st.completion.sync(&st.prompt_text, st.prompt_cursor, &[]);
+    }
+}
+
 /// Top-level iocraft component. Drives the REPL screen and signals exit on
 /// `state.should_exit`.
 #[component]
@@ -451,6 +484,16 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
     let mut first_render = hooks.use_state(|| false);
     let mut prev_streaming = hooks.use_state(|| false);
     let mut last_size = hooks.use_state(|| (0u16, 0u16));
+
+    // ---- Paste coalescer (M7-10): iocraft 0.8.3 surfaces NO paste event
+    // (TerminalEvent = Key|FullscreenMouse|Resize), so a paste arrives as a
+    // rapid burst of single-char Key events (one Enter per newline). We buffer
+    // printable chars + pasted newlines arriving inside `BURST_WINDOW` and
+    // flush them as ONE block (multi-line paste inserts atomically, embedded
+    // Enter never submits). It lives on the mount (not serializable session
+    // state) via `use_ref` — `PasteCoalescer` is Send+Sync so the Ref is
+    // capturable by both the key closure and the idle-flush ticker. ----
+    let paste_coalescer = hooks.use_ref(crate::components::prompt_input::PasteCoalescer::new);
 
     // System context handle — used to break iocraft's render loop on quit.
     let mut system = hooks.use_context_mut::<SystemContext>();
@@ -481,17 +524,37 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         });
     }
 
-    // ---- Ticker: 100ms spinner refresh while streaming -----------------
+    // ---- Ticker: 100ms spinner refresh while streaming + paste idle-flush --
     {
         let state = state.clone();
         let mut tick_for_ticker = tick;
+        let mut coalescer = paste_coalescer;
         hooks.use_future(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
+                // (M7-10) Flush a paste burst that ended WITHOUT a trailing
+                // keystroke (e.g. a paste whose final char was a newline). The
+                //100ms cadence is > the 50ms BURST_WINDOW, so a finished burst
+                // lands on the next tick. `flush_if_idle` is a no-op (returns
+                // None) when the buffer is empty or still within the window, so
+                // this never disturbs live typing. Done under the same lock the
+                // key path uses, then bump `tick` to repaint.
+                // Take the flushed block in a TIGHT scope so the non-Send
+                // `RefMutRef` guard is dropped BEFORE the `state.lock().await`
+                // below (an `await` may not hold a non-Send guard).
+                let flushed: Option<String> =
+                    coalescer.write().flush_if_idle(std::time::Instant::now());
+                let mut needs_redraw = false;
+                if let Some(block) = flushed {
+                    let mut st = state.lock().await;
+                    apply_block(&mut st, &block);
+                    drop(st);
+                    needs_redraw = true;
+                }
                 let streaming = state.lock().await.streaming.is_some();
-                if streaming {
+                if streaming || needs_redraw {
                     tick_for_ticker.set(tick_for_ticker.get().wrapping_add(1));
                 }
             }
@@ -518,6 +581,7 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         let mut tick_for_keys = tick;
         let key_rows = rows;
         let key_cols = cols;
+        let mut coalescer = paste_coalescer;
         hooks.use_terminal_events(move |ev| match ev {
             TerminalEvent::Key(k) if k.kind != KeyEventKind::Release => {
                 // Lock briefly to route the key. `try_lock` because we're in
@@ -535,6 +599,57 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                     viewport_width(key_cols),
                 );
                 let viewport = viewport_height(key_rows, prompt_rows);
+
+                // (M7-10) Paste-coalescer routing. While an overlay/dialog owns
+                // keys we do NOT coalesce — those consume keys directly and a
+                // buffered burst must land first. Otherwise printable chars (and
+                // pasted newlines that continue a burst) buffer; the block
+                // flushes on the idle tick, a non-printable key, or a deliberate
+                // Enter. This is the SAME `handle_live_key` dispatcher — the
+                // coalescer only batches printables before they reach it.
+                let now = std::time::Instant::now();
+                let overlay_active = st.pending_permission.is_some()
+                    || st.history_search.is_some()
+                    || st.palette.open
+                    || st.completion.open;
+                let printable = matches!(k.code, KeyCode::Char(_))
+                    && !k.modifiers.contains(KeyModifiers::CONTROL)
+                    && !k.modifiers.contains(KeyModifiers::ALT);
+                let plain_enter = matches!(k.code, KeyCode::Enter)
+                    && !k.modifiers.contains(KeyModifiers::CONTROL)
+                    && !k.modifiers.contains(KeyModifiers::ALT)
+                    && !k.modifiers.contains(KeyModifiers::SHIFT);
+
+                if !overlay_active && printable {
+                    if let KeyCode::Char(c) = k.code {
+                        if let Some(block) = coalescer.write().push_char(c, now) {
+                            apply_block(&mut st, &block);
+                        }
+                        drop(st);
+                        tick_for_keys.set(tick_for_keys.get().wrapping_add(1));
+                        return;
+                    }
+                }
+
+                // A plain Enter that CONTINUES an active burst is a *pasted*
+                // newline → buffer it (no submit). A plain Enter with no pending
+                // burst (or after the window) is a *deliberate* submit → fall
+                // through to flush + dispatch. This single rule preserves the
+                // M5/M6 single-Enter submit while preventing per-line submit on
+                // a multi-line paste.
+                if !overlay_active && plain_enter && coalescer.read().would_continue_burst(now) {
+                    let _ = coalescer.write().push_char('\n', now);
+                    drop(st);
+                    tick_for_keys.set(tick_for_keys.get().wrapping_add(1));
+                    return;
+                }
+
+                // Non-printable key (Enter-submit, arrows, Ctrl-*, …) or an
+                // overlay is active: flush any buffered burst FIRST so it lands
+                // before the key acts, then route the key normally.
+                if let Some(block) = coalescer.write().flush_now() {
+                    apply_block(&mut st, &block);
+                }
                 handle_live_key(&mut st, &k, viewport);
                 drop(st);
                 tick_for_keys.set(tick_for_keys.get().wrapping_add(1));

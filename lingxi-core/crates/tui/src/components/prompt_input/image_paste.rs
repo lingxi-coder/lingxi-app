@@ -267,6 +267,21 @@ impl PasteCoalescer {
         !self.buf.is_empty()
     }
 
+    /// True when a char/newline arriving at `now` would CONTINUE the current
+    /// burst (there is a pending buffer and `now` is within `BURST_WINDOW` of
+    /// the last char). The live key path uses this to decide whether an `Enter`
+    /// is a *pasted* newline (continues the burst → buffer it) or a *deliberate*
+    /// submit (no pending burst, or the gap exceeded the window → flush + act).
+    /// This is the single guarantee that a lone Enter still submits promptly
+    /// while a multi-line paste's embedded Enters never submit per line.
+    #[must_use]
+    pub fn would_continue_burst(&self, now: Instant) -> bool {
+        match self.last {
+            Some(prev) => now.duration_since(prev) <= BURST_WINDOW,
+            None => false,
+        }
+    }
+
     fn take(&mut self) -> Option<String> {
         self.last = None;
         if self.buf.is_empty() {
@@ -425,5 +440,38 @@ mod tests {
         // A non-printable key (e.g. Left arrow) forces an immediate flush.
         assert_eq!(c.flush_now(), Some("hi".to_string()));
         assert_eq!(c.flush_now(), None);
+    }
+
+    #[test]
+    fn would_continue_burst_distinguishes_pasted_newline_from_submit() {
+        let base = Instant::now();
+        let mut c = PasteCoalescer::new();
+        // Empty buffer → a lone Enter is a deliberate submit, NOT a burst.
+        assert!(!c.would_continue_burst(base));
+        // After a char arrives, an Enter within the window continues the burst
+        // (a pasted newline) ...
+        let _ = c.push_char('a', base);
+        assert!(c.would_continue_burst(base + Duration::from_millis(2)));
+        // ... but an Enter after the window is a deliberate submit.
+        assert!(!c.would_continue_burst(base + Duration::from_millis(80)));
+    }
+
+    #[test]
+    fn pasted_newline_is_buffered_not_submitted() {
+        // Models the live path: chars + embedded newline all within the window
+        // are one block; a multi-line paste therefore never submits per line.
+        let base = Instant::now();
+        let mut c = PasteCoalescer::new();
+        assert_eq!(c.push_char('a', base), None);
+        // The embedded Enter "continues the burst", so the live path pushes
+        // '\n' instead of submitting.
+        assert!(c.would_continue_burst(base + Duration::from_millis(1)));
+        assert_eq!(c.push_char('\n', base + Duration::from_millis(1)), None);
+        assert_eq!(c.push_char('b', base + Duration::from_millis(2)), None);
+        // The whole block flushes as one unit on the idle tick.
+        assert_eq!(
+            c.flush_if_idle(base + Duration::from_millis(80)),
+            Some("a\nb".to_string())
+        );
     }
 }

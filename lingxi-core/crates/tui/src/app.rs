@@ -408,6 +408,25 @@ pub fn render_screen(
                 use crate::screens::settings::SettingsScreen;
                 element! { SettingsScreen(state: Some(ss.clone())) }.into_any()
             }
+            Screen::Memory(ms) => {
+                // (M7-14) Re-resolve the tier list synchronously each frame from
+                // the M3 walker (cheap fs probe); the editor buffer/selection
+                // come from the variant's carried state.
+                use crate::screens::memory::{memory_tiers, MemoryScreen};
+                let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                let tiers = memory_tiers(&state.status.cwd, &home);
+                element! {
+                    MemoryScreen(
+                        tiers: tiers,
+                        selected: ms.selected,
+                        editing: ms.editing,
+                        buffer: ms.buffer.clone(),
+                        dirty: ms.dirty,
+                        status: ms.status.clone(),
+                    )
+                }
+                .into_any()
+            }
         };
     }
     let status = state.status.clone();

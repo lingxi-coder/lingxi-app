@@ -1,0 +1,8 @@
+---
+source: crates/tui/tests/render_memory_screen.rs
+expression: out
+---
+Memory files
+❯ Project memory
+  User memory (new)
+↑/↓ select · Enter edit · Esc close

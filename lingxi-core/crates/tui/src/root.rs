@@ -307,6 +307,35 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 }
             }
         }
+        Some(Screen::Memory(state)) => {
+            // (M7-14) Pick a CLAUDE.md tier, edit it inline, save through the
+            // M3 store. Tiers are re-resolved synchronously each key from
+            // `hierarchy::walk` (no async open pump). The pure
+            // `handle_memory_key` reducer drives selection / editing; we act on
+            // its `MemoryAction`:
+            //   - CloseScreen  → back to REPL.
+            //   - Save{path,body} → atomic write to the SAME HierarchyEntry path
+            //     (§4 R7 — the ONLY write); Esc never produces Save, so a cancel
+            //     never writes.
+            //   - BackToSelector / None → keep the screen open.
+            use crate::screens::memory::{handle_memory_key, memory_tiers, save_tier_body, MemoryAction};
+            let ct = iocraft_to_crossterm028_key(k);
+            let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+            let tiers = memory_tiers(&st.status.cwd, &home);
+            match handle_memory_key(state, &tiers, ct) {
+                MemoryAction::CloseScreen => st.close_screen(),
+                MemoryAction::Save { path, body } => match save_tier_body(&path, &body) {
+                    Ok(()) => {
+                        state.dirty = false;
+                        state.status = Some(format!("Saved {}", path.display()));
+                    }
+                    Err(e) => {
+                        state.status = Some(format!("Could not save memory: {e}"));
+                    }
+                },
+                MemoryAction::BackToSelector | MemoryAction::None => {}
+            }
+        }
         None => {}
     }
 }

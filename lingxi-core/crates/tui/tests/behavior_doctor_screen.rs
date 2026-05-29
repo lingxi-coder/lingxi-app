@@ -24,7 +24,10 @@ fn esc_closes_active_screen() {
     st.open_doctor(diag());
     assert_eq!(st.active_screen, Some(Screen::Doctor));
     handle_live_key(&mut st, &key(KeyCode::Esc), 24);
-    assert_eq!(st.active_screen, None, "Esc closes the screen → back to REPL");
+    assert_eq!(
+        st.active_screen, None,
+        "Esc closes the screen → back to REPL"
+    );
 }
 
 #[test]
@@ -42,7 +45,10 @@ fn text_key_does_not_leak_to_prompt_while_screen_open() {
     st.prompt_cursor = 5;
     st.open_doctor(diag());
     handle_live_key(&mut st, &key(KeyCode::Char('h')), 24);
-    assert_eq!(st.prompt_text, "draft", "text key must NOT reach PromptInput");
+    assert_eq!(
+        st.prompt_text, "draft",
+        "text key must NOT reach PromptInput"
+    );
     assert_eq!(
         st.active_screen,
         Some(Screen::Doctor),

@@ -797,7 +797,10 @@ mod dispatch_tests {
         let should_run = dispatch(KeyAction::Submit, &mut st);
         assert!(!should_run, "/doctor opens a screen, never runs a turn");
         assert_eq!(st.active_screen, Some(Screen::Doctor));
-        assert!(st.doctor_diagnostics.is_some(), "diagnostics captured at open");
+        assert!(
+            st.doctor_diagnostics.is_some(),
+            "diagnostics captured at open"
+        );
         assert!(st.prompt_text.is_empty(), "prompt cleared on submit");
         // No UserText pushed for the intercepted slash command.
         assert!(

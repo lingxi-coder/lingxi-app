@@ -345,7 +345,7 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
     // `try_lock` here: we're in iocraft's synchronous render path, and the
     // mutex is only held briefly by the bridge / key handlers. If somehow
     // contended, fall back to an empty frame for this tick.
-    let snapshot = state.try_lock().map(|st| {
+    let snapshot = state.try_lock().map(|mut st| {
         let cur_streaming = st.streaming.is_some();
         let prev = prev_streaming.get();
         if cur_streaming != prev {
@@ -366,7 +366,11 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         }
         let should_quit = st.should_exit;
         let viewport = viewport_height(rows);
-        let element = crate::app::render_screen(&st, viewport);
+        let vp_width = viewport_width(cols);
+        // (M7-03) Refresh the line-height cache to the live width before
+        // rendering so windowing + scroll clamp math agree on `total_lines`.
+        st.refresh_height_cache(vp_width);
+        let element = crate::app::render_screen(&st, viewport, vp_width);
         (element, should_quit)
     });
 
@@ -400,6 +404,12 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
 /// row even when it's hidden so the scrollback doesn't jitter on `TurnStart`.
 fn viewport_height(rows: u16) -> usize {
     usize::from(rows.saturating_sub(3))
+}
+
+/// Columns available to the scrollback. The REPL reserves no horizontal
+/// chrome today, so this is the full terminal width (min 1).
+fn viewport_width(cols: u16) -> usize {
+    (cols as usize).max(1)
 }
 
 #[cfg(test)]

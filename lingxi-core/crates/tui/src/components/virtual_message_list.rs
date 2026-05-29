@@ -16,11 +16,16 @@
 //! diff) make a line-based model mandatory. The cache is invalidated and
 //! recomputed whenever the viewport width changes.
 
-use crate::state::RenderedMessage;
+use std::collections::HashMap;
+
+use iocraft::prelude::*;
+use lingxi_protocol::ToolUseId;
 use unicode_width::UnicodeWidthStr;
 
+use crate::state::RenderedMessage;
+
 // Re-export the per-variant message dispatch from `scrollback` so the
-// windowed renderer (Task 8) reuses the exact same per-variant rendering
+// windowed renderer reuses the exact same per-variant rendering
 // (including M7-02's StructuredDiff branch) without duplicating it.
 pub use crate::components::scrollback::render_message;
 
@@ -225,6 +230,53 @@ pub fn render_window(
     }
 }
 
+/// Props for [`VirtualMessageList`]. Mirrors the M6 `ScrollbackProps`
+/// surface plus the line-based viewport. The full `messages` log is
+/// passed; the component windows it.
+#[derive(Default, Props)]
+pub struct VirtualMessageListProps {
+    /// Full retained message log (clone of `AppState::messages`).
+    pub messages: Vec<RenderedMessage>,
+    /// Line-based scroll offset (0 = latest at bottom).
+    pub scroll_offset: usize,
+    /// Viewport height in lines.
+    pub viewport_height: usize,
+    /// Viewport width in columns (drives the height cache).
+    pub viewport_width: usize,
+    /// Per-tool expanded flags (clone of `AppState::expanded`).
+    pub expanded: HashMap<ToolUseId, bool>,
+    /// Focused tool id (clone of `AppState::focused_tool_id`).
+    pub focused_tool_id: Option<ToolUseId>,
+}
+
+/// Windowed scrollback component. Renders only the messages whose line
+/// spans intersect the viewport (+ overscan), not the whole log.
+#[component]
+pub fn VirtualMessageList(props: &VirtualMessageListProps) -> impl Into<AnyElement<'static>> {
+    let width = props.viewport_width.max(1);
+    let cache = HeightCache::build(&props.messages, width);
+    // Overscan: render a few extra lines of viewport so a line-step does
+    // not flash blank rows. Purely a visual buffer — offset math is exact.
+    let vh = props.viewport_height.saturating_add(OVERSCAN_LINES);
+    let win = render_window(&props.messages, &cache, props.scroll_offset, vh);
+
+    let expanded = props.expanded.clone();
+    let focused_tool_id = props.focused_tool_id;
+    let rendered: Vec<AnyElement<'static>> = if win.is_empty() {
+        Vec::new()
+    } else {
+        win.indices()
+            .filter_map(|i| props.messages.get(i).cloned())
+            .map(|m| render_message(m, &expanded, focused_tool_id))
+            .collect()
+    };
+    element! {
+        View(flex_direction: FlexDirection::Column, flex_grow: 1.0) {
+            #(rendered)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +421,18 @@ mod tests {
         let win = render_window(&msgs, &cache, 9999, 10);
         assert_eq!(win.first_index, 0);
         assert_eq!(win.skip_top_lines, 0);
+    }
+
+    #[test]
+    fn window_render_count_bounded_by_viewport_not_log_size() {
+        // 5000 single-line messages, viewport 20 → window holds ~20 (+overscan),
+        // never 5000.
+        let msgs: Vec<RenderedMessage> = (0..5000).map(|i| user(&format!("m{i}"))).collect();
+        let cache = HeightCache::build(&msgs, 80);
+        assert_eq!(cache.total_lines(), 5000);
+        let win = render_window(&msgs, &cache, 0, 20);
+        let count = win.indices().count();
+        assert!(count <= 21, "window rendered {count} messages, expected <= 21");
+        assert!(count >= 20, "window should fill the viewport, got {count}");
     }
 }

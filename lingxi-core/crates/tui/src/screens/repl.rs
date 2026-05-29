@@ -12,8 +12,8 @@ use iocraft::prelude::*;
 use lingxi_protocol::ToolUseId;
 
 use crate::components::prompt_input::PromptInput;
-use crate::components::scrollback::Scrollback;
 use crate::components::spinner::SpinnerWithVerb;
+use crate::components::virtual_message_list::VirtualMessageList;
 use crate::components::status_line::StatusLine;
 use crate::state::{AppState, RenderedMessage, StatusSnapshot};
 
@@ -42,6 +42,8 @@ pub struct ReplScreenProps {
     pub scroll_offset: usize,
     /// Live viewport height (rows available for the scrollback).
     pub viewport_height: usize,
+    /// Live viewport width (columns) for the height cache.
+    pub viewport_width: usize,
     /// Whether to render the streaming spinner between scrollback and
     /// prompt input. Wired from `AppState.streaming.is_some()`.
     pub show_spinner: bool,
@@ -64,6 +66,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let prompt_cursor = props.prompt_cursor;
     let scroll_offset = props.scroll_offset;
     let viewport_height = props.viewport_height;
+    let viewport_width = props.viewport_width;
     let show_spinner = props.show_spinner;
     let expanded = props.expanded.clone();
     let focused_tool_id = props.focused_tool_id;
@@ -76,10 +79,11 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 context_pct: context_pct,
                 permission_mode: permission_mode,
             )
-            Scrollback(
+            VirtualMessageList(
                 messages: messages,
                 scroll_offset: scroll_offset,
                 viewport_height: viewport_height,
+                viewport_width: viewport_width,
                 expanded: expanded,
                 focused_tool_id: focused_tool_id,
             )

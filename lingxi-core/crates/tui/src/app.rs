@@ -264,7 +264,11 @@ pub async fn handle_submit_line(
 /// the streaming spinner. M6-02 ships the pure render function so
 /// downstream tasks have a stable assembly point.
 #[must_use]
-pub fn render_screen(state: &AppState, viewport_height: usize) -> AnyElement<'static> {
+pub fn render_screen(
+    state: &AppState,
+    viewport_height: usize,
+    viewport_width: usize,
+) -> AnyElement<'static> {
     use crate::screens::repl::{should_render_spinner, ReplScreen};
     // M6-05 focus-trap render path: when a permission dialog is open,
     // it owns the screen. Iocraft 0.8 doesn't expose a portable z-index
@@ -322,6 +326,7 @@ pub fn render_screen(state: &AppState, viewport_height: usize) -> AnyElement<'st
             prompt_cursor: prompt_cursor,
             scroll_offset: scroll_offset,
             viewport_height: viewport_height,
+            viewport_width: viewport_width,
             show_spinner: show_spinner,
             expanded: expanded,
             focused_tool_id: focused_tool_id,
@@ -646,7 +651,7 @@ mod dispatch_tests {
             body: "hi".into(),
             timestamp: 0,
         });
-        let mut element = render_screen(&st, 5);
+        let mut element = render_screen(&st, 5, 80);
         let rendered = element.to_string();
         assert!(rendered.contains("● hi"), "got: {rendered}");
         assert!(rendered.contains("claude-sonnet-4.5"));

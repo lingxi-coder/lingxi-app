@@ -36,15 +36,24 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
                 focused,
             })
         }
-        RenderedMessage::UserToolResult { id, tool, result } => {
-            render_user_tool_result_to_string(UserToolResultProps {
-                id: *id,
-                tool: tool.clone(),
-                result: result.clone(),
-                expanded,
-                focused,
-                ..UserToolResultProps::default()
-            })
-        }
+        RenderedMessage::UserToolResult {
+            id,
+            tool,
+            result,
+            old_string,
+            new_string,
+            file_path,
+        } => render_user_tool_result_to_string(UserToolResultProps {
+            id: *id,
+            tool: tool.clone(),
+            result: result.clone(),
+            expanded,
+            focused,
+            // M7-02: diff inputs populated by `streaming::apply_event` from the
+            // paired `ToolUseStart`; thread them so the diff branch can fire.
+            old_string: old_string.clone(),
+            new_string: new_string.clone(),
+            file_path: file_path.clone(),
+        }),
     }
 }

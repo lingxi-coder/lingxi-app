@@ -134,7 +134,14 @@ fn render_message(
             }
             .into_any()
         }
-        RenderedMessage::UserToolResult { id, tool, result } => {
+        RenderedMessage::UserToolResult {
+            id,
+            tool,
+            result,
+            old_string,
+            new_string,
+            file_path,
+        } => {
             let is_expanded = expanded.get(&id).copied().unwrap_or(false);
             let is_focused = focused_tool_id == Some(id);
             element! {
@@ -144,6 +151,11 @@ fn render_message(
                     result: result,
                     expanded: is_expanded,
                     focused: is_focused,
+                    // M7-02: diff inputs populated upstream in
+                    // `streaming::apply_event` from the paired `ToolUseStart`.
+                    old_string: old_string,
+                    new_string: new_string,
+                    file_path: file_path,
                 )
             }
             .into_any()

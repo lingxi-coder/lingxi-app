@@ -77,6 +77,16 @@ pub enum RenderedMessage {
         tool: String,
         /// JSON result payload.
         result: serde_json::Value,
+        /// (M7-02) Pre-edit text for diff tools (`old_string` for Edit; `None`
+        /// for Write/pure-add). Populated from the paired `ToolUseStart` input
+        /// at construction time; `None` for non-diff tools.
+        old_string: Option<String>,
+        /// (M7-02) Post-edit text for diff tools (`new_string` for Edit;
+        /// `content` for Write). `None` for non-diff tools.
+        new_string: Option<String>,
+        /// (M7-02) Edited file path (drives diff syntax language). `None` for
+        /// non-diff tools.
+        file_path: Option<String>,
     },
 }
 
@@ -211,6 +221,13 @@ pub struct AppState {
     /// by the `ToolUseId` carried on `AssistantToolUse` / `UserToolResult`
     /// entries.
     pub expanded: HashMap<ToolUseId, bool>,
+    /// (M7-02) Tool-call inputs stashed by id when `ToolUseStart` arrives, so
+    /// the LATER `ToolUseResult` can correlate the call input (Edit's
+    /// `old_string`/`new_string`/`file_path`, Write's `content`) into the
+    /// `UserToolResult` diff fields. Chosen over a backward scan of `messages`
+    /// because M7-03 will window the visible message slice — a stash keyed by
+    /// id is robust to that windowing.
+    pub tool_call_inputs: HashMap<ToolUseId, serde_json::Value>,
     /// (M6-05) Oneshot back-channel to the orchestrator for the active
     /// permission round-trip. `Some(_)` whenever `pending_permission`
     /// holds a real request that arrived over the bridge; `None` for
@@ -250,6 +267,7 @@ impl AppState {
             should_exit: false,
             focused_tool_id: None,
             expanded: HashMap::new(),
+            tool_call_inputs: HashMap::new(),
             pending_permission_resp_tx: None,
             pending_permission_started_at: None,
             tool_use_dialog_state:
@@ -387,6 +405,9 @@ mod tests {
             id,
             tool: "Read".into(),
             result: serde_json::json!({"content": "fn main() {}"}),
+            old_string: None,
+            new_string: None,
+            file_path: None,
         };
         assert!(matches!(call, RenderedMessage::AssistantToolUse { .. }));
         assert!(matches!(result, RenderedMessage::UserToolResult { .. }));

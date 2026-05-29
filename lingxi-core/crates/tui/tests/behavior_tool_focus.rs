@@ -92,6 +92,9 @@ fn dispatcher_routes_tool_call_and_result() {
         id,
         tool: "Read".into(),
         result: serde_json::json!({"content": "hi"}),
+        old_string: None,
+        new_string: None,
+        file_path: None,
     };
     let s2 = render_entry_to_string(&result, false, false);
     assert!(s2.starts_with("└ hi"), "got: {s2}");

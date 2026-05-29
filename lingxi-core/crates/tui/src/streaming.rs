@@ -42,14 +42,30 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
         TurnEvent::ToolUseStart { id, tool, input } => {
             // M6-04: rich tool-use block. Per-id expanded state lives in
             // `state.expanded` (default false → collapsed header).
+            //
+            // M7-02 (T13-wire): the tool-call INPUT carries the diff source
+            // (Edit's `old_string`/`new_string`/`file_path`, Write's `content`).
+            // It must reach the LATER `UserToolResult` render site. We stash it
+            // by id here — chosen over a backward scan of `messages` so it stays
+            // correct once M7-03 windows the visible message slice.
+            state.tool_call_inputs.insert(id, input.clone());
             state
                 .messages
                 .push(RenderedMessage::AssistantToolUse { id, tool, input });
         }
         TurnEvent::ToolUseResult { id, tool, result } => {
-            state
-                .messages
-                .push(RenderedMessage::UserToolResult { id, tool, result });
+            let (old_string, new_string, file_path) = state
+                .tool_call_inputs
+                .remove(&id)
+                .map_or((None, None, None), |input| diff_inputs_for(&tool, &input));
+            state.messages.push(RenderedMessage::UserToolResult {
+                id,
+                tool,
+                result,
+                old_string,
+                new_string,
+                file_path,
+            });
         }
         TurnEvent::PermissionRequest { tool, input } => {
             // M6-03 bridge variant still carries the legacy {tool, input}
@@ -97,6 +113,40 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
         }
     }
     notify.notify_one();
+}
+
+/// Extract the `(old_string, new_string, file_path)` diff inputs for a diff
+/// tool from its call `input` JSON. Returns all-`None` for non-diff tools.
+///
+/// Mapping (claude-code parity):
+///   - `Edit`  → `old_string` / `new_string` / `file_path` keys verbatim.
+///   - `Write` → `old = None` (pure add), `new = content`, `file_path`.
+///   - `MultiEdit` / `NotebookEdit` → only `file_path` populated; the old/new
+///     bodies are multi-hunk (`edits[]`) / cell-shaped and don't map to a
+///     single old→new pair. TODO(M8): render their full multi-hunk diff.
+fn diff_inputs_for(
+    tool: &str,
+    input: &serde_json::Value,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let str_key = |k: &str| {
+        input
+            .get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    match tool {
+        "Edit" => (
+            str_key("old_string"),
+            str_key("new_string"),
+            str_key("file_path"),
+        ),
+        "Write" => (None, str_key("content"), str_key("file_path")),
+        // TODO(M8): MultiEdit (`edits[]`) and NotebookEdit (cell-shaped) carry
+        // no single old→new pair — surface only the path for now so the header
+        // renders without a (wrong) single-hunk diff.
+        "MultiEdit" | "NotebookEdit" => (None, None, str_key("file_path")),
+        _ => (None, None, None),
+    }
 }
 
 #[cfg(test)]

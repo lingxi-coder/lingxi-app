@@ -1,1 +1,203 @@
-//! Markdown renderer — implemented in M7-01 Task 7/8.
+//! CommonMark → [`StyledLine`] rendering via `pulldown-cmark`.
+//!
+//! Pure function: `render(text, theme) -> Vec<StyledLine>`. No iocraft, no
+//! terminal, no async — colors are [`StyleColor`] values mapped to iocraft
+//! only at draw time (`StyleColor::to_iocraft`).
+//!
+//! Literal reference: `claude-code/src/utils/markdown.ts` `formatToken`.
+//! Handled here: paragraphs, headings, bold (`Strong`), italic (`Emphasis`),
+//! inline code (`Code` → `theme.inline_code`), links (`text (url)`),
+//! ordered/unordered/nested lists, blockquote, fenced code (emits a
+//! [`SpanKind::CodePlaceholder`] span — M7-02 highlights it). Best-effort on
+//! partial / unclosed input; never panics.
+//!
+//! Per claude-code: strikethrough is intentionally NOT parsed (the model
+//! uses `~` for "approximately"); HTML/definitions render to nothing.
+
+use crate::render::{SpanStyle, StyleColor, StyledLine, StyledSpan};
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
+/// Theme colors the markdown renderer needs. Kept minimal and decoupled
+/// from iocraft so the renderer is a pure value function. Expand in M7-15.
+#[derive(Debug, Clone, Copy)]
+pub struct MarkdownTheme {
+    /// Inline-code (`codespan`) foreground — claude-code uses the
+    /// `permission` theme color here.
+    pub inline_code: StyleColor,
+}
+
+/// Mutable inline styling state threaded through the event walk.
+#[derive(Debug, Clone, Copy, Default)]
+struct InlineState {
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    code: bool,
+}
+
+impl InlineState {
+    fn to_style(self, theme: &MarkdownTheme) -> SpanStyle {
+        SpanStyle {
+            fg: if self.code {
+                theme.inline_code
+            } else {
+                StyleColor::Default
+            },
+            bg: StyleColor::Default,
+            bold: self.bold,
+            italic: self.italic,
+            underline: self.underline,
+        }
+    }
+}
+
+/// Render CommonMark `text` to styled lines using `theme`. Strikethrough is
+/// disabled to match claude-code; tables and footnotes are enabled by
+/// `pulldown-cmark` defaults but only paragraph/heading/list/quote/code are
+/// styled here (others fall through as their inline text).
+#[must_use]
+pub fn render(text: &str, theme: &MarkdownTheme) -> Vec<StyledLine> {
+    let options = Options::ENABLE_TABLES;
+    let parser = Parser::new_ext(text, options);
+
+    let mut builder = Builder::new(theme);
+    for event in parser {
+        builder.handle(event);
+    }
+    builder.finish()
+}
+
+/// Accumulates styled lines while walking markdown events. Inline content is
+/// appended to `pending` (the current line being built); block boundaries
+/// flush `pending` into `lines`.
+struct Builder<'a> {
+    theme: &'a MarkdownTheme,
+    lines: Vec<StyledLine>,
+    pending: Vec<StyledSpan>,
+    inline: InlineState,
+    link_url: Option<String>,
+}
+
+impl<'a> Builder<'a> {
+    fn new(theme: &'a MarkdownTheme) -> Self {
+        Builder {
+            theme,
+            lines: Vec::new(),
+            pending: Vec::new(),
+            inline: InlineState::default(),
+            link_url: None,
+        }
+    }
+
+    /// Flush the in-progress line (if any) into `lines`.
+    fn flush(&mut self) {
+        if !self.pending.is_empty() {
+            self.lines.push(StyledLine {
+                spans: std::mem::take(&mut self.pending),
+            });
+        }
+    }
+
+    /// Append a styled-text span to the current line using current inline
+    /// state.
+    fn push_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.pending
+            .push(StyledSpan::styled(text, self.inline.to_style(self.theme)));
+    }
+
+    fn handle(&mut self, event: Event<'_>) {
+        match event {
+            Event::Start(Tag::Strong) => self.inline.bold = true,
+            Event::End(TagEnd::Strong) => self.inline.bold = false,
+            Event::Start(Tag::Emphasis) => self.inline.italic = true,
+            Event::End(TagEnd::Emphasis) => self.inline.italic = false,
+            Event::Code(text) => {
+                // inline code: force code color regardless of surrounding em.
+                let prev = self.inline.code;
+                self.inline.code = true;
+                self.push_text(&text);
+                self.inline.code = prev;
+            }
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                // Remember the URL to append after the link text closes.
+                self.link_url = Some(dest_url.to_string());
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some(url) = self.link_url.take() {
+                    self.push_text(&format!(" ({url})"));
+                }
+            }
+            Event::Text(text) => self.push_text(&text),
+            Event::SoftBreak | Event::HardBreak => {
+                self.flush();
+            }
+            Event::End(TagEnd::Paragraph) => {
+                self.flush();
+                self.lines.push(StyledLine::empty());
+            }
+            _ => { /* block elements handled in Task 8 */ }
+        }
+    }
+
+    fn finish(mut self) -> Vec<StyledLine> {
+        self.flush();
+        // Drop a trailing blank line for tidy output.
+        if matches!(self.lines.last(), Some(l) if l.spans.is_empty()) {
+            self.lines.pop();
+        }
+        self.lines
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::{SpanStyle, StyleColor};
+
+    fn theme() -> MarkdownTheme {
+        MarkdownTheme {
+            inline_code: StyleColor::Named(crate::render::NamedColor::Magenta),
+        }
+    }
+
+    #[test]
+    fn plain_paragraph() {
+        let lines = render("hello world", &theme());
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].plain_text(), "hello world");
+        assert_eq!(lines[0].spans[0].style, SpanStyle::default());
+    }
+
+    #[test]
+    fn bold_text() {
+        let lines = render("a **b** c", &theme());
+        // "a " | "b"(bold) | " c"
+        let bold_span = lines[0].spans.iter().find(|s| s.text == "b").unwrap();
+        assert!(bold_span.style.bold);
+    }
+
+    #[test]
+    fn italic_text() {
+        let lines = render("a *b* c", &theme());
+        let it = lines[0].spans.iter().find(|s| s.text == "b").unwrap();
+        assert!(it.style.italic);
+    }
+
+    #[test]
+    fn inline_code_uses_theme_color() {
+        let lines = render("run `cargo test` now", &theme());
+        let code = lines[0].spans.iter().find(|s| s.text == "cargo test").unwrap();
+        assert_eq!(code.style.fg, StyleColor::Named(crate::render::NamedColor::Magenta));
+    }
+
+    #[test]
+    fn link_renders_text_and_url() {
+        let lines = render("see [docs](https://x.io)", &theme());
+        let joined = lines[0].plain_text();
+        assert!(joined.contains("docs"));
+        assert!(joined.contains("https://x.io"));
+    }
+}

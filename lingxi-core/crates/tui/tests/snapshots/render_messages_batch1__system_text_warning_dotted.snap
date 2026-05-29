@@ -1,0 +1,5 @@
+---
+source: crates/tui/tests/render_messages_batch1.rs
+expression: s
+---
+● Approaching context limit.

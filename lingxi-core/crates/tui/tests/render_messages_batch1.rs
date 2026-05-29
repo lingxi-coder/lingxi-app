@@ -1,7 +1,9 @@
 //! M7-04 batch-1 renderer snapshots.
 use lingxi_tui::components::messages::compact_boundary::render_compact_boundary_to_string;
 use lingxi_tui::components::messages::redacted_thinking::render_redacted_thinking_to_string;
+use lingxi_tui::components::messages::system_text::{render_system_text_to_string, SystemTextProps};
 use lingxi_tui::components::messages::thinking::{render_thinking_to_string, ThinkingProps};
+use lingxi_tui::state::SystemLevel;
 
 #[test]
 fn thinking_collapsed() {
@@ -32,4 +34,22 @@ fn redacted_thinking_line() {
 #[test]
 fn compact_boundary_line() {
     insta::assert_snapshot!("compact_boundary_line", render_compact_boundary_to_string());
+}
+
+#[test]
+fn system_text_info_plain() {
+    let s = render_system_text_to_string(SystemTextProps {
+        body: "Saved settings.".into(),
+        level: SystemLevel::Info,
+    });
+    insta::assert_snapshot!("system_text_info_plain", s);
+}
+
+#[test]
+fn system_text_warning_dotted() {
+    let s = render_system_text_to_string(SystemTextProps {
+        body: "Approaching context limit.".into(),
+        level: SystemLevel::Warning,
+    });
+    insta::assert_snapshot!("system_text_warning_dotted", s);
 }

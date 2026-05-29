@@ -242,8 +242,13 @@ fn apply_vim_effect(st: &mut AppState, effect: crate::components::prompt_input::
 ///     - `Resume` → record `resume_request` + flip `should_exit` so the mount
 ///       unwinds back to the CLI, which loads the chosen session.
 ///     - `Cancel` → close the screen (back to REPL).
+/// - `Screen::Settings` (M7-13) is the tab overlay: Left/Right/`h`/`l`/Tab
+///   cycle the four tabs (wrap-around), Esc/`q` close, and `e`/Enter on the
+///   Config tab raises `pending_config_edit` for the bridge's `$EDITOR`
+///   handoff (§4 R7 — the ONLY settings write). All via the pure
+///   `settings::apply_settings_key` reducer.
 ///
-/// M7-13/14 add further `match` arms here for their screens.
+/// M7-14 adds a further `match` arm here for its screen.
 fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
     use crate::screens::Screen;
     match &mut st.active_screen {
@@ -268,6 +273,24 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                     st.should_exit = true; // hand control back to the CLI
                 }
                 ResumeOutcome::Cancel => st.close_screen(),
+            }
+        }
+        Some(Screen::Settings(state)) => {
+            // (M7-13) Tab nav (Left/Right/h/l/Tab/BackTab), Esc/`q` close, and
+            // the Config tab's `e`/Enter $EDITOR handoff — all via the pure
+            // `apply_settings_key` reducer, mirroring the Resume arm.
+            use crate::screens::settings::{apply_settings_key, SettingsOutcome};
+            let ct = iocraft_to_crossterm028_key(k);
+            match apply_settings_key(state, ct) {
+                SettingsOutcome::Stay => { /* tab moved or inert; keep open */ }
+                SettingsOutcome::Close => st.close_screen(),
+                SettingsOutcome::EditConfig => {
+                    // §4 R7: the ONLY settings write is the $EDITOR handoff. We
+                    // CANNOT `.await edit_config_file()` here (sync key path),
+                    // so raise the request; the bridge pump awaits it + re-snaps
+                    // (wired by M7-16). Screen stays open meanwhile.
+                    st.pending_config_edit = true;
+                }
             }
         }
         None => {}

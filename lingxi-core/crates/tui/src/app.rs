@@ -374,6 +374,10 @@ pub fn render_screen(
                 use crate::screens::resume::ResumeScreen;
                 element! { ResumeScreen(state: rs.clone()) }.into_any()
             }
+            Screen::Settings(ss) => {
+                use crate::screens::settings::SettingsScreen;
+                element! { SettingsScreen(state: Some(ss.clone())) }.into_any()
+            }
         };
     }
     let status = state.status.clone();

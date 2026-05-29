@@ -498,6 +498,14 @@ pub struct AppState {
     /// Resume screen also flips `should_exit` so the mount unwinds back to the
     /// CLI, which then surfaces / loads the chosen session.
     pub resume_request: Option<uuid::Uuid>,
+    /// (M7-13) Set by the Settings screen's Config tab on the edit key
+    /// (`e`/`Enter`): the bridge pump observes this flag, awaits
+    /// `OrchestratorHandle::edit_config_file()` (the ONLY settings write the
+    /// engine exposes — §4 R7), re-snapshots the open screen, then clears the
+    /// flag. The actual async handoff + re-snapshot pump is wired by M7-16
+    /// (the screen-lifecycle/command cluster); the synchronous key path only
+    /// raises the request so we never `.await` in a render/key callback.
+    pub pending_config_edit: bool,
     /// (M6-04) Currently focused tool block (Up/Down in scroll mode walks
     /// this through the `AssistantToolUse` entries in scrollback order).
     pub focused_tool_id: Option<ToolUseId>,
@@ -579,6 +587,7 @@ impl AppState {
             sigint_armed_at: None,
             should_exit: false,
             resume_request: None,
+            pending_config_edit: false,
             focused_tool_id: None,
             expanded: HashMap::new(),
             tool_call_inputs: HashMap::new(),
@@ -605,6 +614,14 @@ impl AppState {
     /// inside the `Screen::Doctor` variant.
     pub fn open_doctor(&mut self, diag: crate::screens::doctor::DoctorDiagnostics) {
         self.active_screen = Some(crate::screens::Screen::Doctor(diag));
+    }
+
+    /// (M7-13) Open the Settings screen on a given tab with a pre-read data
+    /// snapshot, carrying both inside the `Screen::Settings` variant. The data
+    /// snapshot is read on the async open path (`SettingsData::snapshot`) so the
+    /// render/key callbacks stay synchronous.
+    pub fn open_settings(&mut self, state: crate::screens::settings::SettingsState) {
+        self.active_screen = Some(crate::screens::Screen::Settings(state));
     }
 
     /// (M7-11) Close any active screen, returning to the REPL. Generic — every

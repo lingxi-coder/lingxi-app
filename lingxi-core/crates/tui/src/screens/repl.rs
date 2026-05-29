@@ -73,6 +73,9 @@ pub struct ReplScreenProps {
     /// (M7-08) Current vim mode (clone of `AppState.vim.mode`). Only shown
     /// when `vim_enabled`.
     pub vim_mode: VimMode,
+    /// (M7-09) Whether the active Visual selection is linewise (`V`). Selects
+    /// `-- VISUAL LINE --` over `-- VISUAL --` in the footer.
+    pub vim_visual_linewise: bool,
 }
 
 impl Default for ReplScreenProps {
@@ -93,6 +96,7 @@ impl Default for ReplScreenProps {
             completion: None,
             vim_enabled: false,
             vim_mode: VimMode::Insert,
+            vim_visual_linewise: false,
         }
     }
 }
@@ -120,6 +124,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let completion = props.completion.clone();
     let vim_enabled = props.vim_enabled;
     let vim_mode = props.vim_mode;
+    let vim_visual_linewise = props.vim_visual_linewise;
     element! {
         View(flex_direction: FlexDirection::Column, width: 100pct, height: 100pct) {
             StatusLine(
@@ -170,6 +175,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 is_empty: prompt_is_empty,
                 vim_enabled: vim_enabled,
                 vim_mode: vim_mode,
+                vim_visual_linewise: vim_visual_linewise,
             )
         }
     }

@@ -355,6 +355,9 @@ pub fn render_screen(
     // (M7-08) Thread the vim flag + mode so the footer can draw `-- MODE --`.
     let vim_enabled = state.vim_enabled;
     let vim_mode = state.vim.mode;
+    // (M7-09) Whether the active Visual selection is linewise (`V`) — picks
+    // `-- VISUAL LINE --` over `-- VISUAL --`.
+    let vim_visual_linewise = state.vim.visual.is_some_and(|v| v.linewise);
     // (M7-03 review) Thread the already-width-synced height cache instead of
     // rebuilding it inside `VirtualMessageList` every frame (that was
     // O(total messages) per frame). The live render path keeps
@@ -390,6 +393,7 @@ pub fn render_screen(
             completion: completion,
             vim_enabled: vim_enabled,
             vim_mode: vim_mode,
+            vim_visual_linewise: vim_visual_linewise,
         )
     }
     .into_any()

@@ -18,6 +18,27 @@ pub fn footer_mode_label(vim_enabled: bool, mode: VimMode) -> Option<&'static st
     vim_enabled.then(|| mode_indicator(mode))
 }
 
+/// (M7-09) Mode-indicator label, distinguishing charwise vs linewise Visual.
+/// `None` when vim is disabled. Supersedes [`footer_mode_label`] which cannot
+/// tell `v` (`-- VISUAL --`) from `V` (`-- VISUAL LINE --`); the older fn is
+/// retained for callers that don't track the linewise flag.
+#[must_use]
+pub fn footer_mode_label_v2(
+    vim_enabled: bool,
+    mode: VimMode,
+    visual_linewise: bool,
+) -> Option<&'static str> {
+    if !vim_enabled {
+        return None;
+    }
+    Some(match mode {
+        VimMode::Normal => "-- NORMAL --",
+        VimMode::Insert => "-- INSERT --",
+        VimMode::Visual if visual_linewise => "-- VISUAL LINE --",
+        VimMode::Visual => "-- VISUAL --",
+    })
+}
+
 /// Which leading glyph the mode-indicator shows. M7-06 ships `Prompt`; the
 /// `Bash` / vim-mode variants land in M7-07/M7-08.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -58,6 +79,9 @@ pub struct PromptInputFooterProps {
     pub vim_enabled: bool,
     /// (M7-08) Current vim mode (only rendered when `vim_enabled`).
     pub vim_mode: VimMode,
+    /// (M7-09) Whether the active Visual selection is linewise (`V`) vs charwise
+    /// (`v`). Selects `-- VISUAL LINE --` over `-- VISUAL --`.
+    pub vim_visual_linewise: bool,
 }
 
 impl Default for PromptInputFooterProps {
@@ -68,6 +92,7 @@ impl Default for PromptInputFooterProps {
             is_empty: false,
             vim_enabled: false,
             vim_mode: VimMode::Insert,
+            vim_visual_linewise: false,
         }
     }
 }
@@ -83,8 +108,10 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
     } else {
         String::new()
     };
-    // (M7-08) Vim mode indicator: shown only when vim is enabled.
-    let mode_label = footer_mode_label(props.vim_enabled, props.vim_mode).map(str::to_string);
+    // (M7-08/M7-09) Vim mode indicator: shown only when vim is enabled; the v2
+    // form distinguishes `-- VISUAL --` from `-- VISUAL LINE --`.
+    let mode_label = footer_mode_label_v2(props.vim_enabled, props.vim_mode, props.vim_visual_linewise)
+        .map(str::to_string);
     element! {
         View(flex_direction: FlexDirection::Column) {
             #(mode_label.map(|label| element! {
@@ -139,5 +166,44 @@ mod vim_indicator_tests {
     #[test]
     fn indicator_hidden_when_vim_disabled() {
         assert_eq!(footer_mode_label(false, VimMode::Normal), None);
+    }
+}
+
+#[cfg(test)]
+mod visual_indicator_tests {
+    use super::*;
+    use crate::components::prompt_input::VimMode;
+
+    #[test]
+    fn charwise_visual_label() {
+        assert_eq!(
+            footer_mode_label_v2(true, VimMode::Visual, false),
+            Some("-- VISUAL --")
+        );
+    }
+
+    #[test]
+    fn linewise_visual_label() {
+        assert_eq!(
+            footer_mode_label_v2(true, VimMode::Visual, true),
+            Some("-- VISUAL LINE --")
+        );
+    }
+
+    #[test]
+    fn normal_insert_labels_unchanged() {
+        assert_eq!(
+            footer_mode_label_v2(true, VimMode::Normal, false),
+            Some("-- NORMAL --")
+        );
+        assert_eq!(
+            footer_mode_label_v2(true, VimMode::Insert, false),
+            Some("-- INSERT --")
+        );
+    }
+
+    #[test]
+    fn disabled_is_none() {
+        assert_eq!(footer_mode_label_v2(false, VimMode::Visual, true), None);
     }
 }

@@ -92,13 +92,17 @@ struct Builder<'a> {
     pending: Vec<StyledSpan>,
     inline: InlineState,
     link_url: Option<String>,
-    /// Active heading level, set between `Start(Heading)`/`End(Heading)`.
-    heading: Option<HeadingLevel>,
     /// Stack of list contexts (outer to inner). `Some(n)` = ordered list at
     /// next item number `n`; `None` = unordered.
     list_stack: Vec<Option<u64>>,
-    /// True while inside a blockquote (prefix lines with the bar + italic).
-    in_blockquote: bool,
+    /// Nesting depth of `Emphasis` spans. Italic is active while `> 0`. A
+    /// counter (not a bool) so `End(Emphasis)` only clears the emphasis it
+    /// owns and never the italic owned by an enclosing blockquote.
+    emphasis_depth: u32,
+    /// Nesting depth of blockquotes. While `> 0`, lines are prefixed with the
+    /// bar and rendered italic. Independent of `emphasis_depth` so the two
+    /// concerns can't stomp each other's italic.
+    blockquote_depth: u32,
     /// When inside a fenced/indented code block: accumulates raw text and
     /// the language hint. `Some` between `Start(CodeBlock)`/`End(CodeBlock)`.
     code_block: Option<CodeBlockState>,
@@ -112,9 +116,9 @@ impl<'a> Builder<'a> {
             pending: Vec::new(),
             inline: InlineState::default(),
             link_url: None,
-            heading: None,
             list_stack: Vec::new(),
-            in_blockquote: false,
+            emphasis_depth: 0,
+            blockquote_depth: 0,
             code_block: None,
         }
     }
@@ -125,7 +129,7 @@ impl<'a> Builder<'a> {
             return;
         }
         let mut spans = std::mem::take(&mut self.pending);
-        if self.in_blockquote {
+        if self.blockquote_depth > 0 {
             let mut prefixed = vec![StyledSpan::styled(
                 format!("{BLOCKQUOTE_BAR} "),
                 SpanStyle {
@@ -145,8 +149,13 @@ impl<'a> Builder<'a> {
         if text.is_empty() {
             return;
         }
+        // Effective italic = inline emphasis OR an enclosing blockquote (or an
+        // H1 heading's `inline.italic`). Derived here so emphasis and
+        // blockquote own independent state and neither clears the other's bit.
+        let mut state = self.inline;
+        state.italic = state.italic || self.emphasis_depth > 0 || self.blockquote_depth > 0;
         self.pending
-            .push(StyledSpan::styled(text, self.inline.to_style(*self.theme)));
+            .push(StyledSpan::styled(text, state.to_style(*self.theme)));
     }
 
     #[allow(clippy::too_many_lines, clippy::match_same_arms)]
@@ -154,8 +163,10 @@ impl<'a> Builder<'a> {
         match event {
             Event::Start(Tag::Strong) => self.inline.bold = true,
             Event::End(TagEnd::Strong) => self.inline.bold = false,
-            Event::Start(Tag::Emphasis) => self.inline.italic = true,
-            Event::End(TagEnd::Emphasis) => self.inline.italic = false,
+            Event::Start(Tag::Emphasis) => self.emphasis_depth += 1,
+            Event::End(TagEnd::Emphasis) => {
+                self.emphasis_depth = self.emphasis_depth.saturating_sub(1);
+            }
             Event::Code(text) => {
                 // inline code: force code color regardless of surrounding em.
                 let prev = self.inline.code;
@@ -188,7 +199,6 @@ impl<'a> Builder<'a> {
             }
             Event::Start(Tag::Heading { level, .. }) => {
                 self.flush();
-                self.heading = Some(level);
                 match level {
                     HeadingLevel::H1 => {
                         self.inline.bold = true;
@@ -201,7 +211,6 @@ impl<'a> Builder<'a> {
             Event::End(TagEnd::Heading(_)) => {
                 self.flush();
                 self.inline = InlineState::default();
-                self.heading = None;
                 self.lines.push(StyledLine::empty());
             }
             Event::Start(Tag::List(first)) => {
@@ -229,24 +238,20 @@ impl<'a> Builder<'a> {
                 self.flush();
             }
             Event::Start(Tag::BlockQuote(_)) => {
-                self.in_blockquote = true;
-                self.inline.italic = true;
+                self.blockquote_depth += 1;
             }
             Event::End(TagEnd::BlockQuote(_)) => {
-                self.in_blockquote = false;
-                self.inline.italic = false;
+                self.blockquote_depth = self.blockquote_depth.saturating_sub(1);
             }
             Event::Start(Tag::CodeBlock(kind)) => {
                 self.flush();
                 let lang = match kind {
                     CodeBlockKind::Fenced(info) => {
                         let trimmed = info.trim();
-                        if trimmed.is_empty() {
-                            None
-                        } else {
-                            // info-string may be "rust ignore" — take first word.
-                            Some(trimmed.split_whitespace().next().unwrap().to_string())
-                        }
+                        // info-string may be "rust ignore" — take first word.
+                        // `next()` yields `None` for whitespace-only info,
+                        // collapsing to no language hint.
+                        trimmed.split_whitespace().next().map(ToString::to_string)
                     }
                     CodeBlockKind::Indented => None,
                 };
@@ -397,6 +402,35 @@ mod tests {
             .find(|s| s.text.contains("quoted"))
             .unwrap();
         assert!(text_span.style.italic);
+    }
+
+    #[test]
+    fn emphasis_inside_blockquote_keeps_blockquote_italic() {
+        // `> before *em* after`: the blockquote makes the whole line italic.
+        // The inner emphasis must not clear the blockquote's italic for the
+        // text that follows it.
+        let lines = render("> before *em* after", &theme());
+        let line = lines
+            .iter()
+            .find(|l| l.plain_text().contains("after"))
+            .unwrap();
+        let em = line.spans.iter().find(|s| s.text == "em").unwrap();
+        assert!(em.style.italic, "emphasis text must be italic");
+        let after = line
+            .spans
+            .iter()
+            .find(|s| s.text.contains("after"))
+            .unwrap();
+        assert!(
+            after.style.italic,
+            "text after emphasis must remain italic (blockquote intact)"
+        );
+        let before = line
+            .spans
+            .iter()
+            .find(|s| s.text.contains("before"))
+            .unwrap();
+        assert!(before.style.italic, "text before emphasis must be italic");
     }
 
     #[test]

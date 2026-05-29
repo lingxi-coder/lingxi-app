@@ -94,7 +94,11 @@ mod tests {
 
     #[test]
     fn filtered_ranked_orders_contiguous_first() {
-        let cands = vec!["context".to_string(), "compact".to_string(), "copy".to_string()];
+        let cands = vec![
+            "context".to_string(),
+            "compact".to_string(),
+            "copy".to_string(),
+        ];
         let out = filtered_ranked("co", &cands);
         // All three contain "co"; "copy" and "compact" and "context" all start
         // with "co" (gap 0). Tie broken by shorter then ASCII → copy, compact,

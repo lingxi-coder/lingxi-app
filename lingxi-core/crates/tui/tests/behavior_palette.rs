@@ -1,6 +1,6 @@
 //! M7-07 palette behavior + focus-trap, driving `root::handle_live_key` — THE
 //! function the live `use_terminal_events` closure calls (mirrors
-//! live_focus_trap_test.rs).
+//! `live_focus_trap_test.rs`).
 
 use iocraft::prelude::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use lingxi_tui::root::handle_live_key;
@@ -58,7 +58,10 @@ fn focus_trap_down_key_does_not_scroll_scrollback() {
     let before = st.prompt_text.clone();
     handle_live_key(&mut st, &key(KeyCode::Down), 24);
     assert_eq!(st.palette.selected, 1, "Down moved palette selection");
-    assert_eq!(st.prompt_text, before, "Down did not pull history into prompt");
+    assert_eq!(
+        st.prompt_text, before,
+        "Down did not pull history into prompt"
+    );
 }
 
 #[test]
@@ -89,7 +92,10 @@ fn permission_pending_beats_open_palette() {
     // A palette-navigation key must route to the permission dialog, not the
     // palette: the dialog stays open and the palette selection is untouched.
     handle_live_key(&mut st, &key(KeyCode::Down), 24);
-    assert_eq!(st.palette.selected, 0, "permission owns keys; palette unchanged");
+    assert_eq!(
+        st.palette.selected, 0,
+        "permission owns keys; palette unchanged"
+    );
     assert!(st.pending_permission.is_some());
 }
 

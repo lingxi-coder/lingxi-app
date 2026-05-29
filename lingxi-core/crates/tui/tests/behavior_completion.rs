@@ -16,8 +16,10 @@ fn state_with_files() -> (AppState, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("alpha.rs"), "").unwrap();
     std::fs::write(dir.path().join("beta.rs"), "").unwrap();
-    let mut status = StatusSnapshot::default();
-    status.cwd = dir.path().to_path_buf();
+    let status = StatusSnapshot {
+        cwd: dir.path().to_path_buf(),
+        ..StatusSnapshot::default()
+    };
     (AppState::new(status), dir)
 }
 

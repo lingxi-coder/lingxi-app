@@ -65,7 +65,10 @@ impl PaletteState {
     /// The filtered, ranked rows for the current filter.
     #[must_use]
     pub fn rows(&self) -> Vec<PaletteRow> {
-        let names: Vec<String> = BUILTIN_COMMAND_NAMES.iter().map(|s| (*s).to_string()).collect();
+        let names: Vec<String> = BUILTIN_COMMAND_NAMES
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
         filtered_ranked(&self.filter, &names)
             .into_iter()
             .filter_map(|matched| {
@@ -223,7 +226,11 @@ mod tests {
     fn core_rows_carry_real_descriptions() {
         let mut p = PaletteState::default();
         p.sync_from_prompt("/help");
-        let row = p.rows().into_iter().find(|r| r.name == "help").expect("help present");
+        let row = p
+            .rows()
+            .into_iter()
+            .find(|r| r.name == "help")
+            .expect("help present");
         assert_eq!(row.description, "Show help and available commands");
     }
 
@@ -232,9 +239,15 @@ mod tests {
         let mut p = PaletteState::default();
         p.sync_from_prompt("/co"); // several rows
         assert_eq!(p.selected, 0);
-        assert!(matches!(handle_key(&mut p, KeyCode::Down), PaletteKeyOutcome::Consumed));
+        assert!(matches!(
+            handle_key(&mut p, KeyCode::Down),
+            PaletteKeyOutcome::Consumed
+        ));
         assert_eq!(p.selected, 1);
-        assert!(matches!(handle_key(&mut p, KeyCode::Up), PaletteKeyOutcome::Consumed));
+        assert!(matches!(
+            handle_key(&mut p, KeyCode::Up),
+            PaletteKeyOutcome::Consumed
+        ));
         assert_eq!(p.selected, 0);
         // Up at the top stays at 0 (no wrap).
         handle_key(&mut p, KeyCode::Up);
@@ -258,14 +271,20 @@ mod tests {
     fn enter_also_accepts() {
         let mut p = PaletteState::default();
         p.sync_from_prompt("/help");
-        assert!(matches!(handle_key(&mut p, KeyCode::Enter), PaletteKeyOutcome::Accept(_)));
+        assert!(matches!(
+            handle_key(&mut p, KeyCode::Enter),
+            PaletteKeyOutcome::Accept(_)
+        ));
     }
 
     #[test]
     fn esc_dismisses_and_releases_keys() {
         let mut p = PaletteState::default();
         p.sync_from_prompt("/co");
-        assert!(matches!(handle_key(&mut p, KeyCode::Esc), PaletteKeyOutcome::Dismiss));
+        assert!(matches!(
+            handle_key(&mut p, KeyCode::Esc),
+            PaletteKeyOutcome::Dismiss
+        ));
         assert!(!p.open);
     }
 
@@ -275,6 +294,9 @@ mod tests {
         p.sync_from_prompt("/zzzznomatch");
         assert!(p.rows().is_empty());
         // Nothing to accept → Enter/Tab fall through to default input.
-        assert!(matches!(handle_key(&mut p, KeyCode::Enter), PaletteKeyOutcome::PassThrough));
+        assert!(matches!(
+            handle_key(&mut p, KeyCode::Enter),
+            PaletteKeyOutcome::PassThrough
+        ));
     }
 }

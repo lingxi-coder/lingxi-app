@@ -4,7 +4,7 @@
 //! is the only fs-touching fn and is exercised by a separate fs test.
 //!
 //! Literal lock (design §2.8): inserts `@<path> ` (trailing space), mirroring
-//! claude-code QuickOpenDialog handleInsert. Empty-state strings copied below.
+//! claude-code `QuickOpenDialog` handleInsert. Empty-state strings copied below.
 
 use std::path::Path;
 
@@ -16,9 +16,9 @@ use crate::theme::TuiTheme;
 /// Max dropdown rows (shared with the palette; claude-code `OVERLAY_MAX_ITEMS`).
 pub const OVERLAY_MAX_ITEMS: usize = 5;
 
-/// claude-code QuickOpenDialog empty-state literal when a query is present.
+/// claude-code `QuickOpenDialog` empty-state literal when a query is present.
 pub const EMPTY_WITH_QUERY: &str = "No matching files";
-/// claude-code QuickOpenDialog empty-state literal for an empty query.
+/// claude-code `QuickOpenDialog` empty-state literal for an empty query.
 pub const EMPTY_NO_QUERY: &str = "Start typing to search…";
 
 /// `@` completion overlay state.
@@ -56,27 +56,24 @@ impl CompletionState {
     /// pre-supplied candidate list (so tests inject candidates; the live path
     /// calls `read_cwd_entries` first — see Task 9).
     pub fn sync(&mut self, prompt: &str, cursor: usize, candidates: &[String]) {
-        match active_at_token(prompt, cursor) {
-            Some((_, partial)) => {
-                if !self.open || partial != self.filter {
-                    self.selected = 0;
-                }
-                self.open = true;
-                self.filter = partial;
-                self.candidates = candidates.to_vec();
-                let max = self.rows().len();
-                if max == 0 {
-                    self.selected = 0;
-                } else if self.selected >= max {
-                    self.selected = max - 1;
-                }
-            }
-            None => {
-                self.open = false;
-                self.filter.clear();
+        if let Some((_, partial)) = active_at_token(prompt, cursor) {
+            if !self.open || partial != self.filter {
                 self.selected = 0;
-                self.candidates.clear();
             }
+            self.open = true;
+            self.filter = partial;
+            self.candidates = candidates.to_vec();
+            let max = self.rows().len();
+            if max == 0 {
+                self.selected = 0;
+            } else if self.selected >= max {
+                self.selected = max - 1;
+            }
+        } else {
+            self.open = false;
+            self.filter.clear();
+            self.selected = 0;
+            self.candidates.clear();
         }
     }
 
@@ -163,7 +160,10 @@ impl CompletionState {
                 self.filter.clear();
                 self.selected = 0;
                 self.candidates.clear();
-                CompletionKeyOutcome::Accept { new_prompt, new_cursor }
+                CompletionKeyOutcome::Accept {
+                    new_prompt,
+                    new_cursor,
+                }
             }
             _ => self.handle_key(code),
         }
@@ -204,7 +204,11 @@ pub struct CompletionOverlayProps {
 pub fn CompletionOverlay(props: &CompletionOverlayProps) -> impl Into<AnyElement<'static>> {
     let selected = props.selected;
     if props.rows.is_empty() {
-        let msg = if props.empty_query { EMPTY_NO_QUERY } else { EMPTY_WITH_QUERY };
+        let msg = if props.empty_query {
+            EMPTY_NO_QUERY
+        } else {
+            EMPTY_WITH_QUERY
+        };
         return element! {
             View(height: 1) { Text(content: msg.to_string(), color: TuiTheme::DIM) }
         }
@@ -232,7 +236,11 @@ mod tests {
     use super::*;
 
     fn cands() -> Vec<String> {
-        vec!["src/main.rs".into(), "src/lib.rs".into(), "README.md".into()]
+        vec![
+            "src/main.rs".into(),
+            "src/lib.rs".into(),
+            "README.md".into(),
+        ]
     }
 
     #[test]
@@ -296,7 +304,10 @@ mod tests {
         let sel = c.rows()[c.selected].clone();
         let outcome = c.handle_key_with_prompt(KeyCode::Tab, "@s", 2);
         match outcome {
-            CompletionKeyOutcome::Accept { new_prompt, new_cursor } => {
+            CompletionKeyOutcome::Accept {
+                new_prompt,
+                new_cursor,
+            } => {
                 let expected = format!("@{sel} ");
                 assert_eq!(new_prompt, expected);
                 assert_eq!(new_cursor, expected.len());
@@ -310,7 +321,10 @@ mod tests {
     fn esc_dismisses() {
         let mut c = CompletionState::default();
         c.sync("@src", 4, &cands());
-        assert!(matches!(c.handle_key(KeyCode::Esc), CompletionKeyOutcome::Dismiss));
+        assert!(matches!(
+            c.handle_key(KeyCode::Esc),
+            CompletionKeyOutcome::Dismiss
+        ));
         assert!(!c.open);
     }
 

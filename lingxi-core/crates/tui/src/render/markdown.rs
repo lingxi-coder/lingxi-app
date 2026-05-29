@@ -262,23 +262,37 @@ impl<'a> Builder<'a> {
             }
             Event::End(TagEnd::CodeBlock) => {
                 if let Some(cb) = self.code_block.take() {
-                    self.lines.push(StyledLine {
-                        spans: vec![StyledSpan::code_placeholder(cb.text, cb.lang.as_deref())],
-                    });
+                    self.emit_code_block(&cb);
                 }
             }
             _ => {}
         }
     }
 
+    /// M7-02: route a finished fenced/indented code block through syntect.
+    /// `cb.lang` is the fence info-string (e.g. `rust`); empty/unknown → plain
+    /// fallback. Emits one [`StyledLine`] per code line. Empty body → nothing.
+    fn emit_code_block(&mut self, cb: &CodeBlockState) {
+        let lang = crate::render::syntax::detect_language(cb.lang.as_deref(), None);
+        let highlighted =
+            crate::render::syntax::highlight(&cb.text, lang.as_deref(), &crate::theme::TuiTheme);
+        if highlighted.is_empty() {
+            // Preserve the previous behavior of an empty block still yielding a
+            // (now empty-text) line so spacing/structure is stable.
+            self.lines.push(StyledLine {
+                spans: vec![StyledSpan::plain(String::new())],
+            });
+        } else {
+            self.lines.extend(highlighted);
+        }
+    }
+
     fn finish(mut self) -> Vec<StyledLine> {
         // Defensive: an unterminated fence (streaming) leaves `code_block`
-        // set with no `End(CodeBlock)` event — emit its placeholder so the
-        // partial code still renders rather than vanishing.
+        // set with no `End(CodeBlock)` event — highlight its partial body so
+        // the code still renders rather than vanishing.
         if let Some(cb) = self.code_block.take() {
-            self.lines.push(StyledLine {
-                spans: vec![StyledSpan::code_placeholder(cb.text, cb.lang.as_deref())],
-            });
+            self.emit_code_block(&cb);
         }
         self.flush();
         // Drop a trailing blank line for tidy output.
@@ -433,69 +447,79 @@ mod tests {
         assert!(before.style.italic, "text before emphasis must be italic");
     }
 
+    // M7-02: fenced code is now routed through syntect at render time, so
+    // these blocks emit syntax-highlighted StyledLines, NOT a placeholder
+    // span. Parity (§0 Q3): assert STRUCTURE (the code text appears, known
+    // langs colorize at least one span), not exact per-token colors.
+
     #[test]
-    fn fenced_code_emits_placeholder_with_lang() {
-        let md = "```rust\nfn main() {}\n```";
+    fn fenced_rust_block_is_syntax_highlighted() {
+        let md = "Here:\n\n```rust\nfn main() {}\n```\n";
         let lines = render(md, &theme());
-        // exactly one placeholder span carrying the raw code + lang hint.
-        let ph = lines
+        // Find the code line "fn main() {}" among the rendered lines.
+        let code_line = lines
             .iter()
-            .flat_map(|l| &l.spans)
-            .find(|s| matches!(s.kind, crate::render::SpanKind::CodePlaceholder { .. }))
-            .expect("a CodePlaceholder span");
-        assert_eq!(ph.text, "fn main() {}\n");
-        assert_eq!(
-            ph.kind,
-            crate::render::SpanKind::CodePlaceholder {
-                lang: Some("rust".to_string())
-            }
+            .find(|l| l.plain_text().contains("fn main"))
+            .expect("code line rendered");
+        assert!(
+            code_line
+                .spans
+                .iter()
+                .any(|s| s.style.fg != StyleColor::Default),
+            "fenced rust is syntax-highlighted, not a plain placeholder"
+        );
+        // No CodePlaceholder span survives.
+        assert!(
+            !lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .any(|s| matches!(s.kind, crate::render::SpanKind::CodePlaceholder { .. })),
+            "placeholder is replaced by highlighted spans"
         );
     }
 
     #[test]
-    fn fenced_code_without_lang_has_none() {
+    fn fenced_unknown_lang_block_is_plain() {
+        let md = "```klingon\nQapla'\n```\n";
+        let lines = render(md, &theme());
+        let code_line = lines
+            .iter()
+            .find(|l| l.plain_text().contains("Qapla"))
+            .expect("code line rendered");
+        assert!(
+            code_line
+                .spans
+                .iter()
+                .all(|s| s.style.fg == StyleColor::Default),
+            "unknown-lang fence falls back to plain"
+        );
+    }
+
+    #[test]
+    fn fenced_no_lang_block_is_plain() {
         let md = "```\nplain code\n```";
         let lines = render(md, &theme());
-        let ph = lines
+        let code_line = lines
             .iter()
-            .flat_map(|l| &l.spans)
-            .find(|s| matches!(s.kind, crate::render::SpanKind::CodePlaceholder { .. }))
-            .unwrap();
-        assert_eq!(
-            ph.kind,
-            crate::render::SpanKind::CodePlaceholder { lang: None }
-        );
+            .find(|l| l.plain_text().contains("plain code"))
+            .expect("code line rendered");
+        assert!(code_line
+            .spans
+            .iter()
+            .all(|s| s.style.fg == StyleColor::Default));
     }
 
     #[test]
-    fn fenced_code_is_not_styled_as_inline() {
-        let md = "```js\nconst x = 1;\n```";
-        let lines = render(md, &theme());
-        let ph = lines
-            .iter()
-            .flat_map(|l| &l.spans)
-            .find(|s| matches!(s.kind, crate::render::SpanKind::CodePlaceholder { .. }))
-            .unwrap();
-        // placeholder text is raw — no bold/italic leaked in.
-        assert!(!ph.style.bold);
-        assert!(!ph.style.italic);
-    }
-
-    #[test]
-    fn unclosed_code_fence_does_not_panic_and_emits_placeholder() {
+    fn unclosed_code_fence_does_not_panic_and_renders_partial() {
         // No closing ``` — streaming mid-block.
         let md = "intro\n```rust\nfn main() {";
         let lines = render(md, &theme());
         // intro paragraph present.
         assert!(lines.iter().any(|l| l.plain_text().contains("intro")));
-        // the partial code still becomes a placeholder.
-        let ph = lines
-            .iter()
-            .flat_map(|l| &l.spans)
-            .find(|s| matches!(s.kind, crate::render::SpanKind::CodePlaceholder { .. }));
+        // the partial code still renders (now highlighted, not a placeholder).
         assert!(
-            ph.is_some(),
-            "unclosed fence should still emit a placeholder"
+            lines.iter().any(|l| l.plain_text().contains("fn main")),
+            "unclosed fence still renders its partial body"
         );
     }
 
@@ -556,13 +580,38 @@ mod tests {
         insta::assert_yaml_snapshot!(render("see [the docs](https://example.io/guide)", &theme()));
     }
 
+    /// Render fenced-code lines structurally: per span "[C]"/"[P]" (colored /
+    /// plain) + the text. M7-02 routes fences through syntect, so concrete
+    /// colors are NOT snapshotted (parity §0 Q3) — only which spans colorize.
+    fn fence_structure(lines: &[StyledLine]) -> String {
+        let mut out = String::new();
+        for (i, l) in lines.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            for s in &l.spans {
+                let flag = if s.style.fg == StyleColor::Default {
+                    'P'
+                } else {
+                    'C'
+                };
+                out.push('[');
+                out.push(flag);
+                out.push(']');
+                out.push_str(&s.text);
+            }
+        }
+        out
+    }
+
     #[test]
-    fn snapshot_fenced_code_placeholder() {
-        insta::assert_yaml_snapshot!(render("```rust\nfn main() {}\n```", &theme()));
+    fn snapshot_fenced_code_highlighted() {
+        // M7-02: ```rust fence is syntect-highlighted (structure, not color).
+        insta::assert_snapshot!(fence_structure(&render("```rust\nfn main() {}\n```", &theme())));
     }
 
     #[test]
     fn snapshot_partial_unclosed_fence() {
-        insta::assert_yaml_snapshot!(render("text\n```python\nprint(1)", &theme()));
+        insta::assert_snapshot!(fence_structure(&render("text\n```python\nprint(1)", &theme())));
     }
 }

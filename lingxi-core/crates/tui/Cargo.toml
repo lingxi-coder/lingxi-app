@@ -38,6 +38,9 @@ tracing = "0.1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 uuid = { version = "1.10", features = ["v4"] }
+# (M7-03) Column-accurate wrap measurement for the line-based scroll model.
+# Exact-pinned to the version already locked in the workspace (0.1.14).
+unicode-width = "=0.1.14"
 
 [dev-dependencies]
 insta = { version = "1.40", features = ["yaml"] }

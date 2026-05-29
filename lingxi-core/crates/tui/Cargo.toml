@@ -20,6 +20,7 @@ lingxi-commands = { path = "../commands" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 iocraft = "=0.8.3"
+pulldown-cmark = { version = "=0.13.4", default-features = false }
 crossterm = { workspace = true, features = ["event-stream"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-util = { workspace = true, features = ["rt"] }

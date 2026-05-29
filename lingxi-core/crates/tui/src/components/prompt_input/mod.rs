@@ -18,6 +18,7 @@
 
 use iocraft::prelude::*;
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 /// Cursor movement primitive for the line editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +132,24 @@ pub fn apply_newline(text: &str, cursor: usize) -> (String, usize) {
     apply_insert(text, cursor, '\n')
 }
 
+/// Number of terminal rows the buffer occupies at the given total column
+/// `width`, accounting for the 2-column `"> "` marker and soft-wrapping each
+/// logical line. Always at least 1 (an empty buffer shows one row).
+#[must_use]
+pub fn visual_row_count(text: &str, width: usize) -> usize {
+    let usable = width.saturating_sub(2).max(1);
+    let starts = line_starts(text);
+    let mut rows = 0usize;
+    for (i, &start) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).map_or(text.len(), |&s| s - 1); // drop the '\n'
+        let line = &text[start..end];
+        let w = UnicodeWidthStr::width(line);
+        // ceil(w / usable), but an empty line is still 1 row.
+        rows += if w == 0 { 1 } else { w.div_ceil(usable) };
+    }
+    rows.max(1)
+}
+
 /// Props for `PromptInput`.
 #[derive(Default, Props)]
 pub struct PromptInputProps {
@@ -210,6 +229,31 @@ mod tests {
         let (t, c) = apply_newline("é", 1);
         assert_eq!(t, "\né");
         assert_eq!(c, 1);
+    }
+
+    #[test]
+    fn visual_rows_single_short_line() {
+        // "hi" with the "> " marker, width 80 → 1 row.
+        assert_eq!(visual_row_count("hi", 80), 1);
+        assert_eq!(visual_row_count("", 80), 1); // empty buffer still 1 row
+    }
+
+    #[test]
+    fn visual_rows_three_logical_lines() {
+        assert_eq!(visual_row_count("a\nb\nc", 80), 3);
+    }
+
+    #[test]
+    fn visual_rows_wraps_long_line() {
+        // 10 graphemes, usable width 4 (after the 2-col "> " marker) → ceil(10/4)=3.
+        // width arg is the TOTAL column count; usable = width - 2.
+        assert_eq!(visual_row_count("0123456789", 6), 3);
+    }
+
+    #[test]
+    fn visual_rows_wrap_plus_newline() {
+        // "0123456789" wraps to 3 (width 6 → usable 4), then "x" is 1 → 4 total.
+        assert_eq!(visual_row_count("0123456789\nx", 6), 4);
     }
 
     #[test]

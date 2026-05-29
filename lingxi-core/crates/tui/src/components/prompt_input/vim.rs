@@ -344,6 +344,47 @@ impl<'a> VimCursor<'a> {
     }
 }
 
+impl<'a> VimCursor<'a> {
+    /// vim f/F/t/T. Returns target byte offset or None if not found.
+    #[must_use]
+    pub fn find_character(&self, ch: char, kind: FindKind, count: usize) -> Option<usize> {
+        let forward = matches!(kind, FindKind::F | FindKind::T);
+        let till = matches!(kind, FindKind::T | FindKind::BigT);
+        let count = count.max(1);
+        let mut found = 0usize;
+        if forward {
+            let mut pos = self.next_off(self.offset);
+            while pos < self.text.len() {
+                if self.char_at(pos) == Some(ch) {
+                    found += 1;
+                    if found == count {
+                        return Some(if till { self.prev_off(pos).max(self.offset) } else { pos });
+                    }
+                }
+                pos = self.next_off(pos);
+            }
+        } else {
+            if self.offset == 0 {
+                return None;
+            }
+            let mut pos = self.prev_off(self.offset);
+            loop {
+                if self.char_at(pos) == Some(ch) {
+                    found += 1;
+                    if found == count {
+                        return Some(if till { self.next_off(pos).min(self.offset) } else { pos });
+                    }
+                }
+                if pos == 0 {
+                    break;
+                }
+                pos = self.prev_off(pos);
+            }
+        }
+        None
+    }
+}
+
 /// Footer mode-indicator literal. Matches the well-known vim convention
 /// (claude-code surfaces the mode via PromptInputModeIndicator; the literal
 /// status-line text is the standard vim `-- MODE --`).
@@ -470,5 +511,41 @@ mod word_tests {
     fn word_motions_handle_punctuation_boundaries() {
         let t = "a, b";
         assert_eq!(cur(t, 0).end_vim_word().offset, 1); // ',' is end of next "word"
+    }
+}
+
+#[cfg(test)]
+mod find_tests {
+    use super::*;
+    fn cur(text: &str, off: usize) -> VimCursor<'_> {
+        VimCursor { text, offset: off }
+    }
+
+    #[test]
+    fn f_lands_on_char() {
+        let t = "abcdabcd";
+        assert_eq!(cur(t, 0).find_character('c', FindKind::F, 1), Some(2));
+        assert_eq!(cur(t, 0).find_character('c', FindKind::F, 2), Some(6)); // 2nd c
+        assert_eq!(cur(t, 0).find_character('z', FindKind::F, 1), None);
+    }
+
+    #[test]
+    fn t_lands_before_char() {
+        let t = "abcdabcd";
+        assert_eq!(cur(t, 0).find_character('c', FindKind::T, 1), Some(1)); // before first c
+    }
+
+    #[test]
+    fn big_f_searches_backward() {
+        let t = "abcdabcd";
+        assert_eq!(cur(t, 7).find_character('a', FindKind::BigF, 1), Some(4));
+        assert_eq!(cur(t, 7).find_character('a', FindKind::BigF, 2), Some(0));
+    }
+
+    #[test]
+    fn big_t_lands_after_char_backward() {
+        let t = "abcdabcd";
+        // from offset 7 ('d'), backward till 'a' (at 4) -> land just after it = 5
+        assert_eq!(cur(t, 7).find_character('a', FindKind::BigT, 1), Some(5));
     }
 }

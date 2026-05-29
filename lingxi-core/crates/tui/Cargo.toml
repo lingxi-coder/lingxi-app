@@ -1,6 +1,6 @@
 [package]
 name = "lingxi-tui"
-version = "0.7.0"   # bumped to 0.7.0 in M6-09
+version = "0.8.0"   # bumped to 0.8.0 in M7-16
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

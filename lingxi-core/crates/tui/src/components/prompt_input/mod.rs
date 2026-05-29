@@ -27,6 +27,9 @@ pub mod completion;
 pub mod fuzzy;
 pub mod palette;
 
+pub mod vim;
+pub use vim::{mode_indicator, VimMode, VimState};
+
 /// Cursor movement primitive for the line editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorMove {

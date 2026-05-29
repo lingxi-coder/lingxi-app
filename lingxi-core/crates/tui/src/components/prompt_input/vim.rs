@@ -13,11 +13,42 @@
 //! are logical-line motions. Grapheme-cluster motion (claude-code's
 //! `Intl.Segmenter`) is deferred to M8; motions step by `char` here.
 //!
-//! ## Telemetry (M7-08)
-//! M7-08 emits ZERO telemetry events. `tengu_tui_vim_mode_entered`
-//! (aggregated, NOT per-keystroke) is a CANDIDATE deferred to the M7-16
-//! telemetry audit — see M7 design §2.7. Do not register it here without an
-//! emit site (M6 discipline: every registered name has a real emit site).
+//! ## GATE: vim subset (M7-09 — parent spec §4 R1 / hard gate §3.3)
+//!
+//! Core vim SHIPS and passes the operator×motion matrix. Obscure cases are
+//! DEFERRED to M8 with this documented "vim parity subset" line:
+//!
+//! IN (M7-09): operators d/c/y × motions {w b e $ 0 ^ h l j k f<char> t<char>
+//!   G gg}, counts (3dw, 2yy, d3w); doubled ops dd/cc/yy (+counts); cw->ce;
+//!   x (count); p/P charwise+linewise; the unnamed yank/delete register;
+//!   Visual (v) + Visual-line (V) with d/c/y on the selection; c enters Insert.
+//!
+//! DEFERRED to M8 (vim parity subset): `.` dot-repeat; macros q/@; ex-commands `:`;
+//!   `/` search-as-motion; named/numbered registers (only the unnamed register
+//!   ships); text objects iw/aw/i(/a" (claude-code has textObjects.ts +
+//!   operatorTextObj — NOT wired here; text-object keys after an operator are a
+//!   no-op, never a panic); W/B/E WORD-motions; r replace; ~ toggle-case; J join;
+//!   >>/<< indent; gj/gk display-wrap motions; ;/, find-repeat; bare NG motion;
+//!   Visual block (Ctrl-v), o (swap ends), gv (reselect).
+//!
+//! NOTE: claude-code's vim (src/vim/*) has NO Visual mode — v/V are implemented
+//! to standard vim semantics; there is no claude-code literal to match for them.
+//!
+//! ## Motion-endpoint reconciliation (M7-09 / M7-08 Issue #2)
+//! Operator inclusive motions extend exactly one char past the target
+//! (`to = next_off(to)`). M7-08's `e` (`end_vim_word`) already lands ON the last
+//! char of the word (e.g. `e` on "foo"@0 -> offset 2), matching claude-code, and
+//! `$` (`end_of_logical_line`) lands at the trailing `\n`/`len` exactly as
+//! claude-code's `findLogicalLineEnd`. `next_off(len)` is a no-op (no overflow),
+//! so `de`/`d$`/`dw` at the buffer tail produce correct ranges; delete/`x`/line-op
+//! cursors clamp to `len - last_char_len`. No M7-08 endpoint required correction.
+//!
+//! ## Telemetry (M7-08 + M7-09)
+//! M7-08 and M7-09 each emit ZERO telemetry events; baseline stays 326 (M7-16
+//! audits the real M7 total). `tengu_tui_vim_mode_entered` (aggregated, NOT
+//! per-keystroke) is a CANDIDATE deferred to the M7-16 telemetry audit — see M7
+//! design §2.7. Per-keystroke vim telemetry is explicitly NOT done. Do not
+//! register a name here without an emit site (M6 discipline).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -1529,6 +1560,40 @@ mod tests {
         // audits the real M7 total). tengu_tui_vim_mode_entered is DEFERRED to
         // M7-16. This guard fails if M7-08 accidentally registers a new event.
         assert_eq!(lingxi_telemetry::tengu::ALL_EVENT_NAMES.len(), 326);
+    }
+
+    #[test]
+    fn m7_09_adds_no_telemetry_events() {
+        // M7-09 ships 0 new telemetry events; baseline locked at 326 (M7-16
+        // audits the real M7 total). vim operators/visual emit nothing
+        // (per-keystroke telemetry is explicitly NOT done; aggregated vim usage
+        // is an M7-16 decision). This guard fails if M7-09 registers a new event.
+        assert_eq!(lingxi_telemetry::tengu::ALL_EVENT_NAMES.len(), 326);
+    }
+
+    #[test]
+    fn deferred_text_object_after_operator_is_noop_not_panic() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut s = VimState {
+            mode: VimMode::Normal,
+            ..VimState::default()
+        };
+        // 'd' then 'i' (would be `diw` text-object in full vim) -> deferred -> no-op.
+        handle_vim_key(
+            &mut s,
+            "foo bar",
+            1,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        let out = handle_vim_key(
+            &mut s,
+            "foo bar",
+            1,
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+        );
+        assert_eq!(out, VimOutcome::Effect(VimEffect::None));
+        assert_eq!(s.command, CommandState::Idle);
+        assert_eq!(s.register, Register::default()); // nothing deleted/yanked
     }
 }
 

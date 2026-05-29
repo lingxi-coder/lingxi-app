@@ -13,7 +13,7 @@ use lingxi_protocol::ToolUseId;
 
 use crate::components::prompt_input::completion::{CompletionOverlay, CompletionState};
 use crate::components::prompt_input::palette::{PaletteOverlay, PaletteState, OVERLAY_MAX_ITEMS};
-use crate::components::prompt_input::{PromptInput, PromptInputFooter};
+use crate::components::prompt_input::{PromptInput, PromptInputFooter, VimMode};
 use crate::components::spinner::SpinnerWithVerb;
 use crate::components::status_line::StatusLine;
 use crate::components::virtual_message_list::{HeightCache, VirtualMessageList};
@@ -30,7 +30,10 @@ pub fn should_render_spinner(state: &AppState) -> bool {
 /// Props for `ReplScreen`. All fields are clones of the current
 /// `AppState`; iocraft's reactive model handles re-rendering on
 /// successive frames.
-#[derive(Default, Props)]
+///
+/// `Default` is hand-rolled (not derived) because [`VimMode`] is a
+/// contract-locked enum without a `Default` impl.
+#[derive(Props)]
 pub struct ReplScreenProps {
     /// Status-line snapshot.
     pub status: StatusSnapshot,
@@ -64,6 +67,34 @@ pub struct ReplScreenProps {
     /// (M7-07) `@` file-ref completion overlay state (clone of
     /// `AppState.completion`). Rendered above `PromptInput` when `open`.
     pub completion: Option<CompletionState>,
+    /// (M7-08) Whether vim mode is enabled (clone of `AppState.vim_enabled`).
+    /// Gates the footer `-- MODE --` indicator.
+    pub vim_enabled: bool,
+    /// (M7-08) Current vim mode (clone of `AppState.vim.mode`). Only shown
+    /// when `vim_enabled`.
+    pub vim_mode: VimMode,
+}
+
+impl Default for ReplScreenProps {
+    fn default() -> Self {
+        Self {
+            status: StatusSnapshot::default(),
+            messages: Vec::new(),
+            cache: HeightCache::default(),
+            prompt_text: String::new(),
+            prompt_cursor: 0,
+            prompt_width: 0,
+            scroll_offset: 0,
+            viewport_height: 0,
+            show_spinner: false,
+            expanded: HashMap::new(),
+            focused_tool_id: None,
+            palette: None,
+            completion: None,
+            vim_enabled: false,
+            vim_mode: VimMode::Insert,
+        }
+    }
 }
 
 /// Compose the vertical zones of the M6-03 REPL screen.
@@ -87,6 +118,8 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let focused_tool_id = props.focused_tool_id;
     let palette = props.palette.clone();
     let completion = props.completion.clone();
+    let vim_enabled = props.vim_enabled;
+    let vim_mode = props.vim_mode;
     element! {
         View(flex_direction: FlexDirection::Column, width: 100pct, height: 100pct) {
             StatusLine(
@@ -135,6 +168,8 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 mode: crate::components::prompt_input::FooterMode::Prompt,
                 placeholder: None,
                 is_empty: prompt_is_empty,
+                vim_enabled: vim_enabled,
+                vim_mode: vim_mode,
             )
         }
     }

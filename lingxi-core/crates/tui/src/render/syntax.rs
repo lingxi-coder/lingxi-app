@@ -7,6 +7,12 @@
 //! `{ text, style: SpanStyle { fg, bg, bold, .. }, kind }`, NOT a flat
 //! `{ text, fg, bg, bold }`. A syntect `Color { r, g, b, a }` maps to
 //! `StyleColor::Rgb(r, g, b)` (alpha dropped); `FontStyle::BOLD` → `style.bold`.
+
+// `highlight.js`, `syntect`, `base16-ocean.dark` etc. read better unquoted in
+// the module prose; suppress the doc-markdown nudge crate-wide for this file
+// (matches `render/markdown.rs`).
+#![allow(clippy::doc_markdown)]
+
 use std::sync::OnceLock;
 
 use syntect::easy::HighlightLines;

@@ -14,8 +14,9 @@
 //! # Resume mode
 //!
 //! ```text
-//! $ lingxi-cli --resume <uuid>
-//! $ lingxi-cli --resume     # interactive picker over 5 most-recent
+//! $ lingxi-cli --resume <uuid>   # load that session
+//! $ lingxi-cli --resume          # TTY: iocraft Resume screen (M7-12)
+//! $ lingxi-cli --resume --no-tui # stdio picker over 5 most-recent (M5-08)
 //! ```
 //!
 //! # REPL mode (M5-13)
@@ -118,8 +119,10 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         }
     };
 
-    // --resume still routes through run::run_resume (v0.6.0 behaviour
-    // unchanged). M7 wires resume into the TUI.
+    // --resume routes through run::run_resume, which itself splits (M7-12):
+    //   <uuid>            → load by id
+    //   (none) + TTY      → iocraft Resume screen
+    //   (none) + --no-tui → M5-08 stdio picker (unchanged fallback)
     if parsed.resume.is_some() {
         return run::run_resume(&parsed, &runtime, sink.as_ref()).await;
     }

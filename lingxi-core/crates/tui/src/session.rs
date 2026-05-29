@@ -129,6 +129,53 @@ pub async fn run_tui_session(
     Ok(())
 }
 
+/// Launch the TUI directly on the Resume screen, seeded with `rows`. Returns
+/// the session UUID the user chose (`None` if cancelled). Used by the CLI's
+/// `--resume` (no id) TTY branch (M7-12).
+///
+/// The ONLY differences from a normal [`run_tui_session`]: (a) the initial
+/// `AppState` is seeded with `active_screen = Some(Screen::Resume(..))` so the
+/// binary opens directly on the picker, and (b) there is no orchestrator
+/// bridge to pump (the picker streams no turn). The mount is otherwise the
+/// same `TuiRoot::fullscreen().await`; on Enter the screen sets
+/// `resume_request` + `should_exit`, the mount unwinds, and we read the
+/// recorded UUID back out.
+///
+/// # Errors
+///
+/// Returns `TuiError::Terminal` if iocraft's render loop fails (e.g. stdout
+/// isn't a TTY — the CLI routes the non-TTY case to the stdio picker instead).
+pub async fn run_resume_picker(
+    rows: Vec<lingxi_session::jsonl::loader::SessionMetadata>,
+) -> Result<Option<uuid::Uuid>, TuiError> {
+    use crate::screens::resume::{ResumeRow, ResumeState};
+    use crate::screens::Screen;
+
+    let display: Vec<ResumeRow> = rows.iter().map(ResumeRow::from_meta).collect();
+    let mut app = AppState::new(StatusSnapshot::default());
+    app.active_screen = Some(Screen::Resume(ResumeState::new(display)));
+    let state = Arc::new(Mutex::new(app));
+
+    let result = element! {
+        TuiRoot(
+            state: Some(state.clone()),
+            bridge_rx: None,
+            cancel: Some(CancellationToken::new()),
+            session_id: None,
+            started_at: Some(Instant::now()),
+        )
+    }
+    .fullscreen()
+    .await;
+
+    if let Err(e) = result {
+        return Err(TuiError::Terminal(e));
+    }
+
+    let chosen = state.lock().await.resume_request;
+    Ok(chosen)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

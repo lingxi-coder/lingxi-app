@@ -50,7 +50,10 @@ pub fn decide_mode_with(argv: &Argv, is_tty: bool) -> Mode {
     Mode::Tui
 }
 
-fn is_full_tty() -> bool {
+/// True iff BOTH stdin and stdout are terminals. (M7-12) Exposed
+/// `pub(crate)` so `run::run_resume` can make the same TTY decision the mode
+/// dispatcher uses — one source of truth for "are we interactive".
+pub(crate) fn is_full_tty() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 

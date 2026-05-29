@@ -1,5 +1,5 @@
 //! M7-12 behavior tests: list renders N rows from a fixture set of
-//! SessionMetadata; arrow select moves; Enter selects the right uuid; Esc
+//! `SessionMetadata`; arrow select moves; Enter selects the right uuid; Esc
 //! cancels; empty set → empty-state. Plus the cross-state seam (Task 9):
 //! a pending permission dialog (priority 1) outranks the Resume screen
 //! (priority 2), so a Down key never moves the screen's selection.
@@ -46,8 +46,14 @@ fn list_renders_three_rows() {
 fn arrow_select_moves_then_enter_picks_right_uuid() {
     let mut st = ResumeState::new(fixture_rows());
     // Down twice → row index 2 (gamma, uuid 3).
-    assert_eq!(handle_resume_key(&mut st, k(KeyCode::Down)), ResumeOutcome::Stay);
-    assert_eq!(handle_resume_key(&mut st, k(KeyCode::Down)), ResumeOutcome::Stay);
+    assert_eq!(
+        handle_resume_key(&mut st, k(KeyCode::Down)),
+        ResumeOutcome::Stay
+    );
+    assert_eq!(
+        handle_resume_key(&mut st, k(KeyCode::Down)),
+        ResumeOutcome::Stay
+    );
     assert_eq!(st.selected, 2);
     assert_eq!(
         handle_resume_key(&mut st, k(KeyCode::Enter)),
@@ -58,7 +64,10 @@ fn arrow_select_moves_then_enter_picks_right_uuid() {
 #[test]
 fn esc_cancels_without_resume() {
     let mut st = ResumeState::new(fixture_rows());
-    assert_eq!(handle_resume_key(&mut st, k(KeyCode::Esc)), ResumeOutcome::Cancel);
+    assert_eq!(
+        handle_resume_key(&mut st, k(KeyCode::Esc)),
+        ResumeOutcome::Cancel
+    );
 }
 
 #[test]

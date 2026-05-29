@@ -4,11 +4,14 @@
 //!
 //! Logic/state (`ResumeRow`, `ResumeState`, `handle_resume_key`) are pure and
 //! terminal-free; `ResumeScreen` is a thin render over `ResumeState`. Mirrors
-//! the M6-05 permission-dialog split. Literals are byte-locked from
-//! `claude-code/src/screens/ResumeConversation.tsx` + `components/LogSelector.tsx`:
-//!   - empty state: `"No conversations found to resume."`
-//!   - empty state (dim): `"Press Ctrl+C to exit and start a new conversation."`
-//! The header `"Resume which session?"` is shared with the M5-08 stdio picker.
+//! the M6-05 permission-dialog split.
+//!
+//! Literals are byte-locked from claude-code `ResumeConversation.tsx` and
+//! `LogSelector.tsx`. The empty state renders two lines:
+//! `"No conversations found to resume."` then (dim)
+//! `"Press Ctrl+C to exit and start a new conversation."`. The header
+//! `"Resume which session?"` is shared with the M5-08 stdio picker.
+//!
 //! claude-code's transient `"Loading conversations…"` / `"Resuming
 //! conversation…"` literals are NOT rendered here: M7-12 loads sessions
 //! synchronously before mount and hands control back to the CLI on Enter, so
@@ -295,10 +298,16 @@ mod tests {
             ResumeRow::from_meta(&meta("a", 0, 1)),
             ResumeRow::from_meta(&meta("b", 0, 1)),
         ]);
-        assert_eq!(handle_resume_key(&mut st, k(KeyCode::Down)), ResumeOutcome::Stay);
+        assert_eq!(
+            handle_resume_key(&mut st, k(KeyCode::Down)),
+            ResumeOutcome::Stay
+        );
         assert_eq!(st.selected, 1);
         // Past the end stays on the last row (no wrap).
-        assert_eq!(handle_resume_key(&mut st, k(KeyCode::Down)), ResumeOutcome::Stay);
+        assert_eq!(
+            handle_resume_key(&mut st, k(KeyCode::Down)),
+            ResumeOutcome::Stay
+        );
         assert_eq!(st.selected, 1);
     }
 
@@ -309,10 +318,16 @@ mod tests {
             ResumeRow::from_meta(&meta("b", 0, 1)),
         ]);
         st.selected = 1;
-        assert_eq!(handle_resume_key(&mut st, k(KeyCode::Up)), ResumeOutcome::Stay);
+        assert_eq!(
+            handle_resume_key(&mut st, k(KeyCode::Up)),
+            ResumeOutcome::Stay
+        );
         assert_eq!(st.selected, 0);
         // Past the start stays on the first row.
-        assert_eq!(handle_resume_key(&mut st, k(KeyCode::Up)), ResumeOutcome::Stay);
+        assert_eq!(
+            handle_resume_key(&mut st, k(KeyCode::Up)),
+            ResumeOutcome::Stay
+        );
         assert_eq!(st.selected, 0);
     }
 
@@ -325,7 +340,7 @@ mod tests {
             ResumeRow::from_meta(&meta("a", 0, 1)),
             ResumeRow::from_meta(&second),
         ]);
-        handle_resume_key(&mut st, k(KeyCode::Down));
+        let _ = handle_resume_key(&mut st, k(KeyCode::Down));
         assert_eq!(
             handle_resume_key(&mut st, k(KeyCode::Enter)),
             ResumeOutcome::Resume(target)
@@ -335,13 +350,19 @@ mod tests {
     #[test]
     fn esc_cancels() {
         let mut st = ResumeState::new(vec![ResumeRow::from_meta(&meta("a", 0, 1))]);
-        assert_eq!(handle_resume_key(&mut st, k(KeyCode::Esc)), ResumeOutcome::Cancel);
+        assert_eq!(
+            handle_resume_key(&mut st, k(KeyCode::Esc)),
+            ResumeOutcome::Cancel
+        );
     }
 
     #[test]
     fn enter_on_empty_cancels() {
         let mut st = ResumeState::new(vec![]);
-        assert_eq!(handle_resume_key(&mut st, k(KeyCode::Enter)), ResumeOutcome::Cancel);
+        assert_eq!(
+            handle_resume_key(&mut st, k(KeyCode::Enter)),
+            ResumeOutcome::Cancel
+        );
     }
 
     #[test]
@@ -366,7 +387,10 @@ mod tests {
         let st = ResumeState::new(vec![]);
         let mut element = element! { ResumeScreen(state: st) };
         let frame = element.to_string();
-        assert!(frame.contains("No conversations found to resume."), "got: {frame}");
+        assert!(
+            frame.contains("No conversations found to resume."),
+            "got: {frame}"
+        );
         assert!(
             frame.contains("Press Ctrl+C to exit and start a new conversation."),
             "got: {frame}"

@@ -1,6 +1,6 @@
 //! M7-12 snapshot: Resume screen with 3 sessions + preview, and the
 //! empty-state. Locks the rendered frame (insta) + substring asserts to
-//! survive snapshot-file corruption (matches snapshot_permission_dialogs.rs).
+//! survive snapshot-file corruption (matches `snapshot_permission_dialogs.rs`).
 
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
@@ -44,5 +44,8 @@ fn snapshot_resume_empty_state() {
     let mut element = element! { ResumeScreen(state: st) };
     let frame = element.to_string();
     insta::assert_snapshot!("resume_empty_state", &frame);
-    assert!(frame.contains("No conversations found to resume."), "got: {frame}");
+    assert!(
+        frame.contains("No conversations found to resume."),
+        "got: {frame}"
+    );
 }

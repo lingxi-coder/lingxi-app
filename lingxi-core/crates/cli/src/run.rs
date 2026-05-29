@@ -140,6 +140,8 @@ async fn run_resume_by_id(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink)
 /// M5-08 "No conversations found to resume." All return [`exit_codes::SUCCESS`]
 /// except a hard I/O failure (`RUNTIME_ERROR`).
 async fn run_resume_stdio_picker(_argv: &Argv, sink: &dyn OutputSink) -> i32 {
+    use tokio::io::BufReader;
+
     let rows = match load_resume_rows().await {
         Ok(rows) => rows,
         Err(LoaderError::EmptyDirectory) => {
@@ -152,7 +154,6 @@ async fn run_resume_stdio_picker(_argv: &Argv, sink: &dyn OutputSink) -> i32 {
         }
     };
 
-    use tokio::io::BufReader;
     let mut stdin = BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
     match select_session_interactive(&rows, &mut stdin, &mut stdout).await {

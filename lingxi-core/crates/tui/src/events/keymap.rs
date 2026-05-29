@@ -85,6 +85,9 @@ pub enum KeyAction {
     MoveCursor(CursorMove),
     /// Enter — submit the current prompt.
     Submit,
+    /// Shift+Enter (or the backslash-return fallback) — insert a `\n` at the
+    /// prompt cursor instead of submitting. Enter alone always submits.
+    InsertNewline,
     /// Ctrl-C — cancel turn / clear prompt / arm exit.
     Cancel,
     /// Up/Down — step through prompt history. `-1` = older, `+1` = newer.
@@ -106,8 +109,8 @@ pub enum KeyAction {
 #[must_use]
 pub fn map_key(evt: KeyEvent, prompt_empty: bool, focus_active: bool) -> Option<KeyAction> {
     use KeyAction::{
-        Backspace, Cancel, FocusToolStep, HistoryStep, InsertChar, MoveCursor, ScrollStep, Submit,
-        ToggleExpanded,
+        Backspace, Cancel, FocusToolStep, HistoryStep, InsertChar, InsertNewline, MoveCursor,
+        ScrollStep, Submit, ToggleExpanded,
     };
     // M6-04 focus-mode bindings take priority when focus is active.
     if focus_active {
@@ -121,6 +124,7 @@ pub fn map_key(evt: KeyEvent, prompt_empty: bool, focus_active: bool) -> Option<
         }
     }
     match (evt.code, evt.modifiers) {
+        (KeyCode::Enter, m) if m.contains(KeyModifiers::SHIFT) => Some(InsertNewline),
         (KeyCode::Enter, _) => Some(Submit),
         (KeyCode::Backspace, _) => Some(Backspace),
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Cancel),
@@ -189,11 +193,20 @@ pub fn handle_key(state: &mut AppState, key: KeyEvent) -> bool {
     }
     // === end focus trap ===
 
-    if let Some(action) = map_key(
+    if let Some(mut action) = map_key(
         key,
         state.prompt_text.is_empty(),
         state.focused_tool_id.is_some(),
     ) {
+        // Backslash-return fallback: a plain-Enter Submit becomes InsertNewline
+        // when the char before the cursor is a lone '\' (terminals that can't
+        // distinguish Shift+Enter from Enter). The dispatcher strips the '\'.
+        if matches!(action, KeyAction::Submit)
+            && state.prompt_cursor > 0
+            && state.prompt_text[..state.prompt_cursor].ends_with('\\')
+        {
+            action = KeyAction::InsertNewline;
+        }
         crate::app::dispatch(action, state)
     } else {
         false
@@ -355,6 +368,23 @@ mod m6_02_tests {
         assert!(matches!(
             map_key(k(KeyCode::Enter), true, true),
             Some(KeyAction::ToggleExpanded)
+        ));
+    }
+
+    #[test]
+    fn shift_enter_maps_to_newline() {
+        let evt = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert!(matches!(
+            map_key(evt, false, false),
+            Some(KeyAction::InsertNewline)
+        ));
+    }
+
+    #[test]
+    fn plain_enter_still_submits() {
+        assert!(matches!(
+            map_key(k(KeyCode::Enter), false, false),
+            Some(KeyAction::Submit)
         ));
     }
 }

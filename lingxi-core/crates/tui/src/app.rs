@@ -23,7 +23,7 @@ use std::time::Instant;
 use iocraft::prelude::*;
 
 use crate::components::prompt_input::{
-    apply_backspace, apply_insert, apply_move, CursorMove as PiCursor,
+    apply_backspace, apply_insert, apply_move, apply_newline, CursorMove as PiCursor,
 };
 use crate::events::keymap::{CursorMove, KeyAction, ScrollDir};
 use crate::state::{AppState, RenderedMessage};
@@ -96,6 +96,20 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
         }
         KeyAction::Backspace => {
             let (t, cur) = apply_backspace(&st.prompt_text, st.prompt_cursor);
+            st.prompt_text = t;
+            st.prompt_cursor = cur;
+            false
+        }
+        KeyAction::InsertNewline => {
+            // Backslash-return fallback: if the char immediately before the
+            // cursor is a lone '\', strip it before inserting the newline so
+            // the literal '\' the user typed doesn't linger.
+            if st.prompt_cursor > 0 && st.prompt_text[..st.prompt_cursor].ends_with('\\') {
+                let (t, cur) = apply_backspace(&st.prompt_text, st.prompt_cursor);
+                st.prompt_text = t;
+                st.prompt_cursor = cur;
+            }
+            let (t, cur) = apply_newline(&st.prompt_text, st.prompt_cursor);
             st.prompt_text = t;
             st.prompt_cursor = cur;
             false
@@ -589,6 +603,27 @@ mod dispatch_tests {
         dispatch(KeyAction::Backspace, &mut st);
         assert_eq!(st.prompt_text, "h");
         assert_eq!(st.prompt_cursor, 1);
+    }
+
+    #[test]
+    fn insert_newline_adds_line() {
+        let mut st = s();
+        dispatch(KeyAction::InsertChar('a'), &mut st);
+        dispatch(KeyAction::InsertNewline, &mut st);
+        dispatch(KeyAction::InsertChar('b'), &mut st);
+        assert_eq!(st.prompt_text, "a\nb");
+        assert_eq!(st.prompt_cursor, 3);
+    }
+
+    #[test]
+    fn backslash_return_strips_backslash_and_adds_newline() {
+        let mut st = s();
+        dispatch(KeyAction::InsertChar('a'), &mut st);
+        dispatch(KeyAction::InsertChar('\\'), &mut st);
+        // Enter with a trailing backslash → keymap emits InsertNewline.
+        dispatch(KeyAction::InsertNewline, &mut st);
+        assert_eq!(st.prompt_text, "a\n"); // trailing '\' stripped, '\n' inserted
+        assert_eq!(st.prompt_cursor, 2);
     }
 
     #[test]

@@ -66,6 +66,24 @@ pub fn remove_bg(_theme: &TuiTheme) -> StyleColor {
     StyleColor::Rgb(0x40, 0x00, 0x00)
 }
 
+/// claude-code CHANGE_THRESHOLD: above this changed-fraction, word diffing is
+/// abandoned for whole-line coloring (lines too dissimilar to align words).
+const CHANGE_THRESHOLD: f64 = 0.4;
+
+/// Brighter emphasis background for the changed *words* of a paired add line
+/// (claude-code `diffAddedWord`).
+#[must_use]
+pub fn add_word_bg(_theme: &TuiTheme) -> StyleColor {
+    StyleColor::Rgb(0x00, 0x80, 0x00)
+}
+
+/// Brighter emphasis background for the changed *words* of a paired remove
+/// line (claude-code `diffRemovedWord`).
+#[must_use]
+pub fn remove_word_bg(_theme: &TuiTheme) -> StyleColor {
+    StyleColor::Rgb(0x80, 0x00, 0x00)
+}
+
 /// Run a line-level diff and classify each change. Line numbers follow
 /// claude-code: removed lines number against the old file, added/context
 /// against the new file.
@@ -161,6 +179,91 @@ fn content_spans(text: &str, lang: Option<&str>, bg: StyleColor, theme: &TuiThem
     }
 }
 
+/// Build the content spans for one line of a paired word-diff. `is_add`
+/// selects which side's changes to emphasize. Returns `None` if the two lines
+/// are too dissimilar (caller falls back to whole-line coloring).
+fn word_diff_spans(
+    remove_text: &str,
+    add_text: &str,
+    is_add: bool,
+    theme: &TuiTheme,
+    line_bg: StyleColor,
+) -> Option<Vec<StyledSpan>> {
+    let wd = TextDiff::from_words(remove_text, add_text);
+    // Changed fraction = changed words / total words on this side.
+    let (mut changed, mut total) = (0usize, 0usize);
+    for ch in wd.iter_all_changes() {
+        match ch.tag() {
+            ChangeTag::Equal => total += 1,
+            ChangeTag::Delete => {
+                if !is_add {
+                    total += 1;
+                    changed += 1;
+                }
+            }
+            ChangeTag::Insert => {
+                if is_add {
+                    total += 1;
+                    changed += 1;
+                }
+            }
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let too_dissimilar = total == 0 || (changed as f64 / total as f64) > CHANGE_THRESHOLD;
+    if too_dissimilar {
+        return None;
+    }
+    let emph_bg = if is_add {
+        add_word_bg(theme)
+    } else {
+        remove_word_bg(theme)
+    };
+    let mut spans = Vec::new();
+    for ch in wd.iter_all_changes() {
+        let show = matches!(ch.tag(), ChangeTag::Equal)
+            || (is_add && ch.tag() == ChangeTag::Insert)
+            || (!is_add && ch.tag() == ChangeTag::Delete);
+        if !show {
+            continue;
+        }
+        let emphasized = !matches!(ch.tag(), ChangeTag::Equal);
+        spans.push(StyledSpan::styled(
+            ch.value(),
+            SpanStyle {
+                bg: if emphasized { emph_bg } else { line_bg },
+                ..SpanStyle::default()
+            },
+        ));
+    }
+    Some(spans)
+}
+
+/// Layout a single non-word-diffed row (context, or unpaired/too-dissimilar
+/// add/remove): gutter + whole-line syntax-colored content over the line bg.
+fn plain_row(row: &DiffRow, gutter_w: usize, lang: Option<&str>, theme: &TuiTheme) -> StyledLine {
+    let bg = match row.kind {
+        LineKind::Add => add_bg(theme),
+        LineKind::Remove => remove_bg(theme),
+        LineKind::Context => StyleColor::Default,
+    };
+    let mut spans = vec![gutter_span(row, gutter_w, bg)];
+    spans.extend(content_spans(&row.text, lang, bg, theme));
+    StyledLine { spans }
+}
+
+/// Layout a word-diffed row: gutter + per-word emphasis spans.
+fn word_row(row: &DiffRow, gutter_w: usize, content: Vec<StyledSpan>, theme: &TuiTheme) -> StyledLine {
+    let bg = match row.kind {
+        LineKind::Add => add_bg(theme),
+        LineKind::Remove => remove_bg(theme),
+        LineKind::Context => StyleColor::Default,
+    };
+    let mut spans = vec![gutter_span(row, gutter_w, bg)];
+    spans.extend(content);
+    StyledLine { spans }
+}
+
 /// Render a structured diff of `old` → `new`. `path` drives syntax language
 /// detection (claude-code's `filePath` prop). Never panics.
 #[must_use]
@@ -174,18 +277,69 @@ pub fn render(old: &str, new: &str, path: Option<&str>, theme: &TuiTheme) -> Vec
     let gutter_w = max_no.to_string().len();
     let lang = syntax::detect_language(None, path);
 
-    rows.into_iter()
-        .map(|row| {
-            let bg = match row.kind {
-                LineKind::Add => add_bg(theme),
-                LineKind::Remove => remove_bg(theme),
-                LineKind::Context => StyleColor::Default,
-            };
-            let mut spans = vec![gutter_span(&row, gutter_w, bg)];
-            spans.extend(content_spans(&row.text, lang.as_deref(), bg, theme));
-            StyledLine { spans }
-        })
-        .collect()
+    layout_rows(&rows, gutter_w, lang.as_deref(), theme)
+}
+
+/// Lay out a slice of diff rows into styled lines, pairing adjacent
+/// remove→add runs for word-level diffing (claude-code `processAdjacentLines`).
+fn layout_rows(
+    rows: &[DiffRow],
+    gutter_w: usize,
+    lang: Option<&str>,
+    theme: &TuiTheme,
+) -> Vec<StyledLine> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        if rows[i].kind == LineKind::Remove {
+            // Collect the contiguous remove run, then the contiguous add run.
+            let rem_start = i;
+            while i < rows.len() && rows[i].kind == LineKind::Remove {
+                i += 1;
+            }
+            let rem_end = i;
+            let add_start = i;
+            while i < rows.len() && rows[i].kind == LineKind::Add {
+                i += 1;
+            }
+            let add_end = i;
+            let removes = &rows[rem_start..rem_end];
+            let adds = &rows[add_start..add_end];
+            // Pair the k-th remove with the k-th add for word diffing; any
+            // unpaired surplus on either side falls back to whole-line.
+            let pairs = removes.len().min(adds.len());
+            for k in 0..pairs {
+                let rem = &removes[k];
+                let add = &adds[k];
+                let rb = remove_bg(theme);
+                let ab = add_bg(theme);
+                match (
+                    word_diff_spans(&rem.text, &add.text, false, theme, rb),
+                    word_diff_spans(&rem.text, &add.text, true, theme, ab),
+                ) {
+                    (Some(rem_spans), Some(add_spans)) => {
+                        out.push(word_row(rem, gutter_w, rem_spans, theme));
+                        out.push(word_row(add, gutter_w, add_spans, theme));
+                    }
+                    _ => {
+                        // Too dissimilar — whole-line coloring for both.
+                        out.push(plain_row(rem, gutter_w, lang, theme));
+                        out.push(plain_row(add, gutter_w, lang, theme));
+                    }
+                }
+            }
+            for rem in &removes[pairs..] {
+                out.push(plain_row(rem, gutter_w, lang, theme));
+            }
+            for add in &adds[pairs..] {
+                out.push(plain_row(add, gutter_w, lang, theme));
+            }
+        } else {
+            out.push(plain_row(&rows[i], gutter_w, lang, theme));
+            i += 1;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -281,5 +435,49 @@ mod tests {
                 "context lines carry neither + nor - sigil: {j:?}"
             );
         }
+    }
+
+    #[test]
+    fn word_diff_highlights_only_changed_words() {
+        // "function oldName(param)" -> "function newName(param)": only the
+        // word "oldName"/"newName" should carry the intra-line emphasis bg.
+        let lines = render(
+            "function oldName(param)\n",
+            "function newName(param)\n",
+            Some("x.js"),
+            &TuiTheme,
+        );
+        // One remove row + one add row.
+        let rem = lines.iter().find(|l| rowline(l).contains('-')).unwrap();
+        let add = lines.iter().find(|l| rowline(l).contains('+')).unwrap();
+        // The changed-word span ("oldName"/"newName") carries the EMPHASIS bg,
+        // while the unchanged "function "/"(param)" spans carry the line bg.
+        assert!(rem
+            .spans
+            .iter()
+            .any(|s| s.text.contains("oldName") && s.style.bg == remove_word_bg(&TuiTheme)));
+        assert!(add
+            .spans
+            .iter()
+            .any(|s| s.text.contains("newName") && s.style.bg == add_word_bg(&TuiTheme)));
+        // The shared word "function" is NOT emphasized.
+        assert!(add
+            .spans
+            .iter()
+            .any(|s| s.text.contains("function") && s.style.bg != add_word_bg(&TuiTheme)));
+    }
+
+    #[test]
+    fn word_diff_skipped_when_lines_too_dissimilar() {
+        // Wildly different lines (> CHANGE_THRESHOLD changed) fall back to
+        // whole-line coloring: no word-emphasis spans.
+        let lines = render("aaaaaaaa\n", "zzzzzzzz\n", Some("x.txt"), &TuiTheme);
+        let add = lines.iter().find(|l| rowline(l).contains('+')).unwrap();
+        assert!(
+            add.spans
+                .iter()
+                .all(|s| s.style.bg != add_word_bg(&TuiTheme)),
+            "dissimilar lines use whole-line coloring, not word emphasis"
+        );
     }
 }

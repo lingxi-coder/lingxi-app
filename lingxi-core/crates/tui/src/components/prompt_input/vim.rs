@@ -18,18 +18,18 @@
 //! Core vim SHIPS and passes the operator×motion matrix. Obscure cases are
 //! DEFERRED to M8 with this documented "vim parity subset" line:
 //!
-//! IN (M7-09): operators d/c/y × motions {w b e $ 0 ^ h l j k f<char> t<char>
-//!   G gg}, counts (3dw, 2yy, d3w); doubled ops dd/cc/yy (+counts); cw->ce;
-//!   x (count); p/P charwise+linewise; the unnamed yank/delete register;
-//!   Visual (v) + Visual-line (V) with d/c/y on the selection; c enters Insert.
+//! IN (M7-09): operators d/c/y × motions {w b e $ 0 ^ h l j k f-char t-char
+//! G gg}, counts (3dw, 2yy, d3w); doubled ops dd/cc/yy (+counts); cw->ce;
+//! x (count); p/P charwise+linewise; the unnamed yank/delete register;
+//! Visual (v) + Visual-line (V) with d/c/y on the selection; c enters Insert.
 //!
 //! DEFERRED to M8 (vim parity subset): `.` dot-repeat; macros q/@; ex-commands `:`;
-//!   `/` search-as-motion; named/numbered registers (only the unnamed register
-//!   ships); text objects iw/aw/i(/a" (claude-code has textObjects.ts +
-//!   operatorTextObj — NOT wired here; text-object keys after an operator are a
-//!   no-op, never a panic); W/B/E WORD-motions; r replace; ~ toggle-case; J join;
-//!   >>/<< indent; gj/gk display-wrap motions; ;/, find-repeat; bare NG motion;
-//!   Visual block (Ctrl-v), o (swap ends), gv (reselect).
+//! `/` search-as-motion; named/numbered registers (only the unnamed register
+//! ships); text objects iw/aw (claude-code has textObjects.ts + operatorTextObj
+//! — NOT wired here; text-object keys after an operator are a no-op, never a
+//! panic); W/B/E WORD-motions; r replace; ~ toggle-case; J join; indent ops;
+//! gj/gk display-wrap motions; find-repeat; bare `NG` motion; Visual block
+//! (`Ctrl-v`), o (swap ends), gv (reselect).
 //!
 //! NOTE: claude-code's vim (src/vim/*) has NO Visual mode — v/V are implemented
 //! to standard vim semantics; there is no claude-code literal to match for them.
@@ -772,7 +772,14 @@ fn apply_operator(
             let new_text = format!("{}{}", &text[..from], &text[to..]);
             let max_off = new_text.len().saturating_sub(last_char_len(&new_text));
             let cursor = from.min(max_off);
-            (VimEffect::Edit { text: new_text, cursor }, register, false)
+            (
+                VimEffect::Edit {
+                    text: new_text,
+                    cursor,
+                },
+                register,
+                false,
+            )
         }
         Operator::Change => {
             let new_text = format!("{}{}", &text[..from], &text[to..]);
@@ -923,7 +930,11 @@ fn paste(after: bool, count: usize, register: &Register, cursor: VimCursor<'_>) 
         let content = register.text.strip_suffix('\n').unwrap_or(&register.text);
         let lines: Vec<&str> = text.split('\n').collect();
         let current_line = text[..cursor.offset].matches('\n').count();
-        let insert_line = if after { current_line + 1 } else { current_line };
+        let insert_line = if after {
+            current_line + 1
+        } else {
+            current_line
+        };
 
         let content_lines: Vec<&str> = content.split('\n').collect();
         let mut repeated: Vec<&str> = Vec::with_capacity(content_lines.len() * count);
@@ -1047,6 +1058,13 @@ pub enum VimOutcome {
 /// Consume one key against the vim state. `text`/`offset` are the current
 /// buffer + byte cursor. Mutates `state.mode`/`state.command`; returns the
 /// outcome. Pure aside from the `&mut VimState`.
+///
+/// This is the single key dispatcher: it is intentionally one flat sequence of
+/// early-return guards (insert / ctrl-alt passthrough / visual / esc) followed
+/// by the command-state match (find/g/count + the M7-09 operator-pending arms).
+/// Splitting it further would obscure the priority order, so the line-count lint
+/// is allowed here (the same posture as root.rs `handle_live_key`).
+#[allow(clippy::too_many_lines)]
 pub fn handle_vim_key(
     state: &mut VimState,
     text: &str,
@@ -1083,66 +1101,7 @@ pub fn handle_vim_key(
     // Placed after the ctrl/alt passthrough (so Ctrl-Alt-V / Ctrl-C still escape
     // a Visual selection) and before the Normal Esc-cancel.
     if state.mode == VimMode::Visual {
-        let visual = state.visual.expect("Visual mode without VisualState");
-        let vcursor = VimCursor { text, offset };
-
-        // Esc -> Normal (clamp the cursor as Normal mode requires).
-        if key.code == KeyCode::Esc {
-            state.mode = VimMode::Normal;
-            state.visual = None;
-            state.command = CommandState::Idle;
-            return VimOutcome::Effect(VimEffect::Move(esc_clamp(text, offset)));
-        }
-
-        let KeyCode::Char(ch) = key.code else {
-            return VimOutcome::Effect(VimEffect::None);
-        };
-
-        // d/c/y operate on the selection, then return to Normal/Insert.
-        if matches!(ch, 'd' | 'c' | 'y') {
-            let op = match ch {
-                'd' => Operator::Delete,
-                'c' => Operator::Change,
-                _ => Operator::Yank,
-            };
-            let (from, to, linewise) = visual_range(text, visual, offset);
-            state.mode = VimMode::Normal;
-            state.visual = None;
-            return finish_operator(state, op, text, from, to, linewise);
-        }
-
-        // Pending count / g-prefix inside Visual reuse the Count / G sub-states.
-        match std::mem::replace(&mut state.command, CommandState::Idle) {
-            CommandState::Count { digits } => {
-                if let '0'..='9' = ch {
-                    let mut d = digits;
-                    d.push(ch);
-                    state.command = CommandState::Count { digits: d };
-                    return VimOutcome::Pending;
-                }
-                let count = digits.parse::<usize>().unwrap_or(1).max(1);
-                return visual_motion(state, vcursor, count, ch);
-            }
-            CommandState::G { count: _ } => {
-                if ch == 'g' {
-                    return VimOutcome::Effect(VimEffect::Move(
-                        vcursor.start_of_first_line().offset,
-                    ));
-                }
-                return VimOutcome::Effect(VimEffect::None);
-            }
-            CommandState::Idle => {}
-            other => {
-                state.command = other; // shouldn't happen in Visual; keep
-            }
-        }
-        if let '1'..='9' = ch {
-            state.command = CommandState::Count {
-                digits: ch.to_string(),
-            };
-            return VimOutcome::Pending;
-        }
-        return visual_motion(state, vcursor, 1, ch);
+        return handle_visual_key(state, text, offset, key);
     }
 
     // Esc in Normal cancels any pending command.
@@ -1196,7 +1155,11 @@ pub fn handle_vim_key(
             if let KeyCode::Char(c @ '0'..='9') = key.code {
                 let mut d = digits;
                 d.push(c);
-                state.command = CommandState::OperatorCount { op, count, digits: d };
+                state.command = CommandState::OperatorCount {
+                    op,
+                    count,
+                    digits: d,
+                };
                 return VimOutcome::Pending;
             }
             let inner = digits.parse::<usize>().unwrap_or(1).max(1);
@@ -1244,6 +1207,71 @@ pub fn handle_vim_key(
         return VimOutcome::Pending;
     }
     dispatch_normal(state, cursor, 1, key)
+}
+
+/// Handle one key while in VISUAL mode (M7-09). `v`/`V` set the anchor in
+/// `dispatch_normal`; here motions move the live end, `d`/`c`/`y` apply over the
+/// selection (then -> Normal/Insert), and `Esc` cancels to Normal. claude-code
+/// has no visual mode — this is standard vim semantics (see the GATE note).
+fn handle_visual_key(state: &mut VimState, text: &str, offset: usize, key: KeyEvent) -> VimOutcome {
+    let visual = state.visual.expect("Visual mode without VisualState");
+    let vcursor = VimCursor { text, offset };
+
+    // Esc -> Normal (clamp the cursor as Normal mode requires).
+    if key.code == KeyCode::Esc {
+        state.mode = VimMode::Normal;
+        state.visual = None;
+        state.command = CommandState::Idle;
+        return VimOutcome::Effect(VimEffect::Move(esc_clamp(text, offset)));
+    }
+
+    let KeyCode::Char(ch) = key.code else {
+        return VimOutcome::Effect(VimEffect::None);
+    };
+
+    // d/c/y operate on the selection, then return to Normal/Insert.
+    if matches!(ch, 'd' | 'c' | 'y') {
+        let op = match ch {
+            'd' => Operator::Delete,
+            'c' => Operator::Change,
+            _ => Operator::Yank,
+        };
+        let (from, to, linewise) = visual_range(text, visual, offset);
+        state.mode = VimMode::Normal;
+        state.visual = None;
+        return finish_operator(state, op, text, from, to, linewise);
+    }
+
+    // Pending count / g-prefix inside Visual reuse the Count / G sub-states.
+    match std::mem::replace(&mut state.command, CommandState::Idle) {
+        CommandState::Count { digits } => {
+            if let '0'..='9' = ch {
+                let mut d = digits;
+                d.push(ch);
+                state.command = CommandState::Count { digits: d };
+                return VimOutcome::Pending;
+            }
+            let count = digits.parse::<usize>().unwrap_or(1).max(1);
+            return visual_motion(state, vcursor, count, ch);
+        }
+        CommandState::G { count: _ } => {
+            if ch == 'g' {
+                return VimOutcome::Effect(VimEffect::Move(vcursor.start_of_first_line().offset));
+            }
+            return VimOutcome::Effect(VimEffect::None);
+        }
+        CommandState::Idle => {}
+        other => {
+            state.command = other; // shouldn't happen in Visual; keep
+        }
+    }
+    if let '1'..='9' = ch {
+        state.command = CommandState::Count {
+            digits: ch.to_string(),
+        };
+        return VimOutcome::Pending;
+    }
+    visual_motion(state, vcursor, 1, ch)
 }
 
 /// Handle a Normal-mode key that is NOT a count digit, with `count` resolved.
@@ -1458,7 +1486,7 @@ fn finish_operator(
 }
 
 /// Operator over whole lines from cursor's line to `target_offset`'s line
-/// (dG / dgg / NdG). Always linewise. Mirrors `executeOperatorG`/`Gg` + line range.
+/// (dG / dgg / `NdG`). Always linewise. Mirrors `executeOperatorG`/`Gg` + line range.
 fn operator_over_lines(
     state: &mut VimState,
     op: Operator,
@@ -1491,7 +1519,9 @@ fn visual_range(text: &str, visual: VisualState, cursor_offset: usize) -> (usize
     let lo = visual.anchor.min(cursor_offset);
     let hi = visual.anchor.max(cursor_offset);
     if visual.linewise {
-        let from = VimCursor { text, offset: lo }.start_of_logical_line().offset;
+        let from = VimCursor { text, offset: lo }
+            .start_of_logical_line()
+            .offset;
         let to = match text[hi..].find('\n') {
             None => text.len(),
             Some(rel) => hi + rel + 1,
@@ -1506,7 +1536,12 @@ fn visual_range(text: &str, visual: VisualState, cursor_offset: usize) -> (usize
 
 /// A motion key inside Visual mode: move the cursor (selection end). Anchor stays.
 /// `gg`/`G` are linewise navigation; supported as selection extenders.
-fn visual_motion(state: &mut VimState, cursor: VimCursor<'_>, count: usize, ch: char) -> VimOutcome {
+fn visual_motion(
+    state: &mut VimState,
+    cursor: VimCursor<'_>,
+    count: usize,
+    ch: char,
+) -> VimOutcome {
     let dest = match ch {
         'g' => {
             // Need a second 'g'; stash a G-pending. The Visual block's `G` arm

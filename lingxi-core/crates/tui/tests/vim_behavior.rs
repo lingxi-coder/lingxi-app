@@ -351,19 +351,25 @@ fn operator_motion_matrix() {
         ("foo bar", 0, "yw", "foo bar", 0), // yank word: buffer unchanged
         ("foo bar", 4, "y$", "foo bar", 4), // yank to EOL: cursor at range start
         // ---- doubled ops ----
-        ("a\nb\nc", 2, "dd", "a\nc", 2), // delete line1
+        ("a\nb\nc", 2, "dd", "a\nc", 2),    // delete line1
         ("a\nb\nc", 0, "yy", "a\nb\nc", 0), // yank line: buffer unchanged
-        ("ab\ncd", 0, "cc", "\ncd", 0),  // clear line, enter insert
+        ("ab\ncd", 0, "cc", "\ncd", 0),     // clear line, enter insert
         // ---- counts ----
-        ("a b c d e", 0, "3dw", "d e", 0), // 3 words
-        ("a b c d e", 0, "d3w", "d e", 0), // inner count, same result
+        ("a b c d e", 0, "3dw", "d e", 0),   // 3 words
+        ("a b c d e", 0, "d3w", "d e", 0),   // inner count, same result
         ("a\nb\nc\nd", 0, "2dd", "c\nd", 0), // 2 lines
         ("a\nb\nc", 0, "2yy", "a\nb\nc", 0), // yank 2 lines: buffer unchanged
     ];
     for (i, (text, off, keys, want_text, want_off)) in cases.iter().enumerate() {
         let (got_text, got_off) = run_normal(text, *off, keys);
-        assert_eq!(&got_text, want_text, "case {i}: text after {keys:?} on {text:?}");
-        assert_eq!(got_off, *want_off, "case {i}: offset after {keys:?} on {text:?}");
+        assert_eq!(
+            &got_text, want_text,
+            "case {i}: text after {keys:?} on {text:?}"
+        );
+        assert_eq!(
+            got_off, *want_off,
+            "case {i}: offset after {keys:?} on {text:?}"
+        );
     }
 }
 
@@ -396,8 +402,14 @@ fn operator_buffer_tail_matrix() {
     ];
     for (i, (text, off, keys, want_text, want_off)) in cases.iter().enumerate() {
         let (got_text, got_off) = run_normal(text, *off, keys);
-        assert_eq!(&got_text, want_text, "tail case {i}: text after {keys:?} on {text:?}");
-        assert_eq!(got_off, *want_off, "tail case {i}: offset after {keys:?} on {text:?}");
+        assert_eq!(
+            &got_text, want_text,
+            "tail case {i}: text after {keys:?} on {text:?}"
+        );
+        assert_eq!(
+            got_off, *want_off,
+            "tail case {i}: offset after {keys:?} on {text:?}"
+        );
     }
 }
 
@@ -446,7 +458,8 @@ fn run_visual(text: &str, offset: usize, keys: &str) -> (String, usize, VimMode)
                 buf = text;
                 off = cursor.min(buf.len());
             }
-            VimOutcome::Effect(VimEffect::None) | VimOutcome::Pending | VimOutcome::PassThrough => {}
+            VimOutcome::Effect(VimEffect::None) | VimOutcome::Pending | VimOutcome::PassThrough => {
+            }
         }
     }
     (buf, off, state.mode)
@@ -456,10 +469,10 @@ fn run_visual(text: &str, offset: usize, keys: &str) -> (String, usize, VimMode)
 fn visual_charwise_delete_matrix() {
     // (start_text, start_offset, keys, expected_text, expected_offset)
     let cases: &[(&str, usize, &str, &str, usize)] = &[
-        ("hello", 0, "vlld", "lo", 0),    // v + ll (cursor->2) + d -> delete "hel"
+        ("hello", 0, "vlld", "lo", 0), // v + ll (cursor->2) + d -> delete "hel"
         ("hello", 0, "vlly", "hello", 0), // yank: buffer unchanged, cursor to start
-        ("hello", 0, "v$d", "", 0),       // v + $ + d -> delete whole line "hello"
-        ("hello", 1, "vlld", "ho", 1),    // v from 1 + ll (cursor->3) + d -> delete "ell"
+        ("hello", 0, "v$d", "", 0),    // v + $ + d -> delete whole line "hello"
+        ("hello", 1, "vlld", "ho", 1), // v from 1 + ll (cursor->3) + d -> delete "ell"
     ];
     for (i, (text, off, keys, want_text, want_off)) in cases.iter().enumerate() {
         let (got_text, got_off, mode) = run_visual(text, *off, keys);

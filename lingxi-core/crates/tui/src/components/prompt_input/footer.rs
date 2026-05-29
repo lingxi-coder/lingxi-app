@@ -110,8 +110,9 @@ pub fn PromptInputFooter(props: &PromptInputFooterProps) -> impl Into<AnyElement
     };
     // (M7-08/M7-09) Vim mode indicator: shown only when vim is enabled; the v2
     // form distinguishes `-- VISUAL --` from `-- VISUAL LINE --`.
-    let mode_label = footer_mode_label_v2(props.vim_enabled, props.vim_mode, props.vim_visual_linewise)
-        .map(str::to_string);
+    let mode_label =
+        footer_mode_label_v2(props.vim_enabled, props.vim_mode, props.vim_visual_linewise)
+            .map(str::to_string);
     element! {
         View(flex_direction: FlexDirection::Column) {
             #(mode_label.map(|label| element! {

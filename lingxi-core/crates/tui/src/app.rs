@@ -220,6 +220,14 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             }
             false
         }
+        KeyAction::ToggleVim => {
+            st.vim_enabled = !st.vim_enabled;
+            if st.vim_enabled {
+                // Entering vim starts in Insert (claude-code createInitialVimState).
+                st.vim = crate::components::prompt_input::VimState::default();
+            }
+            false
+        }
     }
 }
 

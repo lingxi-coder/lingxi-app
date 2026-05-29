@@ -102,6 +102,8 @@ pub enum KeyAction {
     FocusToolStep(i8),
     /// (M6-04) `e` / Enter on a focused tool block — toggle expanded.
     ToggleExpanded,
+    /// (M7-08) Toggle vim-mode editing on/off.
+    ToggleVim,
 }
 
 /// Map a crossterm `KeyEvent` into a `KeyAction`. `prompt_empty` toggles
@@ -174,6 +176,13 @@ pub fn map_key_ml(
         }
         (KeyCode::Char('G'), KeyModifiers::SHIFT) if prompt_empty => {
             Some(ScrollStep(ScrollDir::Bottom))
+        }
+        // (M7-08) Ctrl-Alt-V toggles vim mode. Placed before the printable-char
+        // catch-all so the modifier combo isn't swallowed as an insert.
+        (KeyCode::Char('v'), m)
+            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::ALT) =>
+        {
+            Some(KeyAction::ToggleVim)
         }
         // Printable chars (with optional SHIFT for capitals/symbols).
         (KeyCode::Char(c), m) if m == KeyModifiers::NONE || m == KeyModifiers::SHIFT => {
@@ -323,6 +332,13 @@ mod m6_02_tests {
             map_key(k(KeyCode::Char('h')), false, false),
             Some(KeyAction::InsertChar('h'))
         ));
+    }
+
+    #[test]
+    fn toggle_vim_action_exists() {
+        // Ctrl-Alt-V -> ToggleVim. Placed before the printable-char catch-all.
+        let evt = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        assert!(matches!(map_key(evt, true, false), Some(KeyAction::ToggleVim)));
     }
 
     #[test]

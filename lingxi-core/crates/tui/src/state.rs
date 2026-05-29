@@ -514,6 +514,13 @@ pub struct AppState {
     /// (M7-07) `@` file-ref completion overlay state. Priority 3, same as
     /// the palette — only one can be open at a time (palette wins on `/`).
     pub completion: CompletionState,
+    /// (M7-08) Vim mode enabled flag. Default `false` → M6 default editing
+    /// is unchanged. Togglable via `KeyAction::ToggleVim`. Acceptable-as-bool
+    /// for v0.8.0; wiring to the M3 settings store is a follow-up.
+    pub vim_enabled: bool,
+    /// (M7-08) PromptInput-local vim state (M7 design §2.3). Only consulted
+    /// when `vim_enabled` is true.
+    pub vim: crate::components::prompt_input::VimState,
 }
 
 impl AppState {
@@ -550,6 +557,8 @@ impl AppState {
                 ),
             palette: PaletteState::default(),
             completion: CompletionState::default(),
+            vim_enabled: false,
+            vim: crate::components::prompt_input::VimState::default(),
         }
     }
 
@@ -642,6 +651,16 @@ mod tests {
             context_pct: 0.42,
             permission_mode: PermissionMode::Default,
         }
+    }
+
+    #[test]
+    fn vim_defaults_off_and_insert() {
+        let s = AppState::new(StatusSnapshot::default());
+        assert!(!s.vim_enabled);
+        assert_eq!(
+            s.vim.mode,
+            crate::components::prompt_input::VimMode::Insert
+        );
     }
 
     #[test]

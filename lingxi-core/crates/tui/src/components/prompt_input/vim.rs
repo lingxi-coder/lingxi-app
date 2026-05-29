@@ -416,6 +416,50 @@ pub fn resolve_motion<'a>(m: Motion, cursor: VimCursor<'a>, count: usize) -> Vim
     result
 }
 
+/// The i/a/o/I/A/O mode-entry effect. Returns the cursor placement (Move) or
+/// the buffer edit (Edit, for o/O). Caller flips mode to Insert.
+#[must_use]
+pub fn enter_insert_effect(key: char, c: VimCursor<'_>) -> VimEffect {
+    match key {
+        'i' => VimEffect::Move(c.offset),
+        'a' => VimEffect::Move(if c.is_at_end() { c.offset } else { c.right().offset }),
+        'I' => VimEffect::Move(c.first_non_blank().offset),
+        'A' => VimEffect::Move(c.end_of_logical_line().offset),
+        'o' => {
+            let end = c.end_of_logical_line().offset;
+            let mut text = String::with_capacity(c.text.len() + 1);
+            text.push_str(&c.text[..end]);
+            text.push('\n');
+            text.push_str(&c.text[end..]);
+            VimEffect::Edit { text, cursor: end + 1 }
+        }
+        'O' => {
+            let start = c.start_of_logical_line().offset;
+            let mut text = String::with_capacity(c.text.len() + 1);
+            text.push_str(&c.text[..start]);
+            text.push('\n');
+            text.push_str(&c.text[start..]);
+            VimEffect::Edit { text, cursor: start }
+        }
+        _ => VimEffect::None,
+    }
+}
+
+/// vim Normal-mode cursor clamp on Esc: cannot rest one past the last char of
+/// a non-empty logical line. Returns the clamped byte offset.
+#[must_use]
+pub fn esc_clamp(text: &str, offset: usize) -> usize {
+    let c = VimCursor { text, offset };
+    let start = c.logical_line_start(offset);
+    let end = c.logical_line_end(offset);
+    if offset > start && offset == end {
+        // sitting at end of a non-empty line -> step left one char
+        c.left().offset
+    } else {
+        offset
+    }
+}
+
 /// Footer mode-indicator literal. Matches the well-known vim convention
 /// (claude-code surfaces the mode via PromptInputModeIndicator; the literal
 /// status-line text is the standard vim `-- MODE --`).
@@ -615,5 +659,63 @@ mod resolve_tests {
         let t = "abc\ndef\nghi";
         assert_eq!(resolve_motion(Motion::Down, cur(t, 1), 1).offset, 5); // line2 col1 = 'e'
         assert_eq!(resolve_motion(Motion::Down, cur(t, 1), 2).offset, 9); // line3 col1 = 'h'
+    }
+}
+
+#[cfg(test)]
+mod transition_tests {
+    use super::*;
+    fn cur(text: &str, off: usize) -> VimCursor<'_> {
+        VimCursor { text, offset: off }
+    }
+
+    #[test]
+    fn i_inserts_at_cursor() {
+        assert_eq!(enter_insert_effect('i', cur("hello", 2)), VimEffect::Move(2));
+    }
+
+    #[test]
+    fn a_inserts_after_cursor() {
+        assert_eq!(enter_insert_effect('a', cur("hello", 2)), VimEffect::Move(3));
+        // at end: stays
+        assert_eq!(enter_insert_effect('a', cur("hello", 5)), VimEffect::Move(5));
+    }
+
+    #[test]
+    fn cap_i_first_non_blank() {
+        assert_eq!(enter_insert_effect('I', cur("  hi", 3)), VimEffect::Move(2));
+    }
+
+    #[test]
+    fn cap_a_end_of_line() {
+        assert_eq!(enter_insert_effect('A', cur("ab\ncd", 0)), VimEffect::Move(2)); // end of line0
+    }
+
+    #[test]
+    fn o_opens_line_below() {
+        // "ab\ncd", cursor on line0 -> newline after line0, cursor at its start (offset 3)
+        assert_eq!(
+            enter_insert_effect('o', cur("ab\ncd", 1)),
+            VimEffect::Edit { text: "ab\n\ncd".to_string(), cursor: 3 }
+        );
+    }
+
+    #[test]
+    fn cap_o_opens_line_above() {
+        // "ab\ncd", cursor on line1 ('c' @3) -> newline before line1, cursor at its start (offset 3)
+        assert_eq!(
+            enter_insert_effect('O', cur("ab\ncd", 3)),
+            VimEffect::Edit { text: "ab\n\ncd".to_string(), cursor: 3 }
+        );
+    }
+
+    #[test]
+    fn esc_clamps_past_end_of_line() {
+        // In vim, Normal-mode cursor cannot sit on the trailing position of a
+        // non-empty line; clamp left by one char.
+        assert_eq!(esc_clamp("hello", 5), 4);
+        assert_eq!(esc_clamp("hello", 3), 3); // already valid
+        assert_eq!(esc_clamp("", 0), 0);       // empty line: stay
+        assert_eq!(esc_clamp("ab\ncd", 2), 1); // end of line0 -> clamp to 'b'
     }
 }

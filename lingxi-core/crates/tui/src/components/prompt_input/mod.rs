@@ -17,6 +17,7 @@
 //! saturate.
 
 use iocraft::prelude::*;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Cursor movement primitive for the line editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +111,19 @@ pub fn line_starts(text: &str) -> Vec<usize> {
     starts
 }
 
+/// Map a byte `cursor` into `(line_index, grapheme_column)`.
+/// Column counts grapheme clusters from the line start (not bytes).
+#[must_use]
+pub fn cursor_line_col(text: &str, cursor: usize) -> (usize, usize) {
+    let cursor = clamp_to_char_boundary(text, cursor);
+    let starts = line_starts(text);
+    // Largest line start <= cursor.
+    let line = starts.iter().rposition(|&s| s <= cursor).unwrap_or(0);
+    let line_start = starts[line];
+    let col = text[line_start..cursor].graphemes(true).count();
+    (line, col)
+}
+
 /// Props for `PromptInput`.
 #[derive(Default, Props)]
 pub struct PromptInputProps {
@@ -152,6 +166,21 @@ mod tests {
     fn line_starts_trailing_newline() {
         // A trailing "\n" opens an empty final line.
         assert_eq!(line_starts("ab\n"), vec![0, 3]);
+    }
+
+    #[test]
+    fn cursor_line_col_basics() {
+        // "ab\ncd" — byte 0..2 on line 0; byte 3.. on line 1.
+        assert_eq!(cursor_line_col("ab\ncd", 0), (0, 0));
+        assert_eq!(cursor_line_col("ab\ncd", 2), (0, 2)); // end of line 0
+        assert_eq!(cursor_line_col("ab\ncd", 3), (1, 0)); // start of line 1
+        assert_eq!(cursor_line_col("ab\ncd", 5), (1, 2)); // end of line 1
+    }
+
+    #[test]
+    fn cursor_line_col_grapheme_column() {
+        // "é" is 2 bytes but column 1. "éb\nx": byte 3 is after "éb" → col 2.
+        assert_eq!(cursor_line_col("éb\nx", 3), (0, 2));
     }
 
     #[test]

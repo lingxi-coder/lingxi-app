@@ -56,20 +56,18 @@ pub fn render_system_api_error_to_string(props: SystemApiErrorProps) -> String {
 /// iocraft component — error body (red) + dim footer.
 #[component]
 pub fn SystemApiErrorMessage(props: &SystemApiErrorProps) -> impl Into<AnyElement<'static>> {
-    let unit = if props.retry_in_seconds == 1 {
-        "second"
-    } else {
-        "seconds"
-    };
-    let body = if props.truncated {
-        format!("{}\u{2026}\n{EXPAND_HINT}", props.error)
-    } else {
-        props.error.clone()
-    };
-    let footer = format!(
-        "Retrying in {} {unit}\u{2026} (attempt {}/{})",
-        props.retry_in_seconds, props.retry_attempt, props.max_retries,
-    );
+    // Delegate to the oracle for the body/footer/truncation computation rather
+    // than recomputing it (keeps the two in lock-step, no drift). The oracle
+    // emits `body…\n(hint)\nfooter`; the footer is always the last line. We
+    // need a per-line color split (error body red, retry footer dim) that the
+    // flat oracle string can't express, so we split the footer off the last
+    // `\n` and color the two parts — byte-identical to the oracle string.
+    let full = render_system_api_error_to_string(props.clone());
+    let (body, footer) = full
+        .rsplit_once('\n')
+        .map_or((full.as_str(), ""), |(b, f)| (b, f));
+    let body = body.to_string();
+    let footer = footer.to_string();
     element! {
         View(flex_direction: FlexDirection::Column) {
             Text(content: body, color: TuiTheme::ERROR)

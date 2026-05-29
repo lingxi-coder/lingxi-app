@@ -80,9 +80,9 @@ pub fn AdvisorMessage(props: &AdvisorProps) -> impl Into<AnyElement<'static>> {
     let body = render_advisor_to_string(props.clone());
     let color = match &props.kind {
         AdvisorKind::Error { .. } => TuiTheme::ERROR,
-        // `Advising` is bold in claude-code; the descriptor parts are dim. We
-        // render the whole block dim here (bold inline-runs land with M7-15's
-        // styled-span rendering).
+        // TODO(M7-15): `Advising` is bold in claude-code; the descriptor parts
+        // are dim. We render the whole block dim here (bold inline-runs land
+        // with M7-15's styled-span rendering).
         _ => TuiTheme::DIM,
     };
     element! {

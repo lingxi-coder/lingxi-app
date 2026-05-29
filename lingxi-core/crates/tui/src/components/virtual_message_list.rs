@@ -100,21 +100,18 @@ fn render_text_for_measure(msg: &RenderedMessage) -> String {
         // (`∴ `/`✻ `/`● `) add columns, not rows. Kept in lock-step with the
         // renderers in `components::messages::*`; pinned by the
         // `measured_height_pins_*_m7_04` lock tests below.
+        // Measurement == render by construction: route through the renderer's
+        // own string oracle so the expanded body counts the SAME
+        // markdown-FLATTENED lines the component draws (the raw `thinking`
+        // text over-counts dropped ``` fence rows / trailing blanks). Covers
+        // the collapsed header+hint line too.
         RenderedMessage::AssistantThinking { thinking, expanded } => {
-            if *expanded {
-                // Header `∴ Thinking…` + body lines indented 2 (markdown body
-                // flattened to its plain projection).
-                let mut out = "\u{2234} Thinking\u{2026}".to_string();
-                for line in thinking.lines() {
-                    out.push('\n');
-                    out.push_str("  ");
-                    out.push_str(line);
-                }
-                out
-            } else {
-                // Collapsed header + expand hint — single line.
-                "\u{2234} Thinking (ctrl+o to expand)".to_string()
-            }
+            crate::components::messages::thinking::render_thinking_to_string(
+                crate::components::messages::thinking::ThinkingProps {
+                    thinking: thinking.clone(),
+                    expanded: *expanded,
+                },
+            )
         }
         // Single dim+italic line `✻ Thinking…`.
         RenderedMessage::AssistantRedactedThinking => "\u{273B} Thinking\u{2026}".to_string(),
@@ -183,35 +180,19 @@ fn render_text_for_measure(msg: &RenderedMessage) -> String {
             }
             out
         }
-        // Mirrors `render_advisor_to_string`. Verbose Result renders the raw
-        // markdown body (flattened); other kinds are fixed one-liners.
-        RenderedMessage::Advisor { kind, verbose } => match kind {
-            crate::state::AdvisorKind::ServerToolUse { model, input } => {
-                let mut out = "Advising".to_string();
-                if let Some(m) = model {
-                    out.push_str(&format!(" using {m}"));
-                }
-                if let Some(i) = input {
-                    out.push_str(&format!(" \u{00B7} {i}"));
-                }
-                out
-            }
-            crate::state::AdvisorKind::Result { text } => {
-                if *verbose {
-                    text.clone()
-                } else {
-                    "\u{2714} Advisor has reviewed the conversation and will apply the feedback"
-                        .to_string()
-                }
-            }
-            crate::state::AdvisorKind::RedactedResult => {
-                "\u{2714} Advisor has reviewed the conversation and will apply the feedback"
-                    .to_string()
-            }
-            crate::state::AdvisorKind::Error { error_code } => {
-                format!("Advisor unavailable ({error_code})")
-            }
-        },
+        // Measurement == render by construction: route through the renderer's
+        // own string oracle. The verbose `Result` body counts the SAME
+        // markdown-FLATTENED lines the component draws (raw `text` over-counts
+        // dropped ``` fence rows / trailing blanks); the other kinds remain
+        // their fixed one-liners.
+        RenderedMessage::Advisor { kind, verbose } => {
+            crate::components::messages::advisor::render_advisor_to_string(
+                crate::components::messages::advisor::AdvisorProps {
+                    kind: kind.clone(),
+                    verbose: *verbose,
+                },
+            )
+        }
         // Single dim line (running or transcript summary).
         RenderedMessage::HookProgress {
             event,
@@ -707,6 +688,58 @@ mod tests {
         assert_eq!(measured_height(&expanded, 80), 3);
     }
 
+    // ---- (M7-04 review) measurement == render for markdown bodies --------
+    //
+    // The expanded thinking / verbose advisor renderers flatten their body
+    // through `render::markdown` (fenced code blocks drop the ``` fences,
+    // trailing blank lines collapse). `measured_height` MUST count the SAME
+    // flattened text the renderer draws, so we derive the expected row count
+    // from the renderer's own string output rather than the raw input. These
+    // tests FAIL against a raw-line proxy (which over-counts the dropped
+    // fence/blank rows) and pass once measurement routes through the
+    // renderer's flattening.
+
+    #[test]
+    fn measured_height_thinking_expanded_matches_renderer_fenced_code() {
+        use crate::components::messages::thinking::{render_thinking_to_string, ThinkingProps};
+        // Fenced code block: the ``` fence lines are dropped by markdown
+        // flattening, so the renderer draws fewer rows than the raw input.
+        let body = "intro\n```rust\nlet x = 1;\n```\noutro";
+        let msg = RenderedMessage::AssistantThinking {
+            thinking: body.into(),
+            expanded: true,
+        };
+        let rendered = render_thinking_to_string(ThinkingProps {
+            thinking: body.into(),
+            expanded: true,
+        });
+        let expected_rows = rendered.lines().count();
+        assert_eq!(
+            measured_height(&msg, 80),
+            expected_rows,
+            "measured_height must equal the renderer's flattened row count"
+        );
+    }
+
+    #[test]
+    fn measured_height_thinking_expanded_matches_renderer_trailing_blank() {
+        use crate::components::messages::thinking::{render_thinking_to_string, ThinkingProps};
+        // Trailing blank line: markdown flattening drops it, so the renderer
+        // draws one fewer row than the raw `.lines()` proxy would (raw
+        // `"text\n\n".lines()` yields `["text", ""]` → 2 body rows, but the
+        // flattened body is just `"text"` → 1 body row).
+        let body = "text\n\n";
+        let msg = RenderedMessage::AssistantThinking {
+            thinking: body.into(),
+            expanded: true,
+        };
+        let rendered = render_thinking_to_string(ThinkingProps {
+            thinking: body.into(),
+            expanded: true,
+        });
+        assert_eq!(measured_height(&msg, 80), rendered.lines().count());
+    }
+
     #[test]
     fn measured_height_pins_redacted_thinking_m7_04() {
         // `✻ Thinking…` — single line.
@@ -815,6 +848,29 @@ mod tests {
             verbose: false,
         };
         assert_eq!(measured_height(&err, 80), 1);
+    }
+
+    #[test]
+    fn measured_height_advisor_verbose_matches_renderer_fenced_code() {
+        use crate::components::messages::advisor::{render_advisor_to_string, AdvisorProps};
+        // Verbose result body flows through markdown flattening, so the ```
+        // fence lines are dropped — measurement must match the renderer's
+        // flattened row count, not the raw `.lines()` proxy.
+        let text = "summary\n```\ncode line\n```\ntail";
+        let kind = crate::state::AdvisorKind::Result { text: text.into() };
+        let msg = RenderedMessage::Advisor {
+            kind: kind.clone(),
+            verbose: true,
+        };
+        let rendered = render_advisor_to_string(AdvisorProps {
+            kind,
+            verbose: true,
+        });
+        assert_eq!(
+            measured_height(&msg, 80),
+            rendered.lines().count(),
+            "verbose advisor measurement must equal the renderer's flattened row count"
+        );
     }
 
     #[test]

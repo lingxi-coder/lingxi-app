@@ -42,9 +42,9 @@ pub fn render_hook_progress_to_string(props: HookProgressProps) -> String {
 /// iocraft component — all dim; `{event}` is bold in claude-code.
 #[component]
 pub fn HookProgressMessage(props: &HookProgressProps) -> impl Into<AnyElement<'static>> {
-    // Single dim Text for the whole line (the event-bold run is a styling
-    // nicety the string oracle ignores; equivalent look). The line layout
-    // (one row) matches the string oracle exactly.
+    // TODO(M7-15): single dim Text for the whole line (the event-bold run is a
+    // styling nicety the string oracle ignores; equivalent look). The line
+    // layout (one row) matches the string oracle exactly.
     let body = render_hook_progress_to_string(props.clone());
     element! {
         View(flex_direction: FlexDirection::Column) {

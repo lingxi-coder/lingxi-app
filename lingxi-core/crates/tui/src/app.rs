@@ -136,6 +136,22 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             if st.prompt_text.is_empty() {
                 return false;
             }
+            // (M7-11) `/doctor` opens the Doctor screen instead of echoing /
+            // running a turn. Intercept here (the live submit path) the same
+            // way `handle_submit_line` intercepts `/clear` / `/exit`. The
+            // stdio `--no-tui` `/doctor` text report is unchanged.
+            if st.prompt_text.trim() == "/doctor" {
+                let diag = crate::screens::doctor::DoctorDiagnostics::capture(
+                    &st.status.cwd,
+                    st.status.mcp_configured,
+                    st.status.mcp_connected,
+                    st.status.term_size,
+                );
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.open_doctor(diag);
+                return false;
+            }
             let line = std::mem::take(&mut st.prompt_text);
             st.prompt_cursor = 0;
             st.history.push(line.clone());
@@ -337,6 +353,21 @@ pub fn render_screen(
             PermissionRequest::BypassPermissionsMode => {
                 let typed = state.bypass_dialog_state.typed.clone();
                 element! { BypassPermissionsMode(typed: typed) }.into_any()
+            }
+        };
+    }
+    // (M7-11) Screen overlay: a full-page screen renders INSTEAD OF the REPL
+    // (same render-instead-of discipline as the permission overlay above — no
+    // z-index primitive in iocraft 0.8). A pending permission still wins (its
+    // branch above returns first, consistent with permission winning keys).
+    // Reused by M7-12/13/14 (they add a `Screen` match arm here).
+    if let Some(screen) = state.active_screen {
+        use crate::screens::Screen;
+        return match screen {
+            Screen::Doctor => {
+                use crate::screens::doctor::DoctorScreen;
+                let diag = state.doctor_diagnostics.clone();
+                element! { DoctorScreen(diag: diag) }.into_any()
             }
         };
     }
@@ -754,6 +785,44 @@ mod dispatch_tests {
         let rendered = element.to_string();
         assert!(rendered.contains("● hi"), "got: {rendered}");
         assert!(rendered.contains("claude-sonnet-4.5"));
+    }
+
+    #[test]
+    fn doctor_slash_opens_screen_via_dispatch() {
+        use crate::screens::Screen;
+        let mut st = s();
+        // Submit a "/doctor" line through the same path the live Enter uses.
+        st.prompt_text = "/doctor".to_string();
+        st.prompt_cursor = "/doctor".len();
+        let should_run = dispatch(KeyAction::Submit, &mut st);
+        assert!(!should_run, "/doctor opens a screen, never runs a turn");
+        assert_eq!(st.active_screen, Some(Screen::Doctor));
+        assert!(st.doctor_diagnostics.is_some(), "diagnostics captured at open");
+        assert!(st.prompt_text.is_empty(), "prompt cleared on submit");
+        // No UserText pushed for the intercepted slash command.
+        assert!(
+            !matches!(st.messages.last(), Some(RenderedMessage::UserText { .. })),
+            "/doctor must not echo as a user message"
+        );
+    }
+
+    #[test]
+    fn render_screen_renders_doctor_when_active() {
+        use crate::screens::doctor::DoctorDiagnostics;
+        let mut st = s();
+        st.open_doctor(DoctorDiagnostics::capture(
+            std::path::Path::new("/work"),
+            1,
+            0,
+            (80, 24),
+        ));
+        let mut element = render_screen(&st, 20, 80);
+        let rendered = element.to_string();
+        assert!(rendered.contains("Diagnostics"), "got: {rendered}");
+        assert!(
+            !rendered.contains("claude-sonnet-4.5"),
+            "REPL status hidden while screen up"
+        );
     }
 
     #[tokio::test]

@@ -1,5 +1,5 @@
 //! Snapshot test for `DoctorScreen` at a fixed diagnostic state.
-//! Locks the section headers (`Diagnostics`, `Updates`) + `└ ` row layout.
+//! Locks the section headers (`Diagnostics`, `Terminal`) + `└ ` row layout.
 
 use iocraft::prelude::*;
 use lingxi_tui::screens::doctor::{DoctorDiagnostics, DoctorScreen};

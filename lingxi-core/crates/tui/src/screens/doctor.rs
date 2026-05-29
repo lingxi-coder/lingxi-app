@@ -1,10 +1,14 @@
 //! Doctor screen — the FIRST full-page TUI screen (M7-11).
 //!
 //! Mirrors claude-code `src/screens/Doctor.tsx`: bold section headers
-//! (`Diagnostics`, `Updates`) with `└ `-prefixed detail rows. v0.8.0 shows
+//! (`Diagnostics`, `Terminal`) with `└ `-prefixed detail rows. v0.8.0 shows
 //! the LingXi-relevant subset (versions, config paths, MCP servers, auth,
 //! terminal capabilities); claude-code-internal sections (sandbox, version
 //! locks, plugin/agent parse errors, context warnings) are out of scope.
+//!
+//! NOTE: claude-code's second section is `Updates` (auto-update-channel info),
+//! which `LingXi` does NOT render — so the second header here is `Terminal`,
+//! matching its actual rows (truecolor + terminal size), not `Updates`.
 //!
 //! The screen is a PURE iocraft component fed a `DoctorDiagnostics` value
 //! captured once at open time. No async, no `OrchestratorHandle` call on the
@@ -74,6 +78,9 @@ impl DoctorDiagnostics {
 /// `rustc -V` on the render path (no I/O in a screen). M8 may upgrade this
 /// to a build-time `RUSTC_VERSION` constant.
 fn rust_toolchain_version() -> String {
+    // KEEP IN SYNC WITH rust-toolchain.toml (`channel`). This is a hardcoded
+    // mirror of the pinned toolchain; bump it whenever rust-toolchain.toml's
+    // channel changes so the Doctor screen doesn't silently drift.
     "1.82.0".to_string()
 }
 
@@ -116,8 +123,11 @@ pub fn DoctorScreen(props: &DoctorScreenProps) -> impl Into<AnyElement<'static>>
     });
 
     // Locked literals (claude-code Doctor.tsx parity):
-    //   section headers: "Diagnostics", "Updates" (bold)
+    //   section headers: "Diagnostics", "Terminal" (bold)
     //   detail prefix:   "└ "
+    // (M7-11 review) The second header is "Terminal", not claude-code's
+    // "Updates": "Updates" is auto-update-channel info that LingXi does not
+    // render, so it doesn't apply here — these rows are terminal capabilities.
     let mcp_status = if d.mcp_configured == 0 {
         "none configured".to_string()
     } else if d.mcp_connected == 0 {
@@ -143,7 +153,7 @@ pub fn DoctorScreen(props: &DoctorScreenProps) -> impl Into<AnyElement<'static>>
             Text(content: format!("└ MCP servers: {mcp_status}"))
             Text(content: format!("└ Auth: {}", d.auth_state))
             Text(content: "")
-            Text(content: "Updates", weight: Weight::Bold)
+            Text(content: "Terminal", weight: Weight::Bold)
             Text(content: format!("└ Truecolor: {truecolor}"))
             Text(content: format!("└ Terminal size: {size}"))
             Text(content: "")
@@ -173,6 +183,16 @@ mod tests {
         assert_eq!(diag.clone(), diag);
         assert_eq!(diag.mcp_configured, 2);
         assert_eq!(diag.mcp_connected, 0);
+    }
+
+    /// (M7-11 review FIX #3) `capture` threads the passed-in `term_size`
+    /// straight through, so a live non-zero size is surfaced verbatim (the
+    /// live path now feeds the real `(cols, rows)` instead of the `(0,0)`
+    /// default that rendered "0x0").
+    #[test]
+    fn capture_threads_live_term_size() {
+        let diag = DoctorDiagnostics::capture(std::path::Path::new("/work"), 0, 0, (137, 51));
+        assert_eq!(diag.term_size, (137, 51));
     }
 
     #[test]

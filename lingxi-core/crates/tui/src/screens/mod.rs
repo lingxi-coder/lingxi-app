@@ -9,11 +9,20 @@ pub mod repl;
 
 /// Which full-page screen currently overlays the REPL. `None` ⇒ REPL is live.
 /// Established by M7-11; M7-12/13/14 add `Resume`/`Settings`/`Memory`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// (M7-11 review) Each variant CARRIES its own per-screen state inline (the
+/// data lives in the variant, not in a parallel `AppState` field). This makes
+/// the foundation a clean "add a variant carrying its state + a render arm +
+/// (optional) a key arm" for M7-12/13/14, and lets `AppState::close_screen`
+/// stay a single generic `active_screen = None` with no per-screen clear.
+/// Carrying the (non-`Copy`) `DoctorDiagnostics` drops `Screen: Copy`; the
+/// ≤2 live match sites borrow the variant (`match &st.active_screen`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
-    /// The diagnostic screen opened by `/doctor`.
-    Doctor,
-    // Resume,   // M7-12
-    // Settings, // M7-13
-    // Memory,   // M7-14
+    /// The diagnostic screen opened by `/doctor`, carrying its captured
+    /// diagnostics.
+    Doctor(doctor::DoctorDiagnostics),
+    // Resume(ResumeState),     // M7-12
+    // Settings(SettingsState), // M7-13
+    // Memory(MemoryState),     // M7-14
 }

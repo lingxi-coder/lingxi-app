@@ -361,13 +361,14 @@ pub fn render_screen(
     // z-index primitive in iocraft 0.8). A pending permission still wins (its
     // branch above returns first, consistent with permission winning keys).
     // Reused by M7-12/13/14 (they add a `Screen` match arm here).
-    if let Some(screen) = state.active_screen {
+    if let Some(screen) = &state.active_screen {
         use crate::screens::Screen;
+        // (M7-11 review) Each variant carries its own state inline; destructure
+        // to feed the per-screen component. M7-12/13/14 add a `match` arm here.
         return match screen {
-            Screen::Doctor => {
+            Screen::Doctor(diag) => {
                 use crate::screens::doctor::DoctorScreen;
-                let diag = state.doctor_diagnostics.clone();
-                element! { DoctorScreen(diag: diag) }.into_any()
+                element! { DoctorScreen(diag: Some(diag.clone())) }.into_any()
             }
         };
     }
@@ -796,10 +797,10 @@ mod dispatch_tests {
         st.prompt_cursor = "/doctor".len();
         let should_run = dispatch(KeyAction::Submit, &mut st);
         assert!(!should_run, "/doctor opens a screen, never runs a turn");
-        assert_eq!(st.active_screen, Some(Screen::Doctor));
+        // (M7-11 review) The Doctor variant carries its captured diagnostics.
         assert!(
-            st.doctor_diagnostics.is_some(),
-            "diagnostics captured at open"
+            matches!(&st.active_screen, Some(Screen::Doctor(_))),
+            "diagnostics captured inside the Doctor variant at open"
         );
         assert!(st.prompt_text.is_empty(), "prompt cleared on submit");
         // No UserText pushed for the intercepted slash command.
@@ -825,6 +826,39 @@ mod dispatch_tests {
         assert!(
             !rendered.contains("claude-sonnet-4.5"),
             "REPL status hidden while screen up"
+        );
+    }
+
+    /// (M7-11 review FIX #3) `/doctor` reads the LIVE terminal size off the
+    /// status snapshot (the live `use_terminal_events` closure writes
+    /// `st.status.term_size = (cols, rows)` before routing each key). When that
+    /// is a real value, the captured diagnostics + rendered screen show it —
+    /// NOT the `(0,0)` default that produced "0x0" in the live Doctor.
+    #[test]
+    fn doctor_uses_live_term_size_not_zero() {
+        use crate::screens::Screen;
+        let mut st = s();
+        // The live closure publishes the real size onto the status before the
+        // Enter that opens Doctor. Simulate that here.
+        st.status.term_size = (137, 51);
+        st.prompt_text = "/doctor".to_string();
+        st.prompt_cursor = "/doctor".len();
+        let _ = dispatch(KeyAction::Submit, &mut st);
+        // The captured diagnostics inside the variant carry the live size.
+        match &st.active_screen {
+            Some(Screen::Doctor(diag)) => assert_eq!(diag.term_size, (137, 51)),
+            other => panic!("expected open Doctor screen, got {other:?}"),
+        }
+        // ...and it renders, not "0x0".
+        let mut element = render_screen(&st, 20, 80);
+        let rendered = element.to_string();
+        assert!(
+            rendered.contains("137x51"),
+            "live Doctor must show real terminal size, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("0x0"),
+            "must not show the (0,0) default, got: {rendered}"
         );
     }
 

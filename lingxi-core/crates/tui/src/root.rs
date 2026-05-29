@@ -610,6 +610,13 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 let Ok(mut st) = state.try_lock() else {
                     return;
                 };
+                // (M7-11 review) Publish the LIVE terminal size onto the status
+                // snapshot BEFORE routing the key, so when `/doctor`'s Submit
+                // dispatch builds `DoctorDiagnostics::capture` it reads the real
+                // (cols, rows) instead of the `(0,0)` default — the live Doctor
+                // must show the actual terminal size. Cheap (a tuple write) and
+                // correct on every key, including the Enter that opens Doctor.
+                st.status.term_size = (key_cols, key_rows);
                 // (M7-06) Compute the scrollback viewport from the LIVE prompt
                 // height so the scroll math shrinks as the prompt grows. The
                 // prompt is content-driven (1 → N rows) + a 2-row footer, so

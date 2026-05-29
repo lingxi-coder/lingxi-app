@@ -22,7 +22,7 @@ fn diag() -> DoctorDiagnostics {
 fn esc_closes_active_screen() {
     let mut st = AppState::new(StatusSnapshot::default());
     st.open_doctor(diag());
-    assert_eq!(st.active_screen, Some(Screen::Doctor));
+    assert!(matches!(st.active_screen, Some(Screen::Doctor(_))));
     handle_live_key(&mut st, &key(KeyCode::Esc), 24);
     assert_eq!(
         st.active_screen, None,
@@ -49,9 +49,8 @@ fn text_key_does_not_leak_to_prompt_while_screen_open() {
         st.prompt_text, "draft",
         "text key must NOT reach PromptInput"
     );
-    assert_eq!(
-        st.active_screen,
-        Some(Screen::Doctor),
+    assert!(
+        matches!(st.active_screen, Some(Screen::Doctor(_))),
         "non-close key keeps screen open"
     );
 }
@@ -70,7 +69,7 @@ async fn permission_wins_over_open_screen() {
 
     // Doctor screen is open...
     st.open_doctor(diag());
-    assert_eq!(st.active_screen, Some(Screen::Doctor));
+    assert!(matches!(st.active_screen, Some(Screen::Doctor(_))));
 
     // ...and a permission arrives on top of it.
     let (tx, rx) = oneshot::channel();
@@ -96,9 +95,8 @@ async fn permission_wins_over_open_screen() {
     assert!(st.pending_permission.is_none(), "dialog cleared");
 
     // ...and the screen is UNTOUCHED — `1` did not close or alter it.
-    assert_eq!(
-        st.active_screen,
-        Some(Screen::Doctor),
+    assert!(
+        matches!(st.active_screen, Some(Screen::Doctor(_))),
         "screen must be unaffected: the permission consumed the key"
     );
 }

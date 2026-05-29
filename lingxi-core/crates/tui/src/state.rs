@@ -545,10 +545,12 @@ pub struct AppState {
     /// (M7-11) Active full-page screen overlay. `None` ⇒ REPL is live.
     /// Routed at priority 2 in `handle_live_key` (after permission,
     /// before input). Reused by M7-12/13/14.
+    ///
+    /// (M7-11 review) Each `Screen` variant CARRIES its own per-screen state
+    /// inline (e.g. `Screen::Doctor(DoctorDiagnostics)`), so there is no
+    /// parallel top-level `Option<…State>` field per screen to keep in sync —
+    /// `open_*` sets the variant, `close_screen` is a single `= None`.
     pub active_screen: Option<crate::screens::Screen>,
-    /// (M7-11) Diagnostics captured when the Doctor screen opens. `Some`
-    /// only while `active_screen == Some(Screen::Doctor)`.
-    pub doctor_diagnostics: Option<crate::screens::doctor::DoctorDiagnostics>,
 }
 
 impl AppState {
@@ -590,21 +592,21 @@ impl AppState {
             history_search: None,
             paste: crate::components::prompt_input::PasteState::default(),
             active_screen: None,
-            doctor_diagnostics: None,
         }
     }
 
-    /// (M7-11) Open the Doctor screen with captured diagnostics.
+    /// (M7-11) Open the Doctor screen, carrying the captured diagnostics
+    /// inside the `Screen::Doctor` variant.
     pub fn open_doctor(&mut self, diag: crate::screens::doctor::DoctorDiagnostics) {
-        self.active_screen = Some(crate::screens::Screen::Doctor);
-        self.doctor_diagnostics = Some(diag);
+        self.active_screen = Some(crate::screens::Screen::Doctor(diag));
     }
 
-    /// (M7-11) Close any active screen, returning to the REPL. Clears
-    /// per-screen captured state. Reused by every M7 screen's close path.
+    /// (M7-11) Close any active screen, returning to the REPL. Generic — every
+    /// screen's per-screen state lives INSIDE its `Screen` variant, so dropping
+    /// `active_screen` clears it. Reused by every M7 screen's close path; no
+    /// per-screen clear line to add as M7-12/13/14 land new variants.
     pub fn close_screen(&mut self) {
         self.active_screen = None;
-        self.doctor_diagnostics = None;
     }
 
     /// All tool ids in scrollback order. Iterates `messages` once.
@@ -711,13 +713,15 @@ mod tests {
             0,
             (80, 24),
         ));
-        assert_eq!(st.active_screen, Some(Screen::Doctor));
-        assert!(st.doctor_diagnostics.is_some(), "open captures diagnostics");
-        st.close_screen();
-        assert_eq!(st.active_screen, None, "close_screen returns to REPL");
+        // (M7-11 review) The Doctor variant carries its diagnostics inline.
         assert!(
-            st.doctor_diagnostics.is_none(),
-            "close clears captured diagnostics"
+            matches!(&st.active_screen, Some(Screen::Doctor(diag)) if diag.cwd == "/work"),
+            "open carries captured diagnostics inside the variant"
+        );
+        st.close_screen();
+        assert_eq!(
+            st.active_screen, None,
+            "close_screen returns to REPL (generic — drops the variant + its state)"
         );
     }
 

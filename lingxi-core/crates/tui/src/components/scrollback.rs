@@ -93,6 +93,11 @@ pub fn clamp_offset(requested: i64, total_messages: usize, viewport_height: usiz
     requested.clamp(0, max) as usize
 }
 
+/// Dispatch one [`RenderedMessage`] to its per-variant renderer, threading
+/// the per-id `expanded` flags and `focused_tool_id` into the tool blocks
+/// (including M7-02's StructuredDiff branch for `UserToolResult`). Shared
+/// by both the legacy row-based path and the M7-03 `VirtualMessageList`
+/// (re-exported as `virtual_message_list::render_message`).
 pub fn render_message(
     m: RenderedMessage,
     expanded: &HashMap<ToolUseId, bool>,

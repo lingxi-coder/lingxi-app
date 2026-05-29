@@ -481,7 +481,11 @@ pub fn spawn_streaming_turn(
     clippy::cast_sign_loss
 )]
 pub fn scroll_with_viewport(st: &mut AppState, dir: ScrollDir, viewport_height: usize) {
-    let total = st.messages.len();
+    // (M7-03) Scroll math is LINE-based: clamp against total rendered lines
+    // from the height cache, not the message count. Refresh the cache at
+    // the current viewport width first so `total_lines` is accurate.
+    st.refresh_height_cache(st.viewport_width.max(1));
+    let total = st.height_cache.total_lines();
     let max = total.saturating_sub(viewport_height) as i64;
     let cur = st.scroll_offset as i64;
     let new = match dir {

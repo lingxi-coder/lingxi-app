@@ -7,8 +7,8 @@
 #[test]
 fn placeholder_line_matches_snapshot() {
     // Sourced inline from CARGO_PKG_VERSION (build-time const, stable
-    // across `cargo test` runs). Bump-safe: M6-09 bumps the crate to
-    // 0.7.0 and the snapshot will need a one-line update.
+    // across `cargo test` runs). Bump-safe: M7-16 bumps the crate to
+    // 0.8.0; the snapshot gets a one-line update each release.
     let line = format!("lingxi-tui v{}", env!("CARGO_PKG_VERSION"));
     insta::assert_snapshot!("placeholder_line", line);
 }

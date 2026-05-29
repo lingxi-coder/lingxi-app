@@ -134,13 +134,16 @@ fn at_token_after_text_opens_completion_not_palette() {
 
 #[test]
 fn m7_07_registers_no_new_telemetry_events() {
-    // Decision D2: tengu_tui_command_palette_opened is DEFERRED to M7-16.
-    // M7-07 must not register it. If this fails, an event leaked in early —
-    // remove it (the count audit happens once, in M7-16).
+    // Decision D2: tengu_tui_command_palette_opened is DEFERRED. M7-07 must not
+    // register it. The M7-16 audit (which IS the count audit this deferred to)
+    // locked the registry at 330 — but palette telemetry STAYED deferred to M8
+    // (per-keystroke open/close churn, no clean once-per-open transition), so
+    // the count grew via screen_opened/screen_closed/search_opened + the v0.8.0
+    // marker, NOT the palette. If this fails, the palette event leaked in.
     let names = lingxi_telemetry::tengu::ALL_EVENT_NAMES;
-    assert_eq!(names.len(), 326, "M7-07 adds zero events (D2)");
+    assert_eq!(names.len(), 330, "M7-16 locks the registry at 330");
     assert!(
         !names.contains(&"tengu_tui_command_palette_opened"),
-        "palette telemetry is deferred to M7-16"
+        "palette telemetry is deferred to M8"
     );
 }

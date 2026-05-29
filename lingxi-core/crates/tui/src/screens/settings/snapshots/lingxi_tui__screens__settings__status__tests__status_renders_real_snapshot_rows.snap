@@ -2,7 +2,7 @@
 source: crates/tui/src/screens/settings/status.rs
 expression: out
 ---
-Version: lingxi-cli v0.7.0
+Version: lingxi-cli v0.8.0
 Session name: /rename to add a name
 Session ID: sess-abc123
 cwd: /home/u/proj

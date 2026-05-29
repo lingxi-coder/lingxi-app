@@ -82,7 +82,7 @@ pub const SCREEN_OPENED: &str = "tengu_tui_screen_opened";
 /// guarded so it fires only when a screen was actually open. (M7-16)
 pub const SCREEN_CLOSED: &str = "tengu_tui_screen_closed";
 
-/// Emitted when the MessageSelector search/jump/export overlay opens (Ctrl-T or
+/// Emitted when the `MessageSelector` search/jump/export overlay opens (Ctrl-T or
 /// `/export`). Payload: `mode` (one of `"search"`, `"export"`). Emit site:
 /// `lingxi-tui::telemetry::search_opened`, called from
 /// `MessageSelectorState::open` / `open_export`. (M7-16)

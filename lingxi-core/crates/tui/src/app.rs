@@ -35,8 +35,8 @@ pub const SIGINT_WINDOW_SECS: u64 = 2;
 /// Crate version string surfaced to the placeholder line.
 ///
 /// Sourced from the lingxi-tui crate's own `CARGO_PKG_VERSION` so version
-/// bumps automatically propagate. M6-09 bumps the crate to 0.7.0, at which
-/// point the rendered placeholder reads `"lingxi-tui v0.7.0"`.
+/// bumps automatically propagate. M7-16 bumps the crate to 0.8.0, at which
+/// point the rendered placeholder reads `"lingxi-tui v0.8.0"`.
 fn version_line() -> String {
     format!("lingxi-tui v{}", env!("CARGO_PKG_VERSION"))
 }

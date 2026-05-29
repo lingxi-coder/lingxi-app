@@ -9,7 +9,7 @@
 //! - M6-09: `SCROLL_STARTED`, `SCROLL_ENDED`.
 //! - M7-16: `SCREEN_OPENED`, `SCREEN_CLOSED`, `SEARCH_OPENED` — the §2.7
 //!   candidates that gained REAL emit sites this milestone (screen open/close
-//!   on `active_screen None↔Some`; MessageSelector open). The remaining
+//!   on `active_screen None↔Some`; `MessageSelector` open). The remaining
 //!   candidates (`command_palette_opened`, `vim_mode_entered`, `key_pressed`)
 //!   stay DEFERRED — no clean/aggregated emit site, so registering them would
 //!   mint dead names (the M6 "330 vs 326" lesson).
@@ -104,7 +104,7 @@ pub fn screen_closed() {
     );
 }
 
-/// (M7-16) Fire when the MessageSelector search/jump/export overlay opens
+/// (M7-16) Fire when the `MessageSelector` search/jump/export overlay opens
 /// (Ctrl-T or `/export`). `mode` is one of `"search"`, `"export"`. Called from
 /// `MessageSelectorState::open` / `open_export`.
 pub fn search_opened(mode: &str) {

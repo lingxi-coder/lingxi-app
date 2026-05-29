@@ -64,7 +64,7 @@ fn arm_permission(st: &mut AppState) {
 
 /// SEAM 1 (priority 1 > 2): a screen is open AND a permission becomes pending.
 /// A key the screen would consume (`j`) must NOT reach the screen — the
-/// permission owns it. (The dialog has no resp_tx attached here, so the key is
+/// permission owns it. (The dialog has no `resp_tx` attached here, so the key is
 /// simply swallowed by the priority-1 branch; we assert non-leakage.)
 #[test]
 fn permission_wins_over_open_screen() {
@@ -93,7 +93,7 @@ fn permission_wins_over_open_screen() {
 
 /// SEAM 1b (priority 1 > 3): a permission wins over an open overlay too. With
 /// the message-selector overlay open AND a permission pending, a key does not
-/// reach the overlay. We feed `j` — a key the ToolUseConfirm dialog does NOT
+/// reach the overlay. We feed `j` — a key the `ToolUseConfirm` dialog does NOT
 /// resolve on (only `1`/`2`/`n`/`N`/`Esc` resolve), so the permission stays
 /// pending and we can prove the overlay was untouched. (Esc WOULD resolve the
 /// dialog as Deny, which is also priority-1-correct — it would just clear the
@@ -191,7 +191,7 @@ fn key_burst_while_screen_open_does_not_leak_into_prompt() {
 /// SEAM 4 (mutual exclusion + gating): opening a screen while an overlay is
 /// open is sane, and vim is gated. (a) With the palette overlay open, opening a
 /// screen makes the screen win all keys (priority 2 > 3). (b) vim only fires
-/// when no screen/overlay owns keys AND vim_enabled.
+/// when no screen/overlay owns keys AND `vim_enabled`.
 #[test]
 fn screen_outranks_overlay_and_vim_is_gated() {
     // (a) Overlay open, then a screen opens: priority 2 (screen) > 3 (overlay).
@@ -230,8 +230,14 @@ fn screen_outranks_overlay_and_vim_is_gated() {
     st3.prompt_text = "hello".into();
     st3.prompt_cursor = 0;
     handle_live_key(&mut st3, &key(KeyCode::Char('l')), 24);
-    assert_eq!(st3.prompt_cursor, 1, "vim NORMAL `l` moves the cursor right");
-    assert_eq!(st3.prompt_text, "hello", "vim motion does not edit the buffer");
+    assert_eq!(
+        st3.prompt_cursor, 1,
+        "vim NORMAL `l` moves the cursor right"
+    );
+    assert_eq!(
+        st3.prompt_text, "hello",
+        "vim motion does not edit the buffer"
+    );
 }
 
 /// SEAM 5 (modal-independent toggle, gated on no overlay): Ctrl-Alt-V toggles
@@ -244,7 +250,10 @@ fn vim_toggle_is_modal_independent_but_yields_to_overlay() {
     assert!(!st.vim_enabled);
     handle_live_key(
         &mut st,
-        &key_mods(KeyCode::Char('v'), KeyModifiers::CONTROL | KeyModifiers::ALT),
+        &key_mods(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ),
         24,
     );
     assert!(st.vim_enabled, "Ctrl-Alt-V toggles vim on from the REPL");

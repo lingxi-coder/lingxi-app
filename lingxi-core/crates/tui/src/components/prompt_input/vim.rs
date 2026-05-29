@@ -1591,19 +1591,24 @@ mod tests {
 
     #[test]
     fn m7_08_adds_no_telemetry_events() {
-        // M7-08 ships 0 new telemetry events; baseline locked at 326 (M7-16
-        // audits the real M7 total). tengu_tui_vim_mode_entered is DEFERRED to
-        // M7-16. This guard fails if M7-08 accidentally registers a new event.
-        assert_eq!(lingxi_telemetry::tengu::ALL_EVENT_NAMES.len(), 326);
+        // M7-08 ships 0 new telemetry events. The M7-16 audit (which IS the
+        // "real M7 total" decision this guard deferred to) locked the registry
+        // at 330: vim itself still registers NOTHING —
+        // `tengu_tui_vim_mode_entered` stayed DEFERRED (Esc-from-Insert churn,
+        // no aggregator). The +4 vs the 326 M6 baseline is M7-16's
+        // screen_opened/screen_closed/search_opened + lingxi_core_v0_8_0_released
+        // (none from vim). This guard fails if vim accidentally mints an event.
+        assert_eq!(lingxi_telemetry::tengu::ALL_EVENT_NAMES.len(), 330);
     }
 
     #[test]
     fn m7_09_adds_no_telemetry_events() {
-        // M7-09 ships 0 new telemetry events; baseline locked at 326 (M7-16
-        // audits the real M7 total). vim operators/visual emit nothing
-        // (per-keystroke telemetry is explicitly NOT done; aggregated vim usage
-        // is an M7-16 decision). This guard fails if M7-09 registers a new event.
-        assert_eq!(lingxi_telemetry::tengu::ALL_EVENT_NAMES.len(), 326);
+        // M7-09 ships 0 new telemetry events. Registry locked at 330 by the
+        // M7-16 audit; vim operators/visual emit nothing (per-keystroke
+        // telemetry is explicitly NOT done; `vim_mode_entered` stayed deferred).
+        // The +4 vs the 326 baseline is all M7-16 (screen/search + release
+        // marker). This guard fails if vim registers a new event.
+        assert_eq!(lingxi_telemetry::tengu::ALL_EVENT_NAMES.len(), 330);
     }
 
     #[test]

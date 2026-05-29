@@ -156,7 +156,10 @@ fn resume_list_select() {
 
     let mut st = fresh_state();
     st.active_screen = Some(Screen::Resume(ResumeState::new(rows)));
-    assert_eq!(active_screen_name(&st), s["expected_active_screen"].as_str());
+    assert_eq!(
+        active_screen_name(&st),
+        s["expected_active_screen"].as_str()
+    );
 
     // Drive nav keys through the live reducer.
     let Some(Screen::Resume(rs)) = &mut st.active_screen else {
@@ -165,8 +168,7 @@ fn resume_list_select() {
     for k in s["nav_keys"].as_array().unwrap() {
         let _ = handle_resume_key(rs, ct_key(k.as_str().unwrap()));
     }
-    let expected_idx =
-        usize::try_from(s["expected_selected_index"].as_u64().unwrap()).unwrap();
+    let expected_idx = usize::try_from(s["expected_selected_index"].as_u64().unwrap()).unwrap();
     assert_eq!(rs.selected, expected_idx, "Down moves the selection");
     assert_eq!(
         rs.selected_uuid().map(|u| u.to_string()),
@@ -221,8 +223,14 @@ fn settings_tab_nav() {
 
     // Pump half: open the screen directly (mirrors root::pump_open_settings).
     st.pending_open_settings = None;
-    st.open_settings(SettingsState::new(SettingsTab::Config, fixture_settings_data()));
-    assert_eq!(active_screen_name(&st), s["expected_active_screen"].as_str());
+    st.open_settings(SettingsState::new(
+        SettingsTab::Config,
+        fixture_settings_data(),
+    ));
+    assert_eq!(
+        active_screen_name(&st),
+        s["expected_active_screen"].as_str()
+    );
 
     // Tab nav through the live reducer.
     let expected_seq: Vec<&str> = s["expected_tab_sequence"]

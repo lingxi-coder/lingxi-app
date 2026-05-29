@@ -32,7 +32,7 @@ fn load() -> Value {
     serde_json::from_str(FIXTURE).expect("parity_tui_renderers_m7.json parses")
 }
 
-/// A plain-text MarkdownTheme — the structure tests ignore color (the
+/// A plain-text `MarkdownTheme` — the structure tests ignore color (the
 /// `code_theme` is immaterial for the plain-text projection).
 fn md_theme() -> MarkdownTheme {
     MarkdownTheme {
@@ -84,12 +84,11 @@ fn image_placeholder_is_locked() {
 fn grouped_tool_use_header_is_locked() {
     let f = load();
     let r = &f["renderers"]["grouped_tool_use"];
-    let header =
-        lingxi_tui::components::messages::grouped_tool_use::render_grouped_to_string(
-            r["tool"].as_str().unwrap(),
-            &[],
-            false,
-        );
+    let header = lingxi_tui::components::messages::grouped_tool_use::render_grouped_to_string(
+        r["tool"].as_str().unwrap(),
+        &[],
+        false,
+    );
     assert_eq!(header, r["expected_group_header"].as_str().unwrap());
 }
 
@@ -99,9 +98,18 @@ fn grouped_tool_use_header_is_locked() {
 fn markdown_elements_render_locked_structure() {
     let f = load();
     let md = &f["markdown"];
-    for key in ["heading", "bold_italic", "list", "blockquote", "inline_code"] {
+    for key in [
+        "heading",
+        "bold_italic",
+        "list",
+        "blockquote",
+        "inline_code",
+    ] {
         let case = &md[key];
-        let got = plain(&render_markdown(case["input"].as_str().unwrap(), &md_theme()));
+        let got = plain(&render_markdown(
+            case["input"].as_str().unwrap(),
+            &md_theme(),
+        ));
         let want: Vec<String> = case["expected_structure"]
             .as_array()
             .unwrap()

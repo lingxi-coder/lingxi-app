@@ -370,6 +370,10 @@ pub fn render_screen(
                 use crate::screens::doctor::DoctorScreen;
                 element! { DoctorScreen(diag: Some(diag.clone())) }.into_any()
             }
+            Screen::Resume(rs) => {
+                use crate::screens::resume::ResumeScreen;
+                element! { ResumeScreen(state: rs.clone()) }.into_any()
+            }
         };
     }
     let status = state.status.clone();

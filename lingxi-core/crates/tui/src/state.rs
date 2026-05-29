@@ -493,6 +493,11 @@ pub struct AppState {
     pub sigint_armed_at: Option<Instant>,
     /// Set by `/exit` (or second Ctrl-C within the arming window).
     pub should_exit: bool,
+    /// (M7-12) Set by the Resume screen on Enter: the session UUID the user
+    /// chose. The CLI reads this after the TUI exits to load + resume it. The
+    /// Resume screen also flips `should_exit` so the mount unwinds back to the
+    /// CLI, which then surfaces / loads the chosen session.
+    pub resume_request: Option<uuid::Uuid>,
     /// (M6-04) Currently focused tool block (Up/Down in scroll mode walks
     /// this through the `AssistantToolUse` entries in scrollback order).
     pub focused_tool_id: Option<ToolUseId>,
@@ -573,6 +578,7 @@ impl AppState {
             in_flight_turn: None,
             sigint_armed_at: None,
             should_exit: false,
+            resume_request: None,
             focused_tool_id: None,
             expanded: HashMap::new(),
             tool_call_inputs: HashMap::new(),

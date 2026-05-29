@@ -226,19 +226,51 @@ fn apply_vim_effect(st: &mut AppState, effect: crate::components::prompt_input::
     }
 }
 
-/// Route a key to the active full-page screen (M7-11). Esc / `q` close the
-/// screen (back to the REPL); every other key is swallowed so it cannot leak
-/// to `PromptInput` (the M7-11 no-leak guarantee). Per-screen interactive keys
-/// (arrow-select, Enter) are added by M7-12/13/14 as `match`-on-`Screen` arms
-/// here.
+/// Route a key to the active full-page screen. Dispatches PER-VARIANT on the
+/// active `Screen` (M7-12): each screen owns its own key semantics while the
+/// shared contract — Esc/`q` close, no key leaks to `PromptInput` — holds for
+/// every variant.
+///
+/// - `Screen::Doctor` (M7-11) is read-only: Esc / `q` (no modifiers) close it;
+///   every other key is swallowed (the M7-11 no-leak guarantee). Byte-identical
+///   to the original M7-11 behavior.
+/// - `Screen::Resume` (M7-12) is the FIRST interactive screen: Up/Down select,
+///   Enter resumes the selected uuid, Esc/`q` cancel. We bridge the iocraft
+///   (crossterm-0.29) `KeyEvent` to crossterm-0.28 and run the pure
+///   `resume::handle_resume_key`, then act on its `ResumeOutcome`:
+///     - `Stay`   → keep the screen open (selection moved or inert key).
+///     - `Resume` → record `resume_request` + flip `should_exit` so the mount
+///       unwinds back to the CLI, which loads the chosen session.
+///     - `Cancel` → close the screen (back to REPL).
+///
+/// M7-13/14 add further `match` arms here for their screens.
 fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
-    match k.code {
-        KeyCode::Esc => st.close_screen(),
-        KeyCode::Char('q') if k.modifiers == KeyModifiers::NONE => st.close_screen(),
-        // (M7-16) screen-close telemetry (`tengu_tui_screen_closed`) would emit
-        // here once the M7-16 audit registers it. M7-11 adds 0 events.
-        // Doctor is read-only; other keys are inert. Future screens add arms.
-        _ => {}
+    use crate::screens::Screen;
+    match &mut st.active_screen {
+        Some(Screen::Doctor(_)) => {
+            // (M7-11) Read-only screen: Esc / `q` close; everything else inert.
+            match k.code {
+                KeyCode::Esc => st.close_screen(),
+                KeyCode::Char('q') if k.modifiers == KeyModifiers::NONE => st.close_screen(),
+                // (M7-16) screen-close telemetry (`tengu_tui_screen_closed`)
+                // would emit here once the M7-16 audit registers it. 0 events.
+                _ => {}
+            }
+        }
+        Some(Screen::Resume(state)) => {
+            use crate::screens::resume::{handle_resume_key, ResumeOutcome};
+            let ct = iocraft_to_crossterm028_key(k);
+            match handle_resume_key(state, ct) {
+                ResumeOutcome::Stay => { /* keep the screen open */ }
+                ResumeOutcome::Resume(uuid) => {
+                    st.resume_request = Some(uuid);
+                    st.close_screen();
+                    st.should_exit = true; // hand control back to the CLI
+                }
+                ResumeOutcome::Cancel => st.close_screen(),
+            }
+        }
+        None => {}
     }
 }
 

@@ -285,11 +285,25 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     st.palette.sync_from_prompt(&st.prompt_text);
     if st.palette.open {
         st.completion.open = false;
-    } else {
+    } else if crate::components::prompt_input::completion::active_at_token(
+        &st.prompt_text,
+        st.prompt_cursor,
+    )
+    .is_some()
+    {
+        // Only an active `@` token needs the cwd listing. Reading it on every
+        // non-`@` keystroke (plain typing, arrows, Backspace) was a per-keypress
+        // `read_dir` syscall whose result `sync`'s no-`@` branch discarded — the
+        // plan computes candidates once per directory, not per keystroke.
         let cwd_entries =
             crate::components::prompt_input::completion::read_cwd_entries(&st.status.cwd);
         st.completion
             .sync(&st.prompt_text, st.prompt_cursor, &cwd_entries);
+    } else {
+        // No `@` token: close/clear the overlay without touching the filesystem.
+        // `sync` with an empty candidate slice takes its no-token branch, which
+        // resets open/filter/selected/candidates — identical to the prior path.
+        st.completion.sync(&st.prompt_text, st.prompt_cursor, &[]);
     }
 }
 

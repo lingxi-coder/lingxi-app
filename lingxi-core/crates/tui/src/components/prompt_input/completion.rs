@@ -39,7 +39,13 @@ pub struct CompletionState {
 /// space. Returns `(at_byte_index, partial)` or `None`.
 #[must_use]
 pub fn active_at_token(prompt: &str, cursor: usize) -> Option<(usize, String)> {
-    let cursor = cursor.min(prompt.len());
+    // Clamp to the nearest char boundary at or below `cursor` so `&prompt[..cursor]`
+    // never panics. The live editor keeps `prompt_cursor` on boundaries today, but
+    // this is a public fn and M7-08/09 vim motions manipulate the cursor freely.
+    let mut cursor = cursor.min(prompt.len());
+    while cursor > 0 && !prompt.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
     let head = &prompt[..cursor];
     let at = head.rfind('@')?;
     let preceded_ok = at == 0 || head[..at].ends_with(|c: char| c.is_whitespace());
@@ -256,6 +262,28 @@ mod tests {
     #[test]
     fn no_token_without_at() {
         assert_eq!(active_at_token("plain text", 5), None);
+    }
+
+    #[test]
+    fn no_token_for_plain_text_at_end() {
+        // Important #1 gate: no `@` ⇒ no active token ⇒ live path skips the fs read.
+        assert_eq!(active_at_token("hello", 5), None);
+    }
+
+    #[test]
+    fn token_active_for_at_prefix() {
+        // Important #1 gate: an active `@s` token ⇒ live path performs the fs read.
+        assert_eq!(active_at_token("@s", 2), Some((0, "s".into())));
+    }
+
+    #[test]
+    fn cursor_off_char_boundary_does_not_panic() {
+        // Minor #2: `@café` — `é` is 2 bytes (bytes 4..6); cursor 5 lands mid-`é`,
+        // which is NOT a UTF-8 char boundary. Slicing `&prompt[..5]` would panic;
+        // the entry clamp must walk it down to a boundary (4) instead.
+        let out = active_at_token("@café", 5);
+        // Clamped to byte 4 ⇒ token is "caf" starting at the `@` (byte 0).
+        assert_eq!(out, Some((0, "caf".into())));
     }
 
     #[test]

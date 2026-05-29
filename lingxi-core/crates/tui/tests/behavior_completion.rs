@@ -66,6 +66,23 @@ fn esc_dismisses_completion_keeps_text() {
 }
 
 #[test]
+fn typing_plain_text_leaves_completion_closed_and_empty() {
+    // Important #1: ordinary typing (no `@` token) must not open the completion
+    // overlay. The live re-sync gates its cwd read behind an active `@` token, so
+    // with no `@` the overlay stays closed and carries no candidates.
+    let (mut st, _dir) = state_with_files();
+    for ch in "hello".chars() {
+        handle_live_key(&mut st, &key(KeyCode::Char(ch)), 24);
+    }
+    assert_eq!(st.prompt_text, "hello");
+    assert!(!st.completion.open, "no `@` ⇒ completion stays closed");
+    assert!(
+        st.completion.candidates.is_empty(),
+        "no `@` ⇒ no cwd candidates were read"
+    );
+}
+
+#[test]
 fn focus_trap_down_moves_completion_not_history() {
     let (mut st, _dir) = state_with_files();
     st.history.push("old".into());

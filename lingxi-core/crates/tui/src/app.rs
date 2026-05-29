@@ -124,6 +124,14 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             st.prompt_cursor = apply_move(&st.prompt_text, st.prompt_cursor, pi);
             false
         }
+        KeyAction::MoveCursorVertical(delta) => {
+            st.prompt_cursor = crate::components::prompt_input::apply_move_vertical(
+                &st.prompt_text,
+                st.prompt_cursor,
+                i32::from(delta),
+            );
+            false
+        }
         KeyAction::Submit => {
             if st.prompt_text.is_empty() {
                 return false;
@@ -624,6 +632,15 @@ mod dispatch_tests {
         dispatch(KeyAction::InsertNewline, &mut st);
         assert_eq!(st.prompt_text, "a\n"); // trailing '\' stripped, '\n' inserted
         assert_eq!(st.prompt_cursor, 2);
+    }
+
+    #[test]
+    fn move_cursor_vertical_down() {
+        let mut st = s();
+        st.prompt_text = "abc\ndef".into();
+        st.prompt_cursor = 2;
+        dispatch(KeyAction::MoveCursorVertical(1), &mut st);
+        assert_eq!(st.prompt_cursor, 6);
     }
 
     #[test]

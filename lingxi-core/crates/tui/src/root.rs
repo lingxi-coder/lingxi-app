@@ -65,10 +65,15 @@ pub struct TuiRootProps {
 /// table is intentionally kept in sync byte-for-byte with `keymap::map_key`;
 /// see that file for the canonical bindings.
 #[allow(clippy::too_many_lines)]
-fn map_iocraft_key(evt: &KeyEvent, prompt_empty: bool, focus_active: bool) -> Option<KeyAction> {
+fn map_iocraft_key(
+    evt: &KeyEvent,
+    prompt_empty: bool,
+    focus_active: bool,
+    multiline: bool,
+) -> Option<KeyAction> {
     use KeyAction::{
         Backspace, Cancel, FocusToolStep, HistoryStep, InsertChar, InsertNewline, MoveCursor,
-        ScrollStep, Submit, ToggleExpanded,
+        MoveCursorVertical, ScrollStep, Submit, ToggleExpanded,
     };
     if focus_active {
         match (&evt.code, evt.modifiers) {
@@ -90,6 +95,10 @@ fn map_iocraft_key(evt: &KeyEvent, prompt_empty: bool, focus_active: bool) -> Op
         (KeyCode::Right, _) => Some(MoveCursor(CursorMove::Right)),
         (KeyCode::Home, _) => Some(MoveCursor(CursorMove::Home)),
         (KeyCode::End, _) => Some(MoveCursor(CursorMove::End)),
+        // Multi-line buffers move the cursor vertically; single-line buffers
+        // keep the M6 history-step behaviour.
+        (KeyCode::Up, _) if multiline => Some(MoveCursorVertical(-1)),
+        (KeyCode::Down, _) if multiline => Some(MoveCursorVertical(1)),
         (KeyCode::Up, _) => Some(HistoryStep(-1)),
         (KeyCode::Down, _) => Some(HistoryStep(1)),
         (KeyCode::PageUp, _) => Some(ScrollStep(ScrollDir::PageUp)),
@@ -195,6 +204,8 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     // === end focus trap ===
 
     let prompt_empty = st.prompt_text.is_empty();
+    // Multi-line buffers route Up/Down to vertical cursor motion (Task 9).
+    let multiline = st.prompt_text.contains('\n');
     // Focus mode activates when there's at least one tool block in scrollback
     // AND the prompt is empty.
     let focus_active = prompt_empty
@@ -202,7 +213,7 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
             .messages
             .iter()
             .any(|m| matches!(m, crate::state::RenderedMessage::AssistantToolUse { .. }));
-    if let Some(mut action) = map_iocraft_key(k, prompt_empty, focus_active) {
+    if let Some(mut action) = map_iocraft_key(k, prompt_empty, focus_active, multiline) {
         // Backslash-return fallback: a plain-Enter Submit becomes InsertNewline
         // when the char before the cursor is a lone '\' (terminals that can't
         // distinguish Shift+Enter from Enter). Runs only AFTER the permission
@@ -438,7 +449,7 @@ mod tests {
     fn map_iocraft_key_char_inserts() {
         let k = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('h'));
         assert!(matches!(
-            map_iocraft_key(&k, false, false),
+            map_iocraft_key(&k, false, false, false),
             Some(KeyAction::InsertChar('h'))
         ));
     }
@@ -447,7 +458,7 @@ mod tests {
     fn map_iocraft_key_enter_submits() {
         let k = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
         assert!(matches!(
-            map_iocraft_key(&k, false, false),
+            map_iocraft_key(&k, false, false, false),
             Some(KeyAction::Submit)
         ));
     }
@@ -457,7 +468,7 @@ mod tests {
         let mut k = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
         k.modifiers = KeyModifiers::SHIFT;
         assert!(matches!(
-            map_iocraft_key(&k, false, false),
+            map_iocraft_key(&k, false, false, false),
             Some(KeyAction::InsertNewline)
         ));
     }
@@ -466,8 +477,17 @@ mod tests {
     fn map_iocraft_key_plain_enter_submits() {
         let k = KeyEvent::new(KeyEventKind::Press, KeyCode::Enter);
         assert!(matches!(
-            map_iocraft_key(&k, false, false),
+            map_iocraft_key(&k, false, false, false),
             Some(KeyAction::Submit)
+        ));
+    }
+
+    #[test]
+    fn map_iocraft_key_up_is_vertical_when_multiline() {
+        let k = KeyEvent::new(KeyEventKind::Press, KeyCode::Up);
+        assert!(matches!(
+            map_iocraft_key(&k, false, false, true),
+            Some(KeyAction::MoveCursorVertical(-1))
         ));
     }
 
@@ -476,7 +496,7 @@ mod tests {
         let mut k = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('c'));
         k.modifiers = KeyModifiers::CONTROL;
         assert!(matches!(
-            map_iocraft_key(&k, false, false),
+            map_iocraft_key(&k, false, false, false),
             Some(KeyAction::Cancel)
         ));
     }
@@ -485,7 +505,7 @@ mod tests {
     fn map_iocraft_key_focus_active_routes_e_to_toggle() {
         let k = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('e'));
         assert!(matches!(
-            map_iocraft_key(&k, true, true),
+            map_iocraft_key(&k, true, true, false),
             Some(KeyAction::ToggleExpanded)
         ));
     }

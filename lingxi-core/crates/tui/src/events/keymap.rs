@@ -83,6 +83,9 @@ pub enum KeyAction {
     Backspace,
     /// Move the cursor (Left / Right / Home / End).
     MoveCursor(CursorMove),
+    /// Move the cursor one logical line up (`-1`) or down (`+1`) in a
+    /// multi-line buffer. Single-line buffers route Up/Down to history.
+    MoveCursorVertical(i8),
     /// Enter — submit the current prompt.
     Submit,
     /// Shift+Enter (or the backslash-return fallback) — insert a `\n` at the
@@ -106,11 +109,30 @@ pub enum KeyAction {
 /// promotes Up/Down to tool-focus walking and `e`/Enter to expanded toggle
 /// — used when at least one tool block exists in the scrollback AND the
 /// prompt is empty.
+///
+/// This is the single-line-buffer convenience wrapper: it delegates to
+/// [`map_key_ml`] with `multiline = false`, so every existing M6 caller
+/// keeps its byte-identical behaviour (Up/Down → history). The live path
+/// computes the real `multiline` flag and calls [`map_key_ml`] directly.
 #[must_use]
 pub fn map_key(evt: KeyEvent, prompt_empty: bool, focus_active: bool) -> Option<KeyAction> {
+    map_key_ml(evt, prompt_empty, focus_active, false)
+}
+
+/// Multiline-aware variant of [`map_key`]. When `multiline` is `true` (the
+/// prompt buffer spans more than one logical line) Up/Down move the cursor
+/// vertically ([`KeyAction::MoveCursorVertical`]) instead of stepping
+/// history. All other bindings are identical to [`map_key`].
+#[must_use]
+pub fn map_key_ml(
+    evt: KeyEvent,
+    prompt_empty: bool,
+    focus_active: bool,
+    multiline: bool,
+) -> Option<KeyAction> {
     use KeyAction::{
         Backspace, Cancel, FocusToolStep, HistoryStep, InsertChar, InsertNewline, MoveCursor,
-        ScrollStep, Submit, ToggleExpanded,
+        MoveCursorVertical, ScrollStep, Submit, ToggleExpanded,
     };
     // M6-04 focus-mode bindings take priority when focus is active.
     if focus_active {
@@ -132,6 +154,10 @@ pub fn map_key(evt: KeyEvent, prompt_empty: bool, focus_active: bool) -> Option<
         (KeyCode::Right, _) => Some(MoveCursor(CursorMove::Right)),
         (KeyCode::Home, _) => Some(MoveCursor(CursorMove::Home)),
         (KeyCode::End, _) => Some(MoveCursor(CursorMove::End)),
+        // Multi-line buffers move the cursor vertically; single-line buffers
+        // keep the M6 history-step behaviour.
+        (KeyCode::Up, _) if multiline => Some(MoveCursorVertical(-1)),
+        (KeyCode::Down, _) if multiline => Some(MoveCursorVertical(1)),
         (KeyCode::Up, _) => Some(HistoryStep(-1)),
         (KeyCode::Down, _) => Some(HistoryStep(1)),
         (KeyCode::PageUp, _) => Some(ScrollStep(ScrollDir::PageUp)),
@@ -385,6 +411,27 @@ mod m6_02_tests {
         assert!(matches!(
             map_key(k(KeyCode::Enter), false, false),
             Some(KeyAction::Submit)
+        ));
+    }
+
+    #[test]
+    fn up_down_step_history_in_single_line() {
+        // multiline=false → M6 behaviour preserved.
+        assert!(matches!(
+            map_key_ml(k(KeyCode::Up), false, false, false),
+            Some(KeyAction::HistoryStep(-1))
+        ));
+    }
+
+    #[test]
+    fn up_down_move_cursor_in_multiline() {
+        assert!(matches!(
+            map_key_ml(k(KeyCode::Up), false, false, true),
+            Some(KeyAction::MoveCursorVertical(-1))
+        ));
+        assert!(matches!(
+            map_key_ml(k(KeyCode::Down), false, false, true),
+            Some(KeyAction::MoveCursorVertical(1))
         ));
     }
 }

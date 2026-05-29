@@ -6,6 +6,7 @@
 
 pub mod doctor;
 pub mod repl;
+pub mod resume;
 
 /// Which full-page screen currently overlays the REPL. `None` ⇒ REPL is live.
 /// Established by M7-11; M7-12/13/14 add `Resume`/`Settings`/`Memory`.
@@ -22,7 +23,11 @@ pub enum Screen {
     /// The diagnostic screen opened by `/doctor`, carrying its captured
     /// diagnostics.
     Doctor(doctor::DoctorDiagnostics),
-    // Resume(ResumeState),     // M7-12
+    /// (M7-12) The Resume picker, carrying its own rows + selection state.
+    /// The FIRST screen with interactive keys (Up/Down select, Enter resume):
+    /// `root::handle_screen_key` dispatches per-variant so this arm runs the
+    /// pure `resume::handle_resume_key` while Doctor stays read-only.
+    Resume(resume::ResumeState),
     // Settings(SettingsState), // M7-13
     // Memory(MemoryState),     // M7-14
 }

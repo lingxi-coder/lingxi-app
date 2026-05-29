@@ -429,6 +429,27 @@ pub fn render_screen(
             }
         };
     }
+    // (M7-14) Message search overlay renders over the REPL at priority 3 (after
+    // the permission + screen branches above, mirroring their render-instead-of
+    // discipline — no z-index primitive in iocraft 0.8).
+    if state.message_selector.open {
+        use crate::components::message_selector::{preview_label, MessageSelector};
+        let sel = &state.message_selector;
+        let result_labels: Vec<String> = sel
+            .filtered
+            .iter()
+            .filter_map(|&i| state.messages.get(i))
+            .map(preview_label)
+            .collect();
+        return element! {
+            MessageSelector(
+                query: sel.query.clone(),
+                result_labels: result_labels,
+                selected: sel.selected_filtered,
+            )
+        }
+        .into_any();
+    }
     let status = state.status.clone();
     let messages = state.messages.clone();
     let prompt_text = state.prompt_text.clone();

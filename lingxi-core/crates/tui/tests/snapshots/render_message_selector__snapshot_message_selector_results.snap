@@ -1,0 +1,8 @@
+---
+source: crates/tui/tests/render_message_selector.rs
+expression: out
+---
+Search: world
+❯ hello world
+  worldly affairs
+↑/↓ select · Enter jump · Esc cancel

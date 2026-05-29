@@ -281,7 +281,12 @@ mod tests {
     #[test]
     fn code_placeholder_span_is_tagged() {
         let span = StyledSpan::code_placeholder("fn main() {}", Some("rust"));
-        assert_eq!(span.kind, SpanKind::CodePlaceholder { lang: Some("rust".to_string()) });
+        assert_eq!(
+            span.kind,
+            SpanKind::CodePlaceholder {
+                lang: Some("rust".to_string())
+            }
+        );
         assert_eq!(span.text, "fn main() {}");
     }
 
@@ -299,10 +304,26 @@ mod tests {
     fn style_color_maps_to_iocraft() {
         use iocraft::Color;
         assert!(matches!(StyleColor::Default.to_iocraft(), Color::Reset));
-        assert!(matches!(StyleColor::Named(NamedColor::Red).to_iocraft(), Color::DarkRed));
-        assert!(matches!(StyleColor::Named(NamedColor::BrightRed).to_iocraft(), Color::Red));
-        assert!(matches!(StyleColor::Rgb(10, 20, 30).to_iocraft(), Color::Rgb { r: 10, g: 20, b: 30 }));
+        assert!(matches!(
+            StyleColor::Named(NamedColor::Red).to_iocraft(),
+            Color::DarkRed
+        ));
+        assert!(matches!(
+            StyleColor::Named(NamedColor::BrightRed).to_iocraft(),
+            Color::Red
+        ));
+        assert!(matches!(
+            StyleColor::Rgb(10, 20, 30).to_iocraft(),
+            Color::Rgb {
+                r: 10,
+                g: 20,
+                b: 30
+            }
+        ));
         // 256-palette index resolves to an Rgb triple via the xterm cube.
-        assert!(matches!(StyleColor::Indexed(196).to_iocraft(), Color::Rgb { .. }));
+        assert!(matches!(
+            StyleColor::Indexed(196).to_iocraft(),
+            Color::Rgb { .. }
+        ));
     }
 }

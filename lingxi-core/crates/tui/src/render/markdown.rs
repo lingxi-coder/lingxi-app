@@ -315,8 +315,15 @@ mod tests {
     #[test]
     fn inline_code_uses_theme_color() {
         let lines = render("run `cargo test` now", &theme());
-        let code = lines[0].spans.iter().find(|s| s.text == "cargo test").unwrap();
-        assert_eq!(code.style.fg, StyleColor::Named(crate::render::NamedColor::Magenta));
+        let code = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.text == "cargo test")
+            .unwrap();
+        assert_eq!(
+            code.style.fg,
+            StyleColor::Named(crate::render::NamedColor::Magenta)
+        );
     }
 
     #[test]
@@ -373,9 +380,16 @@ mod tests {
     #[test]
     fn blockquote_has_bar_prefix() {
         let lines = render("> quoted", &theme());
-        let line = lines.iter().find(|l| l.plain_text().contains("quoted")).unwrap();
+        let line = lines
+            .iter()
+            .find(|l| l.plain_text().contains("quoted"))
+            .unwrap();
         assert!(line.plain_text().starts_with("│ "));
-        let text_span = line.spans.iter().find(|s| s.text.contains("quoted")).unwrap();
+        let text_span = line
+            .spans
+            .iter()
+            .find(|s| s.text.contains("quoted"))
+            .unwrap();
         assert!(text_span.style.italic);
     }
 
@@ -392,7 +406,9 @@ mod tests {
         assert_eq!(ph.text, "fn main() {}\n");
         assert_eq!(
             ph.kind,
-            crate::render::SpanKind::CodePlaceholder { lang: Some("rust".to_string()) }
+            crate::render::SpanKind::CodePlaceholder {
+                lang: Some("rust".to_string())
+            }
         );
     }
 
@@ -405,7 +421,10 @@ mod tests {
             .flat_map(|l| &l.spans)
             .find(|s| matches!(s.kind, crate::render::SpanKind::CodePlaceholder { .. }))
             .unwrap();
-        assert_eq!(ph.kind, crate::render::SpanKind::CodePlaceholder { lang: None });
+        assert_eq!(
+            ph.kind,
+            crate::render::SpanKind::CodePlaceholder { lang: None }
+        );
     }
 
     #[test]
@@ -434,7 +453,10 @@ mod tests {
             .iter()
             .flat_map(|l| &l.spans)
             .find(|s| matches!(s.kind, crate::render::SpanKind::CodePlaceholder { .. }));
-        assert!(ph.is_some(), "unclosed fence should still emit a placeholder");
+        assert!(
+            ph.is_some(),
+            "unclosed fence should still emit a placeholder"
+        );
     }
 
     #[test]

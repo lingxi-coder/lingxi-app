@@ -254,19 +254,28 @@ impl<'a> VimCursor<'a> {
         }
     }
 
-    /// Column = byte distance from logical-line start, clamped to dest line.
+    /// Move to the destination logical line preserving the cursor's CHARACTER
+    /// column (claude-code `Cursor.up/downLogicalLine` semantics — column in
+    /// string-index/char units, clamped to the dest line). CJK display-width
+    /// (2-cell) columns stay deferred to M8; this is a char-count column.
     fn move_to_line(&self, target_start: usize, target_end: usize) -> Self {
         let cur_start = self.logical_line_start(self.offset);
-        let col = self.offset - cur_start;
-        let line_len = target_end - target_start;
-        let raw = target_start + col.min(line_len);
+        // Current column = number of chars from this line's start to the cursor.
+        let col = self.text[cur_start..self.offset].chars().count();
+        // Walk `col` chars into the dest line; a shorter dest line clamps to its
+        // end (consistent with the existing end-of-line column behavior).
+        let dest = &self.text[target_start..target_end];
+        let raw = dest
+            .char_indices()
+            .nth(col)
+            .map_or(target_end, |(i, _)| target_start + i);
         Self {
             text: self.text,
             offset: self.clamp(raw),
         }
     }
 
-    /// One logical line down (`j`), preserving the byte column clamped to the
+    /// One logical line down (`j`), preserving the char column clamped to the
     /// destination line. No-op on the last line.
     #[must_use]
     pub fn down_logical_line(&self) -> Self {
@@ -279,7 +288,7 @@ impl<'a> VimCursor<'a> {
         self.move_to_line(next_start, next_end)
     }
 
-    /// One logical line up (`k`), preserving the byte column clamped to the
+    /// One logical line up (`k`), preserving the char column clamped to the
     /// destination line. No-op on the first line.
     #[must_use]
     pub fn up_logical_line(&self) -> Self {
@@ -830,6 +839,39 @@ mod cursor_tests {
         assert_eq!(c2.offset, 10);
         // up from line2 col2 -> line1 clamp end = 7
         assert_eq!(cur(t, 10).up_logical_line().offset, 7);
+    }
+
+    #[test]
+    fn down_up_preserve_char_column_multibyte() {
+        // 'é' is 2 bytes. "éé\nabcd":
+        //   line0 "éé" = bytes 0..4 (é@0..2, é@2..4), '\n'@4, line1 "abcd" = 5..9.
+        // Cursor at char-col 2 of line0 = byte 4 (end of "éé").
+        // j must preserve the CHAR column (2), landing on 'c' (byte 7) — NOT the
+        // byte column (4) which would land past 'd' at byte 9.
+        let t = "éé\nabcd";
+        assert_eq!(cur(t, 4).down_logical_line().offset, 7); // 'c'
+
+        // k reverse: from char-col 2 of "abcd" (byte 7 = 'c') back up to "éé".
+        // char-col 2 of "éé" is byte 4 (end-of-line position for a 2-char line).
+        assert_eq!(cur(t, 7).up_logical_line().offset, 4);
+    }
+
+    #[test]
+    fn down_clamps_to_shorter_multibyte_dest_line() {
+        // "ééé\nx": line0 "ééé" = 0..6, '\n'@6, line1 "x" = 7..8.
+        // Cursor at char-col 3 of line0 = byte 6 (end of "ééé").
+        // j into "x" (only 1 char) clamps to the dest line end = byte 8.
+        let t = "ééé\nx";
+        assert_eq!(cur(t, 6).down_logical_line().offset, 8);
+    }
+
+    #[test]
+    fn down_char_column_mixed_multibyte_then_ascii() {
+        // "éabc\nxyzw": é@0..2, a@2, b@3, c@4, '\n'@5, x@6, y@7, z@8, w@9.
+        // Cursor on line0 at char-col 2 = 'b' (byte 3).
+        // j must land on char-col 2 of "xyzw" = 'z' (byte 8), NOT byte-col 3 = 'w'(9).
+        let t = "éabc\nxyzw";
+        assert_eq!(cur(t, 3).down_logical_line().offset, 8); // 'z'
     }
 
     #[test]

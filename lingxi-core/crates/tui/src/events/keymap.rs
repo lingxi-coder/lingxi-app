@@ -104,6 +104,15 @@ pub enum KeyAction {
     ToggleExpanded,
     /// (M7-08) Toggle vim-mode editing on/off.
     ToggleVim,
+    /// (M7-13 review) Request the Settings screen open on a given tab. The
+    /// SYNC key path only RAISES the request (sets
+    /// `AppState.pending_open_settings`); it can't open synchronously because
+    /// the open needs an async `SettingsData::snapshot(handle, eff)` read.
+    /// The async open pump in `root.rs` (the ticker `use_future`, where the
+    /// `OrchestratorHandle` + `state.lock().await` live) observes the flag,
+    /// builds the snapshot, and calls `AppState::open_settings`. Bound to
+    /// Ctrl-G in `map_key` / `map_iocraft_key`.
+    OpenSettings(crate::screens::settings::SettingsTab),
 }
 
 /// Map a crossterm `KeyEvent` into a `KeyAction`. `prompt_empty` toggles
@@ -184,6 +193,14 @@ pub fn map_key_ml(
         {
             Some(KeyAction::ToggleVim)
         }
+        // (M7-13 review) Ctrl-G opens the Settings screen on the Config tab.
+        // Placed before the printable-char catch-all (Ctrl-G is `Char('g')` +
+        // CONTROL, which the vim-nav `g` arm — `KeyModifiers::NONE` — never
+        // matches, so there's no collision). Opening defaults to the Config
+        // tab; `/config` / `/status` route to specific tabs via app::dispatch.
+        (KeyCode::Char('g'), m) if m.contains(KeyModifiers::CONTROL) => Some(
+            KeyAction::OpenSettings(crate::screens::settings::SettingsTab::Config),
+        ),
         // Printable chars (with optional SHIFT for capitals/symbols).
         (KeyCode::Char(c), m) if m == KeyModifiers::NONE || m == KeyModifiers::SHIFT => {
             Some(InsertChar(c))

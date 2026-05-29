@@ -109,12 +109,11 @@ pub async fn dispatch(
                     return exit_codes::RUNTIME_ERROR;
                 }
             };
-            let session_id = tui_build
-                .runtime
-                .orchestrator
-                .clone()
-                .current_session_id()
-                .await;
+            // (M7-13 review) Coerce the concrete orchestrator to the
+            // `OrchestratorHandle` trait object so it can drive both the session
+            // id read and the Settings open pump inside the TUI mount.
+            let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
+            let session_id = orchestrator.current_session_id().await;
             let bridge = lingxi_tui::session::TuiBridge {
                 rx: tui_build.bridge_rx,
             };
@@ -127,7 +126,8 @@ pub async fn dispatch(
             if let Ok(cwd) = std::env::current_dir() {
                 status.cwd = cwd;
             }
-            let tui_runtime = lingxi_tui::session::Runtime::with_bridge(session_id, bridge, status);
+            let tui_runtime = lingxi_tui::session::Runtime::with_bridge(session_id, bridge, status)
+                .with_orchestrator(orchestrator);
             let cancel = CancellationToken::new();
             match lingxi_tui::run_tui_session(tui_runtime, cancel).await {
                 Ok(()) => exit_codes::SUCCESS,

@@ -47,6 +47,10 @@ pub struct Runtime {
     pub bridge: Option<TuiBridge>,
     /// Initial status snapshot (model / cwd / cost).
     pub status: StatusSnapshot,
+    /// (M7-13 review) Orchestrator handle for the async Settings open pump
+    /// (`SettingsData::snapshot`). `None` (smoke gates / no-bridge mounts)
+    /// leaves Settings unreachable — correct for those mounts.
+    pub orchestrator: Option<Arc<dyn lingxi_traits::OrchestratorHandle>>,
 }
 
 impl Runtime {
@@ -57,6 +61,7 @@ impl Runtime {
             session_id,
             bridge: None,
             status: StatusSnapshot::default(),
+            orchestrator: None,
         }
     }
 
@@ -71,7 +76,19 @@ impl Runtime {
             session_id,
             bridge: Some(bridge),
             status,
+            orchestrator: None,
         }
+    }
+
+    /// (M7-13 review) Attach the orchestrator handle that drives the async
+    /// Settings open pump. Without it the Settings screen is unreachable.
+    #[must_use]
+    pub fn with_orchestrator(
+        mut self,
+        orchestrator: Arc<dyn lingxi_traits::OrchestratorHandle>,
+    ) -> Self {
+        self.orchestrator = Some(orchestrator);
+        self
     }
 }
 
@@ -117,6 +134,7 @@ pub async fn run_tui_session(
             cancel: Some(cancel.clone()),
             session_id: Some(runtime.session_id),
             started_at: Some(started),
+            orchestrator: runtime.orchestrator.clone(),
         )
     }
     .fullscreen()
@@ -163,6 +181,9 @@ pub async fn run_resume_picker(
             cancel: Some(CancellationToken::new()),
             session_id: None,
             started_at: Some(Instant::now()),
+            // The resume picker is bridge-less + handle-less: Settings is
+            // unreachable here, which is correct (the picker streams no turn).
+            orchestrator: None,
         )
     }
     .fullscreen()

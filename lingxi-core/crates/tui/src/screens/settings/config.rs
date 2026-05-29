@@ -31,8 +31,14 @@ pub fn render_config_to_string(data: &SettingsData) -> String {
         "Enabled tools: {}\n",
         list(s.enabled_tools.as_deref())
     ));
-    // Footer: the ONLY write path is the $EDITOR handoff (§4 R7).
-    out.push_str("e to edit config in $EDITOR \u{b7} Esc to close");
+    // Footer. (M7-13 review) HONEST hint: the `$EDITOR` handoff is NOT wired in
+    // the TUI yet — pressing `e` raises `pending_config_edit` but nothing
+    // consumes it, because suspending iocraft's fullscreen render loop to run an
+    // interactive `$EDITOR` (leave raw mode + alt screen, run the child, restore
+    // + repaint) needs terminal-suspend machinery iocraft 0.8.3 exposes no API
+    // for. Deferred to M7-16. We therefore do NOT claim `e` opens an editor; we
+    // surface the read-only state truthfully so the hint never lies.
+    out.push_str("Read-only \u{b7} edit via $EDITOR coming soon \u{b7} Esc to close");
     out
 }
 
@@ -105,6 +111,14 @@ mod tests {
         let out = render_config_to_string(&f);
         assert!(out.contains("Model: (default)"));
         assert!(out.contains("Trusted directories: (none)"));
-        assert!(out.contains("e to edit config in $EDITOR"));
+        // (M7-13 review) HONEST hint: must NOT promise a working `$EDITOR` open
+        // (the handoff is deferred to M7-16) — it reads as read-only + coming
+        // soon instead.
+        assert!(out.contains("Read-only"));
+        assert!(out.contains("edit via $EDITOR coming soon"));
+        assert!(
+            !out.contains("e to edit config in $EDITOR"),
+            "must not claim `e` opens an editor while the handoff is deferred"
+        );
     }
 }

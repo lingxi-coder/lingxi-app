@@ -229,6 +229,184 @@ async fn permission_pending_wins_over_open_settings_screen() {
     assert!(!app.pending_config_edit, "no spurious edit raised");
 }
 
+// ============================================================================
+// (M7-13 review) LIVE-REACHABILITY: the open-pump seam (flag + async pump)
+// ============================================================================
+//
+// These tests prove the Settings screen is reachable in the LIVE app — not just
+// test-reachable. The synchronous key/submit path RAISES `pending_open_settings`
+// (it can't `.await` the snapshot); the async `pump_open_settings` (the ticker
+// `use_future` in `root.rs`) observes the flag and opens the screen.
+
+use lingxi_tui::root::pump_open_settings;
+use lingxi_tui::state::AppState as TuiAppState;
+use tokio::sync::Mutex as TokioMutex;
+
+fn iocraft_ctrl_g() -> KeyEvent {
+    let mut k = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('g'));
+    k.modifiers = KeyModifiers::CONTROL;
+    k
+}
+
+/// (a) Ctrl-G through the REAL live dispatcher raises `pending_open_settings`
+/// (Config tab) WITHOUT opening synchronously (the open is async).
+#[test]
+fn ctrl_g_raises_pending_open_settings_via_live_dispatcher() {
+    let mut app = AppState::new(TuiStatus::default());
+    assert!(app.pending_open_settings.is_none());
+    handle_live_key(&mut app, &iocraft_ctrl_g(), 24);
+    assert_eq!(
+        app.pending_open_settings,
+        Some(SettingsTab::Config),
+        "Ctrl-G raises the open request on the Config tab"
+    );
+    assert!(
+        app.active_screen.is_none(),
+        "the sync key path must NOT open the screen — the async pump does"
+    );
+}
+
+/// (b) The async pump, given a pending request + a mock handle, opens
+/// `Screen::Settings` with REAL data on the right tab. Drives the exact
+/// `pump_open_settings` the live ticker `use_future` calls.
+#[tokio::test]
+async fn pump_opens_settings_with_real_data_on_requested_tab() {
+    let mock = MockOrchestratorHandle::new();
+    mock.set_status_snapshot(StatusSnapshot {
+        model: "claude-opus-4-8".into(),
+        n_mcp_total: 3,
+        ..Default::default()
+    });
+    mock.set_cost_snapshot(CostSnapshot {
+        total_usd: 1.25,
+        ..Default::default()
+    });
+    let handle: Arc<dyn OrchestratorHandle> = Arc::new(mock);
+
+    let mut app = TuiAppState::new(TuiStatus::default());
+    app.pending_open_settings = Some(SettingsTab::Status);
+    let state = Arc::new(TokioMutex::new(app));
+
+    let opened = pump_open_settings(&state, &handle).await;
+    assert!(opened, "pump reports it opened the screen");
+
+    let st = state.lock().await;
+    assert!(
+        st.pending_open_settings.is_none(),
+        "request consumed exactly once"
+    );
+    match &st.active_screen {
+        Some(Screen::Settings(ss)) => {
+            assert_eq!(ss.tab, SettingsTab::Status, "opened on the requested tab");
+            assert_eq!(
+                ss.data.status.model, "claude-opus-4-8",
+                "real status read through the handle"
+            );
+            assert_eq!(ss.data.status.n_mcp_total, 3);
+            assert!((ss.data.cost.total_usd - 1.25).abs() < 1e-9);
+        }
+        other => panic!("expected open Settings(Status), got {other:?}"),
+    }
+}
+
+/// (b') The pump is a no-op when no request is pending.
+#[tokio::test]
+async fn pump_is_noop_without_pending_request() {
+    let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
+    let state = Arc::new(TokioMutex::new(TuiAppState::new(TuiStatus::default())));
+    let opened = pump_open_settings(&state, &handle).await;
+    assert!(!opened, "no request → no open");
+    assert!(state.lock().await.active_screen.is_none());
+}
+
+/// (d) PRIORITY: a pending permission (priority 1) prevents the open. The pump
+/// leaves the request set (so it reopens once the dialog clears) and does NOT
+/// open Settings over the permission.
+#[tokio::test]
+async fn pending_permission_blocks_pump_open() {
+    let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
+
+    let mut app = TuiAppState::new(TuiStatus::default());
+    app.pending_open_settings = Some(SettingsTab::Config);
+    app.pending_permission = Some(PendingPermission {
+        request: PermissionRequest::ToolUseConfirm {
+            tool_name: "Bash".to_string(),
+            tool_input: json!({"command": "ls"}),
+            default_decision: PromptDefault::DenyByDefault,
+        },
+    });
+    let state = Arc::new(TokioMutex::new(app));
+
+    let opened = pump_open_settings(&state, &handle).await;
+    assert!(!opened, "permission (priority 1) blocks the open");
+    let st = state.lock().await;
+    assert!(
+        st.active_screen.is_none(),
+        "Settings must NOT open over a pending permission"
+    );
+    assert_eq!(
+        st.pending_open_settings,
+        Some(SettingsTab::Config),
+        "request preserved so it reopens once the dialog clears"
+    );
+}
+
+/// (d') PRIORITY: an already-open screen (priority 2) prevents the open too.
+#[tokio::test]
+async fn open_screen_blocks_pump_open() {
+    let handle: Arc<dyn OrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
+    let mut app = TuiAppState::new(TuiStatus::default());
+    app.pending_open_settings = Some(SettingsTab::Config);
+    // Another screen already owns the surface.
+    app.open_settings(fixture_state(SettingsTab::Usage));
+    let state = Arc::new(TokioMutex::new(app));
+
+    let opened = pump_open_settings(&state, &handle).await;
+    assert!(!opened, "an open screen blocks a second open");
+    let st = state.lock().await;
+    match &st.active_screen {
+        Some(Screen::Settings(ss)) => {
+            assert_eq!(ss.tab, SettingsTab::Usage, "existing screen untouched");
+        }
+        other => panic!("expected the original screen, got {other:?}"),
+    }
+    assert_eq!(st.pending_open_settings, Some(SettingsTab::Config));
+}
+
+/// (c) `/config` and `/status` Submit raises the flag to the matching tab,
+/// mirroring the `/doctor` intercept — no echo, no turn, screen not opened
+/// synchronously.
+#[test]
+fn slash_config_and_status_submit_raise_open_request() {
+    use lingxi_tui::app::dispatch;
+    use lingxi_tui::events::keymap::KeyAction;
+
+    let mut app = AppState::new(TuiStatus::default());
+    app.prompt_text = "/config".to_string();
+    app.prompt_cursor = app.prompt_text.len();
+    let run = dispatch(KeyAction::Submit, &mut app);
+    assert!(!run, "/config never runs a turn");
+    assert_eq!(app.pending_open_settings, Some(SettingsTab::Config));
+    assert!(app.prompt_text.is_empty(), "prompt cleared, no echo");
+    assert!(
+        app.active_screen.is_none(),
+        "sync submit raises the flag; the async pump opens"
+    );
+    assert!(
+        !matches!(
+            app.messages.last(),
+            Some(lingxi_tui::state::RenderedMessage::UserText { .. })
+        ),
+        "/config must not echo as a user message"
+    );
+
+    let mut app2 = AppState::new(TuiStatus::default());
+    app2.prompt_text = "/status".to_string();
+    app2.prompt_cursor = app2.prompt_text.len();
+    let _ = dispatch(KeyAction::Submit, &mut app2);
+    assert_eq!(app2.pending_open_settings, Some(SettingsTab::Status));
+}
+
 // crossterm-0.28 KeyEvents for the pure reducer (which takes crossterm, not
 // iocraft, keys — matching the M7-12 Resume reducer signature).
 fn crossterm_right() -> crossterm::event::KeyEvent {

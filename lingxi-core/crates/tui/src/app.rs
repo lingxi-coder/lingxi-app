@@ -152,6 +152,28 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.open_doctor(diag);
                 return false;
             }
+            // (M7-13 review) `/config` / `/status` open the Settings screen on
+            // the matching tab. Unlike `/doctor` (whose diagnostics capture is
+            // synchronous + handle-free), the Settings open needs an async
+            // `SettingsData::snapshot(handle, eff)` read — which the sync
+            // `dispatch` seam can't `.await`. So we mirror the keybinding: RAISE
+            // `pending_open_settings`; the async open pump in `root.rs` builds
+            // the snapshot + opens the screen. No echo, no turn. The M5-11
+            // `/config` / `/status` handlers stay the `--no-tui` path, untouched.
+            {
+                use crate::screens::settings::SettingsTab;
+                let open_tab = match st.prompt_text.trim() {
+                    "/config" => Some(SettingsTab::Config),
+                    "/status" => Some(SettingsTab::Status),
+                    _ => None,
+                };
+                if let Some(tab) = open_tab {
+                    st.prompt_text.clear();
+                    st.prompt_cursor = 0;
+                    st.pending_open_settings = Some(tab);
+                    return false;
+                }
+            }
             let line = std::mem::take(&mut st.prompt_text);
             st.prompt_cursor = 0;
             st.history.push(line.clone());
@@ -242,6 +264,14 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 // Entering vim starts in Insert (claude-code createInitialVimState).
                 st.vim = crate::components::prompt_input::VimState::default();
             }
+            false
+        }
+        // (M7-13 review) The sync key path can't `.await SettingsData::snapshot`,
+        // so it only RAISES the open request. The async open pump in `root.rs`
+        // (the ticker `use_future`) observes `pending_open_settings`, reads the
+        // snapshot via the handle, and opens the screen. We do NOT open here.
+        KeyAction::OpenSettings(tab) => {
+            st.pending_open_settings = Some(tab);
             false
         }
     }

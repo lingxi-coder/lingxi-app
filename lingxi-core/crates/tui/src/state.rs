@@ -506,6 +506,17 @@ pub struct AppState {
     /// (the screen-lifecycle/command cluster); the synchronous key path only
     /// raises the request so we never `.await` in a render/key callback.
     pub pending_config_edit: bool,
+    /// (M7-13 review) Set by the `OpenSettings` keybinding (Ctrl-G) or the
+    /// `/config` / `/status` submit intercept: the tab the Settings screen
+    /// should open on. The SYNC key/submit path can only RAISE the request —
+    /// it can't open the screen because the open needs an async
+    /// `SettingsData::snapshot(handle, eff)` read. The async open pump in
+    /// `root.rs` (the ticker `use_future`, where the `OrchestratorHandle` +
+    /// `state.lock().await` are available) observes this flag, builds the
+    /// snapshot, and calls [`Self::open_settings`]. Guarded so it fires once
+    /// per request and never opens over a pending permission or another open
+    /// screen (priority order, parent spec §2.5).
+    pub pending_open_settings: Option<crate::screens::settings::SettingsTab>,
     /// (M6-04) Currently focused tool block (Up/Down in scroll mode walks
     /// this through the `AssistantToolUse` entries in scrollback order).
     pub focused_tool_id: Option<ToolUseId>,
@@ -588,6 +599,7 @@ impl AppState {
             should_exit: false,
             resume_request: None,
             pending_config_edit: false,
+            pending_open_settings: None,
             focused_tool_id: None,
             expanded: HashMap::new(),
             tool_call_inputs: HashMap::new(),

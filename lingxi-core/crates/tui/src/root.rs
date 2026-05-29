@@ -58,6 +58,12 @@ pub struct TuiRootProps {
     pub session_id: Option<lingxi_protocol::SessionId>,
     /// Wall-clock instant the session began (for `FIRST_RENDER` latency).
     pub started_at: Option<Instant>,
+    /// (M7-13 review) Orchestrator handle used by the async Settings open pump
+    /// to read `SettingsData::snapshot(handle, eff)` (status + cost). `None`
+    /// (e.g. the resume picker, smoke gates) disables the open pump — Settings
+    /// is unreachable without a handle, which is correct for those bridge-less
+    /// mounts.
+    pub orchestrator: Option<Arc<dyn lingxi_traits::OrchestratorHandle>>,
 }
 
 /// Map an iocraft `KeyEvent` into the workspace's `KeyAction` enum.
@@ -118,6 +124,14 @@ fn map_iocraft_key(
         (KeyCode::Char('G'), m) if m == KeyModifiers::SHIFT && prompt_empty => {
             Some(ScrollStep(ScrollDir::Bottom))
         }
+        // (M7-13 review) Ctrl-G opens the Settings screen (Config tab). Mirrors
+        // `keymap::map_key_ml`. Placed before the printable-char catch-all; the
+        // CONTROL modifier means it never collides with the vim-nav `g`
+        // (`KeyModifiers::NONE`). The action only RAISES `pending_open_settings`
+        // in `dispatch` — the async open pump does the snapshot + open.
+        (KeyCode::Char('g'), m) if m.contains(KeyModifiers::CONTROL) => Some(
+            KeyAction::OpenSettings(crate::screens::settings::SettingsTab::Config),
+        ),
         (KeyCode::Char(c), m) if m == KeyModifiers::NONE || m == KeyModifiers::SHIFT => {
             Some(InsertChar(*c))
         }
@@ -537,6 +551,84 @@ fn apply_block(st: &mut AppState, block: &str) {
     resync_overlays(st);
 }
 
+/// (M7-13 review) Async Settings open pump.
+///
+/// This is THE seam that makes the Settings screen live-reachable. The
+/// synchronous key/submit path (Ctrl-G, `/config`, `/status`) only RAISES
+/// `AppState.pending_open_settings = Some(tab)` because the open needs an async
+/// `SettingsData::snapshot(handle, eff)` read it can't `.await`. This pump —
+/// driven by the ticker `use_future` (the same place the M7-10 paste coalescer
+/// flushes, where `state.lock().await` + the `OrchestratorHandle` are both
+/// available) — observes the flag and performs the async open.
+///
+/// **Priority guard (parent spec §2.5):** the open NEVER fires while a
+/// permission dialog (priority 1) or another full-page screen (priority 2) owns
+/// the surface. We re-check the guard AFTER the snapshot `.await` (state may
+/// have changed across the await point) before committing the open, and we take
+/// the tab under the FIRST lock so the request fires exactly once.
+///
+/// Returns `true` iff the screen was opened (the caller bumps the redraw tick).
+///
+/// The snapshot read (`SettingsData::snapshot` + `Settings::load`) happens
+/// OUTSIDE the lock so we never hold the `AppState` mutex across the handle's
+/// async calls.
+pub async fn pump_open_settings(
+    state: &Arc<Mutex<AppState>>,
+    handle: &Arc<dyn lingxi_traits::OrchestratorHandle>,
+) -> bool {
+    // 1) Take the request under the lock, respecting priority. If a permission
+    //    or another screen owns the surface, leave the flag set and bail — the
+    //    next tick retries once the surface frees up.
+    let (tab, project_dir) = {
+        let mut st = state.lock().await;
+        if st.pending_open_settings.is_none() {
+            return false;
+        }
+        if st.pending_permission.is_some() || st.active_screen.is_some() {
+            // Priority 1/2 own the surface: do NOT consume the request yet.
+            return false;
+        }
+        let tab = st.pending_open_settings.take().expect("checked is_some");
+        (tab, st.status.cwd.clone())
+    };
+
+    // 2) Build the effective settings + read the snapshot OUTSIDE the lock.
+    let eff = load_effective_settings(&project_dir);
+    let data = crate::screens::settings::SettingsData::snapshot(handle, eff).await;
+
+    // 3) Re-acquire the lock and open — re-checking the priority guard, since
+    //    a permission / screen may have arrived across the snapshot `.await`.
+    let mut st = state.lock().await;
+    if st.pending_permission.is_some() || st.active_screen.is_some() {
+        // Lost the race: re-raise the request so a later tick reopens once the
+        // higher-priority surface clears.
+        st.pending_open_settings = Some(tab);
+        return false;
+    }
+    st.open_settings(crate::screens::settings::SettingsState::new(tab, data));
+    true
+}
+
+/// (M7-13 review) Load the 4-layer effective settings the Settings screen
+/// displays, mirroring the M3 `Settings::load` read API (the ONLY settings read
+/// path; §4 R7). A load error degrades gracefully to defaults so the screen can
+/// always open — the Config tab simply shows `(default)` rows.
+fn load_effective_settings(
+    project_dir: &std::path::Path,
+) -> lingxi_core::settings::EffectiveSettings {
+    use lingxi_core::settings::{EffectiveSettings, LoadInputs, Settings, SettingsJson};
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    Settings::load(LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: SettingsJson::default(),
+    })
+    .unwrap_or_else(|_| EffectiveSettings {
+        settings: SettingsJson::default(),
+        trace: lingxi_core::settings::tracer::ProvenanceTrace::default(),
+    })
+}
+
 /// Top-level iocraft component. Drives the REPL screen and signals exit on
 /// `state.should_exit`.
 #[component]
@@ -599,11 +691,15 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         });
     }
 
-    // ---- Ticker: 100ms spinner refresh while streaming + paste idle-flush --
+    // ---- Ticker: 100ms spinner refresh + paste idle-flush + Settings open pump
     {
         let state = state.clone();
         let mut tick_for_ticker = tick;
         let mut coalescer = paste_coalescer;
+        // (M7-13 review) The orchestrator handle drives the async Settings open
+        // pump below. `None` (resume picker / smoke gates) leaves Settings
+        // unreachable, which is correct for those bridge-less mounts.
+        let orchestrator = props.orchestrator.clone();
         hooks.use_future(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -627,6 +723,18 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                     apply_block(&mut st, &block);
                     drop(st);
                     needs_redraw = true;
+                }
+                // (M7-13 review) Settings open pump. When a Ctrl-G / `/config` /
+                // `/status` request raised `pending_open_settings`, this reads the
+                // snapshot via the handle and opens the screen (respecting the
+                // permission/screen priority guard inside `pump_open_settings`).
+                // Runs on the same 100ms cadence so the screen opens promptly
+                // after the key/submit. No-op (returns false) when no request is
+                // pending or no handle is wired.
+                if let Some(handle) = orchestrator.as_ref() {
+                    if pump_open_settings(&state, handle).await {
+                        needs_redraw = true;
+                    }
                 }
                 let streaming = state.lock().await.streaming.is_some();
                 if streaming || needs_redraw {

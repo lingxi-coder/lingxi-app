@@ -71,7 +71,9 @@ fn snapshot_config_tab() {
     insta::assert_snapshot!("settings_config_tab", &f);
     assert!(f.contains("[Config]"), "selected tab bracketed: {f}");
     assert!(f.contains("Model: claude-opus-4-8"), "got: {f}");
-    assert!(f.contains("e to edit config in $EDITOR"), "got: {f}");
+    // (M7-13 review) HONEST hint: the $EDITOR handoff is deferred to M7-16, so
+    // the footer reads as read-only + coming-soon rather than claiming `e` works.
+    assert!(f.contains("edit via $EDITOR coming soon"), "got: {f}");
 }
 
 #[test]

@@ -10,4 +10,4 @@ expression: "&f"
  Telemetry enabled: true
  Trusted directories: /home/u/proj
  Enabled tools: (none)
- e to edit config in $EDITOR · Esc to close
+ Read-only · edit via $EDITOR coming soon · Esc to close

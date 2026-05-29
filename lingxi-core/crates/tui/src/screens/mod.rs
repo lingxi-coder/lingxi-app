@@ -7,6 +7,7 @@
 pub mod doctor;
 pub mod repl;
 pub mod resume;
+pub mod settings;
 
 /// Which full-page screen currently overlays the REPL. `None` ⇒ REPL is live.
 /// Established by M7-11; M7-12/13/14 add `Resume`/`Settings`/`Memory`.
@@ -18,7 +19,13 @@ pub mod resume;
 /// stay a single generic `active_screen = None` with no per-screen clear.
 /// Carrying the (non-`Copy`) `DoctorDiagnostics` drops `Screen: Copy`; the
 /// ≤2 live match sites borrow the variant (`match &st.active_screen`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// (M7-13) `Eq` is dropped (kept `PartialEq`): the `Settings` variant carries a
+/// `SettingsData` snapshot whose `StatusSnapshot`/`CostSnapshot` hold `f64`
+/// cost fields, which do not implement `Eq`. No code uses `Screen` as a
+/// `HashSet`/`HashMap` key, so `Eq` is unused; the existing `assert_eq!` /
+/// `matches!` sites need only `PartialEq` + `Debug`.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Screen {
     /// The diagnostic screen opened by `/doctor`, carrying its captured
     /// diagnostics.
@@ -28,6 +35,12 @@ pub enum Screen {
     /// `root::handle_screen_key` dispatches per-variant so this arm runs the
     /// pure `resume::handle_resume_key` while Doctor stays read-only.
     Resume(resume::ResumeState),
-    // Settings(SettingsState), // M7-13
+    /// (M7-13) The Settings screen — a Config/Settings/Status/Usage tab
+    /// overlay carrying its tab + read-once data snapshot. Interactive like
+    /// Resume: `root::handle_screen_key` runs the pure `settings::apply_settings_key`
+    /// (Left/Right/Tab cycle, Esc/`q` close). Surface-only — reads real M3
+    /// settings + status/cost, writes ONLY via the `edit_config_file` handoff
+    /// (§4 R7 — no inline mutation).
+    Settings(settings::SettingsState),
     // Memory(MemoryState),     // M7-14
 }

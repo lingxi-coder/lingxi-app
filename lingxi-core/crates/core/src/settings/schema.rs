@@ -60,7 +60,7 @@ pub fn strategy_for(field: &str) -> Option<MergeStrategy> {
 /// All fields `Option<T>` so a partial file (one layer of the 4-layer stack)
 /// can omit a field without it showing up as `Some(Default::default())` —
 /// "absent" must round-trip distinctly from "explicitly set to default".
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SettingsJson {
     /// Forward-compat: claude-code @ 6a25909 does NOT emit this; we tolerate

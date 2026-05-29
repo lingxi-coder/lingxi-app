@@ -1,0 +1,12 @@
+---
+source: crates/tui/src/screens/settings/usage.rs
+expression: out
+---
+Usage
+Total cost: $0.1234
+Input tokens: 5000
+Output tokens: 2000
+API calls: 7
+Session duration: 125s
+Per-model cost breakdown is not available yet (M8).
+Esc to close

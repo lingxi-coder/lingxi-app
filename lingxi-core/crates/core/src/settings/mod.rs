@@ -80,7 +80,7 @@ pub struct LoadInputs<'a> {
 }
 
 /// Result of [`Settings::load`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveSettings {
     /// The merged settings.
     pub settings: SettingsJson,

@@ -24,14 +24,14 @@ pub enum Source {
 }
 
 /// Per-field provenance (one entry per top-level settings field).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FieldProvenance {
     /// Layers that contributed (in low-to-high priority order).
     pub contributors: Vec<Source>,
 }
 
 /// Map from field name → provenance.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct ProvenanceTrace {
     /// Per-field source list.
     pub by_field: BTreeMap<String, FieldProvenance>,

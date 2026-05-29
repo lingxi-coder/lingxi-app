@@ -1,0 +1,15 @@
+---
+source: crates/tui/src/screens/settings/status.rs
+expression: out
+---
+Version: lingxi-cli v0.7.0
+Session name: /rename to add a name
+Session ID: sess-abc123
+cwd: /home/u/proj
+Model: claude-opus-4-8
+Messages: 12
+MCP servers: 1 connected / 3 configured
+Hooks: 2
+Agents: 4
+Started: 2026-05-29T10:00:00Z
+Esc to close

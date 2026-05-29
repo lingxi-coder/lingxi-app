@@ -547,3 +547,66 @@ fn register_linewise_tagging() {
         }
     );
 }
+
+// ===== Task 12: operator/paste/change seam + vim-disabled passthrough =====
+
+#[test]
+fn operator_mutates_real_buffer_via_live_key() {
+    let mut st = AppState::new(StatusSnapshot::default());
+    st.vim_enabled = true;
+    st.vim.mode = VimMode::Normal;
+    st.prompt_text = "foo bar".into();
+    st.prompt_cursor = 0;
+    handle_live_key(&mut st, &live_char('d'), 24); // operator-pending
+    handle_live_key(&mut st, &live_char('w'), 24); // dw
+    assert_eq!(st.prompt_text, "bar");
+    assert_eq!(st.prompt_cursor, 0);
+    assert_eq!(st.vim.register.text, "foo ");
+}
+
+#[test]
+fn change_enters_insert_and_typing_flows_through() {
+    let mut st = AppState::new(StatusSnapshot::default());
+    st.vim_enabled = true;
+    st.vim.mode = VimMode::Normal;
+    st.prompt_text = "foo bar".into();
+    st.prompt_cursor = 0;
+    handle_live_key(&mut st, &live_char('c'), 24);
+    handle_live_key(&mut st, &live_char('w'), 24); // cw -> " bar", Insert at 0
+    assert_eq!(st.vim.mode, VimMode::Insert);
+    assert_eq!(st.prompt_text, " bar");
+    assert_eq!(st.prompt_cursor, 0);
+    // Now type "X": default editing inserts at cursor.
+    handle_live_key(&mut st, &live_char('X'), 24);
+    assert_eq!(st.prompt_text, "X bar");
+    assert_eq!(st.prompt_cursor, 1);
+}
+
+#[test]
+fn paste_via_live_key_after_yank() {
+    let mut st = AppState::new(StatusSnapshot::default());
+    st.vim_enabled = true;
+    st.vim.mode = VimMode::Normal;
+    st.prompt_text = "ab".into();
+    st.prompt_cursor = 0;
+    // yl yanks one char 'a' (yank + Right motion -> range [0,1)).
+    handle_live_key(&mut st, &live_char('y'), 24);
+    handle_live_key(&mut st, &live_char('l'), 24);
+    assert_eq!(st.vim.register.text, "a");
+    handle_live_key(&mut st, &live_char('p'), 24); // paste 'a' after cursor
+    assert_eq!(st.prompt_text, "aab");
+}
+
+#[test]
+fn vim_disabled_operator_keys_are_literal_inserts() {
+    let mut st = AppState::new(StatusSnapshot::default());
+    st.vim_enabled = false; // OFF — the GATE invariant
+    st.prompt_text = String::new();
+    st.prompt_cursor = 0;
+    // "dwccyyxp" with vim OFF are all literal characters.
+    for c in "dwccyyxp".chars() {
+        handle_live_key(&mut st, &live_char(c), 24);
+    }
+    assert_eq!(st.prompt_text, "dwccyyxp");
+    assert_eq!(st.prompt_cursor, 8);
+}

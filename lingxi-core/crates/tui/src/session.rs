@@ -120,7 +120,15 @@ pub async fn run_tui_session(
     // Shared AppState — the bridge pump task + key handlers mutate it,
     // the render path reads it. Wrapped in a tokio Mutex so the pump
     // can await locks across .await points.
-    let state = Arc::new(Mutex::new(AppState::new(runtime.status.clone())));
+    let mut initial_state = AppState::new(runtime.status.clone());
+    // (M7-15) Apply the stored theme preference from ~/.claude/settings.json
+    // (best-effort; absent/unreadable → session-default `auto`). Read once at
+    // startup, before the first render, so the very first frame uses the saved
+    // theme.
+    if let Some(setting) = crate::theme_persist::load_theme_setting() {
+        initial_state.set_theme(setting);
+    }
+    let state = Arc::new(Mutex::new(initial_state));
 
     // Move the bridge receiver into an `Arc<std::sync::Mutex<Option<...>>>`
     // slot so the iocraft root's first `use_future` can `take()` it once.

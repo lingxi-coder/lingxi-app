@@ -339,7 +339,14 @@ where
 }
 
 /// RFC 3339 with second precision and `Z` suffix — e.g. `2026-05-24T19:03:12Z`.
-fn format_rfc3339_seconds(t: SystemTime) -> String {
+///
+/// Shared formatter for the resume surfaces: the M5-08 stdio picker above and
+/// the M7-12 iocraft Resume screen (`lingxi_tui::screens::resume`) both call
+/// this so the two surfaces render timestamps byte-for-byte identically. Pre-1970
+/// inputs (never produced by file mtime on the platforms we target) fall back to
+/// the Unix epoch literal.
+#[must_use]
+pub fn format_rfc3339_seconds(t: SystemTime) -> String {
     use std::time::UNIX_EPOCH;
     let secs = t
         .duration_since(UNIX_EPOCH)

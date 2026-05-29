@@ -18,11 +18,9 @@
 //! neither frame exists — they are documented, not dead-coded.
 #![forbid(unsafe_code)]
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crossterm::event::{KeyCode, KeyEvent};
 use iocraft::prelude::*;
-use lingxi_session::jsonl::loader::SessionMetadata;
+use lingxi_session::jsonl::loader::{format_rfc3339_seconds, SessionMetadata};
 use uuid::Uuid;
 
 /// One display row derived from a [`SessionMetadata`]. Terminal-free.
@@ -40,6 +38,11 @@ pub struct ResumeRow {
 
 impl ResumeRow {
     /// Build a display row from a loader [`SessionMetadata`].
+    ///
+    /// The timestamp is formatted via the shared
+    /// [`lingxi_session::jsonl::loader::format_rfc3339_seconds`] — the very same
+    /// function the M5-08 stdio picker uses — so this screen and the picker
+    /// render timestamps byte-for-byte identically (no hand-copied formatter).
     #[must_use]
     pub fn from_meta(m: &SessionMetadata) -> Self {
         Self {
@@ -53,21 +56,6 @@ impl ResumeRow {
             },
         }
     }
-}
-
-/// RFC 3339, second precision, `Z` suffix — matches the M5-08 stdio picker's
-/// `format_rfc3339_seconds` byte-for-byte so the two surfaces agree.
-fn format_rfc3339_seconds(t: SystemTime) -> String {
-    let secs = t
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    #[allow(clippy::cast_possible_wrap)]
-    let secs_i64 = secs as i64;
-    chrono::DateTime::<chrono::Utc>::from_timestamp(secs_i64, 0).map_or_else(
-        || "1970-01-01T00:00:00Z".to_string(),
-        |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-    )
 }
 
 /// Pure state for the Resume screen: the rows plus the selected index.
@@ -236,7 +224,7 @@ pub fn ResumeScreen(props: &ResumeScreenProps) -> impl Into<AnyElement<'static>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn meta(title: &str, secs: u64, count: usize) -> SessionMetadata {
         SessionMetadata {

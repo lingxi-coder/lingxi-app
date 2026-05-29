@@ -208,15 +208,27 @@ async fn run_resume_iocraft(_argv: &Argv, sink: &dyn OutputSink) -> i32 {
 /// Load the recent-session rows for the current cwd via the M5-08 loader.
 /// Shared by the stdio + iocraft branches (DRY). Resolves `claude_home`
 /// (`$CLAUDE_CONFIG_DIR` → `~/.claude`), the cwd, and a disk-backed
-/// [`PosixFileSystem`] — the same loader inputs M5-08 expects.
+/// [`PosixFileSystem`] — the same loader inputs M5-08 expects, then delegates
+/// to the pure [`load_resume_rows_from`].
 async fn load_resume_rows() -> Result<Vec<SessionMetadata>, LoaderError> {
     let claude_home = claude_home_dir();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    load_resume_rows_from(&claude_home, &cwd).await
+}
+
+/// Production disk→[`SessionMetadata`] path with the inputs passed in (no env /
+/// process-cwd reads), so it is directly testable. Builds the same disk-backed
+/// [`lingxi_platform_posix_minimal::PosixFileSystem`] the live branches use and
+/// asks the M5-08 loader for up to 5 most-recent rows.
+async fn load_resume_rows_from(
+    claude_home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Result<Vec<SessionMetadata>, LoaderError> {
     let cwd_str = cwd.to_string_lossy().into_owned();
     let fs: Arc<dyn FileSystem> = Arc::new(lingxi_platform_posix_minimal::PosixFileSystem::new(
-        cwd.clone(),
+        cwd.to_path_buf(),
     ));
-    list_recent_sessions(&claude_home, &cwd_str, 5, fs).await
+    list_recent_sessions(claude_home, &cwd_str, 5, fs).await
 }
 
 /// Claude config home dir. `$CLAUDE_CONFIG_DIR` (when non-empty) wins, else
@@ -235,4 +247,119 @@ fn resolve_session_id(arg: &str) -> Result<uuid::Uuid, LoaderError> {
     uuid::Uuid::parse_str(arg).map_err(|_| LoaderError::SessionNotFound {
         arg: arg.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! Loader-fixture coverage for the `--resume` disk→[`SessionMetadata`]→
+    //! row production path (`load_resume_rows_from`). Drives the *real* CLI
+    //! wiring — `lingxi_platform_posix_minimal::PosixFileSystem` + the M5-08
+    //! `list_recent_sessions` — over a `tempfile` fixture, with no env or
+    //! process-cwd reads so the test stays deterministic and parallel-safe.
+
+    use super::*;
+    use lingxi_session::jsonl::project_dir_name;
+    use std::time::{Duration, SystemTime};
+    use uuid::Uuid;
+
+    /// Write one valid `<uuid>.jsonl` session file (a single first-user message
+    /// in the M5-07/M5-08 on-disk format) into `project_dir`, stamp its mtime,
+    /// and return the uuid. `prompt` becomes the row's extracted title.
+    fn write_session(project_dir: &std::path::Path, prompt: &str, mtime: SystemTime) -> Uuid {
+        let uuid = Uuid::new_v4();
+        let path = project_dir.join(format!("{uuid}.jsonl"));
+        let line = serde_json::json!({
+            "type": "user",
+            "uuid": uuid.to_string(),
+            "parentUuid": null,
+            "sessionId": uuid.to_string(),
+            "timestamp": "2026-05-25T12:00:00.000Z",
+            "cwd": "/tmp/workproj",
+            "version": "0.8.0",
+            "isSidechain": false,
+            "userType": "external",
+            "message": {"role": "user", "content": prompt},
+        });
+        let bytes = format!("{}\n", serde_json::to_string(&line).unwrap());
+        std::fs::write(&path, bytes).unwrap();
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(mtime)).unwrap();
+        uuid
+    }
+
+    /// `<claude_home>/projects/<sanitize(cwd)>/` — the dir the loader scans.
+    fn make_project_dir(claude_home: &std::path::Path, cwd: &str) -> std::path::PathBuf {
+        let dir = claude_home.join("projects").join(project_dir_name(cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn load_resume_rows_from_returns_sorted_rows_with_titles_and_counts() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let claude_home = temp.path().join("home");
+        // `cwd` is only used as the project-dir key; it need not exist on disk.
+        let cwd = std::path::PathBuf::from("/tmp/workproj");
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let project_dir = make_project_dir(&claude_home, &cwd_str);
+
+        // Three sessions with staggered mtimes; "newest" has the latest mtime.
+        let base = SystemTime::now();
+        let _oldest = write_session(&project_dir, "oldest prompt", base);
+        let _middle = write_session(
+            &project_dir,
+            "middle prompt",
+            base + Duration::from_secs(10),
+        );
+        let newest = write_session(
+            &project_dir,
+            "newest prompt",
+            base + Duration::from_secs(20),
+        );
+
+        let rows = load_resume_rows_from(&claude_home, &cwd)
+            .await
+            .expect("loader should produce rows");
+
+        assert_eq!(rows.len(), 3, "all three sessions surface as rows");
+        // Newest-first (mtime desc).
+        assert_eq!(rows[0].uuid, newest);
+        assert_eq!(rows[0].title, "newest prompt");
+        assert_eq!(rows[1].title, "middle prompt");
+        assert_eq!(rows[2].title, "oldest prompt");
+        for w in rows.windows(2) {
+            assert!(w[0].modified >= w[1].modified, "rows sorted newest-first");
+        }
+        // Each fixture file has exactly one JSONL line.
+        for row in &rows {
+            assert_eq!(row.message_count, 1, "one message per fixture session");
+        }
+    }
+
+    #[tokio::test]
+    async fn load_resume_rows_from_empty_project_dir_is_empty_directory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let claude_home = temp.path().join("home");
+        let cwd = std::path::PathBuf::from("/tmp/emptyproj");
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        // Create the project dir but write no `.jsonl` files into it.
+        make_project_dir(&claude_home, &cwd_str);
+
+        match load_resume_rows_from(&claude_home, &cwd).await {
+            Err(LoaderError::EmptyDirectory) => {}
+            other => panic!("expected EmptyDirectory, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_resume_rows_from_missing_project_dir_is_empty_directory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let claude_home = temp.path().join("home");
+        // No projects dir at all — the loader treats NotFound as empty-state.
+        let cwd = std::path::PathBuf::from("/tmp/neverproj");
+
+        match load_resume_rows_from(&claude_home, &cwd).await {
+            Err(LoaderError::EmptyDirectory) => {}
+            other => panic!("expected EmptyDirectory, got {other:?}"),
+        }
+    }
 }

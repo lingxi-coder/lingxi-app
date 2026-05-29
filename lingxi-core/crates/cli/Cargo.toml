@@ -54,6 +54,8 @@ uuid = { version = "1", features = ["v4"] }
 assert_cmd = "=2.0.16"
 predicates = "3"
 tempfile = "3"
+# Deterministic mtime staggering for the resume-loader fixture test.
+filetime = "0.2"
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

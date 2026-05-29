@@ -12,7 +12,9 @@
 //! `render::ansi` and `render::markdown` both produce `Vec<StyledLine>`.
 
 pub mod ansi;
+pub mod diff;
 pub mod markdown;
+pub mod syntax;
 
 use iocraft::Color;
 

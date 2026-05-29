@@ -12,6 +12,12 @@
 //! wrapped visual lines via `MeasuredText`) are DEFERRED — M7-08 `j`/`k`/`$`
 //! are logical-line motions. Grapheme-cluster motion (claude-code's
 //! `Intl.Segmenter`) is deferred to M8; motions step by `char` here.
+//!
+//! ## Telemetry (M7-08)
+//! M7-08 emits ZERO telemetry events. `tengu_tui_vim_mode_entered`
+//! (aggregated, NOT per-keystroke) is a CANDIDATE deferred to the M7-16
+//! telemetry audit — see M7 design §2.7. Do not register it here without an
+//! emit site (M6 discipline: every registered name has a real emit site).
 
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -634,6 +640,14 @@ mod tests {
         assert_eq!(mode_indicator(VimMode::Normal), "-- NORMAL --");
         assert_eq!(mode_indicator(VimMode::Insert), "-- INSERT --");
         assert_eq!(mode_indicator(VimMode::Visual), "-- VISUAL --");
+    }
+
+    #[test]
+    fn m7_08_adds_no_telemetry_events() {
+        // M7-08 ships 0 new telemetry events; baseline locked at 326 (M7-16
+        // audits the real M7 total). tengu_tui_vim_mode_entered is DEFERRED to
+        // M7-16. This guard fails if M7-08 accidentally registers a new event.
+        assert_eq!(lingxi_telemetry::tengu::ALL_EVENT_NAMES.len(), 326);
     }
 }
 

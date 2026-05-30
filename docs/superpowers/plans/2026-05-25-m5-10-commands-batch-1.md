@@ -200,12 +200,12 @@ git commit -m "plan(M5-10 T0): reverse-engineer 6 command bodies + 12 locked lit
 ## Task 1: New `tengu::command` telemetry submodule + 18 NAMES const
 
 **Files:**
-- Create: `lingxi-core/crates/telemetry/src/tengu/command.rs`
-- Modify: `lingxi-core/crates/telemetry/src/tengu/mod.rs` (add `pub mod command;` + grow `ALL_EVENT_NAMES`)
+- Create: `lingxi-code/crates/telemetry/src/tengu/command.rs`
+- Modify: `lingxi-code/crates/telemetry/src/tengu/mod.rs` (add `pub mod command;` + grow `ALL_EVENT_NAMES`)
 
 - [ ] **Step 1: Write the failing test.**
 
-  Create `lingxi-core/crates/telemetry/src/tengu/command.rs`:
+  Create `lingxi-code/crates/telemetry/src/tengu/command.rs`:
 
 ```rust
 //! `tengu_command_<name>_<phase>` event names — the M5-10 batch-1 surface.
@@ -368,7 +368,7 @@ pub const NAMES: &[&str; 18] = &[
 
 - [ ] **Step 4: Grow `tengu::ALL_EVENT_NAMES` formula.**
 
-  Open `lingxi-core/crates/telemetry/src/tengu/mod.rs`. Add `pub mod command;` to the module list. Update the `ALL_EVENT_NAMES` const-fn:
+  Open `lingxi-code/crates/telemetry/src/tengu/mod.rs`. Add `pub mod command;` to the module list. Update the `ALL_EVENT_NAMES` const-fn:
 
   - Existing TOTAL (post M5-08, pre M5-10): `25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + ...` — the exact formula depends on what M5-02..M5-08 added. Refer to spec §6.3 table.
   - **New TOTAL after M5-10:** **276**.
@@ -431,8 +431,8 @@ cargo clippy -p lingxi-telemetry --lib --tests -- -D warnings 2>&1 | tail -10
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-core/crates/telemetry/src/tengu/command.rs \
-        lingxi-core/crates/telemetry/src/tengu/mod.rs
+git add lingxi-code/crates/telemetry/src/tengu/command.rs \
+        lingxi-code/crates/telemetry/src/tengu/mod.rs
 git commit -m "feat(M5-10 task 1): tengu::command module + 18 NAMES (6 cmds × 3 phases) + ALL_EVENT_NAMES 258→276 (7 invariant tests)"
 ```
 
@@ -441,13 +441,13 @@ git commit -m "feat(M5-10 task 1): tengu::command module + 18 NAMES (6 cmds × 3
 ## Task 2: Extend `OrchestratorHandle` trait + impl on `ConversationOrchestrator`
 
 **Files:**
-- Modify: `lingxi-core/crates/traits/src/orchestrator.rs` (add `request_exit`, `open_memory_editor`, `MemoryEditorOutcome`)
-- Create: `lingxi-core/crates/orchestrator/src/handle_impl.rs` (impl block)
-- Modify: `lingxi-core/crates/orchestrator/src/lib.rs` (re-export + wire module)
+- Modify: `lingxi-code/crates/traits/src/orchestrator.rs` (add `request_exit`, `open_memory_editor`, `MemoryEditorOutcome`)
+- Create: `lingxi-code/crates/orchestrator/src/handle_impl.rs` (impl block)
+- Modify: `lingxi-code/crates/orchestrator/src/lib.rs` (re-export + wire module)
 
 - [ ] **Step 1: Write the failing test.**
 
-  Append to `lingxi-core/crates/traits/src/orchestrator.rs` (after the existing trait definition + tests):
+  Append to `lingxi-code/crates/traits/src/orchestrator.rs` (after the existing trait definition + tests):
 
 ```rust
 #[cfg(test)]
@@ -486,7 +486,7 @@ cargo test -p lingxi-traits --lib m5_10_extension_tests 2>&1 | head -10
 
 - [ ] **Step 3: Add the new types + trait methods.**
 
-  Open `lingxi-core/crates/traits/src/orchestrator.rs`. Find the existing `OrchestratorHandle` trait (defined by M5-02). Add `MemoryEditorOutcome` and the two new trait methods:
+  Open `lingxi-code/crates/traits/src/orchestrator.rs`. Find the existing `OrchestratorHandle` trait (defined by M5-02). Add `MemoryEditorOutcome` and the two new trait methods:
 
 ```rust
 use std::path::PathBuf;
@@ -528,7 +528,7 @@ pub trait OrchestratorHandle: Send + Sync {
 }
 ```
 
-  Also add `pub use orchestrator::MemoryEditorOutcome;` to `lingxi-core/crates/traits/src/lib.rs`.
+  Also add `pub use orchestrator::MemoryEditorOutcome;` to `lingxi-code/crates/traits/src/lib.rs`.
 
 - [ ] **Step 4: Run the trait tests + watch pass.**
 
@@ -540,7 +540,7 @@ cargo test -p lingxi-traits --lib m5_10_extension_tests 2>&1 | tail -10
 
 - [ ] **Step 5: Update mock + production impls of `OrchestratorHandle`.**
 
-  M5-02 ships `MockOrchestratorHandle` in `lingxi-core/crates/orchestrator/src/test_support.rs`. Find it and add two methods so the mock compiles:
+  M5-02 ships `MockOrchestratorHandle` in `lingxi-code/crates/orchestrator/src/test_support.rs`. Find it and add two methods so the mock compiles:
 
 ```rust
 #[async_trait]
@@ -588,7 +588,7 @@ impl MockOrchestratorHandle {
 
 - [ ] **Step 6: Implement on `ConversationOrchestrator` (the production type).**
 
-  Create `lingxi-core/crates/orchestrator/src/handle_impl.rs`:
+  Create `lingxi-code/crates/orchestrator/src/handle_impl.rs`:
 
 ```rust
 //! `impl OrchestratorHandle for ConversationOrchestrator`.
@@ -773,12 +773,12 @@ cargo clippy -p lingxi-traits -p lingxi-orchestrator --lib --tests -- -D warning
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-core/crates/traits/src/orchestrator.rs \
-        lingxi-core/crates/traits/src/lib.rs \
-        lingxi-core/crates/orchestrator/src/handle_impl.rs \
-        lingxi-core/crates/orchestrator/src/lib.rs \
-        lingxi-core/crates/orchestrator/Cargo.toml \
-        lingxi-core/crates/orchestrator/src/test_support.rs
+git add lingxi-code/crates/traits/src/orchestrator.rs \
+        lingxi-code/crates/traits/src/lib.rs \
+        lingxi-code/crates/orchestrator/src/handle_impl.rs \
+        lingxi-code/crates/orchestrator/src/lib.rs \
+        lingxi-code/crates/orchestrator/Cargo.toml \
+        lingxi-code/crates/orchestrator/src/test_support.rs
 git commit -m "feat(M5-10 task 2): OrchestratorHandle grows request_exit + open_memory_editor + MemoryEditorOutcome; impl on ConversationOrchestrator"
 ```
 
@@ -787,13 +787,13 @@ git commit -m "feat(M5-10 task 2): OrchestratorHandle grows request_exit + open_
 ## Task 3: `/clear` real implementation
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/clear.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/mod.rs` (re-export)
-- Modify: `lingxi-core/crates/commands/src/builtin/core_placeholders.rs` (remove the `ClearHandler` macro line)
+- Create: `lingxi-code/crates/commands/src/builtin/clear.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/mod.rs` (re-export)
+- Modify: `lingxi-code/crates/commands/src/builtin/core_placeholders.rs` (remove the `ClearHandler` macro line)
 
 - [ ] **Step 1: Write the failing test.**
 
-  Create `lingxi-core/crates/commands/src/builtin/clear.rs`:
+  Create `lingxi-code/crates/commands/src/builtin/clear.rs`:
 
 ```rust
 //! `/clear` — wipes the orchestrator's in-memory session and emits a
@@ -916,7 +916,7 @@ impl BuiltinCommandHandler for ClearHandler {
 
 - [ ] **Step 4: Remove `ClearHandler` from the macro list in `core_placeholders.rs`.**
 
-  Find the line `core_placeholder!(ClearHandler, "clear");` in `lingxi-core/crates/commands/src/builtin/core_placeholders.rs` and delete it. The remaining 17 macro calls still produce placeholders for the not-yet-implemented core commands. Likewise remove `Arc::new(ClearHandler::new())` from `register_core_placeholders` (the function that takes no args — the M5-09 version).
+  Find the line `core_placeholder!(ClearHandler, "clear");` in `lingxi-code/crates/commands/src/builtin/core_placeholders.rs` and delete it. The remaining 17 macro calls still produce placeholders for the not-yet-implemented core commands. Likewise remove `Arc::new(ClearHandler::new())` from `register_core_placeholders` (the function that takes no args — the M5-09 version).
 
   Also remove `pub use core_placeholders::*;` if it re-exported `ClearHandler` — the canonical home is now `builtin::clear::ClearHandler`. Add `pub mod clear;` + `pub use clear::ClearHandler;` to `builtin/mod.rs` at the top of the list.
 
@@ -941,10 +941,10 @@ cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -10
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-core/crates/commands/src/builtin/clear.rs \
-        lingxi-core/crates/commands/src/builtin/mod.rs \
-        lingxi-core/crates/commands/src/builtin/core_placeholders.rs \
-        lingxi-core/crates/commands/Cargo.toml
+git add lingxi-code/crates/commands/src/builtin/clear.rs \
+        lingxi-code/crates/commands/src/builtin/mod.rs \
+        lingxi-code/crates/commands/src/builtin/core_placeholders.rs \
+        lingxi-code/crates/commands/Cargo.toml
 git commit -m "feat(M5-10 task 3): /clear real impl + 3 telemetry events (3 unit tests)"
 ```
 
@@ -953,13 +953,13 @@ git commit -m "feat(M5-10 task 3): /clear real impl + 3 telemetry events (3 unit
 ## Task 4: `/compact` real implementation
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/compact.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/mod.rs` (re-export)
-- Modify: `lingxi-core/crates/commands/src/builtin/core_placeholders.rs` (remove `CompactHandler` macro)
+- Create: `lingxi-code/crates/commands/src/builtin/compact.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/mod.rs` (re-export)
+- Modify: `lingxi-code/crates/commands/src/builtin/core_placeholders.rs` (remove `CompactHandler` macro)
 
 - [ ] **Step 1: Write the failing test.**
 
-  Create `lingxi-core/crates/commands/src/builtin/compact.rs`:
+  Create `lingxi-code/crates/commands/src/builtin/compact.rs`:
 
 ```rust
 //! `/compact` — runs a forced compaction pass and reports the summary.
@@ -1115,9 +1115,9 @@ impl BuiltinCommandHandler for CompactHandler {
 cargo test -p lingxi-commands --lib builtin::compact::tests 2>&1 | tail -10
 cargo fmt -p lingxi-commands
 cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/src/builtin/compact.rs \
-        lingxi-core/crates/commands/src/builtin/mod.rs \
-        lingxi-core/crates/commands/src/builtin/core_placeholders.rs
+git add lingxi-code/crates/commands/src/builtin/compact.rs \
+        lingxi-code/crates/commands/src/builtin/mod.rs \
+        lingxi-code/crates/commands/src/builtin/core_placeholders.rs
 git commit -m "feat(M5-10 task 4): /compact real impl + 3 telemetry events (4 unit tests)"
 ```
 
@@ -1126,14 +1126,14 @@ git commit -m "feat(M5-10 task 4): /compact real impl + 3 telemetry events (4 un
 ## Task 5: `/help` real implementation + `help_render` module
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/help_render.rs`
-- Create: `lingxi-core/crates/commands/src/builtin/help.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/mod.rs` (re-export both)
-- Modify: `lingxi-core/crates/commands/src/builtin/core_placeholders.rs` (remove `HelpHandler` macro)
+- Create: `lingxi-code/crates/commands/src/builtin/help_render.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/help.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/mod.rs` (re-export both)
+- Modify: `lingxi-code/crates/commands/src/builtin/core_placeholders.rs` (remove `HelpHandler` macro)
 
 - [ ] **Step 1: Write the failing renderer test.**
 
-  Create `lingxi-core/crates/commands/src/builtin/help_render.rs`:
+  Create `lingxi-code/crates/commands/src/builtin/help_render.rs`:
 
 ```rust
 //! Stateless renderer for `/help` output. Produces a byte-locked string
@@ -1274,7 +1274,7 @@ fn is_core(name: &str) -> bool {
 
 - [ ] **Step 4: Write the `HelpHandler` test.**
 
-  Create `lingxi-core/crates/commands/src/builtin/help.rs`:
+  Create `lingxi-code/crates/commands/src/builtin/help.rs`:
 
 ```rust
 //! `/help` — emits the locked rendering of the 102-command surface.
@@ -1345,10 +1345,10 @@ mod tests {
 cargo test -p lingxi-commands --lib builtin::help_render::tests builtin::help::tests 2>&1 | tail -15
 cargo fmt -p lingxi-commands
 cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/src/builtin/help.rs \
-        lingxi-core/crates/commands/src/builtin/help_render.rs \
-        lingxi-core/crates/commands/src/builtin/mod.rs \
-        lingxi-core/crates/commands/src/builtin/core_placeholders.rs
+git add lingxi-code/crates/commands/src/builtin/help.rs \
+        lingxi-code/crates/commands/src/builtin/help_render.rs \
+        lingxi-code/crates/commands/src/builtin/mod.rs \
+        lingxi-code/crates/commands/src/builtin/core_placeholders.rs
 git commit -m "feat(M5-10 task 5): /help real impl + help_render module + 3 telemetry events (8 unit tests, byte-locked layout)"
 ```
 
@@ -1357,9 +1357,9 @@ git commit -m "feat(M5-10 task 5): /help real impl + help_render module + 3 tele
 ## Task 6: `/exit` real implementation
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/exit.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/mod.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/core_placeholders.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/exit.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/mod.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/core_placeholders.rs`
 
 - [ ] **Step 1: Write the failing test.**
 
@@ -1458,9 +1458,9 @@ impl BuiltinCommandHandler for ExitHandler {
 cargo test -p lingxi-commands --lib builtin::exit::tests 2>&1 | tail -10
 cargo fmt -p lingxi-commands
 cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/src/builtin/exit.rs \
-        lingxi-core/crates/commands/src/builtin/mod.rs \
-        lingxi-core/crates/commands/src/builtin/core_placeholders.rs
+git add lingxi-code/crates/commands/src/builtin/exit.rs \
+        lingxi-code/crates/commands/src/builtin/mod.rs \
+        lingxi-code/crates/commands/src/builtin/core_placeholders.rs
 git commit -m "feat(M5-10 task 6): /exit real impl + 2 reachable telemetry events (2 unit tests)"
 ```
 
@@ -1469,9 +1469,9 @@ git commit -m "feat(M5-10 task 6): /exit real impl + 2 reachable telemetry event
 ## Task 7: `/memory` real implementation
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/memory.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/mod.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/core_placeholders.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/memory.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/mod.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/core_placeholders.rs`
 
 - [ ] **Step 1: Write the failing test.**
 
@@ -1616,10 +1616,10 @@ impl BuiltinCommandHandler for MemoryHandler {
 cargo test -p lingxi-commands --lib builtin::memory::tests 2>&1 | tail -10
 cargo fmt -p lingxi-commands
 cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/src/builtin/memory.rs \
-        lingxi-core/crates/commands/src/builtin/mod.rs \
-        lingxi-core/crates/commands/src/builtin/core_placeholders.rs \
-        lingxi-core/crates/orchestrator/src/test_support.rs
+git add lingxi-code/crates/commands/src/builtin/memory.rs \
+        lingxi-code/crates/commands/src/builtin/mod.rs \
+        lingxi-code/crates/commands/src/builtin/core_placeholders.rs \
+        lingxi-code/crates/orchestrator/src/test_support.rs
 git commit -m "feat(M5-10 task 7): /memory real impl + EDITOR fallback + 3 telemetry events (4 unit tests)"
 ```
 
@@ -1628,14 +1628,14 @@ git commit -m "feat(M5-10 task 7): /memory real impl + EDITOR fallback + 3 telem
 ## Task 8: `/init` real implementation + byte-locked `OLD_INIT_PROMPT` template
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/templates.rs`
-- Create: `lingxi-core/crates/commands/src/builtin/init.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/mod.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/core_placeholders.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/templates.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/init.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/mod.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/core_placeholders.rs`
 
 - [ ] **Step 1: Write the failing template invariant tests.**
 
-  Create `lingxi-core/crates/commands/src/builtin/templates.rs`:
+  Create `lingxi-code/crates/commands/src/builtin/templates.rs`:
 
 ```rust
 //! Byte-locked text templates for `/init` and other commands.
@@ -1752,7 +1752,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - [ ] **Step 4: Implement `InitHandler`.**
 
-  Create `lingxi-core/crates/commands/src/builtin/init.rs`:
+  Create `lingxi-code/crates/commands/src/builtin/init.rs`:
 
 ```rust
 //! `/init` — returns the locked `OLD_INIT_PROMPT` template as an injected
@@ -1845,11 +1845,11 @@ mod tests {
 cargo test -p lingxi-commands --lib builtin::templates::tests builtin::init::tests 2>&1 | tail -15
 cargo fmt -p lingxi-commands
 cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/src/builtin/templates.rs \
-        lingxi-core/crates/commands/src/builtin/init.rs \
-        lingxi-core/crates/commands/src/builtin/mod.rs \
-        lingxi-core/crates/commands/src/builtin/core_placeholders.rs \
-        lingxi-core/crates/commands/Cargo.toml
+git add lingxi-code/crates/commands/src/builtin/templates.rs \
+        lingxi-code/crates/commands/src/builtin/init.rs \
+        lingxi-code/crates/commands/src/builtin/mod.rs \
+        lingxi-code/crates/commands/src/builtin/core_placeholders.rs \
+        lingxi-code/crates/commands/Cargo.toml
 git commit -m "feat(M5-10 task 8): /init real impl + OLD_INIT_PROMPT 24-line byte-locked template + 3 telemetry events (8 invariant tests)"
 ```
 
@@ -1858,12 +1858,12 @@ git commit -m "feat(M5-10 task 8): /init real impl + OLD_INIT_PROMPT 24-line byt
 ## Task 9: `register_core_batch_1(reg, handle)` helper
 
 **Files:**
-- Modify: `lingxi-core/crates/commands/src/registry.rs`
-- Modify: `lingxi-core/crates/commands/src/lib.rs`
+- Modify: `lingxi-code/crates/commands/src/registry.rs`
+- Modify: `lingxi-code/crates/commands/src/lib.rs`
 
 - [ ] **Step 1: Write the failing test.**
 
-  Append to `lingxi-core/crates/commands/src/registry.rs`:
+  Append to `lingxi-code/crates/commands/src/registry.rs`:
 
 ```rust
 #[cfg(test)]
@@ -1972,7 +1972,7 @@ pub use registry::{register_all_builtin_commands, register_core_batch_1, Command
 cargo test -p lingxi-commands --lib registry::batch_1_tests 2>&1 | tail -10
 cargo fmt -p lingxi-commands
 cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/src/registry.rs lingxi-core/crates/commands/src/lib.rs
+git add lingxi-code/crates/commands/src/registry.rs lingxi-code/crates/commands/src/lib.rs
 git commit -m "feat(M5-10 task 9): register_core_batch_1(reg, handle) — handle-bound overwrite for 6 commands (3 tests)"
 ```
 
@@ -1981,12 +1981,12 @@ git commit -m "feat(M5-10 task 9): register_core_batch_1(reg, handle) — handle
 ## Task 10: Parity fixtures + driver updates
 
 **Files:**
-- Modify: `lingxi-core/crates/test-harness/src/parity/fixtures/parity_tengu_events.json` (append 18 rows)
-- Create: `lingxi-core/crates/test-harness/src/parity/fixtures/parity_help_screen.txt` (golden output)
-- Create: `lingxi-core/crates/test-harness/src/parity/fixtures/parity_init_template.json` (sha256 + line count)
-- Modify: `lingxi-core/crates/test-harness/tests/parity_telemetry_coverage.rs` (count bump)
-- Create: `lingxi-core/crates/test-harness/tests/parity_help_render.rs`
-- Create: `lingxi-core/crates/test-harness/tests/parity_init_template.rs`
+- Modify: `lingxi-code/crates/test-harness/src/parity/fixtures/parity_tengu_events.json` (append 18 rows)
+- Create: `lingxi-code/crates/test-harness/src/parity/fixtures/parity_help_screen.txt` (golden output)
+- Create: `lingxi-code/crates/test-harness/src/parity/fixtures/parity_init_template.json` (sha256 + line count)
+- Modify: `lingxi-code/crates/test-harness/tests/parity_telemetry_coverage.rs` (count bump)
+- Create: `lingxi-code/crates/test-harness/tests/parity_help_render.rs`
+- Create: `lingxi-code/crates/test-harness/tests/parity_init_template.rs`
 
 - [ ] **Step 1: Append 18 events to `parity_tengu_events.json`.**
 
@@ -2049,7 +2049,7 @@ fn dump_golden_help_screen() {
   Capture the byte length + sha256 + line count of `OLD_INIT_PROMPT`. Manually:
 
 ```bash
-rg -A 100 "pub const OLD_INIT_PROMPT" lingxi-core/crates/commands/src/builtin/templates.rs | \
+rg -A 100 "pub const OLD_INIT_PROMPT" lingxi-code/crates/commands/src/builtin/templates.rs | \
   awk 'BEGIN{p=0} /^pub const/{p=1} p{print}' > /tmp/init_template.rs
 ```
 
@@ -2079,7 +2079,7 @@ rg -A 100 "pub const OLD_INIT_PROMPT" lingxi-core/crates/commands/src/builtin/te
 
 - [ ] **Step 4: Write the help-render parity driver.**
 
-  Create `lingxi-core/crates/test-harness/tests/parity_help_render.rs`:
+  Create `lingxi-code/crates/test-harness/tests/parity_help_render.rs`:
 
 ```rust
 //! Parity: `/help` byte-locked rendering. Compares the renderer output to
@@ -2109,7 +2109,7 @@ fn golden_has_103_lines() {
 
 - [ ] **Step 5: Write the init-template parity driver.**
 
-  Create `lingxi-core/crates/test-harness/tests/parity_init_template.rs`:
+  Create `lingxi-code/crates/test-harness/tests/parity_init_template.rs`:
 
 ```rust
 //! Parity: `/init` template byte-locked.
@@ -2174,7 +2174,7 @@ fn contains_all_required_substrings() {
 
 - [ ] **Step 6: Update telemetry coverage driver.**
 
-  Open `lingxi-core/crates/test-harness/tests/parity_telemetry_coverage.rs`. There's likely a `TOTAL_EVENTS: usize = 258` constant or similar — bump to `276`. Also update any per-category count constants if the test breaks them down.
+  Open `lingxi-code/crates/test-harness/tests/parity_telemetry_coverage.rs`. There's likely a `TOTAL_EVENTS: usize = 258` constant or similar — bump to `276`. Also update any per-category count constants if the test breaks them down.
 
 - [ ] **Step 7: Run all parity tests.**
 
@@ -2189,9 +2189,9 @@ cargo test -p lingxi-test-harness 2>&1 | tail -20
 ```bash
 cargo fmt -p lingxi-test-harness
 cargo clippy -p lingxi-test-harness --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/test-harness/src/parity/fixtures/ \
-        lingxi-core/crates/test-harness/tests/ \
-        lingxi-core/crates/test-harness/Cargo.toml
+git add lingxi-code/crates/test-harness/src/parity/fixtures/ \
+        lingxi-code/crates/test-harness/tests/ \
+        lingxi-code/crates/test-harness/Cargo.toml
 git commit -m "test(M5-10 task 10): parity fixtures + drivers — tengu events 258→276, /help golden, /init template sha256"
 ```
 
@@ -2200,12 +2200,12 @@ git commit -m "test(M5-10 task 10): parity fixtures + drivers — tengu events 2
 ## Task 11: `event_name_completeness_test.rs` bump + cross-check
 
 **Files:**
-- Modify: `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs` (or wherever the M3-06 lock lives)
+- Modify: `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs` (or wherever the M3-06 lock lives)
 
 - [ ] **Step 1: Find the test.**
 
 ```bash
-rg -n "ALL_EVENT_NAMES.len" lingxi-core/crates/telemetry/ lingxi-core/crates/test-harness/ 2>&1 | head -10
+rg -n "ALL_EVENT_NAMES.len" lingxi-code/crates/telemetry/ lingxi-code/crates/test-harness/ 2>&1 | head -10
 ```
 
 - [ ] **Step 2: Update the assertion.**
@@ -2225,7 +2225,7 @@ git commit -m "test(M5-10 task 11): bump ALL_EVENT_NAMES.len() lock 258→276"
 ## Task 12: Integration e2e tests — dispatcher + 6 handlers via real path
 
 **Files:**
-- Create: `lingxi-core/crates/commands/tests/batch_1_e2e.rs`
+- Create: `lingxi-code/crates/commands/tests/batch_1_e2e.rs`
 
 - [ ] **Step 1: Write the e2e test.**
 
@@ -2353,7 +2353,7 @@ async fn non_batch_1_command_still_returns_stub() {
 cargo test -p lingxi-commands --test batch_1_e2e 2>&1 | tail -15
 cargo fmt -p lingxi-commands
 cargo clippy -p lingxi-commands --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/tests/batch_1_e2e.rs
+git add lingxi-code/crates/commands/tests/batch_1_e2e.rs
 git commit -m "test(M5-10 task 12): batch_1_e2e — 7 end-to-end dispatcher cases"
 ```
 
@@ -2362,8 +2362,8 @@ git commit -m "test(M5-10 task 12): batch_1_e2e — 7 end-to-end dispatcher case
 ## Task 13: Documentation updates
 
 **Files:**
-- Modify: `lingxi-core/crates/commands/src/lib.rs` (module docs)
-- Modify: `lingxi-core/crates/traits/src/lib.rs` (re-export note)
+- Modify: `lingxi-code/crates/commands/src/lib.rs` (module docs)
+- Modify: `lingxi-code/crates/traits/src/lib.rs` (re-export note)
 
 - [ ] **Step 1: Update commands crate docs.**
 
@@ -2390,7 +2390,7 @@ git commit -m "test(M5-10 task 12): batch_1_e2e — 7 end-to-end dispatcher case
 - [ ] **Step 2: Commit.**
 
 ```bash
-git add lingxi-core/crates/commands/src/lib.rs
+git add lingxi-code/crates/commands/src/lib.rs
 git commit -m "docs(M5-10 task 13): batch-1 module docs for /clear /compact /help /exit /memory /init"
 ```
 
@@ -2414,7 +2414,7 @@ cargo test --workspace 2>&1 | tail -30
 - [ ] **Step 2: Confirm event count exactly 276.**
 
 ```bash
-rg -n "276\|258\|TOTAL" lingxi-core/crates/telemetry/src/tengu/mod.rs | head -5
+rg -n "276\|258\|TOTAL" lingxi-code/crates/telemetry/src/tengu/mod.rs | head -5
 cargo test -p lingxi-test-harness --test parity_telemetry_coverage 2>&1 | tail -10
 ```
 

@@ -1,4 +1,4 @@
-// lingxi-core/crates/memory/tests/memdir_module_exists.rs
+// lingxi-code/crates/memory/tests/memdir_module_exists.rs
 //! Smoke test: the new modules compile and the locked constants exist
 //! with the exact values from spec §7.
 

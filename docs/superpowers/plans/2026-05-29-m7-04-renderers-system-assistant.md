@@ -6,14 +6,14 @@
 
 **Architecture:** Each renderer follows the established M6-04 two-function pattern: a pure `render_*_to_string(props) -> String` (snapshot-testable, used by `render_entry_to_string`) plus a `#[component]` iocraft wrapper used by `components::scrollback::render_message`. New `RenderedMessage` variants live in `state.rs`; both dispatchers (`messages/mod.rs::render_entry_to_string` and `scrollback.rs::render_message`) gain one arm per variant. Renderers with markdown bodies (`thinking`, `advisor`) route through `render::markdown` (M7-01); none in this batch needs `render::syntax` directly (code blocks ride inside markdown via M7-01/02). Literal-lock: every label/marker/color is copied byte-for-byte from the equivalent claude-code `.tsx`.
 
-**Tech Stack:** Rust 1.82 (pinned via `lingxi-core/rust-toolchain.toml`), iocraft `=0.8.3` (`View` not `Box`), `insta = "1.40"` snapshots, `chrono` (timestamps), `serde_json` (payloads). `lingxi-protocol::ToolUseId` correlator. `render::markdown::render` from M7-01 (prerequisite).
+**Tech Stack:** Rust 1.82 (pinned via `lingxi-code/rust-toolchain.toml`), iocraft `=0.8.3` (`View` not `Box`), `insta = "1.40"` snapshots, `chrono` (timestamps), `serde_json` (payloads). `lingxi-protocol::ToolUseId` correlator. `render::markdown::render` from M7-01 (prerequisite).
 
 ---
 
 ## Prerequisites & Dependencies
 
-- **M7-01 (ANSI + markdown) MUST be merged first.** `thinking` and `advisor` route their bodies through `crate::render::markdown::render(text, theme) -> Vec<StyledLine>`. If M7-01's module is not present when this plan executes, those two renderers fall back to a single dim `Text` block over the raw body (documented inline in Task 2 / Task 8) and a follow-up wires markdown once M7-01 lands. **Verify before starting:** `ls lingxi-core/crates/tui/src/render/markdown.rs` exists and `crate::render::markdown::render` is callable.
-- **`StyledLine` type name (M7-01):** the spec (§2.3) names the markdown/syntax output `Vec<StyledLine>` but the concrete type is defined in M7-01. **Do NOT invent it.** Before using it, grep for the real name: `grep -rn "struct StyledLine\|pub struct Styled\|type StyledLine" lingxi-core/crates/tui/src/render/`. If M7-01 named it differently (e.g. `MarkdownLine`, `RenderedLine`), use that name. In this batch, markdown output is flattened to a `String` for the pure renderer + snapshot (join styled-line plain text with `\n`); the iocraft component may render styled lines directly if the M7-01 helper exposes a `View`-building convenience, otherwise it renders the flattened string in dim.
+- **M7-01 (ANSI + markdown) MUST be merged first.** `thinking` and `advisor` route their bodies through `crate::render::markdown::render(text, theme) -> Vec<StyledLine>`. If M7-01's module is not present when this plan executes, those two renderers fall back to a single dim `Text` block over the raw body (documented inline in Task 2 / Task 8) and a follow-up wires markdown once M7-01 lands. **Verify before starting:** `ls lingxi-code/crates/tui/src/render/markdown.rs` exists and `crate::render::markdown::render` is callable.
+- **`StyledLine` type name (M7-01):** the spec (§2.3) names the markdown/syntax output `Vec<StyledLine>` but the concrete type is defined in M7-01. **Do NOT invent it.** Before using it, grep for the real name: `grep -rn "struct StyledLine\|pub struct Styled\|type StyledLine" lingxi-code/crates/tui/src/render/`. If M7-01 named it differently (e.g. `MarkdownLine`, `RenderedLine`), use that name. In this batch, markdown output is flattened to a `String` for the pure renderer + snapshot (join styled-line plain text with `\n`); the iocraft component may render styled lines directly if the M7-01 helper exposes a `View`-building convenience, otherwise it renders the flattened string in dim.
 - **M7-03 (VirtualMessageList)** is independent of this plan; renderers added here plug into whichever dispatcher is live (`scrollback.rs` today; `virtual_message_list.rs` after M7-03). This plan wires `scrollback.rs::render_message` — if M7-03 already replaced it, wire the equivalent dispatcher instead (same match arms).
 - **Telemetry:** baseline is 326 events. **M7-04 adds 0 events.** No `ALL_EVENT_NAMES` changes. Do not register any telemetry name.
 
@@ -40,7 +40,7 @@ Source root: `/Users/luolingfeng/Projects/LingXi-Next/claude-code/src/components
 
 ## File Structure
 
-**Create (10 renderer files):** `lingxi-core/crates/tui/src/components/messages/`
+**Create (10 renderer files):** `lingxi-code/crates/tui/src/components/messages/`
 - `thinking.rs` — `AssistantThinkingMessage` + `render_thinking_to_string`. Owns the `∴ Thinking` collapsed/`∴ Thinking…` expanded split; routes expanded body through `render::markdown`.
 - `redacted_thinking.rs` — `AssistantRedactedThinkingMessage` + `render_redacted_thinking_to_string`. One-line `✻ Thinking…`.
 - `compact_boundary.rs` — `CompactBoundaryMessage` + `render_compact_boundary_to_string`. `✻ Conversation compacted (ctrl+o for history)`.
@@ -53,17 +53,17 @@ Source root: `/Users/luolingfeng/Projects/LingXi-Next/claude-code/src/components
 - `plan_approval.rs` — `PlanApprovalMessage` + `render_plan_approval_to_string`. Request/approved/rejected kinds; request plan content routes through `render::markdown`.
 
 **Modify:**
-- `lingxi-core/crates/tui/src/state.rs` — add 10 `RenderedMessage` variants (Task 1).
-- `lingxi-core/crates/tui/src/components/messages/mod.rs` — `pub mod` each new file; extend `render_entry_to_string` with 10 match arms.
-- `lingxi-core/crates/tui/src/components/scrollback.rs` — extend `render_message` with 10 match arms (iocraft components).
-- `lingxi-core/crates/tui/src/streaming.rs:83-97` — `CompactionCompleted` handler pushes `RenderedMessage::CompactBoundary {...}` instead of the `SystemText` `[Compacted …]` placeholder (Task 4).
-- `lingxi-core/crates/tui/src/events/orchestrator_bridge.rs:71-82` — update the `CompactionCompleted` doc-comment to reflect the real renderer (no code change beyond the comment) (Task 4).
+- `lingxi-code/crates/tui/src/state.rs` — add 10 `RenderedMessage` variants (Task 1).
+- `lingxi-code/crates/tui/src/components/messages/mod.rs` — `pub mod` each new file; extend `render_entry_to_string` with 10 match arms.
+- `lingxi-code/crates/tui/src/components/scrollback.rs` — extend `render_message` with 10 match arms (iocraft components).
+- `lingxi-code/crates/tui/src/streaming.rs:83-97` — `CompactionCompleted` handler pushes `RenderedMessage::CompactBoundary {...}` instead of the `SystemText` `[Compacted …]` placeholder (Task 4).
+- `lingxi-code/crates/tui/src/events/orchestrator_bridge.rs:71-82` — update the `CompactionCompleted` doc-comment to reflect the real renderer (no code change beyond the comment) (Task 4).
 
-**Create (test files):** `lingxi-core/crates/tui/tests/`
+**Create (test files):** `lingxi-code/crates/tui/tests/`
 - `render_messages_batch1.rs` — insta snapshots, one block per renderer (collapsed + expanded where applicable).
 - `dispatch_batch1.rs` — asserts each new variant routes through `render_entry_to_string` to the expected renderer output (string-form).
 
-**Snapshots land in:** `lingxi-core/crates/tui/tests/snapshots/` (insta auto-creates `*.snap`).
+**Snapshots land in:** `lingxi-code/crates/tui/tests/snapshots/` (insta auto-creates `*.snap`).
 
 ---
 
@@ -73,7 +73,7 @@ Source root: `/Users/luolingfeng/Projects/LingXi-Next/claude-code/src/components
 - **Pure renderer first:** `render_<name>_to_string(props: <Name>Props) -> String` returns the exact display string (newline-joined lines). The component wraps it (or, for multi-color renderers, builds `View` children directly while the string fn stays the snapshot oracle). `#![allow(clippy::needless_pass_by_value)]` at file top where props are taken by value (matches `assistant_tool_use.rs`).
 - **Props:** `#[derive(Debug, Clone, Default, Props)]`. Carry only what the variant carries.
 - **Glyph constants** declared as `pub const` at file top with a byte-comment, e.g. `/// U+2234 + space. dim+italic.` `pub const THINKING_MARKER: &str = "∴ ";` — and a `#[test] fn marker_bytes()` guarding the UTF-8 bytes (mirrors `assistant_tool_use.rs::marker_is_three_utf8_bytes`).
-- **Run cargo from inside `lingxi-core/`** (rust-toolchain pins 1.82; repo-root runs use host toolchain → spurious lint noise — this bit M6-08).
+- **Run cargo from inside `lingxi-code/`** (rust-toolchain pins 1.82; repo-root runs use host toolchain → spurious lint noise — this bit M6-08).
 - **Commit format:** `plan(M7-04 TN): <subject>` with trailer `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`. **Do not push.**
 
 ---
@@ -81,9 +81,9 @@ Source root: `/Users/luolingfeng/Projects/LingXi-Next/claude-code/src/components
 ## Task 1: `RenderedMessage` variants + module declarations
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/state.rs` (the `RenderedMessage` enum, ~line 33-81)
-- Modify: `lingxi-core/crates/tui/src/components/messages/mod.rs` (module decls, ~line 8-11)
-- Test: `lingxi-core/crates/tui/src/state.rs` (inline `#[cfg(test)] mod tests`)
+- Modify: `lingxi-code/crates/tui/src/state.rs` (the `RenderedMessage` enum, ~line 33-81)
+- Modify: `lingxi-code/crates/tui/src/components/messages/mod.rs` (module decls, ~line 8-11)
+- Test: `lingxi-code/crates/tui/src/state.rs` (inline `#[cfg(test)] mod tests`)
 
 - [ ] **Step 1: Write the failing test** — append to `state.rs` tests module:
 
@@ -111,7 +111,7 @@ Source root: `/Users/luolingfeng/Projects/LingXi-Next/claude-code/src/components
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run (from `lingxi-core/`): `cargo test -p lingxi-tui --lib rendered_message_carries_batch1_variants`
+Run (from `lingxi-code/`): `cargo test -p lingxi-tui --lib rendered_message_carries_batch1_variants`
 Expected: FAIL — `no variant named AssistantThinking`, undefined `SystemLevel`/`AdvisorKind`/`PlanApprovalKind`.
 
 - [ ] **Step 3: Add the enum variants + supporting enums** in `state.rs`. Insert these variants into `RenderedMessage` (after `UserToolResult`):
@@ -207,13 +207,13 @@ pub mod thinking;
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run (from `lingxi-core/`): `cargo test -p lingxi-tui --lib rendered_message_carries_batch1_variants`
+Run (from `lingxi-code/`): `cargo test -p lingxi-tui --lib rendered_message_carries_batch1_variants`
 Expected: PASS. (The `pub mod` lines will not compile yet because the files don't exist — create empty stubs `// stub` for each in `components/messages/` so the lib compiles, OR add the `pub mod` lines in Step 3 of Task 2 onward. **Decision:** create empty stub files now containing only a doc-comment so the crate compiles; each later task replaces its stub.)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/state.rs lingxi-core/crates/tui/src/components/messages/
+git add lingxi-code/crates/tui/src/state.rs lingxi-code/crates/tui/src/components/messages/
 git commit -m "$(cat <<'EOF'
 plan(M7-04 T1): add 10 batch-1 RenderedMessage variants + module stubs
 
@@ -227,8 +227,8 @@ EOF
 ## Task 2: `thinking.rs` (AssistantThinkingMessage)
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/messages/thinking.rs` (replaces stub)
-- Test: `lingxi-core/crates/tui/tests/render_messages_batch1.rs` (create)
+- Create: `lingxi-code/crates/tui/src/components/messages/thinking.rs` (replaces stub)
+- Test: `lingxi-code/crates/tui/tests/render_messages_batch1.rs` (create)
 
 Read first: `claude-code/src/components/messages/AssistantThinkingMessage.tsx` + `HighlightedThinkingText.tsx`.
 
@@ -259,7 +259,7 @@ fn thinking_expanded() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run (from `lingxi-core/`): `cargo test -p lingxi-tui --test render_messages_batch1 thinking`
+Run (from `lingxi-code/`): `cargo test -p lingxi-tui --test render_messages_batch1 thinking`
 Expected: FAIL — unresolved import `thinking::render_thinking_to_string`.
 
 - [ ] **Step 3: Write the renderer** — `thinking.rs`:
@@ -349,13 +349,13 @@ mod tests {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run (from `lingxi-core/`): `cargo test -p lingxi-tui --test render_messages_batch1 thinking`
+Run (from `lingxi-code/`): `cargo test -p lingxi-tui --test render_messages_batch1 thinking`
 Then `cargo insta review` (accept the two new snapshots after eyeballing `∴ Thinking (ctrl+o to expand)` and the expanded form). Re-run; expected PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/messages/thinking.rs lingxi-core/crates/tui/tests/render_messages_batch1.rs lingxi-core/crates/tui/tests/snapshots/
+git add lingxi-code/crates/tui/src/components/messages/thinking.rs lingxi-code/crates/tui/tests/render_messages_batch1.rs lingxi-code/crates/tui/tests/snapshots/
 git commit -m "$(cat <<'EOF'
 plan(M7-04 T2): thinking renderer (∴ Thinking collapsed/expanded)
 
@@ -369,9 +369,9 @@ EOF
 ## Task 3: `redacted_thinking.rs` + `compact_boundary.rs` (2 renderers)
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/messages/redacted_thinking.rs`
-- Create: `lingxi-core/crates/tui/src/components/messages/compact_boundary.rs`
-- Test: `lingxi-core/crates/tui/tests/render_messages_batch1.rs` (append)
+- Create: `lingxi-code/crates/tui/src/components/messages/redacted_thinking.rs`
+- Create: `lingxi-code/crates/tui/src/components/messages/compact_boundary.rs`
+- Test: `lingxi-code/crates/tui/tests/render_messages_batch1.rs` (append)
 
 Read first: `AssistantRedactedThinkingMessage.tsx`, `CompactBoundaryMessage.tsx`.
 
@@ -394,7 +394,7 @@ fn compact_boundary_line() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run (from `lingxi-core/`): `cargo test -p lingxi-tui --test render_messages_batch1 redacted_thinking_line compact_boundary_line`
+Run (from `lingxi-code/`): `cargo test -p lingxi-tui --test render_messages_batch1 redacted_thinking_line compact_boundary_line`
 Expected: FAIL — unresolved imports.
 
 - [ ] **Step 3: Write the renderers.**
@@ -474,12 +474,12 @@ pub fn CompactBoundaryMessage() -> impl Into<AnyElement<'static>> {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run (from `lingxi-core/`): `cargo test -p lingxi-tui --test render_messages_batch1 redacted_thinking_line compact_boundary_line` then `cargo insta review`. Expected PASS after accepting `✻ Thinking…` and `✻ Conversation compacted (ctrl+o for history)`.
+Run (from `lingxi-code/`): `cargo test -p lingxi-tui --test render_messages_batch1 redacted_thinking_line compact_boundary_line` then `cargo insta review`. Expected PASS after accepting `✻ Thinking…` and `✻ Conversation compacted (ctrl+o for history)`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/messages/redacted_thinking.rs lingxi-core/crates/tui/src/components/messages/compact_boundary.rs lingxi-core/crates/tui/tests/
+git add lingxi-code/crates/tui/src/components/messages/redacted_thinking.rs lingxi-code/crates/tui/src/components/messages/compact_boundary.rs lingxi-code/crates/tui/tests/
 git commit -m "$(cat <<'EOF'
 plan(M7-04 T3): redacted_thinking + compact_boundary renderers
 
@@ -493,9 +493,9 @@ EOF
 ## Task 4: Replace the M6-08 `[Compacted]` placeholder with `CompactBoundary`
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/streaming.rs:83-97` (the `CompactionCompleted` arm)
-- Modify: `lingxi-core/crates/tui/src/events/orchestrator_bridge.rs:71-82` (doc-comment only)
-- Modify: `lingxi-core/crates/tui/tests/behavior_compact_marker.rs` (the assertion that checks for `"Compacted"`)
+- Modify: `lingxi-code/crates/tui/src/streaming.rs:83-97` (the `CompactionCompleted` arm)
+- Modify: `lingxi-code/crates/tui/src/events/orchestrator_bridge.rs:71-82` (doc-comment only)
+- Modify: `lingxi-code/crates/tui/tests/behavior_compact_marker.rs` (the assertion that checks for `"Compacted"`)
 - Test: same `behavior_compact_marker.rs`
 
 The M6-08 placeholder is emitted in `streaming.rs::apply_event` under `TurnEvent::CompactionCompleted` as a `RenderedMessage::SystemText { body: "[Compacted N → M messages]", .. }`. Switch it to the real variant.
@@ -519,7 +519,7 @@ The M6-08 placeholder is emitted in `streaming.rs::apply_event` under `TurnEvent
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run (from `lingxi-core/`): `cargo test -p lingxi-tui --test behavior_compact_marker`
+Run (from `lingxi-code/`): `cargo test -p lingxi-tui --test behavior_compact_marker`
 Expected: FAIL — still pushes `SystemText`; `render_entry_to_string` has no `CompactBoundary` arm yet.
 
 - [ ] **Step 3: Switch the emit site** — in `streaming.rs`, replace the `CompactionCompleted` body:
@@ -564,13 +564,13 @@ and in `scrollback.rs::render_message` add:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run (from `lingxi-core/`): `cargo test -p lingxi-tui --test behavior_compact_marker`
+Run (from `lingxi-code/`): `cargo test -p lingxi-tui --test behavior_compact_marker`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/streaming.rs lingxi-core/crates/tui/src/events/orchestrator_bridge.rs lingxi-core/crates/tui/src/components/messages/mod.rs lingxi-core/crates/tui/src/components/scrollback.rs lingxi-core/crates/tui/tests/behavior_compact_marker.rs
+git add lingxi-code/crates/tui/src/streaming.rs lingxi-code/crates/tui/src/events/orchestrator_bridge.rs lingxi-code/crates/tui/src/components/messages/mod.rs lingxi-code/crates/tui/src/components/scrollback.rs lingxi-code/crates/tui/tests/behavior_compact_marker.rs
 git commit -m "$(cat <<'EOF'
 plan(M7-04 T4): emit CompactBoundary; retire [Compacted] SystemText placeholder
 
@@ -584,7 +584,7 @@ EOF
 ## Task 5: `system_text.rs` (SystemTextMessage)
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/messages/system_text.rs`
+- Create: `lingxi-code/crates/tui/src/components/messages/system_text.rs`
 - Test: `render_messages_batch1.rs` (append)
 
 Read first: `SystemTextMessage.tsx` (level/marker logic at the tail; `agents_killed` subtype).
@@ -672,7 +672,7 @@ Add `impl Default for SystemLevel { fn default() -> Self { Self::Info } }` to `s
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/messages/system_text.rs lingxi-core/crates/tui/src/state.rs lingxi-core/crates/tui/tests/
+git add lingxi-code/crates/tui/src/components/messages/system_text.rs lingxi-code/crates/tui/src/state.rs lingxi-code/crates/tui/tests/
 git commit -m "$(cat <<'EOF'
 plan(M7-04 T5): system_text renderer (level-aware marker/color)
 
@@ -686,7 +686,7 @@ EOF
 ## Task 6: `system_api_error.rs` (SystemAPIErrorMessage)
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/messages/system_api_error.rs`
+- Create: `lingxi-code/crates/tui/src/components/messages/system_api_error.rs`
 - Test: `render_messages_batch1.rs` (append)
 
 Read first: `SystemAPIErrorMessage.tsx`. Locked: error body + truncation `…` + `(ctrl+o to expand)` hint when truncated; footer `Retrying in {n} second(s)… (attempt {a}/{m})` (singular `second` when n==1). `MAX_API_ERROR_CHARS = 1000`.
@@ -794,7 +794,7 @@ pub fn SystemApiErrorMessage(props: &SystemApiErrorProps) -> impl Into<AnyElemen
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/messages/system_api_error.rs lingxi-core/crates/tui/tests/
+git add lingxi-code/crates/tui/src/components/messages/system_api_error.rs lingxi-code/crates/tui/tests/
 git commit -m "$(cat <<'EOF'
 plan(M7-04 T6): system_api_error renderer (body + retry footer)
 
@@ -808,7 +808,7 @@ EOF
 ## Task 7: `rate_limit.rs` (RateLimitMessage)
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/messages/rate_limit.rs`
+- Create: `lingxi-code/crates/tui/src/components/messages/rate_limit.rs`
 - Test: `render_messages_batch1.rs` (append)
 
 Read first: `RateLimitMessage.tsx` (`getUpsellMessage` holds the locked strings).
@@ -916,7 +916,7 @@ mod tests {
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/messages/rate_limit.rs lingxi-core/crates/tui/tests/
+git add lingxi-code/crates/tui/src/components/messages/rate_limit.rs lingxi-code/crates/tui/tests/
 git commit -m "$(cat <<'EOF'
 plan(M7-04 T7): rate_limit renderer + locked upsell literals
 
@@ -930,8 +930,8 @@ EOF
 ## Task 8: `shutdown.rs` + `advisor.rs` (2 renderers)
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/messages/shutdown.rs`
-- Create: `lingxi-core/crates/tui/src/components/messages/advisor.rs`
+- Create: `lingxi-code/crates/tui/src/components/messages/shutdown.rs`
+- Create: `lingxi-code/crates/tui/src/components/messages/advisor.rs`
 - Test: `render_messages_batch1.rs` (append)
 
 Read first: `ShutdownMessage.tsx`, `AdvisorMessage.tsx`. Advisor result body (verbose) routes through `render::markdown` (M7-01); non-verbose is the fixed `✔ Advisor …` line.
@@ -1113,7 +1113,7 @@ Add `Default for AdvisorKind` to `state.rs` (Props derive): `impl Default for Ad
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/messages/shutdown.rs lingxi-core/crates/tui/src/components/messages/advisor.rs lingxi-core/crates/tui/src/state.rs lingxi-core/crates/tui/tests/
+git add lingxi-code/crates/tui/src/components/messages/shutdown.rs lingxi-code/crates/tui/src/components/messages/advisor.rs lingxi-code/crates/tui/src/state.rs lingxi-code/crates/tui/tests/
 git commit -m "$(cat <<'EOF'
 plan(M7-04 T8): shutdown + advisor renderers
 
@@ -1127,7 +1127,7 @@ EOF
 ## Task 9: `hook_progress.rs` (HookProgressMessage)
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/messages/hook_progress.rs`
+- Create: `lingxi-code/crates/tui/src/components/messages/hook_progress.rs`
 - Test: `render_messages_batch1.rs` (append)
 
 Read first: `HookProgressMessage.tsx`. Running form: `Running ` + `{event}` (bold) + ` hook…`/` hooks…`. Transcript-summary form (Pre/PostToolUse): `{n} ` + `{event}` (bold) + ` hook ran`/` hooks ran`. Singular when count==1.
@@ -1211,7 +1211,7 @@ pub fn HookProgressMessage(props: &HookProgressProps) -> impl Into<AnyElement<'s
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/messages/hook_progress.rs lingxi-core/crates/tui/tests/
+git add lingxi-code/crates/tui/src/components/messages/hook_progress.rs lingxi-code/crates/tui/tests/
 git commit -m "$(cat <<'EOF'
 plan(M7-04 T9): hook_progress renderer (running/transcript, singular/plural)
 
@@ -1225,7 +1225,7 @@ EOF
 ## Task 10: `plan_approval.rs` (PlanApprovalMessage)
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/messages/plan_approval.rs`
+- Create: `lingxi-code/crates/tui/src/components/messages/plan_approval.rs`
 - Test: `render_messages_batch1.rs` (append)
 
 Read first: `PlanApprovalMessage.tsx`. Request body routes plan content through `render::markdown` (M7-01).
@@ -1369,7 +1369,7 @@ Add `Default for PlanApprovalKind` to `state.rs`: `impl Default for PlanApproval
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/messages/plan_approval.rs lingxi-core/crates/tui/src/state.rs lingxi-core/crates/tui/tests/
+git add lingxi-code/crates/tui/src/components/messages/plan_approval.rs lingxi-code/crates/tui/src/state.rs lingxi-code/crates/tui/tests/
 git commit -m "$(cat <<'EOF'
 plan(M7-04 T10): plan_approval renderer (request/approved/rejected)
 
@@ -1383,9 +1383,9 @@ EOF
 ## Task 11: Wire all 10 dispatch arms + dispatch test
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/messages/mod.rs` (`render_entry_to_string`)
-- Modify: `lingxi-core/crates/tui/src/components/scrollback.rs` (`render_message` + `use` imports; remove the Task 4 temporary catch-all)
-- Test: `lingxi-core/crates/tui/tests/dispatch_batch1.rs` (create)
+- Modify: `lingxi-code/crates/tui/src/components/messages/mod.rs` (`render_entry_to_string`)
+- Modify: `lingxi-code/crates/tui/src/components/scrollback.rs` (`render_message` + `use` imports; remove the Task 4 temporary catch-all)
+- Test: `lingxi-code/crates/tui/tests/dispatch_batch1.rs` (create)
 
 - [ ] **Step 1: Write the failing test** — create `dispatch_batch1.rs`:
 
@@ -1497,7 +1497,7 @@ Verify the match is now exhaustive with no `_` arm (the compiler enforces this o
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/messages/mod.rs lingxi-core/crates/tui/src/components/scrollback.rs lingxi-core/crates/tui/tests/dispatch_batch1.rs
+git add lingxi-code/crates/tui/src/components/messages/mod.rs lingxi-code/crates/tui/src/components/scrollback.rs lingxi-code/crates/tui/tests/dispatch_batch1.rs
 git commit -m "$(cat <<'EOF'
 plan(M7-04 T11): wire 10 dispatch arms (both dispatchers) + dispatch test
 
@@ -1512,7 +1512,7 @@ EOF
 
 **Files:** none (verification + tag only)
 
-- [ ] **Step 1: Format + lint + test, from inside `lingxi-core/`** (toolchain pins 1.82; running from repo root uses host toolchain → spurious lint noise — this bit M6-08):
+- [ ] **Step 1: Format + lint + test, from inside `lingxi-code/`** (toolchain pins 1.82; running from repo root uses host toolchain → spurious lint noise — this bit M6-08):
 
 ```bash
 cd lingxi-core && cargo fmt --check
@@ -1567,7 +1567,7 @@ EOF
 
 ## Self-Review
 
-**1. Spec coverage (§3 M7-04 entry):** 10 renderers each get a file + variant + renderer fn + dispatch entry (Tasks 2-3, 5-10 build them; Task 1 adds variants; Task 11 wires dispatch). `compact_boundary` replaces the `[Compacted]` SystemText placeholder (Task 4). Snapshots per renderer with collapsed/expanded where applicable (thinking T2; system_api_error truncated/not T6; hook_progress running/transcript T9; plan_approval request/approved/rejected T10) — 15+ snapshots total. Dispatch test (T11). Markdown routing noted for thinking/advisor/plan-approval (M7-01 prereq). Telemetry +0 (T12 verifies 326). Workspace gate from inside `lingxi-core/` + tag `m7.4` (T12). All covered.
+**1. Spec coverage (§3 M7-04 entry):** 10 renderers each get a file + variant + renderer fn + dispatch entry (Tasks 2-3, 5-10 build them; Task 1 adds variants; Task 11 wires dispatch). `compact_boundary` replaces the `[Compacted]` SystemText placeholder (Task 4). Snapshots per renderer with collapsed/expanded where applicable (thinking T2; system_api_error truncated/not T6; hook_progress running/transcript T9; plan_approval request/approved/rejected T10) — 15+ snapshots total. Dispatch test (T11). Markdown routing noted for thinking/advisor/plan-approval (M7-01 prereq). Telemetry +0 (T12 verifies 326). Workspace gate from inside `lingxi-code/` + tag `m7.4` (T12). All covered.
 
 **2. Placeholder scan:** No TBD/TODO-as-work. The `// TODO(M7-15)` comments are intentional forward-pointers for theme constants (warning/success/planMode colors centralize in M7-15), not plan gaps — each renderer ships a concrete literal iocraft color now.
 

@@ -6,7 +6,7 @@
 
 **Architecture:** Two new pure-function modules under `crates/tui/src/render/` (created by the prerequisite M7-01): `syntax.rs` wraps a lazily-built `syntect::parsing::SyntaxSet` + `ThemeSet`, detects language from a markdown fence info-string (```` ```rust ````) **or** a file path/extension, maps the active `TuiTheme` to a bundled syntect `.tmTheme`, and returns `Vec<StyledLine>` (the M7-01 styled-line type). `diff.rs` uses `similar::TextDiff` for line-level diffing, pairs adjacent remove/add lines for word-level intra-line diffing (`similar::TextDiff::from_words`), and renders gutter (right-aligned line number) + sigil (`+`/`-`/` `) + per-line syntax-colored content with green/red line backgrounds — matching `claude-code/src/components/StructuredDiff/Fallback.tsx`. Both functions are stateless and snapshot-testable in isolation. M7-01's markdown fenced-code **placeholder spans** are then routed through `syntax.rs`, and M6's `UserToolResultMessage` gains an Edit/Write branch that renders the body as a `StructuredDiff`.
 
-**Tech Stack:** Rust 2021, pinned toolchain 1.82.0 (`lingxi-core/rust-toolchain.toml`), `iocraft = "=0.8.3"` (`View`, not `Box`), `syntect = "=5.3.0"` (default-features off, `default-fancy` feature → pure-Rust `fancy-regex` backend, NO `onig` C dependency), `similar = "=2.7.0"` (already in the workspace lockfile; line + word diff), `insta` (existing dev-dep, YAML snapshots). The M7-01 `render::StyledLine` / `render::StyledSpan` types and the `render::markdown` placeholder-fence emitter are prerequisites.
+**Tech Stack:** Rust 2021, pinned toolchain 1.82.0 (`lingxi-code/rust-toolchain.toml`), `iocraft = "=0.8.3"` (`View`, not `Box`), `syntect = "=5.3.0"` (default-features off, `default-fancy` feature → pure-Rust `fancy-regex` backend, NO `onig` C dependency), `similar = "=2.7.0"` (already in the workspace lockfile; line + word diff), `insta` (existing dev-dep, YAML snapshots). The M7-01 `render::StyledLine` / `render::StyledSpan` types and the `render::markdown` placeholder-fence emitter are prerequisites.
 
 **Prerequisite — M7-01 (must land first):** This plan fills placeholders left by M7-01. M7-01 creates `crates/tui/src/render/mod.rs`, `render/ansi.rs` (the expanded ANSI parser moved from `src/ansi.rs`), and `render/markdown.rs`, and defines the styled-line types. **The exact type names `StyledLine` and `StyledSpan` are assumed from the M7 design §2.3 (`-> Vec<StyledLine>`); the implementer MUST confirm the real names M7-01 shipped by reading `crates/tui/src/render/mod.rs` before Task 2, and substitute the actual names everywhere this plan writes `StyledLine` / `StyledSpan` if M7-01 chose different names.** M7-01 also leaves markdown code fences emitting a placeholder span variant (design §3 M7-01: "Code fences emit a placeholder span (filled by M7-02)") — Task 12 below replaces that.
 
@@ -47,7 +47,7 @@
 
 **Files:**
 - Modify: `crates/tui/Cargo.toml:22` (after the `iocraft = "=0.8.3"` line, in `[dependencies]`)
-- Modify: `lingxi-core/Cargo.lock` (via `cargo update --precise`, committed)
+- Modify: `lingxi-code/Cargo.lock` (via `cargo update --precise`, committed)
 
 - [ ] **Step 1: Add the two dependencies, exact-pinned, with the pure-Rust backend.**
 
@@ -66,7 +66,7 @@
 
 - [ ] **Step 2: Apply the transitive-dependency pins that 1.82 requires.**
 
-  A bare `cargo build` will pull transitive deps that need `edition2024` (unsupported by Cargo 1.82) and fail. The following pins were verified to compile on the 1.82.0 toolchain during planning. Run from inside `lingxi-core/`:
+  A bare `cargo build` will pull transitive deps that need `edition2024` (unsupported by Cargo 1.82) and fail. The following pins were verified to compile on the 1.82.0 toolchain during planning. Run from inside `lingxi-code/`:
 
   ```bash
   cargo update -p indexmap --precise 2.7.1   # 2.14.0 needs edition2024 (already 2.7.1 in lockfile — no-op confirms)
@@ -76,7 +76,7 @@
 
   Note: `bincode 1.3.3` and `fancy-regex 0.16.2` (syntect's pinned transitive) are already 1.82-compatible and need no pin. If `cargo build` surfaces a *different* edition2024 offender after these three, pin it down the same way (find the oldest version whose `rust-version` is ≤ 1.82 via `cargo info <crate>` and the crates.io version list).
 
-- [ ] **Step 3: Run the MSRV gate build from inside `lingxi-core/`.**
+- [ ] **Step 3: Run the MSRV gate build from inside `lingxi-code/`.**
 
   Run: `cargo build -p lingxi-tui`
   Expected: `Finished dev profile` with `syntect v5.3.0`, `similar v2.7.0`, `fancy-regex v0.16.2`, `plist v1.7.0`, `time v0.3.36` all compiling. No `edition2024` error, no `onig`/`onig_sys` in the build (confirm with `cargo tree -p lingxi-tui -i onig` printing "package ID specification `onig` did not match any packages").
@@ -156,7 +156,7 @@
 
 - [ ] **Step 4: Build to confirm the stubs compile.**
 
-  Run (from inside `lingxi-core/`): `cargo build -p lingxi-tui`
+  Run (from inside `lingxi-code/`): `cargo build -p lingxi-tui`
   Expected: `Finished` with no errors (two dead-code-allowed stubs).
 
 - [ ] **Step 5: Commit.**
@@ -1376,12 +1376,12 @@
 
 - [ ] **Step 1: Confirm telemetry baseline is unchanged (M7-02 adds 0 events).**
 
-  Run (from inside `lingxi-core/`): `cargo test --workspace event_names`
+  Run (from inside `lingxi-code/`): `cargo test --workspace event_names`
   Expected: the `ALL_EVENT_NAMES.len()` assertion still reads **326** (design §2.7: M7-02 adds zero telemetry events). If any test now reports a different count, M7-02 accidentally registered an event — revert that; M7-02 is render-only.
 
-- [ ] **Step 2: Run the full workspace gate from inside `lingxi-core/`.**
+- [ ] **Step 2: Run the full workspace gate from inside `lingxi-code/`.**
 
-  > Run from inside `lingxi-core/` — the toolchain pins 1.82.0 there; running from the repo root uses the host toolchain and produces spurious lint noise (this bit M6-08).
+  > Run from inside `lingxi-code/` — the toolchain pins 1.82.0 there; running from the repo root uses the host toolchain and produces spurious lint noise (this bit M6-08).
 
   ```bash
   cargo fmt --check
@@ -1433,9 +1433,9 @@
 - Parity caveat (structure, not per-token color) made explicit in every snapshot test → Tasks 5, 11, 12 (and the header). ✓
 - Tests required: syntax {rust, python, js, json, unknown, empty} → Task 5 ✓; diff {add, remove, modify, word, empty, truncation} → Task 11 ✓.
 - Telemetry baseline 326, +0 → Task 14 Step 1. ✓
-- Final task = workspace gate (from inside `lingxi-core/`) + tag `m7.2` → Task 14. ✓
+- Final task = workspace gate (from inside `lingxi-code/`) + tag `m7.2` → Task 14. ✓
 - Commit format `plan(M7-02 TN): <subject>` + Co-Authored-By trailer → every task. ✓
-- iocraft 0.8.3 `View` not `Box`; run cargo from inside `lingxi-core/` → noted in header + Task 14. ✓
+- iocraft 0.8.3 `View` not `Box`; run cargo from inside `lingxi-code/` → noted in header + Task 14. ✓
 
 **Type consistency:** `StyledLine`/`StyledSpan` (M7-01-defined, confirm-before-use flagged in header + Task 2); `render::syntax::{detect_language, highlight, tm_theme_for}`; `render::diff::{render, diff_rows, DiffRow, LineKind, add_bg, remove_bg, add_word_bg, remove_word_bg, MAX_DIFF_LINES}`; `user_tool_result::{is_diff_tool, render_edit_write_diff_lines}` — all names used consistently across the tasks that reference them.
 

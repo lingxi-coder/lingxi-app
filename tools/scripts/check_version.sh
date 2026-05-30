@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tools/scripts/check_version.sh
-# Asserts every Cargo.toml in the lingxi-core workspace carries
+# Asserts every Cargo.toml in the lingxi-code workspace carries
 # `version = "0.5.0"`. M4-09 Task 6 gate.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -15,7 +15,7 @@ while IFS= read -r f; do
     if ! grep -q "^version = \"${VERSION}\"\$" "$f"; then
         mismatches+=("$f")
     fi
-done < <(find lingxi-core -name "Cargo.toml" -not -path "*/target/*")
+done < <(find lingxi-code -name "Cargo.toml" -not -path "*/target/*")
 
 if (( ${#mismatches[@]} )); then
     echo "VERSION MISMATCH — these files do not carry version = \"${VERSION}\":"

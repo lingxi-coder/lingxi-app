@@ -6,7 +6,7 @@
 
 **Architecture:** Screens are **modal overlays / route states** (parent spec §2.3). A new `AppState.active_screen` field holds `None` (REPL is live) or `Some(Screen::Doctor)` (the Doctor screen owns the surface). Live keys route through the **single** `handle_live_key` dispatcher in `root.rs` in strict priority order (parent spec §2.5): permission (1) → screen (2) → input/scroll (existing). When a screen is active, `Esc`/`q` clears `active_screen` and **no key leaks to `PromptInput`**. `render_screen` (in `app.rs`) renders the active screen INSTEAD OF the REPL when `active_screen.is_some()` — same "render-instead-of, no z-index" discipline M6-05 used for permission dialogs. The Doctor screen is a pure iocraft component fed a plain `DoctorDiagnostics` value-struct; it does **no async and no engine calls itself** — the struct is built once when the screen opens, from data already on `AppState`/`StatusSnapshot` plus the MCP-server list the TUI already surfaces. M7 is TUI-only: zero engine changes.
 
-**Tech Stack:** Rust 1.82 (pinned via `lingxi-core/rust-toolchain.toml` — run all cargo from **inside `lingxi-core/`**), iocraft 0.8.3 (`View` not `Box`; crossterm-0.29 re-exports inside iocraft, workspace pinned to crossterm-0.28 — `root.rs` already bridges the skew). Tests: `cargo test` unit + behavior, `insta` snapshots. No new dependencies. **0 new telemetry events** (screen-open/close events are a candidate but DEFERRED to the M7-16 audit — see "Telemetry" below).
+**Tech Stack:** Rust 1.82 (pinned via `lingxi-code/rust-toolchain.toml` — run all cargo from **inside `lingxi-code/`**), iocraft 0.8.3 (`View` not `Box`; crossterm-0.29 re-exports inside iocraft, workspace pinned to crossterm-0.28 — `root.rs` already bridges the skew). Tests: `cargo test` unit + behavior, `insta` snapshots. No new dependencies. **0 new telemetry events** (screen-open/close events are a candidate but DEFERRED to the M7-16 audit — see "Telemetry" below).
 
 **Prerequisite:** none beyond M6 (v0.7.0). This plan does NOT depend on M7-01..M7-10. It only touches `state.rs`, `app.rs`, `root.rs`, and adds `screens/doctor.rs` + `screens/mod.rs`. If those earlier sub-plans have already landed, this plan still applies cleanly (its edits are additive and localized to the screen seam).
 
@@ -80,7 +80,7 @@ To keep the screen pure and testable, the engineer threads a `DoctorDiagnostics`
 - Components are `#[component] pub fn Name(props: &NameProps) -> impl Into<AnyElement<'static>>`.
 - Props are a `#[derive(Default, Props)]` struct (see `screens/repl.rs::ReplScreenProps`). Props with no natural `Default` need a manual `impl Default`.
 - Layout: `View(flex_direction: FlexDirection::Column)`, `Text(content: ...)`. Bold via `Text(content: ..., weight: Weight::Bold)`; dim via a dim color. Match the existing `status_line.rs` / `repl.rs` usage exactly.
-- Snapshot tests live in `crates/tui/tests/render_*.rs`, call `element.to_string()`, and `insta::assert_snapshot!`. New snapshots are accepted with `cargo insta accept` from inside `lingxi-core/`.
+- Snapshot tests live in `crates/tui/tests/render_*.rs`, call `element.to_string()`, and `insta::assert_snapshot!`. New snapshots are accepted with `cargo insta accept` from inside `lingxi-code/`.
 
 ---
 
@@ -88,13 +88,13 @@ To keep the screen pure and testable, the engineer threads a `DoctorDiagnostics`
 
 | Path | New/Modify | Responsibility |
 |---|---|---|
-| `lingxi-core/crates/tui/src/screens/doctor.rs` | **Create** | The Doctor screen: `DoctorDiagnostics` value-struct (the pure data the screen renders) + `DoctorScreen` iocraft component. Pure render — no async, no engine calls. Row/label literals live here. ~220 lines incl. tests. |
-| `lingxi-core/crates/tui/src/screens/mod.rs` | **Modify** | `pub mod doctor;` and define the reusable `Screen` enum (`Doctor` variant now; `// Resume/Settings/Memory added by M7-12/13/14` placeholder comment). This is the NEW shared screen-routing type. |
-| `lingxi-core/crates/tui/src/state.rs` | **Modify** | Add `active_screen: Option<crate::screens::Screen>` and `doctor_diagnostics: Option<crate::screens::doctor::DoctorDiagnostics>` to `AppState`; init both to `None` in `AppState::new`. Add `open_doctor(&mut self, diag)` / `close_screen(&mut self)` helpers. |
-| `lingxi-core/crates/tui/src/root.rs` | **Modify** | Insert the priority-2 screen branch in `handle_live_key` (after the focus-trap `return`, before `map_iocraft_key`). Add a small `fn handle_screen_key(st, k) -> bool` that consumes the key for the active screen (Esc/`q` close → `true`; everything else → swallow → `true` so nothing leaks). |
-| `lingxi-core/crates/tui/src/app.rs` | **Modify** | (a) In `render_screen`, after the permission overlay branch, add: `if active_screen.is_some() → render the active screen instead of ReplScreen`. (b) In `dispatch` (or a focused helper called from the Submit path), intercept a submitted `/doctor` line and set `active_screen = Doctor` + build `DoctorDiagnostics`. |
-| `lingxi-core/crates/tui/tests/render_doctor_screen.rs` | **Create** | Snapshot: `DoctorScreen` at a fixed `DoctorDiagnostics`. |
-| `lingxi-core/crates/tui/tests/behavior_doctor_screen.rs` | **Create** | Behavior: open/close routing; the §4 R4 permission-priority seam; the no-leak-to-PromptInput guard. Drives `handle_live_key` (live path) + the submit intercept. |
+| `lingxi-code/crates/tui/src/screens/doctor.rs` | **Create** | The Doctor screen: `DoctorDiagnostics` value-struct (the pure data the screen renders) + `DoctorScreen` iocraft component. Pure render — no async, no engine calls. Row/label literals live here. ~220 lines incl. tests. |
+| `lingxi-code/crates/tui/src/screens/mod.rs` | **Modify** | `pub mod doctor;` and define the reusable `Screen` enum (`Doctor` variant now; `// Resume/Settings/Memory added by M7-12/13/14` placeholder comment). This is the NEW shared screen-routing type. |
+| `lingxi-code/crates/tui/src/state.rs` | **Modify** | Add `active_screen: Option<crate::screens::Screen>` and `doctor_diagnostics: Option<crate::screens::doctor::DoctorDiagnostics>` to `AppState`; init both to `None` in `AppState::new`. Add `open_doctor(&mut self, diag)` / `close_screen(&mut self)` helpers. |
+| `lingxi-code/crates/tui/src/root.rs` | **Modify** | Insert the priority-2 screen branch in `handle_live_key` (after the focus-trap `return`, before `map_iocraft_key`). Add a small `fn handle_screen_key(st, k) -> bool` that consumes the key for the active screen (Esc/`q` close → `true`; everything else → swallow → `true` so nothing leaks). |
+| `lingxi-code/crates/tui/src/app.rs` | **Modify** | (a) In `render_screen`, after the permission overlay branch, add: `if active_screen.is_some() → render the active screen instead of ReplScreen`. (b) In `dispatch` (or a focused helper called from the Submit path), intercept a submitted `/doctor` line and set `active_screen = Doctor` + build `DoctorDiagnostics`. |
+| `lingxi-code/crates/tui/tests/render_doctor_screen.rs` | **Create** | Snapshot: `DoctorScreen` at a fixed `DoctorDiagnostics`. |
+| `lingxi-code/crates/tui/tests/behavior_doctor_screen.rs` | **Create** | Behavior: open/close routing; the §4 R4 permission-priority seam; the no-leak-to-PromptInput guard. Drives `handle_live_key` (live path) + the submit intercept. |
 
 **Decomposition rationale:** The reusable infra (`Screen` enum + `active_screen` field + priority-2 routing + overlay render) is established in Tasks 1–3 in `state.rs`/`mod.rs`/`root.rs`/`app.rs` so M7-12/13/14 only add a `Screen` variant + a `render` arm + a key-routing arm — no re-plumbing. The Doctor-specific surface (`DoctorDiagnostics` + `DoctorScreen` + its open intercept) is Tasks 2/4/5. Tests (6) cover the seams the parent spec §4 R4 / §5.6 call out. Pure render logic is isolated in `doctor.rs` so it snapshot-tests without a terminal.
 
@@ -151,9 +151,9 @@ pub struct DoctorDiagnostics {
 ## Task 1: `Screen` enum + `active_screen` route-state (reusable infra)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/screens/mod.rs`
-- Modify: `lingxi-core/crates/tui/src/state.rs`
-- Test: `lingxi-core/crates/tui/src/state.rs` (inline `#[cfg(test)]`)
+- Modify: `lingxi-code/crates/tui/src/screens/mod.rs`
+- Modify: `lingxi-code/crates/tui/src/state.rs`
+- Test: `lingxi-code/crates/tui/src/state.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing test** (append to `state.rs` `mod tests`)
 
@@ -173,7 +173,7 @@ fn active_screen_defaults_none_and_open_close_toggles() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run (from inside `lingxi-core/`): `cargo test -p lingxi-tui --lib active_screen_defaults_none -- --nocapture`
+Run (from inside `lingxi-code/`): `cargo test -p lingxi-tui --lib active_screen_defaults_none -- --nocapture`
 Expected: FAIL — `Screen` unresolved / `active_screen` field missing / `close_screen` not found.
 
 - [ ] **Step 3: Define the `Screen` enum** in `screens/mod.rs`
@@ -247,8 +247,8 @@ Because `state.rs` now references `crate::screens::doctor::DoctorDiagnostics`, t
 ## Task 2: `DoctorDiagnostics` value-struct + `capture`
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/screens/doctor.rs`
-- Test: `lingxi-core/crates/tui/src/screens/doctor.rs` (inline `#[cfg(test)]`)
+- Create: `lingxi-code/crates/tui/src/screens/doctor.rs`
+- Test: `lingxi-code/crates/tui/src/screens/doctor.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing test** (in a new `doctor.rs`, at the bottom)
 
@@ -397,7 +397,7 @@ Expected: PASS (all three).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/screens/mod.rs lingxi-core/crates/tui/src/screens/doctor.rs lingxi-core/crates/tui/src/state.rs lingxi-core/crates/tui/Cargo.toml
+git add lingxi-code/crates/tui/src/screens/mod.rs lingxi-code/crates/tui/src/screens/doctor.rs lingxi-code/crates/tui/src/state.rs lingxi-code/crates/tui/Cargo.toml
 git commit -m "$(cat <<'EOF'
 plan(M7-11 T1): active_screen route-state + DoctorDiagnostics value-struct
 
@@ -411,8 +411,8 @@ EOF
 ## Task 3: priority-2 screen routing in `handle_live_key`
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/root.rs`
-- Test: `lingxi-core/crates/tui/tests/behavior_doctor_screen.rs` (created here; expanded in Task 6)
+- Modify: `lingxi-code/crates/tui/src/root.rs`
+- Test: `lingxi-code/crates/tui/tests/behavior_doctor_screen.rs` (created here; expanded in Task 6)
 
 - [ ] **Step 1: Write the failing test** (new file `tests/behavior_doctor_screen.rs`)
 
@@ -513,7 +513,7 @@ Expected: PASS (all three).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/root.rs lingxi-core/crates/tui/tests/behavior_doctor_screen.rs
+git add lingxi-code/crates/tui/src/root.rs lingxi-code/crates/tui/tests/behavior_doctor_screen.rs
 git commit -m "$(cat <<'EOF'
 plan(M7-11 T2): priority-2 screen routing in handle_live_key (Esc/q close, no leak)
 
@@ -527,8 +527,8 @@ EOF
 ## Task 4: `DoctorScreen` component + snapshot
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/screens/doctor.rs`
-- Test: `lingxi-core/crates/tui/tests/render_doctor_screen.rs` (create)
+- Modify: `lingxi-code/crates/tui/src/screens/doctor.rs`
+- Test: `lingxi-code/crates/tui/tests/render_doctor_screen.rs` (create)
 
 - [ ] **Step 1: Write the failing snapshot test** (new file `tests/render_doctor_screen.rs`)
 
@@ -632,13 +632,13 @@ pub fn DoctorScreen(props: &DoctorScreenProps) -> impl Into<AnyElement<'static>>
 - [ ] **Step 4: Run + accept the snapshot**
 
 Run: `cargo test -p lingxi-tui --test render_doctor_screen`
-Then: `cargo insta review` (or `cargo insta accept`) from inside `lingxi-core/`.
+Then: `cargo insta review` (or `cargo insta accept`) from inside `lingxi-code/`.
 Re-run the test. Expected: PASS. Confirm the snapshot contains `Diagnostics`, `Updates`-style `Terminal` header, `└ Version: lingxi-cli v0.8.0`, and `└ MCP servers: 2 configured, 0 connected`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/screens/doctor.rs lingxi-core/crates/tui/tests/render_doctor_screen.rs lingxi-core/crates/tui/tests/snapshots/
+git add lingxi-code/crates/tui/src/screens/doctor.rs lingxi-code/crates/tui/tests/render_doctor_screen.rs lingxi-code/crates/tui/tests/snapshots/
 git commit -m "$(cat <<'EOF'
 plan(M7-11 T3): DoctorScreen component + fixed-state snapshot
 
@@ -652,8 +652,8 @@ EOF
 ## Task 5: render the active screen + `/doctor` open intercept
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/app.rs`
-- Test: `lingxi-core/crates/tui/src/app.rs` (inline `#[cfg(test)]`)
+- Modify: `lingxi-code/crates/tui/src/app.rs`
+- Test: `lingxi-code/crates/tui/src/app.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing tests** (append to `app.rs` `dispatch_tests`)
 
@@ -749,7 +749,7 @@ Expected: PASS (both).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/app.rs lingxi-core/crates/tui/src/state.rs
+git add lingxi-code/crates/tui/src/app.rs lingxi-code/crates/tui/src/state.rs
 git commit -m "$(cat <<'EOF'
 plan(M7-11 T4): render active screen overlay + /doctor open intercept
 
@@ -763,7 +763,7 @@ EOF
 ## Task 6: the §4 R4 permission-priority seam test
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/tests/behavior_doctor_screen.rs`
+- Modify: `lingxi-code/crates/tui/tests/behavior_doctor_screen.rs`
 
 This is the parent spec's §4 R4 / §5.6 cross-state seam, and the single most important test in this plan: **a screen open while a permission is pending must yield to the permission (priority 1 > 2), and the permission key must resolve the dialog — not the screen.**
 
@@ -837,7 +837,7 @@ Expected: **PASS** — Task 3 already placed the screen branch *after* the permi
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/tests/behavior_doctor_screen.rs
+git add lingxi-code/crates/tui/tests/behavior_doctor_screen.rs
 git commit -m "$(cat <<'EOF'
 plan(M7-11 T5): R4 seam test — permission (priority 1) wins over open screen
 
@@ -851,8 +851,8 @@ EOF
 ## Task 7: docs + telemetry note (0 new events)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/screens/mod.rs` (module doc — already done in Task 1; verify)
-- Modify: `lingxi-core/crates/tui/src/telemetry.rs` (add a deferral note comment only)
+- Modify: `lingxi-code/crates/tui/src/screens/mod.rs` (module doc — already done in Task 1; verify)
+- Modify: `lingxi-code/crates/tui/src/telemetry.rs` (add a deferral note comment only)
 
 - [ ] **Step 1: Add the telemetry deferral note** to `telemetry.rs`
 
@@ -867,7 +867,7 @@ Append to the inventory doc comment at the top of `telemetry.rs`:
 
 - [ ] **Step 2: Verify no new event name was registered**
 
-Run (from inside `lingxi-core/`):
+Run (from inside `lingxi-code/`):
 ```bash
 cargo test -p lingxi-telemetry 2>&1 | tail -5
 ```
@@ -876,7 +876,7 @@ Expected: PASS — `ALL_EVENT_NAMES.len()` unchanged at 326 (no `tengu_tui_scree
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/telemetry.rs lingxi-core/crates/tui/src/screens/mod.rs
+git add lingxi-code/crates/tui/src/telemetry.rs lingxi-code/crates/tui/src/screens/mod.rs
 git commit -m "$(cat <<'EOF'
 plan(M7-11 T6): telemetry note — screen events deferred to M7-16 (0 new events)
 
@@ -891,9 +891,9 @@ EOF
 
 **Files:** none (verification + tag only).
 
-- [ ] **Step 1: Run the full workspace gate FROM INSIDE `lingxi-core/`**
+- [ ] **Step 1: Run the full workspace gate FROM INSIDE `lingxi-code/`**
 
-The toolchain pins rust 1.82.0; running from the repo root uses the host toolchain → spurious lint noise (this bit M6-08). Run **every** command below with the working directory inside `lingxi-core/`:
+The toolchain pins rust 1.82.0; running from the repo root uses the host toolchain → spurious lint noise (this bit M6-08). Run **every** command below with the working directory inside `lingxi-code/`:
 
 ```bash
 cargo fmt --check
@@ -955,7 +955,7 @@ Confirm, by re-reading the diff:
 - `/doctor` opens it; REPL yields to Doctor → Task 5. ✓
 - Reads diagnostics from data the handle already exposes; "not connected"/"unknown" otherwise → Task 2 (`capture`, `auth_state="unknown"`, connected=0). ✓
 - 0 new telemetry events, note the deferral → Task 7. ✓
-- Workspace gate from inside `lingxi-core/` + tag `m7.11` → Task 8. ✓
+- Workspace gate from inside `lingxi-code/` + tag `m7.11` → Task 8. ✓
 - Tests: snapshot, open/close, R4 seam, no-leak → Tasks 4/5/3/6/8. ✓
 
 **2. Placeholder scan:** no TBD/TODO/"handle edge cases"; every code step shows the actual code; the snapshot literals are concrete.

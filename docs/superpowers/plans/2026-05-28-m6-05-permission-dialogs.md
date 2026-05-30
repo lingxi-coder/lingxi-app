@@ -32,14 +32,14 @@
   - Body literal: `"In Bypass Permissions mode, Claude Code will not ask for your approval before running potentially dangerous commands.\nThis mode should only be used in a sandboxed container/VM that has restricted internet access and can easily be restored if damaged."` + `"By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode."` (lines 53-57).
   - Telemetry literals (in claude-code): `"tengu_bypass_permissions_mode_dialog_shown"` (line 85), `"tengu_bypass_permissions_mode_dialog_accept"` (line 31). LingXi tracks these as `tengu_tui_permission_dialog_shown` / `tengu_tui_permission_dialog_resolved` with `kind = "bypass_permissions"` discriminant.
 - Existing surfaces consumed by this plan:
-  - `lingxi-core/crates/traits/src/prompting_gate.rs` — already exports `PermissionRequest { tool_name, tool_input, default_decision }` (M5-05). Task 2 step 1 of this plan **REPLACES the existing struct with an enum** (preserves stdio path via a `ToolUseConfirm { tool_name, tool_input, default_decision }` variant — bit-identical to the M5-05 struct's three fields).
-  - `lingxi-core/crates/orchestrator/src/conversation.rs` — orchestrator currently consults `Arc<dyn PermissionGate>` synchronously (M5-05). Task 7 adds an out-of-band `permission_event_tx: Option<mpsc::Sender<PermissionExchange>>` field; when set, the orchestrator uses a `TuiPermissionGate` that sends the request to the TUI and awaits the response via oneshot.
-  - `lingxi-core/crates/tui/src/events/mod.rs` — `TuiEvent` enum (M6-01). Task 7 step 2 adds an `OrchestratorPermissionRequest { request: PermissionRequest, resp_tx: oneshot::Sender<PermissionResponse> }` variant.
-  - `lingxi-core/crates/tui/src/app.rs` — `AppState` (M6-02). Task 7 step 4 adds `pending_permission: Option<PermissionRequest>` + `pending_permission_resp_tx: Option<oneshot::Sender<PermissionResponse>>`.
-  - `lingxi-core/crates/tui/src/screens/repl.rs` — Task 8 step 1 overlays the dialog above `PromptInput` when `pending_permission.is_some()`.
-  - `lingxi-core/crates/tui/src/events/keymap.rs` — Task 8 step 3 adds a focus-trap branch: when `pending_permission.is_some()`, ALL keys route to the dialog handler; PromptInput state is never touched.
-  - `lingxi-core/crates/telemetry/src/tengu/` — Task 13 appends 2 new constants. The post-M6-04 baseline count is locked in M6-04 (TBD by M6-04 — for the purposes of this plan, refer to it as `<M6_04_TOTAL>`; Task 13 step 5 computes `<M6_04_TOTAL> + 2` and updates the `event_name_completeness_test.rs`).
-  - `lingxi-core/crates/test-harness/src/parity/fixtures/` — Task 12 creates `tui_permission_dialogs.json` (new parity fixture).
+  - `lingxi-code/crates/traits/src/prompting_gate.rs` — already exports `PermissionRequest { tool_name, tool_input, default_decision }` (M5-05). Task 2 step 1 of this plan **REPLACES the existing struct with an enum** (preserves stdio path via a `ToolUseConfirm { tool_name, tool_input, default_decision }` variant — bit-identical to the M5-05 struct's three fields).
+  - `lingxi-code/crates/orchestrator/src/conversation.rs` — orchestrator currently consults `Arc<dyn PermissionGate>` synchronously (M5-05). Task 7 adds an out-of-band `permission_event_tx: Option<mpsc::Sender<PermissionExchange>>` field; when set, the orchestrator uses a `TuiPermissionGate` that sends the request to the TUI and awaits the response via oneshot.
+  - `lingxi-code/crates/tui/src/events/mod.rs` — `TuiEvent` enum (M6-01). Task 7 step 2 adds an `OrchestratorPermissionRequest { request: PermissionRequest, resp_tx: oneshot::Sender<PermissionResponse> }` variant.
+  - `lingxi-code/crates/tui/src/app.rs` — `AppState` (M6-02). Task 7 step 4 adds `pending_permission: Option<PermissionRequest>` + `pending_permission_resp_tx: Option<oneshot::Sender<PermissionResponse>>`.
+  - `lingxi-code/crates/tui/src/screens/repl.rs` — Task 8 step 1 overlays the dialog above `PromptInput` when `pending_permission.is_some()`.
+  - `lingxi-code/crates/tui/src/events/keymap.rs` — Task 8 step 3 adds a focus-trap branch: when `pending_permission.is_some()`, ALL keys route to the dialog handler; PromptInput state is never touched.
+  - `lingxi-code/crates/telemetry/src/tengu/` — Task 13 appends 2 new constants. The post-M6-04 baseline count is locked in M6-04 (TBD by M6-04 — for the purposes of this plan, refer to it as `<M6_04_TOTAL>`; Task 13 step 5 computes `<M6_04_TOTAL> + 2` and updates the `event_name_completeness_test.rs`).
+  - `lingxi-code/crates/test-harness/src/parity/fixtures/` — Task 12 creates `tui_permission_dialogs.json` (new parity fixture).
 
 - Repo conventions:
   - Tests live in `#[cfg(test)] mod tests { ... }` blocks adjacent to production code; integration tests live under `crates/<crate>/tests/<name>_test.rs`.
@@ -143,7 +143,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - **Telemetry events** (LingXi-locked):
   - `tengu_tui_permission_dialog_shown` — emitted when `pending_permission` transitions from `None` to `Some(_)`. Payload: `{ kind: PiiTagged("tool_use" | "exit_plan_mode" | "bypass_permissions"), tool_name: Option<PiiTagged> }`.
   - `tengu_tui_permission_dialog_resolved` — emitted when the user resolves the dialog. Payload: `{ kind: PiiTagged(<same>), decision: Verified("allow_once" | "allow_always" | "deny"), persist: Verified("true" | "false"), elapsed_ms: Verified(u64) }`.
-  - Both events appended to `lingxi-core/crates/telemetry/src/tengu/tui.rs` (created in M6-01; Task 13 extends the `NAMES` slice).
+  - Both events appended to `lingxi-code/crates/telemetry/src/tengu/tui.rs` (created in M6-01; Task 13 extends the `NAMES` slice).
 
 ---
 
@@ -151,33 +151,33 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 **Creates (new files):**
 
-- `lingxi-core/crates/tui/src/components/permissions/mod.rs` — module barrel + `PermissionDialogProps` shared types + `DialogResolution` enum.
-- `lingxi-core/crates/tui/src/components/permissions/tool_use_confirm.rs` — `ToolUseConfirm` iocraft component + `handle_key` helper.
-- `lingxi-core/crates/tui/src/components/permissions/exit_plan_mode.rs` — `ExitPlanMode` iocraft component + `handle_key` helper.
-- `lingxi-core/crates/tui/src/components/permissions/bypass_permissions.rs` — `BypassPermissionsMode` iocraft component + `handle_key` helper (with `yes`-typing state machine).
-- `lingxi-core/crates/tui/src/components/permissions/tests/snapshot_tool_use_confirm.rs` — insta snapshot test.
-- `lingxi-core/crates/tui/src/components/permissions/tests/snapshot_exit_plan_mode.rs` — insta snapshot test.
-- `lingxi-core/crates/tui/src/components/permissions/tests/snapshot_bypass_permissions.rs` — insta snapshot test.
-- `lingxi-core/crates/tui/tests/behavior_permission_dialogs.rs` — 6 behavior tests (5 covered in §"Tests required", plus 1 focus-trap test).
-- `lingxi-core/crates/test-harness/src/parity/fixtures/tui_permission_dialogs.json` — locks labels + key bindings + decision discriminants.
-- `lingxi-core/crates/test-harness/tests/parity_tui_permission_dialogs.rs` — driver that loads the fixture and replays each scenario against the dialog components.
+- `lingxi-code/crates/tui/src/components/permissions/mod.rs` — module barrel + `PermissionDialogProps` shared types + `DialogResolution` enum.
+- `lingxi-code/crates/tui/src/components/permissions/tool_use_confirm.rs` — `ToolUseConfirm` iocraft component + `handle_key` helper.
+- `lingxi-code/crates/tui/src/components/permissions/exit_plan_mode.rs` — `ExitPlanMode` iocraft component + `handle_key` helper.
+- `lingxi-code/crates/tui/src/components/permissions/bypass_permissions.rs` — `BypassPermissionsMode` iocraft component + `handle_key` helper (with `yes`-typing state machine).
+- `lingxi-code/crates/tui/src/components/permissions/tests/snapshot_tool_use_confirm.rs` — insta snapshot test.
+- `lingxi-code/crates/tui/src/components/permissions/tests/snapshot_exit_plan_mode.rs` — insta snapshot test.
+- `lingxi-code/crates/tui/src/components/permissions/tests/snapshot_bypass_permissions.rs` — insta snapshot test.
+- `lingxi-code/crates/tui/tests/behavior_permission_dialogs.rs` — 6 behavior tests (5 covered in §"Tests required", plus 1 focus-trap test).
+- `lingxi-code/crates/test-harness/src/parity/fixtures/tui_permission_dialogs.json` — locks labels + key bindings + decision discriminants.
+- `lingxi-code/crates/test-harness/tests/parity_tui_permission_dialogs.rs` — driver that loads the fixture and replays each scenario against the dialog components.
 
 **Modifies:**
 
-- `lingxi-core/crates/traits/src/prompting_gate.rs` — REPLACE struct `PermissionRequest` with enum (3 variants) + ADD `PermissionResponse` enum.
-- `lingxi-core/crates/permission/src/gate.rs` — re-export `PermissionResponse` (1-line addition to the `pub use lingxi_traits::prompting_gate::{..}` list).
-- `lingxi-core/crates/permission/src/prompting_gate.rs` — update `InteractivePromptingGate::prompt_user` to construct `PermissionRequest::ToolUseConfirm { .. }` (M5-05 stdio path). Pattern-match on the enum to keep behavior identical; the other two variants return `PromptError::Cancelled { reason: "unsupported in stdio".into() }` because the M5-05 stdio gate doesn't know how to render multiline plans or warnings — the TUI gate is the only consumer for those.
-- `lingxi-core/crates/orchestrator/src/conversation.rs` — ADD `permission_event_tx: Option<mpsc::Sender<PermissionExchange>>` field + `session_allow_rules: Arc<Mutex<Vec<PermissionRule>>>` field; update `ConversationOrchestrator::new` + `new_with_perms` to accept them.
-- `lingxi-core/crates/orchestrator/src/handle_impl.rs` — ADD `TuiPermissionGate { event_tx, session_allow_rules }` struct + `impl PermissionGate for TuiPermissionGate` that consults session rules first, then sends the request to the TUI and awaits the oneshot.
-- `lingxi-core/crates/tui/src/events/mod.rs` — ADD `OrchestratorPermissionRequest { request: PermissionRequest, resp_tx: oneshot::Sender<PermissionResponse> }` variant to `TuiEvent`.
-- `lingxi-core/crates/tui/src/events/keymap.rs` — ADD focus-trap branch (lines documented in Task 8).
-- `lingxi-core/crates/tui/src/app.rs` — ADD `pending_permission: Option<PermissionRequest>` + `pending_permission_resp_tx: Option<oneshot::Sender<PermissionResponse>>` fields; ADD `pending_permission_started_at: Option<Instant>` for the telemetry `elapsed_ms`.
-- `lingxi-core/crates/tui/src/screens/repl.rs` — overlay dialog on top of the 3-zone layout when `pending_permission.is_some()`; dim the backdrop.
-- `lingxi-core/crates/tui/src/components/mod.rs` — ADD `pub mod permissions;`.
-- `lingxi-core/crates/tui/src/telemetry.rs` — extend the TUI telemetry module with the 2 new events.
-- `lingxi-core/crates/telemetry/src/tengu/tui.rs` — APPEND `PERMISSION_DIALOG_SHOWN` + `PERMISSION_DIALOG_RESOLVED` constants + 2 payload structs.
-- `lingxi-core/crates/telemetry/src/tengu/mod.rs` — bump the `tui` submodule's count by 2 in `TOTAL` formula.
-- `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs` — bump expected count by 2 (assumes the M6-04 baseline of `<M6_04_TOTAL>`; Task 13 computes `<M6_04_TOTAL> + 2`).
+- `lingxi-code/crates/traits/src/prompting_gate.rs` — REPLACE struct `PermissionRequest` with enum (3 variants) + ADD `PermissionResponse` enum.
+- `lingxi-code/crates/permission/src/gate.rs` — re-export `PermissionResponse` (1-line addition to the `pub use lingxi_traits::prompting_gate::{..}` list).
+- `lingxi-code/crates/permission/src/prompting_gate.rs` — update `InteractivePromptingGate::prompt_user` to construct `PermissionRequest::ToolUseConfirm { .. }` (M5-05 stdio path). Pattern-match on the enum to keep behavior identical; the other two variants return `PromptError::Cancelled { reason: "unsupported in stdio".into() }` because the M5-05 stdio gate doesn't know how to render multiline plans or warnings — the TUI gate is the only consumer for those.
+- `lingxi-code/crates/orchestrator/src/conversation.rs` — ADD `permission_event_tx: Option<mpsc::Sender<PermissionExchange>>` field + `session_allow_rules: Arc<Mutex<Vec<PermissionRule>>>` field; update `ConversationOrchestrator::new` + `new_with_perms` to accept them.
+- `lingxi-code/crates/orchestrator/src/handle_impl.rs` — ADD `TuiPermissionGate { event_tx, session_allow_rules }` struct + `impl PermissionGate for TuiPermissionGate` that consults session rules first, then sends the request to the TUI and awaits the oneshot.
+- `lingxi-code/crates/tui/src/events/mod.rs` — ADD `OrchestratorPermissionRequest { request: PermissionRequest, resp_tx: oneshot::Sender<PermissionResponse> }` variant to `TuiEvent`.
+- `lingxi-code/crates/tui/src/events/keymap.rs` — ADD focus-trap branch (lines documented in Task 8).
+- `lingxi-code/crates/tui/src/app.rs` — ADD `pending_permission: Option<PermissionRequest>` + `pending_permission_resp_tx: Option<oneshot::Sender<PermissionResponse>>` fields; ADD `pending_permission_started_at: Option<Instant>` for the telemetry `elapsed_ms`.
+- `lingxi-code/crates/tui/src/screens/repl.rs` — overlay dialog on top of the 3-zone layout when `pending_permission.is_some()`; dim the backdrop.
+- `lingxi-code/crates/tui/src/components/mod.rs` — ADD `pub mod permissions;`.
+- `lingxi-code/crates/tui/src/telemetry.rs` — extend the TUI telemetry module with the 2 new events.
+- `lingxi-code/crates/telemetry/src/tengu/tui.rs` — APPEND `PERMISSION_DIALOG_SHOWN` + `PERMISSION_DIALOG_RESOLVED` constants + 2 payload structs.
+- `lingxi-code/crates/telemetry/src/tengu/mod.rs` — bump the `tui` submodule's count by 2 in `TOTAL` formula.
+- `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs` — bump expected count by 2 (assumes the M6-04 baseline of `<M6_04_TOTAL>`; Task 13 computes `<M6_04_TOTAL> + 2`).
 
 **Deletes:** none.
 
@@ -190,17 +190,17 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 1: Extend `PermissionRequest` to an enum + add `PermissionResponse`
 
 **Files:**
-- Modify: `lingxi-core/crates/traits/src/prompting_gate.rs`
-- Modify: `lingxi-core/crates/permission/src/gate.rs`
-- Modify: `lingxi-core/crates/permission/src/lib.rs`
+- Modify: `lingxi-code/crates/traits/src/prompting_gate.rs`
+- Modify: `lingxi-code/crates/permission/src/gate.rs`
+- Modify: `lingxi-code/crates/permission/src/lib.rs`
 
 **Steps:**
 
-- [ ] **Step 1: Read current state.** Open `lingxi-core/crates/traits/src/prompting_gate.rs`. Confirm `pub struct PermissionRequest { tool_name, tool_input, default_decision }` exists (M5-05). If it doesn't, STOP — M5-05 prerequisite missing.
+- [ ] **Step 1: Read current state.** Open `lingxi-code/crates/traits/src/prompting_gate.rs`. Confirm `pub struct PermissionRequest { tool_name, tool_input, default_decision }` exists (M5-05). If it doesn't, STOP — M5-05 prerequisite missing.
 
 - [ ] **Step 2: Write failing tests for the new enum + response.**
 
-  Append to `lingxi-core/crates/traits/src/prompting_gate.rs` `#[cfg(test)] mod tests`:
+  Append to `lingxi-code/crates/traits/src/prompting_gate.rs` `#[cfg(test)] mod tests`:
   ```rust
   #[test]
   fn permission_request_enum_tool_use_confirm_variant() {
@@ -250,7 +250,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 4: Replace the struct with the enum + add response.**
 
-  In `lingxi-core/crates/traits/src/prompting_gate.rs`, REPLACE the existing `pub struct PermissionRequest { .. }` (lines 26-35 in the M5-05 file) with:
+  In `lingxi-code/crates/traits/src/prompting_gate.rs`, REPLACE the existing `pub struct PermissionRequest { .. }` (lines 26-35 in the M5-05 file) with:
   ```rust
   /// A single permission prompt — three variants:
   /// - `ToolUseConfirm` is the M5-05 stdio-prompt case (preserved).
@@ -305,7 +305,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 6: Update permission re-export.**
 
-  In `lingxi-core/crates/permission/src/gate.rs`, extend the existing `pub use lingxi_traits::prompting_gate::{..}` block to include `PermissionResponse`. Specifically, the existing line:
+  In `lingxi-code/crates/permission/src/gate.rs`, extend the existing `pub use lingxi_traits::prompting_gate::{..}` block to include `PermissionResponse`. Specifically, the existing line:
   ```rust
   pub use lingxi_traits::prompting_gate::{
       PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
@@ -321,7 +321,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 7: Update permission lib.rs re-export.**
 
-  In `lingxi-core/crates/permission/src/lib.rs`, add `PermissionResponse` to the existing re-export line (find the line that re-exports `PermissionDecision, PermissionGate, PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate` from `gate::*` and add `PermissionResponse` to it).
+  In `lingxi-code/crates/permission/src/lib.rs`, add `PermissionResponse` to the existing re-export line (find the line that re-exports `PermissionDecision, PermissionGate, PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate` from `gate::*` and add `PermissionResponse` to it).
 
 - [ ] **Step 8: Verify M5-05 stdio path still compiles.**
 
@@ -331,7 +331,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 9: Commit.**
 
   ```bash
-  git add lingxi-core/crates/traits/src/prompting_gate.rs lingxi-core/crates/permission/src/gate.rs lingxi-core/crates/permission/src/lib.rs
+  git add lingxi-code/crates/traits/src/prompting_gate.rs lingxi-code/crates/permission/src/gate.rs lingxi-code/crates/permission/src/lib.rs
   git commit -m "feat(m6-05 task 1): PermissionRequest enum + PermissionResponse"
   ```
 
@@ -340,11 +340,11 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 2: Update M5-05 stdio gate to the new enum
 
 **Files:**
-- Modify: `lingxi-core/crates/permission/src/prompting_gate.rs`
+- Modify: `lingxi-code/crates/permission/src/prompting_gate.rs`
 
 **Steps:**
 
-- [ ] **Step 1: Locate the M5-05 stdio gate.** Open `lingxi-core/crates/permission/src/prompting_gate.rs`. Find `impl InteractivePromptingGate` — the `prompt_user` method constructs and matches on `PermissionRequest`.
+- [ ] **Step 1: Locate the M5-05 stdio gate.** Open `lingxi-code/crates/permission/src/prompting_gate.rs`. Find `impl InteractivePromptingGate` — the `prompt_user` method constructs and matches on `PermissionRequest`.
 
 - [ ] **Step 2: Refactor `prompt_user` to pattern-match on the enum.**
 
@@ -430,7 +430,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 5: Write a new test for the ExitPlanMode + Bypass arms.**
 
-  In `lingxi-core/crates/permission/src/prompting_gate.rs`, append to `#[cfg(test)] mod tests`:
+  In `lingxi-code/crates/permission/src/prompting_gate.rs`, append to `#[cfg(test)] mod tests`:
   ```rust
   #[tokio::test]
   async fn stdio_gate_returns_cancelled_for_exit_plan_mode() {
@@ -460,7 +460,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 7: Commit.**
 
   ```bash
-  git add lingxi-core/crates/permission/src/prompting_gate.rs
+  git add lingxi-code/crates/permission/src/prompting_gate.rs
   git commit -m "refactor(m6-05 task 2): stdio gate pattern-matches PermissionRequest enum"
   ```
 
@@ -469,15 +469,15 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 3: `ToolUseConfirm` dialog component + `handle_key` helper
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/permissions/mod.rs`
-- Create: `lingxi-core/crates/tui/src/components/permissions/tool_use_confirm.rs`
-- Modify: `lingxi-core/crates/tui/src/components/mod.rs` (add `pub mod permissions;`)
+- Create: `lingxi-code/crates/tui/src/components/permissions/mod.rs`
+- Create: `lingxi-code/crates/tui/src/components/permissions/tool_use_confirm.rs`
+- Modify: `lingxi-code/crates/tui/src/components/mod.rs` (add `pub mod permissions;`)
 
 **Steps:**
 
 - [ ] **Step 1: Add the module barrel.**
 
-  Create `lingxi-core/crates/tui/src/components/permissions/mod.rs`:
+  Create `lingxi-code/crates/tui/src/components/permissions/mod.rs`:
   ```rust
   //! Permission modal dialogs — 3 variants per M6-05 plan.
   #![forbid(unsafe_code)]
@@ -551,14 +551,14 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 2: Add module reference.**
 
-  In `lingxi-core/crates/tui/src/components/mod.rs`, append:
+  In `lingxi-code/crates/tui/src/components/mod.rs`, append:
   ```rust
   pub mod permissions;
   ```
 
 - [ ] **Step 3: Write the failing test for `handle_key`.**
 
-  Create `lingxi-core/crates/tui/src/components/permissions/tool_use_confirm.rs` with:
+  Create `lingxi-code/crates/tui/src/components/permissions/tool_use_confirm.rs` with:
   ```rust
   //! `ToolUseConfirm` dialog — generic per-tool permission prompt.
   #![forbid(unsafe_code)]
@@ -724,7 +724,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 7: Commit.**
 
   ```bash
-  git add lingxi-core/crates/tui/src/components/permissions/ lingxi-core/crates/tui/src/components/mod.rs
+  git add lingxi-code/crates/tui/src/components/permissions/ lingxi-code/crates/tui/src/components/mod.rs
   git commit -m "feat(m6-05 task 3): ToolUseConfirm dialog component + handle_key"
   ```
 
@@ -733,7 +733,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 4: `ExitPlanMode` dialog component + `handle_key` helper
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/permissions/exit_plan_mode.rs`
+- Create: `lingxi-code/crates/tui/src/components/permissions/exit_plan_mode.rs`
 
 **Steps:**
 
@@ -832,7 +832,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 5: Commit.**
 
   ```bash
-  git add lingxi-core/crates/tui/src/components/permissions/exit_plan_mode.rs
+  git add lingxi-code/crates/tui/src/components/permissions/exit_plan_mode.rs
   git commit -m "feat(m6-05 task 4): ExitPlanMode dialog component + handle_key"
   ```
 
@@ -841,7 +841,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 5: `BypassPermissionsMode` dialog component (yes-typing state machine)
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/permissions/bypass_permissions.rs`
+- Create: `lingxi-code/crates/tui/src/components/permissions/bypass_permissions.rs`
 
 **Steps:**
 
@@ -1031,7 +1031,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 5: Commit.**
 
   ```bash
-  git add lingxi-core/crates/tui/src/components/permissions/bypass_permissions.rs
+  git add lingxi-code/crates/tui/src/components/permissions/bypass_permissions.rs
   git commit -m "feat(m6-05 task 5): BypassPermissionsMode dialog component"
   ```
 
@@ -1040,10 +1040,10 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 6: Snapshot tests for all 3 dialogs (insta)
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/permissions/tests/snapshot_tool_use_confirm.rs`
-- Create: `lingxi-core/crates/tui/src/components/permissions/tests/snapshot_exit_plan_mode.rs`
-- Create: `lingxi-core/crates/tui/src/components/permissions/tests/snapshot_bypass_permissions.rs`
-- Modify: `lingxi-core/crates/tui/src/components/permissions/mod.rs` (add `#[cfg(test)] pub mod tests;` if iocraft test harness exposed via subdir)
+- Create: `lingxi-code/crates/tui/src/components/permissions/tests/snapshot_tool_use_confirm.rs`
+- Create: `lingxi-code/crates/tui/src/components/permissions/tests/snapshot_exit_plan_mode.rs`
+- Create: `lingxi-code/crates/tui/src/components/permissions/tests/snapshot_bypass_permissions.rs`
+- Modify: `lingxi-code/crates/tui/src/components/permissions/mod.rs` (add `#[cfg(test)] pub mod tests;` if iocraft test harness exposed via subdir)
 
 **Steps:**
 
@@ -1060,7 +1060,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 2: Write the `ToolUseConfirm` snapshot.**
 
-  Create `lingxi-core/crates/tui/src/components/permissions/tests/snapshot_tool_use_confirm.rs`:
+  Create `lingxi-code/crates/tui/src/components/permissions/tests/snapshot_tool_use_confirm.rs`:
   ```rust
   use iocraft::testing::render_element_to_string;
   use iocraft::prelude::*;
@@ -1084,7 +1084,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 3: Write the `ExitPlanMode` snapshot.**
 
-  Create `lingxi-core/crates/tui/src/components/permissions/tests/snapshot_exit_plan_mode.rs`:
+  Create `lingxi-code/crates/tui/src/components/permissions/tests/snapshot_exit_plan_mode.rs`:
   ```rust
   use iocraft::testing::render_element_to_string;
   use iocraft::prelude::*;
@@ -1106,7 +1106,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 4: Write the `BypassPermissionsMode` snapshot.**
 
-  Create `lingxi-core/crates/tui/src/components/permissions/tests/snapshot_bypass_permissions.rs`:
+  Create `lingxi-code/crates/tui/src/components/permissions/tests/snapshot_bypass_permissions.rs`:
   ```rust
   use iocraft::testing::render_element_to_string;
   use iocraft::prelude::*;
@@ -1153,7 +1153,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 8: Commit.**
 
   ```bash
-  git add lingxi-core/crates/tui/src/components/permissions/tests/ lingxi-core/crates/tui/tests/snapshots/
+  git add lingxi-code/crates/tui/src/components/permissions/tests/ lingxi-code/crates/tui/tests/snapshots/
   git commit -m "test(m6-05 task 6): snapshot tests for 3 permission dialogs"
   ```
 
@@ -1162,17 +1162,17 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 7: Orchestrator → TUI bridge — `TuiPermissionGate` + `PermissionExchange`
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/events/mod.rs`
-- Modify: `lingxi-core/crates/orchestrator/src/handle_impl.rs` (or `conversation.rs` — depending on where the M5-05 gate was wired)
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs`
-- Modify: `lingxi-core/crates/tui/src/app.rs`
-- Modify: `lingxi-core/crates/tui/src/lib.rs` (if exposing `TuiPermissionGate` to the cli crate)
+- Modify: `lingxi-code/crates/tui/src/events/mod.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/handle_impl.rs` (or `conversation.rs` — depending on where the M5-05 gate was wired)
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs`
+- Modify: `lingxi-code/crates/tui/src/app.rs`
+- Modify: `lingxi-code/crates/tui/src/lib.rs` (if exposing `TuiPermissionGate` to the cli crate)
 
 **Steps:**
 
 - [ ] **Step 1: Define `PermissionExchange` type.**
 
-  In `lingxi-core/crates/orchestrator/src/handle_impl.rs`, add at the top:
+  In `lingxi-code/crates/orchestrator/src/handle_impl.rs`, add at the top:
   ```rust
   use lingxi_permission::gate::{PermissionRequest, PermissionResponse};
   use tokio::sync::{mpsc, oneshot, Mutex};
@@ -1189,7 +1189,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 2: Add `TuiEvent::OrchestratorPermissionRequest` variant.**
 
-  In `lingxi-core/crates/tui/src/events/mod.rs`, find the existing `TuiEvent` enum (M6-01 lands this). Add a new variant:
+  In `lingxi-code/crates/tui/src/events/mod.rs`, find the existing `TuiEvent` enum (M6-01 lands this). Add a new variant:
   ```rust
   use lingxi_orchestrator::handle_impl::PermissionExchange;
 
@@ -1208,7 +1208,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 3: Write a failing test for `TuiPermissionGate::check`.**
 
-  Create or append to `lingxi-core/crates/orchestrator/src/handle_impl.rs::tests`:
+  Create or append to `lingxi-code/crates/orchestrator/src/handle_impl.rs::tests`:
   ```rust
   #[cfg(test)]
   mod tui_permission_gate_tests {
@@ -1280,7 +1280,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 5: Implement `TuiPermissionGate`.**
 
-  Add to `lingxi-core/crates/orchestrator/src/handle_impl.rs`:
+  Add to `lingxi-code/crates/orchestrator/src/handle_impl.rs`:
   ```rust
   use async_trait::async_trait;
   use lingxi_traits::permission_gate::{PermissionDecision, PermissionGate};
@@ -1368,7 +1368,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 6: Add `AppState` fields.**
 
-  In `lingxi-core/crates/tui/src/app.rs`, find the `AppState` struct (M6-02). Add:
+  In `lingxi-code/crates/tui/src/app.rs`, find the `AppState` struct (M6-02). Add:
   ```rust
   pub pending_permission: Option<PermissionRequest>,
   pub pending_permission_resp_tx: Option<oneshot::Sender<PermissionResponse>>,
@@ -1388,7 +1388,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 7: Wire `OrchestratorPermissionRequest` event into AppState.**
 
-  In `lingxi-core/crates/tui/src/app.rs` (or wherever the M6-02 event-loop dispatch lives), add a match arm for `TuiEvent::OrchestratorPermissionRequest(ex)`:
+  In `lingxi-code/crates/tui/src/app.rs` (or wherever the M6-02 event-loop dispatch lives), add a match arm for `TuiEvent::OrchestratorPermissionRequest(ex)`:
   ```rust
   TuiEvent::OrchestratorPermissionRequest(ex) => {
       state.pending_permission = Some(ex.request.clone());
@@ -1418,7 +1418,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 9: Commit.**
 
   ```bash
-  git add lingxi-core/crates/orchestrator/src/handle_impl.rs lingxi-core/crates/orchestrator/Cargo.toml lingxi-core/crates/tui/src/events/mod.rs lingxi-core/crates/tui/src/app.rs lingxi-core/crates/tui/Cargo.toml lingxi-core/crates/permission/src/lib.rs
+  git add lingxi-code/crates/orchestrator/src/handle_impl.rs lingxi-code/crates/orchestrator/Cargo.toml lingxi-code/crates/tui/src/events/mod.rs lingxi-code/crates/tui/src/app.rs lingxi-code/crates/tui/Cargo.toml lingxi-code/crates/permission/src/lib.rs
   git commit -m "feat(m6-05 task 7): TuiPermissionGate + orchestrator-TUI bridge"
   ```
 
@@ -1427,14 +1427,14 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 8: Focus-trap keymap + REPL screen overlay
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/events/keymap.rs`
-- Modify: `lingxi-core/crates/tui/src/screens/repl.rs`
+- Modify: `lingxi-code/crates/tui/src/events/keymap.rs`
+- Modify: `lingxi-code/crates/tui/src/screens/repl.rs`
 
 **Steps:**
 
 - [ ] **Step 1: Write failing focus-trap behavior test.**
 
-  Create `lingxi-core/crates/tui/tests/focus_trap_test.rs`:
+  Create `lingxi-code/crates/tui/tests/focus_trap_test.rs`:
   ```rust
   use lingxi_tui::app::AppState;
   use lingxi_tui::events::keymap::handle_key;
@@ -1476,7 +1476,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 3: Implement focus-trap in `keymap.rs`.**
 
-  Open `lingxi-core/crates/tui/src/events/keymap.rs`. At the TOP of `handle_key`, before any other dispatch, add:
+  Open `lingxi-code/crates/tui/src/events/keymap.rs`. At the TOP of `handle_key`, before any other dispatch, add:
   ```rust
   pub fn handle_key(state: &mut AppState, key: KeyEvent) {
       // === FOCUS TRAP (M6-05) ===
@@ -1541,7 +1541,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 4: Add the REPL screen overlay.**
 
-  In `lingxi-core/crates/tui/src/screens/repl.rs`, find the existing render layout (M6-02 lands the 3-zone layout). Add an overlay branch:
+  In `lingxi-code/crates/tui/src/screens/repl.rs`, find the existing render layout (M6-02 lands the 3-zone layout). Add an overlay branch:
   ```rust
   use crate::components::permissions::{
       bypass_permissions::{BypassPermissionsMode, BypassPermissionsProps},
@@ -1594,7 +1594,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 6: Commit.**
 
   ```bash
-  git add lingxi-core/crates/tui/src/events/keymap.rs lingxi-core/crates/tui/src/screens/repl.rs lingxi-core/crates/tui/tests/focus_trap_test.rs
+  git add lingxi-code/crates/tui/src/events/keymap.rs lingxi-code/crates/tui/src/screens/repl.rs lingxi-code/crates/tui/tests/focus_trap_test.rs
   git commit -m "feat(m6-05 task 8): focus-trap keymap + REPL dialog overlay"
   ```
 
@@ -1603,7 +1603,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 9: Behavior test — `1` resolves to `AllowOnce` end-to-end
 
 **Files:**
-- Create: `lingxi-core/crates/tui/tests/behavior_permission_dialogs.rs`
+- Create: `lingxi-code/crates/tui/tests/behavior_permission_dialogs.rs`
 
 **Steps:**
 
@@ -1653,7 +1653,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 3: Commit.**
 
   ```bash
-  git add lingxi-core/crates/tui/tests/behavior_permission_dialogs.rs
+  git add lingxi-code/crates/tui/tests/behavior_permission_dialogs.rs
   git commit -m "test(m6-05 task 9): behavior test — 1 resolves to AllowOnce"
   ```
 
@@ -1662,7 +1662,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 10: Behavior tests — `2` → AllowAlways, `N`/`n` → Deny, `Esc` → Deny
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/tests/behavior_permission_dialogs.rs`
+- Modify: `lingxi-code/crates/tui/tests/behavior_permission_dialogs.rs`
 
 **Steps:**
 
@@ -1715,7 +1715,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 3: Commit.**
 
   ```bash
-  git add lingxi-core/crates/tui/tests/behavior_permission_dialogs.rs
+  git add lingxi-code/crates/tui/tests/behavior_permission_dialogs.rs
   git commit -m "test(m6-05 task 10): behavior tests — 2/n/N/Esc resolutions"
   ```
 
@@ -1724,7 +1724,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 11: Behavior test — BypassPermissions requires typed `yes`
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/tests/behavior_permission_dialogs.rs`
+- Modify: `lingxi-code/crates/tui/tests/behavior_permission_dialogs.rs`
 
 **Steps:**
 
@@ -1779,7 +1779,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 3: Commit.**
 
   ```bash
-  git add lingxi-core/crates/tui/tests/behavior_permission_dialogs.rs
+  git add lingxi-code/crates/tui/tests/behavior_permission_dialogs.rs
   git commit -m "test(m6-05 task 11): behavior — BypassPermissions requires typed yes"
   ```
 
@@ -1788,14 +1788,14 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 12: Parity fixture — `tui_permission_dialogs.json`
 
 **Files:**
-- Create: `lingxi-core/crates/test-harness/src/parity/fixtures/tui_permission_dialogs.json`
-- Create: `lingxi-core/crates/test-harness/tests/parity_tui_permission_dialogs.rs`
+- Create: `lingxi-code/crates/test-harness/src/parity/fixtures/tui_permission_dialogs.json`
+- Create: `lingxi-code/crates/test-harness/tests/parity_tui_permission_dialogs.rs`
 
 **Steps:**
 
 - [ ] **Step 1: Write the fixture JSON.**
 
-  Create `lingxi-core/crates/test-harness/src/parity/fixtures/tui_permission_dialogs.json`:
+  Create `lingxi-code/crates/test-harness/src/parity/fixtures/tui_permission_dialogs.json`:
   ```json
   {
     "_claude_code_version": "2026-05-28-snapshot",
@@ -1846,7 +1846,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 2: Write the parity driver.**
 
-  Create `lingxi-core/crates/test-harness/tests/parity_tui_permission_dialogs.rs`:
+  Create `lingxi-code/crates/test-harness/tests/parity_tui_permission_dialogs.rs`:
   ```rust
   use lingxi_test_harness::parity::load_fixture;
 
@@ -1944,7 +1944,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 4: Commit.**
 
   ```bash
-  git add lingxi-core/crates/test-harness/src/parity/fixtures/tui_permission_dialogs.json lingxi-core/crates/test-harness/tests/parity_tui_permission_dialogs.rs
+  git add lingxi-code/crates/test-harness/src/parity/fixtures/tui_permission_dialogs.json lingxi-code/crates/test-harness/tests/parity_tui_permission_dialogs.rs
   git commit -m "test(m6-05 task 12): parity fixture — tui_permission_dialogs"
   ```
 
@@ -1953,17 +1953,17 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 ### Task 13: Telemetry registration + verification gate + tag
 
 **Files:**
-- Modify: `lingxi-core/crates/telemetry/src/tengu/tui.rs`
-- Modify: `lingxi-core/crates/telemetry/src/tengu/mod.rs`
-- Modify: `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs`
-- Modify: `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json`
-- Create: `lingxi-core/crates/tui/src/telemetry.rs` (or extend the M6-01 one)
+- Modify: `lingxi-code/crates/telemetry/src/tengu/tui.rs`
+- Modify: `lingxi-code/crates/telemetry/src/tengu/mod.rs`
+- Modify: `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs`
+- Modify: `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json`
+- Create: `lingxi-code/crates/tui/src/telemetry.rs` (or extend the M6-01 one)
 
 **Steps:**
 
 - [ ] **Step 1: Add the two telemetry constants.**
 
-  Open `lingxi-core/crates/telemetry/src/tengu/tui.rs` (created in M6-01 with the 4 baseline TUI events). Append:
+  Open `lingxi-code/crates/telemetry/src/tengu/tui.rs` (created in M6-01 with the 4 baseline TUI events). Append:
   ```rust
   /// Emitted when a permission dialog opens in the TUI.
   pub const PERMISSION_DIALOG_SHOWN: &str = "tengu_tui_permission_dialog_shown";
@@ -1982,11 +1982,11 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 2: Bump the `TOTAL` formula.**
 
-  In `lingxi-core/crates/telemetry/src/tengu/mod.rs`, find the `TOTAL = ... + <tui_count> + ...` formula. Increment the `tui` slot by 2. Example: if M6-04 ended at `tui = 8`, this becomes `tui = 10`.
+  In `lingxi-code/crates/telemetry/src/tengu/mod.rs`, find the `TOTAL = ... + <tui_count> + ...` formula. Increment the `tui` slot by 2. Example: if M6-04 ended at `tui = 8`, this becomes `tui = 10`.
 
 - [ ] **Step 3: Add payload structs + emitter helpers.**
 
-  In `lingxi-core/crates/tui/src/telemetry.rs`, append:
+  In `lingxi-code/crates/tui/src/telemetry.rs`, append:
   ```rust
   use lingxi_permission::gate::PermissionResponse;
   use lingxi_telemetry::tengu::tui::{PERMISSION_DIALOG_RESOLVED, PERMISSION_DIALOG_SHOWN};
@@ -2019,11 +2019,11 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 
 - [ ] **Step 4: Insert into `tengu_events.json` parity fixture.**
 
-  Open `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json`. Find the section where M6-04's last TUI events were appended (registration order). Insert `tengu_tui_permission_dialog_shown` and `tengu_tui_permission_dialog_resolved` IMMEDIATELY after the last M6-04 entry and BEFORE any later category.
+  Open `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json`. Find the section where M6-04's last TUI events were appended (registration order). Insert `tengu_tui_permission_dialog_shown` and `tengu_tui_permission_dialog_resolved` IMMEDIATELY after the last M6-04 entry and BEFORE any later category.
 
 - [ ] **Step 5: Update event-count test.**
 
-  Open `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs`. Locate the registry-size assertion (e.g. `registry_is_exactly_NNN_entries`). Bump by 2 (`NNN → NNN+2`). Update the test name + comment to mention M6-05.
+  Open `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs`. Locate the registry-size assertion (e.g. `registry_is_exactly_NNN_entries`). Bump by 2 (`NNN → NNN+2`). Update the test name + comment to mention M6-05.
 
 - [ ] **Step 6: Run the workspace verification gate.**
 
@@ -2067,7 +2067,7 @@ These labels are **byte-locked at the LingXi project level** (Task 12's parity f
 - [ ] **Step 9: Commit any remaining changes.**
 
   ```bash
-  git add lingxi-core/crates/telemetry/ lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json lingxi-core/crates/tui/src/telemetry.rs
+  git add lingxi-code/crates/telemetry/ lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json lingxi-code/crates/tui/src/telemetry.rs
   git commit -m "chore(m6-05 task 13): register 2 TUI permission-dialog telemetry events + tag m6.5"
   ```
 

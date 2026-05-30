@@ -85,7 +85,7 @@ v0.7.0 release equivalent to all of these passing:
 ### 2.1 Crate layout (post-refactor)
 
 ```
-lingxi-core/
+lingxi-code/
 ├── crates/
 │   ├── cli/                  ← already exists; M6-01 refactors it
 │   │   ├── src/
@@ -309,13 +309,13 @@ Each sub-plan ends with an annotated tag `m6.N` and is reviewed before the next 
 **Goal:** Refactor `lingxi-cli` to split out `lingxi-tui` library crate; set up iocraft + crossterm event loop; render a placeholder "Hello, TUI" frame to prove the pipeline works.
 
 **Files:**
-- Create: `lingxi-core/crates/tui/` (new crate; src/lib.rs, app.rs, theme.rs, layout.rs, events/mod.rs, events/keymap.rs)
-- Create: `lingxi-core/crates/tui/Cargo.toml` (`iocraft = "=0.6"` pinned exact)
-- Modify: `lingxi-core/Cargo.toml` (add `crates/tui` to workspace members + default-members)
-- Modify: `lingxi-core/crates/cli/src/main.rs` (add Mode dispatch)
-- Modify: `lingxi-core/crates/cli/src/argv.rs` (add `--no-tui` flag)
-- Modify: `lingxi-core/crates/cli/src/run.rs` (route to `lingxi_tui::run_tui_session` or existing `repl_loop`)
-- Modify: `lingxi-core/crates/cli/Cargo.toml` (add `lingxi-tui` dep)
+- Create: `lingxi-code/crates/tui/` (new crate; src/lib.rs, app.rs, theme.rs, layout.rs, events/mod.rs, events/keymap.rs)
+- Create: `lingxi-code/crates/tui/Cargo.toml` (`iocraft = "=0.6"` pinned exact)
+- Modify: `lingxi-code/Cargo.toml` (add `crates/tui` to workspace members + default-members)
+- Modify: `lingxi-code/crates/cli/src/main.rs` (add Mode dispatch)
+- Modify: `lingxi-code/crates/cli/src/argv.rs` (add `--no-tui` flag)
+- Modify: `lingxi-code/crates/cli/src/run.rs` (route to `lingxi_tui::run_tui_session` or existing `repl_loop`)
+- Modify: `lingxi-code/crates/cli/Cargo.toml` (add `lingxi-tui` dep)
 
 **Key deliverables:**
 - `lingxi_tui::run_tui_session(runtime, cancel) -> Result<()>` public API

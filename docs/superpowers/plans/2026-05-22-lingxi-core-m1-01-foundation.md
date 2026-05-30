@@ -17,7 +17,7 @@
 ## File Structure
 
 ```
-lingxi-core/                          ← workspace root (new git repo or subdirectory)
+lingxi-code/                          ← workspace root (new git repo or subdirectory)
 ├── Cargo.toml                        ← workspace manifest, lints, dependencies
 ├── rust-toolchain.toml               ← pinned Rust version
 ├── .gitignore                        ← target/, etc.
@@ -84,14 +84,14 @@ lingxi-core/                          ← workspace root (new git repo or subdir
 ## Task 1: Bootstrap workspace
 
 **Files:**
-- Create: `/Users/luolingfeng/Projects/LingXi-Next/lingxi-core/Cargo.toml`
-- Create: `/Users/luolingfeng/Projects/LingXi-Next/lingxi-core/rust-toolchain.toml`
-- Create: `/Users/luolingfeng/Projects/LingXi-Next/lingxi-core/.gitignore`
+- Create: `/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/Cargo.toml`
+- Create: `/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/rust-toolchain.toml`
+- Create: `/Users/luolingfeng/Projects/LingXi-Next/lingxi-code/.gitignore`
 
 - [ ] **Step 1: Create workspace root**
 
 ```bash
-mkdir -p /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates
+mkdir -p /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates
 cd /Users/luolingfeng/Projects/LingXi-Next/lingxi-core
 ```
 

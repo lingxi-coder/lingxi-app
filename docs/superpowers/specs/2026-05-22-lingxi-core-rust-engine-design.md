@@ -166,7 +166,7 @@ This is a scope cut, not a design cut: the trait system, capability matrix, and 
 ## 3. Crate Topology
 
 ```
-lingxi-core/                          ← workspace root
+lingxi-code/                          ← workspace root
 ├── Cargo.toml                        ← workspace manifest
 │
 ├── crates/

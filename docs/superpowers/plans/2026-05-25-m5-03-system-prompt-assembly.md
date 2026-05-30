@@ -18,7 +18,7 @@ After this plan, `ConversationOrchestrator::run_turn(prompt)`:
 This plan ships:
 
 - A new submodule `lingxi_orchestrator::prompt` (5 files) carrying `assemble_system_prompt`, `SystemPromptContext`, plus three formatters (`env_block`, `memory_block`, `tools_block`) and one `locked_templates` constants file.
-- One trait surface change: `OrchestratorApiClient::messages_create` gains `system: Option<&str>` as its third arg. `MockApiClient` is updated to capture it; the adapter forwards it; `MessageRequest.system` (already `Option<String>` per `lingxi-core/crates/api-client/src/types.rs:23`) is now populated for real. `AnthropicProvider::messages_create_non_stream` gains a `system: Option<&str>` arg (additive — call sites in the workspace tree are M5-02's orchestrator and the api-client's own tests; both are updated).
+- One trait surface change: `OrchestratorApiClient::messages_create` gains `system: Option<&str>` as its third arg. `MockApiClient` is updated to capture it; the adapter forwards it; `MessageRequest.system` (already `Option<String>` per `lingxi-code/crates/api-client/src/types.rs:23`) is now populated for real. `AnthropicProvider::messages_create_non_stream` gains a `system: Option<&str>` arg (additive — call sites in the workspace tree are M5-02's orchestrator and the api-client's own tests; both are updated).
 - `ConversationOrchestrator` gains one new field: `memory: Arc<dyn MemoryHierarchyProvider>` (new trait in `lingxi-orchestrator::prompt::memory_block` to keep `lingxi-traits` minimal — see Critical fidelity notes).
 - 11 integration test files under `crates/orchestrator/tests/prompt_*` (one per task that ships behavior) plus extensions to two M5-02 tests.
 
@@ -54,14 +54,14 @@ This plan ships:
     M5-03 uses the FIRST line (`Notes:`) and the 4 bullets ONLY (no skill-discovery insert). Tooltip `enhanceSystemPromptWithEnvDetails` adds more bullets when subagents run, but M5-03 is the main-session shape (subagent variant lives in M5-06).
   - `claude-code/src/memdir/memdir.ts:419` — `loadMemoryPrompt(): Promise<string | null>`. We do NOT port the memdir prompt format (that's the `# auto memory` / `# user memory` framing, separate concern). M5-03 ports ONLY the CLAUDE.md hierarchy splice (Task 9).
 - Existing surfaces consumed by this plan:
-  - `lingxi-core/crates/memory/src/claude_md/hierarchy.rs:36` — `walk(cwd, home) -> Hierarchy`. Returns entries **innermost-first** (cwd → parents → `<home>/.claude`). Task 9 REVERSES this order so the spec's "home → repo → local-override" splice order is honored (highest-priority shadowed by being LAST).
-  - `lingxi-core/crates/memory/src/claude_md/hierarchy.rs:10-20` — `HierarchyEntry { path, is_local_override, exact_case }`. Task 9 reads `path` + `is_local_override` to drive labelling.
-  - `lingxi-core/crates/memory/src/claude_md/loader.rs:49` — `load_file(path, bus) -> Result<LoadedFile, LoaderError>`. Used by `RealMemoryHierarchyProvider` (Task 9 step 3). 10 MB cap stays in force; oversized files are skipped (not fatal).
-  - `lingxi-core/crates/tools/src/registry.rs:23` — `ToolRegistry`. We add NO new method to it; instead the new `tools_block::format` accepts `&[String]` and the orchestrator pre-extracts names via `tools.available_tools(&ctx).iter().map(|t| t.name().to_string()).collect()`. Spec lock: names only, NOT full schemas. Schemas are passed to the API via `tools: [...]` (out of scope for the prompt assembler).
-  - `lingxi-core/crates/api-client/src/types.rs:23` — `MessageRequest.system: Option<String>` is already wired in the DTO. Task 12 step 1 makes `AnthropicProvider::messages_create_non_stream` populate it from a new `system: Option<&str>` arg.
-  - `lingxi-core/crates/api-client/src/anthropic.rs:211` — `messages_create_non_stream`. Task 12 step 1 modifies the signature additively.
-  - `lingxi-core/crates/orchestrator/src/conversation.rs:1302-1310` — `ConversationOrchestrator` struct from M5-02. Task 12 step 4 adds two fields: `memory: Arc<dyn MemoryHierarchyProvider>` and `cwd: PathBuf`.
-  - `lingxi-core/crates/orchestrator/src/turn_loop.rs::execute_one_turn` — M5-02 Task 10 step 2 (line 1443+). Task 12 step 5 modifies it to thread `system: Option<&str>` through to `api.messages_create`.
+  - `lingxi-code/crates/memory/src/claude_md/hierarchy.rs:36` — `walk(cwd, home) -> Hierarchy`. Returns entries **innermost-first** (cwd → parents → `<home>/.claude`). Task 9 REVERSES this order so the spec's "home → repo → local-override" splice order is honored (highest-priority shadowed by being LAST).
+  - `lingxi-code/crates/memory/src/claude_md/hierarchy.rs:10-20` — `HierarchyEntry { path, is_local_override, exact_case }`. Task 9 reads `path` + `is_local_override` to drive labelling.
+  - `lingxi-code/crates/memory/src/claude_md/loader.rs:49` — `load_file(path, bus) -> Result<LoadedFile, LoaderError>`. Used by `RealMemoryHierarchyProvider` (Task 9 step 3). 10 MB cap stays in force; oversized files are skipped (not fatal).
+  - `lingxi-code/crates/tools/src/registry.rs:23` — `ToolRegistry`. We add NO new method to it; instead the new `tools_block::format` accepts `&[String]` and the orchestrator pre-extracts names via `tools.available_tools(&ctx).iter().map(|t| t.name().to_string()).collect()`. Spec lock: names only, NOT full schemas. Schemas are passed to the API via `tools: [...]` (out of scope for the prompt assembler).
+  - `lingxi-code/crates/api-client/src/types.rs:23` — `MessageRequest.system: Option<String>` is already wired in the DTO. Task 12 step 1 makes `AnthropicProvider::messages_create_non_stream` populate it from a new `system: Option<&str>` arg.
+  - `lingxi-code/crates/api-client/src/anthropic.rs:211` — `messages_create_non_stream`. Task 12 step 1 modifies the signature additively.
+  - `lingxi-code/crates/orchestrator/src/conversation.rs:1302-1310` — `ConversationOrchestrator` struct from M5-02. Task 12 step 4 adds two fields: `memory: Arc<dyn MemoryHierarchyProvider>` and `cwd: PathBuf`.
+  - `lingxi-code/crates/orchestrator/src/turn_loop.rs::execute_one_turn` — M5-02 Task 10 step 2 (line 1443+). Task 12 step 5 modifies it to thread `system: Option<&str>` through to `api.messages_create`.
 - Repo conventions (M4-01..09 + M5-02 precedent reaffirmed):
   - Tests live in `#[cfg(test)] mod tests { ... }` blocks adjacent to production code.
   - Integration tests live in `crates/<crate>/tests/<name>_test.rs`.
@@ -171,46 +171,46 @@ These were extracted from `claude-code/src/constants/system.ts` and `claude-code
 
 ## File touch inventory (locked at top per spec Appendix A convention)
 
-**Creates (new files — all under `lingxi-core/crates/orchestrator/src/prompt/` unless noted):**
+**Creates (new files — all under `lingxi-code/crates/orchestrator/src/prompt/` unless noted):**
 
-- `lingxi-core/crates/orchestrator/src/prompt/mod.rs` — module declarations + `SystemPromptContext` + `GitStatus` + `FileTree` + `FileTreeEntry` + `MemoryFile` + `assemble_system_prompt`.
-- `lingxi-core/crates/orchestrator/src/prompt/locked_templates.rs` — `HEADER` + `FOOTER` + section delimiters as `pub const &'static str` constants.
-- `lingxi-core/crates/orchestrator/src/prompt/env_block.rs` — `pub fn format(ctx: &SystemPromptContext) -> String` for the `<env>...</env>` block.
-- `lingxi-core/crates/orchestrator/src/prompt/memory_block.rs` — `MemoryHierarchyProvider` trait + `RealMemoryHierarchyProvider` struct + `pub fn format(files: &[MemoryFile]) -> String`.
-- `lingxi-core/crates/orchestrator/src/prompt/tools_block.rs` — `pub fn format(names: &[String]) -> String`.
-- `lingxi-core/crates/orchestrator/src/prompt/file_tree.rs` — `pub fn probe(cwd: &Path, depth_limit: u8) -> FileTree` + `pub fn format(tree: &FileTree) -> String`.
-- `lingxi-core/crates/orchestrator/src/prompt/git_status.rs` — `pub fn probe(cwd: &Path) -> Option<GitStatus>` using `gix`.
-- `lingxi-core/crates/orchestrator/tests/prompt_header_test.rs` — byte-locks for `HEADER`.
-- `lingxi-core/crates/orchestrator/tests/prompt_env_block_test.rs` — env block ordering + format.
-- `lingxi-core/crates/orchestrator/tests/prompt_git_status_test.rs` — git probe end-to-end against a temp repo.
-- `lingxi-core/crates/orchestrator/tests/prompt_file_tree_test.rs` — file tree probe + format at depth 2.
-- `lingxi-core/crates/orchestrator/tests/prompt_memory_block_test.rs` — memory hierarchy splice order + empty branch.
-- `lingxi-core/crates/orchestrator/tests/prompt_tools_block_test.rs` — alphabetic order + empty branch.
-- `lingxi-core/crates/orchestrator/tests/prompt_assemble_test.rs` — end-to-end `assemble_system_prompt` shape.
-- `lingxi-core/crates/orchestrator/tests/prompt_orchestrator_wiring_test.rs` — full `run_turn` invocation observes `messages_create` was called with the expected `system` arg.
-- `lingxi-core/crates/orchestrator/tests/prompt_override_bypass_test.rs` — `system_prompt_override: Some(...)` skips the assembler.
+- `lingxi-code/crates/orchestrator/src/prompt/mod.rs` — module declarations + `SystemPromptContext` + `GitStatus` + `FileTree` + `FileTreeEntry` + `MemoryFile` + `assemble_system_prompt`.
+- `lingxi-code/crates/orchestrator/src/prompt/locked_templates.rs` — `HEADER` + `FOOTER` + section delimiters as `pub const &'static str` constants.
+- `lingxi-code/crates/orchestrator/src/prompt/env_block.rs` — `pub fn format(ctx: &SystemPromptContext) -> String` for the `<env>...</env>` block.
+- `lingxi-code/crates/orchestrator/src/prompt/memory_block.rs` — `MemoryHierarchyProvider` trait + `RealMemoryHierarchyProvider` struct + `pub fn format(files: &[MemoryFile]) -> String`.
+- `lingxi-code/crates/orchestrator/src/prompt/tools_block.rs` — `pub fn format(names: &[String]) -> String`.
+- `lingxi-code/crates/orchestrator/src/prompt/file_tree.rs` — `pub fn probe(cwd: &Path, depth_limit: u8) -> FileTree` + `pub fn format(tree: &FileTree) -> String`.
+- `lingxi-code/crates/orchestrator/src/prompt/git_status.rs` — `pub fn probe(cwd: &Path) -> Option<GitStatus>` using `gix`.
+- `lingxi-code/crates/orchestrator/tests/prompt_header_test.rs` — byte-locks for `HEADER`.
+- `lingxi-code/crates/orchestrator/tests/prompt_env_block_test.rs` — env block ordering + format.
+- `lingxi-code/crates/orchestrator/tests/prompt_git_status_test.rs` — git probe end-to-end against a temp repo.
+- `lingxi-code/crates/orchestrator/tests/prompt_file_tree_test.rs` — file tree probe + format at depth 2.
+- `lingxi-code/crates/orchestrator/tests/prompt_memory_block_test.rs` — memory hierarchy splice order + empty branch.
+- `lingxi-code/crates/orchestrator/tests/prompt_tools_block_test.rs` — alphabetic order + empty branch.
+- `lingxi-code/crates/orchestrator/tests/prompt_assemble_test.rs` — end-to-end `assemble_system_prompt` shape.
+- `lingxi-code/crates/orchestrator/tests/prompt_orchestrator_wiring_test.rs` — full `run_turn` invocation observes `messages_create` was called with the expected `system` arg.
+- `lingxi-code/crates/orchestrator/tests/prompt_override_bypass_test.rs` — `system_prompt_override: Some(...)` skips the assembler.
 
 **Modifies (existing files):**
 
-- `lingxi-core/crates/orchestrator/Cargo.toml` — add `lingxi-memory = { path = "../memory" }` and `gix = { version = "0.66", default-features = false, features = ["max-performance-safe"] }` to `[dependencies]`. `gix` is added with `default-features = false` and only `max-performance-safe` because we ONLY need read-only repo + status + HEAD branch — no networking, no pack writing.
-- `lingxi-core/crates/orchestrator/src/lib.rs` — add `pub mod prompt;` declaration (Task 1) + a single `pub use prompt::{assemble_system_prompt, SystemPromptContext, GitStatus, FileTree, MemoryFile};` re-export (Task 12).
-- `lingxi-core/crates/orchestrator/src/conversation.rs` — modify `OrchestratorApiClient::messages_create` signature (Task 12 step 2); add `memory` + `cwd` fields to `ConversationOrchestrator` struct + `new` constructor (Task 12 step 4); rewire `run_turn` to assemble system prompt before invoking `execute_one_turn` (Task 12 step 5).
-- `lingxi-core/crates/orchestrator/src/turn_loop.rs` — modify `execute_one_turn` to accept a `system: Option<&str>` arg and thread it into `orch.api.messages_create(model, system, history_snapshot)` (Task 12 step 6).
-- `lingxi-core/crates/orchestrator/src/test_support.rs` — extend `MockApiClient` with `captured_systems` field; update the trait impl (Task 12 step 3). Add `StaticMemoryProvider` fixture (Task 9 step 5).
-- `lingxi-core/crates/api-client/src/anthropic.rs` — modify `messages_create_non_stream` signature to take `system: Option<&str>` (Task 12 step 1). Conditional body insertion. Internal call sites inside `api-client` tests are updated in the same task.
-- `lingxi-core/crates/orchestrator/tests/orchestrator_smoke_test.rs` (from M5-02) — update construction to pass `Arc::new(StaticMemoryProvider::empty())` and a cwd (Task 13 step 1).
-- `lingxi-core/crates/orchestrator/tests/orchestrator_multi_turn_test.rs` (from M5-02) — same construction update (Task 13 step 2).
-- `lingxi-core/crates/orchestrator/tests/orchestrator_max_turns_test.rs` (from M5-02) — same (Task 13 step 3).
-- `lingxi-core/crates/orchestrator/tests/orchestrator_tool_error_test.rs` (from M5-02) — same (Task 13 step 4).
-- `lingxi-core/crates/orchestrator/tests/orchestrator_real_tools_test.rs` (from M5-02) — same (Task 13 step 5).
-- `lingxi-core/Cargo.toml` — add `gix = "0.66"` to `[workspace.dependencies]` IF not already present (Task 7 step 1 checks; if present, this modification is skipped).
+- `lingxi-code/crates/orchestrator/Cargo.toml` — add `lingxi-memory = { path = "../memory" }` and `gix = { version = "0.66", default-features = false, features = ["max-performance-safe"] }` to `[dependencies]`. `gix` is added with `default-features = false` and only `max-performance-safe` because we ONLY need read-only repo + status + HEAD branch — no networking, no pack writing.
+- `lingxi-code/crates/orchestrator/src/lib.rs` — add `pub mod prompt;` declaration (Task 1) + a single `pub use prompt::{assemble_system_prompt, SystemPromptContext, GitStatus, FileTree, MemoryFile};` re-export (Task 12).
+- `lingxi-code/crates/orchestrator/src/conversation.rs` — modify `OrchestratorApiClient::messages_create` signature (Task 12 step 2); add `memory` + `cwd` fields to `ConversationOrchestrator` struct + `new` constructor (Task 12 step 4); rewire `run_turn` to assemble system prompt before invoking `execute_one_turn` (Task 12 step 5).
+- `lingxi-code/crates/orchestrator/src/turn_loop.rs` — modify `execute_one_turn` to accept a `system: Option<&str>` arg and thread it into `orch.api.messages_create(model, system, history_snapshot)` (Task 12 step 6).
+- `lingxi-code/crates/orchestrator/src/test_support.rs` — extend `MockApiClient` with `captured_systems` field; update the trait impl (Task 12 step 3). Add `StaticMemoryProvider` fixture (Task 9 step 5).
+- `lingxi-code/crates/api-client/src/anthropic.rs` — modify `messages_create_non_stream` signature to take `system: Option<&str>` (Task 12 step 1). Conditional body insertion. Internal call sites inside `api-client` tests are updated in the same task.
+- `lingxi-code/crates/orchestrator/tests/orchestrator_smoke_test.rs` (from M5-02) — update construction to pass `Arc::new(StaticMemoryProvider::empty())` and a cwd (Task 13 step 1).
+- `lingxi-code/crates/orchestrator/tests/orchestrator_multi_turn_test.rs` (from M5-02) — same construction update (Task 13 step 2).
+- `lingxi-code/crates/orchestrator/tests/orchestrator_max_turns_test.rs` (from M5-02) — same (Task 13 step 3).
+- `lingxi-code/crates/orchestrator/tests/orchestrator_tool_error_test.rs` (from M5-02) — same (Task 13 step 4).
+- `lingxi-code/crates/orchestrator/tests/orchestrator_real_tools_test.rs` (from M5-02) — same (Task 13 step 5).
+- `lingxi-code/Cargo.toml` — add `gix = "0.66"` to `[workspace.dependencies]` IF not already present (Task 7 step 1 checks; if present, this modification is skipped).
 
 **Verifications (no modification, just read in tests):**
 
-- `lingxi-core/crates/memory/src/claude_md/hierarchy.rs:36` — `walk(cwd, home)` signature unchanged.
-- `lingxi-core/crates/memory/src/claude_md/loader.rs:49` — `load_file(path, bus)` signature unchanged.
-- `lingxi-core/crates/api-client/src/types.rs:23` — `MessageRequest.system: Option<String>` still exists.
-- `lingxi-core/crates/telemetry/src/tengu/mod.rs::ALL_EVENT_NAMES` length stays at 241 (Task 14 step 3).
+- `lingxi-code/crates/memory/src/claude_md/hierarchy.rs:36` — `walk(cwd, home)` signature unchanged.
+- `lingxi-code/crates/memory/src/claude_md/loader.rs:49` — `load_file(path, bus)` signature unchanged.
+- `lingxi-code/crates/api-client/src/types.rs:23` — `MessageRequest.system: Option<String>` still exists.
+- `lingxi-code/crates/telemetry/src/tengu/mod.rs::ALL_EVENT_NAMES` length stays at 241 (Task 14 step 3).
 - The 3 M5-02 telemetry events still fire from `run_turn` in the same order (Task 14 step 2).
 
 ---
@@ -263,20 +263,20 @@ Notes:
 ### Task 1: Scaffold `prompt/` submodule under `lingxi-orchestrator`
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/src/prompt/mod.rs`
-- Create: `lingxi-core/crates/orchestrator/src/prompt/env_block.rs`
-- Create: `lingxi-core/crates/orchestrator/src/prompt/memory_block.rs`
-- Create: `lingxi-core/crates/orchestrator/src/prompt/tools_block.rs`
-- Create: `lingxi-core/crates/orchestrator/src/prompt/locked_templates.rs`
-- Create: `lingxi-core/crates/orchestrator/src/prompt/file_tree.rs`
-- Create: `lingxi-core/crates/orchestrator/src/prompt/git_status.rs`
-- Modify: `lingxi-core/crates/orchestrator/src/lib.rs`
+- Create: `lingxi-code/crates/orchestrator/src/prompt/mod.rs`
+- Create: `lingxi-code/crates/orchestrator/src/prompt/env_block.rs`
+- Create: `lingxi-code/crates/orchestrator/src/prompt/memory_block.rs`
+- Create: `lingxi-code/crates/orchestrator/src/prompt/tools_block.rs`
+- Create: `lingxi-code/crates/orchestrator/src/prompt/locked_templates.rs`
+- Create: `lingxi-code/crates/orchestrator/src/prompt/file_tree.rs`
+- Create: `lingxi-code/crates/orchestrator/src/prompt/git_status.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/lib.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Verify predecessor `653de44` (M5-02) is on `HEAD` and `lingxi-core/crates/orchestrator/src/lib.rs` exists. Run `git log -1 --oneline` (expect `653de44`-prefixed) and `test -f lingxi-core/crates/orchestrator/src/lib.rs && echo OK` (must print `OK`).
+- [ ] Step 1 — Verify predecessor `653de44` (M5-02) is on `HEAD` and `lingxi-code/crates/orchestrator/src/lib.rs` exists. Run `git log -1 --oneline` (expect `653de44`-prefixed) and `test -f lingxi-code/crates/orchestrator/src/lib.rs && echo OK` (must print `OK`).
 
-- [ ] Step 2 — Create `lingxi-core/crates/orchestrator/src/prompt/mod.rs` with a placeholder shell — declarations only, types filled in Tasks 2/3:
+- [ ] Step 2 — Create `lingxi-code/crates/orchestrator/src/prompt/mod.rs` with a placeholder shell — declarations only, types filled in Tasks 2/3:
   ```rust
   //! System prompt assembler — produces the byte-locked LingXi system
   //! prompt by concatenating header / `<env>` / `<memory>` / `<tools>` /
@@ -328,7 +328,7 @@ Notes:
     #![forbid(unsafe_code)]
     ```
 
-- [ ] Step 4 — Modify `lingxi-core/crates/orchestrator/src/lib.rs` — add `pub mod prompt;` declaration on a new line immediately AFTER the existing `pub mod turn_loop;` line. Do not add any `pub use` re-exports at this task (those land in Task 12 after the types are real).
+- [ ] Step 4 — Modify `lingxi-code/crates/orchestrator/src/lib.rs` — add `pub mod prompt;` declaration on a new line immediately AFTER the existing `pub mod turn_loop;` line. Do not add any `pub use` re-exports at this task (those land in Task 12 after the types are real).
 
 - [ ] Step 5 — Run `cargo build -p lingxi-orchestrator`. Must succeed. The new `prompt` submodule compiles as an empty shell.
 
@@ -341,11 +341,11 @@ Notes:
 ### Task 2: `SystemPromptContext` struct
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/prompt/mod.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/prompt/mod.rs`
 
 **Steps:**
 
-- [ ] Step 1 — In `lingxi-core/crates/orchestrator/src/prompt/mod.rs`, AFTER the module declarations, add the `SystemPromptContext` struct. The field order is LOCKED — see Critical fidelity items. `MemoryFile`, `GitStatus`, `FileTree`, `FileTreeEntry` are forward-referenced; they land in Task 3.
+- [ ] Step 1 — In `lingxi-code/crates/orchestrator/src/prompt/mod.rs`, AFTER the module declarations, add the `SystemPromptContext` struct. The field order is LOCKED — see Critical fidelity items. `MemoryFile`, `GitStatus`, `FileTree`, `FileTreeEntry` are forward-referenced; they land in Task 3.
   ```rust
   use std::path::PathBuf;
 
@@ -434,11 +434,11 @@ Notes:
 ### Task 3: `GitStatus`, `FileTree`, `FileTreeEntry`, `MemoryFile` types
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/prompt/mod.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/prompt/mod.rs`
 
 **Steps:**
 
-- [ ] Step 1 — In `lingxi-core/crates/orchestrator/src/prompt/mod.rs`, immediately AFTER `SystemPromptContext`, add the four supporting types:
+- [ ] Step 1 — In `lingxi-code/crates/orchestrator/src/prompt/mod.rs`, immediately AFTER `SystemPromptContext`, add the four supporting types:
   ```rust
   /// Result of a git-status probe over the cwd.
   ///
@@ -532,12 +532,12 @@ Notes:
 ### Task 4: `locked_templates::HEADER` constant
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/prompt/locked_templates.rs`
-- Create: `lingxi-core/crates/orchestrator/tests/prompt_header_test.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/prompt/locked_templates.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/prompt_header_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — In `lingxi-core/crates/orchestrator/src/prompt/locked_templates.rs`, replace the placeholder body with:
+- [ ] Step 1 — In `lingxi-code/crates/orchestrator/src/prompt/locked_templates.rs`, replace the placeholder body with:
   ```rust
   //! Header + footer constants — byte-locked from claude-code prompts.ts /
   //! system.ts. See M5-03 plan "Reverse-engineered byte-locks".
@@ -557,7 +557,7 @@ Notes:
   pub const TRAILING_NL: &str = "\n";
   ```
 
-- [ ] Step 2 — Create `lingxi-core/crates/orchestrator/tests/prompt_header_test.rs`:
+- [ ] Step 2 — Create `lingxi-code/crates/orchestrator/tests/prompt_header_test.rs`:
   ```rust
   //! Byte-locks for the system prompt header (M5-03 Task 4).
 
@@ -606,7 +606,7 @@ Notes:
 
   Note: the locked length `57` comes from `"You are Claude Code, Anthropic's official CLI for Claude.".len()`. If the test fails because the actual is `57` not `60`, update the assertion to the actual. Re-verify by counting: `You are Claude Code, Anthropic's official CLI for Claude.` = 57 chars (`Y o u   a r e   C l a u d e   C o d e ,   A n t h r o p i c ' s   o f f i c i a l   C L I   f o r   C l a u d e .` — manual count → 57). Plan locks `57` here as the authoritative value.
 
-- [ ] Step 3 — Need to expose `locked_templates` re-export path for tests. In `lingxi-core/crates/orchestrator/src/prompt/mod.rs`, the `pub mod locked_templates;` is already there from Task 1; no change needed.
+- [ ] Step 3 — Need to expose `locked_templates` re-export path for tests. In `lingxi-code/crates/orchestrator/src/prompt/mod.rs`, the `pub mod locked_templates;` is already there from Task 1; no change needed.
 
 - [ ] Step 4 — Run `cargo test -p lingxi-orchestrator --test prompt_header_test`. All 7 tests must pass. If `header_has_locked_byte_length` fails, the literal in `HEADER` has drifted from the spec — STOP and inspect the actual length, do NOT proceed to Task 5 without re-verifying byte-lock.
 
@@ -617,11 +617,11 @@ Notes:
 ### Task 5: First failing test for `env_block::format` (red)
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/tests/prompt_env_block_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/prompt_env_block_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Create `lingxi-core/crates/orchestrator/tests/prompt_env_block_test.rs`:
+- [ ] Step 1 — Create `lingxi-code/crates/orchestrator/tests/prompt_env_block_test.rs`:
   ```rust
   //! `<env>...</env>` block byte-locks (M5-03 Task 5 — RED).
   //!
@@ -665,7 +665,7 @@ Notes:
   }
   ```
 
-- [ ] Step 2 — Also need a re-export hook. In `lingxi-core/crates/orchestrator/src/prompt/mod.rs`, after `pub mod env_block;`, add (still inside the module declarations area):
+- [ ] Step 2 — Also need a re-export hook. In `lingxi-code/crates/orchestrator/src/prompt/mod.rs`, after `pub mod env_block;`, add (still inside the module declarations area):
   ```rust
   pub use env_block as _env_block_reexport_anchor; // anchor — re-export path stable for tests
   ```
@@ -680,11 +680,11 @@ Notes:
 ### Task 6: Implement `env_block::format` (green)
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/prompt/env_block.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/prompt/env_block.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Replace the placeholder body of `lingxi-core/crates/orchestrator/src/prompt/env_block.rs` with the full implementation:
+- [ ] Step 1 — Replace the placeholder body of `lingxi-code/crates/orchestrator/src/prompt/env_block.rs` with the full implementation:
   ```rust
   //! `<env>...</env>` formatter — produces the env block of the system
   //! prompt with cwd, git status, platform, shell, OS version, and
@@ -813,27 +813,27 @@ Notes:
 ### Task 7: Git status detection in env block + `git_status::probe`
 
 **Files:**
-- Modify: `lingxi-core/Cargo.toml` (add `gix` to `[workspace.dependencies]` if missing)
-- Modify: `lingxi-core/crates/orchestrator/Cargo.toml` (add `gix` + `lingxi-memory` deps)
-- Modify: `lingxi-core/crates/orchestrator/src/prompt/git_status.rs`
-- Create: `lingxi-core/crates/orchestrator/tests/prompt_git_status_test.rs`
+- Modify: `lingxi-code/Cargo.toml` (add `gix` to `[workspace.dependencies]` if missing)
+- Modify: `lingxi-code/crates/orchestrator/Cargo.toml` (add `gix` + `lingxi-memory` deps)
+- Modify: `lingxi-code/crates/orchestrator/src/prompt/git_status.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/prompt_git_status_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Check whether `gix` is already in the workspace dependencies. Run `grep -n "^gix " lingxi-core/Cargo.toml` (note: matches only top-level workspace dep). If a match is found, skip the workspace-level edit. If no match, add to `lingxi-core/Cargo.toml` under `[workspace.dependencies]`:
+- [ ] Step 1 — Check whether `gix` is already in the workspace dependencies. Run `grep -n "^gix " lingxi-code/Cargo.toml` (note: matches only top-level workspace dep). If a match is found, skip the workspace-level edit. If no match, add to `lingxi-code/Cargo.toml` under `[workspace.dependencies]`:
   ```toml
   gix = { version = "0.66", default-features = false, features = ["max-performance-safe"] }
   ```
   Place alphabetically between the existing `glob = ...` (if present) and `globset = ...` (if present); otherwise after the last `g*` entry.
 
-- [ ] Step 2 — Modify `lingxi-core/crates/orchestrator/Cargo.toml`. In the `[dependencies]` block, add (in alphabetic order):
+- [ ] Step 2 — Modify `lingxi-code/crates/orchestrator/Cargo.toml`. In the `[dependencies]` block, add (in alphabetic order):
   ```toml
   gix.workspace = true
   lingxi-memory = { path = "../memory" }
   ```
   Place `gix` before `lingxi-` lines (alphabetic). Place `lingxi-memory` between `lingxi-hooks = ...` and `lingxi-permission = ...` (alphabetic).
 
-- [ ] Step 3 — Replace the placeholder body of `lingxi-core/crates/orchestrator/src/prompt/git_status.rs` with the probe implementation:
+- [ ] Step 3 — Replace the placeholder body of `lingxi-code/crates/orchestrator/src/prompt/git_status.rs` with the probe implementation:
   ```rust
   //! Git status probe — produces `Option<GitStatus>` for a cwd.
   //!
@@ -882,7 +882,7 @@ Notes:
   ```
   Note on `gix::discover`: returns `Ok(Repository)` when `cwd` (or any parent) contains `.git/`. The `into_iter` signature varies across `gix` minor versions — if `gix 0.66`'s `status` API differs from the snippet above, adjust to the exact API at integration time. The PROBE CONTRACT (return shape, error-degrades-to-None) is what's locked, not the gix call sequence.
 
-- [ ] Step 4 — Create `lingxi-core/crates/orchestrator/tests/prompt_git_status_test.rs`:
+- [ ] Step 4 — Create `lingxi-code/crates/orchestrator/tests/prompt_git_status_test.rs`:
   ```rust
   //! Git status probe smoke + env-block integration.
 
@@ -984,12 +984,12 @@ Notes:
 ### Task 8: `file_tree::probe` + `file_tree::format` (depth ≤ 2)
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/prompt/file_tree.rs`
-- Create: `lingxi-core/crates/orchestrator/tests/prompt_file_tree_test.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/prompt/file_tree.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/prompt_file_tree_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Replace the placeholder body of `lingxi-core/crates/orchestrator/src/prompt/file_tree.rs` with:
+- [ ] Step 1 — Replace the placeholder body of `lingxi-code/crates/orchestrator/src/prompt/file_tree.rs` with:
   ```rust
   //! File tree probe + formatter — produces a depth-bounded snapshot
   //! of the cwd direct + grandchild entries, and renders it as an
@@ -1081,7 +1081,7 @@ Notes:
   }
   ```
 
-- [ ] Step 2 — Create `lingxi-core/crates/orchestrator/tests/prompt_file_tree_test.rs`:
+- [ ] Step 2 — Create `lingxi-code/crates/orchestrator/tests/prompt_file_tree_test.rs`:
   ```rust
   //! file_tree::probe + format byte-locks (M5-03 Task 8).
 
@@ -1166,15 +1166,15 @@ Notes:
 ### Task 9: `memory_block::format` + `MemoryHierarchyProvider` trait + `RealMemoryHierarchyProvider`
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/prompt/memory_block.rs`
-- Modify: `lingxi-core/crates/orchestrator/src/test_support.rs` (add `StaticMemoryProvider`)
-- Create: `lingxi-core/crates/orchestrator/tests/prompt_memory_block_test.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/prompt/memory_block.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/test_support.rs` (add `StaticMemoryProvider`)
+- Create: `lingxi-code/crates/orchestrator/tests/prompt_memory_block_test.rs`
 
 **Steps:**
 
 - [ ] Step 1 — Verify cycle-freedom. Run `cargo tree -p lingxi-memory -e normal --depth 5 2>&1 | grep -c lingxi-orchestrator` and confirm `0`. (M3-02 memory crate has no upward dep on orchestrator — sanity check before adding the dep arrow.)
 
-- [ ] Step 2 — Replace the placeholder body of `lingxi-core/crates/orchestrator/src/prompt/memory_block.rs` with:
+- [ ] Step 2 — Replace the placeholder body of `lingxi-code/crates/orchestrator/src/prompt/memory_block.rs` with:
   ```rust
   //! `<memory>...</memory>` formatter + `MemoryHierarchyProvider` trait.
   //!
@@ -1292,13 +1292,13 @@ Notes:
   }
   ```
 
-  Note: `dirs::home_dir()` requires the `dirs` crate. Check whether it's already a workspace dep (M3-02 uses it). If not, add to `lingxi-core/crates/orchestrator/Cargo.toml`:
+  Note: `dirs::home_dir()` requires the `dirs` crate. Check whether it's already a workspace dep (M3-02 uses it). If not, add to `lingxi-code/crates/orchestrator/Cargo.toml`:
   ```toml
   dirs = "5"
   ```
-  Run `grep -n "^dirs " lingxi-core/Cargo.toml` to confirm whether it's a workspace dep. If yes, use `dirs.workspace = true`. If no, pin directly.
+  Run `grep -n "^dirs " lingxi-code/Cargo.toml` to confirm whether it's a workspace dep. If yes, use `dirs.workspace = true`. If no, pin directly.
 
-- [ ] Step 3 — Modify `lingxi-core/crates/orchestrator/src/test_support.rs`. At the bottom of the file, add:
+- [ ] Step 3 — Modify `lingxi-code/crates/orchestrator/src/test_support.rs`. At the bottom of the file, add:
   ```rust
   use crate::prompt::{memory_block::MemoryHierarchyProvider, MemoryFile};
   use std::path::Path;
@@ -1336,7 +1336,7 @@ Notes:
   pub use memory_block::{MemoryHierarchyProvider, RealMemoryHierarchyProvider, real_provider};
   ```
 
-- [ ] Step 4 — Create `lingxi-core/crates/orchestrator/tests/prompt_memory_block_test.rs`:
+- [ ] Step 4 — Create `lingxi-code/crates/orchestrator/tests/prompt_memory_block_test.rs`:
   ```rust
   //! `<memory>...</memory>` byte-locks + hierarchy splice order.
 
@@ -1432,12 +1432,12 @@ Notes:
 ### Task 10: `tools_block::format` (alphabetic names)
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/prompt/tools_block.rs`
-- Create: `lingxi-core/crates/orchestrator/tests/prompt_tools_block_test.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/prompt/tools_block.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/prompt_tools_block_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Replace the placeholder body of `lingxi-core/crates/orchestrator/src/prompt/tools_block.rs` with:
+- [ ] Step 1 — Replace the placeholder body of `lingxi-code/crates/orchestrator/src/prompt/tools_block.rs` with:
   ```rust
   //! `<tools>...</tools>` formatter — emits the available-tool-name list
   //! (one per line). Full tool schemas are wire-side via the API
@@ -1470,7 +1470,7 @@ Notes:
   }
   ```
 
-- [ ] Step 2 — Create `lingxi-core/crates/orchestrator/tests/prompt_tools_block_test.rs`:
+- [ ] Step 2 — Create `lingxi-code/crates/orchestrator/tests/prompt_tools_block_test.rs`:
   ```rust
   //! `<tools>` block byte-locks (M5-03 Task 10).
 
@@ -1523,13 +1523,13 @@ Notes:
 ### Task 11: `assemble_system_prompt` + `FOOTER` literal
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/prompt/locked_templates.rs` (add `FOOTER`)
-- Modify: `lingxi-core/crates/orchestrator/src/prompt/mod.rs` (add `assemble_system_prompt`)
-- Create: `lingxi-core/crates/orchestrator/tests/prompt_assemble_test.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/prompt/locked_templates.rs` (add `FOOTER`)
+- Modify: `lingxi-code/crates/orchestrator/src/prompt/mod.rs` (add `assemble_system_prompt`)
+- Create: `lingxi-code/crates/orchestrator/tests/prompt_assemble_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — In `lingxi-core/crates/orchestrator/src/prompt/locked_templates.rs`, AFTER `HEADER`, add the `FOOTER` constant. The full literal — 5 lines, em-dash in line 2, trailing LF after the last bullet:
+- [ ] Step 1 — In `lingxi-code/crates/orchestrator/src/prompt/locked_templates.rs`, AFTER `HEADER`, add the `FOOTER` constant. The full literal — 5 lines, em-dash in line 2, trailing LF after the last bullet:
   ```rust
   /// Closing literal of every assembled system prompt.
   ///
@@ -1545,7 +1545,7 @@ Notes:
   - Do not use a colon before tool calls. Text like \"Let me read the file:\" followed by a read tool call should just be \"Let me read the file.\" with a period.\n";
   ```
 
-- [ ] Step 2 — In `lingxi-core/crates/orchestrator/src/prompt/mod.rs`, AFTER the type definitions, add `assemble_system_prompt`:
+- [ ] Step 2 — In `lingxi-code/crates/orchestrator/src/prompt/mod.rs`, AFTER the type definitions, add `assemble_system_prompt`:
   ```rust
   use crate::prompt::locked_templates::{FOOTER, HEADER, SECTION_SEP, TRAILING_NL};
 
@@ -1590,7 +1590,7 @@ Notes:
   }
   ```
 
-- [ ] Step 3 — Create `lingxi-core/crates/orchestrator/tests/prompt_assemble_test.rs`:
+- [ ] Step 3 — Create `lingxi-code/crates/orchestrator/tests/prompt_assemble_test.rs`:
   ```rust
   //! Full `assemble_system_prompt` byte-locks (M5-03 Task 11).
 
@@ -1688,7 +1688,7 @@ Notes:
 
 - [ ] Step 4 — Run `cargo test -p lingxi-orchestrator --test prompt_assemble_test`. All 4 tests must pass.
 
-- [ ] Step 5 — If `footer_byte_length_locked` fails, run `printf %s "$(awk '/pub const FOOTER/,/^";$/' lingxi-core/crates/orchestrator/src/prompt/locked_templates.rs)" | wc -c` (or count bytes directly via a one-off Rust file) to discover the real byte length, then update both the docstring in `locked_templates.rs` and the assertion. Then re-run.
+- [ ] Step 5 — If `footer_byte_length_locked` fails, run `printf %s "$(awk '/pub const FOOTER/,/^";$/' lingxi-code/crates/orchestrator/src/prompt/locked_templates.rs)" | wc -c` (or count bytes directly via a one-off Rust file) to discover the real byte length, then update both the docstring in `locked_templates.rs` and the assertion. Then re-run.
 
 - [ ] Commit: `feat(M5-03 task 11): assemble_system_prompt + FOOTER literal (full section-order byte-lock)`
 
@@ -1697,15 +1697,15 @@ Notes:
 ### Task 12: Wire `assemble_system_prompt` into `ConversationOrchestrator::run_turn`
 
 **Files:**
-- Modify: `lingxi-core/crates/api-client/src/anthropic.rs` (`messages_create_non_stream` signature)
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs` (trait + struct + `new` + `run_turn`)
-- Modify: `lingxi-core/crates/orchestrator/src/turn_loop.rs` (`execute_one_turn` arg)
-- Modify: `lingxi-core/crates/orchestrator/src/test_support.rs` (MockApiClient captured_systems)
-- Modify: `lingxi-core/crates/orchestrator/src/lib.rs` (pub use of prompt types)
+- Modify: `lingxi-code/crates/api-client/src/anthropic.rs` (`messages_create_non_stream` signature)
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs` (trait + struct + `new` + `run_turn`)
+- Modify: `lingxi-code/crates/orchestrator/src/turn_loop.rs` (`execute_one_turn` arg)
+- Modify: `lingxi-code/crates/orchestrator/src/test_support.rs` (MockApiClient captured_systems)
+- Modify: `lingxi-code/crates/orchestrator/src/lib.rs` (pub use of prompt types)
 
 **Steps:**
 
-- [ ] Step 1 — Modify `lingxi-core/crates/api-client/src/anthropic.rs:211`. Change the signature of `messages_create_non_stream` to:
+- [ ] Step 1 — Modify `lingxi-code/crates/api-client/src/anthropic.rs:211`. Change the signature of `messages_create_non_stream` to:
   ```rust
   pub async fn messages_create_non_stream<T: HttpTransport>(
       &self,
@@ -1743,9 +1743,9 @@ Notes:
       outcome
   }
   ```
-  Update ALL call sites inside `lingxi-core/crates/api-client/` (likely only test modules in the same file). For each, insert `None` as the new third arg.
+  Update ALL call sites inside `lingxi-code/crates/api-client/` (likely only test modules in the same file). For each, insert `None` as the new third arg.
 
-- [ ] Step 2 — Modify `lingxi-core/crates/orchestrator/src/conversation.rs`. Change the trait `OrchestratorApiClient::messages_create` to take `system: Option<&str>` as its third parameter:
+- [ ] Step 2 — Modify `lingxi-code/crates/orchestrator/src/conversation.rs`. Change the trait `OrchestratorApiClient::messages_create` to take `system: Option<&str>` as its third parameter:
   ```rust
   #[async_trait]
   pub trait OrchestratorApiClient: Send + Sync {
@@ -1774,7 +1774,7 @@ Notes:
   }
   ```
 
-- [ ] Step 3 — Modify `lingxi-core/crates/orchestrator/src/test_support.rs::MockApiClient`. Add a `captured_systems` field and accessor:
+- [ ] Step 3 — Modify `lingxi-code/crates/orchestrator/src/test_support.rs::MockApiClient`. Add a `captured_systems` field and accessor:
   ```rust
   pub struct MockApiClient {
       queue: Arc<Mutex<VecDeque<MessageResponse>>>,
@@ -1819,7 +1819,7 @@ Notes:
   }
   ```
 
-- [ ] Step 4 — Modify `lingxi-core/crates/orchestrator/src/conversation.rs::ConversationOrchestrator`. Add two new fields to the struct (in this exact order — append after `session`):
+- [ ] Step 4 — Modify `lingxi-code/crates/orchestrator/src/conversation.rs::ConversationOrchestrator`. Add two new fields to the struct (in this exact order — append after `session`):
   ```rust
   pub struct ConversationOrchestrator {
       pub(crate) config: OrchestratorConfig,
@@ -1864,7 +1864,7 @@ Notes:
   }
   ```
 
-- [ ] Step 5 — Modify `lingxi-core/crates/orchestrator/src/conversation.rs::run_turn` to assemble + thread the system prompt. Replace the existing `run_turn` with:
+- [ ] Step 5 — Modify `lingxi-code/crates/orchestrator/src/conversation.rs::run_turn` to assemble + thread the system prompt. Replace the existing `run_turn` with:
   ```rust
   pub async fn run_turn(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError> {
       // Telemetry: conversation_started. (Wired in M5-02 Task 15.)
@@ -1977,9 +1977,9 @@ Notes:
   }
   ```
 
-  Note on `ToolStaticContext::minimal()`: if this constructor does not exist on `ToolStaticContext` (it likely doesn't at M5-02 head), use whatever existing `ToolStaticContext::default()` or `::new()` is available. Confirm via `grep -n "impl ToolStaticContext\|pub fn" lingxi-core/crates/tools/src/context.rs` and pick the no-arg constructor. If NONE exists, the cleanest fix is calling `self.tools.register_iter()` directly to collect tool names — but that bypasses `available_tools` filtering. Pragmatic choice: extend `ToolRegistry` with a new `pub fn tool_names(&self) -> Vec<String>` method (one-line change in `lingxi-core/crates/tools/src/registry.rs`) that ignores filters. ADD that method in Step 5b below if `ToolStaticContext::minimal()` doesn't exist.
+  Note on `ToolStaticContext::minimal()`: if this constructor does not exist on `ToolStaticContext` (it likely doesn't at M5-02 head), use whatever existing `ToolStaticContext::default()` or `::new()` is available. Confirm via `grep -n "impl ToolStaticContext\|pub fn" lingxi-code/crates/tools/src/context.rs` and pick the no-arg constructor. If NONE exists, the cleanest fix is calling `self.tools.register_iter()` directly to collect tool names — but that bypasses `available_tools` filtering. Pragmatic choice: extend `ToolRegistry` with a new `pub fn tool_names(&self) -> Vec<String>` method (one-line change in `lingxi-code/crates/tools/src/registry.rs`) that ignores filters. ADD that method in Step 5b below if `ToolStaticContext::minimal()` doesn't exist.
 
-- [ ] Step 5b — Optional: if `ToolStaticContext::minimal()` / `::default()` / `::new()` doesn't exist, add to `lingxi-core/crates/tools/src/registry.rs::ToolRegistry`:
+- [ ] Step 5b — Optional: if `ToolStaticContext::minimal()` / `::default()` / `::new()` doesn't exist, add to `lingxi-code/crates/tools/src/registry.rs::ToolRegistry`:
   ```rust
   /// Return ALL registered tool names (builtin + MCP + plugin), no
   /// filtering. Used by `lingxi-orchestrator` system prompt assembler.
@@ -2001,7 +2001,7 @@ Notes:
   ```
   Then in `build_system_prompt`, replace the tool-name collection with `self.tools.tool_names()`. The exact `.builtin` / `.mcp_tools` field names must match the actual struct — verify by reading the file before editing.
 
-- [ ] Step 6 — Modify `lingxi-core/crates/orchestrator/src/turn_loop.rs::execute_one_turn`. Change the signature to accept the system arg, and thread it into the API call:
+- [ ] Step 6 — Modify `lingxi-code/crates/orchestrator/src/turn_loop.rs::execute_one_turn`. Change the signature to accept the system arg, and thread it into the API call:
   ```rust
   pub(crate) async fn execute_one_turn(
       orch: &ConversationOrchestrator,
@@ -2019,7 +2019,7 @@ Notes:
   }
   ```
 
-- [ ] Step 7 — Modify `lingxi-core/crates/orchestrator/src/lib.rs`. Add the re-export line at the bottom (after the existing `pub use error::OrchestratorError;`):
+- [ ] Step 7 — Modify `lingxi-code/crates/orchestrator/src/lib.rs`. Add the re-export line at the bottom (after the existing `pub use error::OrchestratorError;`):
   ```rust
   pub use prompt::{
       assemble_system_prompt, FileTree, FileTreeEntry, GitStatus, MemoryFile,
@@ -2027,7 +2027,7 @@ Notes:
   };
   ```
 
-- [ ] Step 8 — Create `lingxi-core/crates/orchestrator/tests/prompt_orchestrator_wiring_test.rs`:
+- [ ] Step 8 — Create `lingxi-code/crates/orchestrator/tests/prompt_orchestrator_wiring_test.rs`:
   ```rust
   //! Integration: ConversationOrchestrator::run_turn assembles a
   //! system prompt via assemble_system_prompt and passes it to the
@@ -2097,16 +2097,16 @@ Notes:
 ### Task 13: Update M5-02 baseline tests + add override-bypass test
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/tests/orchestrator_smoke_test.rs`
-- Modify: `lingxi-core/crates/orchestrator/tests/orchestrator_multi_turn_test.rs`
-- Modify: `lingxi-core/crates/orchestrator/tests/orchestrator_max_turns_test.rs`
-- Modify: `lingxi-core/crates/orchestrator/tests/orchestrator_tool_error_test.rs`
-- Modify: `lingxi-core/crates/orchestrator/tests/orchestrator_real_tools_test.rs`
-- Create: `lingxi-core/crates/orchestrator/tests/prompt_override_bypass_test.rs`
+- Modify: `lingxi-code/crates/orchestrator/tests/orchestrator_smoke_test.rs`
+- Modify: `lingxi-code/crates/orchestrator/tests/orchestrator_multi_turn_test.rs`
+- Modify: `lingxi-code/crates/orchestrator/tests/orchestrator_max_turns_test.rs`
+- Modify: `lingxi-code/crates/orchestrator/tests/orchestrator_tool_error_test.rs`
+- Modify: `lingxi-code/crates/orchestrator/tests/orchestrator_real_tools_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/prompt_override_bypass_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — In `lingxi-core/crates/orchestrator/tests/orchestrator_smoke_test.rs`, find every `ConversationOrchestrator::new(cfg, api, tools, hooks, perms, output)` call. Replace each with:
+- [ ] Step 1 — In `lingxi-code/crates/orchestrator/tests/orchestrator_smoke_test.rs`, find every `ConversationOrchestrator::new(cfg, api, tools, hooks, perms, output)` call. Replace each with:
   ```rust
   ConversationOrchestrator::new(
       cfg,
@@ -2129,7 +2129,7 @@ Notes:
 
 - [ ] Step 5 — Repeat Step 1 for `orchestrator_real_tools_test.rs`. For this file, the cwd should be a `tempfile::TempDir` that the real tools (FileReadTool) can write into; pass `tmp.path().to_path_buf()` instead of `std::env::temp_dir()`.
 
-- [ ] Step 6 — Create `lingxi-core/crates/orchestrator/tests/prompt_override_bypass_test.rs`:
+- [ ] Step 6 — Create `lingxi-code/crates/orchestrator/tests/prompt_override_bypass_test.rs`:
   ```rust
   //! `OrchestratorConfig::system_prompt_override = Some(_)` skips the
   //! prompt assembler and forwards the literal byte-for-byte.

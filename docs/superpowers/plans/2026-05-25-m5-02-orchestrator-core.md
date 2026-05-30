@@ -38,32 +38,32 @@ This plan ships:
   - §6.3 telemetry growth table (line 432-446) — v0.5.0 238 → after M5-02 241.
   - §7 Open Questions OQ-1 (line 491) + OQ-2 (line 492) — OQ-1 resolution: claude-code has no global main-loop default, LingXi locks `30`. OQ-2 (SSE event schema) deferred to M5-04 — M5-02 uses non-streaming so OQ-2 is not in scope.
 - Predecessor: **M5-01 — engine wiring close-out** committed at `c477822`. Verifies:
-  - `lingxi-core/crates/agent/src/runner.rs::run_subagent` now drives a real `reduce` loop (not a stub).
-  - `lingxi-core/crates/tasks/src/handle.rs::TaskRegistryHandle::output` reads from `TaskOutputManager::read` (not empty placeholder).
-  - `lingxi-core/crates/tools/src/tool_invoker_impl.rs::RegistryToolInvoker::invoke` dispatches into `ToolRegistry::call` (not `Ok(Value::Null)`).
+  - `lingxi-code/crates/agent/src/runner.rs::run_subagent` now drives a real `reduce` loop (not a stub).
+  - `lingxi-code/crates/tasks/src/handle.rs::TaskRegistryHandle::output` reads from `TaskOutputManager::read` (not empty placeholder).
+  - `lingxi-code/crates/tools/src/tool_invoker_impl.rs::RegistryToolInvoker::invoke` dispatches into `ToolRegistry::call` (not `Ok(Value::Null)`).
   - M4-05's two `Arc::ptr_eq` invariants (`recursion_lock_child_inherits_parent_tool_registry_arc`, `budget_inheritance_child_inherits_parent_budget_arc`) still pass — M5-02 does not touch agent/tasks/tools internals, so those invariants are not at risk.
 - claude-code source:
   - `claude-code/src/QueryEngine.ts:870` — `Reached maximum number of turns (${message.attachment.maxTurns})` byte-lock (verified by grep in Task 2 step 1).
   - `claude-code/src/QueryEngine.ts:146,220,684,1196,1227,1265` — `maxTurns` field usage (camelCase frozen).
 - Existing engine surfaces consumed by this plan:
-  - `lingxi-core/crates/api-client/src/anthropic.rs:211` — `AnthropicProvider::messages_create_non_stream<T: HttpTransport>(&self, model: &str, msgs: Vec<ConversationMessage>, transport: &T) -> Result<MessageResponse, ApiError>`.
-  - `lingxi-core/crates/api-client/src/types.rs:35` — `MessageResponse { id, model, content: Vec<ContentBlockApi>, stop_reason: Option<String>, usage: UsageApi }`.
-  - `lingxi-core/crates/api-client/src/types.rs:59` — `ContentBlockApi::{ Text { text }, ToolUse { id, name, input }, Thinking { .. }, ServerToolUse { .. }, ConnectorText { .. }, AdvisorToolResult { .. } }`. M5-02 only reads `Text` and `ToolUse`; the other 4 variants are passed through as-is into the recorded assistant message (no panic, no dispatch).
-  - `lingxi-core/crates/protocol/src/messages.rs:25` — `ContentBlock::{ Text { text }, ToolUse { id, name, input }, ToolResult { tool_use_id, content, is_error }, Thinking { thinking, signature } }`.
-  - `lingxi-core/crates/protocol/src/messages.rs:61` — `ConversationMessage::{ User { id, content }, Assistant { id, content, stop_reason }, System { id, content } }`.
-  - `lingxi-core/crates/core/src/session.rs:50` — `SessionState { session_id, history, usage, model, todos, plan_mode }` + `SessionState::empty(session_id, model)`.
-  - `lingxi-core/crates/tools/src/registry.rs:23` — `ToolRegistry { ... }` + `ToolRegistry::find_by_name(name) -> Option<Arc<dyn Tool>>`.
-  - `lingxi-core/crates/tools/src/context.rs:20` — `ToolUseContext { options, messages, tool_use_id, agent_id, content_replacement_state, session, subagent_registry }` + `ToolUseOptions`.
-  - `lingxi-core/crates/tools/src/tool_trait.rs::Tool::call(input, ctx, progress_tx) -> Result<ToolCallResult, ToolError>` + `ToolCallResult { data, new_messages, context_modifier, mcp_meta }`.
-  - `lingxi-core/crates/cost/src/summary.rs:30` — `CostSummary { session, day, month, by_model }` + `SessionCostSummary { session_id, total_nano_usd, total_tokens }`. M5-02's `CostSnapshot` trait-level type is a NEW lightweight struct in `lingxi-traits::orchestrator` that holds `{ total_nano_usd: u64, total_tokens: u64, session_id: SessionId }` — it is NOT a re-export of `CostSummary` (the trait surface must stay free of `lingxi-cost` deps to keep `lingxi-traits` a leaf). Task 4 documents this with a doc-link from `CostSnapshot` to `lingxi_cost::CostSummary`.
-  - `lingxi-core/crates/protocol/src/ids.rs` — `SessionId`, `MessageId`, `AgentId`, `ToolUseId`.
-  - `lingxi-core/crates/permission/src/lib.rs` — `PermissionGate` trait (M4-XX); M5-02 uses an in-crate `NoOpPermissionGate` test stub.
-  - `lingxi-core/crates/hooks/src/lib.rs` — `HookExecutor` (M5-06 wires 4 arms); M5-02 uses an in-crate `NoOpHookExecutor` test stub.
+  - `lingxi-code/crates/api-client/src/anthropic.rs:211` — `AnthropicProvider::messages_create_non_stream<T: HttpTransport>(&self, model: &str, msgs: Vec<ConversationMessage>, transport: &T) -> Result<MessageResponse, ApiError>`.
+  - `lingxi-code/crates/api-client/src/types.rs:35` — `MessageResponse { id, model, content: Vec<ContentBlockApi>, stop_reason: Option<String>, usage: UsageApi }`.
+  - `lingxi-code/crates/api-client/src/types.rs:59` — `ContentBlockApi::{ Text { text }, ToolUse { id, name, input }, Thinking { .. }, ServerToolUse { .. }, ConnectorText { .. }, AdvisorToolResult { .. } }`. M5-02 only reads `Text` and `ToolUse`; the other 4 variants are passed through as-is into the recorded assistant message (no panic, no dispatch).
+  - `lingxi-code/crates/protocol/src/messages.rs:25` — `ContentBlock::{ Text { text }, ToolUse { id, name, input }, ToolResult { tool_use_id, content, is_error }, Thinking { thinking, signature } }`.
+  - `lingxi-code/crates/protocol/src/messages.rs:61` — `ConversationMessage::{ User { id, content }, Assistant { id, content, stop_reason }, System { id, content } }`.
+  - `lingxi-code/crates/core/src/session.rs:50` — `SessionState { session_id, history, usage, model, todos, plan_mode }` + `SessionState::empty(session_id, model)`.
+  - `lingxi-code/crates/tools/src/registry.rs:23` — `ToolRegistry { ... }` + `ToolRegistry::find_by_name(name) -> Option<Arc<dyn Tool>>`.
+  - `lingxi-code/crates/tools/src/context.rs:20` — `ToolUseContext { options, messages, tool_use_id, agent_id, content_replacement_state, session, subagent_registry }` + `ToolUseOptions`.
+  - `lingxi-code/crates/tools/src/tool_trait.rs::Tool::call(input, ctx, progress_tx) -> Result<ToolCallResult, ToolError>` + `ToolCallResult { data, new_messages, context_modifier, mcp_meta }`.
+  - `lingxi-code/crates/cost/src/summary.rs:30` — `CostSummary { session, day, month, by_model }` + `SessionCostSummary { session_id, total_nano_usd, total_tokens }`. M5-02's `CostSnapshot` trait-level type is a NEW lightweight struct in `lingxi-traits::orchestrator` that holds `{ total_nano_usd: u64, total_tokens: u64, session_id: SessionId }` — it is NOT a re-export of `CostSummary` (the trait surface must stay free of `lingxi-cost` deps to keep `lingxi-traits` a leaf). Task 4 documents this with a doc-link from `CostSnapshot` to `lingxi_cost::CostSummary`.
+  - `lingxi-code/crates/protocol/src/ids.rs` — `SessionId`, `MessageId`, `AgentId`, `ToolUseId`.
+  - `lingxi-code/crates/permission/src/lib.rs` — `PermissionGate` trait (M4-XX); M5-02 uses an in-crate `NoOpPermissionGate` test stub.
+  - `lingxi-code/crates/hooks/src/lib.rs` — `HookExecutor` (M5-06 wires 4 arms); M5-02 uses an in-crate `NoOpHookExecutor` test stub.
 - Telemetry plumbing (locked by M3-06):
-  - `lingxi-core/crates/telemetry/src/tengu/mod.rs:28` — `ALL_EVENT_NAMES: &[&str]` const, currently sized at 238 (TOTAL = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 1). M5-02 grows this to 241 by inserting a new `orchestrator` submodule between `release` and the close. New TOTAL formula = `25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 3 + 1` (orchestrator inserted as second-to-last, with 3 entries; release stays last).
-  - `lingxi-core/crates/telemetry/src/tengu/release.rs:14` — the existing `NAMES: &[&str] = &[LINGXI_CORE_V0_5_0_RELEASED]` registration pattern (Task 15 follows this template verbatim for the new `orchestrator::NAMES`).
-  - `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs:8` — `registry_is_exactly_238_entries` test (Task 15 updates to 241 + updates the comment to mention M5-02).
-  - `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json` — 286-line JSON array (line 6: `"event_names": [...]`); M5-02 inserts the 3 new orchestrator names BEFORE the trailing `"lingxi_core_v0_5_0_released"` entry to mirror `tengu::ALL_EVENT_NAMES` registration order. Task 15 step 4 documents the insertion line range explicitly.
+  - `lingxi-code/crates/telemetry/src/tengu/mod.rs:28` — `ALL_EVENT_NAMES: &[&str]` const, currently sized at 238 (TOTAL = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 1). M5-02 grows this to 241 by inserting a new `orchestrator` submodule between `release` and the close. New TOTAL formula = `25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 3 + 1` (orchestrator inserted as second-to-last, with 3 entries; release stays last).
+  - `lingxi-code/crates/telemetry/src/tengu/release.rs:14` — the existing `NAMES: &[&str] = &[LINGXI_CORE_V0_5_0_RELEASED]` registration pattern (Task 15 follows this template verbatim for the new `orchestrator::NAMES`).
+  - `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs:8` — `registry_is_exactly_238_entries` test (Task 15 updates to 241 + updates the comment to mention M5-02).
+  - `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json` — 286-line JSON array (line 6: `"event_names": [...]`); M5-02 inserts the 3 new orchestrator names BEFORE the trailing `"lingxi_core_v0_5_0_released"` entry to mirror `tengu::ALL_EVENT_NAMES` registration order. Task 15 step 4 documents the insertion line range explicitly.
 - Repo conventions (M4-01..09 precedent reaffirmed):
   - Tests live in `#[cfg(test)] mod tests { ... }` blocks adjacent to production code.
   - Integration tests live in `crates/<crate>/tests/<name>_test.rs`.
@@ -78,37 +78,37 @@ This plan ships:
 
 **Creates (new files):**
 
-- `lingxi-core/crates/orchestrator/Cargo.toml` — new crate manifest.
-- `lingxi-core/crates/orchestrator/src/lib.rs` — re-exports + crate docs + `#![forbid(unsafe_code)]`.
-- `lingxi-core/crates/orchestrator/src/error.rs` — `OrchestratorError` enum.
-- `lingxi-core/crates/orchestrator/src/config.rs` — `OrchestratorConfig` + `MAX_TURNS_DEFAULT`.
-- `lingxi-core/crates/orchestrator/src/conversation.rs` — `ConversationOrchestrator` + `ConversationOutcome` + `run_turn`.
-- `lingxi-core/crates/orchestrator/src/turn_loop.rs` — private inner loop helpers (`execute_one_turn`, `dispatch_tool_uses`, content-block translation).
-- `lingxi-core/crates/orchestrator/src/test_support.rs` — `MockApiClient`, `MockOutputStream`, `OutputEventCapture`, `NoOpHookExecutor`, `NoOpPermissionGate`.
-- `lingxi-core/crates/orchestrator/tests/orchestrator_smoke_test.rs` — single-turn happy path (no tools).
-- `lingxi-core/crates/orchestrator/tests/orchestrator_multi_turn_test.rs` — two turns, one tool call (mock tool).
-- `lingxi-core/crates/orchestrator/tests/orchestrator_max_turns_test.rs` — exceeds `max_turns`, asserts byte-locked Display.
-- `lingxi-core/crates/orchestrator/tests/orchestrator_tool_error_test.rs` — tool returns `ToolError`, propagates as `is_error: true`.
-- `lingxi-core/crates/orchestrator/tests/orchestrator_real_tools_test.rs` — integrates with real `ToolRegistry` + `FileReadTool` + a tempfile.
-- `lingxi-core/crates/traits/src/orchestrator.rs` — 4 new public types: `OrchestratorHandle`, `OutputStream`, `OutputEvent`, `CostSnapshot`, plus `OrchestratorError` re-export.
-- `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs` — 3 new constants + `NAMES` array.
+- `lingxi-code/crates/orchestrator/Cargo.toml` — new crate manifest.
+- `lingxi-code/crates/orchestrator/src/lib.rs` — re-exports + crate docs + `#![forbid(unsafe_code)]`.
+- `lingxi-code/crates/orchestrator/src/error.rs` — `OrchestratorError` enum.
+- `lingxi-code/crates/orchestrator/src/config.rs` — `OrchestratorConfig` + `MAX_TURNS_DEFAULT`.
+- `lingxi-code/crates/orchestrator/src/conversation.rs` — `ConversationOrchestrator` + `ConversationOutcome` + `run_turn`.
+- `lingxi-code/crates/orchestrator/src/turn_loop.rs` — private inner loop helpers (`execute_one_turn`, `dispatch_tool_uses`, content-block translation).
+- `lingxi-code/crates/orchestrator/src/test_support.rs` — `MockApiClient`, `MockOutputStream`, `OutputEventCapture`, `NoOpHookExecutor`, `NoOpPermissionGate`.
+- `lingxi-code/crates/orchestrator/tests/orchestrator_smoke_test.rs` — single-turn happy path (no tools).
+- `lingxi-code/crates/orchestrator/tests/orchestrator_multi_turn_test.rs` — two turns, one tool call (mock tool).
+- `lingxi-code/crates/orchestrator/tests/orchestrator_max_turns_test.rs` — exceeds `max_turns`, asserts byte-locked Display.
+- `lingxi-code/crates/orchestrator/tests/orchestrator_tool_error_test.rs` — tool returns `ToolError`, propagates as `is_error: true`.
+- `lingxi-code/crates/orchestrator/tests/orchestrator_real_tools_test.rs` — integrates with real `ToolRegistry` + `FileReadTool` + a tempfile.
+- `lingxi-code/crates/traits/src/orchestrator.rs` — 4 new public types: `OrchestratorHandle`, `OutputStream`, `OutputEvent`, `CostSnapshot`, plus `OrchestratorError` re-export.
+- `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` — 3 new constants + `NAMES` array.
 
 **Modifies (existing files):**
 
-- `lingxi-core/Cargo.toml` — add `crates/orchestrator` to `members` AND `default-members` (preserve alphabetical-ish order; insert after `crates/mcp` so the alphabetic placement reads naturally — see Task 1 step 2).
-- `lingxi-core/crates/traits/src/lib.rs` — add `pub mod orchestrator;` declaration + `pub use orchestrator::{...}` re-exports.
-- `lingxi-core/crates/telemetry/src/tengu/mod.rs` — add `pub mod orchestrator;` declaration + update `const TOTAL` arithmetic (`+ 3`) + insert `orchestrator::NAMES` walk before `release::NAMES` in `concat_all()`.
-- `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs` — bump expected count from `238` to `241` in the test + update the explanatory comment to add `M5-02 added 3 (conversation lifecycle × 3 = started/completed/failed): 238 + 3 = 241.`
-- `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json` — insert the 3 orchestrator event names (verbatim wire strings, see "Wire identifiers" below) in registration order BEFORE the trailing `"lingxi_core_v0_5_0_released"` entry. The `_note` field is also updated to mention "+3 (M5-02 orchestrator)". File grows from 286 lines to 289 lines.
-- `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json` `_note` — append " + 3 (M5-02 orchestrator: conversation_started/completed/failed)" to the existing note.
+- `lingxi-code/Cargo.toml` — add `crates/orchestrator` to `members` AND `default-members` (preserve alphabetical-ish order; insert after `crates/mcp` so the alphabetic placement reads naturally — see Task 1 step 2).
+- `lingxi-code/crates/traits/src/lib.rs` — add `pub mod orchestrator;` declaration + `pub use orchestrator::{...}` re-exports.
+- `lingxi-code/crates/telemetry/src/tengu/mod.rs` — add `pub mod orchestrator;` declaration + update `const TOTAL` arithmetic (`+ 3`) + insert `orchestrator::NAMES` walk before `release::NAMES` in `concat_all()`.
+- `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs` — bump expected count from `238` to `241` in the test + update the explanatory comment to add `M5-02 added 3 (conversation lifecycle × 3 = started/completed/failed): 238 + 3 = 241.`
+- `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json` — insert the 3 orchestrator event names (verbatim wire strings, see "Wire identifiers" below) in registration order BEFORE the trailing `"lingxi_core_v0_5_0_released"` entry. The `_note` field is also updated to mention "+3 (M5-02 orchestrator)". File grows from 286 lines to 289 lines.
+- `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json` `_note` — append " + 3 (M5-02 orchestrator: conversation_started/completed/failed)" to the existing note.
 
 **Verifications (no modification, just read in tests):**
 
-- `lingxi-core/crates/api-client/src/anthropic.rs:211` — `messages_create_non_stream` signature still matches what `ConversationOrchestrator` calls.
-- `lingxi-core/crates/protocol/src/messages.rs:25,61` — `ContentBlock` + `ConversationMessage` shapes unchanged from M4.
-- `lingxi-core/crates/tools/src/registry.rs:23` — `ToolRegistry` shape unchanged from M4.
-- `lingxi-core/crates/cost/src/summary.rs:30` — `SessionCostSummary` shape (referenced in `CostSnapshot` doc but not depended on).
-- The two M4-05 `Arc::ptr_eq` tests (`recursion_lock_child_inherits_parent_tool_registry_arc`, `budget_inheritance_child_inherits_parent_budget_arc`) at `lingxi-core/crates/tools/src/builtin/agent.rs::tests` — must remain green (Task 16 step 1).
+- `lingxi-code/crates/api-client/src/anthropic.rs:211` — `messages_create_non_stream` signature still matches what `ConversationOrchestrator` calls.
+- `lingxi-code/crates/protocol/src/messages.rs:25,61` — `ContentBlock` + `ConversationMessage` shapes unchanged from M4.
+- `lingxi-code/crates/tools/src/registry.rs:23` — `ToolRegistry` shape unchanged from M4.
+- `lingxi-code/crates/cost/src/summary.rs:30` — `SessionCostSummary` shape (referenced in `CostSnapshot` doc but not depended on).
+- The two M4-05 `Arc::ptr_eq` tests (`recursion_lock_child_inherits_parent_tool_registry_arc`, `budget_inheritance_child_inherits_parent_budget_arc`) at `lingxi-code/crates/tools/src/builtin/agent.rs::tests` — must remain green (Task 16 step 1).
 
 **Critical fidelity notes (locked here):**
 
@@ -153,17 +153,17 @@ This plan ships:
 ### Task 1: Scaffold new crate `lingxi-orchestrator` + workspace registration
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/Cargo.toml`
-- Create: `lingxi-core/crates/orchestrator/src/lib.rs`
-- Modify: `lingxi-core/Cargo.toml` (add to `[workspace] members` AND `default-members`)
+- Create: `lingxi-code/crates/orchestrator/Cargo.toml`
+- Create: `lingxi-code/crates/orchestrator/src/lib.rs`
+- Modify: `lingxi-code/Cargo.toml` (add to `[workspace] members` AND `default-members`)
 
 **Steps:**
 
-- [ ] Step 1 — Verify predecessor `c477822` (M5-01) is on `HEAD` and that the directory `lingxi-core/crates/orchestrator/` does NOT yet exist. Run `git log -1 --oneline` and `ls lingxi-core/crates/orchestrator 2>/dev/null; echo $?` — second command must print non-zero exit code.
+- [ ] Step 1 — Verify predecessor `c477822` (M5-01) is on `HEAD` and that the directory `lingxi-code/crates/orchestrator/` does NOT yet exist. Run `git log -1 --oneline` and `ls lingxi-code/crates/orchestrator 2>/dev/null; echo $?` — second command must print non-zero exit code.
 
-- [ ] Step 2 — Modify `lingxi-core/Cargo.toml` to add `"crates/orchestrator",` to BOTH `[workspace] members` (line 4-50 block) AND `default-members` (line 53-86 block). Insert the line immediately AFTER `"crates/mcp",` in both arrays (alphabetic placement reads naturally between `mcp` and `outputstyles`). Do not touch any other workspace settings.
+- [ ] Step 2 — Modify `lingxi-code/Cargo.toml` to add `"crates/orchestrator",` to BOTH `[workspace] members` (line 4-50 block) AND `default-members` (line 53-86 block). Insert the line immediately AFTER `"crates/mcp",` in both arrays (alphabetic placement reads naturally between `mcp` and `outputstyles`). Do not touch any other workspace settings.
 
-- [ ] Step 3 — Create `lingxi-core/crates/orchestrator/Cargo.toml`:
+- [ ] Step 3 — Create `lingxi-code/crates/orchestrator/Cargo.toml`:
   ```toml
   [package]
   name = "lingxi-orchestrator"
@@ -199,7 +199,7 @@ This plan ships:
   workspace = true
   ```
 
-- [ ] Step 4 — Create `lingxi-core/crates/orchestrator/src/lib.rs`:
+- [ ] Step 4 — Create `lingxi-code/crates/orchestrator/src/lib.rs`:
   ```rust
   //! Top-level conversational orchestrator — drives the v0.6.0 turn loop.
   //!
@@ -230,11 +230,11 @@ This plan ships:
   ```
 
   Note: at this task the four submodules are empty stubs (Tasks 2/5/10 fill them). Create EACH submodule file as an empty file with just `//! placeholder` plus `#![forbid(unsafe_code)]` is NOT needed at module level — only `lib.rs` carries `#![forbid(unsafe_code)]`. Specifically create:
-  - `lingxi-core/crates/orchestrator/src/config.rs` — file body `//! Orchestrator configuration. Filled in Task 5.`
-  - `lingxi-core/crates/orchestrator/src/conversation.rs` — file body `//! Conversation orchestrator. Filled in Task 10.`
-  - `lingxi-core/crates/orchestrator/src/error.rs` — file body `//! Orchestrator errors. Filled in Task 2.`
-  - `lingxi-core/crates/orchestrator/src/turn_loop.rs` — file body `//! Inner turn loop. Filled in Task 10.`
-  - `lingxi-core/crates/orchestrator/src/test_support.rs` — file body `//! Test fixtures. Filled in Tasks 6-8.`
+  - `lingxi-code/crates/orchestrator/src/config.rs` — file body `//! Orchestrator configuration. Filled in Task 5.`
+  - `lingxi-code/crates/orchestrator/src/conversation.rs` — file body `//! Conversation orchestrator. Filled in Task 10.`
+  - `lingxi-code/crates/orchestrator/src/error.rs` — file body `//! Orchestrator errors. Filled in Task 2.`
+  - `lingxi-code/crates/orchestrator/src/turn_loop.rs` — file body `//! Inner turn loop. Filled in Task 10.`
+  - `lingxi-code/crates/orchestrator/src/test_support.rs` — file body `//! Test fixtures. Filled in Tasks 6-8.`
 
   Until those tasks fill the modules, `lib.rs` would fail to compile if it tried to re-export from them. So at this task, `lib.rs` is the version WITHOUT the `pub use` lines — those land in their respective tasks. Replace the `pub use` lines above with TODO comments:
   ```rust
@@ -258,14 +258,14 @@ This plan ships:
 ### Task 2: `OrchestratorError` enum with byte-locked `MaxTurnsReached` Display
 
 **Files:**
-- Modify (fill from stub): `lingxi-core/crates/orchestrator/src/error.rs`
-- Modify: `lingxi-core/crates/orchestrator/src/lib.rs` (uncomment the `pub use error::OrchestratorError;` line)
+- Modify (fill from stub): `lingxi-code/crates/orchestrator/src/error.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/lib.rs` (uncomment the `pub use error::OrchestratorError;` line)
 
 **Steps:**
 
 - [ ] Step 1 — Re-verify the byte-locked message source. Run `grep -n "Reached maximum number of turns" claude-code/src/QueryEngine.ts` and confirm the match at line 870 reads exactly `` `Reached maximum number of turns (${message.attachment.maxTurns})` ``. The Rust Display must produce the literal `Reached maximum number of turns (<n>)` where `<n>` is the integer value (no padding, no commas, plain `Display` formatting). NOTE: claude-code uses TS template literal — the parentheses are literal `(` `)` chars and the value substitution is `${maxTurns}` with no formatting; Rust `write!(f, "Reached maximum number of turns ({})", max_turns)` produces the byte-identical string.
 
-- [ ] Step 2 — Fill `lingxi-core/crates/orchestrator/src/error.rs`:
+- [ ] Step 2 — Fill `lingxi-code/crates/orchestrator/src/error.rs`:
   ```rust
   //! Orchestrator-side errors.
   //!
@@ -303,7 +303,7 @@ This plan ships:
   }
   ```
 
-- [ ] Step 3 — Uncomment `pub use error::OrchestratorError;` in `lingxi-core/crates/orchestrator/src/lib.rs`.
+- [ ] Step 3 — Uncomment `pub use error::OrchestratorError;` in `lingxi-code/crates/orchestrator/src/lib.rs`.
 
 - [ ] Step 4 — Inside `error.rs`, add a `#[cfg(test)] mod tests` block:
   ```rust
@@ -348,12 +348,12 @@ This plan ships:
 ### Task 3: Add `OrchestratorHandle`, `OutputStream`, `OutputEvent`, `CostSnapshot`, `CompactionSummary` traits to `lingxi-traits`
 
 **Files:**
-- Create: `lingxi-core/crates/traits/src/orchestrator.rs`
-- Modify: `lingxi-core/crates/traits/src/lib.rs` (add `pub mod orchestrator;` + re-exports)
+- Create: `lingxi-code/crates/traits/src/orchestrator.rs`
+- Modify: `lingxi-code/crates/traits/src/lib.rs` (add `pub mod orchestrator;` + re-exports)
 
 **Steps:**
 
-- [ ] Step 1 — Create `lingxi-core/crates/traits/src/orchestrator.rs`:
+- [ ] Step 1 — Create `lingxi-code/crates/traits/src/orchestrator.rs`:
   ```rust
   //! Orchestrator-level traits — the public surface that slash commands
   //! (via `SlashContext`, M5-09) and the CLI binary (M5-12) consume.
@@ -555,7 +555,7 @@ This plan ships:
 
   Use only the corrected version. (The earlier draft with `PhantomData<T>` is documentation; do NOT paste it.)
 
-- [ ] Step 2 — Modify `lingxi-core/crates/traits/src/lib.rs` — add the module declaration AND re-exports. Insert after the existing `pub mod mcp;` line:
+- [ ] Step 2 — Modify `lingxi-code/crates/traits/src/lib.rs` — add the module declaration AND re-exports. Insert after the existing `pub mod mcp;` line:
   ```rust
   pub mod orchestrator;
   ```
@@ -579,13 +579,13 @@ This plan ships:
 ### Task 4: Confirm `CostSnapshot` placement + relationship to `lingxi-cost::SessionCostSummary`
 
 **Files:**
-- Modify (small doc-only): `lingxi-core/crates/cost/src/summary.rs` (add cross-reference doc-link in the `SessionCostSummary` doc comment).
+- Modify (small doc-only): `lingxi-code/crates/cost/src/summary.rs` (add cross-reference doc-link in the `SessionCostSummary` doc comment).
 
 **Steps:**
 
-- [ ] Step 1 — Read `lingxi-core/crates/cost/src/summary.rs:43` to confirm `SessionCostSummary` still has fields `{ session_id, total_nano_usd, total_tokens }` (it does — verified at plan-writing time). The trait-side `CostSnapshot` from Task 3 mirrors these three fields exactly. Confirmation prevents drift between the cost crate and the trait crate.
+- [ ] Step 1 — Read `lingxi-code/crates/cost/src/summary.rs:43` to confirm `SessionCostSummary` still has fields `{ session_id, total_nano_usd, total_tokens }` (it does — verified at plan-writing time). The trait-side `CostSnapshot` from Task 3 mirrors these three fields exactly. Confirmation prevents drift between the cost crate and the trait crate.
 
-- [ ] Step 2 — In `lingxi-core/crates/cost/src/summary.rs`, just above the `pub struct SessionCostSummary` declaration (currently line 43), add the cross-reference paragraph to its doc comment:
+- [ ] Step 2 — In `lingxi-code/crates/cost/src/summary.rs`, just above the `pub struct SessionCostSummary` declaration (currently line 43), add the cross-reference paragraph to its doc comment:
   ```rust
   /// Session-scope rollup.
   ///
@@ -621,12 +621,12 @@ This plan ships:
 ### Task 5: `OrchestratorConfig` with `MAX_TURNS_DEFAULT = 30`
 
 **Files:**
-- Modify (fill from stub): `lingxi-core/crates/orchestrator/src/config.rs`
-- Modify: `lingxi-core/crates/orchestrator/src/lib.rs` (uncomment `pub use config::{OrchestratorConfig, MAX_TURNS_DEFAULT};`).
+- Modify (fill from stub): `lingxi-code/crates/orchestrator/src/config.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/lib.rs` (uncomment `pub use config::{OrchestratorConfig, MAX_TURNS_DEFAULT};`).
 
 **Steps:**
 
-- [ ] Step 1 — Fill `lingxi-core/crates/orchestrator/src/config.rs`:
+- [ ] Step 1 — Fill `lingxi-code/crates/orchestrator/src/config.rs`:
   ```rust
   //! Orchestrator runtime configuration.
   //!
@@ -712,7 +712,7 @@ This plan ships:
   }
   ```
 
-- [ ] Step 2 — Uncomment `pub use config::{OrchestratorConfig, MAX_TURNS_DEFAULT};` in `lingxi-core/crates/orchestrator/src/lib.rs`.
+- [ ] Step 2 — Uncomment `pub use config::{OrchestratorConfig, MAX_TURNS_DEFAULT};` in `lingxi-code/crates/orchestrator/src/lib.rs`.
 
 - [ ] Step 3 — Run `cargo test -p lingxi-orchestrator --lib config::tests` — all 4 tests must pass.
 
@@ -725,13 +725,13 @@ This plan ships:
 ### Task 6: `MockApiClient` in `test_support` + internal `OrchestratorApiClient` trait
 
 **Files:**
-- Modify (start filling): `lingxi-core/crates/orchestrator/src/test_support.rs`
-- Modify (add private trait def): `lingxi-core/crates/orchestrator/src/conversation.rs`
-- Modify: `lingxi-core/crates/orchestrator/src/lib.rs` (uncomment `pub use conversation::{ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient};` partially — see step 4).
+- Modify (start filling): `lingxi-code/crates/orchestrator/src/test_support.rs`
+- Modify (add private trait def): `lingxi-code/crates/orchestrator/src/conversation.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/lib.rs` (uncomment `pub use conversation::{ConversationOrchestrator, ConversationOutcome, OrchestratorApiClient};` partially — see step 4).
 
 **Steps:**
 
-- [ ] Step 1 — In `lingxi-core/crates/orchestrator/src/conversation.rs`, replace the placeholder with the trait definition (production-only — `ConversationOrchestrator` lands in Task 10):
+- [ ] Step 1 — In `lingxi-code/crates/orchestrator/src/conversation.rs`, replace the placeholder with the trait definition (production-only — `ConversationOrchestrator` lands in Task 10):
   ```rust
   //! Conversation orchestrator.
   //!
@@ -759,7 +759,7 @@ This plan ships:
   }
   ```
 
-- [ ] Step 2 — Fill `lingxi-core/crates/orchestrator/src/test_support.rs` with the `MockApiClient` (M5-02 ships ONE mock; later tasks add more):
+- [ ] Step 2 — Fill `lingxi-code/crates/orchestrator/src/test_support.rs` with the `MockApiClient` (M5-02 ships ONE mock; later tasks add more):
   ```rust
   //! Test fixtures.
   //!
@@ -838,11 +838,11 @@ This plan ships:
   }
   ```
 
-  Note: `lingxi_api_client::ApiError::ProviderError(String)` is the closest variant — if M3-03's actual variant name differs (it's locked in the api-client crate), the test will fail to compile and we adjust to the actual variant name. The fall-back is `ApiError::Transport(...)` or similar. Check `lingxi-core/crates/api-client/src/error.rs` first; the production variant for "no upstream response" is most likely `ApiError::ProviderError(String)` per the M3-03 lock.
+  Note: `lingxi_api_client::ApiError::ProviderError(String)` is the closest variant — if M3-03's actual variant name differs (it's locked in the api-client crate), the test will fail to compile and we adjust to the actual variant name. The fall-back is `ApiError::Transport(...)` or similar. Check `lingxi-code/crates/api-client/src/error.rs` first; the production variant for "no upstream response" is most likely `ApiError::ProviderError(String)` per the M3-03 lock.
 
-  **Verification step inside this task**: before writing the line above, `grep -n "pub enum ApiError" lingxi-core/crates/api-client/src/error.rs` AND `grep -n "^    [A-Z]" lingxi-core/crates/api-client/src/error.rs` to see the actual variants. Use the closest single-string-payload variant. If none exists, add a quoted alternative path: use `ApiError::from(std::io::Error::new(std::io::ErrorKind::Other, "mock script exhausted"))` IFF `ApiError: From<std::io::Error>`. Document the exact variant chosen in a comment.
+  **Verification step inside this task**: before writing the line above, `grep -n "pub enum ApiError" lingxi-code/crates/api-client/src/error.rs` AND `grep -n "^    [A-Z]" lingxi-code/crates/api-client/src/error.rs` to see the actual variants. Use the closest single-string-payload variant. If none exists, add a quoted alternative path: use `ApiError::from(std::io::Error::new(std::io::ErrorKind::Other, "mock script exhausted"))` IFF `ApiError: From<std::io::Error>`. Document the exact variant chosen in a comment.
 
-- [ ] Step 3 — In `lingxi-core/crates/orchestrator/src/lib.rs`, uncomment partial — only the trait needs exposing now; `ConversationOrchestrator` + `ConversationOutcome` lands in Task 10:
+- [ ] Step 3 — In `lingxi-code/crates/orchestrator/src/lib.rs`, uncomment partial — only the trait needs exposing now; `ConversationOrchestrator` + `ConversationOutcome` lands in Task 10:
   ```rust
   pub use conversation::OrchestratorApiClient;
   // pub use conversation::{ConversationOrchestrator, ConversationOutcome};  // Task 10
@@ -910,11 +910,11 @@ This plan ships:
 ### Task 7: `MockOutputStream` + `OutputEventCapture` in `test_support`
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/test_support.rs` (append `MockOutputStream` + helpers).
+- Modify: `lingxi-code/crates/orchestrator/src/test_support.rs` (append `MockOutputStream` + helpers).
 
 **Steps:**
 
-- [ ] Step 1 — Append to `lingxi-core/crates/orchestrator/src/test_support.rs`:
+- [ ] Step 1 — Append to `lingxi-code/crates/orchestrator/src/test_support.rs`:
   ```rust
   use async_trait::async_trait as _;
   use lingxi_traits::{CostSnapshot, OutputEvent, OutputStream};
@@ -1044,14 +1044,14 @@ This plan ships:
 ### Task 8: `NoOpHookExecutor` + `NoOpPermissionGate` stubs
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/test_support.rs` (append two stubs).
+- Modify: `lingxi-code/crates/orchestrator/src/test_support.rs` (append two stubs).
 
 **Steps:**
 
 - [ ] Step 1 — First grep for the hook executor trait surface and the permission gate trait surface to make sure the stubs match the real shape. Read the relevant signatures:
   ```bash
   grep -n "pub trait HookExecutor\|pub trait PermissionGate\|async fn.*check\|async fn pre_tool\|async fn post_tool" \
-      lingxi-core/crates/hooks/src/lib.rs lingxi-core/crates/permission/src/lib.rs
+      lingxi-code/crates/hooks/src/lib.rs lingxi-code/crates/permission/src/lib.rs
   ```
   Lock the exact method names + arg shapes from the output. **Decision rule**: if `lingxi-hooks` exposes a trait method like `async fn execute(&self, event: HookEvent) -> Result<HookOutcome, HookError>` (where `HookEvent` is the enum with `PreToolUse { tool_name, tool_input }` and `PostToolUse { tool_name, tool_output, is_error }` arms), the stub does `Ok(HookOutcome::Continue)`. If the surface differs (M5-06 is the canonical wiring plan — M5-02 only consumes whatever exists today), document the discovered shape in this task's commit message and mirror it.
 
@@ -1059,7 +1059,7 @@ This plan ships:
 
   Default to the fallback path unless the grep above shows an existing trait with a compatible shape.
 
-- [ ] Step 2 — Append to `lingxi-core/crates/orchestrator/src/test_support.rs`:
+- [ ] Step 2 — Append to `lingxi-code/crates/orchestrator/src/test_support.rs`:
   ```rust
   /// Local hook executor trait used by `ConversationOrchestrator` until
   /// M5-06 wires the real 4-arm executor from `lingxi-hooks`. Lives here
@@ -1163,11 +1163,11 @@ This plan ships:
 ### Task 9: First failing test — `orchestrator_smoke_test.rs` (single turn, no tools)
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/tests/orchestrator_smoke_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/orchestrator_smoke_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Create `lingxi-core/crates/orchestrator/tests/orchestrator_smoke_test.rs`:
+- [ ] Step 1 — Create `lingxi-code/crates/orchestrator/tests/orchestrator_smoke_test.rs`:
   ```rust
   //! M5-02 Task 9: failing smoke test that drives the future
   //! `ConversationOrchestrator::run_turn` happy path. Expected to FAIL at
@@ -1233,13 +1233,13 @@ This plan ships:
 ### Task 10: Implement `ConversationOrchestrator::new` + `run_turn` happy path
 
 **Files:**
-- Modify (fill from stub): `lingxi-core/crates/orchestrator/src/conversation.rs` (add struct + `new` + `run_turn`)
-- Modify (fill from stub): `lingxi-core/crates/orchestrator/src/turn_loop.rs` (private helpers for turn execution)
-- Modify: `lingxi-core/crates/orchestrator/src/lib.rs` (uncomment `pub use conversation::{ConversationOrchestrator, ConversationOutcome};`).
+- Modify (fill from stub): `lingxi-code/crates/orchestrator/src/conversation.rs` (add struct + `new` + `run_turn`)
+- Modify (fill from stub): `lingxi-code/crates/orchestrator/src/turn_loop.rs` (private helpers for turn execution)
+- Modify: `lingxi-code/crates/orchestrator/src/lib.rs` (uncomment `pub use conversation::{ConversationOrchestrator, ConversationOutcome};`).
 
 **Steps:**
 
-- [ ] Step 1 — Fill `lingxi-core/crates/orchestrator/src/conversation.rs` with the full struct + methods. The file now needs:
+- [ ] Step 1 — Fill `lingxi-code/crates/orchestrator/src/conversation.rs` with the full struct + methods. The file now needs:
   - The `OrchestratorApiClient` trait (from Task 6).
   - The `ConversationOrchestrator` struct.
   - `ConversationOutcome` enum.
@@ -1415,7 +1415,7 @@ This plan ships:
 
   **Note on `AnthropicProvider::new`**: M3-03 made `AnthropicProvider` constructable with a builder; the adapter just stores an already-constructed provider so the caller (M5-12 CLI) handles construction. M5-02 does NOT itself test the adapter end-to-end (no live HTTP); the adapter only needs to compile. Tests use `MockApiClient` which bypasses the adapter entirely.
 
-- [ ] Step 2 — Fill `lingxi-core/crates/orchestrator/src/turn_loop.rs`:
+- [ ] Step 2 — Fill `lingxi-code/crates/orchestrator/src/turn_loop.rs`:
   ```rust
   //! Inner turn-by-turn loop helpers. Private to `ConversationOrchestrator`.
 
@@ -1665,11 +1665,11 @@ This plan ships:
   }
   ```
 
-  **`SessionState.usage`**: M1 ships `CumulativeUsage` with `input_tokens: u64, output_tokens: u64` (plus possibly cache fields). Grep `lingxi-core/crates/core/src/session.rs` for the exact field name — if it's `prompt_tokens` instead of `input_tokens`, adjust. The fall-back is `s.usage.input_tokens` / `s.usage.output_tokens` per M1 lock. Task 10 step 0 (below) does that grep.
+  **`SessionState.usage`**: M1 ships `CumulativeUsage` with `input_tokens: u64, output_tokens: u64` (plus possibly cache fields). Grep `lingxi-code/crates/core/src/session.rs` for the exact field name — if it's `prompt_tokens` instead of `input_tokens`, adjust. The fall-back is `s.usage.input_tokens` / `s.usage.output_tokens` per M1 lock. Task 10 step 0 (below) does that grep.
 
-- [ ] Step 0 — (Pre-step) Run `grep -n "pub struct CumulativeUsage\|pub.*input_tokens\|pub.*output_tokens\|pub.*prompt_tokens" lingxi-core/crates/core/src/session.rs lingxi-core/crates/core/src/usage.rs 2>/dev/null` to confirm field names. Lock the actual field names in `cost_snapshot_from_session`. (If neither exists yet — `CumulativeUsage` could be `Default`-only — use `0` for `total_tokens` and document the placeholder.)
+- [ ] Step 0 — (Pre-step) Run `grep -n "pub struct CumulativeUsage\|pub.*input_tokens\|pub.*output_tokens\|pub.*prompt_tokens" lingxi-code/crates/core/src/session.rs lingxi-code/crates/core/src/usage.rs 2>/dev/null` to confirm field names. Lock the actual field names in `cost_snapshot_from_session`. (If neither exists yet — `CumulativeUsage` could be `Default`-only — use `0` for `total_tokens` and document the placeholder.)
 
-- [ ] Step 3 — Uncomment `pub use conversation::{ConversationOrchestrator, ConversationOutcome};` in `lingxi-core/crates/orchestrator/src/lib.rs`.
+- [ ] Step 3 — Uncomment `pub use conversation::{ConversationOrchestrator, ConversationOutcome};` in `lingxi-code/crates/orchestrator/src/lib.rs`.
 
 - [ ] Step 4 — Run `cargo test -p lingxi-orchestrator --test orchestrator_smoke_test`. The test from Task 9 must now PASS. (If the smoke test still fails because of a field-name mismatch in `CumulativeUsage`, debug + fix; do not declare success without `cargo test -p lingxi-orchestrator --test orchestrator_smoke_test` printing `test result: ok. 1 passed`.)
 
@@ -1684,7 +1684,7 @@ This plan ships:
 ### Task 11: Multi-turn with one tool_use — `orchestrator_multi_turn_test.rs`
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/tests/orchestrator_multi_turn_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/orchestrator_multi_turn_test.rs`
 
 **Steps:**
 
@@ -1842,7 +1842,7 @@ This plan ships:
 
 - [ ] Step 2 — Run `cargo test -p lingxi-orchestrator --test orchestrator_multi_turn_test`. Must pass.
 
-- [ ] Step 3 — If a `lingxi-permission::PermissionDecisionReason` field name differs (registry's `DummyTool` in `lingxi-tools` uses the same pattern — see `lingxi-core/crates/tools/src/registry.rs::tests:151`), align names.
+- [ ] Step 3 — If a `lingxi-permission::PermissionDecisionReason` field name differs (registry's `DummyTool` in `lingxi-tools` uses the same pattern — see `lingxi-code/crates/tools/src/registry.rs::tests:151`), align names.
 
 - [ ] Step 4 — Run `cargo test -p lingxi-orchestrator` (full crate) — all tests must pass.
 
@@ -1853,7 +1853,7 @@ This plan ships:
 ### Task 12: `max_turns` exceeded — `orchestrator_max_turns_test.rs`
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/tests/orchestrator_max_turns_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/orchestrator_max_turns_test.rs`
 
 **Steps:**
 
@@ -1976,7 +1976,7 @@ This plan ships:
 ### Task 13: Tool returns `ToolError` — `orchestrator_tool_error_test.rs`
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/tests/orchestrator_tool_error_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/orchestrator_tool_error_test.rs`
 
 **Steps:**
 
@@ -2122,7 +2122,7 @@ This plan ships:
 ### Task 14: Integration with real `ToolRegistry` + builtin `Read` tool
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/tests/orchestrator_real_tools_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/orchestrator_real_tools_test.rs`
 
 **Steps:**
 
@@ -2203,7 +2203,7 @@ This plan ships:
   }
   ```
 
-  **`FileReadTool::default()` constructor**: M4-01 either ships `Default` for the tool or requires a builder. Grep `lingxi-core/crates/tools/src/builtin/file_read.rs` (or equivalent) to confirm — if no `Default`, use whatever zero-arg constructor exists (e.g. `FileReadTool::new()`). The test code adjusts to the actual API.
+  **`FileReadTool::default()` constructor**: M4-01 either ships `Default` for the tool or requires a builder. Grep `lingxi-code/crates/tools/src/builtin/file_read.rs` (or equivalent) to confirm — if no `Default`, use whatever zero-arg constructor exists (e.g. `FileReadTool::new()`). The test code adjusts to the actual API.
 
 - [ ] Step 2 — Run `cargo test -p lingxi-orchestrator --test orchestrator_real_tools_test`. Must pass.
 
@@ -2218,16 +2218,16 @@ This plan ships:
 ### Task 15: 3 telemetry events — new `tengu::orchestrator` submodule + wire emission
 
 **Files:**
-- Create: `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs`
-- Modify: `lingxi-core/crates/telemetry/src/tengu/mod.rs` (declare submodule + grow `TOTAL` + insert in `concat_all`)
-- Modify: `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs` (count 238 → 241)
-- Modify: `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json` (insert 3 names + update `_note`)
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs` (wire emission inside `run_turn`)
-- Modify: `lingxi-core/crates/orchestrator/Cargo.toml` (already depends on `lingxi-telemetry` — no change unless the dep wasn't added in Task 1; double-check)
+- Create: `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs`
+- Modify: `lingxi-code/crates/telemetry/src/tengu/mod.rs` (declare submodule + grow `TOTAL` + insert in `concat_all`)
+- Modify: `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs` (count 238 → 241)
+- Modify: `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json` (insert 3 names + update `_note`)
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs` (wire emission inside `run_turn`)
+- Modify: `lingxi-code/crates/orchestrator/Cargo.toml` (already depends on `lingxi-telemetry` — no change unless the dep wasn't added in Task 1; double-check)
 
 **Steps:**
 
-- [ ] Step 1 — Create `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs` following the `release.rs` template:
+- [ ] Step 1 — Create `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` following the `release.rs` template:
   ```rust
   //! Orchestrator-lifecycle events (M5-02).
   //!
@@ -2259,7 +2259,7 @@ This plan ships:
   ];
   ```
 
-- [ ] Step 2 — Modify `lingxi-core/crates/telemetry/src/tengu/mod.rs` — declare the submodule + grow `TOTAL` + walk in `concat_all`:
+- [ ] Step 2 — Modify `lingxi-code/crates/telemetry/src/tengu/mod.rs` — declare the submodule + grow `TOTAL` + walk in `concat_all`:
   - Add `pub mod orchestrator;` to the module declarations (right after `pub mod memory;`).
   - Change `const TOTAL: usize = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 1;` (238) to `const TOTAL: usize = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 3 + 1;` (241). The `+ 3` is added BEFORE the final `+ 1` (release marker stays last).
   - In `concat_all()`, add a walk loop for `orchestrator::NAMES` BEFORE the `release::NAMES` walk:
@@ -2273,7 +2273,7 @@ This plan ships:
     ```
   - Update the module-level doc comment top-line: change `"api → agent → session → tool → cost → oauth → memory → settings."` to `"api → agent → session → tool → cost → oauth → memory → settings → orchestrator → release."` (the older docstring also mentions release implicitly; update both occurrences).
 
-- [ ] Step 3 — Modify `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs`:
+- [ ] Step 3 — Modify `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs`:
   - Update the assertion `assert_eq!(ALL_EVENT_NAMES.len(), 238);` → `assert_eq!(ALL_EVENT_NAMES.len(), 241);`.
   - Update the explanatory comment to include the M5-02 row:
     ```rust
@@ -2286,7 +2286,7 @@ This plan ships:
     // 213 (post-M4-07) + 24 (M4-08) + 1 (M4-09) + 3 (M5-02) = 241.
     ```
 
-- [ ] Step 4 — Modify `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json`:
+- [ ] Step 4 — Modify `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json`:
   - Insert these 3 lines immediately BEFORE the trailing `"lingxi_core_v0_5_0_released"` entry (which is currently line 242). The new lines become 242/243/244, the release marker shifts to 245:
     ```json
         "tengu_orchestrator_conversation_started",
@@ -2297,7 +2297,7 @@ This plan ships:
   - Update the `_note` field: append " + 3 (M5-02 orchestrator: conversation_started/completed/failed)" to the existing `_note` string. New total in the note is `216` → `241` (or update whatever current count is mentioned).
   - File total line count grows from 286 → 289.
 
-- [ ] Step 5 — Wire emission in `lingxi-core/crates/orchestrator/src/conversation.rs`:
+- [ ] Step 5 — Wire emission in `lingxi-code/crates/orchestrator/src/conversation.rs`:
   - Add `use lingxi_telemetry::tengu::orchestrator as orch_events;` at the top.
   - Inside `ConversationOrchestrator::run_turn`, immediately at the top (BEFORE the session mutation):
     ```rust
@@ -2335,7 +2335,7 @@ This plan ships:
     }
     ```
 
-- [ ] Step 6 — Add a tracing-subscriber-based test that asserts the 3 events fire in order. Append to `lingxi-core/crates/orchestrator/tests/orchestrator_smoke_test.rs`:
+- [ ] Step 6 — Add a tracing-subscriber-based test that asserts the 3 events fire in order. Append to `lingxi-code/crates/orchestrator/tests/orchestrator_smoke_test.rs`:
   ```rust
   use tracing::subscriber;
   use tracing_subscriber::{fmt, EnvFilter};
@@ -2346,7 +2346,7 @@ This plan ships:
   // `ALL_EVENT_NAMES`. The smoke test here just verifies the events compile.)
   ```
 
-  Actually, do NOT modify the existing smoke test. Instead create a NEW test file `lingxi-core/crates/orchestrator/tests/orchestrator_telemetry_test.rs`:
+  Actually, do NOT modify the existing smoke test. Instead create a NEW test file `lingxi-code/crates/orchestrator/tests/orchestrator_telemetry_test.rs`:
   ```rust
   //! M5-02 Task 15: verify orchestrator emits the 3 lifecycle events.
 
@@ -2459,7 +2459,7 @@ This plan ships:
   }
   ```
 
-  This test requires `tracing-subscriber` as a dev-dep. Modify `lingxi-core/crates/orchestrator/Cargo.toml` `[dev-dependencies]`:
+  This test requires `tracing-subscriber` as a dev-dep. Modify `lingxi-code/crates/orchestrator/Cargo.toml` `[dev-dependencies]`:
   ```toml
   tracing = "0.1"
   tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }

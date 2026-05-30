@@ -18,26 +18,26 @@
 ## File touch inventory (locked at top per spec Appendix A)
 
 Rewrites (file body replaced):
-- `lingxi-core/platforms/windows/src/sandbox.rs` — full rewrite to `Unsupported` stub.
-- `lingxi-core/platforms/windows/src/swarm.rs` — full rewrite to `Unsupported` stub.
-- `lingxi-core/crates/bridge/src/message.rs` — collapse to placeholder struct.
-- `lingxi-core/crates/bridge/src/state.rs` — keep two fields, tighten module doc.
-- `lingxi-core/crates/bridge/src/transport.rs` — collapse to `Unsupported` stub.
-- `lingxi-core/crates/bridge/src/lib.rs` — drop four `pub mod` decls + re-exports.
-- `lingxi-core/crates/bridge/Cargo.toml` — drop `rand`/`sha2`/`hmac`/`base64` deps.
+- `lingxi-code/platforms/windows/src/sandbox.rs` — full rewrite to `Unsupported` stub.
+- `lingxi-code/platforms/windows/src/swarm.rs` — full rewrite to `Unsupported` stub.
+- `lingxi-code/crates/bridge/src/message.rs` — collapse to placeholder struct.
+- `lingxi-code/crates/bridge/src/state.rs` — keep two fields, tighten module doc.
+- `lingxi-code/crates/bridge/src/transport.rs` — collapse to `Unsupported` stub.
+- `lingxi-code/crates/bridge/src/lib.rs` — drop four `pub mod` decls + re-exports.
+- `lingxi-code/crates/bridge/Cargo.toml` — drop `rand`/`sha2`/`hmac`/`base64` deps.
 
 Deletes:
-- `lingxi-core/crates/bridge/src/codes.rs`
-- `lingxi-core/crates/bridge/src/jwt.rs`
-- `lingxi-core/crates/bridge/src/rate_limiter.rs`
-- `lingxi-core/crates/bridge/src/pairing.rs`
+- `lingxi-code/crates/bridge/src/codes.rs`
+- `lingxi-code/crates/bridge/src/jwt.rs`
+- `lingxi-code/crates/bridge/src/rate_limiter.rs`
+- `lingxi-code/crates/bridge/src/pairing.rs`
 
 In-place modifications:
-- `lingxi-core/platforms/posix/src/worktree.rs` — branch prefix `worktree-`, path under `.claude/worktrees/`, slug validation, flatten helper, copy_includes wiring, cleanup_stale stdout parsing.
-- `lingxi-core/platforms/windows/src/worktree.rs` — same set of changes mirrored.
-- `lingxi-core/crates/traits/src/sandbox.rs` — add `SandboxError::Unsupported` variant.
-- `lingxi-core/crates/traits/src/worktree.rs` — add `WorktreeError::InvalidSlug(String)` variant.
-- `lingxi-core/crates/secret/src/keychain_prefetch.rs` — module-doc update only (pointer to M2-06).
+- `lingxi-code/platforms/posix/src/worktree.rs` — branch prefix `worktree-`, path under `.claude/worktrees/`, slug validation, flatten helper, copy_includes wiring, cleanup_stale stdout parsing.
+- `lingxi-code/platforms/windows/src/worktree.rs` — same set of changes mirrored.
+- `lingxi-code/crates/traits/src/sandbox.rs` — add `SandboxError::Unsupported` variant.
+- `lingxi-code/crates/traits/src/worktree.rs` — add `WorktreeError::InvalidSlug(String)` variant.
+- `lingxi-code/crates/secret/src/keychain_prefetch.rs` — module-doc update only (pointer to M2-06).
 
 Total: 8 rewrites, 4 deletes, 5 modifications.
 
@@ -65,7 +65,7 @@ These are non-negotiable strings/identifiers from claude-code that MUST appear i
 ## Task 1: Add `SandboxError::Unsupported` variant
 
 **Files:**
-- Modify: `lingxi-core/crates/traits/src/sandbox.rs`
+- Modify: `lingxi-code/crates/traits/src/sandbox.rs`
 
 The rewritten Windows sandbox (Task 3) needs `SandboxError::Unsupported`. The current enum has `Unavailable(String)` but no parameterless `Unsupported` — claude-code's TS surface treats unsupported-platform as a distinct categorical error so we match. `SwarmError::Unsupported` already exists; this is the symmetric addition.
 
@@ -140,7 +140,7 @@ Expected: clean. No existing consumer exhaustively matches all variants without 
 ## Task 2: Add `WorktreeError::InvalidSlug` variant
 
 **Files:**
-- Modify: `lingxi-core/crates/traits/src/worktree.rs`
+- Modify: `lingxi-code/crates/traits/src/worktree.rs`
 
 `validate_worktree_slug` (Task 8) needs a categorical error for bad input. Today `WorktreeError` has only `Unsupported`, `Git(String)`, `Io(String)`; using `Git("invalid slug …")` would lie about provenance. Add an explicit variant.
 
@@ -204,7 +204,7 @@ Expected: clean.
 ## Task 3: Rewrite `platforms/windows/src/sandbox.rs` as Unsupported
 
 **Files:**
-- Rewrite: `lingxi-core/platforms/windows/src/sandbox.rs`
+- Rewrite: `lingxi-code/platforms/windows/src/sandbox.rs`
 
 claude-code refuses sandbox on Windows at the source (`@anthropic-ai/sandbox-runtime` rejects the platform in its dependency check). Our v0.2.0 Windows sandbox file pretends to validate a policy and returns `SandboxBackend::None` — that is misleading. Replace with a true `Unsupported` stub.
 
@@ -351,7 +351,7 @@ Expected: 5 sandbox tests pass; workspace clean.
 ## Task 4: Rewrite `platforms/windows/src/swarm.rs` as Unsupported
 
 **Files:**
-- Rewrite: `lingxi-core/platforms/windows/src/swarm.rs`
+- Rewrite: `lingxi-code/platforms/windows/src/swarm.rs`
 
 Current file returns `Unsupported` for two methods, but `destroy_swarm` returns `Ok(())` and the module doc mentions a "wezterm / Windows Terminal" future that does not exist in claude-code. Tighten all four trait methods plus the module doc.
 
@@ -463,9 +463,9 @@ Expected: 4 swarm tests pass; workspace clean.
 ## Task 5: Delete invented bridge files
 
 **Files:**
-- Delete: `lingxi-core/crates/bridge/src/{codes,jwt,rate_limiter,pairing}.rs`
-- Modify: `lingxi-core/crates/bridge/src/lib.rs`
-- Modify: `lingxi-core/crates/bridge/Cargo.toml`
+- Delete: `lingxi-code/crates/bridge/src/{codes,jwt,rate_limiter,pairing}.rs`
+- Modify: `lingxi-code/crates/bridge/src/lib.rs`
+- Modify: `lingxi-code/crates/bridge/Cargo.toml`
 
 These four files implemented an 8-char human-typeable pairing-code flow (A3), an HS256 JWT verifier (A3), a token-bucket rate limiter (A4), and pairing-state — the M1 imagining of a `claude.ai`-style trusted-device pairing handshake. claude-code has nothing of the kind. The local IDE bridge is MCP-over-WebSocket via lockfile discovery (M2-02). Cloud Remote Control bridge is out of scope (spec §5).
 
@@ -474,10 +474,10 @@ Delete-only task; no replacement code lands here.
 - [ ] **Step 1: Delete the four files**
 
 ```bash
-rm /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/bridge/src/codes.rs \
-   /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/bridge/src/jwt.rs \
-   /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/bridge/src/rate_limiter.rs \
-   /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/bridge/src/pairing.rs
+rm /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/bridge/src/codes.rs \
+   /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/bridge/src/jwt.rs \
+   /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/bridge/src/rate_limiter.rs \
+   /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/bridge/src/pairing.rs
 ```
 
 - [ ] **Step 2: Rewrite `crates/bridge/src/lib.rs`**
@@ -527,7 +527,7 @@ Keep all other deps (`lingxi-protocol`, `lingxi-traits`, `lingxi-secret`, `serde
 `cargo check -p lingxi-bridge` will fail until Tasks 6 + 7 land. Chain into Task 6. Spot-check:
 
 ```bash
-ls /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/bridge/src/
+ls /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/bridge/src/
 ```
 
 Expected: only `lib.rs`, `message.rs`, `state.rs`, `transport.rs` remain.
@@ -537,7 +537,7 @@ Expected: only `lib.rs`, `message.rs`, `state.rs`, `transport.rs` remain.
 ## Task 6: Simplify `crates/bridge/src/message.rs` to placeholder
 
 **Files:**
-- Rewrite: `lingxi-core/crates/bridge/src/message.rs`
+- Rewrite: `lingxi-code/crates/bridge/src/message.rs`
 
 The 9-variant `BridgeMessage` enum exists nowhere in claude-code. Replace with a placeholder unit struct + module doc explaining what replaces it.
 
@@ -590,8 +590,8 @@ mod tests {
 ## Task 7: Simplify `state.rs` + rewrite `transport.rs` stub
 
 **Files:**
-- Modify: `lingxi-core/crates/bridge/src/state.rs`
-- Rewrite: `lingxi-core/crates/bridge/src/transport.rs`
+- Modify: `lingxi-code/crates/bridge/src/state.rs`
+- Rewrite: `lingxi-code/crates/bridge/src/transport.rs`
 
 Bundle these because they're both ~20-line files and `transport.rs`'s stub depends on `state.rs` staying simple.
 
@@ -737,7 +737,7 @@ Expected: 2 (state) + 2 (message) + 4 (transport) = 8 tests pass; workspace clea
 ## Task 8: Add `validate_worktree_slug` + `flatten_slug` helpers (posix)
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/worktree.rs`
+- Modify: `lingxi-code/platforms/posix/src/worktree.rs`
 
 Two pure functions that the next two tasks (Task 9 + Task 10) consume. claude-code's TS implementation in `src/utils/worktree.ts` (locally cached at `/Users/luolingfeng/Projects/LingXi-Next/claude-code/src/utils/worktree.ts`) enforces:
 
@@ -889,7 +889,7 @@ Expected: 5 slug tests pass; workspace clean.
 ## Task 9: Fix posix worktree branch name + path layout + copy_includes
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/worktree.rs`
+- Modify: `lingxi-code/platforms/posix/src/worktree.rs`
 
 The big rename. Four behaviors change in `PosixWorktreeManager::create_worktree`:
 
@@ -984,7 +984,7 @@ mod create_tests {
 `platforms/posix/Cargo.toml` already has `tempfile` under `[dev-dependencies]` from M1. Confirm:
 
 ```bash
-grep -n "tempfile" /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/platforms/posix/Cargo.toml
+grep -n "tempfile" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/platforms/posix/Cargo.toml
 ```
 
 Expected: at least one match in `[dev-dependencies]`. If zero matches, add `tempfile = "3.13"` to that section (the workspace already pins it per spec §7.1).
@@ -1101,7 +1101,7 @@ Replace the top-of-file `//!` block with:
 The constructor signature changed (`new(repo_root, worktree_base)` → `new(repo_root)`). Find any callsite and update it:
 
 ```bash
-grep -rn "PosixWorktreeManager::new\|PosixWorktreeManager {" /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/ --include="*.rs"
+grep -rn "PosixWorktreeManager::new\|PosixWorktreeManager {" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/ --include="*.rs"
 cargo test -p lingxi-platform-posix --lib worktree::create_tests
 cargo test --workspace
 ```
@@ -1113,7 +1113,7 @@ Expected: zero or one callsite (possibly `examples/cli-demo` or `e2e_single_turn
 ## Task 10: Parse `git worktree prune -v` stdout in posix `cleanup_stale`
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/worktree.rs`
+- Modify: `lingxi-code/platforms/posix/src/worktree.rs`
 
 The current `cleanup_stale` runs `git worktree prune -v` but discards stdout and always returns `Ok(Vec::new())` — that's the M1 stub (see the `TODO(M2-followup)` comment in the v0.2.0 file). Parse stdout to return the actual pruned paths.
 
@@ -1233,7 +1233,7 @@ Expected: 3 tests pass.
 ## Task 11: Mirror the worktree changes into `platforms/windows/src/worktree.rs`
 
 **Files:**
-- Modify: `lingxi-core/platforms/windows/src/worktree.rs`
+- Modify: `lingxi-code/platforms/windows/src/worktree.rs`
 
 Apply the exact same set of changes to the Windows worktree file: helper functions, struct + constructor refactor, `create_worktree` body, `cleanup_stale` parser, and the matching test modules. The Windows version is functionally identical to posix (both shell out to `git`); `PathBuf` already abstracts the separator.
 
@@ -1281,7 +1281,7 @@ Copy both method bodies from the posix file verbatim. They are already path-agno
 Mirror posix `slug_tests`, `create_tests`, and `cleanup_tests` modules verbatim in the Windows file. `create_tests` requires `git` on PATH (CI runners have it). Search for callsite breakage as in Task 9 Step 7.
 
 ```bash
-grep -rn "WindowsWorktreeManager::new\|WindowsWorktreeManager {" /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/ --include="*.rs"
+grep -rn "WindowsWorktreeManager::new\|WindowsWorktreeManager {" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/ --include="*.rs"
 cargo test -p lingxi-platform-windows --lib worktree
 ```
 
@@ -1292,7 +1292,7 @@ Expected: all worktree-module tests pass (5 slug + 4 create + 3 cleanup = 12).
 ## Task 12: Update `keychain_prefetch.rs` module doc
 
 **Files:**
-- Modify: `lingxi-core/crates/secret/src/keychain_prefetch.rs`
+- Modify: `lingxi-code/crates/secret/src/keychain_prefetch.rs`
 
 `KeychainPrefetch` has the right shape but no real keychain wiring. M2-06 §6.6 lands the real `MacOsKeychainStorage`. M2-01 only points the module doc at M2-06.
 
@@ -1354,7 +1354,7 @@ Post-M2-01 expected: ~140 ± a few. Exact count is not load-bearing; what matter
 If `cargo test --workspace` reports any deleted bridge test as missing-by-name, that indicates a stale `--test <name>` filter somewhere; search:
 
 ```bash
-grep -rn "test.*\(codes\|jwt\|rate_limiter\|pairing\)" /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/ --include="*.rs" --include="*.toml"
+grep -rn "test.*\(codes\|jwt\|rate_limiter\|pairing\)" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/ --include="*.rs" --include="*.toml"
 ```
 
 Expected: zero matches (apart from module-doc strings, which are fine).
@@ -1390,7 +1390,7 @@ Expected: no output. (`rand` etc. may still appear elsewhere in the lockfile bec
 Confirm by inspecting `Cargo.lock` for the `lingxi-bridge` package entry:
 
 ```bash
-grep -A 30 "name = \"lingxi-bridge\"" /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/Cargo.lock | head -40
+grep -A 30 "name = \"lingxi-bridge\"" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/Cargo.lock | head -40
 ```
 
 Expected: the `dependencies = [...]` block does **not** list `rand`, `sha2`, `hmac`, `base64`.
@@ -1421,22 +1421,22 @@ git status
 git diff --stat
 ```
 
-Expected: changes in `lingxi-core/platforms/{posix,windows}/src/{sandbox,swarm,worktree}.rs`, `lingxi-core/crates/bridge/{Cargo.toml,src/{lib,message,state,transport}.rs}`, `lingxi-core/crates/secret/src/keychain_prefetch.rs`, `lingxi-core/crates/traits/src/{sandbox,worktree}.rs`. Four files deleted (`codes`, `jwt`, `pairing`, `rate_limiter` under `bridge/src/`).
+Expected: changes in `lingxi-code/platforms/{posix,windows}/src/{sandbox,swarm,worktree}.rs`, `lingxi-code/crates/bridge/{Cargo.toml,src/{lib,message,state,transport}.rs}`, `lingxi-code/crates/secret/src/keychain_prefetch.rs`, `lingxi-code/crates/traits/src/{sandbox,worktree}.rs`. Four files deleted (`codes`, `jwt`, `pairing`, `rate_limiter` under `bridge/src/`).
 
 - [ ] **Step 2: Stage the changes**
 
 ```bash
-git add lingxi-core/platforms \
-        lingxi-core/crates/bridge \
-        lingxi-core/crates/secret/src/keychain_prefetch.rs \
-        lingxi-core/crates/traits/src/sandbox.rs \
-        lingxi-core/crates/traits/src/worktree.rs
+git add lingxi-code/platforms \
+        lingxi-code/crates/bridge \
+        lingxi-code/crates/secret/src/keychain_prefetch.rs \
+        lingxi-code/crates/traits/src/sandbox.rs \
+        lingxi-code/crates/traits/src/worktree.rs
 ```
 
 If `Cargo.lock` updated (it almost certainly did after Task 5), also stage:
 
 ```bash
-git add lingxi-core/Cargo.lock
+git add lingxi-code/Cargo.lock
 ```
 
 - [ ] **Step 3: Confirm no stray files staged**

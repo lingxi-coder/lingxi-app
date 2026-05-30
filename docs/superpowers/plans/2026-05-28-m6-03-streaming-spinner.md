@@ -32,7 +32,7 @@ Captured by reading `claude-code/src/components/Spinner.tsx`, `claude-code/src/c
 | Animation tick | `useAnimationFrame(50)` ms inside `SpinnerAnimationRow` → LingXi M6 uses **100ms (10fps)** per task description (slower than claude-code's 20fps; locked to reduce render churn while still smooth). | `claude-code/src/components/Spinner/SpinnerAnimationRow.tsx` + M6 spec §3 M6-03 |
 | Verb rotation cadence | claude-code samples verb ONCE on mount via `sample(getSpinnerVerbs())`. M6 cycles deterministically every 4000ms across the 3-verb subset for testability. | `claude-code/src/components/Spinner.tsx:166` + M6-03 design |
 | TurnEvent::TurnStarted timing | Fires AFTER `BridgeOutputStream` constructed, BEFORE `run_turn_streaming_with_cancel` is awaited (i.e. the bridge spawns a task and emits `TurnStarted` synchronously then awaits the orchestrator). | New for M6-03 — no claude-code analog (Ink's reactive model handles this via component lifecycle). |
-| TurnEvent::TurnEnded payload | Wraps `TurnOutcome` (`EndTurn` / `MaxTurns` / `Cancelled`) verbatim from `lingxi_orchestrator::conversation::TurnOutcome`. | `lingxi-core/crates/orchestrator/src/conversation.rs:83-93` |
+| TurnEvent::TurnEnded payload | Wraps `TurnOutcome` (`EndTurn` / `MaxTurns` / `Cancelled`) verbatim from `lingxi_orchestrator::conversation::TurnOutcome`. | `lingxi-code/crates/orchestrator/src/conversation.rs:83-93` |
 
 **Note on braille vs asterisk frames:** the task description text mentions "10-frame braille animation (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏)". Claude-code uses asterisk/star glyphs, NOT braille. Per **Literal Lock Discipline (spec §2.8)**: every user-visible string must match claude-code byte-for-byte. This plan locks the claude-code asterisk frames as authoritative. The "braille" mention in the task description is documented as a divergence in Task 12's gate writeup.
 
@@ -42,22 +42,22 @@ Captured by reading `claude-code/src/components/Spinner.tsx`, `claude-code/src/c
 
 | Path | Action | Responsibility |
 |---|---|---|
-| `lingxi-core/crates/orchestrator/src/conversation.rs` | Modify | Add `pub async fn run_turn_streaming_with_cancel(&self, prompt: &str, cancel: CancellationToken) -> Result<TurnOutcome, OrchestratorError>` mirroring `run_turn_with_cancel` shape. |
-| `lingxi-core/crates/traits/src/orchestrator.rs` | Modify | Add `run_turn_streaming_with_cancel` to `OrchestratorHandle` trait; default impl delegates to `run_turn_streaming` (preserves existing impls). |
-| `lingxi-core/crates/orchestrator/src/handle_impl.rs` | Modify | Real impl wires through to `ConversationOrchestrator::run_turn_streaming_with_cancel`. |
-| `lingxi-core/crates/tui/src/events/orchestrator_bridge.rs` | Modify | Define `pub enum TurnEvent` + `pub struct BridgeOutputStream { tx: mpsc::UnboundedSender<TurnEvent> }` + `impl OutputStream for BridgeOutputStream`. |
-| `lingxi-core/crates/tui/src/streaming.rs` | Create | `pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify)`. Pure function — accepts mutable state, dispatches on variant, calls `notify.notify_one()` at end. |
-| `lingxi-core/crates/tui/src/components/spinner.rs` | Create | `#[component] pub fn SpinnerWithVerb` + `pub const SPINNER_FRAMES: &[&str]` + `pub const VERBS_M6: &[&str]`. |
-| `lingxi-core/crates/tui/src/app.rs` | Modify | Replace `orchestrator.run_turn(prompt)` call (M6-02) with the streaming + cancel + bridge wiring. Add `streaming: Option<StreamingState>` and `cancel_token: Option<CancellationToken>` fields to `AppState`. |
-| `lingxi-core/crates/tui/src/screens/repl.rs` | Modify | Mount `<SpinnerWithVerb verb={...} />` between scrollback and prompt input when `app.streaming.is_some()`. Wire Ctrl-C: if streaming, cancel; else delegate to existing M6-02 handler. |
-| `lingxi-core/crates/tui/src/telemetry.rs` | Modify | Register 2 new event constants: `TUI_STREAMING_RENDER_STARTED`, `TUI_STREAMING_RENDER_ENDED`. |
-| `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs` | Modify | Append 2 entries to `NAMES`: `"tengu_tui_streaming_render_started"`, `"tengu_tui_streaming_render_ended"`. Bump `NAMES.len()` documentation from 17 → 19. |
-| `lingxi-core/crates/telemetry/src/tengu/mod.rs` | Modify | Update `const TOTAL` formula: `... + 17 + ...` → `... + 19 + ...`. (Cumulative ALL_EVENT_NAMES: 315 baseline + 4 from M6-01 + 0 from M6-02 + 2 from M6-03 = 321.) |
-| `lingxi-core/crates/tui/tests/snapshots/spinner_frame_0.snap` | Create (insta) | Snapshot for frame index 0. |
-| `lingxi-core/crates/tui/tests/snapshots/spinner_frame_5.snap` | Create (insta) | Snapshot for frame index 5. |
-| `lingxi-core/crates/tui/tests/snapshots/spinner_frame_9.snap` | Create (insta) | Snapshot for frame index 9. |
-| `lingxi-core/crates/tui/tests/streaming_test.rs` | Create | Behavior tests: delta accumulation, spinner mount/unmount, Ctrl-C cancel, perf smoke. |
-| `lingxi-core/crates/tui/tests/render_spinner_test.rs` | Create | Snapshot tests for 3 frames using `iocraft::test_utils`. |
+| `lingxi-code/crates/orchestrator/src/conversation.rs` | Modify | Add `pub async fn run_turn_streaming_with_cancel(&self, prompt: &str, cancel: CancellationToken) -> Result<TurnOutcome, OrchestratorError>` mirroring `run_turn_with_cancel` shape. |
+| `lingxi-code/crates/traits/src/orchestrator.rs` | Modify | Add `run_turn_streaming_with_cancel` to `OrchestratorHandle` trait; default impl delegates to `run_turn_streaming` (preserves existing impls). |
+| `lingxi-code/crates/orchestrator/src/handle_impl.rs` | Modify | Real impl wires through to `ConversationOrchestrator::run_turn_streaming_with_cancel`. |
+| `lingxi-code/crates/tui/src/events/orchestrator_bridge.rs` | Modify | Define `pub enum TurnEvent` + `pub struct BridgeOutputStream { tx: mpsc::UnboundedSender<TurnEvent> }` + `impl OutputStream for BridgeOutputStream`. |
+| `lingxi-code/crates/tui/src/streaming.rs` | Create | `pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify)`. Pure function — accepts mutable state, dispatches on variant, calls `notify.notify_one()` at end. |
+| `lingxi-code/crates/tui/src/components/spinner.rs` | Create | `#[component] pub fn SpinnerWithVerb` + `pub const SPINNER_FRAMES: &[&str]` + `pub const VERBS_M6: &[&str]`. |
+| `lingxi-code/crates/tui/src/app.rs` | Modify | Replace `orchestrator.run_turn(prompt)` call (M6-02) with the streaming + cancel + bridge wiring. Add `streaming: Option<StreamingState>` and `cancel_token: Option<CancellationToken>` fields to `AppState`. |
+| `lingxi-code/crates/tui/src/screens/repl.rs` | Modify | Mount `<SpinnerWithVerb verb={...} />` between scrollback and prompt input when `app.streaming.is_some()`. Wire Ctrl-C: if streaming, cancel; else delegate to existing M6-02 handler. |
+| `lingxi-code/crates/tui/src/telemetry.rs` | Modify | Register 2 new event constants: `TUI_STREAMING_RENDER_STARTED`, `TUI_STREAMING_RENDER_ENDED`. |
+| `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` | Modify | Append 2 entries to `NAMES`: `"tengu_tui_streaming_render_started"`, `"tengu_tui_streaming_render_ended"`. Bump `NAMES.len()` documentation from 17 → 19. |
+| `lingxi-code/crates/telemetry/src/tengu/mod.rs` | Modify | Update `const TOTAL` formula: `... + 17 + ...` → `... + 19 + ...`. (Cumulative ALL_EVENT_NAMES: 315 baseline + 4 from M6-01 + 0 from M6-02 + 2 from M6-03 = 321.) |
+| `lingxi-code/crates/tui/tests/snapshots/spinner_frame_0.snap` | Create (insta) | Snapshot for frame index 0. |
+| `lingxi-code/crates/tui/tests/snapshots/spinner_frame_5.snap` | Create (insta) | Snapshot for frame index 5. |
+| `lingxi-code/crates/tui/tests/snapshots/spinner_frame_9.snap` | Create (insta) | Snapshot for frame index 9. |
+| `lingxi-code/crates/tui/tests/streaming_test.rs` | Create | Behavior tests: delta accumulation, spinner mount/unmount, Ctrl-C cancel, perf smoke. |
+| `lingxi-code/crates/tui/tests/render_spinner_test.rs` | Create | Snapshot tests for 3 frames using `iocraft::test_utils`. |
 
 ---
 
@@ -95,7 +95,7 @@ Captured by reading `claude-code/src/components/Spinner.tsx`, `claude-code/src/c
 
   Run:
   ```bash
-  grep -n "pub struct AppState\|pub streaming\|pub messages\|pub prompt_text" /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/tui/src/app.rs
+  grep -n "pub struct AppState\|pub streaming\|pub messages\|pub prompt_text" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/tui/src/app.rs
   ```
   Expected: `AppState` exists from M6-02 with fields `messages: Vec<RenderedMessage>`, `prompt_text: String`. NO `streaming` or `cancel_token` fields yet (this plan adds them in Task 2).
 
@@ -103,7 +103,7 @@ Captured by reading `claude-code/src/components/Spinner.tsx`, `claude-code/src/c
 
   Run:
   ```bash
-  grep -n "const TOTAL\|17 + 2 + 54" /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/telemetry/src/tengu/mod.rs
+  grep -n "const TOTAL\|17 + 2 + 54" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/telemetry/src/tengu/mod.rs
   ```
   Expected: line 41 shows `const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 2 + 54;` = **315**. After M6-01 (adds 4 events): `... + 21 + 2 + 54` = 319. After this plan: `... + 23 + 2 + 54` = 321. (Confirm M6-01's exact split: 4 events go into the orchestrator submodule? Or a new `tui` submodule? Read M6-01's plan once it exists. If M6-01 created a new `tui` submodule, this plan APPENDS to that submodule instead of orchestrator.) **If unclear**, default to appending to `orchestrator::NAMES` until M6-01 lands its plan — Task 9 step 2 below shows both forms.
 
@@ -111,7 +111,7 @@ Captured by reading `claude-code/src/components/Spinner.tsx`, `claude-code/src/c
 
   Run:
   ```bash
-  grep -n "pub async fn run_turn_streaming\|pub async fn run_turn_with_cancel" /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/orchestrator/src/conversation.rs
+  grep -n "pub async fn run_turn_streaming\|pub async fn run_turn_with_cancel" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/orchestrator/src/conversation.rs
   ```
   Expected: `run_turn_streaming(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError>` (M5-04) AND `run_turn_with_cancel(&self, prompt: &str, cancel: CancellationToken) -> Result<TurnOutcome, OrchestratorError>` (M5-13).
 
@@ -122,11 +122,11 @@ Captured by reading `claude-code/src/components/Spinner.tsx`, `claude-code/src/c
 ## Task 1: Add `ConversationOrchestrator::run_turn_streaming_with_cancel`
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs` (add new method after `run_turn_with_cancel`, around line 644).
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs` (add new method after `run_turn_with_cancel`, around line 644).
 
 - [ ] **Step 1: Write the failing test**
 
-  Append to `lingxi-core/crates/orchestrator/src/conversation.rs` `#[cfg(test)] mod tests`:
+  Append to `lingxi-code/crates/orchestrator/src/conversation.rs` `#[cfg(test)] mod tests`:
 
   ```rust
   #[tokio::test]
@@ -164,7 +164,7 @@ Captured by reading `claude-code/src/components/Spinner.tsx`, `claude-code/src/c
 
 - [ ] **Step 3: Implement the method**
 
-  In `lingxi-core/crates/orchestrator/src/conversation.rs` after the `run_turn_with_cancel` block (around line 643), add:
+  In `lingxi-code/crates/orchestrator/src/conversation.rs` after the `run_turn_with_cancel` block (around line 643), add:
 
   ```rust
       /// Streaming twin of [`Self::run_turn_with_cancel`] (M5-13).
@@ -245,7 +245,7 @@ Captured by reading `claude-code/src/components/Spinner.tsx`, `claude-code/src/c
 - [ ] **Step 6: Commit**
 
   ```bash
-  git add lingxi-core/crates/orchestrator/src/conversation.rs
+  git add lingxi-code/crates/orchestrator/src/conversation.rs
   git commit -m "feat(orchestrator): add run_turn_streaming_with_cancel for M6 TUI
 
 Mirror M5-13's run_turn_with_cancel shape, racing the streaming
@@ -260,12 +260,12 @@ Refs M6-03 Task 1"
 ## Task 2: Add `run_turn_streaming_with_cancel` to `OrchestratorHandle` trait
 
 **Files:**
-- Modify: `lingxi-core/crates/traits/src/orchestrator.rs` (trait definition).
-- Modify: `lingxi-core/crates/orchestrator/src/handle_impl.rs` (real impl).
+- Modify: `lingxi-code/crates/traits/src/orchestrator.rs` (trait definition).
+- Modify: `lingxi-code/crates/orchestrator/src/handle_impl.rs` (real impl).
 
 - [ ] **Step 1: Write the failing test**
 
-  Append to `lingxi-core/crates/orchestrator/src/handle_impl.rs` `#[cfg(test)] mod tests` (or create one if absent):
+  Append to `lingxi-code/crates/orchestrator/src/handle_impl.rs` `#[cfg(test)] mod tests` (or create one if absent):
 
   ```rust
   #[tokio::test]
@@ -290,7 +290,7 @@ Refs M6-03 Task 1"
 
 - [ ] **Step 3: Extend the trait**
 
-  In `lingxi-core/crates/traits/src/orchestrator.rs`, find the `pub trait OrchestratorHandle` block. After the existing `run_turn_with_cancel` method (M5-13), append:
+  In `lingxi-code/crates/traits/src/orchestrator.rs`, find the `pub trait OrchestratorHandle` block. After the existing `run_turn_with_cancel` method (M5-13), append:
 
   ```rust
       /// Streaming twin of [`Self::run_turn_with_cancel`]. The TUI (M6) calls
@@ -320,7 +320,7 @@ Refs M6-03 Task 1"
 
 - [ ] **Step 4: Implement on `OrchestratorHandleImpl`**
 
-  In `lingxi-core/crates/orchestrator/src/handle_impl.rs`, find the existing `impl OrchestratorHandle for OrchestratorHandleImpl` block. After `run_turn_with_cancel`, append:
+  In `lingxi-code/crates/orchestrator/src/handle_impl.rs`, find the existing `impl OrchestratorHandle for OrchestratorHandleImpl` block. After `run_turn_with_cancel`, append:
 
   ```rust
       async fn run_turn_streaming_with_cancel(
@@ -358,7 +358,7 @@ Refs M6-03 Task 1"
 - [ ] **Step 7: Commit**
 
   ```bash
-  git add lingxi-core/crates/traits/src/orchestrator.rs lingxi-core/crates/orchestrator/src/handle_impl.rs
+  git add lingxi-code/crates/traits/src/orchestrator.rs lingxi-code/crates/orchestrator/src/handle_impl.rs
   git commit -m "feat(traits): add run_turn_streaming_with_cancel to OrchestratorHandle
 
 Default impl returns Unimplemented so existing stdio REPL impl
@@ -373,11 +373,11 @@ Refs M6-03 Task 2"
 ## Task 3: Define `TurnEvent` enum and `BridgeOutputStream`
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/events/orchestrator_bridge.rs` (file exists from M6-01).
+- Modify: `lingxi-code/crates/tui/src/events/orchestrator_bridge.rs` (file exists from M6-01).
 
 - [ ] **Step 1: Write the failing test**
 
-  Append to `lingxi-core/crates/tui/src/events/orchestrator_bridge.rs`:
+  Append to `lingxi-code/crates/tui/src/events/orchestrator_bridge.rs`:
 
   ```rust
   #[cfg(test)]
@@ -432,7 +432,7 @@ Refs M6-03 Task 2"
 
 - [ ] **Step 3: Define `TurnEvent` enum**
 
-  Add to the top of `lingxi-core/crates/tui/src/events/orchestrator_bridge.rs`:
+  Add to the top of `lingxi-code/crates/tui/src/events/orchestrator_bridge.rs`:
 
   ```rust
   use async_trait::async_trait;
@@ -520,13 +520,13 @@ Refs M6-03 Task 2"
   }
   ```
 
-  If `uuid` crate is not yet in `lingxi-core/crates/tui/Cargo.toml`, add it:
+  If `uuid` crate is not yet in `lingxi-code/crates/tui/Cargo.toml`, add it:
 
   ```toml
   uuid = { workspace = true, features = ["v4"] }
   ```
 
-  If `uuid` is not yet in `lingxi-core/Cargo.toml` `[workspace.dependencies]`, add:
+  If `uuid` is not yet in `lingxi-code/Cargo.toml` `[workspace.dependencies]`, add:
 
   ```toml
   uuid = { version = "1", default-features = false, features = ["v4"] }
@@ -567,7 +567,7 @@ Refs M6-03 Task 2"
 - [ ] **Step 6: Commit**
 
   ```bash
-  git add lingxi-core/crates/tui/src/events/orchestrator_bridge.rs lingxi-core/crates/tui/Cargo.toml lingxi-core/Cargo.toml
+  git add lingxi-code/crates/tui/src/events/orchestrator_bridge.rs lingxi-code/crates/tui/Cargo.toml lingxi-code/Cargo.toml
   git commit -m "feat(tui): add TurnEvent enum + BridgeOutputStream
 
 TurnEvent is a TUI-local enum mirroring the streaming events the
@@ -582,12 +582,12 @@ Refs M6-03 Task 3"
 ## Task 4: Define spinner constants — frames + verbs
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/spinner.rs`.
-- Modify: `lingxi-core/crates/tui/src/components/mod.rs` (re-export).
+- Create: `lingxi-code/crates/tui/src/components/spinner.rs`.
+- Modify: `lingxi-code/crates/tui/src/components/mod.rs` (re-export).
 
 - [ ] **Step 1: Write the failing test**
 
-  Create `lingxi-core/crates/tui/src/components/spinner.rs` with ONLY the test (no impl):
+  Create `lingxi-code/crates/tui/src/components/spinner.rs` with ONLY the test (no impl):
 
   ```rust
   #![forbid(unsafe_code)]
@@ -630,7 +630,7 @@ Refs M6-03 Task 3"
 
 - [ ] **Step 3: Add the constants**
 
-  At the top of `lingxi-core/crates/tui/src/components/spinner.rs` (above the `#[cfg(test)]` block):
+  At the top of `lingxi-code/crates/tui/src/components/spinner.rs` (above the `#[cfg(test)]` block):
 
   ```rust
   /// Per `claude-code/src/components/Spinner/utils.ts` (darwin default) +
@@ -673,7 +673,7 @@ Refs M6-03 Task 3"
 
 - [ ] **Step 5: Wire into `components/mod.rs`**
 
-  Append to `lingxi-core/crates/tui/src/components/mod.rs`:
+  Append to `lingxi-code/crates/tui/src/components/mod.rs`:
 
   ```rust
   pub mod spinner;
@@ -688,7 +688,7 @@ Refs M6-03 Task 3"
 - [ ] **Step 6: Commit**
 
   ```bash
-  git add lingxi-core/crates/tui/src/components/spinner.rs lingxi-core/crates/tui/src/components/mod.rs
+  git add lingxi-code/crates/tui/src/components/spinner.rs lingxi-code/crates/tui/src/components/mod.rs
   git commit -m "feat(tui): add SpinnerWithVerb constants (frames + verbs)
 
 12-frame asterisk animation matching claude-code Spinner.tsx +
@@ -702,7 +702,7 @@ Refs M6-03 Task 4"
 ## Task 5: Implement `SpinnerWithVerb` component
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/spinner.rs`.
+- Modify: `lingxi-code/crates/tui/src/components/spinner.rs`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -846,7 +846,7 @@ Refs M6-03 Task 4"
 - [ ] **Step 5: Commit**
 
   ```bash
-  git add lingxi-core/crates/tui/src/components/spinner.rs
+  git add lingxi-code/crates/tui/src/components/spinner.rs
   git commit -m "feat(tui): implement SpinnerWithVerb iocraft component
 
 Internal frame and verb state advanced via tokio::time::interval
@@ -861,11 +861,11 @@ Refs M6-03 Task 5"
 ## Task 6: Add 3 spinner snapshots (frames 0, 5, 9)
 
 **Files:**
-- Create: `lingxi-core/crates/tui/tests/render_spinner_test.rs`.
+- Create: `lingxi-code/crates/tui/tests/render_spinner_test.rs`.
 
 - [ ] **Step 1: Write the failing snapshot test**
 
-  Create `lingxi-core/crates/tui/tests/render_spinner_test.rs`:
+  Create `lingxi-code/crates/tui/tests/render_spinner_test.rs`:
 
   ```rust
   //! Snapshot tests for SpinnerWithVerb rendered output. (M6-03 Task 6)
@@ -907,10 +907,10 @@ Refs M6-03 Task 5"
   INSTA_UPDATE=always cargo test -p lingxi-tui --test render_spinner_test
   ```
 
-  Verify the generated `.snap` files in `lingxi-core/crates/tui/tests/snapshots/`:
+  Verify the generated `.snap` files in `lingxi-code/crates/tui/tests/snapshots/`:
 
   ```bash
-  ls lingxi-core/crates/tui/tests/snapshots/
+  ls lingxi-code/crates/tui/tests/snapshots/
   ```
   Expected: three files — `render_spinner_test__spinner_frame_0.snap`, `render_spinner_test__spinner_frame_5.snap`, `render_spinner_test__spinner_frame_9.snap`.
 
@@ -918,7 +918,7 @@ Refs M6-03 Task 5"
 
   ```
   ---
-  source: lingxi-core/crates/tui/tests/render_spinner_test.rs
+  source: lingxi-code/crates/tui/tests/render_spinner_test.rs
   expression: format_spinner_line(0, 0)
   ---
   · Crunching…
@@ -937,7 +937,7 @@ Refs M6-03 Task 5"
 - [ ] **Step 5: Commit**
 
   ```bash
-  git add lingxi-core/crates/tui/tests/render_spinner_test.rs lingxi-core/crates/tui/tests/snapshots/render_spinner_test__spinner_frame_0.snap lingxi-core/crates/tui/tests/snapshots/render_spinner_test__spinner_frame_5.snap lingxi-core/crates/tui/tests/snapshots/render_spinner_test__spinner_frame_9.snap
+  git add lingxi-code/crates/tui/tests/render_spinner_test.rs lingxi-code/crates/tui/tests/snapshots/render_spinner_test__spinner_frame_0.snap lingxi-code/crates/tui/tests/snapshots/render_spinner_test__spinner_frame_5.snap lingxi-code/crates/tui/tests/snapshots/render_spinner_test__spinner_frame_9.snap
   git commit -m "test(tui): snapshot SpinnerWithVerb at frames 0, 5, 9
 
 Locks asterisk glyph + verb byte-for-byte. Frame 0=· Crunching…,
@@ -952,13 +952,13 @@ Refs M6-03 Task 6"
 ## Task 7: Implement `apply_event` in `streaming.rs`
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/streaming.rs`.
-- Modify: `lingxi-core/crates/tui/src/lib.rs` (add `pub mod streaming;`).
-- Modify: `lingxi-core/crates/tui/src/app.rs` (extend `AppState`).
+- Create: `lingxi-code/crates/tui/src/streaming.rs`.
+- Modify: `lingxi-code/crates/tui/src/lib.rs` (add `pub mod streaming;`).
+- Modify: `lingxi-code/crates/tui/src/app.rs` (extend `AppState`).
 
 - [ ] **Step 1: Write the failing test**
 
-  Create `lingxi-core/crates/tui/src/streaming.rs`:
+  Create `lingxi-code/crates/tui/src/streaming.rs`:
 
   ```rust
   #![forbid(unsafe_code)]
@@ -1080,7 +1080,7 @@ Refs M6-03 Task 6"
 
 - [ ] **Step 2: Extend `AppState`**
 
-  In `lingxi-core/crates/tui/src/app.rs`, find the `pub struct AppState` (added in M6-02) and add fields:
+  In `lingxi-code/crates/tui/src/app.rs`, find the `pub struct AppState` (added in M6-02) and add fields:
 
   ```rust
       /// `Some(_)` while a turn is streaming; `None` between turns.
@@ -1147,7 +1147,7 @@ Refs M6-03 Task 6"
 
 - [ ] **Step 3: Wire `streaming` module into the crate root**
 
-  In `lingxi-core/crates/tui/src/lib.rs`, append:
+  In `lingxi-code/crates/tui/src/lib.rs`, append:
 
   ```rust
   pub mod streaming;
@@ -1164,7 +1164,7 @@ Refs M6-03 Task 6"
 - [ ] **Step 5: Commit**
 
   ```bash
-  git add lingxi-core/crates/tui/src/streaming.rs lingxi-core/crates/tui/src/lib.rs lingxi-core/crates/tui/src/app.rs
+  git add lingxi-code/crates/tui/src/streaming.rs lingxi-code/crates/tui/src/lib.rs lingxi-code/crates/tui/src/app.rs
   git commit -m "feat(tui): add apply_event subscriber + AppState streaming fields
 
 apply_event(state, ev, notify) is the pure mutator the render loop
@@ -1181,11 +1181,11 @@ Refs M6-03 Task 7"
 ## Task 8: Wire `app.rs` to drive streaming + cancel
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/app.rs`.
+- Modify: `lingxi-code/crates/tui/src/app.rs`.
 
 - [ ] **Step 1: Write the failing test**
 
-  Create `lingxi-core/crates/tui/tests/streaming_test.rs`:
+  Create `lingxi-code/crates/tui/tests/streaming_test.rs`:
 
   ```rust
   //! End-to-end streaming + cancel tests for the TUI app. (M6-03 Task 8)
@@ -1266,7 +1266,7 @@ Refs M6-03 Task 7"
 
 - [ ] **Step 3: Add `handle_ctrl_c` and `spawn_streaming_turn` to `app.rs`**
 
-  In `lingxi-core/crates/tui/src/app.rs`, add:
+  In `lingxi-code/crates/tui/src/app.rs`, add:
 
   ```rust
   /// Ctrl-C handler during streaming. Idempotent if `streaming.is_none()`
@@ -1351,7 +1351,7 @@ Refs M6-03 Task 7"
 
 - [ ] **Step 4: Wire `BridgeOutputStream` into the runtime initializer**
 
-  In `lingxi-core/crates/cli/src/init.rs` (modified by M6-02 to construct the TUI's orchestrator), replace whatever `OutputStream` was being passed with the bridge. Sketch (exact form depends on M6-02's structure):
+  In `lingxi-code/crates/cli/src/init.rs` (modified by M6-02 to construct the TUI's orchestrator), replace whatever `OutputStream` was being passed with the bridge. Sketch (exact form depends on M6-02's structure):
 
   ```rust
   // Construct a long-lived bridge channel; the receiver is owned by the
@@ -1377,7 +1377,7 @@ Refs M6-03 Task 7"
 - [ ] **Step 6: Commit**
 
   ```bash
-  git add lingxi-core/crates/tui/src/app.rs lingxi-core/crates/cli/src/init.rs lingxi-core/crates/tui/tests/streaming_test.rs
+  git add lingxi-code/crates/tui/src/app.rs lingxi-code/crates/cli/src/init.rs lingxi-code/crates/tui/tests/streaming_test.rs
   git commit -m "feat(tui): wire streaming turn spawner + Ctrl-C cancel
 
 spawn_streaming_turn returns (CancellationToken, mpsc<TurnEvent>);
@@ -1393,15 +1393,15 @@ Refs M6-03 Task 8"
 ## Task 9: Register 2 new telemetry events
 
 **Files:**
-- Modify: `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs` (or `tengu/tui.rs` if M6-01 created it).
-- Modify: `lingxi-core/crates/telemetry/src/tengu/mod.rs` (update `const TOTAL`).
-- Modify: `lingxi-core/crates/tui/src/telemetry.rs` (re-export constants).
+- Modify: `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` (or `tengu/tui.rs` if M6-01 created it).
+- Modify: `lingxi-code/crates/telemetry/src/tengu/mod.rs` (update `const TOTAL`).
+- Modify: `lingxi-code/crates/tui/src/telemetry.rs` (re-export constants).
 
 - [ ] **Step 1: Inspect the M6-01 telemetry layout**
 
   Run:
   ```bash
-  ls /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/telemetry/src/tengu/
+  ls /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/telemetry/src/tengu/
   ```
 
   - If a file `tui.rs` exists → M6-01 created a new submodule. Append to it.
@@ -1411,7 +1411,7 @@ Refs M6-03 Task 8"
 
 - [ ] **Step 2a: Append to `orchestrator.rs` (if M6-01 chose that path)**
 
-  In `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs`, find the `pub const NAMES: &[&str]` array. After the M6-01 entries, append:
+  In `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs`, find the `pub const NAMES: &[&str]` array. After the M6-01 entries, append:
 
   ```rust
       "tengu_tui_streaming_render_started",
@@ -1420,7 +1420,7 @@ Refs M6-03 Task 8"
 
   Update the doc comment count: `Order-locked array of all N names` → bump N by 2.
 
-  Update `lingxi-core/crates/telemetry/src/tengu/mod.rs` `const TOTAL`. After M6-01: `17 + 4 = 21` orchestrator events. After this plan: `21 + 2 = 23`. The formula becomes:
+  Update `lingxi-code/crates/telemetry/src/tengu/mod.rs` `const TOTAL`. After M6-01: `17 + 4 = 21` orchestrator events. After this plan: `21 + 2 = 23`. The formula becomes:
 
   ```rust
   const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 23 + 2 + 54;  // = 321
@@ -1428,7 +1428,7 @@ Refs M6-03 Task 8"
 
 - [ ] **Step 2b: Append to `tui.rs` (if M6-01 chose that path)**
 
-  In `lingxi-core/crates/telemetry/src/tengu/tui.rs`, find the `pub const NAMES: &[&str]` array. Append:
+  In `lingxi-code/crates/telemetry/src/tengu/tui.rs`, find the `pub const NAMES: &[&str]` array. Append:
 
   ```rust
       "tengu_tui_streaming_render_started",
@@ -1439,7 +1439,7 @@ Refs M6-03 Task 8"
 
 - [ ] **Step 3: Add constant aliases in `tui/src/telemetry.rs`**
 
-  In `lingxi-core/crates/tui/src/telemetry.rs` (created in M6-01), append:
+  In `lingxi-code/crates/tui/src/telemetry.rs` (created in M6-01), append:
 
   ```rust
   /// Emitted by the render loop when streaming begins (first render after
@@ -1452,7 +1452,7 @@ Refs M6-03 Task 8"
 
 - [ ] **Step 4: Wire emissions in the render loop**
 
-  In `lingxi-core/crates/tui/src/app.rs`, find the render loop (M6-01 / M6-02). Add tracing calls:
+  In `lingxi-code/crates/tui/src/app.rs`, find the render loop (M6-01 / M6-02). Add tracing calls:
 
   ```rust
   // On first event after streaming becomes Some(_), emit:
@@ -1466,7 +1466,7 @@ Refs M6-03 Task 8"
 
 - [ ] **Step 5: Write the failing parity test**
 
-  Append to `lingxi-core/crates/telemetry/tests/parity_tengu_events.rs` (or the existing telemetry parity test file):
+  Append to `lingxi-code/crates/telemetry/tests/parity_tengu_events.rs` (or the existing telemetry parity test file):
 
   ```rust
   #[test]
@@ -1489,7 +1489,7 @@ Refs M6-03 Task 8"
 - [ ] **Step 6: Commit**
 
   ```bash
-  git add lingxi-core/crates/telemetry/src/tengu/ lingxi-core/crates/tui/src/telemetry.rs lingxi-core/crates/tui/src/app.rs lingxi-core/crates/telemetry/tests/parity_tengu_events.rs
+  git add lingxi-code/crates/telemetry/src/tengu/ lingxi-code/crates/tui/src/telemetry.rs lingxi-code/crates/tui/src/app.rs lingxi-code/crates/telemetry/tests/parity_tengu_events.rs
   git commit -m "feat(telemetry): register tengu_tui_streaming_render_{started,ended}
 
 Two new events bracket each streaming-render lifecycle. Count is
@@ -1504,11 +1504,11 @@ Refs M6-03 Task 9"
 ## Task 10: Mount SpinnerWithVerb in REPL screen
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/screens/repl.rs`.
+- Modify: `lingxi-code/crates/tui/src/screens/repl.rs`.
 
 - [ ] **Step 1: Write the failing test**
 
-  Append to `lingxi-core/crates/tui/tests/streaming_test.rs`:
+  Append to `lingxi-code/crates/tui/tests/streaming_test.rs`:
 
   ```rust
   #[test]
@@ -1531,7 +1531,7 @@ Refs M6-03 Task 9"
 
 - [ ] **Step 3: Add the predicate and mount logic**
 
-  In `lingxi-core/crates/tui/src/screens/repl.rs`, find the existing render layout (M6-02). The layout is `StatusLine` (top) / `Scrollback` (middle) / `PromptInput` (bottom). Insert the spinner BETWEEN scrollback and prompt input:
+  In `lingxi-code/crates/tui/src/screens/repl.rs`, find the existing render layout (M6-02). The layout is `StatusLine` (top) / `Scrollback` (middle) / `PromptInput` (bottom). Insert the spinner BETWEEN scrollback and prompt input:
 
   ```rust
   use crate::components::spinner::SpinnerWithVerb;
@@ -1572,7 +1572,7 @@ Refs M6-03 Task 9"
 - [ ] **Step 5: Commit**
 
   ```bash
-  git add lingxi-core/crates/tui/src/screens/repl.rs
+  git add lingxi-code/crates/tui/src/screens/repl.rs
   git commit -m "feat(tui): mount SpinnerWithVerb between scrollback and prompt input
 
 Conditional on AppState.streaming.is_some(). Hidden between turns;
@@ -1586,11 +1586,11 @@ Refs M6-03 Task 10"
 ## Task 11: 30fps render rate-limit
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/app.rs` (render loop).
+- Modify: `lingxi-code/crates/tui/src/app.rs` (render loop).
 
 - [ ] **Step 1: Write the failing performance test**
 
-  Append to `lingxi-core/crates/tui/tests/streaming_test.rs`:
+  Append to `lingxi-code/crates/tui/tests/streaming_test.rs`:
 
   ```rust
   #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1648,7 +1648,7 @@ Refs M6-03 Task 10"
 
 - [ ] **Step 3: Implement the rate-limited render loop**
 
-  In `lingxi-core/crates/tui/src/app.rs`, find `run_render_loop` (or whatever M6-01/M6-02 named it). Wrap the loop with the debounce:
+  In `lingxi-code/crates/tui/src/app.rs`, find `run_render_loop` (or whatever M6-01/M6-02 named it). Wrap the loop with the debounce:
 
   ```rust
   pub async fn run_render_loop(
@@ -1702,7 +1702,7 @@ Refs M6-03 Task 10"
 - [ ] **Step 5: Commit**
 
   ```bash
-  git add lingxi-core/crates/tui/src/app.rs
+  git add lingxi-code/crates/tui/src/app.rs
   git commit -m "feat(tui): rate-limit streaming renders to ~30fps
 
 Render loop drains tokio::sync::Notify permits and sleeps 33ms

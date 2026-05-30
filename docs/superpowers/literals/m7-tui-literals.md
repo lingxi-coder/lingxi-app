@@ -14,7 +14,7 @@
 > convention established by the M6 catalog + the M7 parity fixtures
 > (`parity_tui_renderers_m7.json` / `parity_tui_screens.json`
 > `_claude_code_version`), not live `.tsx` line numbers. LingXi sites carry real
-> `file:line` against the v0.8.0 tree (paths relative to `lingxi-core/`). On the
+> `file:line` against the v0.8.0 tree (paths relative to `lingxi-code/`). On the
 > next `claude-code/` submodule bump, re-extract the `.tsx` literals (see §11)
 > and back-fill the live line numbers.
 >

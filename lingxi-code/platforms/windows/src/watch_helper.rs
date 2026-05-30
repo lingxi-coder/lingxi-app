@@ -1,7 +1,7 @@
 //! Shared notify + debouncer file-watch helper.
 //!
 //! NOTE: This file is a manually-kept copy of
-//! `lingxi-core/platforms/posix/src/watch_helper.rs`. Keep the two in sync;
+//! `lingxi-code/platforms/posix/src/watch_helper.rs`. Keep the two in sync;
 //! see M2-05 plan, "Deliberate divergences" §2 for rationale.
 //!
 //! Mirrors claude-code's chokidar 4 `awaitWriteFinish` semantics:

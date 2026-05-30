@@ -6,18 +6,18 @@
 
 **Architecture:** `theme.rs` gains a `Theme` value-struct (one `iocraft::Color` field per claude-code `Theme` key the TUI actually consumes), a `ThemeName` enum (the 6 names), a `ThemeSetting` enum (`auto` + the 6 names — mirrors claude-code's wire values), a `theme_registry()` lookup `ThemeName -> Theme` carrying the exact RGB/ANSI colors from `claude-code/src/utils/theme.ts`, and `auto`-resolution (default to `dark` headless — no terminal-background probe in M7). The old `TuiTheme` associated consts are kept as a thin shim mapping to `Theme::dark()` so M6 call sites compile unchanged, then migrated. `AppState` gains `theme: Theme` (the resolved active palette) + `theme_setting: ThemeSetting` (the stored preference). The picker is `screens/theme.rs` — a new `Screen::Theme` variant on the M7-11 `active_screen` enum (priority 2 in the §2.5 dispatcher); it lists the 6 themes (+`auto`), tracks a `highlighted` index for live preview, and on `Enter` commits `theme_setting` → resolves `theme` → best-effort persists to `~/.claude/settings.json` via the existing config write path. `render::syntax` (M7-02) gains a `tm_theme_for(theme_name: ThemeName) -> &syntect::highlighting::Theme` that swaps the bundled `.tmTheme` by active theme name; the highlight entrypoint takes the active `ThemeName`. Renderers/StatusLine/diff read colors from the passed `&Theme` instead of `TuiTheme` consts.
 
-**Tech Stack:** Rust 1.82 (pinned via `lingxi-core/rust-toolchain.toml`), iocraft `=0.8.3` (`View` not `Box`; `Color::Rgb { r, g, b }` for truecolor, named `Color` variants for ANSI), `syntect` (M7-02; `ThemeSet`, lazy `.tmTheme` load), `insta = "1.40"` snapshots, `serde_json` (settings read-modify-write). claude-code references: `src/components/ThemePicker.tsx`, `src/utils/theme.ts`, `src/commands/theme/theme.tsx`.
+**Tech Stack:** Rust 1.82 (pinned via `lingxi-code/rust-toolchain.toml`), iocraft `=0.8.3` (`View` not `Box`; `Color::Rgb { r, g, b }` for truecolor, named `Color` variants for ANSI), `syntect` (M7-02; `ThemeSet`, lazy `.tmTheme` load), `insta = "1.40"` snapshots, `serde_json` (settings read-modify-write). claude-code references: `src/components/ThemePicker.tsx`, `src/utils/theme.ts`, `src/commands/theme/theme.tsx`.
 
 ---
 
 ## Prerequisites & Dependencies
 
-Run cargo **from inside `lingxi-core/`** (rust-toolchain pins 1.82; repo-root runs use the host toolchain → spurious lint noise — this bit M6-08). Real crate path: `lingxi-core/crates/tui/`.
+Run cargo **from inside `lingxi-code/`** (rust-toolchain pins 1.82; repo-root runs use the host toolchain → spurious lint noise — this bit M6-08). Real crate path: `lingxi-code/crates/tui/`.
 
-- **M7-02 (syntect + StructuredDiff) MUST be merged first.** This plan makes the syntect `.tmTheme` selection a function of `AppState.theme`. **Verify before starting:** `ls lingxi-core/crates/tui/src/render/syntax.rs` exists. Grep for the real highlight entrypoint + current theme handling: `grep -n "ThemeSet\|tm_theme\|fn highlight\|\.tmTheme\|highlighting::Theme\|load_defaults" lingxi-core/crates/tui/src/render/syntax.rs`. **Do NOT invent names** — Task 6 adapts whatever M7-02 named (`highlight`, `highlight_code`, `SyntaxHighlighter`, a `theme: &str` arg, etc.). If M7-02 hardcoded a single theme name (e.g. `"base16-ocean.dark"`), Task 6 replaces that constant with a `ThemeName -> &str` map.
-- **M7-11 (Doctor screen / `active_screen` infra) MUST be merged first** if the picker is a screen. **Verify:** `grep -rn "active_screen\|enum Screen\|pub enum Screen" lingxi-core/crates/tui/src/` returns the `Screen` enum + `AppState.active_screen` + the §2.5 dispatcher branch (priority 2). **Do NOT invent the enum name or its variant convention** — Task 4 adds a `Theme` variant to whatever M7-11 defined and routes it through the existing dispatcher and the existing `Esc`/`q` return path. If M7-11 is NOT yet merged when this plan executes, fall back to the documented escape hatch in Task 4 (a self-contained `pending_theme_picker: Option<ThemePickerState>` slot on `AppState`, routed at a new priority-2 branch in `handle_live_key`, mirroring M6's `pending_permission` focus-trap shape) and leave a `// TODO: fold into Screen::Theme once M7-11 active_screen lands` note. Either way the picker is reached via the `/theme` command (claude-code parity) — see Task 5.
+- **M7-02 (syntect + StructuredDiff) MUST be merged first.** This plan makes the syntect `.tmTheme` selection a function of `AppState.theme`. **Verify before starting:** `ls lingxi-code/crates/tui/src/render/syntax.rs` exists. Grep for the real highlight entrypoint + current theme handling: `grep -n "ThemeSet\|tm_theme\|fn highlight\|\.tmTheme\|highlighting::Theme\|load_defaults" lingxi-code/crates/tui/src/render/syntax.rs`. **Do NOT invent names** — Task 6 adapts whatever M7-02 named (`highlight`, `highlight_code`, `SyntaxHighlighter`, a `theme: &str` arg, etc.). If M7-02 hardcoded a single theme name (e.g. `"base16-ocean.dark"`), Task 6 replaces that constant with a `ThemeName -> &str` map.
+- **M7-11 (Doctor screen / `active_screen` infra) MUST be merged first** if the picker is a screen. **Verify:** `grep -rn "active_screen\|enum Screen\|pub enum Screen" lingxi-code/crates/tui/src/` returns the `Screen` enum + `AppState.active_screen` + the §2.5 dispatcher branch (priority 2). **Do NOT invent the enum name or its variant convention** — Task 4 adds a `Theme` variant to whatever M7-11 defined and routes it through the existing dispatcher and the existing `Esc`/`q` return path. If M7-11 is NOT yet merged when this plan executes, fall back to the documented escape hatch in Task 4 (a self-contained `pending_theme_picker: Option<ThemePickerState>` slot on `AppState`, routed at a new priority-2 branch in `handle_live_key`, mirroring M6's `pending_permission` focus-trap shape) and leave a `// TODO: fold into Screen::Theme once M7-11 active_screen lands` note. Either way the picker is reached via the `/theme` command (claude-code parity) — see Task 5.
 - **M7-04 / M7-05 (message renderers) leave `// TODO(M7-15): theme constant` markers** where they hardcoded iocraft colors for claude-code's `warning` / `success` / `planMode` (and any other) semantic colors instead of theme colors (confirmed in the M7-04 plan's color-mapping table: warning→`Color::Yellow`, success→`Color::Green`, planMode→`Color::Magenta`, each with a `// TODO(M7-15): theme constant` comment). Task 7 greps for these and resolves them. If M7-04/05 are NOT yet merged when this plan executes, Task 7 is a no-op except for the StatusLine/assistant/user-text/diff call sites that DO exist — document the deferral inline and the M7-16 final review re-runs the grep.
-- **`StyledLine` / diff color types (M7-01/02):** if Task 6/7 needs the markdown/diff styled-line type, grep first — `grep -rn "struct StyledLine\|pub struct Styled\|diffAdded\|diff_added" lingxi-core/crates/tui/src/render/`. Use the real name.
+- **`StyledLine` / diff color types (M7-01/02):** if Task 6/7 needs the markdown/diff styled-line type, grep first — `grep -rn "struct StyledLine\|pub struct Styled\|diffAdded\|diff_added" lingxi-code/crates/tui/src/render/`. Use the real name.
 - **Telemetry:** baseline is **326 events**. **M7-15 adds 0 events.** No `ALL_EVENT_NAMES` changes. Do NOT register any telemetry name. (A `tengu_tui_screen_opened`-class event for the picker is deferred to M7-16's audit, per spec §2.7.)
 
 ## Literal-Lock Reference (read each source before coding)
@@ -43,25 +43,25 @@ Source root: `/Users/luolingfeng/Projects/LingXi-Next/claude-code/src/`.
 ## File Structure
 
 **Modify:**
-- `lingxi-core/crates/tui/src/theme.rs` — the heart of this plan. Add `ThemeName` enum, `ThemeSetting` enum, `Theme` struct (the per-render-key palette), `theme_registry()` / `Theme::dark()`/`light()`/etc. constructors carrying the locked colors, `ThemeSetting::resolve() -> ThemeName` (`auto`→`dark` headless), wire-string parse/format (`as_wire`/`from_wire`). Keep `struct TuiTheme` with its `ASSISTANT`/`USER`/`ERROR`/`DIM` consts as a **shim** delegating to `Theme::dark()` so M6 call sites compile, with a `// shim — migrated to Theme in M7-15` note.
-- `lingxi-core/crates/tui/src/state.rs` — add `pub theme: Theme` + `pub theme_setting: ThemeSetting` to `AppState`; init in `new()` (default `ThemeSetting::Auto` → `Theme::dark()`) and `default_for_tests()`; add `set_theme(&mut self, setting: ThemeSetting)` that resolves + stores both fields.
-- `lingxi-core/crates/tui/src/render/syntax.rs` (M7-02) — make the `.tmTheme` selection a function of `ThemeName` (Task 6). Add `tm_theme_for(name: ThemeName) -> &'static syntect::highlighting::Theme` (lazy via `once_cell`/`LazyLock`; §4 R9 lazy-load) + thread the active `ThemeName` into the highlight entrypoint.
-- `lingxi-core/crates/tui/src/components/status_line.rs` — `StatusLine` reads label/segment colors from a passed `&Theme` (or `Theme` prop) instead of bare/`TuiTheme` colors (Task 8).
-- `lingxi-core/crates/tui/src/components/messages/*.rs` + `scrollback.rs` + `app.rs::render_screen` — thread the active `&Theme` to renderers; resolve `// TODO(M7-15): theme constant` sites (Task 7).
-- `lingxi-core/crates/tui/src/screens/mod.rs` — `pub mod theme;`.
-- `lingxi-core/crates/tui/src/root.rs` — route `Screen::Theme` key handling through the existing `active_screen` priority-2 branch (Task 4); no parallel key path (§2.5).
-- The `/theme` command site (Task 5) — grep for where slash commands open screens (`grep -rn "Screen::\|active_screen =\|\"/theme\"\|\"theme\"" lingxi-core/crates/tui/src/`); wire `/theme` → open `Screen::Theme`.
+- `lingxi-code/crates/tui/src/theme.rs` — the heart of this plan. Add `ThemeName` enum, `ThemeSetting` enum, `Theme` struct (the per-render-key palette), `theme_registry()` / `Theme::dark()`/`light()`/etc. constructors carrying the locked colors, `ThemeSetting::resolve() -> ThemeName` (`auto`→`dark` headless), wire-string parse/format (`as_wire`/`from_wire`). Keep `struct TuiTheme` with its `ASSISTANT`/`USER`/`ERROR`/`DIM` consts as a **shim** delegating to `Theme::dark()` so M6 call sites compile, with a `// shim — migrated to Theme in M7-15` note.
+- `lingxi-code/crates/tui/src/state.rs` — add `pub theme: Theme` + `pub theme_setting: ThemeSetting` to `AppState`; init in `new()` (default `ThemeSetting::Auto` → `Theme::dark()`) and `default_for_tests()`; add `set_theme(&mut self, setting: ThemeSetting)` that resolves + stores both fields.
+- `lingxi-code/crates/tui/src/render/syntax.rs` (M7-02) — make the `.tmTheme` selection a function of `ThemeName` (Task 6). Add `tm_theme_for(name: ThemeName) -> &'static syntect::highlighting::Theme` (lazy via `once_cell`/`LazyLock`; §4 R9 lazy-load) + thread the active `ThemeName` into the highlight entrypoint.
+- `lingxi-code/crates/tui/src/components/status_line.rs` — `StatusLine` reads label/segment colors from a passed `&Theme` (or `Theme` prop) instead of bare/`TuiTheme` colors (Task 8).
+- `lingxi-code/crates/tui/src/components/messages/*.rs` + `scrollback.rs` + `app.rs::render_screen` — thread the active `&Theme` to renderers; resolve `// TODO(M7-15): theme constant` sites (Task 7).
+- `lingxi-code/crates/tui/src/screens/mod.rs` — `pub mod theme;`.
+- `lingxi-code/crates/tui/src/root.rs` — route `Screen::Theme` key handling through the existing `active_screen` priority-2 branch (Task 4); no parallel key path (§2.5).
+- The `/theme` command site (Task 5) — grep for where slash commands open screens (`grep -rn "Screen::\|active_screen =\|\"/theme\"\|\"theme\"" lingxi-code/crates/tui/src/`); wire `/theme` → open `Screen::Theme`.
 
 **Create:**
-- `lingxi-core/crates/tui/src/screens/theme.rs` — `ThemePickerState { options: Vec<ThemeSetting>, highlighted: usize }` + pure key-handler `theme_picker_handle_key(state, &mut AppState, key) -> ThemePickerOutcome` (Up/Down move `highlighted` → live-preview `AppState.theme`; Enter commit + close; Esc cancel → restore prior setting + close) + a `#[component] ThemePickerScreen` + pure `render_theme_picker_to_string(&ThemePickerState, &Theme) -> String` (snapshot oracle: header + option rows with the locked labels + a `❯ ` pointer on `highlighted` + the diff-preview lines).
+- `lingxi-code/crates/tui/src/screens/theme.rs` — `ThemePickerState { options: Vec<ThemeSetting>, highlighted: usize }` + pure key-handler `theme_picker_handle_key(state, &mut AppState, key) -> ThemePickerOutcome` (Up/Down move `highlighted` → live-preview `AppState.theme`; Enter commit + close; Esc cancel → restore prior setting + close) + a `#[component] ThemePickerScreen` + pure `render_theme_picker_to_string(&ThemePickerState, &Theme) -> String` (snapshot oracle: header + option rows with the locked labels + a `❯ ` pointer on `highlighted` + the diff-preview lines).
 
-**Create (test files):** `lingxi-core/crates/tui/tests/`
+**Create (test files):** `lingxi-code/crates/tui/tests/`
 - `theme_registry.rs` — registry/color/wire-roundtrip + `auto` resolution unit assertions.
 - `theme_picker_behavior.rs` — picker list/highlight/preview/commit/cancel behavior.
 - `theme_snapshots.rs` — insta snapshots of StatusLine + an assistant message + a code block under `dark` and `light`.
 - `theme_syntax_follows.rs` — syntect `.tmTheme` differs between two themes for the same code.
 
-**Snapshots land in:** `lingxi-core/crates/tui/tests/snapshots/` (insta auto-creates `*.snap`).
+**Snapshots land in:** `lingxi-code/crates/tui/tests/snapshots/` (insta auto-creates `*.snap`).
 
 ---
 
@@ -71,7 +71,7 @@ Source root: `/Users/luolingfeng/Projects/LingXi-Next/claude-code/src/`.
 - **Pure-fn-first / two-function pattern:** every renderable gets a `render_*_to_string(...) -> String` snapshot oracle plus a `#[component]` wrapper, matching the M6-04 / M7-04 house style.
 - **`Theme` is a plain value struct** (`#[derive(Debug, Clone, Copy, PartialEq, Eq)]`) — all fields `iocraft::Color` (which is `Copy`). No iocraft `Props` derive on `Theme` itself; pass it by value/ref into components.
 - **No new persistence logic** (§4 R7): theme persists through the **existing** `~/.claude/settings.json` `theme` field (already an allowlisted config field — `crates/tools/src/builtin/config.rs::CONFIG_FIELD_THEME`; `SettingsJson` is camelCase on the wire). Write = read-modify-write the JSON object with `theme: <wire string>` (Task 9 reuses the config-tool serialization shape — pretty JSON, trailing newline). If the write path isn't trivially reachable from the TUI crate without a new dep, the persistence is **best-effort**: log + continue, theme still applies for the session. Read at startup (Task 9) via the existing `Settings::load`/`EffectiveSettings` if reachable, else session-default `auto`.
-- **Run cargo from inside `lingxi-core/`.**
+- **Run cargo from inside `lingxi-code/`.**
 - **Commit format:** `plan(M7-15 TN): <subject>` with trailer `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`. **Do not push. No tag push, amend, or `--no-verify`.**
 
 ---
@@ -79,8 +79,8 @@ Source root: `/Users/luolingfeng/Projects/LingXi-Next/claude-code/src/`.
 ## Task 1: `Theme` struct + `ThemeName`/`ThemeSetting` + ANSI map
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/theme.rs`
-- Test: `lingxi-core/crates/tui/src/theme.rs` (inline `#[cfg(test)] mod tests`)
+- Modify: `lingxi-code/crates/tui/src/theme.rs`
+- Test: `lingxi-code/crates/tui/src/theme.rs` (inline `#[cfg(test)] mod tests`)
 
 - [ ] **Step 1: Write the failing test** — append to the `tests` mod in `theme.rs`:
 
@@ -255,7 +255,7 @@ Expected: PASS (the 3 new tests + the existing 4 `TuiTheme` tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/theme.rs
+git add lingxi-code/crates/tui/src/theme.rs
 git commit -m "plan(M7-15 T1): add ThemeName/ThemeSetting enums + ansi color map
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -268,8 +268,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 The `Theme` struct carries exactly the keys the lingxi TUI renders. Port these from `claude-code/src/utils/theme.ts` (read it first): `text`, `inactive` (→ dim), `error`, `success`, `warning`, `permission`, `plan_mode` (`planMode`), `suggestion`, `diff_added` (`diffAdded`), `diff_removed` (`diffRemoved`), `diff_added_word` (`diffAddedWord`), `diff_removed_word` (`diffRemovedWord`), `claude` (assistant accent). The assistant body color (M6 cyan) maps to `claude` going forward.
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/theme.rs`
-- Test: `lingxi-core/crates/tui/src/theme.rs` (inline tests)
+- Modify: `lingxi-code/crates/tui/src/theme.rs`
+- Test: `lingxi-code/crates/tui/src/theme.rs` (inline tests)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -493,7 +493,7 @@ Expected: PASS.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/theme.rs
+git add lingxi-code/crates/tui/src/theme.rs
 git commit -m "plan(M7-15 T2): Theme struct + 6-theme registry (locked theme.ts colors)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -504,8 +504,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 3: `AppState.theme` + `theme_setting` + `set_theme`
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/state.rs`
-- Test: `lingxi-core/crates/tui/src/state.rs` (inline tests)
+- Modify: `lingxi-code/crates/tui/src/state.rs`
+- Test: `lingxi-code/crates/tui/src/state.rs` (inline tests)
 
 - [ ] **Step 1: Write the failing test** — append to `state.rs` tests:
 
@@ -572,7 +572,7 @@ Expected: PASS (new test + existing state tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/state.rs
+git add lingxi-code/crates/tui/src/state.rs
 git commit -m "plan(M7-15 T3): AppState.theme + theme_setting + set_theme()
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -585,10 +585,10 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 Adds the picker as a screen on the M7-11 `active_screen` infra, routed at priority 2 in the §2.5 dispatcher (the single `handle_live_key`). **Grep first** for the M7-11 `Screen` enum + dispatcher branch (see Prerequisites). The code below assumes M7-11 named it `enum Screen` with `AppState.active_screen: Option<Screen>`; adapt to the real names.
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/screens/theme.rs`
-- Modify: `lingxi-core/crates/tui/src/screens/mod.rs` (`pub mod theme;` + add `Theme` to `Screen`)
-- Modify: `lingxi-core/crates/tui/src/root.rs` (route `Screen::Theme` keys; no parallel path)
-- Test: `lingxi-core/crates/tui/tests/theme_picker_behavior.rs`
+- Create: `lingxi-code/crates/tui/src/screens/theme.rs`
+- Modify: `lingxi-code/crates/tui/src/screens/mod.rs` (`pub mod theme;` + add `Theme` to `Screen`)
+- Modify: `lingxi-code/crates/tui/src/root.rs` (route `Screen::Theme` keys; no parallel path)
+- Test: `lingxi-code/crates/tui/tests/theme_picker_behavior.rs`
 
 - [ ] **Step 1: Write the failing test** — create `tests/theme_picker_behavior.rs`:
 
@@ -833,7 +833,7 @@ Expected: clean. Confirm by inspection that the picker is reached ONLY through t
 - [ ] **Step 7: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/screens/theme.rs lingxi-core/crates/tui/src/screens/mod.rs lingxi-core/crates/tui/src/root.rs lingxi-core/crates/tui/tests/theme_picker_behavior.rs
+git add lingxi-code/crates/tui/src/screens/theme.rs lingxi-code/crates/tui/src/screens/mod.rs lingxi-code/crates/tui/src/root.rs lingxi-code/crates/tui/tests/theme_picker_behavior.rs
 git commit -m "plan(M7-15 T4): theme picker screen + priority-2 key routing
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -843,11 +843,11 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Task 5: Wire the `/theme` command to open the picker
 
-claude-code's `/theme` command (`src/commands/theme/theme.tsx`) opens the ThemePicker. lingxi has a `theme` config field already; this task wires the `/theme` slash command to open `Screen::Theme`. **Grep first** for how existing slash commands open screens (M7-11/12/13 established this): `grep -rn "Screen::\|active_screen = Some\|\"theme\"\|/theme" lingxi-core/crates/tui/src/`.
+claude-code's `/theme` command (`src/commands/theme/theme.tsx`) opens the ThemePicker. lingxi has a `theme` config field already; this task wires the `/theme` slash command to open `Screen::Theme`. **Grep first** for how existing slash commands open screens (M7-11/12/13 established this): `grep -rn "Screen::\|active_screen = Some\|\"theme\"\|/theme" lingxi-code/crates/tui/src/`.
 
 **Files:**
 - Modify: the command-dispatch site found by grep (likely `app.rs` or a commands handler in the TUI crate)
-- Test: `lingxi-core/crates/tui/tests/theme_picker_behavior.rs` (add a command-open test) OR a behavior test at the dispatch site
+- Test: `lingxi-code/crates/tui/tests/theme_picker_behavior.rs` (add a command-open test) OR a behavior test at the dispatch site
 
 - [ ] **Step 1: Write the failing test** — add to `theme_picker_behavior.rs`:
 
@@ -883,7 +883,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/app.rs lingxi-core/crates/tui/tests/theme_picker_behavior.rs
+git add lingxi-code/crates/tui/src/app.rs lingxi-code/crates/tui/tests/theme_picker_behavior.rs
 git commit -m "plan(M7-15 T5): /theme command opens the theme picker screen
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -896,8 +896,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 Make M7-02's syntect highlighter pick its `.tmTheme` by active `ThemeName`. **Grep `render/syntax.rs` first** (Prerequisites) for the real highlight entrypoint + theme handling. The plan below assumes M7-02 used `syntect::highlighting::ThemeSet::load_defaults()` and a hardcoded theme name; adapt names.
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/render/syntax.rs`
-- Test: `lingxi-core/crates/tui/tests/theme_syntax_follows.rs`
+- Modify: `lingxi-code/crates/tui/src/render/syntax.rs`
+- Test: `lingxi-code/crates/tui/tests/theme_syntax_follows.rs`
 
 - [ ] **Step 1: Write the failing test** — create `tests/theme_syntax_follows.rs`:
 
@@ -975,7 +975,7 @@ Expected: PASS. If `base16-ocean.light` is not in `load_defaults()`, grep `THEME
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/render/syntax.rs lingxi-core/crates/tui/tests/theme_syntax_follows.rs
+git add lingxi-code/crates/tui/src/render/syntax.rs lingxi-code/crates/tui/tests/theme_syntax_follows.rs
 git commit -m "plan(M7-15 T6): syntect .tmTheme follows the active theme
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -985,14 +985,14 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Task 7: Thread `&Theme` into renderers; resolve `TODO(M7-15)` color sites
 
-Centralize hardcoded colors into `Theme`. **Grep first:** `grep -rn "TODO(M7-15)" lingxi-core/crates/tui/src/` and `grep -rn "TuiTheme::" lingxi-core/crates/tui/src/`.
+Centralize hardcoded colors into `Theme`. **Grep first:** `grep -rn "TODO(M7-15)" lingxi-code/crates/tui/src/` and `grep -rn "TuiTheme::" lingxi-code/crates/tui/src/`.
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/app.rs` (`render_screen` passes `&state.theme` to the message dispatcher + StatusLine)
-- Modify: `lingxi-core/crates/tui/src/components/scrollback.rs` (`render_message` takes/forwards `&Theme`)
-- Modify: `lingxi-core/crates/tui/src/components/messages/*.rs` (each renderer takes a `color: Color` / `theme: &Theme` instead of `TuiTheme::*` consts where it had a `TODO(M7-15)` or a hardcoded literal color)
-- Modify: `lingxi-core/crates/tui/src/render/diff.rs` (M7-02 diff colors read `theme.diff_added`/`diff_removed`/word variants)
-- Test: `lingxi-core/crates/tui/tests/theme_snapshots.rs` (covered in Task 10) + an assertion test below
+- Modify: `lingxi-code/crates/tui/src/app.rs` (`render_screen` passes `&state.theme` to the message dispatcher + StatusLine)
+- Modify: `lingxi-code/crates/tui/src/components/scrollback.rs` (`render_message` takes/forwards `&Theme`)
+- Modify: `lingxi-code/crates/tui/src/components/messages/*.rs` (each renderer takes a `color: Color` / `theme: &Theme` instead of `TuiTheme::*` consts where it had a `TODO(M7-15)` or a hardcoded literal color)
+- Modify: `lingxi-code/crates/tui/src/render/diff.rs` (M7-02 diff colors read `theme.diff_added`/`diff_removed`/word variants)
+- Test: `lingxi-code/crates/tui/tests/theme_snapshots.rs` (covered in Task 10) + an assertion test below
 
 - [ ] **Step 1: Write the failing test** — create/append `tests/theme_todo_resolved.rs`:
 
@@ -1062,7 +1062,7 @@ Expected: PASS; no `TODO(M7-15)` markers remain; existing renderer snapshots may
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/app.rs lingxi-core/crates/tui/src/components lingxi-core/crates/tui/src/render/diff.rs lingxi-core/crates/tui/tests/theme_todo_resolved.rs
+git add lingxi-code/crates/tui/src/app.rs lingxi-code/crates/tui/src/components lingxi-code/crates/tui/src/render/diff.rs lingxi-code/crates/tui/tests/theme_todo_resolved.rs
 git commit -m "plan(M7-15 T7): thread &Theme into renderers; resolve TODO(M7-15) colors
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1073,9 +1073,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 8: StatusLine reads theme colors
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/status_line.rs`
-- Modify: `lingxi-core/crates/tui/src/app.rs` (`render_screen` passes the theme to `StatusLine`)
-- Test: `lingxi-core/crates/tui/src/components/status_line.rs` (inline) + the snapshot in Task 10
+- Modify: `lingxi-code/crates/tui/src/components/status_line.rs`
+- Modify: `lingxi-code/crates/tui/src/app.rs` (`render_screen` passes the theme to `StatusLine`)
+- Test: `lingxi-code/crates/tui/src/components/status_line.rs` (inline) + the snapshot in Task 10
 
 - [ ] **Step 1: Write the failing test** — append to `status_line.rs` tests:
 
@@ -1106,7 +1106,7 @@ Expected: PASS (new test + the existing `format_matches_byte_locks` / `mode_labe
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/status_line.rs lingxi-core/crates/tui/src/app.rs
+git add lingxi-code/crates/tui/src/components/status_line.rs lingxi-code/crates/tui/src/app.rs
 git commit -m "plan(M7-15 T8): StatusLine colors read from the active Theme
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1116,13 +1116,13 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ## Task 9: Best-effort theme persistence (settings.json `theme` field)
 
-No new persistence logic (§4 R7): reuse the existing `~/.claude/settings.json` `theme` field. **Grep first** for the existing path-resolution + read-modify-write helpers the config tool uses: `grep -rn "settings.json\|home_dir\|\.claude\|read_settings_obj\|write_settings_obj\|CONFIG_FIELD_THEME" lingxi-core/crates/tools/src/builtin/config.rs lingxi-core/crates/core/src/settings/`. Reuse `Settings::load`/`EffectiveSettings` for the read.
+No new persistence logic (§4 R7): reuse the existing `~/.claude/settings.json` `theme` field. **Grep first** for the existing path-resolution + read-modify-write helpers the config tool uses: `grep -rn "settings.json\|home_dir\|\.claude\|read_settings_obj\|write_settings_obj\|CONFIG_FIELD_THEME" lingxi-code/crates/tools/src/builtin/config.rs lingxi-code/crates/core/src/settings/`. Reuse `Settings::load`/`EffectiveSettings` for the read.
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/theme_persist.rs` (tiny module: load + save the theme wire string)
-- Modify: `lingxi-core/crates/tui/src/lib.rs` (`mod theme_persist;`)
+- Create: `lingxi-code/crates/tui/src/theme_persist.rs` (tiny module: load + save the theme wire string)
+- Modify: `lingxi-code/crates/tui/src/lib.rs` (`mod theme_persist;`)
 - Modify: the session/startup site that constructs `AppState` (grep `AppState::new(`) — load the stored theme at startup
-- Test: `lingxi-core/crates/tui/tests/theme_persist.rs`
+- Test: `lingxi-code/crates/tui/tests/theme_persist.rs`
 
 - [ ] **Step 1: Write the failing test** — create `tests/theme_persist.rs`:
 
@@ -1163,7 +1163,7 @@ fn save_preserves_other_settings_fields() {
 }
 ```
 
-(Add `tempfile` to the tui crate's `[dev-dependencies]` if not present — `grep tempfile lingxi-core/crates/tui/Cargo.toml`.)
+(Add `tempfile` to the tui crate's `[dev-dependencies]` if not present — `grep tempfile lingxi-code/crates/tui/Cargo.toml`.)
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1237,7 +1237,7 @@ pub fn save_theme_setting_to(path: &Path, setting: ThemeSetting) -> std::io::Res
 }
 ```
 
-(Confirm `dirs` is a dep of the tui crate — `grep -n "dirs" lingxi-core/crates/tui/Cargo.toml`; if not, use whatever home-dir crate the config tool uses, found in Step's grep. Do NOT add a new dep family — reuse the existing one.)
+(Confirm `dirs` is a dep of the tui crate — `grep -n "dirs" lingxi-code/crates/tui/Cargo.toml`; if not, use whatever home-dir crate the config tool uses, found in Step's grep. Do NOT add a new dep family — reuse the existing one.)
 
 Add `pub mod theme_persist;` to `lib.rs`. At the `AppState::new(` startup site, after constructing the state, apply any stored setting: `if let Some(s) = crate::theme_persist::load_theme_setting() { state.set_theme(s); }`. Wire the `save_theme_setting` call into Task 4's Commit arm (replace the `// TODO(M7-15 T9): persist` note).
 
@@ -1249,7 +1249,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/theme_persist.rs lingxi-core/crates/tui/src/lib.rs lingxi-core/crates/tui/src/root.rs lingxi-core/crates/tui/Cargo.toml lingxi-core/crates/tui/tests/theme_persist.rs
+git add lingxi-code/crates/tui/src/theme_persist.rs lingxi-code/crates/tui/src/lib.rs lingxi-code/crates/tui/src/root.rs lingxi-code/crates/tui/Cargo.toml lingxi-code/crates/tui/tests/theme_persist.rs
 git commit -m "plan(M7-15 T9): best-effort theme persistence via settings.json
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1260,8 +1260,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 10: Snapshots — StatusLine + message + code block under dark & light
 
 **Files:**
-- Create: `lingxi-core/crates/tui/tests/theme_snapshots.rs`
-- Snapshots: `lingxi-core/crates/tui/tests/snapshots/` (insta auto-creates)
+- Create: `lingxi-code/crates/tui/tests/theme_snapshots.rs`
+- Snapshots: `lingxi-code/crates/tui/tests/snapshots/` (insta auto-creates)
 
 - [ ] **Step 1: Write the failing test** — create `tests/theme_snapshots.rs`. Use the same render entrypoint the live mount uses (`app::render_screen` against an `AppState` with a fixed scrollback + a fenced code block), once per theme:
 
@@ -1299,7 +1299,7 @@ fn statusline_message_codeblock_light() {
 }
 ```
 
-> **Note:** `app::render_screen` returns an iocraft `AnyElement` (not a string). Snapshot tests in M7-03/M7-04 used the pure `render_*_to_string` oracles. **Grep** for the screen-level string oracle these prior tests used (`grep -rn "render_screen_to_string\|render_entry_to_string\|to_string(&" lingxi-core/crates/tui/tests/`). If none exists at the screen level, snapshot the **composition of pure oracles** instead: `format_status_line(...)` + `render_entry_to_string(...)` per message (these already exist) + the markdown/syntax `render::*` pure fns for the code block — concatenated. The point of the snapshot is that the *colors* differ between themes; since the pure string oracles drop color, ALSO assert the color-bearing path differs via the Task 6 syntax test + a `Debug`-format comparison of the styled lines for dark vs light (add `assert_ne!` on the two themes' styled-line debug output, mirroring `theme_syntax_follows.rs`). Keep the textual insta snapshot for layout/label regressions and the `assert_ne!` for color divergence.
+> **Note:** `app::render_screen` returns an iocraft `AnyElement` (not a string). Snapshot tests in M7-03/M7-04 used the pure `render_*_to_string` oracles. **Grep** for the screen-level string oracle these prior tests used (`grep -rn "render_screen_to_string\|render_entry_to_string\|to_string(&" lingxi-code/crates/tui/tests/`). If none exists at the screen level, snapshot the **composition of pure oracles** instead: `format_status_line(...)` + `render_entry_to_string(...)` per message (these already exist) + the markdown/syntax `render::*` pure fns for the code block — concatenated. The point of the snapshot is that the *colors* differ between themes; since the pure string oracles drop color, ALSO assert the color-bearing path differs via the Task 6 syntax test + a `Debug`-format comparison of the styled lines for dark vs light (add `assert_ne!` on the two themes' styled-line debug output, mirroring `theme_syntax_follows.rs`). Keep the textual insta snapshot for layout/label regressions and the `assert_ne!` for color divergence.
 
 - [ ] **Step 2: Run test to verify it fails / creates snapshots**
 
@@ -1318,7 +1318,7 @@ Expected: PASS (snapshots blessed).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/tests/theme_snapshots.rs lingxi-core/crates/tui/tests/snapshots/
+git add lingxi-code/crates/tui/tests/theme_snapshots.rs lingxi-code/crates/tui/tests/snapshots/
 git commit -m "plan(M7-15 T10): snapshots — statusline + message + code block under dark/light
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1330,7 +1330,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Files:** none (verification + tag only)
 
-- [ ] **Step 1: Format + lint + full test (from inside `lingxi-core/`)**
+- [ ] **Step 1: Format + lint + full test (from inside `lingxi-code/`)**
 
 ```bash
 cargo fmt --check
@@ -1344,7 +1344,7 @@ Expected: clean fmt; zero clippy warnings; all tests pass. Known flakes (allowed
 
 ```bash
 cargo test --workspace all_event_names 2>/dev/null || true
-grep -rn "ALL_EVENT_NAMES" lingxi-core/crates/telemetry/src/ | head
+grep -rn "ALL_EVENT_NAMES" lingxi-code/crates/telemetry/src/ | head
 ```
 
 Expected: `ALL_EVENT_NAMES.len()` still **326** (M7-15 registered no events). Confirm no new `tengu_tui_*` constant was added by this plan.

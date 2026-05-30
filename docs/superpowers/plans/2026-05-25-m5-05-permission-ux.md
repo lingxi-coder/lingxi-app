@@ -54,16 +54,16 @@ This plan ships:
   - For `REPL` and `PowerShell` — extensions of the Bash family — both inherit `DenyByDefault` per the BashTool pattern.
 
 - Existing surfaces consumed by this plan:
-  - `lingxi-core/crates/permission/src/lib.rs` (M1.3, untouched since) — currently exports `PermissionPolicy`, `PermissionMode`, `PermissionRule`, `PermissionResult`. M5-05 Task 1 step 3 ADDS new modules `gate`, `permission_request`, `defaults_per_tool`, `prompting_gate` to this `lib.rs` (4 lines added, no existing exports touched).
-  - `lingxi-core/crates/permission/src/result.rs:78` — already has `PermissionDecisionReason::PermissionPromptTool { tool_name: String }`. M5-05 reuses this variant when the interactive gate produces an Allow/Deny (via the new `PromptDecision` → `PermissionResult` conversion in `prompting_gate.rs::into_permission_result`).
-  - `lingxi-core/crates/tools/src/builtin/*.rs` — 33 files, exporting 41 distinct `TOOL_NAME` / `*_TOOL_NAME` constants (enumerated in the Task 0 grep). Task 4 references each of these constants by name in the `defaults_per_tool.rs` static table. This makes the table self-checking: if `lingxi-tools` ever renames a constant, the permission crate fails to compile.
-  - `lingxi-core/crates/orchestrator/src/conversation.rs` (M5-04) — `ConversationOrchestrator { config, api, streaming_api, tools, hooks, perms, output, session, memory, cwd }`. Task 11 of this plan does NOT add a new field — it changes the TYPE of `perms` from `Arc<dyn local::PermissionGate>` to `Arc<dyn lingxi_permission::PermissionGate>` (re-export of the same trait, now real). The constructor signature is unchanged.
-  - `lingxi-core/crates/orchestrator/src/config.rs` (M5-02) — `OrchestratorConfig { model, max_turns, cwd }` + `MAX_TURNS_DEFAULT: u32 = 30`. Task 11 adds `interactive_permissions: bool` defaulting to `false`. The `Default for OrchestratorConfig` impl is updated to set the new field; all existing tests that construct `OrchestratorConfig::default()` keep passing because the default keeps the no-op gate behavior.
-  - `lingxi-core/crates/orchestrator/src/test_support.rs` (M5-02) — currently defines the in-crate `PermissionGate` trait + `NoOpPermissionGate` unit struct. Task 2 step 4 deletes the trait definition and replaces it with `pub use lingxi_permission::gate::PermissionGate;` re-export; the `NoOpPermissionGate` impl stays in `test_support.rs` and is updated to import the trait from its new home.
-  - `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs` (added by M5-02, extended by M5-04 to 5 constants). Task 12 of this plan appends 2 more constants + 2 more payload structs + extends the `NAMES` slice to 7 entries.
-  - `lingxi-core/crates/telemetry/src/tengu/mod.rs:29` — current `TOTAL = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 5 + 1` (post-M5-04 = 243; the `5` is the orchestrator submodule's current count). Task 12 step 2 bumps the orchestrator's `5` to `7`, making `TOTAL = 245`.
-  - `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json` — the long JSON `event_names` array currently has 243 entries (post-M5-04). Task 12 step 4 inserts the two new names IMMEDIATELY after `tengu_orchestrator_turn_streaming_completed` and BEFORE `lingxi_core_v0_5_0_released` (the last entry from the release category), keeping the registration-order rule.
-  - `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs:8` — `registry_is_exactly_243_entries` test (added by M5-04). Task 12 step 5 bumps it to 245 + updates the comment to mention M5-05.
+  - `lingxi-code/crates/permission/src/lib.rs` (M1.3, untouched since) — currently exports `PermissionPolicy`, `PermissionMode`, `PermissionRule`, `PermissionResult`. M5-05 Task 1 step 3 ADDS new modules `gate`, `permission_request`, `defaults_per_tool`, `prompting_gate` to this `lib.rs` (4 lines added, no existing exports touched).
+  - `lingxi-code/crates/permission/src/result.rs:78` — already has `PermissionDecisionReason::PermissionPromptTool { tool_name: String }`. M5-05 reuses this variant when the interactive gate produces an Allow/Deny (via the new `PromptDecision` → `PermissionResult` conversion in `prompting_gate.rs::into_permission_result`).
+  - `lingxi-code/crates/tools/src/builtin/*.rs` — 33 files, exporting 41 distinct `TOOL_NAME` / `*_TOOL_NAME` constants (enumerated in the Task 0 grep). Task 4 references each of these constants by name in the `defaults_per_tool.rs` static table. This makes the table self-checking: if `lingxi-tools` ever renames a constant, the permission crate fails to compile.
+  - `lingxi-code/crates/orchestrator/src/conversation.rs` (M5-04) — `ConversationOrchestrator { config, api, streaming_api, tools, hooks, perms, output, session, memory, cwd }`. Task 11 of this plan does NOT add a new field — it changes the TYPE of `perms` from `Arc<dyn local::PermissionGate>` to `Arc<dyn lingxi_permission::PermissionGate>` (re-export of the same trait, now real). The constructor signature is unchanged.
+  - `lingxi-code/crates/orchestrator/src/config.rs` (M5-02) — `OrchestratorConfig { model, max_turns, cwd }` + `MAX_TURNS_DEFAULT: u32 = 30`. Task 11 adds `interactive_permissions: bool` defaulting to `false`. The `Default for OrchestratorConfig` impl is updated to set the new field; all existing tests that construct `OrchestratorConfig::default()` keep passing because the default keeps the no-op gate behavior.
+  - `lingxi-code/crates/orchestrator/src/test_support.rs` (M5-02) — currently defines the in-crate `PermissionGate` trait + `NoOpPermissionGate` unit struct. Task 2 step 4 deletes the trait definition and replaces it with `pub use lingxi_permission::gate::PermissionGate;` re-export; the `NoOpPermissionGate` impl stays in `test_support.rs` and is updated to import the trait from its new home.
+  - `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` (added by M5-02, extended by M5-04 to 5 constants). Task 12 of this plan appends 2 more constants + 2 more payload structs + extends the `NAMES` slice to 7 entries.
+  - `lingxi-code/crates/telemetry/src/tengu/mod.rs:29` — current `TOTAL = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 5 + 1` (post-M5-04 = 243; the `5` is the orchestrator submodule's current count). Task 12 step 2 bumps the orchestrator's `5` to `7`, making `TOTAL = 245`.
+  - `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json` — the long JSON `event_names` array currently has 243 entries (post-M5-04). Task 12 step 4 inserts the two new names IMMEDIATELY after `tengu_orchestrator_turn_streaming_completed` and BEFORE `lingxi_core_v0_5_0_released` (the last entry from the release category), keeping the registration-order rule.
+  - `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs:8` — `registry_is_exactly_243_entries` test (added by M5-04). Task 12 step 5 bumps it to 245 + updates the comment to mention M5-05.
 
 - Repo conventions:
   - Tests live in `#[cfg(test)] mod tests { ... }` blocks adjacent to production code; integration tests live under `crates/<crate>/tests/<name>_test.rs`.
@@ -202,7 +202,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 - **Telemetry events** (LingXi-locked under the existing `tengu::orchestrator` submodule):
   - `tengu_orchestrator_permission_prompted` — emitted by `InteractivePromptingGate::prompt_user` IMMEDIATELY before the stderr write. Payload: `{ tool_name: PiiTagged, default_allow: bool }`.
   - `tengu_orchestrator_permission_answered` — emitted by `InteractivePromptingGate::prompt_user` AFTER a definitive answer (Allow or Deny) is parsed (NOT emitted on retry). Payload: `{ tool_name: PiiTagged, allowed: Verified (`true`/`false` as `"true"`/`"false"`), attempts: u32 }`. (Storing the bool as a `Verified` string avoids needing a new payload type; the audit macro accepts `Verified` for one-bit signals.)
-  Both events are `pub const &'static str` constants in `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs` APPENDED after the existing 5 names. `NAMES` in that file grows from 5 → 7 entries; `ALL_EVENT_NAMES.len()` grows from 243 → 245.
+  Both events are `pub const &'static str` constants in `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` APPENDED after the existing 5 names. `NAMES` in that file grows from 5 → 7 entries; `ALL_EVENT_NAMES.len()` grows from 243 → 245.
 
 - **Workspace-wide invariants reaffirmed at the verification gate:**
   - `cargo test --workspace -p lingxi-permission -p lingxi-orchestrator -p lingxi-telemetry --all-targets`.
@@ -215,31 +215,31 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 
 ## Files this plan touches
 
-**Creates (new files — all under `lingxi-core/crates/permission/src/` or `lingxi-core/crates/traits/src/` unless noted):**
+**Creates (new files — all under `lingxi-code/crates/permission/src/` or `lingxi-code/crates/traits/src/` unless noted):**
 
-- `lingxi-core/crates/traits/src/permission_gate.rs` — the promoted `PermissionGate` trait + `PermissionDecision` enum + `PermError` enum (all moved out of `lingxi-orchestrator::test_support`).
-- `lingxi-core/crates/traits/src/prompting_gate.rs` — `PromptingGate` sub-trait + `PermissionRequest` + `PromptDecision` + `PromptError` + `PromptDefault`.
-- `lingxi-core/crates/permission/src/gate.rs` — re-export shim: `pub use lingxi_traits::permission_gate::*;` + `pub use lingxi_traits::prompting_gate::*;`. (Keeps the public surface of `lingxi-permission` clean — downstream crates import from `lingxi-permission` not `lingxi-traits` directly.)
-- `lingxi-core/crates/permission/src/defaults_per_tool.rs` — the byte-locked `tool_default(name: &str) -> PromptDefault` lookup + the `OnceLock<HashMap>` table populated with all 41 tool names.
-- `lingxi-core/crates/permission/src/prompting_gate.rs` — `InteractivePromptingGate { stdin, stderr }` + `format_prompt` + `parse_user_input` + `prompt_user` impl + `PermissionGate` upcast impl.
-- `lingxi-core/crates/permission/tests/prompting_gate_format_test.rs` — byte-locked prompt-format integration test.
-- `lingxi-core/crates/permission/tests/prompting_gate_parse_test.rs` — input-parsing integration test (8 cases).
-- `lingxi-core/crates/permission/tests/prompting_gate_retry_test.rs` — retry-then-error integration test.
-- `lingxi-core/crates/orchestrator/tests/orchestrator_interactive_perms_test.rs` — end-to-end orchestrator + scripted-stdin + tool-dispatch test.
+- `lingxi-code/crates/traits/src/permission_gate.rs` — the promoted `PermissionGate` trait + `PermissionDecision` enum + `PermError` enum (all moved out of `lingxi-orchestrator::test_support`).
+- `lingxi-code/crates/traits/src/prompting_gate.rs` — `PromptingGate` sub-trait + `PermissionRequest` + `PromptDecision` + `PromptError` + `PromptDefault`.
+- `lingxi-code/crates/permission/src/gate.rs` — re-export shim: `pub use lingxi_traits::permission_gate::*;` + `pub use lingxi_traits::prompting_gate::*;`. (Keeps the public surface of `lingxi-permission` clean — downstream crates import from `lingxi-permission` not `lingxi-traits` directly.)
+- `lingxi-code/crates/permission/src/defaults_per_tool.rs` — the byte-locked `tool_default(name: &str) -> PromptDefault` lookup + the `OnceLock<HashMap>` table populated with all 41 tool names.
+- `lingxi-code/crates/permission/src/prompting_gate.rs` — `InteractivePromptingGate { stdin, stderr }` + `format_prompt` + `parse_user_input` + `prompt_user` impl + `PermissionGate` upcast impl.
+- `lingxi-code/crates/permission/tests/prompting_gate_format_test.rs` — byte-locked prompt-format integration test.
+- `lingxi-code/crates/permission/tests/prompting_gate_parse_test.rs` — input-parsing integration test (8 cases).
+- `lingxi-code/crates/permission/tests/prompting_gate_retry_test.rs` — retry-then-error integration test.
+- `lingxi-code/crates/orchestrator/tests/orchestrator_interactive_perms_test.rs` — end-to-end orchestrator + scripted-stdin + tool-dispatch test.
 
 **Modifies (existing files):**
 
-- `lingxi-core/crates/traits/src/lib.rs` — add `pub mod permission_gate; pub mod prompting_gate;` + re-exports (2 lines).
-- `lingxi-core/crates/permission/src/lib.rs` — add `pub mod gate; pub mod defaults_per_tool; pub mod prompting_gate;` (3 lines) + re-exports (3 more lines).
-- `lingxi-core/crates/permission/Cargo.toml` — verify/add `tokio = { workspace = true, features = ["sync", "io-util", "macros"] }` + `async-trait = { workspace = true }` + `lingxi-traits = { workspace = true }` + `lingxi-tools = { workspace = true }` (the tool-name-constant cross-check).
-- `lingxi-core/crates/orchestrator/src/test_support.rs` — delete the local `pub(crate) trait PermissionGate { ... }` block; replace with `pub use lingxi_permission::gate::PermissionGate;` re-export. `NoOpPermissionGate` impl unchanged (its method signature already matches the promoted trait).
-- `lingxi-core/crates/orchestrator/src/config.rs` — add `pub interactive_permissions: bool` field + update `Default` impl.
-- `lingxi-core/crates/orchestrator/src/conversation.rs` — update `ConversationOrchestrator::new` to honor `config.interactive_permissions` (when `true`, swap the no-op gate for `InteractivePromptingGate`; when `false`, keep `NoOpPermissionGate`).
-- `lingxi-core/crates/orchestrator/Cargo.toml` — add `lingxi-permission = { workspace = true }` if not already present (it is, since M5-02 — but verify).
-- `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs` — append `PERMISSION_PROMPTED` + `PERMISSION_ANSWERED` constants + extend `NAMES` slice + add two payload structs.
-- `lingxi-core/crates/telemetry/src/tengu/mod.rs:29` — bump the orchestrator's count from `5` to `7` in the `TOTAL` formula → `TOTAL = 245`.
-- `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs:8` — bump expected count from 243 to 245.
-- `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json` — insert two new event names in registration order.
+- `lingxi-code/crates/traits/src/lib.rs` — add `pub mod permission_gate; pub mod prompting_gate;` + re-exports (2 lines).
+- `lingxi-code/crates/permission/src/lib.rs` — add `pub mod gate; pub mod defaults_per_tool; pub mod prompting_gate;` (3 lines) + re-exports (3 more lines).
+- `lingxi-code/crates/permission/Cargo.toml` — verify/add `tokio = { workspace = true, features = ["sync", "io-util", "macros"] }` + `async-trait = { workspace = true }` + `lingxi-traits = { workspace = true }` + `lingxi-tools = { workspace = true }` (the tool-name-constant cross-check).
+- `lingxi-code/crates/orchestrator/src/test_support.rs` — delete the local `pub(crate) trait PermissionGate { ... }` block; replace with `pub use lingxi_permission::gate::PermissionGate;` re-export. `NoOpPermissionGate` impl unchanged (its method signature already matches the promoted trait).
+- `lingxi-code/crates/orchestrator/src/config.rs` — add `pub interactive_permissions: bool` field + update `Default` impl.
+- `lingxi-code/crates/orchestrator/src/conversation.rs` — update `ConversationOrchestrator::new` to honor `config.interactive_permissions` (when `true`, swap the no-op gate for `InteractivePromptingGate`; when `false`, keep `NoOpPermissionGate`).
+- `lingxi-code/crates/orchestrator/Cargo.toml` — add `lingxi-permission = { workspace = true }` if not already present (it is, since M5-02 — but verify).
+- `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` — append `PERMISSION_PROMPTED` + `PERMISSION_ANSWERED` constants + extend `NAMES` slice + add two payload structs.
+- `lingxi-code/crates/telemetry/src/tengu/mod.rs:29` — bump the orchestrator's count from `5` to `7` in the `TOTAL` formula → `TOTAL = 245`.
+- `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs:8` — bump expected count from 243 to 245.
+- `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json` — insert two new event names in registration order.
 
 **Deletes:** none.
 
@@ -270,20 +270,20 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 1: Scaffold module files + Cargo wiring
 
 **Files:**
-- Create: `lingxi-core/crates/traits/src/permission_gate.rs`
-- Create: `lingxi-core/crates/traits/src/prompting_gate.rs`
-- Create: `lingxi-core/crates/permission/src/gate.rs`
-- Create: `lingxi-core/crates/permission/src/defaults_per_tool.rs`
-- Create: `lingxi-core/crates/permission/src/prompting_gate.rs`
-- Modify: `lingxi-core/crates/traits/src/lib.rs`
-- Modify: `lingxi-core/crates/permission/src/lib.rs`
-- Modify: `lingxi-core/crates/permission/Cargo.toml`
+- Create: `lingxi-code/crates/traits/src/permission_gate.rs`
+- Create: `lingxi-code/crates/traits/src/prompting_gate.rs`
+- Create: `lingxi-code/crates/permission/src/gate.rs`
+- Create: `lingxi-code/crates/permission/src/defaults_per_tool.rs`
+- Create: `lingxi-code/crates/permission/src/prompting_gate.rs`
+- Modify: `lingxi-code/crates/traits/src/lib.rs`
+- Modify: `lingxi-code/crates/permission/src/lib.rs`
+- Modify: `lingxi-code/crates/permission/Cargo.toml`
 
 **Steps:**
 
 - [ ] Step 1 — Verify predecessor M5-04 is on `HEAD`. Run `git log -1 --format='%H %s'`. Expected first 7 chars: `b49546f` (or whatever SHA M5-04 committed at). If not, STOP and ask the user.
 
-- [ ] Step 2 — Confirm `tokio` features in `lingxi-permission`. Open `lingxi-core/crates/permission/Cargo.toml`. The `[dependencies]` table must contain (add if missing):
+- [ ] Step 2 — Confirm `tokio` features in `lingxi-permission`. Open `lingxi-code/crates/permission/Cargo.toml`. The `[dependencies]` table must contain (add if missing):
   ```toml
   async-trait = { workspace = true }
   tokio = { workspace = true, features = ["sync", "io-util", "macros", "rt"] }
@@ -294,7 +294,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 
 - [ ] Step 2b — Since `lingxi-tools → lingxi-permission` is a real edge (M1.3 lock), do NOT add `lingxi-tools` to `lingxi-permission`'s deps. Instead, inline the 41 tool-name literals as `&'static str` in `defaults_per_tool.rs` (the values are tiny + already byte-locked elsewhere). Add a `#[cfg(test)]` integration test (`permission/tests/tool_name_parity_test.rs`) that depends on `lingxi-tools` as a dev-dep and cross-checks: `assert_eq!(lingxi_permission::defaults_per_tool::tool_default(lingxi_tools::builtin::bash::TOOL_NAME), PromptDefault::DenyByDefault);` for at least 8 representative names. This gives us cross-crate verification WITHOUT a build-time cycle.
 
-- [ ] Step 3 — Create `lingxi-core/crates/traits/src/permission_gate.rs`:
+- [ ] Step 3 — Create `lingxi-code/crates/traits/src/permission_gate.rs`:
   ```rust
   //! `PermissionGate` trait — promoted from the M5-02 in-orchestrator local.
   //!
@@ -346,7 +346,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   }
   ```
 
-- [ ] Step 4 — Create `lingxi-core/crates/traits/src/prompting_gate.rs`:
+- [ ] Step 4 — Create `lingxi-code/crates/traits/src/prompting_gate.rs`:
   ```rust
   //! `PromptingGate` sub-trait — interactive y/N permission UX.
   //!
@@ -435,9 +435,9 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   pub fn _types_marker(_v: &Value) {}
   ```
 
-- [ ] Step 5 — Append `pub mod permission_gate; pub mod prompting_gate;` to `lingxi-core/crates/traits/src/lib.rs` + `pub use {permission_gate::*, prompting_gate::*};` re-exports.
+- [ ] Step 5 — Append `pub mod permission_gate; pub mod prompting_gate;` to `lingxi-code/crates/traits/src/lib.rs` + `pub use {permission_gate::*, prompting_gate::*};` re-exports.
 
-- [ ] Step 6 — Create `lingxi-core/crates/permission/src/gate.rs`:
+- [ ] Step 6 — Create `lingxi-code/crates/permission/src/gate.rs`:
   ```rust
   //! Re-export shim — workspace-wide single source of truth lives in
   //! [`lingxi_traits::permission_gate`] and [`lingxi_traits::prompting_gate`].
@@ -455,19 +455,19 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   ```
 
 - [ ] Step 7 — Create placeholder bodies (filled in later tasks):
-  - `lingxi-core/crates/permission/src/defaults_per_tool.rs`:
+  - `lingxi-code/crates/permission/src/defaults_per_tool.rs`:
     ```rust
     //! Per-tool default Y/N decisions. Filled in Task 4.
     #![forbid(unsafe_code)]
     ```
-  - `lingxi-core/crates/permission/src/prompting_gate.rs`:
+  - `lingxi-code/crates/permission/src/prompting_gate.rs`:
     ```rust
     //! `InteractivePromptingGate` — stdin/stderr prompt loop. Filled in
     //! Tasks 5-10.
     #![forbid(unsafe_code)]
     ```
 
-- [ ] Step 8 — Append to `lingxi-core/crates/permission/src/lib.rs`:
+- [ ] Step 8 — Append to `lingxi-code/crates/permission/src/lib.rs`:
   ```rust
   pub mod gate;
   pub mod defaults_per_tool;
@@ -493,13 +493,13 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 2: Promote `PermissionGate` trait out of `lingxi-orchestrator::test_support`
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/test_support.rs`
-- Modify: `lingxi-core/crates/orchestrator/Cargo.toml` (verify `lingxi-permission` dep)
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs` (re-export path)
+- Modify: `lingxi-code/crates/orchestrator/src/test_support.rs`
+- Modify: `lingxi-code/crates/orchestrator/Cargo.toml` (verify `lingxi-permission` dep)
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs` (re-export path)
 
 **Steps:**
 
-- [ ] Step 1 — Open `lingxi-core/crates/orchestrator/src/test_support.rs`. Locate the existing `pub(crate) trait PermissionGate { ... }` block (added by M5-02 task 8, ~line 38-65). DELETE the trait definition + the `PermissionDecision` enum + the `PermError` enum (all three are now in `lingxi-traits::permission_gate`).
+- [ ] Step 1 — Open `lingxi-code/crates/orchestrator/src/test_support.rs`. Locate the existing `pub(crate) trait PermissionGate { ... }` block (added by M5-02 task 8, ~line 38-65). DELETE the trait definition + the `PermissionDecision` enum + the `PermError` enum (all three are now in `lingxi-traits::permission_gate`).
 
 - [ ] Step 2 — Replace the deleted block with re-exports:
   ```rust
@@ -540,11 +540,11 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 3: Define `PermissionRequest` + `PromptDefault` (already done in Task 1 step 4 — this task adds the tests)
 
 **Files:**
-- Modify: `lingxi-core/crates/traits/src/prompting_gate.rs` (add `#[cfg(test)] mod tests`)
+- Modify: `lingxi-code/crates/traits/src/prompting_gate.rs` (add `#[cfg(test)] mod tests`)
 
 **Steps:**
 
-- [ ] Step 1 — Append to `lingxi-core/crates/traits/src/prompting_gate.rs`:
+- [ ] Step 1 — Append to `lingxi-code/crates/traits/src/prompting_gate.rs`:
   ```rust
   #[cfg(test)]
   mod tests {
@@ -602,12 +602,12 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 4: `defaults_per_tool::tool_default` table for all 41 tools
 
 **Files:**
-- Modify: `lingxi-core/crates/permission/src/defaults_per_tool.rs`
-- Create: `lingxi-core/crates/permission/tests/tool_name_parity_test.rs`
+- Modify: `lingxi-code/crates/permission/src/defaults_per_tool.rs`
+- Create: `lingxi-code/crates/permission/tests/tool_name_parity_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Replace the placeholder body in `lingxi-core/crates/permission/src/defaults_per_tool.rs`:
+- [ ] Step 1 — Replace the placeholder body in `lingxi-code/crates/permission/src/defaults_per_tool.rs`:
   ```rust
   //! Per-tool default Y/N decisions for the interactive permission prompt.
   //!
@@ -743,7 +743,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   }
   ```
 
-- [ ] Step 2 — Create `lingxi-core/crates/permission/tests/tool_name_parity_test.rs`:
+- [ ] Step 2 — Create `lingxi-code/crates/permission/tests/tool_name_parity_test.rs`:
   ```rust
   //! Cross-crate parity test: every tool name from `lingxi-tools::builtin::*`
   //! must resolve via `lingxi_permission::tool_default`. Uses `lingxi-tools`
@@ -751,7 +751,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   //! tests-only dep reverses for verification).
   //!
   //! Source for the constants: `grep -n "pub const TOOL_NAME\|pub const.*_TOOL_NAME"
-  //! lingxi-core/crates/tools/src/builtin/*.rs`.
+  //! lingxi-code/crates/tools/src/builtin/*.rs`.
 
   use lingxi_permission::tool_default;
   use lingxi_permission::PromptDefault;
@@ -826,7 +826,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   }
   ```
 
-- [ ] Step 3 — Open `lingxi-core/crates/permission/Cargo.toml`. Under `[dev-dependencies]` add:
+- [ ] Step 3 — Open `lingxi-code/crates/permission/Cargo.toml`. Under `[dev-dependencies]` add:
   ```toml
   lingxi-tools = { workspace = true }
   ```
@@ -844,8 +844,8 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 5: `format_prompt(request) -> String` byte-locked
 
 **Files:**
-- Modify: `lingxi-core/crates/permission/src/prompting_gate.rs`
-- Create: `lingxi-core/crates/permission/tests/prompting_gate_format_test.rs`
+- Modify: `lingxi-code/crates/permission/src/prompting_gate.rs`
+- Create: `lingxi-code/crates/permission/tests/prompting_gate_format_test.rs`
 
 **Steps:**
 
@@ -964,7 +964,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   }
   ```
 
-- [ ] Step 2 — Create the integration test at `lingxi-core/crates/permission/tests/prompting_gate_format_test.rs`:
+- [ ] Step 2 — Create the integration test at `lingxi-code/crates/permission/tests/prompting_gate_format_test.rs`:
   ```rust
   //! Cross-crate format byte-locks — same assertions as the inline tests, but
   //! run from the integration-test binary so they exercise the published
@@ -1012,11 +1012,11 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 6: `parse_user_input(line, default) -> ParseOutcome`
 
 **Files:**
-- Modify: `lingxi-core/crates/permission/src/prompting_gate.rs`
+- Modify: `lingxi-code/crates/permission/src/prompting_gate.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Append to `lingxi-core/crates/permission/src/prompting_gate.rs` (above the `#[cfg(test)]` block):
+- [ ] Step 1 — Append to `lingxi-code/crates/permission/src/prompting_gate.rs` (above the `#[cfg(test)]` block):
   ```rust
   /// One step of input parsing. `Valid` means the user produced a definitive
   /// answer; `Invalid` means we should re-prompt.
@@ -1150,11 +1150,11 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 7: First failing test for `InteractivePromptingGate::prompt_user` (RED)
 
 **Files:**
-- Create: `lingxi-core/crates/permission/tests/prompting_gate_e2e_test.rs`
+- Create: `lingxi-code/crates/permission/tests/prompting_gate_e2e_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Create the test file `lingxi-core/crates/permission/tests/prompting_gate_e2e_test.rs`:
+- [ ] Step 1 — Create the test file `lingxi-code/crates/permission/tests/prompting_gate_e2e_test.rs`:
   ```rust
   //! End-to-end `InteractivePromptingGate::prompt_user` tests using
   //! `tokio::io::duplex` to script stdin and capture stderr.
@@ -1236,7 +1236,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 8: Implement `PromptingGate for InteractivePromptingGate` (GREEN for Task 7)
 
 **Files:**
-- Modify: `lingxi-core/crates/permission/src/prompting_gate.rs`
+- Modify: `lingxi-code/crates/permission/src/prompting_gate.rs`
 
 **Steps:**
 
@@ -1328,7 +1328,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 9: Empty-input → default tests (both directions)
 
 **Files:**
-- Modify: `lingxi-core/crates/permission/tests/prompting_gate_e2e_test.rs`
+- Modify: `lingxi-code/crates/permission/tests/prompting_gate_e2e_test.rs`
 
 **Steps:**
 
@@ -1417,7 +1417,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 10: Invalid-input retry → error after 3 tries
 
 **Files:**
-- Modify: `lingxi-core/crates/permission/tests/prompting_gate_e2e_test.rs`
+- Modify: `lingxi-code/crates/permission/tests/prompting_gate_e2e_test.rs`
 
 **Steps:**
 
@@ -1513,14 +1513,14 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 11: Wire `InteractivePromptingGate` into `ConversationOrchestrator`
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/config.rs`
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs`
-- Modify: `lingxi-core/crates/permission/src/prompting_gate.rs` (add `PermissionGate` upcast impl)
-- Create: `lingxi-core/crates/orchestrator/tests/orchestrator_interactive_perms_test.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/config.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs`
+- Modify: `lingxi-code/crates/permission/src/prompting_gate.rs` (add `PermissionGate` upcast impl)
+- Create: `lingxi-code/crates/orchestrator/tests/orchestrator_interactive_perms_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Open `lingxi-core/crates/orchestrator/src/config.rs`. Add a new field to `OrchestratorConfig`:
+- [ ] Step 1 — Open `lingxi-code/crates/orchestrator/src/config.rs`. Add a new field to `OrchestratorConfig`:
   ```rust
   pub struct OrchestratorConfig {
       pub model: String,
@@ -1546,7 +1546,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   }
   ```
 
-- [ ] Step 2 — Open `lingxi-core/crates/permission/src/prompting_gate.rs`. Add the `PermissionGate` upcast impl AFTER the `PromptingGate` impl block:
+- [ ] Step 2 — Open `lingxi-code/crates/permission/src/prompting_gate.rs`. Add the `PermissionGate` upcast impl AFTER the `PromptingGate` impl block:
   ```rust
   #[async_trait]
   impl PermissionGate for InteractivePromptingGate {
@@ -1573,7 +1573,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   }
   ```
 
-- [ ] Step 3 — Open `lingxi-core/crates/orchestrator/src/conversation.rs`. Locate `ConversationOrchestrator::new` (or its public constructor). Replace the unconditional `NoOpPermissionGate` construction with a branch:
+- [ ] Step 3 — Open `lingxi-code/crates/orchestrator/src/conversation.rs`. Locate `ConversationOrchestrator::new` (or its public constructor). Replace the unconditional `NoOpPermissionGate` construction with a branch:
   ```rust
   use std::sync::Arc;
   use tokio::io::{stdin, stderr};
@@ -1592,7 +1592,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   ```
   **Note:** the `NoOpPermissionGate` lives under `crate::test_support` which is `#[cfg(any(test, feature = "test-support"))]` — for production this default path needs the no-op gate exposed unconditionally. Solution: move `NoOpPermissionGate` out of `test_support.rs` into a new file `crates/orchestrator/src/noop_gate.rs` (pub-but-undocumented) that is ALWAYS compiled. The trait impl moves with it. Update `test_support.rs` to `pub use crate::noop_gate::NoOpPermissionGate;` for backward-compat with the existing imports.
 
-- [ ] Step 4 — Create `lingxi-core/crates/orchestrator/src/noop_gate.rs`:
+- [ ] Step 4 — Create `lingxi-code/crates/orchestrator/src/noop_gate.rs`:
   ```rust
   //! Always-allow permission gate — used when
   //! [`OrchestratorConfig::interactive_permissions`] is `false`.
@@ -1629,7 +1629,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   ```
   Remove the old in-place struct definition.
 
-- [ ] Step 6 — Create the integration test `lingxi-core/crates/orchestrator/tests/orchestrator_interactive_perms_test.rs`:
+- [ ] Step 6 — Create the integration test `lingxi-code/crates/orchestrator/tests/orchestrator_interactive_perms_test.rs`:
   ```rust
   //! End-to-end orchestrator test with interactive_permissions=true and
   //! scripted stdin. Validates that a tool_use response gates on the user's
@@ -1723,17 +1723,17 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 ### Task 12: Telemetry — `permission_prompted` + `permission_answered` (243 → 245)
 
 **Files:**
-- Modify: `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs`
-- Modify: `lingxi-core/crates/telemetry/src/tengu/mod.rs`
-- Modify: `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs`
-- Modify: `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json`
-- Modify: `lingxi-core/crates/permission/src/prompting_gate.rs` (emit events)
-- Modify: `lingxi-core/crates/permission/Cargo.toml` (add `lingxi-telemetry` dep)
-- Create: `lingxi-core/crates/permission/tests/prompting_gate_telemetry_test.rs`
+- Modify: `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs`
+- Modify: `lingxi-code/crates/telemetry/src/tengu/mod.rs`
+- Modify: `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs`
+- Modify: `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json`
+- Modify: `lingxi-code/crates/permission/src/prompting_gate.rs` (emit events)
+- Modify: `lingxi-code/crates/permission/Cargo.toml` (add `lingxi-telemetry` dep)
+- Create: `lingxi-code/crates/permission/tests/prompting_gate_telemetry_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Open `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs`. Append after the existing 5 constants:
+- [ ] Step 1 — Open `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs`. Append after the existing 5 constants:
   ```rust
   /// `tengu_orchestrator_permission_prompted` — fired immediately before the
   /// interactive permission gate writes the prompt to stderr.
@@ -1772,7 +1772,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   ```
   (The `use` imports at the top of the file already import `PiiTagged` + `Verified` — confirm; if not, add them.)
 
-- [ ] Step 2 — Open `lingxi-core/crates/telemetry/src/tengu/mod.rs:29`. The `TOTAL` formula currently reads (post-M5-04):
+- [ ] Step 2 — Open `lingxi-code/crates/telemetry/src/tengu/mod.rs:29`. The `TOTAL` formula currently reads (post-M5-04):
   ```rust
   const TOTAL: usize = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 5 + 1;
   ```
@@ -1782,7 +1782,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   ```
   (Final = 245.) Update the inline comment above the `TOTAL` line to mention M5-05.
 
-- [ ] Step 3 — Open `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs:8`. Update the count + the doc-comment:
+- [ ] Step 3 — Open `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs:8`. Update the count + the doc-comment:
   ```rust
   #[test]
   fn registry_is_exactly_245_entries() {
@@ -1791,21 +1791,21 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
   }
   ```
 
-- [ ] Step 4 — Open `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json`. Find the position of `"tengu_orchestrator_turn_streaming_completed"` (added by M5-04). Insert the two new names immediately after it (and BEFORE `"lingxi_core_v0_5_0_released"`, the last entry):
+- [ ] Step 4 — Open `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json`. Find the position of `"tengu_orchestrator_turn_streaming_completed"` (added by M5-04). Insert the two new names immediately after it (and BEFORE `"lingxi_core_v0_5_0_released"`, the last entry):
   ```json
   "tengu_orchestrator_turn_streaming_completed",
   "tengu_orchestrator_permission_prompted",
   "tengu_orchestrator_permission_answered",
   "lingxi_core_v0_5_0_released"
   ```
-  The total `event_names` array length must equal 245 — verify with `jq '.event_names | length' lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json` if `jq` is available, otherwise count with `grep -c '",' lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json` (off-by-one — confirm 244 commas + 1 final-no-comma = 245 strings).
+  The total `event_names` array length must equal 245 — verify with `jq '.event_names | length' lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json` if `jq` is available, otherwise count with `grep -c '",' lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json` (off-by-one — confirm 244 commas + 1 final-no-comma = 245 strings).
 
-- [ ] Step 5 — Open `lingxi-core/crates/permission/Cargo.toml`. Under `[dependencies]` add (if not already):
+- [ ] Step 5 — Open `lingxi-code/crates/permission/Cargo.toml`. Under `[dependencies]` add (if not already):
   ```toml
   lingxi-telemetry = { workspace = true }
   ```
 
-- [ ] Step 6 — Open `lingxi-core/crates/permission/src/prompting_gate.rs`. Update the `prompt_user` impl to emit telemetry. Replace the loop body's "1. Write the prompt to stderr" step + the "Some(allow)" success branch with:
+- [ ] Step 6 — Open `lingxi-code/crates/permission/src/prompting_gate.rs`. Update the `prompt_user` impl to emit telemetry. Replace the loop body's "1. Write the prompt to stderr" step + the "Some(allow)" success branch with:
   ```rust
   loop {
       // Telemetry: prompt about to be shown.
@@ -1887,9 +1887,9 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
       }
   }
   ```
-  **Note:** the exact function name for emitting an event is `lingxi_telemetry::tengu::emit_event` (or whatever the M3-06 telemetry crate exports). If the function is named `lingxi_telemetry::emit` or sits in a different module, use the path that exists. Task 12 step 6 confirms with `grep -n "pub fn emit\|fn emit_event\|fn emit_" lingxi-core/crates/telemetry/src/`.
+  **Note:** the exact function name for emitting an event is `lingxi_telemetry::tengu::emit_event` (or whatever the M3-06 telemetry crate exports). If the function is named `lingxi_telemetry::emit` or sits in a different module, use the path that exists. Task 12 step 6 confirms with `grep -n "pub fn emit\|fn emit_event\|fn emit_" lingxi-code/crates/telemetry/src/`.
 
-- [ ] Step 7 — Create the telemetry integration test `lingxi-core/crates/permission/tests/prompting_gate_telemetry_test.rs`:
+- [ ] Step 7 — Create the telemetry integration test `lingxi-code/crates/permission/tests/prompting_gate_telemetry_test.rs`:
   ```rust
   //! Telemetry: the two events fire on a normal prompt round-trip.
 
@@ -2035,7 +2035,7 @@ Source-grep template: `grep -n "defaultValue=\|needsPermissions" claude-code/src
 7. **No build cycle** — Task 1 step 2 explicitly notes `lingxi-tools → lingxi-permission` already exists (M1.3), so the parity test in Task 4 uses `lingxi-tools` as a DEV-dep only (`[dev-dependencies]` block). ✓
 8. **`NoOpPermissionGate` survives the refactor** — Task 11 step 4 moves it out of `#[cfg(test)]` into an always-compiled `noop_gate.rs`, then re-exports from `test_support.rs` for back-compat. All M5-02 / M5-04 tests keep passing. ✓
 9. **Workspace verification gate** at Task 13 runs all four guards (test, clippy, fmt, count). ✓
-10. **Telemetry test path** assumes `lingxi_telemetry::install_test_sink` + `InMemorySink::snapshot` API — verified at plan-writing time against the M3-06 telemetry crate (see `lingxi-core/crates/telemetry/src/sink.rs`). If the actual names differ slightly, Task 12 step 7 substitutes the equivalent. ✓
+10. **Telemetry test path** assumes `lingxi_telemetry::install_test_sink` + `InMemorySink::snapshot` API — verified at plan-writing time against the M3-06 telemetry crate (see `lingxi-code/crates/telemetry/src/sink.rs`). If the actual names differ slightly, Task 12 step 7 substitutes the equivalent. ✓
 
 ---
 

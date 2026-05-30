@@ -11,7 +11,7 @@
 ## File Structure
 
 ```
-lingxi-core/crates/test-harness/
+lingxi-code/crates/test-harness/
 ├── src/
 │   ├── contracts/
 │   │   ├── mod.rs               ← MODIFY: add 12 new pub mod lines
@@ -2586,7 +2586,7 @@ workflow change is visible alongside the release log.
 
 ### Task 25: Final verification + release tag
 
-Run the full verification matrix from `lingxi-core/`:
+Run the full verification matrix from `lingxi-code/`:
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next/lingxi-core

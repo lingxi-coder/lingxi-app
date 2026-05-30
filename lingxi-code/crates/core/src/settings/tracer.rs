@@ -1,4 +1,4 @@
-// lingxi-core/crates/core/src/settings/tracer.rs
+// lingxi-code/crates/core/src/settings/tracer.rs
 //! Provenance recorder for `/doctor` (M6).
 //!
 //! `Settings::load` calls [`ProvenanceTrace::record_layer`] after merging

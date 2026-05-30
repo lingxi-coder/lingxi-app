@@ -6,9 +6,9 @@
 
 **Architecture:** M7-09 **extends the M7-08 state machine in place** (parent spec §2.3 — vim is PromptInput-local). M7-08 left scaffold for exactly this: `VimMode::Visual` (enum variant, never constructed), `VimState.pending_operator: Option<Operator>`, `VimState.register: Option<String>`, and `VimState.last_find`. M7-09 (a) promotes `register` to a linewise-aware `Register { text: String, linewise: bool }`; (b) adds `CommandState::Operator/OperatorCount/OperatorFind/OperatorG` (mirroring claude-code `CommandState`'s operator-pending arms) so `dw`/`3dw`/`df<char>`/`dG` parse; (c) adds a `VisualState { anchor: usize, linewise: bool }` field driving `VimMode::Visual`; (d) adds pure operator functions (`apply_operator`, `line_op`, `delete_char`, `paste`) modelled on claude-code `src/vim/operators.ts`. `handle_vim_key` (M7-08's single dispatcher) grows operator-pending and visual branches; `VimEffect` grows a buffer-mutating variant. The root.rs seam (M7-08 priority-4 branch) is unchanged — it already applies whatever `VimEffect` comes back.
 
-**Tech Stack:** Rust 1.82 (pinned via `lingxi-core/rust-toolchain.toml` — run all cargo from **inside `lingxi-core/`**), iocraft 0.8.3 (`View` not `Box`), crossterm key events. Pure logic — no new dependencies, no async, no iocraft inside `vim.rs`. Tests are `cargo test` unit (in `vim.rs`) + the table-driven `tests/vim_behavior.rs` integration file (created in M7-08, extended here).
+**Tech Stack:** Rust 1.82 (pinned via `lingxi-code/rust-toolchain.toml` — run all cargo from **inside `lingxi-code/`**), iocraft 0.8.3 (`View` not `Box`), crossterm key events. Pure logic — no new dependencies, no async, no iocraft inside `vim.rs`. Tests are `cargo test` unit (in `vim.rs`) + the table-driven `tests/vim_behavior.rs` integration file (created in M7-08, extended here).
 
-**Prerequisite (HARD):** M7-08 has landed and tag `m7.8` exists. This plan assumes `lingxi-core/crates/tui/src/components/prompt_input/vim.rs` already contains: `VimMode {Normal,Insert,Visual}`, `Operator {Delete,Change,Yank}`, `FindKind {F,BigF,T,BigT}`, `CommandState {Idle, Count{digits}, Find{kind,count}, G{count}}`, `VimState {mode, command, pending_operator, register, last_find}`, `Motion`, `VimEffect {Move(usize), Edit{text,cursor}, None}`, `VimOutcome {Effect, Pending, PassThrough}`, the `VimCursor<'a>` motion engine (`left/right/down_logical_line/up_logical_line/start_of_logical_line/end_of_logical_line/first_non_blank/next_vim_word/prev_vim_word/end_vim_word/start_of_first_line/start_of_last_line/go_to_line/find_character/is_at_end`, plus private `logical_line_start`/`logical_line_end`/`next_off`/`prev_off`/`char_at`/`clamp`), `resolve_motion`, `enter_insert_effect`, `esc_clamp`, `handle_vim_key`, `dispatch_normal`, `mode_indicator`, and the `AppState {vim_enabled: bool, vim: VimState}` fields + `KeyAction::ToggleVim` + the root.rs priority-4 vim branch with `apply_vim_effect`. **If `m7.8` is not present, STOP and land M7-08 first** — every File Structure path and type below depends on it. Read `docs/superpowers/plans/2026-05-29-m7-08-vim-motions.md` for the exact M7-08 shapes this plan builds on.
+**Prerequisite (HARD):** M7-08 has landed and tag `m7.8` exists. This plan assumes `lingxi-code/crates/tui/src/components/prompt_input/vim.rs` already contains: `VimMode {Normal,Insert,Visual}`, `Operator {Delete,Change,Yank}`, `FindKind {F,BigF,T,BigT}`, `CommandState {Idle, Count{digits}, Find{kind,count}, G{count}}`, `VimState {mode, command, pending_operator, register, last_find}`, `Motion`, `VimEffect {Move(usize), Edit{text,cursor}, None}`, `VimOutcome {Effect, Pending, PassThrough}`, the `VimCursor<'a>` motion engine (`left/right/down_logical_line/up_logical_line/start_of_logical_line/end_of_logical_line/first_non_blank/next_vim_word/prev_vim_word/end_vim_word/start_of_first_line/start_of_last_line/go_to_line/find_character/is_at_end`, plus private `logical_line_start`/`logical_line_end`/`next_off`/`prev_off`/`char_at`/`clamp`), `resolve_motion`, `enter_insert_effect`, `esc_clamp`, `handle_vim_key`, `dispatch_normal`, `mode_indicator`, and the `AppState {vim_enabled: bool, vim: VimState}` fields + `KeyAction::ToggleVim` + the root.rs priority-4 vim branch with `apply_vim_effect`. **If `m7.8` is not present, STOP and land M7-08 first** — every File Structure path and type below depends on it. Read `docs/superpowers/plans/2026-05-29-m7-08-vim-motions.md` for the exact M7-08 shapes this plan builds on.
 
 ---
 
@@ -98,10 +98,10 @@ The root.rs priority-4 branch (M7-08 Task 10) already routes keys through `handl
 
 | Path | New/Modify | Responsibility |
 |---|---|---|
-| `lingxi-core/crates/tui/src/components/prompt_input/vim.rs` | **Modify** | All M7-09 logic: promote `register` to `Register`; add `VisualState` + `VimState.visual`; add `CommandState::Operator/OperatorCount/OperatorFind/OperatorG`; classify motions (`is_inclusive_motion`/`is_linewise_motion`); add operator engine (`apply_operator`, `line_op`, `delete_char_x`, `paste`, `operator_range`, `last_char_len`); extend `handle_vim_key`/`dispatch_normal` with operator-pending + visual branches; grow `VimEffect` with a buffer-edit variant carrying the new cursor. Pure — no iocraft, no async. Adds ~500 lines incl. tests. |
-| `lingxi-core/crates/tui/src/components/prompt_input/footer.rs` | **Modify** (1 line) | The mode indicator already reads `VimMode` (M7-08 `footer_mode_label`); confirm `VimMode::Visual` → `-- VISUAL --` flows through (it does, via `mode_indicator`). Add a Visual-line label variant `-- VISUAL LINE --` selected from `VisualState.linewise`. |
-| `lingxi-core/crates/tui/src/root.rs` | **Modify** (small) | `apply_vim_effect` gains the new `VimEffect` buffer-edit variant (if M7-09 adds one distinct from `Edit`). The priority-4 routing itself is unchanged. |
-| `lingxi-core/crates/tui/tests/vim_behavior.rs` | **Modify** | Extend the M7-08 table-driven file with the operator×motion matrix, `x`/`p`/`P`, register, visual charwise + linewise, count×operator, `c`-enters-insert, and a re-assert that vim-disabled passthrough is unchanged. |
+| `lingxi-code/crates/tui/src/components/prompt_input/vim.rs` | **Modify** | All M7-09 logic: promote `register` to `Register`; add `VisualState` + `VimState.visual`; add `CommandState::Operator/OperatorCount/OperatorFind/OperatorG`; classify motions (`is_inclusive_motion`/`is_linewise_motion`); add operator engine (`apply_operator`, `line_op`, `delete_char_x`, `paste`, `operator_range`, `last_char_len`); extend `handle_vim_key`/`dispatch_normal` with operator-pending + visual branches; grow `VimEffect` with a buffer-edit variant carrying the new cursor. Pure — no iocraft, no async. Adds ~500 lines incl. tests. |
+| `lingxi-code/crates/tui/src/components/prompt_input/footer.rs` | **Modify** (1 line) | The mode indicator already reads `VimMode` (M7-08 `footer_mode_label`); confirm `VimMode::Visual` → `-- VISUAL --` flows through (it does, via `mode_indicator`). Add a Visual-line label variant `-- VISUAL LINE --` selected from `VisualState.linewise`. |
+| `lingxi-code/crates/tui/src/root.rs` | **Modify** (small) | `apply_vim_effect` gains the new `VimEffect` buffer-edit variant (if M7-09 adds one distinct from `Edit`). The priority-4 routing itself is unchanged. |
+| `lingxi-code/crates/tui/tests/vim_behavior.rs` | **Modify** | Extend the M7-08 table-driven file with the operator×motion matrix, `x`/`p`/`P`, register, visual charwise + linewise, count×operator, `c`-enters-insert, and a re-assert that vim-disabled passthrough is unchanged. |
 
 **Decomposition rationale:** Same as M7-08 — all vim logic stays in the one pure file `vim.rs` so the high-risk operator×motion matrix (parent spec §4 R1) is exhaustively unit-testable without a terminal. The footer/root edits are thin (one label, one effect arm). No new files: M7-08 already established `vim.rs` + `tests/vim_behavior.rs` as the home for this subsystem.
 
@@ -208,7 +208,7 @@ fn last_char_len(text: &str) -> usize {
 ## Task 1: Register type + VisualState + CommandState operator arms (types only)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/prompt_input/vim.rs`
+- Modify: `lingxi-code/crates/tui/src/components/prompt_input/vim.rs`
 - Test: `vim.rs` `#[cfg(test)] mod m7_09_types_tests`
 
 This task lands the type deltas above and updates every existing reference so the crate still compiles. No behavior yet.
@@ -259,7 +259,7 @@ mod m7_09_types_tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run (from inside `lingxi-core/`): `cargo test -p lingxi-tui --lib vim::m7_09_types_tests`
+Run (from inside `lingxi-code/`): `cargo test -p lingxi-tui --lib vim::m7_09_types_tests`
 Expected: FAIL — `Register` / `VisualState` / the new `CommandState` arms / `last_char_len` not defined; and the existing `register: None` initializers no longer typecheck.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -280,7 +280,7 @@ In `vim.rs`:
 
 4. Fix the M7-08 `register` references: M7-08's `handle_vim_key` Find branch did `state.last_find = Some(..)` (fine) and never read `register` — search `vim.rs` for `register` and replace any `register: None` literal in `VimState` construction with `register: Register::default()`. (The M7-08 `Default` impl is the only place; the type-contract paste covers it.)
 
-5. If `AppState::new` or any test in `state.rs` constructed `VimState { register: None, .. }` literally, it used `..VimState::default()` (M7-08 convention) — no change needed. Confirm by `grep -rn "register:" lingxi-core/crates/tui/src` and fix any explicit literal.
+5. If `AppState::new` or any test in `state.rs` constructed `VimState { register: None, .. }` literally, it used `..VimState::default()` (M7-08 convention) — no change needed. Confirm by `grep -rn "register:" lingxi-code/crates/tui/src` and fix any explicit literal.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -290,7 +290,7 @@ Expected: PASS (4 tests). Also run `cargo build -p lingxi-tui` to confirm the wh
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/prompt_input/vim.rs
+git add lingxi-code/crates/tui/src/components/prompt_input/vim.rs
 git commit -m "plan(M7-09 T1): Register type + VisualState + operator-pending CommandState arms
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -301,7 +301,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 2: Motion classification (inclusive / linewise) + the operator-eligible motion map
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/prompt_input/vim.rs`
+- Modify: `lingxi-code/crates/tui/src/components/prompt_input/vim.rs`
 - Test: `vim.rs` `#[cfg(test)] mod motion_class_tests`
 
 Ports `motions.ts::isInclusiveMotion` (`e E $`) and `isLinewiseMotion` (`j k G gg`). These classify how an operator extends its range. Also adds `motion_for_operator_key(char) -> Option<(Motion, char)>` returning the `Motion` and the **classification key char** (the original key, needed because `Motion::EndWord` could come from `e`, and `$` maps to `Motion::LineEnd`).
@@ -400,7 +400,7 @@ Expected: PASS (3 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/prompt_input/vim.rs
+git add lingxi-code/crates/tui/src/components/prompt_input/vim.rs
 git commit -m "plan(M7-09 T2): motion classification (inclusive/linewise) + operator-motion map
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -411,7 +411,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 3: operator_range + apply_operator (d/c/y over a byte range)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/prompt_input/vim.rs`
+- Modify: `lingxi-code/crates/tui/src/components/prompt_input/vim.rs`
 - Test: `vim.rs` `#[cfg(test)] mod apply_op_tests`
 
 Ports `operators.ts::getOperatorRange` + `applyOperator`. `operator_range` computes `(from, to, linewise)` from `(cursor_offset, target_offset, motion_key, op)`; `apply_operator` produces the `(VimEffect, Register, enter_insert: bool)` triple. These are the pure core; the dispatcher (Task 7) wires them.
@@ -601,7 +601,7 @@ Expected: PASS (8 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/prompt_input/vim.rs
+git add lingxi-code/crates/tui/src/components/prompt_input/vim.rs
 git commit -m "plan(M7-09 T3): operator_range + apply_operator (d/c/y over byte range, cw->ce, linewise)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -612,7 +612,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 4: line_op (dd / cc / yy with counts)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/prompt_input/vim.rs`
+- Modify: `lingxi-code/crates/tui/src/components/prompt_input/vim.rs`
 - Test: `vim.rs` `#[cfg(test)] mod line_op_tests`
 
 Ports `operators.ts::executeLineOp`. Doubled operator key (`dd`/`cc`/`yy`) affects `count` whole logical lines from the cursor's line.
@@ -774,7 +774,7 @@ Expected: PASS (6 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/prompt_input/vim.rs
+git add lingxi-code/crates/tui/src/components/prompt_input/vim.rs
 git commit -m "plan(M7-09 T4): line_op (dd/cc/yy with counts, linewise register)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -785,7 +785,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 5: delete_char_x (x command)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/prompt_input/vim.rs`
+- Modify: `lingxi-code/crates/tui/src/components/prompt_input/vim.rs`
 - Test: `vim.rs` `#[cfg(test)] mod x_tests`
 
 Ports `operators.ts::executeX`. `x` deletes `count` chars forward, register charwise.
@@ -884,7 +884,7 @@ Expected: PASS (5 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/prompt_input/vim.rs
+git add lingxi-code/crates/tui/src/components/prompt_input/vim.rs
 git commit -m "plan(M7-09 T5): delete_char_x (x command, count, EOF no-op)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -895,7 +895,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 6: paste (p / P — charwise + linewise)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/prompt_input/vim.rs`
+- Modify: `lingxi-code/crates/tui/src/components/prompt_input/vim.rs`
 - Test: `vim.rs` `#[cfg(test)] mod paste_tests`
 
 Ports `operators.ts::executePaste`. `after=true` is `p`; `after=false` is `P`. Linewise iff `register.linewise`.
@@ -1052,7 +1052,7 @@ Expected: PASS (7 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/prompt_input/vim.rs
+git add lingxi-code/crates/tui/src/components/prompt_input/vim.rs
 git commit -m "plan(M7-09 T6): paste (p/P charwise + linewise, count, empty-register no-op)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1063,7 +1063,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 7: handle_vim_key operator-pending dispatch (d/c/y + motion/dd/count/find/g)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/prompt_input/vim.rs`
+- Modify: `lingxi-code/crates/tui/src/components/prompt_input/vim.rs`
 - Test: `vim.rs` `#[cfg(test)] mod op_dispatch_tests`
 
 Wires the operator engine into the state machine. From `Idle`, `d`/`c`/`y` (or `Count`→operator) enter `Operator{op,count}`. The next key resolves: motion → `operator_range` + `apply_operator`; same-key → `line_op`; digit → `OperatorCount`; `f/F/t/T` → `OperatorFind`; `g` → `OperatorG`; `G` → operator-G to last/Nth line; `Esc` → cancel. `x`/`p`/`P` dispatch directly from Idle. **Change** sets `state.mode = Insert`.
@@ -1490,7 +1490,7 @@ Expected: PASS (19 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/prompt_input/vim.rs
+git add lingxi-code/crates/tui/src/components/prompt_input/vim.rs
 git commit -m "plan(M7-09 T7): operator-pending dispatch (dw/de/d\$/dd/cc/yy/df/dG/dgg/3dw/d3w) + x/p/P
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1501,7 +1501,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 8: Visual / Visual-line modes (v / V + motions + d/c/y + Esc)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/prompt_input/vim.rs`
+- Modify: `lingxi-code/crates/tui/src/components/prompt_input/vim.rs`
 - Test: `vim.rs` `#[cfg(test)] mod visual_tests`
 
 `v`/`V` from Normal set `state.visual` + `state.mode = Visual`. In Visual: motions move the cursor (selection end); `d`/`c`/`y` apply over the selection; `Esc` → Normal. Standard vim semantics (claude-code has no visual mode — documented in GATE note). The selection range is `[min(anchor,cursor) .. max(anchor,cursor))`; charwise visual is **inclusive** of the cursor char (+1 char on the high end); linewise covers whole lines.
@@ -1759,7 +1759,7 @@ Expected: PASS (9 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/prompt_input/vim.rs
+git add lingxi-code/crates/tui/src/components/prompt_input/vim.rs
 git commit -m "plan(M7-09 T8): Visual + Visual-line modes (v/V + motions + d/c/y on selection + Esc)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1770,8 +1770,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 9: Footer indicator for Visual / Visual-line
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/prompt_input/vim.rs` (extend `mode_indicator` callers — but the function takes only `VimMode`)
-- Modify: `lingxi-core/crates/tui/src/components/prompt_input/footer.rs`
+- Modify: `lingxi-code/crates/tui/src/components/prompt_input/vim.rs` (extend `mode_indicator` callers — but the function takes only `VimMode`)
+- Modify: `lingxi-code/crates/tui/src/components/prompt_input/footer.rs`
 - Test: `footer.rs` `#[cfg(test)] mod visual_indicator_tests`
 
 M7-08's `mode_indicator(VimMode)` already returns `-- VISUAL --` for `VimMode::Visual`. But Visual-line should show `-- VISUAL LINE --`. Since `VimMode` doesn't distinguish, the footer reads `VisualState.linewise` to pick the label. Extend `footer_mode_label` to take the visual linewise flag.
@@ -1849,7 +1849,7 @@ Expected: PASS (4 tests). If M7-06/M7-08 established a footer insta snapshot, ru
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/prompt_input/footer.rs
+git add lingxi-code/crates/tui/src/components/prompt_input/footer.rs
 git commit -m "plan(M7-09 T9): footer indicator distinguishes -- VISUAL -- vs -- VISUAL LINE --
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1860,7 +1860,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 10: Operator×motion matrix (exhaustive behavior tests)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/tests/vim_behavior.rs`
+- Modify: `lingxi-code/crates/tui/tests/vim_behavior.rs`
 
 Extends the M7-08 integration file with the dense operator×motion matrix. Reuses M7-08's `run_normal` harness (drives keys one at a time, applying each `VimEffect`). Each row is `(start_text, start_offset, keys, expected_text, expected_offset)`.
 
@@ -1952,7 +1952,7 @@ Expected: PASS (M7-08 fns + the 4 new M7-09 fns).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/tests/vim_behavior.rs
+git add lingxi-code/crates/tui/tests/vim_behavior.rs
 git commit -m "plan(M7-09 T10): exhaustive operator×motion matrix + yank/delete/paste roundtrip tests
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1963,7 +1963,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 11: Visual-mode behavior tests (charwise + linewise via the seam)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/tests/vim_behavior.rs`
+- Modify: `lingxi-code/crates/tui/tests/vim_behavior.rs`
 
 Visual needs the cursor to move between keys (the selection end), so it must drive a harness that threads `Move` effects. The unit tests in Task 8 fed the cursor manually; here a `run_visual` helper threads it through, mirroring `run_normal`. This proves `v`+motions+`d/c/y` compose correctly.
 
@@ -2067,7 +2067,7 @@ Expected: PASS (all fns).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/tests/vim_behavior.rs
+git add lingxi-code/crates/tui/tests/vim_behavior.rs
 git commit -m "plan(M7-09 T11): visual-mode behavior tests (charwise/linewise delete, c-insert, count, esc)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -2078,8 +2078,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 12: vim-disabled passthrough + operator-edit seam (root.rs integration)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/tests/vim_behavior.rs`
-- Modify: `lingxi-core/crates/tui/src/root.rs` (only if the seam needs the new Edit-from-operator path; see Step 3)
+- Modify: `lingxi-code/crates/tui/tests/vim_behavior.rs`
+- Modify: `lingxi-code/crates/tui/src/root.rs` (only if the seam needs the new Edit-from-operator path; see Step 3)
 
 Proves through the full `handle_live_key` seam that: (a) operators mutate the real prompt buffer; (b) `c` enters Insert and subsequent typing flows through `PassThrough`; (c) vim-disabled editing remains byte-identical to M6 (the GATE invariant). Reuses M7-08's `live_char`/`live_esc` helpers if present in `vim_behavior.rs`; else add them (model on M7-08 Task 12).
 
@@ -2175,7 +2175,7 @@ Expected: PASS (all fns). Crucially the M7-08 `vim_disabled_is_unchanged_m6_edit
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/tests/vim_behavior.rs lingxi-core/crates/tui/src/root.rs
+git add lingxi-code/crates/tui/tests/vim_behavior.rs lingxi-code/crates/tui/src/root.rs
 git commit -m "plan(M7-09 T12): operator/paste/change seam tests + vim-disabled passthrough re-assert
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -2188,7 +2188,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 13: Telemetry baseline guard + GATE deferral docs
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/prompt_input/vim.rs` (module doc + a guard test)
+- Modify: `lingxi-code/crates/tui/src/components/prompt_input/vim.rs` (module doc + a guard test)
 
 M7-09 adds **0 telemetry events** (baseline stays 326; M7-16 audits the real M7 total). This task records the "GATE: vim subset" in/out list in-code so the M7-16 auditor and future readers find it, and guards against an accidental event registration.
 
@@ -2267,7 +2267,7 @@ Expected: PASS. (If `dispatch_operator_pending` routes `i` to a text-object arm 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/prompt_input/vim.rs
+git add lingxi-code/crates/tui/src/components/prompt_input/vim.rs
 git commit -m "plan(M7-09 T13): GATE vim-subset in/out doc + telemetry baseline guard + deferred-key no-op test
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -2280,11 +2280,11 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 **Files:**
 - None (verification + tag only).
 
-The final task. It (1) **runs the operator×motion matrix GATE** as the go/no-go, (2) runs the full workspace gate **from inside `lingxi-core/`** (toolchain pins 1.82.0; running from repo root uses the host toolchain → spurious lint noise — this bit M6-08, parent spec §5.4), then (3) cuts the annotated tag.
+The final task. It (1) **runs the operator×motion matrix GATE** as the go/no-go, (2) runs the full workspace gate **from inside `lingxi-code/`** (toolchain pins 1.82.0; running from repo root uses the host toolchain → spurious lint noise — this bit M6-08, parent spec §5.4), then (3) cuts the annotated tag.
 
 - [ ] **Step 1: GATE — operator×motion matrix + visual + register pass**
 
-Run (from inside `lingxi-core/`):
+Run (from inside `lingxi-code/`):
 
 ```bash
 cargo test -p lingxi-tui --test vim_behavior

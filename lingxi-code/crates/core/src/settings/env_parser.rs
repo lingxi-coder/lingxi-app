@@ -1,4 +1,4 @@
-// lingxi-core/crates/core/src/settings/env_parser.rs
+// lingxi-code/crates/core/src/settings/env_parser.rs
 //! Walk a process-env snapshot, picking up keys under the three prefixes
 //! `LINGXI_*` (highest) → `CLAUDE_CODE_*` → `CLAUDE_*` (lowest).
 //!

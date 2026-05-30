@@ -96,8 +96,8 @@ default-members = [
 edition = "2021"
 rust-version = "1.82"
 license = "MIT OR Apache-2.0"
-authors = ["LingXi Core Contributors"]
-repository = "https://github.com/lingxi/lingxi-core"
+authors = ["LingXi Code Contributors"]
+repository = "https://github.com/lingxi/lingxi-code"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

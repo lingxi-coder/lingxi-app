@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.82.0
       - name: Run criterion benches (memory_ranking)
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           if cargo bench -p lingxi-memory --bench memory_ranking -- --quick 2>&1; then
             echo "memory_ranking bench OK"
@@ -25,7 +25,7 @@ jobs:
             echo "::warning::memory_ranking bench not yet scaffolded; skipping for v0.4.0"
           fi
       - name: Run criterion benches (settings_4layer_merge)
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           if cargo bench -p lingxi-core --bench settings_4layer_merge -- --quick 2>&1; then
             echo "settings_4layer_merge bench OK"
@@ -33,7 +33,7 @@ jobs:
             echo "::warning::settings_4layer_merge bench not yet scaffolded; skipping for v0.4.0"
           fi
       - name: Run criterion benches (messages_create_middleware)
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           if cargo bench -p lingxi-api-client --bench messages_create_middleware -- --quick 2>&1; then
             echo "messages_create_middleware bench OK"
@@ -41,7 +41,7 @@ jobs:
             echo "::warning::messages_create_middleware bench not yet scaffolded; skipping for v0.4.0"
           fi
       - name: Run criterion benches (tengu_event_encode)
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           if cargo bench -p lingxi-telemetry --bench tengu_event_encode -- --quick 2>&1; then
             echo "tengu_event_encode bench OK"
@@ -49,7 +49,7 @@ jobs:
             echo "::warning::tengu_event_encode bench not yet scaffolded; skipping for v0.4.0"
           fi
       - name: Run criterion benches (oauth_refresh_under_contention)
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           if cargo bench -p lingxi-anthropic-oauth --bench oauth_refresh_under_contention -- --quick 2>&1; then
             echo "oauth_refresh_under_contention bench OK"
@@ -57,7 +57,7 @@ jobs:
             echo "::warning::oauth_refresh_under_contention bench not yet scaffolded; skipping for v0.4.0"
           fi
       - name: Run criterion benches (engine_init_startup)
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           if cargo bench -p lingxi-core --bench engine_init_startup -- --quick 2>&1; then
             echo "engine_init_startup bench OK"
@@ -65,7 +65,7 @@ jobs:
             echo "::warning::engine_init_startup bench not yet scaffolded; skipping for v0.4.0"
           fi
       - name: Regression check against v0_4_0.json baseline
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           if [ -f "benches/baselines/v0_4_0.json" ]; then
             # Tooling: compare current criterion output (target/criterion/**)

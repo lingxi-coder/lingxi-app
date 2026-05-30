@@ -4,7 +4,7 @@
 
 **Goal:** Land three medium production features for the desktop platform crates so the engine can store OAuth tokens in the real macOS Keychain, stream Anthropic Messages SSE events with full claude-code variant parity, and spawn / tree-kill bash-tool processes with the same env, cwd-tracking, and extglob-disable behavior claude-code ships.
 
-**Architecture:** All three subsystems live in `lingxi-core/platforms/{posix,windows}/src/`, behind existing `lingxi-traits` interfaces (`SecureStorage`, `HttpTransport`, `ProcessRunner`). No trait additions — we only widen the `StreamEvent` / `ContentDelta` / `ContentBlockApi` enums in `crates/api-client/src/types.rs`, refactor `platforms/posix/src/secure_storage.rs` and `platforms/posix/src/process.rs` into directories, replace the `Err(InvalidRequest)` SSE stubs with real `bytes_stream()` adapters, and wire `crates/secret/src/keychain_prefetch.rs` to call the new macOS backend through the same trait it already accepts. The single `unsafe { CommandExt::pre_exec(setsid) }` block lives in one module so the rest of the crate keeps `forbid(unsafe_code)`.
+**Architecture:** All three subsystems live in `lingxi-code/platforms/{posix,windows}/src/`, behind existing `lingxi-traits` interfaces (`SecureStorage`, `HttpTransport`, `ProcessRunner`). No trait additions — we only widen the `StreamEvent` / `ContentDelta` / `ContentBlockApi` enums in `crates/api-client/src/types.rs`, refactor `platforms/posix/src/secure_storage.rs` and `platforms/posix/src/process.rs` into directories, replace the `Err(InvalidRequest)` SSE stubs with real `bytes_stream()` adapters, and wire `crates/secret/src/keychain_prefetch.rs` to call the new macOS backend through the same trait it already accepts. The single `unsafe { CommandExt::pre_exec(setsid) }` block lives in one module so the rest of the crate keeps `forbid(unsafe_code)`.
 
 **Tech Stack:** Rust 1.82 stable (workspace toolchain), edition 2021, workspace lints `-D warnings`. New deps: `nix = "0.27"` (`signal` feature, for `killpg(2)` and `setsid()` constants on Unix), `sha2 = "0.10"` (keychain `dir_hash`), `hex = "0.4"` (keychain `-X <hex>` encoding), `unicode-normalization = "0.1"` (NFC cwd comparison), `bytes = "1"` (SSE chunk accumulation). Existing deps reused: `tokio::process::Command`, `reqwest::Response::bytes_stream()`, `crates/api-client/src/sse.rs::parse_sse_chunks`, `std::os::unix::process::CommandExt::pre_exec`.
 
@@ -18,8 +18,8 @@
   - `claude-code/src/utils/Shell.ts` lines 281-441 — the spawn-env contract, file-mode stdio with `O_NOFOLLOW`, cwd readback with `readFileSync` to keep the post-await microtask race tight.
   - `claude-code/src/utils/ShellCommand.ts` lines 337-347 — `treeKill(pid, 'SIGKILL')`.
   - `claude-code/src/utils/shell/bashProvider.ts` lines 39-56 and 156-187 — the extglob-disable strings and `pwd -P >| <cwd>` tail.
-- Trait definitions: `lingxi-core/crates/traits/src/secure_storage.rs` (`SecureStorage`, `SecureStorageBackend`, `SecureStorageError`), `lingxi-core/crates/traits/src/http.rs` (`HttpTransport`, `SseStream`, `HttpError`), `lingxi-core/crates/traits/src/process.rs` (`ProcessRunner`, `ProcessHandle`, `ProcessOutput`, `ProcessError`), `lingxi-core/crates/traits/src/sandbox.rs` (`SandboxedCommand`, `ProcessCommand`).
-- Existing state: `lingxi-core/platforms/posix/src/secure_storage.rs` (PlainTextSecureStorage only), `lingxi-core/platforms/posix/src/http.rs::stream_sse` (returns `InvalidRequest`), `lingxi-core/platforms/posix/src/process.rs` (foreground `run` works; `spawn_background` returns `Unsupported`, no `kill_tree`), `lingxi-core/crates/api-client/src/types.rs::StreamEvent` (only `Text` + `InputJsonDelta` content deltas; `Thinking` block exists but no `ServerToolUse`/`ConnectorText`/`AdvisorToolResult`), `lingxi-core/crates/secret/src/keychain_prefetch.rs` (already plumbed through the trait — only needs to be invoked against the new macOS impl).
+- Trait definitions: `lingxi-code/crates/traits/src/secure_storage.rs` (`SecureStorage`, `SecureStorageBackend`, `SecureStorageError`), `lingxi-code/crates/traits/src/http.rs` (`HttpTransport`, `SseStream`, `HttpError`), `lingxi-code/crates/traits/src/process.rs` (`ProcessRunner`, `ProcessHandle`, `ProcessOutput`, `ProcessError`), `lingxi-code/crates/traits/src/sandbox.rs` (`SandboxedCommand`, `ProcessCommand`).
+- Existing state: `lingxi-code/platforms/posix/src/secure_storage.rs` (PlainTextSecureStorage only), `lingxi-code/platforms/posix/src/http.rs::stream_sse` (returns `InvalidRequest`), `lingxi-code/platforms/posix/src/process.rs` (foreground `run` works; `spawn_background` returns `Unsupported`, no `kill_tree`), `lingxi-code/crates/api-client/src/types.rs::StreamEvent` (only `Text` + `InputJsonDelta` content deltas; `Thinking` block exists but no `ServerToolUse`/`ConnectorText`/`AdvisorToolResult`), `lingxi-code/crates/secret/src/keychain_prefetch.rs` (already plumbed through the trait — only needs to be invoked against the new macOS impl).
 
 **Dependencies:** Plan M2-01 (worktree/sandbox/swarm/bridge corrections) must be complete. Independent of M2-02 / M2-03 / M2-04 / M2-05 — can land in parallel with any of them.
 
@@ -29,43 +29,43 @@
 
 **Modified (refactored from single-file to directory):**
 
-- `lingxi-core/platforms/posix/src/secure_storage.rs` → deleted; replaced by directory below.
-- `lingxi-core/platforms/posix/src/process.rs` → deleted; replaced by directory below.
+- `lingxi-code/platforms/posix/src/secure_storage.rs` → deleted; replaced by directory below.
+- `lingxi-code/platforms/posix/src/process.rs` → deleted; replaced by directory below.
 
 **New (POSIX `secure_storage/` directory):**
 
-- `lingxi-core/platforms/posix/src/secure_storage/mod.rs` — module top, re-exports `PlainTextSecureStorage`, `MacOsKeychainStorage`, `secure_storage_for_platform`, helper constants.
-- `lingxi-core/platforms/posix/src/secure_storage/plaintext.rs` — verbatim move of today's `PlainTextSecureStorage` body.
-- `lingxi-core/platforms/posix/src/secure_storage/helpers.rs` — `full_service_name`, `compute_dir_hash`, `SECURITY_STDIN_LINE_LIMIT`, `KEYCHAIN_CACHE_TTL`, `CREDENTIALS_SERVICE_SUFFIX`.
-- `lingxi-core/platforms/posix/src/secure_storage/macos.rs` — `MacOsKeychainStorage` (`security` CLI backend, 30 s TTL cache, generation counter, in-flight dedupe).
-- `lingxi-core/platforms/posix/src/secure_storage/factory.rs` — `secure_storage_for_platform(user, config_dir, plaintext_path)` with the macOS-Keychain-first / plaintext fallback policy.
+- `lingxi-code/platforms/posix/src/secure_storage/mod.rs` — module top, re-exports `PlainTextSecureStorage`, `MacOsKeychainStorage`, `secure_storage_for_platform`, helper constants.
+- `lingxi-code/platforms/posix/src/secure_storage/plaintext.rs` — verbatim move of today's `PlainTextSecureStorage` body.
+- `lingxi-code/platforms/posix/src/secure_storage/helpers.rs` — `full_service_name`, `compute_dir_hash`, `SECURITY_STDIN_LINE_LIMIT`, `KEYCHAIN_CACHE_TTL`, `CREDENTIALS_SERVICE_SUFFIX`.
+- `lingxi-code/platforms/posix/src/secure_storage/macos.rs` — `MacOsKeychainStorage` (`security` CLI backend, 30 s TTL cache, generation counter, in-flight dedupe).
+- `lingxi-code/platforms/posix/src/secure_storage/factory.rs` — `secure_storage_for_platform(user, config_dir, plaintext_path)` with the macOS-Keychain-first / plaintext fallback policy.
 
 **New (POSIX `process/` directory):**
 
-- `lingxi-core/platforms/posix/src/process/mod.rs` — module top, re-exports `PosixProcess`, `wrap_command_for_cwd_tracking`, `kill_tree_unix`.
-- `lingxi-core/platforms/posix/src/process/runner.rs` — `PosixProcess` struct, `ProcessRunner` impl (the relocated `run`, real `spawn_background`, real `kill`).
-- `lingxi-core/platforms/posix/src/process/spawn_unsafe.rs` — *the only place* that uses `unsafe`: `pre_exec_setsid` (`#[allow(unsafe_code)]` local to this 25-line module).
-- `lingxi-core/platforms/posix/src/process/kill_tree.rs` — `kill_tree_unix(pid)` via `nix::sys::signal::killpg`.
-- `lingxi-core/platforms/posix/src/process/wrap.rs` — `wrap_command_for_cwd_tracking`, extglob-disable strings, `task_output_path`, the spawn-env contract helper.
+- `lingxi-code/platforms/posix/src/process/mod.rs` — module top, re-exports `PosixProcess`, `wrap_command_for_cwd_tracking`, `kill_tree_unix`.
+- `lingxi-code/platforms/posix/src/process/runner.rs` — `PosixProcess` struct, `ProcessRunner` impl (the relocated `run`, real `spawn_background`, real `kill`).
+- `lingxi-code/platforms/posix/src/process/spawn_unsafe.rs` — *the only place* that uses `unsafe`: `pre_exec_setsid` (`#[allow(unsafe_code)]` local to this 25-line module).
+- `lingxi-code/platforms/posix/src/process/kill_tree.rs` — `kill_tree_unix(pid)` via `nix::sys::signal::killpg`.
+- `lingxi-code/platforms/posix/src/process/wrap.rs` — `wrap_command_for_cwd_tracking`, extglob-disable strings, `task_output_path`, the spawn-env contract helper.
 
 **New (Windows mirrors — Windows file-watch / sandbox stubs are M2-01 / M2-05 already):**
 
-- `lingxi-core/platforms/windows/src/process/mod.rs` — module top.
-- `lingxi-core/platforms/windows/src/process/runner.rs` — `WindowsProcess`, `ProcessRunner` impl.
-- `lingxi-core/platforms/windows/src/process/kill_tree.rs` — `taskkill /T /F /PID`.
+- `lingxi-code/platforms/windows/src/process/mod.rs` — module top.
+- `lingxi-code/platforms/windows/src/process/runner.rs` — `WindowsProcess`, `ProcessRunner` impl.
+- `lingxi-code/platforms/windows/src/process/kill_tree.rs` — `taskkill /T /F /PID`.
 
 **Modified (the rest):**
 
-- `lingxi-core/platforms/posix/src/lib.rs` — relax `#![forbid(unsafe_code)]` to `#![deny(unsafe_code)]` (still strict; the only `#[allow(unsafe_code)]` lives in `process/spawn_unsafe.rs`); update re-exports.
-- `lingxi-core/platforms/windows/src/lib.rs` — symmetrical relaxation; update re-exports.
-- `lingxi-core/platforms/posix/src/http.rs` — replace `stream_sse`'s `Err(InvalidRequest)` with a real `bytes_stream()` adapter.
-- `lingxi-core/platforms/windows/src/http.rs` — same `stream_sse` wiring.
-- `lingxi-core/platforms/windows/src/process.rs` → deleted; replaced by `process/` directory above.
-- `lingxi-core/platforms/posix/Cargo.toml` — add `nix`, `sha2`, `hex`, `unicode-normalization`, `bytes`; add `[dev-dependencies]` block with `tempfile`, `hyper`, `tokio` with `test-util`.
-- `lingxi-core/platforms/windows/Cargo.toml` — add `bytes`; add `[dev-dependencies]` block with `tempfile`, `hyper`.
-- `lingxi-core/crates/api-client/src/types.rs` — widen `StreamEvent`, `ContentDelta`, `ContentBlockApi`.
-- `lingxi-core/crates/api-client/src/lib.rs` — re-export the new enum variants.
-- `lingxi-core/crates/secret/src/keychain_prefetch.rs` — adjust constructor to accept `service`/`account` so the caller can target the macOS-keychain service name (`Claude Code-credentials`) without hard-coding `"lingxi"`.
+- `lingxi-code/platforms/posix/src/lib.rs` — relax `#![forbid(unsafe_code)]` to `#![deny(unsafe_code)]` (still strict; the only `#[allow(unsafe_code)]` lives in `process/spawn_unsafe.rs`); update re-exports.
+- `lingxi-code/platforms/windows/src/lib.rs` — symmetrical relaxation; update re-exports.
+- `lingxi-code/platforms/posix/src/http.rs` — replace `stream_sse`'s `Err(InvalidRequest)` with a real `bytes_stream()` adapter.
+- `lingxi-code/platforms/windows/src/http.rs` — same `stream_sse` wiring.
+- `lingxi-code/platforms/windows/src/process.rs` → deleted; replaced by `process/` directory above.
+- `lingxi-code/platforms/posix/Cargo.toml` — add `nix`, `sha2`, `hex`, `unicode-normalization`, `bytes`; add `[dev-dependencies]` block with `tempfile`, `hyper`, `tokio` with `test-util`.
+- `lingxi-code/platforms/windows/Cargo.toml` — add `bytes`; add `[dev-dependencies]` block with `tempfile`, `hyper`.
+- `lingxi-code/crates/api-client/src/types.rs` — widen `StreamEvent`, `ContentDelta`, `ContentBlockApi`.
+- `lingxi-code/crates/api-client/src/lib.rs` — re-export the new enum variants.
+- `lingxi-code/crates/secret/src/keychain_prefetch.rs` — adjust constructor to accept `service`/`account` so the caller can target the macOS-keychain service name (`Claude Code-credentials`) without hard-coding `"lingxi"`.
 
 **Tests (new integration-test files under `platforms/posix/tests/`):**
 
@@ -92,11 +92,11 @@ Per-task intermediate commits are workflow-only — squash on merge into the thr
 ### Task 1: Cargo dependencies + secure_storage/ skeleton + lib.rs relax
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/Cargo.toml`
-- Modify: `lingxi-core/platforms/posix/src/lib.rs`
-- Create: `lingxi-core/platforms/posix/src/secure_storage/mod.rs`
-- Move: existing `lingxi-core/platforms/posix/src/secure_storage.rs` body → `lingxi-core/platforms/posix/src/secure_storage/plaintext.rs`
-- Delete: `lingxi-core/platforms/posix/src/secure_storage.rs` (replaced by directory)
+- Modify: `lingxi-code/platforms/posix/Cargo.toml`
+- Modify: `lingxi-code/platforms/posix/src/lib.rs`
+- Create: `lingxi-code/platforms/posix/src/secure_storage/mod.rs`
+- Move: existing `lingxi-code/platforms/posix/src/secure_storage.rs` body → `lingxi-code/platforms/posix/src/secure_storage/plaintext.rs`
+- Delete: `lingxi-code/platforms/posix/src/secure_storage.rs` (replaced by directory)
 
 - [ ] **Step 1: Add deps to `platforms/posix/Cargo.toml`**
 
@@ -146,8 +146,8 @@ to:
 - [ ] **Step 3: Create the directory and move plaintext body**
 
 ```bash
-mkdir -p lingxi-core/platforms/posix/src/secure_storage
-git mv lingxi-core/platforms/posix/src/secure_storage.rs lingxi-core/platforms/posix/src/secure_storage/plaintext.rs
+mkdir -p lingxi-code/platforms/posix/src/secure_storage
+git mv lingxi-code/platforms/posix/src/secure_storage.rs lingxi-code/platforms/posix/src/secure_storage/plaintext.rs
 ```
 
 In the new `plaintext.rs`, no body changes are required — only adjust the module doc to:
@@ -162,7 +162,7 @@ In the new `plaintext.rs`, no body changes are required — only adjust the modu
 
 - [ ] **Step 4: Write the new module top**
 
-Create `lingxi-core/platforms/posix/src/secure_storage/mod.rs`:
+Create `lingxi-code/platforms/posix/src/secure_storage/mod.rs`:
 
 ```rust
 //! Secure storage backends for desktop hosts.
@@ -191,19 +191,19 @@ pub use plaintext::PlainTextSecureStorage;
 
 Create empty stubs (filled in by Tasks 2-9):
 
-`lingxi-core/platforms/posix/src/secure_storage/helpers.rs`:
+`lingxi-code/platforms/posix/src/secure_storage/helpers.rs`:
 
 ```rust
 //! Filled in by Task 2.
 ```
 
-`lingxi-core/platforms/posix/src/secure_storage/macos.rs`:
+`lingxi-code/platforms/posix/src/secure_storage/macos.rs`:
 
 ```rust
 //! Filled in by Task 3.
 ```
 
-`lingxi-core/platforms/posix/src/secure_storage/factory.rs`:
+`lingxi-code/platforms/posix/src/secure_storage/factory.rs`:
 
 ```rust
 //! Filled in by Task 9.
@@ -229,7 +229,7 @@ pub async fn secure_storage_for_platform(
 
 - [ ] **Step 6: Update `lib.rs` re-exports**
 
-In `lingxi-core/platforms/posix/src/lib.rs`, replace:
+In `lingxi-code/platforms/posix/src/lib.rs`, replace:
 
 ```rust
 pub use secure_storage::PlainTextSecureStorage;
@@ -254,7 +254,7 @@ Expected: clean. No new errors.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/Cargo.toml lingxi-core/platforms/posix/src/lib.rs lingxi-core/platforms/posix/src/secure_storage/
+git add lingxi-code/platforms/posix/Cargo.toml lingxi-code/platforms/posix/src/lib.rs lingxi-code/platforms/posix/src/secure_storage/
 git commit -m "$(cat <<'EOF'
 build(platform-posix): add nix/sha2/hex deps; scaffold secure_storage/ directory
 
@@ -275,14 +275,14 @@ EOF
 ### Task 2: Service-name helpers + constants (TDD)
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/secure_storage/helpers.rs`
-- Test: `lingxi-core/platforms/posix/tests/keychain_macos_service_name_test.rs`
+- Modify: `lingxi-code/platforms/posix/src/secure_storage/helpers.rs`
+- Test: `lingxi-code/platforms/posix/tests/keychain_macos_service_name_test.rs`
 
 **Critical 1:1 fidelity:** service name format is `format!("Claude Code{oauth_suffix}{service_suffix}{dir_hash}")`. Empty `dir_hash` when `config_dir == default_claude_dir()`; otherwise `format!("-{}", &sha256(config_dir).hex()[..8])`. `oauth_suffix` is empty for M2 (claude-code's `OAUTH_FILE_SUFFIX` is empty in stable build; passing it through preserves the optionality). `service_suffix = "-credentials"` for OAuth entries, `""` for the legacy API-key entry.
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `lingxi-core/platforms/posix/tests/keychain_macos_service_name_test.rs`:
+Create `lingxi-code/platforms/posix/tests/keychain_macos_service_name_test.rs`:
 
 ```rust
 //! Service-name helper tests — must match claude-code's macOsKeychainHelpers.ts exactly.
@@ -350,7 +350,7 @@ Expected: compile error `unresolved imports compute_dir_hash, full_service_name`
 
 - [ ] **Step 3: Implement `helpers.rs`**
 
-Replace `lingxi-core/platforms/posix/src/secure_storage/helpers.rs` body with:
+Replace `lingxi-code/platforms/posix/src/secure_storage/helpers.rs` body with:
 
 ```rust
 //! Constants + service-name helpers shared between [`super::macos`] and
@@ -470,7 +470,7 @@ Expected: both PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/src/secure_storage/helpers.rs lingxi-core/platforms/posix/tests/keychain_macos_service_name_test.rs
+git add lingxi-code/platforms/posix/src/secure_storage/helpers.rs lingxi-code/platforms/posix/tests/keychain_macos_service_name_test.rs
 git commit -m "$(cat <<'EOF'
 feat(secure_storage): keychain service-name helpers (1:1 with claude-code)
 
@@ -489,13 +489,13 @@ EOF
 ### Task 3: `MacOsKeychainStorage` struct + constructor
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/secure_storage/macos.rs`
+- Modify: `lingxi-code/platforms/posix/src/secure_storage/macos.rs`
 
 This task lands the type + constructor + cache state. The trait impl methods are filled in by Tasks 4-8.
 
 - [ ] **Step 1: Write the file**
 
-Replace `lingxi-core/platforms/posix/src/secure_storage/macos.rs` body with:
+Replace `lingxi-code/platforms/posix/src/secure_storage/macos.rs` body with:
 
 ```rust
 //! macOS Keychain backend for [`SecureStorage`], shelling out to the `security` CLI.
@@ -642,7 +642,7 @@ impl MacOsKeychainStorage {
 - [ ] **Step 2: Add the `which` dep if missing**
 
 ```bash
-grep -q '^which = ' lingxi-core/platforms/posix/Cargo.toml || echo "needs which"
+grep -q '^which = ' lingxi-code/platforms/posix/Cargo.toml || echo "needs which"
 ```
 
 If missing, append to `[dependencies]`:
@@ -664,7 +664,7 @@ Expected: clean. The struct compiles even though `SecureStorage` is not yet impl
 - [ ] **Step 4: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/Cargo.toml lingxi-core/platforms/posix/src/secure_storage/macos.rs
+git add lingxi-code/platforms/posix/Cargo.toml lingxi-code/platforms/posix/src/secure_storage/macos.rs
 git commit -m "$(cat <<'EOF'
 feat(secure_storage): MacOsKeychainStorage struct + cache state
 
@@ -682,8 +682,8 @@ EOF
 ### Task 4: `store` via `security -i` stdin with argv fallback (TDD)
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/secure_storage/macos.rs`
-- Test: `lingxi-core/platforms/posix/tests/keychain_macos_store_retrieve_test.rs` (created here, expanded in Task 5)
+- Modify: `lingxi-code/platforms/posix/src/secure_storage/macos.rs`
+- Test: `lingxi-code/platforms/posix/tests/keychain_macos_store_retrieve_test.rs` (created here, expanded in Task 5)
 
 **Critical 1:1 fidelity:**
 - The preferred path spawns `security` with argv `["-i"]` and writes a complete `add-generic-password ...` command on stdin, **newline-terminated**.
@@ -693,7 +693,7 @@ EOF
 
 - [ ] **Step 1: Write the failing test scaffold**
 
-Create `lingxi-core/platforms/posix/tests/keychain_macos_store_retrieve_test.rs`:
+Create `lingxi-code/platforms/posix/tests/keychain_macos_store_retrieve_test.rs`:
 
 ```rust
 //! `MacOsKeychainStorage` store/retrieve round-trip via the real `security` CLI.
@@ -760,7 +760,7 @@ Expected on Linux: silently skipped (`#![cfg(target_os = "macos")]`).
 
 - [ ] **Step 3: Implement `store` and trait scaffold in `macos.rs`**
 
-Append to `lingxi-core/platforms/posix/src/secure_storage/macos.rs`:
+Append to `lingxi-code/platforms/posix/src/secure_storage/macos.rs`:
 
 ```rust
 use tokio::io::AsyncWriteExt;
@@ -917,7 +917,7 @@ async fn run_security_argv(args: &[&str]) -> Result<std::process::ExitStatus, Se
 }
 ```
 
-Check the `SecureStorageBackend` enum has a `MacOsKeychain` variant. If it does not, add it in `lingxi-core/crates/traits/src/secure_storage.rs` (and re-run `cargo check`):
+Check the `SecureStorageBackend` enum has a `MacOsKeychain` variant. If it does not, add it in `lingxi-code/crates/traits/src/secure_storage.rs` (and re-run `cargo check`):
 
 ```rust
 pub enum SecureStorageBackend {
@@ -947,7 +947,7 @@ Expected: store succeeds; `retrieve` fails with the placeholder error (Task 5 wi
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/src/secure_storage/macos.rs lingxi-core/crates/traits/src/secure_storage.rs lingxi-core/platforms/posix/tests/keychain_macos_store_retrieve_test.rs
+git add lingxi-code/platforms/posix/src/secure_storage/macos.rs lingxi-code/crates/traits/src/secure_storage.rs lingxi-code/platforms/posix/tests/keychain_macos_store_retrieve_test.rs
 git commit -m "$(cat <<'EOF'
 feat(secure_storage): MacOsKeychainStorage::store via `security -i` stdin
 
@@ -971,8 +971,8 @@ EOF
 ### Task 5: `retrieve` with 30 s TTL + in-flight dedupe (TDD)
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/secure_storage/macos.rs`
-- Test: `lingxi-core/platforms/posix/tests/keychain_macos_cache_test.rs`
+- Modify: `lingxi-code/platforms/posix/src/secure_storage/macos.rs`
+- Test: `lingxi-code/platforms/posix/tests/keychain_macos_cache_test.rs`
 
 **Critical 1:1 fidelity:**
 - Cache hit: when an entry exists AND `fetched_at + KEYCHAIN_CACHE_TTL > Instant::now()` AND the entry's recorded generation equals the current generation counter, return the cloned data without spawning a subprocess.
@@ -982,7 +982,7 @@ EOF
 
 - [ ] **Step 1: Write the failing cache test**
 
-Create `lingxi-core/platforms/posix/tests/keychain_macos_cache_test.rs`:
+Create `lingxi-code/platforms/posix/tests/keychain_macos_cache_test.rs`:
 
 ```rust
 //! Cache TTL + generation counter + in-flight dedupe tests.
@@ -1233,7 +1233,7 @@ Expected on macOS: both cache tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/src/secure_storage/macos.rs lingxi-core/platforms/posix/tests/keychain_macos_cache_test.rs
+git add lingxi-code/platforms/posix/src/secure_storage/macos.rs lingxi-code/platforms/posix/tests/keychain_macos_cache_test.rs
 git commit -m "$(cat <<'EOF'
 feat(secure_storage): MacOsKeychainStorage::retrieve with 30s TTL + in-flight dedupe
 
@@ -1252,12 +1252,12 @@ EOF
 ### Task 6: `delete` (TDD)
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/secure_storage/macos.rs`
+- Modify: `lingxi-code/platforms/posix/src/secure_storage/macos.rs`
 - Test: append to `keychain_macos_store_retrieve_test.rs`.
 
 - [ ] **Step 1: Append delete-roundtrip test**
 
-Append to `lingxi-core/platforms/posix/tests/keychain_macos_store_retrieve_test.rs`:
+Append to `lingxi-code/platforms/posix/tests/keychain_macos_store_retrieve_test.rs`:
 
 ```rust
 #[tokio::test]
@@ -1337,7 +1337,7 @@ Expected on macOS: all tests PASS.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/src/secure_storage/macos.rs lingxi-core/platforms/posix/tests/keychain_macos_store_retrieve_test.rs
+git add lingxi-code/platforms/posix/src/secure_storage/macos.rs lingxi-code/platforms/posix/tests/keychain_macos_store_retrieve_test.rs
 git commit -m "$(cat <<'EOF'
 feat(secure_storage): MacOsKeychainStorage::delete + list (NotSupported)
 
@@ -1356,13 +1356,13 @@ EOF
 ### Task 7: `secure_storage_for_platform` factory + plaintext fallback warning
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/secure_storage/factory.rs`
+- Modify: `lingxi-code/platforms/posix/src/secure_storage/factory.rs`
 
 **Critical 1:1 fidelity:** the warning string is **exactly** `"Warning: Storing credentials in plaintext."` (period included). Emitted via `tracing::warn!` with target `"lingxi::secure_storage"`. The factory also leaves a `// TODO: add libsecret support for Linux` comment matching the source quote in spec §6.6.
 
 - [ ] **Step 1: Implement the factory**
 
-Replace `lingxi-core/platforms/posix/src/secure_storage/factory.rs` body with:
+Replace `lingxi-code/platforms/posix/src/secure_storage/factory.rs` body with:
 
 ```rust
 //! Platform-default [`SecureStorage`] factory.
@@ -1481,7 +1481,7 @@ Expected: PASS on macOS and Linux.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/src/secure_storage/factory.rs
+git add lingxi-code/platforms/posix/src/secure_storage/factory.rs
 git commit -m "$(cat <<'EOF'
 feat(secure_storage): secure_storage_for_platform factory + plaintext fallback
 
@@ -1503,7 +1503,7 @@ EOF
 ### Task 8: Wire `KeychainPrefetch` to call the real macOS backend
 
 **Files:**
-- Modify: `lingxi-core/crates/secret/src/keychain_prefetch.rs`
+- Modify: `lingxi-code/crates/secret/src/keychain_prefetch.rs`
 
 **Critical 1:1 fidelity:** the prefetch service/account pair must match the macOS keychain backend, not the plaintext default. claude-code prefetches both the OAuth (`Claude Code-credentials`) and legacy API key (`Claude Code`) entries in parallel. For M2 we collapse to the OAuth entry — legacy API key prefetch is a separate concern (the engine wires it through different code paths and tracks it via the existing `KeychainPrefetch` consumer).
 
@@ -1513,7 +1513,7 @@ Current code passes hard-coded `"lingxi"` / `"anthropic-api-key"` as service/acc
 
 - [ ] **Step 2: Refactor `KeychainPrefetch::start` to accept service/account**
 
-Replace `lingxi-core/crates/secret/src/keychain_prefetch.rs` `start` body:
+Replace `lingxi-code/crates/secret/src/keychain_prefetch.rs` `start` body:
 
 ```rust
     /// Spawn the prefetch task on `runtime`.
@@ -1553,11 +1553,11 @@ Replace `lingxi-core/crates/secret/src/keychain_prefetch.rs` `start` body:
 Search the workspace:
 
 ```bash
-rg "KeychainPrefetch::start" lingxi-core/
+rg "KeychainPrefetch::start" lingxi-code/
 ```
 
 Update each call site to pass `"-credentials"` (macOS) / the legacy plaintext service name. Most likely call sites:
-- `lingxi-core/crates/credential-manager/` — accepts the prefetch via constructor; pass `("-credentials", $USER)` here.
+- `lingxi-code/crates/credential-manager/` — accepts the prefetch via constructor; pass `("-credentials", $USER)` here.
 - `examples/cli-demo/` — same.
 
 If no callers exist yet (the prefetch isn't wired into M1 cli-demo per spec §6.6 wording "real impl wired in M2-06"), this step is a no-op.
@@ -1668,7 +1668,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lingxi-core/crates/secret/src/keychain_prefetch.rs
+git add lingxi-code/crates/secret/src/keychain_prefetch.rs
 git commit -m "$(cat <<'EOF'
 feat(secret): keychain prefetch accepts service/account params
 
@@ -1712,8 +1712,8 @@ Expected: clean. Fix any drift inline.
 ### Task 10: Widen `StreamEvent` / `ContentDelta` / `ContentBlockApi` (TDD)
 
 **Files:**
-- Modify: `lingxi-core/crates/api-client/src/types.rs`
-- Modify: `lingxi-core/crates/api-client/src/lib.rs` (re-exports if any)
+- Modify: `lingxi-code/crates/api-client/src/types.rs`
+- Modify: `lingxi-code/crates/api-client/src/lib.rs` (re-exports if any)
 
 **Critical 1:1 fidelity** (from claude-code `services/api/claude.ts:1995-2295`):
 - `ContentBlockApi` variants: `Text`, `ToolUse`, `Thinking`, `ServerToolUse`, `ConnectorText`, `AdvisorToolResult`.
@@ -1723,7 +1723,7 @@ Expected: clean. Fix any drift inline.
 
 - [ ] **Step 1: Write the failing roundtrip tests**
 
-Append to `lingxi-core/crates/api-client/src/types.rs` `mod tests`:
+Append to `lingxi-code/crates/api-client/src/types.rs` `mod tests`:
 
 ```rust
 #[cfg(test)]
@@ -1827,7 +1827,7 @@ Expected: compile errors `no variant ServerToolUse / ConnectorText / AdvisorTool
 
 - [ ] **Step 3: Extend the enums**
 
-In `lingxi-core/crates/api-client/src/types.rs`, extend `ContentBlockApi`:
+In `lingxi-code/crates/api-client/src/types.rs`, extend `ContentBlockApi`:
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1910,7 +1910,7 @@ Expected: all variants decode round-trip; old tests (text-delta, input-json-delt
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/api-client/src/types.rs lingxi-core/crates/api-client/src/lib.rs
+git add lingxi-code/crates/api-client/src/types.rs lingxi-code/crates/api-client/src/lib.rs
 git commit -m "$(cat <<'EOF'
 feat(api-client): widen StreamEvent for claude-code parity
 
@@ -1930,12 +1930,12 @@ EOF
 ### Task 11: Real `stream_sse` in `platforms/posix/src/http.rs` (TDD with mock server)
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/http.rs`
-- Test: `lingxi-core/platforms/posix/tests/http_stream_sse_test.rs`
+- Modify: `lingxi-code/platforms/posix/src/http.rs`
+- Test: `lingxi-code/platforms/posix/tests/http_stream_sse_test.rs`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `lingxi-core/platforms/posix/tests/http_stream_sse_test.rs`:
+Create `lingxi-code/platforms/posix/tests/http_stream_sse_test.rs`:
 
 ```rust
 //! `PosixHttp::stream_sse` end-to-end against a local hyper server.
@@ -2032,7 +2032,7 @@ Expected: error `invalid request: posix: stream_sse not yet wired`.
 
 - [ ] **Step 3: Implement `stream_sse`**
 
-Replace the `stream_sse` body in `lingxi-core/platforms/posix/src/http.rs`:
+Replace the `stream_sse` body in `lingxi-code/platforms/posix/src/http.rs`:
 
 ```rust
     async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError> {
@@ -2149,7 +2149,7 @@ fn boundary_len(buf: &BytesMut, boundary_index_ignored: usize) -> usize {
 - [ ] **Step 4: Confirm the `lingxi-api-client` dep**
 
 ```bash
-grep -q 'lingxi-api-client' lingxi-core/platforms/posix/Cargo.toml || echo "needs lingxi-api-client"
+grep -q 'lingxi-api-client' lingxi-code/platforms/posix/Cargo.toml || echo "needs lingxi-api-client"
 ```
 
 If missing:
@@ -2171,7 +2171,7 @@ Expected: PASS — 4 events parsed in order.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/Cargo.toml lingxi-core/platforms/posix/src/http.rs lingxi-core/platforms/posix/tests/http_stream_sse_test.rs
+git add lingxi-code/platforms/posix/Cargo.toml lingxi-code/platforms/posix/src/http.rs lingxi-code/platforms/posix/tests/http_stream_sse_test.rs
 git commit -m "$(cat <<'EOF'
 feat(http): real stream_sse on platform-posix via reqwest::bytes_stream
 
@@ -2191,9 +2191,9 @@ EOF
 ### Task 12: Mirror `stream_sse` in `platforms/windows/src/http.rs`
 
 **Files:**
-- Modify: `lingxi-core/platforms/windows/src/http.rs`
-- Modify: `lingxi-core/platforms/windows/Cargo.toml`
-- Test (optional smoke): `lingxi-core/platforms/windows/tests/http_stream_sse_smoke_test.rs`
+- Modify: `lingxi-code/platforms/windows/src/http.rs`
+- Modify: `lingxi-code/platforms/windows/Cargo.toml`
+- Test (optional smoke): `lingxi-code/platforms/windows/tests/http_stream_sse_smoke_test.rs`
 
 - [ ] **Step 1: Copy the helper functions verbatim**
 
@@ -2201,7 +2201,7 @@ The `sse_event_stream`, `find_event_boundary`, `boundary_len` helpers are platfo
 
 - [ ] **Step 2: Replace the windows `stream_sse` body**
 
-Same diff as Task 11 Step 3 applied to `lingxi-core/platforms/windows/src/http.rs`. Add the `bytes` and `lingxi-api-client` deps to `platforms/windows/Cargo.toml` mirroring posix:
+Same diff as Task 11 Step 3 applied to `lingxi-code/platforms/windows/src/http.rs`. Add the `bytes` and `lingxi-api-client` deps to `platforms/windows/Cargo.toml` mirroring posix:
 
 ```toml
 bytes = "1"
@@ -2210,7 +2210,7 @@ lingxi-api-client = { path = "../../crates/api-client" }
 
 - [ ] **Step 3: Add a smoke test (host-portable)**
 
-Create `lingxi-core/platforms/windows/tests/http_stream_sse_smoke_test.rs` as a copy of the posix one with `PosixHttp` replaced by `WindowsHttp`. (Hyper test server runs the same on any host since notify abstracts the OS for FS; here reqwest abstracts the OS for HTTP.)
+Create `lingxi-code/platforms/windows/tests/http_stream_sse_smoke_test.rs` as a copy of the posix one with `PosixHttp` replaced by `WindowsHttp`. (Hyper test server runs the same on any host since notify abstracts the OS for FS; here reqwest abstracts the OS for HTTP.)
 
 - [ ] **Step 4: Run the test**
 
@@ -2223,7 +2223,7 @@ Expected: PASS on macOS/Linux dev hosts; PASS on Windows in CI.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/platforms/windows/Cargo.toml lingxi-core/platforms/windows/src/http.rs lingxi-core/platforms/windows/tests/http_stream_sse_smoke_test.rs
+git add lingxi-code/platforms/windows/Cargo.toml lingxi-code/platforms/windows/src/http.rs lingxi-code/platforms/windows/tests/http_stream_sse_smoke_test.rs
 git commit -m "$(cat <<'EOF'
 feat(http): mirror real stream_sse in platform-windows
 
@@ -2243,15 +2243,15 @@ EOF
 ### Task 13: Refactor `process.rs` → `process/` directory + unsafe setsid module
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/process.rs` → delete
-- Create: `lingxi-core/platforms/posix/src/process/{mod.rs,runner.rs,spawn_unsafe.rs,kill_tree.rs,wrap.rs}` (stubs first; bodies in Tasks 14-18)
-- Modify: `lingxi-core/platforms/posix/src/lib.rs` (`pub mod process;`)
+- Modify: `lingxi-code/platforms/posix/src/process.rs` → delete
+- Create: `lingxi-code/platforms/posix/src/process/{mod.rs,runner.rs,spawn_unsafe.rs,kill_tree.rs,wrap.rs}` (stubs first; bodies in Tasks 14-18)
+- Modify: `lingxi-code/platforms/posix/src/lib.rs` (`pub mod process;`)
 
 - [ ] **Step 1: Move existing process.rs body into `runner.rs`**
 
 ```bash
-mkdir -p lingxi-core/platforms/posix/src/process
-git mv lingxi-core/platforms/posix/src/process.rs lingxi-core/platforms/posix/src/process/runner.rs
+mkdir -p lingxi-code/platforms/posix/src/process
+git mv lingxi-code/platforms/posix/src/process.rs lingxi-code/platforms/posix/src/process/runner.rs
 ```
 
 Update the doc comment at the top of `runner.rs`:
@@ -2269,7 +2269,7 @@ Update the doc comment at the top of `runner.rs`:
 
 - [ ] **Step 2: Create `mod.rs`**
 
-`lingxi-core/platforms/posix/src/process/mod.rs`:
+`lingxi-code/platforms/posix/src/process/mod.rs`:
 
 ```rust
 //! Process spawn for desktop hosts.
@@ -2335,7 +2335,7 @@ pub fn wrap_command_for_cwd_tracking(_cmd: &str, _cwd_file: &std::path::Path) ->
 
 - [ ] **Step 4: Update `lib.rs`**
 
-In `lingxi-core/platforms/posix/src/lib.rs`, replace `pub mod process;` re-export and `pub use process::PosixProcess;` to match the new module path. The simplest form (with the new `mod.rs` re-exporting `PosixProcess`):
+In `lingxi-code/platforms/posix/src/lib.rs`, replace `pub mod process;` re-export and `pub use process::PosixProcess;` to match the new module path. The simplest form (with the new `mod.rs` re-exporting `PosixProcess`):
 
 ```rust
 pub mod process;
@@ -2355,7 +2355,7 @@ Expected: clean.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/src/process/ lingxi-core/platforms/posix/src/lib.rs
+git add lingxi-code/platforms/posix/src/process/ lingxi-code/platforms/posix/src/lib.rs
 git commit -m "$(cat <<'EOF'
 refactor(platform-posix): split process.rs into process/ directory
 
@@ -2374,13 +2374,13 @@ EOF
 ### Task 14: `pre_exec_setsid` in `spawn_unsafe.rs`
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/process/spawn_unsafe.rs`
+- Modify: `lingxi-code/platforms/posix/src/process/spawn_unsafe.rs`
 
 **Critical 1:1 fidelity:** the closure passed to `CommandExt::pre_exec` runs in the forked child between `fork()` and `execve()` — it MUST be async-signal-safe. `libc::setsid()` is async-signal-safe (it's listed in POSIX's safe table). No allocation, no logging, no tokio.
 
 - [ ] **Step 1: Implement**
 
-Replace `lingxi-core/platforms/posix/src/process/spawn_unsafe.rs`:
+Replace `lingxi-code/platforms/posix/src/process/spawn_unsafe.rs`:
 
 ```rust
 //! The single module in `lingxi-platform-posix` that uses `unsafe`.
@@ -2438,7 +2438,7 @@ Expected: clean. The `#[allow(unsafe_code)]` at the top of the module satisfies 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/src/process/spawn_unsafe.rs lingxi-core/platforms/posix/Cargo.toml
+git add lingxi-code/platforms/posix/src/process/spawn_unsafe.rs lingxi-code/platforms/posix/Cargo.toml
 git commit -m "$(cat <<'EOF'
 feat(process): attach_setsid via CommandExt::pre_exec
 
@@ -2458,8 +2458,8 @@ EOF
 ### Task 15: `kill_tree_unix` via `killpg(2)` (TDD)
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/process/kill_tree.rs`
-- Test: `lingxi-core/platforms/posix/tests/process_kill_tree_test.rs`
+- Modify: `lingxi-code/platforms/posix/src/process/kill_tree.rs`
+- Test: `lingxi-code/platforms/posix/tests/process_kill_tree_test.rs`
 
 **Critical 1:1 fidelity:**
 - `killpg` argument is the **POSITIVE** pgid — children spawned with `setsid()` have pid == pgid, so we pass the child's pid as the pgid. NOT a negative pid to `kill(2)`.
@@ -2468,7 +2468,7 @@ EOF
 
 - [ ] **Step 1: Write the failing test**
 
-Create `lingxi-core/platforms/posix/tests/process_kill_tree_test.rs`:
+Create `lingxi-code/platforms/posix/tests/process_kill_tree_test.rs`:
 
 ```rust
 //! kill_tree_unix kills the whole process group of a setsid-detached child.
@@ -2541,7 +2541,7 @@ Expected: `ProcessError::Unsupported`.
 
 - [ ] **Step 3: Implement**
 
-Replace `lingxi-core/platforms/posix/src/process/kill_tree.rs`:
+Replace `lingxi-code/platforms/posix/src/process/kill_tree.rs`:
 
 ```rust
 //! Tree-kill via `killpg(2)` on Unix.
@@ -2604,7 +2604,7 @@ Expected: PASS on macOS/Linux. (Test self-skips on non-Unix via `#![cfg(unix)]`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/src/process/kill_tree.rs lingxi-core/platforms/posix/tests/process_kill_tree_test.rs
+git add lingxi-code/platforms/posix/src/process/kill_tree.rs lingxi-code/platforms/posix/tests/process_kill_tree_test.rs
 git commit -m "$(cat <<'EOF'
 feat(process): kill_tree_unix via killpg(2) (SIGTERM → 5s → SIGKILL)
 
@@ -2623,8 +2623,8 @@ EOF
 ### Task 16: `task_output_path` + cwd-tracking wrapper (TDD)
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/process/wrap.rs`
-- Test: `lingxi-core/platforms/posix/tests/process_cwd_tracking_test.rs`
+- Modify: `lingxi-code/platforms/posix/src/process/wrap.rs`
+- Test: `lingxi-code/platforms/posix/tests/process_cwd_tracking_test.rs`
 
 **Critical 1:1 fidelity:**
 - bash extglob disable: `shopt -u extglob 2>/dev/null || true`
@@ -2635,7 +2635,7 @@ EOF
 
 - [ ] **Step 1: Write the failing test**
 
-Create `lingxi-core/platforms/posix/tests/process_cwd_tracking_test.rs`:
+Create `lingxi-code/platforms/posix/tests/process_cwd_tracking_test.rs`:
 
 ```rust
 //! Tests for wrap_command_for_cwd_tracking and task_output_path.
@@ -2708,7 +2708,7 @@ Expected: assertions fail because `wrap_command_for_cwd_tracking` returns `""` a
 
 - [ ] **Step 3: Implement `wrap.rs`**
 
-Replace `lingxi-core/platforms/posix/src/process/wrap.rs`:
+Replace `lingxi-code/platforms/posix/src/process/wrap.rs`:
 
 ```rust
 //! Command wrapping helpers for cwd tracking + extglob disable + env vars.
@@ -2833,7 +2833,7 @@ Expected: all PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/src/process/wrap.rs lingxi-core/platforms/posix/tests/process_cwd_tracking_test.rs
+git add lingxi-code/platforms/posix/src/process/wrap.rs lingxi-code/platforms/posix/tests/process_cwd_tracking_test.rs
 git commit -m "$(cat <<'EOF'
 feat(process): wrap_command_for_cwd_tracking + task_output_path + env constants
 
@@ -2853,9 +2853,9 @@ EOF
 ### Task 17: `spawn_background` + run polish (env vars, file-mode stdio, 30-min timeout)
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/process/runner.rs`
-- Test: `lingxi-core/platforms/posix/tests/process_spawn_background_test.rs`
-- Test: `lingxi-core/platforms/posix/tests/process_spawn_env_test.rs`
+- Modify: `lingxi-code/platforms/posix/src/process/runner.rs`
+- Test: `lingxi-code/platforms/posix/tests/process_spawn_background_test.rs`
+- Test: `lingxi-code/platforms/posix/tests/process_spawn_env_test.rs`
 
 **Critical 1:1 fidelity:**
 - Spawn env: caller env is preserved; `CLAUDECODE=1`, `GIT_EDITOR=true`, `SHELL=<inner.command>` are added.
@@ -2867,7 +2867,7 @@ EOF
 
 - [ ] **Step 1: Write the failing background-spawn test**
 
-Create `lingxi-core/platforms/posix/tests/process_spawn_background_test.rs`:
+Create `lingxi-code/platforms/posix/tests/process_spawn_background_test.rs`:
 
 ```rust
 //! spawn_background lands a real handle and writes output to the task file.
@@ -2925,7 +2925,7 @@ async fn spawn_background_writes_output_file_and_kills_cleanly() {
 
 - [ ] **Step 2: Write the failing env-vars test**
 
-Create `lingxi-core/platforms/posix/tests/process_spawn_env_test.rs`:
+Create `lingxi-code/platforms/posix/tests/process_spawn_env_test.rs`:
 
 ```rust
 //! Foreground `run` injects CLAUDECODE/GIT_EDITOR/SHELL into the child env.
@@ -2987,7 +2987,7 @@ Expected: `spawn_background` returns `Unsupported`; env-var test fails because `
 
 - [ ] **Step 4: Rewrite `runner.rs`**
 
-Replace `lingxi-core/platforms/posix/src/process/runner.rs`:
+Replace `lingxi-code/platforms/posix/src/process/runner.rs`:
 
 ```rust
 //! `tokio::process`-backed [`ProcessRunner`] for desktop hosts.
@@ -3163,7 +3163,7 @@ cargo test -p lingxi-platform-posix
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/src/process/runner.rs lingxi-core/platforms/posix/tests/process_spawn_background_test.rs lingxi-core/platforms/posix/tests/process_spawn_env_test.rs
+git add lingxi-code/platforms/posix/src/process/runner.rs lingxi-code/platforms/posix/tests/process_spawn_background_test.rs lingxi-code/platforms/posix/tests/process_spawn_env_test.rs
 git commit -m "$(cat <<'EOF'
 feat(process): real spawn_background + spawn-env contract + 30min default timeout
 
@@ -3186,21 +3186,21 @@ EOF
 ### Task 18: Windows `kill_tree` + `process/` refactor + `taskkill` wiring
 
 **Files:**
-- Move: `lingxi-core/platforms/windows/src/process.rs` → `lingxi-core/platforms/windows/src/process/runner.rs`
-- Create: `lingxi-core/platforms/windows/src/process/{mod.rs,kill_tree.rs}`
-- Modify: `lingxi-core/platforms/windows/src/lib.rs`
-- Test (host-portable): `lingxi-core/platforms/windows/tests/process_kill_tree_smoke_test.rs`
+- Move: `lingxi-code/platforms/windows/src/process.rs` → `lingxi-code/platforms/windows/src/process/runner.rs`
+- Create: `lingxi-code/platforms/windows/src/process/{mod.rs,kill_tree.rs}`
+- Modify: `lingxi-code/platforms/windows/src/lib.rs`
+- Test (host-portable): `lingxi-code/platforms/windows/tests/process_kill_tree_smoke_test.rs`
 
 **Critical 1:1 fidelity:** Windows uses `taskkill /T /F /PID <pid>` — `/T` walks the tree, `/F` forces termination.
 
 - [ ] **Step 1: Move + create submodules**
 
 ```bash
-mkdir -p lingxi-core/platforms/windows/src/process
-git mv lingxi-core/platforms/windows/src/process.rs lingxi-core/platforms/windows/src/process/runner.rs
+mkdir -p lingxi-code/platforms/windows/src/process
+git mv lingxi-code/platforms/windows/src/process.rs lingxi-code/platforms/windows/src/process/runner.rs
 ```
 
-Create `lingxi-core/platforms/windows/src/process/mod.rs`:
+Create `lingxi-code/platforms/windows/src/process/mod.rs`:
 
 ```rust
 //! Process spawn for Windows hosts.
@@ -3211,7 +3211,7 @@ pub mod runner;
 pub use runner::WindowsProcess;
 ```
 
-Create `lingxi-core/platforms/windows/src/process/kill_tree.rs`:
+Create `lingxi-code/platforms/windows/src/process/kill_tree.rs`:
 
 ```rust
 //! Tree-kill on Windows via `taskkill /T /F /PID`.
@@ -3243,7 +3243,7 @@ pub async fn kill_tree_windows(pid: u32) -> Result<(), ProcessError> {
 
 - [ ] **Step 2: Update Windows `runner.rs` to use `kill_tree_windows`**
 
-In `lingxi-core/platforms/windows/src/process/runner.rs`, replace the `kill` body:
+In `lingxi-code/platforms/windows/src/process/runner.rs`, replace the `kill` body:
 
 ```rust
     async fn kill(&self, handle: &ProcessHandle) -> Result<(), ProcessError> {
@@ -3323,13 +3323,13 @@ For `spawn_background`, mirror the posix shape (file output, no setsid — Windo
 
 - [ ] **Step 3: Update `lib.rs`**
 
-In `lingxi-core/platforms/windows/src/lib.rs`, keep `pub mod process;` and `pub use process::WindowsProcess;` — the move is transparent now that the directory has `mod.rs` re-exporting `WindowsProcess`.
+In `lingxi-code/platforms/windows/src/lib.rs`, keep `pub mod process;` and `pub use process::WindowsProcess;` — the move is transparent now that the directory has `mod.rs` re-exporting `WindowsProcess`.
 
 Also relax `#![forbid(unsafe_code)]` (it lives in this file) to `#![deny(unsafe_code)]` for parity with posix — even though the windows crate today has no `unsafe`, the relaxation keeps the symmetry. If the Windows tree-kill ends up needing a Windows-specific creationflags call via the `windows-sys` crate, it can land an `#[allow(unsafe_code)]` in a single module like posix.
 
 - [ ] **Step 4: Smoke test**
 
-Create `lingxi-core/platforms/windows/tests/process_kill_tree_smoke_test.rs`:
+Create `lingxi-code/platforms/windows/tests/process_kill_tree_smoke_test.rs`:
 
 ```rust
 //! Smoke test: kill_tree_windows tolerates "process not found".
@@ -3363,7 +3363,7 @@ Expected: smoke test PASS, check clean.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lingxi-core/platforms/windows/src/process/ lingxi-core/platforms/windows/src/lib.rs lingxi-core/platforms/windows/tests/process_kill_tree_smoke_test.rs
+git add lingxi-code/platforms/windows/src/process/ lingxi-code/platforms/windows/src/lib.rs lingxi-code/platforms/windows/tests/process_kill_tree_smoke_test.rs
 git commit -m "$(cat <<'EOF'
 feat(process): Windows kill_tree via `taskkill /T /F /PID`
 
@@ -3554,7 +3554,7 @@ Every value below must appear literally in the implementation. Diverging from an
 1. **`nix 0.27` Rust 1.82 compatibility** — `nix 0.27.x` MSRV is 1.69 per its `Cargo.toml`. The `signal`/`process` features are minimal. Risk surfaces only if a transitive dep pulls edition2024 — apply the `cargo update --precise` pattern from spec §7.1 if so. No action required up-front.
 2. **`SandboxBackend::None` test fixture** — the test in Task 17 uses `SandboxedTag::Wrapped { backend: SandboxBackend::None }`. If the actual `SandboxBackend` enum doesn't have a `None` variant, swap to whichever variant the M1 `posix-minimal` tests already use (likely `SandboxBackend::Unsandboxed` or similar). One-line edit at test time.
 3. **`SecureStorageBackend::MacOsKeychain`** — spec §6.6 references this variant. If `crates/traits/src/secure_storage.rs` only has `PlainText` today, add the variant in Task 4 (one-line enum addition).
-4. **`hyper` 1.x dev-dep** — workspace might still pin hyper 0.14. The `[dev-dependencies]` block uses 1.x and `hyper-util` 0.1; check `lingxi-core/Cargo.toml`'s workspace deps for collisions. If they collide, downgrade test to use `tiny_http` 0.12 or `wiremock` 0.6 — either is a one-line change.
+4. **`hyper` 1.x dev-dep** — workspace might still pin hyper 0.14. The `[dev-dependencies]` block uses 1.x and `hyper-util` 0.1; check `lingxi-code/Cargo.toml`'s workspace deps for collisions. If they collide, downgrade test to use `tiny_http` 0.12 or `wiremock` 0.6 — either is a one-line change.
 5. **`unsafe { setsid() }`** — the closure inside `pre_exec` allocates nothing and calls one syscall. Async-signal-safe per POSIX. Documented inline in Task 14.
 
 **File count** — 5 new files in `posix/secure_storage/`, 5 new files in `posix/process/`, 3 new files in `windows/process/`, 8 modified files. Total touch: ~21 files. Test files: 9 new. Within the spec §6.6 §11 file-touch inventory budget.

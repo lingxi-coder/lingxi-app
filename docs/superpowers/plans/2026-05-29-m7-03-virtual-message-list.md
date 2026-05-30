@@ -6,29 +6,29 @@
 
 **Architecture:** M6 scrolls in **message rows** (1 message == 1 row, `scroll_offset` and `viewport_height` both counted in messages). That breaks once a message can be 1 line or 200 lines. M7-03 switches the scroll model to **lines**: a `HeightCache` maps `message-index → rendered line count` (recomputed on viewport-width change), `total_lines()` sums it, and a pure `render_window(messages, heights, line_offset, viewport_height)` returns the contiguous slice of messages plus the intra-message top/bottom line offsets to render. The full `Vec<RenderedMessage>` is retained (no eviction). `app::scroll_with_viewport` migrates from message-count clamp math to total-line clamp math; the `j/k/PgUp/PgDn/g/G` keys and the `scroll_started`/`scroll_ended` telemetry emit sites are preserved unchanged in behavior.
 
-**Tech Stack:** Rust 1.82 (pinned via `rust-toolchain.toml` — **run all cargo from inside `lingxi-core/`**), iocraft `=0.8.3` (`View`, not `Box`), `unicode-width` for column-accurate wrap, `insta` 1.40 for snapshots.
+**Tech Stack:** Rust 1.82 (pinned via `rust-toolchain.toml` — **run all cargo from inside `lingxi-code/`**), iocraft `=0.8.3` (`View`, not `Box`), `unicode-width` for column-accurate wrap, `insta` 1.40 for snapshots.
 
 ---
 
 ## File Structure
 
 **Created:**
-- `lingxi-core/crates/tui/src/components/virtual_message_list.rs` — the new windowed scrollback component + the pure windowing functions (`HeightCache`, `measured_height`, `render_window`, `WindowSlice`). Replaces `scrollback.rs` as the live component; reuses its per-variant `render_message` dispatch logic.
-- `lingxi-core/crates/tui/tests/behavior_virtual_window.rs` — behavior tests: 5k-message render-count gate, mixed-height offset correctness, width-change cache recompute.
-- `lingxi-core/crates/tui/tests/render_virtual_window.rs` — insta snapshot of a 3-mixed-message window at a fixed offset.
+- `lingxi-code/crates/tui/src/components/virtual_message_list.rs` — the new windowed scrollback component + the pure windowing functions (`HeightCache`, `measured_height`, `render_window`, `WindowSlice`). Replaces `scrollback.rs` as the live component; reuses its per-variant `render_message` dispatch logic.
+- `lingxi-code/crates/tui/tests/behavior_virtual_window.rs` — behavior tests: 5k-message render-count gate, mixed-height offset correctness, width-change cache recompute.
+- `lingxi-code/crates/tui/tests/render_virtual_window.rs` — insta snapshot of a 3-mixed-message window at a fixed offset.
 
 **Modified:**
-- `lingxi-core/crates/tui/src/components/scrollback.rs` — keep the per-variant `render_message` dispatch (moved/shared) but retire the message-row `visible_slice`/`clamp_offset`. To avoid a churny move, `virtual_message_list.rs` will `pub use` the dispatch fn from here; `visible_slice`/`clamp_offset` get `#[deprecated]`-free removal once callers migrate (Task 11).
-- `lingxi-core/crates/tui/src/components/mod.rs:9` — register `pub mod virtual_message_list;`.
-- `lingxi-core/crates/tui/src/state.rs` — remove the `SCROLLBACK_CAP` eviction from `push_message`; retain the full log. Add a `HeightCache` field + `viewport_width` tracking to `AppState`. Add `RenderedMessage::measured_line_count(width)` helper or route through the free fn.
-- `lingxi-core/crates/tui/src/app.rs:483-504` — rewrite `scroll_with_viewport` to clamp against `total_lines` (from the height cache) instead of `messages.len()`. Preserve the `scroll_started`/`scroll_ended` emit sites verbatim.
-- `lingxi-core/crates/tui/src/screens/repl.rs:14-15,79-85` — swap `Scrollback` for `VirtualMessageList`; thread the height cache (or recompute inside the component from `messages` + `viewport_width`).
-- `lingxi-core/crates/tui/src/root.rs:300,368` — thread `viewport_width` (terminal columns) alongside `viewport_height` into the per-frame render + into the height-cache recompute trigger.
+- `lingxi-code/crates/tui/src/components/scrollback.rs` — keep the per-variant `render_message` dispatch (moved/shared) but retire the message-row `visible_slice`/`clamp_offset`. To avoid a churny move, `virtual_message_list.rs` will `pub use` the dispatch fn from here; `visible_slice`/`clamp_offset` get `#[deprecated]`-free removal once callers migrate (Task 11).
+- `lingxi-code/crates/tui/src/components/mod.rs:9` — register `pub mod virtual_message_list;`.
+- `lingxi-code/crates/tui/src/state.rs` — remove the `SCROLLBACK_CAP` eviction from `push_message`; retain the full log. Add a `HeightCache` field + `viewport_width` tracking to `AppState`. Add `RenderedMessage::measured_line_count(width)` helper or route through the free fn.
+- `lingxi-code/crates/tui/src/app.rs:483-504` — rewrite `scroll_with_viewport` to clamp against `total_lines` (from the height cache) instead of `messages.len()`. Preserve the `scroll_started`/`scroll_ended` emit sites verbatim.
+- `lingxi-code/crates/tui/src/screens/repl.rs:14-15,79-85` — swap `Scrollback` for `VirtualMessageList`; thread the height cache (or recompute inside the component from `messages` + `viewport_width`).
+- `lingxi-code/crates/tui/src/root.rs:300,368` — thread `viewport_width` (terminal columns) alongside `viewport_height` into the per-frame render + into the height-cache recompute trigger.
 
 **Read-only references (do NOT edit):**
-- `lingxi-core/crates/tui/src/telemetry.rs:52-69` — `scroll_started(offset)` / `scroll_ended()` — must keep firing.
-- `lingxi-core/crates/tui/tests/behavior_scroll.rs` — existing scroll behavior tests; must continue passing (they assert offsets that are now line-based — see Task 9 note).
-- `lingxi-core/crates/tui/src/components/messages/*.rs` — per-variant renderers (unchanged).
+- `lingxi-code/crates/tui/src/telemetry.rs:52-69` — `scroll_started(offset)` / `scroll_ended()` — must keep firing.
+- `lingxi-code/crates/tui/tests/behavior_scroll.rs` — existing scroll behavior tests; must continue passing (they assert offsets that are now line-based — see Task 9 note).
+- `lingxi-code/crates/tui/src/components/messages/*.rs` — per-variant renderers (unchanged).
 
 ---
 
@@ -50,12 +50,12 @@ This is the central correctness surface and is exactly what the §4 R3 gate stre
 ## Task 1: HeightCache type + measured_height pure fn
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/virtual_message_list.rs`
-- Modify: `lingxi-core/crates/tui/src/components/mod.rs:9`
+- Create: `lingxi-code/crates/tui/src/components/virtual_message_list.rs`
+- Modify: `lingxi-code/crates/tui/src/components/mod.rs:9`
 
 - [ ] **Step 1: Register the module**
 
-In `lingxi-core/crates/tui/src/components/mod.rs`, after the `pub mod scrollback;` line (line 9), add:
+In `lingxi-code/crates/tui/src/components/mod.rs`, after the `pub mod scrollback;` line (line 9), add:
 
 ```rust
 pub mod virtual_message_list;
@@ -63,7 +63,7 @@ pub mod virtual_message_list;
 
 - [ ] **Step 2: Write the failing test for `measured_height`**
 
-Create `lingxi-core/crates/tui/src/components/virtual_message_list.rs` with this test module at the bottom:
+Create `lingxi-code/crates/tui/src/components/virtual_message_list.rs` with this test module at the bottom:
 
 ```rust
 #[cfg(test)]
@@ -202,9 +202,9 @@ Expected: PASS (4 tests).
 - [ ] **Step 7: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/virtual_message_list.rs \
-        lingxi-core/crates/tui/src/components/mod.rs \
-        lingxi-core/crates/tui/Cargo.toml lingxi-core/Cargo.lock
+git add lingxi-code/crates/tui/src/components/virtual_message_list.rs \
+        lingxi-code/crates/tui/src/components/mod.rs \
+        lingxi-code/crates/tui/Cargo.toml lingxi-code/Cargo.lock
 git commit -m "plan(M7-03 T1): add measured_height pure fn + virtual_message_list module
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -215,12 +215,12 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 2: HeightCache struct (build / total / per-index lookup)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/virtual_message_list.rs`
-- Modify: `lingxi-core/crates/tui/src/components/scrollback.rs` (make `render_message` `pub`)
+- Modify: `lingxi-code/crates/tui/src/components/virtual_message_list.rs`
+- Modify: `lingxi-code/crates/tui/src/components/scrollback.rs` (make `render_message` `pub`)
 
 - [ ] **Step 1: Make `render_message` reusable**
 
-In `lingxi-core/crates/tui/src/components/scrollback.rs`, change the dispatch fn signature (line 96) from:
+In `lingxi-code/crates/tui/src/components/scrollback.rs`, change the dispatch fn signature (line 96) from:
 
 ```rust
 fn render_message(
@@ -340,8 +340,8 @@ Expected: PASS (7 tests).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/virtual_message_list.rs \
-        lingxi-core/crates/tui/src/components/scrollback.rs
+git add lingxi-code/crates/tui/src/components/virtual_message_list.rs \
+        lingxi-code/crates/tui/src/components/scrollback.rs
 git commit -m "plan(M7-03 T2): HeightCache with build/recompute/total_lines
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -352,7 +352,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 3: WindowSlice type + render_window core windowing fn (offset 0 / tail)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/virtual_message_list.rs`
+- Modify: `lingxi-code/crates/tui/src/components/virtual_message_list.rs`
 
 - [ ] **Step 1: Write the failing test for the tail window**
 
@@ -507,7 +507,7 @@ Expected: PASS (10 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/virtual_message_list.rs
+git add lingxi-code/crates/tui/src/components/virtual_message_list.rs
 git commit -m "plan(M7-03 T3): render_window core windowing fn + WindowSlice
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -518,7 +518,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 4: render_window mixed-height offset correctness
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/virtual_message_list.rs`
+- Modify: `lingxi-code/crates/tui/src/components/virtual_message_list.rs`
 
 - [ ] **Step 1: Write the failing tests for mixed-height offsets**
 
@@ -590,7 +590,7 @@ Expected: PASS (14 tests). If any mixed-height test FAILS, the off-by-one is in 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/virtual_message_list.rs
+git add lingxi-code/crates/tui/src/components/virtual_message_list.rs
 git commit -m "plan(M7-03 T4): mixed-height offset correctness tests for render_window
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -601,7 +601,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 5: AppState migration — retain full log, drop the cap, add height cache
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/state.rs`
+- Modify: `lingxi-code/crates/tui/src/state.rs`
 
 - [ ] **Step 1: Write the failing test for full retention**
 
@@ -683,7 +683,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/state.rs lingxi-core/crates/tui/src/components/scrollback.rs
+git add lingxi-code/crates/tui/src/state.rs lingxi-code/crates/tui/src/components/scrollback.rs
 git commit -m "plan(M7-03 T5): retain full message log, drop SCROLLBACK_CAP eviction
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -694,7 +694,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 6: AppState height-cache + viewport-width fields
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/state.rs`
+- Modify: `lingxi-code/crates/tui/src/state.rs`
 
 - [ ] **Step 1: Write the failing test for the cache field + refresh**
 
@@ -770,7 +770,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/state.rs
+git add lingxi-code/crates/tui/src/state.rs
 git commit -m "plan(M7-03 T6): AppState gains height_cache + viewport_width + refresh
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -781,11 +781,11 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 7: Migrate scroll_with_viewport to line-based clamp math
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/app.rs:483-504`
+- Modify: `lingxi-code/crates/tui/src/app.rs:483-504`
 
 - [ ] **Step 1: Write the failing line-based scroll test**
 
-Create `lingxi-core/crates/tui/tests/behavior_virtual_window.rs`:
+Create `lingxi-code/crates/tui/tests/behavior_virtual_window.rs`:
 
 ```rust
 //! M7-03 behavior tests: line-based scroll, windowing, telemetry, cache.
@@ -889,7 +889,7 @@ Expected: PASS (2 tests).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/app.rs lingxi-core/crates/tui/tests/behavior_virtual_window.rs
+git add lingxi-code/crates/tui/src/app.rs lingxi-code/crates/tui/tests/behavior_virtual_window.rs
 git commit -m "plan(M7-03 T7): scroll_with_viewport clamps against total_lines
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -900,9 +900,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 8: VirtualMessageList component + thread viewport_width through render
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/virtual_message_list.rs`
-- Modify: `lingxi-core/crates/tui/src/screens/repl.rs:14-15,79-85`
-- Modify: `lingxi-core/crates/tui/src/root.rs:300,368`
+- Modify: `lingxi-code/crates/tui/src/components/virtual_message_list.rs`
+- Modify: `lingxi-code/crates/tui/src/screens/repl.rs:14-15,79-85`
+- Modify: `lingxi-code/crates/tui/src/root.rs:300,368`
 
 - [ ] **Step 1: Implement the `VirtualMessageList` component**
 
@@ -1044,10 +1044,10 @@ Expected: PASS; crate builds clean (component + repl + root wiring compile).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/virtual_message_list.rs \
-        lingxi-core/crates/tui/src/screens/repl.rs \
-        lingxi-core/crates/tui/src/root.rs \
-        lingxi-core/crates/tui/src/app.rs
+git add lingxi-code/crates/tui/src/components/virtual_message_list.rs \
+        lingxi-code/crates/tui/src/screens/repl.rs \
+        lingxi-code/crates/tui/src/root.rs \
+        lingxi-code/crates/tui/src/app.rs
 git commit -m "plan(M7-03 T8): VirtualMessageList component + thread viewport_width
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1058,8 +1058,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 9: Preserve j/k/PgUp/PgDn/g/G behavior + migrate the M6 scroll tests
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/tests/behavior_scroll.rs`
-- Read: `lingxi-core/crates/tui/src/events/keymap.rs` (key→ScrollDir mapping; unchanged)
+- Modify: `lingxi-code/crates/tui/tests/behavior_scroll.rs`
+- Read: `lingxi-code/crates/tui/src/events/keymap.rs` (key→ScrollDir mapping; unchanged)
 
 - [ ] **Step 1: Understand why the M6 tests change**
 
@@ -1121,8 +1121,8 @@ Expected: PASS (all).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/tests/behavior_scroll.rs \
-        lingxi-core/crates/tui/tests/behavior_virtual_window.rs
+git add lingxi-code/crates/tui/tests/behavior_scroll.rs \
+        lingxi-code/crates/tui/tests/behavior_virtual_window.rs
 git commit -m "plan(M7-03 T9): preserve j/k/PgUp/PgDn/g/G under line-based scroll
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1133,8 +1133,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 10: Scroll telemetry still fires on 0↔nonzero transition
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/tests/behavior_virtual_window.rs`
-- Read: `lingxi-core/crates/tui/src/telemetry.rs:52-69`
+- Modify: `lingxi-code/crates/tui/tests/behavior_virtual_window.rs`
+- Read: `lingxi-code/crates/tui/src/telemetry.rs:52-69`
 
 - [ ] **Step 1: Find the telemetry capture pattern used by M6**
 
@@ -1185,7 +1185,7 @@ Expected: PASS.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/tests/behavior_virtual_window.rs
+git add lingxi-code/crates/tui/tests/behavior_virtual_window.rs
 git commit -m "plan(M7-03 T10): scroll telemetry still fires on 0<->nonzero transition
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1196,7 +1196,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 11: Retire the message-row scrollback API + repoint imports
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/scrollback.rs`
+- Modify: `lingxi-code/crates/tui/src/components/scrollback.rs`
 - Modify: any caller of `visible_slice` / `clamp_offset` / `Scrollback`
 
 - [ ] **Step 1: Find remaining callers of the old API**
@@ -1224,7 +1224,7 @@ Expected: PASS; no clippy warnings (no dead-code warnings from the removals).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/scrollback.rs lingxi-core/crates/tui/
+git add lingxi-code/crates/tui/src/components/scrollback.rs lingxi-code/crates/tui/
 git commit -m "plan(M7-03 T11): retire message-row scrollback API, keep render_message dispatch
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1235,11 +1235,11 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 12: Snapshot — a window of 3 mixed-height messages at a fixed offset
 
 **Files:**
-- Create: `lingxi-core/crates/tui/tests/render_virtual_window.rs`
+- Create: `lingxi-code/crates/tui/tests/render_virtual_window.rs`
 
 - [ ] **Step 1: Write the snapshot test**
 
-Create `lingxi-core/crates/tui/tests/render_virtual_window.rs`:
+Create `lingxi-code/crates/tui/tests/render_virtual_window.rs`:
 
 ```rust
 //! M7-03 snapshot: a window of 3 mixed-height messages at a fixed offset.
@@ -1298,8 +1298,8 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/tests/render_virtual_window.rs \
-        lingxi-core/crates/tui/tests/snapshots/render_virtual_window__window_three_mixed_fixed_offset.snap
+git add lingxi-code/crates/tui/tests/render_virtual_window.rs \
+        lingxi-code/crates/tui/tests/snapshots/render_virtual_window__window_three_mixed_fixed_offset.snap
 git commit -m "plan(M7-03 T12): snapshot a window of 3 mixed-height messages
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1310,7 +1310,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 13: THE 5K GATE (§4 R3) — mixed-height correctness + bounded render at scale
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/tests/behavior_virtual_window.rs`
+- Modify: `lingxi-code/crates/tui/tests/behavior_virtual_window.rs`
 
 This is the spec §4 R3 hard gate. It must pass before the tag. If windowing proves unstable, apply the GATE FALLBACK below.
 
@@ -1413,7 +1413,7 @@ Expected: PASS (3 gate tests). If an exact-index assertion is off by one, the bu
 - [ ] **Step 4: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/tests/behavior_virtual_window.rs
+git add lingxi-code/crates/tui/tests/behavior_virtual_window.rs
 git commit -m "plan(M7-03 T13): 5k mixed-height gate — bounded render + exact first/last visible
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1425,7 +1425,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Files:** none (verification + tag only)
 
-- [ ] **Step 1: Format check (from inside `lingxi-core/`)**
+- [ ] **Step 1: Format check (from inside `lingxi-code/`)**
 
 Run: `cd /Users/luolingfeng/Projects/LingXi-Next/lingxi-core && cargo fmt --check`
 Expected: clean (no diff). If it reports files, run `cargo fmt` and amend nothing — instead fix and continue.

@@ -6,13 +6,13 @@
 
 **Architecture:** Two new files in the `prompt_input/` submodule (created by M7-06): `palette.rs` (filters the 99 builtin command names) and `completion.rs` (filters cwd path entries). Each is a pure-logic core (`*State` struct + filter/select/accept functions, fully unit-testable) plus a small iocraft overlay component. New `AppState` fields hold each overlay's open-state, filter text, and selected index. The single `handle_live_key` dispatcher in `root.rs` gains a **priority-3 branch** (per design §2.5: below permission dialogs at priority 1 and screens at priority 2, above default input editing) so an open overlay owns every key until `Esc`/accept closes it.
 
-**Tech Stack:** Rust 1.82 (pinned via `lingxi-core/rust-toolchain`), iocraft `=0.8.3` (`View`, not `Box`), crossterm (workspace 0.28 / iocraft 0.29 skew bridged in `root.rs`), `lingxi-commands` (`BUILTIN_COMMAND_NAMES` + `core_description`), `insta` snapshots. **No new dependency** — fuzzy filtering uses a hand-written subsequence matcher (see Decision D1).
+**Tech Stack:** Rust 1.82 (pinned via `lingxi-code/rust-toolchain`), iocraft `=0.8.3` (`View`, not `Box`), crossterm (workspace 0.28 / iocraft 0.29 skew bridged in `root.rs`), `lingxi-commands` (`BUILTIN_COMMAND_NAMES` + `core_description`), `insta` snapshots. **No new dependency** — fuzzy filtering uses a hand-written subsequence matcher (see Decision D1).
 
 ---
 
 ## Context the implementer needs before starting
 
-**Prerequisite:** M7-06 must have landed. It refactors the single file `crates/tui/src/components/prompt_input.rs` into a submodule `crates/tui/src/components/prompt_input/` with at least `mod.rs` (the editor core: `apply_insert`, `apply_backspace`, `apply_move`, `CursorMove`, `PromptInput` component) and `footer.rs`. **If `prompt_input/` is still a single `.rs` file, STOP and confirm M7-06 landed** — every path below assumes the submodule exists. All paths in this plan are relative to `lingxi-core/` unless absolute.
+**Prerequisite:** M7-06 must have landed. It refactors the single file `crates/tui/src/components/prompt_input.rs` into a submodule `crates/tui/src/components/prompt_input/` with at least `mod.rs` (the editor core: `apply_insert`, `apply_backspace`, `apply_move`, `CursorMove`, `PromptInput` component) and `footer.rs`. **If `prompt_input/` is still a single `.rs` file, STOP and confirm M7-06 landed** — every path below assumes the submodule exists. All paths in this plan are relative to `lingxi-code/` unless absolute.
 
 **The single live-key dispatcher** is `crate::root::handle_live_key(st: &mut AppState, k: &iocraft::KeyEvent, viewport: usize)` in `crates/tui/src/root.rs`. As of M6-05 it has exactly one priority branch:
 
@@ -145,7 +145,7 @@ mod tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p lingxi-tui fuzzy:: 2>&1 | head -30` (from inside `lingxi-core/`)
+Run: `cargo test -p lingxi-tui fuzzy:: 2>&1 | head -30` (from inside `lingxi-code/`)
 Expected: FAIL — `cannot find function subsequence_match` / `filtered_ranked`.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -1724,7 +1724,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Format**
 
-Run (from inside `lingxi-core/`): `cargo fmt --check`
+Run (from inside `lingxi-code/`): `cargo fmt --check`
 Expected: clean. If not, run `cargo fmt` and amend the relevant prior commit's intent with a fresh fixup commit (do NOT `--amend` per §6.4; just `git commit -m "plan(M7-07 T14): cargo fmt"`).
 
 - [ ] **Step 2: Clippy**
@@ -1779,7 +1779,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Snapshots: palette 3 filtered commands + completion 3 paths → Tasks 7, 8 (+ REPL-with-overlay snapshot in Task 11).
 - Telemetry 0 new events, palette event deferred to M7-16 → Decision D2 + Task 13.
 - Fuzzy filter without a new dependency → Decision D1 + Task 1.
-- Workspace gate from inside `lingxi-core/` + tag `m7.7` → Task 14.
+- Workspace gate from inside `lingxi-code/` + tag `m7.7` → Task 14.
 
 **Placeholder scan:** No TBD/TODO. Every code step shows complete code; commands show expected output. The one "may already pass" note (Tasks 10, 12) is deliberate — those tests lock behavior that Task 9 establishes, and TDD still requires writing them.
 

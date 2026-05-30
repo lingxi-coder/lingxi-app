@@ -22,12 +22,12 @@
   - `claude-code/src/utils/swarm/backends/registry.ts` (465 lines — backend selection logic)
   - `claude-code/src/utils/swarm/backends/detection.ts` — env probes
   - `claude-code/src/utils/swarm/constants.ts` — `SWARM_SESSION_NAME = 'claude-swarm'`, `getSwarmSocketName()`
-- Trait definitions: `lingxi-core/crates/traits/src/filesystem.rs` (`FileSystem::watch`, `FileEvent`, `FileEventKind`), `lingxi-core/crates/traits/src/swarm.rs` (`SwarmBackend`, `SwarmLayout`, `PanePosition`, `SwarmHandle`, `PaneId`, `SwarmError`)
+- Trait definitions: `lingxi-code/crates/traits/src/filesystem.rs` (`FileSystem::watch`, `FileEvent`, `FileEventKind`), `lingxi-code/crates/traits/src/swarm.rs` (`SwarmBackend`, `SwarmLayout`, `PanePosition`, `SwarmHandle`, `PaneId`, `SwarmError`)
 - Existing code state:
-  - `lingxi-core/platforms/posix/src/fs.rs` — Linux inotify works, macOS empty stream stub (`TODO(M2-followup): FSEvents`)
-  - `lingxi-core/platforms/windows/src/fs.rs` — empty stream stub (`TODO(M2-followup): ReadDirectoryChangesW`)
-  - `lingxi-core/platforms/posix/src/swarm.rs` — `TmuxSwarmBackend` stub returning `SwarmError::Tmux("M2 follow-up: tmux session creation")`
-  - `lingxi-core/platforms/windows/src/swarm.rs` — `WindowsSwarmBackend` returning `SwarmError::Unsupported` (M2-01 corrected)
+  - `lingxi-code/platforms/posix/src/fs.rs` — Linux inotify works, macOS empty stream stub (`TODO(M2-followup): FSEvents`)
+  - `lingxi-code/platforms/windows/src/fs.rs` — empty stream stub (`TODO(M2-followup): ReadDirectoryChangesW`)
+  - `lingxi-code/platforms/posix/src/swarm.rs` — `TmuxSwarmBackend` stub returning `SwarmError::Tmux("M2 follow-up: tmux session creation")`
+  - `lingxi-code/platforms/windows/src/swarm.rs` — `WindowsSwarmBackend` returning `SwarmError::Unsupported` (M2-01 corrected)
 
 **Depends on:** M2-01 (Windows `swarm.rs` is already `Unsupported`; `platforms/posix/src/swarm.rs` is a stub waiting for replacement).
 
@@ -36,32 +36,32 @@
 ## File Touch Inventory (locked at top)
 
 **New files:**
-- `lingxi-core/platforms/posix/src/watch_helper.rs` — common notify+debouncer watcher (~110 lines)
-- `lingxi-core/platforms/posix/src/swarm/mod.rs` — re-exports + back-compat alias (~25 lines)
-- `lingxi-core/platforms/posix/src/swarm/detection.rs` — env probes (~110 lines)
-- `lingxi-core/platforms/posix/src/swarm/tmux.rs` — real `TmuxBackend` (~410 lines)
-- `lingxi-core/platforms/posix/src/swarm/iterm.rs` — `ITermBackend` AppleScript impl (~210 lines)
-- `lingxi-core/platforms/posix/src/swarm/inprocess.rs` — no-pane fallback (~60 lines)
-- `lingxi-core/platforms/posix/src/swarm/registry.rs` — auto-detect constructor (~85 lines)
-- `lingxi-core/platforms/windows/src/watch_helper.rs` — verbatim copy of posix one (~110 lines)
-- `lingxi-core/platforms/posix/tests/fs_watch_debounce_test.rs` — single-event-after-stability test (~70 lines)
-- `lingxi-core/platforms/posix/tests/fs_watch_git_filter_test.rs` — `.git/` excluded (~55 lines)
-- `lingxi-core/platforms/posix/tests/swarm_detection_test.rs` — backend selection (~90 lines)
-- `lingxi-core/platforms/posix/tests/swarm_tmux_argv_test.rs` — color + version parse + argv (~140 lines)
-- `lingxi-core/platforms/posix/tests/swarm_tmux_integration_test.rs` — `#[ignore]`-gated real tmux (~80 lines)
-- `lingxi-core/platforms/windows/tests/fs_watch_smoke_test.rs` — create+modify+delete on Windows (~55 lines)
+- `lingxi-code/platforms/posix/src/watch_helper.rs` — common notify+debouncer watcher (~110 lines)
+- `lingxi-code/platforms/posix/src/swarm/mod.rs` — re-exports + back-compat alias (~25 lines)
+- `lingxi-code/platforms/posix/src/swarm/detection.rs` — env probes (~110 lines)
+- `lingxi-code/platforms/posix/src/swarm/tmux.rs` — real `TmuxBackend` (~410 lines)
+- `lingxi-code/platforms/posix/src/swarm/iterm.rs` — `ITermBackend` AppleScript impl (~210 lines)
+- `lingxi-code/platforms/posix/src/swarm/inprocess.rs` — no-pane fallback (~60 lines)
+- `lingxi-code/platforms/posix/src/swarm/registry.rs` — auto-detect constructor (~85 lines)
+- `lingxi-code/platforms/windows/src/watch_helper.rs` — verbatim copy of posix one (~110 lines)
+- `lingxi-code/platforms/posix/tests/fs_watch_debounce_test.rs` — single-event-after-stability test (~70 lines)
+- `lingxi-code/platforms/posix/tests/fs_watch_git_filter_test.rs` — `.git/` excluded (~55 lines)
+- `lingxi-code/platforms/posix/tests/swarm_detection_test.rs` — backend selection (~90 lines)
+- `lingxi-code/platforms/posix/tests/swarm_tmux_argv_test.rs` — color + version parse + argv (~140 lines)
+- `lingxi-code/platforms/posix/tests/swarm_tmux_integration_test.rs` — `#[ignore]`-gated real tmux (~80 lines)
+- `lingxi-code/platforms/windows/tests/fs_watch_smoke_test.rs` — create+modify+delete on Windows (~55 lines)
 
 **Modified files:**
-- `lingxi-core/platforms/posix/Cargo.toml` — add `notify` `notify-debouncer-mini` `which`; drop `inotify`
-- `lingxi-core/platforms/windows/Cargo.toml` — add `notify` `notify-debouncer-mini`
-- `lingxi-core/platforms/posix/src/fs.rs` — `watch()` now calls `watch_helper::watch_dir_with_debounce`
-- `lingxi-core/platforms/windows/src/fs.rs` — same
-- `lingxi-core/platforms/posix/src/lib.rs` — `pub mod swarm;` becomes the directory; re-export `TmuxSwarmBackend` (alias to `swarm::TmuxBackend`) for source-compat with M2-01 consumers
-- `lingxi-core/platforms/windows/src/lib.rs` — add `pub mod watch_helper;` (private use only)
-- `lingxi-core/platforms/windows/src/swarm.rs` — doc cross-reference only (no code change)
+- `lingxi-code/platforms/posix/Cargo.toml` — add `notify` `notify-debouncer-mini` `which`; drop `inotify`
+- `lingxi-code/platforms/windows/Cargo.toml` — add `notify` `notify-debouncer-mini`
+- `lingxi-code/platforms/posix/src/fs.rs` — `watch()` now calls `watch_helper::watch_dir_with_debounce`
+- `lingxi-code/platforms/windows/src/fs.rs` — same
+- `lingxi-code/platforms/posix/src/lib.rs` — `pub mod swarm;` becomes the directory; re-export `TmuxSwarmBackend` (alias to `swarm::TmuxBackend`) for source-compat with M2-01 consumers
+- `lingxi-code/platforms/windows/src/lib.rs` — add `pub mod watch_helper;` (private use only)
+- `lingxi-code/platforms/windows/src/swarm.rs` — doc cross-reference only (no code change)
 
 **Deleted files:**
-- `lingxi-core/platforms/posix/src/swarm.rs` — replaced by `swarm/` directory (move-then-edit; git rename detection handles it)
+- `lingxi-code/platforms/posix/src/swarm.rs` — replaced by `swarm/` directory (move-then-edit; git rename detection handles it)
 
 Total new code: ~1,475 lines (1,000 lines impl + 475 lines tests). Net deletes: ~50 lines (the old single-file `swarm.rs` stub).
 
@@ -109,8 +109,8 @@ These constants MUST appear verbatim in the Rust impl. The implementer should gr
 ### Task 1: Cargo deps — add `notify`, `notify-debouncer-mini`, `which`; drop direct `inotify`
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/Cargo.toml`
-- Modify: `lingxi-core/platforms/windows/Cargo.toml`
+- Modify: `lingxi-code/platforms/posix/Cargo.toml`
+- Modify: `lingxi-code/platforms/windows/Cargo.toml`
 
 Both platform crates will use the same `notify` + `notify-debouncer-mini` toolkit. The Linux-specific `inotify = "0.10"` direct dep in posix becomes unnecessary because `notify::RecommendedWatcher` selects inotify under the hood on Linux. Add `which = "6"` to posix only (the tmux backend uses it to probe `$PATH`).
 
@@ -119,7 +119,7 @@ Both platform crates will use the same `notify` + `notify-debouncer-mini` toolki
 - `notify-debouncer-mini` version `0.4`
 - `which` version `6` (already used by M2-04 sandbox crate)
 
-- [ ] **Step 1: Add deps to `lingxi-core/platforms/posix/Cargo.toml`**
+- [ ] **Step 1: Add deps to `lingxi-code/platforms/posix/Cargo.toml`**
 
 Modify the existing `[dependencies]` block — replace the inotify target block with workspace-wide notify deps. The final shape (delta only shown; rest of file untouched):
 
@@ -152,7 +152,7 @@ tempfile = "3.13"
 workspace = true
 ```
 
-- [ ] **Step 2: Add deps to `lingxi-core/platforms/windows/Cargo.toml`**
+- [ ] **Step 2: Add deps to `lingxi-code/platforms/windows/Cargo.toml`**
 
 Modify the existing `[dependencies]` block:
 
@@ -202,7 +202,7 @@ Document the pin in a comment on the line where the dep was added: `notify = "=6
 - [ ] **Step 4: Commit (optional intermediate)**
 
 ```bash
-git add lingxi-core/platforms/posix/Cargo.toml lingxi-core/platforms/windows/Cargo.toml lingxi-core/Cargo.lock
+git add lingxi-code/platforms/posix/Cargo.toml lingxi-code/platforms/windows/Cargo.toml lingxi-code/Cargo.lock
 git commit -m "chore(platforms): add notify + notify-debouncer-mini deps for M2-05"
 ```
 
@@ -213,8 +213,8 @@ git commit -m "chore(platforms): add notify + notify-debouncer-mini deps for M2-
 ### Task 2: Create the common `watch_helper` module (posix copy)
 
 **Files:**
-- Create: `lingxi-core/platforms/posix/src/watch_helper.rs`
-- Modify: `lingxi-core/platforms/posix/src/lib.rs` — add `pub(crate) mod watch_helper;` (private to the crate)
+- Create: `lingxi-code/platforms/posix/src/watch_helper.rs`
+- Modify: `lingxi-code/platforms/posix/src/lib.rs` — add `pub(crate) mod watch_helper;` (private to the crate)
 
 This module implements the actual `notify` + `notify-debouncer-mini` pipeline, converts `notify::DebouncedEvent` → our `FileEvent`, and applies the path filters (`.git/`, editor swap files). It's the single source of truth that both `PosixFileSystem::watch` and `WindowsFileSystem::watch` call.
 
@@ -226,7 +226,7 @@ This module implements the actual `notify` + `notify-debouncer-mini` pipeline, c
 
 - [ ] **Step 1: Write the failing test for `.git/` exclusion**
 
-Create `lingxi-core/platforms/posix/tests/fs_watch_git_filter_test.rs`:
+Create `lingxi-code/platforms/posix/tests/fs_watch_git_filter_test.rs`:
 
 ```rust
 //! Verifies the FS watcher excludes `.git/**` paths (parity with claude-code
@@ -292,7 +292,7 @@ Run it: `cd lingxi-core && cargo test -p lingxi-platform-posix --test fs_watch_g
 
 - [ ] **Step 2: Implement `watch_helper.rs`**
 
-Create `lingxi-core/platforms/posix/src/watch_helper.rs`:
+Create `lingxi-code/platforms/posix/src/watch_helper.rs`:
 
 ```rust
 //! Shared notify + debouncer file-watch helper.
@@ -496,7 +496,7 @@ mod tests {
 
 - [ ] **Step 3: Wire the module into `lib.rs`**
 
-Modify `lingxi-core/platforms/posix/src/lib.rs` — add this line near the other `pub mod` declarations (keep crate-private; consumers go through `fs::PosixFileSystem::watch`):
+Modify `lingxi-code/platforms/posix/src/lib.rs` — add this line near the other `pub mod` declarations (keep crate-private; consumers go through `fs::PosixFileSystem::watch`):
 
 ```rust
 pub(crate) mod watch_helper;
@@ -519,7 +519,7 @@ Expected: builds clean; inline unit tests pass.
 ### Task 3: Test — rapid writes collapse to a single event after stability
 
 **Files:**
-- Create: `lingxi-core/platforms/posix/tests/fs_watch_debounce_test.rs`
+- Create: `lingxi-code/platforms/posix/tests/fs_watch_debounce_test.rs`
 
 This is the parity check for chokidar's `awaitWriteFinish.stabilityThreshold`. Multiple rapid writes inside the threshold window MUST be debounced into a single `Modified` event.
 
@@ -615,7 +615,7 @@ Expected: fails. The reason will differ on Linux (inotify code path doesn't appl
 ### Task 5: Replace `PosixFileSystem::watch` with the helper
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/fs.rs`
+- Modify: `lingxi-code/platforms/posix/src/fs.rs`
 
 Drop the dual `#[cfg(target_os = "linux")]` / `#[cfg(not(target_os = "linux"))]` watch implementations and replace with a single call to `watch_helper::watch_dir_with_debounce`. Also remove the `inotify::*` imports.
 
@@ -678,30 +678,30 @@ Expected: clean.
 ### Task 6: Mirror the helper into windows + replace `WindowsFileSystem::watch`
 
 **Files:**
-- Create: `lingxi-core/platforms/windows/src/watch_helper.rs` (byte-identical copy of posix version)
-- Modify: `lingxi-core/platforms/windows/src/lib.rs` — add `pub(crate) mod watch_helper;`
-- Modify: `lingxi-core/platforms/windows/src/fs.rs`
-- Create: `lingxi-core/platforms/windows/tests/fs_watch_smoke_test.rs`
+- Create: `lingxi-code/platforms/windows/src/watch_helper.rs` (byte-identical copy of posix version)
+- Modify: `lingxi-code/platforms/windows/src/lib.rs` — add `pub(crate) mod watch_helper;`
+- Modify: `lingxi-code/platforms/windows/src/fs.rs`
+- Create: `lingxi-code/platforms/windows/tests/fs_watch_smoke_test.rs`
 
 The windows crate's `watch_helper.rs` is a verbatim copy of the posix one — `notify`'s `RecommendedWatcher` is the abstraction layer, so the same code runs on RDC under Windows.
 
 - [ ] **Step 1: Copy `watch_helper.rs`**
 
 ```bash
-cp lingxi-core/platforms/posix/src/watch_helper.rs lingxi-core/platforms/windows/src/watch_helper.rs
+cp lingxi-code/platforms/posix/src/watch_helper.rs lingxi-code/platforms/windows/src/watch_helper.rs
 ```
 
 Add a doc comment to the windows copy:
 
 ```rust
 //! NOTE: This file is a manually-kept copy of
-//! `lingxi-core/platforms/posix/src/watch_helper.rs`. Keep the two in sync;
+//! `lingxi-code/platforms/posix/src/watch_helper.rs`. Keep the two in sync;
 //! see M2-05 plan, "Deliberate divergences" §2 for rationale.
 ```
 
 - [ ] **Step 2: Wire into windows lib.rs**
 
-Add to `lingxi-core/platforms/windows/src/lib.rs`:
+Add to `lingxi-code/platforms/windows/src/lib.rs`:
 
 ```rust
 pub(crate) mod watch_helper;
@@ -711,7 +711,7 @@ If `tokio-stream` is not yet in windows Cargo.toml, add it: `tokio-stream = "0.1
 
 - [ ] **Step 3: Replace `WindowsFileSystem::watch`**
 
-Edit `lingxi-core/platforms/windows/src/fs.rs` — replace the empty-stream `watch` impl with:
+Edit `lingxi-code/platforms/windows/src/fs.rs` — replace the empty-stream `watch` impl with:
 
 ```rust
 async fn watch(
@@ -731,7 +731,7 @@ Update the file's top doc comment to match the posix one (drop the `ReadDirector
 
 - [ ] **Step 4: Write the smoke test**
 
-Create `lingxi-core/platforms/windows/tests/fs_watch_smoke_test.rs`:
+Create `lingxi-code/platforms/windows/tests/fs_watch_smoke_test.rs`:
 
 ```rust
 //! Smoke test: create + modify + delete a file inside the watched dir, verify
@@ -807,18 +807,18 @@ Expected: all clean.
 - [ ] **Step 2: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/Cargo.toml \
-        lingxi-core/platforms/posix/src/lib.rs \
-        lingxi-core/platforms/posix/src/fs.rs \
-        lingxi-core/platforms/posix/src/watch_helper.rs \
-        lingxi-core/platforms/posix/tests/fs_watch_debounce_test.rs \
-        lingxi-core/platforms/posix/tests/fs_watch_git_filter_test.rs \
-        lingxi-core/platforms/windows/Cargo.toml \
-        lingxi-core/platforms/windows/src/lib.rs \
-        lingxi-core/platforms/windows/src/fs.rs \
-        lingxi-core/platforms/windows/src/watch_helper.rs \
-        lingxi-core/platforms/windows/tests/fs_watch_smoke_test.rs \
-        lingxi-core/Cargo.lock
+git add lingxi-code/platforms/posix/Cargo.toml \
+        lingxi-code/platforms/posix/src/lib.rs \
+        lingxi-code/platforms/posix/src/fs.rs \
+        lingxi-code/platforms/posix/src/watch_helper.rs \
+        lingxi-code/platforms/posix/tests/fs_watch_debounce_test.rs \
+        lingxi-code/platforms/posix/tests/fs_watch_git_filter_test.rs \
+        lingxi-code/platforms/windows/Cargo.toml \
+        lingxi-code/platforms/windows/src/lib.rs \
+        lingxi-code/platforms/windows/src/fs.rs \
+        lingxi-code/platforms/windows/src/watch_helper.rs \
+        lingxi-code/platforms/windows/tests/fs_watch_smoke_test.rs \
+        lingxi-code/Cargo.lock
 git commit -m "feat(platforms): notify-based FS watch with debounce"
 ```
 
@@ -828,19 +828,19 @@ End Phase A.
 
 ## Phase B · Swarm backend trifecta — Tmux + iTerm + InProcess (10 tasks)
 
-This phase converts `lingxi-core/platforms/posix/src/swarm.rs` (single file, stub) into `lingxi-core/platforms/posix/src/swarm/` (directory, 6 files). The first task is the move-then-edit boundary; all subsequent tasks edit the new directory contents.
+This phase converts `lingxi-code/platforms/posix/src/swarm.rs` (single file, stub) into `lingxi-code/platforms/posix/src/swarm/` (directory, 6 files). The first task is the move-then-edit boundary; all subsequent tasks edit the new directory contents.
 
 ### Task 8: Convert `swarm.rs` → `swarm/mod.rs` directory layout
 
 **Files:**
-- Delete: `lingxi-core/platforms/posix/src/swarm.rs`
-- Create: `lingxi-core/platforms/posix/src/swarm/mod.rs`
-- Modify: `lingxi-core/platforms/posix/src/lib.rs` (no source change — `pub mod swarm;` still resolves; just confirm)
+- Delete: `lingxi-code/platforms/posix/src/swarm.rs`
+- Create: `lingxi-code/platforms/posix/src/swarm/mod.rs`
+- Modify: `lingxi-code/platforms/posix/src/lib.rs` (no source change — `pub mod swarm;` still resolves; just confirm)
 
 - [ ] **Step 1: Create the directory + initial `mod.rs`**
 
 ```bash
-cd lingxi-core/platforms/posix/src
+cd lingxi-code/platforms/posix/src
 mkdir -p swarm
 ```
 
@@ -878,7 +878,7 @@ pub type TmuxSwarmBackend = TmuxBackend;
 - [ ] **Step 2: Delete the old single-file `swarm.rs`**
 
 ```bash
-rm lingxi-core/platforms/posix/src/swarm.rs
+rm lingxi-code/platforms/posix/src/swarm.rs
 ```
 
 - [ ] **Step 3: Add empty child files (so the `pub mod` lines resolve)**
@@ -886,7 +886,7 @@ rm lingxi-core/platforms/posix/src/swarm.rs
 Create empty (single-line `//! TBD next task` doc) files so the crate still compiles after this checkpoint:
 
 ```bash
-cd lingxi-core/platforms/posix/src/swarm
+cd lingxi-code/platforms/posix/src/swarm
 printf '%s\n' '//! Filled in by Task 9.' > detection.rs
 printf '%s\n' '//! Filled in by Task 14.' > inprocess.rs
 printf '%s\n' '//! Filled in by Task 13.' > iterm.rs
@@ -920,8 +920,8 @@ Expected: clean (no warnings from `lib.rs` because the `pub mod` resolves to emp
 ### Task 9: Implement `detection.rs`
 
 **Files:**
-- Replace: `lingxi-core/platforms/posix/src/swarm/detection.rs`
-- Modify: `lingxi-core/platforms/posix/tests/swarm_detection_test.rs` (new)
+- Replace: `lingxi-code/platforms/posix/src/swarm/detection.rs`
+- Modify: `lingxi-code/platforms/posix/tests/swarm_detection_test.rs` (new)
 
 `detection.rs` exposes pure functions that probe `$TMUX`, `$TERM_PROGRAM`, and `which tmux` to populate a `TerminalEnv` struct. The `pick_backend` function consumes a `TerminalEnv` and returns a `BackendChoice` enum that the registry uses to construct the right concrete backend.
 
@@ -932,7 +932,7 @@ Expected: clean (no warnings from `lib.rs` because the `pub mod` resolves to emp
 
 - [ ] **Step 1: Write the failing test**
 
-Create `lingxi-core/platforms/posix/tests/swarm_detection_test.rs`:
+Create `lingxi-code/platforms/posix/tests/swarm_detection_test.rs`:
 
 ```rust
 //! Verifies the detection logic picks the right backend given env probes.
@@ -1001,7 +1001,7 @@ fn nothing_available_picks_inprocess() {
 
 - [ ] **Step 2: Implement `detection.rs`**
 
-Replace `lingxi-core/platforms/posix/src/swarm/detection.rs`:
+Replace `lingxi-code/platforms/posix/src/swarm/detection.rs`:
 
 ```rust
 //! Detect the terminal environment to choose a `SwarmBackend`.
@@ -1148,8 +1148,8 @@ Expected: all 5 integration tests + 4 unit tests pass.
 ### Task 10: Implement `tmux.rs` (real `TmuxBackend`)
 
 **Files:**
-- Replace: `lingxi-core/platforms/posix/src/swarm/tmux.rs`
-- Modify: `lingxi-core/platforms/posix/src/swarm/mod.rs` (uncomment the `pub use tmux::TmuxBackend;` and `pub type TmuxSwarmBackend` lines)
+- Replace: `lingxi-code/platforms/posix/src/swarm/tmux.rs`
+- Modify: `lingxi-code/platforms/posix/src/swarm/mod.rs` (uncomment the `pub use tmux::TmuxBackend;` and `pub type TmuxSwarmBackend` lines)
 
 `tmux.rs` is the biggest single file in the plan (~410 lines). It implements the `SwarmBackend` trait by shelling out to `tmux` via `tokio::process::Command`. The implementation covers:
 - Inside-tmux vs outside-tmux split-window orchestration.
@@ -1169,7 +1169,7 @@ Expected: all 5 integration tests + 4 unit tests pass.
 
 - [ ] **Step 1: Write the unit test for color mapping + argv shape**
 
-Create `lingxi-core/platforms/posix/tests/swarm_tmux_argv_test.rs`:
+Create `lingxi-code/platforms/posix/tests/swarm_tmux_argv_test.rs`:
 
 ```rust
 //! Verifies the color map literals match claude-code TmuxBackend.ts:60-69 and
@@ -1254,7 +1254,7 @@ fn set_pane_border_argv_uses_lower_p() {
 
 - [ ] **Step 2: Implement `tmux.rs`**
 
-Replace `lingxi-core/platforms/posix/src/swarm/tmux.rs`:
+Replace `lingxi-code/platforms/posix/src/swarm/tmux.rs`:
 
 ```rust
 //! Real `tmux`-backed `SwarmBackend` for POSIX hosts.
@@ -1579,7 +1579,7 @@ impl TmuxBackend {
 
 - [ ] **Step 3: Uncomment the `pub use` line in `mod.rs`**
 
-Edit `lingxi-core/platforms/posix/src/swarm/mod.rs` — uncomment:
+Edit `lingxi-code/platforms/posix/src/swarm/mod.rs` — uncomment:
 
 ```rust
 pub use tmux::TmuxBackend;
@@ -1620,7 +1620,7 @@ Expected: all pass.
 ### Task 12: Integration test — real tmux shell-out (gated `#[ignore]`)
 
 **Files:**
-- Create: `lingxi-core/platforms/posix/tests/swarm_tmux_integration_test.rs`
+- Create: `lingxi-code/platforms/posix/tests/swarm_tmux_integration_test.rs`
 
 A real end-to-end check that requires `tmux` ≥ 3.2 on the host. Marked `#[ignore]` so it doesn't run in default `cargo test`. CI matrix opts in with `cargo test -- --ignored` when the runner has tmux installed.
 
@@ -1675,8 +1675,8 @@ Expected: build clean; test reported as `ignored` (not run).
 ### Task 13: Implement `iterm.rs` (AppleScript via `osascript`)
 
 **Files:**
-- Replace: `lingxi-core/platforms/posix/src/swarm/iterm.rs`
-- Modify: `lingxi-core/platforms/posix/src/swarm/mod.rs` — uncomment `pub use iterm::ITermSwarmBackend;`
+- Replace: `lingxi-code/platforms/posix/src/swarm/iterm.rs`
+- Modify: `lingxi-code/platforms/posix/src/swarm/mod.rs` — uncomment `pub use iterm::ITermSwarmBackend;`
 
 The iTerm backend builds AppleScript snippets and invokes them via `osascript -e <script>`. We don't try to replicate every visual feature of the tmux backend (no per-pane border colors — iTerm draws those at the OS level via tab colors and we skip them, matching claude-code's `ITermBackend.ts:270-289` "skip for performance" comment).
 
@@ -1687,7 +1687,7 @@ The iTerm backend builds AppleScript snippets and invokes them via `osascript -e
 
 - [ ] **Step 1: Implement `iterm.rs`**
 
-Replace `lingxi-core/platforms/posix/src/swarm/iterm.rs`:
+Replace `lingxi-code/platforms/posix/src/swarm/iterm.rs`:
 
 ```rust
 //! iTerm2 `SwarmBackend` using AppleScript via `osascript`.
@@ -1856,14 +1856,14 @@ Expected: clean build; 2 unit tests pass.
 ### Task 14: Implement `inprocess.rs` (no-pane fallback)
 
 **Files:**
-- Replace: `lingxi-core/platforms/posix/src/swarm/inprocess.rs`
-- Modify: `lingxi-core/platforms/posix/src/swarm/mod.rs` — uncomment `pub use inprocess::InProcessSwarmBackend;`
+- Replace: `lingxi-code/platforms/posix/src/swarm/inprocess.rs`
+- Modify: `lingxi-code/platforms/posix/src/swarm/mod.rs` — uncomment `pub use inprocess::InProcessSwarmBackend;`
 
 The InProcess backend is the always-available fallback. Every operation succeeds with a synthetic `PaneId` and logs a debug line — there is no actual pane.
 
 - [ ] **Step 1: Implement `inprocess.rs`**
 
-Replace `lingxi-core/platforms/posix/src/swarm/inprocess.rs`:
+Replace `lingxi-code/platforms/posix/src/swarm/inprocess.rs`:
 
 ```rust
 //! No-pane `SwarmBackend` fallback.
@@ -1947,14 +1947,14 @@ Expected: clean.
 ### Task 15: Implement `registry.rs` (auto-detect constructor)
 
 **Files:**
-- Replace: `lingxi-core/platforms/posix/src/swarm/registry.rs`
-- Modify: `lingxi-core/platforms/posix/src/swarm/mod.rs` — uncomment `pub use registry::SwarmRegistry;`
+- Replace: `lingxi-code/platforms/posix/src/swarm/registry.rs`
+- Modify: `lingxi-code/platforms/posix/src/swarm/mod.rs` — uncomment `pub use registry::SwarmRegistry;`
 
 `registry.rs` exposes the single entry point that the engine calls: `SwarmRegistry::detect_and_construct() -> Box<dyn SwarmBackend>`. It runs `detection::detect_terminal_env()` + `detection::pick_backend()` and instantiates the matching concrete type.
 
 - [ ] **Step 1: Implement `registry.rs`**
 
-Replace `lingxi-core/platforms/posix/src/swarm/registry.rs`:
+Replace `lingxi-code/platforms/posix/src/swarm/registry.rs`:
 
 ```rust
 //! Single source of truth for which `SwarmBackend` the POSIX platform uses.
@@ -2059,7 +2059,7 @@ Expected: clean build; unit test passes.
 ### Task 16: Cross-reference doc for `platforms/windows/src/swarm.rs`
 
 **Files:**
-- Modify: `lingxi-core/platforms/windows/src/swarm.rs` (doc cross-ref only — no code change)
+- Modify: `lingxi-code/platforms/windows/src/swarm.rs` (doc cross-ref only — no code change)
 
 M2-01 already locked the windows swarm impl to `SwarmError::Unsupported`. M2-05 only adds a doc comment pointing at the POSIX trifecta for code archeology purposes.
 
@@ -2068,7 +2068,7 @@ M2-01 already locked the windows swarm impl to `SwarmError::Unsupported`. M2-05 
 
 - [ ] **Step 1: Edit the module doc comment**
 
-Edit `lingxi-core/platforms/windows/src/swarm.rs` — update the top doc block:
+Edit `lingxi-code/platforms/windows/src/swarm.rs` — update the top doc block:
 
 ```rust
 //! Swarm backend — Windows (no tmux).
@@ -2116,15 +2116,15 @@ Expected: everything clean. New tests added in this phase:
 - [ ] **Step 2: Two commits — POSIX trifecta + Windows doc**
 
 ```bash
-git add lingxi-core/platforms/posix/src/swarm/ \
-        lingxi-core/platforms/posix/tests/swarm_detection_test.rs \
-        lingxi-core/platforms/posix/tests/swarm_tmux_argv_test.rs \
-        lingxi-core/platforms/posix/tests/swarm_tmux_integration_test.rs \
-        lingxi-core/platforms/posix/src/lib.rs
+git add lingxi-code/platforms/posix/src/swarm/ \
+        lingxi-code/platforms/posix/tests/swarm_detection_test.rs \
+        lingxi-code/platforms/posix/tests/swarm_tmux_argv_test.rs \
+        lingxi-code/platforms/posix/tests/swarm_tmux_integration_test.rs \
+        lingxi-code/platforms/posix/src/lib.rs
 # (also captures the removal of the old single-file swarm.rs via git rename detection)
 git commit -m "feat(platforms/posix): tmux + iTerm + InProcess swarm backends"
 
-git add lingxi-core/platforms/windows/src/swarm.rs
+git add lingxi-code/platforms/windows/src/swarm.rs
 git commit -m "refactor(platforms/windows): swarm explicitly Unsupported"
 ```
 

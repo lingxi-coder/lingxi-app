@@ -251,12 +251,12 @@ git commit -m "plan(M5-11 T0): reverse-engineer 12 batch-2 command bodies + 13 u
 ## Task 1: Extend `tengu::command` from 18 → 54 entries
 
 **Files:**
-- Modify: `lingxi-core/crates/telemetry/src/tengu/command.rs` (append 36 const + extend NAMES)
-- Modify: `lingxi-core/crates/telemetry/src/tengu/mod.rs` (bump TOTAL formula 276 → 312)
+- Modify: `lingxi-code/crates/telemetry/src/tengu/command.rs` (append 36 const + extend NAMES)
+- Modify: `lingxi-code/crates/telemetry/src/tengu/mod.rs` (bump TOTAL formula 276 → 312)
 
 - [ ] **Step 1: Write the failing test.**
 
-  Append to `lingxi-core/crates/telemetry/src/tengu/command.rs::tests`:
+  Append to `lingxi-code/crates/telemetry/src/tengu/command.rs::tests`:
 
 ```rust
     #[test]
@@ -399,8 +399,8 @@ cargo test -p lingxi-telemetry --lib tengu::tests 2>&1 | tail -5   # ALL_EVENT_N
 ```bash
 cargo fmt -p lingxi-telemetry
 cargo clippy -p lingxi-telemetry --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/telemetry/src/tengu/command.rs \
-        lingxi-core/crates/telemetry/src/tengu/mod.rs
+git add lingxi-code/crates/telemetry/src/tengu/command.rs \
+        lingxi-code/crates/telemetry/src/tengu/mod.rs
 git commit -m "feat(M5-11 task 1): tengu::command 18→54 (+36 events) + ALL_EVENT_NAMES 276→312 (2 new invariant tests)"
 ```
 
@@ -409,13 +409,13 @@ git commit -m "feat(M5-11 task 1): tengu::command 18→54 (+36 events) + ALL_EVE
 ## Task 2: Extend `OrchestratorHandle` with 8 new methods + 5 info structs
 
 **Files:**
-- Modify: `lingxi-core/crates/traits/src/orchestrator.rs`
-- Modify: `lingxi-core/crates/orchestrator/src/handle_impl.rs`
-- Modify: `lingxi-core/crates/orchestrator/src/test_support.rs` (mock methods)
+- Modify: `lingxi-code/crates/traits/src/orchestrator.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/handle_impl.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/test_support.rs` (mock methods)
 
 - [ ] **Step 1: Write the failing test (object safety + struct field invariants).**
 
-  Append to `lingxi-core/crates/traits/src/orchestrator.rs::m5_10_extension_tests` (rename to `m5_extension_tests`):
+  Append to `lingxi-code/crates/traits/src/orchestrator.rs::m5_10_extension_tests` (rename to `m5_extension_tests`):
 
 ```rust
     // Compile-time assertion that the trait remains object-safe after M5-11.
@@ -480,7 +480,7 @@ cargo test -p lingxi-traits --lib m5_extension_tests 2>&1 | head -15
 
 - [ ] **Step 3: Add the 5 info structs + 8 trait methods.**
 
-  Open `lingxi-core/crates/traits/src/orchestrator.rs` and append:
+  Open `lingxi-code/crates/traits/src/orchestrator.rs` and append:
 
 ```rust
 // ────────────────────────────────────────────────────────────────────────────
@@ -564,7 +564,7 @@ pub struct StatusSnapshot {
 }
 ```
 
-  Add re-exports to `lingxi-core/crates/traits/src/lib.rs`:
+  Add re-exports to `lingxi-code/crates/traits/src/lib.rs`:
 
 ```rust
 pub use orchestrator::{
@@ -605,7 +605,7 @@ pub use orchestrator::{
 
 - [ ] **Step 4: Update `MockOrchestratorHandle` to implement the 8 new methods.**
 
-  Open `lingxi-core/crates/orchestrator/src/test_support.rs`. Add 8 setters + 8 fields + 8 mock impls:
+  Open `lingxi-code/crates/orchestrator/src/test_support.rs`. Add 8 setters + 8 fields + 8 mock impls:
 
 ```rust
 pub struct MockOrchestratorHandle {
@@ -669,7 +669,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
 - [ ] **Step 5: Implement 8 methods on `ConversationOrchestrator` (production).**
 
-  Open `lingxi-core/crates/orchestrator/src/handle_impl.rs` and add:
+  Open `lingxi-code/crates/orchestrator/src/handle_impl.rs` and add:
 
 ```rust
 async fn list_mcp_servers(&self) -> Vec<McpServerInfo> {
@@ -789,7 +789,7 @@ async fn spawn_editor_on(&self, target: PathBuf) -> Result<MemoryEditorOutcome, 
 
 - [ ] **Step 6: Add the `diagnostics` module skeleton.**
 
-  Create `lingxi-core/crates/orchestrator/src/diagnostics.rs`:
+  Create `lingxi-code/crates/orchestrator/src/diagnostics.rs`:
 
 ```rust
 //! `/doctor` check runners. M5-11 ships 6 checks.
@@ -923,8 +923,8 @@ cargo test -p lingxi-traits --lib m5_extension_tests 2>&1 | tail -10
 cargo test -p lingxi-orchestrator --lib 2>&1 | tail -15
 cargo fmt -p lingxi-traits -p lingxi-orchestrator
 cargo clippy -p lingxi-traits -p lingxi-orchestrator --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/traits/ \
-        lingxi-core/crates/orchestrator/
+git add lingxi-code/crates/traits/ \
+        lingxi-code/crates/orchestrator/
 git commit -m "feat(M5-11 task 2): OrchestratorHandle +8 methods (list_mcp/hooks/agents, doctor, status, edit_config/permissions, list_models) + 5 info structs + diagnostics module (6 trait tests)"
 ```
 
@@ -933,14 +933,14 @@ git commit -m "feat(M5-11 task 2): OrchestratorHandle +8 methods (list_mcp/hooks
 ## Task 3: `AuthHandle` trait + `OAuthHandle` impl
 
 **Files:**
-- Create: `lingxi-core/crates/traits/src/auth.rs`
-- Modify: `lingxi-core/crates/traits/src/lib.rs`
-- Create: `lingxi-core/crates/anthropic-oauth/src/handle.rs`
-- Modify: `lingxi-core/crates/anthropic-oauth/src/lib.rs`
+- Create: `lingxi-code/crates/traits/src/auth.rs`
+- Modify: `lingxi-code/crates/traits/src/lib.rs`
+- Create: `lingxi-code/crates/anthropic-oauth/src/handle.rs`
+- Modify: `lingxi-code/crates/anthropic-oauth/src/lib.rs`
 
 - [ ] **Step 1: Write the failing test.**
 
-  Create `lingxi-core/crates/traits/src/auth.rs`:
+  Create `lingxi-code/crates/traits/src/auth.rs`:
 
 ```rust
 //! Auth surface used by `/login` and `/logout` slash commands.
@@ -1002,7 +1002,7 @@ mod tests {
 }
 ```
 
-  Add to `lingxi-core/crates/traits/src/lib.rs`: `pub mod auth;` + `pub use auth::{AuthError, AuthHandle, LoginInfo};`.
+  Add to `lingxi-code/crates/traits/src/lib.rs`: `pub mod auth;` + `pub use auth::{AuthError, AuthHandle, LoginInfo};`.
 
 - [ ] **Step 2: Run + pass.**
 
@@ -1014,7 +1014,7 @@ cargo test -p lingxi-traits --lib auth::tests 2>&1 | tail -5
 
 - [ ] **Step 3: Implement `OAuthHandle` in `lingxi-anthropic-oauth`.**
 
-  Create `lingxi-core/crates/anthropic-oauth/src/handle.rs`:
+  Create `lingxi-code/crates/anthropic-oauth/src/handle.rs`:
 
 ```rust
 //! `AuthHandle` implementation backed by the `AnthropicOAuthClient`.
@@ -1142,9 +1142,9 @@ pub enum LoginError {
 cargo test -p lingxi-traits -p lingxi-anthropic-oauth 2>&1 | tail -15
 cargo fmt -p lingxi-traits -p lingxi-anthropic-oauth
 cargo clippy -p lingxi-traits -p lingxi-anthropic-oauth --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/traits/src/auth.rs \
-        lingxi-core/crates/traits/src/lib.rs \
-        lingxi-core/crates/anthropic-oauth/
+git add lingxi-code/crates/traits/src/auth.rs \
+        lingxi-code/crates/traits/src/lib.rs \
+        lingxi-code/crates/anthropic-oauth/
 git commit -m "feat(M5-11 task 3): AuthHandle trait + OAuthHandle impl + run_interactive_login/clear_credentials"
 ```
 
@@ -1153,15 +1153,15 @@ git commit -m "feat(M5-11 task 3): AuthHandle trait + OAuthHandle impl + run_int
 ## Task 4: `/cost` + `/model` + `/version` handlers (trivial trio)
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/cost.rs`
-- Create: `lingxi-core/crates/commands/src/builtin/model.rs`
-- Create: `lingxi-core/crates/commands/src/builtin/version.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/mod.rs` (re-export)
-- Modify: `lingxi-core/crates/commands/src/builtin/core_placeholders.rs` (delete 3 macro lines)
+- Create: `lingxi-code/crates/commands/src/builtin/cost.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/model.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/version.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/mod.rs` (re-export)
+- Modify: `lingxi-code/crates/commands/src/builtin/core_placeholders.rs` (delete 3 macro lines)
 
 - [ ] **Step 1: Write the failing tests for all three.**
 
-  Create `lingxi-core/crates/commands/src/builtin/cost.rs`:
+  Create `lingxi-code/crates/commands/src/builtin/cost.rs`:
 
 ```rust
 //! `/cost` — snapshot the orchestrator's cost via `OrchestratorHandle::snapshot_cost`.
@@ -1291,7 +1291,7 @@ mod tests {
 }
 ```
 
-  Create `lingxi-core/crates/commands/src/builtin/model.rs`:
+  Create `lingxi-code/crates/commands/src/builtin/model.rs`:
 
 ```rust
 //! `/model` — list / switch active model.
@@ -1429,7 +1429,7 @@ mod tests {
 }
 ```
 
-  Create `lingxi-core/crates/commands/src/builtin/version.rs`:
+  Create `lingxi-code/crates/commands/src/builtin/version.rs`:
 
 ```rust
 //! `/version` — print build info.
@@ -1523,7 +1523,7 @@ cargo test -p lingxi-commands --lib builtin::cost::tests builtin::model::tests b
 ```bash
 cargo fmt -p lingxi-commands
 cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/src/builtin/{cost,model,version,mod,core_placeholders}.rs
+git add lingxi-code/crates/commands/src/builtin/{cost,model,version,mod,core_placeholders}.rs
 git commit -m "feat(M5-11 task 4): /cost + /model + /version real impls + 9 telemetry events (10 unit tests)"
 ```
 
@@ -1532,9 +1532,9 @@ git commit -m "feat(M5-11 task 4): /cost + /model + /version real impls + 9 tele
 ## Task 5: `/config` + `/permissions` handlers (file-editor pair)
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/config.rs`
-- Create: `lingxi-core/crates/commands/src/builtin/permissions.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/{mod,core_placeholders}.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/config.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/permissions.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/{mod,core_placeholders}.rs`
 
 - [ ] **Step 1: Implement (same shape as M5-10 `/memory`).**
 
@@ -1630,7 +1630,7 @@ mod tests {
 ```bash
 cargo test -p lingxi-commands --lib builtin::config::tests builtin::permissions::tests 2>&1 | tail -10
 cargo fmt -p lingxi-commands && cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/src/builtin/{config,permissions,mod,core_placeholders}.rs
+git add lingxi-code/crates/commands/src/builtin/{config,permissions,mod,core_placeholders}.rs
 git commit -m "feat(M5-11 task 5): /config + /permissions real impls + 6 telemetry events (6 unit tests)"
 ```
 
@@ -1639,13 +1639,13 @@ git commit -m "feat(M5-11 task 5): /config + /permissions real impls + 6 telemet
 ## Task 6: `/mcp` handler (list-only mode)
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/mcp.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/list_render.rs` (shared helper — created in this task)
-- Modify: `lingxi-core/crates/commands/src/builtin/{mod,core_placeholders}.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/mcp.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/list_render.rs` (shared helper — created in this task)
+- Modify: `lingxi-code/crates/commands/src/builtin/{mod,core_placeholders}.rs`
 
 - [ ] **Step 1: Create the shared list-render helper.**
 
-  Create `lingxi-core/crates/commands/src/builtin/list_render.rs`:
+  Create `lingxi-code/crates/commands/src/builtin/list_render.rs`:
 
 ```rust
 //! Shared text formatter used by `/mcp`, `/hooks`, and `/agents`.
@@ -1687,7 +1687,7 @@ mod tests {
 
 - [ ] **Step 2: Implement `McpHandler`.**
 
-  Create `lingxi-core/crates/commands/src/builtin/mcp.rs`:
+  Create `lingxi-code/crates/commands/src/builtin/mcp.rs`:
 
 ```rust
 //! `/mcp` — list registered MCP servers + their status.
@@ -1786,7 +1786,7 @@ mod tests {
 ```bash
 cargo test -p lingxi-commands --lib builtin::mcp::tests builtin::list_render::tests 2>&1 | tail -10
 cargo fmt -p lingxi-commands && cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/src/builtin/{mcp,list_render,mod,core_placeholders}.rs
+git add lingxi-code/crates/commands/src/builtin/{mcp,list_render,mod,core_placeholders}.rs
 git commit -m "feat(M5-11 task 6): /mcp real impl + list_render helper + 3 telemetry events (5 unit tests)"
 ```
 
@@ -1795,8 +1795,8 @@ git commit -m "feat(M5-11 task 6): /mcp real impl + list_render helper + 3 telem
 ## Task 7: `/hooks` handler
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/hooks.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/{mod,core_placeholders}.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/hooks.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/{mod,core_placeholders}.rs`
 
 - [ ] **Step 1: Implement.**
 
@@ -1884,7 +1884,7 @@ mod tests {
 ```bash
 cargo test -p lingxi-commands --lib builtin::hooks::tests 2>&1 | tail -10
 cargo fmt -p lingxi-commands && cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/src/builtin/{hooks,mod,core_placeholders}.rs
+git add lingxi-code/crates/commands/src/builtin/{hooks,mod,core_placeholders}.rs
 git commit -m "feat(M5-11 task 7): /hooks real impl + 3 telemetry events (3 unit tests)"
 ```
 
@@ -1893,8 +1893,8 @@ git commit -m "feat(M5-11 task 7): /hooks real impl + 3 telemetry events (3 unit
 ## Task 8: `/agents` handler
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/agents.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/{mod,core_placeholders}.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/agents.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/{mod,core_placeholders}.rs`
 
 - [ ] **Step 1: Implement.**
 
@@ -2021,7 +2021,7 @@ mod tests {
 ```bash
 cargo test -p lingxi-commands --lib builtin::agents::tests 2>&1 | tail -10
 cargo fmt -p lingxi-commands && cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/src/builtin/{agents,mod,core_placeholders}.rs
+git add lingxi-code/crates/commands/src/builtin/{agents,mod,core_placeholders}.rs
 git commit -m "feat(M5-11 task 8): /agents real impl + 3 telemetry events + truncate_with_ellipsis (5 unit tests)"
 ```
 
@@ -2030,8 +2030,8 @@ git commit -m "feat(M5-11 task 8): /agents real impl + 3 telemetry events + trun
 ## Task 9: `/login` handler
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/login.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/{mod,core_placeholders}.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/login.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/{mod,core_placeholders}.rs`
 
 - [ ] **Step 1: Implement.**
 
@@ -2140,7 +2140,7 @@ mod tests {
 ```bash
 cargo test -p lingxi-commands --lib builtin::login::tests 2>&1 | tail -10
 cargo fmt -p lingxi-commands && cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/src/builtin/{login,mod,core_placeholders}.rs
+git add lingxi-code/crates/commands/src/builtin/{login,mod,core_placeholders}.rs
 git commit -m "feat(M5-11 task 9): /login real impl + 3 telemetry events (3 unit tests)"
 ```
 
@@ -2149,8 +2149,8 @@ git commit -m "feat(M5-11 task 9): /login real impl + 3 telemetry events (3 unit
 ## Task 10: `/logout` handler
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/logout.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/{mod,core_placeholders}.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/logout.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/{mod,core_placeholders}.rs`
 
 - [ ] **Step 1: Implement.**
 
@@ -2202,7 +2202,7 @@ mod tests {
 
 ```bash
 cargo test -p lingxi-commands --lib builtin::logout::tests 2>&1 | tail -10
-git add lingxi-core/crates/commands/src/builtin/{logout,mod,core_placeholders}.rs
+git add lingxi-code/crates/commands/src/builtin/{logout,mod,core_placeholders}.rs
 git commit -m "feat(M5-11 task 10): /logout real impl + 3 telemetry events (3 unit tests)"
 ```
 
@@ -2211,8 +2211,8 @@ git commit -m "feat(M5-11 task 10): /logout real impl + 3 telemetry events (3 un
 ## Task 11: `/status` handler + locked panel format
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/status.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/{mod,core_placeholders}.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/status.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/{mod,core_placeholders}.rs`
 
 - [ ] **Step 1: Implement.**
 
@@ -2337,7 +2337,7 @@ Status:
 
 ```bash
 cargo test -p lingxi-commands --lib builtin::status::tests 2>&1 | tail -10
-git add lingxi-core/crates/commands/src/builtin/{status,mod,core_placeholders}.rs
+git add lingxi-code/crates/commands/src/builtin/{status,mod,core_placeholders}.rs
 git commit -m "feat(M5-11 task 11): /status panel + locked 11-line layout + 3 telemetry events (2 unit tests)"
 ```
 
@@ -2346,8 +2346,8 @@ git commit -m "feat(M5-11 task 11): /status panel + locked 11-line layout + 3 te
 ## Task 12: `/doctor` handler + locked report format
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/doctor.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/{mod,core_placeholders}.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/doctor.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/{mod,core_placeholders}.rs`
 
 - [ ] **Step 1: Implement.**
 
@@ -2478,7 +2478,7 @@ Doctor:
 
 ```bash
 cargo test -p lingxi-commands --lib builtin::doctor::tests 2>&1 | tail -10
-git add lingxi-core/crates/commands/src/builtin/{doctor,mod,core_placeholders}.rs
+git add lingxi-code/crates/commands/src/builtin/{doctor,mod,core_placeholders}.rs
 git commit -m "feat(M5-11 task 12): /doctor 6-check report + locked render + 3 telemetry events (3 unit tests)"
 ```
 
@@ -2487,8 +2487,8 @@ git commit -m "feat(M5-11 task 12): /doctor 6-check report + locked render + 3 t
 ## Task 13: `register_core_batch_2(reg, handle, auth)` helper
 
 **Files:**
-- Modify: `lingxi-core/crates/commands/src/registry.rs`
-- Modify: `lingxi-core/crates/commands/src/lib.rs`
+- Modify: `lingxi-code/crates/commands/src/registry.rs`
+- Modify: `lingxi-code/crates/commands/src/lib.rs`
 
 - [ ] **Step 1: Implement.**
 
@@ -2573,7 +2573,7 @@ mod batch_2_tests {
 ```bash
 cargo test -p lingxi-commands --lib registry::batch_2_tests 2>&1 | tail -10
 cargo fmt -p lingxi-commands && cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/src/registry.rs lingxi-core/crates/commands/src/lib.rs
+git add lingxi-code/crates/commands/src/registry.rs lingxi-code/crates/commands/src/lib.rs
 git commit -m "feat(M5-11 task 13): register_core_batch_2(reg, handle, auth) — 12 handle-bound overwrites"
 ```
 
@@ -2582,12 +2582,12 @@ git commit -m "feat(M5-11 task 13): register_core_batch_2(reg, handle, auth) —
 ## Task 14: Parity fixtures + telemetry coverage bump
 
 **Files:**
-- Modify: `lingxi-core/crates/test-harness/src/parity/fixtures/parity_tengu_events.json` (append 36 rows)
-- Create: `lingxi-core/crates/test-harness/src/parity/fixtures/parity_status_panel.txt` (golden /status output)
-- Create: `lingxi-core/crates/test-harness/src/parity/fixtures/parity_doctor_report.txt` (golden /doctor output)
-- Modify: `lingxi-core/crates/test-harness/tests/parity_telemetry_coverage.rs` (276 → 312)
-- Create: `lingxi-core/crates/test-harness/tests/parity_status_panel.rs`
-- Create: `lingxi-core/crates/test-harness/tests/parity_doctor_report.rs`
+- Modify: `lingxi-code/crates/test-harness/src/parity/fixtures/parity_tengu_events.json` (append 36 rows)
+- Create: `lingxi-code/crates/test-harness/src/parity/fixtures/parity_status_panel.txt` (golden /status output)
+- Create: `lingxi-code/crates/test-harness/src/parity/fixtures/parity_doctor_report.txt` (golden /doctor output)
+- Modify: `lingxi-code/crates/test-harness/tests/parity_telemetry_coverage.rs` (276 → 312)
+- Create: `lingxi-code/crates/test-harness/tests/parity_status_panel.rs`
+- Create: `lingxi-code/crates/test-harness/tests/parity_doctor_report.rs`
 
 - [ ] **Step 1: Append 36 events to `parity_tengu_events.json`.**
 
@@ -2679,15 +2679,15 @@ fn doctor_layout_matches_golden() {
 
 - [ ] **Step 4: Bump telemetry coverage driver.**
 
-  In `lingxi-core/crates/test-harness/tests/parity_telemetry_coverage.rs`, find the count assertion (`assert_eq!(ALL_EVENT_NAMES.len(), 276)` or similar) and change to `312`.
+  In `lingxi-code/crates/test-harness/tests/parity_telemetry_coverage.rs`, find the count assertion (`assert_eq!(ALL_EVENT_NAMES.len(), 276)` or similar) and change to `312`.
 
 - [ ] **Step 5: Run + commit.**
 
 ```bash
 cargo test -p lingxi-test-harness 2>&1 | tail -15
 cargo fmt -p lingxi-test-harness && cargo clippy -p lingxi-test-harness --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/test-harness/src/parity/fixtures/ \
-        lingxi-core/crates/test-harness/tests/
+git add lingxi-code/crates/test-harness/src/parity/fixtures/ \
+        lingxi-code/crates/test-harness/tests/
 git commit -m "test(M5-11 task 14): parity fixtures — tengu 276→312, /status + /doctor goldens"
 ```
 
@@ -2696,7 +2696,7 @@ git commit -m "test(M5-11 task 14): parity fixtures — tengu 276→312, /status
 ## Task 15: Integration e2e tests (12 dispatch cases)
 
 **Files:**
-- Create: `lingxi-core/crates/commands/tests/batch_2_e2e.rs`
+- Create: `lingxi-code/crates/commands/tests/batch_2_e2e.rs`
 
 - [ ] **Step 1: Write 12 cases.**
 
@@ -2884,7 +2884,7 @@ async fn doctor_dispatch() {
 ```bash
 cargo test -p lingxi-commands --test batch_2_e2e 2>&1 | tail -20
 cargo fmt -p lingxi-commands && cargo clippy -p lingxi-commands --tests -- -D warnings 2>&1 | tail -5
-git add lingxi-core/crates/commands/tests/batch_2_e2e.rs
+git add lingxi-code/crates/commands/tests/batch_2_e2e.rs
 git commit -m "test(M5-11 task 15): batch_2_e2e — 13 dispatcher cases"
 ```
 
@@ -2893,7 +2893,7 @@ git commit -m "test(M5-11 task 15): batch_2_e2e — 13 dispatcher cases"
 ## Task 16: Docs + verification gate + tag `m5.11`
 
 **Files:**
-- Modify: `lingxi-core/crates/commands/src/lib.rs` (docs append)
+- Modify: `lingxi-code/crates/commands/src/lib.rs` (docs append)
 - Modify: this plan file (status header)
 
 - [ ] **Step 1: Append batch-2 docs.**
@@ -2946,7 +2946,7 @@ cargo test -p lingxi-test-harness --test parity_registry 2>&1 | tail -5   # M4-0
 # Edit this file's status header (similar to M5-09 Task 10 step 1).
 cd /Users/luolingfeng/Projects/LingXi-Next
 git add docs/superpowers/plans/2026-05-25-m5-11-commands-batch-2.md \
-        lingxi-core/crates/commands/src/lib.rs
+        lingxi-code/crates/commands/src/lib.rs
 git commit -m "release(M5-11 task 16): mark batch-2 plan complete + docs"
 git tag -a m5.11 -m "M5-11: 12 batch-2 core commands real impls + 36 telemetry events + 18 core commands all live"
 git tag -n 1 | grep "^m5\." | sort | tail

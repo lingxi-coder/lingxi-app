@@ -13,7 +13,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Zero-OS-deps check
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           cargo check -p lingxi-protocol --no-default-features
           cargo check -p lingxi-core --no-default-features
@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.82.0
       - name: cargo test
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: cargo test --workspace --all-features
 
   lint:
@@ -36,10 +36,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: cargo fmt
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: cargo fmt --all -- --check
       - name: cargo clippy
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   cross-compile-desktop:
@@ -59,7 +59,7 @@ jobs:
       - name: Install cross
         run: cargo install cross --locked
       - name: Cross-compile core crates
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           cross check --target ${{ matrix.target }} -p lingxi-protocol
           cross check --target ${{ matrix.target }} -p lingxi-core
@@ -83,7 +83,7 @@ jobs:
       - name: Install cross
         run: cargo install cross --locked
       - name: Cross-compile core crates (informational)
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           cross check --target ${{ matrix.target }} -p lingxi-protocol
           cross check --target ${{ matrix.target }} -p lingxi-core
@@ -102,7 +102,7 @@ jobs:
       - name: Install musl-tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: cargo check (musl)
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           # Per spec line 608: musl is a check-only gate (NOT build/test) —
           # confirms the engine type-checks against musl, no runtime needed.
@@ -126,16 +126,16 @@ jobs:
       - name: Install cargo-vet
         run: cargo install cargo-vet --locked --version '^0.10'
       - name: cargo deny check
-        working-directory: lingxi-core
-        # Uses lingxi-core/deny.toml (or workspace root deny.toml) for
+        working-directory: lingxi-code
+        # Uses lingxi-code/deny.toml (or workspace root deny.toml) for
         # license/banned-deps/advisory policies. If deny.toml is absent,
         # cargo-deny falls back to defaults (still a useful gate).
         run: cargo deny check
       - name: cargo audit
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: cargo audit --deny warnings
       - name: cargo vet
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         # vet requires supply-chain/ directory with audits. If absent,
         # `cargo vet check --locked` prints a setup hint without failing
         # (the directory lives outside this plan's scope; M4 deliverable).
@@ -152,7 +152,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.82.0
       - name: cargo test parity_* drivers
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           # The 'parity_*' glob picks up every test driver matching the
           # convention. As of v0.4.0:

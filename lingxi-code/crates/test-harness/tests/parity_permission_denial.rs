@@ -1,6 +1,6 @@
 //! M4-09 parity driver — permission-gate coverage.
 //!
-//! Every builtin tool file under `lingxi-core/crates/tools/src/builtin/`
+//! Every builtin tool file under `lingxi-code/crates/tools/src/builtin/`
 //! must declare a `PermissionResult` (Allow / Deny / Ask) in its
 //! `permission_required` body, OR explicitly opt out via a
 //! `// no-permission: <reason>` comment for tools that have no permission
@@ -95,7 +95,7 @@ fn every_tool_file_declares_a_permission_result() {
 #[test]
 fn permission_result_enum_variants_locked() {
     // Lock the 3-variant enum surface byte-for-byte against
-    // `lingxi-core/crates/permission/src/result.rs`.
+    // `lingxi-code/crates/permission/src/result.rs`.
     let result_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()

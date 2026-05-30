@@ -20,7 +20,7 @@
 - Read: `claude-code/src/commands/` directory listing (88 subdirs + ~15 top-level `.ts`/`.tsx` files)
 - Read: `claude-code/src/commands/registry.ts` (or wherever the runtime command registry is assembled — find via grep)
 - Read: `claude-code/src/commands/createMovedToPluginCommand.ts` (helper that emits "moved to plugin" stub commands; these still count toward the runtime registry)
-- Read: existing `lingxi-core/crates/commands/src/builtin/{help,cost,memory,compact,resume}.rs` for the 5 already-stubbed handlers — those names are part of the 18 core list and must NOT collide
+- Read: existing `lingxi-code/crates/commands/src/builtin/{help,cost,memory,compact,resume}.rs` for the 5 already-stubbed handlers — those names are part of the 18 core list and must NOT collide
 
 - [ ] **Step 1: Grep claude-code for the runtime command list assembly.**
 
@@ -150,7 +150,7 @@ status      version
 
 - [ ] **Step 6: Confirm the registry's idempotency contract.**
 
-  Read `lingxi-core/crates/commands/src/registry.rs::CommandRegistry::register_command` (already exists from M1.15). Confirm that calling `register_command` twice with the same name **overwrites** the previous entry (the underlying `HashMap::insert` returns the old value but discards it). This is important because Task 4 registers the 18 core placeholders **after** Task 3 registers all 102 as unimplemented — the second pass overwrites those 18 entries with their per-name structs, leaving 84 entries pointing at the shared `UnimplementedCommandHandler` and 18 pointing at their named placeholders. Lock this two-pass design now so Task 3 and Task 4 don't conflict.
+  Read `lingxi-code/crates/commands/src/registry.rs::CommandRegistry::register_command` (already exists from M1.15). Confirm that calling `register_command` twice with the same name **overwrites** the previous entry (the underlying `HashMap::insert` returns the old value but discards it). This is important because Task 4 registers the 18 core placeholders **after** Task 3 registers all 102 as unimplemented — the second pass overwrites those 18 entries with their per-name structs, leaving 84 entries pointing at the shared `UnimplementedCommandHandler` and 18 pointing at their named placeholders. Lock this two-pass design now so Task 3 and Task 4 don't conflict.
 
   **If `register_command` is not idempotent** (rare — e.g., if it panics on duplicate), Task 1 step 2 below adds a guard that drains the previous entry first. Verify by reading `registry.rs` line-by-line. (The version checked in this plan author's working copy uses `HashMap::insert`, so idempotent.)
 
@@ -184,12 +184,12 @@ git commit -m "plan(M5-09 T0): reverse-engineer 102 command list + lock 4 litera
 ## Task 1: Scaffold `builtin/unimplemented.rs` — the shared 84-handler stub
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/unimplemented.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/mod.rs`
+- Create: `lingxi-code/crates/commands/src/builtin/unimplemented.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/mod.rs`
 
 - [ ] **Step 1: Write the failing test.**
 
-  Create `lingxi-core/crates/commands/src/builtin/unimplemented.rs` with **only** the test module:
+  Create `lingxi-code/crates/commands/src/builtin/unimplemented.rs` with **only** the test module:
 
 ```rust
 //! Shared stub handler used for every slash command that lingxi-core has not
@@ -380,7 +380,7 @@ mod tests {
 
 - [ ] **Step 4: Add the submodule to `builtin/mod.rs`.**
 
-  Open `lingxi-core/crates/commands/src/builtin/mod.rs`. The current content lists 5 submodules (`compact, cost, help, memory, resume`). Append:
+  Open `lingxi-code/crates/commands/src/builtin/mod.rs`. The current content lists 5 submodules (`compact, cost, help, memory, resume`). Append:
 
 ```rust
 //! Built-in slash-command handlers.
@@ -426,8 +426,8 @@ cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -20
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-core/crates/commands/src/builtin/unimplemented.rs \
-        lingxi-core/crates/commands/src/builtin/mod.rs
+git add lingxi-code/crates/commands/src/builtin/unimplemented.rs \
+        lingxi-code/crates/commands/src/builtin/mod.rs
 git commit -m "feat(M5-09 task 1): UnimplementedCommandHandler + locked stub literal (3 unit tests)"
 ```
 
@@ -436,12 +436,12 @@ git commit -m "feat(M5-09 task 1): UnimplementedCommandHandler + locked stub lit
 ## Task 2: Lock the 102-name + 18-core constants
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/builtin/names.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/mod.rs` (add `pub mod names;`)
+- Create: `lingxi-code/crates/commands/src/builtin/names.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/mod.rs` (add `pub mod names;`)
 
 - [ ] **Step 1: Write the failing test.**
 
-  Create `lingxi-core/crates/commands/src/builtin/names.rs`:
+  Create `lingxi-code/crates/commands/src/builtin/names.rs`:
 
 ```rust
 //! Locked constant tables of the 102 builtin command names + the 18 core names.
@@ -762,8 +762,8 @@ cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -10
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-core/crates/commands/src/builtin/names.rs \
-        lingxi-core/crates/commands/src/builtin/mod.rs
+git add lingxi-code/crates/commands/src/builtin/names.rs \
+        lingxi-code/crates/commands/src/builtin/mod.rs
 git commit -m "feat(M5-09 task 2): BUILTIN_COMMAND_NAMES (102) + BUILTIN_CORE_NAMES (18) + core_description() (9 invariant tests)"
 ```
 
@@ -772,12 +772,12 @@ git commit -m "feat(M5-09 task 2): BUILTIN_COMMAND_NAMES (102) + BUILTIN_CORE_NA
 ## Task 3: `register_all_builtin_commands(reg)` helper — registers 84 unimplemented stubs
 
 **Files:**
-- Modify: `lingxi-core/crates/commands/src/registry.rs`
-- Modify: `lingxi-core/crates/commands/src/lib.rs` (re-export)
+- Modify: `lingxi-code/crates/commands/src/registry.rs`
+- Modify: `lingxi-code/crates/commands/src/lib.rs` (re-export)
 
 - [ ] **Step 1: Write the failing test in `registry.rs`.**
 
-  Append to `lingxi-core/crates/commands/src/registry.rs`:
+  Append to `lingxi-code/crates/commands/src/registry.rs`:
 
 ```rust
 #[cfg(test)]
@@ -856,7 +856,7 @@ cargo test -p lingxi-commands --lib registry::registry_tests 2>&1 | head -30
 
 - [ ] **Step 3: Implement the helper.**
 
-  Add to `lingxi-core/crates/commands/src/registry.rs` (after the existing `impl CommandRegistry` block):
+  Add to `lingxi-code/crates/commands/src/registry.rs` (after the existing `impl CommandRegistry` block):
 
 ```rust
 /// Register all 102 built-in slash commands into `reg`.
@@ -899,7 +899,7 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
 }
 ```
 
-  Re-export from `lib.rs`. Open `lingxi-core/crates/commands/src/lib.rs` and append to the `pub use` block:
+  Re-export from `lib.rs`. Open `lingxi-code/crates/commands/src/lib.rs` and append to the `pub use` block:
 
 ```rust
 pub use registry::{register_all_builtin_commands, CommandRegistry};
@@ -911,7 +911,7 @@ pub use registry::{register_all_builtin_commands, CommandRegistry};
 
   Until Task 4 implements the real per-name structs, we still need a function with the right signature so `register_all_builtin_commands` compiles. Create the file as a stub now; Task 4 will fill it out:
 
-  Create `lingxi-core/crates/commands/src/builtin/core_placeholders.rs`:
+  Create `lingxi-code/crates/commands/src/builtin/core_placeholders.rs`:
 
 ```rust
 //! Per-name placeholder handler structs for the 18 core commands.
@@ -958,9 +958,9 @@ cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -10
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-core/crates/commands/src/registry.rs \
-        lingxi-core/crates/commands/src/lib.rs \
-        lingxi-core/crates/commands/src/builtin/core_placeholders.rs
+git add lingxi-code/crates/commands/src/registry.rs \
+        lingxi-code/crates/commands/src/lib.rs \
+        lingxi-code/crates/commands/src/builtin/core_placeholders.rs
 git commit -m "feat(M5-09 task 3): register_all_builtin_commands() — 102 entries (4 registry tests)"
 ```
 
@@ -969,11 +969,11 @@ git commit -m "feat(M5-09 task 3): register_all_builtin_commands() — 102 entri
 ## Task 4: 18 per-name core placeholder structs in `core_placeholders.rs`
 
 **Files:**
-- Modify: `lingxi-core/crates/commands/src/builtin/core_placeholders.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/core_placeholders.rs`
 
 - [ ] **Step 1: Write the failing test.**
 
-  Append to `lingxi-core/crates/commands/src/builtin/core_placeholders.rs`:
+  Append to `lingxi-code/crates/commands/src/builtin/core_placeholders.rs`:
 
 ```rust
 #[cfg(test)]
@@ -1227,8 +1227,8 @@ pub fn register_core_placeholders(reg: &mut CommandRegistry) {
   Run a quick check first:
 
 ```bash
-rg -n "pub struct (Compact|Help|Cost|Memory|Resume)Handler" lingxi-core/crates/commands/src/builtin/
-rg -n "use crate::builtin::(compact|help|cost|memory|resume)::(Compact|Help|Cost|Memory|Resume)Handler" lingxi-core/
+rg -n "pub struct (Compact|Help|Cost|Memory|Resume)Handler" lingxi-code/crates/commands/src/builtin/
+rg -n "use crate::builtin::(compact|help|cost|memory|resume)::(Compact|Help|Cost|Memory|Resume)Handler" lingxi-code/
 ```
 
   Then rename. (If the M1.15 handlers are entirely empty stubs not used anywhere — likely — you may instead just **delete** their `pub use` and remove the orphaned files, then keep the macro-generated names. Decide based on the rg output.)
@@ -1270,9 +1270,9 @@ cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -10
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-core/crates/commands/src/builtin/core_placeholders.rs \
-        lingxi-core/crates/commands/src/builtin/mod.rs
-git add -u lingxi-core/crates/commands/src/builtin/  # picks up deletions
+git add lingxi-code/crates/commands/src/builtin/core_placeholders.rs \
+        lingxi-code/crates/commands/src/builtin/mod.rs
+git add -u lingxi-code/crates/commands/src/builtin/  # picks up deletions
 git commit -m "feat(M5-09 task 4): 18 per-name core placeholder structs (macro-generated) + delete M1.15 stub modules (5 placeholder tests)"
 ```
 
@@ -1281,20 +1281,20 @@ git commit -m "feat(M5-09 task 4): 18 per-name core placeholder structs (macro-g
 ## Task 5: `SlashCommandDispatcher` impl + locked unknown-command literal
 
 **Files:**
-- Create: `lingxi-core/crates/commands/src/dispatcher.rs`
-- Modify: `lingxi-core/crates/commands/src/lib.rs` (re-export)
-- Modify: `lingxi-core/crates/commands/Cargo.toml` (add `lingxi-traits` dep if not already)
+- Create: `lingxi-code/crates/commands/src/dispatcher.rs`
+- Modify: `lingxi-code/crates/commands/src/lib.rs` (re-export)
+- Modify: `lingxi-code/crates/commands/Cargo.toml` (add `lingxi-traits` dep if not already)
 
 - [ ] **Step 1: Confirm `OrchestratorHandle` trait location.**
 
 ```bash
-rg -n "pub trait OrchestratorHandle" lingxi-core/crates/traits/src/ 2>&1 | head -5
-rg -n "SlashCommandDispatcher" lingxi-core/crates/traits/src/ 2>&1 | head -5
+rg -n "pub trait OrchestratorHandle" lingxi-code/crates/traits/src/ 2>&1 | head -5
+rg -n "SlashCommandDispatcher" lingxi-code/crates/traits/src/ 2>&1 | head -5
 ```
 
-  Expected: `OrchestratorHandle` lives in `lingxi-core/crates/traits/src/orchestrator.rs` (from M5-02). `SlashCommandDispatcher` either also lives there (defined by M5-02) or it doesn't exist yet and this Task creates it. In either case, the **canonical home** for the trait is `lingxi-traits` so `lingxi-commands` doesn't take a dep on `lingxi-orchestrator`.
+  Expected: `OrchestratorHandle` lives in `lingxi-code/crates/traits/src/orchestrator.rs` (from M5-02). `SlashCommandDispatcher` either also lives there (defined by M5-02) or it doesn't exist yet and this Task creates it. In either case, the **canonical home** for the trait is `lingxi-traits` so `lingxi-commands` doesn't take a dep on `lingxi-orchestrator`.
 
-  - **If `SlashCommandDispatcher` does not exist in `lingxi-traits`**, add it there (in `lingxi-core/crates/traits/src/commands.rs`) before continuing this Task. The trait minimum:
+  - **If `SlashCommandDispatcher` does not exist in `lingxi-traits`**, add it there (in `lingxi-code/crates/traits/src/commands.rs`) before continuing this Task. The trait minimum:
 
 ```rust
 //! Slash-command dispatch surface — implemented by `lingxi-commands`,
@@ -1323,11 +1323,11 @@ pub enum SlashDispatchResult {
 }
 ```
 
-  Add `pub mod commands;` to `lingxi-core/crates/traits/src/lib.rs` and `pub use commands::{SlashCommandDispatcher, SlashDispatchResult};`. Bump `lingxi-traits` version if its `Cargo.toml` semver is strict; otherwise leave it.
+  Add `pub mod commands;` to `lingxi-code/crates/traits/src/lib.rs` and `pub use commands::{SlashCommandDispatcher, SlashDispatchResult};`. Bump `lingxi-traits` version if its `Cargo.toml` semver is strict; otherwise leave it.
 
 - [ ] **Step 2: Write the failing test.**
 
-  Create `lingxi-core/crates/commands/src/dispatcher.rs`:
+  Create `lingxi-code/crates/commands/src/dispatcher.rs`:
 
 ```rust
 //! Implementation of [`lingxi_traits::SlashCommandDispatcher`] that routes
@@ -1551,9 +1551,9 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
 }
 ```
 
-  **About `parse_slash_command`**: Confirm the function exists and its signature. Run `rg -n "pub fn parse_slash_command" lingxi-core/crates/commands/src/parser.rs`. The expected signature is `pub fn parse_slash_command(input: &str) -> Result<ParsedSlashCommand, ParseError>` per M1.15. If the existing function takes `&str` **including** the leading `/`, drop the `strip_prefix` in step 1 (and adjust the unknown-name extraction accordingly). The test cases above assume the parser receives the input **without** the leading `/`.
+  **About `parse_slash_command`**: Confirm the function exists and its signature. Run `rg -n "pub fn parse_slash_command" lingxi-code/crates/commands/src/parser.rs`. The expected signature is `pub fn parse_slash_command(input: &str) -> Result<ParsedSlashCommand, ParseError>` per M1.15. If the existing function takes `&str` **including** the leading `/`, drop the `strip_prefix` in step 1 (and adjust the unknown-name extraction accordingly). The test cases above assume the parser receives the input **without** the leading `/`.
 
-  Add `lingxi-traits` to `Cargo.toml` if not present. Open `lingxi-core/crates/commands/Cargo.toml`:
+  Add `lingxi-traits` to `Cargo.toml` if not present. Open `lingxi-code/crates/commands/Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -1613,10 +1613,10 @@ cargo clippy -p lingxi-commands --lib --tests -- -D warnings 2>&1 | tail -10
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-core/crates/commands/src/dispatcher.rs \
-        lingxi-core/crates/commands/src/lib.rs \
-        lingxi-core/crates/commands/Cargo.toml \
-        lingxi-core/crates/traits/src/    # picks up commands.rs + lib.rs change if added
+git add lingxi-code/crates/commands/src/dispatcher.rs \
+        lingxi-code/crates/commands/src/lib.rs \
+        lingxi-code/crates/commands/Cargo.toml \
+        lingxi-code/crates/traits/src/    # picks up commands.rs + lib.rs change if added
 git commit -m "feat(M5-09 task 5): RegistrySlashDispatcher + SlashCommandDispatcher trait + Unknown command literal lock (7 dispatcher tests)"
 ```
 
@@ -1625,12 +1625,12 @@ git commit -m "feat(M5-09 task 5): RegistrySlashDispatcher + SlashCommandDispatc
 ## Task 6: Parity fixture + driver — lock the 102 + 18 split
 
 **Files:**
-- Create: `lingxi-core/crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
-- Create: `lingxi-core/crates/test-harness/tests/parity_slash_commands.rs`
+- Create: `lingxi-code/crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
+- Create: `lingxi-code/crates/test-harness/tests/parity_slash_commands.rs`
 
 - [ ] **Step 1: Write the parity fixture.**
 
-  Create `lingxi-core/crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`. The file lists every name + its core/unimplemented classification + the expected stub literal:
+  Create `lingxi-code/crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`. The file lists every name + its core/unimplemented classification + the expected stub literal:
 
 ```json
 {
@@ -1752,7 +1752,7 @@ git commit -m "feat(M5-09 task 5): RegistrySlashDispatcher + SlashCommandDispatc
 
 - [ ] **Step 2: Write the parity driver.**
 
-  Create `lingxi-core/crates/test-harness/tests/parity_slash_commands.rs`:
+  Create `lingxi-code/crates/test-harness/tests/parity_slash_commands.rs`:
 
 ```rust
 //! Parity: lock the 102 builtin slash-command names + the 18-core split + the
@@ -1922,7 +1922,7 @@ async fn core_command_description_matches_fixture() {
 - [ ] **Step 3: Ensure `test-harness/Cargo.toml` has the deps.**
 
 ```bash
-cat lingxi-core/crates/test-harness/Cargo.toml | grep -E "lingxi-commands|lingxi-traits|serde_json"
+cat lingxi-code/crates/test-harness/Cargo.toml | grep -E "lingxi-commands|lingxi-traits|serde_json"
 ```
 
   Expected lines (add any missing under `[dependencies]` or `[dev-dependencies]`):
@@ -1957,9 +1957,9 @@ cargo clippy -p lingxi-test-harness --tests -- -D warnings 2>&1 | tail -10
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-core/crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json \
-        lingxi-core/crates/test-harness/tests/parity_slash_commands.rs \
-        lingxi-core/crates/test-harness/Cargo.toml
+git add lingxi-code/crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json \
+        lingxi-code/crates/test-harness/tests/parity_slash_commands.rs \
+        lingxi-code/crates/test-harness/Cargo.toml
 git commit -m "test(M5-09 task 6): parity fixture + 9 drivers — 102 names, 18 core, 84 unimplemented + stub/unknown templates locked"
 ```
 
@@ -1968,7 +1968,7 @@ git commit -m "test(M5-09 task 6): parity fixture + 9 drivers — 102 names, 18 
 ## Task 7: Integration test — dispatcher + registry end-to-end
 
 **Files:**
-- Create: `lingxi-core/crates/commands/tests/dispatch_e2e.rs`
+- Create: `lingxi-code/crates/commands/tests/dispatch_e2e.rs`
 
 - [ ] **Step 1: Write the integration test.**
 
@@ -2103,7 +2103,7 @@ cargo clippy -p lingxi-commands --tests -- -D warnings 2>&1 | tail -10
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-core/crates/commands/tests/dispatch_e2e.rs
+git add lingxi-code/crates/commands/tests/dispatch_e2e.rs
 git commit -m "test(M5-09 task 7): dispatch_e2e integration tests — 7 end-to-end cases"
 ```
 
@@ -2112,12 +2112,12 @@ git commit -m "test(M5-09 task 7): dispatch_e2e integration tests — 7 end-to-e
 ## Task 8: Doc + README updates
 
 **Files:**
-- Modify: `lingxi-core/crates/commands/src/lib.rs` (module-level docs)
-- Modify: `lingxi-core/README.md` (if present — add commands status row)
+- Modify: `lingxi-code/crates/commands/src/lib.rs` (module-level docs)
+- Modify: `lingxi-code/README.md` (if present — add commands status row)
 
 - [ ] **Step 1: Expand the `lingxi-commands` crate docs.**
 
-  Open `lingxi-core/crates/commands/src/lib.rs` and replace the existing top-level comment with:
+  Open `lingxi-code/crates/commands/src/lib.rs` and replace the existing top-level comment with:
 
 ```rust
 //! Slash-command subsystem.
@@ -2156,7 +2156,7 @@ git commit -m "test(M5-09 task 7): dispatch_e2e integration tests — 7 end-to-e
 - [ ] **Step 2: Update README (only if present).**
 
 ```bash
-test -f lingxi-core/README.md && head -30 lingxi-core/README.md
+test -f lingxi-code/README.md && head -30 lingxi-code/README.md
 ```
 
   If the README contains a milestones / surface table, add or update a row:
@@ -2171,8 +2171,8 @@ test -f lingxi-core/README.md && head -30 lingxi-core/README.md
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-core/crates/commands/src/lib.rs
-test -f lingxi-core/README.md && git add lingxi-core/README.md || true
+git add lingxi-code/crates/commands/src/lib.rs
+test -f lingxi-code/README.md && git add lingxi-code/README.md || true
 git commit -m "docs(M5-09 task 8): module-level docs for lingxi-commands M5-09 surface"
 ```
 
@@ -2217,7 +2217,7 @@ cargo test --workspace 2>&1 | tail -30
 - [ ] **Step 4: Confirm `ALL_EVENT_NAMES.len()` unchanged.**
 
 ```bash
-rg -n "ALL_EVENT_NAMES" lingxi-core/crates/telemetry/src/ 2>&1 | head -5
+rg -n "ALL_EVENT_NAMES" lingxi-code/crates/telemetry/src/ 2>&1 | head -5
 cargo test -p lingxi-telemetry --lib event_name_completeness 2>&1 | tail -10
 ```
 

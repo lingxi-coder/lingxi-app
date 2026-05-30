@@ -1,6 +1,6 @@
 # LingXi Core M7 · Plan 10 · History search + image paste
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **Multi-commit allowed** — every implementation task ends with its own commit. The verification gate (final task) is the workspace-wide guard. Run all `cargo` commands **from inside `lingxi-core/`** (the toolchain pins rust 1.82.0 there; running from the repo root uses the host toolchain and produces spurious lint noise — this bit M6-08).
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **Multi-commit allowed** — every implementation task ends with its own commit. The verification gate (final task) is the workspace-wide guard. Run all `cargo` commands **from inside `lingxi-code/`** (the toolchain pins rust 1.82.0 there; running from the repo root uses the host toolchain and produces spurious lint noise — this bit M6-08).
 
 **Goal:** Add two new files to the `prompt_input/` submodule (created by M7-06): `history_search.rs` (Ctrl-R reverse incremental search over prompt history) and `image_paste.rs` (bracketed-paste coalescing + image-on-paste detection that inserts an `[Image #N]` placeholder ref). History search is an **input overlay** routed at priority 3 of the single `handle_live_key` dispatcher (§2.5): while active, every key goes to the search, not normal editing; Ctrl-R opens it; typing filters prompt history (most-recent match first); Ctrl-R again cycles to the next older match; Enter accepts the match into the prompt; Esc restores the pre-search prompt. Bracketed paste is captured as one unit — a multi-line paste inserts as a single block and does **not** trigger per-line submit. Image paste is **detection + ref insertion only** (NO inline terminal image display — that is M8, §4 R8): a paste payload that is an image file path (or the kitty/iTerm2 inline-image escape) records attachment metadata and inserts a `[Image #N]` placeholder into the prompt, incrementing the counter per image. Telemetry adds **0** events (baseline stays 326; the `tengu_tui_search_opened` candidate is deferred to the M7-16 audit — noted below).
 
@@ -1661,11 +1661,11 @@ EOF
 **Files:**
 - None (verification + tag only).
 
-This is the final task. It runs the full workspace gate **from inside `lingxi-core/`** (the toolchain pins 1.82.0; running from repo root uses the host toolchain → spurious lint noise — this bit M6-08, parent spec §5.4), then cuts the annotated tag.
+This is the final task. It runs the full workspace gate **from inside `lingxi-code/`** (the toolchain pins 1.82.0; running from repo root uses the host toolchain → spurious lint noise — this bit M6-08, parent spec §5.4), then cuts the annotated tag.
 
 - [ ] **Step 1: fmt + clippy**
 
-Run (all from inside `lingxi-core/`):
+Run (all from inside `lingxi-code/`):
 
 ```bash
 cargo fmt --check

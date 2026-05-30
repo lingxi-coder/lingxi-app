@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.82.0
       - name: Run chaos scenario ${{ matrix.scenario }}
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           # Chaos scenarios are #[ignore]-gated in their crate; opt them in
           # via the --ignored flag and pattern-match the scenario name.

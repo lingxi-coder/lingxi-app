@@ -72,7 +72,7 @@ v0.8.0 release equivalent to all of these passing:
 M7 is pure surface within the established crate. No new workspace members; `lingxi-tui` grows new modules.
 
 ```
-lingxi-core/crates/tui/src/
+lingxi-code/crates/tui/src/
 ├── render/                       ← NEW: shared rendering primitives (M7-01/02)
 │   ├── mod.rs
 │   ├── ansi.rs                   ← MOVED+EXPANDED from src/ansi.rs (256/truecolor/cursor)
@@ -356,7 +356,7 @@ None block the *milestone* — each degrades scope, not schedule.
 
 ### 5.4 Workspace verification gate (every sub-plan)
 
-Run **from inside `lingxi-core/`** (toolchain pins rust 1.82.0; running from repo root uses host toolchain → spurious lint noise; this bit M6-08):
+Run **from inside `lingxi-code/`** (toolchain pins rust 1.82.0; running from repo root uses host toolchain → spurious lint noise; this bit M6-08):
 
 ```bash
 cargo fmt --check

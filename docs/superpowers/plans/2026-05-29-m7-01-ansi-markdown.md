@@ -6,13 +6,13 @@
 
 **Architecture:** A new `lingxi-tui/src/render/` module owns three things: (1) a shared styled-line value model (`StyleColor`, `SpanStyle`, `StyledSpan`, `StyledLine`) that supersedes M6's 16-color-only `AnsiStyle`; (2) `render/ansi.rs`, the moved-and-expanded ANSI parser that now decodes `38;5;N`/`48;5;N` (256-color) and `38;2;r;g;b`/`48;2;r;g;b` (truecolor) and silently consumes cursor-move/erase CSI sequences without corrupting text; (3) `render/markdown.rs`, a pure `render(text, theme) -> Vec<StyledLine>` function over `pulldown-cmark` events handling headings, bold, italic, lists (ordered/unordered/nested), blockquote, inline code, links, with fenced code emitting a single `CodePlaceholder`-marked span. All three are pure functions tested with `insta` snapshots. The old `crate::ansi` module is deleted; its one consumer (`user_tool_result.rs`) migrates to `crate::render::ansi`.
 
-**Tech Stack:** Rust 1.82.0 (pinned via `lingxi-core/rust-toolchain.toml`), iocraft `=0.8.3`, `pulldown-cmark = "=0.13.4"` (new — MSRV 1.71.1, verified < 1.82), `insta` 1.40 (existing dev-dep).
+**Tech Stack:** Rust 1.82.0 (pinned via `lingxi-code/rust-toolchain.toml`), iocraft `=0.8.3`, `pulldown-cmark = "=0.13.4"` (new — MSRV 1.71.1, verified < 1.82), `insta` 1.40 (existing dev-dep).
 
 ---
 
 ## Critical Context (read before starting)
 
-**Workspace toolchain trap.** The workspace pins **rust 1.82.0** via `lingxi-core/rust-toolchain.toml`. ALL cargo commands in this plan MUST run from inside `lingxi-core/` (e.g. `cd lingxi-core && cargo …`). Running cargo from the repo root uses the host toolchain and produces spurious lint noise — this bit M6-08. Every verification command below already does this.
+**Workspace toolchain trap.** The workspace pins **rust 1.82.0** via `lingxi-code/rust-toolchain.toml`. ALL cargo commands in this plan MUST run from inside `lingxi-code/` (e.g. `cd lingxi-core && cargo …`). Running cargo from the repo root uses the host toolchain and produces spurious lint noise — this bit M6-08. Every verification command below already does this.
 
 **iocraft facts (locked in M6).** iocraft `=0.8.3`. The layout element is `View`, NOT `Box`. Import via `use iocraft::prelude::*;`. `Color` comes from iocraft. M7-01 itself ships **pure value functions** (no iocraft components) — the iocraft mapping for `StyleColor` is a thin helper that M7-02+ renderers consume.
 
@@ -41,7 +41,7 @@ Local commits only. No remote push, no force-push, no `--amend`, no `--no-verify
 ## File Structure
 
 ```
-lingxi-core/crates/tui/
+lingxi-code/crates/tui/
 ├── Cargo.toml                       MODIFY: add pulldown-cmark = "=0.13.4"
 └── src/
     ├── lib.rs                       MODIFY: `pub mod ansi;` → `pub mod render;`
@@ -67,13 +67,13 @@ lingxi-core/crates/tui/
 ## Task 1: Pin `pulldown-cmark` and verify MSRV 1.82 build
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/Cargo.toml`
+- Modify: `lingxi-code/crates/tui/Cargo.toml`
 
 **Context:** Latest stable `pulldown-cmark` is `0.13.4` (verified on crates.io 2026-05-29; MSRV `rust-version = 1.71.1`, comfortably below the workspace's 1.82.0). The design §2.2 example string `=0.12.2` was illustrative; we pin the current latest that is MSRV-safe. Exact-pin discipline (`=`) matches `iocraft = "=0.8.3"`.
 
 - [ ] **Step 1: Add the dependency, pinned exact**
 
-In `lingxi-core/crates/tui/Cargo.toml`, under `[dependencies]`, immediately after the `iocraft = "=0.8.3"` line, add:
+In `lingxi-code/crates/tui/Cargo.toml`, under `[dependencies]`, immediately after the `iocraft = "=0.8.3"` line, add:
 
 ```toml
 pulldown-cmark = { version = "=0.13.4", default-features = false }
@@ -114,13 +114,13 @@ EOF
 ## Task 2: Define the shared styled-line value model (`render/mod.rs`)
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/render/mod.rs`
+- Create: `lingxi-code/crates/tui/src/render/mod.rs`
 
 **Context:** This is the type vocabulary `render::ansi`, `render::markdown`, and all M7-02+ consumers share. `StyleColor` supersedes M6's `AnsiColor` so it can carry 256-color and truecolor. `SpanKind` lets markdown tag a span as a code-fence placeholder that M7-02 swaps for highlighted spans. No parsing here — just the data model + the one iocraft color mapper.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `lingxi-core/crates/tui/src/render/mod.rs` with ONLY the test module first (so the build fails on the missing types):
+Create `lingxi-code/crates/tui/src/render/mod.rs` with ONLY the test module first (so the build fails on the missing types):
 
 ```rust
 #[cfg(test)]
@@ -188,7 +188,7 @@ Expected: FAIL — the file is not yet wired into `lib.rs` and the types are und
 
 - [ ] **Step 3: Write the minimal implementation**
 
-Prepend the following ABOVE the `#[cfg(test)] mod tests` block in `lingxi-core/crates/tui/src/render/mod.rs`:
+Prepend the following ABOVE the `#[cfg(test)] mod tests` block in `lingxi-code/crates/tui/src/render/mod.rs`:
 
 ```rust
 //! Shared rendering primitives for the TUI surface (M7).
@@ -451,16 +451,16 @@ impl StyledLine {
 
 `render/mod.rs` declares `pub mod ansi;` and `pub mod markdown;`, which do not exist yet. To compile Task 2 in isolation, create the two files as empty stubs now (they get real content in later tasks):
 
-Create `lingxi-core/crates/tui/src/render/ansi.rs`:
+Create `lingxi-code/crates/tui/src/render/ansi.rs`:
 ```rust
 //! ANSI parser — implemented in M7-01 Task 4/5.
 ```
-Create `lingxi-core/crates/tui/src/render/markdown.rs`:
+Create `lingxi-code/crates/tui/src/render/markdown.rs`:
 ```rust
 //! Markdown renderer — implemented in M7-01 Task 7/8.
 ```
 
-Add to `lingxi-core/crates/tui/src/lib.rs`, immediately after the `pub mod permission_bridge;` line (keep `pub mod ansi;` for now — it is removed in Task 6):
+Add to `lingxi-code/crates/tui/src/lib.rs`, immediately after the `pub mod permission_bridge;` line (keep `pub mod ansi;` for now — it is removed in Task 6):
 ```rust
 pub mod render;
 ```
@@ -490,14 +490,14 @@ EOF
 ## Task 3: Port the M6 ANSI parser to `render/ansi.rs` (16-color + StyledLine output)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/render/ansi.rs`
-- Reference: `lingxi-core/crates/tui/src/ansi.rs` (the M6 original — do not delete yet)
+- Modify: `lingxi-code/crates/tui/src/render/ansi.rs`
+- Reference: `lingxi-code/crates/tui/src/ansi.rs` (the M6 original — do not delete yet)
 
 **Context:** First move M6's parser into the new module, retargeting its output from `Vec<AnsiSpan>` to `Vec<StyledLine>` (splitting on `\n`) and its color model from `AnsiColor`/`AnsiStyle` to the new `StyleColor`/`SpanStyle`. 256/truecolor + cursor-skip come in Tasks 4/5; this task only re-establishes M6 parity under the new types so we have a green baseline.
 
 - [ ] **Step 1: Write the failing test**
 
-Replace the stub contents of `lingxi-core/crates/tui/src/render/ansi.rs` with the test module only (impl comes next step):
+Replace the stub contents of `lingxi-code/crates/tui/src/render/ansi.rs` with the test module only (impl comes next step):
 
 ```rust
 #[cfg(test)]
@@ -562,7 +562,7 @@ Expected: FAIL — `parse_ansi`, `StyledLine` import path resolved but `parse_an
 
 - [ ] **Step 3: Write the minimal implementation**
 
-Prepend ABOVE the test module in `lingxi-core/crates/tui/src/render/ansi.rs`:
+Prepend ABOVE the test module in `lingxi-code/crates/tui/src/render/ansi.rs`:
 
 ```rust
 //! ANSI / SGR parser producing [`StyledLine`]s.
@@ -771,7 +771,7 @@ EOF
 ## Task 4: Add 256-color and truecolor SGR parsing
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/render/ansi.rs`
+- Modify: `lingxi-code/crates/tui/src/render/ansi.rs`
 
 **Context:** Extended SGR colors use a sub-sequence: `38;5;N` (256-color fg), `48;5;N` (256-color bg), `38;2;r;g;b` (truecolor fg), `48;2;r;g;b` (truecolor bg). These cannot be handled by the per-token `match` in Task 3 because they consume multiple following tokens. We rewrite `apply_sgr` to walk the parameter list with an index so `38`/`48` can pull their sub-parameters.
 
@@ -954,8 +954,8 @@ EOF
 ## Task 5: Verify cursor-move / erase sequences are skipped + ANSI insta snapshots
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/render/ansi.rs` (tests only)
-- Create: `lingxi-core/crates/tui/src/snapshots/` insta files (auto-generated by `cargo insta`)
+- Modify: `lingxi-code/crates/tui/src/render/ansi.rs` (tests only)
+- Create: `lingxi-code/crates/tui/src/snapshots/` insta files (auto-generated by `cargo insta`)
 
 **Context:** CUU/CUD/CUF/CUB (cursor up/down/forward/back, final bytes `A`/`B`/`C`/`D`), ED (erase display, `2J`), EL (erase line, `K`) are non-SGR CSI sequences. The Task 3 parser already drops them (only `m`-final CSI applies SGR), but the spec requires explicit, tested proof they are consumed without corrupting text. We also lock the ANSI output shape with insta snapshots (spec §5.2 budget: ANSI 6+ snapshots).
 
@@ -1074,9 +1074,9 @@ EOF
 ## Task 6: Migrate `user_tool_result.rs` off `crate::ansi`, delete the old module
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/messages/user_tool_result.rs`
-- Modify: `lingxi-core/crates/tui/src/lib.rs`
-- Delete: `lingxi-core/crates/tui/src/ansi.rs`
+- Modify: `lingxi-code/crates/tui/src/components/messages/user_tool_result.rs`
+- Modify: `lingxi-code/crates/tui/src/lib.rs`
+- Delete: `lingxi-code/crates/tui/src/ansi.rs`
 
 **Context:** `user_tool_result.rs` is the only consumer of the old `crate::ansi`. It imports `parse_ansi`, `AnsiColor`, `AnsiSpan`, `AnsiStyle` and has its own `ansi_to_iocraft_color` mapper + `render_user_tool_result_body_spans`. The new `parse_ansi` returns `Vec<StyledLine>` (not `Vec<AnsiSpan>`) and colors are `StyleColor` (mapped via `StyleColor::to_iocraft`, replacing the local mapper). We rewrite the body-span pipeline to flatten the styled lines back into spans (the existing iocraft rendering iterates spans in a single `Row`, so flatten-with-newlines preserves behavior for the single-line Bash-output case M6 tested).
 
@@ -1174,7 +1174,7 @@ Delete the file:
 cd lingxi-core && git rm crates/tui/src/ansi.rs
 ```
 
-In `lingxi-core/crates/tui/src/lib.rs`, delete the line:
+In `lingxi-code/crates/tui/src/lib.rs`, delete the line:
 ```rust
 pub mod ansi;
 ```
@@ -1213,7 +1213,7 @@ EOF
 ## Task 7: Markdown — theme + inline elements (bold, italic, inline code, links)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/render/markdown.rs`
+- Modify: `lingxi-code/crates/tui/src/render/markdown.rs`
 
 **Context:** `render::markdown::render(text, theme) -> Vec<StyledLine>` walks `pulldown-cmark` events. This task lands the `MarkdownTheme` input struct and the inline elements: `Strong` → bold, `Emphasis` → italic, `Code` (inline) → `theme.inline_code` color, `Link` → display text + ` (url)` suffix, plain `Text`. Reference `claude-code/src/utils/markdown.ts`: `strong`→`chalk.bold`, `em`→`chalk.italic`, inline `codespan`→`color('permission', theme)` (a theme color — we expose it as `theme.inline_code`), link→clickable text (we render `text (url)` since the TUI cannot emit OSC 8 hyperlinks in a `StyledLine`). The theme is a plain color struct, NOT iocraft `Color` (those map at render time via `StyleColor::to_iocraft`), so markdown stays a pure value function testable without a terminal.
 
@@ -1474,7 +1474,7 @@ EOF
 ## Task 8: Markdown — block elements (headings, lists, blockquote)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/render/markdown.rs`
+- Modify: `lingxi-code/crates/tui/src/render/markdown.rs`
 
 **Context:** Block elements per `claude-code/src/utils/markdown.ts`: h1 = bold+italic+underline, h2/h3+ = bold (we apply bold+underline for h1, bold for the rest, mirroring the visual weight; claude-code's h1 adds italic too — we set bold+italic+underline for h1, bold for h2+); unordered list item prefix `-`, ordered `N.`; nested lists indent two spaces per depth; blockquote prefixes each non-blank line with `│ ` (claude-code's `BLOCKQUOTE_BAR`) in dim + italic. We extend `Builder` with heading/list/quote state and handle the corresponding `Tag`/`TagEnd` events.
 
@@ -1675,7 +1675,7 @@ EOF
 ## Task 9: Markdown — fenced code emits a `CodePlaceholder` span
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/render/markdown.rs`
+- Modify: `lingxi-code/crates/tui/src/render/markdown.rs`
 
 **Context:** Fenced code blocks MUST NOT be highlighted here (M7-02 does that). M7-01 emits one span tagged `SpanKind::CodePlaceholder { lang }` carrying the raw block text + the fence info-string language. Per `claude-code/src/utils/markdown.ts` `code` case: with no highlighter the block is returned verbatim — our placeholder IS that verbatim-with-deferred-highlight state. `pulldown-cmark` delivers fenced code as `Start(CodeBlock(Fenced(lang)))`, one or more `Event::Text`, `End(CodeBlock)`. We accumulate the text and emit a single placeholder span at close.
 
@@ -1830,7 +1830,7 @@ EOF
 ## Task 10: Markdown — partial / streaming input never panics
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/render/markdown.rs`
+- Modify: `lingxi-code/crates/tui/src/render/markdown.rs`
 
 **Context:** Streaming assistant output feeds half-written markdown to the renderer mid-token: an unclosed code fence, a half-open bold (`**bold without close`), a dangling list. The spec (§3 M7-01, §4 R5) requires best-effort rendering, never a panic. `pulldown-cmark` already tolerates unterminated constructs (it emits the open events and EOF without the matching close); the risk is our `Builder` leaving state set so `finish()` must flush whatever is buffered — including an open code block. We add a defensive flush of the code buffer in `finish` and lock the no-panic behavior with tests.
 
@@ -1933,8 +1933,8 @@ EOF
 ## Task 11: Markdown insta snapshots (each element + partial)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/render/markdown.rs` (tests only)
-- Create: insta snapshot files under `lingxi-core/crates/tui/src/snapshots/`
+- Modify: `lingxi-code/crates/tui/src/render/markdown.rs` (tests only)
+- Create: insta snapshot files under `lingxi-code/crates/tui/src/snapshots/`
 
 **Context:** Lock the markdown output shape with insta snapshots — spec §5.2 budget is 8+ markdown snapshots: heading, bold/italic, nested list, blockquote, inline code, link, fenced-code-placeholder, partial unclosed fence. Use a fixed test theme so snapshots are deterministic.
 
@@ -2022,7 +2022,7 @@ EOF
 ## Task 12: Module-level docs + `lib.rs` cleanup audit
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/lib.rs`
+- Modify: `lingxi-code/crates/tui/src/lib.rs`
 
 **Context:** Tidy the crate root: update the M6-era doc comment that still references the old `ansi` module surface, and confirm `render` is publicly exposed for downstream M7 sub-plans. No behavior change — documentation + module visibility only.
 
@@ -2036,7 +2036,7 @@ Expected: `pub mod render;` present, `pub mod ansi;` absent (removed in Task 6).
 
 - [ ] **Step 2: Update the crate-root doc comment**
 
-In `lingxi-core/crates/tui/src/lib.rs`, the top-of-file doc block lists M6 components. Append a line documenting the new module. Find the doc line:
+In `lingxi-code/crates/tui/src/lib.rs`, the top-of-file doc block lists M6 components. Append a line documenting the new module. Find the doc line:
 ```rust
 //! See plan `docs/superpowers/plans/2026-05-28-m6-01-foundation.md`.
 ```
@@ -2074,7 +2074,7 @@ EOF
 ## Task 13: Telemetry-count guard (no new events)
 
 **Files:**
-- Reference only: `lingxi-core/crates/tui/src/telemetry.rs` and the telemetry registry.
+- Reference only: `lingxi-code/crates/tui/src/telemetry.rs` and the telemetry registry.
 
 **Context:** M7-01 is pure rendering and registers **zero** new telemetry events. The baseline `ALL_EVENT_NAMES.len() == 326` must be unchanged. This task is an explicit guard so an accidental telemetry edit during M7-01 is caught before the gate.
 
@@ -2113,7 +2113,7 @@ This task makes no code change — it is a verification gate. Nothing to commit.
 **Files:**
 - None modified — this is the full verification gate and tag.
 
-**Context:** The sub-plan closes with the standard workspace gate (spec §5.4), run from inside `lingxi-core/`, followed by the local annotated tag `m7.1` (spec §6.4). Known flakes (listed in Critical Context) are allowed a rerun.
+**Context:** The sub-plan closes with the standard workspace gate (spec §5.4), run from inside `lingxi-code/`, followed by the local annotated tag `m7.1` (spec §6.4). Known flakes (listed in Critical Context) are allowed a rerun.
 
 - [ ] **Step 1: Format check**
 
@@ -2195,7 +2195,7 @@ Expected: `m7.1` listed; shows the Task 12/14 head commit. Do NOT push (local on
 - ANSI snapshots (256/truecolor/reset/malformed/cursor-skipped) — Task 5. ✔
 - Markdown snapshots (heading/bold-italic/nested list/blockquote/inline code/link/fenced-placeholder/partial) — Task 11. ✔
 - Telemetry untouched (326) — Task 13. ✔
-- Workspace gate (fmt + clippy -D warnings + test, all from `lingxi-core/`) + 5-target compile + annotated tag `m7.1` — Task 14. ✔
+- Workspace gate (fmt + clippy -D warnings + test, all from `lingxi-code/`) + 5-target compile + annotated tag `m7.1` — Task 14. ✔
 
 **Placeholder scan:** No TBD/TODO/"add error handling"/"similar to Task N". Every code step shows complete code; every test step shows the test body; every command shows expected output.
 

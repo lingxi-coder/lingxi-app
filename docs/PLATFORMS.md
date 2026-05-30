@@ -1,6 +1,6 @@
 # Platform support matrix (v0.3.0)
 
-LingXi Core's behavioral parity with claude-code targets desktop OS releases.
+LingXi Code's behavioral parity with claude-code targets desktop OS releases.
 This document is the authoritative per-OS capability table; it mirrors
 `docs/ARCHITECTURE.md#capability-matrix` and adds setup notes.
 

@@ -1,4 +1,4 @@
-// lingxi-core/crates/core/src/settings/merger.rs
+// lingxi-code/crates/core/src/settings/merger.rs
 //! Per-field merge dispatcher.
 //!
 //! Signature is consume-and-return because every layer is short-lived during

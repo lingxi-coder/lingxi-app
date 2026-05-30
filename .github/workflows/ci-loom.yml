@@ -14,7 +14,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.82.0
       - name: cargo test --cfg loom (OAuth single-flight refresh)
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         env:
           RUSTFLAGS: '--cfg loom'
         run: |
@@ -22,7 +22,7 @@ jobs:
                      --test refresh_single_flight_test \
                      --release
       - name: cargo test --cfg loom (Memory loader hierarchy walk)
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         env:
           RUSTFLAGS: '--cfg loom'
         # M3-02's memdir loader concurrent claude_md hierarchy-walk loom test.

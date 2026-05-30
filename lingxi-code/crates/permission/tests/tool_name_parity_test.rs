@@ -4,7 +4,7 @@
 //! real edge; this test-only dep reverses for verification).
 //!
 //! Source for the constants: `grep -n 'pub const TOOL_NAME\|pub const.*_TOOL_NAME'
-//! lingxi-core/crates/tools/src/builtin/*.rs`.
+//! lingxi-code/crates/tools/src/builtin/*.rs`.
 
 use lingxi_permission::tool_default;
 use lingxi_permission::PromptDefault;

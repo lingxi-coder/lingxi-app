@@ -20,7 +20,7 @@ This plan ships:
 
 **No changes to existing telemetry events.** The 3 events from M5-02 (`conversation_started/completed/failed`) and the 0 new events from M5-03 remain untouched. Task 16 step 4 explicitly re-asserts the count chain `238 (post-M4-09) + 3 (M5-02) + 0 (M5-03) + 2 (M5-04) = 243`.
 
-**Tech Stack:** Rust 2021. Existing workspace deps reused — `async-trait 0.1`, `serde 1` + `serde_json 1`, `tokio 1` (with `rt`, `sync`, `macros`), `thiserror 2`, `futures 0.3` (for `Stream` / `BoxStream` / `StreamExt` / `future::join_all`). One workspace dep additive guard: if `futures = "0.3"` is not yet in `lingxi-core/Cargo.toml` `[workspace.dependencies]`, Task 1 step 2 adds it (it is, in fact, already there from M3-03 / M4-03 — Task 1 step 2 verifies and skips on confirmation). No new third-party deps in this plan.
+**Tech Stack:** Rust 2021. Existing workspace deps reused — `async-trait 0.1`, `serde 1` + `serde_json 1`, `tokio 1` (with `rt`, `sync`, `macros`), `thiserror 2`, `futures 0.3` (for `Stream` / `BoxStream` / `StreamExt` / `future::join_all`). One workspace dep additive guard: if `futures = "0.3"` is not yet in `lingxi-code/Cargo.toml` `[workspace.dependencies]`, Task 1 step 2 adds it (it is, in fact, already there from M3-03 / M4-03 — Task 1 step 2 verifies and skips on confirmation). No new third-party deps in this plan.
 
 **References:**
 
@@ -42,18 +42,18 @@ This plan ships:
   - `claude.ts:2210-2250` — `message_delta` handling: `stop_reason = part.delta.stop_reason` (line 2243). The `stop_reason` is therefore set on `message_delta`, NOT `message_stop`. `message_stop` is a no-op (`break;` on line 2298). This plan locks the same behavior.
   - `claude.ts:2899-2925` — final `extractAssistantMessageFromStream` joins partial input strings + JSON-parses each tool_use block's `input`. Mid-stream dispatch in LingXi happens at `content_block_stop` (one block at a time), so the JSON-parse occurs per-block rather than per-message — but the byte representation of each parsed input must match what claude-code's batched path would have parsed.
 - Existing surfaces consumed by this plan:
-  - `lingxi-core/crates/api-client/src/types.rs:135-178` — `StreamEvent` enum already defined with all 7 variants: `MessageStart`, `ContentBlockStart`, `ContentBlockDelta`, `ContentBlockStop`, `MessageDelta`, `MessageStop`, `Ping`, `Error`. **NO new serde struct work is needed** — the wire types already exist. This plan only adds the streaming TRANSPORT method and the orchestrator-side ACCUMULATOR.
-  - `lingxi-core/crates/api-client/src/types.rs:186-217` — `ContentDelta` enum already defined with `TextDelta`, `InputJsonDelta`, `ThinkingDelta`, `SignatureDelta`, `CitationsDelta`, `ConnectorTextDelta`. Same — no new serde work.
-  - `lingxi-core/crates/api-client/src/anthropic.rs` — `AnthropicProvider`. Currently exposes `messages_create_non_stream`. Task 11 of this plan ADDS `messages_create_stream` returning a typed `BoxStream<'static, Result<StreamEvent, ApiError>>`.
-  - `lingxi-core/crates/api-client/src/sse.rs:14` — `parse_sse_chunks(raw: &str) -> Vec<SseEvent>` (M3-03). Already returns the wire-level event envelope. Task 11 uses this + `serde_json::from_str::<StreamEvent>(&envelope.data)` inside the new `messages_create_stream`.
-  - `lingxi-core/crates/orchestrator/src/conversation.rs` — current state (post-M5-03):
+  - `lingxi-code/crates/api-client/src/types.rs:135-178` — `StreamEvent` enum already defined with all 7 variants: `MessageStart`, `ContentBlockStart`, `ContentBlockDelta`, `ContentBlockStop`, `MessageDelta`, `MessageStop`, `Ping`, `Error`. **NO new serde struct work is needed** — the wire types already exist. This plan only adds the streaming TRANSPORT method and the orchestrator-side ACCUMULATOR.
+  - `lingxi-code/crates/api-client/src/types.rs:186-217` — `ContentDelta` enum already defined with `TextDelta`, `InputJsonDelta`, `ThinkingDelta`, `SignatureDelta`, `CitationsDelta`, `ConnectorTextDelta`. Same — no new serde work.
+  - `lingxi-code/crates/api-client/src/anthropic.rs` — `AnthropicProvider`. Currently exposes `messages_create_non_stream`. Task 11 of this plan ADDS `messages_create_stream` returning a typed `BoxStream<'static, Result<StreamEvent, ApiError>>`.
+  - `lingxi-code/crates/api-client/src/sse.rs:14` — `parse_sse_chunks(raw: &str) -> Vec<SseEvent>` (M3-03). Already returns the wire-level event envelope. Task 11 uses this + `serde_json::from_str::<StreamEvent>(&envelope.data)` inside the new `messages_create_stream`.
+  - `lingxi-code/crates/orchestrator/src/conversation.rs` — current state (post-M5-03):
     - `OrchestratorApiClient::messages_create(&self, model, system: Option<&str>, msgs)` trait.
     - `ConversationOrchestrator { config, api, tools, hooks, perms, output, session, memory, cwd }`.
     - `run_turn(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError>` (batched).
-  - `lingxi-core/crates/orchestrator/src/turn_loop.rs` — `execute_one_turn(&orch)` + `dispatch_tool_uses(&orch, &tool_uses)` + `translate_response_blocks(&content)` + `cost_snapshot_from_session(&s)`. Task 13 of this plan calls `dispatch_tool_uses` from a NEW streaming-tool-dispatch helper (reuses pre-tool hook + permission gate + post-tool hook logic verbatim — the streaming path differs only in WHEN dispatch fires, not HOW).
-  - `lingxi-core/crates/orchestrator/src/test_support.rs` — already holds `MockApiClient`, `MockOutputStream`, `NoOpHookExecutor`, `NoOpPermissionGate`. This plan adds `MockStreamingApiClient` and `ScriptedSseStream` next to them. The two mocks coexist (one for batched tests, one for streaming tests).
+  - `lingxi-code/crates/orchestrator/src/turn_loop.rs` — `execute_one_turn(&orch)` + `dispatch_tool_uses(&orch, &tool_uses)` + `translate_response_blocks(&content)` + `cost_snapshot_from_session(&s)`. Task 13 of this plan calls `dispatch_tool_uses` from a NEW streaming-tool-dispatch helper (reuses pre-tool hook + permission gate + post-tool hook logic verbatim — the streaming path differs only in WHEN dispatch fires, not HOW).
+  - `lingxi-code/crates/orchestrator/src/test_support.rs` — already holds `MockApiClient`, `MockOutputStream`, `NoOpHookExecutor`, `NoOpPermissionGate`. This plan adds `MockStreamingApiClient` and `ScriptedSseStream` next to them. The two mocks coexist (one for batched tests, one for streaming tests).
   - `lingxi-traits::OutputStream::emit_text(&self, text: &str)` — already async, already takes a borrowed string. **No trait surface change**. M5-02 calls it once per Text block (whole body); M5-04 calls it once per `text_delta` (per-token). The behavioral semantic shift is documented in the doc comment on the trait (M5-02 wrote: *"M5-04 will switch to per-SSE-delta emission without changing this signature."*).
-  - `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs` — created by M5-02 with the 3 conversation_* events. Task 16 of this plan adds 2 more constants + extends `NAMES`. The submodule grows but stays a single file.
+  - `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` — created by M5-02 with the 3 conversation_* events. Task 16 of this plan adds 2 more constants + extends `NAMES`. The submodule grows but stays a single file.
 - Repo conventions:
   - Tests live in `#[cfg(test)] mod tests { ... }` blocks adjacent to production code; integration tests live under `crates/orchestrator/tests/<name>_test.rs`.
   - Every new file under `lingxi-orchestrator/src/` includes `#![forbid(unsafe_code)]` at the top.
@@ -134,7 +134,7 @@ Re-run when drift suspected.
   - `tengu_orchestrator_turn_streaming_started`
   - `tengu_orchestrator_turn_streaming_completed`
 
-  Both `pub const &'static str` constants in `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs` appended AFTER the existing 3 conversation_* names. `NAMES` in that file grows from 3 → 5 entries; `ALL_EVENT_NAMES.len()` grows from 241 → 243.
+  Both `pub const &'static str` constants in `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` appended AFTER the existing 3 conversation_* names. `NAMES` in that file grows from 3 → 5 entries; `ALL_EVENT_NAMES.len()` grows from 241 → 243.
 
 - **`OrchestratorError` extensions** — three new variants needed:
   - `Streaming(#[from] ApiError)` (mid-stream byte error from the transport).
@@ -148,45 +148,45 @@ Re-run when drift suspected.
 
 ## File touch inventory (locked at top per spec Appendix A convention)
 
-**Creates (new files — all under `lingxi-core/crates/orchestrator/src/` unless noted):**
+**Creates (new files — all under `lingxi-code/crates/orchestrator/src/` unless noted):**
 
-- `lingxi-core/crates/orchestrator/src/sse/mod.rs` — module re-exports + `StreamingError` enum + crate-level streaming docs.
-- `lingxi-core/crates/orchestrator/src/sse/accumulator.rs` — `BlockAccumulator` + `CompletedBlock` + per-block `BlockState` (private).
-- `lingxi-core/crates/orchestrator/src/sse/event_router.rs` — `dispatch_event(state, event, out, accumulator) -> Result<RouterAction, StreamingError>` switch + `RouterAction` enum (the consumer's "what next" signal).
-- `lingxi-core/crates/orchestrator/src/streaming_loop.rs` — `execute_one_turn_streaming` + `spawn_tool_dispatch` + `join_tool_dispatches` + `run_turn_streaming_inner` helpers.
-- `lingxi-core/crates/orchestrator/src/test_support_stream.rs` — `MockStreamingApiClient` + `ScriptedSseStream` + `scripted!` macro + `MockToolDispatchClock` (records dispatch timestamps for the mid-stream test).
-- `lingxi-core/crates/orchestrator/tests/streaming_text_only_test.rs` — single text response, multiple deltas.
-- `lingxi-core/crates/orchestrator/tests/streaming_mid_stream_tool_test.rs` — tool block dispatched at `content_block_stop`, before `message_stop`.
-- `lingxi-core/crates/orchestrator/tests/streaming_concurrent_tools_test.rs` — two tool_use blocks in one response, dispatched concurrently.
-- `lingxi-core/crates/orchestrator/tests/streaming_multi_turn_test.rs` — two streaming turns, second turn observes the first turn's tool result.
-- `lingxi-core/crates/orchestrator/tests/streaming_ping_noop_test.rs` — ping mid-stream is a no-op.
-- `lingxi-core/crates/orchestrator/tests/streaming_error_propagation_test.rs` — stream `Err` mid-flight → `OrchestratorError::Streaming` surfaced.
-- `lingxi-core/crates/orchestrator/tests/streaming_block_accumulator_test.rs` — direct unit tests of the accumulator's invariants.
-- `lingxi-core/crates/orchestrator/tests/streaming_vs_batched_equivalence_test.rs` — same scripted script consumed via both `run_turn` and `run_turn_streaming` produces the same `ConversationOutcome` + same final session history (modulo telemetry events).
+- `lingxi-code/crates/orchestrator/src/sse/mod.rs` — module re-exports + `StreamingError` enum + crate-level streaming docs.
+- `lingxi-code/crates/orchestrator/src/sse/accumulator.rs` — `BlockAccumulator` + `CompletedBlock` + per-block `BlockState` (private).
+- `lingxi-code/crates/orchestrator/src/sse/event_router.rs` — `dispatch_event(state, event, out, accumulator) -> Result<RouterAction, StreamingError>` switch + `RouterAction` enum (the consumer's "what next" signal).
+- `lingxi-code/crates/orchestrator/src/streaming_loop.rs` — `execute_one_turn_streaming` + `spawn_tool_dispatch` + `join_tool_dispatches` + `run_turn_streaming_inner` helpers.
+- `lingxi-code/crates/orchestrator/src/test_support_stream.rs` — `MockStreamingApiClient` + `ScriptedSseStream` + `scripted!` macro + `MockToolDispatchClock` (records dispatch timestamps for the mid-stream test).
+- `lingxi-code/crates/orchestrator/tests/streaming_text_only_test.rs` — single text response, multiple deltas.
+- `lingxi-code/crates/orchestrator/tests/streaming_mid_stream_tool_test.rs` — tool block dispatched at `content_block_stop`, before `message_stop`.
+- `lingxi-code/crates/orchestrator/tests/streaming_concurrent_tools_test.rs` — two tool_use blocks in one response, dispatched concurrently.
+- `lingxi-code/crates/orchestrator/tests/streaming_multi_turn_test.rs` — two streaming turns, second turn observes the first turn's tool result.
+- `lingxi-code/crates/orchestrator/tests/streaming_ping_noop_test.rs` — ping mid-stream is a no-op.
+- `lingxi-code/crates/orchestrator/tests/streaming_error_propagation_test.rs` — stream `Err` mid-flight → `OrchestratorError::Streaming` surfaced.
+- `lingxi-code/crates/orchestrator/tests/streaming_block_accumulator_test.rs` — direct unit tests of the accumulator's invariants.
+- `lingxi-code/crates/orchestrator/tests/streaming_vs_batched_equivalence_test.rs` — same scripted script consumed via both `run_turn` and `run_turn_streaming` produces the same `ConversationOutcome` + same final session history (modulo telemetry events).
 
 **Modifies (existing files):**
 
-- `lingxi-core/crates/orchestrator/Cargo.toml` — confirm `futures = { workspace = true }` is present in `[dependencies]` (was added by M5-02 transitively; Task 1 step 2 verifies and adds if missing).
-- `lingxi-core/crates/orchestrator/src/lib.rs` — add `pub mod sse;` + `pub mod streaming_loop;` declarations; add `#[cfg(any(test, feature = "test-support"))] pub mod test_support_stream;`; add `pub use conversation::StreamingApiClient;` to the re-export block.
-- `lingxi-core/crates/orchestrator/src/conversation.rs` — add `StreamingApiClient` trait + `AnthropicProviderStreamingAdapter` adapter (Task 11). Add `streaming_api: Arc<dyn StreamingApiClient>` field to `ConversationOrchestrator` + extend `new` constructor (Task 12). Add `pub async fn run_turn_streaming(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError>` method (Task 12).
-- `lingxi-core/crates/orchestrator/src/error.rs` — add 3 new variants: `Streaming(ApiError)`, `StreamingProtocol(String)`, `StreamEndedWithoutStop` (Task 4).
-- `lingxi-core/crates/orchestrator/src/test_support.rs` — re-export `MockStreamingApiClient` + `ScriptedSseStream` from the test_support_stream module (Task 8 step 5; just a `pub use` line at the bottom).
-- `lingxi-core/crates/orchestrator/tests/orchestrator_smoke_test.rs` — update `ConversationOrchestrator::new` construction to pass a `MockStreamingApiClient::empty()` for the new field (Task 12 step 5). The existing assertions on the batched `run_turn` path stay green.
-- `lingxi-core/crates/orchestrator/tests/orchestrator_multi_turn_test.rs` — same construction update.
-- `lingxi-core/crates/orchestrator/tests/orchestrator_max_turns_test.rs` — same.
-- `lingxi-core/crates/orchestrator/tests/orchestrator_tool_error_test.rs` — same.
-- `lingxi-core/crates/orchestrator/tests/orchestrator_real_tools_test.rs` — same.
-- `lingxi-core/crates/api-client/src/anthropic.rs` — add `messages_create_stream<T: HttpTransport>(&self, model, system, msgs, tools, transport) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError>` method (Task 11). The non-streaming path stays untouched.
-- `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs` — append two new `pub const &str` constants + extend `NAMES` from 3 → 5 entries (Task 16).
-- `lingxi-core/crates/telemetry/src/tengu/mod.rs` — bump `TOTAL` arithmetic from `... + 3 + 1` to `... + 5 + 1` (241 → 243).
-- `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs` — bump `241` → `243` + extend the comment with `M5-04 added 2 streaming events`.
-- `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json` — insert the 2 new orchestrator names AFTER the 3 conversation_* entries and BEFORE `lingxi_core_v0_5_0_released`; bump the `_note` field.
+- `lingxi-code/crates/orchestrator/Cargo.toml` — confirm `futures = { workspace = true }` is present in `[dependencies]` (was added by M5-02 transitively; Task 1 step 2 verifies and adds if missing).
+- `lingxi-code/crates/orchestrator/src/lib.rs` — add `pub mod sse;` + `pub mod streaming_loop;` declarations; add `#[cfg(any(test, feature = "test-support"))] pub mod test_support_stream;`; add `pub use conversation::StreamingApiClient;` to the re-export block.
+- `lingxi-code/crates/orchestrator/src/conversation.rs` — add `StreamingApiClient` trait + `AnthropicProviderStreamingAdapter` adapter (Task 11). Add `streaming_api: Arc<dyn StreamingApiClient>` field to `ConversationOrchestrator` + extend `new` constructor (Task 12). Add `pub async fn run_turn_streaming(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError>` method (Task 12).
+- `lingxi-code/crates/orchestrator/src/error.rs` — add 3 new variants: `Streaming(ApiError)`, `StreamingProtocol(String)`, `StreamEndedWithoutStop` (Task 4).
+- `lingxi-code/crates/orchestrator/src/test_support.rs` — re-export `MockStreamingApiClient` + `ScriptedSseStream` from the test_support_stream module (Task 8 step 5; just a `pub use` line at the bottom).
+- `lingxi-code/crates/orchestrator/tests/orchestrator_smoke_test.rs` — update `ConversationOrchestrator::new` construction to pass a `MockStreamingApiClient::empty()` for the new field (Task 12 step 5). The existing assertions on the batched `run_turn` path stay green.
+- `lingxi-code/crates/orchestrator/tests/orchestrator_multi_turn_test.rs` — same construction update.
+- `lingxi-code/crates/orchestrator/tests/orchestrator_max_turns_test.rs` — same.
+- `lingxi-code/crates/orchestrator/tests/orchestrator_tool_error_test.rs` — same.
+- `lingxi-code/crates/orchestrator/tests/orchestrator_real_tools_test.rs` — same.
+- `lingxi-code/crates/api-client/src/anthropic.rs` — add `messages_create_stream<T: HttpTransport>(&self, model, system, msgs, tools, transport) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError>` method (Task 11). The non-streaming path stays untouched.
+- `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` — append two new `pub const &str` constants + extend `NAMES` from 3 → 5 entries (Task 16).
+- `lingxi-code/crates/telemetry/src/tengu/mod.rs` — bump `TOTAL` arithmetic from `... + 3 + 1` to `... + 5 + 1` (241 → 243).
+- `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs` — bump `241` → `243` + extend the comment with `M5-04 added 2 streaming events`.
+- `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json` — insert the 2 new orchestrator names AFTER the 3 conversation_* entries and BEFORE `lingxi_core_v0_5_0_released`; bump the `_note` field.
 
 **Verifications (no modification, just read in tests):**
 
-- `lingxi-core/crates/api-client/src/types.rs:135-217` — `StreamEvent` + `ContentDelta` shapes unchanged.
-- `lingxi-core/crates/api-client/src/sse.rs:14` — `parse_sse_chunks` unchanged.
-- `lingxi-core/crates/orchestrator/src/turn_loop.rs::dispatch_tool_uses` — unchanged; reused as-is from M5-02 by the streaming path (Task 13 step 3 re-uses it for the post-`message_stop` consolidated dispatch).
+- `lingxi-code/crates/api-client/src/types.rs:135-217` — `StreamEvent` + `ContentDelta` shapes unchanged.
+- `lingxi-code/crates/api-client/src/sse.rs:14` — `parse_sse_chunks` unchanged.
+- `lingxi-code/crates/orchestrator/src/turn_loop.rs::dispatch_tool_uses` — unchanged; reused as-is from M5-02 by the streaming path (Task 13 step 3 re-uses it for the post-`message_stop` consolidated dispatch).
 - The 3 M5-02 telemetry events still fire from the batched `run_turn` (Task 17 step 5 asserts via `InMemorySink`).
 
 ---
@@ -214,25 +214,25 @@ Re-run when drift suspected.
 ### Task 1: Scaffold `sse/` + `streaming_loop.rs` + `test_support_stream.rs`
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/src/sse/mod.rs`
-- Create: `lingxi-core/crates/orchestrator/src/sse/accumulator.rs`
-- Create: `lingxi-core/crates/orchestrator/src/sse/event_router.rs`
-- Create: `lingxi-core/crates/orchestrator/src/streaming_loop.rs`
-- Create: `lingxi-core/crates/orchestrator/src/test_support_stream.rs`
-- Modify: `lingxi-core/crates/orchestrator/src/lib.rs`
-- Modify: `lingxi-core/crates/orchestrator/Cargo.toml`
+- Create: `lingxi-code/crates/orchestrator/src/sse/mod.rs`
+- Create: `lingxi-code/crates/orchestrator/src/sse/accumulator.rs`
+- Create: `lingxi-code/crates/orchestrator/src/sse/event_router.rs`
+- Create: `lingxi-code/crates/orchestrator/src/streaming_loop.rs`
+- Create: `lingxi-code/crates/orchestrator/src/test_support_stream.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/lib.rs`
+- Modify: `lingxi-code/crates/orchestrator/Cargo.toml`
 
 **Steps:**
 
 - [ ] Step 1 — Verify predecessor M5-03 is on `HEAD`. Run `git log -1 --format='%H %s'`. Expected first 7 chars: `0ce1f18` (or whatever SHA M5-03 committed at — must match the user-supplied predecessor SHA). If not, STOP and ask the user.
 
-- [ ] Step 2 — Confirm `futures` is in `lingxi-orchestrator`'s dependency tree. Run `grep -n "futures" lingxi-core/crates/orchestrator/Cargo.toml`. If there is no `futures = { workspace = true }` line under `[dependencies]`, add it:
+- [ ] Step 2 — Confirm `futures` is in `lingxi-orchestrator`'s dependency tree. Run `grep -n "futures" lingxi-code/crates/orchestrator/Cargo.toml`. If there is no `futures = { workspace = true }` line under `[dependencies]`, add it:
   ```toml
   futures = { workspace = true }
   ```
-  Verify the workspace already declares `futures = "0.3"` in `lingxi-core/Cargo.toml::[workspace.dependencies]` (added by M3-03). If somehow missing, add `futures = "0.3"` to the workspace table FIRST, then add the per-crate reference. Most likely: it is already present transitively but not directly named — verify with `cargo tree -p lingxi-orchestrator -e normal --depth 2 | grep futures`.
+  Verify the workspace already declares `futures = "0.3"` in `lingxi-code/Cargo.toml::[workspace.dependencies]` (added by M3-03). If somehow missing, add `futures = "0.3"` to the workspace table FIRST, then add the per-crate reference. Most likely: it is already present transitively but not directly named — verify with `cargo tree -p lingxi-orchestrator -e normal --depth 2 | grep futures`.
 
-- [ ] Step 3 — Create `lingxi-core/crates/orchestrator/src/sse/mod.rs`:
+- [ ] Step 3 — Create `lingxi-code/crates/orchestrator/src/sse/mod.rs`:
   ```rust
   //! Streaming SSE → orchestrator-level event routing.
   //!
@@ -280,29 +280,29 @@ Re-run when drift suspected.
   ```
 
 - [ ] Step 4 — Create placeholder bodies (filled in later tasks):
-  - `lingxi-core/crates/orchestrator/src/sse/accumulator.rs`:
+  - `lingxi-code/crates/orchestrator/src/sse/accumulator.rs`:
     ```rust
     //! Per-block accumulator. Filled in Task 5.
     #![forbid(unsafe_code)]
     ```
-  - `lingxi-core/crates/orchestrator/src/sse/event_router.rs`:
+  - `lingxi-code/crates/orchestrator/src/sse/event_router.rs`:
     ```rust
     //! `StreamEvent` → router-action switch. Filled in Task 7.
     #![forbid(unsafe_code)]
     ```
-  - `lingxi-core/crates/orchestrator/src/streaming_loop.rs`:
+  - `lingxi-code/crates/orchestrator/src/streaming_loop.rs`:
     ```rust
     //! Streaming turn loop. Filled in Tasks 9-15.
     #![forbid(unsafe_code)]
     ```
-  - `lingxi-core/crates/orchestrator/src/test_support_stream.rs`:
+  - `lingxi-code/crates/orchestrator/src/test_support_stream.rs`:
     ```rust
     //! Test fixtures for the streaming path. Filled in Tasks 6 + 8.
     #![cfg(any(test, feature = "test-support"))]
     #![forbid(unsafe_code)]
     ```
 
-- [ ] Step 5 — Modify `lingxi-core/crates/orchestrator/src/lib.rs`. Add three new `pub mod` declarations AFTER the existing `pub mod turn_loop;` line:
+- [ ] Step 5 — Modify `lingxi-code/crates/orchestrator/src/lib.rs`. Add three new `pub mod` declarations AFTER the existing `pub mod turn_loop;` line:
   ```rust
   pub mod sse;
   pub mod streaming_loop;
@@ -323,11 +323,11 @@ Re-run when drift suspected.
 ### Task 2: First failing test — `BlockAccumulator` basic flow
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/tests/streaming_block_accumulator_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/streaming_block_accumulator_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Create `lingxi-core/crates/orchestrator/tests/streaming_block_accumulator_test.rs`:
+- [ ] Step 1 — Create `lingxi-code/crates/orchestrator/tests/streaming_block_accumulator_test.rs`:
   ```rust
   //! Unit tests for the BlockAccumulator (M5-04 Task 2 — RED).
   //!
@@ -450,11 +450,11 @@ Re-run when drift suspected.
 ### Task 3: First failing test — streaming text-only happy path
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/tests/streaming_text_only_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/streaming_text_only_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Create `lingxi-core/crates/orchestrator/tests/streaming_text_only_test.rs`:
+- [ ] Step 1 — Create `lingxi-code/crates/orchestrator/tests/streaming_text_only_test.rs`:
   ```rust
   //! Streaming happy path — text-only response (M5-04 Task 3 — RED).
   //!
@@ -540,11 +540,11 @@ Re-run when drift suspected.
 ### Task 4: `OrchestratorError` streaming variants
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/error.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/error.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Read the current `lingxi-core/crates/orchestrator/src/error.rs` (M5-02 created it). Locate the closing `}` of the `OrchestratorError` enum.
+- [ ] Step 1 — Read the current `lingxi-code/crates/orchestrator/src/error.rs` (M5-02 created it). Locate the closing `}` of the `OrchestratorError` enum.
 
 - [ ] Step 2 — Add three new variants AT THE END of the enum (before the closing `}`), keeping comma after the prior variant:
   ```rust
@@ -613,11 +613,11 @@ Re-run when drift suspected.
 ### Task 5: Implement `BlockAccumulator` + `CompletedBlock` + `BlockKind`
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/sse/accumulator.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/sse/accumulator.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Replace the placeholder body of `lingxi-core/crates/orchestrator/src/sse/accumulator.rs` with the full implementation:
+- [ ] Step 1 — Replace the placeholder body of `lingxi-code/crates/orchestrator/src/sse/accumulator.rs` with the full implementation:
   ```rust
   //! Per-block accumulator for the streaming SSE path.
   //!
@@ -832,7 +832,7 @@ Re-run when drift suspected.
 
 - [ ] Step 3 — Run `cargo clippy -p lingxi-orchestrator -- -D warnings` to confirm no clippy diagnostics. If any fire (e.g. `manual_map` on the empty-json check), apply the suggested fix.
 
-- [ ] Step 4 — Document the StreamingError → OrchestratorError::StreamingProtocol byte format. Add this comment block at the top of `lingxi-core/crates/orchestrator/src/streaming_loop.rs` (replacing the existing placeholder doc):
+- [ ] Step 4 — Document the StreamingError → OrchestratorError::StreamingProtocol byte format. Add this comment block at the top of `lingxi-code/crates/orchestrator/src/streaming_loop.rs` (replacing the existing placeholder doc):
   ```rust
   //! Streaming turn loop. Filled in Tasks 9-15.
   //!
@@ -853,11 +853,11 @@ Re-run when drift suspected.
 ### Task 6: `MockStreamingApiClient` + `scripted!` macro
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/test_support_stream.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/test_support_stream.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Replace the placeholder body of `lingxi-core/crates/orchestrator/src/test_support_stream.rs` with:
+- [ ] Step 1 — Replace the placeholder body of `lingxi-code/crates/orchestrator/src/test_support_stream.rs` with:
   ```rust
   //! Test fixtures for the streaming path.
   //!
@@ -1141,11 +1141,11 @@ Re-run when drift suspected.
 ### Task 7: Implement `event_router::dispatch_event` + `RouterAction`
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/sse/event_router.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/sse/event_router.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Replace the placeholder body of `lingxi-core/crates/orchestrator/src/sse/event_router.rs` with:
+- [ ] Step 1 — Replace the placeholder body of `lingxi-code/crates/orchestrator/src/sse/event_router.rs` with:
   ```rust
   //! `StreamEvent` → router-action dispatch.
   //!
@@ -1376,11 +1376,11 @@ Re-run when drift suspected.
 ### Task 8: Wire `MockStreamingApiClient` into `test_support` re-exports
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/test_support.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/test_support.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Open `lingxi-core/crates/orchestrator/src/test_support.rs` (M5-02 created it; M5-03 may have extended it with `StaticMemoryProvider`). Locate the existing `pub use` re-export block at the top OR the very bottom of the file.
+- [ ] Step 1 — Open `lingxi-code/crates/orchestrator/src/test_support.rs` (M5-02 created it; M5-03 may have extended it with `StaticMemoryProvider`). Locate the existing `pub use` re-export block at the top OR the very bottom of the file.
 
 - [ ] Step 2 — Append a re-export pulling the streaming mocks into the same namespace:
   ```rust
@@ -1404,11 +1404,11 @@ Re-run when drift suspected.
 ### Task 9: Implement `streaming_loop::pump_stream` (no orchestrator integration yet)
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/streaming_loop.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/streaming_loop.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Open `lingxi-core/crates/orchestrator/src/streaming_loop.rs`. Replace the placeholder body with the FIRST half of the streaming machinery: a `pump_stream` free function that consumes a stream and returns a `PumpedTurn` describing what to do next. Tool dispatch is concurrent — handled here via `tokio::spawn` and `join_all` after `message_stop`. The OUTER turn loop (which calls `pump_stream` and then loops or exits) lands in Task 12.
+- [ ] Step 1 — Open `lingxi-code/crates/orchestrator/src/streaming_loop.rs`. Replace the placeholder body with the FIRST half of the streaming machinery: a `pump_stream` free function that consumes a stream and returns a `PumpedTurn` describing what to do next. Tool dispatch is concurrent — handled here via `tokio::spawn` and `join_all` after `message_stop`. The OUTER turn loop (which calls `pump_stream` and then loops or exits) lands in Task 12.
   ```rust
   //! Streaming turn loop core helpers.
   //!
@@ -1610,11 +1610,11 @@ Re-run when drift suspected.
 ### Task 10: First failing test — mid-stream tool dispatch timing
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/tests/streaming_mid_stream_tool_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/streaming_mid_stream_tool_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Create `lingxi-core/crates/orchestrator/tests/streaming_mid_stream_tool_test.rs`:
+- [ ] Step 1 — Create `lingxi-code/crates/orchestrator/tests/streaming_mid_stream_tool_test.rs`:
   ```rust
   //! Mid-stream tool dispatch (M5-04 Task 10 — RED).
   //!
@@ -1722,13 +1722,13 @@ Re-run when drift suspected.
 ### Task 11: Add `StreamingApiClient` trait + `AnthropicProviderStreamingAdapter` + `messages_create_stream`
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs`
-- Modify: `lingxi-core/crates/api-client/src/anthropic.rs`
-- Modify: `lingxi-core/crates/orchestrator/src/lib.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs`
+- Modify: `lingxi-code/crates/api-client/src/anthropic.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/lib.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Open `lingxi-core/crates/api-client/src/anthropic.rs`. Find `messages_create_non_stream`. Immediately AFTER it, add a new method:
+- [ ] Step 1 — Open `lingxi-code/crates/api-client/src/anthropic.rs`. Find `messages_create_non_stream`. Immediately AFTER it, add a new method:
   ```rust
   /// Open a streaming `messages.create` request. Yields wire-decoded
   /// `StreamEvent` values until the server emits `message_stop` (or
@@ -1785,7 +1785,7 @@ Re-run when drift suspected.
   }
   ```
 
-  **Note on `HttpTransport::stream_sse`:** confirm at Task 11 step 1.5 whether the transport already has a `stream_sse` method (M3-03 may have shipped it). Run `grep -rn "fn stream_sse\|fn sse_stream" lingxi-core/crates/traits/src/http.rs lingxi-core/crates/api-client/src/` — if the method exists with a different name (e.g. `sse_stream`), update the call. If no SSE streaming method exists yet, you must extend `HttpTransport` first (and likely M3-03 should have done so). In that case, add a minimal `stream_sse` to `lingxi-traits::HttpTransport`:
+  **Note on `HttpTransport::stream_sse`:** confirm at Task 11 step 1.5 whether the transport already has a `stream_sse` method (M3-03 may have shipped it). Run `grep -rn "fn stream_sse\|fn sse_stream" lingxi-code/crates/traits/src/http.rs lingxi-code/crates/api-client/src/` — if the method exists with a different name (e.g. `sse_stream`), update the call. If no SSE streaming method exists yet, you must extend `HttpTransport` first (and likely M3-03 should have done so). In that case, add a minimal `stream_sse` to `lingxi-traits::HttpTransport`:
   ```rust
   async fn stream_sse(
       &self,
@@ -1799,7 +1799,7 @@ Re-run when drift suspected.
   ```
   with a default impl that returns `Err(HttpError::Unsupported)` so existing impls don't break, then implement the real transport variant in `lingxi-bridge` (or wherever the production transport lives). Document the deviation in the commit message.
 
-- [ ] Step 2 — Open `lingxi-core/crates/orchestrator/src/conversation.rs`. Locate the `OrchestratorApiClient` trait definition (from M5-02 Task 6). Immediately AFTER its `}` closing brace, add the streaming trait + adapter:
+- [ ] Step 2 — Open `lingxi-code/crates/orchestrator/src/conversation.rs`. Locate the `OrchestratorApiClient` trait definition (from M5-02 Task 6). Immediately AFTER its `}` closing brace, add the streaming trait + adapter:
   ```rust
   /// Streaming-API surface used by the orchestrator's streaming turn loop.
   ///
@@ -1859,7 +1859,7 @@ Re-run when drift suspected.
   }
   ```
 
-- [ ] Step 3 — Modify `lingxi-core/crates/orchestrator/src/lib.rs` to re-export the new trait:
+- [ ] Step 3 — Modify `lingxi-code/crates/orchestrator/src/lib.rs` to re-export the new trait:
   ```rust
   pub use conversation::{
       AnthropicProviderAdapter, AnthropicProviderStreamingAdapter, ConversationOrchestrator,
@@ -1885,7 +1885,7 @@ Re-run when drift suspected.
 ### Task 12: `ConversationOrchestrator::new_with_streaming` + `run_turn_streaming` (text-only path makes Task 3 + 9 tests green)
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs`
 
 **Steps:**
 
@@ -2178,7 +2178,7 @@ Re-run when drift suspected.
   ```
   **Important:** the exact body of `assemble_system_prompt_for_turn` mirrors what M5-03 ships in `run_turn`. If M5-03's version differs (e.g. uses a different MemoryFile mapping or different ctx defaults), copy ITS version verbatim. The point of this helper is to keep the streaming path 1:1 with the batched path's prompt-assembly behavior. If `run_turn` in M5-03 already extracts this into a private helper (e.g. `fn assemble_system_prompt_for_turn`), DELETE the body above and call the existing helper instead — do NOT duplicate logic.
 
-- [ ] Step 4 — Update `lingxi-core/crates/orchestrator/src/lib.rs` re-exports if `NoStreamingApiClient` should be visible outside (it should NOT — keep it `pub(crate)`).
+- [ ] Step 4 — Update `lingxi-code/crates/orchestrator/src/lib.rs` re-exports if `NoStreamingApiClient` should be visible outside (it should NOT — keep it `pub(crate)`).
 
 - [ ] Step 5 — Update the existing M5-02/M5-03 integration tests to pass `Arc::new(NoStreamingApiClient)` is NOT needed because `new` (the legacy constructor) is still callable. Verify by running `cargo test -p lingxi-orchestrator --test orchestrator_smoke_test --test orchestrator_multi_turn_test --test orchestrator_max_turns_test --test orchestrator_tool_error_test --test orchestrator_real_tools_test`. All M5-02/M5-03 tests must still pass without modification.
 
@@ -2191,8 +2191,8 @@ Re-run when drift suspected.
 ### Task 13: Promote tool dispatch to concurrent (mid-stream + multi-tool)
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/streaming_loop.rs`
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/streaming_loop.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs`
 
 **Steps:**
 
@@ -2295,11 +2295,11 @@ Re-run when drift suspected.
 ### Task 14: Test — two concurrent tools in one response
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/tests/streaming_concurrent_tools_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/streaming_concurrent_tools_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Create `lingxi-core/crates/orchestrator/tests/streaming_concurrent_tools_test.rs`:
+- [ ] Step 1 — Create `lingxi-code/crates/orchestrator/tests/streaming_concurrent_tools_test.rs`:
   ```rust
   //! Two tool_use blocks in one streaming response (M5-04 Task 14).
   //!
@@ -2428,12 +2428,12 @@ Re-run when drift suspected.
 ### Task 15: Test — `ping` mid-stream is a no-op + multi-turn streaming
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/tests/streaming_ping_noop_test.rs`
-- Create: `lingxi-core/crates/orchestrator/tests/streaming_multi_turn_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/streaming_ping_noop_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/streaming_multi_turn_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Create `lingxi-core/crates/orchestrator/tests/streaming_ping_noop_test.rs`:
+- [ ] Step 1 — Create `lingxi-code/crates/orchestrator/tests/streaming_ping_noop_test.rs`:
   ```rust
   //! `ping` event is a no-op (M5-04 Task 15).
 
@@ -2492,7 +2492,7 @@ Re-run when drift suspected.
   }
   ```
 
-- [ ] Step 2 — Create `lingxi-core/crates/orchestrator/tests/streaming_multi_turn_test.rs`:
+- [ ] Step 2 — Create `lingxi-code/crates/orchestrator/tests/streaming_multi_turn_test.rs`:
   ```rust
   //! Multi-turn streaming — turn 1 tool_use, turn 2 end_turn (M5-04 Task 15).
 
@@ -2583,14 +2583,14 @@ Re-run when drift suspected.
 ### Task 16: Telemetry — 2 new events + count 241 → 243
 
 **Files:**
-- Modify: `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs`
-- Modify: `lingxi-core/crates/telemetry/src/tengu/mod.rs`
-- Modify: `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs`
-- Modify: `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json`
+- Modify: `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs`
+- Modify: `lingxi-code/crates/telemetry/src/tengu/mod.rs`
+- Modify: `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs`
+- Modify: `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json`
 
 **Steps:**
 
-- [ ] Step 1 — Open `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs` (created by M5-02 with 3 conversation events). Append two new constants AFTER the existing 3:
+- [ ] Step 1 — Open `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` (created by M5-02 with 3 conversation events). Append two new constants AFTER the existing 3:
   ```rust
   /// Streaming turn started — emitted at the top of
   /// `ConversationOrchestrator::run_turn_streaming` before any session
@@ -2621,7 +2621,7 @@ Re-run when drift suspected.
   ];
   ```
 
-- [ ] Step 3 — Open `lingxi-core/crates/telemetry/src/tengu/mod.rs`. Update the `TOTAL` arithmetic at the top of `ALL_EVENT_NAMES`:
+- [ ] Step 3 — Open `lingxi-code/crates/telemetry/src/tengu/mod.rs`. Update the `TOTAL` arithmetic at the top of `ALL_EVENT_NAMES`:
   ```rust
   // Before M5-04 (from M5-02):
   //   const TOTAL: usize = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 3 + 1;  // = 241
@@ -2632,7 +2632,7 @@ Re-run when drift suspected.
 
   The `concat_all` body that walks each submodule's `NAMES` array must still walk `orchestrator::NAMES` (which is now 5 long). If `mod.rs` does NOT yet include an `orchestrator::NAMES` walk (M5-02 may have inserted it between `settings` and `release`), confirm by reading the file and add the walk in the correct registration-order position (after `settings`, before `release`).
 
-- [ ] Step 4 — Open `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs`. Update the `registry_is_exactly_241_entries` test:
+- [ ] Step 4 — Open `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs`. Update the `registry_is_exactly_241_entries` test:
   ```rust
   // Before:
   //   assert_eq!(ALL_EVENT_NAMES.len(), 241);
@@ -2644,7 +2644,7 @@ Re-run when drift suspected.
   // 213 (post-M4-07) + 24 (M4-08) + 1 (M4-09) + 3 (M5-02) + 0 (M5-03) + 2 (M5-04) = 243.
   ```
 
-- [ ] Step 5 — Open `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json`. Find the section where the M5-02 orchestrator events were inserted (between the `tool_*` block and the trailing `lingxi_core_v0_5_0_released` entry). Append two new entries IMMEDIATELY AFTER `tengu_orchestrator_conversation_failed` and BEFORE `lingxi_core_v0_5_0_released`:
+- [ ] Step 5 — Open `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json`. Find the section where the M5-02 orchestrator events were inserted (between the `tool_*` block and the trailing `lingxi_core_v0_5_0_released` entry). Append two new entries IMMEDIATELY AFTER `tengu_orchestrator_conversation_failed` and BEFORE `lingxi_core_v0_5_0_released`:
   ```json
         "tengu_orchestrator_turn_streaming_started",
         "tengu_orchestrator_turn_streaming_completed",
@@ -2668,12 +2668,12 @@ Re-run when drift suspected.
 ### Task 17: Error-propagation test + streaming-vs-batched equivalence test
 
 **Files:**
-- Create: `lingxi-core/crates/orchestrator/tests/streaming_error_propagation_test.rs`
-- Create: `lingxi-core/crates/orchestrator/tests/streaming_vs_batched_equivalence_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/streaming_error_propagation_test.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/streaming_vs_batched_equivalence_test.rs`
 
 **Steps:**
 
-- [ ] Step 1 — Create `lingxi-core/crates/orchestrator/tests/streaming_error_propagation_test.rs`:
+- [ ] Step 1 — Create `lingxi-code/crates/orchestrator/tests/streaming_error_propagation_test.rs`:
   ```rust
   //! Mid-stream Err propagates as `OrchestratorError::Streaming` (M5-04 Task 17).
 
@@ -2724,7 +2724,7 @@ Re-run when drift suspected.
   }
   ```
 
-- [ ] Step 2 — Create `lingxi-core/crates/orchestrator/tests/streaming_vs_batched_equivalence_test.rs`:
+- [ ] Step 2 — Create `lingxi-code/crates/orchestrator/tests/streaming_vs_batched_equivalence_test.rs`:
   ```rust
   //! Same conversational outcome whether the turn runs via batched or
   //! streaming (M5-04 Task 17). Asserts:

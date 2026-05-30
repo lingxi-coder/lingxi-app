@@ -1,4 +1,4 @@
-// lingxi-core/crates/core/src/settings/loader.rs
+// lingxi-code/crates/core/src/settings/loader.rs
 //! 4-layer source orchestration.
 //!
 //! Task 7 lands [`read_settings_file`] (one file at a time). Task 8 layers

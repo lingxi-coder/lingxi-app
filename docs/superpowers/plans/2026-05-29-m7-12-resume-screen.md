@@ -6,7 +6,7 @@
 
 **Architecture:** A new full-page screen `screens/resume.rs` renders against the existing M5-08 session loader (`lingxi_session::jsonl::loader::{SessionMetadata, list_recent_sessions, load_session}`) — **zero engine change**. The screen is a modal route state added to `AppState.active_screen: Option<Screen>` (the enum M7-11 introduced) as a new `Screen::Resume` variant, routed through the priority-2 branch of the single `handle_live_key` dispatcher (spec §2.5). CLI dispatch (`lingxi-cli`) splits `--resume` with no id: in TTY mode it opens the iocraft screen; under `--no-tui` (or non-TTY) it falls through to the unchanged M5-08 stdio picker (`select_session_interactive`).
 
-**Tech Stack:** Rust 1.82 (pinned via `rust-toolchain`; **run all cargo from inside `lingxi-core/`**), iocraft `=0.8.3` (`View`, not `Box`), `lingxi-session` loader (`uuid`, `chrono`, `SystemTime`), `insta` snapshots, `tempfile` for loader fixtures.
+**Tech Stack:** Rust 1.82 (pinned via `rust-toolchain`; **run all cargo from inside `lingxi-code/`**), iocraft `=0.8.3` (`View`, not `Box`), `lingxi-session` loader (`uuid`, `chrono`, `SystemTime`), `insta` snapshots, `tempfile` for loader fixtures.
 
 ---
 
@@ -107,7 +107,7 @@ lingxi-session = { path = "../session" }
 
 - [ ] **Step 2: Verify it resolves**
 
-Run (from inside `lingxi-core/`):
+Run (from inside `lingxi-code/`):
 
 ```bash
 cargo check -p lingxi-tui
@@ -1308,7 +1308,7 @@ EOF
 
 **Files:** none (gate only)
 
-Spec §5.4: run the gate **from inside `lingxi-core/`** (toolchain pins rust 1.82.0; the repo root uses the host toolchain → spurious lint noise — this bit M6-08). No new telemetry events this sub-plan (baseline stays 326; screen-open event deferred to M7-16 audit per the M7-12 brief).
+Spec §5.4: run the gate **from inside `lingxi-code/`** (toolchain pins rust 1.82.0; the repo root uses the host toolchain → spurious lint noise — this bit M6-08). No new telemetry events this sub-plan (baseline stays 326; screen-open event deferred to M7-16 audit per the M7-12 brief).
 
 - [ ] **Step 1: Format + lint**
 

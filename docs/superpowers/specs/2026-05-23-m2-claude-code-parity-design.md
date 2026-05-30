@@ -1051,7 +1051,7 @@ might unify these, but for v0.3.0 they coexist.
 
 ### 8.1 Pre-release checklist (M2-07)
 
-Run from `lingxi-core/`:
+Run from `lingxi-code/`:
 
 ```bash
 cargo test --workspace

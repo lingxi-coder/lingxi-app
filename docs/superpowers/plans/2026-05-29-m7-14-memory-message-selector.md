@@ -6,7 +6,7 @@
 
 **Architecture:** Two surfaces in one sub-plan. (1) **Memory** is a full-page modal screen (`screens/memory.rs`): a `MemoryFileSelector` lists the project/user CLAUDE.md tiers discovered by `lingxi_memory::claude_md::hierarchy::walk`, and an inline edit view reads/writes that file's bytes — the M3 "store" *is* the on-disk CLAUDE.md, so reads go through `lingxi_memory::claude_md::loader::load_file` and writes go through a thin atomic `std::fs` write of the same `HierarchyEntry.path` (no new persistence layer — §4 R7). (2) **MessageSelector** is a component (`components/message_selector.rs`) that filters `AppState.messages` by a substring query, sets `AppState.scroll_offset` to the selected message's line offset using M7-03's `HeightCache` line model (jump-back), and exports a plain-text transcript dump to a default path (`~/.lingxi/exports/` with cwd fallback — §4 R10) with confirm-on-overwrite (no silent clobber). Both route through the **single** `handle_live_key` dispatcher (design §2.5): the Memory screen sits at `active_screen` priority 2 (the branch M7-11 establishes), and the MessageSelector search overlay sits at priority 3 (input-overlay), so neither re-introduces a parallel key path (the M6 ship-blocker).
 
-**Tech Stack:** Rust 1.82 (pinned via `rust-toolchain.toml` — **run all cargo from inside `lingxi-core/`**), iocraft `=0.8.3` (`View`, not `Box`), `lingxi-memory` (M3 CLAUDE.md hierarchy + loader), `lingxi-tui` (M7-03 `HeightCache`/`measured_height` for line-offset jump math), `insta` 1.40 for snapshots, `tempfile` for test stores.
+**Tech Stack:** Rust 1.82 (pinned via `rust-toolchain.toml` — **run all cargo from inside `lingxi-code/`**), iocraft `=0.8.3` (`View`, not `Box`), `lingxi-memory` (M3 CLAUDE.md hierarchy + loader), `lingxi-tui` (M7-03 `HeightCache`/`measured_height` for line-offset jump math), `insta` 1.40 for snapshots, `tempfile` for test stores.
 
 ---
 
@@ -30,29 +30,29 @@ If `active_screen` / `Screen` are **not yet present** when this plan executes, T
 ## File Structure
 
 **Created:**
-- `lingxi-core/crates/tui/src/screens/memory.rs` — the Memory screen: `MemoryTierEntry` (resolved tier row), `memory_tiers(cwd, home)` (pure resolver over `hierarchy::walk`), `MemoryScreenState` (selector index / edit-mode / buffer / dirty), `load_tier_body` + `save_tier_body` (read/write through the M3 store path), the `handle_memory_key` state machine, and the `MemoryScreen` iocraft component.
-- `lingxi-core/crates/tui/src/components/message_selector.rs` — `MessageSelectorState` (query / filtered indices / selected), `search_messages(messages, query)` (pure substring filter → `Vec<usize>`), `message_line_offset(messages, height_cache, target_index, viewport_height)` (pure jump-back math → line `scroll_offset`), `export_transcript(messages, dir, filename, overwrite)` (plain-text dump + overwrite guard), `default_export_dir()` / `default_export_filename()`, `handle_message_selector_key` state machine, and the `MessageSelector` iocraft component.
-- `lingxi-core/crates/tui/tests/behavior_memory_screen.rs` — memory tier listing, select→edit→save round-trip through a temp store, no-write-on-cancel.
-- `lingxi-core/crates/tui/tests/behavior_message_selector.rs` — search filter, jump-back offset, export-writes-file, export-refuses-silent-overwrite.
-- `lingxi-core/crates/tui/tests/render_memory_screen.rs` — insta snapshot of the tier selector.
-- `lingxi-core/crates/tui/tests/render_message_selector.rs` — insta snapshot of search results.
+- `lingxi-code/crates/tui/src/screens/memory.rs` — the Memory screen: `MemoryTierEntry` (resolved tier row), `memory_tiers(cwd, home)` (pure resolver over `hierarchy::walk`), `MemoryScreenState` (selector index / edit-mode / buffer / dirty), `load_tier_body` + `save_tier_body` (read/write through the M3 store path), the `handle_memory_key` state machine, and the `MemoryScreen` iocraft component.
+- `lingxi-code/crates/tui/src/components/message_selector.rs` — `MessageSelectorState` (query / filtered indices / selected), `search_messages(messages, query)` (pure substring filter → `Vec<usize>`), `message_line_offset(messages, height_cache, target_index, viewport_height)` (pure jump-back math → line `scroll_offset`), `export_transcript(messages, dir, filename, overwrite)` (plain-text dump + overwrite guard), `default_export_dir()` / `default_export_filename()`, `handle_message_selector_key` state machine, and the `MessageSelector` iocraft component.
+- `lingxi-code/crates/tui/tests/behavior_memory_screen.rs` — memory tier listing, select→edit→save round-trip through a temp store, no-write-on-cancel.
+- `lingxi-code/crates/tui/tests/behavior_message_selector.rs` — search filter, jump-back offset, export-writes-file, export-refuses-silent-overwrite.
+- `lingxi-code/crates/tui/tests/render_memory_screen.rs` — insta snapshot of the tier selector.
+- `lingxi-code/crates/tui/tests/render_message_selector.rs` — insta snapshot of search results.
 
 **Modified:**
-- `lingxi-core/crates/tui/src/screens/mod.rs` — `pub mod memory;`; add `Screen::Memory` variant (or the whole `Screen` enum if M7-11 hasn't landed it).
-- `lingxi-core/crates/tui/src/components/mod.rs` — `pub mod message_selector;`.
-- `lingxi-core/crates/tui/src/state.rs` — add `memory_screen: MemoryScreenState` and `message_selector: MessageSelectorState` sub-state slots + (only if M7-11 absent) `active_screen: Option<Screen>`.
-- `lingxi-core/crates/tui/src/app.rs:267-331` — `render_screen` gains a `Screen::Memory` render branch (priority 2, after the `pending_permission` branch) and a MessageSelector overlay branch.
-- `lingxi-core/crates/tui/src/root.rs:187-211` — `handle_live_key` routes to `handle_memory_key` when `active_screen == Some(Screen::Memory)` (priority 2) and to `handle_message_selector_key` when the selector is open (priority 3); Ctrl-T opens the selector.
-- `lingxi-core/crates/tui/Cargo.toml` — add `lingxi-memory` (path dep) under `[dependencies]` and `tempfile` under `[dev-dependencies]` if absent.
-- `lingxi-core/crates/commands/src/builtin/export.rs` (Created) + `lingxi-core/crates/commands/src/builtin/mod.rs` — real `/export` handler replacing the M5-11 unimplemented stub; wired to signal the TUI to open the selector's export flow.
+- `lingxi-code/crates/tui/src/screens/mod.rs` — `pub mod memory;`; add `Screen::Memory` variant (or the whole `Screen` enum if M7-11 hasn't landed it).
+- `lingxi-code/crates/tui/src/components/mod.rs` — `pub mod message_selector;`.
+- `lingxi-code/crates/tui/src/state.rs` — add `memory_screen: MemoryScreenState` and `message_selector: MessageSelectorState` sub-state slots + (only if M7-11 absent) `active_screen: Option<Screen>`.
+- `lingxi-code/crates/tui/src/app.rs:267-331` — `render_screen` gains a `Screen::Memory` render branch (priority 2, after the `pending_permission` branch) and a MessageSelector overlay branch.
+- `lingxi-code/crates/tui/src/root.rs:187-211` — `handle_live_key` routes to `handle_memory_key` when `active_screen == Some(Screen::Memory)` (priority 2) and to `handle_message_selector_key` when the selector is open (priority 3); Ctrl-T opens the selector.
+- `lingxi-code/crates/tui/Cargo.toml` — add `lingxi-memory` (path dep) under `[dependencies]` and `tempfile` under `[dev-dependencies]` if absent.
+- `lingxi-code/crates/commands/src/builtin/export.rs` (Created) + `lingxi-code/crates/commands/src/builtin/mod.rs` — real `/export` handler replacing the M5-11 unimplemented stub; wired to signal the TUI to open the selector's export flow.
 
 **Read-only references (do NOT edit):**
-- `lingxi-core/crates/memory/src/claude_md/hierarchy.rs` — `walk(cwd, home) -> Hierarchy`, `HierarchyEntry { path, is_local_override, exact_case }`, `FILE_NAME = "CLAUDE.md"`.
-- `lingxi-core/crates/memory/src/claude_md/loader.rs` — `load_file(path, bus) -> Result<LoadedFile, LoaderError>`, `LoadedFile { path, body, size_bytes }`.
-- `lingxi-core/crates/tui/src/components/virtual_message_list.rs` — `HeightCache::build`, `measured_height` (M7-03 line model for jump-back).
-- `lingxi-core/crates/tui/src/state.rs` — `AppState.messages: Vec<RenderedMessage>`, `RenderedMessage` variants, `scroll_offset`.
-- `lingxi-core/crates/tui/src/app.rs:267-308` — the `pending_permission` render branch (the pattern the Memory branch mirrors).
-- `lingxi-core/crates/tui/src/root.rs:187-211` — the `handle_live_key` focus-trap dispatcher (the single key path to extend).
+- `lingxi-code/crates/memory/src/claude_md/hierarchy.rs` — `walk(cwd, home) -> Hierarchy`, `HierarchyEntry { path, is_local_override, exact_case }`, `FILE_NAME = "CLAUDE.md"`.
+- `lingxi-code/crates/memory/src/claude_md/loader.rs` — `load_file(path, bus) -> Result<LoadedFile, LoaderError>`, `LoadedFile { path, body, size_bytes }`.
+- `lingxi-code/crates/tui/src/components/virtual_message_list.rs` — `HeightCache::build`, `measured_height` (M7-03 line model for jump-back).
+- `lingxi-code/crates/tui/src/state.rs` — `AppState.messages: Vec<RenderedMessage>`, `RenderedMessage` variants, `scroll_offset`.
+- `lingxi-code/crates/tui/src/app.rs:267-308` — the `pending_permission` render branch (the pattern the Memory branch mirrors).
+- `lingxi-code/crates/tui/src/root.rs:187-211` — the `handle_live_key` focus-trap dispatcher (the single key path to extend).
 - `claude-code/src/components/memory/MemoryFileSelector.tsx`, `claude-code/src/components/MessageSelector.tsx`, `claude-code/src/components/ExportDialog.tsx` — literal-lock sources.
 
 ---
@@ -70,11 +70,11 @@ M7-03 made `scroll_offset` count **lines from the bottom** (not message rows), b
 ## Task 1: `lingxi-memory` dependency + module registration
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/Cargo.toml`
-- Modify: `lingxi-core/crates/tui/src/screens/mod.rs`
-- Modify: `lingxi-core/crates/tui/src/components/mod.rs`
-- Create: `lingxi-core/crates/tui/src/screens/memory.rs`
-- Create: `lingxi-core/crates/tui/src/components/message_selector.rs`
+- Modify: `lingxi-code/crates/tui/Cargo.toml`
+- Modify: `lingxi-code/crates/tui/src/screens/mod.rs`
+- Modify: `lingxi-code/crates/tui/src/components/mod.rs`
+- Create: `lingxi-code/crates/tui/src/screens/memory.rs`
+- Create: `lingxi-code/crates/tui/src/components/message_selector.rs`
 
 - [ ] **Step 1: Confirm whether `lingxi-memory` is already a tui dep**
 
@@ -144,11 +144,11 @@ Expected: builds clean (empty modules + new deps resolve).
 - [ ] **Step 7: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/Cargo.toml lingxi-core/Cargo.lock \
-        lingxi-core/crates/tui/src/screens/mod.rs \
-        lingxi-core/crates/tui/src/components/mod.rs \
-        lingxi-core/crates/tui/src/screens/memory.rs \
-        lingxi-core/crates/tui/src/components/message_selector.rs
+git add lingxi-code/crates/tui/Cargo.toml lingxi-code/Cargo.lock \
+        lingxi-code/crates/tui/src/screens/mod.rs \
+        lingxi-code/crates/tui/src/components/mod.rs \
+        lingxi-code/crates/tui/src/screens/memory.rs \
+        lingxi-code/crates/tui/src/components/message_selector.rs
 git commit -m "plan(M7-14 T1): scaffold memory screen + message_selector modules + lingxi-memory dep
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -159,8 +159,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 2: `Screen::Memory` variant + `active_screen` field (defensive)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/screens/mod.rs`
-- Modify: `lingxi-core/crates/tui/src/state.rs`
+- Modify: `lingxi-code/crates/tui/src/screens/mod.rs`
+- Modify: `lingxi-code/crates/tui/src/state.rs`
 
 - [ ] **Step 1: Check what M7-11 already landed**
 
@@ -233,7 +233,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/screens/mod.rs lingxi-core/crates/tui/src/state.rs
+git add lingxi-code/crates/tui/src/screens/mod.rs lingxi-code/crates/tui/src/state.rs
 git commit -m "plan(M7-14 T2): Screen::Memory variant + active_screen slot
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -244,7 +244,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 3: `memory_tiers` resolver — list project/user CLAUDE.md tiers
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/screens/memory.rs`
+- Modify: `lingxi-code/crates/tui/src/screens/memory.rs`
 
 - [ ] **Step 1: Write the failing test for tier resolution**
 
@@ -377,7 +377,7 @@ Expected: PASS (2 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/screens/memory.rs
+git add lingxi-code/crates/tui/src/screens/memory.rs
 git commit -m "plan(M7-14 T3): memory_tiers resolver over M3 CLAUDE.md hierarchy
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -388,7 +388,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 4: `load_tier_body` + `save_tier_body` — read/write through the M3 store
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/screens/memory.rs`
+- Modify: `lingxi-code/crates/tui/src/screens/memory.rs`
 
 - [ ] **Step 1: Write the failing round-trip test**
 
@@ -488,7 +488,7 @@ Expected: PASS (5 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/screens/memory.rs
+git add lingxi-code/crates/tui/src/screens/memory.rs
 git commit -m "plan(M7-14 T4): load_tier_body via M3 loader + atomic save_tier_body
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -499,7 +499,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 5: `MemoryScreenState` + `handle_memory_key` state machine
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/screens/memory.rs`
+- Modify: `lingxi-code/crates/tui/src/screens/memory.rs`
 
 - [ ] **Step 1: Write the failing tests for the state machine**
 
@@ -704,7 +704,7 @@ Expected: PASS (9 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/screens/memory.rs
+git add lingxi-code/crates/tui/src/screens/memory.rs
 git commit -m "plan(M7-14 T5): MemoryScreenState + handle_memory_key state machine
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -715,9 +715,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 6: `MemoryScreen` iocraft component + render branch
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/screens/memory.rs`
-- Modify: `lingxi-core/crates/tui/src/state.rs`
-- Modify: `lingxi-core/crates/tui/src/app.rs:267-308`
+- Modify: `lingxi-code/crates/tui/src/screens/memory.rs`
+- Modify: `lingxi-code/crates/tui/src/state.rs`
+- Modify: `lingxi-code/crates/tui/src/app.rs:267-308`
 
 - [ ] **Step 1: Add the `memory_screen` slot to `AppState`**
 
@@ -871,12 +871,12 @@ Expected: builds; lib tests PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/screens/memory.rs \
-        lingxi-core/crates/tui/src/state.rs \
-        lingxi-core/crates/tui/src/app.rs \
-        lingxi-core/crates/tui/Cargo.toml lingxi-core/Cargo.lock \
-        lingxi-core/crates/tui/tests/render_memory_screen.rs \
-        lingxi-core/crates/tui/tests/snapshots/
+git add lingxi-code/crates/tui/src/screens/memory.rs \
+        lingxi-code/crates/tui/src/state.rs \
+        lingxi-code/crates/tui/src/app.rs \
+        lingxi-code/crates/tui/Cargo.toml lingxi-code/Cargo.lock \
+        lingxi-code/crates/tui/tests/render_memory_screen.rs \
+        lingxi-code/crates/tui/tests/snapshots/
 git commit -m "plan(M7-14 T6): MemoryScreen component + priority-2 render branch + snapshot
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -887,7 +887,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 7: `search_messages` pure filter
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/message_selector.rs`
+- Modify: `lingxi-code/crates/tui/src/components/message_selector.rs`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -992,7 +992,7 @@ Expected: PASS (4 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/message_selector.rs
+git add lingxi-code/crates/tui/src/components/message_selector.rs
 git commit -m "plan(M7-14 T7): search_messages case-insensitive substring filter
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1003,7 +1003,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 8: `message_line_offset` — jump-back via M7-03 line model
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/message_selector.rs`
+- Modify: `lingxi-code/crates/tui/src/components/message_selector.rs`
 
 - [ ] **Step 1: Write the failing jump-back tests**
 
@@ -1105,7 +1105,7 @@ Expected: PASS (8 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/message_selector.rs
+git add lingxi-code/crates/tui/src/components/message_selector.rs
 git commit -m "plan(M7-14 T8): message_line_offset jump-back using M7-03 HeightCache
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1116,7 +1116,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 9: `export_transcript` + default path + overwrite confirm
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/message_selector.rs`
+- Modify: `lingxi-code/crates/tui/src/components/message_selector.rs`
 
 - [ ] **Step 1: Write the failing export tests**
 
@@ -1275,7 +1275,7 @@ Expected: PASS (12 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/message_selector.rs
+git add lingxi-code/crates/tui/src/components/message_selector.rs
 git commit -m "plan(M7-14 T9): export_transcript with default path + overwrite confirm
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1286,7 +1286,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 10: `MessageSelectorState` + `handle_message_selector_key` state machine
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/message_selector.rs`
+- Modify: `lingxi-code/crates/tui/src/components/message_selector.rs`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1474,7 +1474,7 @@ Expected: PASS (16 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/message_selector.rs
+git add lingxi-code/crates/tui/src/components/message_selector.rs
 git commit -m "plan(M7-14 T10): MessageSelectorState + handle_message_selector_key
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1485,8 +1485,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 11: Wire MessageSelector into `handle_live_key` (priority 3) + Memory routing (priority 2)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/state.rs`
-- Modify: `lingxi-core/crates/tui/src/root.rs:187-211`
+- Modify: `lingxi-code/crates/tui/src/state.rs`
+- Modify: `lingxi-code/crates/tui/src/root.rs:187-211`
 
 - [ ] **Step 1: Add the `message_selector` slot to `AppState`**
 
@@ -1649,11 +1649,11 @@ Expected: builds; all PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/state.rs \
-        lingxi-core/crates/tui/src/root.rs \
-        lingxi-core/crates/tui/src/components/message_selector.rs \
-        lingxi-core/crates/tui/Cargo.toml lingxi-core/Cargo.lock \
-        lingxi-core/crates/tui/tests/behavior_message_selector.rs
+git add lingxi-code/crates/tui/src/state.rs \
+        lingxi-code/crates/tui/src/root.rs \
+        lingxi-code/crates/tui/src/components/message_selector.rs \
+        lingxi-code/crates/tui/Cargo.toml lingxi-code/Cargo.lock \
+        lingxi-code/crates/tui/tests/behavior_message_selector.rs
 git commit -m "plan(M7-14 T11): route Memory (prio-2) + MessageSelector (prio-3) through handle_live_key
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1664,9 +1664,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 12: `MessageSelector` component + render overlay branch + snapshot
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/components/message_selector.rs`
-- Modify: `lingxi-core/crates/tui/src/app.rs:267-331`
-- Create: `lingxi-core/crates/tui/tests/render_message_selector.rs`
+- Modify: `lingxi-code/crates/tui/src/components/message_selector.rs`
+- Modify: `lingxi-code/crates/tui/src/app.rs:267-331`
+- Create: `lingxi-code/crates/tui/tests/render_message_selector.rs`
 
 - [ ] **Step 1: Implement the `MessageSelector` component**
 
@@ -1789,10 +1789,10 @@ Expected: builds; PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/message_selector.rs \
-        lingxi-core/crates/tui/src/app.rs \
-        lingxi-core/crates/tui/tests/render_message_selector.rs \
-        lingxi-core/crates/tui/tests/snapshots/
+git add lingxi-code/crates/tui/src/components/message_selector.rs \
+        lingxi-code/crates/tui/src/app.rs \
+        lingxi-code/crates/tui/tests/render_message_selector.rs \
+        lingxi-code/crates/tui/tests/snapshots/
 git commit -m "plan(M7-14 T12): MessageSelector component + render overlay + snapshot
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1803,9 +1803,9 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 13: Wire `/memory` → open the Memory screen + real `/export` handler
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/root.rs` (or `app.rs` command dispatch) — `/memory` opens `Screen::Memory`
-- Create: `lingxi-core/crates/commands/src/builtin/export.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/mod.rs`
+- Modify: `lingxi-code/crates/tui/src/root.rs` (or `app.rs` command dispatch) — `/memory` opens `Screen::Memory`
+- Create: `lingxi-code/crates/commands/src/builtin/export.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/mod.rs`
 
 - [ ] **Step 1: Find how slash-command output reaches the TUI**
 
@@ -1950,10 +1950,10 @@ Expected: all PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/app.rs \
-        lingxi-core/crates/tui/tests/behavior_memory_screen.rs \
-        lingxi-core/crates/tui/tests/behavior_message_selector.rs \
-        lingxi-core/crates/commands/src/builtin/
+git add lingxi-code/crates/tui/src/app.rs \
+        lingxi-code/crates/tui/tests/behavior_memory_screen.rs \
+        lingxi-code/crates/tui/tests/behavior_message_selector.rs \
+        lingxi-code/crates/commands/src/builtin/
 git commit -m "plan(M7-14 T13): /memory opens Memory screen; /export opens search/export overlay
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1973,7 +1973,7 @@ Expected: clean. If not, run `cargo fmt` and re-stage.
 - [ ] **Step 2: Clippy (workspace, all targets, deny warnings)**
 
 Run: `cd /Users/luolingfeng/Projects/LingXi-Next/lingxi-core && cargo clippy --workspace --all-targets -- -D warnings`
-Expected: clean. Fix any lints in the M7-14 files (the gate runs from inside `lingxi-core/` so the pinned 1.82 toolchain is used — running from repo root gives spurious lint noise; this bit M6-08).
+Expected: clean. Fix any lints in the M7-14 files (the gate runs from inside `lingxi-code/` so the pinned 1.82 toolchain is used — running from repo root gives spurious lint noise; this bit M6-08).
 
 - [ ] **Step 3: Full workspace test**
 

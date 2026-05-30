@@ -1,4 +1,4 @@
-# LingXi Core
+# LingXi Code
 
 Platform-agnostic Rust engine for an AI coding assistant with 1:1 behavioral
 parity to claude-code (2026-03-31 TypeScript reference) on desktop OSes.

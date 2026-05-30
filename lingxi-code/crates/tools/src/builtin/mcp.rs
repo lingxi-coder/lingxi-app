@@ -1052,7 +1052,7 @@ mod tests {
 
     #[test]
     fn mcp_timeout_byte_locked_literal() {
-        // Cross-crate byte-lock with M2-02b lingxi-core/crates/mcp/src/client.rs:489.
+        // Cross-crate byte-lock with M2-02b lingxi-code/crates/mcp/src/client.rs:489.
         let err = lingxi_mcp::McpClientError::Timeout {
             server: "filesystem".into(),
             tool: "read".into(),

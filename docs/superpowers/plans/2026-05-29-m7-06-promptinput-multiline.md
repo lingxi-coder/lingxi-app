@@ -1,12 +1,12 @@
 # LingXi Core M7 · Plan 06 · PromptInput multi-line + footer
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **Multi-commit allowed** — every implementation task ends with its own commit. The verification gate (final task) is the workspace-wide guard. Run all `cargo` commands **from inside `lingxi-core/`** (the toolchain pins rust 1.82.0 there; running from the repo root uses the host toolchain and produces spurious lint noise — this bit M6-08).
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **Multi-commit allowed** — every implementation task ends with its own commit. The verification gate (final task) is the workspace-wide guard. Run all `cargo` commands **from inside `lingxi-code/`** (the toolchain pins rust 1.82.0 there; running from the repo root uses the host toolchain and produces spurious lint noise — this bit M6-08).
 
 **Goal:** Refactor the single-file M6 editor `crates/tui/src/components/prompt_input.rs` into a `prompt_input/` submodule (`mod.rs` = editor core, `footer.rs` = footer surface), then grow the editor from single-line to multi-line: newline insertion (Shift+Enter, with `\`+Enter fallback), cursor up/down across lines, line/visual-line height that grows the `PromptInput` zone from 1 to N rows, and a footer surface (placeholder text, help-menu hint, mode-indicator, suggestions area). The refactor is move-don't-rewrite: every M6 behavior (line editing, history nav, submit, backspace, Home/End, the live-key dispatcher, slash routing) stays green. Enter still submits; the new newline key adds a line. Telemetry adds **0** events (baseline stays 326).
 
 **Architecture:** `components/prompt_input.rs` becomes `components/prompt_input/mod.rs` verbatim (move only) in Task 1 so all `crate::components::prompt_input::{apply_insert, apply_backspace, apply_move, CursorMove, PromptInput, PromptInputProps}` import paths in `app.rs`, `root.rs`, `screens/repl.rs`, and the keymap stay byte-identical — no call-site edits. Multi-line is then layered onto `mod.rs`: the existing `prompt_text: String` keeps holding the whole buffer, now with embedded `\n`; new pure helpers (`line_starts`, `cursor_line_col`, `apply_move_vertical`, `apply_newline`, `visual_row_count`) compute line geometry and vertical cursor motion as pure functions of `(text, cursor, width)`, mirroring the M6 pure-function-then-component split. A new `KeyAction::InsertNewline` variant (emitted by Shift+Enter / `\`+Enter in both keymaps) routes through `app::dispatch`. The `PromptInput` component renders one `Text` per visual row and the REPL screen sizes the zone from `visual_row_count`. A sibling `footer.rs` holds the `PromptInputFooter` component (placeholder / help hint / mode-indicator / suggestions placeholder), pure and snapshot-tested. No AppState shape change beyond the existing `prompt_text`/`prompt_cursor`; no engine wiring; the single `handle_live_key` dispatcher (§2.5 priority order) is preserved — `InsertNewline` slots into priority 4 (input widget) exactly like `InsertChar`.
 
-**Tech Stack:** Rust 2021, edition/rust-version from workspace (rust 1.82). `iocraft = "=0.8.3"` (`View`, not `Box`; `Text`). New deps added to `crates/tui/Cargo.toml`: `unicode-segmentation = "=1.12.0"` and `unicode-width = "=0.1.14"` (exact versions already resolved in `lingxi-core/Cargo.lock`; the workspace already builds them transitively, so this is a no-network pin). `insta = "1.40"` (yaml) for footer + multi-line snapshots, already a dev-dependency. No `StyledLine` type exists yet (it lands in M7-01); M7-06 does **not** depend on it — the footer renders with plain `Text` + `Color` from `theme::TuiTheme`, matching M6.
+**Tech Stack:** Rust 2021, edition/rust-version from workspace (rust 1.82). `iocraft = "=0.8.3"` (`View`, not `Box`; `Text`). New deps added to `crates/tui/Cargo.toml`: `unicode-segmentation = "=1.12.0"` and `unicode-width = "=0.1.14"` (exact versions already resolved in `lingxi-code/Cargo.lock`; the workspace already builds them transitively, so this is a no-network pin). `insta = "1.40"` (yaml) for footer + multi-line snapshots, already a dev-dependency. No `StyledLine` type exists yet (it lands in M7-01); M7-06 does **not** depend on it — the footer renders with plain `Text` + `Color` from `theme::TuiTheme`, matching M6.
 
 **References:**
 
@@ -69,7 +69,7 @@ Expected: hits in `app.rs` (`use crate::components::prompt_input::{apply_backspa
 - [ ] **Step 2: Move the file (git mv into the new dir)**
 
 ```bash
-cd lingxi-core/crates/tui/src/components
+cd lingxi-code/crates/tui/src/components
 mkdir prompt_input
 git mv prompt_input.rs prompt_input/mod.rs
 ```
@@ -132,7 +132,7 @@ EOF
 - Modify: `crates/tui/Cargo.toml` (`[dependencies]`)
 - Modify: `crates/tui/src/components/prompt_input/mod.rs`
 
-`mod.rs` will need grapheme-correct and width-aware geometry. The two crates resolve to the exact versions already in `lingxi-core/Cargo.lock` (`unicode-segmentation 1.12.0`, `unicode-width 0.1.14`), so adding them as direct deps does not change the lockfile or hit the network.
+`mod.rs` will need grapheme-correct and width-aware geometry. The two crates resolve to the exact versions already in `lingxi-code/Cargo.lock` (`unicode-segmentation 1.12.0`, `unicode-width 0.1.14`), so adding them as direct deps does not change the lockfile or hit the network.
 
 - [ ] **Step 1: Add the deps to `crates/tui/Cargo.toml`**
 
@@ -1222,7 +1222,7 @@ EOF
 - Create: `crates/tui/tests/prompt_input_footer_snapshot.rs`
 - Create snapshots: `crates/tui/tests/snapshots/*.snap` (insta-generated, accepted)
 
-Two snapshots per §5.2: the footer (mode-indicator + help hint + newline hint, with a placeholder), and a 3-line multi-line input. Then the full workspace verification gate (run from inside `lingxi-core/`) and the annotated tag.
+Two snapshots per §5.2: the footer (mode-indicator + help hint + newline hint, with a placeholder), and a 3-line multi-line input. Then the full workspace verification gate (run from inside `lingxi-code/`) and the annotated tag.
 
 - [ ] **Step 1: Write the footer snapshot test**
 

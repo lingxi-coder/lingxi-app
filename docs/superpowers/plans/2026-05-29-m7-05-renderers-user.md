@@ -6,7 +6,7 @@
 
 **Architecture:** Each renderer follows the M6-04 pattern: a `RenderedMessage` enum variant in `state.rs`, a pure string-form renderer fn + an iocraft `#[component]` in its own file, and a dispatch arm in **both** `components/messages/mod.rs::render_entry_to_string` (string form, used by snapshot/parity tests) and `components/scrollback.rs::render_message` (iocraft element form, used by the live mount). Markdown bodies (plan, local-command-output) go through `render::markdown::render`; bash output goes through the full ANSI parser (`render::ansi` from M7-01, the expanded successor to today's `crate::ansi`); the two folding renderers (grouped-tool-use, collapsed-read-search) carry a list of child entries and collapse/expand on the per-id `AppState.expanded` map already established in M6-04. Image is a `[Image #N]`/`[Image]` placeholder + metadata only — terminal image protocols defer to M8.
 
-**Tech Stack:** Rust (workspace MSRV pinned to 1.82 via `lingxi-core/rust-toolchain.toml`), iocraft `=0.8.3` (`View`, not `Box`; `Text`, `element!`, `#[component]`, `Props`), `insta` snapshots, `serde_json::Value` for tool input/result payloads, `lingxi_protocol::ToolUseId` correlators.
+**Tech Stack:** Rust (workspace MSRV pinned to 1.82 via `lingxi-code/rust-toolchain.toml`), iocraft `=0.8.3` (`View`, not `Box`; `Text`, `element!`, `#[component]`, `Props`), `insta` snapshots, `serde_json::Value` for tool input/result payloads, `lingxi_protocol::ToolUseId` correlators.
 
 ---
 
@@ -14,24 +14,24 @@
 
 **This is a TUI-surface-only milestone. Zero engine changes.** All renderers are pure functions of their inputs; no async, no orchestrator calls.
 
-**Run cargo from inside `lingxi-core/`** — the repo root uses the host toolchain and produces spurious clippy noise (this bit M6-08). Every build/test/clippy command in this plan assumes cwd `lingxi-core/`.
+**Run cargo from inside `lingxi-code/`** — the repo root uses the host toolchain and produces spurious clippy noise (this bit M6-08). Every build/test/clippy command in this plan assumes cwd `lingxi-code/`.
 
-**The crate lives at `lingxi-core/crates/tui/`** (NOT `crates/tui/` at repo root). All paths below are relative to repo root `/Users/luolingfeng/Projects/LingXi-Next`.
+**The crate lives at `lingxi-code/crates/tui/`** (NOT `crates/tui/` at repo root). All paths below are relative to repo root `/Users/luolingfeng/Projects/LingXi-Next`.
 
 **Two dispatchers, always edited together** (this is the single most common mistake to avoid):
-- `lingxi-core/crates/tui/src/components/messages/mod.rs` → `render_entry_to_string(entry, focused, expanded) -> String`. Match arm per variant. Used by snapshot tests + parity fixtures.
-- `lingxi-core/crates/tui/src/components/scrollback.rs` → `render_message(m, expanded, focused_tool_id) -> AnyElement<'static>`. Match arm per variant. Used by the live iocraft mount.
+- `lingxi-code/crates/tui/src/components/messages/mod.rs` → `render_entry_to_string(entry, focused, expanded) -> String`. Match arm per variant. Used by snapshot tests + parity fixtures.
+- `lingxi-code/crates/tui/src/components/scrollback.rs` → `render_message(m, expanded, focused_tool_id) -> AnyElement<'static>`. Match arm per variant. Used by the live iocraft mount.
 
 A new `RenderedMessage` variant that is added to `state.rs` but missing from either dispatcher's `match` will FAIL TO COMPILE (non-exhaustive match) — that is the safety net; rely on it.
 
 **Existing reference renderers to copy the shape from:**
-- `lingxi-core/crates/tui/src/components/messages/user_text.rs` — minimal: `Props` struct, one `#[component]`, `format!("> {}", body)`, `TuiTheme::USER`.
-- `lingxi-core/crates/tui/src/components/messages/user_tool_result.rs` — the full pattern: pure string-form renderer fn (`render_user_tool_result_to_string`), collapsed-vs-expanded branching on `props.expanded`, ANSI span pipeline (`render_user_tool_result_body_spans` → `parse_ansi`), and the `#[component]` that wraps it. **Copy its ANSI-span → iocraft-color mapping helper `ansi_to_iocraft_color` for bash-output and local-command-output.**
-- `lingxi-core/crates/tui/src/components/messages/assistant_text.rs` — `TuiTheme::ASSISTANT` cyan + `● ` prefix.
+- `lingxi-code/crates/tui/src/components/messages/user_text.rs` — minimal: `Props` struct, one `#[component]`, `format!("> {}", body)`, `TuiTheme::USER`.
+- `lingxi-code/crates/tui/src/components/messages/user_tool_result.rs` — the full pattern: pure string-form renderer fn (`render_user_tool_result_to_string`), collapsed-vs-expanded branching on `props.expanded`, ANSI span pipeline (`render_user_tool_result_body_spans` → `parse_ansi`), and the `#[component]` that wraps it. **Copy its ANSI-span → iocraft-color mapping helper `ansi_to_iocraft_color` for bash-output and local-command-output.**
+- `lingxi-code/crates/tui/src/components/messages/assistant_text.rs` — `TuiTheme::ASSISTANT` cyan + `● ` prefix.
 
-**Theme constants available today** (`lingxi-core/crates/tui/src/theme.rs`): `TuiTheme::ASSISTANT` (Cyan), `TuiTheme::USER` (Reset), `TuiTheme::ERROR` (Red), `TuiTheme::DIM` (DarkGrey). claude-code uses named theme colors (`bashBorder`, `subtle`, `planMode`, `remember`, `success`, `suggestion`) that do NOT exist in `theme.rs` yet and are NOT in scope for M7-05. **Map claude-code's named colors to the closest existing `TuiTheme` constant** (see the per-task literal tables) — do NOT add new theme constants here (that is M7-15's job). Record the chosen mapping in a `//` doc comment so M7-15 can revisit.
+**Theme constants available today** (`lingxi-code/crates/tui/src/theme.rs`): `TuiTheme::ASSISTANT` (Cyan), `TuiTheme::USER` (Reset), `TuiTheme::ERROR` (Red), `TuiTheme::DIM` (DarkGrey). claude-code uses named theme colors (`bashBorder`, `subtle`, `planMode`, `remember`, `success`, `suggestion`) that do NOT exist in `theme.rs` yet and are NOT in scope for M7-05. **Map claude-code's named colors to the closest existing `TuiTheme` constant** (see the per-task literal tables) — do NOT add new theme constants here (that is M7-15's job). Record the chosen mapping in a `//` doc comment so M7-15 can revisit.
 
-**ANSI / markdown primitives:** M7-01 lands `render::ansi` (full 256/truecolor parser) and `render::markdown::render(text, theme) -> Vec<StyledLine>`; M7-02 lands `render::syntax::highlight`. The styled-line type produced by these is the M7-01 `render::StyledLine` (a `Vec` of styled spans per line). **If `render/` is not yet present when you start** (M7-01/02 are prerequisites — verify with `ls lingxi-core/crates/tui/src/render/`), STOP and flag the missing prerequisite; do not stub the primitives. For bash output specifically, the existing `crate::ansi::parse_ansi` (8/16-color) is an acceptable fallback only if `render::ansi` is genuinely absent — note it in the file's doc comment as a downgrade and add a `// TODO(M7-01): switch to render::ansi` marker.
+**ANSI / markdown primitives:** M7-01 lands `render::ansi` (full 256/truecolor parser) and `render::markdown::render(text, theme) -> Vec<StyledLine>`; M7-02 lands `render::syntax::highlight`. The styled-line type produced by these is the M7-01 `render::StyledLine` (a `Vec` of styled spans per line). **If `render/` is not yet present when you start** (M7-01/02 are prerequisites — verify with `ls lingxi-code/crates/tui/src/render/`), STOP and flag the missing prerequisite; do not stub the primitives. For bash output specifically, the existing `crate::ansi::parse_ansi` (8/16-color) is an acceptable fallback only if `render::ansi` is genuinely absent — note it in the file's doc comment as a downgrade and add a `// TODO(M7-01): switch to render::ansi` marker.
 
 **Telemetry:** M7-05 adds **0** events. Baseline stays at 326. Do not register any event names. If a test asserts `ALL_EVENT_NAMES.len()`, it must still read 326 after this sub-plan.
 
@@ -49,54 +49,54 @@ A new `RenderedMessage` variant that is added to `state.rs` but missing from eit
 
 | File | Responsibility |
 |---|---|
-| `lingxi-core/crates/tui/src/components/messages/bash_input.rs` | `UserBashInputMessage` — `! ` prefix + command text |
-| `lingxi-core/crates/tui/src/components/messages/bash_output.rs` | `UserBashOutputMessage` — stdout/stderr through ANSI parser |
-| `lingxi-core/crates/tui/src/components/messages/command.rs` | `UserCommandMessage` — `❯ /cmd args` or `❯ Skill(name)` |
-| `lingxi-core/crates/tui/src/components/messages/local_command_output.rs` | `UserLocalCommandOutputMessage` — `  ⎿  ` gutter + markdown body |
-| `lingxi-core/crates/tui/src/components/messages/memory_input.rs` | `UserMemoryInputMessage` — `# {input}` + saving line |
-| `lingxi-core/crates/tui/src/components/messages/plan.rs` | `UserPlanMessage` — bordered "Plan to implement" + markdown |
-| `lingxi-core/crates/tui/src/components/messages/prompt.rs` | `UserPromptMessage` — prompt text with head+tail truncation |
-| `lingxi-core/crates/tui/src/components/messages/resource_update.rs` | `UserResourceUpdateMessage` — `↻ server: target · reason` lines |
-| `lingxi-core/crates/tui/src/components/messages/image.rs` | `UserImageMessage` — `[Image #N]` / `[Image]` placeholder + metadata |
-| `lingxi-core/crates/tui/src/components/messages/attachment.rs` | `AttachmentMessage` — solo-user attachment `Line` summaries |
-| `lingxi-core/crates/tui/src/components/messages/grouped_tool_use.rs` | `GroupedToolUseContent` — same-tool folding |
-| `lingxi-core/crates/tui/src/components/messages/collapsed_read_search.rs` | `CollapsedReadSearchContent` — Read/Search/List count folding |
+| `lingxi-code/crates/tui/src/components/messages/bash_input.rs` | `UserBashInputMessage` — `! ` prefix + command text |
+| `lingxi-code/crates/tui/src/components/messages/bash_output.rs` | `UserBashOutputMessage` — stdout/stderr through ANSI parser |
+| `lingxi-code/crates/tui/src/components/messages/command.rs` | `UserCommandMessage` — `❯ /cmd args` or `❯ Skill(name)` |
+| `lingxi-code/crates/tui/src/components/messages/local_command_output.rs` | `UserLocalCommandOutputMessage` — `  ⎿  ` gutter + markdown body |
+| `lingxi-code/crates/tui/src/components/messages/memory_input.rs` | `UserMemoryInputMessage` — `# {input}` + saving line |
+| `lingxi-code/crates/tui/src/components/messages/plan.rs` | `UserPlanMessage` — bordered "Plan to implement" + markdown |
+| `lingxi-code/crates/tui/src/components/messages/prompt.rs` | `UserPromptMessage` — prompt text with head+tail truncation |
+| `lingxi-code/crates/tui/src/components/messages/resource_update.rs` | `UserResourceUpdateMessage` — `↻ server: target · reason` lines |
+| `lingxi-code/crates/tui/src/components/messages/image.rs` | `UserImageMessage` — `[Image #N]` / `[Image]` placeholder + metadata |
+| `lingxi-code/crates/tui/src/components/messages/attachment.rs` | `AttachmentMessage` — solo-user attachment `Line` summaries |
+| `lingxi-code/crates/tui/src/components/messages/grouped_tool_use.rs` | `GroupedToolUseContent` — same-tool folding |
+| `lingxi-code/crates/tui/src/components/messages/collapsed_read_search.rs` | `CollapsedReadSearchContent` — Read/Search/List count folding |
 
 **Modified files:**
 
 | File | Change |
 |---|---|
-| `lingxi-core/crates/tui/src/state.rs` | +12 `RenderedMessage` variants |
-| `lingxi-core/crates/tui/src/components/messages/mod.rs` | +12 `pub mod` declarations; +12 arms in `render_entry_to_string` |
-| `lingxi-core/crates/tui/src/components/scrollback.rs` | +12 arms in `render_message` |
+| `lingxi-code/crates/tui/src/state.rs` | +12 `RenderedMessage` variants |
+| `lingxi-code/crates/tui/src/components/messages/mod.rs` | +12 `pub mod` declarations; +12 arms in `render_entry_to_string` |
+| `lingxi-code/crates/tui/src/components/scrollback.rs` | +12 arms in `render_message` |
 
 **New test files (one per renderer group, mirroring `tests/render_messages.rs`):**
 
 | File | Covers |
 |---|---|
-| `lingxi-core/crates/tui/tests/render_user_bash.rs` | bash_input, bash_output (incl. ANSI passthrough) |
-| `lingxi-core/crates/tui/tests/render_user_command.rs` | command, local_command_output |
-| `lingxi-core/crates/tui/tests/render_user_misc.rs` | memory_input, plan, prompt, resource_update, image |
-| `lingxi-core/crates/tui/tests/render_user_attachment.rs` | attachment |
-| `lingxi-core/crates/tui/tests/render_folding.rs` | grouped_tool_use, collapsed_read_search (collapsed + expanded) |
-| `lingxi-core/crates/tui/tests/dispatch_user_renderers.rs` | one dispatch test per variant (both dispatchers compile + route) |
+| `lingxi-code/crates/tui/tests/render_user_bash.rs` | bash_input, bash_output (incl. ANSI passthrough) |
+| `lingxi-code/crates/tui/tests/render_user_command.rs` | command, local_command_output |
+| `lingxi-code/crates/tui/tests/render_user_misc.rs` | memory_input, plan, prompt, resource_update, image |
+| `lingxi-code/crates/tui/tests/render_user_attachment.rs` | attachment |
+| `lingxi-code/crates/tui/tests/render_folding.rs` | grouped_tool_use, collapsed_read_search (collapsed + expanded) |
+| `lingxi-code/crates/tui/tests/dispatch_user_renderers.rs` | one dispatch test per variant (both dispatchers compile + route) |
 
 ---
 
 ## Task 1: `UserBashInputMessage` renderer + variant + dispatch
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/state.rs` (add variant)
-- Create: `lingxi-core/crates/tui/src/components/messages/bash_input.rs`
-- Modify: `lingxi-core/crates/tui/src/components/messages/mod.rs`
-- Modify: `lingxi-core/crates/tui/src/components/scrollback.rs`
-- Test: `lingxi-core/crates/tui/tests/render_user_bash.rs`
+- Modify: `lingxi-code/crates/tui/src/state.rs` (add variant)
+- Create: `lingxi-code/crates/tui/src/components/messages/bash_input.rs`
+- Modify: `lingxi-code/crates/tui/src/components/messages/mod.rs`
+- Modify: `lingxi-code/crates/tui/src/components/scrollback.rs`
+- Test: `lingxi-code/crates/tui/tests/render_user_bash.rs`
 
 **Literal lock** (claude-code `UserBashInputMessage.tsx`): prefix `"! "` (color `bashBorder` → map to `TuiTheme::DIM`); command text in `text` color (→ `TuiTheme::USER`). The input is the inner text of a `<bash-input>…</bash-input>` tag in the engine payload; M7-05 receives it already extracted as a plain `String`. Empty input → render nothing.
 
 - [ ] **Step 1: Write the failing snapshot test**
 
-In `lingxi-core/crates/tui/tests/render_user_bash.rs`:
+In `lingxi-code/crates/tui/tests/render_user_bash.rs`:
 ```rust
 use iocraft::prelude::*;
 use lingxi_tui::components::messages::bash_input::UserBashInputMessage;
@@ -112,12 +112,12 @@ fn bash_input_renders_bang_prefix() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run (cwd `lingxi-core/`): `cargo test -p lingxi-tui --test render_user_bash bash_input_renders_bang_prefix`
+Run (cwd `lingxi-code/`): `cargo test -p lingxi-tui --test render_user_bash bash_input_renders_bang_prefix`
 Expected: FAIL — `unresolved import lingxi_tui::components::messages::bash_input`.
 
 - [ ] **Step 3: Add the `RenderedMessage` variant**
 
-In `lingxi-core/crates/tui/src/state.rs`, inside `enum RenderedMessage`:
+In `lingxi-code/crates/tui/src/state.rs`, inside `enum RenderedMessage`:
 ```rust
     /// (M7-05) User bash-mode command line (`!` prefix). Body is the
     /// command text already extracted from the `<bash-input>` engine tag.
@@ -129,7 +129,7 @@ In `lingxi-core/crates/tui/src/state.rs`, inside `enum RenderedMessage`:
 
 - [ ] **Step 4: Write the renderer**
 
-Create `lingxi-core/crates/tui/src/components/messages/bash_input.rs`:
+Create `lingxi-code/crates/tui/src/components/messages/bash_input.rs`:
 ```rust
 //! `UserBashInputMessage` — `! ` prefix + command text.
 //!
@@ -192,7 +192,7 @@ mod tests {
 
 - [ ] **Step 5: Register the module + both dispatch arms**
 
-In `lingxi-core/crates/tui/src/components/messages/mod.rs`, add module + dispatch arm:
+In `lingxi-code/crates/tui/src/components/messages/mod.rs`, add module + dispatch arm:
 ```rust
 pub mod bash_input;
 ```
@@ -203,7 +203,7 @@ and in `render_entry_to_string`, add:
         }
 ```
 
-In `lingxi-core/crates/tui/src/components/scrollback.rs`, add to `render_message`:
+In `lingxi-code/crates/tui/src/components/scrollback.rs`, add to `render_message`:
 ```rust
         RenderedMessage::UserBashInput { command } => element! {
             UserBashInputMessage(command: command)
@@ -214,18 +214,18 @@ and add the import at the top: `use crate::components::messages::bash_input::Use
 
 - [ ] **Step 6: Run the snapshot test, accept the snapshot**
 
-Run (cwd `lingxi-core/`): `cargo test -p lingxi-tui --test render_user_bash bash_input_renders_bang_prefix`
+Run (cwd `lingxi-code/`): `cargo test -p lingxi-tui --test render_user_bash bash_input_renders_bang_prefix`
 Expected: FAIL on first run with a pending snapshot. Review the `.snap.new` shows `! ls -la`, then accept: `cargo insta accept`. Re-run → PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/state.rs \
-        lingxi-core/crates/tui/src/components/messages/bash_input.rs \
-        lingxi-core/crates/tui/src/components/messages/mod.rs \
-        lingxi-core/crates/tui/src/components/scrollback.rs \
-        lingxi-core/crates/tui/tests/render_user_bash.rs \
-        lingxi-core/crates/tui/tests/snapshots/
+git add lingxi-code/crates/tui/src/state.rs \
+        lingxi-code/crates/tui/src/components/messages/bash_input.rs \
+        lingxi-code/crates/tui/src/components/messages/mod.rs \
+        lingxi-code/crates/tui/src/components/scrollback.rs \
+        lingxi-code/crates/tui/tests/render_user_bash.rs \
+        lingxi-code/crates/tui/tests/snapshots/
 git commit -m "$(cat <<'EOF'
 plan(M7-05 T1): UserBashInputMessage renderer + variant + dispatch
 
@@ -239,17 +239,17 @@ EOF
 ## Task 2: `UserBashOutputMessage` renderer (ANSI passthrough)
 
 **Files:**
-- Modify: `lingxi-core/crates/tui/src/state.rs`
-- Create: `lingxi-core/crates/tui/src/components/messages/bash_output.rs`
-- Modify: `lingxi-core/crates/tui/src/components/messages/mod.rs`
-- Modify: `lingxi-core/crates/tui/src/components/scrollback.rs`
-- Test: `lingxi-core/crates/tui/tests/render_user_bash.rs`
+- Modify: `lingxi-code/crates/tui/src/state.rs`
+- Create: `lingxi-code/crates/tui/src/components/messages/bash_output.rs`
+- Modify: `lingxi-code/crates/tui/src/components/messages/mod.rs`
+- Modify: `lingxi-code/crates/tui/src/components/scrollback.rs`
+- Test: `lingxi-code/crates/tui/tests/render_user_bash.rs`
 
 **Literal lock** (claude-code `UserBashOutputMessage.tsx` → `BashToolResultMessage`): the body is `<bash-stdout>` (unwrapping an inner `<persisted-output>` if present) and `<bash-stderr>`; M7-05 receives `stdout: String` and `stderr: String` already extracted. Bash output carries ANSI SGR codes — it MUST route through the ANSI parser, NOT be rendered as a plain string. Reuse `user_tool_result.rs`'s `ansi_to_iocraft_color` mapping (copy it into a shared helper or duplicate with a doc comment; do not refactor `user_tool_result.rs` in this task).
 
 - [ ] **Step 1: Write the failing ANSI-passthrough test**
 
-In `lingxi-core/crates/tui/tests/render_user_bash.rs` append:
+In `lingxi-code/crates/tui/tests/render_user_bash.rs` append:
 ```rust
 use lingxi_tui::components::messages::bash_output::{render_bash_output_spans, UserBashOutputMessage};
 
@@ -273,7 +273,7 @@ fn bash_output_snapshot() {
 
 - [ ] **Step 2: Run to verify failure**
 
-Run (cwd `lingxi-core/`): `cargo test -p lingxi-tui --test render_user_bash bash_output`
+Run (cwd `lingxi-code/`): `cargo test -p lingxi-tui --test render_user_bash bash_output`
 Expected: FAIL — unresolved `bash_output` module.
 
 - [ ] **Step 3: Add the variant**
@@ -293,7 +293,7 @@ In `state.rs`:
 
 - [ ] **Step 4: Write the renderer**
 
-Create `lingxi-core/crates/tui/src/components/messages/bash_output.rs`:
+Create `lingxi-code/crates/tui/src/components/messages/bash_output.rs`:
 ```rust
 //! `UserBashOutputMessage` — stdout/stderr rendered through the ANSI parser.
 //!
@@ -417,18 +417,18 @@ Note: `TuiTheme` import may be unused — if clippy flags it, drop the `use crat
 
 - [ ] **Step 6: Run tests, accept snapshot**
 
-Run (cwd `lingxi-core/`): `cargo test -p lingxi-tui --test render_user_bash bash_output`
+Run (cwd `lingxi-code/`): `cargo test -p lingxi-tui --test render_user_bash bash_output`
 Expected: `bash_output_parses_ansi_into_spans` PASS; snapshot pending → `cargo insta accept` → re-run PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/src/state.rs \
-        lingxi-core/crates/tui/src/components/messages/bash_output.rs \
-        lingxi-core/crates/tui/src/components/messages/mod.rs \
-        lingxi-core/crates/tui/src/components/scrollback.rs \
-        lingxi-core/crates/tui/tests/render_user_bash.rs \
-        lingxi-core/crates/tui/tests/snapshots/
+git add lingxi-code/crates/tui/src/state.rs \
+        lingxi-code/crates/tui/src/components/messages/bash_output.rs \
+        lingxi-code/crates/tui/src/components/messages/mod.rs \
+        lingxi-code/crates/tui/src/components/scrollback.rs \
+        lingxi-code/crates/tui/tests/render_user_bash.rs \
+        lingxi-code/crates/tui/tests/snapshots/
 git commit -m "$(cat <<'EOF'
 plan(M7-05 T2): UserBashOutputMessage renderer with ANSI passthrough
 
@@ -444,7 +444,7 @@ EOF
 **Files:**
 - Modify: `state.rs`, `messages/mod.rs`, `scrollback.rs`
 - Create: `messages/command.rs`, `messages/local_command_output.rs`
-- Test: `lingxi-core/crates/tui/tests/render_user_command.rs`
+- Test: `lingxi-code/crates/tui/tests/render_user_command.rs`
 
 **Literal locks:**
 - `UserCommandMessage.tsx`: prefix `figures.pointer` = `❯ ` (U+276F + space, color `subtle` → `TuiTheme::DIM`). Slash form content = `/{command}` joined with `args` by a space → `/{command} {args}` (args omitted when empty). Skill form (`<skill-format>true</skill-format>`) → `Skill({command})`. Body text color `text` → `TuiTheme::USER`.
@@ -452,7 +452,7 @@ EOF
 
 - [ ] **Step 1: Write failing tests**
 
-In `lingxi-core/crates/tui/tests/render_user_command.rs`:
+In `lingxi-code/crates/tui/tests/render_user_command.rs`:
 ```rust
 use iocraft::prelude::*;
 use lingxi_tui::components::messages::command::{render_command_to_string, UserCommandMessage};
@@ -519,7 +519,7 @@ In `state.rs`:
 
 - [ ] **Step 4: Write `command.rs`**
 
-Create `lingxi-core/crates/tui/src/components/messages/command.rs`:
+Create `lingxi-code/crates/tui/src/components/messages/command.rs`:
 ```rust
 //! `UserCommandMessage` — `❯ /cmd args` or `❯ Skill(name)`.
 //!
@@ -588,7 +588,7 @@ mod tests {
 
 - [ ] **Step 5: Write `local_command_output.rs`**
 
-Create `lingxi-core/crates/tui/src/components/messages/local_command_output.rs`:
+Create `lingxi-code/crates/tui/src/components/messages/local_command_output.rs`:
 ```rust
 //! `UserLocalCommandOutputMessage` — `  ⎿  ` gutter + markdown body.
 //!
@@ -696,7 +696,7 @@ mod tests {
 
 Run: `cargo test -p lingxi-tui --test render_user_command` → fix until unit asserts PASS; `cargo insta accept`; re-run PASS.
 ```bash
-git add lingxi-core/crates/tui/src/state.rs lingxi-core/crates/tui/src/components/messages/command.rs lingxi-core/crates/tui/src/components/messages/local_command_output.rs lingxi-core/crates/tui/src/components/messages/mod.rs lingxi-core/crates/tui/src/components/scrollback.rs lingxi-core/crates/tui/tests/render_user_command.rs lingxi-core/crates/tui/tests/snapshots/
+git add lingxi-code/crates/tui/src/state.rs lingxi-code/crates/tui/src/components/messages/command.rs lingxi-code/crates/tui/src/components/messages/local_command_output.rs lingxi-code/crates/tui/src/components/messages/mod.rs lingxi-code/crates/tui/src/components/scrollback.rs lingxi-code/crates/tui/tests/render_user_command.rs lingxi-code/crates/tui/tests/snapshots/
 git commit -m "$(cat <<'EOF'
 plan(M7-05 T3): UserCommand + UserLocalCommandOutput renderers
 
@@ -712,7 +712,7 @@ EOF
 **Files:**
 - Modify: `state.rs`, `messages/mod.rs`, `scrollback.rs`
 - Create: `messages/memory_input.rs`, `messages/plan.rs`
-- Test: `lingxi-core/crates/tui/tests/render_user_misc.rs`
+- Test: `lingxi-code/crates/tui/tests/render_user_misc.rs`
 
 **Literal locks:**
 - `UserMemoryInputMessage.tsx`: `#` glyph (color `remember`, bg `memoryBackgroundColor`) then `" {input} "` (color `text`, same bg). Below it a dim saving line — claude-code picks randomly from `['Got it.', 'Good to know.', 'Noted.']`. **Determinism:** snapshots must be stable, so M7-05 fixes the saving line to the first literal `"Got it."` (document the divergence: claude-code randomizes for variety; we pin for snapshot stability — record in the literal-lock catalog at M7-16). Input extracted from `<user-memory-input>`. Map `remember` → `TuiTheme::USER`, gutter `# ` rendered as a `# ` prefix.
@@ -720,7 +720,7 @@ EOF
 
 - [ ] **Step 1: Failing tests**
 
-In `lingxi-core/crates/tui/tests/render_user_misc.rs`:
+In `lingxi-code/crates/tui/tests/render_user_misc.rs`:
 ```rust
 use iocraft::prelude::*;
 use lingxi_tui::components::messages::memory_input::{render_memory_to_string, UserMemoryInputMessage};
@@ -916,7 +916,7 @@ Note: confirm iocraft 0.8.3 `View` accepts `border_style`/`border_color` (it doe
 
 Run: `cargo test -p lingxi-tui --test render_user_misc memory plan` → PASS unit asserts; `cargo insta accept`; re-run PASS.
 ```bash
-git add lingxi-core/crates/tui/src/state.rs lingxi-core/crates/tui/src/components/messages/memory_input.rs lingxi-core/crates/tui/src/components/messages/plan.rs lingxi-core/crates/tui/src/components/messages/mod.rs lingxi-core/crates/tui/src/components/scrollback.rs lingxi-core/crates/tui/tests/render_user_misc.rs lingxi-core/crates/tui/tests/snapshots/
+git add lingxi-code/crates/tui/src/state.rs lingxi-code/crates/tui/src/components/messages/memory_input.rs lingxi-code/crates/tui/src/components/messages/plan.rs lingxi-code/crates/tui/src/components/messages/mod.rs lingxi-code/crates/tui/src/components/scrollback.rs lingxi-code/crates/tui/tests/render_user_misc.rs lingxi-code/crates/tui/tests/snapshots/
 git commit -m "$(cat <<'EOF'
 plan(M7-05 T4): UserMemoryInput + UserPlan renderers
 
@@ -932,7 +932,7 @@ EOF
 **Files:**
 - Modify: `state.rs`, `messages/mod.rs`, `scrollback.rs`
 - Create: `messages/prompt.rs`
-- Test: `lingxi-core/crates/tui/tests/render_user_misc.rs`
+- Test: `lingxi-code/crates/tui/tests/render_user_misc.rs`
 
 **Literal lock** (claude-code `UserPromptMessage.tsx`): renders the user prompt text (color `text`, bg `userMessageBackground`). The KAIROS/brief-layout branches are M8 team-mode scope — M7-05 implements the plain path only. The truncation constants are load-bearing: `MAX_DISPLAY_CHARS = 10_000`, `TRUNCATE_HEAD_CHARS = 2_500`, `TRUNCATE_TAIL_CHARS = 2_500`. When `text.len() > MAX_DISPLAY_CHARS`, display `"{head}\n… +{hiddenLines} lines …\n{tail}"` where head = first 2500 chars, tail = last 2500 chars, and `hiddenLines = countNewlines(text up to head boundary) - countNewlines(tail)`. The ellipsis marker is exactly `… +{N} lines …` (U+2026 ellipsis, surrounding spaces). Empty text → render nothing.
 
@@ -1065,7 +1065,7 @@ mod tests {
 
 Run: `cargo test -p lingxi-tui --test render_user_misc prompt` → PASS.
 ```bash
-git add lingxi-core/crates/tui/src/state.rs lingxi-core/crates/tui/src/components/messages/prompt.rs lingxi-core/crates/tui/src/components/messages/mod.rs lingxi-core/crates/tui/src/components/scrollback.rs lingxi-core/crates/tui/tests/render_user_misc.rs
+git add lingxi-code/crates/tui/src/state.rs lingxi-code/crates/tui/src/components/messages/prompt.rs lingxi-code/crates/tui/src/components/messages/mod.rs lingxi-code/crates/tui/src/components/scrollback.rs lingxi-code/crates/tui/tests/render_user_misc.rs
 git commit -m "$(cat <<'EOF'
 plan(M7-05 T5): UserPromptMessage renderer with head+tail truncation
 
@@ -1081,7 +1081,7 @@ EOF
 **Files:**
 - Modify: `state.rs`, `messages/mod.rs`, `scrollback.rs`
 - Create: `messages/resource_update.rs`, `messages/image.rs`
-- Test: `lingxi-core/crates/tui/tests/render_user_misc.rs`
+- Test: `lingxi-code/crates/tui/tests/render_user_misc.rs`
 
 **Literal locks:**
 - `UserResourceUpdateMessage.tsx`: each update line = `↻` (REFRESH_ARROW U+21BB, color `success` → `TuiTheme::ASSISTANT`) + ` ` + `{server}:` (dim) + ` ` + `{target}` (color `suggestion` → `TuiTheme::USER`) + optional ` · {reason}` (dim). For resource kind, `target` is a formatted URI: `file://` URIs show the basename; other URIs longer than 40 chars are truncated to 39 chars + `…` (U+2026). For polling kind, `target` is the tool name verbatim. M7-05 receives updates already parsed into `(server, target, reason)` triples — implement `format_uri` but the engine-side XML parse is out of scope (the data arrives structured). The separator between server:target and reason is ` · ` (space, U+00B7 middle dot, space).
@@ -1344,7 +1344,7 @@ mod tests {
 
 Run: `cargo test -p lingxi-tui --test render_user_misc image resource` → PASS; add `#[test]` snapshot for each component (`image_label`, `resource_lines`) and `cargo insta accept`.
 ```bash
-git add lingxi-core/crates/tui/src/state.rs lingxi-core/crates/tui/src/components/messages/resource_update.rs lingxi-core/crates/tui/src/components/messages/image.rs lingxi-core/crates/tui/src/components/messages/mod.rs lingxi-core/crates/tui/src/components/scrollback.rs lingxi-core/crates/tui/tests/render_user_misc.rs lingxi-core/crates/tui/tests/snapshots/
+git add lingxi-code/crates/tui/src/state.rs lingxi-code/crates/tui/src/components/messages/resource_update.rs lingxi-code/crates/tui/src/components/messages/image.rs lingxi-code/crates/tui/src/components/messages/mod.rs lingxi-code/crates/tui/src/components/scrollback.rs lingxi-code/crates/tui/tests/render_user_misc.rs lingxi-code/crates/tui/tests/snapshots/
 git commit -m "$(cat <<'EOF'
 plan(M7-05 T6): UserResourceUpdate + UserImage (placeholder) renderers
 
@@ -1360,7 +1360,7 @@ EOF
 **Files:**
 - Modify: `state.rs`, `messages/mod.rs`, `scrollback.rs`
 - Create: `messages/attachment.rs`
-- Test: `lingxi-core/crates/tui/tests/render_user_attachment.rs`
+- Test: `lingxi-code/crates/tui/tests/render_user_attachment.rs`
 
 **Literal locks** (claude-code `AttachmentMessage.tsx` — the `Line` helper is a dim 2-space-gutter row; bold spans wrap the path/count). M7-05 implements the solo-user attachment kinds via a single `Attachment` enum; team/swarm/hook kinds defer to M8 (document). Exact literals per kind:
 
@@ -1380,7 +1380,7 @@ Glyph `⧉` = U+29C9. M7-05 renders the full `Line` as dim text (bold spans coll
 
 - [ ] **Step 1: Failing tests**
 
-In `lingxi-core/crates/tui/tests/render_user_attachment.rs`:
+In `lingxi-code/crates/tui/tests/render_user_attachment.rs`:
 ```rust
 use iocraft::prelude::*;
 use lingxi_tui::components::messages::attachment::{render_attachment_to_string, Attachment, AttachmentMessage};
@@ -1567,7 +1567,7 @@ Note: `Attachment` has no `Copy`/`Default`-friendly auto-derive issue for the `P
 
 Run: `cargo test -p lingxi-tui --test render_user_attachment` → PASS; `cargo insta accept`.
 ```bash
-git add lingxi-core/crates/tui/src/state.rs lingxi-core/crates/tui/src/components/messages/attachment.rs lingxi-core/crates/tui/src/components/messages/mod.rs lingxi-core/crates/tui/src/components/scrollback.rs lingxi-core/crates/tui/tests/render_user_attachment.rs lingxi-core/crates/tui/tests/snapshots/
+git add lingxi-code/crates/tui/src/state.rs lingxi-code/crates/tui/src/components/messages/attachment.rs lingxi-code/crates/tui/src/components/messages/mod.rs lingxi-code/crates/tui/src/components/scrollback.rs lingxi-code/crates/tui/tests/render_user_attachment.rs lingxi-code/crates/tui/tests/snapshots/
 git commit -m "$(cat <<'EOF'
 plan(M7-05 T7): AttachmentMessage solo-user summary renderer
 
@@ -1583,7 +1583,7 @@ EOF
 **Files:**
 - Modify: `state.rs`, `messages/mod.rs`, `scrollback.rs`
 - Create: `messages/grouped_tool_use.rs`
-- Test: `lingxi-core/crates/tui/tests/render_folding.rs`
+- Test: `lingxi-code/crates/tui/tests/render_folding.rs`
 
 **Folding behavior** (claude-code `GroupedToolUseContent.tsx`): groups consecutive tool-use blocks of the **same tool name** and renders them as a unit. M7-05 reproduces the fold structure:
 - The variant carries `tool: String`, `group_id: ToolUseId` (the first child's id, used as the `expanded` map key), and `entries: Vec<(serde_json::Value, serde_json::Value)>` — `(input, result)` pairs.
@@ -1593,7 +1593,7 @@ EOF
 
 - [ ] **Step 1: Failing folding tests**
 
-In `lingxi-core/crates/tui/tests/render_folding.rs`:
+In `lingxi-code/crates/tui/tests/render_folding.rs`:
 ```rust
 use lingxi_protocol::ToolUseId;
 use lingxi_tui::components::messages::grouped_tool_use::render_grouped_to_string;
@@ -1772,7 +1772,7 @@ mod tests {
 
 Run: `cargo test -p lingxi-tui --test render_folding grouped` → PASS.
 ```bash
-git add lingxi-core/crates/tui/src/state.rs lingxi-core/crates/tui/src/components/messages/grouped_tool_use.rs lingxi-core/crates/tui/src/components/messages/mod.rs lingxi-core/crates/tui/src/components/scrollback.rs lingxi-core/crates/tui/tests/render_folding.rs
+git add lingxi-code/crates/tui/src/state.rs lingxi-code/crates/tui/src/components/messages/grouped_tool_use.rs lingxi-code/crates/tui/src/components/messages/mod.rs lingxi-code/crates/tui/src/components/scrollback.rs lingxi-code/crates/tui/tests/render_folding.rs
 git commit -m "$(cat <<'EOF'
 plan(M7-05 T8): GroupedToolUseContent same-tool folding renderer
 
@@ -1788,7 +1788,7 @@ EOF
 **Files:**
 - Modify: `state.rs`, `messages/mod.rs`, `scrollback.rs`
 - Create: `messages/collapsed_read_search.rs`
-- Test: `lingxi-core/crates/tui/tests/render_folding.rs`
+- Test: `lingxi-code/crates/tui/tests/render_folding.rs`
 
 **Folding behavior** (claude-code `CollapsedReadSearchContent.tsx`, non-verbose path). M7-05 scope = read/search/list counts (the solo-user core; git/PR/bash/mcp/memory/team parts defer to M8). Build a comma-joined summary line under the `  ⎿  ` gutter:
 - Verbs (active vs finalized) and nouns — exact literals:
@@ -2043,7 +2043,7 @@ mod tests {
 
 Run: `cargo test -p lingxi-tui --test render_folding collapsed` → PASS.
 ```bash
-git add lingxi-core/crates/tui/src/state.rs lingxi-core/crates/tui/src/components/messages/collapsed_read_search.rs lingxi-core/crates/tui/src/components/messages/mod.rs lingxi-core/crates/tui/src/components/scrollback.rs lingxi-core/crates/tui/tests/render_folding.rs
+git add lingxi-code/crates/tui/src/state.rs lingxi-code/crates/tui/src/components/messages/collapsed_read_search.rs lingxi-code/crates/tui/src/components/messages/mod.rs lingxi-code/crates/tui/src/components/scrollback.rs lingxi-code/crates/tui/tests/render_folding.rs
 git commit -m "$(cat <<'EOF'
 plan(M7-05 T9): CollapsedReadSearchContent Read/Search/List folding
 
@@ -2057,13 +2057,13 @@ EOF
 ## Task 10: Dispatch coverage tests for all 12 variants
 
 **Files:**
-- Test: `lingxi-core/crates/tui/tests/dispatch_user_renderers.rs`
+- Test: `lingxi-code/crates/tui/tests/dispatch_user_renderers.rs`
 
 **Why:** the two `match` arms compile-check exhaustiveness, but a dispatch test asserts each new variant actually *routes* through `render_entry_to_string` (string form) and produces the expected leading literal. This catches a wrong-arm copy-paste (e.g. `UserCommand` routed to `bash_input`'s renderer) that the compiler can't.
 
 - [ ] **Step 1: Write the dispatch test (one assertion per variant)**
 
-In `lingxi-core/crates/tui/tests/dispatch_user_renderers.rs`:
+In `lingxi-code/crates/tui/tests/dispatch_user_renderers.rs`:
 ```rust
 use lingxi_protocol::ToolUseId;
 use lingxi_tui::components::messages::render_entry_to_string;
@@ -2153,13 +2153,13 @@ fn dispatch_collapsed_read_search() {
 
 - [ ] **Step 2: Run the dispatch tests**
 
-Run (cwd `lingxi-core/`): `cargo test -p lingxi-tui --test dispatch_user_renderers`
+Run (cwd `lingxi-code/`): `cargo test -p lingxi-tui --test dispatch_user_renderers`
 Expected: PASS (all 12). If any FAILs, the dispatch arm for that variant routes to the wrong renderer or has a literal typo — fix the arm in `messages/mod.rs`.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/crates/tui/tests/dispatch_user_renderers.rs
+git add lingxi-code/crates/tui/tests/dispatch_user_renderers.rs
 git commit -m "$(cat <<'EOF'
 plan(M7-05 T10): dispatch coverage tests for all 12 user renderers
 
@@ -2174,31 +2174,31 @@ EOF
 
 **Files:** none modified (verification + tag only)
 
-**Run every command from inside `lingxi-core/`** (toolchain pins 1.82; running from repo root produces spurious lint noise — this bit M6-08).
+**Run every command from inside `lingxi-code/`** (toolchain pins 1.82; running from repo root produces spurious lint noise — this bit M6-08).
 
 - [ ] **Step 1: Format check**
 
-Run (cwd `lingxi-core/`): `cargo fmt --check`
+Run (cwd `lingxi-code/`): `cargo fmt --check`
 Expected: clean. If it reports diffs, run `cargo fmt` and re-check.
 
 - [ ] **Step 2: Clippy (deny warnings)**
 
-Run (cwd `lingxi-core/`): `cargo clippy --workspace --all-targets -- -D warnings`
+Run (cwd `lingxi-code/`): `cargo clippy --workspace --all-targets -- -D warnings`
 Expected: clean. Common fixes in this sub-plan: unused `TuiTheme` imports in `bash_output.rs`, `needless_pass_by_value` on `Value`-taking fns (the `#![allow(...)]` at the top of those files covers it — add it if clippy flags).
 
 - [ ] **Step 3: Full test suite**
 
-Run (cwd `lingxi-core/`): `cargo test --workspace`
+Run (cwd `lingxi-code/`): `cargo test --workspace`
 Expected: PASS. Known flakes (allowed to rerun, NOT failures): `rapid_writes_collapse_to_single_event`, `writer_output_equals_single_turn_fixture`, `streaming_concurrent_tools_test`, and `lingxi-platform-posix` fs_watch FSEvents timing tests. Rerun the specific flaky test if it trips; do not treat as a gate failure.
 
 - [ ] **Step 4: Telemetry baseline unchanged**
 
-Run (cwd `lingxi-core/`): `cargo test --workspace -- all_event_names 2>/dev/null; echo "verify the count test still reads 326"`
+Run (cwd `lingxi-code/`): `cargo test --workspace -- all_event_names 2>/dev/null; echo "verify the count test still reads 326"`
 Expected: the `ALL_EVENT_NAMES.len()` assertion (wherever it lives) still reads **326**. M7-05 registered no new events. If the count changed, you accidentally registered an event — revert it.
 
 - [ ] **Step 5: Cross-platform compile gate (5 targets)**
 
-Run (cwd `lingxi-core/`), each target:
+Run (cwd `lingxi-code/`), each target:
 ```bash
 cargo check --workspace --target x86_64-unknown-linux-gnu
 cargo check --workspace --target x86_64-apple-darwin
@@ -2242,7 +2242,7 @@ EOF
 - grouped_tool_use + collapsed_read_search folding — Tasks 8-9, with collapsed/expanded behavior tests. ✓
 - Telemetry adds 0 events; baseline 326 — Task 11 Step 4. ✓
 - Tests: 1-2 insta snapshots per renderer (Tasks 1-7), folding behavior tests (Tasks 8-9), ANSI-passthrough test (Task 2), dispatch test per variant (Task 10). ✓
-- Workspace gate from inside `lingxi-core/` + tag `m7.5` — Task 11. ✓
+- Workspace gate from inside `lingxi-code/` + tag `m7.5` — Task 11. ✓
 
 **2. Placeholder scan:** No "TBD"/"implement later"/"add error handling" — every step carries real code or an exact command. The only deferred items are explicitly-scoped M8 features (CloudLaunchContent diamonds, KAIROS brief layout, git/PR/bash/mcp/memory fold parts, inline image protocols) each with a documented `// SCOPE`/`TODO(M7-01)` marker and a reason. The `NO_CONTENT_MESSAGE` literal is flagged for byte-verification against `constants/messages.ts` (verify step in Task 3). ✓
 

@@ -1,4 +1,4 @@
-// lingxi-core/crates/core/tests/settings_module_exists.rs
+// lingxi-code/crates/core/tests/settings_module_exists.rs
 //! Smoke test: the settings module compiles and exports `SettingsError`.
 //! This is the very first failing test of M3-01.
 

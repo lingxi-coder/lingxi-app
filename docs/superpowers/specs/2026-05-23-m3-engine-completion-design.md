@@ -153,7 +153,7 @@ Each sub-plan is independently committable, independently verifiable, and produc
 ### Module structure increments
 
 ```
-lingxi-core/crates/core/
+lingxi-code/crates/core/
   settings/                              [NEW M3-01]
     mod.rs
     loader.rs                            # 4-layer source priority loader
@@ -162,7 +162,7 @@ lingxi-core/crates/core/
     schema.rs                            # SettingsJson type + validation
     env_parser.rs                        # LINGXI_*/CLAUDE_*/CLAUDE_CODE_* env walker
 
-lingxi-core/crates/memory/
+lingxi-code/crates/memory/
   memdir/                                [NEW M3-02; mirrors claude-code/src/memdir/]
     mod.rs
     scan.rs                              # memoryScan.ts equivalent
@@ -177,7 +177,7 @@ lingxi-core/crates/memory/
     hierarchy.rs                         # dir-up walk + user CLAUDE.md
     loader.rs                            # file reader + size cap
 
-lingxi-core/crates/api-client/
+lingxi-code/crates/api-client/
   anthropic.rs                           [EXTEND M3-03; +200 LOC]
                                          # add non-stream messages.create + count_tokens
   retry.rs                               [NEW M3-03]
@@ -185,19 +185,19 @@ lingxi-core/crates/api-client/
   rate_limit.rs                          [NEW M3-03]
                                          # parse Retry-After / anthropic-ratelimit-* headers
 
-lingxi-core/crates/anthropic-oauth/
+lingxi-code/crates/anthropic-oauth/
   refresh.rs                             [NEW M3-04]
                                          # reactive (401-driven) + proactive (5-min lead) refresh
   scope_upgrade.rs                       [NEW M3-04]
                                          # scope upgrade flow when API requires new scope
 
-lingxi-core/crates/cost/
+lingxi-code/crates/cost/
   events.rs                              [NEW M3-05]
                                          # emit tengu_cost_* on every API call
   tracker.rs                             [EXTEND M3-05]
                                          # hook into events; add cache hit/miss + batches discount
 
-lingxi-core/crates/telemetry/
+lingxi-code/crates/telemetry/
   tengu/                                 [NEW M3-06]
     mod.rs
     api.rs                               # tengu_api_*       (~25 events)
@@ -1034,11 +1034,11 @@ These do NOT block v0.4.0 release.
 - **M2 spec:** `docs/superpowers/specs/2026-05-23-m2-claude-code-parity-design.md`
 - **M2 plans:** `docs/superpowers/plans/2026-05-23-m2-{01..07}*.md`
 - **Existing LingXi crates:**
-  - `lingxi-core/crates/api-client/` (M2 SSE foundation)
-  - `lingxi-core/crates/anthropic-oauth/` (M1/M2 PKCE foundation)
-  - `lingxi-core/crates/memory/` (M1 skeleton)
-  - `lingxi-core/crates/cost/` (M1 budget/calculator/pricing/tracker/usage)
-  - `lingxi-core/crates/telemetry/` (M1 bus/sink/pii/killswitch)
+  - `lingxi-code/crates/api-client/` (M2 SSE foundation)
+  - `lingxi-code/crates/anthropic-oauth/` (M1/M2 PKCE foundation)
+  - `lingxi-code/crates/memory/` (M1 skeleton)
+  - `lingxi-code/crates/cost/` (M1 budget/calculator/pricing/tracker/usage)
+  - `lingxi-code/crates/telemetry/` (M1 bus/sink/pii/killswitch)
 
 - **JSON-RPC spec:** https://www.jsonrpc.org/specification (M2 already locked)
 - **Anthropic API docs:** https://docs.anthropic.com/api (canonical wire format)

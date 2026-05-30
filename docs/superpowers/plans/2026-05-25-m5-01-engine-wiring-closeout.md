@@ -4,9 +4,9 @@
 
 **Goal:** Close out the three v0.5.0 follow-ups that were intentionally stubbed in M4-05's wiring sprint, **without regressing the two `Arc::ptr_eq` invariants** that anchor recursive-subagent dispatch. After this plan, the M4-05 wiring path is no longer half-stubbed: a real subagent driven by `lingxi_core::reduce` runs to terminal state and emits `SubagentEvent` faithfully; `TaskRegistryHandle::output` reads the actual spool file via `TaskOutputManager::read` (not the empty placeholder); and `RegistryToolInvoker::invoke` dispatches into `ToolRegistry`-resident tools (not `Ok(Value::Null)` after a `find_by_name` probe). Tag `m5.1` at the end. **No new telemetry events. No new byte-locks. The 134-entry `tengu::tool::NAMES` count and 238-entry `ALL_EVENT_NAMES` count stay frozen.** This is the smallest M5 sub-plan: ~12 TDD tasks.
 
-**Architecture:** Three surfaces are touched, all under `lingxi-core/crates/`:
+**Architecture:** Three surfaces are touched, all under `lingxi-code/crates/`:
 
-- **Follow-up A — `lingxi-agent::runner::run_subagent`** (file `lingxi-core/crates/agent/src/runner.rs`). The current body is a two-line stub:
+- **Follow-up A — `lingxi-agent::runner::run_subagent`** (file `lingxi-code/crates/agent/src/runner.rs`). The current body is a two-line stub:
   ```rust
   let _ = event_rx.recv().await;
   let _ = out_tx.send(SubagentEvent::Completed { agent_id, result: json!({"stub": true}) }).await;
@@ -19,16 +19,16 @@
 
   The runner does NOT issue any I/O of its own — it remains a pure transformer between `lingxi_core::Event` (in) and `SubagentEvent` (out), preserving D17 (purity). All effect-side I/O remains the host's responsibility via the existing `lingxi_protocol::Effect` channel (out of scope for this plan; `Vec<Effect>` returned by `reduce` is dropped — the host will wire it in M5-02 when the orchestrator drives the runner).
 
-- **Follow-up B — `TaskRegistryHandle::output`** (file `lingxi-core/crates/tasks/src/handle.rs`, the `impl TaskRegistryHandle for TaskRegistry` block at line 209). Currently:
+- **Follow-up B — `TaskRegistryHandle::output`** (file `lingxi-code/crates/tasks/src/handle.rs`, the `impl TaskRegistryHandle for TaskRegistry` block at line 209). Currently:
   ```rust
   async fn output(&self, id: &str, _offset: Option<u64>) -> Result<TaskOutputChunk, TaskRegistryError> {
       let state = self.get(id).await.ok_or_else(|| TaskRegistryError::NotFound(id.into()))?;
       Ok(TaskOutputChunk { task_id: state.base().id.clone(), content: String::new(), total_lines: 0, truncated: false })
   }
   ```
-  Replaced with a real spool read: look up the task state, pull `state.base().output_file: PathBuf`, call `self.output_manager.read(&output_file, OutputOptions { offset, limit: None })` (the manager already exists at `lingxi-core/crates/tasks/src/output_manager.rs:83`), and map the resulting `TaskOutput { content, total_lines, truncated }` into a `TaskOutputChunk { task_id, content, total_lines, truncated }`. The `offset` argument that has been arriving as `_offset` is now THREADED through as `OutputOptions { offset: _offset, limit: None }`. On `OutputError::Io(s)` from the manager → `TaskRegistryError::Internal(format!("io: {s}"))`; on `OutputError::PathEscape(p)` → `TaskRegistryError::Internal(format!("path escape: {p}"))` (the latter is defensive — `TaskRegistry::create` already enforces sandbox containment on allocation).
+  Replaced with a real spool read: look up the task state, pull `state.base().output_file: PathBuf`, call `self.output_manager.read(&output_file, OutputOptions { offset, limit: None })` (the manager already exists at `lingxi-code/crates/tasks/src/output_manager.rs:83`), and map the resulting `TaskOutput { content, total_lines, truncated }` into a `TaskOutputChunk { task_id, content, total_lines, truncated }`. The `offset` argument that has been arriving as `_offset` is now THREADED through as `OutputOptions { offset: _offset, limit: None }`. On `OutputError::Io(s)` from the manager → `TaskRegistryError::Internal(format!("io: {s}"))`; on `OutputError::PathEscape(p)` → `TaskRegistryError::Internal(format!("path escape: {p}"))` (the latter is defensive — `TaskRegistry::create` already enforces sandbox containment on allocation).
 
-- **Follow-up C — `RegistryToolInvoker::invoke`** (file `lingxi-core/crates/tools/src/tool_invoker_impl.rs`, the `#[async_trait] impl ToolInvoker for RegistryToolInvoker` block at line 38). Currently:
+- **Follow-up C — `RegistryToolInvoker::invoke`** (file `lingxi-code/crates/tools/src/tool_invoker_impl.rs`, the `#[async_trait] impl ToolInvoker for RegistryToolInvoker` block at line 38). Currently:
   ```rust
   async fn invoke(&self, name: &str, _input: Value, _ctx: SubagentInvocationContext) -> Result<Value, ToolInvokerError> {
       self.registry.find_by_name(name).ok_or_else(|| ToolInvokerError::NotFound(name.to_string()))?;
@@ -37,7 +37,7 @@
   ```
   Replaced with a real dispatch: locate the tool via `find_by_name`, then synthesize a minimal `ToolUseContext` from `SubagentInvocationContext` (only `agent_id` is supplied by the trait — every other field is filled from `ToolUseContext::default()` semantics: empty messages, no session, `subagent_registry: Some(self.registry.clone())` so a recursive `AgentTool` invocation from inside the called tool reuses the same registry Arc), spawn a single-shot `ToolProgressSender` channel (drained immediately so progress events do not deadlock the caller), and invoke `tool.call(input, tool_use_ctx, progress_tx).await`. On `Ok(result)` → return `result.data`. On `Err(ToolError::InvalidInput(s))` → `ToolInvokerError::InvalidInput(s)`. On any other `ToolError` → `ToolInvokerError::Internal(format!("{e}"))`. **The `Arc<ToolRegistry>` field is reused verbatim** — no fresh `Arc::new(ToolRegistry::new())` is constructed, so the M4-05 `Arc::ptr_eq(parent_registry, invoker.registry_arc())` invariant continues to hold.
 
-The unifying constraint binding all three follow-ups: the two **critical `Arc::ptr_eq` tests** in `lingxi-core/crates/tools/src/builtin/agent.rs::tests`:
+The unifying constraint binding all three follow-ups: the two **critical `Arc::ptr_eq` tests** in `lingxi-code/crates/tools/src/builtin/agent.rs::tests`:
 - `recursion_lock_child_inherits_parent_tool_registry_arc` (line 455) — asserts the child subagent's invoker wraps the same `Arc<ToolRegistry>` as the parent.
 - `budget_inheritance_child_inherits_parent_budget_arc` (line 508) — asserts the child subagent's `Arc<dyn BudgetEnforcerHandle>` is the parent's Arc.
 
@@ -53,31 +53,31 @@ Per spec §6.2 (backward compatibility): every M4-05 test must remain green. Per
   - §3 Sub-plan table M5-01 row (line 177) — three follow-ups: `(a)` runner stub → real reduce loop, `(b)` `TaskRegistryHandle::output` real spool read, `(c)` `RegistryToolInvoker::invoke` real dispatch. 0 new events. ~12 tasks.
   - §6.2 backward compatibility — M4-05 wiring `Arc::ptr_eq` tests must stay green throughout M5.
 - Predecessor (M4-05 wiring follow-up):
-  - `lingxi-core/crates/agent/src/runner.rs` (commit baseline — the 2-line stub body at lines 64-70).
-  - `lingxi-core/crates/agent/src/pool.rs` (lines 57-85, `StateMachinePool::allocate` — the channel pair `event_tx / event_rx` and `out_tx / out_rx` are owned by the pool; `run_subagent` consumes `event_rx` and produces on `out_tx`).
-  - `lingxi-core/crates/agent/src/context.rs` (full file — `SubagentContext` carries `agent_id`, `agent_definition`, `prompt_messages`, plus a dozen optional fields; M5-01 reads `agent_id` and `agent_definition.model` only).
-  - `lingxi-core/crates/core/src/lib.rs` (lines 14-28) + `events.rs` (full file) + `reducer.rs` (`reduce(state, event) -> (new_state, effects)` at line 15) + `state_machine.rs` (5-variant `ConversationState`; `Terminated` is the absorbing terminal).
-  - `lingxi-core/crates/traits/src/subagent_spawn.rs` — `SubagentSpawner` trait + `SubagentInheritance { tool_invoker: Arc<dyn ToolInvoker>, budget: Arc<dyn BudgetEnforcerHandle> }`.
-  - `lingxi-core/crates/traits/src/tool_invoker.rs` — `ToolInvoker::invoke(name, input, ctx)` + `SubagentInvocationContext { parent_agent_id }` + `ToolInvokerError::{NotFound, InvalidInput, Internal}`.
-  - `lingxi-core/crates/traits/src/task_registry.rs` — `TaskRegistryHandle::output(id, offset) -> Result<TaskOutputChunk, TaskRegistryError>`.
-  - `lingxi-core/crates/tasks/src/registry.rs` (lines 26-44, `pub output_manager: Arc<TaskOutputManager>` is already on `TaskRegistry`).
-  - `lingxi-core/crates/tasks/src/output_manager.rs` (lines 83-103, `TaskOutputManager::read(output_file, OutputOptions) -> Result<TaskOutput, OutputError>` is already implemented).
-  - `lingxi-core/crates/tasks/src/handle.rs` (lines 209-228, current `output` stub).
-  - `lingxi-core/crates/tools/src/tool_invoker_impl.rs` (lines 38-60, current `invoke` `NotFound`-only body).
-  - `lingxi-core/crates/tools/src/builtin/agent.rs::tests::{recursion_lock_child_inherits_parent_tool_registry_arc, budget_inheritance_child_inherits_parent_budget_arc}` (lines 454-541) — the two critical Arc-identity tests.
+  - `lingxi-code/crates/agent/src/runner.rs` (commit baseline — the 2-line stub body at lines 64-70).
+  - `lingxi-code/crates/agent/src/pool.rs` (lines 57-85, `StateMachinePool::allocate` — the channel pair `event_tx / event_rx` and `out_tx / out_rx` are owned by the pool; `run_subagent` consumes `event_rx` and produces on `out_tx`).
+  - `lingxi-code/crates/agent/src/context.rs` (full file — `SubagentContext` carries `agent_id`, `agent_definition`, `prompt_messages`, plus a dozen optional fields; M5-01 reads `agent_id` and `agent_definition.model` only).
+  - `lingxi-code/crates/core/src/lib.rs` (lines 14-28) + `events.rs` (full file) + `reducer.rs` (`reduce(state, event) -> (new_state, effects)` at line 15) + `state_machine.rs` (5-variant `ConversationState`; `Terminated` is the absorbing terminal).
+  - `lingxi-code/crates/traits/src/subagent_spawn.rs` — `SubagentSpawner` trait + `SubagentInheritance { tool_invoker: Arc<dyn ToolInvoker>, budget: Arc<dyn BudgetEnforcerHandle> }`.
+  - `lingxi-code/crates/traits/src/tool_invoker.rs` — `ToolInvoker::invoke(name, input, ctx)` + `SubagentInvocationContext { parent_agent_id }` + `ToolInvokerError::{NotFound, InvalidInput, Internal}`.
+  - `lingxi-code/crates/traits/src/task_registry.rs` — `TaskRegistryHandle::output(id, offset) -> Result<TaskOutputChunk, TaskRegistryError>`.
+  - `lingxi-code/crates/tasks/src/registry.rs` (lines 26-44, `pub output_manager: Arc<TaskOutputManager>` is already on `TaskRegistry`).
+  - `lingxi-code/crates/tasks/src/output_manager.rs` (lines 83-103, `TaskOutputManager::read(output_file, OutputOptions) -> Result<TaskOutput, OutputError>` is already implemented).
+  - `lingxi-code/crates/tasks/src/handle.rs` (lines 209-228, current `output` stub).
+  - `lingxi-code/crates/tools/src/tool_invoker_impl.rs` (lines 38-60, current `invoke` `NotFound`-only body).
+  - `lingxi-code/crates/tools/src/builtin/agent.rs::tests::{recursion_lock_child_inherits_parent_tool_registry_arc, budget_inheritance_child_inherits_parent_budget_arc}` (lines 454-541) — the two critical Arc-identity tests.
 - Repo conventions (M4-01..09 precedent):
   - Tests live in `#[cfg(test)] mod tests { ... }` blocks adjacent to the production code.
-  - Integration tests live in `lingxi-core/crates/<crate>/tests/<name>_test.rs`.
+  - Integration tests live in `lingxi-code/crates/<crate>/tests/<name>_test.rs`.
   - Every error string visible in tests is the EXACT byte sequence in production (`assert_eq!`-quality, not `assert!(s.contains(...))`).
   - Telemetry constants are CAPITAL_SNAKE; production code references `lingxi_telemetry::tengu::tool::*` symbols, not literals. **M5-01 emits no telemetry — no new constants.**
   - Tool event-name suffix `_completed` (M3-06 lock) — irrelevant here (no new events).
 - M4-05 wiring artefacts already in place (verified at `2026-05-25`):
-  - `lingxi-core/crates/traits/src/tool_invoker.rs` — `ToolInvoker` trait + `SubagentInvocationContext` + `ToolInvokerError` (added in M4-05 wiring follow-up; commit `29dfe89` or later).
-  - `lingxi-core/crates/traits/src/subagent_spawn.rs` — `SubagentSpawner` + `SubagentInheritance` (same commit).
-  - `lingxi-core/crates/tools/src/tool_invoker_impl.rs::RegistryToolInvoker::registry_arc()` — pub accessor that returns `&Arc<ToolRegistry>` (used by the M4-05 critical tests via downcast through `as_any()`).
-  - `lingxi-core/crates/tools/src/builtin/agent_test_support.rs` — `MockSubagentSpawner`, `MockBudgetEnforcerHandle`, `MockTaskRegistryHandle`, `MockMailboxRouterHandle`, plus `arc_*` helpers.
-  - `lingxi-core/crates/tasks/src/registry.rs` — `TaskRegistry::new(runtime, fs, output_manager)`, `TaskRegistry::create(task_type, _input, description) -> Result<String, TaskError>` (the `_input` arg is intentionally unused; this is fine).
-  - `lingxi-core/crates/tasks/src/output_manager.rs::TaskOutputManager::{allocate, read}` — already production-quality; M5-01 only adds CALL SITES, no new methods.
+  - `lingxi-code/crates/traits/src/tool_invoker.rs` — `ToolInvoker` trait + `SubagentInvocationContext` + `ToolInvokerError` (added in M4-05 wiring follow-up; commit `29dfe89` or later).
+  - `lingxi-code/crates/traits/src/subagent_spawn.rs` — `SubagentSpawner` + `SubagentInheritance` (same commit).
+  - `lingxi-code/crates/tools/src/tool_invoker_impl.rs::RegistryToolInvoker::registry_arc()` — pub accessor that returns `&Arc<ToolRegistry>` (used by the M4-05 critical tests via downcast through `as_any()`).
+  - `lingxi-code/crates/tools/src/builtin/agent_test_support.rs` — `MockSubagentSpawner`, `MockBudgetEnforcerHandle`, `MockTaskRegistryHandle`, `MockMailboxRouterHandle`, plus `arc_*` helpers.
+  - `lingxi-code/crates/tasks/src/registry.rs` — `TaskRegistry::new(runtime, fs, output_manager)`, `TaskRegistry::create(task_type, _input, description) -> Result<String, TaskError>` (the `_input` arg is intentionally unused; this is fine).
+  - `lingxi-code/crates/tasks/src/output_manager.rs::TaskOutputManager::{allocate, read}` — already production-quality; M5-01 only adds CALL SITES, no new methods.
 - M1 surfaces (still stable):
   - `lingxi_core::Event::{UserMessage, UserInterrupt, UserExit, ApiStreamStart, ApiStreamDelta, ApiStreamEnd, ApiError, SessionLoaded, CostRecorded, BudgetThresholdReached, BudgetExceeded, PermissionGranted, ...}` (see `events.rs` for the full enum).
   - `lingxi_core::ConversationState::{Idle, AssemblingPrompt, AwaitingApiResponse, StreamingResponse, Terminated}` + `is_terminal()` (line 68).
@@ -93,11 +93,11 @@ Per spec §6.2 (backward compatibility): every M4-05 test must remain green. Per
 
 **Modifies (existing files):**
 
-- `lingxi-core/crates/agent/src/runner.rs` — replace the 2-line stub body in `run_subagent` with the real reduce/pump loop (~60 LOC). Add a private helper `event_to_session_input(event: &lingxi_core::Event) -> Option<SubagentEvent>` only if needed; the current draft inlines the translation. Add a new `#[cfg(test)] mod tests { ... }` block at the bottom of the file with 3 unit tests (Tasks 2, 4, 5).
-- `lingxi-core/crates/tasks/src/handle.rs` — replace the `output(...)` body (line 209-228) with the real spool read. Adjust the existing `output_returns_empty_for_freshly_created_task` test (line 380) into `output_returns_empty_for_freshly_created_task_with_zero_byte_spool` and add one new test `output_returns_real_content_after_spool_write` (Task 7).
-- `lingxi-core/crates/tasks/src/handle.rs::tests::NoopFs` — extend `read_file` to actually walk the in-memory map seeded by `write_file` so the new spool-read test can observe non-empty content (Task 7 step 3). The existing tests that rely on `NoopFs` returning empty are not invalidated because they never call `output` on a task whose spool was written to.
-- `lingxi-core/crates/tools/src/tool_invoker_impl.rs` — replace the `invoke(...)` body (lines 40-55) with the real dispatch. Add 2 new tests to the existing `#[cfg(test)] mod tests` block (Tasks 9, 11).
-- `lingxi-core/crates/tools/tests/agent_task_integration_test.rs` — **NO modification** to the M4-05 fixture; M5-01 verifies its tests still pass (Task 5 step 4 + Task 11 step 2 + Task 12 step 1). If the integration suite is moved or extended in M4-05 wiring follow-up commits (post-`29dfe89`), this plan's verification gate STILL covers it via `cargo test --workspace`.
+- `lingxi-code/crates/agent/src/runner.rs` — replace the 2-line stub body in `run_subagent` with the real reduce/pump loop (~60 LOC). Add a private helper `event_to_session_input(event: &lingxi_core::Event) -> Option<SubagentEvent>` only if needed; the current draft inlines the translation. Add a new `#[cfg(test)] mod tests { ... }` block at the bottom of the file with 3 unit tests (Tasks 2, 4, 5).
+- `lingxi-code/crates/tasks/src/handle.rs` — replace the `output(...)` body (line 209-228) with the real spool read. Adjust the existing `output_returns_empty_for_freshly_created_task` test (line 380) into `output_returns_empty_for_freshly_created_task_with_zero_byte_spool` and add one new test `output_returns_real_content_after_spool_write` (Task 7).
+- `lingxi-code/crates/tasks/src/handle.rs::tests::NoopFs` — extend `read_file` to actually walk the in-memory map seeded by `write_file` so the new spool-read test can observe non-empty content (Task 7 step 3). The existing tests that rely on `NoopFs` returning empty are not invalidated because they never call `output` on a task whose spool was written to.
+- `lingxi-code/crates/tools/src/tool_invoker_impl.rs` — replace the `invoke(...)` body (lines 40-55) with the real dispatch. Add 2 new tests to the existing `#[cfg(test)] mod tests` block (Tasks 9, 11).
+- `lingxi-code/crates/tools/tests/agent_task_integration_test.rs` — **NO modification** to the M4-05 fixture; M5-01 verifies its tests still pass (Task 5 step 4 + Task 11 step 2 + Task 12 step 1). If the integration suite is moved or extended in M4-05 wiring follow-up commits (post-`29dfe89`), this plan's verification gate STILL covers it via `cargo test --workspace`.
 
 **Critical fidelity notes (locked here):**
 
@@ -116,7 +116,7 @@ Per spec §6.2 (backward compatibility): every M4-05 test must remain green. Per
 ### Task 1: Verify predecessors + scaffold baseline marker
 
 **Files:**
-- Verify (on disk): predecessor M4-05 wiring follow-up committed (commit `29dfe89` or successor) AND `lingxi-core/crates/agent/src/runner.rs` still contains the 2-line stub AND the two `Arc::ptr_eq` tests still pass under HEAD.
+- Verify (on disk): predecessor M4-05 wiring follow-up committed (commit `29dfe89` or successor) AND `lingxi-code/crates/agent/src/runner.rs` still contains the 2-line stub AND the two `Arc::ptr_eq` tests still pass under HEAD.
 - No file modification this task — just a baseline marker commit recording the pre-M5-01 state.
 
 - [ ] **Step 1: Verify the three follow-up surfaces are at the documented baseline**
@@ -124,9 +124,9 @@ Per spec §6.2 (backward compatibility): every M4-05 test must remain green. Per
 Run:
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-grep -n 'let _ = event_rx.recv().await;' lingxi-core/crates/agent/src/runner.rs && echo "A baseline OK (runner stub present)"
-grep -n 'content: String::new(),' lingxi-core/crates/tasks/src/handle.rs | head -1 && echo "B baseline OK (output stub present)"
-grep -n 'Ok(Value::Null)' lingxi-core/crates/tools/src/tool_invoker_impl.rs && echo "C baseline OK (invoker stub present)"
+grep -n 'let _ = event_rx.recv().await;' lingxi-code/crates/agent/src/runner.rs && echo "A baseline OK (runner stub present)"
+grep -n 'content: String::new(),' lingxi-code/crates/tasks/src/handle.rs | head -1 && echo "B baseline OK (output stub present)"
+grep -n 'Ok(Value::Null)' lingxi-code/crates/tools/src/tool_invoker_impl.rs && echo "C baseline OK (invoker stub present)"
 ```
 Expected: all three `OK` lines print. If ANY fails, the follow-up has already been (partially) implemented — STOP and reconcile with the executor.
 
@@ -144,10 +144,10 @@ Expected: `test result: ok. 2 passed; 0 failed`. These two tests are the M4-05 w
 
 - [ ] **Step 3: Pin the locked failure message string + Killed reason prefixes**
 
-Read `lingxi-core/crates/core/src/reducer.rs` end-to-end to identify what `reason` string the reducer puts on `Terminated` for `UserExit` / `UserInterrupt` / `BudgetExceeded`. Run:
+Read `lingxi-code/crates/core/src/reducer.rs` end-to-end to identify what `reason` string the reducer puts on `Terminated` for `UserExit` / `UserInterrupt` / `BudgetExceeded`. Run:
 ```bash
-grep -n 'Terminated {' lingxi-core/crates/core/src/reducer.rs | head -20
-grep -n 'reason:' lingxi-core/crates/core/src/reducer.rs | head -20
+grep -n 'Terminated {' lingxi-code/crates/core/src/reducer.rs | head -20
+grep -n 'reason:' lingxi-code/crates/core/src/reducer.rs | head -20
 ```
 Note the exact `reason` literals (e.g. `"user_exit"`, `"user_interrupt"`, `"budget_exceeded"`, `"api_error"`). Record these in a comment at the top of Task 3's `run_subagent` body so the Killed-vs-Completed predicate is defensible. **If the reducer does not yet produce a `Terminated` state on `UserExit`/`UserInterrupt`** (in M1 it may go straight to `Idle` or no-op), Task 4's test seeds the terminal via a direct `Event` that the reducer DOES translate — for example `Event::ApiError` with a budget-exceeded payload; the test then asserts `SubagentEvent::Failed`. The exact mapping is recorded in Task 3 step 2.
 
@@ -173,11 +173,11 @@ EOF
 ### Task 2: Write failing test — `run_subagent` real loop emits `Message` on `ApiStreamEnd`
 
 **Files:**
-- Modify: `lingxi-core/crates/agent/src/runner.rs` — append a `#[cfg(test)] mod tests { ... }` block at the bottom of the file (if absent — verified in Task 1) with the first failing test.
+- Modify: `lingxi-code/crates/agent/src/runner.rs` — append a `#[cfg(test)] mod tests { ... }` block at the bottom of the file (if absent — verified in Task 1) with the first failing test.
 
 - [ ] **Step 1: Write the failing test**
 
-Open `lingxi-core/crates/agent/src/runner.rs`. After the existing `pub async fn run_subagent(...)` body (line 71), append:
+Open `lingxi-code/crates/agent/src/runner.rs`. After the existing `pub async fn run_subagent(...)` body (line 71), append:
 
 ```rust
 #[cfg(test)]
@@ -319,9 +319,9 @@ mod tests {
 }
 ```
 
-**Note on `ConversationMessage::assistant_text`**: this constructor is the M1 idiom (see `lingxi-protocol::ConversationMessage::user` for the symmetric one). If the exact symbol differs at HEAD (e.g. `assistant`, `assistant_with_text`), grep `lingxi-core/crates/protocol/src/` for the correct constructor and substitute it byte-for-byte. Expected available variants:
+**Note on `ConversationMessage::assistant_text`**: this constructor is the M1 idiom (see `lingxi-protocol::ConversationMessage::user` for the symmetric one). If the exact symbol differs at HEAD (e.g. `assistant`, `assistant_with_text`), grep `lingxi-code/crates/protocol/src/` for the correct constructor and substitute it byte-for-byte. Expected available variants:
 ```bash
-grep -nE 'impl ConversationMessage|pub fn (user|assistant)' lingxi-core/crates/protocol/src/conversation_message.rs 2>/dev/null | head -10
+grep -nE 'impl ConversationMessage|pub fn (user|assistant)' lingxi-code/crates/protocol/src/conversation_message.rs 2>/dev/null | head -10
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -435,7 +435,7 @@ Expected: `test result: ok. 1 passed; 0 failed`. The runner now emits a Message 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/agent/src/runner.rs
+git add lingxi-code/crates/agent/src/runner.rs
 git commit -m "$(cat <<'EOF'
 feat(M5-01 task 2): run_subagent emits Message on ApiStreamEnd
 
@@ -461,7 +461,7 @@ EOF
 ### Task 3: Write failing test — `run_subagent` emits `Killed` when reducer terminates with `user_exit` / `user_interrupt`
 
 **Files:**
-- Modify: `lingxi-core/crates/agent/src/runner.rs` — add one test inside the existing `#[cfg(test)] mod tests` block.
+- Modify: `lingxi-code/crates/agent/src/runner.rs` — add one test inside the existing `#[cfg(test)] mod tests` block.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -572,7 +572,7 @@ Expected: BOTH tests pass. (The Task 2 test must remain green after Task 3's ref
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/agent/src/runner.rs
+git add lingxi-code/crates/agent/src/runner.rs
 git commit -m "$(cat <<'EOF'
 feat(M5-01 task 3): run_subagent emits Killed on UserExit/UserInterrupt
 
@@ -595,7 +595,7 @@ EOF
 ### Task 4: Write failing test — `run_subagent` emits `Failed` when event channel closes before any useful work
 
 **Files:**
-- Modify: `lingxi-core/crates/agent/src/runner.rs` — add one test + adjust the EOF branch to distinguish "useful work happened" (Completed) from "nothing happened" (Failed).
+- Modify: `lingxi-code/crates/agent/src/runner.rs` — add one test + adjust the EOF branch to distinguish "useful work happened" (Completed) from "nothing happened" (Failed).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -789,7 +789,7 @@ Expected: ALL THREE runner tests pass:
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/agent/src/runner.rs
+git add lingxi-code/crates/agent/src/runner.rs
 git commit -m "$(cat <<'EOF'
 feat(M5-01 task 4): run_subagent emits Failed on premature EOF
 
@@ -863,7 +863,7 @@ EOF
 ### Task 6: Write failing test — `TaskRegistryHandle::output` returns real spool content (not empty)
 
 **Files:**
-- Modify: `lingxi-core/crates/tasks/src/handle.rs::tests` block — repurpose the existing `output_returns_empty_for_freshly_created_task` test and add a new `output_returns_real_content_after_spool_write`.
+- Modify: `lingxi-code/crates/tasks/src/handle.rs::tests` block — repurpose the existing `output_returns_empty_for_freshly_created_task` test and add a new `output_returns_real_content_after_spool_write`.
 
 - [ ] **Step 1: Extend `NoopFs` to be a real in-memory FS for the spool write/read path**
 
@@ -1055,7 +1055,7 @@ Expected: BOTH fail. The stub `output(...)` body returns `TaskOutputChunk { cont
 
 - [ ] **Step 4: Write minimal implementation — wire `output` to `TaskOutputManager::read`**
 
-Open `lingxi-core/crates/tasks/src/handle.rs`. Replace the `async fn output(...)` body (lines 209-228) with:
+Open `lingxi-code/crates/tasks/src/handle.rs`. Replace the `async fn output(...)` body (lines 209-228) with:
 
 ```rust
     async fn output(
@@ -1110,7 +1110,7 @@ Expected: ALL handle::tests pass:
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lingxi-core/crates/tasks/src/handle.rs lingxi-core/crates/tasks/src/output_manager.rs
+git add lingxi-code/crates/tasks/src/handle.rs lingxi-code/crates/tasks/src/output_manager.rs
 git commit -m "$(cat <<'EOF'
 feat(M5-01 task 6): TaskRegistryHandle::output reads real spool
 
@@ -1140,18 +1140,18 @@ EOF
 ### Task 7: Integration test — `TaskRegistryHandle::output` end-to-end via a test executor
 
 **Files:**
-- Modify: `lingxi-core/crates/tools/tests/agent_task_integration_test.rs` — add a single new integration test exercising create → seed spool → list → output round-trip via the public `TaskRegistryHandle` trait surface (no internal access).
+- Modify: `lingxi-code/crates/tools/tests/agent_task_integration_test.rs` — add a single new integration test exercising create → seed spool → list → output round-trip via the public `TaskRegistryHandle` trait surface (no internal access).
 
 - [ ] **Step 1: Read the existing integration test file to learn its conventions**
 
 ```bash
-grep -n '^#\[tokio::test\]\|^async fn\|^use ' lingxi-core/crates/tools/tests/agent_task_integration_test.rs | head -30
+grep -n '^#\[tokio::test\]\|^async fn\|^use ' lingxi-code/crates/tools/tests/agent_task_integration_test.rs | head -30
 ```
 Capture the helper-construction patterns (`make_test_*` functions, mock injection).
 
 - [ ] **Step 2: Write the failing test**
 
-Append to `lingxi-core/crates/tools/tests/agent_task_integration_test.rs`:
+Append to `lingxi-code/crates/tools/tests/agent_task_integration_test.rs`:
 
 ```rust
 #[tokio::test]
@@ -1262,19 +1262,19 @@ async fn task_registry_handle_output_round_trip_via_real_output_manager() {
 }
 ```
 
-If the integration test file does NOT yet import `async_trait` at the top level, add `async_trait = { workspace = true }` to `lingxi-core/crates/tools/Cargo.toml`'s `[dev-dependencies]` (likely already present from M4-05; verify with `grep async_trait lingxi-core/crates/tools/Cargo.toml`).
+If the integration test file does NOT yet import `async_trait` at the top level, add `async_trait = { workspace = true }` to `lingxi-code/crates/tools/Cargo.toml`'s `[dev-dependencies]` (likely already present from M4-05; verify with `grep async_trait lingxi-code/crates/tools/Cargo.toml`).
 
 - [ ] **Step 2.5: Run test to verify it fails (against pre-Task-6 baseline) OR passes (post-Task-6)**
 
 ```bash
 cargo test -p lingxi-tools --test agent_task_integration_test task_registry_handle_output_round_trip_via_real_output_manager 2>&1 | tail -20
 ```
-Expected: PASSES (Task 6 already wired `output` to the manager). If it FAILS with empty content, Task 6's commit didn't land cleanly — re-verify `git log --oneline -5 lingxi-core/crates/tasks/src/handle.rs`.
+Expected: PASSES (Task 6 already wired `output` to the manager). If it FAILS with empty content, Task 6's commit didn't land cleanly — re-verify `git log --oneline -5 lingxi-code/crates/tasks/src/handle.rs`.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/crates/tools/tests/agent_task_integration_test.rs
+git add lingxi-code/crates/tools/tests/agent_task_integration_test.rs
 git commit -m "$(cat <<'EOF'
 test(M5-01 task 7): integration spool round-trip via TaskRegistryHandle
 
@@ -1296,13 +1296,13 @@ EOF
 ### Task 8: Scaffold a builtin `Echo`-style tool for testing `RegistryToolInvoker` dispatch
 
 **Files:**
-- Modify: `lingxi-core/crates/tools/src/tool_invoker_impl.rs` — extend the existing `#[cfg(test)] mod tests` block with a `TestEchoTool` fixture (private to the test module).
+- Modify: `lingxi-code/crates/tools/src/tool_invoker_impl.rs` — extend the existing `#[cfg(test)] mod tests` block with a `TestEchoTool` fixture (private to the test module).
 
 This task ADDS a tiny `Tool`-implementing struct used by Tasks 9-11 to drive the invoker. The struct lives entirely under `#[cfg(test)]` — no production code is affected.
 
 - [ ] **Step 1: Write the test fixture (no test yet — just the fixture)**
 
-Open `lingxi-core/crates/tools/src/tool_invoker_impl.rs`. Find the existing `#[cfg(test)] mod tests { ... }` block at line 62. Extend it with:
+Open `lingxi-code/crates/tools/src/tool_invoker_impl.rs`. Find the existing `#[cfg(test)] mod tests { ... }` block at line 62. Extend it with:
 
 ```rust
 #[cfg(test)]
@@ -1386,9 +1386,9 @@ mod tests {
 }
 ```
 
-**Note on `Tool` trait method names and signatures**: every method above must match the trait at HEAD. The signatures above are taken from `lingxi-core/crates/tools/src/tool_trait.rs` (already inspected during Task 1). If any method has drifted (e.g. added a parameter), substitute the current signature byte-for-byte. The most likely drift surface is `max_result_size_chars()` (return type `Option<usize>` vs `usize`) and `interrupt_behavior` (whether it's `&self` or `&self, _: &Value`). Verify with:
+**Note on `Tool` trait method names and signatures**: every method above must match the trait at HEAD. The signatures above are taken from `lingxi-code/crates/tools/src/tool_trait.rs` (already inspected during Task 1). If any method has drifted (e.g. added a parameter), substitute the current signature byte-for-byte. The most likely drift surface is `max_result_size_chars()` (return type `Option<usize>` vs `usize`) and `interrupt_behavior` (whether it's `&self` or `&self, _: &Value`). Verify with:
 ```bash
-grep -nE 'fn (name|aliases|input_schema|output_schema|is_enabled|is_concurrency_safe|is_read_only|is_destructive|is_open_world|max_result_size_chars|interrupt_behavior|validate_input|check_permissions|description|prompt|call)' lingxi-core/crates/tools/src/tool_trait.rs | head -30
+grep -nE 'fn (name|aliases|input_schema|output_schema|is_enabled|is_concurrency_safe|is_read_only|is_destructive|is_open_world|max_result_size_chars|interrupt_behavior|validate_input|check_permissions|description|prompt|call)' lingxi-code/crates/tools/src/tool_trait.rs | head -30
 ```
 
 - [ ] **Step 2: Verify the fixture compiles**
@@ -1401,7 +1401,7 @@ Expected: PASS (this is the existing M4-05 test; the fixture extension must not 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/crates/tools/src/tool_invoker_impl.rs
+git add lingxi-code/crates/tools/src/tool_invoker_impl.rs
 git commit -m "$(cat <<'EOF'
 test(M5-01 task 8): TestEchoTool fixture for RegistryToolInvoker tests
 
@@ -1421,7 +1421,7 @@ EOF
 ### Task 9: Write failing test — `RegistryToolInvoker::invoke` returns tool output (not `Null`)
 
 **Files:**
-- Modify: `lingxi-core/crates/tools/src/tool_invoker_impl.rs::tests` — add one test.
+- Modify: `lingxi-code/crates/tools/src/tool_invoker_impl.rs::tests` — add one test.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1489,7 +1489,7 @@ Expected: PASS.
 
 - [ ] **Step 3: Write minimal implementation — real dispatch**
 
-Open `lingxi-core/crates/tools/src/tool_invoker_impl.rs`. Replace the `async fn invoke(...)` body (lines 40-55) with:
+Open `lingxi-code/crates/tools/src/tool_invoker_impl.rs`. Replace the `async fn invoke(...)` body (lines 40-55) with:
 
 ```rust
     async fn invoke(
@@ -1549,11 +1549,11 @@ Open `lingxi-core/crates/tools/src/tool_invoker_impl.rs`. Replace the `async fn 
 
 **Note on `ToolProgressSender::new`**: the constructor name MAY differ at HEAD. Likely candidates: `ToolProgressSender::new(tx)`, `ToolProgressSender::from(tx)`, or the type may be a direct alias for `mpsc::Sender<ToolProgressEvent>`. Verify with:
 ```bash
-grep -n 'pub struct ToolProgressSender\|impl ToolProgressSender\|pub fn new\|pub type ToolProgressSender' lingxi-core/crates/tools/src/progress.rs | head -10
+grep -n 'pub struct ToolProgressSender\|impl ToolProgressSender\|pub fn new\|pub type ToolProgressSender' lingxi-code/crates/tools/src/progress.rs | head -10
 ```
 If `ToolProgressSender` IS a type alias for `mpsc::Sender<ToolProgressEvent>`, the constructor line collapses to `let progress_tx = progress_tx;` (the `mpsc::channel(8)` output already matches). Substitute the correct form.
 
-**Note on `ToolUseContext` fields**: the field list above is taken from `lingxi-core/crates/tools/src/builtin/agent.rs::tests::fresh_ctx_with_registry` (the M4-05 test fixture; see line 428). If any field has drifted at HEAD, copy the M4-05 fixture's exact `ToolUseContext { .. }` literal byte-for-byte and substitute.
+**Note on `ToolUseContext` fields**: the field list above is taken from `lingxi-code/crates/tools/src/builtin/agent.rs::tests::fresh_ctx_with_registry` (the M4-05 test fixture; see line 428). If any field has drifted at HEAD, copy the M4-05 fixture's exact `ToolUseContext { .. }` literal byte-for-byte and substitute.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1569,7 +1569,7 @@ Expected: ALL FOUR `tool_invoker_impl::tests` pass:
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/tools/src/tool_invoker_impl.rs
+git add lingxi-code/crates/tools/src/tool_invoker_impl.rs
 git commit -m "$(cat <<'EOF'
 feat(M5-01 task 9): RegistryToolInvoker::invoke dispatches into ToolRegistry
 
@@ -1598,7 +1598,7 @@ EOF
 ### Task 10: Test — `RegistryToolInvoker::invoke` preserves the subagent_registry Arc identity
 
 **Files:**
-- Modify: `lingxi-core/crates/tools/src/tool_invoker_impl.rs::tests` — add one test asserting the recursion-lock Arc flows into the synthesized `ToolUseContext`.
+- Modify: `lingxi-code/crates/tools/src/tool_invoker_impl.rs::tests` — add one test asserting the recursion-lock Arc flows into the synthesized `ToolUseContext`.
 
 This task makes the recursion-lock invariant explicit at the dispatch path (whereas Task 11 verifies the existing M4-05 tests still hold). A `RecordingTool` fixture captures the `ToolUseContext` it receives so the test can assert `Arc::ptr_eq(parent_registry, ctx.subagent_registry.unwrap())`.
 
@@ -1710,7 +1710,7 @@ If it FAILS (the assertion fires saying the Arcs differ), there is a regression 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/crates/tools/src/tool_invoker_impl.rs
+git add lingxi-code/crates/tools/src/tool_invoker_impl.rs
 git commit -m "$(cat <<'EOF'
 test(M5-01 task 10): RegistryToolInvoker preserves recursion-lock Arc into ToolUseContext
 
@@ -1822,9 +1822,9 @@ Expected: all 3 pass.
 - [ ] **Step 5: Verify telemetry counts are UNCHANGED**
 
 ```bash
-grep -n 'NAMES\.len(),$' lingxi-core/crates/telemetry/src/tengu/tool.rs
-grep -n '134,$' lingxi-core/crates/telemetry/src/tengu/tool.rs
-grep -n '25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 1' lingxi-core/crates/telemetry/src/tengu/mod.rs
+grep -n 'NAMES\.len(),$' lingxi-code/crates/telemetry/src/tengu/tool.rs
+grep -n '134,$' lingxi-code/crates/telemetry/src/tengu/tool.rs
+grep -n '25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 1' lingxi-code/crates/telemetry/src/tengu/mod.rs
 ```
 Expected:
 - `tengu::tool::NAMES.len() == 134` (the assertion is intact; M5-01 added zero new tool events).
@@ -1882,12 +1882,12 @@ The fallback recipes are necessary because three symbol names are theoretically 
 
 **3. Type consistency**
 
-- `SubagentEvent` variants used: `Message { agent_id, message }`, `Completed { agent_id, result }`, `Killed { agent_id }`, `Failed { agent_id, error }`. Matches the enum at `lingxi-core/crates/agent/src/runner.rs:14-51`. `Progress` is NOT emitted by M5-01 (it lands when M5-04 wires streaming token counts).
-- `lingxi_core::Event` variants consumed: `UserMessage { message_id, request_id, content }`, `UserInterrupt`, `UserExit`, `ApiStreamStart { request_id }`, `ApiStreamDelta { request_id, text }`, `ApiStreamEnd { request_id, final_message, usage }`. Matches `lingxi-core/crates/core/src/events.rs:14-100`.
+- `SubagentEvent` variants used: `Message { agent_id, message }`, `Completed { agent_id, result }`, `Killed { agent_id }`, `Failed { agent_id, error }`. Matches the enum at `lingxi-code/crates/agent/src/runner.rs:14-51`. `Progress` is NOT emitted by M5-01 (it lands when M5-04 wires streaming token counts).
+- `lingxi_core::Event` variants consumed: `UserMessage { message_id, request_id, content }`, `UserInterrupt`, `UserExit`, `ApiStreamStart { request_id }`, `ApiStreamDelta { request_id, text }`, `ApiStreamEnd { request_id, final_message, usage }`. Matches `lingxi-code/crates/core/src/events.rs:14-100`.
 - `ConversationState` variants pattern-matched: `Idle { session }`, `Terminated { session, reason }`. Other variants are not explicitly destructured (the loop only checks `is_terminal()`).
-- `TaskOutputChunk { task_id, content, total_lines, truncated }` shape consistent across Tasks 6, 7 and the trait surface `lingxi-core/crates/traits/src/task_registry.rs:48-58`.
-- `OutputOptions { offset, limit }` shape from `lingxi-core/crates/tasks/src/output_manager.rs:36-42`. Task 6's call uses `OutputOptions { offset, limit: None }`.
-- `ToolInvokerError` variants used: `NotFound(String)`, `InvalidInput(String)`, `Internal(String)`. Matches `lingxi-core/crates/traits/src/tool_invoker.rs:29-41`.
+- `TaskOutputChunk { task_id, content, total_lines, truncated }` shape consistent across Tasks 6, 7 and the trait surface `lingxi-code/crates/traits/src/task_registry.rs:48-58`.
+- `OutputOptions { offset, limit }` shape from `lingxi-code/crates/tasks/src/output_manager.rs:36-42`. Task 6's call uses `OutputOptions { offset, limit: None }`.
+- `ToolInvokerError` variants used: `NotFound(String)`, `InvalidInput(String)`, `Internal(String)`. Matches `lingxi-code/crates/traits/src/tool_invoker.rs:29-41`.
 - `ToolUseContext` field list (Task 9 body): `options, messages, tool_use_id, agent_id, content_replacement_state, session, subagent_registry`. Matches the M4-05 fixture at `agent.rs::tests::fresh_ctx_with_registry`.
 - `Arc::ptr_eq` invocations: 4 total in this plan — 2 in M4-05's existing tests (preserved), 1 in Task 10's new `registry_invoker_preserves_subagent_registry_arc_into_tool_use_ctx`, 1 in the existing M4-05 `registry_invoker_preserves_arc_identity` test (preserved). All four hold throughout M5-01.
 

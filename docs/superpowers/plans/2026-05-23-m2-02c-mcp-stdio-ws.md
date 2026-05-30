@@ -26,21 +26,21 @@
 ## File Structure
 
 **New files:**
-- `lingxi-core/platforms/common/Cargo.toml` — new shared crate manifest.
-- `lingxi-core/platforms/common/src/lib.rs` — crate root, exports `mcp_ws`.
-- `lingxi-core/platforms/common/src/mcp_ws.rs` — `connect_ws(url, auth_token)` + WS↔JsonRpcMessage adapter.
-- `lingxi-core/platforms/common/src/mcp_stdio.rs` — `StdioConfig` struct and `StderrRing` (shared utility used by both posix and windows stdio impls).
-- `lingxi-core/platforms/posix/tests/mcp_stdio_test.rs` — round-trips a JSON-RPC call against the mock stdio fixture.
-- `lingxi-core/platforms/posix/tests/mcp_ws_test.rs` — round-trips a JSON-RPC call against an in-process axum WS server; asserts the auth header reaches the server.
-- `lingxi-core/platforms/posix/tests/fixtures/mock_stdio_mcp/Cargo.toml` — fixture sub-crate manifest.
-- `lingxi-core/platforms/posix/tests/fixtures/mock_stdio_mcp/src/main.rs` — line-echo JSON-RPC fixture binary.
+- `lingxi-code/platforms/common/Cargo.toml` — new shared crate manifest.
+- `lingxi-code/platforms/common/src/lib.rs` — crate root, exports `mcp_ws`.
+- `lingxi-code/platforms/common/src/mcp_ws.rs` — `connect_ws(url, auth_token)` + WS↔JsonRpcMessage adapter.
+- `lingxi-code/platforms/common/src/mcp_stdio.rs` — `StdioConfig` struct and `StderrRing` (shared utility used by both posix and windows stdio impls).
+- `lingxi-code/platforms/posix/tests/mcp_stdio_test.rs` — round-trips a JSON-RPC call against the mock stdio fixture.
+- `lingxi-code/platforms/posix/tests/mcp_ws_test.rs` — round-trips a JSON-RPC call against an in-process axum WS server; asserts the auth header reaches the server.
+- `lingxi-code/platforms/posix/tests/fixtures/mock_stdio_mcp/Cargo.toml` — fixture sub-crate manifest.
+- `lingxi-code/platforms/posix/tests/fixtures/mock_stdio_mcp/src/main.rs` — line-echo JSON-RPC fixture binary.
 
 **Modified files:**
-- `lingxi-core/Cargo.toml` — register the new `platforms/common` workspace member and the fixture.
-- `lingxi-core/platforms/posix/Cargo.toml` — add `tokio-tungstenite`, `tokio-util`, `lingxi-jsonrpc`, `lingxi-mcp`, `lingxi-platform-common`, dev-deps for tests.
-- `lingxi-core/platforms/windows/Cargo.toml` — same additions (sans dev-deps for posix-only tests).
-- `lingxi-core/platforms/posix/src/mcp.rs` — replace stdio stub with real `spawn_stdio` + add `connect_ws` re-export; keep `McpTransport` trait surface working.
-- `lingxi-core/platforms/windows/src/mcp.rs` — same.
+- `lingxi-code/Cargo.toml` — register the new `platforms/common` workspace member and the fixture.
+- `lingxi-code/platforms/posix/Cargo.toml` — add `tokio-tungstenite`, `tokio-util`, `lingxi-jsonrpc`, `lingxi-mcp`, `lingxi-platform-common`, dev-deps for tests.
+- `lingxi-code/platforms/windows/Cargo.toml` — same additions (sans dev-deps for posix-only tests).
+- `lingxi-code/platforms/posix/src/mcp.rs` — replace stdio stub with real `spawn_stdio` + add `connect_ws` re-export; keep `McpTransport` trait surface working.
+- `lingxi-code/platforms/windows/src/mcp.rs` — same.
 
 Each new file has a single responsibility and stays under ~300 lines. Tests live next to the platform they exercise (`platforms/posix/tests/`).
 
@@ -51,13 +51,13 @@ Each new file has a single responsibility and stays under ~300 lines. Tests live
 ### Task 1: Create `platforms/common` shared crate skeleton
 
 **Files:**
-- Create: `lingxi-core/platforms/common/Cargo.toml`
-- Create: `lingxi-core/platforms/common/src/lib.rs`
-- Modify: `lingxi-core/Cargo.toml`
+- Create: `lingxi-code/platforms/common/Cargo.toml`
+- Create: `lingxi-code/platforms/common/src/lib.rs`
+- Modify: `lingxi-code/Cargo.toml`
 
 - [ ] **Step 1: Write the failing compile test**
 
-Add this file `lingxi-core/platforms/common/tests/smoke.rs`:
+Add this file `lingxi-code/platforms/common/tests/smoke.rs`:
 
 ```rust
 #[test]
@@ -74,7 +74,7 @@ Expected: FAIL — `error: could not find package 'lingxi-platform-common'`.
 
 - [ ] **Step 3: Create the crate manifest**
 
-Write `lingxi-core/platforms/common/Cargo.toml`:
+Write `lingxi-code/platforms/common/Cargo.toml`:
 
 ```toml
 [package]
@@ -106,7 +106,7 @@ workspace = true
 
 - [ ] **Step 4: Create the crate root**
 
-Write `lingxi-core/platforms/common/src/lib.rs`:
+Write `lingxi-code/platforms/common/src/lib.rs`:
 
 ```rust
 //! Cross-platform MCP transport helpers shared by `platforms/posix` and
@@ -125,11 +125,11 @@ pub mod mcp_ws;
 
 - [ ] **Step 5: Register the workspace member**
 
-Modify `lingxi-core/Cargo.toml` — add `"platforms/common"` to the existing `[workspace].members` list, keeping alphabetic ordering with `"platforms/posix"` etc. If a `default-members` list exists, also add `"platforms/common"` there.
+Modify `lingxi-code/Cargo.toml` — add `"platforms/common"` to the existing `[workspace].members` list, keeping alphabetic ordering with `"platforms/posix"` etc. If a `default-members` list exists, also add `"platforms/common"` there.
 
 - [ ] **Step 6: Create placeholder modules so `lib.rs` compiles**
 
-Write `lingxi-core/platforms/common/src/mcp_stdio.rs`:
+Write `lingxi-code/platforms/common/src/mcp_stdio.rs`:
 
 ```rust
 //! Stdio MCP transport helpers — types only in this task; real spawn lives
@@ -152,7 +152,7 @@ pub struct StdioConfig {
 }
 ```
 
-Write `lingxi-core/platforms/common/src/mcp_ws.rs`:
+Write `lingxi-code/platforms/common/src/mcp_ws.rs`:
 
 ```rust
 //! WebSocket MCP transport — placeholder; real implementation in Task 5.
@@ -166,7 +166,7 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add lingxi-core/Cargo.toml lingxi-core/platforms/common
+git add lingxi-code/Cargo.toml lingxi-code/platforms/common
 git commit -m "feat(platform-common): new crate for shared MCP transport helpers"
 ```
 
@@ -175,11 +175,11 @@ git commit -m "feat(platform-common): new crate for shared MCP transport helpers
 ### Task 2: `StderrRing` — 64MB drop-oldest ring buffer
 
 **Files:**
-- Modify: `lingxi-core/platforms/common/src/mcp_stdio.rs`
+- Modify: `lingxi-code/platforms/common/src/mcp_stdio.rs`
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `lingxi-core/platforms/common/src/mcp_stdio.rs`:
+Add to `lingxi-code/platforms/common/src/mcp_stdio.rs`:
 
 ```rust
 #[cfg(test)]
@@ -227,7 +227,7 @@ Expected: FAIL — `StderrRing` not defined.
 
 - [ ] **Step 3: Implement `StderrRing`**
 
-Add to `lingxi-core/platforms/common/src/mcp_stdio.rs`, above the `#[cfg(test)]` module:
+Add to `lingxi-code/platforms/common/src/mcp_stdio.rs`, above the `#[cfg(test)]` module:
 
 ```rust
 use std::collections::VecDeque;
@@ -300,7 +300,7 @@ Expected: PASS (4 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/platforms/common/src/mcp_stdio.rs
+git add lingxi-code/platforms/common/src/mcp_stdio.rs
 git commit -m "feat(platform-common): StderrRing with drop-oldest 64MB cap"
 ```
 
@@ -309,13 +309,13 @@ git commit -m "feat(platform-common): StderrRing with drop-oldest 64MB cap"
 ### Task 3: Mock stdio MCP fixture binary
 
 **Files:**
-- Create: `lingxi-core/platforms/posix/tests/fixtures/mock_stdio_mcp/Cargo.toml`
-- Create: `lingxi-core/platforms/posix/tests/fixtures/mock_stdio_mcp/src/main.rs`
-- Modify: `lingxi-core/Cargo.toml`
+- Create: `lingxi-code/platforms/posix/tests/fixtures/mock_stdio_mcp/Cargo.toml`
+- Create: `lingxi-code/platforms/posix/tests/fixtures/mock_stdio_mcp/src/main.rs`
+- Modify: `lingxi-code/Cargo.toml`
 
 - [ ] **Step 1: Write the test that drives the fixture (will fail until both fixture and `spawn_stdio` exist)**
 
-Create `lingxi-core/platforms/posix/tests/mcp_stdio_test.rs`:
+Create `lingxi-code/platforms/posix/tests/mcp_stdio_test.rs`:
 
 ```rust
 //! Integration test: drive the mock stdio MCP fixture binary through
@@ -374,7 +374,7 @@ Expected: FAIL — `mock_stdio_mcp` binary not found AND `lingxi_platform_common
 
 - [ ] **Step 3: Create the fixture sub-crate manifest**
 
-Write `lingxi-core/platforms/posix/tests/fixtures/mock_stdio_mcp/Cargo.toml`:
+Write `lingxi-code/platforms/posix/tests/fixtures/mock_stdio_mcp/Cargo.toml`:
 
 ```toml
 [package]
@@ -395,7 +395,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", 
 
 - [ ] **Step 4: Write the fixture source**
 
-Write `lingxi-core/platforms/posix/tests/fixtures/mock_stdio_mcp/src/main.rs`:
+Write `lingxi-code/platforms/posix/tests/fixtures/mock_stdio_mcp/src/main.rs`:
 
 ```rust
 //! Minimal NDJSON JSON-RPC echo server used as a stdio MCP test fixture.
@@ -479,7 +479,7 @@ async fn main() {
 
 - [ ] **Step 5: Register the fixture as a workspace member**
 
-Modify `lingxi-core/Cargo.toml` — add `"platforms/posix/tests/fixtures/mock_stdio_mcp"` to `[workspace].members`. Do NOT add it to `default-members` (fixtures should not build by default in CI's release path).
+Modify `lingxi-code/Cargo.toml` — add `"platforms/posix/tests/fixtures/mock_stdio_mcp"` to `[workspace].members`. Do NOT add it to `default-members` (fixtures should not build by default in CI's release path).
 
 - [ ] **Step 6: Confirm fixture builds**
 
@@ -494,7 +494,7 @@ Expected: STILL FAIL — `spawn_stdio` and the `StdioConfig` re-export are not i
 - [ ] **Step 8: Commit**
 
 ```bash
-git add lingxi-core/Cargo.toml lingxi-core/platforms/posix/tests/fixtures lingxi-core/platforms/posix/tests/mcp_stdio_test.rs
+git add lingxi-code/Cargo.toml lingxi-code/platforms/posix/tests/fixtures lingxi-code/platforms/posix/tests/mcp_stdio_test.rs
 git commit -m "test(platform-posix): mock stdio MCP fixture binary + roundtrip test (failing)"
 ```
 
@@ -503,13 +503,13 @@ git commit -m "test(platform-posix): mock stdio MCP fixture binary + roundtrip t
 ### Task 4: Posix `spawn_stdio` implementation
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/Cargo.toml`
-- Modify: `lingxi-core/platforms/posix/src/mcp.rs`
-- Modify: `lingxi-core/platforms/posix/src/lib.rs`
+- Modify: `lingxi-code/platforms/posix/Cargo.toml`
+- Modify: `lingxi-code/platforms/posix/src/mcp.rs`
+- Modify: `lingxi-code/platforms/posix/src/lib.rs`
 
 - [ ] **Step 1: Add new dependencies**
 
-Modify `lingxi-core/platforms/posix/Cargo.toml` to extend `[dependencies]` (preserve existing entries):
+Modify `lingxi-code/platforms/posix/Cargo.toml` to extend `[dependencies]` (preserve existing entries):
 
 ```toml
 [dependencies]
@@ -547,7 +547,7 @@ workspace = true
 
 - [ ] **Step 2: Implement `spawn_stdio` in `platforms/posix/src/mcp.rs`**
 
-Add the following to `lingxi-core/platforms/posix/src/mcp.rs` (keep existing `PosixMcpTransport` trait impl; we will route to `spawn_stdio` from the `connect` arm in a follow-up plan but the function must exist as a public API now):
+Add the following to `lingxi-code/platforms/posix/src/mcp.rs` (keep existing `PosixMcpTransport` trait impl; we will route to `spawn_stdio` from the `connect` arm in a follow-up plan but the function must exist as a public API now):
 
 ```rust
 // New imports near the top (merge with existing imports already present):
@@ -657,7 +657,7 @@ Expected: PASS — `ping_roundtrips_via_stdio` succeeds.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/Cargo.toml lingxi-core/platforms/posix/src/mcp.rs lingxi-core/platforms/posix/src/lib.rs
+git add lingxi-code/platforms/posix/Cargo.toml lingxi-code/platforms/posix/src/mcp.rs lingxi-code/platforms/posix/src/lib.rs
 git commit -m "feat(platform-posix): spawn_stdio MCP transport with NDJSON framing and 64MB stderr cap"
 ```
 
@@ -666,14 +666,14 @@ git commit -m "feat(platform-posix): spawn_stdio MCP transport with NDJSON frami
 ### Task 5: `connect_ws` shared connector (handshake + header + subprotocol)
 
 **Files:**
-- Modify: `lingxi-core/platforms/common/src/mcp_ws.rs`
+- Modify: `lingxi-code/platforms/common/src/mcp_ws.rs`
 
 - [ ] **Step 1: Write the failing test**
 
 Add tests inline (real end-to-end roundtrip test lands in Task 7; here we test the request builder in isolation):
 
 ```rust
-// Append to lingxi-core/platforms/common/src/mcp_ws.rs
+// Append to lingxi-code/platforms/common/src/mcp_ws.rs
 
 #[cfg(test)]
 mod tests {
@@ -730,7 +730,7 @@ Expected: FAIL — `build_handshake_request` not defined.
 
 - [ ] **Step 3: Implement the WS connector and helpers**
 
-Replace `lingxi-core/platforms/common/src/mcp_ws.rs` with:
+Replace `lingxi-code/platforms/common/src/mcp_ws.rs` with:
 
 ```rust
 //! WebSocket MCP transport. Constructs a `lingxi_jsonrpc::Connection` over a
@@ -871,7 +871,7 @@ Expected: PASS (3 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/platforms/common/src/mcp_ws.rs
+git add lingxi-code/platforms/common/src/mcp_ws.rs
 git commit -m "feat(platform-common): connect_ws with X-Claude-Code-Ide-Authorization header and mcp subprotocol"
 ```
 
@@ -880,12 +880,12 @@ git commit -m "feat(platform-common): connect_ws with X-Claude-Code-Ide-Authoriz
 ### Task 6: Posix re-export of `connect_ws`
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/mcp.rs`
-- Modify: `lingxi-core/platforms/posix/src/lib.rs`
+- Modify: `lingxi-code/platforms/posix/src/mcp.rs`
+- Modify: `lingxi-code/platforms/posix/src/lib.rs`
 
 - [ ] **Step 1: Write the failing test**
 
-Add this small unit test to `lingxi-core/platforms/posix/src/mcp.rs` under `#[cfg(test)] mod tests`:
+Add this small unit test to `lingxi-code/platforms/posix/src/mcp.rs` under `#[cfg(test)] mod tests`:
 
 ```rust
 #[cfg(test)]
@@ -905,7 +905,7 @@ Expected: FAIL — `connect_ws` not in scope.
 
 - [ ] **Step 3: Add the re-export**
 
-Append to `lingxi-core/platforms/posix/src/mcp.rs`:
+Append to `lingxi-code/platforms/posix/src/mcp.rs`:
 
 ```rust
 // Re-export the shared WebSocket connector so callers can use a single path.
@@ -914,7 +914,7 @@ pub use lingxi_platform_common::mcp_ws::{
 };
 ```
 
-Append to `lingxi-core/platforms/posix/src/lib.rs`:
+Append to `lingxi-code/platforms/posix/src/lib.rs`:
 
 ```rust
 // Convenience: re-export at crate root for ergonomic `lingxi_platform_posix::connect_ws`.
@@ -929,7 +929,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/src/mcp.rs lingxi-core/platforms/posix/src/lib.rs
+git add lingxi-code/platforms/posix/src/mcp.rs lingxi-code/platforms/posix/src/lib.rs
 git commit -m "feat(platform-posix): re-export connect_ws + spawn_stdio at crate root"
 ```
 
@@ -938,11 +938,11 @@ git commit -m "feat(platform-posix): re-export connect_ws + spawn_stdio at crate
 ### Task 7: WS roundtrip integration test (axum mock server)
 
 **Files:**
-- Create: `lingxi-core/platforms/posix/tests/mcp_ws_test.rs`
+- Create: `lingxi-code/platforms/posix/tests/mcp_ws_test.rs`
 
 - [ ] **Step 1: Write the failing test**
 
-Write `lingxi-core/platforms/posix/tests/mcp_ws_test.rs`:
+Write `lingxi-code/platforms/posix/tests/mcp_ws_test.rs`:
 
 ```rust
 //! Integration test: connect to an in-process axum WebSocket server via
@@ -1071,7 +1071,7 @@ Expected: PASS — `ws_roundtrips_and_sends_auth_header` succeeds; both `X-Claud
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/tests/mcp_ws_test.rs
+git add lingxi-code/platforms/posix/tests/mcp_ws_test.rs
 git commit -m "test(platform-posix): WS roundtrip + auth header + mcp subprotocol verified end-to-end"
 ```
 
@@ -1080,11 +1080,11 @@ git commit -m "test(platform-posix): WS roundtrip + auth header + mcp subprotoco
 ### Task 8: McpClient integration smoke test (posix stdio)
 
 **Files:**
-- Create: `lingxi-core/platforms/posix/tests/mcp_client_stdio_test.rs`
+- Create: `lingxi-code/platforms/posix/tests/mcp_client_stdio_test.rs`
 
 - [ ] **Step 1: Write the failing test**
 
-Write `lingxi-core/platforms/posix/tests/mcp_client_stdio_test.rs`:
+Write `lingxi-code/platforms/posix/tests/mcp_client_stdio_test.rs`:
 
 ```rust
 //! Verify `lingxi_mcp::McpClient` can be constructed on top of the
@@ -1142,7 +1142,7 @@ Expected: PASS — `initialize_handshake_completes_over_stdio` succeeds.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/tests/mcp_client_stdio_test.rs
+git add lingxi-code/platforms/posix/tests/mcp_client_stdio_test.rs
 git commit -m "test(platform-posix): McpClient initialize handshake over stdio fixture"
 ```
 
@@ -1151,13 +1151,13 @@ git commit -m "test(platform-posix): McpClient initialize handshake over stdio f
 ### Task 9: Windows `spawn_stdio` implementation
 
 **Files:**
-- Modify: `lingxi-core/platforms/windows/Cargo.toml`
-- Modify: `lingxi-core/platforms/windows/src/mcp.rs`
-- Modify: `lingxi-core/platforms/windows/src/lib.rs`
+- Modify: `lingxi-code/platforms/windows/Cargo.toml`
+- Modify: `lingxi-code/platforms/windows/src/mcp.rs`
+- Modify: `lingxi-code/platforms/windows/src/lib.rs`
 
 - [ ] **Step 1: Add the same dependencies as posix (sans posix-only ones)**
 
-Modify `lingxi-core/platforms/windows/Cargo.toml`:
+Modify `lingxi-code/platforms/windows/Cargo.toml`:
 
 ```toml
 [package]
@@ -1192,7 +1192,7 @@ workspace = true
 
 - [ ] **Step 2: Implement `spawn_stdio` and re-exports in `platforms/windows/src/mcp.rs`**
 
-Append to `lingxi-core/platforms/windows/src/mcp.rs` (keep existing `WindowsMcpTransport` trait impl):
+Append to `lingxi-code/platforms/windows/src/mcp.rs` (keep existing `WindowsMcpTransport` trait impl):
 
 ```rust
 use lingxi_jsonrpc::Connection;
@@ -1287,7 +1287,7 @@ pub use lingxi_platform_common::mcp_ws::{
 };
 ```
 
-Append to `lingxi-core/platforms/windows/src/lib.rs`:
+Append to `lingxi-code/platforms/windows/src/lib.rs`:
 
 ```rust
 pub use lingxi_platform_common::mcp_stdio::StdioConfig;
@@ -1318,7 +1318,7 @@ If pure cross-target build is not feasible on the current host, the minimum gate
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/platforms/windows/Cargo.toml lingxi-core/platforms/windows/src/mcp.rs lingxi-core/platforms/windows/src/lib.rs
+git add lingxi-code/platforms/windows/Cargo.toml lingxi-code/platforms/windows/src/mcp.rs lingxi-code/platforms/windows/src/lib.rs
 git commit -m "feat(platform-windows): spawn_stdio + connect_ws re-export mirroring posix"
 ```
 
@@ -1334,12 +1334,12 @@ git commit -m "feat(platform-windows): spawn_stdio + connect_ws re-export mirror
 Run:
 
 ```bash
-rg -n "X-Claude-Code-Ide-Authorization" lingxi-core/
+rg -n "X-Claude-Code-Ide-Authorization" lingxi-code/
 ```
 
 Expected output: appears in
-- `lingxi-core/platforms/common/src/mcp_ws.rs` (constant + tests)
-- `lingxi-core/platforms/posix/tests/mcp_ws_test.rs` (assertion)
+- `lingxi-code/platforms/common/src/mcp_ws.rs` (constant + tests)
+- `lingxi-code/platforms/posix/tests/mcp_ws_test.rs` (assertion)
 - ONE constant definition; all other usages reference the constant.
 
 If the literal appears in more than two source files, fix it: code referencing the header MUST go through `AUTH_HEADER_NAME` constant.
@@ -1349,7 +1349,7 @@ If the literal appears in more than two source files, fix it: code referencing t
 Run:
 
 ```bash
-rg -n "'mcp'|\"mcp\"" lingxi-core/platforms/
+rg -n "'mcp'|\"mcp\"" lingxi-code/platforms/
 ```
 
 Expected: appears in `mcp_ws.rs` (constant `WS_SUBPROTOCOL`) and in the test that asserts on it (`mcp_ws_test.rs`). NOT directly inline in `connect_ws` body — that uses the constant.
@@ -1359,7 +1359,7 @@ Expected: appears in `mcp_ws.rs` (constant `WS_SUBPROTOCOL`) and in the test tha
 Run:
 
 ```bash
-rg -n "Bearer" lingxi-core/platforms/common/ lingxi-core/platforms/posix/src/mcp.rs lingxi-core/platforms/windows/src/mcp.rs
+rg -n "Bearer" lingxi-code/platforms/common/ lingxi-code/platforms/posix/src/mcp.rs lingxi-code/platforms/windows/src/mcp.rs
 ```
 
 Expected: NO matches. WS auth MUST NOT include `Bearer ` prefix per claude-code's `client.ts:713` (the value is the raw `serverRef.authToken`).
@@ -1369,7 +1369,7 @@ Expected: NO matches. WS auth MUST NOT include `Bearer ` prefix per claude-code'
 Run:
 
 ```bash
-rg -n "stream_sse|http_transport|SseClientTransport|StreamableHttp" lingxi-core/platforms/common/ lingxi-core/platforms/posix/src/mcp.rs lingxi-core/platforms/windows/src/mcp.rs
+rg -n "stream_sse|http_transport|SseClientTransport|StreamableHttp" lingxi-code/platforms/common/ lingxi-code/platforms/posix/src/mcp.rs lingxi-code/platforms/windows/src/mcp.rs
 ```
 
 Expected: NO matches. SSE + HTTP are scope of plan M2-02d.
@@ -1413,14 +1413,14 @@ If everything was already clean, no commit is needed.
 ### Task 11: Update parent docs to note M2-02c shipped
 
 **Files:**
-- Modify: `lingxi-core/CHANGELOG.md` (if exists; otherwise skip silently)
+- Modify: `lingxi-code/CHANGELOG.md` (if exists; otherwise skip silently)
 
 - [ ] **Step 1: Check whether a CHANGELOG entry should be added**
 
 Run:
 
 ```bash
-ls lingxi-core/CHANGELOG.md
+ls lingxi-code/CHANGELOG.md
 ```
 
 If the file exists, add a new entry under the in-progress v0.3.0 section:
@@ -1435,7 +1435,7 @@ If the file exists, add a new entry under the in-progress v0.3.0 section:
 - [ ] **Step 2: Commit if a CHANGELOG was modified**
 
 ```bash
-git add lingxi-core/CHANGELOG.md
+git add lingxi-code/CHANGELOG.md
 git commit -m "docs(changelog): M2-02c MCP stdio + WS transports"
 ```
 

@@ -22,7 +22,7 @@
 
 ## §1 StatusLine
 
-LingXi site: `lingxi-core/crates/tui/src/components/status_line.rs`. claude-code
+LingXi site: `lingxi-code/crates/tui/src/components/status_line.rs`. claude-code
 source: `src/components/StatusLine.tsx` (snapshot).
 
 | # | Literal | LingXi site | Notes |
@@ -38,7 +38,7 @@ source: `src/components/StatusLine.tsx` (snapshot).
 
 ## §2 Spinner
 
-LingXi site: `lingxi-core/crates/tui/src/components/spinner.rs`. claude-code
+LingXi site: `lingxi-code/crates/tui/src/components/spinner.rs`. claude-code
 source: `src/components/Spinner.tsx:41` (snapshot).
 
 | # | Literal | LingXi site | Notes |
@@ -49,7 +49,7 @@ source: `src/components/Spinner.tsx:41` (snapshot).
 
 ## §3 PromptInput
 
-LingXi site: `lingxi-core/crates/tui/src/components/prompt_input.rs`.
+LingXi site: `lingxi-code/crates/tui/src/components/prompt_input.rs`.
 claude-code source: `src/components/PromptInput/PromptInput.tsx` (snapshot).
 
 | # | Literal | LingXi site | Notes |
@@ -58,7 +58,7 @@ claude-code source: `src/components/PromptInput/PromptInput.tsx` (snapshot).
 
 ## §4 Permission Dialogs
 
-LingXi sites under `lingxi-core/crates/tui/src/components/permissions/`.
+LingXi sites under `lingxi-code/crates/tui/src/components/permissions/`.
 claude-code source: `src/components/permissions/PermissionRequest.tsx`
 (snapshot). **Documented divergence**: LingXi uses numeric-key button labels
 (`[1] Allow Once` / `[2] Allow Always` / `[N] Deny`) where claude-code's
@@ -78,7 +78,7 @@ the `tui_permission_dialogs.json` `_comment`.
 
 ## §5 Message Renderers
 
-LingXi sites under `lingxi-core/crates/tui/src/components/messages/`.
+LingXi sites under `lingxi-code/crates/tui/src/components/messages/`.
 
 ### §5.1 UserTextMessage
 
@@ -111,7 +111,7 @@ LingXi sites under `lingxi-core/crates/tui/src/components/messages/`.
 
 ## §6 System Messages
 
-LingXi site: `lingxi-core/crates/tui/src/app.rs`.
+LingXi site: `lingxi-code/crates/tui/src/app.rs`.
 
 | # | Literal | LingXi site | Notes |
 |---|---|---|---|

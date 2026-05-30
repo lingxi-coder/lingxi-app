@@ -164,28 +164,28 @@ git commit -m "plan(M5-07 T0): reverse-engineer byte-locks (djb2 algorithm + pat
 ## Task 1: Scaffold `jsonl/` submodule
 
 **Files:**
-- Modify: `lingxi-core/crates/session/src/lib.rs:1-19` (replace single-file `pub mod jsonl;` with submodule)
-- Move: `lingxi-core/crates/session/src/jsonl.rs` → `lingxi-core/crates/session/src/jsonl/recover.rs` (preserves existing `read_recover`/`RecoveryResult`/`StorageError`)
-- Create: `lingxi-core/crates/session/src/jsonl/mod.rs`
-- Create: `lingxi-core/crates/session/src/jsonl/writer.rs`
-- Create: `lingxi-core/crates/session/src/jsonl/reader.rs`
-- Create: `lingxi-core/crates/session/src/jsonl/schema.rs`
-- Create: `lingxi-core/crates/session/src/jsonl/path.rs`
-- Create: `lingxi-core/crates/session/src/jsonl/djb2.rs`
-- Create: `lingxi-core/crates/session/src/jsonl/uuid.rs`
-- Modify: `lingxi-core/crates/session/Cargo.toml` (add `uuid`, `regex`, `tempfile` dev-dep)
+- Modify: `lingxi-code/crates/session/src/lib.rs:1-19` (replace single-file `pub mod jsonl;` with submodule)
+- Move: `lingxi-code/crates/session/src/jsonl.rs` → `lingxi-code/crates/session/src/jsonl/recover.rs` (preserves existing `read_recover`/`RecoveryResult`/`StorageError`)
+- Create: `lingxi-code/crates/session/src/jsonl/mod.rs`
+- Create: `lingxi-code/crates/session/src/jsonl/writer.rs`
+- Create: `lingxi-code/crates/session/src/jsonl/reader.rs`
+- Create: `lingxi-code/crates/session/src/jsonl/schema.rs`
+- Create: `lingxi-code/crates/session/src/jsonl/path.rs`
+- Create: `lingxi-code/crates/session/src/jsonl/djb2.rs`
+- Create: `lingxi-code/crates/session/src/jsonl/uuid.rs`
+- Modify: `lingxi-code/crates/session/Cargo.toml` (add `uuid`, `regex`, `tempfile` dev-dep)
 
 - [ ] **Step 1: Move the existing `jsonl.rs` to a submodule file (preserves history if `git mv` is used).**
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-mkdir -p lingxi-core/crates/session/src/jsonl
-git mv lingxi-core/crates/session/src/jsonl.rs lingxi-core/crates/session/src/jsonl/recover.rs
+mkdir -p lingxi-code/crates/session/src/jsonl
+git mv lingxi-code/crates/session/src/jsonl.rs lingxi-code/crates/session/src/jsonl/recover.rs
 ```
 
 - [ ] **Step 2: Create `jsonl/mod.rs` re-exporting everything that was previously at `crate::jsonl::*`.**
 
-Open `lingxi-core/crates/session/src/jsonl/mod.rs` and write:
+Open `lingxi-code/crates/session/src/jsonl/mod.rs` and write:
 
 ```rust
 //! On-disk JSONL transcript format — byte-equivalent to claude-code's
@@ -226,7 +226,7 @@ pub const LITE_READ_BUF_SIZE: usize = 65_536;
 
 - [ ] **Step 3: Stub the six new submodule files so the crate compiles.**
 
-`lingxi-core/crates/session/src/jsonl/djb2.rs`:
+`lingxi-code/crates/session/src/jsonl/djb2.rs`:
 
 ```rust
 //! Modified-djb2 / SDBM-style hash — 1:1 port of `claude-code/src/utils/hash.ts:7-13`.
@@ -249,7 +249,7 @@ pub fn djb2_hash(s: &str) -> i32 {
 }
 ```
 
-`lingxi-core/crates/session/src/jsonl/uuid.rs`:
+`lingxi-code/crates/session/src/jsonl/uuid.rs`:
 
 ```rust
 //! UUID validation — 1:1 port of `claude-code/src/utils/sessionStoragePortable.ts:23-29`.
@@ -271,7 +271,7 @@ pub fn validate_uuid(s: &str) -> bool {
 }
 ```
 
-`lingxi-core/crates/session/src/jsonl/path.rs`:
+`lingxi-code/crates/session/src/jsonl/path.rs`:
 
 ```rust
 //! Project-dir name resolver — 1:1 port of
@@ -330,7 +330,7 @@ fn base36_abs(h: i32) -> String {
 }
 ```
 
-`lingxi-core/crates/session/src/jsonl/schema.rs`:
+`lingxi-code/crates/session/src/jsonl/schema.rs`:
 
 ```rust
 //! `JsonlMessage` — outer JSONL line schema, byte-locked to
@@ -401,7 +401,7 @@ pub struct JsonlMessage {
 }
 ```
 
-`lingxi-core/crates/session/src/jsonl/writer.rs`:
+`lingxi-code/crates/session/src/jsonl/writer.rs`:
 
 ```rust
 //! Append-only JSONL writer — 1:1 port of
@@ -482,7 +482,7 @@ impl JsonlWriter {
 }
 ```
 
-`lingxi-core/crates/session/src/jsonl/reader.rs`:
+`lingxi-code/crates/session/src/jsonl/reader.rs`:
 
 ```rust
 //! JSONL reader — full parse + lite head-only metadata.
@@ -633,7 +633,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 ```
 
-- [ ] **Step 4: Update `lingxi-core/crates/session/src/lib.rs` to re-export the new public surface (keep the old surface stable).**
+- [ ] **Step 4: Update `lingxi-code/crates/session/src/lib.rs` to re-export the new public surface (keep the old surface stable).**
 
 ```rust
 //! Session storage + crash-safe transcript reader + resumer.
@@ -665,7 +665,7 @@ pub use jsonl::{
 pub use jsonl::reader::SessionMetadata as JsonlSessionMetadata;
 ```
 
-- [ ] **Step 5: Add deps to `lingxi-core/crates/session/Cargo.toml`.**
+- [ ] **Step 5: Add deps to `lingxi-code/crates/session/Cargo.toml`.**
 
 ```toml
 [dependencies]
@@ -699,7 +699,7 @@ Expected: clean build (zero warnings under workspace `-D warnings` because every
 - [ ] **Step 7: Commit.**
 
 ```bash
-git add lingxi-core/crates/session/
+git add lingxi-code/crates/session/
 git commit -m "feat(M5-07 T1): scaffold jsonl/ submodule (djb2 + uuid + path + schema + writer + reader stubs)"
 ```
 
@@ -708,8 +708,8 @@ git commit -m "feat(M5-07 T1): scaffold jsonl/ submodule (djb2 + uuid + path + s
 ## Task 2: djb2 hash — port + 5 known-value tests
 
 **Files:**
-- Modify: `lingxi-core/crates/session/src/jsonl/djb2.rs` (already implemented in T1; T2 just adds the tests)
-- Create: `lingxi-core/crates/session/tests/jsonl_djb2_test.rs`
+- Modify: `lingxi-code/crates/session/src/jsonl/djb2.rs` (already implemented in T1; T2 just adds the tests)
+- Create: `lingxi-code/crates/session/tests/jsonl_djb2_test.rs`
 
 - [ ] **Step 1: Pre-compute reference hashes from claude-code by running its djb2 in Node.js.**
 
@@ -734,7 +734,7 @@ console.log(djb2Hash("/tmp"));                // 3556503
 
 - [ ] **Step 2: Write failing tests.**
 
-  Create `lingxi-core/crates/session/tests/jsonl_djb2_test.rs`:
+  Create `lingxi-code/crates/session/tests/jsonl_djb2_test.rs`:
 
 ```rust
 //! djb2_hash 1:1 byte-for-byte parity with claude-code/src/utils/hash.ts.
@@ -793,7 +793,7 @@ If `unicode_iterates_utf16_units` fails because the reference math is wrong, **r
 - [ ] **Step 4: Commit.**
 
 ```bash
-git add lingxi-core/crates/session/src/jsonl/djb2.rs lingxi-core/crates/session/tests/jsonl_djb2_test.rs
+git add lingxi-code/crates/session/src/jsonl/djb2.rs lingxi-code/crates/session/tests/jsonl_djb2_test.rs
 git commit -m "test(M5-07 T2): djb2_hash 1:1 parity — 6 reference values from claude-code TS"
 ```
 
@@ -802,12 +802,12 @@ git commit -m "test(M5-07 T2): djb2_hash 1:1 parity — 6 reference values from 
 ## Task 3: Path resolver — project_dir_name + session_path
 
 **Files:**
-- Modify: `lingxi-core/crates/session/src/jsonl/path.rs` (already implemented in T1; T3 adds tests)
-- Create: `lingxi-core/crates/session/tests/jsonl_path_test.rs`
+- Modify: `lingxi-code/crates/session/src/jsonl/path.rs` (already implemented in T1; T3 adds tests)
+- Create: `lingxi-code/crates/session/tests/jsonl_path_test.rs`
 
 - [ ] **Step 1: Write failing tests.**
 
-  Create `lingxi-core/crates/session/tests/jsonl_path_test.rs`:
+  Create `lingxi-code/crates/session/tests/jsonl_path_test.rs`:
 
 ```rust
 //! Project-dir + session-path resolver parity with
@@ -878,7 +878,7 @@ Expected: 7 passed.
 - [ ] **Step 3: Commit.**
 
 ```bash
-git add lingxi-core/crates/session/tests/jsonl_path_test.rs
+git add lingxi-code/crates/session/tests/jsonl_path_test.rs
 git commit -m "test(M5-07 T3): project_dir_name + session_path — claude-code layout parity"
 ```
 
@@ -887,8 +887,8 @@ git commit -m "test(M5-07 T3): project_dir_name + session_path — claude-code l
 ## Task 4: UUID validator — 10-case regex test
 
 **Files:**
-- Modify: `lingxi-core/crates/session/src/jsonl/uuid.rs` (implemented in T1)
-- Create: `lingxi-core/crates/session/tests/jsonl_uuid_test.rs`
+- Modify: `lingxi-code/crates/session/src/jsonl/uuid.rs` (implemented in T1)
+- Create: `lingxi-code/crates/session/tests/jsonl_uuid_test.rs`
 
 - [ ] **Step 1: Write the failing test.**
 
@@ -929,7 +929,7 @@ Run: `cargo test -p lingxi-session --test jsonl_uuid_test`
 Expected: 2 passed.
 
 ```bash
-git add lingxi-core/crates/session/tests/jsonl_uuid_test.rs
+git add lingxi-code/crates/session/tests/jsonl_uuid_test.rs
 git commit -m "test(M5-07 T4): validate_uuid — 5 valid + 5 invalid"
 ```
 
@@ -938,7 +938,7 @@ git commit -m "test(M5-07 T4): validate_uuid — 5 valid + 5 invalid"
 ## Task 5: JsonlMessage round-trip preserves byte order
 
 **Files:**
-- Create: `lingxi-core/crates/session/tests/jsonl_schema_test.rs`
+- Create: `lingxi-code/crates/session/tests/jsonl_schema_test.rs`
 
 - [ ] **Step 1: Write the round-trip test.**
 
@@ -1011,7 +1011,7 @@ Expected: 4 passed.
 - [ ] **Step 3: Commit.**
 
 ```bash
-git add lingxi-core/crates/session/tests/jsonl_schema_test.rs
+git add lingxi-code/crates/session/tests/jsonl_schema_test.rs
 git commit -m "test(M5-07 T5): JsonlMessage round-trip — 4 cases pin field order + extras flatten"
 ```
 
@@ -1020,12 +1020,12 @@ git commit -m "test(M5-07 T5): JsonlMessage round-trip — 4 cases pin field ord
 ## Task 6: JsonlWriter — append + raw-byte assertion
 
 **Files:**
-- Modify: `lingxi-core/crates/session/src/jsonl/writer.rs` (implemented in T1)
-- Create: `lingxi-core/crates/session/tests/jsonl_writer_test.rs`
+- Modify: `lingxi-code/crates/session/src/jsonl/writer.rs` (implemented in T1)
+- Create: `lingxi-code/crates/session/tests/jsonl_writer_test.rs`
 
 - [ ] **Step 1: Confirm `lingxi-traits::FileSystem` exposes `mkdir_p` + `append_file`.**
 
-Run: `grep -n "fn mkdir_p\|fn append_file" /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/traits/src/fs.rs`
+Run: `grep -n "fn mkdir_p\|fn append_file" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/traits/src/fs.rs`
 Expected: both methods exist (they were added in M1.3). If `mkdir_p` does NOT exist, the writer in T1 falls back to `create_dir` or `write_file` (the writer code in T1 already swallows the result via `let _ =`, so a missing method only means we skip parent creation — `append_file` itself errors with a clear "no such directory" message which the test catches).
 
   If `mkdir_p` is missing, replace the `_ = self.fs.mkdir_p(parent_str).await;` line in `writer.rs` with:
@@ -1106,7 +1106,7 @@ async fn three_appends_produce_three_lines_one_lf_each() {
 
 - [ ] **Step 3: Confirm `lingxi-platform-posix::posix_filesystem` is the canonical constructor.**
 
-Run: `grep -n "pub fn posix_filesystem\|pub fn filesystem" /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/platform-posix/src/lib.rs | head -5`
+Run: `grep -n "pub fn posix_filesystem\|pub fn filesystem" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/platform-posix/src/lib.rs | head -5`
 Expected: one of those is the public constructor. If the name differs (e.g. `new_filesystem`), update the test to use the actual name. Add `lingxi-platform-posix` to the session crate's `[dev-dependencies]` if not already there:
 
 ```toml
@@ -1124,7 +1124,7 @@ Expected: 1 passed.
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/session/src/jsonl/writer.rs lingxi-core/crates/session/tests/jsonl_writer_test.rs lingxi-core/crates/session/Cargo.toml
+git add lingxi-code/crates/session/src/jsonl/writer.rs lingxi-code/crates/session/tests/jsonl_writer_test.rs lingxi-code/crates/session/Cargo.toml
 git commit -m "test(M5-07 T6): JsonlWriter 3-append raw-byte assertion (1 LF per line, no CRLF)"
 ```
 
@@ -1133,8 +1133,8 @@ git commit -m "test(M5-07 T6): JsonlWriter 3-append raw-byte assertion (1 LF per
 ## Task 7: JsonlReader — full read round-trip + lite head-only read
 
 **Files:**
-- Modify: `lingxi-core/crates/session/src/jsonl/reader.rs` (implemented in T1)
-- Create: `lingxi-core/crates/session/tests/jsonl_reader_test.rs`
+- Modify: `lingxi-code/crates/session/src/jsonl/reader.rs` (implemented in T1)
+- Create: `lingxi-code/crates/session/tests/jsonl_reader_test.rs`
 
 - [ ] **Step 1: Write failing tests.**
 
@@ -1241,7 +1241,7 @@ Expected: 3 passed.
 - [ ] **Step 3: Commit.**
 
 ```bash
-git add lingxi-core/crates/session/src/jsonl/reader.rs lingxi-core/crates/session/tests/jsonl_reader_test.rs
+git add lingxi-code/crates/session/src/jsonl/reader.rs lingxi-code/crates/session/tests/jsonl_reader_test.rs
 git commit -m "test(M5-07 T7): JsonlReader read_all round-trip + read_lite 64KiB head + escape parity"
 ```
 
@@ -1250,7 +1250,7 @@ git commit -m "test(M5-07 T7): JsonlReader read_all round-trip + read_lite 64KiB
 ## Task 8: extract_json_string_field — 5 cases for the no-parse algorithm
 
 **Files:**
-- Create: `lingxi-core/crates/session/tests/jsonl_extract_test.rs`
+- Create: `lingxi-code/crates/session/tests/jsonl_extract_test.rs`
 
 - [ ] **Step 1: Write failing tests.**
 
@@ -1314,7 +1314,7 @@ Expected: 7 passed.
 - [ ] **Step 3: Commit.**
 
 ```bash
-git add lingxi-core/crates/session/tests/jsonl_extract_test.rs
+git add lingxi-code/crates/session/tests/jsonl_extract_test.rs
 git commit -m "test(M5-07 T8): extract_json_string_field + unescape — 7 parity cases"
 ```
 
@@ -1323,14 +1323,14 @@ git commit -m "test(M5-07 T8): extract_json_string_field + unescape — 7 parity
 ## Task 9: Golden fixture #1 — single_turn_no_tools.jsonl
 
 **Files:**
-- Create: `lingxi-core/crates/session/tests/fixtures/golden_sessions/single_turn_no_tools.jsonl`
-- Create: `lingxi-core/crates/session/tests/fixtures/golden_sessions/README.md`
+- Create: `lingxi-code/crates/session/tests/fixtures/golden_sessions/single_turn_no_tools.jsonl`
+- Create: `lingxi-code/crates/session/tests/fixtures/golden_sessions/README.md`
 
 - [ ] **Step 1: Write the fixture file.**
 
   Two lines: one user message + one assistant `end_turn` response. Lock the byte sequence. UUIDs are placeholders `<UUID-1>` / `<UUID-2>` and the session id is `<SESSION-1>`; the timestamp tokens are `<TS-1>` / `<TS-2>`. These tokens are substituted at test time.
 
-  Create `lingxi-core/crates/session/tests/fixtures/golden_sessions/single_turn_no_tools.jsonl` with EXACTLY these two lines (each terminated with one `\n`):
+  Create `lingxi-code/crates/session/tests/fixtures/golden_sessions/single_turn_no_tools.jsonl` with EXACTLY these two lines (each terminated with one `\n`):
 
 ```jsonl
 {"type":"user","uuid":"<UUID-1>","parentUuid":null,"sessionId":"<SESSION-1>","timestamp":"<TS-1>","cwd":"/tmp/golden","version":"0.6.0","message":{"role":"user","content":"say hi"},"isSidechain":false,"userType":"external"}
@@ -1341,7 +1341,7 @@ git commit -m "test(M5-07 T8): extract_json_string_field + unescape — 7 parity
 
 - [ ] **Step 2: Document the fixture origin in `README.md`.**
 
-  Create `lingxi-core/crates/session/tests/fixtures/golden_sessions/README.md`:
+  Create `lingxi-code/crates/session/tests/fixtures/golden_sessions/README.md`:
 
 ```markdown
 # Golden session fixtures
@@ -1397,7 +1397,7 @@ writer matches them.
 - [ ] **Step 3: Commit.**
 
 ```bash
-git add lingxi-core/crates/session/tests/fixtures/
+git add lingxi-code/crates/session/tests/fixtures/
 git commit -m "test(M5-07 T9): golden fixture single_turn_no_tools.jsonl + README"
 ```
 
@@ -1406,7 +1406,7 @@ git commit -m "test(M5-07 T9): golden fixture single_turn_no_tools.jsonl + READM
 ## Task 10: Golden write test — writer output equals fixture #1
 
 **Files:**
-- Create: `lingxi-core/crates/session/tests/golden_session_test.rs`
+- Create: `lingxi-code/crates/session/tests/golden_session_test.rs`
 
 - [ ] **Step 1: Write the test.**
 
@@ -1508,7 +1508,7 @@ Expected: 1 passed.
 - [ ] **Step 3: Commit.**
 
 ```bash
-git add lingxi-core/crates/session/tests/golden_session_test.rs
+git add lingxi-code/crates/session/tests/golden_session_test.rs
 git commit -m "test(M5-07 T10): golden write — writer output equals single_turn_no_tools fixture byte-for-byte"
 ```
 
@@ -1517,7 +1517,7 @@ git commit -m "test(M5-07 T10): golden write — writer output equals single_tur
 ## Task 11: Golden read test — reader returns expected sequence
 
 **Files:**
-- Modify: `lingxi-core/crates/session/tests/golden_session_test.rs` (add a second test)
+- Modify: `lingxi-code/crates/session/tests/golden_session_test.rs` (add a second test)
 
 - [ ] **Step 1: Append the test.**
 
@@ -1558,7 +1558,7 @@ Expected: 1 passed.
 - [ ] **Step 3: Commit.**
 
 ```bash
-git add lingxi-core/crates/session/tests/golden_session_test.rs
+git add lingxi-code/crates/session/tests/golden_session_test.rs
 git commit -m "test(M5-07 T11): golden read — reader returns expected JsonlMessage sequence"
 ```
 
@@ -1567,15 +1567,15 @@ git commit -m "test(M5-07 T11): golden read — reader returns expected JsonlMes
 ## Task 12: Two more golden fixtures (multi_turn_with_tools + compacted_session)
 
 **Files:**
-- Create: `lingxi-core/crates/session/tests/fixtures/golden_sessions/multi_turn_with_tools.jsonl`
-- Create: `lingxi-core/crates/session/tests/fixtures/golden_sessions/compacted_session.jsonl`
-- Modify: `lingxi-core/crates/session/tests/golden_session_test.rs` (add 4 tests: write + read for each)
+- Create: `lingxi-code/crates/session/tests/fixtures/golden_sessions/multi_turn_with_tools.jsonl`
+- Create: `lingxi-code/crates/session/tests/fixtures/golden_sessions/compacted_session.jsonl`
+- Modify: `lingxi-code/crates/session/tests/golden_session_test.rs` (add 4 tests: write + read for each)
 
 - [ ] **Step 1: Author `multi_turn_with_tools.jsonl`.**
 
   5 lines (turn 1 user + assistant tool_use, turn 1 user tool_result, turn 2 user, turn 2 assistant end_turn). Insertion order of inner `message` keys MUST match what the Rust `json!` macro emits.
 
-  Create `lingxi-core/crates/session/tests/fixtures/golden_sessions/multi_turn_with_tools.jsonl` with EXACTLY these five lines (one `\n` terminator each):
+  Create `lingxi-code/crates/session/tests/fixtures/golden_sessions/multi_turn_with_tools.jsonl` with EXACTLY these five lines (one `\n` terminator each):
 
 ```jsonl
 {"type":"user","uuid":"<UUID-1>","parentUuid":null,"sessionId":"<SESSION-1>","timestamp":"<TS-1>","cwd":"/tmp/golden","version":"0.6.0","message":{"role":"user","content":"read /etc/hostname"},"isSidechain":false,"userType":"external"}
@@ -1808,9 +1808,9 @@ Expected: 5 tests passed (single_turn write + single_turn read + multi_turn writ
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/session/tests/fixtures/golden_sessions/multi_turn_with_tools.jsonl \
-        lingxi-core/crates/session/tests/fixtures/golden_sessions/compacted_session.jsonl \
-        lingxi-core/crates/session/tests/golden_session_test.rs
+git add lingxi-code/crates/session/tests/fixtures/golden_sessions/multi_turn_with_tools.jsonl \
+        lingxi-code/crates/session/tests/fixtures/golden_sessions/compacted_session.jsonl \
+        lingxi-code/crates/session/tests/golden_session_test.rs
 git commit -m "test(M5-07 T12): 2 more golden fixtures (multi_turn_with_tools + compacted_session) + 4 byte-equiv tests"
 ```
 
@@ -1821,13 +1821,13 @@ git commit -m "test(M5-07 T12): 2 more golden fixtures (multi_turn_with_tools + 
 **Context:** M5-02 created `lingxi-orchestrator` crate with `ConversationOrchestrator`. M5-07 adds a `Option<Arc<JsonlWriter>>` field so user/assistant/tool_result appends also flow to disk in byte-equivalent JSONL.
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs` (constructor + per-message append site)
-- Modify: `lingxi-core/crates/orchestrator/Cargo.toml` (add `lingxi-session` dep if not already there)
-- Create: `lingxi-core/crates/orchestrator/tests/jsonl_persistence_test.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs` (constructor + per-message append site)
+- Modify: `lingxi-code/crates/orchestrator/Cargo.toml` (add `lingxi-session` dep if not already there)
+- Create: `lingxi-code/crates/orchestrator/tests/jsonl_persistence_test.rs`
 
 - [ ] **Step 1: Locate the existing constructor + append site.**
 
-Run: `grep -n "impl ConversationOrchestrator\|fn new\|fn run_turn_streaming\|append" /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/orchestrator/src/conversation.rs | head -20`
+Run: `grep -n "impl ConversationOrchestrator\|fn new\|fn run_turn_streaming\|append" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/orchestrator/src/conversation.rs | head -20`
 
   Expected output: the constructor signature (`pub fn new(...) -> Self`) and the per-turn append site (look for where assistant/tool_result messages are pushed into the in-memory transcript — M5-02 calls this `transcript.push(msg)` or similar).
 
@@ -1837,7 +1837,7 @@ Run: `grep -n "impl ConversationOrchestrator\|fn new\|fn run_turn_streaming\|app
 
 - [ ] **Step 2: Add the writer field + builder.**
 
-  Edit `lingxi-core/crates/orchestrator/src/conversation.rs`:
+  Edit `lingxi-code/crates/orchestrator/src/conversation.rs`:
 
 ```rust
 use lingxi_session::JsonlWriter;
@@ -1902,7 +1902,7 @@ if let Some(writer) = self.jsonl_writer.as_ref() {
 
 - [ ] **Step 3: Write the integration test.**
 
-  Create `lingxi-core/crates/orchestrator/tests/jsonl_persistence_test.rs`:
+  Create `lingxi-code/crates/orchestrator/tests/jsonl_persistence_test.rs`:
 
 ```rust
 //! Scripted 2-turn run produces a JSONL file whose parentUuid chain matches
@@ -1968,7 +1968,7 @@ async fn orchestrator_without_writer_does_not_persist() {
 
 - [ ] **Step 4: Cargo deps.**
 
-  Edit `lingxi-core/crates/orchestrator/Cargo.toml`:
+  Edit `lingxi-code/crates/orchestrator/Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -1996,9 +1996,9 @@ cargo test -p lingxi-agent  # M4-05 owner
 - [ ] **Step 6: Commit.**
 
 ```bash
-git add lingxi-core/crates/orchestrator/src/conversation.rs \
-        lingxi-core/crates/orchestrator/Cargo.toml \
-        lingxi-core/crates/orchestrator/tests/jsonl_persistence_test.rs
+git add lingxi-code/crates/orchestrator/src/conversation.rs \
+        lingxi-code/crates/orchestrator/Cargo.toml \
+        lingxi-code/crates/orchestrator/tests/jsonl_persistence_test.rs
 git commit -m "feat(M5-07 T13): ConversationOrchestrator::with_jsonl_writer — per-message JSONL persistence + parentUuid chain"
 ```
 
@@ -2007,15 +2007,15 @@ git commit -m "feat(M5-07 T13): ConversationOrchestrator::with_jsonl_writer — 
 ## Task 14: Telemetry — 3 new events (253 → 256)
 
 **Files:**
-- Modify: `lingxi-core/crates/telemetry/src/tengu/session.rs` (add 3 constants + 3 payload structs + bump `NAMES`)
-- Modify: `lingxi-core/crates/telemetry/src/tengu/mod.rs` (bump TOTAL formula)
-- Modify: `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs` (bump assertion to 256, slice ranges)
-- Modify: `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json` (insert 3 names after `tengu_session_import_failed`, before tool block)
-- Modify: `lingxi-core/crates/telemetry/src/lib.rs` (add `emit_session_appended/rotated/corrupted` helper functions referenced by T13)
+- Modify: `lingxi-code/crates/telemetry/src/tengu/session.rs` (add 3 constants + 3 payload structs + bump `NAMES`)
+- Modify: `lingxi-code/crates/telemetry/src/tengu/mod.rs` (bump TOTAL formula)
+- Modify: `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs` (bump assertion to 256, slice ranges)
+- Modify: `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json` (insert 3 names after `tengu_session_import_failed`, before tool block)
+- Modify: `lingxi-code/crates/telemetry/src/lib.rs` (add `emit_session_appended/rotated/corrupted` helper functions referenced by T13)
 
 - [ ] **Step 1: Add 3 constants + `NAMES` entries in `tengu/session.rs`.**
 
-  Open `lingxi-core/crates/telemetry/src/tengu/session.rs`. After line 43 (`pub const IMPORT_FAILED: &str = "tengu_session_import_failed";`) add:
+  Open `lingxi-code/crates/telemetry/src/tengu/session.rs`. After line 43 (`pub const IMPORT_FAILED: &str = "tengu_session_import_failed";`) add:
 
 ```rust
 /// `tengu_session_appended` — one message was appended to the on-disk JSONL.
@@ -2090,7 +2090,7 @@ pub struct CorruptedPayload {
 
 - [ ] **Step 2: Bump the TOTAL formula in `tengu/mod.rs:29`.**
 
-  Open `lingxi-core/crates/telemetry/src/tengu/mod.rs:29` and change:
+  Open `lingxi-code/crates/telemetry/src/tengu/mod.rs:29` and change:
 
   Before (post-M5-06):
 
@@ -2111,7 +2111,7 @@ pub struct CorruptedPayload {
 
 - [ ] **Step 3: Bump the assertion in `event_name_completeness_test.rs`.**
 
-  Open `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs`. Rename `registry_is_exactly_245_entries` (renamed by M5-06 to `..._253_entries`) → `registry_is_exactly_256_entries`. Update:
+  Open `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs`. Rename `registry_is_exactly_245_entries` (renamed by M5-06 to `..._253_entries`) → `registry_is_exactly_256_entries`. Update:
 
 ```rust
 #[test]
@@ -2167,14 +2167,14 @@ fn category_ordering_preserved() {
   **Important:** if M5-06 named the new block something other than `tengu_orchestrator_` (e.g. `tengu_hook_`), update the prefix assertion to match what M5-06 wrote. Cross-check before editing:
 
 ```bash
-grep -n "tengu_orchestrator_\|tengu_hook_" /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/telemetry/src/tengu/ | head -5
+grep -n "tengu_orchestrator_\|tengu_hook_" /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/telemetry/src/tengu/ | head -5
 ```
 
   The orchestrator-block prefix must match the prefix written into `NAMES` by the M5-02/M5-04/M5-05/M5-06 owners. If those plans put the new events under `tengu_hook_` (M5-06) instead of a fresh orchestrator module, then the prefix in the `[240..255]` slice assertion is `tengu_hook_` — and we keep the comment honest.
 
 - [ ] **Step 4: Insert 3 names in the parity fixture.**
 
-  Open `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json`. Locate `"tengu_session_import_failed"` (last entry of the session block). Insert immediately after it (and before `tengu_tool_started`):
+  Open `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json`. Locate `"tengu_session_import_failed"` (last entry of the session block). Insert immediately after it (and before `tengu_tool_started`):
 
 ```json
     "tengu_session_import_failed",
@@ -2188,7 +2188,7 @@ grep -n "tengu_orchestrator_\|tengu_hook_" /Users/luolingfeng/Projects/LingXi-Ne
 
 - [ ] **Step 5: Add public emit helpers.**
 
-  Open `lingxi-core/crates/telemetry/src/lib.rs` and look at how the M5-06 emit functions (`emit_hook_pre_started`, etc.) are exposed. Add three sibling helpers:
+  Open `lingxi-code/crates/telemetry/src/lib.rs` and look at how the M5-06 emit functions (`emit_hook_pre_started`, etc.) are exposed. Add three sibling helpers:
 
 ```rust
 use crate::tengu::session::{AppendedPayload, CorruptedPayload, RotatedPayload};
@@ -2227,7 +2227,7 @@ pub fn emit_session_corrupted(session_id: impl Into<String>, error: impl Into<St
 
 - [ ] **Step 6: Add payload schema tests.**
 
-  Open `lingxi-core/crates/telemetry/tests/session_schema_test.rs` (created in M3-06). Mirror the existing test pattern (round-trip `AppendedPayload` / `RotatedPayload` / `CorruptedPayload` through JSON):
+  Open `lingxi-code/crates/telemetry/tests/session_schema_test.rs` (created in M3-06). Mirror the existing test pattern (round-trip `AppendedPayload` / `RotatedPayload` / `CorruptedPayload` through JSON):
 
 ```rust
 #[test]
@@ -2292,12 +2292,12 @@ cargo test -p lingxi-test-harness parity_tengu_events
 - [ ] **Step 8: Commit.**
 
 ```bash
-git add lingxi-core/crates/telemetry/src/tengu/session.rs \
-        lingxi-core/crates/telemetry/src/tengu/mod.rs \
-        lingxi-core/crates/telemetry/src/lib.rs \
-        lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs \
-        lingxi-core/crates/telemetry/tests/session_schema_test.rs \
-        lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json
+git add lingxi-code/crates/telemetry/src/tengu/session.rs \
+        lingxi-code/crates/telemetry/src/tengu/mod.rs \
+        lingxi-code/crates/telemetry/src/lib.rs \
+        lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs \
+        lingxi-code/crates/telemetry/tests/session_schema_test.rs \
+        lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json
 git commit -m "feat(M5-07 T14): 3 session telemetry events + parity fixture bump (253 -> 256)"
 ```
 
@@ -2321,11 +2321,11 @@ Expected: all tests pass.
 
 | Failing test | Likely cause | Fix |
 |---|---|---|
-| `lingxi-session` build error: `cannot find function ... in trait FileSystem` | The session crate calls a method that doesn't exist on `lingxi-traits::FileSystem` (e.g. `mkdir_p` not present) | Open `lingxi-core/crates/traits/src/fs.rs`; check what's actually there. Adjust the writer/reader to use the available API. Do NOT add new trait methods in T15 — defer to a follow-up. |
-| `lingxi-orchestrator` compile error: `ConversationOrchestrator::new` signature mismatch | M5-02 changed the constructor since the plan was written | Open `lingxi-core/crates/orchestrator/src/conversation.rs` and update T13's integration code to match the actual signature. |
+| `lingxi-session` build error: `cannot find function ... in trait FileSystem` | The session crate calls a method that doesn't exist on `lingxi-traits::FileSystem` (e.g. `mkdir_p` not present) | Open `lingxi-code/crates/traits/src/fs.rs`; check what's actually there. Adjust the writer/reader to use the available API. Do NOT add new trait methods in T15 — defer to a follow-up. |
+| `lingxi-orchestrator` compile error: `ConversationOrchestrator::new` signature mismatch | M5-02 changed the constructor since the plan was written | Open `lingxi-code/crates/orchestrator/src/conversation.rs` and update T13's integration code to match the actual signature. |
 | `parity_tengu_events` test fails with "extra entries" | The 3 new names landed in wrong slot in the JSON fixture | Re-open `tengu_events.json`; verify the 3 new names sit immediately after `tengu_session_import_failed` and before the first `tengu_tool_*` name. |
 | `category_ordering_preserved` index out of bounds | A downstream slice range wasn't shifted by +3 | Verify all slice ranges in `event_name_completeness_test.rs` step 3 of T14. |
-| `golden_session_test::writer_output_equals_*` fails with diff | `serde_json` is alphabetizing keys instead of preserving insertion order | Add explicit `serde_json = { workspace = true, features = ["preserve_order"] }` to `lingxi-core/crates/session/Cargo.toml` `[dependencies]` and re-run. |
+| `golden_session_test::writer_output_equals_*` fails with diff | `serde_json` is alphabetizing keys instead of preserving insertion order | Add explicit `serde_json = { workspace = true, features = ["preserve_order"] }` to `lingxi-code/crates/session/Cargo.toml` `[dependencies]` and re-run. |
 
 - [ ] **Step 2: Clippy with `-D warnings`.**
 
@@ -2340,7 +2340,7 @@ Expected: no warnings, no errors.
 | Warning | Fix |
 |---|---|
 | `clippy::missing_docs_in_private_items` on new files | Already covered by module-level `//!` headers; check that every public fn has `///` docs. |
-| `clippy::module_name_repetitions` on `JsonlWriter` / `JsonlReader` | Workspace lints already allow this (`module_name_repetitions = "allow"` in `lingxi-core/Cargo.toml:136`). Should not trigger. If it does, the `[lints]` section in `lingxi-session/Cargo.toml` may need `workspace = true`. |
+| `clippy::module_name_repetitions` on `JsonlWriter` / `JsonlReader` | Workspace lints already allow this (`module_name_repetitions = "allow"` in `lingxi-code/Cargo.toml:136`). Should not trigger. If it does, the `[lints]` section in `lingxi-session/Cargo.toml` may need `workspace = true`. |
 | `clippy::pedantic::cast_possible_truncation` on `LITE_READ_BUF_SIZE as u64` | The cast is from `usize` (64-bit on supported platforms) to `u64` — safe. Annotate with `#[allow(clippy::cast_possible_truncation)]` only at the call site, with a comment explaining the lock to `LITE_READ_BUF_SIZE = 65_536`. |
 
 - [ ] **Step 3: `cargo fmt --check`.**
@@ -2370,7 +2370,7 @@ Expected: `OK: no placeholders` (or empty output).
 
 - [ ] **Step 6: RE-CAPTURE golden fixtures if `claude` CLI is now reachable.**
 
-  This is a soft step. If `which claude` succeeds on the executing machine, follow the README.md procedure in `lingxi-core/crates/session/tests/fixtures/golden_sessions/README.md` to RE-CAPTURE the three fixtures from real sessions. Diff them against the synthetic ones byte-for-byte — any difference is a schema lock that needs reconciling (open a follow-up ticket; do NOT block T15 on this).
+  This is a soft step. If `which claude` succeeds on the executing machine, follow the README.md procedure in `lingxi-code/crates/session/tests/fixtures/golden_sessions/README.md` to RE-CAPTURE the three fixtures from real sessions. Diff them against the synthetic ones byte-for-byte — any difference is a schema lock that needs reconciling (open a follow-up ticket; do NOT block T15 on this).
 
 - [ ] **Step 7: Tag the release.**
 

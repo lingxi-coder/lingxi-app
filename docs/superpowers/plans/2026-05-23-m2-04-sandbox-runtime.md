@@ -23,25 +23,25 @@
 ## File Inventory
 
 **New files (must not exist before this plan starts):**
-- `lingxi-core/crates/sandbox/src/runtime_config.rs` — ~280 lines · full `SandboxRuntimeConfig` schema + `Platform` enum + `SettingsJson` slice.
-- `lingxi-core/crates/sandbox/src/path_pattern.rs` — ~70 lines · `resolve_path_pattern_for_sandbox` (`//`, `/`, `~/`, `./`, bare passthrough).
-- `lingxi-core/crates/sandbox/src/policy_convert.rs` — ~240 lines · `convert_settings_to_runtime_config` + `linux_glob_pattern_warnings`.
-- `lingxi-core/crates/sandbox/src/dependency_check.rs` — ~180 lines · `check_dependencies` + `sandbox_unavailable_reason`.
-- `lingxi-core/crates/sandbox/src/violation_store.rs` — ~120 lines · bounded `SandboxViolationEvent` store.
-- `lingxi-core/crates/sandbox/src/wrap.rs` — ~340 lines · `wrap_with_sandbox` dispatch (Linux bwrap, macOS SBPL, Windows/WSL1 refuse).
-- `lingxi-core/platforms/posix/src/wsl_detect.rs` — ~70 lines · `/proc/version` parser → `WslKind`.
+- `lingxi-code/crates/sandbox/src/runtime_config.rs` — ~280 lines · full `SandboxRuntimeConfig` schema + `Platform` enum + `SettingsJson` slice.
+- `lingxi-code/crates/sandbox/src/path_pattern.rs` — ~70 lines · `resolve_path_pattern_for_sandbox` (`//`, `/`, `~/`, `./`, bare passthrough).
+- `lingxi-code/crates/sandbox/src/policy_convert.rs` — ~240 lines · `convert_settings_to_runtime_config` + `linux_glob_pattern_warnings`.
+- `lingxi-code/crates/sandbox/src/dependency_check.rs` — ~180 lines · `check_dependencies` + `sandbox_unavailable_reason`.
+- `lingxi-code/crates/sandbox/src/violation_store.rs` — ~120 lines · bounded `SandboxViolationEvent` store.
+- `lingxi-code/crates/sandbox/src/wrap.rs` — ~340 lines · `wrap_with_sandbox` dispatch (Linux bwrap, macOS SBPL, Windows/WSL1 refuse).
+- `lingxi-code/platforms/posix/src/wsl_detect.rs` — ~70 lines · `/proc/version` parser → `WslKind`.
 
 **Modified files:**
-- `lingxi-core/crates/sandbox/Cargo.toml` — add `which = "6"`, `tempfile = "3"`, `tokio` `sync` feature.
-- `lingxi-core/crates/sandbox/src/lib.rs` — wire new modules into the public API.
-- `lingxi-core/crates/sandbox/src/decision.rs` — expand `should_use_sandbox` with claude-code's compound + env-var + safe-wrapper fixed-point logic.
-- `lingxi-core/crates/sandbox/src/policy.rs` — unchanged (M1 default policy stays valid for callers that don't use `SandboxRuntimeConfig`).
-- `lingxi-core/platforms/posix/Cargo.toml` — add `lingxi-sandbox = { path = "../../crates/sandbox" }`.
-- `lingxi-core/platforms/posix/src/lib.rs` — `pub mod wsl_detect;` export.
-- `lingxi-core/platforms/posix/src/sandbox.rs` — full rewrite (~240 lines) wiring all new modules.
+- `lingxi-code/crates/sandbox/Cargo.toml` — add `which = "6"`, `tempfile = "3"`, `tokio` `sync` feature.
+- `lingxi-code/crates/sandbox/src/lib.rs` — wire new modules into the public API.
+- `lingxi-code/crates/sandbox/src/decision.rs` — expand `should_use_sandbox` with claude-code's compound + env-var + safe-wrapper fixed-point logic.
+- `lingxi-code/crates/sandbox/src/policy.rs` — unchanged (M1 default policy stays valid for callers that don't use `SandboxRuntimeConfig`).
+- `lingxi-code/platforms/posix/Cargo.toml` — add `lingxi-sandbox = { path = "../../crates/sandbox" }`.
+- `lingxi-code/platforms/posix/src/lib.rs` — `pub mod wsl_detect;` export.
+- `lingxi-code/platforms/posix/src/sandbox.rs` — full rewrite (~240 lines) wiring all new modules.
 
 **Unchanged (M2-01 already corrected):**
-- `lingxi-core/platforms/windows/src/sandbox.rs` — stays Unsupported. M2-04 adds a doc cross-reference only (Task 18).
+- `lingxi-code/platforms/windows/src/sandbox.rs` — stays Unsupported. M2-04 adds a doc cross-reference only (Task 18).
 
 Total new code: ~1300 lines in `crates/sandbox/` + ~310 lines in `platforms/posix/` + ~280 lines of test code. Total budget ~1900 lines including tests.
 
@@ -58,15 +58,15 @@ Total new code: ~1300 lines in `crates/sandbox/` + ~310 lines in `platforms/posi
 ### Task 1: Cargo dependencies and `runtime_config.rs` skeleton
 
 **Files:**
-- Modify: `lingxi-core/crates/sandbox/Cargo.toml`
-- Create: `lingxi-core/crates/sandbox/src/runtime_config.rs`
-- Modify: `lingxi-core/crates/sandbox/src/lib.rs`
+- Modify: `lingxi-code/crates/sandbox/Cargo.toml`
+- Create: `lingxi-code/crates/sandbox/src/runtime_config.rs`
+- Modify: `lingxi-code/crates/sandbox/src/lib.rs`
 
 **Critical 1:1 fidelity:** every field name in the `#[serde(rename_all = "camelCase")]` rendering MUST match claude-code's `SandboxSettingsSchema` (zod) byte-for-byte. The strings managed-settings deployments key off these.
 
 - [ ] **Step 1: Replace the dependency block**
 
-Replace the `[dependencies]` block in `lingxi-core/crates/sandbox/Cargo.toml`:
+Replace the `[dependencies]` block in `lingxi-code/crates/sandbox/Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -89,7 +89,7 @@ serde_json = { workspace = true }
 
 - [ ] **Step 2: Write the failing JSON-roundtrip test**
 
-Create `lingxi-core/crates/sandbox/tests/runtime_config_test.rs`:
+Create `lingxi-code/crates/sandbox/tests/runtime_config_test.rs`:
 
 ```rust
 use lingxi_sandbox::runtime_config::{
@@ -247,7 +247,7 @@ Expected: FAIL with `unresolved import lingxi_sandbox::runtime_config` (module d
 
 - [ ] **Step 4: Create the full `runtime_config.rs`**
 
-Create `lingxi-core/crates/sandbox/src/runtime_config.rs`:
+Create `lingxi-code/crates/sandbox/src/runtime_config.rs`:
 
 ```rust
 //! Wire-shape `SandboxRuntimeConfig` matching claude-code's zod
@@ -432,7 +432,7 @@ pub struct SandboxSettingsJson {
 
 - [ ] **Step 5: Wire the module into `lib.rs`**
 
-Edit `lingxi-core/crates/sandbox/src/lib.rs` — add `pub mod runtime_config;` and a re-export block.
+Edit `lingxi-code/crates/sandbox/src/lib.rs` — add `pub mod runtime_config;` and a re-export block.
 
 Replace the `pub mod` lines and the `pub use` block:
 
@@ -470,8 +470,8 @@ Expected: no warnings, no diff.
 ### Task 2: `path_pattern.rs` — claude-code-specific path prefix resolution
 
 **Files:**
-- Create: `lingxi-core/crates/sandbox/src/path_pattern.rs`
-- Modify: `lingxi-core/crates/sandbox/src/lib.rs`
+- Create: `lingxi-code/crates/sandbox/src/path_pattern.rs`
+- Modify: `lingxi-code/crates/sandbox/src/lib.rs`
 
 claude-code's permission-rule path patterns have three CC-specific conventions (the rest pass through to sandbox-runtime):
 - `//path` → strip the leading `/` (absolute from filesystem root). Used to write absolute paths in permission rules without colliding with the `/path` convention.
@@ -482,7 +482,7 @@ claude-code's permission-rule path patterns have three CC-specific conventions (
 
 - [ ] **Step 1: Write the failing test**
 
-Create `lingxi-core/crates/sandbox/tests/path_pattern_test.rs`:
+Create `lingxi-code/crates/sandbox/tests/path_pattern_test.rs`:
 
 ```rust
 use lingxi_sandbox::path_pattern::resolve_path_pattern_for_sandbox;
@@ -533,7 +533,7 @@ Expected: FAIL — `unresolved import lingxi_sandbox::path_pattern`.
 
 - [ ] **Step 3: Implement `path_pattern.rs`**
 
-Create `lingxi-core/crates/sandbox/src/path_pattern.rs`:
+Create `lingxi-code/crates/sandbox/src/path_pattern.rs`:
 
 ```rust
 //! claude-code path-pattern resolution. Ports
@@ -584,7 +584,7 @@ pub fn resolve_path_pattern_for_sandbox(pattern: &str, settings_dir: &Path) -> S
 
 - [ ] **Step 4: Wire into lib.rs**
 
-Add `pub mod path_pattern;` to `lingxi-core/crates/sandbox/src/lib.rs` after `pub mod runtime_config;`.
+Add `pub mod path_pattern;` to `lingxi-code/crates/sandbox/src/lib.rs` after `pub mod runtime_config;`.
 
 - [ ] **Step 5: Run the test to verify it passes**
 
@@ -596,8 +596,8 @@ Expected: 6 tests pass.
 ### Task 3: `policy_convert.rs` — SettingsJson → SandboxRuntimeConfig conversion
 
 **Files:**
-- Create: `lingxi-core/crates/sandbox/src/policy_convert.rs`
-- Modify: `lingxi-core/crates/sandbox/src/lib.rs`
+- Create: `lingxi-code/crates/sandbox/src/policy_convert.rs`
+- Modify: `lingxi-code/crates/sandbox/src/lib.rs`
 
 Port `convertToSandboxRuntimeConfig` from `claude-code/src/utils/sandbox/sandbox-adapter.ts`. Walks `permissions.allow` and `permissions.deny`:
 - `Edit(<pattern>)` → `filesystem.allow_write` (allow) or `filesystem.deny_write` (deny).
@@ -616,7 +616,7 @@ Also ports `getLinuxGlobPatternWarnings` (lines 597-642): scan allow/deny Edit/R
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `lingxi-core/crates/sandbox/tests/policy_convert_test.rs`:
+Create `lingxi-code/crates/sandbox/tests/policy_convert_test.rs`:
 
 ```rust
 use lingxi_sandbox::policy_convert::{
@@ -750,7 +750,7 @@ Expected: FAIL — `unresolved import lingxi_sandbox::policy_convert`.
 
 - [ ] **Step 3: Implement `policy_convert.rs`**
 
-Create `lingxi-core/crates/sandbox/src/policy_convert.rs`:
+Create `lingxi-code/crates/sandbox/src/policy_convert.rs`:
 
 ```rust
 //! Port of `convertToSandboxRuntimeConfig` and `getLinuxGlobPatternWarnings`
@@ -999,7 +999,7 @@ fn has_globs_excluding_trailing_double_star(path: &str) -> bool {
 
 - [ ] **Step 4: Wire into lib.rs**
 
-Add to `lingxi-core/crates/sandbox/src/lib.rs`:
+Add to `lingxi-code/crates/sandbox/src/lib.rs`:
 
 ```rust
 pub mod policy_convert;
@@ -1017,8 +1017,8 @@ Expected: 11 tests pass.
 ### Task 4: WSL detection (`wsl_detect.rs` in `platforms/posix/`)
 
 **Files:**
-- Create: `lingxi-core/platforms/posix/src/wsl_detect.rs`
-- Modify: `lingxi-core/platforms/posix/src/lib.rs`
+- Create: `lingxi-code/platforms/posix/src/wsl_detect.rs`
+- Modify: `lingxi-code/platforms/posix/src/lib.rs`
 
 claude-code distinguishes WSL2 (sandbox-capable via bwrap) from WSL1 (refused). Detection reads `/proc/version`:
 - Contains `"microsoft-standard"` (lowercase) OR `"WSL2"` → WSL2.
@@ -1033,7 +1033,7 @@ This lives in `platforms/posix/` (not in `crates/sandbox/`) because reading `/pr
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `lingxi-core/platforms/posix/src/wsl_detect.rs`:
+Add to `lingxi-code/platforms/posix/src/wsl_detect.rs`:
 
 ```rust
 #[cfg(test)]
@@ -1080,7 +1080,7 @@ Expected: FAIL — `cannot find module wsl_detect`.
 
 - [ ] **Step 3: Implement `wsl_detect.rs`**
 
-Create `lingxi-core/platforms/posix/src/wsl_detect.rs`:
+Create `lingxi-code/platforms/posix/src/wsl_detect.rs`:
 
 ```rust
 //! WSL kernel detection.
@@ -1137,7 +1137,7 @@ pub fn parse_wsl_kind(proc_version: &str) -> WslKind {
 
 - [ ] **Step 4: Export from `lib.rs`**
 
-Add to `lingxi-core/platforms/posix/src/lib.rs` (alongside the other `pub mod` lines):
+Add to `lingxi-code/platforms/posix/src/lib.rs` (alongside the other `pub mod` lines):
 
 ```rust
 pub mod wsl_detect;
@@ -1165,16 +1165,16 @@ Expected: no warnings.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/crates/sandbox/Cargo.toml \
-        lingxi-core/crates/sandbox/src/lib.rs \
-        lingxi-core/crates/sandbox/src/runtime_config.rs \
-        lingxi-core/crates/sandbox/src/path_pattern.rs \
-        lingxi-core/crates/sandbox/src/policy_convert.rs \
-        lingxi-core/crates/sandbox/tests/runtime_config_test.rs \
-        lingxi-core/crates/sandbox/tests/path_pattern_test.rs \
-        lingxi-core/crates/sandbox/tests/policy_convert_test.rs \
-        lingxi-core/platforms/posix/src/wsl_detect.rs \
-        lingxi-core/platforms/posix/src/lib.rs
+git add lingxi-code/crates/sandbox/Cargo.toml \
+        lingxi-code/crates/sandbox/src/lib.rs \
+        lingxi-code/crates/sandbox/src/runtime_config.rs \
+        lingxi-code/crates/sandbox/src/path_pattern.rs \
+        lingxi-code/crates/sandbox/src/policy_convert.rs \
+        lingxi-code/crates/sandbox/tests/runtime_config_test.rs \
+        lingxi-code/crates/sandbox/tests/path_pattern_test.rs \
+        lingxi-code/crates/sandbox/tests/policy_convert_test.rs \
+        lingxi-code/platforms/posix/src/wsl_detect.rs \
+        lingxi-code/platforms/posix/src/lib.rs
 git commit -m "feat(sandbox): RuntimeConfig schema"
 ```
 
@@ -1185,8 +1185,8 @@ git commit -m "feat(sandbox): RuntimeConfig schema"
 ### Task 6: `dependency_check.rs` — probe `bwrap`, `socat`, `sandbox-exec`
 
 **Files:**
-- Create: `lingxi-core/crates/sandbox/src/dependency_check.rs`
-- Modify: `lingxi-core/crates/sandbox/src/lib.rs`
+- Create: `lingxi-code/crates/sandbox/src/dependency_check.rs`
+- Modify: `lingxi-code/crates/sandbox/src/lib.rs`
 
 Probe required CLIs per platform:
 - macOS (`Platform::Mac`): need `sandbox-exec` in `$PATH` (claude-code expects `/usr/bin/sandbox-exec`, but `which` works on any path).
@@ -1198,7 +1198,7 @@ Probe required CLIs per platform:
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `lingxi-core/crates/sandbox/tests/dependency_check_test.rs`:
+Create `lingxi-code/crates/sandbox/tests/dependency_check_test.rs`:
 
 ```rust
 use lingxi_sandbox::dependency_check::{
@@ -1345,7 +1345,7 @@ Expected: FAIL — `unresolved import lingxi_sandbox::dependency_check`.
 
 - [ ] **Step 3: Implement `dependency_check.rs`**
 
-Create `lingxi-core/crates/sandbox/src/dependency_check.rs`:
+Create `lingxi-code/crates/sandbox/src/dependency_check.rs`:
 
 ```rust
 //! Sandbox dependency probing + the `sandbox_unavailable_reason` decoder.
@@ -1519,7 +1519,7 @@ pub fn sandbox_unavailable_reason(
 
 - [ ] **Step 4: Wire into lib.rs**
 
-Add to `lingxi-core/crates/sandbox/src/lib.rs`:
+Add to `lingxi-code/crates/sandbox/src/lib.rs`:
 
 ```rust
 pub mod dependency_check;
@@ -1539,8 +1539,8 @@ Expected: 7 tests pass.
 ### Task 7: `violation_store.rs` — bounded ring buffer of sandbox events
 
 **Files:**
-- Create: `lingxi-core/crates/sandbox/src/violation_store.rs`
-- Modify: `lingxi-core/crates/sandbox/src/lib.rs`
+- Create: `lingxi-code/crates/sandbox/src/violation_store.rs`
+- Modify: `lingxi-code/crates/sandbox/src/lib.rs`
 
 Bounded `VecDeque<SandboxViolationEvent>` under `RwLock`. Capacity is `SANDBOX_VIOLATION_STORE_CAP = 1000` (claude-code's circular buffer cap). Oldest events evicted when over.
 
@@ -1553,7 +1553,7 @@ API:
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `lingxi-core/crates/sandbox/tests/violation_store_test.rs`:
+Create `lingxi-code/crates/sandbox/tests/violation_store_test.rs`:
 
 ```rust
 use lingxi_sandbox::violation_store::{
@@ -1622,7 +1622,7 @@ Expected: FAIL — `unresolved import lingxi_sandbox::violation_store`.
 
 - [ ] **Step 3: Implement `violation_store.rs`**
 
-Create `lingxi-core/crates/sandbox/src/violation_store.rs`:
+Create `lingxi-code/crates/sandbox/src/violation_store.rs`:
 
 ```rust
 //! Bounded ring buffer of sandbox violation events. Matches claude-code's
@@ -1717,7 +1717,7 @@ impl SandboxViolationStore {
 
 - [ ] **Step 4: Wire into lib.rs**
 
-Add to `lingxi-core/crates/sandbox/src/lib.rs`:
+Add to `lingxi-code/crates/sandbox/src/lib.rs`:
 
 ```rust
 pub mod violation_store;
@@ -1738,7 +1738,7 @@ Expected: 4 tests pass.
 ### Task 8: Compound-command splitter + env-var stripper
 
 **Files:**
-- Modify: `lingxi-core/crates/sandbox/src/decision.rs`
+- Modify: `lingxi-code/crates/sandbox/src/decision.rs`
 
 claude-code's `shouldUseSandbox.ts` performs a fixed-point removal of two layers:
 1. `splitCommand_DEPRECATED` splits on `&&`, `;`, `||` (and a few rarer pipe forms).
@@ -1752,7 +1752,7 @@ The fixed-point loop runs until no new candidate is produced.
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `lingxi-core/crates/sandbox/tests/decision_compound_test.rs`:
+Create `lingxi-code/crates/sandbox/tests/decision_compound_test.rs`:
 
 ```rust
 use lingxi_sandbox::decision::{strip_env_and_wrappers_fixedpoint, split_compound_command};
@@ -1855,7 +1855,7 @@ Expected: FAIL — `unresolved import lingxi_sandbox::decision::strip_env_and_wr
 
 - [ ] **Step 3: Add splitter + stripper to `decision.rs`**
 
-Append to `lingxi-core/crates/sandbox/src/decision.rs` (do NOT delete existing content; this is an addition):
+Append to `lingxi-code/crates/sandbox/src/decision.rs` (do NOT delete existing content; this is an addition):
 
 ```rust
 // =============================================================================
@@ -2000,7 +2000,7 @@ Expected: 11 tests pass.
 ### Task 9: Wire `excludedCommands` match into the decision
 
 **Files:**
-- Modify: `lingxi-core/crates/sandbox/src/decision.rs`
+- Modify: `lingxi-code/crates/sandbox/src/decision.rs`
 
 Add `should_use_sandbox_for_command` (separate from the M1 `should_use_sandbox` — that one stays for legacy callers; the new function consumes `SandboxRuntimeConfig` and runs the full compound + fixed-point logic). The function returns `bool`:
 - `false` if any subcommand's candidate set matches any pattern in `config.excluded_commands`.
@@ -2010,7 +2010,7 @@ Pattern matching: claude-code supports three kinds of `excludedCommands` pattern
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `lingxi-core/crates/sandbox/tests/decision_match_test.rs`:
+Create `lingxi-code/crates/sandbox/tests/decision_match_test.rs`:
 
 ```rust
 use lingxi_sandbox::decision::should_use_sandbox_for_command;
@@ -2081,7 +2081,7 @@ Expected: FAIL — `unresolved import lingxi_sandbox::decision::should_use_sandb
 
 - [ ] **Step 3: Implement `should_use_sandbox_for_command`**
 
-Append to `lingxi-core/crates/sandbox/src/decision.rs`:
+Append to `lingxi-code/crates/sandbox/src/decision.rs`:
 
 ```rust
 use crate::runtime_config::SandboxRuntimeConfig;
@@ -2140,11 +2140,11 @@ Expected: 7 tests pass.
 ### Task 10: Re-export decision additions; add module doc
 
 **Files:**
-- Modify: `lingxi-core/crates/sandbox/src/lib.rs`
+- Modify: `lingxi-code/crates/sandbox/src/lib.rs`
 
 - [ ] **Step 1: Update `lib.rs` re-exports**
 
-Edit the existing `pub use decision::{...}` block in `lingxi-core/crates/sandbox/src/lib.rs` to include the new symbols:
+Edit the existing `pub use decision::{...}` block in `lingxi-code/crates/sandbox/src/lib.rs` to include the new symbols:
 
 ```rust
 pub use decision::{
@@ -2171,14 +2171,14 @@ Expected: no warnings, no diff.
 - [ ] **Step 2: Commit**
 
 ```bash
-git add lingxi-core/crates/sandbox/src/dependency_check.rs \
-        lingxi-core/crates/sandbox/src/violation_store.rs \
-        lingxi-core/crates/sandbox/src/decision.rs \
-        lingxi-core/crates/sandbox/src/lib.rs \
-        lingxi-core/crates/sandbox/tests/dependency_check_test.rs \
-        lingxi-core/crates/sandbox/tests/violation_store_test.rs \
-        lingxi-core/crates/sandbox/tests/decision_compound_test.rs \
-        lingxi-core/crates/sandbox/tests/decision_match_test.rs
+git add lingxi-code/crates/sandbox/src/dependency_check.rs \
+        lingxi-code/crates/sandbox/src/violation_store.rs \
+        lingxi-code/crates/sandbox/src/decision.rs \
+        lingxi-code/crates/sandbox/src/lib.rs \
+        lingxi-code/crates/sandbox/tests/dependency_check_test.rs \
+        lingxi-code/crates/sandbox/tests/violation_store_test.rs \
+        lingxi-code/crates/sandbox/tests/decision_compound_test.rs \
+        lingxi-code/crates/sandbox/tests/decision_match_test.rs
 git commit -m "feat(sandbox): dependency check + violation store"
 ```
 
@@ -2187,13 +2187,13 @@ git commit -m "feat(sandbox): dependency check + violation store"
 ### Task 12: WSL1 refusal end-to-end test (golden string check)
 
 **Files:**
-- Modify: `lingxi-core/crates/sandbox/tests/dependency_check_test.rs`
+- Modify: `lingxi-code/crates/sandbox/tests/dependency_check_test.rs`
 
 This task adds one extra assertion verifying that the full WSL1 refusal pipeline returns the byte-for-byte claude-code error string. It's a separate task so the assertion lives close to the canonical source-of-truth string.
 
 - [ ] **Step 1: Add the assertion**
 
-Append to `lingxi-core/crates/sandbox/tests/dependency_check_test.rs`:
+Append to `lingxi-code/crates/sandbox/tests/dependency_check_test.rs`:
 
 ```rust
 #[test]
@@ -2224,8 +2224,8 @@ Expected: PASS.
 ### Task 13: Linux bwrap invocation builder
 
 **Files:**
-- Create: `lingxi-core/crates/sandbox/src/wrap.rs`
-- Modify: `lingxi-core/crates/sandbox/src/lib.rs`
+- Create: `lingxi-code/crates/sandbox/src/wrap.rs`
+- Modify: `lingxi-code/crates/sandbox/src/lib.rs`
 
 The bwrap invocation builder produces a single shell-runnable string composed of:
 - `bwrap` binary path
@@ -2237,7 +2237,7 @@ The bwrap invocation builder produces a single shell-runnable string composed of
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `lingxi-core/crates/sandbox/tests/wrap_linux_test.rs`:
+Create `lingxi-code/crates/sandbox/tests/wrap_linux_test.rs`:
 
 ```rust
 use lingxi_sandbox::runtime_config::{
@@ -2335,7 +2335,7 @@ Expected: FAIL — `unresolved import lingxi_sandbox::wrap`.
 
 - [ ] **Step 3: Implement the Linux side of `wrap.rs`**
 
-Create `lingxi-core/crates/sandbox/src/wrap.rs`:
+Create `lingxi-code/crates/sandbox/src/wrap.rs`:
 
 ```rust
 //! Sandbox wrap dispatch: produce a shell-runnable wrapped command line per
@@ -2569,7 +2569,7 @@ fn write_sbpl_tempfile(profile: &str) -> Result<String, SandboxWrapError> {
 
 - [ ] **Step 4: Wire into lib.rs**
 
-Add to `lingxi-core/crates/sandbox/src/lib.rs`:
+Add to `lingxi-code/crates/sandbox/src/lib.rs`:
 
 ```rust
 pub mod wrap;
@@ -2587,11 +2587,11 @@ Expected: 7 tests pass.
 ### Task 14: macOS SBPL profile test
 
 **Files:**
-- Create: `lingxi-core/crates/sandbox/tests/wrap_macos_test.rs`
+- Create: `lingxi-code/crates/sandbox/tests/wrap_macos_test.rs`
 
 - [ ] **Step 1: Write the test**
 
-Create `lingxi-core/crates/sandbox/tests/wrap_macos_test.rs`:
+Create `lingxi-code/crates/sandbox/tests/wrap_macos_test.rs`:
 
 ```rust
 use lingxi_sandbox::runtime_config::{
@@ -2729,13 +2729,13 @@ Expected: 6 tests pass.
 ### Task 15: Documented exact error strings (constants module)
 
 **Files:**
-- Modify: `lingxi-core/crates/sandbox/src/dependency_check.rs`
+- Modify: `lingxi-code/crates/sandbox/src/dependency_check.rs`
 
 Add a `const` block at the top of `dependency_check.rs` so the exact claude-code error strings are documented and grep-able. The strings are already used by `sandbox_unavailable_reason`, but exposing them as `pub const` lets tests (and `/sandbox doctor` output) reference them by name without retyping.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `lingxi-core/crates/sandbox/tests/error_strings_test.rs`:
+Create `lingxi-code/crates/sandbox/tests/error_strings_test.rs`:
 
 ```rust
 use lingxi_sandbox::dependency_check::error_strings;
@@ -2788,7 +2788,7 @@ Expected: FAIL — `unresolved import lingxi_sandbox::dependency_check::error_st
 
 - [ ] **Step 3: Add the constants module**
 
-Append to `lingxi-core/crates/sandbox/src/dependency_check.rs`:
+Append to `lingxi-code/crates/sandbox/src/dependency_check.rs`:
 
 ```rust
 /// Byte-for-byte exact error strings from claude-code's sandbox-adapter.ts.
@@ -2823,7 +2823,7 @@ Expected: 5 tests pass.
 
 - [ ] **Step 5: Replace the inline format strings in `sandbox_unavailable_reason` with the constants**
 
-Edit `lingxi-core/crates/sandbox/src/dependency_check.rs` — replace the body of `sandbox_unavailable_reason`. Find the section that builds the messages and update it to reference `error_strings::*`:
+Edit `lingxi-code/crates/sandbox/src/dependency_check.rs` — replace the body of `sandbox_unavailable_reason`. Find the section that builds the messages and update it to reference `error_strings::*`:
 
 ```rust
     if wsl_one_detected {
@@ -2874,12 +2874,12 @@ Expected: no warnings.
 - [ ] **Step 2: Commit**
 
 ```bash
-git add lingxi-core/crates/sandbox/src/wrap.rs \
-        lingxi-core/crates/sandbox/src/dependency_check.rs \
-        lingxi-core/crates/sandbox/src/lib.rs \
-        lingxi-core/crates/sandbox/tests/wrap_linux_test.rs \
-        lingxi-core/crates/sandbox/tests/wrap_macos_test.rs \
-        lingxi-core/crates/sandbox/tests/error_strings_test.rs
+git add lingxi-code/crates/sandbox/src/wrap.rs \
+        lingxi-code/crates/sandbox/src/dependency_check.rs \
+        lingxi-code/crates/sandbox/src/lib.rs \
+        lingxi-code/crates/sandbox/tests/wrap_linux_test.rs \
+        lingxi-code/crates/sandbox/tests/wrap_macos_test.rs \
+        lingxi-code/crates/sandbox/tests/error_strings_test.rs
 git commit -m "feat(sandbox): wrap_with_sandbox dispatch"
 ```
 
@@ -2890,8 +2890,8 @@ git commit -m "feat(sandbox): wrap_with_sandbox dispatch"
 ### Task 17: Rewrite `platforms/posix/src/sandbox.rs` as a real `Sandbox` impl
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/Cargo.toml`
-- Modify: `lingxi-core/platforms/posix/src/sandbox.rs` (full rewrite)
+- Modify: `lingxi-code/platforms/posix/Cargo.toml`
+- Modify: `lingxi-code/platforms/posix/src/sandbox.rs` (full rewrite)
 
 This task wires together everything in Phases A-C and produces a `PosixSandbox` whose:
 - `is_available()` checks WSL1, platform support, and dependency presence.
@@ -2906,7 +2906,7 @@ The `Sandbox` trait operates on the M1 `SandboxPolicy` shape (`writable_paths`, 
 
 - [ ] **Step 1: Add the sandbox crate as a posix dep**
 
-Add to `lingxi-core/platforms/posix/Cargo.toml` under `[dependencies]`:
+Add to `lingxi-code/platforms/posix/Cargo.toml` under `[dependencies]`:
 
 ```toml
 lingxi-sandbox = { path = "../../crates/sandbox" }
@@ -2914,7 +2914,7 @@ lingxi-sandbox = { path = "../../crates/sandbox" }
 
 - [ ] **Step 2: Write the failing test**
 
-Create `lingxi-core/platforms/posix/tests/sandbox_real_impl_test.rs`:
+Create `lingxi-code/platforms/posix/tests/sandbox_real_impl_test.rs`:
 
 ```rust
 use lingxi_platform_posix::sandbox::PosixSandbox;
@@ -3010,7 +3010,7 @@ Expected: FAIL — `prepare` either returns the M1 stub `Wrapped { backend: None
 
 - [ ] **Step 4: Full rewrite of `platforms/posix/src/sandbox.rs`**
 
-Replace the entire body of `lingxi-core/platforms/posix/src/sandbox.rs`:
+Replace the entire body of `lingxi-code/platforms/posix/src/sandbox.rs`:
 
 ```rust
 //! Real POSIX `Sandbox` implementation.
@@ -3283,18 +3283,18 @@ Expected: 3 tests pass (one is `cfg`-gated on macOS/linux).
 ### Task 18: Verify Windows sandbox stays Unsupported + add doc cross-ref
 
 **Files:**
-- Modify: `lingxi-core/platforms/windows/src/sandbox.rs` (doc only)
+- Modify: `lingxi-code/platforms/windows/src/sandbox.rs` (doc only)
 
 M2-01 should have already rewritten the Windows sandbox to return `Unsupported`. Verify, and add a doc comment pointing at M2-04 for the cross-platform parity story.
 
 - [ ] **Step 1: Inspect the current file**
 
-Run: `cat /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/platforms/windows/src/sandbox.rs | head -30`
+Run: `cat /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/platforms/windows/src/sandbox.rs | head -30`
 Expected (if M2-01 done): doc comment mentions "claude-code does not support sandbox on Windows" or returns `SandboxError::Unsupported`. If it still says "M2.03 windows sandbox is a policy-validating no-op", M2-01 needs to be re-checked first.
 
 - [ ] **Step 2: Update the module doc**
 
-Edit the top of `lingxi-core/platforms/windows/src/sandbox.rs` — replace the module doc with:
+Edit the top of `lingxi-code/platforms/windows/src/sandbox.rs` — replace the module doc with:
 
 ```rust
 //! `Sandbox` trait impl — Windows is Unsupported.
@@ -3319,13 +3319,13 @@ Expected: ok.
 ### Task 19: WSL1 refusal integration test
 
 **Files:**
-- Create: `lingxi-core/platforms/posix/tests/sandbox_wsl1_refusal_test.rs`
+- Create: `lingxi-code/platforms/posix/tests/sandbox_wsl1_refusal_test.rs`
 
 This test is gated on Linux only (we can't mock `/proc/version` on macOS). It exercises the `parse_wsl_kind` parser as a proxy: feed in WSL1 markup, confirm the `dependency_check::sandbox_unavailable_reason` produces the exact byte-for-byte WSL1 string.
 
 - [ ] **Step 1: Write the test**
 
-Create `lingxi-core/platforms/posix/tests/sandbox_wsl1_refusal_test.rs`:
+Create `lingxi-code/platforms/posix/tests/sandbox_wsl1_refusal_test.rs`:
 
 ```rust
 use lingxi_platform_posix::wsl_detect::{parse_wsl_kind, WslKind};
@@ -3391,13 +3391,13 @@ Expected: 2 tests pass.
 ### Task 20: Integration test — prepare a real ls command, inspect the wrapped argv
 
 **Files:**
-- Create: `lingxi-core/platforms/posix/tests/sandbox_prepare_e2e_test.rs`
+- Create: `lingxi-code/platforms/posix/tests/sandbox_prepare_e2e_test.rs`
 
 End-to-end test that exercises the full `PosixSandbox::prepare` pipeline with a realistic policy and verifies the wrapped `ProcessCommand` argv matches expectations. Gated on `target_os = "macos"` OR `target_os = "linux"`.
 
 - [ ] **Step 1: Write the test**
 
-Create `lingxi-core/platforms/posix/tests/sandbox_prepare_e2e_test.rs`:
+Create `lingxi-code/platforms/posix/tests/sandbox_prepare_e2e_test.rs`:
 
 ```rust
 #![cfg(any(target_os = "macos", target_os = "linux"))]
@@ -3501,13 +3501,13 @@ Expected: no errors.
 - [ ] **Step 1: Stage and commit**
 
 ```bash
-git add lingxi-core/platforms/posix/Cargo.toml \
-        lingxi-core/platforms/posix/src/sandbox.rs \
-        lingxi-core/platforms/posix/src/lib.rs \
-        lingxi-core/platforms/posix/tests/sandbox_real_impl_test.rs \
-        lingxi-core/platforms/posix/tests/sandbox_wsl1_refusal_test.rs \
-        lingxi-core/platforms/posix/tests/sandbox_prepare_e2e_test.rs \
-        lingxi-core/platforms/windows/src/sandbox.rs
+git add lingxi-code/platforms/posix/Cargo.toml \
+        lingxi-code/platforms/posix/src/sandbox.rs \
+        lingxi-code/platforms/posix/src/lib.rs \
+        lingxi-code/platforms/posix/tests/sandbox_real_impl_test.rs \
+        lingxi-code/platforms/posix/tests/sandbox_wsl1_refusal_test.rs \
+        lingxi-code/platforms/posix/tests/sandbox_prepare_e2e_test.rs \
+        lingxi-code/platforms/windows/src/sandbox.rs
 git commit -m "feat(platforms/posix): real Sandbox impl"
 ```
 

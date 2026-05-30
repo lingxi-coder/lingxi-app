@@ -13,20 +13,20 @@
 ## File Structure
 
 **Modify:**
-- `lingxi-core/crates/orchestrator/src/conversation.rs` — add `Arc<CompactionOrchestrator>` field + `with_compaction` builder; emit `CompactionCompleted` event via `OutputStream`.
-- `lingxi-core/crates/orchestrator/src/handle_impl.rs` — `force_compact` real body: snapshot, run, swap, append marker, return summary.
-- `lingxi-core/crates/orchestrator/src/error.rs` — extend `OrchestratorError` with `Compaction(lingxi_compaction::CompactionError)` and `CompactionCancelled` variants (keeps the trait surface `HandleError::ActionFailed(String)` unchanged — projects errors to a string).
-- `lingxi-core/crates/orchestrator/src/test_support.rs` — `MockOrchestratorHandle` setter `set_compact_history_delta(before, after, bytes_saved)` already exists from M5-10; verify the production handle now produces non-zero deltas in the integration test.
-- `lingxi-core/crates/cli/src/init.rs` — construct `CompactionOrchestrator` once; pass via `.with_compaction(compactor)` builder.
-- `lingxi-core/crates/commands/src/builtin/compact.rs` — no behavioural change; verify the existing `"Compacted: {before} → {after} messages ({bytes} bytes saved)."` template renders real numbers (handler tests already cover the template; add a smoke test that exercises the real orchestrator).
-- `lingxi-core/crates/tui/src/app.rs` — handle `CompactionCompleted` event: push `SystemTextMessage` `"[Compacted N → M messages]"` to scrollback.
-- `lingxi-core/crates/tui/src/components/messages/mod.rs` — add `SystemText` variant + minimal renderer.
-- `lingxi-core/crates/test-harness/src/parity/fixtures/parity_orchestrator_turn_loop.json` — extend with `compact_scenario`.
-- `lingxi-core/crates/test-harness/tests/parity_orchestrator.rs` — drive the new compact scenario.
+- `lingxi-code/crates/orchestrator/src/conversation.rs` — add `Arc<CompactionOrchestrator>` field + `with_compaction` builder; emit `CompactionCompleted` event via `OutputStream`.
+- `lingxi-code/crates/orchestrator/src/handle_impl.rs` — `force_compact` real body: snapshot, run, swap, append marker, return summary.
+- `lingxi-code/crates/orchestrator/src/error.rs` — extend `OrchestratorError` with `Compaction(lingxi_compaction::CompactionError)` and `CompactionCancelled` variants (keeps the trait surface `HandleError::ActionFailed(String)` unchanged — projects errors to a string).
+- `lingxi-code/crates/orchestrator/src/test_support.rs` — `MockOrchestratorHandle` setter `set_compact_history_delta(before, after, bytes_saved)` already exists from M5-10; verify the production handle now produces non-zero deltas in the integration test.
+- `lingxi-code/crates/cli/src/init.rs` — construct `CompactionOrchestrator` once; pass via `.with_compaction(compactor)` builder.
+- `lingxi-code/crates/commands/src/builtin/compact.rs` — no behavioural change; verify the existing `"Compacted: {before} → {after} messages ({bytes} bytes saved)."` template renders real numbers (handler tests already cover the template; add a smoke test that exercises the real orchestrator).
+- `lingxi-code/crates/tui/src/app.rs` — handle `CompactionCompleted` event: push `SystemTextMessage` `"[Compacted N → M messages]"` to scrollback.
+- `lingxi-code/crates/tui/src/components/messages/mod.rs` — add `SystemText` variant + minimal renderer.
+- `lingxi-code/crates/test-harness/src/parity/fixtures/parity_orchestrator_turn_loop.json` — extend with `compact_scenario`.
+- `lingxi-code/crates/test-harness/tests/parity_orchestrator.rs` — drive the new compact scenario.
 
 **Create:**
-- `lingxi-core/crates/orchestrator/tests/force_compact_real.rs` — behavior tests for real wiring (50 msg → reduced, failure unchanged, cancel unchanged, stress 5×).
-- `lingxi-core/crates/tui/src/components/messages/system_text.rs` — minimal system-text renderer (dim gray).
+- `lingxi-code/crates/orchestrator/tests/force_compact_real.rs` — behavior tests for real wiring (50 msg → reduced, failure unchanged, cancel unchanged, stress 5×).
+- `lingxi-code/crates/tui/src/components/messages/system_text.rs` — minimal system-text renderer (dim gray).
 
 **Key types (locked):**
 - Trait surface: `CompactionSummary { messages_before: u32, messages_after: u32, bytes_saved: u64 }` — unchanged from M5-02; **no `summary_id`** in v0.7.0 (deferred to M7 when `CompactBoundaryMessage` ships with a real summary content reference).
@@ -39,18 +39,18 @@
 ## Task 0: Reverse-engineer the M3 Compactor API and lock the integration contract
 
 **Files:**
-- Read: `lingxi-core/crates/compaction/src/lib.rs`
-- Read: `lingxi-core/crates/compaction/src/orchestrator.rs`
-- Read: `lingxi-core/crates/compaction/src/autocompact.rs`
-- Read: `lingxi-core/crates/orchestrator/src/handle_impl.rs:52-66`
+- Read: `lingxi-code/crates/compaction/src/lib.rs`
+- Read: `lingxi-code/crates/compaction/src/orchestrator.rs`
+- Read: `lingxi-code/crates/compaction/src/autocompact.rs`
+- Read: `lingxi-code/crates/orchestrator/src/handle_impl.rs:52-66`
 - Read: `claude-code/src/commands/compact.ts` (or `claude-code/src/utils/compaction*`) — confirm the user-visible "Compacted N → M" template
 
 - [ ] **Step 1: Confirm the M3 Compactor entry-point shape.**
 
 Run:
 ```bash
-rg -n "pub fn process_iteration|pub async fn compact" lingxi-core/crates/compaction/src/
-rg -n "pub fn new" lingxi-core/crates/compaction/src/orchestrator.rs
+rg -n "pub fn process_iteration|pub async fn compact" lingxi-code/crates/compaction/src/
+rg -n "pub fn new" lingxi-code/crates/compaction/src/orchestrator.rs
 ```
 
 Expected (locked here so subsequent tasks compile against the real signatures):
@@ -109,9 +109,9 @@ git commit -m "docs(m6-08): land force_compact integration contract notes"
 ## Task 1: Helper — `ConversationMessage::text_byte_size`
 
 **Files:**
-- Create: `lingxi-core/crates/protocol/src/message_size.rs`
-- Modify: `lingxi-core/crates/protocol/src/lib.rs` (re-export trait)
-- Test: `lingxi-core/crates/protocol/src/message_size.rs` (inline `#[cfg(test)] mod tests`)
+- Create: `lingxi-code/crates/protocol/src/message_size.rs`
+- Modify: `lingxi-code/crates/protocol/src/lib.rs` (re-export trait)
+- Test: `lingxi-code/crates/protocol/src/message_size.rs` (inline `#[cfg(test)] mod tests`)
 
 - [ ] **Step 1: Write the failing test.**
 
@@ -216,7 +216,7 @@ Expected: 3 passed.
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/protocol/src/message_size.rs lingxi-core/crates/protocol/src/lib.rs
+git add lingxi-code/crates/protocol/src/message_size.rs lingxi-code/crates/protocol/src/lib.rs
 git commit -m "feat(protocol): add text_byte_size helper for M6-08 bytes_saved estimate"
 ```
 
@@ -225,7 +225,7 @@ git commit -m "feat(protocol): add text_byte_size helper for M6-08 bytes_saved e
 ## Task 2: Extend `OrchestratorError` with compaction variants
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/error.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/error.rs`
 - Test: same file (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing test.**
@@ -283,7 +283,7 @@ Expected: 2 new passing tests; no regressions in the rest of the module.
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/orchestrator/src/error.rs lingxi-core/crates/orchestrator/Cargo.toml
+git add lingxi-code/crates/orchestrator/src/error.rs lingxi-code/crates/orchestrator/Cargo.toml
 git commit -m "feat(orchestrator): add Compaction + CompactionCancelled error variants"
 ```
 
@@ -292,8 +292,8 @@ git commit -m "feat(orchestrator): add Compaction + CompactionCancelled error va
 ## Task 3: Add `compaction: Option<Arc<CompactionOrchestrator>>` field + `with_compaction` builder
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs`
-- Test: `lingxi-core/crates/orchestrator/src/conversation.rs` (inline `#[cfg(test)]`)
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs`
+- Test: `lingxi-code/crates/orchestrator/src/conversation.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing test.**
 
@@ -370,7 +370,7 @@ Expected: 1 passed.
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/orchestrator/src/conversation.rs
+git add lingxi-code/crates/orchestrator/src/conversation.rs
 git commit -m "feat(orchestrator): add Compaction field + with_compaction builder"
 ```
 
@@ -379,13 +379,13 @@ git commit -m "feat(orchestrator): add Compaction field + with_compaction builde
 ## Task 4: Add a `CompactionCompleted` `OutputEvent` variant
 
 **Files:**
-- Modify: `lingxi-core/crates/traits/src/output_stream.rs` (variant lives wherever `OutputEvent` is defined — check `crates/traits/src/`)
-- Test: `lingxi-core/crates/orchestrator/src/test_support.rs` (`MockOutputStream` already records events)
+- Modify: `lingxi-code/crates/traits/src/output_stream.rs` (variant lives wherever `OutputEvent` is defined — check `crates/traits/src/`)
+- Test: `lingxi-code/crates/orchestrator/src/test_support.rs` (`MockOutputStream` already records events)
 
 - [ ] **Step 1: Locate the `OutputEvent` enum.**
 
 ```bash
-rg -n "pub enum OutputEvent" lingxi-core/crates/traits/src/
+rg -n "pub enum OutputEvent" lingxi-code/crates/traits/src/
 ```
 
 Expected: one definition. Read the file and identify existing variant style (likely `Text { ... }`, `ToolCall { ... }`, `TurnEnd { ... }`).
@@ -452,7 +452,7 @@ cargo test -p lingxi-orchestrator mock_output_records_compaction_completed
 - [ ] **Step 6: Commit.**
 
 ```bash
-git add lingxi-core/crates/traits/src/output_stream.rs lingxi-core/crates/orchestrator/src/test_support.rs
+git add lingxi-code/crates/traits/src/output_stream.rs lingxi-code/crates/orchestrator/src/test_support.rs
 git commit -m "feat(traits): add OutputEvent::CompactionCompleted variant + default emitter"
 ```
 
@@ -461,8 +461,8 @@ git commit -m "feat(traits): add OutputEvent::CompactionCompleted variant + defa
 ## Task 5: Implement the real `force_compact` body (happy path, no cancel yet)
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/handle_impl.rs:52-66`
-- Test: `lingxi-core/crates/orchestrator/tests/force_compact_real.rs` (new file)
+- Modify: `lingxi-code/crates/orchestrator/src/handle_impl.rs:52-66`
+- Test: `lingxi-code/crates/orchestrator/tests/force_compact_real.rs` (new file)
 
 - [ ] **Step 1: Write the failing test (50 messages → reduced).**
 
@@ -624,7 +624,7 @@ Expected: 1 passed.
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/orchestrator/src/handle_impl.rs lingxi-core/crates/orchestrator/tests/force_compact_real.rs
+git add lingxi-code/crates/orchestrator/src/handle_impl.rs lingxi-code/crates/orchestrator/tests/force_compact_real.rs
 git commit -m "feat(orchestrator): wire real force_compact via CompactionOrchestrator"
 ```
 
@@ -633,7 +633,7 @@ git commit -m "feat(orchestrator): wire real force_compact via CompactionOrchest
 ## Task 6: Compaction failure path — history must stay unchanged
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/tests/force_compact_real.rs`
+- Modify: `lingxi-code/crates/orchestrator/tests/force_compact_real.rs`
 - (No production code changes — Task 5 already returns `Err(HandleError::ActionFailed)` without touching `session.history`.)
 
 - [ ] **Step 1: Write the failing test.**
@@ -715,12 +715,12 @@ cargo test -p lingxi-orchestrator --test force_compact_real failure_leaves_histo
 ```
 Expected: PASS (Task 5's body already returns `Err` without writing back).
 
-If the test compile fails because `SubagentSlotProvider`'s exact signature differs, run `rg -n "trait SubagentSlotProvider" lingxi-core/crates/sidequery/src/` and adjust the impl signature.
+If the test compile fails because `SubagentSlotProvider`'s exact signature differs, run `rg -n "trait SubagentSlotProvider" lingxi-code/crates/sidequery/src/` and adjust the impl signature.
 
 - [ ] **Step 3: Commit.**
 
 ```bash
-git add lingxi-core/crates/orchestrator/tests/force_compact_real.rs
+git add lingxi-code/crates/orchestrator/tests/force_compact_real.rs
 git commit -m "test(orchestrator): force_compact failure leaves history unchanged"
 ```
 
@@ -729,9 +729,9 @@ git commit -m "test(orchestrator): force_compact failure leaves history unchange
 ## Task 7: Cancellation — race `process_iteration` against a `CancellationToken`
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/handle_impl.rs::force_compact`
+- Modify: `lingxi-code/crates/orchestrator/src/handle_impl.rs::force_compact`
 - Add: `force_compact_cancelable` helper method on `ConversationOrchestrator` (so the REPL/TUI can supply a token; the trait method calls into it with `CancellationToken::new()`)
-- Test: `lingxi-core/crates/orchestrator/tests/force_compact_real.rs`
+- Test: `lingxi-code/crates/orchestrator/tests/force_compact_real.rs`
 
 - [ ] **Step 1: Write the failing test.**
 
@@ -802,7 +802,7 @@ Expected: 3 passed (compacts_50, failure_leaves, cancel_leaves).
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/orchestrator/src/handle_impl.rs lingxi-core/crates/orchestrator/tests/force_compact_real.rs
+git add lingxi-code/crates/orchestrator/src/handle_impl.rs lingxi-code/crates/orchestrator/tests/force_compact_real.rs
 git commit -m "feat(orchestrator): force_compact_with_cancel — Ctrl-C-safe compaction"
 ```
 
@@ -811,7 +811,7 @@ git commit -m "feat(orchestrator): force_compact_with_cancel — Ctrl-C-safe com
 ## Task 8: Verify post-compact summary is part of next turn's context
 
 **Files:**
-- Test: `lingxi-core/crates/orchestrator/tests/force_compact_real.rs`
+- Test: `lingxi-code/crates/orchestrator/tests/force_compact_real.rs`
 
 - [ ] **Step 1: Write the failing test.**
 
@@ -860,7 +860,7 @@ Expected: PASS (Task 5's body already builds the marker correctly).
 - [ ] **Step 3: Commit.**
 
 ```bash
-git add lingxi-core/crates/orchestrator/tests/force_compact_real.rs
+git add lingxi-code/crates/orchestrator/tests/force_compact_real.rs
 git commit -m "test(orchestrator): post-compact summary visible to next turn"
 ```
 
@@ -869,7 +869,7 @@ git commit -m "test(orchestrator): post-compact summary visible to next turn"
 ## Task 9: Stress smoke — 5 consecutive `force_compact` calls
 
 **Files:**
-- Test: `lingxi-core/crates/orchestrator/tests/force_compact_real.rs`
+- Test: `lingxi-code/crates/orchestrator/tests/force_compact_real.rs`
 
 - [ ] **Step 1: Write the test.**
 
@@ -901,7 +901,7 @@ cargo test -p lingxi-orchestrator --test force_compact_real five_consecutive_for
 - [ ] **Step 3: Commit.**
 
 ```bash
-git add lingxi-core/crates/orchestrator/tests/force_compact_real.rs
+git add lingxi-code/crates/orchestrator/tests/force_compact_real.rs
 git commit -m "test(orchestrator): 5× force_compact stress smoke"
 ```
 
@@ -910,8 +910,8 @@ git commit -m "test(orchestrator): 5× force_compact stress smoke"
 ## Task 10: Wire `CompactionOrchestrator` in `lingxi-cli::init`
 
 **Files:**
-- Modify: `lingxi-core/crates/cli/src/init.rs`
-- Modify: `lingxi-core/crates/cli/Cargo.toml` (add `lingxi-compaction = { path = "../compaction" }`)
+- Modify: `lingxi-code/crates/cli/src/init.rs`
+- Modify: `lingxi-code/crates/cli/Cargo.toml` (add `lingxi-compaction = { path = "../compaction" }`)
 - Test: existing `build_runtime_with_defaults` (verify post-wire the orchestrator carries the compactor)
 
 - [ ] **Step 1: Extend the existing test.**
@@ -987,7 +987,7 @@ Expected: PASS, `has_compaction == true`.
 - [ ] **Step 6: Commit.**
 
 ```bash
-git add lingxi-core/crates/cli/src/init.rs lingxi-core/crates/cli/Cargo.toml lingxi-core/crates/orchestrator/src/conversation.rs
+git add lingxi-code/crates/cli/src/init.rs lingxi-code/crates/cli/Cargo.toml lingxi-code/crates/orchestrator/src/conversation.rs
 git commit -m "feat(cli): wire CompactionOrchestrator into build_runtime"
 ```
 
@@ -996,10 +996,10 @@ git commit -m "feat(cli): wire CompactionOrchestrator into build_runtime"
 ## Task 11: TUI — render `[Compacted]` boundary in scrollback
 
 **Files:**
-- Create: `lingxi-core/crates/tui/src/components/messages/system_text.rs`
-- Modify: `lingxi-core/crates/tui/src/components/messages/mod.rs`
-- Modify: `lingxi-core/crates/tui/src/app.rs` (handle `CompactionCompleted` event → push SystemText)
-- Test: `lingxi-core/crates/tui/tests/behavior_compact_marker.rs`
+- Create: `lingxi-code/crates/tui/src/components/messages/system_text.rs`
+- Modify: `lingxi-code/crates/tui/src/components/messages/mod.rs`
+- Modify: `lingxi-code/crates/tui/src/app.rs` (handle `CompactionCompleted` event → push SystemText)
+- Test: `lingxi-code/crates/tui/tests/behavior_compact_marker.rs`
 
 > **Prerequisite check:** if M6-01 / M6-02 are still in flight when this task starts and `crates/tui/src/components/messages/` does not yet exist, defer Task 11 to immediately after M6-02 lands (recorded in the dependency graph below). The handler and engine wiring (Tasks 1-10, 12) are independent and ship first.
 
@@ -1112,7 +1112,7 @@ cargo test -p lingxi-tui --test behavior_compact_marker
 - [ ] **Step 6: Commit.**
 
 ```bash
-git add lingxi-core/crates/tui/src/components/messages/system_text.rs lingxi-core/crates/tui/src/components/messages/mod.rs lingxi-core/crates/tui/src/app.rs lingxi-core/crates/tui/tests/behavior_compact_marker.rs
+git add lingxi-code/crates/tui/src/components/messages/system_text.rs lingxi-code/crates/tui/src/components/messages/mod.rs lingxi-code/crates/tui/src/app.rs lingxi-code/crates/tui/tests/behavior_compact_marker.rs
 git commit -m "feat(tui): render [Compacted] boundary marker in scrollback"
 ```
 
@@ -1121,7 +1121,7 @@ git commit -m "feat(tui): render [Compacted] boundary marker in scrollback"
 ## Task 12: Verify `/compact` command surface (smoke + regression)
 
 **Files:**
-- Test: `lingxi-core/crates/commands/src/builtin/compact.rs` (extend existing `#[cfg(test)]`)
+- Test: `lingxi-code/crates/commands/src/builtin/compact.rs` (extend existing `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the integration smoke.**
 
@@ -1181,7 +1181,7 @@ Expected: PASS — the `40 → N` where N < 40 confirms real wiring end-to-end t
 - [ ] **Step 3: Commit.**
 
 ```bash
-git add lingxi-core/crates/commands/src/builtin/compact.rs
+git add lingxi-code/crates/commands/src/builtin/compact.rs
 git commit -m "test(commands): /compact renders non-zero delta against real orchestrator"
 ```
 
@@ -1190,8 +1190,8 @@ git commit -m "test(commands): /compact renders non-zero delta against real orch
 ## Task 13: Extend `parity_orchestrator_turn_loop.json` with a compact scenario
 
 **Files:**
-- Modify: `lingxi-core/crates/test-harness/src/parity/fixtures/parity_orchestrator_turn_loop.json`
-- Modify: `lingxi-core/crates/test-harness/tests/parity_orchestrator.rs`
+- Modify: `lingxi-code/crates/test-harness/src/parity/fixtures/parity_orchestrator_turn_loop.json`
+- Modify: `lingxi-code/crates/test-harness/tests/parity_orchestrator.rs`
 
 - [ ] **Step 1: Append the scenario to the fixture.**
 
@@ -1291,7 +1291,7 @@ Expected: all green. If `parity_orchestrator_turn_loop` was previously passing u
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/test-harness/src/parity/fixtures/parity_orchestrator_turn_loop.json lingxi-core/crates/test-harness/tests/parity_orchestrator.rs
+git add lingxi-code/crates/test-harness/src/parity/fixtures/parity_orchestrator_turn_loop.json lingxi-code/crates/test-harness/tests/parity_orchestrator.rs
 git commit -m "test(parity): force_compact 50-message scenario in parity_orchestrator_turn_loop"
 ```
 

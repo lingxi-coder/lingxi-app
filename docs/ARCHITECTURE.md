@@ -1,6 +1,6 @@
 # Architecture
 
-LingXi Core is an event-sourced conversation engine split across 30 crates.
+LingXi Code is an event-sourced conversation engine split across 30 crates.
 This document is a navigation aid; full design lives in
 `docs/superpowers/specs/2026-05-22-lingxi-core-rust-engine-design.md`.
 

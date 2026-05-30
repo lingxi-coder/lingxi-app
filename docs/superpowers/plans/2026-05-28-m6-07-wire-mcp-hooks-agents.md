@@ -13,27 +13,27 @@
 ## File Structure
 
 **Modify:**
-- `lingxi-core/crates/orchestrator/src/conversation.rs` — add three optional registry fields + three builder methods (`with_mcp_registry`, `with_hook_registry`, `with_agent_catalog`).
-- `lingxi-core/crates/orchestrator/src/handle_impl.rs:106-127` — `list_mcp_servers`, `list_hooks`, `list_agents` read the real registries when wired, fall back to `vec![]` when unset.
-- `lingxi-core/crates/orchestrator/Cargo.toml` — add `lingxi-mcp = { path = "../mcp" }`, `lingxi-hooks = { path = "../hooks" }`, `lingxi-agent = { path = "../agent" }` to `[dependencies]` (lingxi-hooks may already be transitive; the explicit dep makes the field type compile).
-- `lingxi-core/crates/commands/src/builtin/list_render.rs` — extend `render_list` to take an `empty_state: &str` argument so the three handlers can supply distinct empty-state literals.
-- `lingxi-core/crates/commands/src/builtin/mcp.rs`, `hooks.rs`, `agents.rs` — pass the empty-state literal into the updated `render_list`. Update the existing 6 `empty_list` tests to the new expected output.
-- `lingxi-core/crates/cli/src/init.rs` — construct `McpRegistry`, `HookRegistry`, agent catalog `Arc<RwLock<Vec<AgentDefinition>>>` from disk; wire all three onto the orchestrator via the new builders.
-- `lingxi-core/crates/cli/Cargo.toml` — add `lingxi-mcp = { path = "../mcp" }`, `lingxi-hooks = { path = "../hooks" }`, `lingxi-agent = { path = "../agent" }`.
+- `lingxi-code/crates/orchestrator/src/conversation.rs` — add three optional registry fields + three builder methods (`with_mcp_registry`, `with_hook_registry`, `with_agent_catalog`).
+- `lingxi-code/crates/orchestrator/src/handle_impl.rs:106-127` — `list_mcp_servers`, `list_hooks`, `list_agents` read the real registries when wired, fall back to `vec![]` when unset.
+- `lingxi-code/crates/orchestrator/Cargo.toml` — add `lingxi-mcp = { path = "../mcp" }`, `lingxi-hooks = { path = "../hooks" }`, `lingxi-agent = { path = "../agent" }` to `[dependencies]` (lingxi-hooks may already be transitive; the explicit dep makes the field type compile).
+- `lingxi-code/crates/commands/src/builtin/list_render.rs` — extend `render_list` to take an `empty_state: &str` argument so the three handlers can supply distinct empty-state literals.
+- `lingxi-code/crates/commands/src/builtin/mcp.rs`, `hooks.rs`, `agents.rs` — pass the empty-state literal into the updated `render_list`. Update the existing 6 `empty_list` tests to the new expected output.
+- `lingxi-code/crates/cli/src/init.rs` — construct `McpRegistry`, `HookRegistry`, agent catalog `Arc<RwLock<Vec<AgentDefinition>>>` from disk; wire all three onto the orchestrator via the new builders.
+- `lingxi-code/crates/cli/Cargo.toml` — add `lingxi-mcp = { path = "../mcp" }`, `lingxi-hooks = { path = "../hooks" }`, `lingxi-agent = { path = "../agent" }`.
 
 **Create:**
-- `lingxi-core/crates/mcp/src/json_config.rs` — parse `.mcp.json` (claude-code-compatible `{ "mcpServers": { name: { command, args, env, … } } }` shape) into `Vec<McpServerConfig>`. Public surface: `parse_mcp_json_string(raw: &str, scope: ConfigScope) -> Result<Vec<McpServerConfig>, McpJsonError>` and `load_mcp_json_with_precedence(project: &Path, global: &Path) -> Vec<McpServerConfig>`.
-- `lingxi-core/crates/mcp/src/lib.rs` — re-export `parse_mcp_json_string` + `load_mcp_json_with_precedence`.
-- `lingxi-core/crates/hooks/src/loader.rs` — `load_hooks_from_settings(settings: &lingxi_core::Settings) -> Vec<HookDefinition>`. Reads the existing M3-01 settings `hooks` map.
-- `lingxi-core/crates/hooks/src/lib.rs` — re-export `load_hooks_from_settings`.
-- `lingxi-core/crates/agent/src/catalog.rs` — frontmatter loader: `load_agents_from_dirs(paths: &[PathBuf]) -> Vec<AgentDefinition>` reads every `*.md` under each path, parses `---` YAML frontmatter with `gray_matter`, and projects into `AgentDefinition` (project paths take precedence over global on `agent_type` collision). Public surface: `load_agents_from_dirs` + `parse_agent_markdown(raw: &str, source: AgentSource, base_dir: PathBuf) -> Result<AgentDefinition, AgentLoadError>`.
-- `lingxi-core/crates/agent/src/lib.rs` — re-export `load_agents_from_dirs` + `parse_agent_markdown`.
-- `lingxi-core/crates/agent/Cargo.toml` — add `gray_matter = "0.2"` (workspace already uses it in `lingxi-skills`) and `serde_yaml = "0.9"` if not present.
-- `lingxi-core/crates/orchestrator/tests/list_mcp_real.rs` — behavioural test for `list_mcp_servers`.
-- `lingxi-core/crates/orchestrator/tests/list_hooks_real.rs` — behavioural test for `list_hooks`.
-- `lingxi-core/crates/orchestrator/tests/list_agents_real.rs` — behavioural test for `list_agents`.
-- `lingxi-core/crates/test-harness/src/parity/fixtures/tui_listings.json` — parity fixture locking the three empty-state literals.
-- `lingxi-core/crates/test-harness/tests/parity_tui_listings.rs` — driver for the new fixture.
+- `lingxi-code/crates/mcp/src/json_config.rs` — parse `.mcp.json` (claude-code-compatible `{ "mcpServers": { name: { command, args, env, … } } }` shape) into `Vec<McpServerConfig>`. Public surface: `parse_mcp_json_string(raw: &str, scope: ConfigScope) -> Result<Vec<McpServerConfig>, McpJsonError>` and `load_mcp_json_with_precedence(project: &Path, global: &Path) -> Vec<McpServerConfig>`.
+- `lingxi-code/crates/mcp/src/lib.rs` — re-export `parse_mcp_json_string` + `load_mcp_json_with_precedence`.
+- `lingxi-code/crates/hooks/src/loader.rs` — `load_hooks_from_settings(settings: &lingxi_core::Settings) -> Vec<HookDefinition>`. Reads the existing M3-01 settings `hooks` map.
+- `lingxi-code/crates/hooks/src/lib.rs` — re-export `load_hooks_from_settings`.
+- `lingxi-code/crates/agent/src/catalog.rs` — frontmatter loader: `load_agents_from_dirs(paths: &[PathBuf]) -> Vec<AgentDefinition>` reads every `*.md` under each path, parses `---` YAML frontmatter with `gray_matter`, and projects into `AgentDefinition` (project paths take precedence over global on `agent_type` collision). Public surface: `load_agents_from_dirs` + `parse_agent_markdown(raw: &str, source: AgentSource, base_dir: PathBuf) -> Result<AgentDefinition, AgentLoadError>`.
+- `lingxi-code/crates/agent/src/lib.rs` — re-export `load_agents_from_dirs` + `parse_agent_markdown`.
+- `lingxi-code/crates/agent/Cargo.toml` — add `gray_matter = "0.2"` (workspace already uses it in `lingxi-skills`) and `serde_yaml = "0.9"` if not present.
+- `lingxi-code/crates/orchestrator/tests/list_mcp_real.rs` — behavioural test for `list_mcp_servers`.
+- `lingxi-code/crates/orchestrator/tests/list_hooks_real.rs` — behavioural test for `list_hooks`.
+- `lingxi-code/crates/orchestrator/tests/list_agents_real.rs` — behavioural test for `list_agents`.
+- `lingxi-code/crates/test-harness/src/parity/fixtures/tui_listings.json` — parity fixture locking the three empty-state literals.
+- `lingxi-code/crates/test-harness/tests/parity_tui_listings.rs` — driver for the new fixture.
 
 **Key types (locked — unchanged from `lingxi_traits::orchestrator`):**
 - `McpServerInfo { name: String, status: McpStatus, transport: String }` — `McpStatus` ∈ `{ Connected, Disconnected, Error(String) }`.
@@ -54,10 +54,10 @@
 ## Task 0: Lock the registry shapes + empty-state literals (no code yet)
 
 **Files:**
-- Read: `lingxi-core/crates/mcp/src/registry.rs:17-86` — confirm `McpRegistry` API (`connections: RwLock<HashMap<String, McpConnectionState>>`).
-- Read: `lingxi-core/crates/hooks/src/registry.rs:50-101` — confirm `HookRegistry::sources` + `plugin` shape.
-- Read: `lingxi-core/crates/agent/src/definition.rs:14-48` — confirm `AgentDefinition` field shape.
-- Read: `lingxi-core/crates/traits/src/orchestrator.rs:97-141` — re-confirm `McpServerInfo`, `HookInfo`, `AgentInfo` are unchanged.
+- Read: `lingxi-code/crates/mcp/src/registry.rs:17-86` — confirm `McpRegistry` API (`connections: RwLock<HashMap<String, McpConnectionState>>`).
+- Read: `lingxi-code/crates/hooks/src/registry.rs:50-101` — confirm `HookRegistry::sources` + `plugin` shape.
+- Read: `lingxi-code/crates/agent/src/definition.rs:14-48` — confirm `AgentDefinition` field shape.
+- Read: `lingxi-code/crates/traits/src/orchestrator.rs:97-141` — re-confirm `McpServerInfo`, `HookInfo`, `AgentInfo` are unchanged.
 - Read: `claude-code/src/cli/handlers/mcp.tsx:151` — confirm `"No MCP servers configured"` is the production string.
 - Read: `claude-code/src/components/hooks/SelectMatcherMode.tsx:70` — confirm `"No hooks configured for this event"`.
 
@@ -65,9 +65,9 @@
 
 Run:
 ```bash
-rg -n "pub fn|pub async fn" lingxi-core/crates/mcp/src/registry.rs
-rg -n "pub fn|pub async fn" lingxi-core/crates/hooks/src/registry.rs
-rg -n "pub struct AgentDefinition" lingxi-core/crates/agent/src/definition.rs
+rg -n "pub fn|pub async fn" lingxi-code/crates/mcp/src/registry.rs
+rg -n "pub fn|pub async fn" lingxi-code/crates/hooks/src/registry.rs
+rg -n "pub struct AgentDefinition" lingxi-code/crates/agent/src/definition.rs
 ```
 
 Expected (locked here so all later code compiles against the real signatures):
@@ -139,8 +139,8 @@ git commit -m "docs(m6-07): land MCP/hooks/agents wiring contract notes"
 ## Task 1: `render_list` gains an `empty_state` argument
 
 **Files:**
-- Modify: `lingxi-core/crates/commands/src/builtin/list_render.rs`
-- Test: `lingxi-core/crates/commands/src/builtin/list_render.rs` (inline `#[cfg(test)]`)
+- Modify: `lingxi-code/crates/commands/src/builtin/list_render.rs`
+- Test: `lingxi-code/crates/commands/src/builtin/list_render.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing test.**
 
@@ -222,7 +222,7 @@ Expected: 3 passing.
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/commands/src/builtin/list_render.rs
+git add lingxi-code/crates/commands/src/builtin/list_render.rs
 git commit -m "feat(commands): render_list takes an empty_state literal"
 ```
 
@@ -231,10 +231,10 @@ git commit -m "feat(commands): render_list takes an empty_state literal"
 ## Task 2: Public `McpRegistry::snapshot` projecting state → `McpServerInfo`
 
 **Files:**
-- Modify: `lingxi-core/crates/mcp/src/registry.rs`
-- Modify: `lingxi-core/crates/mcp/src/connection.rs` — add `pub fn name(&self) -> &str` on `McpConnectionState` if missing; add `pub fn transport_kind(&self) -> &'static str` on `McpTransportSpec` (or wherever the variant lives).
-- Modify: `lingxi-core/crates/mcp/Cargo.toml` — add `lingxi-traits = { path = "../traits" }` to `[dependencies]` (already a transitive dep; the `McpServerInfo` import needs the explicit declaration).
-- Test: `lingxi-core/crates/mcp/src/registry.rs` (inline `#[cfg(test)]`)
+- Modify: `lingxi-code/crates/mcp/src/registry.rs`
+- Modify: `lingxi-code/crates/mcp/src/connection.rs` — add `pub fn name(&self) -> &str` on `McpConnectionState` if missing; add `pub fn transport_kind(&self) -> &'static str` on `McpTransportSpec` (or wherever the variant lives).
+- Modify: `lingxi-code/crates/mcp/Cargo.toml` — add `lingxi-traits = { path = "../traits" }` to `[dependencies]` (already a transitive dep; the `McpServerInfo` import needs the explicit declaration).
+- Test: `lingxi-code/crates/mcp/src/registry.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing test.**
 
@@ -352,7 +352,7 @@ mod snapshot_tests {
 }
 ```
 
-(If the actual `McpTransport` trait signature in `lingxi_traits` differs, run `rg -n "pub trait McpTransport" lingxi-core/crates/traits/src/` and adjust.)
+(If the actual `McpTransport` trait signature in `lingxi_traits` differs, run `rg -n "pub trait McpTransport" lingxi-code/crates/traits/src/` and adjust.)
 
 - [ ] **Step 2: Run; expect FAIL (`snapshot` method missing).**
 
@@ -456,7 +456,7 @@ Expected: 2 passing.
 - [ ] **Step 6: Commit.**
 
 ```bash
-git add lingxi-core/crates/mcp/src/registry.rs lingxi-core/crates/mcp/Cargo.toml lingxi-core/crates/traits/src/
+git add lingxi-code/crates/mcp/src/registry.rs lingxi-code/crates/mcp/Cargo.toml lingxi-code/crates/traits/src/
 git commit -m "feat(mcp): McpRegistry::snapshot projects state into McpServerInfo"
 ```
 
@@ -465,7 +465,7 @@ git commit -m "feat(mcp): McpRegistry::snapshot projects state into McpServerInf
 ## Task 3: Public `HookRegistry::all_hooks` snapshot
 
 **Files:**
-- Modify: `lingxi-core/crates/hooks/src/registry.rs`
+- Modify: `lingxi-code/crates/hooks/src/registry.rs`
 - Test: same file (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing test.**
@@ -519,7 +519,7 @@ mod all_hooks_tests {
 }
 ```
 
-(If `HookEventType` variants differ, run `rg -n "pub enum HookEventType" lingxi-core/crates/hooks/src/events.rs` and adjust. If `HookId::new` / `PluginId::new` don't exist, look up the actual constructors.)
+(If `HookEventType` variants differ, run `rg -n "pub enum HookEventType" lingxi-code/crates/hooks/src/events.rs` and adjust. If `HookId::new` / `PluginId::new` don't exist, look up the actual constructors.)
 
 - [ ] **Step 2: Run; expect FAIL (method missing).**
 
@@ -556,7 +556,7 @@ cargo test -p lingxi-hooks all_hooks_tests::
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/hooks/src/registry.rs
+git add lingxi-code/crates/hooks/src/registry.rs
 git commit -m "feat(hooks): HookRegistry::all_hooks snapshot across all sources"
 ```
 
@@ -565,14 +565,14 @@ git commit -m "feat(hooks): HookRegistry::all_hooks snapshot across all sources"
 ## Task 4: `lingxi_hooks::loader::load_hooks_from_settings`
 
 **Files:**
-- Create: `lingxi-core/crates/hooks/src/loader.rs`
-- Modify: `lingxi-core/crates/hooks/src/lib.rs` — `pub mod loader; pub use loader::load_hooks_from_settings;`
-- Test: `lingxi-core/crates/hooks/src/loader.rs` (inline `#[cfg(test)]`)
+- Create: `lingxi-code/crates/hooks/src/loader.rs`
+- Modify: `lingxi-code/crates/hooks/src/lib.rs` — `pub mod loader; pub use loader::load_hooks_from_settings;`
+- Test: `lingxi-code/crates/hooks/src/loader.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Find the existing settings hooks schema.**
 
 ```bash
-rg -n "hooks.*HashMap\|hooks: \|pub hooks" lingxi-core/crates/core/src/settings/ | head -10
+rg -n "hooks.*HashMap\|hooks: \|pub hooks" lingxi-code/crates/core/src/settings/ | head -10
 ```
 
 Expected: `lingxi_core::Settings` (or equivalent) carries a `hooks: HashMap<HookEventType, Vec<HookSettingEntry>>` or similar shape parsed in M3-01. Read the exact field on `Settings` and adapt the loader accordingly.
@@ -765,7 +765,7 @@ Expected: 4 passing.
 - [ ] **Step 6: Commit.**
 
 ```bash
-git add lingxi-core/crates/hooks/src/loader.rs lingxi-core/crates/hooks/src/lib.rs
+git add lingxi-code/crates/hooks/src/loader.rs lingxi-code/crates/hooks/src/lib.rs
 git commit -m "feat(hooks): parse_hooks_from_settings_json loader (M6-07)"
 ```
 
@@ -774,9 +774,9 @@ git commit -m "feat(hooks): parse_hooks_from_settings_json loader (M6-07)"
 ## Task 5: `lingxi_mcp::json_config::parse_mcp_json_string` + precedence loader
 
 **Files:**
-- Create: `lingxi-core/crates/mcp/src/json_config.rs`
-- Modify: `lingxi-core/crates/mcp/src/lib.rs`
-- Test: `lingxi-core/crates/mcp/src/json_config.rs` (inline `#[cfg(test)]`)
+- Create: `lingxi-code/crates/mcp/src/json_config.rs`
+- Modify: `lingxi-code/crates/mcp/src/lib.rs`
+- Test: `lingxi-code/crates/mcp/src/json_config.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing test.**
 
@@ -972,7 +972,7 @@ mod tests {
 }
 ```
 
-(If `McpTransportSpec::Sse { url, headers }` / `Http { url, headers }` field names differ, run `rg -n "pub enum McpTransportSpec" lingxi-core/crates/traits/src/` and adjust. `tempfile` is already a workspace dev-dep.)
+(If `McpTransportSpec::Sse { url, headers }` / `Http { url, headers }` field names differ, run `rg -n "pub enum McpTransportSpec" lingxi-code/crates/traits/src/` and adjust. `tempfile` is already a workspace dev-dep.)
 
 - [ ] **Step 2: Run; expect FAIL.**
 
@@ -1012,7 +1012,7 @@ Expected: 4 passing.
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/mcp/src/json_config.rs lingxi-core/crates/mcp/src/lib.rs lingxi-core/crates/mcp/Cargo.toml
+git add lingxi-code/crates/mcp/src/json_config.rs lingxi-code/crates/mcp/src/lib.rs lingxi-code/crates/mcp/Cargo.toml
 git commit -m "feat(mcp): .mcp.json parser + precedence loader (M6-07)"
 ```
 
@@ -1021,10 +1021,10 @@ git commit -m "feat(mcp): .mcp.json parser + precedence loader (M6-07)"
 ## Task 6: `lingxi_agent::catalog::load_agents_from_dirs`
 
 **Files:**
-- Create: `lingxi-core/crates/agent/src/catalog.rs`
-- Modify: `lingxi-core/crates/agent/src/lib.rs`
-- Modify: `lingxi-core/crates/agent/Cargo.toml` — add `gray_matter = { workspace = true }` and `serde_yaml = { workspace = true }` if missing.
-- Test: `lingxi-core/crates/agent/src/catalog.rs` (inline `#[cfg(test)]`)
+- Create: `lingxi-code/crates/agent/src/catalog.rs`
+- Modify: `lingxi-code/crates/agent/src/lib.rs`
+- Modify: `lingxi-code/crates/agent/Cargo.toml` — add `gray_matter = { workspace = true }` and `serde_yaml = { workspace = true }` if missing.
+- Test: `lingxi-code/crates/agent/src/catalog.rs` (inline `#[cfg(test)]`)
 
 - [ ] **Step 1: Write the failing test.**
 
@@ -1311,7 +1311,7 @@ Expected: 4 passing.
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/agent/src/catalog.rs lingxi-core/crates/agent/src/lib.rs lingxi-core/crates/agent/Cargo.toml
+git add lingxi-code/crates/agent/src/catalog.rs lingxi-code/crates/agent/src/lib.rs lingxi-code/crates/agent/Cargo.toml
 git commit -m "feat(agent): catalog loader for ~/.claude/agents/ + project agents (M6-07)"
 ```
 
@@ -1320,9 +1320,9 @@ git commit -m "feat(agent): catalog loader for ~/.claude/agents/ + project agent
 ## Task 7: Add registry fields + builders on `ConversationOrchestrator`
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs`
-- Modify: `lingxi-core/crates/orchestrator/Cargo.toml` — add `lingxi-mcp = { path = "../mcp" }`, `lingxi-agent = { path = "../agent" }` (lingxi-hooks already present).
-- Test: `lingxi-core/crates/orchestrator/src/conversation.rs` (inline `#[cfg(test)] mod tests`)
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs`
+- Modify: `lingxi-code/crates/orchestrator/Cargo.toml` — add `lingxi-mcp = { path = "../mcp" }`, `lingxi-agent = { path = "../agent" }` (lingxi-hooks already present).
+- Test: `lingxi-code/crates/orchestrator/src/conversation.rs` (inline `#[cfg(test)] mod tests`)
 
 - [ ] **Step 1: Write the failing test.**
 
@@ -1458,7 +1458,7 @@ cargo test -p lingxi-orchestrator with_mcp_hook_agent_builders_store_fields
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/orchestrator/src/conversation.rs lingxi-core/crates/orchestrator/Cargo.toml
+git add lingxi-code/crates/orchestrator/src/conversation.rs lingxi-code/crates/orchestrator/Cargo.toml
 git commit -m "feat(orchestrator): add mcp/hook/agent registry fields + builders (M6-07)"
 ```
 
@@ -1467,10 +1467,10 @@ git commit -m "feat(orchestrator): add mcp/hook/agent registry fields + builders
 ## Task 8: Real `list_mcp_servers` / `list_hooks` / `list_agents`
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/handle_impl.rs:106-127`
-- Create: `lingxi-core/crates/orchestrator/tests/list_mcp_real.rs`
-- Create: `lingxi-core/crates/orchestrator/tests/list_hooks_real.rs`
-- Create: `lingxi-core/crates/orchestrator/tests/list_agents_real.rs`
+- Modify: `lingxi-code/crates/orchestrator/src/handle_impl.rs:106-127`
+- Create: `lingxi-code/crates/orchestrator/tests/list_mcp_real.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/list_hooks_real.rs`
+- Create: `lingxi-code/crates/orchestrator/tests/list_agents_real.rs`
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -1844,7 +1844,7 @@ Expected: 6 passing across the three test files.
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/orchestrator/src/handle_impl.rs lingxi-core/crates/orchestrator/tests/list_mcp_real.rs lingxi-core/crates/orchestrator/tests/list_hooks_real.rs lingxi-core/crates/orchestrator/tests/list_agents_real.rs
+git add lingxi-code/crates/orchestrator/src/handle_impl.rs lingxi-code/crates/orchestrator/tests/list_mcp_real.rs lingxi-code/crates/orchestrator/tests/list_hooks_real.rs lingxi-code/crates/orchestrator/tests/list_agents_real.rs
 git commit -m "feat(orchestrator): real list_mcp_servers / list_hooks / list_agents (M6-07)"
 ```
 
@@ -1853,9 +1853,9 @@ git commit -m "feat(orchestrator): real list_mcp_servers / list_hooks / list_age
 ## Task 9: Empty-state literals in `/mcp`, `/hooks`, `/agents` handlers
 
 **Files:**
-- Modify: `lingxi-core/crates/commands/src/builtin/mcp.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/hooks.rs`
-- Modify: `lingxi-core/crates/commands/src/builtin/agents.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/mcp.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/hooks.rs`
+- Modify: `lingxi-code/crates/commands/src/builtin/agents.rs`
 - Modify: existing tests in those files
 
 - [ ] **Step 1: Write the failing test.**
@@ -1938,7 +1938,7 @@ Expected: all green.
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/commands/src/builtin/mcp.rs lingxi-core/crates/commands/src/builtin/hooks.rs lingxi-core/crates/commands/src/builtin/agents.rs
+git add lingxi-code/crates/commands/src/builtin/mcp.rs lingxi-code/crates/commands/src/builtin/hooks.rs lingxi-code/crates/commands/src/builtin/agents.rs
 git commit -m "feat(commands): /mcp /hooks /agents empty-state literals (M6-07)"
 ```
 
@@ -1947,9 +1947,9 @@ git commit -m "feat(commands): /mcp /hooks /agents empty-state literals (M6-07)"
 ## Task 10: CLI `build_runtime` wires the three registries
 
 **Files:**
-- Modify: `lingxi-core/crates/cli/src/init.rs`
-- Modify: `lingxi-core/crates/cli/Cargo.toml` — add `lingxi-mcp = { path = "../mcp" }`, `lingxi-hooks = { path = "../hooks" }`, `lingxi-agent = { path = "../agent" }`.
-- Test: `lingxi-core/crates/cli/src/init.rs` (existing `build_runtime_with_defaults`)
+- Modify: `lingxi-code/crates/cli/src/init.rs`
+- Modify: `lingxi-code/crates/cli/Cargo.toml` — add `lingxi-mcp = { path = "../mcp" }`, `lingxi-hooks = { path = "../hooks" }`, `lingxi-agent = { path = "../agent" }`.
+- Test: `lingxi-code/crates/cli/src/init.rs` (existing `build_runtime_with_defaults`)
 
 - [ ] **Step 1: Extend the test.**
 
@@ -2082,7 +2082,7 @@ cargo test -p lingxi-cli build_runtime_with_defaults
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/cli/src/init.rs lingxi-core/crates/cli/Cargo.toml lingxi-core/crates/orchestrator/src/conversation.rs
+git add lingxi-code/crates/cli/src/init.rs lingxi-code/crates/cli/Cargo.toml lingxi-code/crates/orchestrator/src/conversation.rs
 git commit -m "feat(cli): wire McpRegistry + HookRegistry + agent catalog into build_runtime (M6-07)"
 ```
 
@@ -2091,8 +2091,8 @@ git commit -m "feat(cli): wire McpRegistry + HookRegistry + agent catalog into b
 ## Task 11: Parity fixture — `tui_listings.json` locks empty-state literals
 
 **Files:**
-- Create: `lingxi-core/crates/test-harness/src/parity/fixtures/tui_listings.json`
-- Create: `lingxi-core/crates/test-harness/tests/parity_tui_listings.rs`
+- Create: `lingxi-code/crates/test-harness/src/parity/fixtures/tui_listings.json`
+- Create: `lingxi-code/crates/test-harness/tests/parity_tui_listings.rs`
 
 - [ ] **Step 1: Write the fixture.**
 
@@ -2246,7 +2246,7 @@ async fn non_empty_agents_matches_fixture() {
 }
 ```
 
-(If `lingxi_commands::builtin::{agents::AgentsHandler, hooks::HooksHandler, mcp::McpHandler}` paths differ, run `rg -n "pub struct McpHandler\|pub struct HooksHandler\|pub struct AgentsHandler" lingxi-core/crates/commands/src/` and adjust the import paths.)
+(If `lingxi_commands::builtin::{agents::AgentsHandler, hooks::HooksHandler, mcp::McpHandler}` paths differ, run `rg -n "pub struct McpHandler\|pub struct HooksHandler\|pub struct AgentsHandler" lingxi-code/crates/commands/src/` and adjust the import paths.)
 
 - [ ] **Step 3: Run; expect PASS (handlers and fixture align by construction).**
 
@@ -2265,7 +2265,7 @@ Expected: every fixture under `crates/test-harness/tests/parity_*.rs` still gree
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add lingxi-core/crates/test-harness/src/parity/fixtures/tui_listings.json lingxi-core/crates/test-harness/tests/parity_tui_listings.rs
+git add lingxi-code/crates/test-harness/src/parity/fixtures/tui_listings.json lingxi-code/crates/test-harness/tests/parity_tui_listings.rs
 git commit -m "test(parity): tui_listings fixture locks /mcp /hooks /agents literals (M6-07)"
 ```
 

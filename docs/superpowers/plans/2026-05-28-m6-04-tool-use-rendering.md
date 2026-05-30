@@ -36,7 +36,7 @@
 - `crates/tui/src/components/messages/mod.rs` (already listed above; same file gets the `enum ScrollbackEntry` variant additions: `AssistantToolCall { id, tool, input }` and `UserToolResult { id, tool, result }`). ~+25 lines for the enum branches.
 
 **Modified existing core crate (M5-04 surface — 1 file):**
-- `lingxi-core/crates/traits/src/orchestrator.rs` — add `id: lingxi_protocol::ToolUseId` field to `OutputEvent::ToolCall` and `OutputEvent::ToolResult` variants; update `OutputStream::emit_tool_call` / `emit_tool_result` trait signatures to `(&self, id: &ToolUseId, tool: &str, …)`; bump all impls (`MockOutputStream`, `SinkAdapter` in `crates/cli/src/output_adapter.rs`, `lingxi-orchestrator::streaming_loop` call sites). ~+15 lines net; covered in Task 2.
+- `lingxi-code/crates/traits/src/orchestrator.rs` — add `id: lingxi_protocol::ToolUseId` field to `OutputEvent::ToolCall` and `OutputEvent::ToolResult` variants; update `OutputStream::emit_tool_call` / `emit_tool_result` trait signatures to `(&self, id: &ToolUseId, tool: &str, …)`; bump all impls (`MockOutputStream`, `SinkAdapter` in `crates/cli/src/output_adapter.rs`, `lingxi-orchestrator::streaming_loop` call sites). ~+15 lines net; covered in Task 2.
 
 **Test files (5):**
 - `crates/tui/tests/render_assistant_tool_use.rs` — insta snapshot tests for collapsed + expanded `AssistantToolUseMessage`.
@@ -54,8 +54,8 @@
 - Read: `claude-code/src/components/messages/UserToolResultMessage/UserToolResultMessage.tsx` + `UserToolSuccessMessage.tsx`
 - Read: `claude-code/src/constants/figures.ts` (confirm `BLACK_CIRCLE = '●'`)
 - Read: `claude-code/src/components/messages/CollapsedReadSearchContent.tsx` (collapse/expand discipline)
-- Modify: `lingxi-core/crates/traits/src/orchestrator.rs:313-340` (`OutputEvent`)
-- Modify: `lingxi-core/crates/traits/src/orchestrator.rs:347-362` (`OutputStream` trait)
+- Modify: `lingxi-code/crates/traits/src/orchestrator.rs:313-340` (`OutputEvent`)
+- Modify: `lingxi-code/crates/traits/src/orchestrator.rs:347-362` (`OutputStream` trait)
 
 - [ ] **Step 1: Read the four claude-code references and lock literals.**
 
@@ -71,7 +71,7 @@
 
 - [ ] **Step 2: Write the failing test for `OutputEvent::ToolCall` carrying a `ToolUseId`.**
 
-  Create `lingxi-core/crates/traits/src/orchestrator.rs` tests addition:
+  Create `lingxi-code/crates/traits/src/orchestrator.rs` tests addition:
 
   ```rust
   #[test]
@@ -95,7 +95,7 @@
 
 - [ ] **Step 4: Extend `OutputEvent::ToolCall` and `OutputEvent::ToolResult` with `id: ToolUseId`.**
 
-  Edit `lingxi-core/crates/traits/src/orchestrator.rs` around lines 319-332:
+  Edit `lingxi-code/crates/traits/src/orchestrator.rs` around lines 319-332:
 
   ```rust
   #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,7 +116,7 @@
   }
   ```
 
-  Add `lingxi-protocol` to `lingxi-core/crates/traits/Cargo.toml` `[dependencies]` if not already there (it is — used for `ContentBlock` in the same file).
+  Add `lingxi-protocol` to `lingxi-code/crates/traits/Cargo.toml` `[dependencies]` if not already there (it is — used for `ContentBlock` in the same file).
 
 - [ ] **Step 5: Update the `OutputStream` trait signatures.**
 
@@ -144,9 +144,9 @@
 
   Update these three files (compile errors will point you to the exact lines):
 
-  1. `lingxi-core/crates/cli/src/output_adapter.rs:33-37` — accept the new `id` parameter and pass through to `OutputSink` (extend `OutputSink::tool_call` / `tool_result` in `crates/cli/src/output.rs` with the same `id: &ToolUseId` parameter; for the plain stdout sink ignore it; for the JSON sink emit `"tool_use_id": "<id>"` in the NDJSON line).
-  2. `lingxi-core/crates/orchestrator/src/test_support.rs` — `MockOutputStream::emit_tool_call` / `emit_tool_result` accept the new parameter and record it.
-  3. `lingxi-core/crates/orchestrator/src/streaming_loop.rs` and `turn_loop.rs` — at every call site that constructs `OutputEvent::ToolCall { tool, input }` or calls `output.emit_tool_call(tool, input)`, thread the `ObservedToolUse::id` through. The streaming loop already has `id` in scope (it's pushed into `turn.tool_uses` at line 84). The batched turn loop reads it from each `ContentBlock::ToolUse { id, .. }`.
+  1. `lingxi-code/crates/cli/src/output_adapter.rs:33-37` — accept the new `id` parameter and pass through to `OutputSink` (extend `OutputSink::tool_call` / `tool_result` in `crates/cli/src/output.rs` with the same `id: &ToolUseId` parameter; for the plain stdout sink ignore it; for the JSON sink emit `"tool_use_id": "<id>"` in the NDJSON line).
+  2. `lingxi-code/crates/orchestrator/src/test_support.rs` — `MockOutputStream::emit_tool_call` / `emit_tool_result` accept the new parameter and record it.
+  3. `lingxi-code/crates/orchestrator/src/streaming_loop.rs` and `turn_loop.rs` — at every call site that constructs `OutputEvent::ToolCall { tool, input }` or calls `output.emit_tool_call(tool, input)`, thread the `ObservedToolUse::id` through. The streaming loop already has `id` in scope (it's pushed into `turn.tool_uses` at line 84). The batched turn loop reads it from each `ContentBlock::ToolUse { id, .. }`.
 
 - [ ] **Step 7: Run tests to verify they pass.**
 
@@ -158,12 +158,12 @@
 - [ ] **Step 8: Commit.**
 
   ```bash
-  git add lingxi-core/crates/traits/src/orchestrator.rs \
-          lingxi-core/crates/cli/src/output.rs \
-          lingxi-core/crates/cli/src/output_adapter.rs \
-          lingxi-core/crates/orchestrator/src/test_support.rs \
-          lingxi-core/crates/orchestrator/src/streaming_loop.rs \
-          lingxi-core/crates/orchestrator/src/turn_loop.rs
+  git add lingxi-code/crates/traits/src/orchestrator.rs \
+          lingxi-code/crates/cli/src/output.rs \
+          lingxi-code/crates/cli/src/output_adapter.rs \
+          lingxi-code/crates/orchestrator/src/test_support.rs \
+          lingxi-code/crates/orchestrator/src/streaming_loop.rs \
+          lingxi-code/crates/orchestrator/src/turn_loop.rs
   git commit -m "feat(traits): carry ToolUseId on OutputEvent::ToolCall/ToolResult
 
   Extends the M5-04 OutputEvent surface so the M6-04 TUI can correlate
@@ -1246,7 +1246,7 @@
 - [ ] **Step 5: Commit.**
 
   ```bash
-  git add crates/tui/src/app.rs lingxi-core/crates/protocol/src/lib.rs
+  git add crates/tui/src/app.rs lingxi-code/crates/protocol/src/lib.rs
   git commit -m "feat(tui): AppState focus + expanded for tool blocks"
   ```
 

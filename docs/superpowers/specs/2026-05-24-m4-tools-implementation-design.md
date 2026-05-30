@@ -79,7 +79,7 @@ Dependency progression:
 ### Crate layout (no new crates; extend `lingxi-tools`)
 
 ```
-lingxi-core/crates/tools/
+lingxi-code/crates/tools/
 ├── src/
 │   ├── lib.rs                          # (extend) re-export all builtin tools
 │   ├── tool_trait.rs                   # (existing M1) Tool trait + ToolCallResult + ToolError
@@ -726,11 +726,11 @@ These do NOT block v0.5.0 release.
 - **M2 spec:** `docs/superpowers/specs/2026-05-23-m2-claude-code-parity-design.md`
 - **M3 sub-plans:** `docs/superpowers/plans/2026-05-23-m3-*.md` (7 files)
 - **Existing LingXi crates:**
-  - `lingxi-core/crates/tools/` — framework (Tool trait, registry, dispatcher, permissions, streaming, results)
-  - `lingxi-core/crates/permission/` — M1 PermissionGate trait
-  - `lingxi-core/crates/agent/`, `coordinator/`, `tasks/`, `session/`, `memory/` — M1/M3 supporting crates
-  - `lingxi-core/crates/mcp/`, `lsp/` — M2 protocol clients
-  - `lingxi-core/crates/api-client/`, `anthropic-oauth/`, `cost/`, `telemetry/`, `settings/` — M3 engine
+  - `lingxi-code/crates/tools/` — framework (Tool trait, registry, dispatcher, permissions, streaming, results)
+  - `lingxi-code/crates/permission/` — M1 PermissionGate trait
+  - `lingxi-code/crates/agent/`, `coordinator/`, `tasks/`, `session/`, `memory/` — M1/M3 supporting crates
+  - `lingxi-code/crates/mcp/`, `lsp/` — M2 protocol clients
+  - `lingxi-code/crates/api-client/`, `anthropic-oauth/`, `cost/`, `telemetry/`, `settings/` — M3 engine
 - **Existing parity protocol:** v3 §32.6 — every fixture has `_source` + `_note` claude-code citations
 
 ---

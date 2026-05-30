@@ -37,29 +37,29 @@ If a reader of this plan later finds an IDE plugin in the wild emitting a `port`
 ## File touch inventory (locked at top per spec Appendix A)
 
 **New workspace member**:
-- `lingxi-core/platforms/common/` (new crate `lingxi-platform-common`)
+- `lingxi-code/platforms/common/` (new crate `lingxi-platform-common`)
 
 **Create**:
-- `lingxi-core/platforms/common/Cargo.toml`
-- `lingxi-core/platforms/common/src/lib.rs`
-- `lingxi-core/platforms/common/src/mcp_sse.rs`
-- `lingxi-core/platforms/common/src/mcp_http.rs`
-- `lingxi-core/platforms/common/tests/mcp_sse_test.rs`
-- `lingxi-core/platforms/common/tests/mcp_http_test.rs`
-- `lingxi-core/crates/bridge/src/lockfile.rs`
-- `lingxi-core/crates/bridge/src/mcp_endpoint.rs`
-- `lingxi-core/crates/bridge/tests/lockfile_test.rs`
-- `lingxi-core/crates/bridge/tests/mcp_endpoint_test.rs`
+- `lingxi-code/platforms/common/Cargo.toml`
+- `lingxi-code/platforms/common/src/lib.rs`
+- `lingxi-code/platforms/common/src/mcp_sse.rs`
+- `lingxi-code/platforms/common/src/mcp_http.rs`
+- `lingxi-code/platforms/common/tests/mcp_sse_test.rs`
+- `lingxi-code/platforms/common/tests/mcp_http_test.rs`
+- `lingxi-code/crates/bridge/src/lockfile.rs`
+- `lingxi-code/crates/bridge/src/mcp_endpoint.rs`
+- `lingxi-code/crates/bridge/tests/lockfile_test.rs`
+- `lingxi-code/crates/bridge/tests/mcp_endpoint_test.rs`
 
 **Modify**:
-- `lingxi-core/Cargo.toml` (add `platforms/common` workspace member)
-- `lingxi-core/platforms/posix/src/mcp.rs` (add SSE + HTTP branches)
-- `lingxi-core/platforms/posix/Cargo.toml` (add `lingxi-platform-common`, `eventsource-stream`)
-- `lingxi-core/platforms/windows/src/mcp.rs` (add SSE + HTTP branches)
-- `lingxi-core/platforms/windows/Cargo.toml` (add `lingxi-platform-common`, `eventsource-stream`)
-- `lingxi-core/crates/bridge/src/lib.rs` (replace placeholder exports with `lockfile`, `mcp_endpoint`, `IdeBridge`)
-- `lingxi-core/crates/bridge/src/transport.rs` (rewrite as `IdeBridge` over `lingxi-mcp::McpRegistry`)
-- `lingxi-core/crates/bridge/Cargo.toml` (add `lingxi-jsonrpc`, `lingxi-mcp`, `tokio-tungstenite`, `rand`, `dirs`, `serde_json` features)
+- `lingxi-code/Cargo.toml` (add `platforms/common` workspace member)
+- `lingxi-code/platforms/posix/src/mcp.rs` (add SSE + HTTP branches)
+- `lingxi-code/platforms/posix/Cargo.toml` (add `lingxi-platform-common`, `eventsource-stream`)
+- `lingxi-code/platforms/windows/src/mcp.rs` (add SSE + HTTP branches)
+- `lingxi-code/platforms/windows/Cargo.toml` (add `lingxi-platform-common`, `eventsource-stream`)
+- `lingxi-code/crates/bridge/src/lib.rs` (replace placeholder exports with `lockfile`, `mcp_endpoint`, `IdeBridge`)
+- `lingxi-code/crates/bridge/src/transport.rs` (rewrite as `IdeBridge` over `lingxi-mcp::McpRegistry`)
+- `lingxi-code/crates/bridge/Cargo.toml` (add `lingxi-jsonrpc`, `lingxi-mcp`, `tokio-tungstenite`, `rand`, `dirs`, `serde_json` features)
 
 Total: 10 new files, 1 new workspace member, 8 modified files.
 
@@ -100,15 +100,15 @@ These must appear LITERALLY in code and test assertions:
 ## Task 1: Add `platforms/common` crate skeleton
 
 **Files:**
-- Create: `lingxi-core/platforms/common/Cargo.toml`
-- Create: `lingxi-core/platforms/common/src/lib.rs`
-- Modify: `lingxi-core/Cargo.toml`
+- Create: `lingxi-code/platforms/common/Cargo.toml`
+- Create: `lingxi-code/platforms/common/src/lib.rs`
+- Modify: `lingxi-code/Cargo.toml`
 
 The two SSE/HTTP connectors share machinery that is identical on posix and windows (everything except platform-specific HTTP TLS backend, which `reqwest` already abstracts). A small shared crate avoids copy-paste and keeps the per-platform `mcp.rs` files focused on dispatch.
 
 - [ ] **Step 1: Write failing crate-existence test**
 
-Create `lingxi-core/platforms/common/tests/smoke.rs`:
+Create `lingxi-code/platforms/common/tests/smoke.rs`:
 
 ```rust
 #[test]
@@ -184,7 +184,7 @@ pub use mcp_http::{connect_http, HttpConnectError};
 
 - [ ] **Step 5: Create stub modules** so `lib.rs` resolves
 
-Create `lingxi-core/platforms/common/src/mcp_sse.rs`:
+Create `lingxi-code/platforms/common/src/mcp_sse.rs`:
 
 ```rust
 //! MCP SSE transport — implemented in Task 3.
@@ -218,7 +218,7 @@ pub async fn connect_sse(
 }
 ```
 
-Create `lingxi-core/platforms/common/src/mcp_http.rs`:
+Create `lingxi-code/platforms/common/src/mcp_http.rs`:
 
 ```rust
 //! MCP Streamable HTTP transport — implemented in Task 5.
@@ -254,7 +254,7 @@ pub async fn connect_http(
 
 - [ ] **Step 6: Register crate in workspace**
 
-Modify `lingxi-core/Cargo.toml`. Find the `members = [` array and add `"platforms/common",` between `"platforms/posix-minimal",` and `"platforms/posix",`. Resulting members snippet:
+Modify `lingxi-code/Cargo.toml`. Find the `members = [` array and add `"platforms/common",` between `"platforms/posix-minimal",` and `"platforms/posix",`. Resulting members snippet:
 
 ```toml
 members = [
@@ -280,7 +280,7 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add lingxi-core/Cargo.toml lingxi-core/platforms/common/
+git add lingxi-code/Cargo.toml lingxi-code/platforms/common/
 git commit -m "feat(platform-common): scaffold shared crate for MCP SSE/HTTP connectors"
 ```
 
@@ -289,7 +289,7 @@ git commit -m "feat(platform-common): scaffold shared crate for MCP SSE/HTTP con
 ## Task 2: Write failing SSE-connector roundtrip test against an axum mock
 
 **Files:**
-- Create: `lingxi-core/platforms/common/tests/mcp_sse_test.rs`
+- Create: `lingxi-code/platforms/common/tests/mcp_sse_test.rs`
 
 Write the test BEFORE the implementation so the contract is locked.
 
@@ -465,7 +465,7 @@ Expected: FAIL — `connect_sse not yet implemented (Task 3)`.
 - [ ] **Step 3: Commit (failing test only)**
 
 ```bash
-git add lingxi-core/platforms/common/tests/mcp_sse_test.rs
+git add lingxi-code/platforms/common/tests/mcp_sse_test.rs
 git commit -m "test(platform-common): failing SSE roundtrip + headers test"
 ```
 
@@ -474,13 +474,13 @@ git commit -m "test(platform-common): failing SSE roundtrip + headers test"
 ## Task 3: Implement `connect_sse`
 
 **Files:**
-- Modify: `lingxi-core/platforms/common/src/mcp_sse.rs`
+- Modify: `lingxi-code/platforms/common/src/mcp_sse.rs`
 
 The connector spawns two background tasks: one streams `eventsource-stream` events from the GET response and pushes parsed JSON-RPC frames into a `tokio::sync::mpsc` channel; the other reads outbound frames from `lingxi_jsonrpc::Connection` and `POST`s them. Both are joined by `Connection::new_streams(read_rx, write_tx)`.
 
 - [ ] **Step 1: Implement `connect_sse`**
 
-Replace the body of `lingxi-core/platforms/common/src/mcp_sse.rs`:
+Replace the body of `lingxi-code/platforms/common/src/mcp_sse.rs`:
 
 ```rust
 //! MCP SSE transport: GET text/event-stream from `url` for inbound JSON-RPC
@@ -672,7 +672,7 @@ Expected: PASS (both `connect_sse_sends_get_with_accept_event_stream` and `conne
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/platforms/common/src/mcp_sse.rs
+git add lingxi-code/platforms/common/src/mcp_sse.rs
 git commit -m "feat(platform-common): SSE MCP transport (GET event-stream + POST same URL)"
 ```
 
@@ -681,7 +681,7 @@ git commit -m "feat(platform-common): SSE MCP transport (GET event-stream + POST
 ## Task 4: Write failing Streamable-HTTP-connector test
 
 **Files:**
-- Create: `lingxi-core/platforms/common/tests/mcp_http_test.rs`
+- Create: `lingxi-code/platforms/common/tests/mcp_http_test.rs`
 
 - [ ] **Step 1: Write failing test**
 
@@ -795,7 +795,7 @@ Expected: FAIL — `connect_http not yet implemented (Task 5)`.
 - [ ] **Step 3: Commit (failing test only)**
 
 ```bash
-git add lingxi-core/platforms/common/tests/mcp_http_test.rs
+git add lingxi-code/platforms/common/tests/mcp_http_test.rs
 git commit -m "test(platform-common): failing Streamable-HTTP roundtrip test"
 ```
 
@@ -804,13 +804,13 @@ git commit -m "test(platform-common): failing Streamable-HTTP roundtrip test"
 ## Task 5: Implement `connect_http`
 
 **Files:**
-- Modify: `lingxi-core/platforms/common/src/mcp_http.rs`
+- Modify: `lingxi-code/platforms/common/src/mcp_http.rs`
 
 For Streamable HTTP the client POSTs each outbound JSON-RPC frame; the server may reply with a single `application/json` body OR a `text/event-stream` body of zero-or-more frames. This task implements both response modes by inspecting `Content-Type`.
 
 - [ ] **Step 1: Implement `connect_http`**
 
-Replace the body of `lingxi-core/platforms/common/src/mcp_http.rs`:
+Replace the body of `lingxi-code/platforms/common/src/mcp_http.rs`:
 
 ```rust
 //! MCP Streamable HTTP transport — POST request, JSON or text/event-stream response.
@@ -981,7 +981,7 @@ Expected: PASS (both tests).
 - [ ] **Step 3: Commit**
 
 ```bash
-git add lingxi-core/platforms/common/src/mcp_http.rs
+git add lingxi-code/platforms/common/src/mcp_http.rs
 git commit -m "feat(platform-common): Streamable HTTP MCP transport"
 ```
 
@@ -990,14 +990,14 @@ git commit -m "feat(platform-common): Streamable HTTP MCP transport"
 ## Task 6: Wire SSE + HTTP into `platforms/posix/src/mcp.rs`
 
 **Files:**
-- Modify: `lingxi-core/platforms/posix/src/mcp.rs`
-- Modify: `lingxi-core/platforms/posix/Cargo.toml`
+- Modify: `lingxi-code/platforms/posix/src/mcp.rs`
+- Modify: `lingxi-code/platforms/posix/Cargo.toml`
 
 `PosixMcpTransport::connect` currently dispatches only `Stdio`. Add SSE and HTTP arms that delegate to `lingxi-platform-common`. WebSocket is added by sibling M2-02c; this task only touches the SSE and HTTP arms.
 
 - [ ] **Step 1: Write failing test for SSE branch**
 
-Create `lingxi-core/platforms/posix/tests/mcp_dispatch_test.rs`:
+Create `lingxi-code/platforms/posix/tests/mcp_dispatch_test.rs`:
 
 ```rust
 //! Verifies that PosixMcpTransport::connect dispatches Sse and Http specs
@@ -1064,7 +1064,7 @@ Expected: FAIL with `UnsupportedTransport(Sse)` (or `Http`).
 
 - [ ] **Step 3: Add `lingxi-platform-common` and `eventsource-stream` deps**
 
-Modify `lingxi-core/platforms/posix/Cargo.toml` `[dependencies]` section, adding two lines (preserve existing alphabetical-ish ordering):
+Modify `lingxi-code/platforms/posix/Cargo.toml` `[dependencies]` section, adding two lines (preserve existing alphabetical-ish ordering):
 
 ```toml
 lingxi-platform-common = { path = "../common" }
@@ -1073,7 +1073,7 @@ eventsource-stream = "0.2"
 
 - [ ] **Step 4: Update `PosixMcpTransport` to dispatch SSE + HTTP**
 
-Edit `lingxi-core/platforms/posix/src/mcp.rs`. We extend the `connections` map's value type from `Child` to an enum so SSE/HTTP/Stdio can share storage, and add new arms in `connect`. For minimal churn, store a unified `PosixMcpConnection` enum.
+Edit `lingxi-code/platforms/posix/src/mcp.rs`. We extend the `connections` map's value type from `Child` to an enum so SSE/HTTP/Stdio can share storage, and add new arms in `connect`. For minimal churn, store a unified `PosixMcpConnection` enum.
 
 Replace the file body with:
 
@@ -1318,7 +1318,7 @@ Expected: PASS (all three tests).
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lingxi-core/platforms/posix/Cargo.toml lingxi-core/platforms/posix/src/mcp.rs lingxi-core/platforms/posix/tests/mcp_dispatch_test.rs
+git add lingxi-code/platforms/posix/Cargo.toml lingxi-code/platforms/posix/src/mcp.rs lingxi-code/platforms/posix/tests/mcp_dispatch_test.rs
 git commit -m "feat(platform-posix): dispatch MCP Sse + Http via lingxi-platform-common"
 ```
 
@@ -1327,14 +1327,14 @@ git commit -m "feat(platform-posix): dispatch MCP Sse + Http via lingxi-platform
 ## Task 7: Mirror SSE + HTTP dispatch into `platforms/windows/src/mcp.rs`
 
 **Files:**
-- Modify: `lingxi-core/platforms/windows/src/mcp.rs`
-- Modify: `lingxi-core/platforms/windows/Cargo.toml`
+- Modify: `lingxi-code/platforms/windows/src/mcp.rs`
+- Modify: `lingxi-code/platforms/windows/Cargo.toml`
 
 Mirror the posix changes verbatim. Read posix's mcp.rs at task start and translate (the file body is intentionally identical except for the struct name).
 
 - [ ] **Step 1: Write failing test**
 
-Create `lingxi-core/platforms/windows/tests/mcp_dispatch_test.rs`:
+Create `lingxi-code/platforms/windows/tests/mcp_dispatch_test.rs`:
 
 ```rust
 //! Mirrors posix mcp_dispatch_test.rs against WindowsMcpTransport.
@@ -1420,7 +1420,7 @@ Expected: success (or if MSVC toolchain unavailable, defer to CI matrix — note
 - [ ] **Step 7: Commit**
 
 ```bash
-git add lingxi-core/platforms/windows/Cargo.toml lingxi-core/platforms/windows/src/mcp.rs lingxi-core/platforms/windows/tests/mcp_dispatch_test.rs
+git add lingxi-code/platforms/windows/Cargo.toml lingxi-code/platforms/windows/src/mcp.rs lingxi-code/platforms/windows/tests/mcp_dispatch_test.rs
 git commit -m "feat(platform-windows): mirror Sse + Http MCP dispatch"
 ```
 
@@ -1429,13 +1429,13 @@ git commit -m "feat(platform-windows): mirror Sse + Http MCP dispatch"
 ## Task 8: Lockfile shape — failing test FIRST
 
 **Files:**
-- Create: `lingxi-core/crates/bridge/tests/lockfile_test.rs`
+- Create: `lingxi-code/crates/bridge/tests/lockfile_test.rs`
 
 Lock the exact JSON shape and filename layout BEFORE writing the lockfile writer. This file matches claude-code's `LockfileJsonContent` byte-for-byte.
 
 - [ ] **Step 1: Write failing test**
 
-Create `lingxi-core/crates/bridge/tests/lockfile_test.rs`:
+Create `lingxi-code/crates/bridge/tests/lockfile_test.rs`:
 
 ```rust
 //! Asserts the LITERAL `~/.claude/ide/<port>.lock` filename and JSON shape
@@ -1562,7 +1562,7 @@ Expected: FAIL with `error[E0432]: unresolved import 'lingxi_bridge::lockfile'` 
 - [ ] **Step 3: Commit failing test**
 
 ```bash
-git add lingxi-core/crates/bridge/tests/lockfile_test.rs
+git add lingxi-code/crates/bridge/tests/lockfile_test.rs
 git commit -m "test(bridge): failing lockfile shape + Drop-guard tests"
 ```
 
@@ -1571,12 +1571,12 @@ git commit -m "test(bridge): failing lockfile shape + Drop-guard tests"
 ## Task 9: Implement `lockfile.rs` and `LockfileGuard`
 
 **Files:**
-- Create: `lingxi-core/crates/bridge/src/lockfile.rs`
-- Modify: `lingxi-core/crates/bridge/Cargo.toml`
+- Create: `lingxi-code/crates/bridge/src/lockfile.rs`
+- Modify: `lingxi-code/crates/bridge/Cargo.toml`
 
 - [ ] **Step 1: Add deps**
 
-Modify `lingxi-core/crates/bridge/Cargo.toml`. After M2-01 the file has only `lingxi-protocol`, `lingxi-traits`, `lingxi-secret`, `serde`, `serde_json`, `thiserror`, `async-trait`, `tokio`, `tracing`. Append:
+Modify `lingxi-code/crates/bridge/Cargo.toml`. After M2-01 the file has only `lingxi-protocol`, `lingxi-traits`, `lingxi-secret`, `serde`, `serde_json`, `thiserror`, `async-trait`, `tokio`, `tracing`. Append:
 
 ```toml
 rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "os_rng"] }
@@ -1591,7 +1591,7 @@ tokio-tungstenite = "0.21"
 
 - [ ] **Step 2: Write the lockfile module**
 
-Create `lingxi-core/crates/bridge/src/lockfile.rs`:
+Create `lingxi-code/crates/bridge/src/lockfile.rs`:
 
 ```rust
 //! `~/.claude/ide/<port>.lock` writer and Drop-guard.
@@ -1792,7 +1792,7 @@ impl Drop for LockfileGuard {
 
 - [ ] **Step 3: Wire module into `lib.rs`**
 
-Modify `lingxi-core/crates/bridge/src/lib.rs` — replace its body with:
+Modify `lingxi-code/crates/bridge/src/lib.rs` — replace its body with:
 
 ```rust
 //! `lingxi-bridge` — IDE bridge over MCP-WebSocket.
@@ -1825,7 +1825,7 @@ pub use transport::IdeBridge;
 (M2-01 had collapsed `message.rs` to a placeholder; that file is now removed. If the file still exists, delete it as part of this task — the bridge no longer ships a wire vocabulary because all wire framing is JSON-RPC via `lingxi-jsonrpc`.)
 
 ```bash
-git rm lingxi-core/crates/bridge/src/message.rs   # if still present after M2-01
+git rm lingxi-code/crates/bridge/src/message.rs   # if still present after M2-01
 ```
 
 - [ ] **Step 4: Run test to verify pass**
@@ -1839,8 +1839,8 @@ Expected: PASS (all 5 tests in the lockfile_test.rs file).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/bridge/Cargo.toml lingxi-core/crates/bridge/src/lockfile.rs lingxi-core/crates/bridge/src/lib.rs
-test -e lingxi-core/crates/bridge/src/message.rs || true
+git add lingxi-code/crates/bridge/Cargo.toml lingxi-code/crates/bridge/src/lockfile.rs lingxi-code/crates/bridge/src/lib.rs
+test -e lingxi-code/crates/bridge/src/message.rs || true
 git commit -m "feat(bridge): lockfile writer + Drop-guard with panic cleanup"
 ```
 
@@ -1849,13 +1849,13 @@ git commit -m "feat(bridge): lockfile writer + Drop-guard with panic cleanup"
 ## Task 10: MCP endpoint — failing auth test
 
 **Files:**
-- Create: `lingxi-core/crates/bridge/tests/mcp_endpoint_test.rs`
+- Create: `lingxi-code/crates/bridge/tests/mcp_endpoint_test.rs`
 
 This test will become the integration test in Task 12 too — we lock the 401 path now and the happy path later.
 
 - [ ] **Step 1: Write failing test**
 
-Create `lingxi-core/crates/bridge/tests/mcp_endpoint_test.rs`:
+Create `lingxi-code/crates/bridge/tests/mcp_endpoint_test.rs`:
 
 ```rust
 //! Integration tests for `McpEndpoint`:
@@ -1926,7 +1926,7 @@ Expected: FAIL — `unresolved import 'lingxi_bridge::McpEndpoint'`.
 - [ ] **Step 3: Commit failing test**
 
 ```bash
-git add lingxi-core/crates/bridge/tests/mcp_endpoint_test.rs
+git add lingxi-code/crates/bridge/tests/mcp_endpoint_test.rs
 git commit -m "test(bridge): failing 401 auth-rejection tests for MCP endpoint"
 ```
 
@@ -1935,14 +1935,14 @@ git commit -m "test(bridge): failing 401 auth-rejection tests for MCP endpoint"
 ## Task 11: Implement `McpEndpoint` (WS server + auth)
 
 **Files:**
-- Create: `lingxi-core/crates/bridge/src/mcp_endpoint.rs`
-- Modify: `lingxi-core/crates/bridge/src/transport.rs`
+- Create: `lingxi-code/crates/bridge/src/mcp_endpoint.rs`
+- Modify: `lingxi-code/crates/bridge/src/transport.rs`
 
 We do NOT pull in `axum` for production — the upgrade flow is short and hand-rolled with `tokio::net::TcpListener` + `tokio_tungstenite::accept_hdr_async`. This keeps the bridge crate lean and side-steps tower middleware.
 
 - [ ] **Step 1: Write the endpoint module**
 
-Create `lingxi-core/crates/bridge/src/mcp_endpoint.rs`:
+Create `lingxi-code/crates/bridge/src/mcp_endpoint.rs`:
 
 ```rust
 //! MCP-over-WebSocket endpoint exposed by the bridge.
@@ -2097,7 +2097,7 @@ Expected: PASS (both rejection tests).
 
 - [ ] **Step 3: Rewrite `transport.rs` to use the new modules**
 
-Replace `lingxi-core/crates/bridge/src/transport.rs` with:
+Replace `lingxi-code/crates/bridge/src/transport.rs` with:
 
 ```rust
 //! Engine-facing `IdeBridge`: starts the MCP endpoint, writes the lockfile,
@@ -2195,7 +2195,7 @@ Expected: lockfile_test (5 tests) + mcp_endpoint_test (2 tests for 401) pass; th
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lingxi-core/crates/bridge/src/mcp_endpoint.rs lingxi-core/crates/bridge/src/transport.rs
+git add lingxi-code/crates/bridge/src/mcp_endpoint.rs lingxi-code/crates/bridge/src/transport.rs
 git commit -m "feat(bridge): MCP-over-WS endpoint with auth gating + IdeBridge wrapper"
 ```
 
@@ -2204,13 +2204,13 @@ git commit -m "feat(bridge): MCP-over-WS endpoint with auth gating + IdeBridge w
 ## Task 12: End-to-end happy-path integration test
 
 **Files:**
-- Modify: `lingxi-core/crates/bridge/tests/mcp_endpoint_test.rs`
+- Modify: `lingxi-code/crates/bridge/tests/mcp_endpoint_test.rs`
 
 Append a test that exercises the entire flow: start an `IdeBridge`, read its lockfile from disk, parse it, open a WebSocket with the matching auth header, and verify (a) the upgrade succeeds and (b) the lockfile disappears after `shutdown`.
 
 - [ ] **Step 1: Append happy-path test**
 
-Append to `lingxi-core/crates/bridge/tests/mcp_endpoint_test.rs`:
+Append to `lingxi-code/crates/bridge/tests/mcp_endpoint_test.rs`:
 
 ```rust
 use lingxi_bridge::{IdeBridge, IdeLockfile};
@@ -2271,7 +2271,7 @@ async fn bridge_writes_lockfile_then_round_trips_ws_upgrade() {
 }
 ```
 
-Also add `http = "1"` as a dev-dependency to `lingxi-core/crates/bridge/Cargo.toml`:
+Also add `http = "1"` as a dev-dependency to `lingxi-code/crates/bridge/Cargo.toml`:
 
 ```toml
 [dev-dependencies]
@@ -2300,7 +2300,7 @@ Expected: 5 lockfile + 3 endpoint = 8 tests PASS.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add lingxi-core/crates/bridge/tests/mcp_endpoint_test.rs lingxi-core/crates/bridge/Cargo.toml
+git add lingxi-code/crates/bridge/tests/mcp_endpoint_test.rs lingxi-code/crates/bridge/Cargo.toml
 git commit -m "test(bridge): end-to-end lockfile + WS upgrade + Drop-cleanup integration"
 ```
 

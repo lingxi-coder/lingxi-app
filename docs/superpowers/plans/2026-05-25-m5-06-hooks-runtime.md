@@ -6,16 +6,16 @@
 
 This plan ships:
 
-- A new module tree under `lingxi-core/crates/hooks/src/`:
+- A new module tree under `lingxi-code/crates/hooks/src/`:
   - `hook_payload.rs` — serde-locked `PreToolUsePayload` / `PostToolUsePayload` structs whose JSON keys match `claude-code/src/entrypoints/sdk/coreSchemas.ts:414-446` byte-for-byte (`hook_event_name`, `tool_name`, `tool_input`, `tool_response`, `tool_use_id`, `session_id`, `transcript_path`, `cwd`, `permission_mode?`, `agent_id?`, `agent_type?`). Plus the inbound `HookResponseBody` parser that lifts claude-code's `{ continue?, stopReason?, suppressOutput?, systemMessage?, decision?, permissionDecision?, hookSpecificOutput? }` shape into our `HookResponse`.
   - `http_executor.rs` — `HttpExecutor { http: Arc<dyn HttpTransport>, ssrf_guard: SsrfGuard }`. POSTs the `PreToolUsePayload` / `PostToolUsePayload` JSON to `hook.url` with `Content-Type: application/json`, enforces `HOOK_HTTP_TIMEOUT_MS = 600_000` (10 minutes — see T0) or per-hook override, parses the body via `hook_payload::parse_response`, returns a `HookResult`.
   - `command_executor.rs` — `CommandExecutor { runtime: Arc<dyn RuntimeSpawner> }`. Spawns `hook.command` with `hook.args` via the runtime spawner (D17 — no direct `tokio::process`), pipes the payload JSON to stdin, captures stdout/stderr, parses stdout via `hook_payload::parse_response`. Default timeout `HOOK_COMMAND_TIMEOUT_MS = 600_000` (10 minutes — same as TOOL_HOOK_EXECUTION_TIMEOUT_MS in claude-code).
   - `agent_executor.rs` — `AgentExecutor { spawner: Arc<dyn SubagentSpawner> }`. Builds a `SubagentSpawnRequest { subagent_type: hook.agent_type.clone(), prompt: hook.prompt_template + payload_json, context_paths: vec![] }`, awaits `SubagentResult::Completed { content, .. }`, treats `content` as `HookResponse` JSON (or empty success if absent). Default timeout `HOOK_AGENT_TIMEOUT_MS = 60_000` (60 seconds — claude-code's `execAgentHook.ts:75`).
-- A modification to `lingxi-core/crates/hooks/src/executor.rs`:
+- A modification to `lingxi-code/crates/hooks/src/executor.rs`:
   - `HookExecutorImpl` gains a 4th field `Option<Arc<dyn SubagentSpawner>>` (None means agent-arm hooks return `HookOutcome::Error` with `"agent executor not wired"`). The HTTP and Command arms always work — they reuse the already-stored `http` and `runtime` fields.
   - `HookExecutorImpl::new` keeps its current 3-arg signature; a new builder method `with_agent_spawner(spawner: Arc<dyn SubagentSpawner>)` attaches the agent arm. Production wiring (the orchestrator constructor) calls `with_agent_spawner(spawner.clone())`; tests that don't exercise agent hooks construct without it.
   - The match in `execute_single` replaces the three "stubbed" arms with delegating calls to the three new executor structs. The `Builtin` arm is untouched.
-- A wiring change in `lingxi-core/crates/orchestrator/src/conversation.rs`:
+- A wiring change in `lingxi-code/crates/orchestrator/src/conversation.rs`:
   - `ConversationOrchestrator` grows a new public method `dispatch_tool_with_hooks(name, input, tool_use_id) -> Result<ToolCallResult, ToolError>` that:
     1. Constructs a `HookEvent::PreToolUse { tool_name, tool_input, tool_use_id }` and calls `self.hooks.execute(event, ctx).await`.
     2. If the aggregate `decision == Some(HookDecision::Block)`, returns `Err(ToolError::PermissionDenied(reason))`.
@@ -296,28 +296,28 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ## File structure
 
 **Created:**
-- `lingxi-core/crates/hooks/src/hook_payload.rs` — `PreToolUsePayload`, `PostToolUsePayload`, `HookEventEnvelope`, `parse_response`, `HookResponseParseError`. (~250 LoC inc. tests.)
-- `lingxi-core/crates/hooks/src/http_executor.rs` — `HttpExecutor` struct + `execute` method. (~180 LoC inc. tests.)
-- `lingxi-core/crates/hooks/src/command_executor.rs` — `CommandExecutor` struct + `execute` method. (~200 LoC inc. tests.)
-- `lingxi-core/crates/hooks/src/agent_executor.rs` — `AgentExecutor` struct + `execute` method. (~180 LoC inc. tests.)
-- `lingxi-core/crates/hooks/tests/http_executor_test.rs` — integration: SSRF block, timeout, happy path (mock `HttpTransport`).
-- `lingxi-core/crates/hooks/tests/command_executor_test.rs` — integration: stdin payload, non-zero exit, timeout (mock `RuntimeSpawner`).
-- `lingxi-core/crates/hooks/tests/agent_executor_test.rs` — integration: agent spawn happy path, `Failed`, `Killed` (mock `SubagentSpawner`).
-- `lingxi-core/crates/orchestrator/tests/orchestrator_pre_post_hook_test.rs` — end-to-end with scripted Pre/PostToolUse hooks.
-- `lingxi-core/crates/orchestrator/tests/orchestrator_hook_telemetry_test.rs` — captures the 8 new events in registration order.
+- `lingxi-code/crates/hooks/src/hook_payload.rs` — `PreToolUsePayload`, `PostToolUsePayload`, `HookEventEnvelope`, `parse_response`, `HookResponseParseError`. (~250 LoC inc. tests.)
+- `lingxi-code/crates/hooks/src/http_executor.rs` — `HttpExecutor` struct + `execute` method. (~180 LoC inc. tests.)
+- `lingxi-code/crates/hooks/src/command_executor.rs` — `CommandExecutor` struct + `execute` method. (~200 LoC inc. tests.)
+- `lingxi-code/crates/hooks/src/agent_executor.rs` — `AgentExecutor` struct + `execute` method. (~180 LoC inc. tests.)
+- `lingxi-code/crates/hooks/tests/http_executor_test.rs` — integration: SSRF block, timeout, happy path (mock `HttpTransport`).
+- `lingxi-code/crates/hooks/tests/command_executor_test.rs` — integration: stdin payload, non-zero exit, timeout (mock `RuntimeSpawner`).
+- `lingxi-code/crates/hooks/tests/agent_executor_test.rs` — integration: agent spawn happy path, `Failed`, `Killed` (mock `SubagentSpawner`).
+- `lingxi-code/crates/orchestrator/tests/orchestrator_pre_post_hook_test.rs` — end-to-end with scripted Pre/PostToolUse hooks.
+- `lingxi-code/crates/orchestrator/tests/orchestrator_hook_telemetry_test.rs` — captures the 8 new events in registration order.
 
 **Modified:**
-- `lingxi-core/crates/hooks/src/lib.rs` — add 4 new `pub mod` lines + corresponding `pub use` re-exports.
-- `lingxi-core/crates/hooks/src/executor.rs` — fill three stub arms, add `agent_spawner` field, add `telemetry` field, add `with_agent_spawner` + `with_telemetry` builder methods.
-- `lingxi-core/crates/hooks/src/registry.rs` — extend `HookContext` with the 5 new fields (T11).
-- `lingxi-core/crates/hooks/src/ssrf_guard.rs` — add 169.254/16 link-local range to `with_defaults` (T5).
-- `lingxi-core/crates/hooks/Cargo.toml` — add `lingxi-telemetry = { workspace = true }` (already a workspace member, but `hooks` does not yet depend on it).
-- `lingxi-core/crates/orchestrator/src/conversation.rs` — add `dispatch_tool_with_hooks` method, route `run_turn`'s tool-dispatch loop through it.
-- `lingxi-core/crates/orchestrator/Cargo.toml` — no change (already depends on `lingxi-hooks` and `lingxi-telemetry`).
-- `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs` — append 8 new constants + payload structs + extend `NAMES` slice to 15 entries.
-- `lingxi-core/crates/telemetry/src/tengu/mod.rs:29` — bump TOTAL formula's orchestrator count from `7` to `15` → 253.
-- `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs` — bump assertion to 253.
-- `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json` — insert 8 new names in registration order after `tengu_orchestrator_permission_answered`.
+- `lingxi-code/crates/hooks/src/lib.rs` — add 4 new `pub mod` lines + corresponding `pub use` re-exports.
+- `lingxi-code/crates/hooks/src/executor.rs` — fill three stub arms, add `agent_spawner` field, add `telemetry` field, add `with_agent_spawner` + `with_telemetry` builder methods.
+- `lingxi-code/crates/hooks/src/registry.rs` — extend `HookContext` with the 5 new fields (T11).
+- `lingxi-code/crates/hooks/src/ssrf_guard.rs` — add 169.254/16 link-local range to `with_defaults` (T5).
+- `lingxi-code/crates/hooks/Cargo.toml` — add `lingxi-telemetry = { workspace = true }` (already a workspace member, but `hooks` does not yet depend on it).
+- `lingxi-code/crates/orchestrator/src/conversation.rs` — add `dispatch_tool_with_hooks` method, route `run_turn`'s tool-dispatch loop through it.
+- `lingxi-code/crates/orchestrator/Cargo.toml` — no change (already depends on `lingxi-hooks` and `lingxi-telemetry`).
+- `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` — append 8 new constants + payload structs + extend `NAMES` slice to 15 entries.
+- `lingxi-code/crates/telemetry/src/tengu/mod.rs:29` — bump TOTAL formula's orchestrator count from `7` to `15` → 253.
+- `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs` — bump assertion to 253.
+- `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json` — insert 8 new names in registration order after `tengu_orchestrator_permission_answered`.
 
 ---
 
@@ -402,7 +402,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   Run:
   ```bash
   grep -n "169\.254\|link-local\|metadata\.\|169\\.254" \
-      /Users/luolingfeng/Projects/LingXi-Next/lingxi-core/crates/hooks/src/ssrf_guard.rs
+      /Users/luolingfeng/Projects/LingXi-Next/lingxi-code/crates/hooks/src/ssrf_guard.rs
   ```
 
   Expected: zero matches (link-local was deferred to M2 per the M1.4 comment). T5 adds the range.
@@ -416,12 +416,12 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 1: `hook_payload.rs` with serde-locked schemas
 
 **Files:**
-- Create: `lingxi-core/crates/hooks/src/hook_payload.rs`
-- Modify: `lingxi-core/crates/hooks/src/lib.rs` (add `pub mod hook_payload;` + `pub use hook_payload::{...};`)
+- Create: `lingxi-code/crates/hooks/src/hook_payload.rs`
+- Modify: `lingxi-code/crates/hooks/src/lib.rs` (add `pub mod hook_payload;` + `pub use hook_payload::{...};`)
 
 - [ ] **Step 1: Create the file with the full module body.**
 
-  Write `lingxi-core/crates/hooks/src/hook_payload.rs`:
+  Write `lingxi-code/crates/hooks/src/hook_payload.rs`:
   ```rust
   //! Hook event payload (over-the-wire JSON) and response parser.
   //!
@@ -741,7 +741,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
 - [ ] **Step 2: Wire the module in `lib.rs`.**
 
-  In `lingxi-core/crates/hooks/src/lib.rs`, find the existing `pub mod` block (currently `async_registry, builtin, definition, events, executor, registry, response, ssrf_guard`) and add `pub mod hook_payload;` AFTER `events`. Then append to the `pub use` block:
+  In `lingxi-code/crates/hooks/src/lib.rs`, find the existing `pub mod` block (currently `async_registry, builtin, definition, events, executor, registry, response, ssrf_guard`) and add `pub mod hook_payload;` AFTER `events`. Then append to the `pub use` block:
   ```rust
   pub use hook_payload::{
       HookEventEnvelope, HookEventNamePost, HookEventNamePre, HookResponseParseError,
@@ -770,7 +770,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
   ```bash
   cd /Users/luolingfeng/Projects/LingXi-Next
-  git add lingxi-core/crates/hooks/src/hook_payload.rs lingxi-core/crates/hooks/src/lib.rs
+  git add lingxi-code/crates/hooks/src/hook_payload.rs lingxi-code/crates/hooks/src/lib.rs
   git commit -m "feat(M5-06 T1): hook_payload module — PreToolUse/PostToolUse serde-locked schemas + parse_response"
   ```
 
@@ -779,11 +779,11 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 2: Timeout constants
 
 **Files:**
-- Modify: `lingxi-core/crates/hooks/src/executor.rs` (add three `pub const` declarations at the top).
+- Modify: `lingxi-code/crates/hooks/src/executor.rs` (add three `pub const` declarations at the top).
 
 - [ ] **Step 1: Add the constants.**
 
-  Open `lingxi-core/crates/hooks/src/executor.rs`. Immediately after the file-level doc comment and before the `use` block, insert:
+  Open `lingxi-code/crates/hooks/src/executor.rs`. Immediately after the file-level doc comment and before the `use` block, insert:
   ```rust
   /// Default HTTP hook timeout (10 minutes — matches
   /// `claude-code/src/utils/hooks/execHttpHook.ts:12` DEFAULT_HTTP_HOOK_TIMEOUT_MS).
@@ -842,7 +842,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 5: Commit.**
 
   ```bash
-  git add lingxi-core/crates/hooks/src/executor.rs lingxi-core/crates/hooks/src/lib.rs
+  git add lingxi-code/crates/hooks/src/executor.rs lingxi-code/crates/hooks/src/lib.rs
   git commit -m "feat(M5-06 T2): byte-lock hook timeout constants (600s http/command, 60s agent)"
   ```
 
@@ -851,13 +851,13 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 3: HttpExecutor failing test (RED)
 
 **Files:**
-- Create: `lingxi-core/crates/hooks/src/http_executor.rs` — empty stub.
-- Create: `lingxi-core/crates/hooks/tests/http_executor_test.rs`.
-- Modify: `lingxi-core/crates/hooks/src/lib.rs` (`pub mod http_executor;` — keep private from public API).
+- Create: `lingxi-code/crates/hooks/src/http_executor.rs` — empty stub.
+- Create: `lingxi-code/crates/hooks/tests/http_executor_test.rs`.
+- Modify: `lingxi-code/crates/hooks/src/lib.rs` (`pub mod http_executor;` — keep private from public API).
 
 - [ ] **Step 1: Create the empty stub.**
 
-  Write `lingxi-core/crates/hooks/src/http_executor.rs`:
+  Write `lingxi-code/crates/hooks/src/http_executor.rs`:
   ```rust
   //! HTTP hook executor — POSTs the event JSON, parses the body.
   //!
@@ -911,7 +911,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
 - [ ] **Step 3: Create the failing integration test.**
 
-  Write `lingxi-core/crates/hooks/tests/http_executor_test.rs`:
+  Write `lingxi-code/crates/hooks/tests/http_executor_test.rs`:
   ```rust
   //! Integration tests for the HTTP hook executor.
   //!
@@ -1039,9 +1039,9 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 5: Commit (RED).**
 
   ```bash
-  git add lingxi-core/crates/hooks/src/http_executor.rs \
-          lingxi-core/crates/hooks/src/lib.rs \
-          lingxi-core/crates/hooks/tests/http_executor_test.rs
+  git add lingxi-code/crates/hooks/src/http_executor.rs \
+          lingxi-code/crates/hooks/src/lib.rs \
+          lingxi-code/crates/hooks/tests/http_executor_test.rs
   git commit -m "test(M5-06 T3): RED — HttpExecutor integration test against mock 200 OK"
   ```
 
@@ -1050,13 +1050,13 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 4: HttpExecutor implementation (GREEN — happy path)
 
 **Files:**
-- Modify: `lingxi-core/crates/hooks/src/http_executor.rs` (fill `execute` body).
-- Modify: `lingxi-core/crates/hooks/src/registry.rs` (add five new `HookContext` fields — actually completed in T11, but T4 needs the minimum for compile: add a `pub transcript_path: PathBuf` field with `Default` impl returning empty path, plus `pub inherit: Option<lingxi_traits::SubagentInheritance>` — the rest stay as `None`-typed `Option<String>`/`Option<AgentId>`.)
-- Modify: `lingxi-core/crates/hooks/src/executor.rs` (replace the stubbed `HookExecutor::Http` arm with a delegating call to `HttpExecutor`).
+- Modify: `lingxi-code/crates/hooks/src/http_executor.rs` (fill `execute` body).
+- Modify: `lingxi-code/crates/hooks/src/registry.rs` (add five new `HookContext` fields — actually completed in T11, but T4 needs the minimum for compile: add a `pub transcript_path: PathBuf` field with `Default` impl returning empty path, plus `pub inherit: Option<lingxi_traits::SubagentInheritance>` — the rest stay as `None`-typed `Option<String>`/`Option<AgentId>`.)
+- Modify: `lingxi-code/crates/hooks/src/executor.rs` (replace the stubbed `HookExecutor::Http` arm with a delegating call to `HttpExecutor`).
 
 - [ ] **Step 1: Extend `HookContext` with the five new fields (forward-compatible).**
 
-  Open `lingxi-core/crates/hooks/src/registry.rs`. Find the current `HookContext` struct (M1.4 shape: probably `pub struct HookContext { pub session_id: SessionId, pub cwd: PathBuf }`). Add the five new fields and update the `Default` impl. The exact struct now reads:
+  Open `lingxi-code/crates/hooks/src/registry.rs`. Find the current `HookContext` struct (M1.4 shape: probably `pub struct HookContext { pub session_id: SessionId, pub cwd: PathBuf }`). Add the five new fields and update the `Default` impl. The exact struct now reads:
   ```rust
   use lingxi_protocol::{AgentId, SessionId};
   use lingxi_traits::SubagentInheritance;
@@ -1074,9 +1074,9 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
       pub inherit: Option<SubagentInheritance>,
   }
   ```
-  If `HookContext` previously did NOT derive `Default`, add it now and audit existing call sites (`grep -rn "HookContext {" lingxi-core/crates/`) — every literal struct construction must explicitly include the new fields OR use `..Default::default()`.
+  If `HookContext` previously did NOT derive `Default`, add it now and audit existing call sites (`grep -rn "HookContext {" lingxi-code/crates/`) — every literal struct construction must explicitly include the new fields OR use `..Default::default()`.
 
-  **`Cargo.toml` reconcile:** ensure `lingxi-hooks/Cargo.toml` has `lingxi-traits = { workspace = true }` (it should — confirm with `grep lingxi-traits lingxi-core/crates/hooks/Cargo.toml`).
+  **`Cargo.toml` reconcile:** ensure `lingxi-hooks/Cargo.toml` has `lingxi-traits = { workspace = true }` (it should — confirm with `grep lingxi-traits lingxi-code/crates/hooks/Cargo.toml`).
 
 - [ ] **Step 2: Fill the `HttpExecutor::execute` body.**
 
@@ -1227,7 +1227,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
 - [ ] **Step 3: Wire the `HookExecutor::Http` arm in `executor.rs`.**
 
-  In `lingxi-core/crates/hooks/src/executor.rs`, replace the `HookExecutor::Http { url, .. } => { … }` match arm with:
+  In `lingxi-code/crates/hooks/src/executor.rs`, replace the `HookExecutor::Http { url, .. } => { … }` match arm with:
   ```rust
   HookExecutor::Http { url, headers, .. } => {
       let envelope_json = match self.serialize_event(event, ctx) {
@@ -1338,10 +1338,10 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 7: Commit (GREEN).**
 
   ```bash
-  git add lingxi-core/crates/hooks/src/http_executor.rs \
-          lingxi-core/crates/hooks/src/executor.rs \
-          lingxi-core/crates/hooks/src/registry.rs \
-          lingxi-core/crates/hooks/src/ssrf_guard.rs
+  git add lingxi-code/crates/hooks/src/http_executor.rs \
+          lingxi-code/crates/hooks/src/executor.rs \
+          lingxi-code/crates/hooks/src/registry.rs \
+          lingxi-code/crates/hooks/src/ssrf_guard.rs
   git commit -m "feat(M5-06 T4): GREEN — HttpExecutor POSTs envelope + parses response + SSRF/timeout signals"
   ```
 
@@ -1350,12 +1350,12 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 5: SSRF block test + telemetry signal
 
 **Files:**
-- Modify: `lingxi-core/crates/hooks/src/ssrf_guard.rs` (add 169.254.0.0–169.254.255.255 range to `with_defaults`).
-- Modify: `lingxi-core/crates/hooks/tests/http_executor_test.rs` (add a `ssrf_blocks_link_local` test).
+- Modify: `lingxi-code/crates/hooks/src/ssrf_guard.rs` (add 169.254.0.0–169.254.255.255 range to `with_defaults`).
+- Modify: `lingxi-code/crates/hooks/tests/http_executor_test.rs` (add a `ssrf_blocks_link_local` test).
 
 - [ ] **Step 1: Add the link-local range.**
 
-  Open `lingxi-core/crates/hooks/src/ssrf_guard.rs`. Find the `blocked` vec inside `with_defaults`. Append:
+  Open `lingxi-code/crates/hooks/src/ssrf_guard.rs`. Find the `blocked` vec inside `with_defaults`. Append:
   ```rust
   IpRange {
       start: "169.254.0.0".parse().unwrap(),
@@ -1367,7 +1367,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
 - [ ] **Step 2: Add the SSRF test.**
 
-  Append to `lingxi-core/crates/hooks/tests/http_executor_test.rs`:
+  Append to `lingxi-code/crates/hooks/tests/http_executor_test.rs`:
   ```rust
   #[tokio::test]
   async fn ssrf_blocks_link_local_metadata_endpoint() {
@@ -1417,8 +1417,8 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 5: Commit.**
 
   ```bash
-  git add lingxi-core/crates/hooks/src/ssrf_guard.rs \
-          lingxi-core/crates/hooks/tests/http_executor_test.rs
+  git add lingxi-code/crates/hooks/src/ssrf_guard.rs \
+          lingxi-code/crates/hooks/tests/http_executor_test.rs
   git commit -m "feat(M5-06 T5): SSRF guard blocks 169.254/16 (cloud metadata) + integration test"
   ```
 
@@ -1427,11 +1427,11 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 6: HTTP timeout test + telemetry signal
 
 **Files:**
-- Modify: `lingxi-core/crates/hooks/tests/http_executor_test.rs` (add a `never_resolving_endpoint_times_out` test).
+- Modify: `lingxi-code/crates/hooks/tests/http_executor_test.rs` (add a `never_resolving_endpoint_times_out` test).
 
 - [ ] **Step 1: Add the timeout test.**
 
-  Append to `lingxi-core/crates/hooks/tests/http_executor_test.rs`:
+  Append to `lingxi-code/crates/hooks/tests/http_executor_test.rs`:
   ```rust
   /// HTTP transport that never resolves — used to trigger the executor timeout.
   struct PendingForeverHttp;
@@ -1487,7 +1487,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 3: Commit.**
 
   ```bash
-  git add lingxi-core/crates/hooks/tests/http_executor_test.rs
+  git add lingxi-code/crates/hooks/tests/http_executor_test.rs
   git commit -m "feat(M5-06 T6): HTTP timeout test with tokio::test(start_paused=true) — proves Timeout outcome path"
   ```
 
@@ -1496,13 +1496,13 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 7: CommandExecutor failing test (RED)
 
 **Files:**
-- Create: `lingxi-core/crates/hooks/src/command_executor.rs` — empty stub.
-- Create: `lingxi-core/crates/hooks/tests/command_executor_test.rs`.
-- Modify: `lingxi-core/crates/hooks/src/lib.rs` (`mod command_executor;`).
+- Create: `lingxi-code/crates/hooks/src/command_executor.rs` — empty stub.
+- Create: `lingxi-code/crates/hooks/tests/command_executor_test.rs`.
+- Modify: `lingxi-code/crates/hooks/src/lib.rs` (`mod command_executor;`).
 
 - [ ] **Step 1: Create the empty stub.**
 
-  Write `lingxi-core/crates/hooks/src/command_executor.rs`:
+  Write `lingxi-code/crates/hooks/src/command_executor.rs`:
   ```rust
   //! Command (shell-exec) hook executor.
   //!
@@ -1565,7 +1565,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
 - [ ] **Step 3: Create the failing test.**
 
-  Write `lingxi-core/crates/hooks/tests/command_executor_test.rs`:
+  Write `lingxi-code/crates/hooks/tests/command_executor_test.rs`:
   ```rust
   //! Integration tests for the Command hook executor.
 
@@ -1688,9 +1688,9 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 5: Commit (RED).**
 
   ```bash
-  git add lingxi-core/crates/hooks/src/command_executor.rs \
-          lingxi-core/crates/hooks/src/lib.rs \
-          lingxi-core/crates/hooks/tests/command_executor_test.rs
+  git add lingxi-code/crates/hooks/src/command_executor.rs \
+          lingxi-code/crates/hooks/src/lib.rs \
+          lingxi-code/crates/hooks/tests/command_executor_test.rs
   git commit -m "test(M5-06 T7): RED — CommandExecutor pipes payload to stdin + parses deny response"
   ```
 
@@ -1699,8 +1699,8 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 8: CommandExecutor implementation (GREEN)
 
 **Files:**
-- Modify: `lingxi-core/crates/hooks/src/command_executor.rs` (fill `execute` body).
-- Modify: `lingxi-core/crates/hooks/src/executor.rs` (replace the stubbed `Command` arm).
+- Modify: `lingxi-code/crates/hooks/src/command_executor.rs` (fill `execute` body).
+- Modify: `lingxi-code/crates/hooks/src/executor.rs` (replace the stubbed `Command` arm).
 
 - [ ] **Step 1: Fill the impl.**
 
@@ -1913,8 +1913,8 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 5: Commit (GREEN).**
 
   ```bash
-  git add lingxi-core/crates/hooks/src/command_executor.rs \
-          lingxi-core/crates/hooks/src/executor.rs
+  git add lingxi-code/crates/hooks/src/command_executor.rs \
+          lingxi-code/crates/hooks/src/executor.rs
   git commit -m "feat(M5-06 T8): GREEN — CommandExecutor spawns via RuntimeSpawner, pipes envelope JSON, parses stdout"
   ```
 
@@ -1923,11 +1923,11 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 9: Command timeout test
 
 **Files:**
-- Modify: `lingxi-core/crates/hooks/tests/command_executor_test.rs` (add a timeout test using a `ScriptedRuntime` variant that reports `timed_out: true`).
+- Modify: `lingxi-code/crates/hooks/tests/command_executor_test.rs` (add a timeout test using a `ScriptedRuntime` variant that reports `timed_out: true`).
 
 - [ ] **Step 1: Add a timeout-marking runtime + test.**
 
-  Append to `lingxi-core/crates/hooks/tests/command_executor_test.rs`:
+  Append to `lingxi-code/crates/hooks/tests/command_executor_test.rs`:
   ```rust
   struct TimingOutRuntime;
   #[async_trait::async_trait]
@@ -1982,7 +1982,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 3: Commit.**
 
   ```bash
-  git add lingxi-core/crates/hooks/tests/command_executor_test.rs
+  git add lingxi-code/crates/hooks/tests/command_executor_test.rs
   git commit -m "feat(M5-06 T9): Command arm timeout test — RuntimeSpawner's timed_out flag → HookOutcome::Timeout"
   ```
 
@@ -1991,11 +1991,11 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 10: Command non-zero exit captures stderr
 
 **Files:**
-- Modify: `lingxi-core/crates/hooks/tests/command_executor_test.rs` (add a non-zero-exit test).
+- Modify: `lingxi-code/crates/hooks/tests/command_executor_test.rs` (add a non-zero-exit test).
 
 - [ ] **Step 1: Add the test.**
 
-  Append to `lingxi-core/crates/hooks/tests/command_executor_test.rs`:
+  Append to `lingxi-code/crates/hooks/tests/command_executor_test.rs`:
   ```rust
   #[tokio::test]
   async fn command_arm_returns_error_outcome_with_stderr_when_exit_code_nonzero() {
@@ -2072,7 +2072,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 3: Commit.**
 
   ```bash
-  git add lingxi-core/crates/hooks/tests/command_executor_test.rs
+  git add lingxi-code/crates/hooks/tests/command_executor_test.rs
   git commit -m "feat(M5-06 T10): Command arm non-zero exit captures stderr + parses advisory stdout"
   ```
 
@@ -2081,14 +2081,14 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 11: AgentExecutor failing test (RED)
 
 **Files:**
-- Create: `lingxi-core/crates/hooks/src/agent_executor.rs` — stub.
-- Create: `lingxi-core/crates/hooks/tests/agent_executor_test.rs`.
-- Modify: `lingxi-core/crates/hooks/src/lib.rs` (`mod agent_executor;`).
-- Modify: `lingxi-core/crates/hooks/src/executor.rs` (add `with_agent_spawner` builder + `agent_spawner` field — minimal, enough to compile).
+- Create: `lingxi-code/crates/hooks/src/agent_executor.rs` — stub.
+- Create: `lingxi-code/crates/hooks/tests/agent_executor_test.rs`.
+- Modify: `lingxi-code/crates/hooks/src/lib.rs` (`mod agent_executor;`).
+- Modify: `lingxi-code/crates/hooks/src/executor.rs` (add `with_agent_spawner` builder + `agent_spawner` field — minimal, enough to compile).
 
 - [ ] **Step 1: Create the stub.**
 
-  Write `lingxi-core/crates/hooks/src/agent_executor.rs`:
+  Write `lingxi-code/crates/hooks/src/agent_executor.rs`:
   ```rust
   //! Agent (subagent-spawn) hook executor.
 
@@ -2163,7 +2163,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
 - [ ] **Step 4: Create the failing test.**
 
-  Write `lingxi-core/crates/hooks/tests/agent_executor_test.rs`:
+  Write `lingxi-code/crates/hooks/tests/agent_executor_test.rs`:
   ```rust
   //! Integration tests for the Agent hook executor.
 
@@ -2307,10 +2307,10 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 6: Commit (RED).**
 
   ```bash
-  git add lingxi-core/crates/hooks/src/agent_executor.rs \
-          lingxi-core/crates/hooks/src/executor.rs \
-          lingxi-core/crates/hooks/src/lib.rs \
-          lingxi-core/crates/hooks/tests/agent_executor_test.rs
+  git add lingxi-code/crates/hooks/src/agent_executor.rs \
+          lingxi-code/crates/hooks/src/executor.rs \
+          lingxi-code/crates/hooks/src/lib.rs \
+          lingxi-code/crates/hooks/tests/agent_executor_test.rs
   git commit -m "test(M5-06 T11): RED — AgentExecutor spawns subagent + parses response (with_agent_spawner builder)"
   ```
 
@@ -2319,8 +2319,8 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 12: AgentExecutor implementation (GREEN)
 
 **Files:**
-- Modify: `lingxi-core/crates/hooks/src/agent_executor.rs` (fill `execute`).
-- Modify: `lingxi-core/crates/hooks/src/executor.rs` (replace stubbed `Agent` arm).
+- Modify: `lingxi-code/crates/hooks/src/agent_executor.rs` (fill `execute`).
+- Modify: `lingxi-code/crates/hooks/src/executor.rs` (replace stubbed `Agent` arm).
 
 - [ ] **Step 1: Fill the impl.**
 
@@ -2597,9 +2597,9 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 6: Commit (GREEN).**
 
   ```bash
-  git add lingxi-core/crates/hooks/src/agent_executor.rs \
-          lingxi-core/crates/hooks/src/executor.rs \
-          lingxi-core/crates/hooks/tests/agent_executor_test.rs
+  git add lingxi-code/crates/hooks/src/agent_executor.rs \
+          lingxi-code/crates/hooks/src/executor.rs \
+          lingxi-code/crates/hooks/tests/agent_executor_test.rs
   git commit -m "feat(M5-06 T12): GREEN — AgentExecutor spawns via SubagentSpawner + maps Completed/Failed/Killed"
   ```
 
@@ -2608,11 +2608,11 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 13: Full dispatch integration test + M4-05 regression gate
 
 **Files:**
-- Create: `lingxi-core/crates/hooks/tests/full_dispatch_test.rs`.
+- Create: `lingxi-code/crates/hooks/tests/full_dispatch_test.rs`.
 
 - [ ] **Step 1: Exercise all 4 arms in one registry.**
 
-  Write `lingxi-core/crates/hooks/tests/full_dispatch_test.rs`:
+  Write `lingxi-code/crates/hooks/tests/full_dispatch_test.rs`:
   ```rust
   //! End-to-end: a single registry holds one hook of each kind; the executor
   //! routes each event to the correct arm.
@@ -2833,8 +2833,8 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 5: Commit.**
 
   ```bash
-  git add lingxi-core/crates/hooks/src/executor.rs \
-          lingxi-core/crates/hooks/tests/full_dispatch_test.rs
+  git add lingxi-code/crates/hooks/src/executor.rs \
+          lingxi-code/crates/hooks/tests/full_dispatch_test.rs
   git commit -m "feat(M5-06 T13): full 4-arm dispatch test + M4-05 Arc::ptr_eq regression gate"
   ```
 
@@ -2843,12 +2843,12 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 14: Orchestrator PreToolUse wiring
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs` (add `dispatch_tool_with_hooks` + reroute `run_turn`).
-- Create: `lingxi-core/crates/orchestrator/tests/orchestrator_pre_post_hook_test.rs` (scripted hook denies Bash).
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs` (add `dispatch_tool_with_hooks` + reroute `run_turn`).
+- Create: `lingxi-code/crates/orchestrator/tests/orchestrator_pre_post_hook_test.rs` (scripted hook denies Bash).
 
 - [ ] **Step 1: Add `dispatch_tool_with_hooks` method body.**
 
-  Open `lingxi-core/crates/orchestrator/src/conversation.rs`. Inside `impl ConversationOrchestrator`, append the method:
+  Open `lingxi-code/crates/orchestrator/src/conversation.rs`. Inside `impl ConversationOrchestrator`, append the method:
   ```rust
   /// Tool dispatch with `PreToolUse` + `PostToolUse` hooks (M5-06).
   ///
@@ -2988,7 +2988,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
 - [ ] **Step 4: Add the deny-hook integration test.**
 
-  Write `lingxi-core/crates/orchestrator/tests/orchestrator_pre_post_hook_test.rs`:
+  Write `lingxi-code/crates/orchestrator/tests/orchestrator_pre_post_hook_test.rs`:
   ```rust
   //! Orchestrator end-to-end with a scripted PreToolUse hook that denies Bash.
 
@@ -3063,7 +3063,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
   }
   ```
 
-  **NOTE:** `build_test_orchestrator`, `scripted_assistant_turn_calling_bash`, `with_hook_registry`, `with_builtin_hook`, `with_scripted_assistant`, and `.build()` are existing test-support helpers introduced in M5-02 + M5-04. If `with_hook_registry`/`with_builtin_hook` don't yet exist, add them as straight-through setters on the orchestrator builder (Task 14 step 4a inside the `lingxi-orchestrator/src/test_support.rs` file — 6 lines, no logic, just `self.hook_registry = Some(r); self`). If you cannot find these helpers, `grep -n "build_test_orchestrator\|TestOrchestratorBuilder" lingxi-core/crates/orchestrator/src/test_support.rs` and adapt — the M5-04 plan installed the streaming variant of these helpers.
+  **NOTE:** `build_test_orchestrator`, `scripted_assistant_turn_calling_bash`, `with_hook_registry`, `with_builtin_hook`, `with_scripted_assistant`, and `.build()` are existing test-support helpers introduced in M5-02 + M5-04. If `with_hook_registry`/`with_builtin_hook` don't yet exist, add them as straight-through setters on the orchestrator builder (Task 14 step 4a inside the `lingxi-orchestrator/src/test_support.rs` file — 6 lines, no logic, just `self.hook_registry = Some(r); self`). If you cannot find these helpers, `grep -n "build_test_orchestrator\|TestOrchestratorBuilder" lingxi-code/crates/orchestrator/src/test_support.rs` and adapt — the M5-04 plan installed the streaming variant of these helpers.
 
 - [ ] **Step 5: Add three telemetry emit helpers (stubs for now — full bodies land in T16).**
 
@@ -3104,8 +3104,8 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 8: Commit.**
 
   ```bash
-  git add lingxi-core/crates/orchestrator/src/conversation.rs \
-          lingxi-core/crates/orchestrator/tests/orchestrator_pre_post_hook_test.rs
+  git add lingxi-code/crates/orchestrator/src/conversation.rs \
+          lingxi-code/crates/orchestrator/tests/orchestrator_pre_post_hook_test.rs
   git commit -m "feat(M5-06 T14): wire PreToolUse hook into orchestrator dispatch — deny path returns ToolError::PermissionDenied"
   ```
 
@@ -3114,7 +3114,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 15: Orchestrator PostToolUse wiring + response mutation test
 
 **Files:**
-- Modify: `lingxi-core/crates/orchestrator/tests/orchestrator_pre_post_hook_test.rs` (add a Post test).
+- Modify: `lingxi-code/crates/orchestrator/tests/orchestrator_pre_post_hook_test.rs` (add a Post test).
 
 - [ ] **Step 1: Add an append-context PostToolUse test.**
 
@@ -3188,7 +3188,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 3: Commit.**
 
   ```bash
-  git add lingxi-core/crates/orchestrator/tests/orchestrator_pre_post_hook_test.rs
+  git add lingxi-code/crates/orchestrator/tests/orchestrator_pre_post_hook_test.rs
   git commit -m "feat(M5-06 T15): wire PostToolUse hook into orchestrator — system_message appended to tool result"
   ```
 
@@ -3197,17 +3197,17 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 ### Task 16: Telemetry — 8 new event constants + parity bump (245 → 253)
 
 **Files:**
-- Modify: `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs` (append 8 constants + payloads + extend `NAMES` to 15 entries).
-- Modify: `lingxi-core/crates/telemetry/src/tengu/mod.rs:29` (bump orchestrator count `7` → `15`).
-- Modify: `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs` (bump assertion 245 → 253).
-- Modify: `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json` (insert 8 names after `tengu_orchestrator_permission_answered`).
-- Modify: `lingxi-core/crates/orchestrator/src/conversation.rs` (fill the 4 emit-helper bodies + add 2 emit helpers `emit_hook_http_skipped_ssrf` / `emit_hook_timeout`).
-- Modify: `lingxi-core/crates/hooks/src/executor.rs` (replace `tracing::warn!` calls in `emit_ssrf_skip` / `emit_timeout` with real telemetry emission via the new `telemetry` field).
-- Create: `lingxi-core/crates/orchestrator/tests/orchestrator_hook_telemetry_test.rs`.
+- Modify: `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs` (append 8 constants + payloads + extend `NAMES` to 15 entries).
+- Modify: `lingxi-code/crates/telemetry/src/tengu/mod.rs:29` (bump orchestrator count `7` → `15`).
+- Modify: `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs` (bump assertion 245 → 253).
+- Modify: `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json` (insert 8 names after `tengu_orchestrator_permission_answered`).
+- Modify: `lingxi-code/crates/orchestrator/src/conversation.rs` (fill the 4 emit-helper bodies + add 2 emit helpers `emit_hook_http_skipped_ssrf` / `emit_hook_timeout`).
+- Modify: `lingxi-code/crates/hooks/src/executor.rs` (replace `tracing::warn!` calls in `emit_ssrf_skip` / `emit_timeout` with real telemetry emission via the new `telemetry` field).
+- Create: `lingxi-code/crates/orchestrator/tests/orchestrator_hook_telemetry_test.rs`.
 
 - [ ] **Step 1: Append 8 constants + payloads to `tengu/orchestrator.rs`.**
 
-  Open `lingxi-core/crates/telemetry/src/tengu/orchestrator.rs`. After the existing 7 constants (`CONVERSATION_STARTED/COMPLETED/FAILED`, `TURN_STREAMING_STARTED/COMPLETED`, `PERMISSION_PROMPTED/ANSWERED`), append:
+  Open `lingxi-code/crates/telemetry/src/tengu/orchestrator.rs`. After the existing 7 constants (`CONVERSATION_STARTED/COMPLETED/FAILED`, `TURN_STREAMING_STARTED/COMPLETED`, `PERMISSION_PROMPTED/ANSWERED`), append:
   ```rust
   /// `tengu_orchestrator_hook_pre_started` — fired before PreToolUse hook execution.
   pub const HOOK_PRE_STARTED: &str = "tengu_orchestrator_hook_pre_started";
@@ -3272,7 +3272,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
 - [ ] **Step 2: Bump the orchestrator count in `tengu/mod.rs`.**
 
-  Open `lingxi-core/crates/telemetry/src/tengu/mod.rs:29`. The current `TOTAL` formula reads:
+  Open `lingxi-code/crates/telemetry/src/tengu/mod.rs:29`. The current `TOTAL` formula reads:
   ```rust
   pub const TOTAL: usize = 25 + 30 + 15 + 134 + 10 + 8 + 12 + 3 + 7 + 1;
   ```
@@ -3284,11 +3284,11 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
 - [ ] **Step 3: Bump the completeness test.**
 
-  Open `lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs`. Find the `registry_is_exactly_245_entries` test added by M5-05. Rename to `registry_is_exactly_253_entries`, update the assertion `assert_eq!(lingxi_telemetry::tengu::ALL_EVENT_NAMES.len(), 253);`, update the comment to mention M5-06.
+  Open `lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs`. Find the `registry_is_exactly_245_entries` test added by M5-05. Rename to `registry_is_exactly_253_entries`, update the assertion `assert_eq!(lingxi_telemetry::tengu::ALL_EVENT_NAMES.len(), 253);`, update the comment to mention M5-06.
 
 - [ ] **Step 4: Insert 8 names into the parity fixture.**
 
-  Open `lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json`. Locate `"tengu_orchestrator_permission_answered"` (last entry from the M5-05 batch). Insert immediately after it (and before the next category):
+  Open `lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json`. Locate `"tengu_orchestrator_permission_answered"` (last entry from the M5-05 batch). Insert immediately after it (and before the next category):
   ```json
   "tengu_orchestrator_hook_pre_started",
   "tengu_orchestrator_hook_pre_completed",
@@ -3372,7 +3372,7 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
 - [ ] **Step 6: Write the telemetry-capture integration test.**
 
-  Write `lingxi-core/crates/orchestrator/tests/orchestrator_hook_telemetry_test.rs`:
+  Write `lingxi-code/crates/orchestrator/tests/orchestrator_hook_telemetry_test.rs`:
   ```rust
   //! Capture the 8 new hook telemetry events on a deny-then-allow turn.
 
@@ -3422,13 +3422,13 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 - [ ] **Step 9: Commit.**
 
   ```bash
-  git add lingxi-core/crates/telemetry/src/tengu/orchestrator.rs \
-          lingxi-core/crates/telemetry/src/tengu/mod.rs \
-          lingxi-core/crates/telemetry/tests/event_name_completeness_test.rs \
-          lingxi-core/crates/test-harness/src/parity/fixtures/tengu_events.json \
-          lingxi-core/crates/orchestrator/src/conversation.rs \
-          lingxi-core/crates/hooks/src/executor.rs \
-          lingxi-core/crates/orchestrator/tests/orchestrator_hook_telemetry_test.rs
+  git add lingxi-code/crates/telemetry/src/tengu/orchestrator.rs \
+          lingxi-code/crates/telemetry/src/tengu/mod.rs \
+          lingxi-code/crates/telemetry/tests/event_name_completeness_test.rs \
+          lingxi-code/crates/test-harness/src/parity/fixtures/tengu_events.json \
+          lingxi-code/crates/orchestrator/src/conversation.rs \
+          lingxi-code/crates/hooks/src/executor.rs \
+          lingxi-code/crates/orchestrator/tests/orchestrator_hook_telemetry_test.rs
   git commit -m "feat(M5-06 T16): 8 hook telemetry events + parity fixture bump (245 → 253)"
   ```
 
@@ -3483,8 +3483,8 @@ All emitted on the `lingxi-telemetry::tengu::orchestrator` submodule (the same s
 
   ```bash
   grep -rn "unimplemented!\|todo!\|panic!.*stub\|TODO\|FIXME" \
-      lingxi-core/crates/hooks/src/ \
-      lingxi-core/crates/orchestrator/src/conversation.rs \
+      lingxi-code/crates/hooks/src/ \
+      lingxi-code/crates/orchestrator/src/conversation.rs \
       | grep -v -E '(^|/)(tests?)\.rs:' | grep -v "Wired in T" | grep -v "// Filled in"
   ```
 

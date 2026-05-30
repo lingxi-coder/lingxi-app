@@ -1,4 +1,4 @@
-// lingxi-core/crates/core/src/settings/schema.rs
+// lingxi-code/crates/core/src/settings/schema.rs
 //! `SettingsJson` — strongly-typed mirror of claude-code's `settings.json`.
 //!
 //! Field naming policy: keep camelCase on the wire (claude-code emits it),

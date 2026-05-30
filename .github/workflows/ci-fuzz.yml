@@ -27,7 +27,7 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked --version '^0.13'
       - name: Run fuzz harness ${{ matrix.harness }} (5-minute budget)
-        working-directory: lingxi-core
+        working-directory: lingxi-code
         run: |
           # -max_total_time=300 caps each harness at 5 minutes.
           # If a harness directory is missing, fail loudly (the M3 sub-plans

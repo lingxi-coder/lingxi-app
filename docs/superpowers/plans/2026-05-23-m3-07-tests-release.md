@@ -34,16 +34,16 @@ Creates (new files):
 - `.github/workflows/ci-fuzz.yml` — dedicated fuzz workflow. Triggers: `workflow_dispatch` + `schedule: cron('0 7 * * *')` (daily 07:00 UTC). 4 harnesses, 5-minute CI budget each (controlled by `-runs=` count). All harness steps run with `continue-on-error: true` for v0.4.0 (per the brief: "mandatory at v0.5.0+"). Harnesses: `settings_json_parse` (M3-01), `anthropic_beta_assemble` (M3-03), `memdir_canonicalizer` (M3-02), `tengu_payload_deserialize` (M3-06).
 - `.github/workflows/ci-bench.yml` — dedicated criterion workflow. Triggers: `workflow_dispatch` + `schedule: cron('0 8 * * 1')` (weekly Monday 08:00 UTC). 6 benches: `memory_ranking` (M3-02 N×K), `settings_4layer_merge` (M3-01), `messages_create_middleware` (M3-03), `tengu_event_encode` (M3-06), `oauth_refresh_under_contention` (M3-04), `engine_init_startup` (full Engine::init() startup). Regression baseline check `continue-on-error: true` initially (per the brief: "regression check against baseline file (continue-on-error: true initially)").
 - `.github/workflows/ci-chaos.yml` — dedicated chaos workflow. Triggers: `workflow_dispatch` + `schedule: cron('0 9 * * 1')` (weekly Monday 09:00 UTC). 6 scenarios: `securestorage_refuses` (M2-06 reuse), `fs_watch_drops_events` (M2-05 reuse), `http_5xx_burst_across_retry_window` (M3-03), `oauth_token_expires_mid_request` (M3-04), `telemetry_sink_rejects` (M3-06), `partial_write_settings_json` (M3-01). Each scenario is a `#[ignore]`-gated `cargo test` invocation under a `--ignored chaos_` pattern; `continue-on-error: false` (chaos passes are mandatory).
-- `lingxi-core/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json` — high-level smoke fixture. Asserts ALL of M3's locked literals appear in a representative startup-and-API-call run: settings 4-layer order, memory filenames, 16 anthropic-beta constants list, OAuth token endpoint URL, `tengu_cost_recorded` event name, three of M3-06's 143 event names. Per v3 §32.6 parity protocol — carries `_source` + `_note` citations.
-- `lingxi-core/crates/test-harness/tests/parity_full_v0_4_0_smoke.rs` — parity driver: loads `full_v0_4_0_smoke.json` and asserts every locked literal is reachable through the public API of each M3 crate (`lingxi-core::settings::ENV_PREFIX_PRIORITY`, `lingxi-memory::claude_md::CLAUDE_MD_FILENAME`, `lingxi-api-client::anthropic::betas::*`, `lingxi-anthropic-oauth::TOKEN_ENDPOINT_URL`, `lingxi-telemetry::tengu::cost::TENGU_COST_RECORDED`, etc.).
+- `lingxi-code/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json` — high-level smoke fixture. Asserts ALL of M3's locked literals appear in a representative startup-and-API-call run: settings 4-layer order, memory filenames, 16 anthropic-beta constants list, OAuth token endpoint URL, `tengu_cost_recorded` event name, three of M3-06's 143 event names. Per v3 §32.6 parity protocol — carries `_source` + `_note` citations.
+- `lingxi-code/crates/test-harness/tests/parity_full_v0_4_0_smoke.rs` — parity driver: loads `full_v0_4_0_smoke.json` and asserts every locked literal is reachable through the public API of each M3 crate (`lingxi-core::settings::ENV_PREFIX_PRIORITY`, `lingxi-memory::claude_md::CLAUDE_MD_FILENAME`, `lingxi-api-client::anthropic::betas::*`, `lingxi-anthropic-oauth::TOKEN_ENDPOINT_URL`, `lingxi-telemetry::tengu::cost::TENGU_COST_RECORDED`, etc.).
 
 Modifies (in-place):
 - `.github/workflows/ci.yml` — add three new gating jobs: (a) `cross-compile-musl` adding `x86_64-unknown-linux-musl` cargo-check (per v3 §32.4 Layer 5 / spec line 608); (b) `parity-fixtures` running `cargo test -p lingxi-test-harness --test 'parity_*'` for the 9 M3 fixtures (`parity_settings_merge` + `parity_memory_loading` + `parity_memory_relevance` + `parity_messages_create` + `parity_betas` + `parity_oauth_pkce_refresh` + `parity_cost_events` + `parity_tengu_events` + `parity_full_v0_4_0_smoke`) plus the 7 M2 fixtures inherited from v0.3.0; (c) `supply-chain` running `cargo deny check` + `cargo audit` + `cargo vet --locked` (per v3 §32.4 Layers 1-3).
 - `CHANGELOG.md` — prepend `## [0.4.0] — M3 Engine Completion` section above the existing `## [0.3.0]` entry. Lists every M3-01..M3-06 deliverable, all locked wire identifiers, parity-fixture list, migration notes, and the new CI gates.
-- `docs/ARCHITECTURE.md` — refresh crate map (add `settings/` module under lingxi-core/`memory`/`api-client`/`anthropic-oauth`/`cost`/`telemetry`; register `telemetry-macros` as a new workspace member); add "claude-code parity guarantees (v0.4.0 additions)" subsection listing every locked literal from spec §7 Wire identifiers (lines 620-810).
+- `docs/ARCHITECTURE.md` — refresh crate map (add `settings/` module under lingxi-code/`memory`/`api-client`/`anthropic-oauth`/`cost`/`telemetry`; register `telemetry-macros` as a new workspace member); add "claude-code parity guarantees (v0.4.0 additions)" subsection listing every locked literal from spec §7 Wire identifiers (lines 620-810).
 - `docs/PLATFORMS.md` — Tier-1 support gains the new engine subsystems (Settings 4-layer, Memory with hierarchy walk, real anthropic API client, OAuth refresh + scope upgrade, cost events, telemetry schema). No new platform; rather an "M3 subsystems available on Tier-1" subsection.
 - `README.md` — bump version reference to v0.4.0 (the `Platform-agnostic Rust engine for an AI coding assistant with 1:1 behavioral parity to claude-code...` line); update the architecture-pointer paragraph to reference the M3 spec and the v0.4.0 parity section; mention "8-10-week engine completion delivery" per spec §9 line 953.
-- `lingxi-core/Cargo.toml` — verify that `default-members` keeps any fuzz fixture / mobile-platform paths out of release builds. No structural change is expected (the existing default-members list already excludes test fixtures); the verification step is to grep for any `fuzz_targets` or similar paths and confirm they're absent from `default-members`. If M3-06's `crates/telemetry-macros` was added to `members` but not `default-members`, fix that here.
+- `lingxi-code/Cargo.toml` — verify that `default-members` keeps any fuzz fixture / mobile-platform paths out of release builds. No structural change is expected (the existing default-members list already excludes test fixtures); the verification step is to grep for any `fuzz_targets` or similar paths and confirm they're absent from `default-members`. If M3-06's `crates/telemetry-macros` was added to `members` but not `default-members`, fix that here.
 
 Total: 6 creates, 6 modifications. (18 TDD-style tasks across 6 phases. Multi-commit; verification gate is Phase F.)
 
@@ -58,7 +58,7 @@ These are the M3 final-release acceptance criteria. Drift breaks downstream pari
 - **CI workflow file names exactly**: `.github/workflows/ci-loom.yml`, `.github/workflows/ci-fuzz.yml`, `.github/workflows/ci-bench.yml`, `.github/workflows/ci-chaos.yml`. NOT `loom.yml` / `fuzz.yml`. The `ci-*` prefix matches the existing `ci.yml` naming so workflow dashboards group them together.
 - **Loom is NOT on per-PR fast path**: `ci-loom.yml` triggers are `workflow_dispatch` + weekly `schedule`. No `pull_request:` trigger. Per spec line 616: "Loom / fuzz / criterion run on dedicated CI jobs, not the per-PR fast path."
 - **Fuzz harnesses use `continue-on-error: true` in v0.4.0**: matches the brief literally — "mandatory at v0.5.0+". Drift breaks the M3 → M4 release-gate hand-off.
-- **Criterion regression baseline check uses `continue-on-error: true` initially**: matches the brief. Baseline file lives at `lingxi-core/benches/baselines/v0_4_0.json` (created in Task 11 alongside the workflow); regressions > 10% will surface as warnings, not hard failures.
+- **Criterion regression baseline check uses `continue-on-error: true` initially**: matches the brief. Baseline file lives at `lingxi-code/benches/baselines/v0_4_0.json` (created in Task 11 alongside the workflow); regressions > 10% will surface as warnings, not hard failures.
 - **Chaos uses `continue-on-error: false`**: chaos passes ARE mandatory. The 6 scenarios are documented + reproducible failures, not flaky shake-downs.
 - **`x86_64-unknown-linux-musl` is a hard gate**: per v3 §32.4 Layer 5 and spec line 608. The musl job runs `cargo check`, NOT `cargo build/test` (matches the spec — "musl gate from v3 §32.4 Layer 5"). A new gating job, not `continue-on-error`.
 - **Supply-chain layer is a hard gate**: `cargo deny check` (v3 §32.4 Layer 1), `cargo audit` (v3 §32.4 Layer 2), `cargo vet --locked` (v3 §32.4 Layer 3) ALL run on every PR. Per brief: "add cargo-deny/cargo-audit/cargo-vet supply-chain layer."
@@ -119,7 +119,7 @@ These are the M3 final-release acceptance criteria. Drift breaks downstream pari
 ### Task 1: Confirm M3-01..M3-06 hand-off is clean
 
 **Files:**
-- Read: `lingxi-core/Cargo.toml` (verify `crates/telemetry-macros` registered in both `members` and `default-members`)
+- Read: `lingxi-code/Cargo.toml` (verify `crates/telemetry-macros` registered in both `members` and `default-members`)
 - Read (verification only): all parity fixture files added by M3-01..M3-06
 
 This task does NOT modify files unless a defect is found. It exists so the agent has a green starting point before Phase B.
@@ -143,16 +143,16 @@ cargo fmt --all --check
 
 Expected: both exit `0`. If either fails, STOP — clippy / fmt failures must be fixed in their owning sub-plan, NOT in M3-07.
 
-- [ ] **Step 3: Verify `lingxi-core/Cargo.toml` registers `telemetry-macros` in both `members` and `default-members`**
+- [ ] **Step 3: Verify `lingxi-code/Cargo.toml` registers `telemetry-macros` in both `members` and `default-members`**
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-grep -c '"crates/telemetry-macros"' lingxi-core/Cargo.toml
+grep -c '"crates/telemetry-macros"' lingxi-code/Cargo.toml
 ```
 
 Expected output: `2` (one occurrence in `members`, one in `default-members`).
 
-If the count is `0` or `1`, this is a defect carried in from M3-06. Fix it by editing `lingxi-core/Cargo.toml`:
+If the count is `0` or `1`, this is a defect carried in from M3-06. Fix it by editing `lingxi-code/Cargo.toml`:
 
 ```toml
 # In the [workspace] members array, after "crates/uniffi-bridge":
@@ -166,7 +166,7 @@ If the count is `0` or `1`, this is a defect carried in from M3-06. Fix it by ed
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-ls lingxi-core/crates/test-harness/src/parity/fixtures/ | sort
+ls lingxi-code/crates/test-harness/src/parity/fixtures/ | sort
 ```
 
 Expected output must include (alongside the 7 M2 fixtures):
@@ -187,19 +187,19 @@ If any of these 8 is missing, STOP — its owning sub-plan must land first. Phas
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-ls lingxi-core/crates/test-harness/tests/parity_*.rs | sort
+ls lingxi-code/crates/test-harness/tests/parity_*.rs | sort
 ```
 
 Expected output must include:
 ```
-lingxi-core/crates/test-harness/tests/parity_betas.rs
-lingxi-core/crates/test-harness/tests/parity_cost_events.rs
-lingxi-core/crates/test-harness/tests/parity_memory_loading.rs
-lingxi-core/crates/test-harness/tests/parity_memory_relevance.rs
-lingxi-core/crates/test-harness/tests/parity_messages_create.rs
-lingxi-core/crates/test-harness/tests/parity_oauth_pkce_refresh.rs
-lingxi-core/crates/test-harness/tests/parity_settings_merge.rs
-lingxi-core/crates/test-harness/tests/parity_tengu_events.rs
+lingxi-code/crates/test-harness/tests/parity_betas.rs
+lingxi-code/crates/test-harness/tests/parity_cost_events.rs
+lingxi-code/crates/test-harness/tests/parity_memory_loading.rs
+lingxi-code/crates/test-harness/tests/parity_memory_relevance.rs
+lingxi-code/crates/test-harness/tests/parity_messages_create.rs
+lingxi-code/crates/test-harness/tests/parity_oauth_pkce_refresh.rs
+lingxi-code/crates/test-harness/tests/parity_settings_merge.rs
+lingxi-code/crates/test-harness/tests/parity_tengu_events.rs
 ```
 
 Plus the 7 M2 drivers (`parity_keychain_service_name.rs`, `parity_lsp_plugin_only.rs`, `parity_mcp_initialize.rs`, `parity_mcp_transports.rs`, `parity_sandbox_config.rs`, `parity_tmux_windows.rs`, `parity_worktree_naming.rs`).
@@ -221,7 +221,7 @@ If Step 3 fixed a defect in `Cargo.toml`:
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-core/Cargo.toml
+git add lingxi-code/Cargo.toml
 git commit -m "$(cat <<'EOF'
 chore(M3-07): register telemetry-macros in workspace default-members
 
@@ -723,7 +723,7 @@ Add after the existing `cross-compile-mobile` block:
         run: cargo install cargo-vet --locked --version '^0.10'
       - name: cargo deny check
         working-directory: lingxi-core
-        # Uses lingxi-core/deny.toml (or workspace root deny.toml) for
+        # Uses lingxi-code/deny.toml (or workspace root deny.toml) for
         # license/banned-deps/advisory policies. If deny.toml is absent,
         # cargo-deny falls back to defaults (still a useful gate).
         run: cargo deny check
@@ -904,13 +904,13 @@ Expected: 1 file changed (`.github/workflows/ci.yml`), additions only.
 ### Task 9: Write `full_v0_4_0_smoke.json` fixture
 
 **Files:**
-- Create: `lingxi-core/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json`
+- Create: `lingxi-code/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json`
 
 High-level smoke fixture: asserts ALL of M3's locked literals appear in a representative startup-and-API-call run. Per v3 §32.6 parity protocol — carries `_source` + `_note` citation keys.
 
 - [ ] **Step 1: Write the failing test (the driver in Task 10 fails because the fixture file does not exist yet — write the fixture first)**
 
-Create `lingxi-core/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json`:
+Create `lingxi-code/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json`:
 
 ```json
 {
@@ -1025,7 +1025,7 @@ Per spec §7 (lines 620-810), every literal in this fixture is locked. The keys 
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-python3 -c "import json; json.load(open('lingxi-core/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json')); print('ok')"
+python3 -c "import json; json.load(open('lingxi-code/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json')); print('ok')"
 ```
 
 Expected output: `ok`. If invalid, fix and re-run.
@@ -1039,13 +1039,13 @@ Expected output: `ok`. If invalid, fix and re-run.
 ### Task 10: Write `parity_full_v0_4_0_smoke.rs` driver + Phase D commit
 
 **Files:**
-- Create: `lingxi-core/crates/test-harness/tests/parity_full_v0_4_0_smoke.rs`
+- Create: `lingxi-code/crates/test-harness/tests/parity_full_v0_4_0_smoke.rs`
 
 The driver loads the fixture and asserts every locked literal is reachable through the public API of each M3 crate. This is a presence + byte-equality check, NOT a behavioral roundtrip (per the fixture's `_note`).
 
 - [ ] **Step 1: Write the failing test driver**
 
-Create `lingxi-core/crates/test-harness/tests/parity_full_v0_4_0_smoke.rs`:
+Create `lingxi-code/crates/test-harness/tests/parity_full_v0_4_0_smoke.rs`:
 
 ```rust
 //! Parity driver: v0.4.0 smoke — cross-checks that EVERY M3 locked
@@ -1308,7 +1308,7 @@ Expected: both exit `0`.
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-python3 -c "import json; json.load(open('lingxi-core/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json')); print('ok')"
+python3 -c "import json; json.load(open('lingxi-code/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json')); print('ok')"
 ```
 
 Expected output: `ok`.
@@ -1317,8 +1317,8 @@ Expected output: `ok`.
 
 ```bash
 cd /Users/luolingfeng/Projects/LingXi-Next
-git add lingxi-core/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json \
-        lingxi-core/crates/test-harness/tests/parity_full_v0_4_0_smoke.rs
+git add lingxi-code/crates/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json \
+        lingxi-code/crates/test-harness/tests/parity_full_v0_4_0_smoke.rs
 git commit -m "$(cat <<'EOF'
 test(parity): full_v0_4_0_smoke — M3 locked-literals cross-check
 
@@ -1359,7 +1359,7 @@ cd /Users/luolingfeng/Projects/LingXi-Next
 git log -1 --stat
 ```
 
-Expected: 2 files added under `lingxi-core/crates/test-harness/`.
+Expected: 2 files added under `lingxi-code/crates/test-harness/`.
 
 ---
 
@@ -2125,7 +2125,7 @@ docs: CHANGELOG + ARCHITECTURE + PLATFORMS + README for v0.4.0
   discount, cargo-fuzz hard-gate, baseline tooling, supply-chain audit
   data), and a Migration-from-v0.3.0 block.
 - docs/ARCHITECTURE.md refreshes the crate map (M3 additions to
-  lingxi-core/settings, lingxi-memory/{claude_md,memdir}, lingxi-api-
+  lingxi-code/settings, lingxi-memory/{claude_md,memdir}, lingxi-api-
   client/{anthropic,oauth_hook,retry,rate_limit,betas}, lingxi-anthropic-
   oauth/{refresh,scope_upgrade}, lingxi-cost/events, lingxi-
   telemetry/{tengu,sinks}, new lingxi-telemetry-macros sibling crate)
@@ -2561,7 +2561,7 @@ Expected output: recent log shows the M3-07 commits + the release marker; tag li
 
 4. **The plan adds an empty release-marker commit (Task 16)** rather than amending Phase E. Reason: per M2-07 precedent (commit `398f217` is the "release: v0.3.0 verification + cross-compile split" commit and it carries actual file changes — the cross-compile split). For v0.4.0 there is no equivalent "last-minute file change" — the cross-compile + supply-chain + parity-fixtures additions land in Phase C, the smoke fixture in Phase D, the docs in Phase E. The marker commit therefore must be empty (`--allow-empty`) to give the v0.4.0 tag a stable anchor that distinguishes "v0.4.0 release point" from "Phase E doc commit". An empty commit is also the simplest tag anchor that documents the verification matrix ran clean.
 
-5. **The brief lists "Create: `lingxi-core/Cargo.toml`"** as a modification candidate — but in practice the M3-06 plan already added `crates/telemetry-macros` to both `members` and `default-members`. The plan therefore makes Task 1 Step 3 a verification check; an actual `Cargo.toml` modification only lands if the M3-06 commit drifted from spec. The commit message in Task 1 Step 7 documents the rationale if the fix is needed.
+5. **The brief lists "Create: `lingxi-code/Cargo.toml`"** as a modification candidate — but in practice the M3-06 plan already added `crates/telemetry-macros` to both `members` and `default-members`. The plan therefore makes Task 1 Step 3 a verification check; an actual `Cargo.toml` modification only lands if the M3-06 commit drifted from spec. The commit message in Task 1 Step 7 documents the rationale if the fix is needed.
 
 6. **The brief says "the v0.4.0 smoke fixture asserts ALL of M3's locked literals appear in a representative startup-and-API-call run".** The plan's `full_v0_4_0_smoke.json` driver does NOT perform an actual startup-and-API-call. Reason: a true end-to-end startup-and-API-call test would require either a real ANTHROPIC_API_KEY (CI-unsafe) or an axum mock server matching every sub-plan's wire contract (a non-trivial amount of code that duplicates M3-01..M3-06's existing integration tests). The plan treats the smoke fixture as a literal-presence cross-check (every locked literal byte-equals its expected value via JSON deserialization), which is the cheapest way to catch drift across all six sub-plans in a single driver. The per-sub-plan integration tests (`settings_4layer_test.rs`, `messages_create_test.rs`, etc.) already cover the actual startup-and-API-call paths.
 

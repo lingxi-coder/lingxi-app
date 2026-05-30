@@ -6,8 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-jsonrpc = { path = "../../crates/jsonrpc" }
-lingxi-traits = { path = "../../crates/traits" }
+lingxi-jsonrpc = { path = "../../jsonrpc" }
+lingxi-traits = { path = "../../traits" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }

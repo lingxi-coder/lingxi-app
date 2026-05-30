@@ -11,7 +11,7 @@ lingxi-traits = { path = "../traits" }
 lingxi-secret = { path = "../secret" }
 lingxi-jsonrpc = { path = "../jsonrpc" }
 lingxi-mcp = { path = "../mcp" }
-lingxi-platform-common = { path = "../../platforms/common" }
+lingxi-platform-common = { path = "../platforms/common" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -6,8 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../../crates/protocol" }
-lingxi-traits = { path = "../../crates/traits" }
+lingxi-protocol = { path = "../../protocol" }
+lingxi-traits = { path = "../../traits" }
 async-trait.workspace = true
 tokio = { workspace = true, features = ["full"] }
 futures-core = { workspace = true }

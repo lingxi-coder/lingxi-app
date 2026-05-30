@@ -24,12 +24,12 @@ pub fn mock_lsp_server_path() -> PathBuf {
         PathBuf::from(dir)
     } else {
         // <workspace>/target by default; we are at
-        // <workspace>/crates/test-harness, so walk up two levels
+        // <workspace>/test-harness, so walk up one level
         // and append target.
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         manifest
             .ancestors()
-            .nth(2)
+            .nth(1)
             .map(|p| p.join("target"))
             .expect("workspace target dir")
     };

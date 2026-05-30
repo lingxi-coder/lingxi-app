@@ -6,12 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../../crates/protocol" }
-lingxi-traits = { path = "../../crates/traits" }
-lingxi-jsonrpc = { path = "../../crates/jsonrpc" }
-lingxi-lsp = { path = "../../crates/lsp" }
+lingxi-protocol = { path = "../../protocol" }
+lingxi-traits = { path = "../../traits" }
+lingxi-jsonrpc = { path = "../../jsonrpc" }
+lingxi-lsp = { path = "../../lsp" }
 lingxi-platform-common = { path = "../common" }
-lingxi-api-client = { path = "../../crates/api-client" }
+lingxi-api-client = { path = "../../api-client" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }

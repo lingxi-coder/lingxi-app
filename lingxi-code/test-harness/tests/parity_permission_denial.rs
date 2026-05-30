@@ -64,9 +64,7 @@ fn builtin_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .parent()
-        .unwrap()
-        .join("crates/tools/src/builtin")
+        .join("tools/src/builtin")
 }
 
 #[test]
@@ -99,9 +97,7 @@ fn permission_result_enum_variants_locked() {
     let result_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .parent()
-        .unwrap()
-        .join("crates/permission/src/result.rs");
+        .join("permission/src/result.rs");
     let body = fs::read_to_string(&result_src)
         .unwrap_or_else(|e| panic!("read {}: {e}", result_src.display()));
     for needle in ["pub enum PermissionResult", "Allow {", "Deny {", "Ask {"] {
@@ -118,9 +114,7 @@ fn permission_module_exports_policy() {
     let lib_src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .parent()
-        .unwrap()
-        .join("crates/permission/src/lib.rs");
+        .join("permission/src/lib.rs");
     let body =
         fs::read_to_string(&lib_src).unwrap_or_else(|e| panic!("read {}: {e}", lib_src.display()));
     assert!(

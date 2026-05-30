@@ -27,7 +27,7 @@ tokio = { version = "1", features = ["sync", "fs", "io-util", "macros", "rt-mult
 lingxi-test-harness = { path = "../test-harness" }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
-lingxi-platform-posix = { path = "../../platforms/posix" }
+lingxi-platform-posix = { path = "../platforms/posix" }
 
 [lints]
 workspace = true

@@ -46,7 +46,7 @@ axum = "0.7"
 lingxi-test-harness = { path = "../test-harness" }
 
 [target.'cfg(unix)'.dev-dependencies]
-lingxi-platform-posix = { path = "../../platforms/posix" }
+lingxi-platform-posix = { path = "../platforms/posix" }
 
 [lints]
 workspace = true

@@ -39,7 +39,7 @@ http-body-util = "0.1"
 
 [dev-dependencies]
 proptest.workspace = true
-lingxi-platform-posix-minimal = { path = "../../platforms/posix-minimal" }
+lingxi-platform-posix-minimal = { path = "../platforms/posix-minimal" }
 # Used by the M2-07 Phase B parity drivers to exercise production
 # `convert_settings_to_runtime_config` (sandbox config conversion fixture).
 lingxi-sandbox = { path = "../sandbox" }
@@ -91,10 +91,10 @@ lingxi-permission = { path = "../permission" }
 crossterm = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
-lingxi-platform-posix = { path = "../../platforms/posix" }
+lingxi-platform-posix = { path = "../platforms/posix" }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
-lingxi-platform-windows = { path = "../../platforms/windows" }
+lingxi-platform-windows = { path = "../platforms/windows" }
 
 [[bin]]
 name = "mock_lsp_server"

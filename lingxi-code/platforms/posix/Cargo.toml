@@ -6,13 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../../crates/protocol" }
-lingxi-traits = { path = "../../crates/traits" }
-lingxi-jsonrpc = { path = "../../crates/jsonrpc" }
-lingxi-lsp = { path = "../../crates/lsp" }
+lingxi-protocol = { path = "../../protocol" }
+lingxi-traits = { path = "../../traits" }
+lingxi-jsonrpc = { path = "../../jsonrpc" }
+lingxi-lsp = { path = "../../lsp" }
 lingxi-platform-common = { path = "../common" }
-lingxi-sandbox = { path = "../../crates/sandbox" }
-lingxi-api-client = { path = "../../crates/api-client" }
+lingxi-sandbox = { path = "../../sandbox" }
+lingxi-api-client = { path = "../../api-client" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
@@ -44,7 +44,7 @@ axum = { version = "0.7", features = ["ws"] }
 url = "2"
 # Integration test (`tests/mcp_client_stdio_test.rs`) drives the real
 # `lingxi_mcp::McpClient` over a stdio-spawned mock MCP server.
-lingxi-mcp = { path = "../../crates/mcp" }
+lingxi-mcp = { path = "../../mcp" }
 futures-util = "0.3"
 
 [lints]

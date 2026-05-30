@@ -86,10 +86,8 @@ fn truncation_lib_source_contains_literals() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .parent()
-        .unwrap()
         .to_path_buf();
-    let lib_src = repo_root.join("crates/tools/src/shared/output_truncation.rs");
+    let lib_src = repo_root.join("tools/src/shared/output_truncation.rs");
     let body =
         fs::read_to_string(&lib_src).unwrap_or_else(|e| panic!("read {}: {e}", lib_src.display()));
     assert!(
@@ -109,10 +107,8 @@ fn every_tool_with_output_calls_truncate_or_opts_out() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .parent()
-        .unwrap()
         .to_path_buf();
-    let builtin_dir = repo_root.join("crates/tools/src/builtin");
+    let builtin_dir = repo_root.join("tools/src/builtin");
     let exempt = exempt_tools();
 
     let mut violations: Vec<String> = Vec::new();

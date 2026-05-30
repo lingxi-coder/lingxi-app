@@ -70,6 +70,7 @@ fn resolve_tool_src(repo_root: &std::path::Path, file: &str) -> PathBuf {
         "skill.rs" => Some("skill/src/skill.rs"),
         "worktree.rs" => Some("worktree/src/worktree.rs"),
         "team.rs" => Some("team/src/team.rs"),
+        "lsp.rs" => Some("lsp/src/lsp_tool.rs"),
         _ => None,
     };
     match mapped {

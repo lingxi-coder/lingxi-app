@@ -29,9 +29,9 @@ use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{LSP_COMPLETED, LSP_FAILED, LSP_STARTED};
 use telemetry::AnalyticsBus;
 
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
@@ -99,13 +99,13 @@ fn allow_lsp() -> PermissionResult {
 
 /// Builtin tool — dispatches 4 LSP operations.
 pub struct LSPTool {
-    pub(crate) ctx: super::BuiltinToolContext,
+    pub(crate) ctx: tool_api::BuiltinToolContext,
 }
 
 impl LSPTool {
     /// Construct a new [`LSPTool`] over the supplied context.
     #[must_use]
-    pub fn new(ctx: super::BuiltinToolContext) -> Self {
+    pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self { ctx }
     }
     fn lsp_registry(&self) -> Option<&Arc<LspRegistry>> {

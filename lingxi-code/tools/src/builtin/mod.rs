@@ -7,7 +7,6 @@ use crate::registry::ToolRegistry;
 use std::sync::Arc;
 
 pub mod agent;
-pub mod lsp;
 pub mod mcp;
 pub mod shell_events;
 
@@ -21,7 +20,6 @@ pub(crate) use tool_api::test_support;
 pub mod agent_test_support;
 
 pub use agent::AgentTool;
-pub use lsp::LSPTool;
 pub use mcp::{ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool};
 
 // M8-P5: BuiltinToolContext moved to tool-api so per-category tool crates
@@ -39,6 +37,8 @@ pub use tool_file::{
 pub use tool_file::{
     FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, NotebookEditTool,
 };
+pub use tool_lsp::lsp_tool as lsp;
+pub use tool_lsp::LSPTool;
 pub use tool_meta::{config, tool_search};
 pub use tool_meta::{ConfigTool, ToolSearchTool};
 pub use tool_plan::plan_mode;
@@ -92,7 +92,7 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     registry.register_builtin(Arc::new(McpAuthTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(ListMcpResourcesTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(ReadMcpResourceTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(LSPTool::new(ctx.clone())));
+    tool_lsp::register_all(registry, ctx.clone());
     // M4-08 — system tools.
     tool_skill::register_all(registry, ctx.clone());
     tool_cron::register_all(registry, ctx.clone());

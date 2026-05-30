@@ -12,7 +12,6 @@ pub mod brief;
 pub mod config;
 pub mod lsp;
 pub mod mcp;
-pub mod plan_mode;
 pub mod remote_trigger;
 pub mod schedule_cron;
 pub mod send_message;
@@ -39,7 +38,6 @@ pub use brief::BriefTool;
 pub use config::ConfigTool;
 pub use lsp::LSPTool;
 pub use mcp::{ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool};
-pub use plan_mode::{EnterPlanModeTool, ExitPlanModeTool};
 pub use remote_trigger::RemoteTriggerTool;
 pub use schedule_cron::ScheduleCronTool;
 pub use send_message::SendMessageTool;
@@ -63,6 +61,8 @@ pub use tool_file::{
 pub use tool_file::{
     FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, NotebookEditTool,
 };
+pub use tool_plan::plan_mode;
+pub use tool_plan::{EnterPlanModeTool, ExitPlanModeTool};
 pub use tool_shell::{bash, powershell, repl};
 pub use tool_shell::{BashTool, PowerShellTool, REPLTool};
 pub use tool_task::{task, todo_write};
@@ -91,8 +91,7 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     // M4-03 — web tools.
     tool_web::register_all(registry, ctx.clone());
     // M4-04 — workflow tools.
-    registry.register_builtin(Arc::new(EnterPlanModeTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(ExitPlanModeTool::new(ctx.clone())));
+    tool_plan::register_all(registry, ctx.clone());
     registry.register_builtin(Arc::new(EnterWorktreeTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(ExitWorktreeTool::new(ctx.clone())));
     // M4-05 — agent + task + send_message tools.

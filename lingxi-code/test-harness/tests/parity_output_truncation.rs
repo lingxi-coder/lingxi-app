@@ -57,6 +57,7 @@ fn resolve_tool_src(repo_root: &std::path::Path, file: &str) -> PathBuf {
         "todo_write.rs" => Some("task/src/todo_write.rs"),
         "web_fetch.rs" => Some("web/src/web_fetch.rs"),
         "web_search.rs" => Some("web/src/web_search.rs"),
+        "plan_mode.rs" => Some("plan/src/plan_mode.rs"),
         _ => None,
     };
     match mapped {

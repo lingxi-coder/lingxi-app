@@ -17,13 +17,13 @@ use telemetry::tengu::tool::{
     EXIT_PLAN_MODE_COMPLETED, EXIT_PLAN_MODE_FAILED, EXIT_PLAN_MODE_STARTED,
 };
 
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
+use tool_api::BuiltinToolContext;
 
 /// Byte-locked marker emitted when entering plan mode (spec §7 line 487).
 pub const PLAN_MODE_ENTER_MARKER: &str = "[PLAN MODE]";
@@ -107,7 +107,7 @@ impl Tool for EnterPlanModeTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         false
@@ -238,7 +238,7 @@ impl Tool for ExitPlanModeTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         false
@@ -317,18 +317,18 @@ impl Tool for ExitPlanModeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
     use engine::SessionState;
     use protocol::SessionId;
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tokio::sync::Mutex;
+    use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
 
     fn make_ctx() -> (
         BuiltinToolContext,
         Arc<InMemorySink>,
         Arc<Mutex<SessionState>>,
-        crate::context::ToolUseContext,
+        tool_api::context::ToolUseContext,
     ) {
         let bus = Arc::new(AnalyticsBus::new());
         let sink = Arc::new(InMemorySink::default());

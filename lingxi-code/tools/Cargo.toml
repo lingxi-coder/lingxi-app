@@ -11,6 +11,7 @@ tool-file = { path = "file" }
 tool-shell = { path = "shell" }
 tool-task = { path = "task" }
 tool-web = { path = "web" }
+tool-plan = { path = "plan" }
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }

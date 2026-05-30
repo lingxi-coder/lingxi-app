@@ -67,6 +67,7 @@ fn resolve_tool_src(repo_root: &std::path::Path, file: &str) -> PathBuf {
         "send_message.rs" => Some("ui/src/send_message.rs"),
         "sleep.rs" => Some("ui/src/sleep.rs"),
         "synthetic_output.rs" => Some("ui/src/synthetic_output.rs"),
+        "skill.rs" => Some("skill/src/skill.rs"),
         _ => None,
     };
     match mapped {

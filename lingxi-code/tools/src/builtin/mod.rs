@@ -10,7 +10,6 @@ pub mod agent;
 pub mod lsp;
 pub mod mcp;
 pub mod shell_events;
-pub mod skill;
 pub mod team;
 pub mod worktree;
 
@@ -26,7 +25,6 @@ pub mod agent_test_support;
 pub use agent::AgentTool;
 pub use lsp::LSPTool;
 pub use mcp::{ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool};
-pub use skill::SkillTool;
 pub use team::{TeamCreateTool, TeamDeleteTool};
 pub use worktree::{EnterWorktreeTool, ExitWorktreeTool};
 
@@ -51,6 +49,8 @@ pub use tool_plan::plan_mode;
 pub use tool_plan::{EnterPlanModeTool, ExitPlanModeTool};
 pub use tool_shell::{bash, powershell, repl};
 pub use tool_shell::{BashTool, PowerShellTool, REPLTool};
+pub use tool_skill::skill;
+pub use tool_skill::SkillTool;
 pub use tool_task::{task, todo_write};
 pub use tool_task::{
     TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
@@ -96,7 +96,7 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     registry.register_builtin(Arc::new(ReadMcpResourceTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(LSPTool::new(ctx.clone())));
     // M4-08 — system tools.
-    registry.register_builtin(Arc::new(SkillTool::new(ctx.clone())));
+    tool_skill::register_all(registry, ctx.clone());
     tool_cron::register_all(registry, ctx.clone());
     tool_meta::register_all(registry, ctx.clone());
     tool_ui::register_all(registry, ctx);

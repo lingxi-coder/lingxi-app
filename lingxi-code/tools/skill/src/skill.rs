@@ -20,9 +20,9 @@ use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{SKILL_COMPLETED, SKILL_FAILED, SKILL_STARTED};
 use telemetry::AnalyticsBus;
 
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext, ValidationError,
 };
@@ -66,14 +66,14 @@ impl SkillLoader for EmptySkillLoader {
 
 /// `SkillTool` — loads + validates a skill descriptor.
 pub struct SkillTool {
-    pub(crate) ctx: super::BuiltinToolContext,
+    pub(crate) ctx: tool_api::BuiltinToolContext,
     pub(crate) loader: Arc<dyn SkillLoader>,
 }
 
 impl SkillTool {
     /// Construct with the default `EmptySkillLoader`.
     #[must_use]
-    pub fn new(ctx: super::BuiltinToolContext) -> Self {
+    pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self {
             ctx,
             loader: Arc::new(EmptySkillLoader),
@@ -82,7 +82,7 @@ impl SkillTool {
 
     /// Construct with a caller-supplied loader.
     #[must_use]
-    pub fn with_loader(ctx: super::BuiltinToolContext, loader: Arc<dyn SkillLoader>) -> Self {
+    pub fn with_loader(ctx: tool_api::BuiltinToolContext, loader: Arc<dyn SkillLoader>) -> Self {
         Self { ctx, loader }
     }
 }
@@ -127,7 +127,7 @@ impl Tool for SkillTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -275,7 +275,7 @@ impl Tool for SkillTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {

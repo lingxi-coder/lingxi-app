@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "protocol",
+    "tool-api",
     "engine",
     "traits",
     "api-client",
@@ -50,6 +51,7 @@ members = [
 # build only the real crates, not the integration-test fixtures.
 default-members = [
     "protocol",
+    "tool-api",
     "engine",
     "traits",
     "api-client",

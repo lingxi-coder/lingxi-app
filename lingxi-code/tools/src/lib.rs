@@ -1,23 +1,20 @@
-//! Tool system — `Tool` trait, registry, concurrency-partitioned dispatcher,
-//! shared helpers (M4-01), and builtin tool implementations (M4-01..M4-08).
+//! Tool system — builtin `Tool` implementations, concurrency-partitioned
+//! dispatcher, shared helpers, and the `register_all_builtin_tools` entry
+//! point.
 //!
-//! M1.4 shipped the `Tool` trait + context + error types. M4-01 adds:
-//! - `shared/` — cross-tool helpers (binary detection, path validation,
-//!   output truncation) reused by every later sub-plan.
-//! - `builtin/` — concrete `Tool` impls. M4-01 lands the 6 foundation tools
-//!   (Read, Write, Edit, NotebookEdit, Glob, Grep) plus the
-//!   `register_all_builtin_tools(registry, ctx)` entrypoint that future
-//!   sub-plans extend.
+//! M8-P3: the abstract surface (`Tool` trait, `ToolUseContext`,
+//! `ToolRegistry`, progress, content-replacement) moved to the `tool-api`
+//! crate. This crate re-exports it so existing `use tools::…` and
+//! `crate::tool_trait::…` paths keep resolving; the builtin tools +
+//! `register_all_builtin_tools` stay here until P5/P7 split them into
+//! per-category crates.
 
 #![forbid(unsafe_code)]
 // M4-01 telemetry emitters convert `u64` byte/duration counters into the
 // `AnalyticsValue::Int(i64)` wire type — values are always well below
 // `i64::MAX` (file sizes are capped at 256 KB, durations are ms-scale, line
-// counts are user-bounded). The saturating helper used in `lingxi-cost`
-// would add noise across 6 emitter files for no observable benefit. Same
-// rationale for the `usize → i64` casts in tests and for a few style
-// choices (let-else vs match destructure) the per-tool dispatch keeps for
-// readability.
+// counts are user-bounded). Same rationale for the `usize → i64` casts in
+// tests and a few style choices the per-tool dispatch keeps for readability.
 #![allow(
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
@@ -33,27 +30,29 @@
     clippy::manual_let_else
 )]
 
+// Re-export the abstract surface that moved to `tool-api` in P3, including
+// the module paths so `crate::tool_trait::…`, `crate::registry::…`, etc.
+// keep resolving from the builtin/dispatcher files.
+pub use tool_api::tool_trait::*;
+pub use tool_api::{content_replacement, context, progress, registry, tool_trait};
+pub use tool_api::{
+    progress_channel, ContentReplacementState, ToolProgress, ToolProgressReceiver,
+    ToolProgressSender, ToolRegistry, ToolUseContext, ToolUseOptions,
+};
+
+// Builtin tools + supporting machinery stay in this crate.
 pub mod builtin;
-pub mod content_replacement;
-pub mod context;
 pub mod dispatcher;
 pub mod permissions;
-pub mod progress;
-pub mod registry;
 pub mod result_storage;
 pub mod shared;
 pub mod streaming_exec;
 pub mod tool_invoker_impl;
-pub mod tool_trait;
 
 pub use builtin::{
     register_all_builtin_tools, BuiltinToolContext, FileEditTool, FileReadTool, FileWriteTool,
     GlobTool, GrepTool, NotebookEditTool, WebFetchTool, WebSearchTool,
 };
-pub use context::{ToolUseContext, ToolUseOptions};
 pub use dispatcher::{ToolCall, ToolDispatchEvent, ToolDispatcher};
-pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};
-pub use registry::ToolRegistry;
 pub use result_storage::ToolResultStorage;
 pub use tool_invoker_impl::RegistryToolInvoker;
-pub use tool_trait::*;

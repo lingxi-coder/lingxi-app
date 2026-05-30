@@ -37,8 +37,9 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod worktree;
 
+// M8-P5: shared test fixture moved to tool-api (feature "test-support").
 #[cfg(test)]
-pub(crate) mod test_support;
+pub(crate) use tool_api::test_support;
 
 /// M4-05 wiring mocks. Public so `tests/agent_task_integration_test.rs`
 /// (an external integration crate) can pull in the same fixtures the
@@ -148,6 +149,12 @@ mod tests {
     use crate::registry::ToolRegistry;
     use std::path::PathBuf;
     use telemetry::AnalyticsBus;
+    // M8-P5: these moved out of the file-level imports when BuiltinToolContext
+    // left this module; the dummy_ctx fixture below still constructs one.
+    use api_client::AnthropicProvider;
+    use permission::PermissionMode;
+    use sandbox::decision::ProjectTrustLevel;
+    use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 
     fn dummy_ctx() -> BuiltinToolContext {
         use crate::builtin::test_support::{

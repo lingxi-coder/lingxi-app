@@ -22,6 +22,10 @@ pub mod context;
 pub mod progress;
 pub mod registry;
 pub mod tool_trait;
+pub mod util;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use builtin_context::BuiltinToolContext;
 pub use content_replacement::ContentReplacementState;

@@ -87,7 +87,7 @@ fn truncation_lib_source_contains_literals() {
         .parent()
         .unwrap()
         .to_path_buf();
-    let lib_src = repo_root.join("tools/src/shared/output_truncation.rs");
+    let lib_src = repo_root.join("tool-api/src/util/output_truncation.rs");
     let body =
         fs::read_to_string(&lib_src).unwrap_or_else(|e| panic!("read {}: {e}", lib_src.display()));
     assert!(

@@ -3565,6 +3565,7 @@ dependencies = [
  "api-client",
  "async-trait",
  "engine",
+ "futures",
  "lsp",
  "mcp",
  "once_cell",

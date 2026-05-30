@@ -28,6 +28,11 @@ thiserror.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+# Only used by the feature-gated test_support module (mock FileSystem stream).
+futures = { version = "0.3", optional = true }
+
+[features]
+test-support = ["dep:futures"]
 
 [dev-dependencies]
 # registry.rs #[cfg(test)] builds a Lazy schema fixture.

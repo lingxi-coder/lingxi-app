@@ -39,6 +39,7 @@ grep-matcher = "=0.1.7"
 rand = "0.9"
 
 [dev-dependencies]
+tool-api = { path = "../tool-api", features = ["test-support"] }
 tempfile = "3.13"
 regex = "1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "sync", "time", "net"] }

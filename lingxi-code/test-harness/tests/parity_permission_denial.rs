@@ -98,6 +98,7 @@ fn resolve_tool_src(file: &str) -> PathBuf {
         "synthetic_output.rs" => Some("ui/src/synthetic_output.rs"),
         "skill.rs" => Some("skill/src/skill.rs"),
         "worktree.rs" => Some("worktree/src/worktree.rs"),
+        "team.rs" => Some("team/src/team.rs"),
         _ => None,
     };
     match mapped {

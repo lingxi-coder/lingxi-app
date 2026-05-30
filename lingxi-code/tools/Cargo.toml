@@ -17,6 +17,7 @@ tool-cron = { path = "cron" }
 tool-ui = { path = "ui" }
 tool-skill = { path = "skill" }
 tool-worktree = { path = "worktree" }
+tool-team = { path = "team" }
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }

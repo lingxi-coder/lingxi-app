@@ -27,9 +27,9 @@ use telemetry::tengu::tool::{
 };
 use telemetry::AnalyticsBus;
 
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
@@ -67,18 +67,18 @@ pub const TEAM_NAME_PATTERN_DESC: &str = "[a-zA-Z0-9_-]+";
 
 /// Builtin tool: create a team directory + default `config.json`.
 pub struct TeamCreateTool {
-    pub(crate) ctx: super::BuiltinToolContext,
+    pub(crate) ctx: tool_api::BuiltinToolContext,
 }
 
 /// Builtin tool: delete a team directory (with safety opt-in).
 pub struct TeamDeleteTool {
-    pub(crate) ctx: super::BuiltinToolContext,
+    pub(crate) ctx: tool_api::BuiltinToolContext,
 }
 
 impl TeamCreateTool {
     /// Construct.
     #[must_use]
-    pub fn new(ctx: super::BuiltinToolContext) -> Self {
+    pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self { ctx }
     }
 }
@@ -86,7 +86,7 @@ impl TeamCreateTool {
 impl TeamDeleteTool {
     /// Construct.
     #[must_use]
-    pub fn new(ctx: super::BuiltinToolContext) -> Self {
+    pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self { ctx }
     }
 }
@@ -251,7 +251,7 @@ impl Tool for TeamCreateTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -471,7 +471,7 @@ impl Tool for TeamDeleteTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -811,14 +811,14 @@ mod validation_tests {
 #[cfg(test)]
 mod tool_metadata_tests {
     use super::*;
-    use crate::builtin::test_support::ctx_for_file_tools;
     use serde_json::json;
     use telemetry::AnalyticsBus;
+    use tool_api::test_support::ctx_for_file_tools;
 
     fn make_create() -> TeamCreateTool {
         let bus = Arc::new(AnalyticsBus::new());
         let ctx = ctx_for_file_tools(
-            crate::builtin::test_support::make_dummy_fs(),
+            tool_api::test_support::make_dummy_fs(),
             bus,
             vec![std::env::temp_dir()],
         );
@@ -828,7 +828,7 @@ mod tool_metadata_tests {
     fn make_delete() -> TeamDeleteTool {
         let bus = Arc::new(AnalyticsBus::new());
         let ctx = ctx_for_file_tools(
-            crate::builtin::test_support::make_dummy_fs(),
+            tool_api::test_support::make_dummy_fs(),
             bus,
             vec![std::env::temp_dir()],
         );

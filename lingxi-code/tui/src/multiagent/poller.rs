@@ -54,7 +54,9 @@ impl MultiAgentFeed for PollerFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use traits::task_registry::{TaskCreateInput, TaskOutputChunk, TaskRegistryError, TaskUpdatePatch};
+    use traits::task_registry::{
+        TaskCreateInput, TaskOutputChunk, TaskRegistryError, TaskUpdatePatch,
+    };
 
     /// Minimal stand-in `TaskRegistryHandle`: `list` returns a canned set; the
     /// other methods are unused by `PollerFeed::poll` and return trivially.
@@ -73,7 +75,11 @@ mod tests {
         async fn list(&self, _: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
             Ok(self.rows.clone())
         }
-        async fn update(&self, _: &str, _: TaskUpdatePatch) -> Result<TaskRecord, TaskRegistryError> {
+        async fn update(
+            &self,
+            _: &str,
+            _: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
             Err(TaskRegistryError::Internal("unused".into()))
         }
         async fn set_status(&self, _: &str, _: &str) -> Result<TaskRecord, TaskRegistryError> {
@@ -82,7 +88,11 @@ mod tests {
         async fn kill(&self, _: &str) -> Result<TaskRecord, TaskRegistryError> {
             Err(TaskRegistryError::Internal("unused".into()))
         }
-        async fn output(&self, _: &str, _: Option<u64>) -> Result<TaskOutputChunk, TaskRegistryError> {
+        async fn output(
+            &self,
+            _: &str,
+            _: Option<u64>,
+        ) -> Result<TaskOutputChunk, TaskRegistryError> {
             Ok(TaskOutputChunk::default())
         }
     }

@@ -36,9 +36,9 @@ pub async fn pump_once(feed: &dyn MultiAgentFeed, tx: &UnboundedSender<MultiAgen
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::multiagent::fixture::FixtureFeed;
     use crate::multiagent::state::TaskRow;
+    use std::sync::Arc;
     use tokio::sync::mpsc;
 
     #[test]

@@ -2,9 +2,9 @@
 //! `FixtureFeed` emit the SAME `MultiAgentEvent`/`TaskRow` shape, so the UI
 //! built against fixtures lights up correctly against the real engine.
 
+use traits::task_registry::TaskRecord;
 use tui::multiagent::poller::task_row_from_record;
 use tui::multiagent::{FixtureFeed, MultiAgentEvent, MultiAgentFeed, TaskRow};
-use traits::task_registry::TaskRecord;
 
 /// The record→row mapping is TOTAL: every `TaskRecord` field lands on the
 /// corresponding `TaskRow` field (no data dropped, no field invented).

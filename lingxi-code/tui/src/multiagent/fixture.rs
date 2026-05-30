@@ -26,7 +26,11 @@ impl FixtureFeed {
 #[async_trait]
 impl MultiAgentFeed for FixtureFeed {
     async fn poll(&self) -> Vec<MultiAgentEvent> {
-        self.steps.lock().expect("fixture poisoned").pop_front().unwrap_or_default()
+        self.steps
+            .lock()
+            .expect("fixture poisoned")
+            .pop_front()
+            .unwrap_or_default()
     }
 }
 

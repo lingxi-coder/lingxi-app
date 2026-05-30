@@ -47,7 +47,6 @@ pub mod permissions;
 pub mod result_storage;
 pub mod shared;
 pub mod streaming_exec;
-pub mod tool_invoker_impl;
 
 pub use builtin::{
     register_all_builtin_tools, BuiltinToolContext, FileEditTool, FileReadTool, FileWriteTool,
@@ -55,4 +54,4 @@ pub use builtin::{
 };
 pub use dispatcher::{ToolCall, ToolDispatchEvent, ToolDispatcher};
 pub use result_storage::ToolResultStorage;
-pub use tool_invoker_impl::RegistryToolInvoker;
+pub use tool_api::RegistryToolInvoker;

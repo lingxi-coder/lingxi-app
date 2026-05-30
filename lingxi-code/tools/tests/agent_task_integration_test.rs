@@ -255,16 +255,14 @@ mod common {
             provider: Arc::new(AnthropicProvider::new("test", None)),
             default_model: "claude-sonnet-4-20250514".into(),
             worktree: Arc::new(StubWt),
-            subagent_spawner: Some(tools::builtin::agent_test_support::arc_mock_spawner()
+            subagent_spawner: Some(tool_agent::agent_test_support::arc_mock_spawner()
                 as Arc<dyn traits::subagent_spawn::SubagentSpawner>),
-            task_registry: Some(tools::builtin::agent_test_support::arc_mock_task_registry()
+            task_registry: Some(tool_agent::agent_test_support::arc_mock_task_registry()
                 as Arc<dyn traits::task_registry::TaskRegistryHandle>),
-            mailbox_router: Some(tools::builtin::agent_test_support::arc_mock_mailbox()
+            mailbox_router: Some(tool_agent::agent_test_support::arc_mock_mailbox()
                 as Arc<dyn traits::mailbox::MailboxRouterHandle>),
-            budget_enforcer: Some(
-                tools::builtin::agent_test_support::arc_mock_budget(u64::MAX)
-                    as Arc<dyn traits::budget::BudgetEnforcerHandle>,
-            ),
+            budget_enforcer: Some(tool_agent::agent_test_support::arc_mock_budget(u64::MAX)
+                as Arc<dyn traits::budget::BudgetEnforcerHandle>),
             mcp_registry: None,
             lsp_registry: None,
         }

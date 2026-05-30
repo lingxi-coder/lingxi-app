@@ -32,13 +32,13 @@ use telemetry::AnalyticsBus;
 use traits::budget::BudgetError;
 use traits::subagent_spawn::{SubagentInheritance, SubagentResult, SubagentSpawnRequest};
 
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
+use tool_api::BuiltinToolContext;
 
 /// `Agent` — canonical tool name (claude-code `AGENT_TOOL_NAME`).
 pub const AGENT_TOOL_NAME: &str = "Agent";
@@ -202,7 +202,7 @@ impl Tool for AgentTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         false
@@ -344,7 +344,7 @@ impl Tool for AgentTool {
         // The budget Arc is cloned (no deep clone — `Arc::clone` only bumps
         // the refcount), so `Arc::ptr_eq` between parent + child holds.
         let invoker: Arc<dyn traits::tool_invoker::ToolInvoker> = Arc::new(
-            crate::tool_invoker_impl::RegistryToolInvoker::new(parent_registry.clone()),
+            tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry.clone()),
         );
         let inherit = SubagentInheritance {
             tool_invoker: invoker,
@@ -392,23 +392,23 @@ impl Tool for AgentTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::agent_test_support::{
+    use crate::agent_test_support::{
         arc_mock_budget, arc_mock_mailbox, arc_mock_spawner, arc_mock_task_registry,
         MockBudgetEnforcerHandle, MockSubagentSpawner,
     };
-    use crate::builtin::test_support::{ctx_for_file_tools, fresh_tx, make_dummy_fs};
-    use crate::context::{ToolUseContext, ToolUseOptions};
-    use crate::registry::ToolRegistry;
     use std::path::PathBuf;
     use telemetry::AnalyticsBus;
+    use tool_api::context::{ToolUseContext, ToolUseOptions};
+    use tool_api::test_support::{ctx_for_file_tools, fresh_tx, make_dummy_fs};
+    use tool_api::ToolRegistry;
     use traits::budget::BudgetEnforcerHandle;
     use traits::subagent_spawn::SubagentSpawner;
 
     /// Build a `BuiltinToolContext` wired with all four M4-05 mocks.
     fn wired_ctx(
         spawner: Arc<MockSubagentSpawner>,
-        registry: Arc<crate::builtin::agent_test_support::MockTaskRegistryHandle>,
-        mailbox: Arc<crate::builtin::agent_test_support::MockMailboxRouterHandle>,
+        registry: Arc<crate::agent_test_support::MockTaskRegistryHandle>,
+        mailbox: Arc<crate::agent_test_support::MockMailboxRouterHandle>,
         budget: Arc<MockBudgetEnforcerHandle>,
     ) -> BuiltinToolContext {
         let mut bctx = ctx_for_file_tools(
@@ -486,7 +486,7 @@ mod tests {
         // is unique to this invocation. We compare the inner Arcs.
         let captured = (**captured_invoker)
             .as_any()
-            .downcast_ref::<crate::tool_invoker_impl::RegistryToolInvoker>()
+            .downcast_ref::<tool_api::tool_invoker_impl::RegistryToolInvoker>()
             .map(|i| i.registry_arc().clone());
         assert!(
             captured.is_some(),

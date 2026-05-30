@@ -21,6 +21,7 @@ pub mod content_replacement;
 pub mod context;
 pub mod progress;
 pub mod registry;
+pub mod tool_invoker_impl;
 pub mod tool_trait;
 pub mod util;
 
@@ -32,4 +33,5 @@ pub use content_replacement::ContentReplacementState;
 pub use context::{ToolUseContext, ToolUseOptions};
 pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};
 pub use registry::ToolRegistry;
+pub use tool_invoker_impl::RegistryToolInvoker;
 pub use tool_trait::*;

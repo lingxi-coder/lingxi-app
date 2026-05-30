@@ -6,19 +6,11 @@
 use crate::registry::ToolRegistry;
 use std::sync::Arc;
 
-pub mod agent;
 pub mod shell_events;
 
 // M8-P5: shared test fixture moved to tool-api (feature "test-support").
 #[cfg(test)]
 pub(crate) use tool_api::test_support;
-
-/// M4-05 wiring mocks. Public so `tests/agent_task_integration_test.rs`
-/// (an external integration crate) can pull in the same fixtures the
-/// in-crate unit tests use.
-pub mod agent_test_support;
-
-pub use agent::AgentTool;
 
 // M8-P5: BuiltinToolContext moved to tool-api so per-category tool crates
 // can construct tools without depending on this monolith.
@@ -27,6 +19,8 @@ pub use tool_api::BuiltinToolContext;
 // tool types AND the modules (under their old `file_*` names) so
 // `tools::builtin::FileReadTool` and `tools::builtin::file_read::TOOL_NAME`
 // (parity tests, external callers) keep working.
+pub use tool_agent::agent;
+pub use tool_agent::AgentTool;
 pub use tool_cron::{remote_trigger, schedule_cron};
 pub use tool_cron::{RemoteTriggerTool, ScheduleCronTool};
 pub use tool_file::{
@@ -83,7 +77,7 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     tool_plan::register_all(registry, ctx.clone());
     tool_worktree::register_all(registry, ctx.clone());
     // M4-05 — agent + task + send_message tools.
-    registry.register_builtin(Arc::new(AgentTool::new(ctx.clone())));
+    tool_agent::register_all(registry, ctx.clone());
     tool_task::register_all(registry, ctx.clone());
     // M4-06 — team tools.
     tool_team::register_all(registry, ctx.clone());

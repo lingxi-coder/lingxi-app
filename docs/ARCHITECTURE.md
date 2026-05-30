@@ -1,80 +1,142 @@
 # Architecture
 
-LingXi Code is an event-sourced conversation engine split across 30 crates.
-This document is a navigation aid; full design lives in
-`docs/superpowers/specs/2026-05-22-lingxi-core-rust-engine-design.md`.
+LingXi Code is an event-sourced conversation engine split across ~73 flat
+crates under `lingxi-code/`. This document is a navigation aid; full design
+lives in `docs/superpowers/specs/2026-05-22-lingxi-core-rust-engine-design.md`,
+and the M8 composition-root restructure (the layout described below) in
+`docs/superpowers/specs/2026-05-29-m8-composable-engine-mobile-design.md`.
+
+## M8 composition-root architecture
+
+The same core agent logic runs on every OS; only the *assembly* differs. Library
+crates make no shipping choices — they expose capabilities (`tool-*`, `skill-*`,
+`command-*`) and abstractions (`tool-api`, `skill-api`, `command-api`,
+`traits::Platform`). Two **composition-root** libraries under `apps/` decide what
+ships by naming a different subset of capability crates via Cargo dependency
+edges:
+
+- **`engine-desktop`** — links all 14 desktop tool crates (40 tools), the core +
+  desktop commands, and the desktop skill set.
+- **`engine-mobile`** — links the cross-platform tool subset + the mobile tools
+  (`camera`/`voice`/`share`), the core + mobile commands, and the mobile skill set.
+
+There is **no `#[cfg(target_os)]` switching in any library crate** — that is
+confined to `platforms/*` and `apps/*`, and enforced by `scripts/check-deps.sh`
+(the §8.1 dependency-graph gate: tools never depend on sibling tools/platforms,
+apps are leaves, the `*-api` crates stay impl-free).
 
 ## Crate map
 
+### Engine subsystems (flat at root)
+
+The platform-agnostic core. None of these depend on `tools/*`, `skills/*`,
+`commands/*`, `platforms/*`, or `apps/*` (enforced by the §8.1 gate).
+
 - `protocol` — shared DTOs, IDs, Effect/Event envelopes
-- `core` — state machine, reducer, prompt assembly, session model. M3 adds
-  the `settings/` module tree: `schema.rs` (full `SettingsJson` shape),
-  `env_parser.rs` (3-prefix priority `LINGXI_*` > `CLAUDE_CODE_*` >
-  `CLAUDE_*`), `loader.rs` (4-layer env > user > project > defaults),
-  `merger.rs` (per-field dispatcher), `tracer.rs` (provenance).
-- `traits` — 13 platform abstraction traits
-- `api-client` — Anthropic/OpenAI-compatible API + SSE. M3 adds
-  `anthropic/messages_create.rs` + `anthropic/count_tokens.rs`,
-  `oauth_hook.rs` (frozen `OAuthRefreshHook` trait), `retry/` middleware
-  (3 attempts at 500ms/1s/2s ± 20% jitter), `rate_limit/` (Retry-After
-  + `anthropic-ratelimit-requests-reset` aware), `betas.rs` (16 locked
-  `anthropic-beta` constants + per-provider × per-endpoint applicability).
-- `permission/secret/cost` — security & cost foundations (Plan 02). M3
-  extends `cost/events.rs` with `tengu_cost_recorded` (incl. reserved
-  `is_batch_request: bool` for M4) / `_budget_warning` / `_budget_exceeded`
-  and the four `tengu_api_*` events.
-- `tools/hooks` — execution + extension (Plan 03)
-- `memory/mcp` — retrieval + tool surface (Plan 04). M3 expands `memory`
-  with `claude_md/` (hierarchy walk + 10 MB cap), `memdir/` (memdir +
-  team-mem scan + fixed-point u64 ranking), `find.rs`
-  (`#![deny(clippy::float_arithmetic)]` integer-only scoring path),
-  `secret_scan.rs` (adapter over v3 §16.5 `lingxi_secret::SecretScanner`).
-- `jsonrpc` — JSON-RPC 2.0 framing shared by MCP and LSP. Content-Length and
-  line-delimited framing, outbound request router with timeout + drop-cancel,
-  inbound request router, notification broker (added in M2).
-- `compaction` — 5-layer compactor (Plan 05)
-- `agent` — subagent runtime (Plan 06)
-- `tasks/coordinator` — background work + multi-agent (Plan 07)
-- `sidequery` — side LLM + forked agent infra (Plan 08)
-- `skills/commands/outputstyles` — user-facing surface (Plan 09)
-- `session/filestate/msgqueue` — persistence + caching (Plan 10)
-- `cron` — scheduled tasks (Plan 11)
-- `sandbox/lsp` — execution support (Plan 12; M2 expands sandbox to full
-  `SandboxRuntimeConfig` + dispatcher, LSP to real client over `jsonrpc`)
-- `telemetry` — analytics bus + sinks + PII discipline. M3 adds the
-  `tengu/` module tree (8 sub-modules: `api`, `agent`, `session`, `tool`,
-  `cost`, `oauth`, `memory`, `settings`; 143 event names; every payload
-  struct `#[serde(deny_unknown_fields)]`, every payload enum
-  `#[non_exhaustive]`, every user-derived string `Verified` / `PiiTagged`)
-  and `sinks/` (NoOpSink default, InMemorySink test capture, StatsigSink
-  trait + MockStatsigSink skeleton).
-- `telemetry-macros` — sibling proc-macro crate added in M3. Ships
-  `tengu_event_audit!()` which walks `telemetry::tengu/*.rs` at compile
-  time and emits `compile_error!()` on bare `String`, missing
-  `deny_unknown_fields`, or missing `non_exhaustive`.
-- `anthropic-oauth` — main auth (Plan 13). M3 adds `refresh/RefreshDriver`
-  implementing `OAuthRefreshHook` (single-flight via
-  `refresh_lock: Arc<Mutex<()>>` per v3 §16.3; loom-verified hotspot),
-  `scope_upgrade.rs` (403-with-`required_scopes` re-runs PKCE preserving
-  refresh_token), proactive task with lifecycle owned by `AuthState` and
-  cancelable via `Engine::shutdown`.
-- `bridge` — lockfile-based local IDE bridge (MCP-over-WebSocket). M2 swap
-  removed the pre-claude-code pairing/JWT machinery.
-- `plugin` — manifest + 8-registry materialization (Plan 15)
-- `uniffi-bridge` — FFI façade (Plan 16)
-- `test-harness` — contracts + properties + parity (Plan 17)
-- `platforms/posix-minimal` — M1 desktop demo host
-- `platforms/posix` — M2 production host for Linux + macOS + WSL2. Ships real
-  impls for `Sandbox`, `McpTransport` (stdio + sse + http + ws), `LspTransport`,
-  `SwarmBackend` (tmux + iTerm + InProcess), `FileSystem::watch` (notify +
-  debounce), `HttpTransport::stream_sse`, `ProcessRunner::spawn_background` +
-  `kill_tree`, `SecureStorage` (macOS Keychain via `security` CLI, plaintext
-  fallback on Linux).
-- `platforms/windows` — M2 production host for Windows 10 22H2+. `Sandbox` and
-  `SwarmBackend` return `Unsupported` (matches claude-code refusal logic);
-  `FileSystem::watch` uses `notify`'s `ReadDirectoryChangesW`. `SecureStorage`
-  remains plaintext (Credential Vault deferred).
-- `examples/cli-demo` — M1 end-to-end demo
+- `engine` — state machine, reducer, prompt assembly, session model + the
+  `settings/` tree (schema, 3-prefix env parser, 4-layer loader, merger, tracer).
+  (Renamed from `core` in M8-P2 — `core` collided with the sysroot crate.)
+- `traits` — platform abstraction traits, incl. the `Platform` aggregate and the
+  mobile/device callback traits (`CameraControl`, `VoiceRecorder`,
+  `SharingService`, `ComputerControl`)
+- `tool-api` / `skill-api` / `command-api` — the three plugin **abstraction**
+  crates (Tool/Skill/Command traits + registries + shared scaffolding). Kept
+  impl-free so the composition roots can assemble any subset.
+- `api-client` — Anthropic API + SSE + retry/rate-limit/betas
+- `permission` / `secret` / `cost` — security & cost foundations
+- `hooks` — lifecycle hook execution + registry
+- `memory` / `mcp` — retrieval + MCP registry/transport surface
+- `jsonrpc` — JSON-RPC 2.0 framing shared by MCP + LSP
+- `compaction` — 5-layer compactor
+- `agent` — subagent runtime
+- `tasks` / `coordinator` — background work + multi-agent
+- `sidequery` — side LLM + forked-agent infra
+- `outputstyles` — output-style registry
+- `session` / `filestate` / `msgqueue` — persistence + caching
+- `cron` — scheduled tasks
+- `sandbox` / `lsp` — execution support
+- `telemetry` / `telemetry-macros` — analytics bus + sinks + the compile-time
+  `tengu_event_audit!()` PII/shape gate
+- `anthropic-oauth` — OAuth + refresh driver
+- `bridge` — lockfile-based IDE bridge (MCP-over-WebSocket) + the M9 remote-drive
+  wire types (`bridge::wire`, re-exported at the crate root)
+- `plugin` — manifest + 8-registry materialization
+- `tui` — terminal UI (consumes `command-core` for the palette/dispatcher)
+- `test-harness` — contracts + properties + parity drivers
+- `tools` — **legacy** monolith aggregator (`register_all_builtin_tools`
+  delegates to the 14 `tool-*` crates). Backward-compat only; slated for removal.
+
+### Tool plugin crates (`tools/`)
+
+Each is an independent crate exposing `register_all(&mut ToolRegistry, ctx)`.
+Tools never depend on sibling tools, platforms, or apps.
+
+- Cross-platform (linked by both composition roots): `tool-file` `tool-task`
+  `tool-web` `tool-plan` `tool-meta` `tool-cron` `tool-ui` `tool-skill`
+- Desktop-only: `tool-shell` `tool-agent` `tool-mcp` `tool-lsp` `tool-team`
+  `tool-worktree`
+- Mobile-only: `tool-camera` `tool-voice` `tool-share`
+- Device-control (opt-in): `tool-computer-use` `tool-android-use` `tool-ios-use`
+
+### Skill plugin crates (`skills/`)
+
+- `skill-builtin` — `register_desktop()` / `register_mobile()` + bundled-template
+  loader (template tables empty in M8)
+
+### Slash-command plugin crates (`commands/`)
+
+- `command-core` — the 18 real core handlers + `register_all_builtin_commands` /
+  `register_core_batch_1` / `register_core_batch_2` (the locked 99-name surface)
+- `command-desktop` / `command-mobile` — per-platform `register()` (placeholders
+  in M8)
+
+### Platform trait implementations (`platforms/`)
+
+- `platform-common` — cross-platform shared infra (MCP transports)
+- `platform-posix-minimal` — minimal portable host (stub HTTP)
+- `platform-posix` — production Linux/macOS/WSL2 host (real Sandbox, MCP, LSP,
+  Swarm, watch, SSE, SecureStorage)
+- `platform-windows` — Windows host (Sandbox/Swarm `Unsupported`)
+- `platform-ios` / `platform-android` — mobile skeletons implementing `Platform`,
+  injecting the Swift/Kotlin capability callbacks (M8 reuses posix-minimal's
+  portable handles; M9 specializes)
+
+### Composition roots & binaries (`apps/`)
+
+Leaves of the dependency graph — nothing depends on them.
+
+- `engine-desktop` / `engine-mobile` — the two composition libraries (above)
+- `cli` — the `lingxi-cli` binary; delegates registry assembly to `engine-desktop`
+- `bridge-server` — remote-drive server skeleton (M9 grows it)
+- `ios-framework` / `android-aar` — UniFFI packager crates wrapping
+  `engine-mobile`; ship Swift/Kotlin callback-interface skeletons (the `uniffi`
+  dep + bindgen land in M9)
+- `examples/cli-demo` — end-to-end demo
+
+### Tool → crate index
+
+| Tool name(s) | Crate |
+|---|---|
+| `Read` `Write` `Edit` `Glob` `Grep` `NotebookEdit` | `tool-file` |
+| `Bash` `PowerShell` `REPL` | `tool-shell` |
+| `TaskCreate` `TaskGet` `TaskList` `TaskUpdate` `TaskStop` `TaskOutput` `TodoWrite` | `tool-task` |
+| `WebFetch` `WebSearch` | `tool-web` |
+| `EnterPlanMode` `ExitPlanMode` | `tool-plan` |
+| `Config` `ToolSearch` | `tool-meta` |
+| `ScheduleCron` `RemoteTrigger` | `tool-cron` |
+| `AskUserQuestion` `Brief` `SendMessage` `Sleep` `SyntheticOutput` | `tool-ui` |
+| `Skill` | `tool-skill` |
+| `Agent` | `tool-agent` |
+| `MCP` `McpAuth` `ListMcpResources` `ReadMcpResource` | `tool-mcp` |
+| `LSP` | `tool-lsp` |
+| `TeamCreate` `TeamDelete` | `tool-team` |
+| `EnterWorktree` `ExitWorktree` | `tool-worktree` |
+| `camera` | `tool-camera` |
+| `voice` | `tool-voice` |
+| `share` | `tool-share` |
+| `computer` | `tool-computer-use` |
+| `android_use` | `tool-android-use` |
+| `ios_use` | `tool-ios-use` |
 
 ## Key flows
 
@@ -127,7 +189,7 @@ The following identifiers, error strings, and file paths are part of the
 behavioral contract with claude-code. Changing any of them is a breaking
 change for managed-policy customers and for users restoring cross-version
 state. They are covered by parity fixtures in
-`crates/test-harness/src/parity/fixtures/`.
+`test-harness/src/parity/fixtures/`.
 
 ### Wire identifiers
 | Identifier | Value | Rationale |
@@ -188,7 +250,7 @@ state. They are covered by parity fixtures in
 ## claude-code parity guarantees (v0.4.0 additions)
 
 M3 locks the following identifiers/paths/numerics on top of v0.3.0.
-Coverage in `crates/test-harness/src/parity/fixtures/`: `settings_merge.json`
+Coverage in `test-harness/src/parity/fixtures/`: `settings_merge.json`
 (M3-01), `memory_loading.json` + `memory_relevance.json` (M3-02),
 `messages_create.json` + `betas.json` (M3-03), `oauth_pkce_refresh.json`
 (M3-04), `cost_events.json` (M3-05), `tengu_events.json` (M3-06),

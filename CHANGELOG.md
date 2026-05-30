@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.9.0] — M8 Composable Engine + Mobile
+
+Restructured the workspace from a `crates/`-wrapped, `lingxi-`-prefixed,
+tool-monolith layout into a **flat, composition-root architecture** where the
+same core agent logic assembles into separate desktop and mobile builds by
+choosing a different set of capability crates — not by `#[cfg(target_os)]`
+scattered through the code.
+
+Highlights:
+
+- **Repo + naming:** `lingxi-core/` → `lingxi-code/`; dropped the `crates/`
+  wrapper (all crates flat at root) and the `lingxi-` crate-name prefix
+  (`protocol`, `traits`, …). `core` → `engine` (avoids the sysroot collision).
+- **Plugin abstractions:** extracted `tool-api`, `skill-api`, `command-api`;
+  split the tool monolith into 14 desktop `tool-*` crates, `skills/` into
+  `skill-api` + `skill-builtin`, and `commands/` into `command-api` +
+  `command-core/desktop/mobile`. The byte-locked `/help` golden + 99-name
+  surface are preserved.
+- **Composition roots:** `apps/engine-desktop` (40 tools) and
+  `apps/engine-mobile` (cross-platform subset + camera/voice/share) own all
+  registry assembly; the `cli` binary delegates to `engine-desktop` and now
+  ships real tools (previously an empty registry).
+- **Mobile:** `traits::Platform` aggregate + device-capability callback traits
+  (`CameraControl`/`VoiceRecorder`/`SharingService`/`ComputerControl`);
+  `platform-ios`/`platform-android` skeletons; `tool-camera/voice/share` +
+  `tool-computer-use/android-use/ios-use`; `apps/ios-framework`/`android-aar`
+  UniFFI packager crates with Swift/Kotlin callback-interface skeletons.
+- **Bridge:** `bridge::wire` remote-drive protocol types + `apps/bridge-server`
+  skeleton.
+- **Guard rails:** `scripts/check-deps.sh` enforces the §8.1 dependency graph
+  (tool independence, platform isolation, apps-are-leaves, API-crate purity);
+  `deny.toml` for supply-chain hygiene.
+
+**BREAKING:** every crate was renamed/moved. Library consumers must update
+imports (`lingxi_core` → `engine`, `lingxi_protocol` → `protocol`, `tools::*`
+runtime types → `tool_api::*`, `commands::*` → `command_api`/`command_core`,
+`skills::*` → `skill_api`). The `lingxi-cli` *binary* name is unchanged.
+
+UniFFI binding generation (the `uniffi` crate dep + `#[uniffi::export]` +
+`uniffi-bindgen`) and real Swift/Kotlin/desktop-automation capability impls are
+deferred to M9; M8 ships the structure, contracts, and host-verified skeletons.
+
 ## [0.8.0] — M7 TUI Surface
 
 The full single-user TUI surface. Builds on the v0.7.0 iocraft foundation with

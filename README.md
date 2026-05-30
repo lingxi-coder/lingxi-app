@@ -30,11 +30,13 @@ events/telemetry, 238 events — remains intact underneath.
 ```bash
 cargo build --workspace --release
 
-# Demo against the production posix platform (real HTTP/SSE, real MCP,
-# real sandbox, real Keychain on macOS).
-ANTHROPIC_API_KEY=sk-ant-... cargo run --bin lingxi-demo -- \
-    --model claude-opus-4-7 \
-    --platform posix
+# Run the CLI. Tool/skill/command assembly is owned by the `engine-desktop`
+# composition root (M8); the `cli` crate just hands it the platform + config.
+ANTHROPIC_API_KEY=sk-ant-... cargo run -p cli -- \
+    --model claude-opus-4-7
+
+# The minimal end-to-end demo (effect-only path, no live API call):
+cargo run -p cli-demo
 ```
 
 ## Platform support
@@ -76,7 +78,8 @@ setup notes + the "M3 engine subsystems" section.
 | Live assistant text → markdown/syntect (#211) | Plain text (markdown wired only into secondary renderers) | M8 |
 | Advanced engine wiring (real `/compact` summary, CostTracker→AnalyticsBus, MCP auto-connect, OAuth PKCE, per-model cost) | Deferred | M8 |
 | Team / Coordinator / Swarm renderers, voice, mouse mode, inline image display | Out of scope | M8 |
-| Mobile real-device binding | Out of scope (compile-only gates remain) | — |
+| Composable engine (`engine-desktop` / `engine-mobile` composition roots, ~73 flat crates, §8.1 dep gate) | Complete | M8 / v0.9.0 |
+| Mobile platform + UniFFI callbacks (`platform-ios/android`, `tool-camera/voice/share`, `ios-framework`/`android-aar` + Swift/Kotlin skeletons) | Skeleton only — full bring-up in M9 | M8 / v0.9.0 |
 
 ## Architecture
 

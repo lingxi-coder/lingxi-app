@@ -22,8 +22,6 @@ pub mod sleep;
 pub mod synthetic_output;
 pub mod team;
 pub mod tool_search;
-pub mod web_fetch;
-pub mod web_search;
 pub mod worktree;
 
 // M8-P5: shared test fixture moved to tool-api (feature "test-support").
@@ -50,8 +48,6 @@ pub use sleep::SleepTool;
 pub use synthetic_output::SyntheticOutputTool;
 pub use team::{TeamCreateTool, TeamDeleteTool};
 pub use tool_search::ToolSearchTool;
-pub use web_fetch::WebFetchTool;
-pub use web_search::WebSearchTool;
 pub use worktree::{EnterWorktreeTool, ExitWorktreeTool};
 
 // M8-P5: BuiltinToolContext moved to tool-api so per-category tool crates
@@ -74,6 +70,8 @@ pub use tool_task::{
     TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
     TodoWriteTool,
 };
+pub use tool_web::{web_fetch, web_search};
+pub use tool_web::{WebFetchTool, WebSearchTool};
 
 /// Register every M4-01 foundation tool against `registry`.
 ///
@@ -91,8 +89,7 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     tool_shell::register_all(registry, ctx.clone());
     registry.register_builtin(Arc::new(SleepTool::new(ctx.clone())));
     // M4-03 — web tools.
-    registry.register_builtin(Arc::new(WebFetchTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(WebSearchTool::new(ctx.clone())));
+    tool_web::register_all(registry, ctx.clone());
     // M4-04 — workflow tools.
     registry.register_builtin(Arc::new(EnterPlanModeTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(ExitPlanModeTool::new(ctx.clone())));

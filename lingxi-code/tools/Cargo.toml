@@ -10,6 +10,7 @@ tool-api = { path = "../tool-api" }
 tool-file = { path = "file" }
 tool-shell = { path = "shell" }
 tool-task = { path = "task" }
+tool-web = { path = "web" }
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }

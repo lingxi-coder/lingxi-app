@@ -3647,6 +3647,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-web"
+version = "0.8.0"
+dependencies = [
+ "api-client",
+ "async-trait",
+ "once_cell",
+ "permission",
+ "protocol",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "test-harness",
+ "thiserror 2.0.18",
+ "tokio",
+ "tool-api",
+ "traits",
+ "url",
+]
+
+[[package]]
 name = "tools"
 version = "0.8.0"
 dependencies = [
@@ -3682,6 +3702,7 @@ dependencies = [
  "tool-file",
  "tool-shell",
  "tool-task",
+ "tool-web",
  "tracing",
  "traits",
  "url",

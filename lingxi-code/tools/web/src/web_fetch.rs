@@ -11,13 +11,6 @@
 //! - HTTP error format: `"WebFetch: HTTP {status} from {url}"`
 //! - DNS error format: `"WebFetch: cannot resolve {host}"`
 
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
-};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -30,6 +23,13 @@ use std::time::{Duration, Instant};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{WEB_FETCH_COMPLETED, WEB_FETCH_FAILED, WEB_FETCH_STARTED};
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
+    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
+    ToolStaticContext,
+};
+use tool_api::BuiltinToolContext;
 use traits::http::HttpError;
 
 /// Maximum response-body size before truncation (5 MB). Spec §7 lock.
@@ -244,7 +244,7 @@ impl Tool for WebFetchTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         true
@@ -512,11 +512,11 @@ mod tests {
 
     // ---- async impl Tool tests using MockHttpTransport ---------------------
 
-    use crate::builtin::test_support::{fresh_ctx, fresh_tx};
     use std::sync::Arc;
     use telemetry::sinks::InMemorySink;
     use telemetry::AnalyticsBus;
     use test_harness::mocks::{MockHttpTransport, ScriptedResponse};
+    use tool_api::test_support::{fresh_ctx, fresh_tx};
     use traits::http::HttpTransport;
 
     fn make_web_ctx() -> (
@@ -527,8 +527,8 @@ mod tests {
         let bus = Arc::new(AnalyticsBus::new());
         let sink = Arc::new(InMemorySink::default());
         let http = Arc::new(MockHttpTransport::new());
-        let mut ctx = crate::builtin::test_support::ctx_for_file_tools(
-            crate::builtin::test_support::make_dummy_fs(),
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
             bus,
             vec![std::path::PathBuf::from("/tmp")],
         );

@@ -9,14 +9,7 @@
 //! - `WEB_SEARCH_DEFAULT_MAX_TOKENS = 4096`
 //! - `anthropic-beta: web-search-2025-03-05` (via `api_client::betas::WEB_SEARCH`)
 
-use crate::builtin::web_fetch::WEBFETCH_USER_AGENT_PREFIX;
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
-};
+use crate::web_fetch::WEBFETCH_USER_AGENT_PREFIX;
 use api_client::betas::WEB_SEARCH as WEB_SEARCH_BETA;
 use api_client::types::{ContentBlockApi, MessageResponse};
 use async_trait::async_trait;
@@ -30,6 +23,13 @@ use std::time::Instant;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{WEB_SEARCH_COMPLETED, WEB_SEARCH_FAILED, WEB_SEARCH_STARTED};
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
+    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
+    ToolStaticContext,
+};
+use tool_api::BuiltinToolContext;
 use traits::http::HttpError;
 
 /// Wire `type` field on the WebSearch tool block. Spec §7 lock; matches
@@ -260,7 +260,7 @@ impl Tool for WebSearchTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         true
@@ -290,12 +290,12 @@ impl Tool for WebSearchTool {
         &self,
         input: &Value,
         _ctx: &ToolUseContext,
-    ) -> Result<(), crate::tool_trait::ValidationError> {
+    ) -> Result<(), tool_api::tool_trait::ValidationError> {
         let q = input.get("query").and_then(Value::as_str).ok_or_else(|| {
-            crate::tool_trait::ValidationError("missing required field: query".into())
+            tool_api::tool_trait::ValidationError("missing required field: query".into())
         })?;
         if q.chars().count() < 2 {
-            return Err(crate::tool_trait::ValidationError(
+            return Err(tool_api::tool_trait::ValidationError(
                 "query must be at least 2 characters".into(),
             ));
         }
@@ -551,12 +551,12 @@ mod tests {
 
     // ---- async impl Tool tests using MockHttpTransport ---------------------
 
-    use crate::builtin::test_support::{fresh_ctx, fresh_tx};
     use api_client::AnthropicProvider;
     use std::sync::Arc;
     use telemetry::sinks::InMemorySink;
     use telemetry::AnalyticsBus;
     use test_harness::mocks::{MockHttpTransport, ScriptedResponse};
+    use tool_api::test_support::{fresh_ctx, fresh_tx};
     use traits::http::HttpTransport;
 
     fn make_web_ctx() -> (
@@ -567,8 +567,8 @@ mod tests {
         let bus = Arc::new(AnalyticsBus::new());
         let sink = Arc::new(InMemorySink::default());
         let http = Arc::new(MockHttpTransport::new());
-        let mut ctx = crate::builtin::test_support::ctx_for_file_tools(
-            crate::builtin::test_support::make_dummy_fs(),
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
             bus,
             vec![std::path::PathBuf::from("/tmp")],
         );

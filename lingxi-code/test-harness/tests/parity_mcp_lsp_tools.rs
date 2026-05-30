@@ -38,20 +38,20 @@ struct WireIdentifiers {
 #[test]
 fn tool_names_match_production_constants() {
     let fx: Fixture = load_fixture("mcp_lsp_tools");
-    assert_eq!(fx.tool_names.mcp_tool, tools::builtin::mcp::MCP_TOOL_NAME);
+    assert_eq!(fx.tool_names.mcp_tool, tool_mcp::mcp_tool::MCP_TOOL_NAME);
     assert_eq!(
         fx.tool_names.mcp_auth_tool,
-        tools::builtin::mcp::MCP_AUTH_TOOL_NAME
+        tool_mcp::mcp_tool::MCP_AUTH_TOOL_NAME
     );
     assert_eq!(
         fx.tool_names.list_mcp_resources_tool,
-        tools::builtin::mcp::LIST_MCP_RESOURCES_TOOL_NAME
+        tool_mcp::mcp_tool::LIST_MCP_RESOURCES_TOOL_NAME
     );
     assert_eq!(
         fx.tool_names.read_mcp_resource_tool,
-        tools::builtin::mcp::READ_MCP_RESOURCE_TOOL_NAME
+        tool_mcp::mcp_tool::READ_MCP_RESOURCE_TOOL_NAME
     );
-    assert_eq!(fx.tool_names.lsp_tool, tools::builtin::lsp::LSP_TOOL_NAME);
+    assert_eq!(fx.tool_names.lsp_tool, tool_lsp::lsp_tool::LSP_TOOL_NAME);
 }
 
 #[test]
@@ -59,11 +59,11 @@ fn mcp_wire_identifiers_match() {
     let fx: Fixture = load_fixture("mcp_lsp_tools");
     assert_eq!(
         fx.wire_identifiers.mcp_full_name_prefix,
-        tools::builtin::mcp::MCP_TOOL_FULL_NAME_PREFIX
+        tool_mcp::mcp_tool::MCP_TOOL_FULL_NAME_PREFIX
     );
     assert_eq!(
         fx.wire_identifiers.mcp_full_name_separator,
-        tools::builtin::mcp::MCP_TOOL_FULL_NAME_SEPARATOR
+        tool_mcp::mcp_tool::MCP_TOOL_FULL_NAME_SEPARATOR
     );
 }
 
@@ -72,11 +72,11 @@ fn lsp_wire_identifiers_match() {
     let fx: Fixture = load_fixture("mcp_lsp_tools");
     assert_eq!(
         fx.wire_identifiers.lsp_position_error,
-        tools::builtin::lsp::LSP_POSITION_ERROR
+        tool_lsp::lsp_tool::LSP_POSITION_ERROR
     );
     assert_eq!(
         fx.wire_identifiers.lsp_operations_locked,
-        tools::builtin::lsp::LSP_OPERATIONS_LOCKED.to_vec()
+        tool_lsp::lsp_tool::LSP_OPERATIONS_LOCKED.to_vec()
     );
 }
 

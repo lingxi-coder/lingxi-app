@@ -17,35 +17,35 @@ fn tool_names_match_production_constants() {
     let n = &fx["tool_names"];
     assert_eq!(
         n["ask_user_question"].as_str().unwrap(),
-        tools::builtin::ask_user_question::ASK_USER_QUESTION_TOOL_NAME
+        tool_ui::ask_user_question::ASK_USER_QUESTION_TOOL_NAME
     );
     assert_eq!(
         n["brief"].as_str().unwrap(),
-        tools::builtin::brief::BRIEF_TOOL_NAME
+        tool_ui::brief::BRIEF_TOOL_NAME
     );
     assert_eq!(
         n["config"].as_str().unwrap(),
-        tools::builtin::config::CONFIG_TOOL_NAME
+        tool_meta::config::CONFIG_TOOL_NAME
     );
     assert_eq!(
         n["skill"].as_str().unwrap(),
-        tools::builtin::skill::SKILL_TOOL_NAME
+        tool_skill::skill::SKILL_TOOL_NAME
     );
     assert_eq!(
         n["schedule_cron"].as_str().unwrap(),
-        tools::builtin::schedule_cron::SCHEDULE_CRON_TOOL_NAME
+        tool_cron::schedule_cron::SCHEDULE_CRON_TOOL_NAME
     );
     assert_eq!(
         n["tool_search"].as_str().unwrap(),
-        tools::builtin::tool_search::TOOL_SEARCH_TOOL_NAME
+        tool_meta::tool_search::TOOL_SEARCH_TOOL_NAME
     );
     assert_eq!(
         n["remote_trigger"].as_str().unwrap(),
-        tools::builtin::remote_trigger::REMOTE_TRIGGER_TOOL_NAME
+        tool_cron::remote_trigger::REMOTE_TRIGGER_TOOL_NAME
     );
     assert_eq!(
         n["synthetic_output"].as_str().unwrap(),
-        tools::builtin::synthetic_output::SYNTHETIC_OUTPUT_TOOL_NAME
+        tool_ui::synthetic_output::SYNTHETIC_OUTPUT_TOOL_NAME
     );
 }
 
@@ -54,15 +54,15 @@ fn wire_identifiers_match_production_constants() {
     let fx = fx();
     let w = &fx["wire_identifiers"];
 
-    use tools::builtin::{
-        ask_user_question::{MAX_ASK_LABEL_LEN, MAX_ASK_OPTIONS, MAX_ASK_QUESTION_LEN},
-        brief::{BRIEF_FILE_SUFFIX, BRIEF_SUBDIR, BRIEF_TASK_ID_PREFIX},
-        config::{CONFIG_FIELDS_ALLOWED, CONFIG_FILE_NAME, CONFIG_SUBDIR},
-        remote_trigger::{REMOTE_TRIGGER_CREDENTIALS_FILE, REMOTE_TRIGGER_SUBDIR},
-        schedule_cron::{CRON_FILE_SUFFIX, CRON_SUBDIR, CRON_TASK_ID_PREFIX, SIX_FIELD_REJECTION},
-        skill::MAX_SKILL_DESCRIPTOR_LEN,
-        tool_search::TOOL_SEARCH_MAX_RESULTS,
+    use tool_cron::remote_trigger::{REMOTE_TRIGGER_CREDENTIALS_FILE, REMOTE_TRIGGER_SUBDIR};
+    use tool_cron::schedule_cron::{
+        CRON_FILE_SUFFIX, CRON_SUBDIR, CRON_TASK_ID_PREFIX, SIX_FIELD_REJECTION,
     };
+    use tool_meta::config::{CONFIG_FIELDS_ALLOWED, CONFIG_FILE_NAME, CONFIG_SUBDIR};
+    use tool_meta::tool_search::TOOL_SEARCH_MAX_RESULTS;
+    use tool_skill::skill::MAX_SKILL_DESCRIPTOR_LEN;
+    use tool_ui::ask_user_question::{MAX_ASK_LABEL_LEN, MAX_ASK_OPTIONS, MAX_ASK_QUESTION_LEN};
+    use tool_ui::brief::{BRIEF_FILE_SUFFIX, BRIEF_SUBDIR, BRIEF_TASK_ID_PREFIX};
 
     assert_eq!(
         w["max_ask_options"].as_u64().unwrap(),

@@ -55,45 +55,36 @@ fn fx() -> Fixture {
 #[test]
 fn agent_task_tool_names_match_production_constants() {
     let f = fx();
-    assert_eq!(f.tool_names.agent, tools::builtin::agent::AGENT_TOOL_NAME);
+    assert_eq!(f.tool_names.agent, tool_agent::agent::AGENT_TOOL_NAME);
     assert_eq!(
         f.tool_names.agent_legacy_alias,
-        tools::builtin::agent::LEGACY_AGENT_TOOL_NAME
+        tool_agent::agent::LEGACY_AGENT_TOOL_NAME
     );
     assert_eq!(
         f.tool_names.send_message,
-        tools::builtin::send_message::SEND_MESSAGE_TOOL_NAME
+        tool_ui::send_message::SEND_MESSAGE_TOOL_NAME
     );
     assert_eq!(
         f.tool_names.task_create,
-        tools::builtin::task::TASK_CREATE_TOOL_NAME
+        tool_task::task::TASK_CREATE_TOOL_NAME
     );
-    assert_eq!(
-        f.tool_names.task_get,
-        tools::builtin::task::TASK_GET_TOOL_NAME
-    );
-    assert_eq!(
-        f.tool_names.task_list,
-        tools::builtin::task::TASK_LIST_TOOL_NAME
-    );
+    assert_eq!(f.tool_names.task_get, tool_task::task::TASK_GET_TOOL_NAME);
+    assert_eq!(f.tool_names.task_list, tool_task::task::TASK_LIST_TOOL_NAME);
     assert_eq!(
         f.tool_names.task_update,
-        tools::builtin::task::TASK_UPDATE_TOOL_NAME
+        tool_task::task::TASK_UPDATE_TOOL_NAME
     );
-    assert_eq!(
-        f.tool_names.task_stop,
-        tools::builtin::task::TASK_STOP_TOOL_NAME
-    );
+    assert_eq!(f.tool_names.task_stop, tool_task::task::TASK_STOP_TOOL_NAME);
     assert_eq!(
         f.tool_names.task_output,
-        tools::builtin::task::TASK_OUTPUT_TOOL_NAME
+        tool_task::task::TASK_OUTPUT_TOOL_NAME
     );
 }
 
 #[test]
 fn six_builtin_subagent_types_match_production() {
     let f = fx();
-    let prod: Vec<String> = tools::builtin::agent::BUILTIN_SUBAGENT_TYPES
+    let prod: Vec<String> = tool_agent::agent::BUILTIN_SUBAGENT_TYPES
         .iter()
         .map(|s| (*s).to_string())
         .collect();
@@ -106,7 +97,7 @@ fn send_message_claim_window_matches_production() {
     let f = fx();
     assert_eq!(f.send_message_claim_window_secs, 30);
     assert_eq!(
-        tools::builtin::send_message::SEND_MESSAGE_CLAIM_WINDOW.as_secs(),
+        tool_ui::send_message::SEND_MESSAGE_CLAIM_WINDOW.as_secs(),
         f.send_message_claim_window_secs
     );
 }
@@ -123,7 +114,7 @@ fn task_id_regex_matches_validate_task_id_acceptance() {
             "fixture regex must accept {id} (prefix={prefix})"
         );
         assert!(
-            tools::builtin::task::validate_task_id(&id).is_ok(),
+            tool_task::task::validate_task_id(&id).is_ok(),
             "validate_task_id must accept {id}"
         );
     }
@@ -136,7 +127,7 @@ fn task_id_regex_matches_validate_task_id_acceptance() {
 #[test]
 fn task_types_match_production() {
     let f = fx();
-    let prod: Vec<String> = tools::builtin::task::TASK_TYPES
+    let prod: Vec<String> = tool_task::task::TASK_TYPES
         .iter()
         .map(|s| (*s).to_string())
         .collect();
@@ -146,7 +137,7 @@ fn task_types_match_production() {
 #[test]
 fn task_status_values_match_production() {
     let f = fx();
-    let prod: Vec<String> = tools::builtin::task::TASK_STATUSES
+    let prod: Vec<String> = tool_task::task::TASK_STATUSES
         .iter()
         .map(|s| (*s).to_string())
         .collect();
@@ -169,7 +160,7 @@ fn telemetry_events_present_in_tengu_tool_names_array() {
 fn budget_denied_byte_lock_matches_m3_05_format() {
     let f = fx();
     // Production formatter mirrors `cost/src/budget.rs` test fixture string.
-    let built = tools::builtin::agent::format_budget_denied(150_750_000_000);
+    let built = tool_agent::agent::format_budget_denied(150_750_000_000);
     assert_eq!(built, f.constants_lock.m3_05_byte_locked_budget_example);
     assert_eq!(built, "Budget exceeded ($150.75); stopped.");
 }
@@ -179,15 +170,15 @@ fn constants_lock_block_matches_production() {
     let f = fx();
     assert_eq!(
         f.constants_lock.agent_tool_name,
-        tools::builtin::agent::AGENT_TOOL_NAME
+        tool_agent::agent::AGENT_TOOL_NAME
     );
     assert_eq!(
         f.constants_lock.legacy_agent_tool_name,
-        tools::builtin::agent::LEGACY_AGENT_TOOL_NAME
+        tool_agent::agent::LEGACY_AGENT_TOOL_NAME
     );
     assert_eq!(
         f.constants_lock.send_message_tool_name,
-        tools::builtin::send_message::SEND_MESSAGE_TOOL_NAME
+        tool_ui::send_message::SEND_MESSAGE_TOOL_NAME
     );
     assert_eq!(
         f.constants_lock.send_message_claim_window_rust,
@@ -195,6 +186,6 @@ fn constants_lock_block_matches_production() {
     );
     assert_eq!(
         f.constants_lock.subagent_budget_denied_prefix,
-        tools::builtin::agent::SUBAGENT_BUDGET_DENIED_PREFIX
+        tool_agent::agent::SUBAGENT_BUDGET_DENIED_PREFIX
     );
 }

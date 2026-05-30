@@ -18,7 +18,14 @@ tracing.workspace = true
 regex = "1"
 
 [dev-dependencies]
-tools = { path = "../tools" }
+# M8-P7-final: the tool_name_parity_test reads TOOL_NAME constants directly from
+# the per-category tool crates (the `tools` monolith is dissolved). dev-dep
+# cycles (these crates dep `permission`) are allowed by cargo.
+tool-file = { path = "../tools/file" }
+tool-shell = { path = "../tools/shell" }
+tool-web = { path = "../tools/web" }
+tool-agent = { path = "../tools/agent" }
+tool-mcp = { path = "../tools/mcp" }
 tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "macros"] }
 
 [lints]

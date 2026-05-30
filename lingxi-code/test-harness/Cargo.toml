@@ -64,9 +64,23 @@ filetime = "0.2"
 # `ClaudeAiOAuthConfig::default_with_port` + `OAuthError` Display strings +
 # `proactive_lead` formula against locked wire identifiers. Dev-only.
 anthropic-oauth = { path = "../anthropic-oauth" }
-# Used by the M4-01 parity driver (parity_file_tools) to assert fixture
-# constants match production byte-for-byte. Dev-only.
-tools = { path = "../tools" }
+# M8-P7-final: the `tools` monolith is dissolved; parity drivers now assert
+# fixture constants directly against the per-category tool crates + tool-api.
+tool-api = { path = "../tool-api" }
+tool-file = { path = "../tools/file" }
+tool-shell = { path = "../tools/shell" }
+tool-task = { path = "../tools/task" }
+tool-web = { path = "../tools/web" }
+tool-plan = { path = "../tools/plan" }
+tool-meta = { path = "../tools/meta" }
+tool-cron = { path = "../tools/cron" }
+tool-ui = { path = "../tools/ui" }
+tool-skill = { path = "../tools/skill" }
+tool-agent = { path = "../tools/agent" }
+tool-mcp = { path = "../tools/mcp" }
+tool-lsp = { path = "../tools/lsp" }
+tool-team = { path = "../tools/team" }
+tool-worktree = { path = "../tools/worktree" }
 # Used by the M4-05 parity driver (parity_agent_task_tools) to validate the
 # task-id regex against fresh-generated 9-char [bartwmd][0-9a-z]{8} ids.
 regex = "1"

@@ -85,7 +85,7 @@ fn file_tools_fixture_matches_production_constants() {
 
     assert_eq!(
         fx.read_size_limit.value,
-        tools::builtin::file_read::MAX_FILE_READ_SIZE
+        tool_file::read::MAX_FILE_READ_SIZE
     );
     assert_eq!(
         fx.read_size_limit.error_template,
@@ -94,7 +94,7 @@ fn file_tools_fixture_matches_production_constants() {
 
     assert_eq!(
         fx.binary_detection.scan_window_bytes,
-        tools::shared::file_kit::NUL_SCAN_WINDOW
+        tool_file::shared::NUL_SCAN_WINDOW
     );
     assert_eq!(
         fx.binary_detection.error_template,
@@ -107,13 +107,13 @@ fn file_tools_fixture_matches_production_constants() {
     );
     assert_eq!(
         fx.path_blocked_event_name.value,
-        tools::shared::path_validation::PATH_BLOCKED_EVENT
+        tool_api::util::path_validation::PATH_BLOCKED_EVENT
     );
     assert_eq!(fx.path_blocked_event_name.value, "tengu_file_path_blocked");
 
     assert_eq!(
         fx.patch_truncation_suffix.template,
-        tools::builtin::file_edit::PATCH_TRUNCATION_SUFFIX_TEMPLATE
+        tool_file::edit::PATCH_TRUNCATION_SUFFIX_TEMPLATE
     );
     assert_eq!(
         fx.patch_truncation_suffix.template,
@@ -122,24 +122,24 @@ fn file_tools_fixture_matches_production_constants() {
 
     assert_eq!(
         fx.output_truncation.max_length,
-        tools::shared::output_truncation::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     );
     assert_eq!(fx.output_truncation.max_length, 30_000);
     assert_eq!(
         fx.output_truncation.suffix,
-        tools::shared::output_truncation::TRUNCATION_SUFFIX
+        tool_api::util::output_truncation::TRUNCATION_SUFFIX
     );
     assert_eq!(
         fx.output_truncation.suffix,
         "\n\n[Output truncated due to length]"
     );
 
-    assert_eq!(fx.glob_cap.value, tools::builtin::glob::MAX_GLOB_MATCHES);
+    assert_eq!(fx.glob_cap.value, tool_file::glob::MAX_GLOB_MATCHES);
     assert_eq!(fx.glob_cap.value, 100);
 
     assert_eq!(
         fx.grep_per_file_cap.value,
-        tools::builtin::grep::GREP_PER_FILE_CAP
+        tool_file::grep::GREP_PER_FILE_CAP
     );
     assert_eq!(fx.grep_per_file_cap.value, 100);
 

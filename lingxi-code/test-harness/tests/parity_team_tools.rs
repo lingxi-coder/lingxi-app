@@ -16,11 +16,11 @@ fn team_tool_names_match_production_constants() {
     let fx = fx();
     assert_eq!(
         fx["tool_names"]["team_create"].as_str().unwrap(),
-        tools::builtin::team::TEAM_CREATE_TOOL_NAME
+        tool_team::team::TEAM_CREATE_TOOL_NAME
     );
     assert_eq!(
         fx["tool_names"]["team_delete"].as_str().unwrap(),
-        tools::builtin::team::TEAM_DELETE_TOOL_NAME
+        tool_team::team::TEAM_DELETE_TOOL_NAME
     );
 }
 
@@ -34,7 +34,7 @@ fn wire_identifiers_match_production_constants() {
     // local mirror AND the upstream M3-02 symbol equal the fixture literal.
     assert_eq!(
         w["team_mem_subdir"].as_str().unwrap(),
-        tools::builtin::team::TEAM_MEM_SUBDIR
+        tool_team::team::TEAM_MEM_SUBDIR
     );
     assert_eq!(
         w["team_mem_subdir"].as_str().unwrap(),
@@ -42,25 +42,25 @@ fn wire_identifiers_match_production_constants() {
     );
     // And the two mirrors must agree with each other.
     assert_eq!(
-        tools::builtin::team::TEAM_MEM_SUBDIR,
+        tool_team::team::TEAM_MEM_SUBDIR,
         memory::memdir::paths::TEAM_MEM_SUBDIR
     );
 
     assert_eq!(
         w["team_config_filename"].as_str().unwrap(),
-        tools::builtin::team::TEAM_CONFIG_FILENAME
+        tool_team::team::TEAM_CONFIG_FILENAME
     );
     assert_eq!(
         w["default_team_name"].as_str().unwrap(),
-        tools::builtin::team::DEFAULT_TEAM_NAME
+        tool_team::team::DEFAULT_TEAM_NAME
     );
     assert_eq!(
         w["max_team_name_len"].as_u64().unwrap(),
-        tools::builtin::team::MAX_TEAM_NAME_LEN as u64
+        tool_team::team::MAX_TEAM_NAME_LEN as u64
     );
     assert_eq!(
         w["team_name_pattern_desc"].as_str().unwrap(),
-        tools::builtin::team::TEAM_NAME_PATTERN_DESC
+        tool_team::team::TEAM_NAME_PATTERN_DESC
     );
 }
 
@@ -109,7 +109,7 @@ fn team_dir_template_matches_resolve_team_dir() {
     let tmpl = fx["team_dir_template"].as_str().unwrap();
     assert_eq!(tmpl, "~/.claude/team-mem/<team_name>/");
     let home = std::path::PathBuf::from("/tmp/parity-home");
-    let dir = tools::builtin::team::resolve_team_dir(&home, "example");
+    let dir = tool_team::team::resolve_team_dir(&home, "example");
     assert_eq!(
         dir,
         std::path::PathBuf::from("/tmp/parity-home/.claude/team-mem/example")
@@ -156,27 +156,27 @@ fn constants_lock_block_mirrors_production() {
     let c = &fx["constants_lock"];
     assert_eq!(
         c["TEAM_CREATE_TOOL_NAME"].as_str().unwrap(),
-        tools::builtin::team::TEAM_CREATE_TOOL_NAME
+        tool_team::team::TEAM_CREATE_TOOL_NAME
     );
     assert_eq!(
         c["TEAM_DELETE_TOOL_NAME"].as_str().unwrap(),
-        tools::builtin::team::TEAM_DELETE_TOOL_NAME
+        tool_team::team::TEAM_DELETE_TOOL_NAME
     );
     assert_eq!(
         c["DEFAULT_TEAM_NAME"].as_str().unwrap(),
-        tools::builtin::team::DEFAULT_TEAM_NAME
+        tool_team::team::DEFAULT_TEAM_NAME
     );
     assert_eq!(
         c["TEAM_CONFIG_FILENAME"].as_str().unwrap(),
-        tools::builtin::team::TEAM_CONFIG_FILENAME
+        tool_team::team::TEAM_CONFIG_FILENAME
     );
     assert_eq!(
         c["MAX_TEAM_NAME_LEN"].as_u64().unwrap(),
-        tools::builtin::team::MAX_TEAM_NAME_LEN as u64
+        tool_team::team::MAX_TEAM_NAME_LEN as u64
     );
     assert_eq!(
         c["TEAM_NAME_PATTERN_DESC"].as_str().unwrap(),
-        tools::builtin::team::TEAM_NAME_PATTERN_DESC
+        tool_team::team::TEAM_NAME_PATTERN_DESC
     );
     assert_eq!(
         c["M3_02_TEAM_MEM_SUBDIR"].as_str().unwrap(),

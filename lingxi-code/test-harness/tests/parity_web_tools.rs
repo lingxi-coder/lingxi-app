@@ -15,11 +15,11 @@ use telemetry::tengu::tool::{
     WEB_SEARCH_FAILED, WEB_SEARCH_STARTED,
 };
 use test_harness::parity::load_fixture;
-use tools::builtin::web_fetch::{
+use tool_web::web_fetch::{
     fmt_dns_error, fmt_http_error, WEBFETCH_ALLOWED_SCHEMES, WEBFETCH_MAX_BYTES, WEBFETCH_TIMEOUT,
     WEBFETCH_TRUNCATION_SUFFIX, WEBFETCH_USER_AGENT_PREFIX,
 };
-use tools::builtin::web_search::{
+use tool_web::web_search::{
     WEB_SEARCH_DEFAULT_MAX_TOKENS, WEB_SEARCH_MAX_USES, WEB_SEARCH_TOOL_BLOCK_NAME,
     WEB_SEARCH_TOOL_BLOCK_TYPE,
 };

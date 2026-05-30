@@ -68,7 +68,7 @@ fn build_orchestrator_with_writer(
 ) -> ConversationOrchestrator {
     let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
     let output = Arc::new(MockOutputStream::new());
     let cfg = OrchestratorConfig::default();
     ConversationOrchestrator::new(

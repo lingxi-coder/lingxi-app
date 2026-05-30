@@ -97,7 +97,7 @@ fn build_orchestrator_with_api(
 ) -> ConversationOrchestrator {
     let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
     let output = Arc::new(MockOutputStream::new());
     let mut cfg = OrchestratorConfig::default();
     if let Some(mt) = max_turns {
@@ -344,7 +344,7 @@ async fn parity_cost_after_one_turn() {
         ConversationOrchestrator::new(
             cfg,
             api,
-            Arc::new(tools::registry::ToolRegistry::new()),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
             orchestrator::test_support::noop_hook_executor(),
             Arc::new(NoOpPermissionGate),
             Arc::new(MockOutputStream::new()),
@@ -397,7 +397,7 @@ async fn parity_force_compact_50_messages() {
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(vec![])),
-            Arc::new(tools::registry::ToolRegistry::new()),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
             orchestrator::test_support::noop_hook_executor(),
             Arc::new(NoOpPermissionGate),
             Arc::new(MockOutputStream::new()),

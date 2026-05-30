@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use tools::shared::{MAX_TOOL_OUTPUT_LENGTH, TRUNCATION_SUFFIX};
+use tool_api::util::output_truncation::{MAX_TOOL_OUTPUT_LENGTH, TRUNCATION_SUFFIX};
 
 /// Each entry MUST carry a one-line justification.
 fn exempt_tools() -> HashSet<&'static str> {

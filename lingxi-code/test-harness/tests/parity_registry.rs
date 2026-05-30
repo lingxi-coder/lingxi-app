@@ -73,8 +73,6 @@ fn registry_40_tools_fixture_categories_locked() {
 /// the in-module `TOOL_NAME` constants (single-tool modules).
 #[test]
 fn fixture_names_match_production_constants() {
-    use tools::builtin;
-
     let f = fx();
     let names: BTreeSet<String> = f
         .by_category
@@ -86,68 +84,71 @@ fn fixture_names_match_production_constants() {
     // in its module — byte-for-byte equal to the fixture entry.
     let pairs: &[(&str, &str)] = &[
         // File (5)
-        ("Read", builtin::file_read::TOOL_NAME),
-        ("Write", builtin::file_write::TOOL_NAME),
-        ("Edit", builtin::file_edit::TOOL_NAME),
-        ("NotebookEdit", builtin::notebook_edit::TOOL_NAME),
-        ("Glob", builtin::glob::TOOL_NAME),
+        ("Read", tool_file::read::TOOL_NAME),
+        ("Write", tool_file::write::TOOL_NAME),
+        ("Edit", tool_file::edit::TOOL_NAME),
+        ("NotebookEdit", tool_file::notebook_edit::TOOL_NAME),
+        ("Glob", tool_file::glob::TOOL_NAME),
         // Search (1)
-        ("Grep", builtin::grep::TOOL_NAME),
+        ("Grep", tool_file::grep::TOOL_NAME),
         // Shell (4)
-        ("Bash", builtin::bash::TOOL_NAME),
-        ("PowerShell", builtin::powershell::TOOL_NAME),
-        ("REPL", builtin::repl::TOOL_NAME),
-        ("Sleep", builtin::sleep::TOOL_NAME),
+        ("Bash", tool_shell::bash::TOOL_NAME),
+        ("PowerShell", tool_shell::powershell::TOOL_NAME),
+        ("REPL", tool_shell::repl::TOOL_NAME),
+        ("Sleep", tool_ui::sleep::TOOL_NAME),
         // Web (2)
-        ("WebFetch", builtin::web_fetch::TOOL_NAME),
-        ("WebSearch", builtin::web_search::TOOL_NAME),
+        ("WebFetch", tool_web::web_fetch::TOOL_NAME),
+        ("WebSearch", tool_web::web_search::TOOL_NAME),
         // Workflow (5)
-        ("TodoWrite", builtin::todo_write::TOOL_NAME),
-        ("EnterPlanMode", builtin::plan_mode::ENTER_TOOL_NAME),
-        ("ExitPlanMode", builtin::plan_mode::EXIT_TOOL_NAME),
-        ("EnterWorktree", builtin::worktree::ENTER_TOOL_NAME),
-        ("ExitWorktree", builtin::worktree::EXIT_TOOL_NAME),
+        ("TodoWrite", tool_task::todo_write::TOOL_NAME),
+        ("EnterPlanMode", tool_plan::plan_mode::ENTER_TOOL_NAME),
+        ("ExitPlanMode", tool_plan::plan_mode::EXIT_TOOL_NAME),
+        ("EnterWorktree", tool_worktree::worktree::ENTER_TOOL_NAME),
+        ("ExitWorktree", tool_worktree::worktree::EXIT_TOOL_NAME),
         // Agent + Task (8)
-        ("Agent", builtin::agent::AGENT_TOOL_NAME),
-        ("TaskCreate", builtin::task::TASK_CREATE_TOOL_NAME),
-        ("TaskGet", builtin::task::TASK_GET_TOOL_NAME),
-        ("TaskList", builtin::task::TASK_LIST_TOOL_NAME),
-        ("TaskUpdate", builtin::task::TASK_UPDATE_TOOL_NAME),
-        ("TaskStop", builtin::task::TASK_STOP_TOOL_NAME),
-        ("TaskOutput", builtin::task::TASK_OUTPUT_TOOL_NAME),
-        ("SendMessage", builtin::send_message::SEND_MESSAGE_TOOL_NAME),
+        ("Agent", tool_agent::agent::AGENT_TOOL_NAME),
+        ("TaskCreate", tool_task::task::TASK_CREATE_TOOL_NAME),
+        ("TaskGet", tool_task::task::TASK_GET_TOOL_NAME),
+        ("TaskList", tool_task::task::TASK_LIST_TOOL_NAME),
+        ("TaskUpdate", tool_task::task::TASK_UPDATE_TOOL_NAME),
+        ("TaskStop", tool_task::task::TASK_STOP_TOOL_NAME),
+        ("TaskOutput", tool_task::task::TASK_OUTPUT_TOOL_NAME),
+        ("SendMessage", tool_ui::send_message::SEND_MESSAGE_TOOL_NAME),
         // Team (2)
-        ("TeamCreate", builtin::team::TEAM_CREATE_TOOL_NAME),
-        ("TeamDelete", builtin::team::TEAM_DELETE_TOOL_NAME),
+        ("TeamCreate", tool_team::team::TEAM_CREATE_TOOL_NAME),
+        ("TeamDelete", tool_team::team::TEAM_DELETE_TOOL_NAME),
         // MCP + LSP (5)
-        ("MCP", builtin::mcp::MCP_TOOL_NAME),
-        ("McpAuth", builtin::mcp::MCP_AUTH_TOOL_NAME),
+        ("MCP", tool_mcp::mcp_tool::MCP_TOOL_NAME),
+        ("McpAuth", tool_mcp::mcp_tool::MCP_AUTH_TOOL_NAME),
         (
             "ListMcpResources",
-            builtin::mcp::LIST_MCP_RESOURCES_TOOL_NAME,
+            tool_mcp::mcp_tool::LIST_MCP_RESOURCES_TOOL_NAME,
         ),
-        ("ReadMcpResource", builtin::mcp::READ_MCP_RESOURCE_TOOL_NAME),
-        ("LSP", builtin::lsp::LSP_TOOL_NAME),
+        (
+            "ReadMcpResource",
+            tool_mcp::mcp_tool::READ_MCP_RESOURCE_TOOL_NAME,
+        ),
+        ("LSP", tool_lsp::lsp_tool::LSP_TOOL_NAME),
         // System (8)
         (
             "AskUserQuestion",
-            builtin::ask_user_question::ASK_USER_QUESTION_TOOL_NAME,
+            tool_ui::ask_user_question::ASK_USER_QUESTION_TOOL_NAME,
         ),
-        ("Brief", builtin::brief::BRIEF_TOOL_NAME),
-        ("Config", builtin::config::CONFIG_TOOL_NAME),
-        ("Skill", builtin::skill::SKILL_TOOL_NAME),
+        ("Brief", tool_ui::brief::BRIEF_TOOL_NAME),
+        ("Config", tool_meta::config::CONFIG_TOOL_NAME),
+        ("Skill", tool_skill::skill::SKILL_TOOL_NAME),
         (
             "ScheduleCron",
-            builtin::schedule_cron::SCHEDULE_CRON_TOOL_NAME,
+            tool_cron::schedule_cron::SCHEDULE_CRON_TOOL_NAME,
         ),
-        ("ToolSearch", builtin::tool_search::TOOL_SEARCH_TOOL_NAME),
+        ("ToolSearch", tool_meta::tool_search::TOOL_SEARCH_TOOL_NAME),
         (
             "RemoteTrigger",
-            builtin::remote_trigger::REMOTE_TRIGGER_TOOL_NAME,
+            tool_cron::remote_trigger::REMOTE_TRIGGER_TOOL_NAME,
         ),
         (
             "SyntheticOutput",
-            builtin::synthetic_output::SYNTHETIC_OUTPUT_TOOL_NAME,
+            tool_ui::synthetic_output::SYNTHETIC_OUTPUT_TOOL_NAME,
         ),
     ];
 

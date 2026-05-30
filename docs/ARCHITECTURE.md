@@ -63,8 +63,10 @@ The platform-agnostic core. None of these depend on `tools/*`, `skills/*`,
 - `plugin` — manifest + 8-registry materialization
 - `tui` — terminal UI (consumes `command-core` for the palette/dispatcher)
 - `test-harness` — contracts + properties + parity drivers
-- `tools` — **legacy** monolith aggregator (`register_all_builtin_tools`
-  delegates to the 14 `tool-*` crates). Backward-compat only; slated for removal.
+
+(The legacy `tools` monolith aggregator was dissolved in M8-P7-final — the 14
+`tool-*` crates are assembled directly by the composition roots, and the parity
+drivers read constants straight from the per-crate modules.)
 
 ### Tool plugin crates (`tools/`)
 

@@ -86,7 +86,7 @@ fn shell_tools_parity() {
     assert_eq!(f.tool_names, vec!["Bash", "PowerShell", "REPL", "Sleep"]);
 
     // Bash constants.
-    use tools::builtin::bash;
+    use tool_shell::bash;
     assert_eq!(f.bash.default_timeout_ms, bash::BASH_DEFAULT_TIMEOUT_MS);
     assert_eq!(f.bash.max_timeout_ms, bash::BASH_MAX_TIMEOUT_MS);
     assert_eq!(f.bash.shell_paths.linux, bash::BASH_SHELL_LINUX);
@@ -114,7 +114,7 @@ fn shell_tools_parity() {
     );
 
     // PowerShell.
-    use tools::builtin::powershell;
+    use tool_shell::powershell;
     assert_eq!(
         f.powershell.default_timeout_ms,
         powershell::POWERSHELL_DEFAULT_TIMEOUT_MS
@@ -140,14 +140,14 @@ fn shell_tools_parity() {
     assert_eq!(
         f.powershell.telemetry_events,
         vec![
-            tools::builtin::shell_events::POWERSHELL_STARTED.to_string(),
-            tools::builtin::shell_events::POWERSHELL_COMPLETED.into(),
-            tools::builtin::shell_events::POWERSHELL_FAILED.into(),
+            telemetry::tengu::tool::POWERSHELL_STARTED.to_string(),
+            telemetry::tengu::tool::POWERSHELL_COMPLETED.into(),
+            telemetry::tengu::tool::POWERSHELL_FAILED.into(),
         ],
     );
 
     // REPL.
-    use tools::builtin::repl;
+    use tool_shell::repl;
     assert_eq!(f.repl.default_timeout_ms, repl::REPL_DEFAULT_TIMEOUT_MS);
     assert_eq!(f.repl.supported_languages, vec!["python", "node", "ruby"]);
     let python_expected = if cfg!(target_os = "windows") {
@@ -161,38 +161,38 @@ fn shell_tools_parity() {
     assert_eq!(
         f.repl.telemetry_events,
         vec![
-            tools::builtin::shell_events::REPL_STARTED.to_string(),
-            tools::builtin::shell_events::REPL_COMPLETED.into(),
-            tools::builtin::shell_events::REPL_FAILED.into(),
+            telemetry::tengu::tool::REPL_STARTED.to_string(),
+            telemetry::tengu::tool::REPL_COMPLETED.into(),
+            telemetry::tengu::tool::REPL_FAILED.into(),
         ],
     );
 
     // Sleep.
-    use tools::builtin::sleep as sleep_tool;
+    use tool_ui::sleep as sleep_tool;
     assert_eq!(f.sleep.max_duration_ms, sleep_tool::SLEEP_MAX_DURATION_MS);
     assert_eq!(
         f.sleep.telemetry_events,
         vec![
-            tools::builtin::shell_events::SLEEP_STARTED.to_string(),
-            tools::builtin::shell_events::SLEEP_COMPLETED.into(),
-            tools::builtin::shell_events::SLEEP_FAILED.into(),
+            telemetry::tengu::tool::SLEEP_STARTED.to_string(),
+            telemetry::tengu::tool::SLEEP_COMPLETED.into(),
+            telemetry::tengu::tool::SLEEP_FAILED.into(),
         ],
     );
 
     // ANSI strip regex literal.
     assert_eq!(
         f.ansi_strip.regex_literal,
-        tools::shared::ansi_strip::ANSI_ESCAPE_REGEX_LITERAL,
+        tool_shell::shared::ANSI_ESCAPE_REGEX_LITERAL,
     );
 
     // Output truncation (cross-check with M4-01 lock).
     assert_eq!(
         f.output_truncation.max_length,
-        tools::shared::output_truncation::MAX_TOOL_OUTPUT_LENGTH,
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH,
     );
     assert_eq!(
         f.output_truncation.suffix,
-        tools::shared::output_truncation::TRUNCATION_SUFFIX,
+        tool_api::util::output_truncation::TRUNCATION_SUFFIX,
     );
 
     // Sandbox refusal literal — sourced from M2-04 lock at

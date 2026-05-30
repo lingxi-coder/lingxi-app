@@ -11,7 +11,11 @@ traits = { path = "../../traits" }
 protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
-async-trait = { workspace = true, optional = true }
+# M8-P6: non-optional — `agent.rs` (the AgentTool impl, always compiled) uses
+# `#[async_trait]`. Marking it optional only built under workspace feature
+# unification (when some other crate enabled `agent-test-support`); building
+# `tool-agent` standalone (e.g. via the engine-desktop composition root) failed.
+async-trait = { workspace = true }
 serde.workspace = true
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
@@ -20,8 +24,9 @@ thiserror.workspace = true
 
 [features]
 # Exposes agent_test_support (M4-05 subagent/mailbox/task/budget mocks) for
-# downstream crates' tests (e.g. the tools integration suite).
-agent-test-support = ["dep:async-trait"]
+# downstream crates' tests (e.g. the tools integration suite). async-trait is
+# now a hard dep, so the feature only gates the module.
+agent-test-support = []
 
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }

@@ -28,18 +28,22 @@ use anthropic_oauth::config::ClaudeAiOAuthConfig;
 use anthropic_oauth::handle::OAuthHandle;
 use api_client::AnthropicProvider;
 use commands::dispatcher::RegistrySlashDispatcher;
-use commands::registry::{
-    register_all_builtin_commands, register_core_batch_1, register_core_batch_2, CommandRegistry,
-};
+use engine_desktop::{desktop_command_registry, desktop_tool_registry};
 use orchestrator::test_support::{noop_hook_executor, NoOpPermissionGate, StaticMemoryProvider};
 use orchestrator::{
     AnthropicProviderAdapter, ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig,
 };
-use platform_posix_minimal::{PlainTextSecureStorage, PosixClock, PosixHttp, PosixMcp};
+use permission::PermissionMode;
+use platform_posix_minimal::{
+    PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixMcp, PosixProcess,
+    PosixSandbox, PosixWorktree,
+};
+use sandbox::decision::ProjectTrustLevel;
+use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tools::registry::ToolRegistry;
+use tool_api::BuiltinToolContext;
 use traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 
 /// Bundle of everything `run_cli` needs to drive a conversation.
@@ -116,9 +120,14 @@ pub async fn build_runtime(
     //     with a 401 if no real key is configured, but the CLI binary
     //     itself constructs successfully so slash-command dispatch still
     //     works without an API key.
-    let provider = AnthropicProvider::new(api_key, Some(api_base.clone()));
+    let provider = AnthropicProvider::new(api_key.clone(), Some(api_base.clone()));
     let api_client: Arc<dyn OrchestratorApiClient> =
         Arc::new(AnthropicProviderAdapter::new(provider, http.clone()));
+    // M8-P6: the tool context's WebSearch tool builds `POST /v1/messages`
+    // requests through its own `Arc<AnthropicProvider>`. `AnthropicProvider`
+    // isn't `Clone`, so build a second cheap instance (it only stores the
+    // api key + base URL).
+    let tool_provider = Arc::new(AnthropicProvider::new(api_key, Some(api_base.clone())));
 
     // (3) Credential manager + OAuth client (used by /login, /logout).
     let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
@@ -165,7 +174,10 @@ pub async fn build_runtime(
     // (5) Build the orchestrator using test_support fillers for the
     //     hook/permission/memory slots. These are the documented inherited
     //     M5-10/M5-11 gaps — production constructors land in M5-13+.
-    let tools = Arc::new(ToolRegistry::new());
+    //
+    //     M8-P6: the tool registry is no longer constructed empty here — it is
+    //     assembled below (after the MCP registry exists) through the desktop
+    //     composition root `engine_desktop::desktop_tool_registry`.
     let hooks = noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let memory: Arc<dyn orchestrator::prompt::MemoryHierarchyProvider> =
@@ -254,6 +266,43 @@ pub async fn build_runtime(
     //       in M7 when the ForkedAgentRunner pool is wired.
     let compactor = Arc::new(compaction::CompactionOrchestrator::new(150_000));
 
+    // (5.5) M8-P6: assemble the desktop tool registry through the composition
+    //       root. The orchestrator previously received an empty
+    //       `ToolRegistry::new()`; `engine-desktop` now owns the desktop tool
+    //       set (14 tool crates) and we build the `BuiltinToolContext` from the
+    //       posix platform handles + session policy. MCP tools share the
+    //       orchestrator's `McpRegistry`; subagent/task/mailbox/budget/LSP seams
+    //       stay `None` until their production pools are wired (M9+).
+    let tool_ctx = BuiltinToolContext {
+        fs: Arc::new(PosixFileSystem::new(cwd.clone())),
+        bus: Arc::new(telemetry::AnalyticsBus::new()),
+        trusted_dirs: vec![cwd.clone()],
+        process: Arc::new(PosixProcess::new()),
+        sandbox: Arc::new(PosixSandbox::new()),
+        clock: clock.clone(),
+        sandbox_runtime: SandboxRuntimeConfig::default(),
+        permission_mode: PermissionMode::Default,
+        project_trust: ProjectTrustLevel::Trusted,
+        sandbox_available: false,
+        workspace: cwd.clone(),
+        platform: if cfg!(target_os = "macos") {
+            SandboxPlatform::Mac
+        } else {
+            SandboxPlatform::Linux
+        },
+        http: http.clone(),
+        provider: tool_provider,
+        default_model: cfg.model.clone(),
+        worktree: Arc::new(PosixWorktree::new()),
+        subagent_spawner: None,
+        task_registry: None,
+        mailbox_router: None,
+        budget_enforcer: None,
+        mcp_registry: Some(mcp_registry.clone()),
+        lsp_registry: None,
+    };
+    let tools = Arc::new(desktop_tool_registry(tool_ctx));
+
     let orch = Arc::new(
         ConversationOrchestrator::new(cfg, api_client, tools, hooks, perms, output, memory, cwd)
             .with_cost_tracker(cost_tracker)
@@ -263,13 +312,12 @@ pub async fn build_runtime(
             .with_compaction(compactor),
     );
 
-    // (6) Build the command registry. The orchestrator implements
-    //     `OrchestratorHandle` via M5-10 + M5-11.
+    // (6) Build the command registry through the desktop composition root.
+    //     The orchestrator implements `OrchestratorHandle` via M5-10 + M5-11;
+    //     `engine_desktop::desktop_command_registry` owns the seed →
+    //     batch-1 → batch-2 sequence that was previously inlined here.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
-    let mut reg = CommandRegistry::new();
-    register_all_builtin_commands(&mut reg);
-    register_core_batch_1(&mut reg, handle.clone());
-    register_core_batch_2(&mut reg, handle, auth.clone());
+    let reg = desktop_command_registry(handle, auth.clone());
     let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
 
     Ok(Runtime {

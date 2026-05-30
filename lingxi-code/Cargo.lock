@@ -482,15 +482,18 @@ dependencies = [
  "compaction",
  "cost",
  "dirs",
+ "engine-desktop",
  "filetime",
  "futures",
  "hooks",
  "libc",
  "mcp",
  "orchestrator",
+ "permission",
  "platform-posix-minimal",
  "predicates",
  "protocol",
+ "sandbox",
  "secret",
  "serde",
  "serde_json",
@@ -500,7 +503,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
- "tools",
+ "tool-api",
  "tracing",
  "tracing-subscriber",
  "traits",
@@ -907,6 +910,30 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "engine-desktop"
+version = "0.9.0"
+dependencies = [
+ "commands",
+ "insta",
+ "tool-agent",
+ "tool-api",
+ "tool-cron",
+ "tool-file",
+ "tool-lsp",
+ "tool-mcp",
+ "tool-meta",
+ "tool-plan",
+ "tool-shell",
+ "tool-skill",
+ "tool-task",
+ "tool-team",
+ "tool-ui",
+ "tool-web",
+ "tool-worktree",
+ "traits",
 ]
 
 [[package]]

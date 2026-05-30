@@ -1,0 +1,41 @@
+[package]
+name = "engine-desktop"
+version = "0.9.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# M8-P6: the desktop composition root. Names every desktop capability crate
+# via a Cargo dependency edge — this is the single declarative place that
+# decides what ships on desktop. `engine-mobile` (P11) will depend on a
+# different subset. No `[lib]`/`[[bin]]` split: library-only.
+
+[dependencies]
+tool-api = { path = "../../tool-api" }
+traits = { path = "../../traits" }
+commands = { path = "../../commands" }
+
+# The 14 desktop builtin tool crates (9 cross-platform + 5 desktop-only).
+tool-file = { path = "../../tools/file" }
+tool-shell = { path = "../../tools/shell" }
+tool-task = { path = "../../tools/task" }
+tool-web = { path = "../../tools/web" }
+tool-plan = { path = "../../tools/plan" }
+tool-meta = { path = "../../tools/meta" }
+tool-cron = { path = "../../tools/cron" }
+tool-ui = { path = "../../tools/ui" }
+tool-skill = { path = "../../tools/skill" }
+tool-agent = { path = "../../tools/agent" }
+tool-mcp = { path = "../../tools/mcp" }
+tool-lsp = { path = "../../tools/lsp" }
+tool-team = { path = "../../tools/team" }
+tool-worktree = { path = "../../tools/worktree" }
+
+[dev-dependencies]
+# Snapshot the assembled tool set (§14 criterion 8). `test-support` exposes the
+# stub `BuiltinToolContext` builder so the registry can be assembled offline.
+tool-api = { path = "../../tool-api", features = ["test-support"] }
+insta = { version = "1.40", features = ["yaml"] }
+
+[lints]
+workspace = true

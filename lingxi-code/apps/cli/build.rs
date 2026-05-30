@@ -25,8 +25,9 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
 
     println!("cargo:rustc-env=LINGXI_GIT_SHA_SHORT={sha}");
-    // Re-run if HEAD moves.
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/refs/heads");
+    // Re-run if HEAD moves. M8-P6: package moved to apps/cli (one level
+    // deeper), so the repo-root `.git` is now three `..` up.
+    println!("cargo:rerun-if-changed=../../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../../.git/refs/heads");
     println!("cargo:rerun-if-changed=build.rs");
 }

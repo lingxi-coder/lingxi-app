@@ -14,24 +14,31 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
-protocol = { path = "../protocol" }
-traits = { path = "../traits" }
-api-client = { path = "../api-client" }
-commands = { path = "../commands" }
-orchestrator = { path = "../orchestrator" }
-compaction = { path = "../compaction" }
-mcp = { path = "../mcp" }
-hooks = { path = "../hooks" }
-agent = { path = "../agent" }
-cost = { path = "../cost" }
+# M8-P6: nested under apps/, so workspace-crate paths gain one `..`. The tool
+# set + command set come from the desktop composition root; this binary only
+# supplies platform handles + session policy.
+engine-desktop = { path = "../engine-desktop" }
+protocol = { path = "../../protocol" }
+traits = { path = "../../traits" }
+api-client = { path = "../../api-client" }
+commands = { path = "../../commands" }
+orchestrator = { path = "../../orchestrator" }
+compaction = { path = "../../compaction" }
+mcp = { path = "../../mcp" }
+hooks = { path = "../../hooks" }
+agent = { path = "../../agent" }
+cost = { path = "../../cost" }
 dirs = "5"
-tui = { path = "../tui" }
-session = { path = "../session" }
-anthropic-oauth = { path = "../anthropic-oauth" }
-secret = { path = "../secret" }
-tools = { path = "../tools" }
-telemetry = { path = "../telemetry" }
-platform-posix-minimal = { path = "../platforms/posix-minimal" }
+tui = { path = "../../tui" }
+session = { path = "../../session" }
+anthropic-oauth = { path = "../../anthropic-oauth" }
+secret = { path = "../../secret" }
+# Tool-context construction (BuiltinToolContext + ToolRegistry + policy types).
+tool-api = { path = "../../tool-api" }
+permission = { path = "../../permission" }
+sandbox = { path = "../../sandbox" }
+telemetry = { path = "../../telemetry" }
+platform-posix-minimal = { path = "../../platforms/posix-minimal" }
 
 # clap 4.6+ requires edition2024; pin to a release compatible with Rust 1.82.
 clap = { version = "=4.5.20", features = ["derive", "env"] }

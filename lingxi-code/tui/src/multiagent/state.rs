@@ -1,7 +1,7 @@
 //! Multi-agent presentation model. (M9-01)
 //!
 //! Pure data held on `AppState`, mutated only by
-//! [`crate::multiagent::apply::apply_multiagent_event`]. Renderers (M9-03+)
+//! `crate::multiagent::apply::apply_multiagent_event`. Renderers (M9-03+)
 //! are pure functions of this state.
 
 /// One background task as surfaced to the TUI. Mirrors the field shape of

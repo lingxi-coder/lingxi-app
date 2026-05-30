@@ -17,6 +17,7 @@ pub mod app;
 pub mod components;
 pub mod error;
 pub mod events;
+pub mod multiagent;
 pub mod permission_bridge;
 pub mod render;
 pub mod root;
@@ -26,7 +27,6 @@ pub mod state;
 pub mod streaming;
 pub mod telemetry;
 pub(crate) mod terminal;
-pub mod multiagent;
 pub mod theme;
 pub mod theme_persist;
 

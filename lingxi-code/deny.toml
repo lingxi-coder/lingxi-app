@@ -1,0 +1,49 @@
+# cargo-deny config (schema v2 / cargo-deny ^0.16). Run by the CI `supply-chain`
+# job's `cargo deny check` step.
+#
+# Scope: supply-chain hygiene (licenses / advisories / duplicate versions /
+# sources). The COMPOSITION-ROOT *architectural* dependency rules (design §8.1 —
+# tool independence, platform isolation, apps-are-leaves, API-crate purity) are
+# enforced by `scripts/check-deps.sh`, which runs as a separate CI step and is
+# verifiable offline. Kept deliberately permissive here so supply-chain noise
+# never masks an architectural regression.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+# Vulnerabilities are denied by cargo-deny default; curate explicit ignores here
+# (with justification) if a transitive advisory blocks a release.
+ignore = []
+
+[bans]
+# Duplicate versions are a warning, not a hard failure (the workspace pins many
+# deps but transitive duplicates happen); promote to "deny" in a future hardening.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# Broad permissive allow-list covering the Rust ecosystem the workspace pulls in.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "0BSD",
+    "BSL-1.0",
+    "OpenSSL",
+]
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"

@@ -11,7 +11,6 @@ traits = { path = "../traits" }
 secret = { path = "../secret" }
 jsonrpc = { path = "../jsonrpc" }
 mcp = { path = "../mcp" }
-platform-common = { path = "../platforms/common" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

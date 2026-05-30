@@ -127,10 +127,16 @@ jobs:
         run: cargo install cargo-vet --locked --version '^0.10'
       - name: cargo deny check
         working-directory: lingxi-code
-        # Uses lingxi-code/deny.toml (or workspace root deny.toml) for
-        # license/banned-deps/advisory policies. If deny.toml is absent,
-        # cargo-deny falls back to defaults (still a useful gate).
+        # Uses lingxi-code/deny.toml for license/advisory/duplicate-version
+        # policy. The architectural dependency-graph rules (design §8.1) are a
+        # separate step below.
         run: cargo deny check
+      - name: scripts/check-deps.sh (M8 dependency-graph gate)
+        working-directory: lingxi-code
+        # Enforces the composition-root edges (tool independence, platform
+        # isolation, apps-are-leaves, API-crate purity). Pure cargo-metadata +
+        # python3 — no extra toolchain. See scripts/check_deps.py.
+        run: ./scripts/check-deps.sh
       - name: cargo audit
         working-directory: lingxi-code
         run: cargo audit --deny warnings

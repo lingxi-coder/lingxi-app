@@ -352,7 +352,6 @@ dependencies = [
  "http",
  "jsonrpc",
  "mcp",
- "platform-common",
  "protocol",
  "rand 0.9.4",
  "reqwest",
@@ -3350,7 +3349,6 @@ dependencies = [
  "test-harness",
  "thiserror 2.0.18",
  "tokio",
- "tools",
  "tracing",
  "traits",
 ]

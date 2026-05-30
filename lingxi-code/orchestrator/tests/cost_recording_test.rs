@@ -12,7 +12,7 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use protocol::SessionId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tools::registry::ToolRegistry;
+use tool_api::registry::ToolRegistry;
 
 /// Build a `MessageResponse` that emulates a single `end_turn` API reply with
 /// the given token usage.

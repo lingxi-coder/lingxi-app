@@ -8,7 +8,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig, OrchestratorError};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tools::registry::ToolRegistry;
+use tool_api::registry::ToolRegistry;
 use traits::HttpError;
 
 #[tokio::test]

@@ -10,7 +10,7 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use protocol::SessionId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tools::registry::ToolRegistry;
+use tool_api::registry::ToolRegistry;
 
 fn make_tracker() -> Arc<CostTracker> {
     let (tx, _rx) = mpsc::channel(8);

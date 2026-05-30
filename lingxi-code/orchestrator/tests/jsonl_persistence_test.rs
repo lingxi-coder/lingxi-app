@@ -44,7 +44,7 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     let output = Arc::new(MockOutputStream::new());
     let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
 
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -130,7 +130,7 @@ async fn orchestrator_without_writer_creates_no_file() {
     let output = Arc::new(MockOutputStream::new());
     let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
 
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),

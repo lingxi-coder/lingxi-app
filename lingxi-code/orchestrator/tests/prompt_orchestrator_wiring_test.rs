@@ -10,7 +10,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
 use tempfile::TempDir;
-use tools::registry::ToolRegistry;
+use tool_api::registry::ToolRegistry;
 
 #[tokio::test]
 async fn run_turn_passes_assembled_system_prompt_to_api_client() {

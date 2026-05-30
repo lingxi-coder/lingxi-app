@@ -19,9 +19,9 @@ use protocol::ToolUseId;
 use serde_json::json;
 use std::io::Write;
 use std::sync::Arc;
-use tools::progress::ToolProgressSender;
-use tools::registry::ToolRegistry;
-use tools::tool_trait::{
+use tool_api::progress::ToolProgressSender;
+use tool_api::registry::ToolRegistry;
+use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
@@ -63,14 +63,14 @@ impl Tool for SimpleReadTool {
     async fn validate_input(
         &self,
         _input: &serde_json::Value,
-        _ctx: &tools::context::ToolUseContext,
+        _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
         _input: &serde_json::Value,
-        _ctx: &tools::context::ToolUseContext,
+        _ctx: &tool_api::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
@@ -90,7 +90,7 @@ impl Tool for SimpleReadTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        _ctx: tools::context::ToolUseContext,
+        _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let path = input

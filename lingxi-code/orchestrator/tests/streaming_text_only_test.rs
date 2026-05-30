@@ -17,7 +17,7 @@ use orchestrator::test_support_stream::{
 use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tools::registry::ToolRegistry;
+use tool_api::registry::ToolRegistry;
 use traits::OutputEvent;
 
 #[tokio::test]

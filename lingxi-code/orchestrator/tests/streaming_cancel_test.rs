@@ -15,7 +15,7 @@ use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig, TurnO
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tools::registry::ToolRegistry;
+use tool_api::registry::ToolRegistry;
 
 fn build_orch(api: Arc<MockStreamingApiClient>) -> ConversationOrchestrator {
     let batched = Arc::new(MockApiClient::new(Vec::new()));

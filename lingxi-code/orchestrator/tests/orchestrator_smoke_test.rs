@@ -22,7 +22,7 @@ async fn single_turn_no_tools_returns_end_turn_and_emits_text_and_end_turn() {
     let output = Arc::new(MockOutputStream::new());
     let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
 
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),

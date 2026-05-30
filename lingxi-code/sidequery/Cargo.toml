@@ -11,7 +11,7 @@ traits = { path = "../traits" }
 engine = { path = "../engine" }
 api-client = { path = "../api-client" }
 cost = { path = "../cost" }
-tools = { path = "../tools" }
+tool-api = { path = "../tool-api" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

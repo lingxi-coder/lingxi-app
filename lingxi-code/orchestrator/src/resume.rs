@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use telemetry::tengu::session::{RESUME_COMPLETED, RESUME_STARTED};
 use tokio::sync::Mutex;
-use tools::registry::ToolRegistry;
+use tool_api::registry::ToolRegistry;
 use traits::{FileSystem, OutputStream};
 use uuid::Uuid;
 

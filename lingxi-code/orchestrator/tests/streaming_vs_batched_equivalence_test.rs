@@ -15,7 +15,7 @@ use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, Orch
 use protocol::{ContentBlock, ConversationMessage};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tools::registry::ToolRegistry;
+use tool_api::registry::ToolRegistry;
 
 fn batched_response(text: &str) -> MessageResponse {
     MessageResponse {

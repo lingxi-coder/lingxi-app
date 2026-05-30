@@ -91,7 +91,7 @@ fn build_orch() -> ConversationOrchestrator {
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![])),
-        Arc::new(tools::registry::ToolRegistry::new()),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
         noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),

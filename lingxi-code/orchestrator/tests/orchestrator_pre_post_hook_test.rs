@@ -188,7 +188,7 @@ async fn pre_hook_blocks_bash_tool() {
     )
     .await;
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
 
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),

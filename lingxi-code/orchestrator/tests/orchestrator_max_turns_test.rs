@@ -9,7 +9,7 @@ use orchestrator::{
     ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, OrchestratorError,
 };
 use std::sync::Arc;
-use tools::registry::ToolRegistry;
+use tool_api::registry::ToolRegistry;
 
 #[tokio::test]
 async fn never_ending_loop_aborts_with_max_turns_reached() {

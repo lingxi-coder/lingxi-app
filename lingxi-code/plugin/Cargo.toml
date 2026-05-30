@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
-tools = { path = "../tools" }
+tool-api = { path = "../tool-api" }
 hooks = { path = "../hooks" }
 mcp = { path = "../mcp" }
 agent = { path = "../agent" }

@@ -6,7 +6,7 @@
 //! dep on `lingxi-coordinator`.
 //!
 //! The 30-second `claim_window_secs` is byte-locked to
-//! `SEND_MESSAGE_CLAIM_WINDOW` in `lingxi-tools::builtin::send_message`.
+//! `SEND_MESSAGE_CLAIM_WINDOW` in `lingxi-tool_api::builtin::send_message`.
 
 use crate::mailbox::{MailboxRouter, MessageSender, TeammateMessage};
 use async_trait::async_trait;

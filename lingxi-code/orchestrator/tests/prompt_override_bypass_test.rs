@@ -8,7 +8,7 @@ use orchestrator::test_support::{
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
-use tools::registry::ToolRegistry;
+use tool_api::registry::ToolRegistry;
 
 fn end_turn() -> api_client::types::MessageResponse {
     mock_message_response(

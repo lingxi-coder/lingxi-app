@@ -193,7 +193,7 @@ mod tests {
             tx,
         ));
 
-        let tools = Arc::new(tools::registry::ToolRegistry::new());
+        let tools = Arc::new(tool_api::registry::ToolRegistry::new());
         let hooks = noop_hook_executor();
         let perms = Arc::new(NoOpPermissionGate);
         let output = Arc::new(MockOutputStream::new());
@@ -261,7 +261,7 @@ mod tests {
             Arc::new(PricingCatalog::builtin_reference()),
             tx,
         ));
-        let tools = Arc::new(tools::registry::ToolRegistry::new());
+        let tools = Arc::new(tool_api::registry::ToolRegistry::new());
         let hooks = noop_hook_executor();
         let perms = Arc::new(NoOpPermissionGate);
         let output = Arc::new(MockOutputStream::new());

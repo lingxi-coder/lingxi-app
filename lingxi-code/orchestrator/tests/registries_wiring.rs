@@ -81,7 +81,7 @@ impl McpTransport for StubTransport {
 #[tokio::test]
 async fn with_mcp_hook_agent_builders_store_fields() {
     let api = Arc::new(MockApiClient::new(vec![]));
-    let tools = Arc::new(tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
     let hooks = noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let output = Arc::new(MockOutputStream::new());
@@ -113,7 +113,7 @@ async fn with_mcp_hook_agent_builders_store_fields() {
 #[tokio::test]
 async fn default_orchestrator_has_no_registries() {
     let api = Arc::new(MockApiClient::new(vec![]));
-    let tools = Arc::new(tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
     let hooks = noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let output = Arc::new(MockOutputStream::new());

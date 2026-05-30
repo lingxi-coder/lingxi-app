@@ -15,7 +15,7 @@ use std::sync::Arc;
 use telemetry::tengu::orchestrator as orch_events;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tools::registry::ToolRegistry;
+use tool_api::registry::ToolRegistry;
 use traits::{HttpTransport, OutputStream};
 
 /// Minimal contract the orchestrator needs from the API client.

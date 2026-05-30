@@ -19,9 +19,9 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tools::progress::ToolProgressSender;
-use tools::registry::ToolRegistry;
-use tools::tool_trait::{
+use tool_api::progress::ToolProgressSender;
+use tool_api::registry::ToolRegistry;
+use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
@@ -57,14 +57,14 @@ macro_rules! impl_test_tool {
             async fn validate_input(
                 &self,
                 _input: &serde_json::Value,
-                _ctx: &tools::context::ToolUseContext,
+                _ctx: &tool_api::context::ToolUseContext,
             ) -> Result<(), ValidationError> {
                 Ok(())
             }
             async fn check_permissions(
                 &self,
                 _input: &serde_json::Value,
-                _ctx: &tools::context::ToolUseContext,
+                _ctx: &tool_api::context::ToolUseContext,
             ) -> PermissionResult {
                 PermissionResult::Allow {
                     reason: PermissionDecisionReason::Other {
@@ -88,7 +88,7 @@ macro_rules! impl_test_tool {
             async fn call(
                 &self,
                 _input: serde_json::Value,
-                _ctx: tools::context::ToolUseContext,
+                _ctx: tool_api::context::ToolUseContext,
                 _tx: ToolProgressSender,
             ) -> Result<ToolCallResult, ToolError> {
                 let sleep_ms: u64 = $sleep_ms;

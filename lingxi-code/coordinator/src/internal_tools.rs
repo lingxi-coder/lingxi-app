@@ -10,7 +10,7 @@
 
 use crate::team_registry::TeamRegistry;
 use std::sync::Arc;
-use tools::Tool;
+use tool_api::Tool;
 
 /// Build the placeholder list of coordinator-only tools.
 ///

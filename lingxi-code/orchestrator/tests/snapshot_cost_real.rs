@@ -15,7 +15,7 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use protocol::SessionId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tools::registry::ToolRegistry;
+use tool_api::registry::ToolRegistry;
 use traits::OrchestratorHandle;
 
 fn end_turn_response_with_usage(input: u64, output: u64) -> MessageResponse {

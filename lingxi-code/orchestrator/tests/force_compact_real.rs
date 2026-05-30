@@ -22,7 +22,7 @@ use traits::OrchestratorHandle;
 
 fn make_orch() -> Arc<ConversationOrchestrator> {
     let api = Arc::new(MockApiClient::new(vec![]));
-    let tools = Arc::new(tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
     let hooks = noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let output = Arc::new(MockOutputStream::new());
@@ -168,7 +168,7 @@ fn errored_compactor() -> Arc<CompactionOrchestrator> {
 #[tokio::test]
 async fn failure_leaves_history_unchanged() {
     let api = Arc::new(MockApiClient::new(vec![]));
-    let tools = Arc::new(tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
     let hooks = noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let output = Arc::new(MockOutputStream::new());
@@ -305,7 +305,7 @@ async fn compaction_safety_gate() {
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             api,
-            Arc::new(tools::registry::ToolRegistry::new()),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
             noop_hook_executor(),
             Arc::new(NoOpPermissionGate),
             Arc::new(MockOutputStream::new()),

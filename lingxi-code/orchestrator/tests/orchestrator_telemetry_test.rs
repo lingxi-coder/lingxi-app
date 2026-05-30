@@ -8,7 +8,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::{Arc, Mutex as StdMutex};
 use telemetry::tengu::orchestrator as orch_events;
-use tools::registry::ToolRegistry;
+use tool_api::registry::ToolRegistry;
 use tracing::field::Field;
 use tracing::Event;
 use tracing::Subscriber;

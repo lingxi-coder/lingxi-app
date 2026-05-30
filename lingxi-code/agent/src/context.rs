@@ -13,7 +13,7 @@ use protocol::{AgentId, ConversationMessage, McpConnectionId};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tools::content_replacement::ContentReplacementState;
+use tool_api::content_replacement::ContentReplacementState;
 use traits::WorktreeHandle;
 
 /// All the state required to drive one subagent run.

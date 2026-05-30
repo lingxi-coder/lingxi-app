@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tools::ToolRegistry;
+use tool_api::ToolRegistry;
 use traits::{FileSystem, HttpTransport, RuntimeSpawner};
 
 /// Failure modes for [`PluginManager`] operations.

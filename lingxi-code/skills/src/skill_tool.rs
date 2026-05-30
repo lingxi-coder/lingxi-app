@@ -13,7 +13,7 @@ use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tools::{
+use tool_api::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolProgressSender,
     ToolStaticContext, ToolUseContext,
 };

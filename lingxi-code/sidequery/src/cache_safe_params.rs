@@ -19,7 +19,7 @@ use tokio::sync::RwLock;
 /// Snapshot of every input the main loop must reproduce byte-for-byte for the
 /// forked agent to share its prompt cache.
 ///
-/// `Debug` is intentionally not derived: [`tools::ToolUseOptions`]
+/// `Debug` is intentionally not derived: [`tool_api::ToolUseOptions`]
 /// only implements `Clone` today, and tunneling debug formatting through
 /// here would print MCP connection ids that may contain user secrets.
 #[derive(Clone)]
@@ -31,7 +31,7 @@ pub struct CacheSafeParams {
     /// Engine-tier context bindings (model id, working dir, ...).
     pub system_context: HashMap<String, String>,
     /// Tool-set options the parent rendered in this turn.
-    pub tool_use_options: tools::ToolUseOptions,
+    pub tool_use_options: tool_api::ToolUseOptions,
     /// Conversation prefix forks must replay verbatim.
     pub fork_context_messages: Vec<ConversationMessage>,
     /// Slot-assigned generation tag. Producers should treat this as

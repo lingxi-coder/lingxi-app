@@ -1,7 +1,7 @@
 //! `ComputerControl` — screen-capture + input-automation seam (M8-P10).
 //!
 //! Implemented natively per platform: a desktop automation backend, or
-//! Swift/Kotlin via UniFFI on mobile (the callback-interface annotations land
+//! Swift/Kotlin via `UniFFI` on mobile (the callback-interface annotations land
 //! in P12). The `tool-computer-use` tool (P11b) routes through this trait, so
 //! Rust drives the host's screen + input without knowing the backend.
 

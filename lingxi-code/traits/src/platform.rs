@@ -5,7 +5,7 @@
 //! clock, process, sandbox, worktree. Mobile builds additionally expose the
 //! native device capabilities (camera, voice, share) — these default to `None`
 //! so desktop platforms need not implement them. `computer_control` likewise
-//! defaults to `None` (a desktop automation backend or a mobile UniFFI impl
+//! defaults to `None` (a desktop automation backend or a mobile `UniFFI` impl
 //! supplies it).
 //!
 //! This is the single seam that lets the *same* core agent logic run on every

@@ -1,6 +1,6 @@
 //! `VoiceRecorder` — microphone capture seam (M8-P10).
 //!
-//! Implemented natively in Swift/Kotlin via UniFFI (P12) and injected into the
+//! Implemented natively in Swift/Kotlin via `UniFFI` (P12) and injected into the
 //! mobile `Platform`. The `tool-voice` tool (P11) routes through it.
 
 use async_trait::async_trait;
@@ -9,7 +9,7 @@ use thiserror::Error;
 /// Options for a recording session.
 #[derive(Debug, Clone)]
 pub struct VoiceRecordingOpts {
-    /// Target sample rate in Hz (e.g. 16_000 for speech).
+    /// Target sample rate in Hz (e.g. `16_000` for speech).
     pub sample_rate_hz: u32,
     /// Container/codec hint (e.g. `"m4a"`, `"wav"`).
     pub format: String,

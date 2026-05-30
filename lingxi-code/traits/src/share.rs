@@ -1,6 +1,6 @@
 //! `SharingService` — native share-sheet seam (M8-P10).
 //!
-//! Implemented natively in Swift/Kotlin via UniFFI (P12) and injected into the
+//! Implemented natively in Swift/Kotlin via `UniFFI` (P12) and injected into the
 //! mobile `Platform`. The `tool-share` tool (P11) routes through it.
 
 use async_trait::async_trait;

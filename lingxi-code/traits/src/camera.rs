@@ -1,6 +1,6 @@
 //! `CameraControl` — photo capture + library picker seam (M8-P10).
 //!
-//! Implemented natively in Swift/Kotlin via UniFFI (P12) and injected into the
+//! Implemented natively in Swift/Kotlin via `UniFFI` (P12) and injected into the
 //! mobile `Platform`. The `tool-camera` tool (P11) routes through it so Rust
 //! can request a photo without knowing the native camera API.
 

@@ -10,6 +10,27 @@ This checklist turns the 17-phase migration plan in §9.1 of the design doc into
 
 ---
 
+## §0 Execution status (live)
+
+> Updated as phases land. Branch: `m8-p0-repo-rename`. Every commit below verified `cargo build --workspace` green + `cargo fmt --check` clean.
+
+| Phase | Status | Commit | Notes / deviations discovered during execution |
+|---|---|---|---|
+| P0 repo rename → lingxi-code | ✅ DONE | `ff0cc0f` | path-form refs only; cargo name + telemetry literal left for P2 |
+| P1 drop crates/ wrapper | ✅ DONE | `543380c` | recon missed 9 internal `../../platforms` deps + had wrong path arithmetic (`../../crates/X`→`../../X`, not `../X`); test-harness path walks needed one fewer `.parent()` |
+| P2 drop lingxi- prefix | ✅ DONE | `d92301f` | **`core` collides with sysroot `core`** (thiserror emits `::core::fmt`) → renamed to **`engine`**. Local-module vs crate collisions fixed with `::telemetry::`/`::mcp::`/`::lsp::`. tui insta snapshots + trybuild .stderr regenerated (rename artifacts). |
+| P3 extract tool-api | ✅ DONE | `4d979f1` | 5 files moved (tool_trait/context/registry/progress/content_replacement); tools/ is a re-export shim |
+| P4 engine → tool-api | ✅ DONE | `df28c09` | **ToolInvoker NOT deleted** — `traits→tool-api` would cycle (`tool-api→permission→traits`). ToolInvoker kept as the dependency-inversion seam. 7 engine crates decoupled from tools monolith. |
+| P5a BuiltinToolContext → tool-api | ✅ DONE | `01efe96` | enabling step for tool split; tool-api gains traits/telemetry/sandbox/api-client/mcp/lsp deps (cycle-safe) |
+| P5b file/shell tool crates | ⏳ TODO | — | blocked on shared-helper split (path_validation/output_truncation→tool-api/util) + **test_support relocation** (551-line shared fixture) + cross-tool util (`ulid_or_uuid`) + parity tests that read source paths |
+| P6–P15 | ⏳ TODO | — | composition roots, skill/command split, mobile platforms, UniFFI, bridge, CI, cleanup |
+
+**Foundational restructure (P0–P4 + P5a) is complete and verified.** The repo is renamed, flattened, deprefixed; `tool-api` is extracted; the 7 engine crates no longer depend on the `tools` monolith; `BuiltinToolContext` is relocated to enable the per-category tool split.
+
+**Key coupling points discovered (must be resolved to finish P5b/P7):** all 41 tools share (1) `BuiltinToolContext` [resolved in P5a], (2) `tools/src/shared/{path_validation,output_truncation,file_kit,ansi_strip}.rs` helpers, (3) the 551-line `test_support.rs` fixture, (4) cross-tool utilities like `file_read::ulid_or_uuid`. Parity tests in `test-harness` read tool source files by path, so every file move must update those test paths. This makes P5b/P7 a genuine multi-day effort rather than a mechanical sed.
+
+---
+
 ## §1 Executive Summary
 
 M8 restructures the workspace from a `crates/`-wrapped, `lingxi-`-prefixed, tool-monolith layout into a flat, composition-root architecture where one engine assembles into separate desktop and mobile binaries. The migration is **17 phases / ~30 commits / ~15.6 engineer-days**, each phase independently buildable and mergeable. The critical path is P0→P1→P2 (rename/flatten, mechanical) → P3→P4 (extract `tool-api`, rewire engine) → P5→P7 (split tools) → P6 (composition root) → P8/P9 (skills/commands) → P10→P12 (mobile) → P13/P14/P15 (bridge/CI/cleanup).

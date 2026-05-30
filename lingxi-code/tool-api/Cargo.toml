@@ -12,6 +12,16 @@ permission = { path = "../permission" }
 # `ToolUseContext::session: SessionState` field. The design's clean ToolCtx
 # (full Platform handles, no engine dep) is a P4 reshape — this dep is cut then.
 engine = { path = "../engine" }
+# M8-P5: BuiltinToolContext (the construction-time handle every builtin tool
+# takes) moved here so per-category tool crates (tools/file, tools/shell, …)
+# can construct tools without depending on the `tools` monolith. Pulls in the
+# handle-providing crates. The design §5.1 ToolCtx reshape will slim this later.
+traits = { path = "../traits" }
+telemetry = { path = "../telemetry" }
+sandbox = { path = "../sandbox" }
+api-client = { path = "../api-client" }
+mcp = { path = "../mcp" }
+lsp = { path = "../lsp" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

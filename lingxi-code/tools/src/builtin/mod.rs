@@ -4,23 +4,7 @@
 //! `register_all_builtin_tools` entrypoint that future sub-plans extend.
 
 use crate::registry::ToolRegistry;
-use api_client::AnthropicProvider;
-use permission::PermissionMode;
-use sandbox::decision::ProjectTrustLevel;
-use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
-use std::path::PathBuf;
 use std::sync::Arc;
-use telemetry::AnalyticsBus;
-use traits::budget::BudgetEnforcerHandle;
-use traits::clock::Clock;
-use traits::filesystem::FileSystem;
-use traits::http::HttpTransport;
-use traits::mailbox::MailboxRouterHandle;
-use traits::process::ProcessRunner;
-use traits::sandbox::Sandbox;
-use traits::subagent_spawn::SubagentSpawner;
-use traits::task_registry::TaskRegistryHandle;
-use traits::worktree::WorktreeManager;
 
 pub mod agent;
 pub mod ask_user_question;
@@ -93,79 +77,9 @@ pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 pub use worktree::{EnterWorktreeTool, ExitWorktreeTool};
 
-/// Static surface every builtin tool needs at construction time.
-///
-/// Cloning is cheap — every field is `Arc` or a small owned vec.
-#[derive(Clone)]
-pub struct BuiltinToolContext {
-    /// Sandboxed FS access (M1).
-    pub fs: Arc<dyn FileSystem>,
-    /// Telemetry bus (M3-06).
-    pub bus: Arc<AnalyticsBus>,
-    /// Canonicalised root directories the agent is allowed to read/write.
-    pub trusted_dirs: Vec<PathBuf>,
-    /// Process runner — backs BashTool/PowerShellTool/REPLTool (M4-02).
-    pub process: Arc<dyn ProcessRunner>,
-    /// Sandbox seam — provides the `prepare`/`bypass_with_audit` constructors
-    /// that turn `ProcessCommand` into `SandboxedCommand` (M4-02).
-    pub sandbox: Arc<dyn Sandbox>,
-    /// Wall-clock — backs SleepTool + duration measurement (M4-02).
-    pub clock: Arc<dyn Clock>,
-    /// Sandbox policy runtime config — drives `wrap_with_sandbox` (M4-02).
-    pub sandbox_runtime: SandboxRuntimeConfig,
-    /// Active permission mode (M4-02).
-    pub permission_mode: PermissionMode,
-    /// Whether the project workspace has been explicitly trusted (M4-02).
-    pub project_trust: ProjectTrustLevel,
-    /// Whether the host has a working sandbox backend right now (M4-02).
-    pub sandbox_available: bool,
-    /// Project workspace path (M4-02).
-    pub workspace: PathBuf,
-    /// Detected platform — drives `wrap_with_sandbox` branch (M4-02).
-    pub platform: Platform,
-    /// HTTP transport for web tools (WebFetch + WebSearch) (M4-03). M1 trait;
-    /// tests inject `MockHttpTransport`.
-    pub http: Arc<dyn HttpTransport>,
-    /// Anthropic provider for assembling `POST /v1/messages` requests (M3-03).
-    /// `WebSearchTool` uses it to build the HTTP request, then attaches a tool
-    /// block + custom `anthropic-beta` header.
-    pub provider: Arc<AnthropicProvider>,
-    /// Model used by `WebSearch` when calling `POST /v1/messages` (M4-03).
-    /// Sourced from the session's `coordinator_model` at registration time.
-    pub default_model: String,
-    /// Worktree manager (M2-01 trait) — backs `EnterWorktree` + `ExitWorktree`
-    /// (M4-04). Tests inject `MockWorktreeManager`; production uses
-    /// `platform_posix::PosixWorktreeManager`.
-    pub worktree: Arc<dyn WorktreeManager>,
-
-    // ===== M4-05 wiring (Phase 3) =====
-    /// Subagent spawner — `AgentTool` dispatches recursive subagent runs
-    /// through this seam. `None` when the host has not wired a state-
-    /// machine pool yet; in that case `AgentTool::call` surfaces a clear
-    /// internal error. Production wires `agent::PoolSubagentSpawner`.
-    pub subagent_spawner: Option<Arc<dyn SubagentSpawner>>,
-    /// Task registry — the 6 `Task*` tools dispatch CRUD through this seam.
-    /// Production wires `tasks::TaskRegistry`.
-    pub task_registry: Option<Arc<dyn TaskRegistryHandle>>,
-    /// Mailbox router — `SendMessageTool` dispatches teammate routing
-    /// through this seam. Production wires `coordinator::MailboxRouter`.
-    pub mailbox_router: Option<Arc<dyn MailboxRouterHandle>>,
-    /// Budget enforcer — `AgentTool` gates spawn calls through this seam.
-    /// Production wires `cost::BudgetEnforcer`.
-    pub budget_enforcer: Option<Arc<dyn BudgetEnforcerHandle>>,
-
-    // ===== M4-07 wiring (Phase 7) =====
-    /// MCP registry — the 4 MCP builtin tools (`MCPTool`, `McpAuthTool`,
-    /// `ListMcpResourcesTool`, `ReadMcpResourceTool`) dispatch through this
-    /// seam. `None` when the host has not wired an MCP layer; tools surface
-    /// a "MCP registry not configured" error in that case. Production wires
-    /// `mcp::McpRegistry` populated by the platform.
-    pub mcp_registry: Option<Arc<::mcp::registry::McpRegistry>>,
-    /// LSP registry — `LSPTool` dispatches through this seam. `None` when
-    /// the host has not wired an LSP layer. Production wires
-    /// `lsp::registry::LspRegistry` populated by plugin registration.
-    pub lsp_registry: Option<Arc<::lsp::registry::LspRegistry>>,
-}
+// M8-P5: BuiltinToolContext moved to tool-api so per-category tool crates
+// can construct tools without depending on this monolith.
+pub use tool_api::BuiltinToolContext;
 
 /// Register every M4-01 foundation tool against `registry`.
 ///

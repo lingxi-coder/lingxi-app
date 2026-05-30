@@ -16,12 +16,14 @@
     clippy::doc_markdown
 )]
 
+pub mod builtin_context;
 pub mod content_replacement;
 pub mod context;
 pub mod progress;
 pub mod registry;
 pub mod tool_trait;
 
+pub use builtin_context::BuiltinToolContext;
 pub use content_replacement::ContentReplacementState;
 pub use context::{ToolUseContext, ToolUseOptions};
 pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};

@@ -2164,6 +2164,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "platform-android"
+version = "0.8.0"
+dependencies = [
+ "platform-posix-minimal",
+ "traits",
+]
+
+[[package]]
 name = "platform-common"
 version = "0.8.0"
 dependencies = [
@@ -2185,6 +2193,14 @@ dependencies = [
  "tracing",
  "traits",
  "url",
+]
+
+[[package]]
+name = "platform-ios"
+version = "0.8.0"
+dependencies = [
+ "platform-posix-minimal",
+ "traits",
 ]
 
 [[package]]

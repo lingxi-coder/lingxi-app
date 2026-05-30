@@ -1,0 +1,60 @@
+//! `Platform` — the aggregate OS-capability seam (M8-P10).
+//!
+//! A composition root (`engine-desktop` / `engine-mobile`) is handed one
+//! `Arc<dyn Platform>` and reads every OS handle from it: filesystem, HTTP,
+//! clock, process, sandbox, worktree. Mobile builds additionally expose the
+//! native device capabilities (camera, voice, share) — these default to `None`
+//! so desktop platforms need not implement them. `computer_control` likewise
+//! defaults to `None` (a desktop automation backend or a mobile UniFFI impl
+//! supplies it).
+//!
+//! This is the single seam that lets the *same* core agent logic run on every
+//! OS: the platform crate (`platform-posix` / `platform-ios` / …) decides the
+//! concrete handles; library crates stay `#[cfg]`-free.
+
+use crate::camera::CameraControl;
+use crate::clock::Clock;
+use crate::computer_control::ComputerControl;
+use crate::filesystem::FileSystem;
+use crate::http::HttpTransport;
+use crate::process::ProcessRunner;
+use crate::sandbox::Sandbox;
+use crate::share::SharingService;
+use crate::voice::VoiceRecorder;
+use crate::worktree::WorktreeManager;
+use std::sync::Arc;
+
+/// Aggregate of the OS handles a built engine needs.
+pub trait Platform: Send + Sync {
+    /// Sandboxed filesystem access.
+    fn filesystem(&self) -> Arc<dyn FileSystem>;
+    /// HTTP transport (provider requests, web tools).
+    fn http(&self) -> Arc<dyn HttpTransport>;
+    /// Wall-clock.
+    fn clock(&self) -> Arc<dyn Clock>;
+    /// Subprocess runner (shell tools).
+    fn process(&self) -> Arc<dyn ProcessRunner>;
+    /// Sandbox seam for wrapping subprocess commands.
+    fn sandbox(&self) -> Arc<dyn Sandbox>;
+    /// Git worktree manager.
+    fn worktree(&self) -> Arc<dyn WorktreeManager>;
+
+    // ----- mobile / automation capabilities (None unless provided) ---------
+
+    /// Native camera + photo library, if the platform has one.
+    fn camera(&self) -> Option<Arc<dyn CameraControl>> {
+        None
+    }
+    /// Native microphone recorder, if the platform has one.
+    fn voice(&self) -> Option<Arc<dyn VoiceRecorder>> {
+        None
+    }
+    /// Native share sheet, if the platform has one.
+    fn share(&self) -> Option<Arc<dyn SharingService>> {
+        None
+    }
+    /// Screen-capture + input automation backend, if available.
+    fn computer_control(&self) -> Option<Arc<dyn ComputerControl>> {
+        None
+    }
+}

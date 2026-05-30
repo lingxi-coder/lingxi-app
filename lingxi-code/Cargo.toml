@@ -61,6 +61,8 @@ members = [
     "platforms/posix-minimal",
     "platforms/posix",
     "platforms/windows",
+    "platforms/ios",
+    "platforms/android",
     "platforms/posix/tests/fixtures/mock_stdio_mcp",
     "examples/cli-demo",
 ]
@@ -129,6 +131,8 @@ default-members = [
     "platforms/posix-minimal",
     "platforms/posix",
     "platforms/windows",
+    "platforms/ios",
+    "platforms/android",
     "examples/cli-demo",
 ]
 

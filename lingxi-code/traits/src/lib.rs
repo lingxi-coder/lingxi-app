@@ -11,8 +11,10 @@
 pub mod auth;
 pub mod bridge;
 pub mod budget;
+pub mod camera;
 pub mod clock;
 pub mod commands;
+pub mod computer_control;
 pub mod effect_handler;
 pub mod filesystem;
 pub mod http;
@@ -21,22 +23,27 @@ pub mod mailbox;
 pub mod mcp;
 pub mod orchestrator;
 pub mod permission_gate;
+pub mod platform;
 pub mod process;
 pub mod prompting_gate;
 pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;
+pub mod share;
 pub mod subagent_spawn;
 pub mod swarm;
 pub mod task_registry;
 pub mod tool_invoker;
+pub mod voice;
 pub mod worktree;
 
 pub use auth::{AuthError, AuthHandle, LoginInfo};
 pub use bridge::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 pub use budget::{BudgetEnforcerHandle, BudgetError};
+pub use camera::{CameraControl, CameraError, CameraPosition, CapturePhotoOpts, CapturedImage};
 pub use clock::Clock;
 pub use commands::{SlashCommandDispatcher, SlashDispatchResult};
+pub use computer_control::{ComputerControl, ComputerError, Screenshot};
 pub use effect_handler::EffectHandler;
 pub use filesystem::{FileContent, FileEvent, FileEventKind, FileSystem, FlockGuard, FsError};
 pub use http::{HttpError, HttpTransport};
@@ -51,6 +58,7 @@ pub use orchestrator::{
     OrchestratorHandle, OutputEvent, OutputStream, StatusSnapshot, TurnOutcome,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
+pub use platform::Platform;
 pub use process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
 pub use prompting_gate::{
     PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
@@ -61,6 +69,7 @@ pub use sandbox::{
     SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
 pub use secure_storage::{SecureStorage, SecureStorageBackend, SecureStorageError};
+pub use share::{ShareError, SharePayload, ShareResult, SharingService};
 pub use subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
     SubagentUsage,
@@ -71,6 +80,7 @@ pub use task_registry::{
     TaskRegistryHandle, TaskUpdatePatch,
 };
 pub use tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+pub use voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
 #[allow(unused_imports)]
 pub use worktree::*;
 pub use worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};

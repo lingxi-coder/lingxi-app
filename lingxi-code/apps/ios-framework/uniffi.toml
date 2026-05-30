@@ -1,0 +1,8 @@
+# M8-P12: UniFFI bindgen config — consumed in M9 once the `uniffi` crate dep is
+# added (it is omitted in M8 so the workspace builds under `--offline`). When
+# M9 runs `uniffi-bindgen generate --library <staticlib> --language swift`,
+# these settings name the generated Swift module.
+[bindings.swift]
+module_name = "LingxiCodeBindings"
+ffi_module_name = "lingxi_code_bindings_FFI"
+generate_immutable_records = true

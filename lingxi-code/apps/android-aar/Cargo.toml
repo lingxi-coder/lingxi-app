@@ -1,0 +1,31 @@
+[package]
+name = "android-aar"
+version = "0.9.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# M8-P12: the Android UniFFI packager crate. Wraps engine-mobile behind an
+# opaque `MobileEngineHandle` and accepts foreign-supplied (Kotlin) callback
+# objects (camera / voice / share) to construct an `AndroidPlatform`.
+#
+# UniFFI NOTE: same as ios-framework — the `uniffi` dep + `#[uniffi::export]` +
+# Kotlin bindgen are deferred to M9 (uniffi is unavailable under `--offline`).
+# The Rust surface is shaped exactly as UniFFI will export it. See `uniffi.toml`
+# and the Kotlin skeletons under `kotlin/`.
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+engine-mobile = { path = "../engine-mobile" }
+skill-api = { path = "../../skill-api" }
+traits = { path = "../../traits" }
+protocol = { path = "../../protocol" }
+thiserror.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+platform-android = { path = "../../platforms/android" }
+
+[lints]
+workspace = true

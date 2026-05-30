@@ -42,6 +42,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "android-aar"
+version = "0.9.0"
+dependencies = [
+ "engine-mobile",
+ "platform-android",
+ "protocol",
+ "skill-api",
+ "thiserror 2.0.18",
+ "traits",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1649,6 +1661,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "ios-framework"
+version = "0.9.0"
+dependencies = [
+ "engine-mobile",
+ "platform-ios",
+ "protocol",
+ "skill-api",
+ "thiserror 2.0.18",
+ "traits",
 ]
 
 [[package]]
@@ -4381,18 +4405,6 @@ name = "unicode-width"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
-
-[[package]]
-name = "uniffi-bridge"
-version = "0.8.0"
-dependencies = [
- "engine",
- "protocol",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
-]
 
 [[package]]
 name = "unsafe-libyaml"

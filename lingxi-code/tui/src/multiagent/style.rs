@@ -74,10 +74,26 @@ pub fn agent_color(c: AgentColor) -> Color {
         AgentColor::Green => Color::Green,
         AgentColor::Blue => Color::Blue,
         AgentColor::Red => Color::Red,
-        AgentColor::Orange => Color::Rgb { r: 255, g: 165, b: 0 },
-        AgentColor::Purple => Color::Rgb { r: 160, g: 90, b: 220 },
-        AgentColor::Pink => Color::Rgb { r: 255, g: 130, b: 180 },
-        AgentColor::Teal => Color::Rgb { r: 0, g: 160, b: 160 },
+        AgentColor::Orange => Color::Rgb {
+            r: 255,
+            g: 165,
+            b: 0,
+        },
+        AgentColor::Purple => Color::Rgb {
+            r: 160,
+            g: 90,
+            b: 220,
+        },
+        AgentColor::Pink => Color::Rgb {
+            r: 255,
+            g: 130,
+            b: 180,
+        },
+        AgentColor::Teal => Color::Rgb {
+            r: 0,
+            g: 160,
+            b: 160,
+        },
     }
 }
 
@@ -130,6 +146,13 @@ mod tests {
         }
         // Spot-check a named + an rgb mapping.
         assert_eq!(agent_color(AgentColor::Cyan), Color::Cyan);
-        assert_eq!(agent_color(AgentColor::Orange), Color::Rgb { r: 255, g: 165, b: 0 });
+        assert_eq!(
+            agent_color(AgentColor::Orange),
+            Color::Rgb {
+                r: 255,
+                g: 165,
+                b: 0
+            }
+        );
     }
 }

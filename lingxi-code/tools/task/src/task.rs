@@ -34,13 +34,13 @@ use telemetry::tengu::tool::{
 use telemetry::AnalyticsBus;
 use traits::task_registry::{TaskCreateInput, TaskListFilter, TaskRegistryError, TaskUpdatePatch};
 
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
+use tool_api::BuiltinToolContext;
 
 /// Tool name `'TaskCreate'` (claude-code `TASK_CREATE_TOOL_NAME`).
 pub const TASK_CREATE_TOOL_NAME: &str = "TaskCreate";
@@ -257,7 +257,7 @@ impl Tool for TaskCreateTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -477,7 +477,7 @@ impl Tool for TaskGetTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -641,7 +641,7 @@ impl Tool for TaskListTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -805,7 +805,7 @@ impl Tool for TaskUpdateTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         false
@@ -997,7 +997,7 @@ impl Tool for TaskStopTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         false
@@ -1160,7 +1160,7 @@ impl Tool for TaskOutputTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true

@@ -20,9 +20,7 @@ pub mod shell_events;
 pub mod skill;
 pub mod sleep;
 pub mod synthetic_output;
-pub mod task;
 pub mod team;
-pub mod todo_write;
 pub mod tool_search;
 pub mod web_fetch;
 pub mod web_search;
@@ -50,11 +48,7 @@ pub use send_message::SendMessageTool;
 pub use skill::SkillTool;
 pub use sleep::SleepTool;
 pub use synthetic_output::SyntheticOutputTool;
-pub use task::{
-    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
-};
 pub use team::{TeamCreateTool, TeamDeleteTool};
-pub use todo_write::TodoWriteTool;
 pub use tool_search::ToolSearchTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
@@ -75,6 +69,11 @@ pub use tool_file::{
 };
 pub use tool_shell::{bash, powershell, repl};
 pub use tool_shell::{BashTool, PowerShellTool, REPLTool};
+pub use tool_task::{task, todo_write};
+pub use tool_task::{
+    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
+    TodoWriteTool,
+};
 
 /// Register every M4-01 foundation tool against `registry`.
 ///
@@ -95,19 +94,13 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     registry.register_builtin(Arc::new(WebFetchTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(WebSearchTool::new(ctx.clone())));
     // M4-04 — workflow tools.
-    registry.register_builtin(Arc::new(TodoWriteTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(EnterPlanModeTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(ExitPlanModeTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(EnterWorktreeTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(ExitWorktreeTool::new(ctx.clone())));
     // M4-05 — agent + task + send_message tools.
     registry.register_builtin(Arc::new(AgentTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(TaskCreateTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(TaskGetTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(TaskListTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(TaskUpdateTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(TaskStopTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(TaskOutputTool::new(ctx.clone())));
+    tool_task::register_all(registry, ctx.clone());
     registry.register_builtin(Arc::new(SendMessageTool::new(ctx.clone())));
     // M4-06 — team tools.
     registry.register_builtin(Arc::new(TeamCreateTool::new(ctx.clone())));

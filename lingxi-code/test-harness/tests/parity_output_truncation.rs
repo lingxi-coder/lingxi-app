@@ -53,6 +53,8 @@ fn resolve_tool_src(repo_root: &std::path::Path, file: &str) -> PathBuf {
         "bash.rs" => Some("shell/src/bash.rs"),
         "powershell.rs" => Some("shell/src/powershell.rs"),
         "repl.rs" => Some("shell/src/repl.rs"),
+        "task.rs" => Some("task/src/task.rs"),
+        "todo_write.rs" => Some("task/src/todo_write.rs"),
         _ => None,
     };
     match mapped {

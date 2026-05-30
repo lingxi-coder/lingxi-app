@@ -7,6 +7,7 @@ pub mod event;
 pub mod fixture;
 pub mod poller;
 pub mod state;
+pub mod style;
 
 pub use adapter::{pump_once, MultiAgentFeed};
 pub use apply::apply_multiagent_event;
@@ -14,3 +15,4 @@ pub use event::MultiAgentEvent;
 pub use fixture::FixtureFeed;
 pub use poller::{task_row_from_record, PollerFeed};
 pub use state::{MultiAgentState, TaskRow, WorkerRow};
+pub use style::{agent_color, task_status_color, task_status_icon, AgentColor};

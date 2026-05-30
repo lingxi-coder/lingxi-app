@@ -3704,6 +3704,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-ui"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "engine",
+ "once_cell",
+ "permission",
+ "protocol",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tool-api",
+ "traits",
+]
+
+[[package]]
 name = "tool-web"
 version = "0.8.0"
 dependencies = [
@@ -3762,6 +3782,7 @@ dependencies = [
  "tool-plan",
  "tool-shell",
  "tool-task",
+ "tool-ui",
  "tool-web",
  "tracing",
  "traits",

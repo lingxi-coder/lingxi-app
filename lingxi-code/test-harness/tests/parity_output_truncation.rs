@@ -62,6 +62,11 @@ fn resolve_tool_src(repo_root: &std::path::Path, file: &str) -> PathBuf {
         "tool_search.rs" => Some("meta/src/tool_search.rs"),
         "schedule_cron.rs" => Some("cron/src/schedule_cron.rs"),
         "remote_trigger.rs" => Some("cron/src/remote_trigger.rs"),
+        "ask_user_question.rs" => Some("ui/src/ask_user_question.rs"),
+        "brief.rs" => Some("ui/src/brief.rs"),
+        "send_message.rs" => Some("ui/src/send_message.rs"),
+        "sleep.rs" => Some("ui/src/sleep.rs"),
+        "synthetic_output.rs" => Some("ui/src/synthetic_output.rs"),
         _ => None,
     };
     match mapped {

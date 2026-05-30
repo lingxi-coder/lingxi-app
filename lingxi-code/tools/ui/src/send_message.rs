@@ -25,13 +25,13 @@ use telemetry::tengu::tool::{SEND_MESSAGE_COMPLETED, SEND_MESSAGE_FAILED, SEND_M
 use telemetry::AnalyticsBus;
 use traits::mailbox::MailboxMessage;
 
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
+use tool_api::BuiltinToolContext;
 
 /// Tool name `'SendMessage'` (claude-code `SEND_MESSAGE_TOOL_NAME`).
 pub const SEND_MESSAGE_TOOL_NAME: &str = "SendMessage";
@@ -125,7 +125,7 @@ impl Tool for SendMessageTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true

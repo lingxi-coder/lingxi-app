@@ -21,13 +21,13 @@ use telemetry::tengu::tool::{
 };
 use telemetry::AnalyticsBus;
 
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::shared::MAX_TOOL_OUTPUT_LENGTH;
-use crate::tool_trait::{
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext, ValidationError,
 };
+use tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH;
 
 /// Tool name byte-lock.
 pub const SYNTHETIC_OUTPUT_TOOL_NAME: &str = "SyntheticOutput";
@@ -37,13 +37,13 @@ pub const SYNTHETIC_TRUNCATION_SUFFIX: &str = "\n... [truncated]";
 
 /// `SyntheticOutputTool` — echo-input stub for parity replay.
 pub struct SyntheticOutputTool {
-    pub(crate) ctx: super::BuiltinToolContext,
+    pub(crate) ctx: tool_api::BuiltinToolContext,
 }
 
 impl SyntheticOutputTool {
     /// Construct.
     #[must_use]
-    pub fn new(ctx: super::BuiltinToolContext) -> Self {
+    pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self { ctx }
     }
 }
@@ -213,7 +213,7 @@ impl Tool for SyntheticOutputTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {

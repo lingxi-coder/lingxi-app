@@ -7,15 +7,10 @@ use crate::registry::ToolRegistry;
 use std::sync::Arc;
 
 pub mod agent;
-pub mod ask_user_question;
-pub mod brief;
 pub mod lsp;
 pub mod mcp;
-pub mod send_message;
 pub mod shell_events;
 pub mod skill;
-pub mod sleep;
-pub mod synthetic_output;
 pub mod team;
 pub mod worktree;
 
@@ -29,14 +24,9 @@ pub(crate) use tool_api::test_support;
 pub mod agent_test_support;
 
 pub use agent::AgentTool;
-pub use ask_user_question::AskUserQuestionTool;
-pub use brief::BriefTool;
 pub use lsp::LSPTool;
 pub use mcp::{ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool};
-pub use send_message::SendMessageTool;
 pub use skill::SkillTool;
-pub use sleep::SleepTool;
-pub use synthetic_output::SyntheticOutputTool;
 pub use team::{TeamCreateTool, TeamDeleteTool};
 pub use worktree::{EnterWorktreeTool, ExitWorktreeTool};
 
@@ -66,6 +56,10 @@ pub use tool_task::{
     TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
     TodoWriteTool,
 };
+pub use tool_ui::{ask_user_question, brief, send_message, sleep, synthetic_output};
+pub use tool_ui::{
+    AskUserQuestionTool, BriefTool, SendMessageTool, SleepTool, SyntheticOutputTool,
+};
 pub use tool_web::{web_fetch, web_search};
 pub use tool_web::{WebFetchTool, WebSearchTool};
 
@@ -83,7 +77,6 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     tool_file::register_all(registry, ctx.clone());
     // M4-02 — shell tools.
     tool_shell::register_all(registry, ctx.clone());
-    registry.register_builtin(Arc::new(SleepTool::new(ctx.clone())));
     // M4-03 — web tools.
     tool_web::register_all(registry, ctx.clone());
     // M4-04 — workflow tools.
@@ -93,7 +86,6 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     // M4-05 — agent + task + send_message tools.
     registry.register_builtin(Arc::new(AgentTool::new(ctx.clone())));
     tool_task::register_all(registry, ctx.clone());
-    registry.register_builtin(Arc::new(SendMessageTool::new(ctx.clone())));
     // M4-06 — team tools.
     registry.register_builtin(Arc::new(TeamCreateTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(TeamDeleteTool::new(ctx.clone())));
@@ -104,12 +96,10 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     registry.register_builtin(Arc::new(ReadMcpResourceTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(LSPTool::new(ctx.clone())));
     // M4-08 — system tools.
-    registry.register_builtin(Arc::new(AskUserQuestionTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(BriefTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(SkillTool::new(ctx.clone())));
     tool_cron::register_all(registry, ctx.clone());
     tool_meta::register_all(registry, ctx.clone());
-    registry.register_builtin(Arc::new(SyntheticOutputTool::new(ctx)));
+    tool_ui::register_all(registry, ctx);
 }
 
 #[cfg(test)]

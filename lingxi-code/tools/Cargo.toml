@@ -14,6 +14,7 @@ tool-web = { path = "web" }
 tool-plan = { path = "plan" }
 tool-meta = { path = "meta" }
 tool-cron = { path = "cron" }
+tool-ui = { path = "ui" }
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }

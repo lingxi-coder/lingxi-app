@@ -2,14 +2,6 @@
 //!
 //! Reads start/elapsed via the injected `Clock` so tests stay hermetic.
 
-use crate::builtin::shell_events::{SLEEP_COMPLETED, SLEEP_FAILED, SLEEP_STARTED};
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
-};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -18,6 +10,14 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{SLEEP_COMPLETED, SLEEP_FAILED, SLEEP_STARTED};
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    ValidationError,
+};
+use tool_api::BuiltinToolContext;
 
 /// 10-minute cap on the sleep duration — matches BashTool's max.
 pub const SLEEP_MAX_DURATION_MS: u64 = 600_000;
@@ -160,7 +160,7 @@ impl Tool for SleepTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {

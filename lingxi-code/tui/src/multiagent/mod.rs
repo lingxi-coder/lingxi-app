@@ -8,7 +8,7 @@ pub mod fixture;
 pub mod poller;
 pub mod state;
 
-pub use adapter::MultiAgentFeed;
+pub use adapter::{pump_once, MultiAgentFeed};
 pub use apply::apply_multiagent_event;
 pub use event::MultiAgentEvent;
 pub use fixture::FixtureFeed;

@@ -8,6 +8,7 @@
 
 use crate::multiagent::event::MultiAgentEvent;
 use async_trait::async_trait;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// A source of multi-agent updates. One `poll()` returns the events for one
 /// tick (a poller read, or one scripted fixture step).
@@ -17,13 +18,57 @@ pub trait MultiAgentFeed: Send + Sync {
     async fn poll(&self) -> Vec<MultiAgentEvent>;
 }
 
+/// Poll `feed` once and forward every produced event to `tx`. Returns the
+/// number of events sent. The M9-05 `root.rs` pump calls this on a tick; here
+/// it is a standalone, fully-testable unit. A closed channel is treated as a
+/// no-op (events are dropped) — the caller owns shutdown.
+pub async fn pump_once(feed: &dyn MultiAgentFeed, tx: &UnboundedSender<MultiAgentEvent>) -> usize {
+    let events = feed.poll().await;
+    let mut sent = 0;
+    for ev in events {
+        if tx.send(ev).is_ok() {
+            sent += 1;
+        }
+    }
+    sent
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use crate::multiagent::fixture::FixtureFeed;
+    use crate::multiagent::state::TaskRow;
+    use tokio::sync::mpsc;
 
     #[test]
     fn trait_is_object_safe() {
         let _: Option<Arc<dyn MultiAgentFeed>> = None;
+    }
+
+    #[tokio::test]
+    async fn pump_once_forwards_fixture_events_to_channel() {
+        let feed = FixtureFeed::new(vec![vec![MultiAgentEvent::TasksRefreshed(vec![TaskRow {
+            task_id: "b00000001".into(),
+            task_type: "local_bash".into(),
+            status: "running".into(),
+            description: "x".into(),
+        }])]]);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sent = pump_once(&feed, &tx).await;
+        assert_eq!(sent, 1);
+        match rx.recv().await.unwrap() {
+            MultiAgentEvent::TasksRefreshed(rows) => assert_eq!(rows.len(), 1),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pump_once_on_exhausted_feed_sends_nothing() {
+        let feed = FixtureFeed::new(vec![]); // empty script
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sent = pump_once(&feed, &tx).await;
+        assert_eq!(sent, 0);
+        assert!(rx.try_recv().is_err());
     }
 }

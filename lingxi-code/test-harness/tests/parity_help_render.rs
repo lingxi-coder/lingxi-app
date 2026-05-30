@@ -3,7 +3,7 @@
 //!
 //! M5-10 Task 10.
 
-use commands::builtin::help_render::render_help_screen;
+use command_api::builtin_support::help_render::render_help_screen;
 
 const GOLDEN: &str = include_str!("../src/parity/fixtures/parity_help_screen.txt");
 

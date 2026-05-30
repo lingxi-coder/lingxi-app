@@ -1,0 +1,38 @@
+[package]
+name = "command-core"
+version = "0.8.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# M8-P9: the cross-platform builtin slash-command handlers (the 18 "core"
+# commands) + the registration entry points the composition roots call. Built
+# on the command-api runtime. build.rs captures LINGXI_GIT_SHA_SHORT for /version.
+
+[dependencies]
+command-api = { path = "../../command-api" }
+protocol = { path = "../../protocol" }
+traits = { path = "../../traits" }
+telemetry = { path = "../../telemetry" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+# Batch-1/2 tests bind handlers to a mock orchestrator handle; compact/cost
+# tests construct a bare ToolRegistry + cost/compaction/api-client deps; the
+# /init template test checks the OLD_INIT_PROMPT sha256 via sha2.
+orchestrator = { path = "../../orchestrator" }
+tool-api = { path = "../../tool-api" }
+cost = { path = "../../cost" }
+api-client = { path = "../../api-client" }
+compaction = { path = "../../compaction" }
+sha2 = "0.10"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+
+[lints]
+workspace = true

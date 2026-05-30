@@ -9,8 +9,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use commands::dispatcher::RegistrySlashDispatcher;
-use commands::registry::{register_all_builtin_commands, CommandRegistry};
+use command_api::CommandRegistry;
+use command_api::RegistrySlashDispatcher;
+use command_core::register_all_builtin_commands;
 use permission::PermissionMode;
 use tokio::sync::RwLock;
 use tui::state::StatusSnapshot;

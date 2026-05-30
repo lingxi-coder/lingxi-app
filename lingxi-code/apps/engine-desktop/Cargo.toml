@@ -13,7 +13,9 @@ license.workspace = true
 [dependencies]
 tool-api = { path = "../../tool-api" }
 traits = { path = "../../traits" }
-commands = { path = "../../commands" }
+command-api = { path = "../../command-api" }
+command-core = { path = "../../commands/core" }
+command-desktop = { path = "../../commands/desktop" }
 
 # Skill composition (P8): the abstraction crate + the builtin skill set.
 skill-api = { path = "../../skill-api" }

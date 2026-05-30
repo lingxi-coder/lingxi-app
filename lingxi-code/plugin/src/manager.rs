@@ -15,7 +15,7 @@ use crate::manifest::PluginManifest;
 use crate::source::PluginSource;
 use crate::strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
 
-use commands::CommandRegistry;
+use command_api::CommandRegistry;
 use hooks::HookRegistry;
 use lsp::LspRegistry;
 use mcp::McpRegistry;
@@ -196,11 +196,11 @@ impl PluginManager {
 
         // 1. Commands.
         if !self.strict.is_locked(PluginComponent::Commands) {
-            let cmds: Vec<commands::SlashCommand> = manifest
+            let cmds: Vec<command_api::SlashCommand> = manifest
                 .components
                 .commands
                 .iter()
-                .map(|cp| commands::SlashCommand {
+                .map(|cp| command_api::SlashCommand {
                     name: cp
                         .path
                         .file_stem()
@@ -208,11 +208,11 @@ impl PluginManager {
                         .unwrap_or("")
                         .to_string(),
                     description: String::new(),
-                    source: commands::CommandSource::Plugin,
-                    kind: commands::SlashCommandKind::Plugin {
+                    source: command_api::CommandSource::Plugin,
+                    kind: command_api::SlashCommandKind::Plugin {
                         plugin_id: manifest.id,
                         file_path: cp.path.clone(),
-                        frontmatter: commands::CommandFrontmatter::default(),
+                        frontmatter: command_api::CommandFrontmatter::default(),
                         prompt_template: String::new(),
                     },
                 })

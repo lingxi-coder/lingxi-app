@@ -1,11 +1,11 @@
 //! M6-07 parity — locks `/mcp`, `/hooks`, `/agents` empty-state literals
 //! and one non-empty sample for each.
 
-use commands::builtin::agents::AgentsHandler;
-use commands::builtin::hooks::HooksHandler;
-use commands::builtin::mcp::McpHandler;
-use commands::model::{BuiltinCommandHandler, CommandResult};
-use commands::parser::ParsedSlashCommand;
+use command_api::model::{BuiltinCommandHandler, CommandResult};
+use command_api::parser::ParsedSlashCommand;
+use command_core::agents::AgentsHandler;
+use command_core::hooks::HooksHandler;
+use command_core::mcp::McpHandler;
 use orchestrator::test_support::MockOrchestratorHandle;
 use serde_json::Value;
 use std::sync::Arc;

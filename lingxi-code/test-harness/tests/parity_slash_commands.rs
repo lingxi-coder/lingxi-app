@@ -10,9 +10,10 @@
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
 //! - Unknown literal template = "Unknown command: /{name}"
 
-use commands::builtin::{BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES};
-use commands::dispatcher::RegistrySlashDispatcher;
-use commands::registry::{register_all_builtin_commands, CommandRegistry};
+use command_api::builtin_support::names::{BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES};
+use command_api::CommandRegistry;
+use command_api::RegistrySlashDispatcher;
+use command_core::register_all_builtin_commands;
 use serde::Deserialize;
 use std::sync::Arc;
 use test_harness::parity::load_fixture;
@@ -238,7 +239,8 @@ fn implemented_names_match_builtin_core_names_constant() {
         .collect();
     fixture_impl.sort_unstable();
 
-    let mut const_core: Vec<&str> = commands::builtin::BUILTIN_CORE_NAMES.to_vec();
+    let mut const_core: Vec<&str> =
+        command_api::builtin_support::names::BUILTIN_CORE_NAMES.to_vec();
     const_core.sort_unstable();
 
     assert_eq!(

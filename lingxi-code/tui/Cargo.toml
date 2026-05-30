@@ -16,7 +16,8 @@ orchestrator = { path = "../orchestrator" }
 telemetry = { path = "../telemetry" }
 engine = { path = "../engine" }
 permission = { path = "../permission" }
-commands = { path = "../commands" }
+command-api = { path = "../command-api" }
+command-core = { path = "../commands/core" }
 session = { path = "../session" }
 # (M7-14) CLAUDE.md hierarchy walker + loader — the M3 store the Memory editor
 # reads through and writes back to (§4 R7: no new persistence layer).

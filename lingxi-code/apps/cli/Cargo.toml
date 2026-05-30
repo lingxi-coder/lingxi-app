@@ -21,7 +21,7 @@ engine-desktop = { path = "../engine-desktop" }
 protocol = { path = "../../protocol" }
 traits = { path = "../../traits" }
 api-client = { path = "../../api-client" }
-commands = { path = "../../commands" }
+command-api = { path = "../../command-api" }
 orchestrator = { path = "../../orchestrator" }
 compaction = { path = "../../compaction" }
 mcp = { path = "../../mcp" }

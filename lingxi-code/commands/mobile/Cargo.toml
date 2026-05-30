@@ -1,0 +1,17 @@
+[package]
+name = "command-mobile"
+version = "0.8.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# M8-P9: mobile-only slash-command handlers. Empty in M8 — the mobile commands
+# (/mobile /voice /share /camera) are still served as unimplemented stubs by
+# command-core's register_all_builtin_commands. This crate's register() is the
+# slot the engine-mobile composition root (P11) calls.
+
+[dependencies]
+command-api = { path = "../../command-api" }
+
+[lints]
+workspace = true

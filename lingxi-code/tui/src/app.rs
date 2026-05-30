@@ -879,9 +879,10 @@ mod dispatch_tests {
     }
 
     /// Build a `RegistrySlashDispatcher` seeded with the M5-09 built-ins.
-    fn dispatcher() -> commands::dispatcher::RegistrySlashDispatcher {
-        use commands::dispatcher::RegistrySlashDispatcher;
-        use commands::registry::{register_all_builtin_commands, CommandRegistry};
+    fn dispatcher() -> command_api::RegistrySlashDispatcher {
+        use command_api::CommandRegistry;
+        use command_api::RegistrySlashDispatcher;
+        use command_core::register_all_builtin_commands;
         use std::sync::Arc;
         use tokio::sync::RwLock;
         let mut reg = CommandRegistry::new();

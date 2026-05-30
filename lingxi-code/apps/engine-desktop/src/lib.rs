@@ -26,9 +26,8 @@
 
 #![forbid(unsafe_code)]
 
-use commands::registry::{
-    register_all_builtin_commands, register_core_batch_1, register_core_batch_2, CommandRegistry,
-};
+use command_api::CommandRegistry;
+use command_core::{register_all_builtin_commands, register_core_batch_1, register_core_batch_2};
 use skill_api::SkillRegistry;
 use std::sync::Arc;
 use tool_api::{BuiltinToolContext, ToolRegistry};
@@ -117,5 +116,8 @@ pub fn desktop_command_registry(
     register_all_builtin_commands(&mut reg);
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle, auth);
+    // Desktop-only command handlers (no-op in M8 — the names remain
+    // command-core unimplemented stubs until future milestones fill them).
+    command_desktop::register(&mut reg);
     reg
 }

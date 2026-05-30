@@ -27,7 +27,7 @@ use anthropic_oauth::client::ClaudeAiOAuthClient;
 use anthropic_oauth::config::ClaudeAiOAuthConfig;
 use anthropic_oauth::handle::OAuthHandle;
 use api_client::AnthropicProvider;
-use commands::dispatcher::RegistrySlashDispatcher;
+use command_api::RegistrySlashDispatcher;
 use engine_desktop::{desktop_command_registry, desktop_tool_registry};
 use orchestrator::test_support::{noop_hook_executor, NoOpPermissionGate, StaticMemoryProvider};
 use orchestrator::{

@@ -1,0 +1,17 @@
+[package]
+name = "command-desktop"
+version = "0.8.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# M8-P9: desktop-only slash-command handlers. Empty in M8 — the desktop
+# commands (/commit /diff /review /chrome /ide ...) are still served as
+# unimplemented stubs by command-core's register_all_builtin_commands. This
+# crate's register() is the slot future milestones populate.
+
+[dependencies]
+command-api = { path = "../../command-api" }
+
+[lints]
+workspace = true

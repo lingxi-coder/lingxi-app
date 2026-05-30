@@ -368,6 +368,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bridge-server"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "bridge",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bstr"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -21,8 +21,15 @@ pub mod lockfile;
 pub mod mcp_endpoint;
 pub mod state;
 pub mod transport;
+/// M9-targeted remote-drive **wire protocol** types (handshake + framing).
+/// Named `wire` to avoid shadowing the `protocol` crate dependency.
+pub mod wire;
 
 pub use lockfile::{IdeLockfile, LockfileBody, LockfileGuard, IDE_NAME, TRANSPORT};
 pub use mcp_endpoint::{McpEndpoint, AUTH_HEADER_NAME, WS_SUBPROTOCOL};
 pub use state::BridgeState;
 pub use transport::{BridgeError, IdeBridge};
+pub use wire::{
+    AuthChallenge, AuthResponse, BridgeRequest, BridgeResponse, BridgeWireError, Capabilities,
+    ClientHello, ServerHello, BRIDGE_PROTOCOL_VERSION,
+};

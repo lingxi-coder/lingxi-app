@@ -1,0 +1,26 @@
+[package]
+name = "bridge-server"
+version = "0.9.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# M8-P13: hello-world remote-engine entrypoint. Loads the bridge wire types to
+# prove the wiring; the WebSocket server + JWT auth + engine-desktop wiring land
+# in M9. bridge-server is the consumer tier that may later pull engine-desktop;
+# the `bridge` crate itself stays an engine-tier subsystem.
+
+[[bin]]
+name = "bridge-server"
+path = "src/main.rs"
+
+[dependencies]
+bridge = { path = "../../bridge" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+
+[lints]
+workspace = true

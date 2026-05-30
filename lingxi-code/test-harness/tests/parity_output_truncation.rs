@@ -50,6 +50,9 @@ fn resolve_tool_src(repo_root: &std::path::Path, file: &str) -> PathBuf {
         "notebook_edit.rs" => Some("file/src/notebook_edit.rs"),
         "glob.rs" => Some("file/src/glob.rs"),
         "grep.rs" => Some("file/src/grep.rs"),
+        "bash.rs" => Some("shell/src/bash.rs"),
+        "powershell.rs" => Some("shell/src/powershell.rs"),
+        "repl.rs" => Some("shell/src/repl.rs"),
         _ => None,
     };
     match mapped {

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 tool-api = { path = "../tool-api" }
 tool-file = { path = "file" }
+tool-shell = { path = "shell" }
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }

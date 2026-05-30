@@ -5,15 +5,7 @@
 //! and `docs/superpowers/specs/2026-05-24-m4-tools-implementation-design.md`
 //! §4 Flow C and §7 wire identifiers for the locked literals.
 
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::shared::ansi_strip::strip_ansi_count;
-use crate::shared::output_truncation::{truncate_default, MAX_TOOL_OUTPUT_LENGTH};
-use crate::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
-};
+use crate::shared::strip_ansi_count;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -24,6 +16,14 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{BASH_COMPLETED, BASH_FAILED, BASH_STARTED, BASH_TIMEOUT};
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    ValidationError,
+};
+use tool_api::util::output_truncation::{truncate_default, MAX_TOOL_OUTPUT_LENGTH};
+use tool_api::BuiltinToolContext;
 
 // ===== Locked constants =====================================================
 
@@ -414,11 +414,11 @@ impl Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{fresh_tx, shell_test_ctx};
+    use tool_api::test_support::{fresh_tx, shell_test_ctx};
     use traits::process::ProcessOutput;
 
     fn use_ctx() -> ToolUseContext {
-        crate::builtin::test_support::fresh_ctx()
+        tool_api::test_support::fresh_ctx()
     }
 
     #[test]

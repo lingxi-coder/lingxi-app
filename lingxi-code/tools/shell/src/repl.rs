@@ -7,16 +7,7 @@
 //!
 //! See spec §7 wire identifiers (REPL row) and claude-code/src/tools/REPLTool/.
 
-use crate::builtin::shell_events::{REPL_COMPLETED, REPL_FAILED, REPL_STARTED};
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::shared::ansi_strip::strip_ansi_count;
-use crate::shared::output_truncation::{truncate_default, MAX_TOOL_OUTPUT_LENGTH};
-use crate::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
-};
+use crate::shared::strip_ansi_count;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -25,6 +16,15 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{REPL_COMPLETED, REPL_FAILED, REPL_STARTED};
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    ValidationError,
+};
+use tool_api::util::output_truncation::{truncate_default, MAX_TOOL_OUTPUT_LENGTH};
+use tool_api::BuiltinToolContext;
 
 /// 2-minute REPL timeout (no per-call override).
 pub const REPL_DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -218,7 +218,7 @@ impl Tool for REPLTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use traits::process::ProcessOutput;
 
     #[test]

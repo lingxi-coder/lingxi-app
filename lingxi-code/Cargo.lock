@@ -3608,6 +3608,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-shell"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "once_cell",
+ "permission",
+ "protocol",
+ "sandbox",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tool-api",
+ "traits",
+]
+
+[[package]]
 name = "tools"
 version = "0.8.0"
 dependencies = [
@@ -3641,6 +3660,7 @@ dependencies = [
  "tokio",
  "tool-api",
  "tool-file",
+ "tool-shell",
  "tracing",
  "traits",
  "url",

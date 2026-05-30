@@ -1,15 +1,15 @@
 //! Cross-tool shared helpers.
 //!
-//! M8-P5: `output_truncation` and `path_validation` moved to `tool-api`'s
-//! `util` module (shared across tool crates + engine); re-exported here so
-//! the monolith's remaining tools keep using `crate::shared::…` until P7.
-//! `ansi_strip` (shell-only) and `file_kit` (file-only) stay until their
-//! tool crates take them.
+//! M8-P5: the helpers all moved out of the monolith. `output_truncation` and
+//! `path_validation` went to `tool-api`'s `util` module (shared across tool
+//! crates + engine); `file_kit` went to the `tool-file` crate; `ansi_strip`
+//! went to the `tool-shell` crate. They are re-exported here so the monolith's
+//! remaining tools and the parity tests keep using `crate::shared::…` /
+//! `tools::shared::…` until P7 finishes the split.
 
-pub mod ansi_strip;
-// M8-P5: file_kit moved to the tool-file crate; re-export so monolith callers
-// and parity tests keep using `tools::shared::file_kit::…`.
+// file-only and shell-only helpers, re-exported from their tool crates.
 pub use tool_file::shared as file_kit;
+pub use tool_shell::shared as ansi_strip;
 
 pub use tool_api::util::output_truncation::{
     self, truncate, truncate_default, MAX_TOOL_OUTPUT_LENGTH, TRUNCATION_SUFFIX,

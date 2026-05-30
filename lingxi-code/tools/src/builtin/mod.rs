@@ -8,15 +8,12 @@ use std::sync::Arc;
 
 pub mod agent;
 pub mod ask_user_question;
-pub mod bash;
 pub mod brief;
 pub mod config;
 pub mod lsp;
 pub mod mcp;
 pub mod plan_mode;
-pub mod powershell;
 pub mod remote_trigger;
-pub mod repl;
 pub mod schedule_cron;
 pub mod send_message;
 pub mod shell_events;
@@ -42,15 +39,12 @@ pub mod agent_test_support;
 
 pub use agent::AgentTool;
 pub use ask_user_question::AskUserQuestionTool;
-pub use bash::BashTool;
 pub use brief::BriefTool;
 pub use config::ConfigTool;
 pub use lsp::LSPTool;
 pub use mcp::{ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool};
 pub use plan_mode::{EnterPlanModeTool, ExitPlanModeTool};
-pub use powershell::PowerShellTool;
 pub use remote_trigger::RemoteTriggerTool;
-pub use repl::REPLTool;
 pub use schedule_cron::ScheduleCronTool;
 pub use send_message::SendMessageTool;
 pub use skill::SkillTool;
@@ -79,6 +73,8 @@ pub use tool_file::{
 pub use tool_file::{
     FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, NotebookEditTool,
 };
+pub use tool_shell::{bash, powershell, repl};
+pub use tool_shell::{BashTool, PowerShellTool, REPLTool};
 
 /// Register every M4-01 foundation tool against `registry`.
 ///
@@ -93,9 +89,7 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     // M4-01 — file/search tools (M8-P5: extracted to the tool-file crate).
     tool_file::register_all(registry, ctx.clone());
     // M4-02 — shell tools.
-    registry.register_builtin(Arc::new(BashTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(PowerShellTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(REPLTool::new(ctx.clone())));
+    tool_shell::register_all(registry, ctx.clone());
     registry.register_builtin(Arc::new(SleepTool::new(ctx.clone())));
     // M4-03 — web tools.
     registry.register_builtin(Arc::new(WebFetchTool::new(ctx.clone())));

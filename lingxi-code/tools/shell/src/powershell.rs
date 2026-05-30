@@ -5,16 +5,7 @@
 //!
 //! See spec §7 wire identifiers (PowerShell row).
 
-use crate::builtin::shell_events::{POWERSHELL_COMPLETED, POWERSHELL_FAILED, POWERSHELL_STARTED};
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::shared::ansi_strip::strip_ansi_count;
-use crate::shared::output_truncation::{truncate_default, MAX_TOOL_OUTPUT_LENGTH};
-use crate::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
-};
+use crate::shared::strip_ansi_count;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -24,6 +15,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{POWERSHELL_COMPLETED, POWERSHELL_FAILED, POWERSHELL_STARTED};
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    ValidationError,
+};
+use tool_api::util::output_truncation::{truncate_default, MAX_TOOL_OUTPUT_LENGTH};
+use tool_api::BuiltinToolContext;
 
 /// Windows PowerShell executable.
 pub const POWERSHELL_BIN_WINDOWS: &str = "powershell.exe";
@@ -295,7 +295,7 @@ impl Tool for PowerShellTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use traits::process::ProcessOutput;
 
     #[test]

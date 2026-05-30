@@ -11,8 +11,6 @@ pub mod ask_user_question;
 pub mod brief;
 pub mod lsp;
 pub mod mcp;
-pub mod remote_trigger;
-pub mod schedule_cron;
 pub mod send_message;
 pub mod shell_events;
 pub mod skill;
@@ -35,8 +33,6 @@ pub use ask_user_question::AskUserQuestionTool;
 pub use brief::BriefTool;
 pub use lsp::LSPTool;
 pub use mcp::{ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool};
-pub use remote_trigger::RemoteTriggerTool;
-pub use schedule_cron::ScheduleCronTool;
 pub use send_message::SendMessageTool;
 pub use skill::SkillTool;
 pub use sleep::SleepTool;
@@ -51,6 +47,8 @@ pub use tool_api::BuiltinToolContext;
 // tool types AND the modules (under their old `file_*` names) so
 // `tools::builtin::FileReadTool` and `tools::builtin::file_read::TOOL_NAME`
 // (parity tests, external callers) keep working.
+pub use tool_cron::{remote_trigger, schedule_cron};
+pub use tool_cron::{RemoteTriggerTool, ScheduleCronTool};
 pub use tool_file::{
     edit as file_edit, glob, grep, notebook_edit, read as file_read, write as file_write,
 };
@@ -109,9 +107,8 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     registry.register_builtin(Arc::new(AskUserQuestionTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(BriefTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(SkillTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(ScheduleCronTool::new(ctx.clone())));
+    tool_cron::register_all(registry, ctx.clone());
     tool_meta::register_all(registry, ctx.clone());
-    registry.register_builtin(Arc::new(RemoteTriggerTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(SyntheticOutputTool::new(ctx)));
 }
 

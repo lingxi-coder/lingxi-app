@@ -3583,6 +3583,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-cron"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "engine",
+ "once_cell",
+ "permission",
+ "protocol",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tool-api",
+ "traits",
+]
+
+[[package]]
 name = "tool-file"
 version = "0.8.0"
 dependencies = [
@@ -3736,6 +3756,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
+ "tool-cron",
  "tool-file",
  "tool-meta",
  "tool-plan",

@@ -89,6 +89,8 @@ fn resolve_tool_src(file: &str) -> PathBuf {
         "plan_mode.rs" => Some("plan/src/plan_mode.rs"),
         "config.rs" => Some("meta/src/config.rs"),
         "tool_search.rs" => Some("meta/src/tool_search.rs"),
+        "schedule_cron.rs" => Some("cron/src/schedule_cron.rs"),
+        "remote_trigger.rs" => Some("cron/src/remote_trigger.rs"),
         _ => None,
     };
     match mapped {

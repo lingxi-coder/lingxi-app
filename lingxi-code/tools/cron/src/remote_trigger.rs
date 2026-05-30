@@ -27,9 +27,9 @@ use telemetry::tengu::tool::{
 };
 use telemetry::AnalyticsBus;
 
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext, ValidationError,
 };
@@ -56,13 +56,13 @@ pub(crate) fn credentials_path(home: &Path) -> PathBuf {
 /// `RemoteTriggerTool` — local stub. Validates credentials file exists +
 /// has `oauth.access_token` string; never hits the network.
 pub struct RemoteTriggerTool {
-    pub(crate) ctx: super::BuiltinToolContext,
+    pub(crate) ctx: tool_api::BuiltinToolContext,
 }
 
 impl RemoteTriggerTool {
     /// Construct.
     #[must_use]
-    pub fn new(ctx: super::BuiltinToolContext) -> Self {
+    pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self { ctx }
     }
 }
@@ -284,7 +284,7 @@ impl Tool for RemoteTriggerTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, HOME_LOCK};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, HOME_LOCK};
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {

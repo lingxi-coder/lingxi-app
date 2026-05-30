@@ -195,6 +195,10 @@ fn make_web_ctx(http: Arc<dyn HttpTransport>) -> (BuiltinToolContext, Arc<InMemo
         budget_enforcer: None,
         mcp_registry: None,
         lsp_registry: None,
+        camera: None,
+        voice: None,
+        share: None,
+        computer_control: None,
     };
     (ctx, sink)
 }

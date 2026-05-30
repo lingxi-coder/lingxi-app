@@ -507,6 +507,10 @@ pub fn ctx_for_file_tools(
         budget_enforcer: None,
         mcp_registry: None,
         lsp_registry: None,
+        camera: None,
+        voice: None,
+        share: None,
+        computer_control: None,
     }
 }
 
@@ -547,5 +551,9 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         budget_enforcer: None,
         mcp_registry: None,
         lsp_registry: None,
+        camera: None,
+        voice: None,
+        share: None,
+        computer_control: None,
     }
 }

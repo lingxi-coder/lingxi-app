@@ -245,6 +245,10 @@ fn make_bctx(mock: Arc<LocalMockWorktree>) -> BuiltinToolContext {
         budget_enforcer: None,
         mcp_registry: None,
         lsp_registry: None,
+        camera: None,
+        voice: None,
+        share: None,
+        computer_control: None,
     }
 }
 

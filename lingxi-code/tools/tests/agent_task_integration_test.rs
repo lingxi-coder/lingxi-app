@@ -265,6 +265,10 @@ mod common {
                 as Arc<dyn traits::budget::BudgetEnforcerHandle>),
             mcp_registry: None,
             lsp_registry: None,
+            camera: None,
+            voice: None,
+            share: None,
+            computer_control: None,
         }
     }
 }

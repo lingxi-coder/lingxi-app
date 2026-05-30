@@ -300,6 +300,11 @@ pub async fn build_runtime(
         budget_enforcer: None,
         mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: None,
+        // Mobile / device-control capabilities are not wired on desktop (M8).
+        camera: None,
+        voice: None,
+        share: None,
+        computer_control: None,
     };
     let tools = Arc::new(desktop_tool_registry(tool_ctx));
 

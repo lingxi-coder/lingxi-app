@@ -970,6 +970,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-mobile"
+version = "0.9.0"
+dependencies = [
+ "command-api",
+ "command-core",
+ "command-mobile",
+ "insta",
+ "platform-android",
+ "platform-ios",
+ "skill-api",
+ "skill-builtin",
+ "tool-api",
+ "tool-camera",
+ "tool-cron",
+ "tool-file",
+ "tool-meta",
+ "tool-plan",
+ "tool-share",
+ "tool-skill",
+ "tool-task",
+ "tool-ui",
+ "tool-voice",
+ "tool-web",
+ "traits",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3652,6 +3679,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-android-use"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "once_cell",
+ "permission",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tool-api",
+ "traits",
+]
+
+[[package]]
 name = "tool-api"
 version = "0.8.0"
 dependencies = [
@@ -3672,6 +3713,34 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "traits",
+]
+
+[[package]]
+name = "tool-camera"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "once_cell",
+ "permission",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tool-api",
+ "traits",
+]
+
+[[package]]
+name = "tool-computer-use"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "once_cell",
+ "permission",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tool-api",
  "traits",
 ]
 
@@ -3718,6 +3787,20 @@ dependencies = [
  "tool-api",
  "traits",
  "walkdir",
+]
+
+[[package]]
+name = "tool-ios-use"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "once_cell",
+ "permission",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tool-api",
+ "traits",
 ]
 
 [[package]]
@@ -3792,6 +3875,20 @@ dependencies = [
  "serde_json",
  "telemetry",
  "thiserror 2.0.18",
+ "tokio",
+ "tool-api",
+ "traits",
+]
+
+[[package]]
+name = "tool-share"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "once_cell",
+ "permission",
+ "serde",
+ "serde_json",
  "tokio",
  "tool-api",
  "traits",
@@ -3889,6 +3986,20 @@ dependencies = [
  "telemetry",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tool-api",
+ "traits",
+]
+
+[[package]]
+name = "tool-voice"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "once_cell",
+ "permission",
+ "serde",
+ "serde_json",
  "tokio",
  "tool-api",
  "traits",

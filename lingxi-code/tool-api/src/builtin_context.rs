@@ -15,14 +15,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use telemetry::AnalyticsBus;
 use traits::budget::BudgetEnforcerHandle;
+use traits::camera::CameraControl;
 use traits::clock::Clock;
+use traits::computer_control::ComputerControl;
 use traits::filesystem::FileSystem;
 use traits::http::HttpTransport;
 use traits::mailbox::MailboxRouterHandle;
 use traits::process::ProcessRunner;
 use traits::sandbox::Sandbox;
+use traits::share::SharingService;
 use traits::subagent_spawn::SubagentSpawner;
 use traits::task_registry::TaskRegistryHandle;
+use traits::voice::VoiceRecorder;
 use traits::worktree::WorktreeManager;
 
 /// Static surface every builtin tool needs at construction time.
@@ -97,4 +101,20 @@ pub struct BuiltinToolContext {
     /// the host has not wired an LSP layer. Production wires
     /// `lsp::registry::LspRegistry` populated by plugin registration.
     pub lsp_registry: Option<Arc<::lsp::registry::LspRegistry>>,
+
+    // ===== M8-P11 mobile / device-control capabilities =====
+    /// Native camera — `tool-camera`'s `CameraTool` routes here. `None` on
+    /// desktop; mobile composition roots wire `platform.camera()` (a Swift /
+    /// Kotlin impl via UniFFI).
+    pub camera: Option<Arc<dyn CameraControl>>,
+    /// Native microphone recorder — `tool-voice`'s `VoiceTool` routes here.
+    /// `None` on desktop.
+    pub voice: Option<Arc<dyn VoiceRecorder>>,
+    /// Native share sheet — `tool-share`'s `ShareTool` routes here. `None` on
+    /// desktop.
+    pub share: Option<Arc<dyn SharingService>>,
+    /// Screen-capture + input automation — the device-control tools
+    /// (`computer`/`android_use`/`ios_use`) route here. `None` unless a
+    /// desktop automation backend or a mobile UniFFI impl is wired.
+    pub computer_control: Option<Arc<dyn ComputerControl>>,
 }

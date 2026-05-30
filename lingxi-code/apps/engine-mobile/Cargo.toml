@@ -1,0 +1,50 @@
+[package]
+name = "engine-mobile"
+version = "0.9.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# M8-P11: the mobile composition root. Names the mobile capability set via Cargo
+# edges — the cross-platform tool subset (file/task/web/plan/meta/cron/ui/skill)
+# + the mobile-exclusive tools (camera/voice/share), the mobile skill set, and
+# the core+mobile command set. Deliberately omits the desktop-only tool crates
+# (shell/agent/mcp/lsp/team/worktree) and the device-control tools.
+
+[dependencies]
+tool-api = { path = "../../tool-api" }
+traits = { path = "../../traits" }
+skill-api = { path = "../../skill-api" }
+command-api = { path = "../../command-api" }
+
+# Cross-platform tool crates (shared with engine-desktop).
+tool-file = { path = "../../tools/file" }
+tool-task = { path = "../../tools/task" }
+tool-web = { path = "../../tools/web" }
+tool-plan = { path = "../../tools/plan" }
+tool-meta = { path = "../../tools/meta" }
+tool-cron = { path = "../../tools/cron" }
+tool-ui = { path = "../../tools/ui" }
+tool-skill = { path = "../../tools/skill" }
+# Mobile-exclusive tool crates.
+tool-camera = { path = "../../tools/camera" }
+tool-voice = { path = "../../tools/voice" }
+tool-share = { path = "../../tools/share" }
+# Skill + command sets.
+skill-builtin = { path = "../../skills/builtin" }
+command-core = { path = "../../commands/core" }
+command-mobile = { path = "../../commands/mobile" }
+
+# Platform impls are target-gated: only linked when building for the device.
+[target.'cfg(target_os = "ios")'.dependencies]
+platform-ios = { path = "../../platforms/ios" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+platform-android = { path = "../../platforms/android" }
+
+[dev-dependencies]
+tool-api = { path = "../../tool-api", features = ["test-support"] }
+insta = { version = "1.40", features = ["yaml"] }
+
+[lints]
+workspace = true

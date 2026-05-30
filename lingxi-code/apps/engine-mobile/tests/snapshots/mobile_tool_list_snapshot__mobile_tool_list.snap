@@ -1,0 +1,34 @@
+---
+source: apps/engine-mobile/tests/mobile_tool_list_snapshot.rs
+expression: names
+---
+- AskUserQuestion
+- Brief
+- Config
+- Edit
+- EnterPlanMode
+- ExitPlanMode
+- Glob
+- Grep
+- NotebookEdit
+- Read
+- RemoteTrigger
+- ScheduleCron
+- SendMessage
+- Skill
+- Sleep
+- SyntheticOutput
+- TaskCreate
+- TaskGet
+- TaskList
+- TaskOutput
+- TaskStop
+- TaskUpdate
+- TodoWrite
+- ToolSearch
+- WebFetch
+- WebSearch
+- Write
+- camera
+- share
+- voice

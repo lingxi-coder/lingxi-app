@@ -9,7 +9,6 @@ use std::sync::Arc;
 pub mod agent;
 pub mod ask_user_question;
 pub mod brief;
-pub mod config;
 pub mod lsp;
 pub mod mcp;
 pub mod remote_trigger;
@@ -20,7 +19,6 @@ pub mod skill;
 pub mod sleep;
 pub mod synthetic_output;
 pub mod team;
-pub mod tool_search;
 pub mod worktree;
 
 // M8-P5: shared test fixture moved to tool-api (feature "test-support").
@@ -35,7 +33,6 @@ pub mod agent_test_support;
 pub use agent::AgentTool;
 pub use ask_user_question::AskUserQuestionTool;
 pub use brief::BriefTool;
-pub use config::ConfigTool;
 pub use lsp::LSPTool;
 pub use mcp::{ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool};
 pub use remote_trigger::RemoteTriggerTool;
@@ -45,7 +42,6 @@ pub use skill::SkillTool;
 pub use sleep::SleepTool;
 pub use synthetic_output::SyntheticOutputTool;
 pub use team::{TeamCreateTool, TeamDeleteTool};
-pub use tool_search::ToolSearchTool;
 pub use worktree::{EnterWorktreeTool, ExitWorktreeTool};
 
 // M8-P5: BuiltinToolContext moved to tool-api so per-category tool crates
@@ -61,6 +57,8 @@ pub use tool_file::{
 pub use tool_file::{
     FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, NotebookEditTool,
 };
+pub use tool_meta::{config, tool_search};
+pub use tool_meta::{ConfigTool, ToolSearchTool};
 pub use tool_plan::plan_mode;
 pub use tool_plan::{EnterPlanModeTool, ExitPlanModeTool};
 pub use tool_shell::{bash, powershell, repl};
@@ -110,10 +108,9 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     // M4-08 — system tools.
     registry.register_builtin(Arc::new(AskUserQuestionTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(BriefTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(ConfigTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(SkillTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(ScheduleCronTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(ToolSearchTool::new(ctx.clone())));
+    tool_meta::register_all(registry, ctx.clone());
     registry.register_builtin(Arc::new(RemoteTriggerTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(SyntheticOutputTool::new(ctx)));
 }

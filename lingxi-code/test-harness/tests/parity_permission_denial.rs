@@ -87,6 +87,8 @@ fn resolve_tool_src(file: &str) -> PathBuf {
         "web_fetch.rs" => Some("web/src/web_fetch.rs"),
         "web_search.rs" => Some("web/src/web_search.rs"),
         "plan_mode.rs" => Some("plan/src/plan_mode.rs"),
+        "config.rs" => Some("meta/src/config.rs"),
+        "tool_search.rs" => Some("meta/src/tool_search.rs"),
         _ => None,
     };
     match mapped {

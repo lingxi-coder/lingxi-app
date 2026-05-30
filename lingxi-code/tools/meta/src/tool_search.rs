@@ -24,9 +24,9 @@ use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{TOOL_SEARCH_COMPLETED, TOOL_SEARCH_FAILED, TOOL_SEARCH_STARTED};
 use telemetry::AnalyticsBus;
 
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext, ValidationError,
 };
@@ -75,7 +75,7 @@ impl ToolRegistryView for StaticRegistryView {
 
 /// `ToolSearchTool` — token-overlap search over the registry. Top-20 results.
 pub struct ToolSearchTool {
-    pub(crate) ctx: super::BuiltinToolContext,
+    pub(crate) ctx: tool_api::BuiltinToolContext,
     pub(crate) view: Arc<dyn ToolRegistryView>,
 }
 
@@ -83,7 +83,7 @@ impl ToolSearchTool {
     /// Construct with an empty view (always returns no results — hermetic
     /// default for when no registry snapshot has been wired).
     #[must_use]
-    pub fn new(ctx: super::BuiltinToolContext) -> Self {
+    pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self {
             ctx,
             view: Arc::new(StaticRegistryView::new(Vec::new())),
@@ -92,7 +92,7 @@ impl ToolSearchTool {
 
     /// Construct with a caller-supplied view (production use).
     #[must_use]
-    pub fn with_view(ctx: super::BuiltinToolContext, view: Arc<dyn ToolRegistryView>) -> Self {
+    pub fn with_view(ctx: tool_api::BuiltinToolContext, view: Arc<dyn ToolRegistryView>) -> Self {
         Self { ctx, view }
     }
 }
@@ -181,7 +181,7 @@ impl Tool for ToolSearchTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -301,7 +301,7 @@ impl Tool for ToolSearchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {

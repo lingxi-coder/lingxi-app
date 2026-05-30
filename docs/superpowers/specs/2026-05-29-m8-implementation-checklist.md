@@ -24,7 +24,7 @@ This checklist turns the 17-phase migration plan in §9.1 of the design doc into
 | P5a BuiltinToolContext → tool-api | ✅ DONE | `01efe96` | enabling step for tool split; tool-api gains traits/telemetry/sandbox/api-client/mcp/lsp deps (cycle-safe) |
 | P5-prep shared/test_support → tool-api | ✅ DONE | `1359e19` | path_validation+output_truncation→tool-api/util; test_support→tool-api (feature `test-support`); shared/mod.rs shim |
 | P5-file extract tool-file | ✅ DONE | `9e59387` | **first per-category tool crate — proves the template.** Read/Write/Edit/Glob/Grep/NotebookEdit; `ulid_or_uuid`→tool-api/util/ids; monolith delegates + re-exports; parity tests gained `resolve_tool_src()` map |
-| P5-shell extract tool-shell | ⏳ TODO | — | apply the proven template: Bash/PowerShell/REPL + ansi_strip; handle shell_events (import telemetry consts directly) |
+| P5-shell extract tool-shell | ✅ DONE | `ea647ae` | Bash/PowerShell/REPL + ansi_strip; shell_events consts imported from telemetry directly. **P5 complete.** |
 | P7 remaining 12 tool crates | ⏳ TODO | — | mechanical re-application of the P5-file template (task/web/ui/meta/cron/plan/agent/mcp/lsp/team/worktree + skill); then delete monolith |
 | P6, P8–P15 | ⏳ TODO | — | composition roots, skill/command split, mobile platforms, UniFFI, bridge, CI, cleanup |
 

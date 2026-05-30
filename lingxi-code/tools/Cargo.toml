@@ -16,6 +16,7 @@ tool-meta = { path = "meta" }
 tool-cron = { path = "cron" }
 tool-ui = { path = "ui" }
 tool-skill = { path = "skill" }
+tool-worktree = { path = "worktree" }
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }

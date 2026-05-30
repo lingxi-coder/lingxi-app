@@ -11,7 +11,6 @@ pub mod lsp;
 pub mod mcp;
 pub mod shell_events;
 pub mod team;
-pub mod worktree;
 
 // M8-P5: shared test fixture moved to tool-api (feature "test-support").
 #[cfg(test)]
@@ -26,7 +25,6 @@ pub use agent::AgentTool;
 pub use lsp::LSPTool;
 pub use mcp::{ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool};
 pub use team::{TeamCreateTool, TeamDeleteTool};
-pub use worktree::{EnterWorktreeTool, ExitWorktreeTool};
 
 // M8-P5: BuiltinToolContext moved to tool-api so per-category tool crates
 // can construct tools without depending on this monolith.
@@ -62,6 +60,8 @@ pub use tool_ui::{
 };
 pub use tool_web::{web_fetch, web_search};
 pub use tool_web::{WebFetchTool, WebSearchTool};
+pub use tool_worktree::worktree;
+pub use tool_worktree::{EnterWorktreeTool, ExitWorktreeTool};
 
 /// Register every M4-01 foundation tool against `registry`.
 ///
@@ -81,8 +81,7 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     tool_web::register_all(registry, ctx.clone());
     // M4-04 — workflow tools.
     tool_plan::register_all(registry, ctx.clone());
-    registry.register_builtin(Arc::new(EnterWorktreeTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(ExitWorktreeTool::new(ctx.clone())));
+    tool_worktree::register_all(registry, ctx.clone());
     // M4-05 — agent + task + send_message tools.
     registry.register_builtin(Arc::new(AgentTool::new(ctx.clone())));
     tool_task::register_all(registry, ctx.clone());

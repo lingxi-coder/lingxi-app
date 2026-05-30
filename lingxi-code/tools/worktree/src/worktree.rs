@@ -28,13 +28,13 @@ use telemetry::tengu::tool::{
 };
 use traits::worktree::{WorktreeError, WorktreeHandle};
 
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
+use tool_api::BuiltinToolContext;
 
 /// Byte-locked git branch prefix for disposable worktrees (spec §7 line 488,
 /// M2-01 lock). The full branch is `worktree-<flatten(slug)>`.
@@ -203,7 +203,7 @@ impl Tool for EnterWorktreeTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         false
@@ -395,7 +395,7 @@ impl Tool for ExitWorktreeTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         false
@@ -507,11 +507,11 @@ impl Tool for ExitWorktreeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{
-        ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs, MockWorktreeManager,
-    };
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
+    use tool_api::test_support::{
+        ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs, MockWorktreeManager,
+    };
     use traits::worktree::WorktreeManager;
 
     fn make_bctx(mock: Arc<MockWorktreeManager>) -> (BuiltinToolContext, Arc<InMemorySink>) {

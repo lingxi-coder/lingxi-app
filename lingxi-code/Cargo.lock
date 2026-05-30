@@ -3763,6 +3763,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-worktree"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "engine",
+ "once_cell",
+ "permission",
+ "protocol",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tool-api",
+ "traits",
+]
+
+[[package]]
 name = "tools"
 version = "0.8.0"
 dependencies = [
@@ -3804,6 +3823,7 @@ dependencies = [
  "tool-task",
  "tool-ui",
  "tool-web",
+ "tool-worktree",
  "tracing",
  "traits",
  "url",

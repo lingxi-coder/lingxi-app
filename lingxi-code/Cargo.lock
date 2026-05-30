@@ -3648,6 +3648,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-mcp"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "engine",
+ "mcp",
+ "once_cell",
+ "permission",
+ "protocol",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tool-api",
+ "traits",
+]
+
+[[package]]
 name = "tool-meta"
 version = "0.8.0"
 dependencies = [
@@ -3856,6 +3876,7 @@ dependencies = [
  "tool-cron",
  "tool-file",
  "tool-lsp",
+ "tool-mcp",
  "tool-meta",
  "tool-plan",
  "tool-shell",

@@ -7,7 +7,6 @@ use crate::registry::ToolRegistry;
 use std::sync::Arc;
 
 pub mod agent;
-pub mod mcp;
 pub mod shell_events;
 
 // M8-P5: shared test fixture moved to tool-api (feature "test-support").
@@ -20,7 +19,6 @@ pub(crate) use tool_api::test_support;
 pub mod agent_test_support;
 
 pub use agent::AgentTool;
-pub use mcp::{ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool};
 
 // M8-P5: BuiltinToolContext moved to tool-api so per-category tool crates
 // can construct tools without depending on this monolith.
@@ -39,6 +37,8 @@ pub use tool_file::{
 };
 pub use tool_lsp::lsp_tool as lsp;
 pub use tool_lsp::LSPTool;
+pub use tool_mcp::mcp_tool as mcp;
+pub use tool_mcp::{ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool};
 pub use tool_meta::{config, tool_search};
 pub use tool_meta::{ConfigTool, ToolSearchTool};
 pub use tool_plan::plan_mode;
@@ -88,10 +88,7 @@ pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolC
     // M4-06 — team tools.
     tool_team::register_all(registry, ctx.clone());
     // M4-07 — MCP + LSP tools.
-    registry.register_builtin(Arc::new(MCPTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(McpAuthTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(ListMcpResourcesTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(ReadMcpResourceTool::new(ctx.clone())));
+    tool_mcp::register_all(registry, ctx.clone());
     tool_lsp::register_all(registry, ctx.clone());
     // M4-08 — system tools.
     tool_skill::register_all(registry, ctx.clone());

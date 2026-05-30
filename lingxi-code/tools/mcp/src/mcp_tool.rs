@@ -3,7 +3,7 @@
 //! resource read (`ReadMcpResourceTool`).
 //!
 //! All four wrap `mcp::McpClient` (M2-02b) via an
-//! `Arc<McpRegistry>` injected through [`crate::builtin::BuiltinToolContext`].
+//! `Arc<McpRegistry>` injected through [`tool_api::BuiltinToolContext`].
 //!
 //! Wire identifiers locked in spec §7 lines 685-700 and reproduced
 //! byte-for-byte in `parity/fixtures/mcp_lsp_tools.json`.
@@ -35,9 +35,9 @@ use telemetry::tengu::tool::{
 use telemetry::AnalyticsBus;
 use traits::McpTransportSpec;
 
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::tool_trait::{
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
@@ -160,28 +160,28 @@ fn allow_mcp(reason: &str) -> PermissionResult {
 
 /// Generic MCP dispatcher — forwards to `McpClient::call_tool`.
 pub struct MCPTool {
-    pub(crate) ctx: super::BuiltinToolContext,
+    pub(crate) ctx: tool_api::BuiltinToolContext,
 }
 
 /// Inspect a configured MCP server's auth/transport surface.
 pub struct McpAuthTool {
-    pub(crate) ctx: super::BuiltinToolContext,
+    pub(crate) ctx: tool_api::BuiltinToolContext,
 }
 
 /// List resources advertised by an MCP server.
 pub struct ListMcpResourcesTool {
-    pub(crate) ctx: super::BuiltinToolContext,
+    pub(crate) ctx: tool_api::BuiltinToolContext,
 }
 
 /// Read a single resource by URI from an MCP server.
 pub struct ReadMcpResourceTool {
-    pub(crate) ctx: super::BuiltinToolContext,
+    pub(crate) ctx: tool_api::BuiltinToolContext,
 }
 
 impl MCPTool {
     /// Construct a new [`MCPTool`] over the supplied context.
     #[must_use]
-    pub fn new(ctx: super::BuiltinToolContext) -> Self {
+    pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self { ctx }
     }
     fn mcp_registry(&self) -> Option<&Arc<McpRegistry>> {
@@ -194,21 +194,21 @@ impl MCPTool {
 impl McpAuthTool {
     /// Construct a new [`McpAuthTool`] over the supplied context.
     #[must_use]
-    pub fn new(ctx: super::BuiltinToolContext) -> Self {
+    pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self { ctx }
     }
 }
 impl ListMcpResourcesTool {
     /// Construct a new [`ListMcpResourcesTool`] over the supplied context.
     #[must_use]
-    pub fn new(ctx: super::BuiltinToolContext) -> Self {
+    pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self { ctx }
     }
 }
 impl ReadMcpResourceTool {
     /// Construct a new [`ReadMcpResourceTool`] over the supplied context.
     #[must_use]
-    pub fn new(ctx: super::BuiltinToolContext) -> Self {
+    pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self { ctx }
     }
 }

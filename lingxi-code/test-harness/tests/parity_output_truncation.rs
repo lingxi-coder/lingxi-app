@@ -71,6 +71,7 @@ fn resolve_tool_src(repo_root: &std::path::Path, file: &str) -> PathBuf {
         "worktree.rs" => Some("worktree/src/worktree.rs"),
         "team.rs" => Some("team/src/team.rs"),
         "lsp.rs" => Some("lsp/src/lsp_tool.rs"),
+        "mcp.rs" => Some("mcp/src/mcp_tool.rs"),
         _ => None,
     };
     match mapped {

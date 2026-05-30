@@ -4,13 +4,6 @@
 //! through `serde_json::Value` so `preserve_order` (workspace feature) keeps
 //! key ordering byte-stable.
 
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::shared::path_validation::{canonicalize_and_validate, emit_blocked_event};
-use crate::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -22,6 +15,13 @@ use std::time::Instant;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{NOTEBOOK_COMPLETED, NOTEBOOK_FAILED, NOTEBOOK_STARTED};
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+};
+use tool_api::util::path_validation::{canonicalize_and_validate, emit_blocked_event};
+use tool_api::BuiltinToolContext;
 
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "NotebookEdit";
@@ -120,7 +120,7 @@ impl Tool for NotebookEditTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         false
@@ -164,7 +164,7 @@ impl Tool for NotebookEditTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let invocation_id = crate::builtin::file_read::ulid_or_uuid();
+        let invocation_id = tool_api::util::ids::ulid_or_uuid();
         let notebook_path = input
             .get("notebook_path")
             .and_then(Value::as_str)
@@ -288,16 +288,16 @@ impl Tool for NotebookEditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
+    use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
 
     pub(crate) fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {
         let bus = Arc::new(AnalyticsBus::new());
         let sink = Arc::new(InMemorySink::default());
         (
-            crate::builtin::test_support::ctx_for_file_tools(
+            tool_api::test_support::ctx_for_file_tools(
                 make_dummy_fs(),
                 bus,
                 vec![tmp.path().to_path_buf()],

@@ -325,7 +325,7 @@ impl Tool for WebSearchTool {
             ));
         }
 
-        let invocation_id = crate::builtin::file_read::ulid_or_uuid();
+        let invocation_id = tool_api::util::ids::ulid_or_uuid();
         let allowed_count = parsed_input.allowed_domains.as_ref().map_or(0, Vec::len);
         let blocked_count = parsed_input.blocked_domains.as_ref().map_or(0, Vec::len);
         self.emit_started(

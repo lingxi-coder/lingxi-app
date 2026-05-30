@@ -153,7 +153,7 @@ pub(crate) fn validate_team_name(name: &str) -> Result<(), ToolError> {
 // -- Shared telemetry helpers ------------------------------------------------
 
 fn fresh_invocation_id() -> String {
-    crate::builtin::file_read::ulid_or_uuid()
+    tool_api::util::ids::ulid_or_uuid()
 }
 
 fn now_unix_secs() -> u64 {

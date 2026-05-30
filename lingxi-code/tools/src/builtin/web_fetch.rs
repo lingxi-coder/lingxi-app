@@ -289,7 +289,7 @@ impl Tool for WebFetchTool {
             .map_err(|e| ToolError::InvalidInput(format!("invalid input: {e}")))?;
         let parsed_url = validate_url(&parsed_input.url).map_err(ToolError::InvalidInput)?;
         let host = parsed_url.host_str().unwrap_or("<unknown>").to_string();
-        let invocation_id = crate::builtin::file_read::ulid_or_uuid();
+        let invocation_id = tool_api::util::ids::ulid_or_uuid();
 
         self.emit_started(
             &invocation_id,

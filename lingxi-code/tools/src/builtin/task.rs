@@ -142,7 +142,7 @@ fn validate_task_status(s: &str) -> Result<(), String> {
 }
 
 fn fresh_invocation_id() -> String {
-    crate::builtin::file_read::ulid_or_uuid()
+    tool_api::util::ids::ulid_or_uuid()
 }
 
 async fn emit_started(

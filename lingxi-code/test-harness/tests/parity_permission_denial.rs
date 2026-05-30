@@ -60,19 +60,38 @@ fn tool_files() -> Vec<&'static str> {
     ]
 }
 
-fn builtin_dir() -> PathBuf {
+fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("tools/src/builtin")
+        .to_path_buf()
+}
+
+/// Resolve a tool source-file name to its actual on-disk path. M8-P5+ moves
+/// tools out of `tools/src/builtin/` into per-category crates under `tools/`.
+/// Extend this map as P7 extracts further crates.
+fn resolve_tool_src(file: &str) -> PathBuf {
+    let root = repo_root();
+    let mapped: Option<&str> = match file {
+        "file_read.rs" => Some("file/src/read.rs"),
+        "file_write.rs" => Some("file/src/write.rs"),
+        "file_edit.rs" => Some("file/src/edit.rs"),
+        "notebook_edit.rs" => Some("file/src/notebook_edit.rs"),
+        "glob.rs" => Some("file/src/glob.rs"),
+        "grep.rs" => Some("file/src/grep.rs"),
+        _ => None,
+    };
+    match mapped {
+        Some(rel) => root.join("tools").join(rel),
+        None => root.join("tools/src/builtin").join(file),
+    }
 }
 
 #[test]
 fn every_tool_file_declares_a_permission_result() {
-    let dir = builtin_dir();
     let mut violations: Vec<String> = Vec::new();
     for file in tool_files() {
-        let src = dir.join(file);
+        let src = resolve_tool_src(file);
         let body =
             fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
         let has_permission_decl = body.contains("PermissionResult::Allow")

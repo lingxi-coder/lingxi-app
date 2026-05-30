@@ -44,7 +44,7 @@ static EMPTY_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
 });
 
 fn fresh_invocation_id() -> String {
-    crate::builtin::file_read::ulid_or_uuid()
+    tool_api::util::ids::ulid_or_uuid()
 }
 
 fn verified(s: impl Into<String>) -> AnalyticsValue {

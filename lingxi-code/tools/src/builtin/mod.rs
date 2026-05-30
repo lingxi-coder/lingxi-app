@@ -11,14 +11,8 @@ pub mod ask_user_question;
 pub mod bash;
 pub mod brief;
 pub mod config;
-pub mod file_edit;
-pub mod file_read;
-pub mod file_write;
-pub mod glob;
-pub mod grep;
 pub mod lsp;
 pub mod mcp;
-pub mod notebook_edit;
 pub mod plan_mode;
 pub mod powershell;
 pub mod remote_trigger;
@@ -51,14 +45,8 @@ pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
 pub use brief::BriefTool;
 pub use config::ConfigTool;
-pub use file_edit::FileEditTool;
-pub use file_read::FileReadTool;
-pub use file_write::FileWriteTool;
-pub use glob::GlobTool;
-pub use grep::GrepTool;
 pub use lsp::LSPTool;
 pub use mcp::{ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool};
-pub use notebook_edit::NotebookEditTool;
 pub use plan_mode::{EnterPlanModeTool, ExitPlanModeTool};
 pub use powershell::PowerShellTool;
 pub use remote_trigger::RemoteTriggerTool;
@@ -81,6 +69,16 @@ pub use worktree::{EnterWorktreeTool, ExitWorktreeTool};
 // M8-P5: BuiltinToolContext moved to tool-api so per-category tool crates
 // can construct tools without depending on this monolith.
 pub use tool_api::BuiltinToolContext;
+// M8-P5: file/search tools extracted to the tool-file crate; re-export the
+// tool types AND the modules (under their old `file_*` names) so
+// `tools::builtin::FileReadTool` and `tools::builtin::file_read::TOOL_NAME`
+// (parity tests, external callers) keep working.
+pub use tool_file::{
+    edit as file_edit, glob, grep, notebook_edit, read as file_read, write as file_write,
+};
+pub use tool_file::{
+    FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, NotebookEditTool,
+};
 
 /// Register every M4-01 foundation tool against `registry`.
 ///
@@ -92,13 +90,8 @@ pub use tool_api::BuiltinToolContext;
 /// land, the matching line below is uncommented incrementally so the crate
 /// remains buildable between tasks. Task 17 verifies that all 6 are wired.
 pub fn register_all_builtin_tools(registry: &mut ToolRegistry, ctx: BuiltinToolContext) {
-    // M4-01 — file/search tools.
-    registry.register_builtin(Arc::new(FileReadTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(FileWriteTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(FileEditTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(NotebookEditTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(GlobTool::new(ctx.clone())));
-    registry.register_builtin(Arc::new(GrepTool::new(ctx.clone())));
+    // M4-01 — file/search tools (M8-P5: extracted to the tool-file crate).
+    tool_file::register_all(registry, ctx.clone());
     // M4-02 — shell tools.
     registry.register_builtin(Arc::new(BashTool::new(ctx.clone())));
     registry.register_builtin(Arc::new(PowerShellTool::new(ctx.clone())));

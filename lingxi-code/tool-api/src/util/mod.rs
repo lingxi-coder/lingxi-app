@@ -4,5 +4,6 @@
 //! (`tool-file`, `tool-shell`, …) and engine code can use them without
 //! depending on the `tools` monolith.
 
+pub mod ids;
 pub mod output_truncation;
 pub mod path_validation;

@@ -136,7 +136,7 @@ impl TodoWriteTool {
 
     fn fresh_invocation_id() -> String {
         // Reuse the existing M4-01 invocation-id helper (ULID/UUID hybrid).
-        crate::builtin::file_read::ulid_or_uuid()
+        tool_api::util::ids::ulid_or_uuid()
     }
 
     async fn emit_started(&self, invocation_id: &str, todo_count: usize) {

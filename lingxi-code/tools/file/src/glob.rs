@@ -5,13 +5,6 @@
 //! - Excess truncated → returns `truncated: true` field on output.
 //! - Results sorted newest-first by mtime (claude-code parity).
 
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::shared::path_validation::{canonicalize_and_validate, emit_blocked_event};
-use crate::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-};
 use async_trait::async_trait;
 use globset::Glob;
 use once_cell::sync::Lazy;
@@ -24,6 +17,13 @@ use std::time::{Instant, SystemTime};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{GLOB_COMPLETED, GLOB_FAILED, GLOB_STARTED};
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+};
+use tool_api::util::path_validation::{canonicalize_and_validate, emit_blocked_event};
+use tool_api::BuiltinToolContext;
 use walkdir::WalkDir;
 
 /// Tool name byte-lock.
@@ -111,7 +111,7 @@ impl Tool for GlobTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         true
@@ -145,7 +145,7 @@ impl Tool for GlobTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let invocation_id = crate::builtin::file_read::ulid_or_uuid();
+        let invocation_id = tool_api::util::ids::ulid_or_uuid();
         let pattern = input
             .get("pattern")
             .and_then(Value::as_str)
@@ -231,16 +231,16 @@ impl Tool for GlobTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
+    use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
 
     pub(crate) fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {
         let bus = Arc::new(AnalyticsBus::new());
         let sink = Arc::new(InMemorySink::default());
         (
-            crate::builtin::test_support::ctx_for_file_tools(
+            tool_api::test_support::ctx_for_file_tools(
                 make_dummy_fs(),
                 bus,
                 vec![tmp.path().to_path_buf()],

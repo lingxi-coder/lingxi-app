@@ -3575,10 +3575,36 @@ dependencies = [
  "serde",
  "serde_json",
  "telemetry",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "traits",
+]
+
+[[package]]
+name = "tool-file"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "filetime",
+ "globset",
+ "grep-matcher",
+ "grep-regex",
+ "grep-searcher",
+ "ignore",
+ "once_cell",
+ "permission",
+ "protocol",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tool-api",
+ "traits",
+ "walkdir",
 ]
 
 [[package]]
@@ -3614,6 +3640,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
+ "tool-file",
  "tracing",
  "traits",
  "url",

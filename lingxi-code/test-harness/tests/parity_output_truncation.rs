@@ -38,6 +38,26 @@ fn exempt_tools() -> HashSet<&'static str> {
 /// Mapping: tool display-name → source file under `builtin/`. Some tool
 /// modules host multiple display-names (e.g. `task.rs` hosts 6 task tools,
 /// `plan_mode.rs` hosts Enter+Exit). The grep is at file granularity.
+/// Resolve a tool source-file name to its actual on-disk path. M8-P5+ moves
+/// tools out of `tools/src/builtin/` into per-category crates under `tools/`,
+/// so the file-tool names map to `tools/file/src/<renamed>.rs`. Extend this
+/// map as P7 extracts further crates.
+fn resolve_tool_src(repo_root: &std::path::Path, file: &str) -> PathBuf {
+    let mapped: Option<&str> = match file {
+        "file_read.rs" => Some("file/src/read.rs"),
+        "file_write.rs" => Some("file/src/write.rs"),
+        "file_edit.rs" => Some("file/src/edit.rs"),
+        "notebook_edit.rs" => Some("file/src/notebook_edit.rs"),
+        "glob.rs" => Some("file/src/glob.rs"),
+        "grep.rs" => Some("file/src/grep.rs"),
+        _ => None,
+    };
+    match mapped {
+        Some(rel) => repo_root.join("tools").join(rel),
+        None => repo_root.join("tools/src/builtin").join(file),
+    }
+}
+
 fn tool_files() -> Vec<&'static str> {
     vec![
         "file_read.rs",
@@ -108,12 +128,11 @@ fn every_tool_with_output_calls_truncate_or_opts_out() {
         .parent()
         .unwrap()
         .to_path_buf();
-    let builtin_dir = repo_root.join("tools/src/builtin");
     let exempt = exempt_tools();
 
     let mut violations: Vec<String> = Vec::new();
     for file in tool_files() {
-        let src = builtin_dir.join(file);
+        let src = resolve_tool_src(&repo_root, file);
         let body =
             fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
         let has_call = body.contains("MAX_TOOL_OUTPUT_LENGTH")

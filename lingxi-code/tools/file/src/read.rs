@@ -8,14 +8,7 @@
 //! - Errors carry byte-locked human strings (see [`format_too_large`],
 //!   [`format_binary`]).
 
-use crate::builtin::BuiltinToolContext;
-use crate::context::ToolUseContext;
-use crate::progress::ToolProgressSender;
-use crate::shared::file_kit::{decode_utf8_strict, looks_binary, NUL_SCAN_WINDOW};
-use crate::shared::path_validation::{canonicalize_and_validate, emit_blocked_event};
-use crate::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-};
+use crate::shared::{decode_utf8_strict, looks_binary, NUL_SCAN_WINDOW};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -27,6 +20,14 @@ use std::time::Instant;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{READ_COMPLETED, READ_FAILED, READ_STARTED};
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+};
+use tool_api::util::ids::ulid_or_uuid;
+use tool_api::util::path_validation::{canonicalize_and_validate, emit_blocked_event};
+use tool_api::BuiltinToolContext;
 
 /// Maximum file size FileReadTool will load. Spec §7 lock (256 KB).
 pub const MAX_FILE_READ_SIZE: u64 = 262_144;
@@ -136,7 +137,7 @@ impl Tool for FileReadTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        crate::shared::MAX_TOOL_OUTPUT_LENGTH
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     }
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         true
@@ -263,36 +264,20 @@ impl Tool for FileReadTool {
     }
 }
 
-pub(crate) fn ulid_or_uuid() -> String {
-    // M4-01 uses a tiny counter-based ID until M4-09 wires a real uuid crate.
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let micros = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0);
-    format!("inv-{micros}-{n}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
+    use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
 
     fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {
         let fs = make_dummy_fs();
         let bus = Arc::new(AnalyticsBus::new());
         let sink = Arc::new(InMemorySink::default());
         (
-            crate::builtin::test_support::ctx_for_file_tools(
-                fs,
-                bus,
-                vec![tmp.path().to_path_buf()],
-            ),
+            tool_api::test_support::ctx_for_file_tools(fs, bus, vec![tmp.path().to_path_buf()]),
             sink,
         )
     }

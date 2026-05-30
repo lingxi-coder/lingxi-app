@@ -7,7 +7,9 @@
 //! tool crates take them.
 
 pub mod ansi_strip;
-pub mod file_kit;
+// M8-P5: file_kit moved to the tool-file crate; re-export so monolith callers
+// and parity tests keep using `tools::shared::file_kit::…`.
+pub use tool_file::shared as file_kit;
 
 pub use tool_api::util::output_truncation::{
     self, truncate, truncate_default, MAX_TOOL_OUTPUT_LENGTH, TRUNCATION_SUFFIX,

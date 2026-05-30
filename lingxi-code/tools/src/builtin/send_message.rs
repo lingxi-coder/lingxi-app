@@ -64,7 +64,7 @@ impl SendMessageTool {
     }
 
     fn fresh_invocation_id() -> String {
-        crate::builtin::file_read::ulid_or_uuid()
+        tool_api::util::ids::ulid_or_uuid()
     }
 
     async fn emit_started(bus: &Arc<AnalyticsBus>, invocation_id: &str, message_chars: i64) {

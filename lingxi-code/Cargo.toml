@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "protocol",
     "tool-api",
+    "tools/file",
     "engine",
     "traits",
     "api-client",
@@ -52,6 +53,7 @@ members = [
 default-members = [
     "protocol",
     "tool-api",
+    "tools/file",
     "engine",
     "traits",
     "api-client",

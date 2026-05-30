@@ -1,15 +1,15 @@
 //! `ping` event is a no-op (M5-04 Task 15).
 
-use lingxi_orchestrator::test_support::{
+use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     ping, text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use lingxi_orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
-use lingxi_tools::registry::ToolRegistry;
-use lingxi_traits::OutputEvent;
+use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tools::registry::ToolRegistry;
+use traits::OutputEvent;
 
 #[tokio::test]
 async fn ping_between_deltas_does_not_disturb_output() {
@@ -37,7 +37,7 @@ async fn ping_between_deltas_does_not_disturb_output() {
         batched,
         api,
         Arc::new(ToolRegistry::new()),
-        lingxi_orchestrator::test_support::noop_hook_executor(),
+        orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),

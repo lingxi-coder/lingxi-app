@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lingxi_session::jsonl::loader::SessionMetadata;
-use lingxi_tui::screens::resume::{handle_resume_key, ResumeOutcome, ResumeRow, ResumeState};
+use session::jsonl::loader::SessionMetadata;
+use tui::screens::resume::{handle_resume_key, ResumeOutcome, ResumeRow, ResumeState};
 use uuid::Uuid;
 
 fn meta(title: &str, secs: u64, count: usize, uuid: Uuid) -> SessionMetadata {
@@ -79,10 +79,10 @@ fn empty_set_is_empty_state() {
 
 // --- Task 9: cross-state seam — permission focus-trap outranks the screen. ---
 
-use lingxi_permission::gate::PermissionRequest;
-use lingxi_tui::root::handle_live_key;
-use lingxi_tui::screens::Screen;
-use lingxi_tui::state::{AppState, PendingPermission, StatusSnapshot};
+use permission::gate::PermissionRequest;
+use tui::root::handle_live_key;
+use tui::screens::Screen;
+use tui::state::{AppState, PendingPermission, StatusSnapshot};
 
 fn iocraft_down() -> iocraft::KeyEvent {
     iocraft::KeyEvent::new(iocraft::KeyEventKind::Press, iocraft::KeyCode::Down)

@@ -19,8 +19,8 @@ pub fn assemble_request(session: &SessionState, user_message: &str) -> Value {
     })
 }
 
-fn message_to_api_shape(m: &lingxi_protocol::ConversationMessage) -> Value {
-    use lingxi_protocol::ConversationMessage;
+fn message_to_api_shape(m: &protocol::ConversationMessage) -> Value {
+    use protocol::ConversationMessage;
     match m {
         ConversationMessage::User { content, .. } => {
             json!({"role": "user", "content": content_blocks_to_api(content)})
@@ -34,8 +34,8 @@ fn message_to_api_shape(m: &lingxi_protocol::ConversationMessage) -> Value {
     }
 }
 
-fn content_blocks_to_api(blocks: &[lingxi_protocol::ContentBlock]) -> Value {
-    use lingxi_protocol::ContentBlock;
+fn content_blocks_to_api(blocks: &[protocol::ContentBlock]) -> Value {
+    use protocol::ContentBlock;
     let arr: Vec<Value> = blocks
         .iter()
         .map(|b| match b {
@@ -66,7 +66,7 @@ fn content_blocks_to_api(blocks: &[lingxi_protocol::ContentBlock]) -> Value {
 mod tests {
     use super::*;
     use crate::session::SessionState;
-    use lingxi_protocol::SessionId;
+    use protocol::SessionId;
 
     #[test]
     fn assemble_includes_history_and_new_user_message() {
@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn assemble_appends_prior_history() {
-        use lingxi_protocol::{ConversationMessage, MessageId};
+        use protocol::{ConversationMessage, MessageId};
         let mut session = SessionState::empty(SessionId::nil(), "claude-opus-4-6".into());
         session.history.push(ConversationMessage::user(
             MessageId::nil(),

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use lingxi_jsonrpc::{
+use jsonrpc::{
     Connection, InboundHandler, LineCodec, LspCodec, Notification, Request, Response, RouterError,
 };
 use serde_json::json;
@@ -107,7 +107,7 @@ async fn timeout_surfaces_when_peer_never_answers() {
         .unwrap_err();
     // Expect the inner `RouterError::Timeout` wrapped in `ConnectionError`.
     match err {
-        lingxi_jsonrpc::ConnectionError::Router(RouterError::Timeout(d)) => {
+        jsonrpc::ConnectionError::Router(RouterError::Timeout(d)) => {
             assert_eq!(d, Duration::from_millis(120));
         }
         other => panic!("expected Timeout, got: {other:?}"),
@@ -117,7 +117,7 @@ async fn timeout_surfaces_when_peer_never_answers() {
 #[tokio::test]
 async fn malformed_frame_surfaces_as_codec_error_on_reader() {
     use futures::stream::unfold;
-    use lingxi_jsonrpc::{BrokerError, CodecError, Dispatcher, Router};
+    use jsonrpc::{BrokerError, CodecError, Dispatcher, Router};
 
     // Build a one-way feed straight into the broker's reader half: we
     // bypass the `Connection` builder so we can grab the `BrokerHandle`
@@ -140,7 +140,7 @@ async fn malformed_frame_surfaces_as_codec_error_on_reader() {
     let (router_tx, router_rx) = mpsc::unbounded_channel();
     let router = Router::new(router_tx);
     let dispatcher = Dispatcher::new();
-    let (handle, _notif) = lingxi_jsonrpc::broker::spawn(
+    let (handle, _notif) = jsonrpc::broker::spawn(
         in_stream,
         out_sink,
         LspCodec::default(),
@@ -217,8 +217,8 @@ async fn inbound_request_unknown_method_yields_method_not_found_to_caller() {
         .await
         .unwrap_err();
     match err {
-        lingxi_jsonrpc::ConnectionError::Router(RouterError::Remote(e)) => {
-            assert_eq!(e.code, lingxi_jsonrpc::METHOD_NOT_FOUND);
+        jsonrpc::ConnectionError::Router(RouterError::Remote(e)) => {
+            assert_eq!(e.code, jsonrpc::METHOD_NOT_FOUND);
             assert!(e.message.contains("nope"));
         }
         other => panic!("expected Remote(MethodNotFound), got: {other:?}"),

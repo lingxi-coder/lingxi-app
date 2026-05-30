@@ -4,7 +4,7 @@
 
 use crate::memdir::age::age_weight_bps;
 use crate::DEFAULT_RELEVANT_MEMORIES;
-use lingxi_protocol::{MemoryEntry, MemoryEntryTier};
+use protocol::{MemoryEntry, MemoryEntryTier};
 
 /// Inputs to `find_relevant`. Bundled so the public signature stays
 /// stable as we add fields (e.g. recent tools, agent type) in M5.
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn find_relevant_returns_top_k_sorted_desc() {
-        use lingxi_protocol::{MemoryEntry, MemoryEntryTier};
+        use protocol::{MemoryEntry, MemoryEntryTier};
 
         let entries = vec![
             MemoryEntry {
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn find_relevant_default_k_is_five() {
-        use lingxi_protocol::{MemoryEntry, MemoryEntryTier};
+        use protocol::{MemoryEntry, MemoryEntryTier};
         let entries: Vec<MemoryEntry> = (0..10)
             .map(|i| MemoryEntry {
                 path: format!("/m/{i:02}.md").into(),
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn find_relevant_tie_break_by_tier_then_path() {
-        use lingxi_protocol::{MemoryEntry, MemoryEntryTier};
+        use protocol::{MemoryEntry, MemoryEntryTier};
         // Two equally scored entries — User and Project both with same jaccard.
         // Tier-order asc: Session(0) < Project(1) < Team(2) < User(3).
         // After multiplying by tier weight (project=8000, user=6000), the
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn find_relevant_old_entries_still_reachable() {
-        use lingxi_protocol::{MemoryEntry, MemoryEntryTier};
+        use protocol::{MemoryEntry, MemoryEntryTier};
         // 9-block-old entry → age_weight = 1000 (floor). Score with jaccard
         // 10000 and project weight 8000 is 10000*1000*8000 = 80_000_000_000.
         // Brand-new project entry with jaccard 5000: 5000*10000*8000 = 400_000_000_000.
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn team_boost_only_applies_when_enabled() {
-        use lingxi_protocol::{MemoryEntry, MemoryEntryTier};
+        use protocol::{MemoryEntry, MemoryEntryTier};
         let entries = vec![
             MemoryEntry {
                 path: "/m/team.md".into(),
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn team_boost_only_applies_to_team_tier() {
-        use lingxi_protocol::{MemoryEntry, MemoryEntryTier};
+        use protocol::{MemoryEntry, MemoryEntryTier};
         // A Project entry must NOT receive the boost when team_boost_enabled.
         let entries = vec![MemoryEntry {
             path: "/m/proj.md".into(),

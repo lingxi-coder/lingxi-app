@@ -6,26 +6,26 @@
 //! bus, sandbox, etc.). The intent — exercise the orchestrator driving a
 //! tool that performs real I/O — is preserved.
 
+use api_client::types::ContentBlockApi;
 use async_trait::async_trait;
-use lingxi_api_client::types::ContentBlockApi;
-use lingxi_orchestrator::test_support::{
+use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_protocol::ToolUseId;
-use lingxi_tools::progress::ToolProgressSender;
-use lingxi_tools::registry::ToolRegistry;
-use lingxi_tools::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
-};
-use lingxi_traits::OutputEvent;
+use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
+use protocol::ToolUseId;
 use serde_json::json;
 use std::io::Write;
 use std::sync::Arc;
+use tools::progress::ToolProgressSender;
+use tools::registry::ToolRegistry;
+use tools::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    ValidationError,
+};
+use traits::OutputEvent;
 
 /// Real-fs tool: reads a UTF-8 file from the path argument, returns its
 /// content as a JSON `{"content": "..."}` payload. Exercises the orchestrator
@@ -63,14 +63,14 @@ impl Tool for SimpleReadTool {
     async fn validate_input(
         &self,
         _input: &serde_json::Value,
-        _ctx: &lingxi_tools::context::ToolUseContext,
+        _ctx: &tools::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
         _input: &serde_json::Value,
-        _ctx: &lingxi_tools::context::ToolUseContext,
+        _ctx: &tools::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
@@ -90,7 +90,7 @@ impl Tool for SimpleReadTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        _ctx: lingxi_tools::context::ToolUseContext,
+        _ctx: tools::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let path = input
@@ -135,7 +135,7 @@ async fn orchestrator_drives_real_file_read_tool_on_a_tempfile() {
     );
     let api = Arc::new(MockApiClient::new(vec![r1, r2]));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let mut registry = ToolRegistry::new();
     registry.register_builtin(Arc::new(SimpleReadTool));

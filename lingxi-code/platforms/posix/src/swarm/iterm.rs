@@ -11,11 +11,11 @@
 //! `ITermBackend.ts:270-300` performance posture.
 
 use async_trait::async_trait;
-use lingxi_protocol::AgentId;
-use lingxi_traits::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+use protocol::AgentId;
 use std::sync::OnceLock;
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use traits::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 
 /// Per-process pane-creation lock, matching the tmux backend's serialization.
 fn pane_creation_lock() -> &'static Mutex<()> {

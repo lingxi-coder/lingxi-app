@@ -7,7 +7,7 @@
 //! Interactive like the Resume picker (M7-12): `root::handle_screen_key`
 //! bridges the live iocraft key to the pure [`apply_settings_key`] reducer.
 //!
-//! Reads REAL data from the M3 settings store (`lingxi_core::settings`) and
+//! Reads REAL data from the M3 settings store (`engine::settings`) and
 //! the orchestrator handle (`get_status_snapshot`, `snapshot_cost`). Writes
 //! ONLY through the existing `OrchestratorHandle::edit_config_file` `$EDITOR`
 //! handoff (§4 R7 — no new persistence/validation/schema logic; there is no
@@ -34,9 +34,9 @@
 
 use std::sync::Arc;
 
+use engine::settings::EffectiveSettings;
 use iocraft::prelude::*;
-use lingxi_core::settings::EffectiveSettings;
-use lingxi_traits::{CostSnapshot, OrchestratorHandle, StatusSnapshot};
+use traits::{CostSnapshot, OrchestratorHandle, StatusSnapshot};
 
 use crate::theme::TuiTheme;
 
@@ -112,7 +112,7 @@ pub struct SettingsData {
     /// the whole [`EffectiveSettings`] so the Settings tab can surface
     /// `effective_for(field)` provenance without a second read.
     pub effective: EffectiveSettings,
-    /// `/status` panel snapshot (the rich `lingxi_traits::StatusSnapshot`).
+    /// `/status` panel snapshot (the rich `traits::StatusSnapshot`).
     pub status: StatusSnapshot,
     /// Cumulative cost (FLAT — no per-model field; per-model is M8).
     pub cost: CostSnapshot,
@@ -123,7 +123,7 @@ impl SettingsData {
     /// the `$EDITOR` handoff) so the render path stays synchronous.
     ///
     /// `eff` is the already-loaded effective settings (the caller loads it via
-    /// `lingxi_core::settings::Settings::load`, which is the ONLY M3 read API).
+    /// `engine::settings::Settings::load`, which is the ONLY M3 read API).
     /// Status + cost come from the handle.
     pub async fn snapshot(handle: &Arc<dyn OrchestratorHandle>, eff: EffectiveSettings) -> Self {
         let status = handle.get_status_snapshot().await;
@@ -258,8 +258,8 @@ pub fn SettingsScreen(props: &SettingsScreenProps) -> impl Into<AnyElement<'stat
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use lingxi_core::settings::tracer::ProvenanceTrace;
-    use lingxi_core::settings::SettingsJson;
+    use engine::settings::tracer::ProvenanceTrace;
+    use engine::settings::SettingsJson;
 
     fn k(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

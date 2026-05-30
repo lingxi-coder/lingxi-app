@@ -3,8 +3,8 @@
 //! Locks byte-strings L4 (`"● "`) and L5 (`"> "`) from M6-02 T0.
 
 use iocraft::prelude::*;
-use lingxi_tui::components::messages::assistant_text::AssistantTextMessage;
-use lingxi_tui::components::messages::user_text::UserTextMessage;
+use tui::components::messages::assistant_text::AssistantTextMessage;
+use tui::components::messages::user_text::UserTextMessage;
 
 #[test]
 fn user_text_single_line() {

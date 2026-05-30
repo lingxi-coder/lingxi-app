@@ -8,21 +8,21 @@
     clippy::used_underscore_binding
 )]
 
-use lingxi_api_client::betas::WEB_SEARCH as API_CLIENT_WEB_SEARCH_BETA;
-use lingxi_telemetry::tengu::tool::{
+use api_client::betas::WEB_SEARCH as API_CLIENT_WEB_SEARCH_BETA;
+use serde::Deserialize;
+use telemetry::tengu::tool::{
     WEB_FETCH_COMPLETED, WEB_FETCH_FAILED, WEB_FETCH_STARTED, WEB_SEARCH_COMPLETED,
     WEB_SEARCH_FAILED, WEB_SEARCH_STARTED,
 };
-use lingxi_test_harness::parity::load_fixture;
-use lingxi_tools::builtin::web_fetch::{
+use test_harness::parity::load_fixture;
+use tools::builtin::web_fetch::{
     fmt_dns_error, fmt_http_error, WEBFETCH_ALLOWED_SCHEMES, WEBFETCH_MAX_BYTES, WEBFETCH_TIMEOUT,
     WEBFETCH_TRUNCATION_SUFFIX, WEBFETCH_USER_AGENT_PREFIX,
 };
-use lingxi_tools::builtin::web_search::{
+use tools::builtin::web_search::{
     WEB_SEARCH_DEFAULT_MAX_TOKENS, WEB_SEARCH_MAX_USES, WEB_SEARCH_TOOL_BLOCK_NAME,
     WEB_SEARCH_TOOL_BLOCK_TYPE,
 };
-use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 struct ErrorTemplates {

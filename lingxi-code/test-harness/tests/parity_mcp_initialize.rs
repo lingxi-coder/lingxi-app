@@ -1,7 +1,7 @@
 //! Parity fixture: MCP `initialize` request wire identity.
 //!
 //! Locks the literal `clientInfo` and `capabilities` shape emitted by
-//! `lingxi_mcp::InitializeParams::default()` against claude-code's
+//! `mcp::InitializeParams::default()` against claude-code's
 //! reference (`src/services/mcp/client.ts:985-1002`):
 //!
 //! - `clientInfo.name = "claude-code"` (literal),
@@ -12,10 +12,10 @@
 //!   empty objects `{}` (NOT null, NOT missing). The Java MCP SDK rejects
 //!   `{form:{},url:{}}` for elicitation, so we must emit a bare `{}`.
 
-use lingxi_mcp::initialize_params::InitializeParams;
-use lingxi_test_harness::parity::load_fixture;
+use mcp::initialize_params::InitializeParams;
 use serde::Deserialize;
 use serde_json::Value;
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 #[allow(clippy::struct_field_names)] // mirrors the JSON fixture's `expected_*` keys
@@ -58,7 +58,7 @@ fn mcp_initialize_request_matches_claude_code_identity() {
     // someone bypassed `Default::default()` and hand-rolled a struct.
     assert_eq!(
         got_version,
-        lingxi_mcp::CLIENT_VERSION,
+        mcp::CLIENT_VERSION,
         "version must come from CARGO_PKG_VERSION via CLIENT_VERSION",
     );
 

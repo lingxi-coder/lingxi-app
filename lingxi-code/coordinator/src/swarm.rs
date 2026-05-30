@@ -4,4 +4,4 @@
 //! code uses these re-exports so callers do not need to depend on the
 //! traits crate directly.
 
-pub use lingxi_traits::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+pub use traits::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};

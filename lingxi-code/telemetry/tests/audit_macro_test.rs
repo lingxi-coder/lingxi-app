@@ -8,5 +8,5 @@
 fn audit_macro_path_resolves() {
     // No-op — if the macro path were wrong, `tengu/mod.rs` would fail at
     // compile time and we'd never get here.
-    assert!(!lingxi_telemetry::tengu::ALL_EVENT_NAMES.is_empty());
+    assert!(!telemetry::tengu::ALL_EVENT_NAMES.is_empty());
 }

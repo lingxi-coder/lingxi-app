@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncRead, AsyncWrite, DuplexStream};
 use tokio::sync::Mutex;
 
-use lingxi_mcp::McpClient;
+use mcp::McpClient;
 
 /// Records every outgoing JSON-RPC payload received from the client end.
 /// Tests inspect this to assert literal byte content.
@@ -105,7 +105,7 @@ where
 
     let client_read: Box<dyn AsyncRead + Send + Unpin> = Box::new(client_read);
     let client_write: Box<dyn AsyncWrite + Send + Unpin> = Box::new(client_write);
-    let connection = lingxi_jsonrpc::Connection::new_line_delimited(client_read, client_write);
+    let connection = jsonrpc::Connection::new_line_delimited(client_read, client_write);
     let client = McpClient::new(server_name, cwd, Arc::new(connection)).await;
     (client, captured, handle)
 }
@@ -430,7 +430,7 @@ async fn list_tools_truncates_oversized_descriptions() {
     );
     assert!(
         tools[0].description.chars().count()
-            <= lingxi_mcp::MAX_MCP_DESCRIPTION_LENGTH + "\u{2026} [truncated]".chars().count(),
+            <= mcp::MAX_MCP_DESCRIPTION_LENGTH + "\u{2026} [truncated]".chars().count(),
         "must not exceed MAX_MCP_DESCRIPTION_LENGTH + sentinel length",
     );
 }
@@ -453,7 +453,7 @@ async fn raw_tool_decodes_anthropic_meta_block() {
     // Use a public alias-import trick to reach the private RawTool — for
     // black-box testing we serialize a `ToolMeta` directly via the public
     // re-export and assert symmetric encoding/decoding.
-    let meta: lingxi_mcp::client::ToolMeta =
+    let meta: mcp::client::ToolMeta =
         serde_json::from_value(raw_json["_meta"].clone()).expect("decode meta");
     assert_eq!(meta.search_hint.as_deref(), Some("shell"));
     assert_eq!(meta.always_load, Some(true));
@@ -725,7 +725,7 @@ async fn run_inbound_roundtrip(
 
     let client_read: Box<dyn AsyncRead + Send + Unpin> = Box::new(client_read);
     let client_write: Box<dyn AsyncWrite + Send + Unpin> = Box::new(client_write);
-    let connection = lingxi_jsonrpc::Connection::new_line_delimited(client_read, client_write);
+    let connection = jsonrpc::Connection::new_line_delimited(client_read, client_write);
     let client = McpClient::new("inbound-srv", cwd, Arc::new(connection)).await;
     client.initialize().await.expect("init");
 

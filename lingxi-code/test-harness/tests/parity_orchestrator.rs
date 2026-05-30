@@ -2,17 +2,17 @@
 //!
 //! Locks the `ConversationOrchestrator` turn loop behavior surface for
 //! v0.6.0: single-turn completion, max-turns cap, and cancellation.
-//! Uses `MockApiClient` from `lingxi_orchestrator::test_support`.
+//! Uses `MockApiClient` from `orchestrator::test_support`.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-14-release-v0.6.0.md` Task 2.
 #![allow(clippy::field_reassign_with_default)]
 
-use lingxi_api_client::types::ContentBlockApi;
-use lingxi_orchestrator::test_support::{
+use api_client::types::ContentBlockApi;
+use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use lingxi_orchestrator::{
+use orchestrator::{
     ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, OrchestratorError,
     TurnOutcome,
 };
@@ -95,9 +95,9 @@ fn build_orchestrator_with_api(
     api: Arc<MockApiClient>,
     max_turns: Option<u32>,
 ) -> ConversationOrchestrator {
-    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tools::registry::ToolRegistry::new());
     let output = Arc::new(MockOutputStream::new());
     let mut cfg = OrchestratorConfig::default();
     if let Some(mt) = max_turns {
@@ -269,7 +269,7 @@ async fn cancel_before_first_turn_returns_cancelled() {
 fn telemetry_invariants_events_are_registered() {
     let f = load();
     let registered: std::collections::HashSet<&&str> =
-        lingxi_telemetry::tengu::ALL_EVENT_NAMES.iter().collect();
+        telemetry::tengu::ALL_EVENT_NAMES.iter().collect();
     for name in &f.telemetry_invariants.events_fired_per_normal_turn {
         assert!(
             registered.contains(&name.as_str()),
@@ -312,12 +312,12 @@ fn fixture_scenarios_names_unique_and_outcomes_valid() {
 
 #[tokio::test]
 async fn parity_cost_after_one_turn() {
-    use lingxi_api_client::types::{MessageResponse, UsageApi};
-    use lingxi_cost::pricing::PricingCatalog;
-    use lingxi_cost::CostTracker;
-    use lingxi_protocol::SessionId;
-    use lingxi_traits::OrchestratorHandle;
+    use api_client::types::{MessageResponse, UsageApi};
+    use cost::pricing::PricingCatalog;
+    use cost::CostTracker;
+    use protocol::SessionId;
     use tokio::sync::mpsc;
+    use traits::OrchestratorHandle;
 
     let response = MessageResponse {
         id: "msg_mock".into(),
@@ -344,8 +344,8 @@ async fn parity_cost_after_one_turn() {
         ConversationOrchestrator::new(
             cfg,
             api,
-            Arc::new(lingxi_tools::registry::ToolRegistry::new()),
-            lingxi_orchestrator::test_support::noop_hook_executor(),
+            Arc::new(tools::registry::ToolRegistry::new()),
+            orchestrator::test_support::noop_hook_executor(),
             Arc::new(NoOpPermissionGate),
             Arc::new(MockOutputStream::new()),
             Arc::new(StaticMemoryProvider::empty()),
@@ -369,9 +369,9 @@ async fn parity_cost_after_one_turn() {
 
 #[tokio::test]
 async fn parity_force_compact_50_messages() {
-    use lingxi_compaction::CompactionOrchestrator;
-    use lingxi_protocol::{ConversationMessage, MessageId};
-    use lingxi_traits::OrchestratorHandle;
+    use compaction::CompactionOrchestrator;
+    use protocol::{ConversationMessage, MessageId};
+    use traits::OrchestratorHandle;
 
     // Drive the assertion from the fixture so the scenario fields are
     // load-bearing (matches the cost_after_one_turn convention).
@@ -397,8 +397,8 @@ async fn parity_force_compact_50_messages() {
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(vec![])),
-            Arc::new(lingxi_tools::registry::ToolRegistry::new()),
-            lingxi_orchestrator::test_support::noop_hook_executor(),
+            Arc::new(tools::registry::ToolRegistry::new()),
+            orchestrator::test_support::noop_hook_executor(),
             Arc::new(NoOpPermissionGate),
             Arc::new(MockOutputStream::new()),
             Arc::new(StaticMemoryProvider::empty()),

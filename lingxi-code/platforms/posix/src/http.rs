@@ -3,15 +3,15 @@
 //! Implements blocking-style request/response via `reqwest::Client`. SSE
 //! streaming is wired through `reqwest::Response::bytes_stream()` and a
 //! buffered `\n\n` / `\r\n\r\n` boundary scanner that defers framing details
-//! to `lingxi_api_client::sse::parse_sse_chunks`.
+//! to `api_client::sse::parse_sse_chunks`.
 
 use async_trait::async_trait;
 use bytes::BytesMut;
 use futures_core::stream::Stream;
 use futures_util::stream::StreamExt;
-use lingxi_protocol::{HttpRequest, HttpResponse, SseEvent};
-use lingxi_traits::http::SseStream;
-use lingxi_traits::{HttpError, HttpTransport};
+use protocol::{HttpRequest, HttpResponse, SseEvent};
+use traits::http::SseStream;
+use traits::{HttpError, HttpTransport};
 
 /// Production HTTP transport using `reqwest::Client`.
 pub struct PosixHttp {
@@ -44,13 +44,13 @@ impl Default for PosixHttp {
 impl HttpTransport for PosixHttp {
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
         let method = match req.method {
-            lingxi_protocol::HttpMethod::Get => reqwest::Method::GET,
-            lingxi_protocol::HttpMethod::Post => reqwest::Method::POST,
-            lingxi_protocol::HttpMethod::Put => reqwest::Method::PUT,
-            lingxi_protocol::HttpMethod::Patch => reqwest::Method::PATCH,
-            lingxi_protocol::HttpMethod::Delete => reqwest::Method::DELETE,
-            lingxi_protocol::HttpMethod::Head => reqwest::Method::HEAD,
-            lingxi_protocol::HttpMethod::Options => reqwest::Method::OPTIONS,
+            protocol::HttpMethod::Get => reqwest::Method::GET,
+            protocol::HttpMethod::Post => reqwest::Method::POST,
+            protocol::HttpMethod::Put => reqwest::Method::PUT,
+            protocol::HttpMethod::Patch => reqwest::Method::PATCH,
+            protocol::HttpMethod::Delete => reqwest::Method::DELETE,
+            protocol::HttpMethod::Head => reqwest::Method::HEAD,
+            protocol::HttpMethod::Options => reqwest::Method::OPTIONS,
         };
         let mut rb = self.client.request(method, &req.url);
         for (k, v) in &req.headers {
@@ -85,13 +85,13 @@ impl HttpTransport for PosixHttp {
 
     async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError> {
         let method = match req.method {
-            lingxi_protocol::HttpMethod::Get => reqwest::Method::GET,
-            lingxi_protocol::HttpMethod::Post => reqwest::Method::POST,
-            lingxi_protocol::HttpMethod::Put => reqwest::Method::PUT,
-            lingxi_protocol::HttpMethod::Patch => reqwest::Method::PATCH,
-            lingxi_protocol::HttpMethod::Delete => reqwest::Method::DELETE,
-            lingxi_protocol::HttpMethod::Head => reqwest::Method::HEAD,
-            lingxi_protocol::HttpMethod::Options => reqwest::Method::OPTIONS,
+            protocol::HttpMethod::Get => reqwest::Method::GET,
+            protocol::HttpMethod::Post => reqwest::Method::POST,
+            protocol::HttpMethod::Put => reqwest::Method::PUT,
+            protocol::HttpMethod::Patch => reqwest::Method::PATCH,
+            protocol::HttpMethod::Delete => reqwest::Method::DELETE,
+            protocol::HttpMethod::Head => reqwest::Method::HEAD,
+            protocol::HttpMethod::Options => reqwest::Method::OPTIONS,
         };
         let mut rb = self.client.request(method, &req.url);
         for (k, v) in &req.headers {
@@ -145,7 +145,7 @@ where
                     // Consume the boundary itself.
                     drop(buf.split_to(boundary_len));
                     let chunk = String::from_utf8_lossy(&event_bytes).to_string();
-                    let events = lingxi_api_client::sse::parse_sse_chunks(&format!("{chunk}\n\n"));
+                    let events = api_client::sse::parse_sse_chunks(&format!("{chunk}\n\n"));
                     if let Some(ev) = events.into_iter().next() {
                         return Some((Ok(ev), (s, buf)));
                     }

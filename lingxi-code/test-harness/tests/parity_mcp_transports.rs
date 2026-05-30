@@ -7,7 +7,7 @@
 //! `SdkControl` are internal-only and never round-trip through
 //! user/project/managed settings.
 //!
-//! The production [`lingxi_platform_posix::PosixMcpTransport`] mirrors
+//! The production [`platform_posix::PosixMcpTransport`] mirrors
 //! that split by:
 //!
 //! - claiming `Stdio | Sse | Http` in `supported_transports()`,
@@ -20,10 +20,10 @@
 //! path returns `UnsupportedTransport` (matching the in-source TODO note in
 //! `platforms/posix/src/mcp.rs`).
 
-use lingxi_test_harness::parity::load_fixture;
-use lingxi_traits::mcp::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
 use serde::Deserialize;
 use std::collections::HashMap;
+use test_harness::parity::load_fixture;
+use traits::mcp::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -85,7 +85,7 @@ fn sample_spec(kind: McpTransportKind) -> McpTransportSpec {
 async fn mcp_transport_matrix_matches_claude_code() {
     let fx: Fixture = load_fixture("mcp_transport_settings_matrix");
 
-    let transport = lingxi_platform_posix::PosixMcpTransport::new();
+    let transport = platform_posix::PosixMcpTransport::new();
     let supported = transport.supported_transports();
 
     // claude-code's four user-facing kinds. The production transport must
@@ -147,7 +147,7 @@ async fn mcp_transport_matrix_matches_claude_code() {
 async fn mcp_transport_matrix_matches_claude_code() {
     let fx: Fixture = load_fixture("mcp_transport_settings_matrix");
 
-    let transport = lingxi_platform_windows::WindowsMcpTransport::new();
+    let transport = platform_windows::WindowsMcpTransport::new();
     let supported = transport.supported_transports();
 
     for kind_name in &fx.internal_only_kinds {

@@ -19,7 +19,7 @@ use syn::{parse_macro_input, LitStr};
 /// Compile-time event-audit macro. Takes no arguments; expands to `()` on
 /// success, `compile_error!(...)` on failure.
 ///
-/// Invoke from `tengu/mod.rs` as `lingxi_telemetry_macros::tengu_event_audit!();`.
+/// Invoke from `tengu/mod.rs` as `telemetry_macros::tengu_event_audit!();`.
 #[proc_macro]
 pub fn tengu_event_audit(input: TokenStream) -> TokenStream {
     let _ = input;

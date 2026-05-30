@@ -2,8 +2,8 @@
 //!
 //! See Plan 07 — Task 5.
 
-use lingxi_coordinator::{MailboxError, MessageSender, TeamRegistry, TeammateMessage};
-use lingxi_protocol::AgentId;
+use coordinator::{MailboxError, MessageSender, TeamRegistry, TeammateMessage};
+use protocol::AgentId;
 
 #[tokio::test]
 async fn coordinator_routes_message_to_worker() {

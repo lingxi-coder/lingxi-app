@@ -1,7 +1,7 @@
 //! Schema-level checks: `deny_unknown_fields` rejects extras across categories;
 //! a couple of representative payload structs round-trip via serde JSON.
 
-use lingxi_telemetry::{tengu, Verified};
+use telemetry::{tengu, Verified};
 
 #[test]
 fn api_request_started_rejects_unknown_field() {
@@ -41,7 +41,7 @@ fn cost_recorded_round_trips() {
 
 #[test]
 fn memory_case_mismatch_preserves_proto_path() {
-    use lingxi_telemetry::pii::PiiTagged;
+    use telemetry::pii::PiiTagged;
     let p = tengu::memory::CaseMismatchPayload {
         actual_name: Verified::assert_safe("claude.md".into()),
         path: PiiTagged::assert_pii_tagged_column("/x/y".into()),

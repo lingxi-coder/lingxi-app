@@ -7,11 +7,11 @@
 //! the oneshot back-channel and the dialog slot is cleared.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lingxi_permission::gate::{PermissionRequest, PermissionResponse, PromptDefault};
-use lingxi_tui::events::keymap::handle_key;
-use lingxi_tui::state::{AppState, PendingPermission, StatusSnapshot};
+use permission::gate::{PermissionRequest, PermissionResponse, PromptDefault};
 use serde_json::json;
 use tokio::sync::oneshot;
+use tui::events::keymap::handle_key;
+use tui::state::{AppState, PendingPermission, StatusSnapshot};
 
 fn k(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)

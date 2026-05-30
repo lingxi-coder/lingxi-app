@@ -1,6 +1,6 @@
 //! Three-way mode dispatch added in M6-01. Routes argv to one of:
 //! - `Mode::Print(prompt)`: existing `run::run_oneshot` (v0.6.0, unchanged)
-//! - `Mode::Tui`: new `lingxi_tui::run_tui_session` (v0.7.0 default)
+//! - `Mode::Tui`: new `tui::run_tui_session` (v0.7.0 default)
 //! - `Mode::StdioRepl`: existing `repl::run_repl` (v0.6.0, kept as `--no-tui`
 //!   and non-TTY fallback)
 //!
@@ -60,9 +60,9 @@ pub(crate) fn is_full_tty() -> bool {
 use crate::exit_codes;
 use crate::init::Runtime;
 use crate::output::OutputSink;
-use lingxi_traits::OrchestratorHandle;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use traits::OrchestratorHandle;
 
 /// Execute the chosen mode. Returns the process exit code.
 ///
@@ -114,22 +114,22 @@ pub async fn dispatch(
             // id read and the Settings open pump inside the TUI mount.
             let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
             let session_id = orchestrator.current_session_id().await;
-            let bridge = lingxi_tui::session::TuiBridge {
+            let bridge = tui::session::TuiBridge {
                 rx: tui_build.bridge_rx,
             };
             // Status snapshot — model from argv (if set), cwd from current
             // dir, cost placeholder. Full status wiring lands in M6-06.
-            let mut status = lingxi_tui::state::StatusSnapshot::default();
+            let mut status = tui::state::StatusSnapshot::default();
             if let Some(m) = &argv.model {
                 status.model.clone_from(m);
             }
             if let Ok(cwd) = std::env::current_dir() {
                 status.cwd = cwd;
             }
-            let tui_runtime = lingxi_tui::session::Runtime::with_bridge(session_id, bridge, status)
+            let tui_runtime = tui::session::Runtime::with_bridge(session_id, bridge, status)
                 .with_orchestrator(orchestrator);
             let cancel = CancellationToken::new();
-            match lingxi_tui::run_tui_session(tui_runtime, cancel).await {
+            match tui::run_tui_session(tui_runtime, cancel).await {
                 Ok(()) => exit_codes::SUCCESS,
                 Err(e) => {
                     eprintln!("lingxi-cli: tui session failed: {e}");

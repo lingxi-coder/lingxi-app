@@ -1,11 +1,11 @@
 //! (M7-05) Folding tests: grouped_tool_use + collapsed_read_search.
 #![allow(clippy::doc_markdown)]
 
-use lingxi_protocol::ToolUseId;
-use lingxi_tui::components::messages::collapsed_read_search::{
+use protocol::ToolUseId;
+use tui::components::messages::collapsed_read_search::{
     render_collapsed_to_string, CollapsedCounts,
 };
-use lingxi_tui::components::messages::grouped_tool_use::render_grouped_to_string;
+use tui::components::messages::grouped_tool_use::render_grouped_to_string;
 
 fn pair(p: &str) -> (serde_json::Value, serde_json::Value) {
     (

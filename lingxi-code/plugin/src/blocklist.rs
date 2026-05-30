@@ -7,7 +7,7 @@
 //!
 //! See spec §15.5.
 
-use lingxi_protocol::PluginId;
+use protocol::PluginId;
 use std::collections::HashSet;
 use tokio::sync::RwLock;
 

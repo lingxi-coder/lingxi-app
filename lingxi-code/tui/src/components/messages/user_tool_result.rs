@@ -13,7 +13,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use iocraft::prelude::*;
-use lingxi_protocol::ToolUseId;
+use protocol::ToolUseId;
 
 use crate::render::ansi::parse_ansi;
 use crate::render::{diff, split_spans_into_line_rows, StyledLine, StyledSpan};

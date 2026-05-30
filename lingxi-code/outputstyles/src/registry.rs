@@ -1,7 +1,7 @@
 //! Output-style registry with builtin markdown default and async switching.
 
 use crate::model::{OutputFormat, OutputStyle, OutputStyleFrontmatter, OutputStyleSource};
-use lingxi_protocol::PluginId;
+use protocol::PluginId;
 use std::collections::HashMap;
 use thiserror::Error;
 use tokio::sync::RwLock;

@@ -10,7 +10,7 @@
 //! from the FFI — a contended lock returns a default value rather than
 //! parking the host thread.
 
-use lingxi_protocol::SessionId;
+use protocol::SessionId;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 

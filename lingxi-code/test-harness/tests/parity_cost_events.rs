@@ -6,16 +6,16 @@
 //! place to lock it.
 
 use async_trait::async_trait;
-use lingxi_cost::{
+use cost::{
     emit_cost_recorded, BATCH_DISCOUNT_BPS, BUDGET_EXCEEDED_THRESHOLD_BPS,
     BUDGET_WARNING_THRESHOLD_BPS,
 };
-use lingxi_protocol::SessionId;
-use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
-use lingxi_test_harness::parity::load_fixture;
+use protocol::SessionId;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 struct Fixture {

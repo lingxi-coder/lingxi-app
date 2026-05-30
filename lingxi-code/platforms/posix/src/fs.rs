@@ -10,9 +10,9 @@
 use async_trait::async_trait;
 use fs2::FileExt;
 use futures_core::stream::Stream;
-use lingxi_traits::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use std::path::PathBuf;
 use std::pin::Pin;
+use traits::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 
 /// Concrete [`FileSystem`] backed by `tokio::fs`.
 ///

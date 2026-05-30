@@ -2,10 +2,8 @@
 #![allow(clippy::doc_markdown)]
 
 use iocraft::prelude::*;
-use lingxi_tui::components::messages::bash_input::UserBashInputMessage;
-use lingxi_tui::components::messages::bash_output::{
-    render_bash_output_spans, UserBashOutputMessage,
-};
+use tui::components::messages::bash_input::UserBashInputMessage;
+use tui::components::messages::bash_output::{render_bash_output_spans, UserBashOutputMessage};
 
 #[test]
 fn bash_input_renders_bang_prefix() {
@@ -91,8 +89,8 @@ fn bash_output_single_line_stays_one_row() {
 /// component, not just measurement vs the joined string oracle.
 #[test]
 fn bash_output_measured_height_matches_rendered_rows() {
-    use lingxi_tui::components::virtual_message_list::measured_height;
-    use lingxi_tui::state::RenderedMessage;
+    use tui::components::virtual_message_list::measured_height;
+    use tui::state::RenderedMessage;
 
     let msg = RenderedMessage::UserBashOutput {
         stdout: "a\nb\nc".to_string(),
@@ -115,7 +113,7 @@ fn bash_output_measured_height_matches_rendered_rows() {
 /// separate.
 #[test]
 fn bash_output_ansi_color_survives_line_split() {
-    use lingxi_tui::render::{NamedColor, StyleColor};
+    use tui::render::{NamedColor, StyleColor};
 
     // Line 1: red "err"; line 2: plain "ok".
     let spans = render_bash_output_spans("\x1b[31merr\x1b[0m\nok", "");

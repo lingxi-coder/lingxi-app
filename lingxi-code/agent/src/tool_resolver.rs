@@ -6,8 +6,8 @@
 //! [`AgentPermissionMode::Plan`]. See spec §10.8.
 
 use crate::definition::{AgentDefinition, AgentPermissionMode, AgentToolPolicy};
-use lingxi_tools::Tool;
 use std::sync::Arc;
+use tools::Tool;
 
 /// Stateless utility that computes the effective tool set for an agent
 /// spawn from the agent definition plus the surrounding tool sets.

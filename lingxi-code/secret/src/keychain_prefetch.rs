@@ -9,16 +9,16 @@
 //! drain via [`KeychainPrefetch::consume`].
 //!
 //! M2-06 wired this through to the real
-//! `lingxi_platform_posix::secure_storage::MacOsKeychainStorage`. Callers
+//! `platform_posix::secure_storage::MacOsKeychainStorage`. Callers
 //! supply the `(service, account)` pair so the prefetch can target either
 //! the OAuth entry (`service = "-credentials"`) or the legacy API-key entry
 //! (`service = ""`). When the backend is the plaintext fallback, the same
 //! call still works — the storage layer just hits the disk.
 
-use lingxi_protocol::SecureStorageData;
-use lingxi_traits::{RuntimeError, RuntimeSpawner, SecureStorage, SecureStorageError};
+use protocol::SecureStorageData;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use traits::{RuntimeError, RuntimeSpawner, SecureStorage, SecureStorageError};
 
 /// Result delivered by the background prefetch task.
 type PrefetchResult = Result<Option<SecureStorageData>, SecureStorageError>;
@@ -77,10 +77,10 @@ impl KeychainPrefetch {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use lingxi_protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
-    use lingxi_traits::{BackgroundTaskHandle, SecureStorageBackend};
+    use protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
     use std::sync::Mutex;
     use std::time::Duration;
+    use traits::{BackgroundTaskHandle, SecureStorageBackend};
 
     struct MockStorage {
         invocations: Mutex<Vec<(String, String)>>,

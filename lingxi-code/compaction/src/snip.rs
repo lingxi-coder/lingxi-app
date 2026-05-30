@@ -1,7 +1,7 @@
 //! Snip compaction — the cheapest layer. Drops oldest messages with no LLM
 //! involvement. Always preserves the most-recent `MIN_PROTECTED_TAIL` messages.
 
-use lingxi_protocol::ConversationMessage;
+use protocol::ConversationMessage;
 
 /// Result of running the snip compactor.
 #[derive(Debug, Clone)]

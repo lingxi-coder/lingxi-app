@@ -9,7 +9,7 @@
 //! See M4-05 wiring follow-up plan.
 
 use async_trait::async_trait;
-use lingxi_protocol::AgentId;
+use protocol::AgentId;
 use serde_json::Value;
 use std::any::Any;
 use thiserror::Error;

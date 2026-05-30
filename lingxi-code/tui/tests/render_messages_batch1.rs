@@ -1,23 +1,17 @@
 //! M7-04 batch-1 renderer snapshots.
-use lingxi_tui::components::messages::advisor::{render_advisor_to_string, AdvisorProps};
-use lingxi_tui::components::messages::compact_boundary::render_compact_boundary_to_string;
-use lingxi_tui::components::messages::hook_progress::{
-    render_hook_progress_to_string, HookProgressProps,
-};
-use lingxi_tui::components::messages::plan_approval::{
-    render_plan_approval_to_string, PlanApprovalProps,
-};
-use lingxi_tui::components::messages::rate_limit::{render_rate_limit_to_string, RateLimitProps};
-use lingxi_tui::components::messages::redacted_thinking::render_redacted_thinking_to_string;
-use lingxi_tui::components::messages::shutdown::{render_shutdown_to_string, ShutdownProps};
-use lingxi_tui::components::messages::system_api_error::{
+use tui::components::messages::advisor::{render_advisor_to_string, AdvisorProps};
+use tui::components::messages::compact_boundary::render_compact_boundary_to_string;
+use tui::components::messages::hook_progress::{render_hook_progress_to_string, HookProgressProps};
+use tui::components::messages::plan_approval::{render_plan_approval_to_string, PlanApprovalProps};
+use tui::components::messages::rate_limit::{render_rate_limit_to_string, RateLimitProps};
+use tui::components::messages::redacted_thinking::render_redacted_thinking_to_string;
+use tui::components::messages::shutdown::{render_shutdown_to_string, ShutdownProps};
+use tui::components::messages::system_api_error::{
     render_system_api_error_to_string, SystemApiErrorProps,
 };
-use lingxi_tui::components::messages::system_text::{
-    render_system_text_to_string, SystemTextProps,
-};
-use lingxi_tui::components::messages::thinking::{render_thinking_to_string, ThinkingProps};
-use lingxi_tui::state::{AdvisorKind, PlanApprovalKind, SystemLevel};
+use tui::components::messages::system_text::{render_system_text_to_string, SystemTextProps};
+use tui::components::messages::thinking::{render_thinking_to_string, ThinkingProps};
+use tui::state::{AdvisorKind, PlanApprovalKind, SystemLevel};
 
 #[test]
 fn thinking_collapsed() {

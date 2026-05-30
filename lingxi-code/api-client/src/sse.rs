@@ -3,7 +3,7 @@
 //! Conforms to <https://html.spec.whatwg.org/multipage/server-sent-events.html>.
 //! Buffers raw chunks and emits complete `SseEvent` values.
 
-use lingxi_protocol::SseEvent;
+use protocol::SseEvent;
 
 /// Parse one or more complete events out of a chunk. The chunk MUST end with
 /// `\n\n` to terminate the last event; partial events are dropped.

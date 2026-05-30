@@ -3,7 +3,7 @@
 //! from claude-code HistorySearchInput.tsx.
 
 use iocraft::prelude::*;
-use lingxi_tui::components::prompt_input::HistorySearchOverlay;
+use tui::components::prompt_input::HistorySearchOverlay;
 
 fn render_row(query: &str, failed: bool) -> String {
     let mut canvas = element! {

@@ -1,11 +1,11 @@
 //! M7-14 behavior: memory screen open + tier round-trip through the M3 store.
 
-use lingxi_tui::screens::memory::{
+use tui::screens::memory::{
     handle_memory_key, load_tier_body, save_tier_body, MemoryAction, MemoryScreenState,
     MemoryTierEntry,
 };
-use lingxi_tui::screens::Screen;
-use lingxi_tui::state::AppState;
+use tui::screens::Screen;
+use tui::state::AppState;
 
 mod support;
 use support::fake_status;

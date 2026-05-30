@@ -6,17 +6,17 @@
 //! subagent spawn is wired in Plan 15's cli-demo.
 
 use crate::registry::SkillRegistry;
+use agent::StateMachinePool;
 use async_trait::async_trait;
-use lingxi_agent::StateMachinePool;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_tools::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolProgressSender,
-    ToolStaticContext, ToolUseContext,
-};
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tools::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolProgressSender,
+    ToolStaticContext, ToolUseContext,
+};
 
 /// Model-visible `Skill` tool. Resolves a skill by name from the registry
 /// and (in later milestones) hands execution to the `StateMachinePool`.

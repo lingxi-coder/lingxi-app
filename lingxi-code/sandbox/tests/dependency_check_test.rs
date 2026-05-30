@@ -1,7 +1,5 @@
-use lingxi_sandbox::dependency_check::{
-    sandbox_unavailable_reason, MissingDeps, SandboxDependencyCheck,
-};
-use lingxi_sandbox::runtime_config::Platform;
+use sandbox::dependency_check::{sandbox_unavailable_reason, MissingDeps, SandboxDependencyCheck};
+use sandbox::runtime_config::Platform;
 
 #[test]
 fn unavailable_reason_wsl1_string_exact() {

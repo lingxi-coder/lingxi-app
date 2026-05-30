@@ -20,11 +20,11 @@
 //! Per-token highlight COLOR is deliberately NOT locked here (parity =
 //! equivalent look). Color/style is covered by the lingxi-tui insta snapshots.
 
-use lingxi_tui::render::markdown::{render as render_markdown, MarkdownTheme};
-use lingxi_tui::render::syntax::highlight;
-use lingxi_tui::render::{diff, StyleColor, StyledLine};
-use lingxi_tui::theme::ThemeName;
 use serde_json::Value;
+use tui::render::markdown::{render as render_markdown, MarkdownTheme};
+use tui::render::syntax::highlight;
+use tui::render::{diff, StyleColor, StyledLine};
+use tui::theme::ThemeName;
 
 const FIXTURE: &str = include_str!("../src/parity/fixtures/parity_tui_renderers_m7.json");
 
@@ -52,7 +52,7 @@ fn compact_boundary_marker_is_locked() {
     let f = load();
     let r = &f["renderers"]["compact_boundary"];
     assert_eq!(
-        lingxi_tui::components::messages::compact_boundary::render_compact_boundary_to_string(),
+        tui::components::messages::compact_boundary::render_compact_boundary_to_string(),
         r["expected_rendered_text"].as_str().unwrap(),
     );
 }
@@ -62,7 +62,7 @@ fn bash_input_prefix_is_locked() {
     let f = load();
     let r = &f["renderers"]["bash_input"];
     assert_eq!(
-        lingxi_tui::components::messages::bash_input::render_bash_input_to_string(
+        tui::components::messages::bash_input::render_bash_input_to_string(
             r["command"].as_str().unwrap()
         ),
         r["expected_rendered_text"].as_str().unwrap(),
@@ -75,7 +75,7 @@ fn image_placeholder_is_locked() {
     let r = &f["renderers"]["image"];
     let id = r["image_id"].as_u64();
     assert_eq!(
-        lingxi_tui::components::messages::image::render_image_label(id, None),
+        tui::components::messages::image::render_image_label(id, None),
         r["expected_rendered_text"].as_str().unwrap(),
     );
 }
@@ -84,7 +84,7 @@ fn image_placeholder_is_locked() {
 fn grouped_tool_use_header_is_locked() {
     let f = load();
     let r = &f["renderers"]["grouped_tool_use"];
-    let header = lingxi_tui::components::messages::grouped_tool_use::render_grouped_to_string(
+    let header = tui::components::messages::grouped_tool_use::render_grouped_to_string(
         r["tool"].as_str().unwrap(),
         &[],
         false,

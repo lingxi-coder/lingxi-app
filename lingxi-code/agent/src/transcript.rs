@@ -2,16 +2,16 @@
 //!
 //! [`AgentTranscriptWriter`] appends one JSON line per
 //! [`ConversationMessage`] to a transcript file under the agent's transcript
-//! subdir. The full append-only [`lingxi_traits::FileSystem::append_file`]
+//! subdir. The full append-only [`traits::FileSystem::append_file`]
 //! lands in Plan 10; today we read-then-rewrite to keep the public surface
 //! stable.
 
-use lingxi_protocol::{AgentId, ConversationMessage};
-use lingxi_traits::FileSystem;
+use protocol::{AgentId, ConversationMessage};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
+use traits::FileSystem;
 
 /// One line in the agent transcript.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,10 +49,7 @@ impl AgentTranscriptWriter {
     }
 
     /// Append one [`TranscriptEntry`] for `message`.
-    pub async fn record(
-        &self,
-        message: &ConversationMessage,
-    ) -> Result<(), lingxi_traits::FsError> {
+    pub async fn record(&self, message: &ConversationMessage) -> Result<(), traits::FsError> {
         let entry = TranscriptEntry {
             agent_id: self.agent_id,
             timestamp: SystemTime::now(),

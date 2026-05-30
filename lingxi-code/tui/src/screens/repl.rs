@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use iocraft::prelude::*;
-use lingxi_protocol::ToolUseId;
+use protocol::ToolUseId;
 
 use crate::components::prompt_input::completion::{CompletionOverlay, CompletionState};
 use crate::components::prompt_input::palette::{PaletteOverlay, PaletteState, OVERLAY_MAX_ITEMS};

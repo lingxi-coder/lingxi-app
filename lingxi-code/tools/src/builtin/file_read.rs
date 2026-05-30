@@ -17,16 +17,16 @@ use crate::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
 };
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::{PiiTagged, Verified};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{READ_COMPLETED, READ_FAILED, READ_STARTED};
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
+use telemetry::pii::{PiiTagged, Verified};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{READ_COMPLETED, READ_FAILED, READ_STARTED};
 
 /// Maximum file size FileReadTool will load. Spec §7 lock (256 KB).
 pub const MAX_FILE_READ_SIZE: u64 = 262_144;
@@ -279,8 +279,8 @@ pub(crate) fn ulid_or_uuid() -> String {
 mod tests {
     use super::*;
     use crate::builtin::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
-    use lingxi_telemetry::{AnalyticsBus, InMemorySink};
     use std::sync::Arc;
+    use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
 
     fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {

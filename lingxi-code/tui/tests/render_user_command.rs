@@ -2,8 +2,8 @@
 #![allow(clippy::doc_markdown)]
 
 use iocraft::prelude::*;
-use lingxi_tui::components::messages::command::{render_command_to_string, UserCommandMessage};
-use lingxi_tui::components::messages::local_command_output::{
+use tui::components::messages::command::{render_command_to_string, UserCommandMessage};
+use tui::components::messages::local_command_output::{
     render_local_output_to_string, UserLocalCommandOutputMessage,
 };
 

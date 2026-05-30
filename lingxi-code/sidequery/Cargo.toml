@@ -1,17 +1,17 @@
 [package]
-name = "lingxi-sidequery"
+name = "sidequery"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
-lingxi-core = { path = "../core" }
-lingxi-api-client = { path = "../api-client" }
-lingxi-cost = { path = "../cost" }
-lingxi-tools = { path = "../tools" }
+protocol = { path = "../protocol" }
+traits = { path = "../traits" }
+engine = { path = "../engine" }
+api-client = { path = "../api-client" }
+cost = { path = "../cost" }
+tools = { path = "../tools" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

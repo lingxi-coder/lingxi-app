@@ -2,7 +2,7 @@
 //! Locks the section headers (`Diagnostics`, `Terminal`) + `└ ` row layout.
 
 use iocraft::prelude::*;
-use lingxi_tui::screens::doctor::{DoctorDiagnostics, DoctorScreen};
+use tui::screens::doctor::{DoctorDiagnostics, DoctorScreen};
 
 fn fixed_diag() -> DoctorDiagnostics {
     DoctorDiagnostics {

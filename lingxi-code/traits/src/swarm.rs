@@ -5,7 +5,7 @@
 //! this trait so it can run on systems without a swarm backend.
 
 use async_trait::async_trait;
-use lingxi_protocol::AgentId;
+use protocol::AgentId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

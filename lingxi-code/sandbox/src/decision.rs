@@ -14,9 +14,9 @@
 //! See spec §24.3 (sandbox decision matrix).
 
 use crate::runtime_config::SandboxRuntimeConfig;
-use lingxi_permission::PermissionMode;
-use lingxi_traits::SandboxPolicy;
+use permission::PermissionMode;
 use std::collections::BTreeSet;
+use traits::SandboxPolicy;
 
 /// Outcome of [`should_use_sandbox`].
 #[derive(Debug, Clone)]
@@ -25,7 +25,7 @@ pub enum SandboxDecision {
     NoSandbox,
     /// Wrap the command using the supplied policy.
     Sandbox {
-        /// Policy to apply when calling [`lingxi_traits::Sandbox::prepare`].
+        /// Policy to apply when calling [`traits::Sandbox::prepare`].
         policy: SandboxPolicy,
     },
     /// Host cannot provide a sandbox but the command is dangerous — refuse.

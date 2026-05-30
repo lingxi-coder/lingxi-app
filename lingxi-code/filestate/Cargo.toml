@@ -1,12 +1,12 @@
 [package]
-name = "lingxi-filestate"
+name = "filestate"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-traits = { path = "../traits" }
+traits = { path = "../traits" }
 serde.workspace = true
 thiserror.workspace = true
 sha2 = "0.10"

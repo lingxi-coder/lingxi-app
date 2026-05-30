@@ -6,12 +6,12 @@
 //! `TurnEvent::ToolUseStart/ToolUseResult`). We exercise the same surface
 //! here.
 
-use lingxi_protocol::ToolUseId;
-use lingxi_tui::components::messages::render_entry_to_string;
-use lingxi_tui::events::orchestrator_bridge::TurnEvent;
-use lingxi_tui::state::{AppState, StatusSnapshot};
-use lingxi_tui::streaming::apply_event;
+use protocol::ToolUseId;
 use tokio::sync::Notify;
+use tui::components::messages::render_entry_to_string;
+use tui::events::orchestrator_bridge::TurnEvent;
+use tui::state::{AppState, StatusSnapshot};
+use tui::streaming::apply_event;
 
 #[test]
 fn full_flow_call_then_result_renders_both_blocks() {

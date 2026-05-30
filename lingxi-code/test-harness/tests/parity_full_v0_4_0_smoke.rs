@@ -9,8 +9,8 @@
 //! driver (`parity_settings_merge.rs`, `parity_memory_loading.rs`, etc.)
 //! handles the roundtrip story.
 
-use lingxi_test_harness::parity::load_fixture;
 use serde::Deserialize;
+use test_harness::parity::load_fixture;
 
 #[derive(Debug, Deserialize)]
 struct Fixture {

@@ -4,21 +4,21 @@
 //! - Descriptor cap: 1024 chars.
 //!
 //! Hermetic by default: the `EmptySkillLoader` always returns "skill not
-//! found". Production hosts inject a loader backed by `lingxi_skills::registry`.
+//! found". Production hosts inject a loader backed by `skills::registry`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::{PiiTagged, Verified};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{SKILL_COMPLETED, SKILL_FAILED, SKILL_STARTED};
-use lingxi_telemetry::AnalyticsBus;
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
+use telemetry::pii::{PiiTagged, Verified};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{SKILL_COMPLETED, SKILL_FAILED, SKILL_STARTED};
+use telemetry::AnalyticsBus;
 
 use crate::context::ToolUseContext;
 use crate::progress::ToolProgressSender;
@@ -35,7 +35,7 @@ pub const MAX_SKILL_DESCRIPTOR_LEN: usize = 1024;
 pub const MAX_SKILL_NAME_LEN: usize = 128;
 
 /// Minimal skill descriptor returned to the model. Subset of
-/// `lingxi_skills::model::Skill` — only the fields the model actually needs.
+/// `skills::model::Skill` — only the fields the model actually needs.
 #[derive(Debug, Clone)]
 pub struct SkillDescriptor {
     /// Canonical name (matches the input field).
@@ -46,7 +46,7 @@ pub struct SkillDescriptor {
     pub body: String,
 }
 
-/// Loader trait — production wraps `lingxi_skills::registry::SkillRegistry`;
+/// Loader trait — production wraps `skills::registry::SkillRegistry`;
 /// tests inject a fixed map.
 #[async_trait]
 pub trait SkillLoader: Send + Sync {
@@ -276,7 +276,7 @@ impl Tool for SkillTool {
 mod tests {
     use super::*;
     use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use lingxi_traits::process::ProcessOutput;
+    use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {

@@ -3,12 +3,12 @@
 //! Locks the byte-for-byte string identifiers M3-04 promises against
 //! claude-code @ 6a25909. Drift breaks interop with the upstream `IdP`.
 
-use lingxi_anthropic_oauth::config::{CLAUDE_CODE_OAUTH_SCOPES, REFRESH_GRANT_TYPE};
-use lingxi_anthropic_oauth::refresh::{proactive_lead, PROACTIVE_LEAD_CAP};
-use lingxi_anthropic_oauth::{ClaudeAiOAuthConfig, OAuthError};
-use lingxi_test_harness::parity::load_fixture;
+use anthropic_oauth::config::{CLAUDE_CODE_OAUTH_SCOPES, REFRESH_GRANT_TYPE};
+use anthropic_oauth::refresh::{proactive_lead, PROACTIVE_LEAD_CAP};
+use anthropic_oauth::{ClaudeAiOAuthConfig, OAuthError};
 use serde::Deserialize;
 use std::time::Duration;
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 struct Fixture {

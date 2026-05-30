@@ -6,10 +6,10 @@
 use std::path::PathBuf;
 
 use iocraft::prelude::*;
-use lingxi_permission::PermissionMode;
-use lingxi_tui::components::virtual_message_list::HeightCache;
-use lingxi_tui::screens::repl::ReplScreen;
-use lingxi_tui::state::{RenderedMessage, StatusSnapshot};
+use permission::PermissionMode;
+use tui::components::virtual_message_list::HeightCache;
+use tui::screens::repl::ReplScreen;
+use tui::state::{RenderedMessage, StatusSnapshot};
 
 fn status() -> StatusSnapshot {
     StatusSnapshot {

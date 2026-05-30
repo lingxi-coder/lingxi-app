@@ -6,9 +6,9 @@
 //! command and wipes everything (including the just-pushed entry).
 //! Net effect: empty scrollback.
 
-use lingxi_tui::app::{dispatch, handle_submit_line};
-use lingxi_tui::events::keymap::KeyAction;
-use lingxi_tui::state::{AppState, RenderedMessage};
+use tui::app::{dispatch, handle_submit_line};
+use tui::events::keymap::KeyAction;
+use tui::state::{AppState, RenderedMessage};
 
 mod support;
 use support::{fake_dispatcher, fake_status};

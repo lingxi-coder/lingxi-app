@@ -1,21 +1,21 @@
 //! `MockMcpTransport` — minimal in-memory MCP transport for engine tests.
 //!
 //! Tests pre-register tool DTOs with [`MockMcpTransport::add_tool`] and
-//! then drive `lingxi_mcp::McpRegistry::connect` against the mock. The
+//! then drive `mcp::McpRegistry::connect` against the mock. The
 //! mock is intentionally tiny: it only implements enough of
 //! [`McpTransport`] to walk the connect → initialize → `list_tools` path.
 
 #![allow(clippy::unwrap_used)] // Mutex lock failures here mean the test is broken.
 
 use async_trait::async_trait;
-use lingxi_protocol::McpConnectionId;
-use lingxi_traits::{
+use protocol::McpConnectionId;
+use serde_json::Value;
+use std::sync::Mutex;
+use traits::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
-use serde_json::Value;
-use std::sync::Mutex;
 
 /// In-memory MCP transport that returns canned responses to the registry.
 pub struct MockMcpTransport {

@@ -1,18 +1,18 @@
 [package]
-name = "lingxi-platform-posix"
+name = "platform-posix"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../../protocol" }
-lingxi-traits = { path = "../../traits" }
-lingxi-jsonrpc = { path = "../../jsonrpc" }
-lingxi-lsp = { path = "../../lsp" }
-lingxi-platform-common = { path = "../common" }
-lingxi-sandbox = { path = "../../sandbox" }
-lingxi-api-client = { path = "../../api-client" }
+protocol = { path = "../../protocol" }
+traits = { path = "../../traits" }
+jsonrpc = { path = "../../jsonrpc" }
+lsp = { path = "../../lsp" }
+platform-common = { path = "../common" }
+sandbox = { path = "../../sandbox" }
+api-client = { path = "../../api-client" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
@@ -44,7 +44,7 @@ axum = { version = "0.7", features = ["ws"] }
 url = "2"
 # Integration test (`tests/mcp_client_stdio_test.rs`) drives the real
 # `lingxi_mcp::McpClient` over a stdio-spawned mock MCP server.
-lingxi-mcp = { path = "../../mcp" }
+mcp = { path = "../../mcp" }
 futures-util = "0.3"
 
 [lints]

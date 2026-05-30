@@ -2,8 +2,8 @@
 //! struct deserializes with `deny_unknown_fields`, and `Verified`-typed
 //! string fields round-trip through serde.
 
-use lingxi_telemetry::tengu::api;
-use lingxi_telemetry::Verified;
+use telemetry::tengu::api;
+use telemetry::Verified;
 
 #[test]
 fn all_25_api_event_names_are_locked() {

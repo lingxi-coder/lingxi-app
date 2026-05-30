@@ -1,7 +1,7 @@
 //! M7-15 Task 6 — syntect `.tmTheme` follows the active `ThemeName`.
 
-use lingxi_tui::render::syntax;
-use lingxi_tui::theme::ThemeName;
+use tui::render::syntax;
+use tui::theme::ThemeName;
 
 #[test]
 fn syntect_theme_changes_with_active_theme() {

@@ -1,7 +1,5 @@
-use lingxi_sandbox::policy_convert::{
-    convert_settings_to_runtime_config, linux_glob_pattern_warnings,
-};
-use lingxi_sandbox::runtime_config::{SandboxSettingsJson, SettingsJson, SettingsPermissions};
+use sandbox::policy_convert::{convert_settings_to_runtime_config, linux_glob_pattern_warnings};
+use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson, SettingsPermissions};
 use std::path::PathBuf;
 
 fn settings(allow: Vec<&str>, deny: Vec<&str>) -> SettingsJson {

@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use lingxi_traits::SwarmBackend;
+use traits::SwarmBackend;
 
 use super::detection::{detect_terminal_env, pick_backend, BackendChoice, TerminalEnv};
 use super::inprocess::InProcessSwarmBackend;

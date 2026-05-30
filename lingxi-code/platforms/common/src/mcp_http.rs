@@ -17,12 +17,12 @@ use std::collections::HashMap;
 
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
-use lingxi_jsonrpc::messages::Message as JsonRpcMessage;
-use lingxi_jsonrpc::{BrokerError, Connection, ConnectionError};
-use lingxi_traits::mcp::McpError;
+use jsonrpc::messages::Message as JsonRpcMessage;
+use jsonrpc::{BrokerError, Connection, ConnectionError};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
 use thiserror::Error;
 use tokio::sync::mpsc;
+use traits::mcp::McpError;
 
 /// Literal `Accept` header value for Streamable HTTP. Matches claude-code's
 /// `MCP_STREAMABLE_HTTP_ACCEPT` const (`client.ts:471`) byte-for-byte.
@@ -87,7 +87,7 @@ fn build_headers(
 /// Each outbound JSON-RPC frame is `POSTed` to `url`. The server may reply with
 /// either a single `application/json` body OR a `text/event-stream` body of
 /// zero-or-more frames — both modes are decoded and routed back through
-/// `lingxi_jsonrpc::Connection`.
+/// `jsonrpc::Connection`.
 ///
 /// # Errors
 ///

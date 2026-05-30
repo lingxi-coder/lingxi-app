@@ -6,15 +6,15 @@
 //! Loom version (full thread-interleaving exploration) lives in
 //! `refresh_single_flight_test.rs` — this file is a tokio-level smoke test.
 
+use anthropic_oauth::refresh::{AuthState, RefreshDriver};
+use anthropic_oauth::ClaudeAiOAuthConfig;
+use api_client::oauth_hook::OAuthRefreshHook;
 use async_trait::async_trait;
-use lingxi_anthropic_oauth::refresh::{AuthState, RefreshDriver};
-use lingxi_anthropic_oauth::ClaudeAiOAuthConfig;
-use lingxi_api_client::oauth_hook::OAuthRefreshHook;
-use lingxi_protocol::{HttpRequest, HttpResponse, Secret};
-use lingxi_traits::{Clock, HttpError, HttpTransport};
+use protocol::{HttpRequest, HttpResponse, Secret};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use traits::{Clock, HttpError, HttpTransport};
 
 /// Counting HTTP transport: every `request()` increments `calls`. Always returns
 /// a fresh token in the JSON body.
@@ -40,10 +40,7 @@ impl HttpTransport for CountingTransport {
             body,
         })
     }
-    async fn stream_sse(
-        &self,
-        _req: HttpRequest,
-    ) -> Result<lingxi_traits::http::SseStream, HttpError> {
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
         unimplemented!("not used in refresh tests");
     }
 }

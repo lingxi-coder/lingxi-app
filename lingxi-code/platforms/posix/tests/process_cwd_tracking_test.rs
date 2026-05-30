@@ -1,6 +1,6 @@
 //! Tests for `wrap_command_for_cwd_tracking` and `task_output_path`.
 
-use lingxi_platform_posix::process::{task_output_path, wrap_command_for_cwd_tracking};
+use platform_posix::process::{task_output_path, wrap_command_for_cwd_tracking};
 use std::path::Path;
 
 #[test]

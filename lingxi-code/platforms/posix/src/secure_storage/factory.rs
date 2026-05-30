@@ -10,9 +10,9 @@
 //! claude-code's Linux behavior (`auth.ts` falls back to plaintext under the
 //! same comment).
 
-use lingxi_traits::{SecureStorage, SecureStorageError};
 use std::path::PathBuf;
 use std::sync::Arc;
+use traits::{SecureStorage, SecureStorageError};
 
 /// Return the best available [`SecureStorage`] for the current OS.
 ///

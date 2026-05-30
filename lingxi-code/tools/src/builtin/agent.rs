@@ -20,17 +20,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::{PiiTagged, Verified};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{AGENT_COMPLETED_M4_05, AGENT_FAILED, AGENT_STARTED};
-use lingxi_telemetry::AnalyticsBus;
-use lingxi_traits::budget::BudgetError;
-use lingxi_traits::subagent_spawn::{SubagentInheritance, SubagentResult, SubagentSpawnRequest};
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use telemetry::pii::{PiiTagged, Verified};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{AGENT_COMPLETED_M4_05, AGENT_FAILED, AGENT_STARTED};
+use telemetry::AnalyticsBus;
+use traits::budget::BudgetError;
+use traits::subagent_spawn::{SubagentInheritance, SubagentResult, SubagentSpawnRequest};
 
 use crate::builtin::BuiltinToolContext;
 use crate::context::ToolUseContext;
@@ -343,7 +343,7 @@ impl Tool for AgentTool {
         // into the bundle via `RegistryToolInvoker::new(parent_registry)`.
         // The budget Arc is cloned (no deep clone — `Arc::clone` only bumps
         // the refcount), so `Arc::ptr_eq` between parent + child holds.
-        let invoker: Arc<dyn lingxi_traits::tool_invoker::ToolInvoker> = Arc::new(
+        let invoker: Arc<dyn traits::tool_invoker::ToolInvoker> = Arc::new(
             crate::tool_invoker_impl::RegistryToolInvoker::new(parent_registry.clone()),
         );
         let inherit = SubagentInheritance {
@@ -399,10 +399,10 @@ mod tests {
     use crate::builtin::test_support::{ctx_for_file_tools, fresh_tx, make_dummy_fs};
     use crate::context::{ToolUseContext, ToolUseOptions};
     use crate::registry::ToolRegistry;
-    use lingxi_telemetry::AnalyticsBus;
-    use lingxi_traits::budget::BudgetEnforcerHandle;
-    use lingxi_traits::subagent_spawn::SubagentSpawner;
     use std::path::PathBuf;
+    use telemetry::AnalyticsBus;
+    use traits::budget::BudgetEnforcerHandle;
+    use traits::subagent_spawn::SubagentSpawner;
 
     /// Build a `BuiltinToolContext` wired with all four M4-05 mocks.
     fn wired_ctx(
@@ -417,9 +417,8 @@ mod tests {
             vec![PathBuf::from("/tmp")],
         );
         bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
-        bctx.task_registry =
-            Some(registry as Arc<dyn lingxi_traits::task_registry::TaskRegistryHandle>);
-        bctx.mailbox_router = Some(mailbox as Arc<dyn lingxi_traits::mailbox::MailboxRouterHandle>);
+        bctx.task_registry = Some(registry as Arc<dyn traits::task_registry::TaskRegistryHandle>);
+        bctx.mailbox_router = Some(mailbox as Arc<dyn traits::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(budget.clone() as Arc<dyn BudgetEnforcerHandle>);
         bctx
     }
@@ -517,10 +516,9 @@ mod tests {
         );
         bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
         bctx.task_registry =
-            Some(arc_mock_task_registry()
-                as Arc<dyn lingxi_traits::task_registry::TaskRegistryHandle>);
+            Some(arc_mock_task_registry() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
         bctx.mailbox_router =
-            Some(arc_mock_mailbox() as Arc<dyn lingxi_traits::mailbox::MailboxRouterHandle>);
+            Some(arc_mock_mailbox() as Arc<dyn traits::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(parent_budget.clone());
 
         let tool = AgentTool::new(bctx);
@@ -556,10 +554,9 @@ mod tests {
         );
         bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
         bctx.task_registry =
-            Some(arc_mock_task_registry()
-                as Arc<dyn lingxi_traits::task_registry::TaskRegistryHandle>);
+            Some(arc_mock_task_registry() as Arc<dyn traits::task_registry::TaskRegistryHandle>);
         bctx.mailbox_router =
-            Some(arc_mock_mailbox() as Arc<dyn lingxi_traits::mailbox::MailboxRouterHandle>);
+            Some(arc_mock_mailbox() as Arc<dyn traits::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(budget.clone() as Arc<dyn BudgetEnforcerHandle>);
 
         let tool = AgentTool::new(bctx);

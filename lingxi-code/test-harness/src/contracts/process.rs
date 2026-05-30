@@ -15,10 +15,10 @@
 //!   from the runner's POV — non-zero exit is not a `ProcessError`).
 //! * A timeout that fires returns [`ProcessError::Timeout`].
 
-use lingxi_traits::sandbox::ProcessCommand;
-use lingxi_traits::{ProcessError, ProcessRunner, Sandbox};
 use std::collections::HashMap;
 use std::time::Duration;
+use traits::sandbox::ProcessCommand;
+use traits::{ProcessError, ProcessRunner, Sandbox};
 
 const TEST_BYPASS_REASON: &str = "contract test (bypass auditing intentional)";
 

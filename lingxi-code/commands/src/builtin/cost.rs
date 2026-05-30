@@ -12,10 +12,10 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
 use std::sync::Arc;
 use std::time::Duration;
+use telemetry::tengu::command as cmd_evt;
+use traits::OrchestratorHandle;
 
 /// `/cost` handler — renders the cumulative cost snapshot.
 #[derive(Clone)]
@@ -34,14 +34,14 @@ impl CostHandler {
 #[async_trait]
 impl BuiltinCommandHandler for CostHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::COST_STARTED);
+        telemetry::emit_command_started(cmd_evt::COST_STARTED);
         let cost = self.handle.snapshot_cost().await;
         let dur = format_duration(cost.session_duration);
         let display = format!(
             "Cost: ${:.4} ({} calls, {}+{} tokens, {} session time)",
             cost.total_usd, cost.api_calls, cost.input_tokens, cost.output_tokens, dur
         );
-        lingxi_telemetry::emit_command_completed(cmd_evt::COST_COMPLETED, "");
+        telemetry::emit_command_completed(cmd_evt::COST_COMPLETED, "");
         CommandResult::Done {
             display: Some(display),
         }
@@ -74,8 +74,8 @@ fn format_duration(d: Duration) -> String {
 #[allow(clippy::field_reassign_with_default, clippy::manual_let_else)]
 mod tests {
     use super::*;
-    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
-    use lingxi_traits::CostSnapshot;
+    use orchestrator::test_support::MockOrchestratorHandle;
+    use traits::CostSnapshot;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
@@ -156,16 +156,13 @@ mod tests {
     // M6-06 T7: end-to-end smoke against a real ConversationOrchestrator
     // with a wired CostTracker — confirms the /cost slash command reflects
     // real numbers (not the M5-10 zero stub).
-    fn end_turn_response_with_usage(
-        input: u64,
-        output: u64,
-    ) -> lingxi_api_client::types::MessageResponse {
-        lingxi_api_client::types::MessageResponse {
+    fn end_turn_response_with_usage(input: u64, output: u64) -> api_client::types::MessageResponse {
+        api_client::types::MessageResponse {
             id: "msg_mock".to_string(),
             model: "claude-opus-4-6".to_string(),
             content: Vec::new(),
             stop_reason: Some("end_turn".to_string()),
-            usage: lingxi_api_client::types::UsageApi {
+            usage: api_client::types::UsageApi {
                 input_tokens: input,
                 output_tokens: output,
                 cache_creation_input_tokens: 0,
@@ -176,14 +173,14 @@ mod tests {
 
     #[tokio::test]
     async fn real_orchestrator_renders_non_zero_cost() {
-        use lingxi_cost::pricing::PricingCatalog;
-        use lingxi_cost::CostTracker;
-        use lingxi_orchestrator::test_support::{
+        use cost::pricing::PricingCatalog;
+        use cost::CostTracker;
+        use orchestrator::test_support::{
             noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
             StaticMemoryProvider,
         };
-        use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-        use lingxi_protocol::SessionId;
+        use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+        use protocol::SessionId;
         use tokio::sync::mpsc;
 
         let api = Arc::new(MockApiClient::new(vec![end_turn_response_with_usage(
@@ -196,7 +193,7 @@ mod tests {
             tx,
         ));
 
-        let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+        let tools = Arc::new(tools::registry::ToolRegistry::new());
         let hooks = noop_hook_executor();
         let perms = Arc::new(NoOpPermissionGate);
         let output = Arc::new(MockOutputStream::new());
@@ -220,7 +217,7 @@ mod tests {
         );
         orch.run_turn("hi").await.unwrap();
 
-        let handle: Arc<dyn lingxi_traits::OrchestratorHandle> = orch.clone();
+        let handle: Arc<dyn traits::OrchestratorHandle> = orch.clone();
         let h = CostHandler::new(handle);
 
         match h.handle(&args()).await {
@@ -245,14 +242,14 @@ mod tests {
         // Locks the invariant that the slash command and the trait method
         // read from the same source. (`/cost` already calls `snapshot_cost`
         // — this test wires real numbers and confirms identity.)
-        use lingxi_cost::pricing::PricingCatalog;
-        use lingxi_cost::CostTracker;
-        use lingxi_orchestrator::test_support::{
+        use cost::pricing::PricingCatalog;
+        use cost::CostTracker;
+        use orchestrator::test_support::{
             noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
             StaticMemoryProvider,
         };
-        use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-        use lingxi_protocol::SessionId;
+        use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+        use protocol::SessionId;
         use tokio::sync::mpsc;
 
         let api = Arc::new(MockApiClient::new(vec![end_turn_response_with_usage(
@@ -264,7 +261,7 @@ mod tests {
             Arc::new(PricingCatalog::builtin_reference()),
             tx,
         ));
-        let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+        let tools = Arc::new(tools::registry::ToolRegistry::new());
         let hooks = noop_hook_executor();
         let perms = Arc::new(NoOpPermissionGate);
         let output = Arc::new(MockOutputStream::new());
@@ -287,7 +284,7 @@ mod tests {
         orch.run_turn("hi").await.unwrap();
 
         let snap = orch.snapshot_cost().await;
-        let handle: Arc<dyn lingxi_traits::OrchestratorHandle> = orch.clone();
+        let handle: Arc<dyn traits::OrchestratorHandle> = orch.clone();
         let h = CostHandler::new(handle);
         let display = match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => s,

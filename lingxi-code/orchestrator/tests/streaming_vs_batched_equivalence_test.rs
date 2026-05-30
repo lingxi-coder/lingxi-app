@@ -5,19 +5,17 @@
 //!   - both paths produce `ConversationOutcome::EndTurn { turn_count: 1, .. }`
 //!   - both paths append identical assistant message bodies to the session.
 
-use lingxi_api_client::types::{ContentBlockApi, MessageResponse, UsageApi};
-use lingxi_orchestrator::test_support::{
+use api_client::types::{ContentBlockApi, MessageResponse, UsageApi};
+use orchestrator::test_support::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use lingxi_orchestrator::{
-    scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig,
-};
-use lingxi_protocol::{ContentBlock, ConversationMessage};
-use lingxi_tools::registry::ToolRegistry;
+use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use protocol::{ContentBlock, ConversationMessage};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tools::registry::ToolRegistry;
 
 fn batched_response(text: &str) -> MessageResponse {
     MessageResponse {
@@ -40,7 +38,7 @@ async fn batched_and_streaming_produce_same_assistant_text() {
         batched_mock,
         streaming_stub,
         Arc::new(ToolRegistry::new()),
-        lingxi_orchestrator::test_support::noop_hook_executor(),
+        orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         output_b.clone(),
         Arc::new(StaticMemoryProvider::empty()),
@@ -65,7 +63,7 @@ async fn batched_and_streaming_produce_same_assistant_text() {
         batched_stub,
         streaming_mock,
         Arc::new(ToolRegistry::new()),
-        lingxi_orchestrator::test_support::noop_hook_executor(),
+        orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         output_s.clone(),
         Arc::new(StaticMemoryProvider::empty()),

@@ -9,13 +9,13 @@
 //! via the styled-line debug of the code block under the two themes.
 #![allow(clippy::doc_markdown)]
 
-use lingxi_permission::PermissionMode;
-use lingxi_tui::components::messages::render_entry_to_string;
-use lingxi_tui::components::status_line::format_status_line;
-use lingxi_tui::render::markdown::{render as render_markdown, MarkdownTheme};
-use lingxi_tui::render::{StyleColor, StyledLine};
-use lingxi_tui::state::RenderedMessage;
-use lingxi_tui::theme::ThemeName;
+use permission::PermissionMode;
+use tui::components::messages::render_entry_to_string;
+use tui::components::status_line::format_status_line;
+use tui::render::markdown::{render as render_markdown, MarkdownTheme};
+use tui::render::{StyleColor, StyledLine};
+use tui::state::RenderedMessage;
+use tui::theme::ThemeName;
 
 /// Fixed scrollback fixture: a user line + an assistant message carrying a
 /// fenced rust code block.

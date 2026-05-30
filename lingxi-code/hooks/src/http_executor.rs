@@ -20,8 +20,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use lingxi_protocol::{HttpMethod, HttpRequest};
-use lingxi_traits::{HttpError, HttpTransport};
+use protocol::{HttpMethod, HttpRequest};
+use traits::{HttpError, HttpTransport};
 
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::hook_payload::parse_response;
@@ -187,7 +187,7 @@ mod tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::HookEventType;
     use async_trait::async_trait;
-    use lingxi_protocol::{HookId, HttpResponse};
+    use protocol::{HookId, HttpResponse};
     use std::sync::Mutex;
 
     struct MockHttp {
@@ -213,7 +213,7 @@ mod tests {
         async fn stream_sse(
             &self,
             _req: HttpRequest,
-        ) -> Result<lingxi_traits::http::SseStream, HttpError> {
+        ) -> Result<traits::http::SseStream, HttpError> {
             Err(HttpError::InvalidRequest("not implemented".into()))
         }
     }

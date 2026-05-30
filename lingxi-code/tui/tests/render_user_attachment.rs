@@ -2,7 +2,7 @@
 #![allow(clippy::doc_markdown)]
 
 use iocraft::prelude::*;
-use lingxi_tui::components::messages::attachment::{
+use tui::components::messages::attachment::{
     render_attachment_to_string, Attachment, AttachmentMessage,
 };
 

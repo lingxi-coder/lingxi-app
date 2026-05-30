@@ -6,13 +6,13 @@
 //! - When the sandbox is actually available on the host, `prepare()` wraps the
 //!   inner command in `/bin/sh -c "<bwrap … | sandbox-exec …>"`.
 
-use lingxi_platform_posix::sandbox::PosixSandbox;
-use lingxi_traits::{
+use platform_posix::sandbox::PosixSandbox;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use traits::{
     NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxBackend, SandboxPolicy,
     SandboxedTag,
 };
-use std::collections::HashMap;
-use std::path::PathBuf;
 
 fn sample_policy() -> SandboxPolicy {
     SandboxPolicy {

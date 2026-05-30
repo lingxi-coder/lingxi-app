@@ -6,21 +6,21 @@
 //! spawner and asserting the trait-object Arcs match the originals.
 
 use async_trait::async_trait;
-use lingxi_traits::budget::{BudgetEnforcerHandle, BudgetError};
-use lingxi_traits::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
-use lingxi_traits::subagent_spawn::{
-    SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
-    SubagentUsage,
-};
-use lingxi_traits::task_registry::{
-    TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
-    TaskRegistryHandle, TaskUpdatePatch,
-};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+use traits::budget::{BudgetEnforcerHandle, BudgetError};
+use traits::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
+use traits::subagent_spawn::{
+    SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
+    SubagentUsage,
+};
+use traits::task_registry::{
+    TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
+    TaskRegistryHandle, TaskUpdatePatch,
+};
 
 // =========================================================================
 // MockSubagentSpawner — records every spawn + exposes captured inheritance.

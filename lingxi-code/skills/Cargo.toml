@@ -1,18 +1,18 @@
 [package]
-name = "lingxi-skills"
+name = "skills"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
-lingxi-tools = { path = "../tools" }
-lingxi-agent = { path = "../agent" }
-lingxi-sidequery = { path = "../sidequery" }
-lingxi-mcp = { path = "../mcp" }
-lingxi-permission = { path = "../permission" }
+protocol = { path = "../protocol" }
+traits = { path = "../traits" }
+tools = { path = "../tools" }
+agent = { path = "../agent" }
+sidequery = { path = "../sidequery" }
+mcp = { path = "../mcp" }
+permission = { path = "../permission" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"

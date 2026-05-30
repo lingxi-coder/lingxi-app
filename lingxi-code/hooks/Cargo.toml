@@ -1,15 +1,15 @@
 [package]
-name = "lingxi-hooks"
+name = "hooks"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../protocol" }
-lingxi-telemetry = { path = "../telemetry" }
-lingxi-traits = { path = "../traits" }
-lingxi-core = { path = "../core" }
+protocol = { path = "../protocol" }
+telemetry = { path = "../telemetry" }
+traits = { path = "../traits" }
+engine = { path = "../engine" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

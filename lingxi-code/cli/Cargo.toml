@@ -1,5 +1,5 @@
 [package]
-name = "lingxi-cli"
+name = "cli"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -14,24 +14,24 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
-lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
-lingxi-api-client = { path = "../api-client" }
-lingxi-commands = { path = "../commands" }
-lingxi-orchestrator = { path = "../orchestrator" }
-lingxi-compaction = { path = "../compaction" }
-lingxi-mcp = { path = "../mcp" }
-lingxi-hooks = { path = "../hooks" }
-lingxi-agent = { path = "../agent" }
-lingxi-cost = { path = "../cost" }
+protocol = { path = "../protocol" }
+traits = { path = "../traits" }
+api-client = { path = "../api-client" }
+commands = { path = "../commands" }
+orchestrator = { path = "../orchestrator" }
+compaction = { path = "../compaction" }
+mcp = { path = "../mcp" }
+hooks = { path = "../hooks" }
+agent = { path = "../agent" }
+cost = { path = "../cost" }
 dirs = "5"
-lingxi-tui = { path = "../tui" }
-lingxi-session = { path = "../session" }
-lingxi-anthropic-oauth = { path = "../anthropic-oauth" }
-lingxi-secret = { path = "../secret" }
-lingxi-tools = { path = "../tools" }
-lingxi-telemetry = { path = "../telemetry" }
-lingxi-platform-posix-minimal = { path = "../platforms/posix-minimal" }
+tui = { path = "../tui" }
+session = { path = "../session" }
+anthropic-oauth = { path = "../anthropic-oauth" }
+secret = { path = "../secret" }
+tools = { path = "../tools" }
+telemetry = { path = "../telemetry" }
+platform-posix-minimal = { path = "../platforms/posix-minimal" }
 
 # clap 4.6+ requires edition2024; pin to a release compatible with Rust 1.82.
 clap = { version = "=4.5.20", features = ["derive", "env"] }

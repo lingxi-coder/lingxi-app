@@ -5,8 +5,8 @@
 use std::path::PathBuf;
 
 use iocraft::prelude::*;
-use lingxi_permission::PermissionMode;
-use lingxi_tui::components::status_line::StatusLine;
+use permission::PermissionMode;
+use tui::components::status_line::StatusLine;
 
 #[test]
 fn status_line_default_state() {

@@ -100,11 +100,11 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // is minted afresh (synchronous mint via `SessionId::new`); for
     // plain mode the id is unused.
     let sink: Arc<dyn output::OutputSink> = if parsed.json {
-        Arc::new(output::JsonSink::new(lingxi_protocol::SessionId::new()))
+        Arc::new(output::JsonSink::new(protocol::SessionId::new()))
     } else {
         Arc::new(output::PlainSink::new())
     };
-    let adapter: Arc<dyn lingxi_traits::OutputStream> =
+    let adapter: Arc<dyn traits::OutputStream> =
         Arc::new(output_adapter::SinkAdapter::new(sink.clone()));
 
     // For `Mode::Print` we still need the runtime; for `Mode::StdioRepl`

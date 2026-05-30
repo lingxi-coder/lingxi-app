@@ -55,7 +55,7 @@ pub struct TuiRootProps {
     /// `state.should_exit` and exits.
     pub cancel: Option<CancellationToken>,
     /// Process-local session id (forwarded to telemetry events).
-    pub session_id: Option<lingxi_protocol::SessionId>,
+    pub session_id: Option<protocol::SessionId>,
     /// Wall-clock instant the session began (for `FIRST_RENDER` latency).
     pub started_at: Option<Instant>,
     /// (M7-13 review) Orchestrator handle used by the async Settings open pump
@@ -63,7 +63,7 @@ pub struct TuiRootProps {
     /// (e.g. the resume picker, smoke gates) disables the open pump — Settings
     /// is unreachable without a handle, which is correct for those bridge-less
     /// mounts.
-    pub orchestrator: Option<Arc<dyn lingxi_traits::OrchestratorHandle>>,
+    pub orchestrator: Option<Arc<dyn traits::OrchestratorHandle>>,
 }
 
 /// Map an iocraft `KeyEvent` into the workspace's `KeyAction` enum.
@@ -696,7 +696,7 @@ fn apply_block(st: &mut AppState, block: &str) {
 /// async calls.
 pub async fn pump_open_settings(
     state: &Arc<Mutex<AppState>>,
-    handle: &Arc<dyn lingxi_traits::OrchestratorHandle>,
+    handle: &Arc<dyn traits::OrchestratorHandle>,
 ) -> bool {
     // 1) Take the request under the lock, respecting priority. If a permission
     //    or another screen owns the surface, leave the flag set and bail — the
@@ -735,10 +735,8 @@ pub async fn pump_open_settings(
 /// displays, mirroring the M3 `Settings::load` read API (the ONLY settings read
 /// path; §4 R7). A load error degrades gracefully to defaults so the screen can
 /// always open — the Config tab simply shows `(default)` rows.
-fn load_effective_settings(
-    project_dir: &std::path::Path,
-) -> lingxi_core::settings::EffectiveSettings {
-    use lingxi_core::settings::{EffectiveSettings, LoadInputs, Settings, SettingsJson};
+fn load_effective_settings(project_dir: &std::path::Path) -> engine::settings::EffectiveSettings {
+    use engine::settings::{EffectiveSettings, LoadInputs, Settings, SettingsJson};
     let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
     Settings::load(LoadInputs {
         env: &env,
@@ -747,7 +745,7 @@ fn load_effective_settings(
     })
     .unwrap_or_else(|_| EffectiveSettings {
         settings: SettingsJson::default(),
-        trace: lingxi_core::settings::tracer::ProvenanceTrace::default(),
+        trace: engine::settings::tracer::ProvenanceTrace::default(),
     })
 }
 

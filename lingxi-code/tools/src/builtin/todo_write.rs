@@ -7,15 +7,15 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use lingxi_core::{TodoItem, TodoState};
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::Verified;
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{TODO_WRITE_COMPLETED, TODO_WRITE_FAILED, TODO_WRITE_STARTED};
+use engine::{TodoItem, TodoState};
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use telemetry::pii::Verified;
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{TODO_WRITE_COMPLETED, TODO_WRITE_FAILED, TODO_WRITE_STARTED};
 
 use crate::builtin::BuiltinToolContext;
 use crate::context::ToolUseContext;
@@ -338,10 +338,10 @@ impl Tool for TodoWriteTool {
 mod tests {
     use super::*;
     use crate::builtin::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
-    use lingxi_core::SessionState;
-    use lingxi_protocol::SessionId;
-    use lingxi_telemetry::{AnalyticsBus, InMemorySink};
+    use engine::SessionState;
+    use protocol::SessionId;
     use std::sync::Arc;
+    use telemetry::{AnalyticsBus, InMemorySink};
     use tokio::sync::Mutex;
 
     fn make_tool_and_session() -> (

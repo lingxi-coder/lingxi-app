@@ -38,7 +38,7 @@ pub use http::WindowsHttp;
 pub use lsp::WindowsLspTransport;
 pub use mcp::WindowsMcpTransport;
 // Convenience re-exports at the crate root so callers can write
-// `lingxi_platform_windows::{connect_ws, spawn_stdio}` directly — mirrors
+// `platform_windows::{connect_ws, spawn_stdio}` directly — mirrors
 // the layout exposed by `lingxi-platform-posix`.
 pub use mcp::{connect_ws, spawn_stdio, McpTransportError};
 pub use process::WindowsProcess;

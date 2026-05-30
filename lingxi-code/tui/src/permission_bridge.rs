@@ -17,10 +17,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lingxi_permission::gate::{
-    PermissionDecision, PermissionGate, PermissionRequest, PermissionResponse,
-};
-use lingxi_permission::PermissionRule;
+use permission::gate::{PermissionDecision, PermissionGate, PermissionRequest, PermissionResponse};
+use permission::PermissionRule;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// One in-flight permission round-trip between the orchestrator and TUI.
@@ -74,7 +72,7 @@ impl PermissionGate for TuiPermissionGate {
         }
 
         // Step 2: build request.
-        let default_decision = lingxi_permission::tool_default(name);
+        let default_decision = permission::tool_default(name);
         let request = PermissionRequest::ToolUseConfirm {
             tool_name: name.to_string(),
             tool_input: input.clone(),

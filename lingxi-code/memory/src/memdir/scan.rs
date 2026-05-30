@@ -1,7 +1,7 @@
 //! Memdir enumeration + 365-day hard drop.
 
 use crate::{MAX_MEMORY_FILE_SIZE, MEMORY_AGE_HARD_DROP_DAYS};
-use lingxi_protocol::{MemoryEntry, MemoryEntryTier};
+use protocol::{MemoryEntry, MemoryEntryTier};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -113,7 +113,7 @@ mod tests {
     use super::*;
     use crate::memdir::paths::{memdir_path, MemdirRoots};
     use crate::MEMORY_AGE_HARD_DROP_DAYS;
-    use lingxi_protocol::MemoryEntryTier;
+    use protocol::MemoryEntryTier;
     use std::fs;
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;

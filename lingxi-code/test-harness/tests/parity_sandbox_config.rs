@@ -9,11 +9,11 @@
 //! `Bash(...)` rules are intentionally ignored here — their decision lives
 //! in `should_use_sandbox` (see `crates/sandbox/src/decision.rs`).
 
-use lingxi_sandbox::policy_convert::convert_settings_to_runtime_config;
-use lingxi_sandbox::runtime_config::SettingsJson;
-use lingxi_test_harness::parity::load_fixture;
+use sandbox::policy_convert::convert_settings_to_runtime_config;
+use sandbox::runtime_config::SettingsJson;
 use serde::Deserialize;
 use serde_json::Value;
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 struct Fixture {

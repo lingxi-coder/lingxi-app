@@ -12,12 +12,12 @@ use crate::argv::Argv;
 use crate::exit_codes;
 use crate::init::Runtime;
 use crate::output::OutputSink;
-use lingxi_session::jsonl::loader::{
+use session::jsonl::loader::{
     list_recent_sessions, select_session_interactive, LoaderError, SessionMetadata,
 };
-use lingxi_traits::{FileSystem, SlashCommandDispatcher, SlashDispatchResult};
 use std::path::PathBuf;
 use std::sync::Arc;
+use traits::{FileSystem, SlashCommandDispatcher, SlashDispatchResult};
 
 /// Drive a one-shot conversation: either a `/slash-command` or a normal
 /// prompt that runs through the orchestrator turn loop.
@@ -189,7 +189,7 @@ async fn run_resume_iocraft(_argv: &Argv, sink: &dyn OutputSink) -> i32 {
         }
     };
 
-    match lingxi_tui::session::run_resume_picker(rows).await {
+    match tui::session::run_resume_picker(rows).await {
         Ok(Some(uuid)) => {
             sink.text(&format!("Resumed session {uuid}\n")).await;
             exit_codes::SUCCESS
@@ -218,14 +218,14 @@ async fn load_resume_rows() -> Result<Vec<SessionMetadata>, LoaderError> {
 
 /// Production disk→[`SessionMetadata`] path with the inputs passed in (no env /
 /// process-cwd reads), so it is directly testable. Builds the same disk-backed
-/// [`lingxi_platform_posix_minimal::PosixFileSystem`] the live branches use and
+/// [`platform_posix_minimal::PosixFileSystem`] the live branches use and
 /// asks the M5-08 loader for up to 5 most-recent rows.
 async fn load_resume_rows_from(
     claude_home: &std::path::Path,
     cwd: &std::path::Path,
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
     let cwd_str = cwd.to_string_lossy().into_owned();
-    let fs: Arc<dyn FileSystem> = Arc::new(lingxi_platform_posix_minimal::PosixFileSystem::new(
+    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix_minimal::PosixFileSystem::new(
         cwd.to_path_buf(),
     ));
     list_recent_sessions(claude_home, &cwd_str, 5, fs).await
@@ -253,12 +253,12 @@ fn resolve_session_id(arg: &str) -> Result<uuid::Uuid, LoaderError> {
 mod tests {
     //! Loader-fixture coverage for the `--resume` disk→[`SessionMetadata`]→
     //! row production path (`load_resume_rows_from`). Drives the *real* CLI
-    //! wiring — `lingxi_platform_posix_minimal::PosixFileSystem` + the M5-08
+    //! wiring — `platform_posix_minimal::PosixFileSystem` + the M5-08
     //! `list_recent_sessions` — over a `tempfile` fixture, with no env or
     //! process-cwd reads so the test stays deterministic and parallel-safe.
 
     use super::*;
-    use lingxi_session::jsonl::project_dir_name;
+    use session::jsonl::project_dir_name;
     use std::time::{Duration, SystemTime};
     use uuid::Uuid;
 

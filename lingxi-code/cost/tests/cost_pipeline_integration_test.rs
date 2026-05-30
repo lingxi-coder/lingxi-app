@@ -3,14 +3,14 @@
 //! in the locked order.
 
 use async_trait::async_trait;
-use lingxi_cost::{
+use cost::{
     BudgetConfig, BudgetEnforcer, BudgetExceedPolicy, CostTracker, ModelRef, PricingCatalog,
     ProviderId, TokenUsage, Usage,
 };
-use lingxi_protocol::SessionId;
-use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, LogEventMetadata};
+use protocol::SessionId;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use telemetry::{AnalyticsBus, AnalyticsSink, LogEventMetadata};
 use tokio::sync::mpsc;
 
 #[derive(Default)]

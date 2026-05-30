@@ -7,12 +7,12 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
 use std::sync::Arc;
+use telemetry::tengu::command as cmd_evt;
+use traits::OrchestratorHandle;
 
 /// `/compact` handler — calls
-/// [`OrchestratorHandle::force_compact`](lingxi_traits::OrchestratorHandle::force_compact)
+/// [`OrchestratorHandle::force_compact`](traits::OrchestratorHandle::force_compact)
 /// and renders the summary template.
 #[derive(Clone)]
 pub struct CompactHandler {
@@ -30,14 +30,14 @@ impl CompactHandler {
 #[async_trait]
 impl BuiltinCommandHandler for CompactHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::COMPACT_STARTED);
+        telemetry::emit_command_started(cmd_evt::COMPACT_STARTED);
         match self.handle.force_compact().await {
             Ok(summary) => {
                 let details = format!(
                     "{{\"messages_before\":{},\"messages_after\":{},\"bytes_saved\":{}}}",
                     summary.messages_before, summary.messages_after, summary.bytes_saved
                 );
-                lingxi_telemetry::emit_command_completed(cmd_evt::COMPACT_COMPLETED, &details);
+                telemetry::emit_command_completed(cmd_evt::COMPACT_COMPLETED, &details);
                 CommandResult::Done {
                     display: Some(format!(
                         "Compacted: {} → {} messages ({} bytes saved).",
@@ -47,7 +47,7 @@ impl BuiltinCommandHandler for CompactHandler {
             }
             Err(e) => {
                 let msg = e.to_string();
-                lingxi_telemetry::emit_command_failed(cmd_evt::COMPACT_FAILED, &msg);
+                telemetry::emit_command_failed(cmd_evt::COMPACT_FAILED, &msg);
                 CommandResult::Done {
                     display: Some(format!("Could not compact: {msg}")),
                 }
@@ -67,8 +67,8 @@ impl BuiltinCommandHandler for CompactHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
-    use lingxi_traits::CompactionSummary;
+    use orchestrator::test_support::MockOrchestratorHandle;
+    use traits::CompactionSummary;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
@@ -143,16 +143,16 @@ mod tests {
     /// wires a real `ForkedAgentRunner`).
     #[tokio::test]
     async fn real_orchestrator_renders_non_zero_delta() {
-        use lingxi_compaction::CompactionOrchestrator;
-        use lingxi_orchestrator::test_support::{
+        use compaction::CompactionOrchestrator;
+        use orchestrator::test_support::{
             noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
             StaticMemoryProvider,
         };
-        use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-        use lingxi_protocol::{ConversationMessage, MessageId};
+        use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+        use protocol::{ConversationMessage, MessageId};
 
         let api = Arc::new(MockApiClient::new(vec![]));
-        let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+        let tools = Arc::new(tools::registry::ToolRegistry::new());
         let hooks = noop_hook_executor();
         let perms = Arc::new(NoOpPermissionGate);
         let output = Arc::new(MockOutputStream::new());

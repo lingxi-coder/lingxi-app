@@ -2,11 +2,9 @@
 
 #![cfg(unix)]
 
-use lingxi_platform_posix::process::PosixProcess;
-use lingxi_traits::{
-    ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand, SandboxedTag,
-};
+use platform_posix::process::PosixProcess;
 use std::collections::HashMap;
+use traits::{ProcessCommand, ProcessRunner, SandboxBackend, SandboxedCommand, SandboxedTag};
 
 fn mk(command: &str, args: Vec<&str>, env: HashMap<String, String>) -> SandboxedCommand {
     SandboxedCommand::__new_sandboxed(

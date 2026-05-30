@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use iocraft::prelude::*;
-use lingxi_protocol::ToolUseId;
+use protocol::ToolUseId;
 use unicode_width::UnicodeWidthStr;
 
 use crate::state::RenderedMessage;

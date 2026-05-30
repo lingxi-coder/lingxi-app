@@ -3,9 +3,9 @@
 //! Each test asserts an invariant of the per-block state machine.
 //! These tests fail to compile until Task 5 lands the implementation.
 
-use lingxi_orchestrator::sse::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
-use lingxi_orchestrator::sse::StreamingError;
-use lingxi_protocol::ToolUseId;
+use orchestrator::sse::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
+use orchestrator::sse::StreamingError;
+use protocol::ToolUseId;
 use serde_json::json;
 
 #[test]

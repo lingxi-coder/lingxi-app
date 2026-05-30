@@ -1,8 +1,8 @@
 //! Snapshot tests for `AssistantToolUseMessage` (M6-04 Tasks 3 + 4).
 
 use insta::assert_snapshot;
-use lingxi_protocol::ToolUseId;
-use lingxi_tui::components::messages::assistant_tool_use::{
+use protocol::ToolUseId;
+use tui::components::messages::assistant_tool_use::{
     render_assistant_tool_use_to_string, AssistantToolUseProps,
 };
 

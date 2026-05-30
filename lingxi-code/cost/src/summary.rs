@@ -40,7 +40,7 @@ pub struct CostSummary {
 
 /// Session-scope rollup.
 ///
-/// `lingxi_traits::CostSnapshot` (M5-02) mirrors the three primary fields
+/// `traits::CostSnapshot` (M5-02) mirrors the three primary fields
 /// (`session_id`, `total_nano_usd`, `total_tokens`) without depending on
 /// `lingxi-cost`, so traits-tier consumers can publish costs without
 /// pulling in pricing. The two types convert via
@@ -50,7 +50,7 @@ pub struct CostSummary {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionCostSummary {
     /// The session this summary is for.
-    pub session_id: lingxi_protocol::SessionId,
+    pub session_id: protocol::SessionId,
     /// Cumulative cost across all models in nano-USD.
     pub total_nano_usd: u64,
     /// Cumulative total tokens (input + output across all models).

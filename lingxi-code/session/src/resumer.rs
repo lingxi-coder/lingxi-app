@@ -6,10 +6,10 @@
 //! is handled by the host wrapper in Plans 15 and 16.
 
 use crate::storage::{LoadedSession, SessionStorage};
-use lingxi_filestate::FileStateCache;
-use lingxi_traits::FileSystem;
+use filestate::FileStateCache;
 use std::sync::Arc;
 use thiserror::Error;
+use traits::FileSystem;
 
 /// Output of [`SessionResumer::resume`].
 pub struct ResumedSession {
@@ -52,14 +52,14 @@ impl SessionResumer {
     /// agent re-Reads any file it needs.
     pub async fn resume(
         &self,
-        session_id: &lingxi_protocol::SessionId,
+        session_id: &protocol::SessionId,
     ) -> Result<ResumedSession, ResumeError> {
         let loaded = self
             .storage
             .load(session_id)
             .await
             .map_err(|e| ResumeError::Storage(e.to_string()))?;
-        let cache = FileStateCache::new(lingxi_filestate::MAX_ENTRIES, lingxi_filestate::MAX_BYTES);
+        let cache = FileStateCache::new(filestate::MAX_ENTRIES, filestate::MAX_BYTES);
         Ok(ResumedSession {
             loaded,
             file_state_cache: cache,

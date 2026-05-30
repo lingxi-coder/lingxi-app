@@ -5,12 +5,12 @@
 //! exposes only the Anthropic API key; OAuth access/refresh tokens land in a
 //! follow-up task.
 
-use lingxi_protocol::{Secret, SecureStorageData, SecureStorageMetadata};
-use lingxi_traits::{Clock, HttpTransport, SecureStorage, SecureStorageError};
+use protocol::{Secret, SecureStorageData, SecureStorageMetadata};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
+use traits::{Clock, HttpTransport, SecureStorage, SecureStorageError};
 
 use crate::kinds::SecretKind;
 

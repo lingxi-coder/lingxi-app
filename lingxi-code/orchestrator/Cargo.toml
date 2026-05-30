@@ -1,25 +1,25 @@
 [package]
-name = "lingxi-orchestrator"
+name = "orchestrator"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../protocol" }
-lingxi-core = { path = "../core" }
-lingxi-traits = { path = "../traits" }
-lingxi-api-client = { path = "../api-client" }
-lingxi-tools = { path = "../tools" }
-lingxi-memory = { path = "../memory" }
-lingxi-permission = { path = "../permission" }
-lingxi-hooks = { path = "../hooks" }
-lingxi-mcp = { path = "../mcp" }
-lingxi-agent = { path = "../agent" }
-lingxi-cost = { path = "../cost" }
-lingxi-compaction = { path = "../compaction" }
-lingxi-session = { path = "../session" }
-lingxi-telemetry = { path = "../telemetry" }
+protocol = { path = "../protocol" }
+engine = { path = "../engine" }
+traits = { path = "../traits" }
+api-client = { path = "../api-client" }
+tools = { path = "../tools" }
+memory = { path = "../memory" }
+permission = { path = "../permission" }
+hooks = { path = "../hooks" }
+mcp = { path = "../mcp" }
+agent = { path = "../agent" }
+cost = { path = "../cost" }
+compaction = { path = "../compaction" }
+session = { path = "../session" }
+telemetry = { path = "../telemetry" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 async-trait.workspace = true
 dirs = "5"
@@ -37,8 +37,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sy
 tokio-util = { workspace = true, features = ["rt"] }
 tempfile = "3"
 once_cell = "1"
-lingxi-platform-posix = { path = "../platforms/posix" }
-lingxi-sidequery = { path = "../sidequery" }
+platform-posix = { path = "../platforms/posix" }
+sidequery = { path = "../sidequery" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 

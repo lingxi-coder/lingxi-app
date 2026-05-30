@@ -4,10 +4,10 @@
 //! active dialog and `PromptInput` / scrollback bindings are inert.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lingxi_permission::gate::{PermissionRequest, PromptDefault};
-use lingxi_tui::events::keymap::handle_key;
-use lingxi_tui::state::{AppState, PendingPermission, StatusSnapshot};
+use permission::gate::{PermissionRequest, PromptDefault};
 use serde_json::json;
+use tui::events::keymap::handle_key;
+use tui::state::{AppState, PendingPermission, StatusSnapshot};
 
 fn k(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)

@@ -10,13 +10,13 @@ use crate::output_adapter::SinkAdapter;
 use crate::repl_loop::{step, StepOutcome};
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
-use lingxi_orchestrator::{OrchestratorError, TurnOutcome};
-use lingxi_protocol::SessionId;
-use lingxi_traits::{OrchestratorHandle, OutputStream};
+use orchestrator::{OrchestratorError, TurnOutcome};
+use protocol::SessionId;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{stderr, stdin, BufReader};
 use tokio_util::sync::CancellationToken;
+use traits::{OrchestratorHandle, OutputStream};
 
 /// REPL entry point.  Builds the runtime, runs the prompt loop, emits
 /// `tengu_repl_session_started` / `tengu_repl_session_ended` telemetry.
@@ -45,7 +45,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     let mut turn_count: u32 = 0;
 
     tracing::info!(
-        event = lingxi_telemetry::tengu::orchestrator::REPL_SESSION_STARTED,
+        event = telemetry::tengu::orchestrator::REPL_SESSION_STARTED,
         session_id = %session_id,
         started_at = %chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     );
@@ -101,7 +101,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     }
 
     tracing::info!(
-        event = lingxi_telemetry::tengu::orchestrator::REPL_SESSION_ENDED,
+        event = telemetry::tengu::orchestrator::REPL_SESSION_ENDED,
         session_id = %session_id,
         duration_secs = started.elapsed().as_secs(),
         turn_count = turn_count,

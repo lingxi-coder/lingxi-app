@@ -1,7 +1,7 @@
 //! M7-14 snapshot: message search results.
 
 use iocraft::prelude::*;
-use lingxi_tui::components::message_selector::MessageSelector;
+use tui::components::message_selector::MessageSelector;
 
 #[test]
 fn snapshot_message_selector_results() {

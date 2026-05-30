@@ -1,8 +1,8 @@
 //! M7-12: --resume routing. Empty arg + TTY → iocraft screen; empty arg +
 //! no-tui/non-TTY → M5-08 stdio picker; concrete id → load-by-id.
 
-use lingxi_cli::argv::Argv;
-use lingxi_cli::run::{resume_route, ResumeRoute};
+use cli::argv::Argv;
+use cli::run::{resume_route, ResumeRoute};
 
 fn argv_resume(arg: &str, no_tui: bool) -> Argv {
     let mut a = Argv::from_iter(["lingxi-cli", "--resume", arg]).unwrap();

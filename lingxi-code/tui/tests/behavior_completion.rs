@@ -2,8 +2,8 @@
 //! These run in a temp dir so the cwd listing is deterministic.
 
 use iocraft::prelude::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use lingxi_tui::root::handle_live_key;
-use lingxi_tui::state::{AppState, StatusSnapshot};
+use tui::root::handle_live_key;
+use tui::state::{AppState, StatusSnapshot};
 
 fn key(code: KeyCode) -> KeyEvent {
     let mut k = KeyEvent::new(KeyEventKind::Press, code);

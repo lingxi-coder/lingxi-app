@@ -12,10 +12,10 @@
 use crate::grouping::group_messages_by_api_round;
 use crate::ptl_retry::truncate_head_for_ptl_retry;
 use crate::thresholds::{MAX_OUTPUT_TOKENS_FOR_SUMMARY, MAX_PTL_RETRIES};
-use lingxi_api_client::ApiError;
-use lingxi_cost::Usage;
-use lingxi_protocol::ConversationMessage;
-use lingxi_sidequery::{CacheSafeParamsSlot, ForkedAgentRequest, ForkedAgentRunner, QuerySource};
+use api_client::ApiError;
+use cost::Usage;
+use protocol::ConversationMessage;
+use sidequery::{CacheSafeParamsSlot, ForkedAgentRequest, ForkedAgentRunner, QuerySource};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -138,7 +138,7 @@ impl Autocompactor {
 
             let req = ForkedAgentRequest {
                 prompt_messages: vec![ConversationMessage::user(
-                    lingxi_protocol::MessageId::new(),
+                    protocol::MessageId::new(),
                     self.config.compact_user_prompt.clone(),
                 )],
                 cache_safe_params: cache_params,
@@ -159,7 +159,7 @@ impl Autocompactor {
                 true_post_compact_token_count: result.usage.tokens.input,
                 compaction_usage: Some(result.usage),
                 summary_messages: vec![ConversationMessage::System {
-                    id: lingxi_protocol::MessageId::new(),
+                    id: protocol::MessageId::new(),
                     content: result.final_text,
                 }],
             });
@@ -176,7 +176,7 @@ impl Autocompactor {
             );
 
             let summary_msg = ConversationMessage::System {
-                id: lingxi_protocol::MessageId::new(),
+                id: protocol::MessageId::new(),
                 content: summary_text,
             };
             return Ok(CompactionResult {

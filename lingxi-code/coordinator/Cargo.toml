@@ -1,17 +1,17 @@
 [package]
-name = "lingxi-coordinator"
+name = "coordinator"
 version = "0.8.0"
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
-lingxi-core = { path = "../core" }
-lingxi-tools = { path = "../tools" }
-lingxi-agent = { path = "../agent" }
-lingxi-tasks = { path = "../tasks" }
-lingxi-memory = { path = "../memory" }
+protocol = { path = "../protocol" }
+traits = { path = "../traits" }
+engine = { path = "../engine" }
+tools = { path = "../tools" }
+agent = { path = "../agent" }
+tasks = { path = "../tasks" }
+memory = { path = "../memory" }
 serde.workspace = true
 uuid = { version = "1", features = ["v4", "serde"] }
 serde_json.workspace = true

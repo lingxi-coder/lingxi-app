@@ -13,7 +13,7 @@
 //! preserved by [`available_tools`](ToolRegistry::available_tools).
 
 use crate::tool_trait::{Tool, ToolStaticContext};
-use lingxi_protocol::{McpConnectionId, PluginId};
+use protocol::{McpConnectionId, PluginId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -135,8 +135,8 @@ mod tests {
     };
     use crate::ToolUseContext;
     use async_trait::async_trait;
-    use lingxi_permission::result::PermissionMetadata;
-    use lingxi_permission::{PermissionDecisionReason, PermissionResult};
+    use permission::result::PermissionMetadata;
+    use permission::{PermissionDecisionReason, PermissionResult};
     use serde_json::json;
 
     struct DummyTool;

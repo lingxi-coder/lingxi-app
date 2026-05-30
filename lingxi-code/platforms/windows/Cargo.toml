@@ -1,17 +1,17 @@
 [package]
-name = "lingxi-platform-windows"
+name = "platform-windows"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../../protocol" }
-lingxi-traits = { path = "../../traits" }
-lingxi-jsonrpc = { path = "../../jsonrpc" }
-lingxi-lsp = { path = "../../lsp" }
-lingxi-platform-common = { path = "../common" }
-lingxi-api-client = { path = "../../api-client" }
+protocol = { path = "../../protocol" }
+traits = { path = "../../traits" }
+jsonrpc = { path = "../../jsonrpc" }
+lsp = { path = "../../lsp" }
+platform-common = { path = "../common" }
+api-client = { path = "../../api-client" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }

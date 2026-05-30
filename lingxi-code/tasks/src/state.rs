@@ -1,7 +1,7 @@
 //! Polymorphic task state — one variant per [`TaskType`](crate::id::TaskType).
 
 use crate::id::TaskType;
-use lingxi_protocol::AgentId;
+use protocol::AgentId;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -119,7 +119,7 @@ pub struct LocalAgentTaskState {
     /// Error message if the agent failed.
     pub error: Option<String>,
     /// Accumulated conversation messages.
-    pub messages: Vec<lingxi_protocol::ConversationMessage>,
+    pub messages: Vec<protocol::ConversationMessage>,
     /// Inbound messages queued for delivery.
     pub pending_messages: Vec<String>,
     /// Whether the agent is currently backgrounded.

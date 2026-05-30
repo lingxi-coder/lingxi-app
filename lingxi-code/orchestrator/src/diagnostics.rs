@@ -4,8 +4,8 @@
 //! The aggregate [`DoctorReport`] is what the `/doctor` slash-command
 //! handler renders into the locked 6-row + Summary text panel.
 
-use lingxi_traits::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
 use std::path::Path;
+use traits::{CheckStatus, DoctorCheck, DoctorReport, DoctorSummary};
 
 /// Run all 6 doctor checks against the supplied config-dir root and
 /// aggregate the results.
@@ -169,7 +169,7 @@ async fn check_git() -> DoctorCheck {
 }
 
 fn check_telemetry_schema() -> DoctorCheck {
-    let actual = lingxi_telemetry::tengu::ALL_EVENT_NAMES.len();
+    let actual = telemetry::tengu::ALL_EVENT_NAMES.len();
     // M5-14: +1 release marker (lingxi_core_v0_6_0_released) → 315 total.
     // M6-01: +4 TUI lifecycle events (tengu_tui_*) → 319 total.
     // M6-03: +2 TUI streaming render events → 321 total.

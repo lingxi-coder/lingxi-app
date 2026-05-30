@@ -11,18 +11,18 @@
 //!   the compaction transition.
 //! - Five consecutive `force_compact` calls do not panic / leak.
 
-use lingxi_compaction::CompactionOrchestrator;
-use lingxi_orchestrator::test_support::{
+use compaction::CompactionOrchestrator;
+use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use lingxi_protocol::{ConversationMessage, MessageId};
-use lingxi_traits::OrchestratorHandle;
+use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use protocol::{ConversationMessage, MessageId};
 use std::sync::Arc;
+use traits::OrchestratorHandle;
 
 fn make_orch() -> Arc<ConversationOrchestrator> {
     let api = Arc::new(MockApiClient::new(vec![]));
-    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tools::registry::ToolRegistry::new());
     let hooks = noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let output = Arc::new(MockOutputStream::new());
@@ -140,10 +140,10 @@ async fn cancel_during_compaction_leaves_history_unchanged() {
 /// `slot.get_last().await` returns `None`, surfacing
 /// `CompactionError::Internal("no cache-safe params")`.
 fn errored_compactor() -> Arc<CompactionOrchestrator> {
-    use lingxi_compaction::autocompact::Autocompactor;
-    use lingxi_compaction::microcompact::{Microcompactor, TimeBasedMCConfig};
-    use lingxi_compaction::snip::SnipCompactor;
-    use lingxi_sidequery::{CacheSafeParamsSlot, ForkedAgentRunner, SubagentSlotProvider};
+    use compaction::autocompact::Autocompactor;
+    use compaction::microcompact::{Microcompactor, TimeBasedMCConfig};
+    use compaction::snip::SnipCompactor;
+    use sidequery::{CacheSafeParamsSlot, ForkedAgentRunner, SubagentSlotProvider};
 
     // Marker pool — `SubagentSlotProvider` is intentionally an empty
     // marker trait (M1.14); the forked-agent stub never touches it.
@@ -168,7 +168,7 @@ fn errored_compactor() -> Arc<CompactionOrchestrator> {
 #[tokio::test]
 async fn failure_leaves_history_unchanged() {
     let api = Arc::new(MockApiClient::new(vec![]));
-    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tools::registry::ToolRegistry::new());
     let hooks = noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let output = Arc::new(MockOutputStream::new());
@@ -255,7 +255,7 @@ async fn five_consecutive_force_compact_calls_do_not_explode() {
 /// every assistant `ToolUse` block has a matching `ToolResult` in a later
 /// user message, and no orphan `ToolResult` precedes its `ToolUse`.
 fn history_is_valid(history: &[ConversationMessage]) -> bool {
-    use lingxi_protocol::{ContentBlock, ToolUseId};
+    use protocol::{ContentBlock, ToolUseId};
     use std::collections::HashSet;
 
     let mut open_tool_uses: HashSet<ToolUseId> = HashSet::new();
@@ -290,7 +290,7 @@ fn history_is_valid(history: &[ConversationMessage]) -> bool {
 
 #[tokio::test]
 async fn compaction_safety_gate() {
-    use lingxi_api_client::types::{ContentBlockApi, MessageResponse, UsageApi};
+    use api_client::types::{ContentBlockApi, MessageResponse, UsageApi};
 
     // Scripted end_turn response so the post-compaction turn can run.
     let response = MessageResponse {
@@ -305,7 +305,7 @@ async fn compaction_safety_gate() {
         ConversationOrchestrator::new(
             OrchestratorConfig::default(),
             api,
-            Arc::new(lingxi_tools::registry::ToolRegistry::new()),
+            Arc::new(tools::registry::ToolRegistry::new()),
             noop_hook_executor(),
             Arc::new(NoOpPermissionGate),
             Arc::new(MockOutputStream::new()),

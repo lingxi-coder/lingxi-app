@@ -16,7 +16,7 @@ pub mod bypass_permissions;
 pub mod exit_plan_mode;
 pub mod tool_use_confirm;
 
-use lingxi_permission::gate::PermissionResponse;
+use permission::gate::PermissionResponse;
 
 /// What the dialog produces when the user resolves it.
 ///

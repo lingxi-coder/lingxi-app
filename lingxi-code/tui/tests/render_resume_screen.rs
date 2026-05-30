@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 
 use iocraft::prelude::*;
-use lingxi_session::jsonl::loader::SessionMetadata;
-use lingxi_tui::screens::resume::{ResumeRow, ResumeScreen, ResumeState};
+use session::jsonl::loader::SessionMetadata;
+use tui::screens::resume::{ResumeRow, ResumeScreen, ResumeState};
 use uuid::Uuid;
 
 fn meta(title: &str, secs: u64, count: usize) -> SessionMetadata {

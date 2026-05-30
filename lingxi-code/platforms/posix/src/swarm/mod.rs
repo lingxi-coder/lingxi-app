@@ -21,6 +21,6 @@ pub use registry::SwarmRegistry;
 pub use tmux::TmuxBackend;
 
 /// Back-compat alias for the legacy v0.2.0 name. Existing callers
-/// (`lingxi_platform_posix::TmuxSwarmBackend`) continue to resolve to the
+/// (`platform_posix::TmuxSwarmBackend`) continue to resolve to the
 /// new real `TmuxBackend`.
 pub type TmuxSwarmBackend = TmuxBackend;

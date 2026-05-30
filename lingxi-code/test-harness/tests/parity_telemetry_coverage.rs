@@ -1,6 +1,6 @@
 //! M4-09 parity driver — every builtin tool has its 3 lifecycle events
 //! (`tengu_tool_<snake>_{started,completed,failed}`) registered in
-//! `lingxi_telemetry::tengu::tool::NAMES`.
+//! `telemetry::tengu::tool::NAMES`.
 //!
 //! This is a registration-coverage assertion (NOT a runtime dispatch test).
 //! Each of the 40 tools is mapped here to its byte-locked snake name (the
@@ -18,8 +18,8 @@
 
 #![allow(clippy::unwrap_used)]
 
-use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
 use std::collections::BTreeSet;
+use telemetry::tengu::ALL_EVENT_NAMES;
 
 /// All tool-prefixed events in `ALL_EVENT_NAMES`. Mirrors what
 /// `tengu::tool::NAMES` would expose if it were `pub`.

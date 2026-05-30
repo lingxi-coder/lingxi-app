@@ -160,7 +160,7 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr, auth: Arc<RwLock
     match tokio_tungstenite::accept_hdr_async(stream, cb).await {
         Ok(ws) => {
             tracing::debug!(?addr, "bridge: client connected");
-            // The JSON-RPC plumbing (adapt `ws` onto a `lingxi_jsonrpc::Connection`
+            // The JSON-RPC plumbing (adapt `ws` onto a `jsonrpc::Connection`
             // and dispatch into `lingxi_mcp`) is wired by `IdeBridge` /
             // Task 12's happy-path roundtrip. Here we just hold the socket
             // open until the client disconnects so the upgrade succeeds.

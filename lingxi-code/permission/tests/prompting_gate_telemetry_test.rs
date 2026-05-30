@@ -1,10 +1,10 @@
 //! Telemetry plumbing: the two M5-05 event constants are byte-locked and
-//! appear in the `lingxi_telemetry::tengu::ALL_EVENT_NAMES` registry in
+//! appear in the `telemetry::tengu::ALL_EVENT_NAMES` registry in
 //! registration order (after the M5-04 streaming events, before the
 //! `lingxi_core_v0_5_0_released` release marker).
 //!
 //! Plan deviation: the plan called for an `InMemorySink` capture test
-//! using `lingxi_telemetry::install_test_sink` — but the M5-04 / M5-02
+//! using `telemetry::install_test_sink` — but the M5-04 / M5-02
 //! emit path uses `tracing::info!(event = NAME, …)` (not the
 //! `AnalyticsBus`), so installing a sink doesn't observe these events.
 //! Adding a `tracing-subscriber` test capture would introduce a new
@@ -14,8 +14,8 @@
 //! fail to compile if the `tracing::info!(event = …)` line referenced
 //! a non-existent constant).
 
-use lingxi_telemetry::tengu::orchestrator::{PERMISSION_ANSWERED, PERMISSION_PROMPTED};
-use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
+use telemetry::tengu::orchestrator::{PERMISSION_ANSWERED, PERMISSION_PROMPTED};
+use telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
 fn permission_prompted_constant_is_byte_locked() {

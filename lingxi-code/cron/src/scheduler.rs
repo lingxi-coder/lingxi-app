@@ -1,4 +1,4 @@
-//! Cron scheduler tick loop wired to [`lingxi_tasks::TaskRegistry`].
+//! Cron scheduler tick loop wired to [`tasks::TaskRegistry`].
 //!
 //! The scheduler ticks once per minute, finds due jobs, attempts to acquire a
 //! per-job cross-process lock (A9), applies jitter to avoid thundering-herd
@@ -6,14 +6,14 @@
 
 use crate::lock::{try_acquire_lock, CronLockError};
 use crate::schedule::{parse_cron, CronExpression};
-use lingxi_tasks::registry::TaskRegistry;
-use lingxi_tasks::{TaskSpawnInput, TaskType};
-use lingxi_traits::{Clock, FileSystem, RuntimeSpawner};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tasks::registry::TaskRegistry;
+use tasks::{TaskSpawnInput, TaskType};
 use tokio::sync::{Mutex, RwLock};
+use traits::{Clock, FileSystem, RuntimeSpawner};
 
 /// One registered cron job: its schedule, prompt, and last-fire bookkeeping.
 pub struct CronTaskDef {
@@ -42,7 +42,7 @@ pub struct CronScheduler {
     lock_dir: PathBuf,
     /// Maximum random delay (seconds) applied before launching each due job.
     pub jitter_seconds: u32,
-    tick_handle: Mutex<Option<lingxi_traits::BackgroundTaskHandle>>,
+    tick_handle: Mutex<Option<traits::BackgroundTaskHandle>>,
 }
 
 impl CronScheduler {
@@ -94,7 +94,7 @@ impl CronScheduler {
 
     /// Spawn the tick loop on the configured [`RuntimeSpawner`]. Safe to call
     /// once; calling again replaces the handle without stopping the prior loop.
-    pub async fn start(self: Arc<Self>) -> Result<(), lingxi_traits::RuntimeError> {
+    pub async fn start(self: Arc<Self>) -> Result<(), traits::RuntimeError> {
         let me = self.clone();
         let handle = self
             .runtime
@@ -172,7 +172,7 @@ impl CronScheduler {
     }
 
     /// Cancel the tick loop, if running. Idempotent.
-    pub async fn stop(&self) -> Result<(), lingxi_traits::RuntimeError> {
+    pub async fn stop(&self) -> Result<(), traits::RuntimeError> {
         if let Some(h) = self.tick_handle.lock().await.take() {
             self.runtime.cancel(&h).await?;
         }

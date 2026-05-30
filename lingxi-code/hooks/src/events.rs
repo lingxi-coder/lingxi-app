@@ -6,7 +6,7 @@
 //! by `HookEventType` (the type-tag enum) and inspect the carried `HookEvent`
 //! payload when invoked.
 
-use lingxi_protocol::{AgentId, SessionId, ToolUseId};
+use protocol::{AgentId, SessionId, ToolUseId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;

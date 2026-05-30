@@ -1,22 +1,22 @@
 [package]
-name = "lingxi-plugin"
+name = "plugin"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
-lingxi-tools = { path = "../tools" }
-lingxi-hooks = { path = "../hooks" }
-lingxi-mcp = { path = "../mcp" }
-lingxi-agent = { path = "../agent" }
-lingxi-skills = { path = "../skills" }
-lingxi-commands = { path = "../commands" }
-lingxi-outputstyles = { path = "../outputstyles" }
-lingxi-lsp = { path = "../lsp" }
-lingxi-secret = { path = "../secret" }
+protocol = { path = "../protocol" }
+traits = { path = "../traits" }
+tools = { path = "../tools" }
+hooks = { path = "../hooks" }
+mcp = { path = "../mcp" }
+agent = { path = "../agent" }
+skills = { path = "../skills" }
+commands = { path = "../commands" }
+outputstyles = { path = "../outputstyles" }
+lsp = { path = "../lsp" }
+secret = { path = "../secret" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"

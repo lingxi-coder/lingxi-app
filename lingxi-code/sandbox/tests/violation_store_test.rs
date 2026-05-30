@@ -1,4 +1,4 @@
-use lingxi_sandbox::violation_store::{
+use sandbox::violation_store::{
     SandboxViolationEvent, SandboxViolationKind, SandboxViolationStore, SANDBOX_VIOLATION_STORE_CAP,
 };
 

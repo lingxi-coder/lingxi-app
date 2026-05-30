@@ -2,9 +2,9 @@
 //! `PassiveDiagnosticSubscriber` end-to-end over an in-memory LSP-framed
 //! `Connection`.
 
-use lingxi_jsonrpc::Connection;
-use lingxi_lsp::passive_feedback::publish_for_test;
-use lingxi_lsp::{DiagnosticEntry, LspDiagnosticRegistry, PassiveDiagnosticSubscriber};
+use jsonrpc::Connection;
+use lsp::passive_feedback::publish_for_test;
+use lsp::{DiagnosticEntry, LspDiagnosticRegistry, PassiveDiagnosticSubscriber};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 use serde_json::json;
 use std::sync::Arc;

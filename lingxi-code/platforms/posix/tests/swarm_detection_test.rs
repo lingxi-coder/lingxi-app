@@ -1,6 +1,6 @@
 //! Verifies the detection logic picks the right backend given env probes.
 
-use lingxi_platform_posix::swarm::detection::{pick_backend, BackendChoice, TerminalEnv};
+use platform_posix::swarm::detection::{pick_backend, BackendChoice, TerminalEnv};
 
 #[test]
 fn inside_tmux_picks_tmux() {

@@ -12,10 +12,10 @@
 //! The suite is parameterized over a `&R: RuntimeSpawner`; drivers in
 //! `tests/` exercise it against the mock, posix, and windows impls.
 
-use lingxi_traits::{RuntimeError, RuntimeSpawner};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use traits::{RuntimeError, RuntimeSpawner};
 
 /// Run the standard [`RuntimeSpawner`] contract against an impl.
 ///

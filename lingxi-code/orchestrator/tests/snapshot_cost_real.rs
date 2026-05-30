@@ -5,18 +5,18 @@
     clippy::unused_async
 )]
 
-use lingxi_api_client::types::{MessageResponse, UsageApi};
-use lingxi_cost::pricing::PricingCatalog;
-use lingxi_cost::CostTracker;
-use lingxi_orchestrator::test_support::{
+use api_client::types::{MessageResponse, UsageApi};
+use cost::pricing::PricingCatalog;
+use cost::CostTracker;
+use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_protocol::SessionId;
-use lingxi_tools::registry::ToolRegistry;
-use lingxi_traits::OrchestratorHandle;
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use protocol::SessionId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tools::registry::ToolRegistry;
+use traits::OrchestratorHandle;
 
 fn end_turn_response_with_usage(input: u64, output: u64) -> MessageResponse {
     MessageResponse {
@@ -39,7 +39,7 @@ async fn make_orch_with_n_responses(
     n: usize,
 ) -> (
     Arc<ConversationOrchestrator>,
-    mpsc::Receiver<lingxi_cost::CostState>,
+    mpsc::Receiver<cost::CostState>,
 ) {
     let responses: Vec<_> = (0..n)
         .map(|_| end_turn_response_with_usage(1_000, 500))
@@ -159,7 +159,7 @@ async fn emit_end_turn_carries_real_cost() {
     let end_turn_cost = events
         .iter()
         .find_map(|e| match e {
-            lingxi_traits::OutputEvent::EndTurn { cost, .. } => Some(cost.clone()),
+            traits::OutputEvent::EndTurn { cost, .. } => Some(cost.clone()),
             _ => None,
         })
         .expect("end_turn event present");

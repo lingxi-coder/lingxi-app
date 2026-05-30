@@ -1,19 +1,17 @@
 //! End-to-end smoke: `init_refresh_driver` registers the hook + spawns proactive.
 
+use anthropic_oauth::client::init_refresh_driver;
+use anthropic_oauth::ClaudeAiOAuthConfig;
 use async_trait::async_trait;
-use lingxi_anthropic_oauth::client::init_refresh_driver;
-use lingxi_anthropic_oauth::ClaudeAiOAuthConfig;
-use lingxi_protocol::{HttpRequest, HttpResponse, Secret};
-use lingxi_traits::http::SseStream;
-use lingxi_traits::{
-    BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner,
-};
+use protocol::{HttpRequest, HttpResponse, Secret};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::Mutex;
+use traits::http::SseStream;
+use traits::{BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 struct NoopTransport;
 #[async_trait]

@@ -1,7 +1,7 @@
 //! Parity: scripted interactive flows through the TUI event loop.
 //!
 //! Each scenario feeds a key sequence into
-//! `lingxi_tui::events::keymap::handle_key` against a real `AppState`, then
+//! `tui::events::keymap::handle_key` against a real `AppState`, then
 //! injects the scripted orchestrator output (assistant text, tool-use
 //! blocks, tool results, permission requests, cancellation) directly into
 //! the state the same way `events::orchestrator_bridge` would, and asserts
@@ -17,16 +17,14 @@
 //! See plan `docs/superpowers/plans/2026-05-28-m6-09-release-v0.7.0.md` Task 6.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lingxi_permission::gate::{PermissionRequest, PermissionResponse, PromptDefault};
-use lingxi_protocol::ToolUseId;
-use lingxi_test_harness::parity::load_fixture;
-use lingxi_tui::events::keymap::handle_key;
-use lingxi_tui::state::{
-    AppState, PendingPermission, RenderedMessage, StatusSnapshot, TurnInFlight,
-};
+use permission::gate::{PermissionRequest, PermissionResponse, PromptDefault};
+use protocol::ToolUseId;
 use serde_json::Value;
+use test_harness::parity::load_fixture;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+use tui::events::keymap::handle_key;
+use tui::state::{AppState, PendingPermission, RenderedMessage, StatusSnapshot, TurnInFlight};
 
 fn key_from_str(s: &str) -> KeyEvent {
     match s {

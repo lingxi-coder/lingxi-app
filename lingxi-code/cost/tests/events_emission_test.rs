@@ -3,10 +3,10 @@
 //! `cache_creation_input_tokens`, `cost_usd`, `session_id`, `is_batch_request`).
 
 use async_trait::async_trait;
-use lingxi_cost::emit_cost_recorded;
-use lingxi_protocol::SessionId;
-use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
+use cost::emit_cost_recorded;
+use protocol::SessionId;
 use std::sync::{Arc, Mutex};
+use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
 
 #[derive(Default)]
 struct CaptureSink {

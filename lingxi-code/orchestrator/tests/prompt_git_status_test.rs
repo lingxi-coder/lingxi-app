@@ -1,6 +1,6 @@
 //! Git status probe smoke + env-block integration.
 
-use lingxi_orchestrator::prompt::{env_block, git_status, FileTree, SystemPromptContext};
+use orchestrator::prompt::{env_block, git_status, FileTree, SystemPromptContext};
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
@@ -50,7 +50,7 @@ fn env_block_includes_git_branch_when_repo_present() {
         knowledge_cutoff: None,
         shell: "zsh".into(),
         os_version: "Darwin 25.3.0".into(),
-        git_status: Some(lingxi_orchestrator::prompt::GitStatus {
+        git_status: Some(orchestrator::prompt::GitStatus {
             branch: "feature/x".into(),
             working_dir_clean: false,
             file_changes_summary: String::new(),

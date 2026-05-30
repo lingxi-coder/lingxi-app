@@ -13,7 +13,7 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
+use telemetry::tengu::command as cmd_evt;
 
 /// Short git SHA baked into the binary by `lingxi-cli/build.rs`. Falls back
 /// to `"unknown"` when the env var is absent (e.g. cargo install / library
@@ -38,13 +38,13 @@ impl VersionHandler {
 #[async_trait]
 impl BuiltinCommandHandler for VersionHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::VERSION_STARTED);
+        telemetry::emit_command_started(cmd_evt::VERSION_STARTED);
         let s = format!(
             "lingxi-cli {} ({})",
             env!("CARGO_PKG_VERSION"),
             GIT_SHA_SHORT
         );
-        lingxi_telemetry::emit_command_completed(cmd_evt::VERSION_COMPLETED, "");
+        telemetry::emit_command_completed(cmd_evt::VERSION_COMPLETED, "");
         CommandResult::Done { display: Some(s) }
     }
     fn name(&self) -> &str {

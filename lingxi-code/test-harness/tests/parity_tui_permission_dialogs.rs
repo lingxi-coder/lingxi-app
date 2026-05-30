@@ -1,18 +1,18 @@
 //! Parity driver for the M6-05 TUI permission dialogs.
 //!
 //! Walks the `tui_permission_dialogs.json` fixture and replays every
-//! locked binding through `lingxi_tui::events::keymap::handle_key`,
+//! locked binding through `tui::events::keymap::handle_key`,
 //! asserting the matching `PermissionResponse` comes back on the
 //! oneshot. Also asserts the label literals (header strings, button
 //! labels, bypass body literals).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lingxi_permission::gate::{PermissionRequest, PermissionResponse, PromptDefault};
-use lingxi_test_harness::parity::load_fixture;
-use lingxi_tui::events::keymap::handle_key;
-use lingxi_tui::state::{AppState, PendingPermission, StatusSnapshot};
+use permission::gate::{PermissionRequest, PermissionResponse, PromptDefault};
 use serde_json::json;
+use test_harness::parity::load_fixture;
 use tokio::sync::oneshot;
+use tui::events::keymap::handle_key;
+use tui::state::{AppState, PendingPermission, StatusSnapshot};
 
 fn key_from_str(s: &str) -> KeyEvent {
     match s {

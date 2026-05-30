@@ -1,22 +1,22 @@
 [package]
-name = "lingxi-tools"
+name = "tools"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
-lingxi-core = { path = "../core" }
-lingxi-permission = { path = "../permission" }
-lingxi-sandbox = { path = "../sandbox" }
-lingxi-telemetry = { path = "../telemetry" }
-lingxi-api-client = { path = "../api-client" }
+protocol = { path = "../protocol" }
+traits = { path = "../traits" }
+engine = { path = "../engine" }
+permission = { path = "../permission" }
+sandbox = { path = "../sandbox" }
+telemetry = { path = "../telemetry" }
+api-client = { path = "../api-client" }
 # M4-07 — MCP + LSP tool wrappers.
-lingxi-mcp = { path = "../mcp" }
-lingxi-lsp = { path = "../lsp" }
-lingxi-jsonrpc = { path = "../jsonrpc" }
+mcp = { path = "../mcp" }
+lsp = { path = "../lsp" }
+jsonrpc = { path = "../jsonrpc" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -43,10 +43,10 @@ regex = "1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "sync", "time", "net"] }
 filetime = "0.2"
 axum = "0.7"
-lingxi-test-harness = { path = "../test-harness" }
+test-harness = { path = "../test-harness" }
 
 [target.'cfg(unix)'.dev-dependencies]
-lingxi-platform-posix = { path = "../platforms/posix" }
+platform-posix = { path = "../platforms/posix" }
 
 [lints]
 workspace = true

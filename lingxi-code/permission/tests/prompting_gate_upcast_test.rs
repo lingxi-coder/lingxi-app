@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use lingxi_permission::{InteractivePromptingGate, PermissionDecision, PermissionGate};
+use permission::{InteractivePromptingGate, PermissionDecision, PermissionGate};
 use serde_json::json;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;

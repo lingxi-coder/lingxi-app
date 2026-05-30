@@ -13,15 +13,15 @@
 use crate::config::OrchestratorConfig;
 use crate::conversation::{ConversationOrchestrator, NoStreamingApiClient, OrchestratorApiClient};
 use crate::test_support::{HookExecutor, PermissionGate};
-use lingxi_core::SessionState;
-use lingxi_protocol::{ContentBlock, ConversationMessage, MessageId, SessionId};
-use lingxi_session::jsonl::{load_session, JsonlMessage, JsonlWriter, LoaderError};
-use lingxi_telemetry::tengu::session::{RESUME_COMPLETED, RESUME_STARTED};
-use lingxi_tools::registry::ToolRegistry;
-use lingxi_traits::{FileSystem, OutputStream};
+use engine::SessionState;
+use protocol::{ContentBlock, ConversationMessage, MessageId, SessionId};
+use session::jsonl::{load_session, JsonlMessage, JsonlWriter, LoaderError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use telemetry::tengu::session::{RESUME_COMPLETED, RESUME_STARTED};
 use tokio::sync::Mutex;
+use tools::registry::ToolRegistry;
+use traits::{FileSystem, OutputStream};
 use uuid::Uuid;
 
 /// Errors raised by the resume path. Forwards loader errors verbatim.

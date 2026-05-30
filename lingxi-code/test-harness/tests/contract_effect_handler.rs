@@ -4,9 +4,7 @@
 //! minimal handler that acks every variant. Downstream crates (e.g. the
 //! cli-demo's run loop) layer their own contract drivers on top.
 
-use lingxi_test_harness::contracts::effect_handler::{
-    effect_handler_contract_tests, AckEffectHandler,
-};
+use test_harness::contracts::effect_handler::{effect_handler_contract_tests, AckEffectHandler};
 
 #[tokio::test]
 async fn ack_effect_handler_passes_contract() {

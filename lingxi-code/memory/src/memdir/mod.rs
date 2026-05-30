@@ -16,7 +16,7 @@ pub use find::{find_relevant, RelevanceInputs};
 pub use paths::{memdir_path, MemdirRoots, MEMDIR_SUBDIR, TEAM_MEM_SUBDIR};
 pub use scan::{scan_memdir, MemdirSnapshot};
 
-use lingxi_protocol::{MemoryEntry, MemoryEntryTier};
+use protocol::{MemoryEntry, MemoryEntryTier};
 use std::sync::Arc;
 
 /// Telemetry event name emitted once per memory-load operation.
@@ -32,7 +32,7 @@ pub const TENGU_AGENT_MEMORY_LOADED: &str = "tengu_agent_memory_loaded";
 ///   - `had_team_boost: Bool(b)` — mirrors `settings.team_memory.enabled`
 ///     at the time of the load
 pub async fn emit_agent_memory_loaded(
-    bus: Option<&Arc<lingxi_telemetry::AnalyticsBus>>,
+    bus: Option<&Arc<telemetry::AnalyticsBus>>,
     entries: &[MemoryEntry],
     had_team_boost: bool,
 ) {
@@ -60,23 +60,20 @@ pub async fn emit_agent_memory_loaded(
             });
         }
     }
-    let mut md = lingxi_telemetry::sink::LogEventMetadata::new();
+    let mut md = telemetry::sink::LogEventMetadata::new();
     // Memory loads of >i64::MAX entries are unreachable in practice;
     // saturate to keep the event well-formed in any pathological case.
     let count = i64::try_from(entries.len()).unwrap_or(i64::MAX);
-    md.insert(
-        "count".into(),
-        lingxi_telemetry::sink::AnalyticsValue::Int(count),
-    );
+    md.insert("count".into(), telemetry::sink::AnalyticsValue::Int(count));
     md.insert(
         "sources".into(),
-        lingxi_telemetry::sink::AnalyticsValue::String(
-            lingxi_telemetry::pii::Verified::assert_safe(parts.join(",")).into_inner(),
+        telemetry::sink::AnalyticsValue::String(
+            telemetry::pii::Verified::assert_safe(parts.join(",")).into_inner(),
         ),
     );
     md.insert(
         "had_team_boost".into(),
-        lingxi_telemetry::sink::AnalyticsValue::Bool(had_team_boost),
+        telemetry::sink::AnalyticsValue::Bool(had_team_boost),
     );
     bus.log_event(TENGU_AGENT_MEMORY_LOADED, md).await;
 }
@@ -84,9 +81,9 @@ pub async fn emit_agent_memory_loaded(
 #[cfg(test)]
 mod telemetry_tests {
     use super::*;
-    use lingxi_protocol::{MemoryEntry, MemoryEntryTier};
-    use lingxi_telemetry::{sink::LogEventMetadata, AnalyticsBus, AnalyticsSink, AnalyticsValue};
+    use protocol::{MemoryEntry, MemoryEntryTier};
     use std::sync::{Arc, Mutex};
+    use telemetry::{sink::LogEventMetadata, AnalyticsBus, AnalyticsSink, AnalyticsValue};
 
     struct Cap {
         events: Mutex<Vec<(String, LogEventMetadata)>>,

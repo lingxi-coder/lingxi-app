@@ -15,17 +15,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::{PiiTagged, Verified};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{
+use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
+use serde_json::{json, Value};
+use telemetry::pii::{PiiTagged, Verified};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{
     TEAM_CREATE_COMPLETED, TEAM_CREATE_FAILED, TEAM_CREATE_STARTED, TEAM_DELETE_COMPLETED,
     TEAM_DELETE_FAILED, TEAM_DELETE_STARTED,
 };
-use lingxi_telemetry::AnalyticsBus;
-use once_cell::sync::Lazy;
-use serde_json::{json, Value};
+use telemetry::AnalyticsBus;
 
 use crate::context::ToolUseContext;
 use crate::progress::ToolProgressSender;
@@ -39,7 +39,7 @@ use crate::tool_trait::{
 /// M3-02 lock: the `~/.claude/team-mem/` subdirectory name.
 ///
 /// **Deviation from plan Task 0 step 2:** the plan called for importing
-/// `lingxi_memory::memdir::paths::TEAM_MEM_SUBDIR`, but `lingxi-memory`
+/// `memory::memdir::paths::TEAM_MEM_SUBDIR`, but `lingxi-memory`
 /// already depends transitively on `lingxi-tools` (via `lingxi-sidequery`),
 /// so a direct path-dep would form a cycle. We mirror the M3-02 literal
 /// here; the parity fixture asserts the two strings stay in sync.
@@ -812,8 +812,8 @@ mod validation_tests {
 mod tool_metadata_tests {
     use super::*;
     use crate::builtin::test_support::ctx_for_file_tools;
-    use lingxi_telemetry::AnalyticsBus;
     use serde_json::json;
+    use telemetry::AnalyticsBus;
 
     fn make_create() -> TeamCreateTool {
         let bus = Arc::new(AnalyticsBus::new());

@@ -8,7 +8,7 @@
 use crate::client::OAuthError;
 use crate::refresh::{AuthState, TokenInfo};
 use async_trait::async_trait;
-use lingxi_protocol::Secret;
+use protocol::Secret;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -131,13 +131,13 @@ pub async fn run_scope_upgrade(
     Ok(())
 }
 
-async fn emit_scope_upgrade_started(bus: &Option<Arc<lingxi_telemetry::AnalyticsBus>>) {
+async fn emit_scope_upgrade_started(bus: &Option<Arc<telemetry::AnalyticsBus>>) {
     let Some(bus) = bus else { return };
-    let mut m = lingxi_telemetry::sink::LogEventMetadata::new();
+    let mut m = telemetry::sink::LogEventMetadata::new();
     m.insert(
         "trigger".into(),
-        lingxi_telemetry::sink::AnalyticsValue::String(
-            lingxi_telemetry::Verified::assert_safe("scope_upgrade".to_string())
+        telemetry::sink::AnalyticsValue::String(
+            telemetry::Verified::assert_safe("scope_upgrade".to_string())
                 .as_str()
                 .to_string(),
         ),
@@ -146,38 +146,38 @@ async fn emit_scope_upgrade_started(bus: &Option<Arc<lingxi_telemetry::Analytics
 }
 
 async fn emit_scope_upgraded(
-    bus: &Option<Arc<lingxi_telemetry::AnalyticsBus>>,
+    bus: &Option<Arc<telemetry::AnalyticsBus>>,
     granted_count: i64,
     required_count: i64,
 ) {
     let Some(bus) = bus else { return };
-    let mut m = lingxi_telemetry::sink::LogEventMetadata::new();
+    let mut m = telemetry::sink::LogEventMetadata::new();
     m.insert(
         "granted_count".into(),
-        lingxi_telemetry::sink::AnalyticsValue::Int(granted_count),
+        telemetry::sink::AnalyticsValue::Int(granted_count),
     );
     m.insert(
         "required_count".into(),
-        lingxi_telemetry::sink::AnalyticsValue::Int(required_count),
+        telemetry::sink::AnalyticsValue::Int(required_count),
     );
     bus.log_event("tengu_oauth_scope_upgraded", m).await;
 }
 
-async fn emit_refresh_failed_scope_rejected(bus: &Option<Arc<lingxi_telemetry::AnalyticsBus>>) {
+async fn emit_refresh_failed_scope_rejected(bus: &Option<Arc<telemetry::AnalyticsBus>>) {
     let Some(bus) = bus else { return };
-    let mut m = lingxi_telemetry::sink::LogEventMetadata::new();
+    let mut m = telemetry::sink::LogEventMetadata::new();
     m.insert(
         "trigger".into(),
-        lingxi_telemetry::sink::AnalyticsValue::String(
-            lingxi_telemetry::Verified::assert_safe("scope_upgrade".to_string())
+        telemetry::sink::AnalyticsValue::String(
+            telemetry::Verified::assert_safe("scope_upgrade".to_string())
                 .as_str()
                 .to_string(),
         ),
     );
     m.insert(
         "error_kind".into(),
-        lingxi_telemetry::sink::AnalyticsValue::String(
-            lingxi_telemetry::Verified::assert_safe("scope_rejected".to_string())
+        telemetry::sink::AnalyticsValue::String(
+            telemetry::Verified::assert_safe("scope_rejected".to_string())
                 .as_str()
                 .to_string(),
         ),

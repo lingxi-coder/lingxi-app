@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-use lingxi_cli::run_cli;
+use cli::run_cli;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {

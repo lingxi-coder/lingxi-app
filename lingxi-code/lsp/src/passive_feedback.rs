@@ -1,5 +1,5 @@
 //! `PassiveDiagnosticSubscriber` — listens for
-//! `textDocument/publishDiagnostics` on a `lingxi_jsonrpc::Connection` and
+//! `textDocument/publishDiagnostics` on a `jsonrpc::Connection` and
 //! drains the diagnostics into an [`LspDiagnosticRegistry`].
 //!
 //! Modelled after claude-code, where the LSP `LSPServerInstance` registers
@@ -7,7 +7,7 @@
 //! "current file diagnostics" cache. The Rust shape here is a background
 //! tokio task spawned per LSP server connection.
 //!
-//! Implementation note: `lingxi_jsonrpc::Connection` exposes a single
+//! Implementation note: `jsonrpc::Connection` exposes a single
 //! `notifications()` broadcast receiver that fans out *every* inbound
 //! notification (no per-method subscription). We resubscribe to a fresh
 //! receiver and filter for `textDocument/publishDiagnostics` ourselves —
@@ -16,7 +16,7 @@
 //! than aborting (other diagnostics may still be useful).
 
 use crate::diagnostic_registry::{DiagnosticEntry, LspDiagnosticRegistry};
-use lingxi_jsonrpc::Connection;
+use jsonrpc::Connection;
 use lsp_types::{PublishDiagnosticsParams, Url};
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;

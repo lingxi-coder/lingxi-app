@@ -23,7 +23,7 @@ pub use messages::{
 pub use router::{OutboundMessage, Router, RouterError, DEFAULT_TIMEOUT};
 
 // JS-protocol-name aliases for ergonomic dual naming. Consumer crates may
-// `use lingxi_jsonrpc::JsonRpcError;` or `use lingxi_jsonrpc::RequestId;` and
+// `use jsonrpc::JsonRpcError;` or `use jsonrpc::RequestId;` and
 // get the canonical Rust types without going through the long path.
 pub use messages::Id as RequestId;
 pub use messages::ResponseError as JsonRpcError;

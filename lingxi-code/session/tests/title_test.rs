@@ -2,8 +2,8 @@
 
 #![allow(clippy::needless_pass_by_value)]
 
-use lingxi_session::jsonl::{extract_title, JsonlMessage};
 use serde_json::json;
+use session::jsonl::{extract_title, JsonlMessage};
 
 fn make_user(content: serde_json::Value) -> JsonlMessage {
     serde_json::from_value(json!({

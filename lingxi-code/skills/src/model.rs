@@ -3,7 +3,7 @@
 //!
 //! See spec §18 for the Skill subsystem overview.
 
-use lingxi_protocol::PluginId;
+use protocol::PluginId;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

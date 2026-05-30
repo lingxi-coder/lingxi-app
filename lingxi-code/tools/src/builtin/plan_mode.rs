@@ -5,17 +5,17 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::Verified;
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{
+use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use telemetry::pii::Verified;
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{
     ENTER_PLAN_MODE_COMPLETED, ENTER_PLAN_MODE_FAILED, ENTER_PLAN_MODE_STARTED,
     EXIT_PLAN_MODE_COMPLETED, EXIT_PLAN_MODE_FAILED, EXIT_PLAN_MODE_STARTED,
 };
-use once_cell::sync::Lazy;
-use serde_json::{json, Value};
-use std::collections::HashMap;
 
 use crate::builtin::BuiltinToolContext;
 use crate::context::ToolUseContext;
@@ -318,10 +318,10 @@ impl Tool for ExitPlanModeTool {
 mod tests {
     use super::*;
     use crate::builtin::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
-    use lingxi_core::SessionState;
-    use lingxi_protocol::SessionId;
-    use lingxi_telemetry::{AnalyticsBus, InMemorySink};
+    use engine::SessionState;
+    use protocol::SessionId;
     use std::sync::Arc;
+    use telemetry::{AnalyticsBus, InMemorySink};
     use tokio::sync::Mutex;
 
     fn make_ctx() -> (

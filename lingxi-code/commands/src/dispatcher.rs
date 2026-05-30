@@ -1,4 +1,4 @@
-//! Implementation of [`lingxi_traits::SlashCommandDispatcher`] that routes
+//! Implementation of [`traits::SlashCommandDispatcher`] that routes
 //! `/<name> <args>` into the in-crate [`CommandRegistry`].
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md` Task 5.
@@ -7,9 +7,9 @@ use crate::model::CommandResult;
 use crate::parser::parse_slash_command;
 use crate::registry::CommandRegistry;
 use async_trait::async_trait;
-use lingxi_traits::{SlashCommandDispatcher, SlashDispatchResult};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use traits::{SlashCommandDispatcher, SlashDispatchResult};
 
 /// Concrete `SlashCommandDispatcher` backed by an `Arc<RwLock<CommandRegistry>>`.
 ///

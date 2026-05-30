@@ -6,11 +6,11 @@
 //! is what the iocraft root assembles in production.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lingxi_protocol::ToolUseId;
-use lingxi_tui::app::dispatch;
-use lingxi_tui::components::messages::render_entry_to_string;
-use lingxi_tui::events::keymap::map_key;
-use lingxi_tui::state::{AppState, RenderedMessage, StatusSnapshot};
+use protocol::ToolUseId;
+use tui::app::dispatch;
+use tui::components::messages::render_entry_to_string;
+use tui::events::keymap::map_key;
+use tui::state::{AppState, RenderedMessage, StatusSnapshot};
 
 fn k(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)

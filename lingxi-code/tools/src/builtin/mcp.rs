@@ -2,7 +2,7 @@
 //! (`McpAuthTool`), resources listing (`ListMcpResourcesTool`), and
 //! resource read (`ReadMcpResourceTool`).
 //!
-//! All four wrap `lingxi_mcp::McpClient` (M2-02b) via an
+//! All four wrap `mcp::McpClient` (M2-02b) via an
 //! `Arc<McpRegistry>` injected through [`crate::builtin::BuiltinToolContext`].
 //!
 //! Wire identifiers locked in spec §7 lines 685-700 and reproduced
@@ -13,27 +13,27 @@
 //! `{ authenticated: bool }`; ListMcpResourcesTool returns a bounded
 //! resource list; ReadMcpResourceTool exposes server-controlled payloads.
 //! Variable-length user content (e.g. tool dispatch results from MCP) is
-//! bounded upstream by lingxi_mcp::McpClient response handling.
+//! bounded upstream by mcp::McpClient response handling.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use lingxi_mcp::registry::McpRegistry;
-use lingxi_mcp::McpClientError;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{
+use mcp::registry::McpRegistry;
+use mcp::McpClientError;
+use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
+use serde_json::{json, Value};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{
     LIST_MCP_RESOURCES_COMPLETED, LIST_MCP_RESOURCES_FAILED, LIST_MCP_RESOURCES_STARTED,
     MCP_AUTH_COMPLETED, MCP_AUTH_FAILED, MCP_AUTH_STARTED, MCP_COMPLETED, MCP_FAILED, MCP_STARTED,
     READ_MCP_RESOURCE_COMPLETED, READ_MCP_RESOURCE_FAILED, READ_MCP_RESOURCE_STARTED,
 };
-use lingxi_telemetry::AnalyticsBus;
-use lingxi_traits::McpTransportSpec;
-use once_cell::sync::Lazy;
-use serde_json::{json, Value};
+use telemetry::AnalyticsBus;
+use traits::McpTransportSpec;
 
 use crate::context::ToolUseContext;
 use crate::progress::ToolProgressSender;
@@ -124,14 +124,14 @@ pub(crate) fn auth_kind_from_spec(spec: &McpTransportSpec) -> (&'static str, &'s
 }
 
 fn pii(s: &str) -> AnalyticsValue {
-    use lingxi_telemetry::pii::PiiTagged;
+    use telemetry::pii::PiiTagged;
     AnalyticsValue::String(PiiTagged::assert_pii_tagged_column(s.to_string()).into_inner())
 }
 fn verified_int(n: u64) -> AnalyticsValue {
     AnalyticsValue::Int(n as i64)
 }
 fn verified_str(s: &str) -> AnalyticsValue {
-    use lingxi_telemetry::pii::Verified;
+    use telemetry::pii::Verified;
     AnalyticsValue::String(Verified::assert_safe(s.to_string()).into_inner())
 }
 
@@ -972,7 +972,7 @@ mod tests {
             url: "https://x".into(),
             headers: StdHashMap::new(),
             headers_helper: None,
-            oauth: Some(lingxi_traits::McpOAuthConfigDto {
+            oauth: Some(traits::McpOAuthConfigDto {
                 client_id: Some("cid".into()),
                 callback_port: Some(8080),
                 auth_server_metadata_url: Some("https://m".into()),
@@ -1011,7 +1011,7 @@ mod tests {
         let spec = McpTransportSpec::Http {
             url: "https://x".into(),
             headers: StdHashMap::new(),
-            oauth: Some(lingxi_traits::McpOAuthConfigDto {
+            oauth: Some(traits::McpOAuthConfigDto {
                 client_id: None,
                 callback_port: None,
                 auth_server_metadata_url: None,
@@ -1053,7 +1053,7 @@ mod tests {
     #[test]
     fn mcp_timeout_byte_locked_literal() {
         // Cross-crate byte-lock with M2-02b lingxi-code/crates/mcp/src/client.rs:489.
-        let err = lingxi_mcp::McpClientError::Timeout {
+        let err = mcp::McpClientError::Timeout {
             server: "filesystem".into(),
             tool: "read".into(),
             secs: 60,

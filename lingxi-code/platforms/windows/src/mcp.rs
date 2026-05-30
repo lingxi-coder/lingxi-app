@@ -1,6 +1,6 @@
 //! MCP transport — Windows.
 //!
-//! Mirrors `lingxi_platform_posix::mcp` exactly — see M2-02d Task 7. Supports
+//! Mirrors `platform_posix::mcp` exactly — see M2-02d Task 7. Supports
 //! the `Stdio`, `Sse`, and `Http` variants in M2. The `WebSocket` variant's
 //! low-level `connect_ws` helper is re-exported by M2-02c, but
 //! `WindowsMcpTransport::connect` does NOT yet route `WebSocket` specs — that
@@ -10,18 +10,13 @@
 //!
 //! M2-02c also lands `spawn_stdio` (mirrors the POSIX implementation, NDJSON
 //! framing + 64 MB stderr ring) plus a re-export of the shared WebSocket
-//! connector at `lingxi_platform_windows::mcp::connect_ws`.
+//! connector at `platform_windows::mcp::connect_ws`.
 
 use async_trait::async_trait;
-use lingxi_jsonrpc::Connection;
-use lingxi_platform_common::mcp_stdio::{StderrRing, StdioConfig};
-use lingxi_platform_common::{connect_http, connect_sse};
-use lingxi_protocol::McpConnectionId;
-use lingxi_traits::{
-    ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
-    McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
-    McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
-};
+use jsonrpc::Connection;
+use platform_common::mcp_stdio::{StderrRing, StdioConfig};
+use platform_common::{connect_http, connect_sse};
+use protocol::McpConnectionId;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -29,10 +24,15 @@ use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
 use tokio::sync::Mutex as AsyncMutex;
+use traits::{
+    ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+    McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
+    McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+};
 
 /// Per-connection state held by `WindowsMcpTransport`.
 ///
-/// Mirrors `lingxi_platform_posix::mcp::PosixMcpConnection`. Different
+/// Mirrors `platform_posix::mcp::PosixMcpConnection`. Different
 /// transports keep slightly different ownership: `Stdio` owns the spawned
 /// child so `disconnect` can kill it; SSE / HTTP just own the JSON-RPC
 /// `Connection` (the underlying `reqwest` tasks live inside the
@@ -229,7 +229,7 @@ fn map_kind(spec: &McpTransportSpec) -> McpTransportKind {
 
 /// Error type returned by `spawn_stdio` on Windows.
 ///
-/// Mirrors `lingxi_platform_posix::mcp::McpTransportError` — distinct type
+/// Mirrors `platform_posix::mcp::McpTransportError` — distinct type
 /// per crate so callers can match against either via the shared `From` impls
 /// in `lingxi-mcp` (added in M2-02d when the per-platform transport plug-in
 /// trait lands).
@@ -255,9 +255,9 @@ pub struct StdioHandles {
 }
 
 /// Spawn an MCP child over stdio on Windows and return a fully-wired
-/// `lingxi_jsonrpc::Connection`.
+/// `jsonrpc::Connection`.
 ///
-/// Mirrors `lingxi_platform_posix::mcp::spawn_stdio` exactly in framing
+/// Mirrors `platform_posix::mcp::spawn_stdio` exactly in framing
 /// (NDJSON / `LineCodec` via `Connection::new_line_delimited`), stderr
 /// handling (64 MB drop-oldest ring), and child reaping (`kill_on_drop` so
 /// dropping the connection tears the child down).
@@ -363,16 +363,14 @@ pub async fn spawn_stdio_with_handles(cfg: StdioConfig) -> Result<StdioHandles, 
 }
 
 // Re-export the shared WebSocket connector at this crate too, so callers
-// can write `lingxi_platform_windows::mcp::connect_ws` directly without
+// can write `platform_windows::mcp::connect_ws` directly without
 // reaching into `lingxi_platform_common`.
-pub use lingxi_platform_common::mcp_ws::{
-    connect_ws, WsConnectError, AUTH_HEADER_NAME, WS_SUBPROTOCOL,
-};
+pub use platform_common::mcp_ws::{connect_ws, WsConnectError, AUTH_HEADER_NAME, WS_SUBPROTOCOL};
 
 #[cfg(test)]
 mod re_export_tests {
     /// Verify the windows crate exposes the public `connect_ws` symbol at
-    /// `lingxi_platform_windows::mcp::connect_ws` (callers should not have
+    /// `platform_windows::mcp::connect_ws` (callers should not have
     /// to import from `lingxi_platform_common` directly).
     #[allow(unused_imports)]
     use crate::mcp::connect_ws;

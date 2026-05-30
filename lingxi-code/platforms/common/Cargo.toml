@@ -1,13 +1,13 @@
 [package]
-name = "lingxi-platform-common"
+name = "platform-common"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-jsonrpc = { path = "../../jsonrpc" }
-lingxi-traits = { path = "../../traits" }
+jsonrpc = { path = "../../jsonrpc" }
+traits = { path = "../../traits" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }

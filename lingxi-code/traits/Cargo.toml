@@ -1,12 +1,12 @@
 [package]
-name = "lingxi-traits"
+name = "traits"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../protocol" }
+protocol = { path = "../protocol" }
 async-trait.workspace = true
 futures-core.workspace = true
 serde.workspace = true

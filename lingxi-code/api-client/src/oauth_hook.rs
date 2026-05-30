@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
-use lingxi_protocol::Secret;
+use protocol::Secret;
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 

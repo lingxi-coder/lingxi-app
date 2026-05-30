@@ -2,7 +2,7 @@
 //! API rounds until we've shaved off the suggested token gap with a margin.
 
 use crate::grouping::ApiRoundGroup;
-use lingxi_protocol::ConversationMessage;
+use protocol::ConversationMessage;
 
 /// On PTL: drop oldest API rounds until estimated tokens drop by
 /// `token_gap + margin`. 20% safety margin per spec §13.7 C5.

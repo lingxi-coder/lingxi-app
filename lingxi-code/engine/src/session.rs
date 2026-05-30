@@ -1,7 +1,7 @@
 //! Session state model. Persistence lives in `lingxi-session` (Plan 10).
 
 use crate::token::Usage;
-use lingxi_protocol::{ConversationMessage, SessionId};
+use protocol::{ConversationMessage, SessionId};
 use serde::{Deserialize, Serialize};
 
 /// Running total of `Usage` across all turns in a session.
@@ -84,7 +84,7 @@ impl SessionState {
 #[cfg(test)]
 mod m4_04_session_extension_tests {
     use super::*;
-    use lingxi_protocol::SessionId;
+    use protocol::SessionId;
 
     #[test]
     fn fresh_session_has_empty_todos_and_plan_mode_false() {

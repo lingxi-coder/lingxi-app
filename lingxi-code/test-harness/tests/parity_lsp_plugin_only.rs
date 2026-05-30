@@ -12,14 +12,12 @@
 //! future change to the registry signature trips an alarm even if the
 //! per-crate test were accidentally moved.
 
-use lingxi_lsp::LspRegistry;
-use lingxi_test_harness::parity::load_fixture;
-use lingxi_traits::{
-    LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
-};
+use lsp::LspRegistry;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+use test_harness::parity::load_fixture;
+use traits::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -58,7 +56,7 @@ impl LspTransport for DummyTransport {
     ) -> Result<(), LspError> {
         Err(LspError::Unavailable)
     }
-    async fn shutdown(&self, _: lingxi_protocol::McpConnectionId) -> Result<(), LspError> {
+    async fn shutdown(&self, _: protocol::McpConnectionId) -> Result<(), LspError> {
         Err(LspError::Unavailable)
     }
     fn is_available(&self) -> bool {
@@ -113,6 +111,6 @@ async fn lsp_plugin_only_public_path_works_from_external_crate() {
     // Only public registration entry point: register_plugin_servers.
     // Calling `registry.register_config(...)` here would not compile.
     registry
-        .register_plugin_servers(lingxi_protocol::PluginId::new(), vec![config])
+        .register_plugin_servers(protocol::PluginId::new(), vec![config])
         .await;
 }

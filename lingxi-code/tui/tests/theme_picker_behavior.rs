@@ -2,10 +2,10 @@
 //! the `/theme` command open path.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use lingxi_tui::screens::theme::{theme_picker_handle_key, ThemePickerOutcome, ThemePickerState};
-use lingxi_tui::screens::Screen;
-use lingxi_tui::state::AppState;
-use lingxi_tui::theme::{theme_for, Theme, ThemeName, ThemeSetting};
+use tui::screens::theme::{theme_picker_handle_key, ThemePickerOutcome, ThemePickerState};
+use tui::screens::Screen;
+use tui::state::AppState;
+use tui::theme::{theme_for, Theme, ThemeName, ThemeSetting};
 
 fn key(c: KeyCode) -> KeyEvent {
     KeyEvent::new(c, crossterm::event::KeyModifiers::NONE)
@@ -86,8 +86,7 @@ fn slash_theme_opens_picker_screen() {
     // Drive the same submit path the live REPL uses.
     app.prompt_text = "/theme".to_string();
     app.prompt_cursor = "/theme".len();
-    let should_run =
-        lingxi_tui::app::dispatch(lingxi_tui::events::keymap::KeyAction::Submit, &mut app);
+    let should_run = tui::app::dispatch(tui::events::keymap::KeyAction::Submit, &mut app);
     assert!(!should_run, "/theme opens a screen, never runs a turn");
     // The Theme screen is now active.
     assert!(matches!(app.active_screen.as_ref(), Some(Screen::Theme(_))));

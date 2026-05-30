@@ -1,10 +1,8 @@
 //! Verifies `CostTracker::summary() -> CostSummary` returns aggregated session
 //! totals, per-model breakdown, and labeled day/month buckets.
 
-use lingxi_cost::{
-    CostSummary, CostTracker, ModelRef, PricingCatalog, ProviderId, TokenUsage, Usage,
-};
-use lingxi_protocol::SessionId;
+use cost::{CostSummary, CostTracker, ModelRef, PricingCatalog, ProviderId, TokenUsage, Usage};
+use protocol::SessionId;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;

@@ -2,13 +2,11 @@
 #![allow(clippy::doc_markdown)]
 
 use iocraft::prelude::*;
-use lingxi_tui::components::messages::image::{render_image_label, UserImageMessage};
-use lingxi_tui::components::messages::memory_input::{
-    render_memory_to_string, UserMemoryInputMessage,
-};
-use lingxi_tui::components::messages::plan::{render_plan_to_string, UserPlanMessage};
-use lingxi_tui::components::messages::prompt::{render_prompt_to_string, MAX_DISPLAY_CHARS};
-use lingxi_tui::components::messages::resource_update::{
+use tui::components::messages::image::{render_image_label, UserImageMessage};
+use tui::components::messages::memory_input::{render_memory_to_string, UserMemoryInputMessage};
+use tui::components::messages::plan::{render_plan_to_string, UserPlanMessage};
+use tui::components::messages::prompt::{render_prompt_to_string, MAX_DISPLAY_CHARS};
+use tui::components::messages::resource_update::{
     format_uri, render_resource_update_to_string, ResourceUpdate, UserResourceUpdateMessage,
 };
 

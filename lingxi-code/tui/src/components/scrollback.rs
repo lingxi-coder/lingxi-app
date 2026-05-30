@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use iocraft::prelude::*;
-use lingxi_protocol::ToolUseId;
+use protocol::ToolUseId;
 
 use crate::components::messages::{
     advisor::AdvisorMessage,

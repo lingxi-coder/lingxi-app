@@ -1,4 +1,4 @@
-use lingxi_telemetry::tengu::oauth;
+use telemetry::tengu::oauth;
 
 #[test]
 fn all_8_oauth_event_names_are_locked() {

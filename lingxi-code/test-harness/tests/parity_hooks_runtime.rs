@@ -9,15 +9,15 @@
 //! See plan `docs/superpowers/plans/2026-05-25-m5-14-release-v0.6.0.md` Task 5.
 
 use async_trait::async_trait;
-use lingxi_hooks::{
+use hooks::{
     BuiltinHookHandler, HookContext, HookDefinition, HookEvent, HookEventType, HookExecutor,
     HookExecutorImpl, HookOutcome, HookRegistry, HookResult, HookSource,
 };
-use lingxi_protocol::{HookId, HttpResponse, SessionId, ToolUseId};
-use lingxi_test_harness::mocks::{MockHttpTransport, MockRuntimeSpawner, ScriptedResponse};
+use protocol::{HookId, HttpResponse, SessionId, ToolUseId};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+use test_harness::mocks::{MockHttpTransport, MockRuntimeSpawner, ScriptedResponse};
 use tokio::sync::RwLock;
 
 const FIXTURE: &str = include_str!("../src/parity/fixtures/parity_hooks_runtime.json");
@@ -102,7 +102,7 @@ fn fixture_declares_all_four_arms() {
 fn hook_telemetry_events_are_registered() {
     let f = load();
     let registered: std::collections::HashSet<&&str> =
-        lingxi_telemetry::tengu::ALL_EVENT_NAMES.iter().collect();
+        telemetry::tengu::ALL_EVENT_NAMES.iter().collect();
     for name in &f.hook_telemetry_events {
         assert!(
             registered.contains(&name.as_str()),
@@ -118,7 +118,7 @@ fn hook_telemetry_events_are_registered() {
 #[test]
 fn ssrf_guard_blocks_known_bad_urls() {
     let f = load();
-    let guard = lingxi_hooks::SsrfGuard::with_defaults();
+    let guard = hooks::SsrfGuard::with_defaults();
     for url in &f.ssrf_guard_blocked_urls {
         assert!(
             guard.check_url(url).is_err(),

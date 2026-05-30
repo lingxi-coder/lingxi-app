@@ -5,9 +5,9 @@
 //! `CLAUDE.local.md` shadowing `CLAUDE.md` at the same depth, and the
 //! 10 MB cap must skip oversized files without aborting the load.
 
-use lingxi_memory::claude_md::hierarchy::walk;
-use lingxi_memory::claude_md::loader::{load_file, LoaderError};
-use lingxi_memory::MAX_MEMORY_FILE_SIZE;
+use memory::claude_md::hierarchy::walk;
+use memory::claude_md::loader::{load_file, LoaderError};
+use memory::MAX_MEMORY_FILE_SIZE;
 use std::fs;
 use tempfile::TempDir;
 

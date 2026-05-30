@@ -3,10 +3,10 @@
 
 use crate::definition::{HookDefinition, HookSource};
 use crate::events::HookEvent;
-use lingxi_protocol::{AgentId, PluginId, SessionId};
-use lingxi_traits::SubagentInheritance;
+use protocol::{AgentId, PluginId, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use traits::SubagentInheritance;
 
 /// Per-call context handed to hooks alongside the event payload.
 ///
@@ -126,7 +126,7 @@ mod all_hooks_tests {
     use super::*;
     use crate::definition::{HookExecutor, HookSource};
     use crate::events::HookEventType;
-    use lingxi_protocol::HookId;
+    use protocol::HookId;
 
     fn hk(name: &str, event: HookEventType, source: HookSource) -> HookDefinition {
         HookDefinition {
@@ -156,7 +156,7 @@ mod all_hooks_tests {
         r.register(hk("user-fmt", HookEventType::PostToolUse, HookSource::User));
         r.register(hk("project-lint", HookEventType::Stop, HookSource::Project));
         r.register_plugin_hooks(
-            lingxi_protocol::PluginId::new(),
+            protocol::PluginId::new(),
             vec![hk(
                 "plugin-x",
                 HookEventType::PreToolUse,

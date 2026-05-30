@@ -4,24 +4,24 @@
 //! streaming path. The orchestrator races `try_run_turn_streaming` against
 //! the cancel token and returns `TurnOutcome::{EndTurn, Cancelled}`.
 
-use lingxi_orchestrator::test_support::{
+use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::test_support_stream::{
+use orchestrator::test_support_stream::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockStreamingApiClient,
 };
-use lingxi_orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig, TurnOutcome};
-use lingxi_tools::registry::ToolRegistry;
+use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig, TurnOutcome};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use tools::registry::ToolRegistry;
 
 fn build_orch(api: Arc<MockStreamingApiClient>) -> ConversationOrchestrator {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     let output = Arc::new(MockOutputStream::new());
     let tools = Arc::new(ToolRegistry::new());
-    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
     ConversationOrchestrator::new_with_streaming(
@@ -92,12 +92,12 @@ async fn handle_trait_run_turn_streaming_with_cancel_pre_cancelled_returns_cance
     ];
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![stream]));
     let orch = Arc::new(build_orch(api));
-    let handle: Arc<dyn lingxi_traits::OrchestratorHandle> = orch;
+    let handle: Arc<dyn traits::OrchestratorHandle> = orch;
     let cancel = CancellationToken::new();
     cancel.cancel();
     let outcome = handle
         .run_turn_streaming_with_cancel("hi", cancel)
         .await
         .unwrap();
-    assert!(matches!(outcome, lingxi_traits::TurnOutcome::Cancelled));
+    assert!(matches!(outcome, traits::TurnOutcome::Cancelled));
 }

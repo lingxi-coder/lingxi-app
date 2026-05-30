@@ -10,14 +10,14 @@
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
 //! - Unknown literal template = "Unknown command: /{name}"
 
-use lingxi_commands::builtin::{BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES};
-use lingxi_commands::dispatcher::RegistrySlashDispatcher;
-use lingxi_commands::registry::{register_all_builtin_commands, CommandRegistry};
-use lingxi_test_harness::parity::load_fixture;
-use lingxi_traits::{SlashCommandDispatcher, SlashDispatchResult};
+use commands::builtin::{BUILTIN_COMMAND_NAMES, BUILTIN_CORE_NAMES};
+use commands::dispatcher::RegistrySlashDispatcher;
+use commands::registry::{register_all_builtin_commands, CommandRegistry};
 use serde::Deserialize;
 use std::sync::Arc;
+use test_harness::parity::load_fixture;
 use tokio::sync::RwLock;
+use traits::{SlashCommandDispatcher, SlashDispatchResult};
 
 #[derive(Debug, Deserialize)]
 struct ParityFile {
@@ -238,7 +238,7 @@ fn implemented_names_match_builtin_core_names_constant() {
         .collect();
     fixture_impl.sort_unstable();
 
-    let mut const_core: Vec<&str> = lingxi_commands::builtin::BUILTIN_CORE_NAMES.to_vec();
+    let mut const_core: Vec<&str> = commands::builtin::BUILTIN_CORE_NAMES.to_vec();
     const_core.sort_unstable();
 
     assert_eq!(

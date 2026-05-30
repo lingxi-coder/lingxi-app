@@ -1,9 +1,9 @@
 //! Behavior tests (M6-02 T12) for `PgUp` / `PgDn` / `g` / `G` against
 //! the `scroll_with_viewport` helper.
 
-use lingxi_tui::app::scroll_with_viewport;
-use lingxi_tui::events::keymap::ScrollDir;
-use lingxi_tui::state::{AppState, RenderedMessage};
+use tui::app::scroll_with_viewport;
+use tui::events::keymap::ScrollDir;
+use tui::state::{AppState, RenderedMessage};
 
 mod support;
 use support::fake_status;

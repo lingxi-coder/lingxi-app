@@ -5,14 +5,14 @@
 //! `src/memory/loader.ts:14-38`). Each scenario builds a tempdir layout
 //! and asserts the walk order + skipped-due-to-size set match.
 
-use lingxi_memory::claude_md::hierarchy::walk;
-use lingxi_memory::claude_md::loader::{load_file, LoaderError};
-use lingxi_memory::MAX_MEMORY_FILE_SIZE;
-use lingxi_test_harness::parity::load_fixture;
+use memory::claude_md::hierarchy::walk;
+use memory::claude_md::loader::{load_file, LoaderError};
+use memory::MAX_MEMORY_FILE_SIZE;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 struct Fixture {

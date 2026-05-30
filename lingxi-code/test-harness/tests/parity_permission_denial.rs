@@ -17,7 +17,7 @@
 //! a `DenyAllGate` (not in `lingxi_permission`) AND constructing 40
 //! schema-valid happy-path inputs. The pragmatic v0.5.0 ship gate is
 //! "every tool exposes a permission decision surface" — runtime denial
-//! semantics are covered by `lingxi_permission::policy::tests`.
+//! semantics are covered by `permission::policy::tests`.
 
 #![allow(clippy::unwrap_used)]
 

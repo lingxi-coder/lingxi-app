@@ -11,9 +11,9 @@
 
 #![forbid(unsafe_code)]
 
-use lingxi_protocol::SessionId;
-use lingxi_telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata, Verified};
+use protocol::SessionId;
 use std::sync::Arc;
+use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata, Verified};
 
 /// Event name (locked byte-for-byte; matches spec §7 line 734 and claude-code @ 6a25909).
 pub const EVENT_NAME_COST_RECORDED: &str = "tengu_cost_recorded";

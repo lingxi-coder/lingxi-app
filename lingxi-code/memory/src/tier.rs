@@ -3,7 +3,7 @@
 //! Each loaded memory file belongs to one of four tiers (spec §6.1). The
 //! tier determines its discovery rules, lifetime, and trust level.
 
-use lingxi_protocol::SessionId;
+use protocol::SessionId;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

@@ -8,13 +8,13 @@
 
 use crate::definition::AgentDefinition;
 use crate::display::AgentDisplay;
-use lingxi_memory::snapshot::AgentMemorySnapshot;
-use lingxi_protocol::{AgentId, ConversationMessage, McpConnectionId};
-use lingxi_tools::content_replacement::ContentReplacementState;
-use lingxi_traits::WorktreeHandle;
+use memory::snapshot::AgentMemorySnapshot;
+use protocol::{AgentId, ConversationMessage, McpConnectionId};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tools::content_replacement::ContentReplacementState;
+use traits::WorktreeHandle;
 
 /// All the state required to drive one subagent run.
 ///

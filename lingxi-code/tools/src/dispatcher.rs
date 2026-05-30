@@ -8,7 +8,7 @@
 use crate::progress::ToolProgress;
 use crate::registry::ToolRegistry;
 use crate::tool_trait::ToolError;
-use lingxi_protocol::ToolUseId;
+use protocol::ToolUseId;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -188,7 +188,7 @@ impl ToolDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_protocol::ToolUseId;
+    use protocol::ToolUseId;
     use serde_json::json;
 
     #[test]

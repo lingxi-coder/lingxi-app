@@ -10,11 +10,11 @@ use crate::definition::HookDefinition;
 use crate::events::HookEvent;
 use crate::registry::HookContext;
 use crate::response::HookResult;
-use lingxi_protocol::HookId;
-use lingxi_traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use protocol::HookId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
+use traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 
 /// Registry of currently-running non-blocking hooks.
 ///

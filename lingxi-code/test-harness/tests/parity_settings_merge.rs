@@ -8,14 +8,14 @@
 //! - The `tengu_settings_loaded` telemetry event fires with the locked keys.
 
 use async_trait::async_trait;
-use lingxi_core::settings::schema::SettingsJson;
-use lingxi_core::settings::{LoadInputs, Settings};
-use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
-use lingxi_test_harness::parity::load_fixture;
+use engine::settings::schema::SettingsJson;
+use engine::settings::{LoadInputs, Settings};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
+use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
+use test_harness::parity::load_fixture;
 
 #[derive(Debug, Deserialize)]
 struct Fixture {

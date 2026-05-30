@@ -5,14 +5,14 @@
 //! suite is skipped on shared dev machines where popping `security`
 //! authorisation prompts would be disruptive.
 
-use lingxi_test_harness::contracts::secure_storage::secure_storage_contract_tests;
 use tempfile::TempDir;
+use test_harness::contracts::secure_storage::secure_storage_contract_tests;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn posix_plaintext_secure_storage_passes_contract() {
     let dir = TempDir::new().expect("tempdir");
-    let s = lingxi_platform_posix::PlainTextSecureStorage::new(dir.path().to_path_buf())
+    let s = platform_posix::PlainTextSecureStorage::new(dir.path().to_path_buf())
         .await
         .expect("plaintext storage init");
     secure_storage_contract_tests(&s).await;
@@ -26,7 +26,7 @@ async fn macos_keychain_secure_storage_passes_contract() {
         return;
     }
     let dir = TempDir::new().expect("tempdir");
-    let s = lingxi_platform_posix::MacOsKeychainStorage::new(
+    let s = platform_posix::MacOsKeychainStorage::new(
         "lingxi-contract-test-user".into(),
         dir.path().to_path_buf(),
         dir.path().to_path_buf(),
@@ -40,7 +40,7 @@ async fn macos_keychain_secure_storage_passes_contract() {
 #[tokio::test]
 async fn windows_plaintext_secure_storage_passes_contract() {
     let dir = TempDir::new().expect("tempdir");
-    let s = lingxi_platform_windows::PlainTextSecureStorage::new(dir.path().to_path_buf())
+    let s = platform_windows::PlainTextSecureStorage::new(dir.path().to_path_buf())
         .await
         .expect("plaintext storage init");
     secure_storage_contract_tests(&s).await;

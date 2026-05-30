@@ -5,8 +5,8 @@
 //! offset and the recovered prefix is returned.
 
 use crate::transcript::TranscriptEntry;
-use lingxi_traits::{FileSystem, FsError};
 use thiserror::Error;
+use traits::{FileSystem, FsError};
 
 /// Failure modes for session storage operations.
 #[derive(Debug, Clone, Error)]

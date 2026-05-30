@@ -1,10 +1,10 @@
 //! Integration test: 401 → refresh → retry, and 5xx × 3 → `RetryExhausted`.
 
-use lingxi_api_client::anthropic::{AnthropicProvider, DEFAULT_BASE_URL};
-use lingxi_api_client::{
+use api_client::anthropic::{AnthropicProvider, DEFAULT_BASE_URL};
+use api_client::{
     ApiError, BearerToken, NoOpOAuthHook, OAuthHookError, OAuthRefreshHook, TokenHash,
 };
-use lingxi_protocol::{ContentBlock, ConversationMessage, MessageId, Secret};
+use protocol::{ContentBlock, ConversationMessage, MessageId, Secret};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 

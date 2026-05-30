@@ -14,19 +14,19 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::{PiiTagged, Verified};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{
-    ENTER_WORKTREE_COMPLETED, ENTER_WORKTREE_FAILED, ENTER_WORKTREE_STARTED,
-    EXIT_WORKTREE_COMPLETED, EXIT_WORKTREE_FAILED, EXIT_WORKTREE_STARTED,
-};
-use lingxi_traits::worktree::{WorktreeError, WorktreeHandle};
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use telemetry::pii::{PiiTagged, Verified};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{
+    ENTER_WORKTREE_COMPLETED, ENTER_WORKTREE_FAILED, ENTER_WORKTREE_STARTED,
+    EXIT_WORKTREE_COMPLETED, EXIT_WORKTREE_FAILED, EXIT_WORKTREE_STARTED,
+};
+use traits::worktree::{WorktreeError, WorktreeHandle};
 
 use crate::builtin::BuiltinToolContext;
 use crate::context::ToolUseContext;
@@ -510,9 +510,9 @@ mod tests {
     use crate::builtin::test_support::{
         ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs, MockWorktreeManager,
     };
-    use lingxi_telemetry::{AnalyticsBus, InMemorySink};
-    use lingxi_traits::worktree::WorktreeManager;
     use std::sync::Arc;
+    use telemetry::{AnalyticsBus, InMemorySink};
+    use traits::worktree::WorktreeManager;
 
     fn make_bctx(mock: Arc<MockWorktreeManager>) -> (BuiltinToolContext, Arc<InMemorySink>) {
         let bus = Arc::new(AnalyticsBus::new());

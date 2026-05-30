@@ -4,7 +4,7 @@
 //! Priorities are encoded as a Rust `Ord` enum so dequeue can rely on
 //! ordered insertion (B3 — Ord on priority; B4 — single shared queue).
 
-use lingxi_protocol::{AgentId, HookId, ToolUseId};
+use protocol::{AgentId, HookId, ToolUseId};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;

@@ -4,7 +4,7 @@
 //! each Effect into real I/O (API call, render, persistence, …). See spec §5.3.
 
 use async_trait::async_trait;
-use lingxi_protocol::{Effect, EffectError, EffectResult};
+use protocol::{Effect, EffectError, EffectResult};
 
 /// Processes Effects emitted by the reducer.
 ///

@@ -11,15 +11,15 @@
     clippy::map_unwrap_or
 )]
 
-use lingxi_tasks::output_manager::TaskOutputManager;
-use lingxi_tasks::registry::TaskRegistry;
-use lingxi_traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-use lingxi_traits::task_registry::{TaskCreateInput, TaskRegistryError, TaskRegistryHandle};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tasks::output_manager::TaskOutputManager;
+use tasks::registry::TaskRegistry;
 use tempfile::tempdir;
 use tokio::sync::Mutex as TokioMutex;
+use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use traits::task_registry::{TaskCreateInput, TaskRegistryError, TaskRegistryHandle};
 
 struct MapFs {
     files: TokioMutex<HashMap<String, String>>,
@@ -101,7 +101,7 @@ async fn task_registry_handle_output_round_trip_via_real_output_manager() {
     let fs: Arc<dyn FileSystem> = Arc::new(MapFs {
         files: TokioMutex::new(HashMap::new()),
     });
-    let runtime = Arc::new(lingxi_test_harness::mocks::MockRuntimeSpawner::default());
+    let runtime = Arc::new(test_harness::mocks::MockRuntimeSpawner::default());
     let out_mgr = Arc::new(TaskOutputManager::new(
         PathBuf::from(dir.path()),
         fs.clone(),

@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use futures::stream::{empty, Stream};
-use lingxi_traits::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 use std::pin::Pin;
+use traits::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 
 /// POSIX `BridgeTransport` — M2 stub returning `Unsupported` on connect.
 #[derive(Default)]

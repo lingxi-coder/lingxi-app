@@ -2,21 +2,19 @@
 //! remaining/2 (not at a fixed 5 min lead). Handle is owned by `AuthState` and
 //! cancellable via `AuthState::shutdown` (Task 6).
 
+use anthropic_oauth::refresh::{AuthState, RefreshDriver};
+use anthropic_oauth::ClaudeAiOAuthConfig;
 use async_trait::async_trait;
-use lingxi_anthropic_oauth::refresh::{AuthState, RefreshDriver};
-use lingxi_anthropic_oauth::ClaudeAiOAuthConfig;
-use lingxi_protocol::{HttpRequest, HttpResponse, Secret};
-use lingxi_telemetry::sink::{AnalyticsSink, LogEventMetadata};
-use lingxi_traits::http::SseStream;
-use lingxi_traits::{
-    BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner,
-};
+use protocol::{HttpRequest, HttpResponse, Secret};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use telemetry::sink::{AnalyticsSink, LogEventMetadata};
 use tokio::sync::Mutex;
+use traits::http::SseStream;
+use traits::{BackgroundTaskHandle, Clock, HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 struct CountingTransport {
     calls: Arc<AtomicU32>,
@@ -178,7 +176,7 @@ async fn shutdown_cancels_handle_and_emits_event() {
         next_id: AtomicU64::new(0),
         handles: Mutex::new(vec![]),
     });
-    let bus = Arc::new(lingxi_telemetry::AnalyticsBus::new());
+    let bus = Arc::new(telemetry::AnalyticsBus::new());
     let sink = Arc::new(CaptureSink::default());
     bus.attach_sink(sink.clone()).await;
 
@@ -251,9 +249,9 @@ async fn proactive_then_reactive_collapses_to_one_refresh() {
         .expect("spawn ok");
 
     // Fire a reactive refresh BEFORE the proactive timer's 30s wake.
-    let driver = lingxi_anthropic_oauth::refresh::RefreshDriver::new(state.clone());
+    let driver = anthropic_oauth::refresh::RefreshDriver::new(state.clone());
     let prev = state.token.read().await.token_hash();
-    let r = lingxi_api_client::oauth_hook::OAuthRefreshHook::refresh(&driver, prev).await;
+    let r = api_client::oauth_hook::OAuthRefreshHook::refresh(&driver, prev).await;
     assert!(r.is_ok(), "reactive refresh ok: {r:?}");
     let after_reactive = calls.load(Ordering::SeqCst);
     assert_eq!(after_reactive, 1, "reactive made exactly one call");

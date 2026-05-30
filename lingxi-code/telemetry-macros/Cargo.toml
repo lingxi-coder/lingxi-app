@@ -1,10 +1,10 @@
 [package]
-name = "lingxi-telemetry-macros"
+name = "telemetry-macros"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Compile-time audit macros for the lingxi-telemetry tengu event tree"
+description = "Compile-time audit macros for the telemetry tengu event tree"
 
 [lib]
 proc-macro = true

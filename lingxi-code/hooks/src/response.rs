@@ -5,7 +5,7 @@
 //! reply. The executor merges all matching hooks' responses into a single
 //! [`AggregateHookResult`] consumed by the calling subsystem.
 
-use lingxi_protocol::HookId;
+use protocol::HookId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

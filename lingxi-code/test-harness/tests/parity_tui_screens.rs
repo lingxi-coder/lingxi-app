@@ -21,12 +21,12 @@
 //! half here and drive the open directly via `open_settings`, mirroring the
 //! pump.
 
-use lingxi_tui::app::dispatch;
-use lingxi_tui::events::keymap::KeyAction;
-use lingxi_tui::screens::settings::{SettingsData, SettingsState, SettingsTab};
-use lingxi_tui::screens::Screen;
-use lingxi_tui::state::{AppState, RenderedMessage, StatusSnapshot};
 use serde_json::Value;
+use tui::app::dispatch;
+use tui::events::keymap::KeyAction;
+use tui::screens::settings::{SettingsData, SettingsState, SettingsTab};
+use tui::screens::Screen;
+use tui::state::{AppState, RenderedMessage, StatusSnapshot};
 
 const FIXTURE: &str = include_str!("../src/parity/fixtures/parity_tui_screens.json");
 
@@ -137,7 +137,7 @@ fn doctor_open_rows_close() {
 
 #[test]
 fn resume_list_select() {
-    use lingxi_tui::screens::resume::{handle_resume_key, ResumeOutcome, ResumeRow, ResumeState};
+    use tui::screens::resume::{handle_resume_key, ResumeOutcome, ResumeRow, ResumeState};
 
     let f = load();
     let s = scenario(&f, "resume_list_select");
@@ -203,7 +203,7 @@ fn resume_list_select() {
 
 #[test]
 fn settings_tab_nav() {
-    use lingxi_tui::screens::settings::{apply_settings_key, SettingsOutcome};
+    use tui::screens::settings::{apply_settings_key, SettingsOutcome};
 
     let f = load();
     let s = scenario(&f, "settings_tab_nav");
@@ -258,12 +258,12 @@ fn settings_tab_nav() {
 }
 
 fn fixture_settings_data() -> SettingsData {
-    use lingxi_core::settings::{EffectiveSettings, SettingsJson};
-    use lingxi_traits::{CostSnapshot, StatusSnapshot as TraitsStatus};
+    use engine::settings::{EffectiveSettings, SettingsJson};
+    use traits::{CostSnapshot, StatusSnapshot as TraitsStatus};
     SettingsData {
         effective: EffectiveSettings {
             settings: SettingsJson::default(),
-            trace: lingxi_core::settings::tracer::ProvenanceTrace::default(),
+            trace: engine::settings::tracer::ProvenanceTrace::default(),
         },
         status: TraitsStatus::default(),
         cost: CostSnapshot::default(),
@@ -294,7 +294,7 @@ fn memory_open_close() {
 #[test]
 fn search_jump_export() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use lingxi_tui::components::message_selector::{
+    use tui::components::message_selector::{
         export_transcript, handle_message_selector_key, SelectorAction,
     };
 

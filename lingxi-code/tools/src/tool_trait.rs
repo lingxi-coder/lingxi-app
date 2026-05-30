@@ -5,7 +5,7 @@
 //! concurrency safety, validation, execution).
 
 use async_trait::async_trait;
-use lingxi_permission::PermissionResult;
+use permission::PermissionResult;
 use serde_json::Value;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -224,7 +224,7 @@ pub struct ToolCallResult {
     /// JSON payload returned to the model.
     pub data: Value,
     /// Extra conversation messages to inject after this call.
-    pub new_messages: Vec<lingxi_protocol::ConversationMessage>,
+    pub new_messages: Vec<protocol::ConversationMessage>,
     /// Optional one-shot mutator for the [`ToolUseContext`].
     pub context_modifier: Option<Box<dyn FnOnce(ToolUseContext) -> ToolUseContext + Send>>,
     /// Opaque per-call metadata (used by MCP tools).

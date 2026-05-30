@@ -2,9 +2,9 @@
 //! `parity/fixtures/mcp_lsp_tools.json` appears byte-for-byte in production
 //! source (constants, telemetry NAMES, `McpClientError::Timeout` Display).
 
-use lingxi_test_harness::parity::load_fixture;
 use serde::Deserialize;
 use serde_json::Value;
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -38,26 +38,20 @@ struct WireIdentifiers {
 #[test]
 fn tool_names_match_production_constants() {
     let fx: Fixture = load_fixture("mcp_lsp_tools");
-    assert_eq!(
-        fx.tool_names.mcp_tool,
-        lingxi_tools::builtin::mcp::MCP_TOOL_NAME
-    );
+    assert_eq!(fx.tool_names.mcp_tool, tools::builtin::mcp::MCP_TOOL_NAME);
     assert_eq!(
         fx.tool_names.mcp_auth_tool,
-        lingxi_tools::builtin::mcp::MCP_AUTH_TOOL_NAME
+        tools::builtin::mcp::MCP_AUTH_TOOL_NAME
     );
     assert_eq!(
         fx.tool_names.list_mcp_resources_tool,
-        lingxi_tools::builtin::mcp::LIST_MCP_RESOURCES_TOOL_NAME
+        tools::builtin::mcp::LIST_MCP_RESOURCES_TOOL_NAME
     );
     assert_eq!(
         fx.tool_names.read_mcp_resource_tool,
-        lingxi_tools::builtin::mcp::READ_MCP_RESOURCE_TOOL_NAME
+        tools::builtin::mcp::READ_MCP_RESOURCE_TOOL_NAME
     );
-    assert_eq!(
-        fx.tool_names.lsp_tool,
-        lingxi_tools::builtin::lsp::LSP_TOOL_NAME
-    );
+    assert_eq!(fx.tool_names.lsp_tool, tools::builtin::lsp::LSP_TOOL_NAME);
 }
 
 #[test]
@@ -65,11 +59,11 @@ fn mcp_wire_identifiers_match() {
     let fx: Fixture = load_fixture("mcp_lsp_tools");
     assert_eq!(
         fx.wire_identifiers.mcp_full_name_prefix,
-        lingxi_tools::builtin::mcp::MCP_TOOL_FULL_NAME_PREFIX
+        tools::builtin::mcp::MCP_TOOL_FULL_NAME_PREFIX
     );
     assert_eq!(
         fx.wire_identifiers.mcp_full_name_separator,
-        lingxi_tools::builtin::mcp::MCP_TOOL_FULL_NAME_SEPARATOR
+        tools::builtin::mcp::MCP_TOOL_FULL_NAME_SEPARATOR
     );
 }
 
@@ -78,11 +72,11 @@ fn lsp_wire_identifiers_match() {
     let fx: Fixture = load_fixture("mcp_lsp_tools");
     assert_eq!(
         fx.wire_identifiers.lsp_position_error,
-        lingxi_tools::builtin::lsp::LSP_POSITION_ERROR
+        tools::builtin::lsp::LSP_POSITION_ERROR
     );
     assert_eq!(
         fx.wire_identifiers.lsp_operations_locked,
-        lingxi_tools::builtin::lsp::LSP_OPERATIONS_LOCKED.to_vec()
+        tools::builtin::lsp::LSP_OPERATIONS_LOCKED.to_vec()
     );
 }
 
@@ -94,7 +88,7 @@ fn telemetry_events_present_in_all_event_names() {
         15,
         "M4-07 must list exactly 15 telemetry events (3 per tool; MCP_COMPLETED/FAILED are reused from M3-06 baseline)"
     );
-    let names = lingxi_telemetry::tengu::ALL_EVENT_NAMES;
+    let names = telemetry::tengu::ALL_EVENT_NAMES;
     for name in &fx.telemetry_events {
         assert!(
             names.contains(&name.as_str()),
@@ -110,7 +104,7 @@ fn mcp_timeout_display_matches_locked_template() {
         fx.wire_identifiers.mcp_timeout_display_template,
         "MCP server \"{server}\" tool \"{tool}\" timed out after {secs}s"
     );
-    let err = lingxi_mcp::McpClientError::Timeout {
+    let err = mcp::McpClientError::Timeout {
         server: "filesystem".into(),
         tool: "read".into(),
         secs: 60,

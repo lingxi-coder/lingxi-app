@@ -1,4 +1,4 @@
-//! `LspClient` — typed JSON-RPC wrapper around a `lingxi_jsonrpc::Connection`.
+//! `LspClient` — typed JSON-RPC wrapper around a `jsonrpc::Connection`.
 //!
 //! Mirrors claude-code's `LSPClient` (`claude-code/src/services/lsp/LSPClient.ts`)
 //! in shape: typed `initialize`, untyped `request<P, R>` for arbitrary LSP
@@ -10,8 +10,7 @@
 
 use std::sync::Arc;
 
-use lingxi_jsonrpc::{Connection, ConnectionError};
-use lingxi_traits::LspError;
+use jsonrpc::{Connection, ConnectionError};
 use lsp_types::{
     ClientCapabilities, InitializeParams, InitializeResult, ServerCapabilities,
     WorkspaceClientCapabilities,
@@ -20,6 +19,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
+use traits::LspError;
 
 /// Typed client over a JSON-RPC connection to one LSP server.
 pub struct LspClient {
@@ -200,14 +200,14 @@ impl LspClient {
     }
 }
 
-/// Map a `lingxi_jsonrpc::ConnectionError` to the trait-level `LspError`.
+/// Map a `jsonrpc::ConnectionError` to the trait-level `LspError`.
 ///
 /// Server-returned JSON-RPC errors (`RouterError::Remote`) become
 /// `LspError::ServerError`; every other failure mode (timeout, writer
 /// closed, serde, broker) is reported as `LspError::Transport` with the
 /// method name prefixed for diagnostics.
 fn map_connection_error(method: &str, err: ConnectionError) -> LspError {
-    use lingxi_jsonrpc::router::RouterError;
+    use jsonrpc::router::RouterError;
     match err {
         ConnectionError::Router(RouterError::Remote(remote)) => LspError::ServerError(format!(
             "{method} returned code {}: {}",

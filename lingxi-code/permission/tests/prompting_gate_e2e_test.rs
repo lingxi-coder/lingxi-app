@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use lingxi_permission::{
+use permission::{
     InteractivePromptingGate, PermissionRequest, PromptDefault, PromptError, PromptingGate,
 };
 use serde_json::json;

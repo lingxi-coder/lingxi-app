@@ -2,24 +2,24 @@
 //! against `workflow_tools.json`. Every byte-locked literal from spec §7
 //! lines 482-489 is asserted here AND in the tool's own unit tests.
 
-use lingxi_core::TodoState;
-use lingxi_telemetry::tengu::tool::{
+use engine::TodoState;
+use serde_json::Value;
+use telemetry::tengu::tool::{
     ENTER_PLAN_MODE_COMPLETED, ENTER_PLAN_MODE_FAILED, ENTER_PLAN_MODE_STARTED,
     ENTER_WORKTREE_COMPLETED, ENTER_WORKTREE_FAILED, ENTER_WORKTREE_STARTED,
     EXIT_PLAN_MODE_COMPLETED, EXIT_PLAN_MODE_FAILED, EXIT_PLAN_MODE_STARTED,
     EXIT_WORKTREE_COMPLETED, EXIT_WORKTREE_FAILED, EXIT_WORKTREE_STARTED, TODO_WRITE_COMPLETED,
     TODO_WRITE_FAILED, TODO_WRITE_STARTED,
 };
-use lingxi_test_harness::parity::load_fixture;
-use lingxi_tools::builtin::plan_mode::{PLAN_MODE_ENTER_MARKER, PLAN_MODE_EXIT_MARKER};
-use lingxi_tools::builtin::todo_write::{
+use test_harness::parity::load_fixture;
+use tools::builtin::plan_mode::{PLAN_MODE_ENTER_MARKER, PLAN_MODE_EXIT_MARKER};
+use tools::builtin::todo_write::{
     TODO_MAX_CONTENT_CHARS, TODO_STATE_COMPLETED, TODO_STATE_IN_PROGRESS, TODO_STATE_PENDING,
 };
-use lingxi_tools::builtin::worktree::{
+use tools::builtin::worktree::{
     flatten_slug, validate_worktree_slug, MAX_WORKTREE_SLUG_LENGTH, WORKTREE_BRANCH_PREFIX,
     WORKTREE_FLATTEN_CHAR, WORKTREE_PATH_SEGMENT,
 };
-use serde_json::Value;
 
 fn fixture() -> Value {
     load_fixture::<Value>("workflow_tools")

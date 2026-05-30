@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use futures_core::stream::Stream;
-use lingxi_protocol::{HttpRequest, HttpResponse, SseEvent};
+use protocol::{HttpRequest, HttpResponse, SseEvent};
 use std::pin::Pin;
 use thiserror::Error;
 

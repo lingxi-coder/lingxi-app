@@ -9,34 +9,34 @@
 
 use std::sync::Arc;
 
-use lingxi_telemetry::AnalyticsBus;
-use lingxi_tools::builtin::agent::{
+use telemetry::AnalyticsBus;
+use tools::builtin::agent::{
     AgentTool, AgentToolInput, AGENT_TOOL_NAME, BUILTIN_SUBAGENT_TYPES, LEGACY_AGENT_TOOL_NAME,
     SUBAGENT_BUDGET_DENIED_PREFIX,
 };
-use lingxi_tools::builtin::send_message::{
+use tools::builtin::send_message::{
     SendMessageTool, SEND_MESSAGE_CLAIM_WINDOW, SEND_MESSAGE_TOOL_NAME,
 };
-use lingxi_tools::builtin::task::{
+use tools::builtin::task::{
     validate_task_id, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool,
     TaskUpdateTool, TASK_CREATE_TOOL_NAME, TASK_GET_TOOL_NAME, TASK_LIST_TOOL_NAME,
     TASK_OUTPUT_TOOL_NAME, TASK_STATUSES, TASK_STOP_TOOL_NAME, TASK_TYPES, TASK_UPDATE_TOOL_NAME,
 };
-use lingxi_tools::tool_trait::Tool;
+use tools::tool_trait::Tool;
 
 use common::{fresh_ctx, fresh_tx, test_builtin_ctx};
 
 mod common {
-    use lingxi_api_client::AnthropicProvider;
-    use lingxi_permission::PermissionMode;
-    use lingxi_sandbox::decision::ProjectTrustLevel;
-    use lingxi_sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
-    use lingxi_telemetry::AnalyticsBus;
-    use lingxi_tools::builtin::BuiltinToolContext;
-    use lingxi_tools::context::{ToolUseContext, ToolUseOptions};
-    use lingxi_tools::progress::{progress_channel, ToolProgressSender};
+    use api_client::AnthropicProvider;
+    use permission::PermissionMode;
+    use sandbox::decision::ProjectTrustLevel;
+    use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
     use std::path::PathBuf;
     use std::sync::Arc;
+    use telemetry::AnalyticsBus;
+    use tools::builtin::BuiltinToolContext;
+    use tools::context::{ToolUseContext, ToolUseOptions};
+    use tools::progress::{progress_channel, ToolProgressSender};
 
     pub fn fresh_ctx() -> ToolUseContext {
         ToolUseContext {
@@ -57,7 +57,7 @@ mod common {
             session: None,
             // AgentTool requires the parent registry; wire an empty one
             // for integ tests so the recursion-lock path stays exercised.
-            subagent_registry: Some(Arc::new(lingxi_tools::ToolRegistry::new())),
+            subagent_registry: Some(Arc::new(tools::ToolRegistry::new())),
         }
     }
 
@@ -72,16 +72,14 @@ mod common {
     #[allow(clippy::too_many_lines)]
     pub fn test_builtin_ctx(bus: Arc<AnalyticsBus>) -> BuiltinToolContext {
         use async_trait::async_trait;
-        use lingxi_traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-        use lingxi_traits::http::{HttpError, HttpTransport, SseStream};
-        use lingxi_traits::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
-        use lingxi_traits::sandbox::{
+        use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+        use traits::http::{HttpError, HttpTransport, SseStream};
+        use traits::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
+        use traits::sandbox::{
             ProcessCommand as SbxCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
             SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
         };
-        use lingxi_traits::worktree::{
-            WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager,
-        };
+        use traits::worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 
         struct PanickingFs;
         #[async_trait]
@@ -192,7 +190,7 @@ mod common {
         }
 
         struct StubClock;
-        impl lingxi_traits::Clock for StubClock {
+        impl traits::Clock for StubClock {
             fn now(&self) -> std::time::SystemTime {
                 std::time::UNIX_EPOCH
             }
@@ -203,14 +201,11 @@ mod common {
         impl HttpTransport for StubHttp {
             async fn request(
                 &self,
-                _: lingxi_protocol::HttpRequest,
-            ) -> Result<lingxi_protocol::HttpResponse, HttpError> {
+                _: protocol::HttpRequest,
+            ) -> Result<protocol::HttpResponse, HttpError> {
                 Err(HttpError::InvalidRequest("stub".into()))
             }
-            async fn stream_sse(
-                &self,
-                _: lingxi_protocol::HttpRequest,
-            ) -> Result<SseStream, HttpError> {
+            async fn stream_sse(&self, _: protocol::HttpRequest) -> Result<SseStream, HttpError> {
                 Err(HttpError::InvalidRequest("stub".into()))
             }
         }
@@ -260,22 +255,16 @@ mod common {
             provider: Arc::new(AnthropicProvider::new("test", None)),
             default_model: "claude-sonnet-4-20250514".into(),
             worktree: Arc::new(StubWt),
-            subagent_spawner: Some(
-                lingxi_tools::builtin::agent_test_support::arc_mock_spawner()
-                    as Arc<dyn lingxi_traits::subagent_spawn::SubagentSpawner>,
+            subagent_spawner: Some(tools::builtin::agent_test_support::arc_mock_spawner()
+                as Arc<dyn traits::subagent_spawn::SubagentSpawner>),
+            task_registry: Some(tools::builtin::agent_test_support::arc_mock_task_registry()
+                as Arc<dyn traits::task_registry::TaskRegistryHandle>),
+            mailbox_router: Some(tools::builtin::agent_test_support::arc_mock_mailbox()
+                as Arc<dyn traits::mailbox::MailboxRouterHandle>),
+            budget_enforcer: Some(
+                tools::builtin::agent_test_support::arc_mock_budget(u64::MAX)
+                    as Arc<dyn traits::budget::BudgetEnforcerHandle>,
             ),
-            task_registry: Some(
-                lingxi_tools::builtin::agent_test_support::arc_mock_task_registry()
-                    as Arc<dyn lingxi_traits::task_registry::TaskRegistryHandle>,
-            ),
-            mailbox_router: Some(
-                lingxi_tools::builtin::agent_test_support::arc_mock_mailbox()
-                    as Arc<dyn lingxi_traits::mailbox::MailboxRouterHandle>,
-            ),
-            budget_enforcer: Some(lingxi_tools::builtin::agent_test_support::arc_mock_budget(
-                u64::MAX,
-            )
-                as Arc<dyn lingxi_traits::budget::BudgetEnforcerHandle>),
             mcp_registry: None,
             lsp_registry: None,
         }

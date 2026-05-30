@@ -1,5 +1,5 @@
 [package]
-name = "lingxi-jsonrpc"
+name = "jsonrpc"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true

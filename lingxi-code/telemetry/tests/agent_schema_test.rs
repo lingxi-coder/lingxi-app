@@ -1,4 +1,4 @@
-use lingxi_telemetry::tengu::agent;
+use telemetry::tengu::agent;
 
 #[test]
 fn all_30_agent_event_names_are_locked() {
@@ -51,7 +51,7 @@ fn all_30_agent_event_names_are_locked() {
 
 #[test]
 fn agent_started_payload_round_trips() {
-    use lingxi_telemetry::Verified;
+    use telemetry::Verified;
     let p = agent::StartedPayload {
         agent_id: Verified::assert_safe("agent-001".into()),
         agent_kind: agent::AgentKind::Main,
@@ -64,7 +64,7 @@ fn agent_started_payload_round_trips() {
 
 #[test]
 fn agent_loop_iteration_carries_extra_value() {
-    use lingxi_telemetry::Verified;
+    use telemetry::Verified;
     let p = agent::LoopIterationPayload {
         agent_id: Verified::assert_safe("agent-001".into()),
         iteration: 7,

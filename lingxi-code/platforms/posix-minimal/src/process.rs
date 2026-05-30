@@ -4,7 +4,7 @@
 //! call surfaces loudly during the demo.
 
 use async_trait::async_trait;
-use lingxi_traits::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand};
+use traits::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand};
 
 /// Stub process runner.
 #[derive(Default)]

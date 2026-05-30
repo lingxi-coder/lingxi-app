@@ -3,13 +3,13 @@
 use crate::conversation::ConversationOrchestrator;
 use crate::error::OrchestratorError;
 use crate::test_support::PermissionDecision;
-use lingxi_api_client::types::ContentBlockApi;
-use lingxi_hooks::events::HookEvent;
-use lingxi_hooks::registry::HookContext;
-use lingxi_hooks::response::HookDecision;
-use lingxi_protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
-use lingxi_telemetry::tengu::orchestrator as orch_events;
-use lingxi_tools::context::{ToolUseContext, ToolUseOptions};
+use api_client::types::ContentBlockApi;
+use hooks::events::HookEvent;
+use hooks::registry::HookContext;
+use hooks::response::HookDecision;
+use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+use telemetry::tengu::orchestrator as orch_events;
+use tools::context::{ToolUseContext, ToolUseOptions};
 
 /// What one turn step decided.
 pub(crate) enum TurnStepOutcome {
@@ -310,7 +310,7 @@ pub(crate) async fn dispatch_tool_uses(
 
         // One-shot progress channel — receiver dropped immediately.
         let (progress_tx, _progress_rx) =
-            tokio::sync::mpsc::channel::<lingxi_tools::progress::ToolProgress>(8);
+            tokio::sync::mpsc::channel::<tools::progress::ToolProgress>(8);
 
         let tool_outcome = tool_handle
             .call(effective_input.clone(), ctx, progress_tx)

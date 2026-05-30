@@ -4,9 +4,9 @@
 //! This is the end-to-end exercise of the ENOENT guard + connection setup +
 //! request round-trip.
 
-use lingxi_test_harness::mocks::mock_lsp_server::mock_lsp_server_path;
-use lingxi_traits::LspServerConfig;
 use std::collections::HashMap;
+use test_harness::mocks::mock_lsp_server::mock_lsp_server_path;
+use traits::LspServerConfig;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn mock_config() -> LspServerConfig {
@@ -28,8 +28,8 @@ fn mock_config() -> LspServerConfig {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn posix_spawn_and_initialize_round_trip() {
-    use lingxi_platform_posix::lsp::PosixLspTransport;
-    use lingxi_traits::LspTransport;
+    use platform_posix::lsp::PosixLspTransport;
+    use traits::LspTransport;
 
     // The mock binary must be present. Cargo does not cross-build artifacts
     // for integration tests of another package automatically — the test
@@ -69,8 +69,8 @@ async fn posix_spawn_and_initialize_round_trip() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn posix_spawn_enoent_is_clean_error() {
-    use lingxi_platform_posix::lsp::PosixLspTransport;
-    use lingxi_traits::LspTransport;
+    use platform_posix::lsp::PosixLspTransport;
+    use traits::LspTransport;
     let mut config = mock_config();
     config.command = "/nonexistent/path/to/lsp-server".into();
     let transport = PosixLspTransport::new();

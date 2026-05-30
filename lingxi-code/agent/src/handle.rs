@@ -19,12 +19,12 @@ use crate::display::{AgentColor, AgentDisplay};
 use crate::pool::StateMachinePool;
 use crate::runner::SubagentEvent;
 use async_trait::async_trait;
-use lingxi_protocol::AgentId;
-use lingxi_traits::subagent_spawn::{
+use protocol::AgentId;
+use std::sync::Arc;
+use traits::subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
     SubagentUsage,
 };
-use std::sync::Arc;
 
 /// Production [`SubagentSpawner`] backed by a [`StateMachinePool`].
 ///
@@ -142,11 +142,11 @@ impl SubagentSpawner for PoolSubagentSpawner {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use lingxi_test_harness::mocks::MockRuntimeSpawner;
-    use lingxi_traits::budget::{BudgetEnforcerHandle, BudgetError};
-    use lingxi_traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
     use serde_json::Value;
     use std::sync::Arc;
+    use test_harness::mocks::MockRuntimeSpawner;
+    use traits::budget::{BudgetEnforcerHandle, BudgetError};
+    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
     struct DummyInvoker;
 
@@ -182,7 +182,7 @@ mod tests {
         // The production wiring uses Arc<StateMachinePool>; this test
         // confirms the adapter accepts and stores the Arc cleanly. Driving
         // the runner end-to-end requires the M1.11 stub to receive an
-        // inbound `lingxi_core::Event`, which lands when the agentic loop
+        // inbound `engine::Event`, which lands when the agentic loop
         // arrives in Plan 09+.
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));

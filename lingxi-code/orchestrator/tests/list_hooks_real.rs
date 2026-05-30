@@ -1,17 +1,17 @@
 //! M6-07 — `list_hooks` reads the wired `Arc<RwLock<HookRegistry>>`.
 
-use lingxi_hooks::definition::{HookCondition, HookExecutor, HookSource};
-use lingxi_hooks::events::HookEventType;
-use lingxi_hooks::{HookDefinition, HookRegistry};
-use lingxi_orchestrator::test_support::{
+use hooks::definition::{HookCondition, HookExecutor, HookSource};
+use hooks::events::HookEventType;
+use hooks::{HookDefinition, HookRegistry};
+use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_protocol::HookId;
-use lingxi_traits::OrchestratorHandle;
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use protocol::HookId;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
+use traits::OrchestratorHandle;
 
 fn hk(
     name: &str,
@@ -42,7 +42,7 @@ fn build_orch() -> ConversationOrchestrator {
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![])),
-        Arc::new(lingxi_tools::registry::ToolRegistry::new()),
+        Arc::new(tools::registry::ToolRegistry::new()),
         noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),

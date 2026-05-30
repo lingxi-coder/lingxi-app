@@ -1,14 +1,14 @@
 //! LSP builtin tool — `LSPTool` exposes 4 operations (hover / completion /
-//! definition / references) over `lingxi_lsp::LspClient` (M2-03).
+//! definition / references) over `lsp::LspClient` (M2-03).
 //!
 //! Input position is 1-based (claude-code UI convention); we convert to
-//! 0-based via `lingxi_lsp::tool_operations::position_from_one_based`
+//! 0-based via `lsp::tool_operations::position_from_one_based`
 //! before issuing the LSP request.
 //!
 //! Wire identifiers locked in spec §7 line 695.
 //!
 //! no-truncation: LSPTool returns structured hover/completion/definition/
-//! references payloads forwarded verbatim from lingxi_lsp::LspClient (the
+//! references payloads forwarded verbatim from lsp::LspClient (the
 //! upstream LSP server is the trust boundary). Free-form text comes only
 //! from hover contents, which are bounded by the LSP protocol itself.
 
@@ -18,16 +18,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use lingxi_lsp::registry::LspRegistry;
-use lingxi_lsp::tool_operations as ops;
-use lingxi_lsp::OpenFileTracker;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{LSP_COMPLETED, LSP_FAILED, LSP_STARTED};
-use lingxi_telemetry::AnalyticsBus;
+use lsp::registry::LspRegistry;
+use lsp::tool_operations as ops;
+use lsp::OpenFileTracker;
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{LSP_COMPLETED, LSP_FAILED, LSP_STARTED};
+use telemetry::AnalyticsBus;
 
 use crate::context::ToolUseContext;
 use crate::progress::ToolProgressSender;
@@ -65,14 +65,14 @@ pub const LSP_POSITION_ERROR: &str = "LSP position must be 1-based (line >= 1, c
 // -- Helpers -----------------------------------------------------------------
 
 fn pii(s: &str) -> AnalyticsValue {
-    use lingxi_telemetry::pii::PiiTagged;
+    use telemetry::pii::PiiTagged;
     AnalyticsValue::String(PiiTagged::assert_pii_tagged_column(s.to_string()).into_inner())
 }
 fn verified_int(n: u64) -> AnalyticsValue {
     AnalyticsValue::Int(n as i64)
 }
 fn verified_str(s: &str) -> AnalyticsValue {
-    use lingxi_telemetry::pii::Verified;
+    use telemetry::pii::Verified;
     AnalyticsValue::String(Verified::assert_safe(s.to_string()).into_inner())
 }
 

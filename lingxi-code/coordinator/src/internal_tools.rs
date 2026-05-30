@@ -9,8 +9,8 @@
 //! registry can be assembled at startup.
 
 use crate::team_registry::TeamRegistry;
-use lingxi_tools::Tool;
 use std::sync::Arc;
+use tools::Tool;
 
 /// Build the placeholder list of coordinator-only tools.
 ///

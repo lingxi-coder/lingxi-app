@@ -5,16 +5,16 @@
 //! pulling them into release builds.
 
 use crate::conversation::OrchestratorApiClient;
-use async_trait::async_trait;
-use lingxi_api_client::{
+use api_client::{
     types::{MessageResponse, UsageApi},
     ApiError,
 };
-use lingxi_protocol::ConversationMessage;
-use lingxi_traits::{CostSnapshot, OutputEvent, OutputStream};
+use async_trait::async_trait;
+use protocol::ConversationMessage;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use traits::{CostSnapshot, OutputEvent, OutputStream};
 
 // ============================================================================
 // MockApiClient (Task 6)
@@ -89,7 +89,7 @@ impl OrchestratorApiClient for MockApiClient {
 /// caller picks the content blocks + `stop_reason`.
 #[must_use]
 pub fn mock_message_response(
-    content: Vec<lingxi_api_client::types::ContentBlockApi>,
+    content: Vec<api_client::types::ContentBlockApi>,
     stop_reason: Option<&str>,
 ) -> MessageResponse {
     MessageResponse {
@@ -166,7 +166,7 @@ impl OutputStream for MockOutputStream {
     }
     async fn emit_tool_call(
         &self,
-        id: &lingxi_protocol::ToolUseId,
+        id: &protocol::ToolUseId,
         tool: &str,
         input: &serde_json::Value,
     ) {
@@ -178,7 +178,7 @@ impl OutputStream for MockOutputStream {
     }
     async fn emit_tool_result(
         &self,
-        id: &lingxi_protocol::ToolUseId,
+        id: &protocol::ToolUseId,
         tool: &str,
         result: &serde_json::Value,
     ) {
@@ -222,10 +222,10 @@ impl OutputStream for MockOutputStream {
 // machinery.
 
 // M5-06 Task 14: the local `HookExecutor` trait that M5-02 introduced is
-// replaced by the real `lingxi_hooks::HookExecutorImpl`. We re-export the
+// replaced by the real `hooks::HookExecutorImpl`. We re-export the
 // concrete type so existing imports (crate::test_support::HookExecutor)
 // keep working as a type alias.
-pub use lingxi_hooks::HookExecutorImpl as HookExecutor;
+pub use hooks::HookExecutorImpl as HookExecutor;
 
 /// Construct an empty `HookExecutorImpl` suitable for tests + the
 /// orchestrator's "no hooks configured" path. The registry is empty so
@@ -236,25 +236,25 @@ pub use lingxi_hooks::HookExecutorImpl as HookExecutor;
 /// the orchestrator can carry an `Arc<HookExecutorImpl>` instead of an
 /// `Arc<dyn local::HookExecutor>` trait object.
 #[must_use]
-pub fn noop_hook_executor() -> Arc<lingxi_hooks::HookExecutorImpl> {
-    use lingxi_hooks::registry::HookRegistry;
+pub fn noop_hook_executor() -> Arc<hooks::HookExecutorImpl> {
+    use hooks::registry::HookRegistry;
 
     struct UnusedHttp;
     #[async_trait]
-    impl lingxi_traits::HttpTransport for UnusedHttp {
+    impl traits::HttpTransport for UnusedHttp {
         async fn request(
             &self,
-            _req: lingxi_protocol::HttpRequest,
-        ) -> Result<lingxi_protocol::HttpResponse, lingxi_traits::HttpError> {
-            Err(lingxi_traits::HttpError::InvalidRequest(
+            _req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest(
                 "noop hook executor — http arm is never called with an empty registry".into(),
             ))
         }
         async fn stream_sse(
             &self,
-            _req: lingxi_protocol::HttpRequest,
-        ) -> Result<lingxi_traits::http::SseStream, lingxi_traits::HttpError> {
-            Err(lingxi_traits::HttpError::InvalidRequest(
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest(
                 "noop hook executor — sse arm is never called".into(),
             ))
         }
@@ -262,29 +262,29 @@ pub fn noop_hook_executor() -> Arc<lingxi_hooks::HookExecutorImpl> {
 
     struct UnusedRuntime;
     #[async_trait]
-    impl lingxi_traits::RuntimeSpawner for UnusedRuntime {
+    impl traits::RuntimeSpawner for UnusedRuntime {
         async fn spawn(
             &self,
             _name: &str,
             _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-        ) -> Result<lingxi_traits::BackgroundTaskHandle, lingxi_traits::RuntimeError> {
-            Err(lingxi_traits::RuntimeError::Internal(
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            Err(traits::RuntimeError::Internal(
                 "noop hook executor — runtime arm is never called".into(),
             ))
         }
         async fn sleep(&self, _duration: std::time::Duration) {}
         async fn cancel(
             &self,
-            _handle: &lingxi_traits::BackgroundTaskHandle,
-        ) -> Result<(), lingxi_traits::RuntimeError> {
+            _handle: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
             Ok(())
         }
     }
 
     let registry = Arc::new(tokio::sync::RwLock::new(HookRegistry::new()));
-    let http: Arc<dyn lingxi_traits::HttpTransport> = Arc::new(UnusedHttp);
-    let runtime: Arc<dyn lingxi_traits::RuntimeSpawner> = Arc::new(UnusedRuntime);
-    Arc::new(lingxi_hooks::HookExecutorImpl::new(registry, http, runtime))
+    let http: Arc<dyn traits::HttpTransport> = Arc::new(UnusedHttp);
+    let runtime: Arc<dyn traits::RuntimeSpawner> = Arc::new(UnusedRuntime);
+    Arc::new(hooks::HookExecutorImpl::new(registry, http, runtime))
 }
 
 // M5-06 Task 14: M5-02's `pub struct NoOpHookExecutor;` is gone — the
@@ -297,7 +297,7 @@ pub fn noop_hook_executor() -> Arc<lingxi_hooks::HookExecutorImpl> {
 // lingxi-traits::permission_gate. We re-export them here so existing
 // orchestrator imports (crate::test_support::PermissionGate, …) keep
 // working unchanged.
-pub use lingxi_permission::gate::{PermissionDecision, PermissionGate};
+pub use permission::gate::{PermissionDecision, PermissionGate};
 
 /// Allow-all permission gate. Always returns `Allow`.
 ///
@@ -305,7 +305,7 @@ pub use lingxi_permission::gate::{PermissionDecision, PermissionGate};
 /// stays here for back-compat with M5-02 / M5-04 tests that import
 /// `crate::test_support::NoOpPermissionGate`. Production wiring (M5-12
 /// CLI) chooses between this no-op and
-/// [`lingxi_permission::InteractivePromptingGate`] based on
+/// [`permission::InteractivePromptingGate`] based on
 /// [`crate::OrchestratorConfig::interactive_permissions`].
 pub struct NoOpPermissionGate;
 
@@ -356,7 +356,7 @@ impl crate::prompt::MemoryHierarchyProvider for StaticMemoryProvider {
 // `MockToolDispatchClock`, the per-event helpers (`message_start`,
 // `text_delta`, …) and the `scripted!` macro. Re-export them through
 // the `test_support` namespace so integration tests can `use
-// lingxi_orchestrator::test_support::{MockStreamingApiClient, …}`
+// orchestrator::test_support::{MockStreamingApiClient, …}`
 // without importing two distinct modules.
 
 pub use crate::test_support_stream::{
@@ -369,18 +369,18 @@ pub use crate::test_support_stream::{
 // MockOrchestratorHandle (M5-10 Task 2)
 // ============================================================================
 //
-// Scripted mock of `lingxi_traits::OrchestratorHandle` for the M5-10/M5-11
+// Scripted mock of `traits::OrchestratorHandle` for the M5-10/M5-11
 // slash-command handler tests. Captures every call as a flag/counter and
 // returns whatever the test pre-loaded via setter methods.
 
-use lingxi_protocol::SessionId;
-use lingxi_traits::{
-    AgentInfo, CompactionSummary, DoctorReport, HandleError, HookInfo, McpServerInfo,
-    MemoryEditorOutcome, OrchestratorHandle, StatusSnapshot,
-};
+use protocol::SessionId;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
+use traits::{
+    AgentInfo, CompactionSummary, DoctorReport, HandleError, HookInfo, McpServerInfo,
+    MemoryEditorOutcome, OrchestratorHandle, StatusSnapshot,
+};
 
 /// Test double for `OrchestratorHandle`.
 ///
@@ -421,7 +421,7 @@ pub struct MockOrchestratorHandle {
     cost_tokens: AtomicU64,
     /// Optional pre-loaded full cost snapshot returned by `snapshot_cost`.
     /// If `Some`, used verbatim (with `session_id` overwritten to mock's id).
-    cost_snapshot: StdMutex<Option<lingxi_traits::CostSnapshot>>,
+    cost_snapshot: StdMutex<Option<traits::CostSnapshot>>,
     // M5-11 additions:
     /// Pre-loaded MCP server list returned by `list_mcp_servers`.
     mcp_servers: StdMutex<Vec<McpServerInfo>>,
@@ -523,7 +523,7 @@ impl MockOrchestratorHandle {
     /// Pre-load the full `CostSnapshot` returned by `snapshot_cost`. If set,
     /// the snapshot is returned verbatim (with `session_id` overwritten to
     /// the mock's stable id).
-    pub fn set_cost_snapshot(&self, s: lingxi_traits::CostSnapshot) {
+    pub fn set_cost_snapshot(&self, s: traits::CostSnapshot) {
         *self.cost_snapshot.lock().unwrap() = Some(s);
     }
     // M5-11 setters:
@@ -593,20 +593,20 @@ impl OrchestratorHandle for MockOrchestratorHandle {
             .unwrap_or_default())
     }
 
-    async fn snapshot_cost(&self) -> lingxi_traits::CostSnapshot {
+    async fn snapshot_cost(&self) -> traits::CostSnapshot {
         if let Some(s) = self.cost_snapshot.lock().unwrap().clone() {
             // Force the session id to match the mock's stable id for
             // consistency with other handle methods.
-            return lingxi_traits::CostSnapshot {
+            return traits::CostSnapshot {
                 session_id: self.session_id,
                 ..s
             };
         }
-        lingxi_traits::CostSnapshot {
+        traits::CostSnapshot {
             session_id: self.session_id,
             total_nano_usd: self.cost_nano_usd.load(Ordering::SeqCst),
             total_tokens: self.cost_tokens.load(Ordering::SeqCst),
-            ..lingxi_traits::CostSnapshot::default()
+            ..traits::CostSnapshot::default()
         }
     }
 
@@ -696,7 +696,7 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_api_client::types::ContentBlockApi;
+    use api_client::types::ContentBlockApi;
 
     // -------- MockApiClient (Task 6) --------
 
@@ -763,7 +763,7 @@ mod tests {
     #[tokio::test]
     async fn mock_output_stream_captures_tool_lifecycle() {
         let m = MockOutputStream::new();
-        let id = lingxi_protocol::ToolUseId::new();
+        let id = protocol::ToolUseId::new();
         let input = serde_json::json!({"file_path": "/tmp/x"});
         let result = serde_json::json!({"content": "ok"});
         m.emit_tool_call(&id, "Read", &input).await;
@@ -803,12 +803,12 @@ mod tests {
     #[tokio::test]
     async fn noop_hook_executor_returns_empty_aggregate() {
         let h = noop_hook_executor();
-        let event = lingxi_hooks::events::HookEvent::PreToolUse {
+        let event = hooks::events::HookEvent::PreToolUse {
             tool_name: "Read".into(),
             tool_input: serde_json::json!({}),
-            tool_use_id: lingxi_protocol::ToolUseId::new(),
+            tool_use_id: protocol::ToolUseId::new(),
         };
-        let ctx = lingxi_hooks::registry::HookContext::default();
+        let ctx = hooks::registry::HookContext::default();
         let agg = h.execute(event, ctx).await;
         assert!(agg.decision.is_none());
         assert!(agg.modified_input.is_none());

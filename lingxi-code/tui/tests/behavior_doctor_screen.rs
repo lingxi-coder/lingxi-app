@@ -3,10 +3,10 @@
 //! `use_terminal_events` closure invokes.
 
 use iocraft::prelude::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use lingxi_tui::root::handle_live_key;
-use lingxi_tui::screens::doctor::DoctorDiagnostics;
-use lingxi_tui::screens::Screen;
-use lingxi_tui::state::{AppState, StatusSnapshot};
+use tui::root::handle_live_key;
+use tui::screens::doctor::DoctorDiagnostics;
+use tui::screens::Screen;
+use tui::state::{AppState, StatusSnapshot};
 
 fn key(code: KeyCode) -> KeyEvent {
     let mut k = KeyEvent::new(KeyEventKind::Press, code);
@@ -55,11 +55,11 @@ fn text_key_does_not_leak_to_prompt_while_screen_open() {
     );
 }
 
-use lingxi_permission::gate::{PermissionRequest, PermissionResponse, PromptDefault};
-use lingxi_tui::state::PendingPermission;
+use permission::gate::{PermissionRequest, PermissionResponse, PromptDefault};
 use serde_json::json;
 use std::time::Duration;
 use tokio::sync::oneshot;
+use tui::state::PendingPermission;
 
 /// §4 R4 SEAM: Doctor screen open WHILE a permission is pending. The
 /// permission (priority 1) wins; its key resolves the DIALOG, not the screen.

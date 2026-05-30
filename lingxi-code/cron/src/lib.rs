@@ -3,7 +3,7 @@
 //! Provides three modules:
 //! - [`schedule`] — 5-field cron expression parser + minute-boundary matcher.
 //! - [`lock`] — cross-process file lock with PID-liveness detection (A9).
-//! - [`scheduler`] — tick loop wired to [`lingxi_tasks::TaskRegistry`].
+//! - [`scheduler`] — tick loop wired to [`tasks::TaskRegistry`].
 //!
 //! Unsafe code is permitted in this crate (workspace override) because
 //! [`scheduler::pid_alive_check`] uses platform FFI (`libc::kill` on Unix,

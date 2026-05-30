@@ -14,10 +14,10 @@
 //! entries are accepted via the `url` field.
 
 use crate::connection::{ConfigScope, McpServerConfig};
-use lingxi_traits::McpTransportSpec;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
+use traits::McpTransportSpec;
 
 /// Errors raised while parsing a `.mcp.json` file.
 #[derive(Debug, thiserror::Error)]

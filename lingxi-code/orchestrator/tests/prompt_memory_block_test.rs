@@ -1,6 +1,6 @@
 //! `<memory>...</memory>` byte-locks + hierarchy splice order.
 
-use lingxi_orchestrator::prompt::{memory_block, MemoryFile};
+use orchestrator::prompt::{memory_block, MemoryFile};
 use std::path::PathBuf;
 
 fn mf(path: &str, body: &str, is_local: bool) -> MemoryFile {
@@ -51,7 +51,7 @@ local\n\
 
 #[tokio::test]
 async fn real_provider_loads_in_spec_splice_order_via_temp_repo() {
-    use lingxi_orchestrator::prompt::memory_block::{
+    use orchestrator::prompt::memory_block::{
         MemoryHierarchyProvider, RealMemoryHierarchyProvider,
     };
 

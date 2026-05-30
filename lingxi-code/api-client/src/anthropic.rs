@@ -10,12 +10,12 @@ use crate::rate_limit::{parse_anthropic_ratelimit_reset, parse_retry_after};
 use crate::retry::{with_retry, DEFAULT_BASE_DELAYS_MS, DEFAULT_RETRY_BUDGET};
 use crate::types::{MessageResponse, StreamEvent};
 use crate::ApiError;
-use lingxi_protocol::{ConversationMessage, HttpMethod, HttpRequest};
-use lingxi_traits::HttpTransport;
+use protocol::{ConversationMessage, HttpMethod, HttpRequest};
 use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
+use traits::HttpTransport;
 
 /// Default Anthropic API base URL. Override via [`AnthropicProvider::new`].
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -61,13 +61,13 @@ pub struct AnthropicProvider {
     /// the process-global registration via `oauth_hook::current_hook()`.
     oauth_hook: Option<Arc<dyn OAuthRefreshHook>>,
     /// Optional analytics bus. When `Some`, `tengu_api_*` events are emitted
-    /// via `lingxi_telemetry::AnalyticsBus`. When `None` (test-mode default),
+    /// via `telemetry::AnalyticsBus`. When `None` (test-mode default),
     /// emission is silently skipped — matches M3-01 / M3-02 convention.
-    bus: Option<Arc<lingxi_telemetry::AnalyticsBus>>,
+    bus: Option<Arc<::telemetry::AnalyticsBus>>,
     /// Optional cost tracker; when present, every successful 200 response
     /// records cost via `tracker.record_api_response_v2(...)` and (if the
     /// provider also has a `bus`) emits `tengu_cost_recorded`.
-    cost_tracker: Option<Arc<lingxi_cost::CostTracker>>,
+    cost_tracker: Option<Arc<cost::CostTracker>>,
 }
 
 impl fmt::Debug for AnthropicProvider {
@@ -118,19 +118,19 @@ impl AnthropicProvider {
     /// Attach an `AnalyticsBus` so middleware emits `tengu_api_*` events.
     /// Without a bus, events are silently skipped (test-mode default).
     #[must_use]
-    pub fn with_bus(mut self, bus: Arc<lingxi_telemetry::AnalyticsBus>) -> Self {
+    pub fn with_bus(mut self, bus: Arc<::telemetry::AnalyticsBus>) -> Self {
         self.bus = Some(bus);
         self
     }
 
     /// Attach a cost tracker so successful 200 responses record cost.
     /// If the provider also has an
-    /// [`AnalyticsBus`](lingxi_telemetry::AnalyticsBus) attached via
+    /// [`AnalyticsBus`](::telemetry::AnalyticsBus) attached via
     /// [`Self::with_bus`], the tracker uses it to emit `tengu_cost_recorded`
     /// per spec §4 Flow B lines 364-376. Without a bus, the cost state
     /// still updates but no event fires.
     #[must_use]
-    pub fn with_cost_tracker(mut self, tracker: Arc<lingxi_cost::CostTracker>) -> Self {
+    pub fn with_cost_tracker(mut self, tracker: Arc<cost::CostTracker>) -> Self {
         self.cost_tracker = Some(tracker);
         self
     }
@@ -272,12 +272,12 @@ impl AnthropicProvider {
         let Some(tracker) = &self.cost_tracker else {
             return;
         };
-        let mr = lingxi_cost::ModelRef {
-            provider: lingxi_cost::ProviderId::Anthropic,
+        let mr = cost::ModelRef {
+            provider: cost::ProviderId::Anthropic,
             model: model.to_string(),
         };
-        let usage = lingxi_cost::Usage {
-            tokens: lingxi_cost::TokenUsage {
+        let usage = cost::Usage {
+            tokens: cost::TokenUsage {
                 input: message_response.usage.input_tokens,
                 output: message_response.usage.output_tokens,
                 cache_read: message_response.usage.cache_read_input_tokens,
@@ -308,7 +308,7 @@ impl AnthropicProvider {
         &self,
         body: &Value,
         transport: &T,
-    ) -> Result<lingxi_protocol::HttpResponse, ApiError> {
+    ) -> Result<protocol::HttpResponse, ApiError> {
         let bus_for_loop = self.bus.clone();
         let model_for_loop = body
             .get("model")
@@ -324,7 +324,7 @@ impl AnthropicProvider {
                 let resp = transport.request(req).await?;
                 if resp.status == 429 {
                     handle_429(&resp.headers, &bus, &model_s).await;
-                    return Ok(lingxi_protocol::HttpResponse {
+                    return Ok(protocol::HttpResponse {
                         status: 503,
                         headers: Vec::new(),
                         body: String::new(),
@@ -340,7 +340,7 @@ impl AnthropicProvider {
     /// drive the 401 → refresh path, and pass other errors through.
     async fn resolve_outcome<T: HttpTransport>(
         &self,
-        resp_result: Result<lingxi_protocol::HttpResponse, ApiError>,
+        resp_result: Result<protocol::HttpResponse, ApiError>,
         body: &Value,
         model: &str,
         request_id: &str,
@@ -463,7 +463,7 @@ impl AnthropicProvider {
         req
     }
 
-    fn bearer_to_header(&self, token: &lingxi_protocol::Secret<String>) -> String {
+    fn bearer_to_header(&self, token: &protocol::Secret<String>) -> String {
         let _ = self; // suppress dead-code lint when impl is empty.
         token.expose_secret().clone()
     }
@@ -643,7 +643,7 @@ impl AnthropicProvider {
 /// sleep for the resolved delay (defaulting to 1s when no header was sent).
 async fn handle_429(
     headers: &[(String, String)],
-    bus: &Option<Arc<lingxi_telemetry::AnalyticsBus>>,
+    bus: &Option<Arc<::telemetry::AnalyticsBus>>,
     model: &str,
 ) {
     let now = SystemTime::now();
@@ -701,8 +701,8 @@ fn status_of(e: &ApiError) -> Option<u16> {
 /// * `model`, `request_id`, `error_kind` use the [`Verified`] newtype.
 /// * `status_code` becomes `AnalyticsValue::None` when absent, never omitted.
 mod telemetry {
-    use lingxi_telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata, Verified};
     use std::sync::Arc;
+    use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata, Verified};
 
     #[allow(
         clippy::cast_possible_wrap,
@@ -846,7 +846,7 @@ mod telemetry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_protocol::HttpMethod;
+    use protocol::HttpMethod;
 
     #[test]
     fn build_request_includes_auth_and_version_headers() {

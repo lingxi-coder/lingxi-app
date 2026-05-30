@@ -4,15 +4,15 @@
 //!
 //! Requires `git` on PATH — assumed available on every M2 CI runner.
 
-use lingxi_test_harness::contracts::worktree::worktree_manager_contract_tests;
 use tempfile::TempDir;
+use test_harness::contracts::worktree::worktree_manager_contract_tests;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn posix_worktree_passes_contract() {
     let tmp = TempDir::new().expect("tempdir");
     worktree_manager_contract_tests(tmp.path(), |root| {
-        lingxi_platform_posix::PosixWorktreeManager::new(root.to_path_buf())
+        platform_posix::PosixWorktreeManager::new(root.to_path_buf())
     })
     .await;
 }
@@ -22,7 +22,7 @@ async fn posix_worktree_passes_contract() {
 async fn windows_worktree_passes_contract() {
     let tmp = TempDir::new().expect("tempdir");
     worktree_manager_contract_tests(tmp.path(), |root| {
-        lingxi_platform_windows::WindowsWorktreeManager::new(root.to_path_buf())
+        platform_windows::WindowsWorktreeManager::new(root.to_path_buf())
     })
     .await;
 }

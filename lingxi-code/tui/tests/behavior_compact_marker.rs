@@ -3,10 +3,10 @@
 //! (ctrl+o for history)`), replacing M6-08's `[Compacted N → M messages]`
 //! `SystemText` placeholder.
 
-use lingxi_tui::events::orchestrator_bridge::TurnEvent;
-use lingxi_tui::state::{AppState, RenderedMessage, StatusSnapshot};
-use lingxi_tui::streaming::apply_event;
 use tokio::sync::Notify;
+use tui::events::orchestrator_bridge::TurnEvent;
+use tui::state::{AppState, RenderedMessage, StatusSnapshot};
+use tui::streaming::apply_event;
 
 #[tokio::test]
 async fn compaction_completed_event_appends_marker_to_scrollback() {
@@ -37,17 +37,17 @@ async fn compaction_completed_event_appends_marker_to_scrollback() {
         "expected CompactBoundary, got: {last:?}",
     );
     // The rendered line is the locked boundary string (no counts).
-    let rendered = lingxi_tui::components::messages::render_entry_to_string(last, false, false);
+    let rendered = tui::components::messages::render_entry_to_string(last, false, false);
     assert_eq!(rendered, "✻ Conversation compacted (ctrl+o for history)");
 }
 
 #[tokio::test]
 async fn bridge_translates_emit_compaction_completed_to_turn_event() {
-    use lingxi_traits::OutputStream;
     use tokio::sync::mpsc;
+    use traits::OutputStream;
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let bridge = lingxi_tui::BridgeOutputStream::new(tx);
+    let bridge = tui::BridgeOutputStream::new(tx);
     bridge.emit_compaction_completed(40, 3, 9_999).await;
 
     let ev = rx.recv().await.expect("event received");

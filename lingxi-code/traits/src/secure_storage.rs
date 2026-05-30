@@ -4,7 +4,7 @@
 //! encrypted-file fallback. See spec §6 (Secrets) and D17 (Runtime boundary).
 
 use async_trait::async_trait;
-use lingxi_protocol::SecureStorageData;
+use protocol::SecureStorageData;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

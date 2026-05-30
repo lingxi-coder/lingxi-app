@@ -1,6 +1,6 @@
 //! Content replacement state — tracks per-turn cleared tool results.
 
-use lingxi_protocol::ToolUseId;
+use protocol::ToolUseId;
 use std::collections::HashMap;
 
 /// Tracks replaced tool result content (large outputs cleared in older turns).

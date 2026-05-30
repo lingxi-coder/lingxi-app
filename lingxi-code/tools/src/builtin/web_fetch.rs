@@ -19,18 +19,18 @@ use crate::tool_trait::{
     ToolStaticContext,
 };
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_protocol::{HttpMethod, HttpRequest};
-use lingxi_telemetry::pii::{PiiTagged, Verified};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{WEB_FETCH_COMPLETED, WEB_FETCH_FAILED, WEB_FETCH_STARTED};
-use lingxi_traits::http::HttpError;
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
+use protocol::{HttpMethod, HttpRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use telemetry::pii::{PiiTagged, Verified};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{WEB_FETCH_COMPLETED, WEB_FETCH_FAILED, WEB_FETCH_STARTED};
+use traits::http::HttpError;
 
 /// Maximum response-body size before truncation (5 MB). Spec §7 lock.
 pub const WEBFETCH_MAX_BYTES: usize = 5 * 1024 * 1024;
@@ -513,11 +513,11 @@ mod tests {
     // ---- async impl Tool tests using MockHttpTransport ---------------------
 
     use crate::builtin::test_support::{fresh_ctx, fresh_tx};
-    use lingxi_telemetry::sinks::InMemorySink;
-    use lingxi_telemetry::AnalyticsBus;
-    use lingxi_test_harness::mocks::{MockHttpTransport, ScriptedResponse};
-    use lingxi_traits::http::HttpTransport;
     use std::sync::Arc;
+    use telemetry::sinks::InMemorySink;
+    use telemetry::AnalyticsBus;
+    use test_harness::mocks::{MockHttpTransport, ScriptedResponse};
+    use traits::http::HttpTransport;
 
     fn make_web_ctx() -> (
         BuiltinToolContext,
@@ -537,7 +537,7 @@ mod tests {
     }
 
     fn ok_response(status: u16, body: &str) -> ScriptedResponse {
-        ScriptedResponse::Sync(lingxi_protocol::HttpResponse {
+        ScriptedResponse::Sync(protocol::HttpResponse {
             status,
             headers: vec![],
             body: body.to_string(),

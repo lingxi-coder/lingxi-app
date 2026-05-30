@@ -15,21 +15,21 @@ use crate::manifest::PluginManifest;
 use crate::source::PluginSource;
 use crate::strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
 
-use lingxi_commands::CommandRegistry;
-use lingxi_hooks::HookRegistry;
-use lingxi_lsp::LspRegistry;
-use lingxi_mcp::McpRegistry;
-use lingxi_outputstyles::OutputStyleRegistry;
-use lingxi_protocol::PluginId;
-use lingxi_secret::CredentialManager;
-use lingxi_skills::SkillRegistry;
-use lingxi_tools::ToolRegistry;
-use lingxi_traits::{FileSystem, HttpTransport, RuntimeSpawner};
+use commands::CommandRegistry;
+use hooks::HookRegistry;
+use lsp::LspRegistry;
+use mcp::McpRegistry;
+use outputstyles::OutputStyleRegistry;
+use protocol::PluginId;
+use secret::CredentialManager;
+use skills::SkillRegistry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
+use tools::ToolRegistry;
+use traits::{FileSystem, HttpTransport, RuntimeSpawner};
 
 /// Failure modes for [`PluginManager`] operations.
 #[derive(Debug, Clone, Error)]
@@ -196,11 +196,11 @@ impl PluginManager {
 
         // 1. Commands.
         if !self.strict.is_locked(PluginComponent::Commands) {
-            let cmds: Vec<lingxi_commands::SlashCommand> = manifest
+            let cmds: Vec<commands::SlashCommand> = manifest
                 .components
                 .commands
                 .iter()
-                .map(|cp| lingxi_commands::SlashCommand {
+                .map(|cp| commands::SlashCommand {
                     name: cp
                         .path
                         .file_stem()
@@ -208,11 +208,11 @@ impl PluginManager {
                         .unwrap_or("")
                         .to_string(),
                     description: String::new(),
-                    source: lingxi_commands::CommandSource::Plugin,
-                    kind: lingxi_commands::SlashCommandKind::Plugin {
+                    source: commands::CommandSource::Plugin,
+                    kind: commands::SlashCommandKind::Plugin {
                         plugin_id: manifest.id,
                         file_path: cp.path.clone(),
-                        frontmatter: lingxi_commands::CommandFrontmatter::default(),
+                        frontmatter: commands::CommandFrontmatter::default(),
                         prompt_template: String::new(),
                     },
                 })

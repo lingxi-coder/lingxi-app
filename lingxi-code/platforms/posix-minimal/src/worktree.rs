@@ -1,9 +1,9 @@
 //! Stub [`WorktreeManager`] — real `git worktree` shell-out lands in Plan 17.
 
 use async_trait::async_trait;
-use lingxi_traits::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 use std::path::PathBuf;
 use std::time::Duration;
+use traits::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 
 /// Stub worktree manager.
 #[derive(Default)]

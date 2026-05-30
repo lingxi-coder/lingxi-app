@@ -1,4 +1,4 @@
-use lingxi_telemetry::tengu::session;
+use telemetry::tengu::session;
 
 #[test]
 fn all_20_session_event_names_are_locked() {
@@ -47,7 +47,7 @@ fn all_20_session_event_names_are_locked() {
 
 #[test]
 fn session_started_payload_round_trips() {
-    use lingxi_telemetry::Verified;
+    use telemetry::Verified;
     let p = session::StartedPayload {
         session_id: Verified::assert_safe("sess-uuid".into()),
         resumed_from: None,
@@ -60,7 +60,7 @@ fn session_started_payload_round_trips() {
 
 #[test]
 fn appended_payload_round_trips() {
-    use lingxi_telemetry::Verified;
+    use telemetry::Verified;
     let p = session::AppendedPayload {
         session_id: Verified::assert_safe("11111111-2222-3333-4444-555555555555".into()),
         message_uuid: Verified::assert_safe("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into()),
@@ -73,7 +73,7 @@ fn appended_payload_round_trips() {
 
 #[test]
 fn rotated_payload_round_trips() {
-    use lingxi_telemetry::Verified;
+    use telemetry::Verified;
     let p = session::RotatedPayload {
         session_id: Verified::assert_safe("11111111-2222-3333-4444-555555555555".into()),
         bytes_before_rotation: 50_000_000,
@@ -86,7 +86,7 @@ fn rotated_payload_round_trips() {
 
 #[test]
 fn corrupted_payload_round_trips() {
-    use lingxi_telemetry::Verified;
+    use telemetry::Verified;
     let p = session::CorruptedPayload {
         session_id: Verified::assert_safe("11111111-2222-3333-4444-555555555555".into()),
         error: Verified::assert_safe("io_error".into()),
@@ -105,7 +105,7 @@ fn three_new_names_have_correct_prefixes() {
 
 #[test]
 fn resume_started_payload_round_trips() {
-    use lingxi_telemetry::Verified;
+    use telemetry::Verified;
     let p = session::ResumeStartedPayload {
         session_id: Verified::assert_safe("11111111-2222-3333-4444-555555555555".into()),
     };
@@ -116,7 +116,7 @@ fn resume_started_payload_round_trips() {
 
 #[test]
 fn resume_completed_payload_round_trips() {
-    use lingxi_telemetry::Verified;
+    use telemetry::Verified;
     let p = session::ResumeCompletedPayload {
         session_id: Verified::assert_safe("11111111-2222-3333-4444-555555555555".into()),
         message_count: 7,

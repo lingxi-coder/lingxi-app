@@ -1,9 +1,9 @@
 //! Generic `Task` trait — implemented per [`TaskType`](crate::id::TaskType).
 
 use async_trait::async_trait;
-use lingxi_traits::{FileSystem, RuntimeSpawner};
 use std::sync::Arc;
 use thiserror::Error;
+use traits::{FileSystem, RuntimeSpawner};
 
 /// Generic interface implemented by per-type task handlers.
 #[async_trait]
@@ -45,7 +45,7 @@ pub enum TaskSpawnInput {
     /// Spawn an in-process agent.
     LocalAgent {
         /// Agent target.
-        agent_id: lingxi_protocol::AgentId,
+        agent_id: protocol::AgentId,
         /// Initial prompt.
         prompt: String,
         /// Whether to start backgrounded.
@@ -61,7 +61,7 @@ pub enum TaskSpawnInput {
     /// Spawn an in-process teammate.
     InProcessTeammate {
         /// Agent target.
-        agent_id: lingxi_protocol::AgentId,
+        agent_id: protocol::AgentId,
         /// Display name.
         name: String,
     },

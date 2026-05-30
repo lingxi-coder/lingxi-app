@@ -7,11 +7,11 @@ use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
 use crate::state::{TaskState, TaskStateBase, TaskStatus};
 use crate::task_trait::{Task, TaskError, TaskSpawnInput};
-use lingxi_traits::{BackgroundTaskHandle, FileSystem, RuntimeSpawner};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
+use traits::{BackgroundTaskHandle, FileSystem, RuntimeSpawner};
 
 /// Tracks running tasks and dispatches lifecycle operations to handlers.
 pub struct TaskRegistry {

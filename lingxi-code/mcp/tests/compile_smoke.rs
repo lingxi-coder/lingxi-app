@@ -6,10 +6,10 @@
 #[test]
 fn module_surface_is_reachable() {
     // Touch each public type to force a compile-time check.
-    let _: Option<lingxi_mcp::McpClient> = None;
-    let _: Option<lingxi_mcp::ClientInfo> = None;
-    let _: Option<lingxi_mcp::InitializeParams> = None;
-    let _: Option<lingxi_mcp::McpClientError> = None;
-    let _: Option<lingxi_mcp::RootsListHandler> = None;
-    let _: Option<lingxi_mcp::ElicitationCreateHandler> = None;
+    let _: Option<mcp::McpClient> = None;
+    let _: Option<mcp::ClientInfo> = None;
+    let _: Option<mcp::InitializeParams> = None;
+    let _: Option<mcp::McpClientError> = None;
+    let _: Option<mcp::RootsListHandler> = None;
+    let _: Option<mcp::ElicitationCreateHandler> = None;
 }

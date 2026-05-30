@@ -8,7 +8,7 @@
 //! - Reactive + proactive token refresh (M3-04)
 //! - Scope upgrade flow (M3-04)
 //!
-//! M3-04 implements `lingxi_api_client::oauth_hook::OAuthRefreshHook` (frozen
+//! M3-04 implements `api_client::oauth_hook::OAuthRefreshHook` (frozen
 //! in M3-03 §3); we extend, never modify, the api-client trait surface.
 
 #![forbid(unsafe_code)]

@@ -48,7 +48,7 @@ pub const TENGU_MEMORY_FILE_TOO_LARGE: &str = "tengu_memory_file_too_large";
 /// - [`LoaderError::FileTooLarge`] when the size exceeds the cap.
 pub fn load_file(
     path: &Path,
-    _bus: Option<&Arc<lingxi_telemetry::AnalyticsBus>>,
+    _bus: Option<&Arc<telemetry::AnalyticsBus>>,
 ) -> Result<LoadedFile, LoaderError> {
     let meta = std::fs::metadata(path).map_err(|e| LoaderError::Io(e.to_string()))?;
     let size = meta.len();
@@ -78,18 +78,18 @@ pub fn load_file(
 /// No-op when `bus` is `None`. Payload keys (locked):
 /// `_PROTO_path: PiiTagged(<path>)`, `size_bytes: Int(N)`.
 pub async fn emit_file_too_large(
-    bus: Option<&Arc<lingxi_telemetry::AnalyticsBus>>,
+    bus: Option<&Arc<telemetry::AnalyticsBus>>,
     path: &Path,
     bytes: u64,
 ) {
     let Some(bus) = bus else {
         return;
     };
-    let mut md = lingxi_telemetry::sink::LogEventMetadata::new();
+    let mut md = telemetry::sink::LogEventMetadata::new();
     md.insert(
         "_PROTO_path".into(),
-        lingxi_telemetry::sink::AnalyticsValue::String(
-            lingxi_telemetry::pii::PiiTagged::assert_pii_tagged_column(path.display().to_string())
+        telemetry::sink::AnalyticsValue::String(
+            telemetry::pii::PiiTagged::assert_pii_tagged_column(path.display().to_string())
                 .into_inner(),
         ),
     );
@@ -98,7 +98,7 @@ pub async fn emit_file_too_large(
     let size_int = i64::try_from(bytes).unwrap_or(i64::MAX);
     md.insert(
         "size_bytes".into(),
-        lingxi_telemetry::sink::AnalyticsValue::Int(size_int),
+        telemetry::sink::AnalyticsValue::Int(size_int),
     );
     bus.log_event(TENGU_MEMORY_FILE_TOO_LARGE, md).await;
 }
@@ -147,10 +147,8 @@ mod tests {
 
     #[tokio::test]
     async fn emit_file_too_large_writes_event_with_size() {
-        use lingxi_telemetry::{
-            sink::LogEventMetadata, AnalyticsBus, AnalyticsSink, AnalyticsValue,
-        };
         use std::sync::{Arc, Mutex};
+        use telemetry::{sink::LogEventMetadata, AnalyticsBus, AnalyticsSink, AnalyticsValue};
 
         struct Cap {
             events: Mutex<Vec<(String, LogEventMetadata)>>,

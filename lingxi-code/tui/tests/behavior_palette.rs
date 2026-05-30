@@ -3,8 +3,8 @@
 //! `live_focus_trap_test.rs`).
 
 use iocraft::prelude::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use lingxi_tui::root::handle_live_key;
-use lingxi_tui::state::{AppState, StatusSnapshot};
+use tui::root::handle_live_key;
+use tui::state::{AppState, StatusSnapshot};
 
 fn key(code: KeyCode) -> KeyEvent {
     let mut k = KeyEvent::new(KeyEventKind::Press, code);
@@ -68,10 +68,10 @@ fn focus_trap_down_key_does_not_scroll_scrollback() {
 fn permission_pending_beats_open_palette() {
     // Cross-state seam (design §5.6): if a permission is pending AND the palette
     // is open, the permission focus-trap (priority 1) wins.
-    use lingxi_permission::gate::{PermissionRequest, PromptDefault};
-    use lingxi_tui::state::PendingPermission;
+    use permission::gate::{PermissionRequest, PromptDefault};
     use serde_json::json;
     use tokio::sync::oneshot;
+    use tui::state::PendingPermission;
 
     let mut st = AppState::new(StatusSnapshot::default());
     for ch in "/co".chars() {
@@ -140,7 +140,7 @@ fn m7_07_registers_no_new_telemetry_events() {
     // (per-keystroke open/close churn, no clean once-per-open transition), so
     // the count grew via screen_opened/screen_closed/search_opened + the v0.8.0
     // marker, NOT the palette. If this fails, the palette event leaked in.
-    let names = lingxi_telemetry::tengu::ALL_EVENT_NAMES;
+    let names = telemetry::tengu::ALL_EVENT_NAMES;
     assert_eq!(names.len(), 330, "M7-16 locks the registry at 330");
     assert!(
         !names.contains(&"tengu_tui_command_palette_opened"),

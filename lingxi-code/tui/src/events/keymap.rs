@@ -21,7 +21,7 @@ use crate::components::permissions::{
     bypass_permissions, exit_plan_mode, tool_use_confirm, DialogResolution,
 };
 use crate::state::AppState;
-use lingxi_permission::gate::PermissionRequest;
+use permission::gate::PermissionRequest;
 
 /// Legacy M6-01 quit classifier. Retained for the existing event-loop
 /// behaviour test.

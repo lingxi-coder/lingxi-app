@@ -7,7 +7,7 @@
 //! - `WEB_SEARCH_TOOL_BLOCK_NAME = "web_search"` (tool block `name`)
 //! - `WEB_SEARCH_MAX_USES = 8` (upstream `WebSearchTool.ts:80`)
 //! - `WEB_SEARCH_DEFAULT_MAX_TOKENS = 4096`
-//! - `anthropic-beta: web-search-2025-03-05` (via `lingxi_api_client::betas::WEB_SEARCH`)
+//! - `anthropic-beta: web-search-2025-03-05` (via `api_client::betas::WEB_SEARCH`)
 
 use crate::builtin::web_fetch::WEBFETCH_USER_AGENT_PREFIX;
 use crate::builtin::BuiltinToolContext;
@@ -17,20 +17,20 @@ use crate::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
 };
+use api_client::betas::WEB_SEARCH as WEB_SEARCH_BETA;
+use api_client::types::{ContentBlockApi, MessageResponse};
 use async_trait::async_trait;
-use lingxi_api_client::betas::WEB_SEARCH as WEB_SEARCH_BETA;
-use lingxi_api_client::types::{ContentBlockApi, MessageResponse};
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::{PiiTagged, Verified};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{WEB_SEARCH_COMPLETED, WEB_SEARCH_FAILED, WEB_SEARCH_STARTED};
-use lingxi_traits::http::HttpError;
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::time::Instant;
+use telemetry::pii::{PiiTagged, Verified};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{WEB_SEARCH_COMPLETED, WEB_SEARCH_FAILED, WEB_SEARCH_STARTED};
+use traits::http::HttpError;
 
 /// Wire `type` field on the WebSearch tool block. Spec §7 lock; matches
 /// `claude-code/src/tools/WebSearchTool/WebSearchTool.ts:78`.
@@ -552,12 +552,12 @@ mod tests {
     // ---- async impl Tool tests using MockHttpTransport ---------------------
 
     use crate::builtin::test_support::{fresh_ctx, fresh_tx};
-    use lingxi_api_client::AnthropicProvider;
-    use lingxi_telemetry::sinks::InMemorySink;
-    use lingxi_telemetry::AnalyticsBus;
-    use lingxi_test_harness::mocks::{MockHttpTransport, ScriptedResponse};
-    use lingxi_traits::http::HttpTransport;
+    use api_client::AnthropicProvider;
     use std::sync::Arc;
+    use telemetry::sinks::InMemorySink;
+    use telemetry::AnalyticsBus;
+    use test_harness::mocks::{MockHttpTransport, ScriptedResponse};
+    use traits::http::HttpTransport;
 
     fn make_web_ctx() -> (
         BuiltinToolContext,
@@ -579,7 +579,7 @@ mod tests {
     }
 
     fn ok_response(status: u16, body: &str) -> ScriptedResponse {
-        ScriptedResponse::Sync(lingxi_protocol::HttpResponse {
+        ScriptedResponse::Sync(protocol::HttpResponse {
             status,
             headers: vec![],
             body: body.to_string(),

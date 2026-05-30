@@ -41,7 +41,7 @@ pub struct TuiBridge {
 /// Opaque runtime handle that the CLI passes in.
 pub struct Runtime {
     /// Session UUID for telemetry correlation.
-    pub session_id: lingxi_protocol::SessionId,
+    pub session_id: protocol::SessionId,
     /// Optional bridge for streaming events. `None` falls back to a static
     /// REPL with no orchestrator wiring (smoke / manual gates).
     pub bridge: Option<TuiBridge>,
@@ -50,13 +50,13 @@ pub struct Runtime {
     /// (M7-13 review) Orchestrator handle for the async Settings open pump
     /// (`SettingsData::snapshot`). `None` (smoke gates / no-bridge mounts)
     /// leaves Settings unreachable — correct for those mounts.
-    pub orchestrator: Option<Arc<dyn lingxi_traits::OrchestratorHandle>>,
+    pub orchestrator: Option<Arc<dyn traits::OrchestratorHandle>>,
 }
 
 impl Runtime {
     /// Construct from a session id. No bridge, default status.
     #[must_use]
-    pub fn new(session_id: lingxi_protocol::SessionId) -> Self {
+    pub fn new(session_id: protocol::SessionId) -> Self {
         Self {
             session_id,
             bridge: None,
@@ -68,7 +68,7 @@ impl Runtime {
     /// Construct with a streaming bridge + status snapshot.
     #[must_use]
     pub fn with_bridge(
-        session_id: lingxi_protocol::SessionId,
+        session_id: protocol::SessionId,
         bridge: TuiBridge,
         status: StatusSnapshot,
     ) -> Self {
@@ -83,10 +83,7 @@ impl Runtime {
     /// (M7-13 review) Attach the orchestrator handle that drives the async
     /// Settings open pump. Without it the Settings screen is unreachable.
     #[must_use]
-    pub fn with_orchestrator(
-        mut self,
-        orchestrator: Arc<dyn lingxi_traits::OrchestratorHandle>,
-    ) -> Self {
+    pub fn with_orchestrator(mut self, orchestrator: Arc<dyn traits::OrchestratorHandle>) -> Self {
         self.orchestrator = Some(orchestrator);
         self
     }
@@ -172,7 +169,7 @@ pub async fn run_tui_session(
 /// Returns `TuiError::Terminal` if iocraft's render loop fails (e.g. stdout
 /// isn't a TTY — the CLI routes the non-TTY case to the stdio picker instead).
 pub async fn run_resume_picker(
-    rows: Vec<lingxi_session::jsonl::loader::SessionMetadata>,
+    rows: Vec<session::jsonl::loader::SessionMetadata>,
 ) -> Result<Option<uuid::Uuid>, TuiError> {
     use crate::screens::resume::{ResumeRow, ResumeState};
     use crate::screens::Screen;
@@ -227,7 +224,7 @@ mod tests {
     /// the session_id round-trips.
     #[test]
     fn runtime_carries_session_id() {
-        let id = lingxi_protocol::SessionId::new();
+        let id = protocol::SessionId::new();
         let r = Runtime::new(id);
         assert_eq!(r.session_id, id);
         assert!(r.bridge.is_none());
@@ -235,7 +232,7 @@ mod tests {
 
     #[test]
     fn runtime_with_bridge_carries_rx() {
-        let id = lingxi_protocol::SessionId::new();
+        let id = protocol::SessionId::new();
         let (_, rx) = mpsc::unbounded_channel();
         let r = Runtime::with_bridge(id, TuiBridge { rx }, StatusSnapshot::default());
         assert!(r.bridge.is_some());

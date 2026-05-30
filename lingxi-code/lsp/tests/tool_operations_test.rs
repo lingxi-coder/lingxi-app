@@ -4,21 +4,21 @@
 //! verify the wire shape of the requests + the 1-based → 0-based position
 //! conversion + the didOpen-gating + the file-size cap.
 
-use lingxi_jsonrpc::Connection;
-use lingxi_lsp::client::LspClient;
-use lingxi_lsp::tool_operations::{
+use jsonrpc::Connection;
+use lsp::client::LspClient;
+use lsp::tool_operations::{
     document_symbol, find_references, go_to_definition, go_to_implementation, hover,
     incoming_calls, language_id_for, outgoing_calls, position_from_one_based,
     prepare_call_hierarchy, workspace_symbol, LspOperation, LspOperationError,
     MAX_LSP_FILE_SIZE_BYTES,
 };
-use lingxi_lsp::OpenFileTracker;
-use lingxi_traits::LspServerConfig;
+use lsp::OpenFileTracker;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+use traits::LspServerConfig;
 
 const FRAME_BUFFER: usize = 64 * 1024;
 

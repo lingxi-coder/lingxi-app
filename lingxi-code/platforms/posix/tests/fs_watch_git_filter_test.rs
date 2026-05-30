@@ -2,10 +2,10 @@
 //! `changeDetector.ts:118` which calls .split(sep).some(d => d === '.git')).
 
 use futures_util::StreamExt;
-use lingxi_platform_posix::PosixFileSystem;
-use lingxi_traits::FileSystem;
+use platform_posix::PosixFileSystem;
 use std::time::Duration;
 use tempfile::tempdir;
+use traits::FileSystem;
 
 #[tokio::test]
 async fn watch_excludes_dot_git_directory() {

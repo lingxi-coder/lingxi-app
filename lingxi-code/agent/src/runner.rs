@@ -6,7 +6,7 @@
 //! loop in Plan 09+ uses `§22 SessionStorage` and `§23 FileStateCache`.
 
 use crate::context::SubagentContext;
-use lingxi_protocol::AgentId;
+use protocol::AgentId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -52,17 +52,17 @@ pub enum SubagentEvent {
 
 /// Subagent state-machine loop.
 ///
-/// Drives [`lingxi_core::reduce`] over `event_rx` and emits
+/// Drives [`engine::reduce`] over `event_rx` and emits
 /// [`SubagentEvent`]s on `out_tx`. M1.11 stubs completion after the first
 /// event so the pool can be wired end-to-end before the full agentic loop
 /// arrives in Plan 09+.
 pub async fn run_subagent(
     ctx: SubagentContext,
-    mut event_rx: mpsc::Receiver<lingxi_core::Event>,
+    mut event_rx: mpsc::Receiver<engine::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
 ) {
-    use lingxi_core::{reduce, ConversationState, SessionState};
-    use lingxi_protocol::SessionId;
+    use engine::{reduce, ConversationState, SessionState};
+    use protocol::SessionId;
 
     let agent_id = ctx.agent_id;
 
@@ -92,7 +92,7 @@ pub async fn run_subagent(
         // without this fast path it would never produce Killed.
         if matches!(
             &event,
-            lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt
+            engine::Event::UserExit | engine::Event::UserInterrupt
         ) {
             // Drive the reducer anyway for state consistency, but ignore
             // the resulting reason.
@@ -108,7 +108,7 @@ pub async fn run_subagent(
         // BEFORE the reducer consumes it — we need to peek at the
         // final_message for the Message emit.
         let api_end_msg = match &event {
-            lingxi_core::Event::ApiStreamEnd { final_message, .. } => Some(final_message.clone()),
+            engine::Event::ApiStreamEnd { final_message, .. } => Some(final_message.clone()),
             _ => None,
         };
 
@@ -175,8 +175,8 @@ mod tests {
         AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
     };
     use crate::display::{AgentColor, AgentDisplay};
-    use lingxi_core::token::Usage;
-    use lingxi_protocol::{ContentBlock, ConversationMessage, MessageId, RequestId};
+    use engine::token::Usage;
+    use protocol::{ContentBlock, ConversationMessage, MessageId, RequestId};
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
@@ -246,7 +246,7 @@ mod tests {
         let ctx = fresh_subagent_ctx();
         let agent_id = ctx.agent_id;
 
-        let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
         let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(8);
 
         // Drive the runner from a request-response cycle the M1 reducer
@@ -261,7 +261,7 @@ mod tests {
         let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
 
         event_tx
-            .send(lingxi_core::Event::UserMessage {
+            .send(engine::Event::UserMessage {
                 message_id: msg_id,
                 request_id: req,
                 content: "hi".into(),
@@ -269,11 +269,11 @@ mod tests {
             .await
             .unwrap();
         event_tx
-            .send(lingxi_core::Event::ApiStreamStart { request_id: req })
+            .send(engine::Event::ApiStreamStart { request_id: req })
             .await
             .unwrap();
         event_tx
-            .send(lingxi_core::Event::ApiStreamEnd {
+            .send(engine::Event::ApiStreamEnd {
                 request_id: req,
                 final_message: final_msg.clone(),
                 usage: Usage::default(),
@@ -342,14 +342,14 @@ mod tests {
         let ctx = fresh_subagent_ctx();
         let agent_id = ctx.agent_id;
 
-        let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
         let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(8);
 
         let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
 
         // Drive directly to terminal via UserExit. The fast-path in the
         // runner short-circuits to Killed on this input event.
-        event_tx.send(lingxi_core::Event::UserExit).await.unwrap();
+        event_tx.send(engine::Event::UserExit).await.unwrap();
         drop(event_tx);
 
         handle.await.unwrap();
@@ -393,15 +393,12 @@ mod tests {
         let ctx = fresh_subagent_ctx();
         let agent_id = ctx.agent_id;
 
-        let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
         let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(8);
 
         let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
 
-        event_tx
-            .send(lingxi_core::Event::UserInterrupt)
-            .await
-            .unwrap();
+        event_tx.send(engine::Event::UserInterrupt).await.unwrap();
         drop(event_tx);
 
         handle.await.unwrap();
@@ -424,7 +421,7 @@ mod tests {
         let ctx = fresh_subagent_ctx();
         let agent_id = ctx.agent_id;
 
-        let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
         let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(8);
 
         let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));

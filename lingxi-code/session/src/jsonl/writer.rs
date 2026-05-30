@@ -5,11 +5,11 @@
 //! terminate every line with a single `\n`, file mode `0o600`, dir mode `0o700`.
 
 use crate::jsonl::schema::JsonlMessage;
-use lingxi_traits::{FileSystem, FsError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
+use traits::{FileSystem, FsError};
 
 /// Failure modes for [`JsonlWriter`] operations.
 #[derive(Debug, Error)]

@@ -8,9 +8,9 @@
 
 use crate::registry::ToolRegistry;
 use async_trait::async_trait;
-use lingxi_traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use serde_json::Value;
 use std::sync::Arc;
+use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
 /// Wraps an `Arc<ToolRegistry>` as a `dyn ToolInvoker`.
 ///
@@ -103,9 +103,9 @@ mod tests {
         ToolStaticContext, ValidationError,
     };
     use async_trait::async_trait;
-    use lingxi_permission::result::PermissionMetadata;
-    use lingxi_permission::{PermissionDecisionReason, PermissionResult};
     use once_cell::sync::Lazy;
+    use permission::result::PermissionMetadata;
+    use permission::{PermissionDecisionReason, PermissionResult};
     use serde_json::json;
     use std::sync::Mutex as StdMutex;
 

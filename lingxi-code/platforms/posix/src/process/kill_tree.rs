@@ -9,10 +9,10 @@
 //! `treeKill(pid, 'SIGKILL')` semantics but with a polite SIGTERM first
 //! (the node `tree-kill` library's default sequence is similar).
 
-use lingxi_traits::ProcessError;
 use nix::sys::signal::{killpg, Signal};
 use nix::unistd::Pid;
 use std::time::Duration;
+use traits::ProcessError;
 
 /// Default grace period between SIGTERM and the SIGKILL escalation.
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(5);
@@ -90,7 +90,7 @@ fn pgid_from(pid: u32) -> Result<Pid, ProcessError> {
 #[cfg(test)]
 mod tests {
     use super::{kill_tree_force, kill_tree_unix};
-    use lingxi_traits::ProcessError;
+    use traits::ProcessError;
 
     /// Killing a non-existent PGID returns `Ok(())` — `ESRCH` on the first
     /// signal is treated as success because the caller's only goal is "the

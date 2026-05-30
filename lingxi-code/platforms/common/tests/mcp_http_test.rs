@@ -47,7 +47,7 @@ async fn spawn_mock() -> (String, MockState) {
 #[tokio::test]
 async fn connect_http_sends_accept_and_content_type() {
     let (url, state) = spawn_mock().await;
-    let conn = lingxi_platform_common::connect_http(&url, None, &HashMap::new())
+    let conn = platform_common::connect_http(&url, None, &HashMap::new())
         .await
         .expect("connect_http should succeed");
 
@@ -83,7 +83,7 @@ async fn connect_http_sends_accept_and_content_type() {
 #[tokio::test]
 async fn connect_http_includes_ide_auth_header_when_provided() {
     let (url, state) = spawn_mock().await;
-    let conn = lingxi_platform_common::connect_http(
+    let conn = platform_common::connect_http(
         &url,
         Some("deadbeefdeadbeefdeadbeefdeadbeef"),
         &HashMap::new(),

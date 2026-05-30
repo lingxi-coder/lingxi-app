@@ -4,10 +4,10 @@
 //! query; the result is awaited just before assembling the next prompt.
 
 use crate::selector::MemorySelector;
-use lingxi_traits::RuntimeSpawner;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use traits::RuntimeSpawner;
 
 /// Side-channel that fires the memory selector concurrently with the
 /// main turn.

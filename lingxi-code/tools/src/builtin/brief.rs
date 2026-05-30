@@ -10,14 +10,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::{PiiTagged, Verified};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{BRIEF_COMPLETED, BRIEF_FAILED, BRIEF_STARTED};
-use lingxi_telemetry::AnalyticsBus;
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
+use telemetry::pii::{PiiTagged, Verified};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{BRIEF_COMPLETED, BRIEF_FAILED, BRIEF_STARTED};
+use telemetry::AnalyticsBus;
 
 use crate::context::ToolUseContext;
 use crate::progress::ToolProgressSender;
@@ -272,7 +272,7 @@ impl Tool for BriefTool {
 mod tests {
     use super::*;
     use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, HOME_LOCK};
-    use lingxi_traits::process::ProcessOutput;
+    use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {

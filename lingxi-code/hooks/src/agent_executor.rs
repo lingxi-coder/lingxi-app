@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use lingxi_traits::subagent_spawn::{
+use traits::subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnRequest, SubagentSpawner,
 };
 
@@ -186,12 +186,12 @@ mod tests {
     use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
     use crate::events::HookEventType;
     use async_trait::async_trait;
-    use lingxi_protocol::HookId;
-    use lingxi_traits::budget::{BudgetEnforcerHandle, BudgetError};
-    use lingxi_traits::subagent_spawn::{SubagentResult, SubagentSpawnError, SubagentUsage};
-    use lingxi_traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use protocol::HookId;
     use serde_json::json;
     use std::sync::Mutex;
+    use traits::budget::{BudgetEnforcerHandle, BudgetError};
+    use traits::subagent_spawn::{SubagentResult, SubagentSpawnError, SubagentUsage};
+    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
     struct InertInvoker;
     #[async_trait]

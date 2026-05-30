@@ -3,7 +3,7 @@
 //! See spec §3 (cross-plan trait), §4 Flow A (lifecycle), §7 (wire identifiers),
 //! §8 M3-04 phase list.
 //!
-//! M3-04 implements [`lingxi_api_client::oauth_hook::OAuthRefreshHook`] (frozen
+//! M3-04 implements [`api_client::oauth_hook::OAuthRefreshHook`] (frozen
 //! in M3-03 §3). The single-flight invariant is enforced via [`AuthState::refresh_lock`]
 //! with double-check-after-acquire (v3 §16.3).
 
@@ -13,9 +13,9 @@
 
 use crate::client::OAuthError;
 use crate::config::ClaudeAiOAuthConfig;
+use api_client::oauth_hook::{BearerToken, OAuthHookError, OAuthRefreshHook, TokenHash};
 use async_trait::async_trait;
-use lingxi_api_client::oauth_hook::{BearerToken, OAuthHookError, OAuthRefreshHook, TokenHash};
-use lingxi_protocol::{HttpMethod, HttpRequest, Secret};
+use protocol::{HttpMethod, HttpRequest, Secret};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -60,18 +60,18 @@ pub struct AuthState {
     pub(crate) refresh_lock: Arc<Mutex<()>>,
     /// Proactive task handle. Populated by `RefreshDriver::spawn_proactive`;
     /// cleared by `AuthState::shutdown`.
-    pub(crate) proactive_handle: RwLock<Option<lingxi_traits::BackgroundTaskHandle>>,
+    pub(crate) proactive_handle: RwLock<Option<traits::BackgroundTaskHandle>>,
     /// HTTP transport for token-endpoint POSTs. Engine code never imports a
     /// concrete HTTP client; we go through the trait per D17.
-    pub(crate) http: Arc<dyn lingxi_traits::HttpTransport>,
+    pub(crate) http: Arc<dyn traits::HttpTransport>,
     /// Wall-clock source. Tests inject a virtual clock.
-    pub(crate) clock: Arc<dyn lingxi_traits::Clock>,
+    pub(crate) clock: Arc<dyn traits::Clock>,
     /// Optional analytics bus for `tengu_oauth_*` events. `None` in tests that
     /// don't care about telemetry.
-    pub(crate) bus: Option<Arc<lingxi_telemetry::AnalyticsBus>>,
+    pub(crate) bus: Option<Arc<telemetry::AnalyticsBus>>,
     /// Optional credential manager for keychain persistence. `None` in tests
     /// that only exercise the in-memory token rotation.
-    pub(crate) credentials: Option<Arc<lingxi_secret::CredentialManager>>,
+    pub(crate) credentials: Option<Arc<secret::CredentialManager>>,
 }
 
 impl AuthState {
@@ -87,10 +87,10 @@ impl AuthState {
         access_token: Secret<String>,
         refresh_token: Option<Secret<String>>,
         expires_at: SystemTime,
-        http: Arc<dyn lingxi_traits::HttpTransport>,
-        clock: Arc<dyn lingxi_traits::Clock>,
-        bus: Option<Arc<lingxi_telemetry::AnalyticsBus>>,
-        credentials: Option<Arc<lingxi_secret::CredentialManager>>,
+        http: Arc<dyn traits::HttpTransport>,
+        clock: Arc<dyn traits::Clock>,
+        bus: Option<Arc<telemetry::AnalyticsBus>>,
+        credentials: Option<Arc<secret::CredentialManager>>,
     ) -> Arc<Self> {
         let scopes = config.scopes.clone();
         Arc::new(Self {
@@ -138,7 +138,7 @@ impl AuthState {
     }
 
     /// Borrow the proactive task handle if one has been spawned.
-    pub async fn proactive_handle(&self) -> Option<lingxi_traits::BackgroundTaskHandle> {
+    pub async fn proactive_handle(&self) -> Option<traits::BackgroundTaskHandle> {
         self.proactive_handle.read().await.clone()
     }
 
@@ -149,7 +149,7 @@ impl AuthState {
     /// `spawner` must be the same `RuntimeSpawner` used by `spawn_proactive`;
     /// if a different one is passed, the handle may not be recognized and
     /// `cancel` returns `RuntimeError::NotFound` which we treat as a no-op.
-    pub async fn shutdown(&self, spawner: &dyn lingxi_traits::RuntimeSpawner) {
+    pub async fn shutdown(&self, spawner: &dyn traits::RuntimeSpawner) {
         let handle = self.proactive_handle.write().await.take();
         let Some(handle) = handle else {
             // Already shut down — emit no event; matches v3 §16.4 idempotency.
@@ -211,7 +211,7 @@ impl AuthState {
     /// Persist the new [`TokenInfo`] to keychain if a `CredentialManager` is
     /// attached. No-op (returns `Ok`) if no manager is configured (test path).
     ///
-    /// NOTE: the M2-06 [`lingxi_secret::CredentialManager`] surface only
+    /// NOTE: the M2-06 [`secret::CredentialManager`] surface only
     /// exposes an Anthropic-API-key entry point; a generic OAuth-token store
     /// path is filed for a follow-up. For M3-04 the in-memory rotation is the
     /// source of truth; the engine's startup wiring (Task 4 §5) will pass a
@@ -236,17 +236,17 @@ impl AuthState {
 /// with a counting transport.
 struct NullTransport;
 #[async_trait]
-impl lingxi_traits::HttpTransport for NullTransport {
+impl traits::HttpTransport for NullTransport {
     async fn request(
         &self,
-        _req: lingxi_protocol::HttpRequest,
-    ) -> Result<lingxi_protocol::HttpResponse, lingxi_traits::HttpError> {
+        _req: protocol::HttpRequest,
+    ) -> Result<protocol::HttpResponse, traits::HttpError> {
         panic!("NullTransport: test forgot to inject a real transport");
     }
     async fn stream_sse(
         &self,
-        _req: lingxi_protocol::HttpRequest,
-    ) -> Result<lingxi_traits::http::SseStream, lingxi_traits::HttpError> {
+        _req: protocol::HttpRequest,
+    ) -> Result<traits::http::SseStream, traits::HttpError> {
         panic!("NullTransport: test forgot to inject a real transport");
     }
 }
@@ -254,7 +254,7 @@ impl lingxi_traits::HttpTransport for NullTransport {
 /// Null clock — always returns [`SystemTime::UNIX_EPOCH`]. Used by
 /// [`AuthState::new_for_test`].
 struct NullClock;
-impl lingxi_traits::Clock for NullClock {
+impl traits::Clock for NullClock {
     fn now(&self) -> SystemTime {
         SystemTime::UNIX_EPOCH
     }
@@ -402,13 +402,13 @@ impl OAuthRefreshHook for RefreshDriver {
 }
 
 // Telemetry helpers — emit `tengu_oauth_*` events when a bus is attached.
-async fn emit_refresh_started(bus: &Option<Arc<lingxi_telemetry::AnalyticsBus>>, trigger: &str) {
+async fn emit_refresh_started(bus: &Option<Arc<telemetry::AnalyticsBus>>, trigger: &str) {
     let Some(bus) = bus else { return };
-    let mut m = lingxi_telemetry::sink::LogEventMetadata::new();
+    let mut m = telemetry::sink::LogEventMetadata::new();
     m.insert(
         "trigger".into(),
-        lingxi_telemetry::sink::AnalyticsValue::String(
-            lingxi_telemetry::Verified::assert_safe(trigger.to_string())
+        telemetry::sink::AnalyticsValue::String(
+            telemetry::Verified::assert_safe(trigger.to_string())
                 .as_str()
                 .to_string(),
         ),
@@ -417,51 +417,51 @@ async fn emit_refresh_started(bus: &Option<Arc<lingxi_telemetry::AnalyticsBus>>,
 }
 
 async fn emit_refresh_succeeded(
-    bus: &Option<Arc<lingxi_telemetry::AnalyticsBus>>,
+    bus: &Option<Arc<telemetry::AnalyticsBus>>,
     trigger: &str,
     new_expiry_unix: i64,
     duration_ms: u64,
 ) {
     let Some(bus) = bus else { return };
-    let mut m = lingxi_telemetry::sink::LogEventMetadata::new();
+    let mut m = telemetry::sink::LogEventMetadata::new();
     m.insert(
         "trigger".into(),
-        lingxi_telemetry::sink::AnalyticsValue::String(
-            lingxi_telemetry::Verified::assert_safe(trigger.to_string())
+        telemetry::sink::AnalyticsValue::String(
+            telemetry::Verified::assert_safe(trigger.to_string())
                 .as_str()
                 .to_string(),
         ),
     );
     m.insert(
         "new_expiry_unix".into(),
-        lingxi_telemetry::sink::AnalyticsValue::Int(new_expiry_unix),
+        telemetry::sink::AnalyticsValue::Int(new_expiry_unix),
     );
     m.insert(
         "duration_ms".into(),
-        lingxi_telemetry::sink::AnalyticsValue::Int(i64::try_from(duration_ms).unwrap_or(i64::MAX)),
+        telemetry::sink::AnalyticsValue::Int(i64::try_from(duration_ms).unwrap_or(i64::MAX)),
     );
     bus.log_event("tengu_oauth_refresh_succeeded", m).await;
 }
 
 async fn emit_refresh_failed(
-    bus: &Option<Arc<lingxi_telemetry::AnalyticsBus>>,
+    bus: &Option<Arc<telemetry::AnalyticsBus>>,
     trigger: &str,
     error_kind: &str,
 ) {
     let Some(bus) = bus else { return };
-    let mut m = lingxi_telemetry::sink::LogEventMetadata::new();
+    let mut m = telemetry::sink::LogEventMetadata::new();
     m.insert(
         "trigger".into(),
-        lingxi_telemetry::sink::AnalyticsValue::String(
-            lingxi_telemetry::Verified::assert_safe(trigger.to_string())
+        telemetry::sink::AnalyticsValue::String(
+            telemetry::Verified::assert_safe(trigger.to_string())
                 .as_str()
                 .to_string(),
         ),
     );
     m.insert(
         "error_kind".into(),
-        lingxi_telemetry::sink::AnalyticsValue::String(
-            lingxi_telemetry::Verified::assert_safe(error_kind.to_string())
+        telemetry::sink::AnalyticsValue::String(
+            telemetry::Verified::assert_safe(error_kind.to_string())
                 .as_str()
                 .to_string(),
         ),
@@ -469,13 +469,13 @@ async fn emit_refresh_failed(
     bus.log_event("tengu_oauth_refresh_failed", m).await;
 }
 
-async fn emit_proactive_canceled(bus: &Option<Arc<lingxi_telemetry::AnalyticsBus>>, reason: &str) {
+async fn emit_proactive_canceled(bus: &Option<Arc<telemetry::AnalyticsBus>>, reason: &str) {
     let Some(bus) = bus else { return };
-    let mut m = lingxi_telemetry::sink::LogEventMetadata::new();
+    let mut m = telemetry::sink::LogEventMetadata::new();
     m.insert(
         "reason".into(),
-        lingxi_telemetry::sink::AnalyticsValue::String(
-            lingxi_telemetry::Verified::assert_safe(reason.to_string())
+        telemetry::sink::AnalyticsValue::String(
+            telemetry::Verified::assert_safe(reason.to_string())
                 .as_str()
                 .to_string(),
         ),
@@ -516,7 +516,7 @@ impl RefreshDriver {
     /// before expiry (spec §7 line 721).
     pub async fn spawn_proactive(
         state: Arc<AuthState>,
-        spawner: Arc<dyn lingxi_traits::RuntimeSpawner>,
+        spawner: Arc<dyn traits::RuntimeSpawner>,
     ) -> Result<(), OAuthError> {
         let task_state = state.clone();
         let task_spawner = spawner.clone();
@@ -535,7 +535,7 @@ impl RefreshDriver {
 
 /// The proactive task loop. Wakes at `min(remaining/2, 5min)` before expiry,
 /// calls `RefreshDriver::refresh`, and reschedules against the new expiry.
-async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn lingxi_traits::RuntimeSpawner>) {
+async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn traits::RuntimeSpawner>) {
     let driver = RefreshDriver::new(state.clone());
     loop {
         // Read current expiry + token_hash.
@@ -557,7 +557,7 @@ async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn lingxi_traits::R
         // Fire a refresh. If it fails we emit a `_failed` event and back off
         // for 30 seconds; on hard failure (RefreshExpired) we exit the loop —
         // the next API call will surface the auth error to the user.
-        match <RefreshDriver as lingxi_api_client::oauth_hook::OAuthRefreshHook>::refresh(
+        match <RefreshDriver as api_client::oauth_hook::OAuthRefreshHook>::refresh(
             &driver, prev_hash,
         )
         .await
@@ -566,7 +566,7 @@ async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn lingxi_traits::R
                 // Success — loop continues against the freshly-rotated token.
                 continue;
             }
-            Err(lingxi_api_client::oauth_hook::OAuthHookError::RefreshFailed(msg))
+            Err(api_client::oauth_hook::OAuthHookError::RefreshFailed(msg))
                 if msg == "Session expired. Re-authenticate?" =>
             {
                 tracing::error!(

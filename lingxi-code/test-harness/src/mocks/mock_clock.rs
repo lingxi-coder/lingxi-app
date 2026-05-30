@@ -2,9 +2,9 @@
 
 #![allow(clippy::unwrap_used)]
 
-use lingxi_traits::Clock;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use traits::Clock;
 
 /// Deterministic [`Clock`] implementation backed by an interior-mutable
 /// `SystemTime`. Tests advance the clock explicitly via [`Self::advance`].

@@ -60,10 +60,10 @@ pub fn UsageTab(props: &UsageTabProps) -> impl Into<AnyElement<'static>> {
 mod tests {
     use super::*;
     use crate::screens::settings::SettingsData;
-    use lingxi_core::settings::tracer::ProvenanceTrace;
-    use lingxi_core::settings::{EffectiveSettings, SettingsJson};
-    use lingxi_traits::{CostSnapshot, StatusSnapshot};
+    use engine::settings::tracer::ProvenanceTrace;
+    use engine::settings::{EffectiveSettings, SettingsJson};
     use std::time::Duration;
+    use traits::{CostSnapshot, StatusSnapshot};
 
     fn fixture() -> SettingsData {
         SettingsData {

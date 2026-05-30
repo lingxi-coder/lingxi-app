@@ -4,8 +4,8 @@
 
 #![allow(clippy::unwrap_used, clippy::items_after_statements)]
 
-use lingxi_test_harness::parity::load_fixture;
 use serde_json::Value;
+use test_harness::parity::load_fixture;
 
 fn fx() -> Value {
     load_fixture::<Value>("system_tools")
@@ -17,35 +17,35 @@ fn tool_names_match_production_constants() {
     let n = &fx["tool_names"];
     assert_eq!(
         n["ask_user_question"].as_str().unwrap(),
-        lingxi_tools::builtin::ask_user_question::ASK_USER_QUESTION_TOOL_NAME
+        tools::builtin::ask_user_question::ASK_USER_QUESTION_TOOL_NAME
     );
     assert_eq!(
         n["brief"].as_str().unwrap(),
-        lingxi_tools::builtin::brief::BRIEF_TOOL_NAME
+        tools::builtin::brief::BRIEF_TOOL_NAME
     );
     assert_eq!(
         n["config"].as_str().unwrap(),
-        lingxi_tools::builtin::config::CONFIG_TOOL_NAME
+        tools::builtin::config::CONFIG_TOOL_NAME
     );
     assert_eq!(
         n["skill"].as_str().unwrap(),
-        lingxi_tools::builtin::skill::SKILL_TOOL_NAME
+        tools::builtin::skill::SKILL_TOOL_NAME
     );
     assert_eq!(
         n["schedule_cron"].as_str().unwrap(),
-        lingxi_tools::builtin::schedule_cron::SCHEDULE_CRON_TOOL_NAME
+        tools::builtin::schedule_cron::SCHEDULE_CRON_TOOL_NAME
     );
     assert_eq!(
         n["tool_search"].as_str().unwrap(),
-        lingxi_tools::builtin::tool_search::TOOL_SEARCH_TOOL_NAME
+        tools::builtin::tool_search::TOOL_SEARCH_TOOL_NAME
     );
     assert_eq!(
         n["remote_trigger"].as_str().unwrap(),
-        lingxi_tools::builtin::remote_trigger::REMOTE_TRIGGER_TOOL_NAME
+        tools::builtin::remote_trigger::REMOTE_TRIGGER_TOOL_NAME
     );
     assert_eq!(
         n["synthetic_output"].as_str().unwrap(),
-        lingxi_tools::builtin::synthetic_output::SYNTHETIC_OUTPUT_TOOL_NAME
+        tools::builtin::synthetic_output::SYNTHETIC_OUTPUT_TOOL_NAME
     );
 }
 
@@ -54,7 +54,7 @@ fn wire_identifiers_match_production_constants() {
     let fx = fx();
     let w = &fx["wire_identifiers"];
 
-    use lingxi_tools::builtin::{
+    use tools::builtin::{
         ask_user_question::{MAX_ASK_LABEL_LEN, MAX_ASK_OPTIONS, MAX_ASK_QUESTION_LEN},
         brief::{BRIEF_FILE_SUFFIX, BRIEF_SUBDIR, BRIEF_TASK_ID_PREFIX},
         config::{CONFIG_FIELDS_ALLOWED, CONFIG_FILE_NAME, CONFIG_SUBDIR},
@@ -141,7 +141,7 @@ fn telemetry_events_present_in_tengu_tool_names_array() {
     );
     for name in &events {
         assert!(
-            lingxi_telemetry::tengu::ALL_EVENT_NAMES.contains(name),
+            telemetry::tengu::ALL_EVENT_NAMES.contains(name),
             "fixture event {name} missing from tengu::ALL_EVENT_NAMES"
         );
     }
@@ -149,7 +149,7 @@ fn telemetry_events_present_in_tengu_tool_names_array() {
 
 #[test]
 fn telemetry_constant_symbols_match_event_strings() {
-    use lingxi_telemetry::tengu::tool::{
+    use telemetry::tengu::tool::{
         ASK_USER_QUESTION_COMPLETED, ASK_USER_QUESTION_FAILED, ASK_USER_QUESTION_STARTED,
         BRIEF_COMPLETED, BRIEF_FAILED, BRIEF_STARTED, CONFIG_COMPLETED, CONFIG_FAILED,
         CONFIG_STARTED, REMOTE_TRIGGER_COMPLETED, REMOTE_TRIGGER_FAILED, REMOTE_TRIGGER_STARTED,

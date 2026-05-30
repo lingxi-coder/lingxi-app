@@ -1,10 +1,10 @@
-//! Thin adapter over `lingxi_secret::SecretScanner`.
+//! Thin adapter over `secret::SecretScanner`.
 //!
 //! Reuses the v3 §16.5 30+ gitleaks rules — we do NOT duplicate the rule
 //! set here. The scanner is built once via [`SecretScanner::builtin`] and
 //! shared across loader passes.
 
-use lingxi_secret::{SecretDetection, SecretScanner};
+use secret::{SecretDetection, SecretScanner};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
@@ -39,7 +39,7 @@ pub fn redact(content: &str) -> String {
 /// Payload (locked): `rule_id: Verified(<rule id>)`, `_PROTO_path: PiiTagged(<path>)`.
 /// The matched secret value itself is NEVER emitted.
 pub async fn emit_redactions(
-    bus: Option<&Arc<lingxi_telemetry::AnalyticsBus>>,
+    bus: Option<&Arc<telemetry::AnalyticsBus>>,
     path: &Path,
     detections: &[SecretDetection],
 ) {
@@ -47,20 +47,18 @@ pub async fn emit_redactions(
         return;
     };
     for det in detections {
-        let mut md = lingxi_telemetry::sink::LogEventMetadata::new();
+        let mut md = telemetry::sink::LogEventMetadata::new();
         md.insert(
             "rule_id".into(),
-            lingxi_telemetry::sink::AnalyticsValue::String(
-                lingxi_telemetry::pii::Verified::assert_safe(det.rule_id.clone()).into_inner(),
+            telemetry::sink::AnalyticsValue::String(
+                telemetry::pii::Verified::assert_safe(det.rule_id.clone()).into_inner(),
             ),
         );
         md.insert(
             "_PROTO_path".into(),
-            lingxi_telemetry::sink::AnalyticsValue::String(
-                lingxi_telemetry::pii::PiiTagged::assert_pii_tagged_column(
-                    path.display().to_string(),
-                )
-                .into_inner(),
+            telemetry::sink::AnalyticsValue::String(
+                telemetry::pii::PiiTagged::assert_pii_tagged_column(path.display().to_string())
+                    .into_inner(),
             ),
         );
         bus.log_event(TENGU_MEMORY_SECRET_REDACTED, md).await;
@@ -70,8 +68,8 @@ pub async fn emit_redactions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_telemetry::{sink::LogEventMetadata, AnalyticsBus, AnalyticsSink, AnalyticsValue};
     use std::sync::Mutex;
+    use telemetry::{sink::LogEventMetadata, AnalyticsBus, AnalyticsSink, AnalyticsValue};
 
     #[test]
     fn no_secrets_passes_through_unchanged() {

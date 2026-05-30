@@ -10,9 +10,9 @@
 //! [`crate::forked_agent::ForkedAgentRunner`] instead.
 
 use crate::purposes::QuerySource;
+use api_client::ApiError;
 use async_trait::async_trait;
-use lingxi_api_client::ApiError;
-use lingxi_protocol::ConversationMessage;
+use protocol::ConversationMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -58,7 +58,7 @@ pub struct SideQueryResponse {
     /// Tool calls emitted by the model (typically empty for side queries).
     pub tool_calls: Vec<Value>,
     /// Token / cost usage for COGS attribution.
-    pub usage: lingxi_cost::Usage,
+    pub usage: cost::Usage,
     /// Stop-reason as reported by the provider (`end_turn`, `tool_use`, ...).
     pub stop_reason: Option<String>,
 }

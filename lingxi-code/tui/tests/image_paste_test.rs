@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use lingxi_tui::components::prompt_input::{
+use tui::components::prompt_input::{
     apply_paste_block, AttachmentKind, PasteCoalescer, PasteState,
 };
 

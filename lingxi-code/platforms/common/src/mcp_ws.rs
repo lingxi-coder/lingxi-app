@@ -1,4 +1,4 @@
-//! WebSocket MCP transport. Constructs a `lingxi_jsonrpc::Connection` over a
+//! WebSocket MCP transport. Constructs a `jsonrpc::Connection` over a
 //! `tokio_tungstenite::WebSocketStream`, sending the
 //! `X-Claude-Code-Ide-Authorization: <token>` header and the
 //! `Sec-WebSocket-Protocol: mcp` subprotocol literally — both verified
@@ -7,8 +7,8 @@
 use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
 use http::Request;
-use lingxi_jsonrpc::messages::Message as JsonRpcMessage;
-use lingxi_jsonrpc::{Connection, ConnectionError};
+use jsonrpc::messages::Message as JsonRpcMessage;
+use jsonrpc::{Connection, ConnectionError};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, Message},
@@ -74,7 +74,7 @@ pub fn build_handshake_request(url: &Url, auth_token: &str) -> Result<Request<()
 ///
 /// - Sends `X-Claude-Code-Ide-Authorization: <auth_token>` in the handshake.
 /// - Negotiates the `mcp` subprotocol.
-/// - Adapts WS text frames to and from `lingxi_jsonrpc::Message` (one JSON
+/// - Adapts WS text frames to and from `jsonrpc::Message` (one JSON
 ///   object per text frame). Binary frames are rejected; ping/pong are
 ///   handled automatically by `tokio-tungstenite`; close frames terminate
 ///   the inbound stream so the broker shuts down naturally.
@@ -132,7 +132,7 @@ pub async fn connect_ws(url: Url, auth_token: &str) -> Result<Connection, WsConn
     // Re-map tungstenite errors to ConnectionError so the Sink<Message,
     // Error = ConnectionError> bound on `from_message_streams` is satisfied.
     let outbound = outbound.sink_map_err(|e: tokio_tungstenite::tungstenite::Error| {
-        ConnectionError::Broker(lingxi_jsonrpc::BrokerError::Join(format!("ws sink: {e}")))
+        ConnectionError::Broker(jsonrpc::BrokerError::Join(format!("ws sink: {e}")))
     });
 
     Ok(Connection::from_message_streams(

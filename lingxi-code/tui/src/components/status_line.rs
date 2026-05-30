@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use iocraft::prelude::*;
-use lingxi_permission::PermissionMode;
+use permission::PermissionMode;
 
 use crate::theme::Theme;
 

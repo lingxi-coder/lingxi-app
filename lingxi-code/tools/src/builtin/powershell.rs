@@ -16,14 +16,14 @@ use crate::tool_trait::{
     ValidationError,
 };
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 
 /// Windows PowerShell executable.
 pub const POWERSHELL_BIN_WINDOWS: &str = "powershell.exe";
@@ -158,9 +158,9 @@ impl Tool for PowerShellTool {
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        use lingxi_sandbox::decision::{should_use_sandbox, SandboxDecision};
-        use lingxi_sandbox::wrap::wrap_with_sandbox;
-        use lingxi_traits::sandbox::ProcessCommand as SbxCommand;
+        use sandbox::decision::{should_use_sandbox, SandboxDecision};
+        use sandbox::wrap::wrap_with_sandbox;
+        use traits::sandbox::ProcessCommand as SbxCommand;
 
         let cmd_str = input
             .get("command")
@@ -218,10 +218,10 @@ impl Tool for PowerShellTool {
             SandboxDecision::Sandbox { policy: _ } => {
                 match wrap_with_sandbox(&cmd_str, &self.ctx.sandbox_runtime, self.ctx.platform) {
                     Ok(w) => w,
-                    Err(lingxi_sandbox::wrap::SandboxWrapError::Unsupported(s)) => {
+                    Err(sandbox::wrap::SandboxWrapError::Unsupported(s)) => {
                         return Err(ToolError::InvalidInput(s));
                     }
-                    Err(lingxi_sandbox::wrap::SandboxWrapError::SbplWrite(s)) => {
+                    Err(sandbox::wrap::SandboxWrapError::SbplWrite(s)) => {
                         return Err(ToolError::Io(s));
                     }
                 }
@@ -296,7 +296,7 @@ impl Tool for PowerShellTool {
 mod tests {
     use super::*;
     use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use lingxi_traits::process::ProcessOutput;
+    use traits::process::ProcessOutput;
 
     #[test]
     fn locked_constants_unchanged() {
@@ -420,7 +420,7 @@ mod tests {
     fn sandbox_refusal_literal_byte_locked_at_m204_site() {
         // The literal lives at `SandboxError::Unsupported` in lingxi-traits:
         // `#[error("sandbox not supported on this platform")]`.
-        let err = lingxi_traits::sandbox::SandboxError::Unsupported;
+        let err = traits::sandbox::SandboxError::Unsupported;
         assert_eq!(err.to_string(), "sandbox not supported on this platform");
     }
 }

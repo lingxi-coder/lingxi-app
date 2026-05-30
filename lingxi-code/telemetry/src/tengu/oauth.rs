@@ -3,7 +3,7 @@
 //! Spec §7 line 712-721. The five M3-04-emitted events
 //! (`tengu_oauth_refresh_started`, `_succeeded`, `_failed`,
 //! `tengu_oauth_scope_upgraded`, `tengu_oauth_proactive_canceled`) byte-match
-//! the wire shape emitted by `lingxi_anthropic_oauth::refresh` and
+//! the wire shape emitted by `anthropic_oauth::refresh` and
 //! `scope_upgrade`. The three PKCE schemas are M4-staged but locked here so
 //! the PKCE runner can emit without bumping the schema tree.
 

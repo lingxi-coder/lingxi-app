@@ -30,12 +30,12 @@
 //! No parallel key path exists.
 
 use iocraft::prelude::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use lingxi_permission::gate::{PermissionRequest, PromptDefault};
-use lingxi_tui::components::prompt_input::VimMode;
-use lingxi_tui::root::handle_live_key;
-use lingxi_tui::screens::Screen;
-use lingxi_tui::state::{AppState, PendingPermission, StatusSnapshot};
+use permission::gate::{PermissionRequest, PromptDefault};
 use serde_json::json;
+use tui::components::prompt_input::VimMode;
+use tui::root::handle_live_key;
+use tui::screens::Screen;
+use tui::state::{AppState, PendingPermission, StatusSnapshot};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(KeyEventKind::Press, code)
@@ -69,7 +69,7 @@ fn arm_permission(st: &mut AppState) {
 #[test]
 fn permission_wins_over_open_screen() {
     let mut st = fresh();
-    st.open_doctor(lingxi_tui::screens::doctor::DoctorDiagnostics::capture(
+    st.open_doctor(tui::screens::doctor::DoctorDiagnostics::capture(
         std::path::Path::new("/work"),
         0,
         0,
@@ -198,7 +198,7 @@ fn screen_outranks_overlay_and_vim_is_gated() {
     let mut st = fresh();
     st.palette.sync_from_prompt("/conf"); // opens the palette overlay
     let palette_was_open = st.palette.open;
-    st.open_doctor(lingxi_tui::screens::doctor::DoctorDiagnostics::capture(
+    st.open_doctor(tui::screens::doctor::DoctorDiagnostics::capture(
         std::path::Path::new("/work"),
         0,
         0,

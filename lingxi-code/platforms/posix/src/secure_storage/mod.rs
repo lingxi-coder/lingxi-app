@@ -2,7 +2,7 @@
 //!
 //! [`PlainTextSecureStorage`] (Linux + fallback) and [`MacOsKeychainStorage`]
 //! (macOS, via the `security` CLI) implement
-//! [`lingxi_traits::SecureStorage`]. The
+//! [`traits::SecureStorage`]. The
 //! [`secure_storage_for_platform`] helper picks the best backend per OS,
 //! with a documented plaintext-fallback warning when the preferred backend
 //! cannot initialise.

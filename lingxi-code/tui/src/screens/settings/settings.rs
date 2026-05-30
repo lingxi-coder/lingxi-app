@@ -4,8 +4,8 @@
 //! inline mutation; the only write path is the Config tab's `$EDITOR`
 //! handoff (`edit_config_file`).
 
+use engine::settings::tracer::{FieldProvenance, Source};
 use iocraft::prelude::*;
-use lingxi_core::settings::tracer::{FieldProvenance, Source};
 
 use crate::screens::settings::SettingsData;
 use crate::theme::TuiTheme;
@@ -68,9 +68,9 @@ pub fn SettingsTabView(props: &SettingsTabProps) -> impl Into<AnyElement<'static
 mod tests {
     use super::*;
     use crate::screens::settings::SettingsData;
-    use lingxi_core::settings::tracer::ProvenanceTrace;
-    use lingxi_core::settings::{EffectiveSettings, SettingsJson};
-    use lingxi_traits::{CostSnapshot, StatusSnapshot};
+    use engine::settings::tracer::ProvenanceTrace;
+    use engine::settings::{EffectiveSettings, SettingsJson};
+    use traits::{CostSnapshot, StatusSnapshot};
 
     fn data_with_trace(trace: ProvenanceTrace) -> SettingsData {
         SettingsData {

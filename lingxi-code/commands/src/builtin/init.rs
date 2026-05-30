@@ -9,7 +9,7 @@ use crate::builtin::templates::OLD_INIT_PROMPT;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
+use telemetry::tengu::command as cmd_evt;
 
 /// `/init` handler — returns the locked init prompt as `InjectMessage`.
 ///
@@ -30,9 +30,9 @@ impl InitHandler {
 #[async_trait]
 impl BuiltinCommandHandler for InitHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::INIT_STARTED);
+        telemetry::emit_command_started(cmd_evt::INIT_STARTED);
         let details = format!("{{\"template_bytes\":{}}}", OLD_INIT_PROMPT.len());
-        lingxi_telemetry::emit_command_completed(cmd_evt::INIT_COMPLETED, &details);
+        telemetry::emit_command_completed(cmd_evt::INIT_COMPLETED, &details);
         CommandResult::InjectMessage {
             content: OLD_INIT_PROMPT.to_string(),
         }

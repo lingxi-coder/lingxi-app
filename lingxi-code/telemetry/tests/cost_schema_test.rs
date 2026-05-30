@@ -1,4 +1,4 @@
-use lingxi_telemetry::tengu::cost;
+use telemetry::tengu::cost;
 
 #[test]
 fn all_10_cost_event_names_are_locked() {
@@ -26,7 +26,7 @@ fn all_10_cost_event_names_are_locked() {
 
 #[test]
 fn recorded_payload_field_set_matches_m3_05() {
-    use lingxi_telemetry::Verified;
+    use telemetry::Verified;
     let p = cost::RecordedPayload {
         model: Verified::assert_safe("claude-sonnet-4-5".into()),
         input_tokens: 100,

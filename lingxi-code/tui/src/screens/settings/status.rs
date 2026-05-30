@@ -1,4 +1,4 @@
-//! Status tab — renders `lingxi_traits::StatusSnapshot` rows (M7-13),
+//! Status tab — renders `traits::StatusSnapshot` rows (M7-13),
 //! matching claude-code `Status.tsx` row order/labels where the data exists.
 //!
 //! Literal-lock (claude-code `components/Settings/Status.tsx:23-52`): rows in
@@ -71,10 +71,10 @@ pub fn StatusTab(props: &StatusTabProps) -> impl Into<AnyElement<'static>> {
 mod tests {
     use super::*;
     use crate::screens::settings::SettingsData;
-    use lingxi_core::settings::tracer::ProvenanceTrace;
-    use lingxi_core::settings::{EffectiveSettings, SettingsJson};
-    use lingxi_traits::{CostSnapshot, StatusSnapshot};
+    use engine::settings::tracer::ProvenanceTrace;
+    use engine::settings::{EffectiveSettings, SettingsJson};
     use std::path::PathBuf;
+    use traits::{CostSnapshot, StatusSnapshot};
 
     fn fixture() -> SettingsData {
         SettingsData {

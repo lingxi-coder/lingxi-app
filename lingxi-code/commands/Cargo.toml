@@ -1,16 +1,16 @@
 [package]
-name = "lingxi-commands"
+name = "commands"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
-lingxi-core = { path = "../core" }
-lingxi-tools = { path = "../tools" }
-lingxi-telemetry = { path = "../telemetry" }
+protocol = { path = "../protocol" }
+traits = { path = "../traits" }
+engine = { path = "../engine" }
+tools = { path = "../tools" }
+telemetry = { path = "../telemetry" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
@@ -21,10 +21,10 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
-lingxi-orchestrator = { path = "../orchestrator" }
-lingxi-cost = { path = "../cost" }
-lingxi-api-client = { path = "../api-client" }
-lingxi-compaction = { path = "../compaction" }
+orchestrator = { path = "../orchestrator" }
+cost = { path = "../cost" }
+api-client = { path = "../api-client" }
+compaction = { path = "../compaction" }
 sha2 = "0.10"
 
 [lints]

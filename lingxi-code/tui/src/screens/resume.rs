@@ -1,5 +1,5 @@
 //! Resume screen (M7-12) — an iocraft full-page view over the M5-08 session
-//! loader (`lingxi_session::jsonl::loader`). Lists recent sessions, previews
+//! loader (`session::jsonl::loader`). Lists recent sessions, previews
 //! the selected one, resumes on Enter, cancels on Esc.
 //!
 //! Logic/state (`ResumeRow`, `ResumeState`, `handle_resume_key`) are pure and
@@ -20,7 +20,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use iocraft::prelude::*;
-use lingxi_session::jsonl::loader::{format_rfc3339_seconds, SessionMetadata};
+use session::jsonl::loader::{format_rfc3339_seconds, SessionMetadata};
 use uuid::Uuid;
 
 /// One display row derived from a [`SessionMetadata`]. Terminal-free.
@@ -40,7 +40,7 @@ impl ResumeRow {
     /// Build a display row from a loader [`SessionMetadata`].
     ///
     /// The timestamp is formatted via the shared
-    /// [`lingxi_session::jsonl::loader::format_rfc3339_seconds`] — the very same
+    /// [`session::jsonl::loader::format_rfc3339_seconds`] — the very same
     /// function the M5-08 stdio picker uses — so this screen and the picker
     /// render timestamps byte-for-byte identically (no hand-copied formatter).
     #[must_use]

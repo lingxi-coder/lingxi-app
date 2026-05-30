@@ -1,4 +1,4 @@
-use lingxi_sandbox::runtime_config::{
+use sandbox::runtime_config::{
     FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, RipgrepConfig,
     SandboxRuntimeConfig,
 };

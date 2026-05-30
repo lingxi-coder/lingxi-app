@@ -1,4 +1,4 @@
-use lingxi_sandbox::decision::{split_compound_command, strip_env_and_wrappers_fixedpoint};
+use sandbox::decision::{split_compound_command, strip_env_and_wrappers_fixedpoint};
 
 #[test]
 fn split_double_ampersand() {

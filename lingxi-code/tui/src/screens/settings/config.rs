@@ -78,9 +78,9 @@ pub fn ConfigTab(props: &ConfigTabProps) -> impl Into<AnyElement<'static>> {
 mod tests {
     use super::*;
     use crate::screens::settings::SettingsData;
-    use lingxi_core::settings::tracer::ProvenanceTrace;
-    use lingxi_core::settings::{EffectiveSettings, SettingsJson};
-    use lingxi_traits::{CostSnapshot, StatusSnapshot};
+    use engine::settings::tracer::ProvenanceTrace;
+    use engine::settings::{EffectiveSettings, SettingsJson};
+    use traits::{CostSnapshot, StatusSnapshot};
 
     fn fixture() -> SettingsData {
         SettingsData {

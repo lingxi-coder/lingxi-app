@@ -4,14 +4,12 @@
 //!
 //! M5-10 Task 12.
 
-use lingxi_commands::dispatcher::RegistrySlashDispatcher;
-use lingxi_commands::registry::{
-    register_all_builtin_commands, register_core_batch_1, CommandRegistry,
-};
-use lingxi_orchestrator::test_support::MockOrchestratorHandle;
-use lingxi_traits::{CompactionSummary, SlashCommandDispatcher, SlashDispatchResult};
+use commands::dispatcher::RegistrySlashDispatcher;
+use commands::registry::{register_all_builtin_commands, register_core_batch_1, CommandRegistry};
+use orchestrator::test_support::MockOrchestratorHandle;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use traits::{CompactionSummary, SlashCommandDispatcher, SlashDispatchResult};
 
 fn fresh() -> (RegistrySlashDispatcher, Arc<MockOrchestratorHandle>) {
     let mut reg = CommandRegistry::new();

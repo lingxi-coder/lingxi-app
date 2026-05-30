@@ -19,7 +19,7 @@
 
 use crate::definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
 use crate::events::HookEventType;
-use lingxi_protocol::HookId;
+use protocol::HookId;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;

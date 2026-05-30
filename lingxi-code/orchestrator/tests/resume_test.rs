@@ -1,14 +1,14 @@
 //! T9 tests — `replay_session_state` reproduces the chain pointer + history
 //! from an on-disk JSONL so the next live turn's append chains correctly.
 
-use lingxi_orchestrator::{replay_session_state, ResumeError};
-use lingxi_platform_posix::fs::PosixFileSystem;
-use lingxi_protocol::ConversationMessage;
-use lingxi_session::jsonl::project_dir_name;
-use lingxi_traits::FileSystem;
+use orchestrator::{replay_session_state, ResumeError};
+use platform_posix::fs::PosixFileSystem;
+use protocol::ConversationMessage;
 use serde_json::json;
+use session::jsonl::project_dir_name;
 use std::sync::Arc;
 use tempfile::TempDir;
+use traits::FileSystem;
 use uuid::Uuid;
 
 async fn setup_two_turn_jsonl() -> (

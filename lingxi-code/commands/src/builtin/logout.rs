@@ -8,9 +8,9 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::AuthHandle;
 use std::sync::Arc;
+use telemetry::tengu::command as cmd_evt;
+use traits::AuthHandle;
 
 /// `/logout` handler — drives [`AuthHandle::logout`].
 #[derive(Clone)]
@@ -29,17 +29,17 @@ impl LogoutHandler {
 #[async_trait]
 impl BuiltinCommandHandler for LogoutHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::LOGOUT_STARTED);
+        telemetry::emit_command_started(cmd_evt::LOGOUT_STARTED);
         match self.auth.logout().await {
             Ok(()) => {
-                lingxi_telemetry::emit_command_completed(cmd_evt::LOGOUT_COMPLETED, "");
+                telemetry::emit_command_completed(cmd_evt::LOGOUT_COMPLETED, "");
                 CommandResult::Done {
                     display: Some("Logged out.".to_string()),
                 }
             }
             Err(e) => {
                 let msg = e.to_string();
-                lingxi_telemetry::emit_command_failed(cmd_evt::LOGOUT_FAILED, &msg);
+                telemetry::emit_command_failed(cmd_evt::LOGOUT_FAILED, &msg);
                 CommandResult::Done {
                     display: Some(format!("Could not log out: {msg}")),
                 }
@@ -58,7 +58,7 @@ impl BuiltinCommandHandler for LogoutHandler {
 mod tests {
     use super::*;
     use crate::builtin::login::tests::MockAuth;
-    use lingxi_traits::{AuthError, LoginInfo};
+    use traits::{AuthError, LoginInfo};
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {

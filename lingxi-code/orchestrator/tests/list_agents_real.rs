@@ -1,15 +1,15 @@
 //! M6-07 — `list_agents` reads the wired `Arc<RwLock<Vec<AgentDefinition>>>`.
 
-use lingxi_agent::definition::{
+use agent::definition::{
     AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
 };
-use lingxi_orchestrator::test_support::{
+use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_traits::OrchestratorHandle;
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use traits::OrchestratorHandle;
 
 fn mk(name: &str, desc: &str, tools: Vec<String>) -> AgentDefinition {
     AgentDefinition {
@@ -34,7 +34,7 @@ fn build_orch() -> ConversationOrchestrator {
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![])),
-        Arc::new(lingxi_tools::registry::ToolRegistry::new()),
+        Arc::new(tools::registry::ToolRegistry::new()),
         noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),

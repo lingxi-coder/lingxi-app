@@ -1,6 +1,6 @@
 //! `<tools>` block byte-locks (M5-03 Task 10).
 
-use lingxi_orchestrator::prompt::tools_block;
+use orchestrator::prompt::tools_block;
 
 #[test]
 fn empty_input_returns_empty_string() {

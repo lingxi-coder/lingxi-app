@@ -7,8 +7,8 @@
 
 #![cfg(unix)]
 
-use lingxi_platform_posix::process::kill_tree::kill_tree_with_grace;
-use lingxi_platform_posix::process::spawn_unsafe::attach_setsid;
+use platform_posix::process::kill_tree::kill_tree_with_grace;
+use platform_posix::process::spawn_unsafe::attach_setsid;
 use std::time::Duration;
 use tokio::process::Command;
 

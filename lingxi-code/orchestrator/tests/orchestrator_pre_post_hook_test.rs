@@ -1,5 +1,5 @@
 //! End-to-end orchestrator turn with `PreToolUse` + `PostToolUse` hooks
-//! registered through `lingxi_hooks::HookExecutorImpl`.
+//! registered through `hooks::HookExecutorImpl`.
 //!
 //! Exercises the M5-06 Task 14 swap: the orchestrator now consults the
 //! real 4-arm executor (via the Builtin arm here) and folds the
@@ -11,26 +11,26 @@
 //! 2. `PostToolUse` hook returns `system_message` → the orchestrator
 //!    appends it to the result content.
 
+use api_client::types::ContentBlockApi;
 use async_trait::async_trait;
-use lingxi_api_client::types::ContentBlockApi;
-use lingxi_hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
-use lingxi_hooks::events::{HookEvent, HookEventType};
-use lingxi_hooks::executor::BuiltinHookHandler;
-use lingxi_hooks::registry::{HookContext, HookRegistry};
-use lingxi_hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
-use lingxi_hooks::HookExecutorImpl;
-use lingxi_orchestrator::test_support::{
+use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
+use hooks::events::{HookEvent, HookEventType};
+use hooks::executor::BuiltinHookHandler;
+use hooks::registry::{HookContext, HookRegistry};
+use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
+use hooks::HookExecutorImpl;
+use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use lingxi_protocol::{HookId, HttpRequest, HttpResponse, ToolUseId};
-use lingxi_traits::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
+use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use protocol::{HookId, HttpRequest, HttpResponse, ToolUseId};
 use serde_json::json;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
+use traits::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 
 // ---------- unused HTTP / Runtime stubs (never called with empty arms) ----------
 
@@ -40,10 +40,7 @@ impl HttpTransport for UnusedHttp {
     async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
-    async fn stream_sse(
-        &self,
-        _req: HttpRequest,
-    ) -> Result<lingxi_traits::http::SseStream, HttpError> {
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
         Err(HttpError::InvalidRequest("unused".into()))
     }
 }
@@ -55,14 +52,11 @@ impl RuntimeSpawner for UnusedRuntime {
         &self,
         _name: &str,
         _task: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
-    ) -> Result<lingxi_traits::BackgroundTaskHandle, RuntimeError> {
+    ) -> Result<traits::BackgroundTaskHandle, RuntimeError> {
         Err(RuntimeError::Internal("unused".into()))
     }
     async fn sleep(&self, _duration: Duration) {}
-    async fn cancel(
-        &self,
-        _handle: &lingxi_traits::BackgroundTaskHandle,
-    ) -> Result<(), RuntimeError> {
+    async fn cancel(&self, _handle: &traits::BackgroundTaskHandle) -> Result<(), RuntimeError> {
         Ok(())
     }
 }
@@ -194,7 +188,7 @@ async fn pre_hook_blocks_bash_tool() {
     )
     .await;
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tools::registry::ToolRegistry::new());
 
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),

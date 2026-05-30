@@ -1,12 +1,12 @@
 //! Integration test: 429 with `Retry-After` sleeps and retries; telemetry events fire.
 
+use api_client::anthropic::AnthropicProvider;
+use api_client::ApiError;
 use async_trait::async_trait;
-use lingxi_api_client::anthropic::AnthropicProvider;
-use lingxi_api_client::ApiError;
-use lingxi_protocol::{ContentBlock, ConversationMessage, MessageId};
-use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
+use protocol::{ContentBlock, ConversationMessage, MessageId};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
 
 mod mock_server;
 use mock_server::{spawn_mock, MockResp};

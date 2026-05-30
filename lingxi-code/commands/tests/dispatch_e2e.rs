@@ -4,11 +4,11 @@
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 7.
 
-use lingxi_commands::dispatcher::RegistrySlashDispatcher;
-use lingxi_commands::registry::{register_all_builtin_commands, CommandRegistry};
-use lingxi_traits::{SlashCommandDispatcher, SlashDispatchResult};
+use commands::dispatcher::RegistrySlashDispatcher;
+use commands::registry::{register_all_builtin_commands, CommandRegistry};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use traits::{SlashCommandDispatcher, SlashDispatchResult};
 
 fn build_dispatcher() -> RegistrySlashDispatcher {
     let mut reg = CommandRegistry::new();

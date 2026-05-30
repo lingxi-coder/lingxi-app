@@ -15,18 +15,18 @@
 #![forbid(unsafe_code)]
 
 use crate::conversation::StreamingApiClient;
-use async_trait::async_trait;
-use futures::stream::{self, BoxStream, StreamExt};
-use lingxi_api_client::types::{
+use api_client::types::{
     ContentBlockApi, ContentDelta, MessageDeltaPayload, MessageResponse, StreamEvent, UsageApi,
 };
-use lingxi_api_client::ApiError;
-use lingxi_protocol::{ConversationMessage, ToolUseId};
-use lingxi_traits::HttpError;
+use api_client::ApiError;
+use async_trait::async_trait;
+use futures::stream::{self, BoxStream, StreamExt};
+use protocol::{ConversationMessage, ToolUseId};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
+use traits::HttpError;
 
 /// Captured arguments of one `StreamingApiClient::stream` call.
 #[derive(Debug, Clone)]

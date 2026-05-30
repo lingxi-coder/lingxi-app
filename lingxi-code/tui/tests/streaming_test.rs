@@ -1,11 +1,11 @@
 //! End-to-end streaming + cancel tests for the TUI app. (M6-03 Task 8)
 
-use lingxi_tui::app::handle_ctrl_c;
-use lingxi_tui::events::orchestrator_bridge::TurnEvent;
-use lingxi_tui::state::{AppState, RenderedMessage, StatusSnapshot, StreamingState};
-use lingxi_tui::streaming::apply_event;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+use tui::app::handle_ctrl_c;
+use tui::events::orchestrator_bridge::TurnEvent;
+use tui::state::{AppState, RenderedMessage, StatusSnapshot, StreamingState};
+use tui::streaming::apply_event;
 
 fn new_state() -> AppState {
     AppState::new(StatusSnapshot::default())
@@ -23,7 +23,7 @@ async fn five_deltas_with_50ms_gap_concatenate_correctly() {
     }
     apply_event(
         &mut state,
-        TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::EndTurn),
+        TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn),
         &notify,
     );
 
@@ -46,7 +46,7 @@ async fn spinner_mount_predicate_tracks_streaming_field() {
     assert!(state.streaming.is_some());
     apply_event(
         &mut state,
-        TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::EndTurn),
+        TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn),
         &notify,
     );
     assert!(state.streaming.is_none());
@@ -67,7 +67,7 @@ async fn ctrl_c_cancels_within_100ms_and_clears_streaming() {
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     apply_event(
         &mut state,
-        TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::Cancelled),
+        TurnEvent::TurnEnded(traits::TurnOutcome::Cancelled),
         &notify,
     );
 
@@ -96,9 +96,9 @@ async fn streaming_state_started_at_is_recent() {
 #[test]
 fn repl_render_includes_spinner_when_streaming() {
     let mut state = new_state();
-    assert!(!lingxi_tui::screens::repl::should_render_spinner(&state));
+    assert!(!tui::screens::repl::should_render_spinner(&state));
     state.streaming = Some(StreamingState::new());
-    assert!(lingxi_tui::screens::repl::should_render_spinner(&state));
+    assert!(tui::screens::repl::should_render_spinner(&state));
 }
 
 /// Perf smoke (M6-03 T11): a 100-events/sec burst for 5 seconds should

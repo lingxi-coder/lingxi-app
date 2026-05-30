@@ -6,8 +6,8 @@
 //! Literal lock (design §2.8): rows show `name` + ` – ` (en-dash, U+2013) +
 //! description, mirroring claude-code PromptInputFooterSuggestions.tsx.
 
+use commands::builtin::{core_description, BUILTIN_COMMAND_NAMES};
 use iocraft::prelude::*;
-use lingxi_commands::builtin::{core_description, BUILTIN_COMMAND_NAMES};
 
 use super::fuzzy::filtered_ranked;
 use crate::theme::Theme;

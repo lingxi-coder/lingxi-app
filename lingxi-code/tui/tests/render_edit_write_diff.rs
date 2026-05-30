@@ -1,8 +1,6 @@
 //! Edit/Write tool results render as a `StructuredDiff` (M7-02).
-use lingxi_tui::components::messages::user_tool_result::{
-    is_diff_tool, render_edit_write_diff_lines,
-};
-use lingxi_tui::theme::ThemeName;
+use tui::components::messages::user_tool_result::{is_diff_tool, render_edit_write_diff_lines};
+use tui::theme::ThemeName;
 
 #[test]
 fn edit_result_renders_structured_diff() {

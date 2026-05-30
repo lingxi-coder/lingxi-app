@@ -7,11 +7,11 @@
 
 use crate::context::SubagentContext;
 use crate::runner::SubagentEvent;
-use lingxi_protocol::AgentId;
-use lingxi_traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use protocol::AgentId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
+use traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 
 /// One slot in the [`StateMachinePool`].
 ///
@@ -24,7 +24,7 @@ pub struct StateMachineSlot {
     /// Handle to the background task running the subagent.
     pub task: BackgroundTaskHandle,
     /// Sender used by the host to deliver `Event`s into the slot.
-    pub event_tx: mpsc::Sender<lingxi_core::Event>,
+    pub event_tx: mpsc::Sender<engine::Event>,
 }
 
 /// Fixed-capacity table of active subagent slots.
@@ -52,7 +52,7 @@ impl StateMachinePool {
 
     /// Allocate a slot. Returns `(agent_id, event_rx)` where `event_rx` is the
     /// channel emitting [`SubagentEvent`]s for the new spawn. The
-    /// `event_tx` for inbound `lingxi_core::Event`s is owned by the slot
+    /// `event_tx` for inbound `engine::Event`s is owned by the slot
     /// table and reachable via [`Self::send_event`] in later milestones.
     pub async fn allocate(
         &self,
@@ -62,7 +62,7 @@ impl StateMachinePool {
             return Err(PoolError::TooManyAgents);
         }
         let agent_id = ctx.agent_id;
-        let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(100);
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(100);
         let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(100);
 
         let task = self
@@ -104,7 +104,7 @@ impl StateMachinePool {
 /// `sidequery → agent → memory → sidequery` cycle). The trait is currently a
 /// marker so the M1.14 stub compiles; production methods land alongside the
 /// real forked-agent runner in a later plan.
-impl lingxi_sidequery::SubagentSlotProvider for StateMachinePool {}
+impl sidequery::SubagentSlotProvider for StateMachinePool {}
 
 /// Failure modes for [`StateMachinePool`] operations.
 #[derive(Debug, thiserror::Error)]
@@ -125,8 +125,8 @@ mod tests {
         AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
     };
     use crate::display::{AgentColor, AgentDisplay};
-    use lingxi_test_harness::mocks::MockRuntimeSpawner;
     use std::sync::Arc;
+    use test_harness::mocks::MockRuntimeSpawner;
 
     #[tokio::test]
     async fn allocate_and_deallocate() {

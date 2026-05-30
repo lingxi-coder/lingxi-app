@@ -1,7 +1,7 @@
 //! Service-name helper tests — must match claude-code's
 //! `macOsKeychainHelpers.ts` exactly.
 
-use lingxi_platform_posix::secure_storage::{compute_dir_hash, full_service_name};
+use platform_posix::secure_storage::{compute_dir_hash, full_service_name};
 use std::path::PathBuf;
 
 #[test]

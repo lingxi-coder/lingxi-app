@@ -1,6 +1,6 @@
 //! `validate_uuid` 1:1 with sessionStoragePortable.ts:23-29 regex.
 
-use lingxi_session::jsonl::uuid::validate_uuid;
+use session::jsonl::uuid::validate_uuid;
 
 #[test]
 fn five_valid_uuids_accepted() {

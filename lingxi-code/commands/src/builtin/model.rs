@@ -13,9 +13,9 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
 use std::sync::Arc;
+use telemetry::tengu::command as cmd_evt;
+use traits::OrchestratorHandle;
 
 /// `/model` handler — list / switch active model.
 #[derive(Clone)]
@@ -34,13 +34,13 @@ impl ModelHandler {
 #[async_trait]
 impl BuiltinCommandHandler for ModelHandler {
     async fn handle(&self, args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::MODEL_STARTED);
+        telemetry::emit_command_started(cmd_evt::MODEL_STARTED);
         let trimmed = args.raw_args.trim();
         if trimmed.is_empty() {
             // List mode.
             let available = self.handle.list_available_models().await;
             let snap = self.handle.get_status_snapshot().await;
-            lingxi_telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "list");
+            telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "list");
             return CommandResult::Done {
                 display: Some(format!(
                     "Current model: {}\nAvailable: {}",
@@ -52,14 +52,14 @@ impl BuiltinCommandHandler for ModelHandler {
         // Switch mode.
         match self.handle.switch_model(trimmed).await {
             Ok(()) => {
-                lingxi_telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "switch");
+                telemetry::emit_command_completed(cmd_evt::MODEL_COMPLETED, "switch");
                 CommandResult::Done {
                     display: Some(format!("Switched to model: {trimmed}")),
                 }
             }
             Err(e) => {
                 let msg = e.to_string();
-                lingxi_telemetry::emit_command_failed(cmd_evt::MODEL_FAILED, &msg);
+                telemetry::emit_command_failed(cmd_evt::MODEL_FAILED, &msg);
                 CommandResult::Done {
                     display: Some(format!("Could not switch model: {msg}")),
                 }
@@ -77,7 +77,7 @@ impl BuiltinCommandHandler for ModelHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
+    use orchestrator::test_support::MockOrchestratorHandle;
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
@@ -91,9 +91,9 @@ mod tests {
     async fn list_mode_when_no_args() {
         let mock = Arc::new(MockOrchestratorHandle::new());
         mock.set_available_models(vec!["claude-opus-4-7".into(), "claude-sonnet-4-6".into()]);
-        let snap = lingxi_traits::StatusSnapshot {
+        let snap = traits::StatusSnapshot {
             model: "claude-opus-4-7".into(),
-            ..lingxi_traits::StatusSnapshot::default()
+            ..traits::StatusSnapshot::default()
         };
         mock.set_status_snapshot(snap);
         let h = ModelHandler::new(mock);

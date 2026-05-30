@@ -8,7 +8,7 @@ use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use lingxi_platform_posix::connect_ws;
+use platform_posix::connect_ws;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

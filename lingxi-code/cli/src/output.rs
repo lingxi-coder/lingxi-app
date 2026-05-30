@@ -103,7 +103,7 @@ impl JsonSink {
     /// Construct a new sink keyed to the given session id (used in
     /// `turn_start` events).
     #[must_use]
-    pub fn new(session_id: lingxi_protocol::SessionId) -> Self {
+    pub fn new(session_id: protocol::SessionId) -> Self {
         Self {
             out: Mutex::new(std::io::stdout()),
             session_id: session_id.to_string(),

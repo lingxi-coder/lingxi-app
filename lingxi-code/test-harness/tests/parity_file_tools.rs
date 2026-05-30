@@ -6,8 +6,8 @@
 
 #![allow(clippy::too_many_lines, clippy::items_after_statements)]
 
-use lingxi_test_harness::parity::load_fixture;
 use serde::Deserialize;
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 struct SizeLimitRow {
@@ -85,7 +85,7 @@ fn file_tools_fixture_matches_production_constants() {
 
     assert_eq!(
         fx.read_size_limit.value,
-        lingxi_tools::builtin::file_read::MAX_FILE_READ_SIZE
+        tools::builtin::file_read::MAX_FILE_READ_SIZE
     );
     assert_eq!(
         fx.read_size_limit.error_template,
@@ -94,7 +94,7 @@ fn file_tools_fixture_matches_production_constants() {
 
     assert_eq!(
         fx.binary_detection.scan_window_bytes,
-        lingxi_tools::shared::file_kit::NUL_SCAN_WINDOW
+        tools::shared::file_kit::NUL_SCAN_WINDOW
     );
     assert_eq!(
         fx.binary_detection.error_template,
@@ -107,13 +107,13 @@ fn file_tools_fixture_matches_production_constants() {
     );
     assert_eq!(
         fx.path_blocked_event_name.value,
-        lingxi_tools::shared::path_validation::PATH_BLOCKED_EVENT
+        tools::shared::path_validation::PATH_BLOCKED_EVENT
     );
     assert_eq!(fx.path_blocked_event_name.value, "tengu_file_path_blocked");
 
     assert_eq!(
         fx.patch_truncation_suffix.template,
-        lingxi_tools::builtin::file_edit::PATCH_TRUNCATION_SUFFIX_TEMPLATE
+        tools::builtin::file_edit::PATCH_TRUNCATION_SUFFIX_TEMPLATE
     );
     assert_eq!(
         fx.patch_truncation_suffix.template,
@@ -122,33 +122,30 @@ fn file_tools_fixture_matches_production_constants() {
 
     assert_eq!(
         fx.output_truncation.max_length,
-        lingxi_tools::shared::output_truncation::MAX_TOOL_OUTPUT_LENGTH
+        tools::shared::output_truncation::MAX_TOOL_OUTPUT_LENGTH
     );
     assert_eq!(fx.output_truncation.max_length, 30_000);
     assert_eq!(
         fx.output_truncation.suffix,
-        lingxi_tools::shared::output_truncation::TRUNCATION_SUFFIX
+        tools::shared::output_truncation::TRUNCATION_SUFFIX
     );
     assert_eq!(
         fx.output_truncation.suffix,
         "\n\n[Output truncated due to length]"
     );
 
-    assert_eq!(
-        fx.glob_cap.value,
-        lingxi_tools::builtin::glob::MAX_GLOB_MATCHES
-    );
+    assert_eq!(fx.glob_cap.value, tools::builtin::glob::MAX_GLOB_MATCHES);
     assert_eq!(fx.glob_cap.value, 100);
 
     assert_eq!(
         fx.grep_per_file_cap.value,
-        lingxi_tools::builtin::grep::GREP_PER_FILE_CAP
+        tools::builtin::grep::GREP_PER_FILE_CAP
     );
     assert_eq!(fx.grep_per_file_cap.value, 100);
 
     assert_eq!(fx.line_indexing_base.value, 1);
 
-    use lingxi_telemetry::tengu::tool as ev;
+    use telemetry::tengu::tool as ev;
     assert_eq!(
         fx.telemetry_events.read,
         vec![

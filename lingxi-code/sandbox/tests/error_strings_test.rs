@@ -1,4 +1,4 @@
-use lingxi_sandbox::dependency_check::error_strings;
+use sandbox::dependency_check::error_strings;
 
 #[test]
 fn wsl1_refusal_constant() {

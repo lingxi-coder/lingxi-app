@@ -1,7 +1,7 @@
 //! Asserts the LITERAL `~/.claude/ide/<port>.lock` filename and JSON shape
 //! from claude-code's `src/utils/ide.ts` (`LockfileJsonContent` type).
 
-use lingxi_bridge::lockfile::{IdeLockfile, LockfileGuard};
+use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use serde_json::Value;
 use std::path::PathBuf;
 use tempfile::TempDir;

@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use futures_core::stream::Stream;
-use lingxi_protocol::McpConnectionId;
+use protocol::McpConnectionId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::pin::Pin;

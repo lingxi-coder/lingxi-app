@@ -7,14 +7,14 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
 use std::sync::Arc;
+use telemetry::tengu::command as cmd_evt;
+use traits::OrchestratorHandle;
 
 /// `/memory` handler — opens the user's memory file in `$EDITOR`.
 ///
 /// Calls
-/// [`OrchestratorHandle::open_memory_editor`](lingxi_traits::OrchestratorHandle::open_memory_editor)
+/// [`OrchestratorHandle::open_memory_editor`](traits::OrchestratorHandle::open_memory_editor)
 /// and renders `"Edited {path} (exit {code})."` on success or the locked
 /// `"Could not edit memory: {error}"` prefix on failure.
 #[derive(Clone)]
@@ -33,7 +33,7 @@ impl MemoryHandler {
 #[async_trait]
 impl BuiltinCommandHandler for MemoryHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::MEMORY_STARTED);
+        telemetry::emit_command_started(cmd_evt::MEMORY_STARTED);
         match self.handle.open_memory_editor().await {
             Ok(outcome) => {
                 let details = format!(
@@ -41,7 +41,7 @@ impl BuiltinCommandHandler for MemoryHandler {
                     outcome.edited_path.display(),
                     outcome.exit_code
                 );
-                lingxi_telemetry::emit_command_completed(cmd_evt::MEMORY_COMPLETED, &details);
+                telemetry::emit_command_completed(cmd_evt::MEMORY_COMPLETED, &details);
                 CommandResult::Done {
                     display: Some(format!(
                         "Edited {} (exit {}).",
@@ -52,7 +52,7 @@ impl BuiltinCommandHandler for MemoryHandler {
             }
             Err(e) => {
                 let msg = e.to_string();
-                lingxi_telemetry::emit_command_failed(cmd_evt::MEMORY_FAILED, &msg);
+                telemetry::emit_command_failed(cmd_evt::MEMORY_FAILED, &msg);
                 CommandResult::Done {
                     display: Some(format!("Could not edit memory: {msg}")),
                 }
@@ -72,7 +72,7 @@ impl BuiltinCommandHandler for MemoryHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
+    use orchestrator::test_support::MockOrchestratorHandle;
     use std::path::PathBuf;
 
     fn args() -> ParsedSlashCommand {

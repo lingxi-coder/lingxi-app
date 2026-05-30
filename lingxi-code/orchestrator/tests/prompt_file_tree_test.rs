@@ -1,6 +1,6 @@
 //! `file_tree::probe` + format byte-locks (M5-03 Task 8).
 
-use lingxi_orchestrator::prompt::file_tree;
+use orchestrator::prompt::file_tree;
 use std::fs;
 use tempfile::TempDir;
 

@@ -1,27 +1,25 @@
 //! Multi-turn streaming — turn 1 `tool_use`, turn 2 `end_turn` (M5-04 Task 15).
 
 use async_trait::async_trait;
-use lingxi_orchestrator::test_support::{
+use orchestrator::test_support::{
     content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
     message_delta_stop, message_start, message_stop, text_delta, MockApiClient, MockOutputStream,
     MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::{
-    scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig,
-};
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_protocol::ToolUseId;
-use lingxi_tools::progress::ToolProgressSender;
-use lingxi_tools::registry::ToolRegistry;
-use lingxi_tools::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
-};
-use lingxi_traits::OutputEvent;
+use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
+use protocol::ToolUseId;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tools::progress::ToolProgressSender;
+use tools::registry::ToolRegistry;
+use tools::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    ValidationError,
+};
+use traits::OutputEvent;
 
 struct AlwaysOkTool;
 
@@ -50,14 +48,14 @@ impl Tool for AlwaysOkTool {
     async fn validate_input(
         &self,
         _input: &serde_json::Value,
-        _ctx: &lingxi_tools::context::ToolUseContext,
+        _ctx: &tools::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
         _input: &serde_json::Value,
-        _ctx: &lingxi_tools::context::ToolUseContext,
+        _ctx: &tools::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
@@ -77,7 +75,7 @@ impl Tool for AlwaysOkTool {
     async fn call(
         &self,
         _input: serde_json::Value,
-        _ctx: lingxi_tools::context::ToolUseContext,
+        _ctx: tools::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
@@ -123,7 +121,7 @@ async fn two_streaming_turns_with_tool_in_between() {
         batched,
         api.clone(),
         registry_with_always_ok(),
-        lingxi_orchestrator::test_support::noop_hook_executor(),
+        orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),

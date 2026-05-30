@@ -1,6 +1,6 @@
 //! Orchestrator → TUI event bridge. (M6-03)
 //!
-//! The `BridgeOutputStream` is an [`lingxi_traits::OutputStream`] impl that
+//! The `BridgeOutputStream` is an [`traits::OutputStream`] impl that
 //! forwards every orchestrator callback as a [`TurnEvent`] on an mpsc
 //! channel. The TUI render loop drains the receiver and feeds events into
 //! `crate::streaming::apply_event`, which mutates `AppState` and pokes a
@@ -17,8 +17,8 @@
 //! 5. On `emit_end_turn` the bridge fires `TurnEvent::TurnEnded(_)`.
 
 use async_trait::async_trait;
-use lingxi_traits::{CostSnapshot, OutputStream, TurnOutcome};
 use tokio::sync::mpsc::UnboundedSender;
+use traits::{CostSnapshot, OutputStream, TurnOutcome};
 
 /// Events flowing from the orchestrator into the TUI render loop.
 ///
@@ -34,7 +34,7 @@ pub enum TurnEvent {
     ToolUseStart {
         /// Stable id (the model-supplied `tool_use_id`) — correlates with
         /// the matching `ToolUseResult`.
-        id: lingxi_protocol::ToolUseId,
+        id: protocol::ToolUseId,
         /// Name of the tool being invoked.
         tool: String,
         /// JSON input passed to the tool.
@@ -43,7 +43,7 @@ pub enum TurnEvent {
     /// A tool result has returned.
     ToolUseResult {
         /// Correlator with the paired `ToolUseStart`.
-        id: lingxi_protocol::ToolUseId,
+        id: protocol::ToolUseId,
         /// Tool name (used to gate Bash → ANSI parser at render time).
         tool: String,
         /// JSON result payload.
@@ -108,7 +108,7 @@ impl OutputStream for BridgeOutputStream {
 
     async fn emit_tool_call(
         &self,
-        id: &lingxi_protocol::ToolUseId,
+        id: &protocol::ToolUseId,
         tool: &str,
         input: &serde_json::Value,
     ) {
@@ -121,7 +121,7 @@ impl OutputStream for BridgeOutputStream {
 
     async fn emit_tool_result(
         &self,
-        id: &lingxi_protocol::ToolUseId,
+        id: &protocol::ToolUseId,
         tool: &str,
         result: &serde_json::Value,
     ) {
@@ -180,7 +180,7 @@ mod tests {
     async fn emit_tool_call_translates_to_tool_use_start() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        let id = lingxi_protocol::ToolUseId::new();
+        let id = protocol::ToolUseId::new();
         bridge
             .emit_tool_call(&id, "Read", &serde_json::json!({"file_path": "/tmp/x"}))
             .await;
@@ -202,7 +202,7 @@ mod tests {
     async fn emit_end_turn_endturn_reason_translates_to_endturn() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        let cost = lingxi_traits::CostSnapshot::default();
+        let cost = traits::CostSnapshot::default();
         bridge.emit_end_turn("end_turn", &cost).await;
         // M6-06: emit_end_turn now precedes TurnEnded with a CostUpdated event.
         assert!(matches!(
@@ -219,7 +219,7 @@ mod tests {
     async fn emit_end_turn_max_tokens_translates_to_maxturns() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        let cost = lingxi_traits::CostSnapshot::default();
+        let cost = traits::CostSnapshot::default();
         bridge.emit_end_turn("max_tokens", &cost).await;
         assert!(matches!(
             rx.recv().await.unwrap(),
@@ -235,9 +235,9 @@ mod tests {
     async fn emit_end_turn_formats_real_cost_4dp() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let bridge = BridgeOutputStream::new(tx);
-        let cost = lingxi_traits::CostSnapshot {
+        let cost = traits::CostSnapshot {
             total_usd: 0.0234,
-            ..lingxi_traits::CostSnapshot::default()
+            ..traits::CostSnapshot::default()
         };
         bridge.emit_end_turn("end_turn", &cost).await;
         match rx.recv().await.unwrap() {

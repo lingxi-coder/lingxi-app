@@ -1,12 +1,12 @@
 //! Re-export façade for shell-tool telemetry event names.
 //!
-//! The canonical declarations live in `lingxi_telemetry::tengu::tool`.
+//! The canonical declarations live in `telemetry::tengu::tool`.
 //! This façade exists so `builtin/{powershell,repl,sleep}.rs` can
 //! `use crate::builtin::shell_events::POWERSHELL_STARTED;` without
 //! reaching across crates at every callsite. The string values are
 //! locked by `tengu::tool` — DO NOT redeclare here.
 
-pub use lingxi_telemetry::tengu::tool::{
+pub use telemetry::tengu::tool::{
     POWERSHELL_COMPLETED, POWERSHELL_FAILED, POWERSHELL_STARTED, REPL_COMPLETED, REPL_FAILED,
     REPL_STARTED, SLEEP_COMPLETED, SLEEP_FAILED, SLEEP_STARTED,
 };

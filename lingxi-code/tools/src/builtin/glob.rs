@@ -14,16 +14,16 @@ use crate::tool_trait::{
 };
 use async_trait::async_trait;
 use globset::Glob;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::{PiiTagged, Verified};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{GLOB_COMPLETED, GLOB_FAILED, GLOB_STARTED};
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
+use telemetry::pii::{PiiTagged, Verified};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{GLOB_COMPLETED, GLOB_FAILED, GLOB_STARTED};
 use walkdir::WalkDir;
 
 /// Tool name byte-lock.
@@ -232,8 +232,8 @@ impl Tool for GlobTool {
 mod tests {
     use super::*;
     use crate::builtin::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
-    use lingxi_telemetry::{AnalyticsBus, InMemorySink};
     use std::sync::Arc;
+    use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
 
     pub(crate) fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {

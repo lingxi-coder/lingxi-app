@@ -6,18 +6,18 @@ fn events_module_exports_emit_fn() {
     // Compile-time assertion: the function signature is reachable.
     let _: fn() = || {
         // Reference the symbol so the linker pulls it in.
-        let _: &dyn std::any::Any = &lingxi_cost::emit_cost_recorded;
+        let _: &dyn std::any::Any = &cost::emit_cost_recorded;
     };
 }
 
 #[test]
 fn summary_module_exports_cost_summary() {
-    fn _accepts(_: &lingxi_cost::CostSummary) {}
+    fn _accepts(_: &cost::CostSummary) {}
 }
 
 #[test]
 fn cost_error_has_new_variants() {
-    use lingxi_cost::CostError;
+    use cost::CostError;
     // The two new variants from spec §5.
     let e1 = CostError::UnknownModel {
         model: "claude-foo".to_string(),
@@ -40,7 +40,7 @@ fn cost_error_has_new_variants() {
 
 #[test]
 fn budget_threshold_bps_constants_are_locked() {
-    assert_eq!(lingxi_cost::BUDGET_WARNING_THRESHOLD_BPS, 8000_u32);
-    assert_eq!(lingxi_cost::BUDGET_EXCEEDED_THRESHOLD_BPS, 10000_u32);
-    assert_eq!(lingxi_cost::BATCH_DISCOUNT_BPS, 5000_u32);
+    assert_eq!(cost::BUDGET_WARNING_THRESHOLD_BPS, 8000_u32);
+    assert_eq!(cost::BUDGET_EXCEEDED_THRESHOLD_BPS, 10000_u32);
+    assert_eq!(cost::BATCH_DISCOUNT_BPS, 5000_u32);
 }

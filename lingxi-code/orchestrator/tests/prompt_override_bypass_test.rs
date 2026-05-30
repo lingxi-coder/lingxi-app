@@ -1,16 +1,16 @@
 //! `OrchestratorConfig::system_prompt_override = Some(_)` skips the
 //! prompt assembler and forwards the literal byte-for-byte.
 
-use lingxi_api_client::types::ContentBlockApi;
-use lingxi_orchestrator::test_support::{
+use api_client::types::ContentBlockApi;
+use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_tools::registry::ToolRegistry;
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
+use tools::registry::ToolRegistry;
 
-fn end_turn() -> lingxi_api_client::types::MessageResponse {
+fn end_turn() -> api_client::types::MessageResponse {
     mock_message_response(
         vec![ContentBlockApi::Text { text: "ok".into() }],
         Some("end_turn"),
@@ -28,7 +28,7 @@ async fn override_is_forwarded_verbatim_bypassing_assembler() {
         cfg,
         api.clone(),
         Arc::new(ToolRegistry::new()),
-        lingxi_orchestrator::test_support::noop_hook_executor(),
+        orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
@@ -52,7 +52,7 @@ async fn default_config_uses_assembler() {
         OrchestratorConfig::default(),
         api.clone(),
         Arc::new(ToolRegistry::new()),
-        lingxi_orchestrator::test_support::noop_hook_executor(),
+        orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),

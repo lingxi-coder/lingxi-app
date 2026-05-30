@@ -15,11 +15,11 @@ use crate::process::wrap::{
     ENV_SHELL,
 };
 use async_trait::async_trait;
-use lingxi_traits::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand};
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use traits::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner, SandboxedCommand};
 
 /// Production [`ProcessRunner`] using `tokio::process`.
 #[derive(Default)]

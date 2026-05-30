@@ -5,7 +5,7 @@
 //! isn't installed; we expect a spawn-level [`ProcessError::Io`] error so
 //! the test still pulls the function into the build graph.
 
-use lingxi_platform_windows::process::kill_tree::kill_tree_windows;
+use platform_windows::process::kill_tree::kill_tree_windows;
 
 #[tokio::test]
 async fn kill_tree_windows_handles_nonexistent_pid_gracefully() {

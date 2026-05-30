@@ -2,7 +2,7 @@
 //!
 //! M5-10 Task 10.
 
-use lingxi_commands::builtin::OLD_INIT_PROMPT;
+use commands::builtin::OLD_INIT_PROMPT;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 

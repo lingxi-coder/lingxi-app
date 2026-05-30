@@ -10,9 +10,9 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::{HookInfo, OrchestratorHandle};
 use std::sync::Arc;
+use telemetry::tengu::command as cmd_evt;
+use traits::{HookInfo, OrchestratorHandle};
 
 /// `/hooks` handler — list mode.
 #[derive(Clone)]
@@ -31,11 +31,11 @@ impl HooksHandler {
 #[async_trait]
 impl BuiltinCommandHandler for HooksHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::HOOKS_STARTED);
+        telemetry::emit_command_started(cmd_evt::HOOKS_STARTED);
         let hooks = self.handle.list_hooks().await;
         let rows: Vec<String> = hooks.iter().map(format_row).collect();
         let s = render_list("Hooks", rows, "No hooks configured");
-        lingxi_telemetry::emit_command_completed(cmd_evt::HOOKS_COMPLETED, "");
+        telemetry::emit_command_completed(cmd_evt::HOOKS_COMPLETED, "");
         CommandResult::Done { display: Some(s) }
     }
     fn name(&self) -> &str {
@@ -53,7 +53,7 @@ fn format_row(h: &HookInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
+    use orchestrator::test_support::MockOrchestratorHandle;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {

@@ -84,7 +84,7 @@ async fn connect_sse_sends_get_with_accept_event_stream() {
     });
     let (url, state) = spawn_mock(pre_baked_reply).await;
 
-    let conn = lingxi_platform_common::connect_sse(&url, None, &HashMap::new())
+    let conn = platform_common::connect_sse(&url, None, &HashMap::new())
         .await
         .expect("connect_sse should succeed against mock");
 
@@ -128,7 +128,7 @@ async fn connect_sse_passes_auth_header_when_token_supplied() {
     });
     let (url, state) = spawn_mock(pre_baked_reply).await;
 
-    let conn = lingxi_platform_common::connect_sse(
+    let conn = platform_common::connect_sse(
         &url,
         Some("abc123def456abc123def456abc12345"),
         &HashMap::new(),

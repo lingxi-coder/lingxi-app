@@ -1,7 +1,7 @@
 //! A payload enum referenced from a payload struct must be `#[non_exhaustive]`.
 
 fn main() {
-    lingxi_telemetry_macros::_audit_source!(r#"
+    telemetry_macros::_audit_source!(r#"
         #[derive(serde::Serialize, serde::Deserialize)]
         pub enum Kind { A, B }
 

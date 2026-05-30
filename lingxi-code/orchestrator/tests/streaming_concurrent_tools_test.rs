@@ -6,26 +6,26 @@
 //! message in the ORIGINAL (in-stream) order.
 
 use async_trait::async_trait;
-use lingxi_orchestrator::test_support::{
+use orchestrator::test_support::{
     content_block_start_tool_use, content_block_stop, input_json_delta, message_delta_stop,
     message_start, message_stop, MockApiClient, MockOutputStream, MockStreamingApiClient,
     NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_protocol::ToolUseId;
-use lingxi_tools::progress::ToolProgressSender;
-use lingxi_tools::registry::ToolRegistry;
-use lingxi_tools::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
-};
-use lingxi_traits::OutputEvent;
+use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
+use protocol::ToolUseId;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tools::progress::ToolProgressSender;
+use tools::registry::ToolRegistry;
+use tools::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    ValidationError,
+};
+use traits::OutputEvent;
 
 struct SlowTool;
 struct FastTool;
@@ -57,14 +57,14 @@ macro_rules! impl_test_tool {
             async fn validate_input(
                 &self,
                 _input: &serde_json::Value,
-                _ctx: &lingxi_tools::context::ToolUseContext,
+                _ctx: &tools::context::ToolUseContext,
             ) -> Result<(), ValidationError> {
                 Ok(())
             }
             async fn check_permissions(
                 &self,
                 _input: &serde_json::Value,
-                _ctx: &lingxi_tools::context::ToolUseContext,
+                _ctx: &tools::context::ToolUseContext,
             ) -> PermissionResult {
                 PermissionResult::Allow {
                     reason: PermissionDecisionReason::Other {
@@ -88,7 +88,7 @@ macro_rules! impl_test_tool {
             async fn call(
                 &self,
                 _input: serde_json::Value,
-                _ctx: lingxi_tools::context::ToolUseContext,
+                _ctx: tools::context::ToolUseContext,
                 _tx: ToolProgressSender,
             ) -> Result<ToolCallResult, ToolError> {
                 let sleep_ms: u64 = $sleep_ms;
@@ -146,7 +146,7 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
         batched,
         api,
         registry_with_slow_and_fast(),
-        lingxi_orchestrator::test_support::noop_hook_executor(),
+        orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),

@@ -4,7 +4,7 @@
 //! down when the agent exits, even if the registry still holds them for
 //! other agents.
 
-use lingxi_protocol::{AgentId, McpConnectionId};
+use protocol::{AgentId, McpConnectionId};
 use std::collections::HashMap;
 
 /// Tracks which connections each agent is responsible for.

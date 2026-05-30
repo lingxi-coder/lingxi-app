@@ -3,7 +3,7 @@
 
 use crate::memdir::paths::MemdirRoots;
 use crate::memdir::scan::scan_memdir_at;
-use lingxi_protocol::MemoryEntry;
+use protocol::MemoryEntry;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn populated_dir_returns_entries_tagged_team() {
-        use lingxi_protocol::MemoryEntryTier;
+        use protocol::MemoryEntryTier;
         let tmp = TempDir::new().unwrap();
         let team = tmp.path().join("team");
         fs::create_dir_all(&team).unwrap();

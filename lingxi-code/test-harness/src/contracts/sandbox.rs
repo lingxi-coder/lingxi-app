@@ -16,11 +16,11 @@
 //! on macOS, the Windows `Unsupported` branch) belong in platform-local
 //! tests; this contract is the trait-level surface only.
 
-use lingxi_traits::sandbox::{
+use std::collections::HashMap;
+use traits::sandbox::{
     NetworkPolicy, ProcessCommand, ResourceLimits, Sandbox, SandboxError, SandboxPolicy,
     SandboxedTag,
 };
-use std::collections::HashMap;
 
 const REASON: &str = "sandbox contract bypass (audit intentional)";
 

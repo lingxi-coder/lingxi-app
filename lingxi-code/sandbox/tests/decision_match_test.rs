@@ -1,5 +1,5 @@
-use lingxi_sandbox::decision::should_use_sandbox_for_command;
-use lingxi_sandbox::runtime_config::SandboxRuntimeConfig;
+use sandbox::decision::should_use_sandbox_for_command;
+use sandbox::runtime_config::SandboxRuntimeConfig;
 
 fn cfg_with_excluded(excluded: &[&str]) -> SandboxRuntimeConfig {
     SandboxRuntimeConfig {

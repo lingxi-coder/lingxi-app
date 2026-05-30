@@ -2,7 +2,7 @@
 //! the trait every built-in handler implements.
 
 use crate::parser::ParsedSlashCommand;
-use lingxi_protocol::{Effect, McpConnectionId, PluginId};
+use protocol::{Effect, McpConnectionId, PluginId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

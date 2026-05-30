@@ -196,7 +196,7 @@ impl PromptingGate for InteractivePromptingGate {
         loop {
             // Telemetry: prompt about to be shown (once per attempt).
             tracing::info!(
-                event = lingxi_telemetry::tengu::orchestrator::PERMISSION_PROMPTED,
+                event = telemetry::tengu::orchestrator::PERMISSION_PROMPTED,
                 tool_name = %tool_name,
                 default_allow,
             );
@@ -241,7 +241,7 @@ impl PromptingGate for InteractivePromptingGate {
                 };
                 // Telemetry: definitive answer (NOT fired on retry).
                 tracing::info!(
-                    event = lingxi_telemetry::tengu::orchestrator::PERMISSION_ANSWERED,
+                    event = telemetry::tengu::orchestrator::PERMISSION_ANSWERED,
                     tool_name = %tool_name,
                     allowed = allow,
                     attempts = attempts + 1,

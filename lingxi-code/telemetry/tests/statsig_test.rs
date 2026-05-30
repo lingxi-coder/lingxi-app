@@ -1,10 +1,8 @@
 //! `StatsigSink` trait + `MockStatsigSink` skeleton.
 
-use lingxi_protocol::Secret;
-use lingxi_telemetry::{
-    AnalyticsSink, AnalyticsValue, LogEventMetadata, MockStatsigSink, StatsigSink,
-};
+use protocol::Secret;
 use std::collections::HashMap;
+use telemetry::{AnalyticsSink, AnalyticsValue, LogEventMetadata, MockStatsigSink, StatsigSink};
 
 #[tokio::test]
 async fn statsig_wire_payload_matches_logstatsigevent_shape() {

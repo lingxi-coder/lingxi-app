@@ -7,15 +7,15 @@
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-14-release-v0.6.0.md` Task 4.
 
-use lingxi_api_client::types::ContentBlockApi;
-use lingxi_orchestrator::test_support::{
+use api_client::types::ContentBlockApi;
+use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_session::jsonl::{JsonlReader, JsonlWriter};
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use serde::Deserialize;
 use serde_json::Value;
+use session::jsonl::{JsonlReader, JsonlWriter};
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -66,9 +66,9 @@ fn build_orchestrator_with_writer(
     api: Arc<MockApiClient>,
     writer: Arc<JsonlWriter>,
 ) -> ConversationOrchestrator {
-    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tools::registry::ToolRegistry::new());
     let output = Arc::new(MockOutputStream::new());
     let cfg = OrchestratorConfig::default();
     ConversationOrchestrator::new(
@@ -93,9 +93,9 @@ async fn single_turn_produces_two_jsonl_lines() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("session.jsonl");
 
-    let fs: Arc<dyn lingxi_traits::FileSystem> = Arc::new(
-        lingxi_platform_posix::fs::PosixFileSystem::new(tmp.path().to_path_buf()),
-    );
+    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        tmp.path().to_path_buf(),
+    ));
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
@@ -129,9 +129,9 @@ async fn single_turn_line_types_are_user_then_assistant() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("session.jsonl");
 
-    let fs: Arc<dyn lingxi_traits::FileSystem> = Arc::new(
-        lingxi_platform_posix::fs::PosixFileSystem::new(tmp.path().to_path_buf()),
-    );
+    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        tmp.path().to_path_buf(),
+    ));
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
@@ -170,9 +170,9 @@ async fn single_turn_parent_uuid_chain_is_correct() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("session.jsonl");
 
-    let fs: Arc<dyn lingxi_traits::FileSystem> = Arc::new(
-        lingxi_platform_posix::fs::PosixFileSystem::new(tmp.path().to_path_buf()),
-    );
+    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        tmp.path().to_path_buf(),
+    ));
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
@@ -211,9 +211,9 @@ async fn single_turn_all_lines_share_session_id() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("session.jsonl");
 
-    let fs: Arc<dyn lingxi_traits::FileSystem> = Arc::new(
-        lingxi_platform_posix::fs::PosixFileSystem::new(tmp.path().to_path_buf()),
-    );
+    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        tmp.path().to_path_buf(),
+    ));
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
@@ -246,9 +246,9 @@ async fn single_turn_file_has_lf_only_terminator_and_compact_json() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("session.jsonl");
 
-    let fs: Arc<dyn lingxi_traits::FileSystem> = Arc::new(
-        lingxi_platform_posix::fs::PosixFileSystem::new(tmp.path().to_path_buf()),
-    );
+    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        tmp.path().to_path_buf(),
+    ));
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
@@ -302,9 +302,9 @@ async fn single_turn_user_line_has_usertype_external() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("session.jsonl");
 
-    let fs: Arc<dyn lingxi_traits::FileSystem> = Arc::new(
-        lingxi_platform_posix::fs::PosixFileSystem::new(tmp.path().to_path_buf()),
-    );
+    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        tmp.path().to_path_buf(),
+    ));
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
@@ -339,9 +339,9 @@ async fn single_turn_is_sidechain_is_false() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("session.jsonl");
 
-    let fs: Arc<dyn lingxi_traits::FileSystem> = Arc::new(
-        lingxi_platform_posix::fs::PosixFileSystem::new(tmp.path().to_path_buf()),
-    );
+    let fs: Arc<dyn traits::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+        tmp.path().to_path_buf(),
+    ));
     let writer = Arc::new(JsonlWriter::new(path.clone(), Arc::clone(&fs)));
 
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
@@ -374,7 +374,7 @@ async fn single_turn_is_sidechain_is_false() {
 fn session_telemetry_events_are_registered() {
     let f = load();
     let registered: std::collections::HashSet<&&str> =
-        lingxi_telemetry::tengu::ALL_EVENT_NAMES.iter().collect();
+        telemetry::tengu::ALL_EVENT_NAMES.iter().collect();
     for name in &f.meta.session_telemetry_events {
         assert!(
             registered.contains(&name.as_str()),

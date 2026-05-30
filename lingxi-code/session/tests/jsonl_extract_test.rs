@@ -1,7 +1,7 @@
 //! `extract_json_string_field` + `unescape_json_string` parity with
 //! sessionStoragePortable.ts:39-46, 53-76.
 
-use lingxi_session::jsonl::reader::{extract_json_string_field, unescape_json_string};
+use session::jsonl::reader::{extract_json_string_field, unescape_json_string};
 
 #[test]
 fn finds_basic_key_value_pair() {

@@ -9,6 +9,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agent"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "engine",
+ "hooks",
+ "mcp",
+ "memory",
+ "permission",
+ "protocol",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sidequery",
+ "tempfile",
+ "test-harness",
+ "thiserror 2.0.18",
+ "tokio",
+ "tools",
+ "tracing",
+ "traits",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -77,10 +101,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "anthropic-oauth"
+version = "0.8.0"
+dependencies = [
+ "api-client",
+ "async-trait",
+ "base64",
+ "futures",
+ "loom",
+ "protocol",
+ "rand 0.9.4",
+ "secret",
+ "serde",
+ "serde_json",
+ "sha2",
+ "telemetry",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "traits",
+ "url",
+ "urlencoding",
+]
+
+[[package]]
 name = "anyhow"
 version = "1.0.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+
+[[package]]
+name = "api-client"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "cost",
+ "futures",
+ "futures-core",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "protocol",
+ "rand 0.8.6",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "traits",
+]
 
 [[package]]
 name = "arrayvec"
@@ -261,6 +332,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "bridge"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "http",
+ "jsonrpc",
+ "mcp",
+ "platform-common",
+ "protocol",
+ "rand 0.9.4",
+ "reqwest",
+ "secret",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.21.0",
+ "tracing",
+ "traits",
+]
+
+[[package]]
 name = "bstr"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -372,10 +467,108 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3e64b0cc0439b12df2fa678eae89a1c56a529fd067a9115f7827f1fffd22b32"
 
 [[package]]
+name = "cli"
+version = "0.8.0"
+dependencies = [
+ "agent",
+ "anthropic-oauth",
+ "anyhow",
+ "api-client",
+ "assert_cmd",
+ "async-trait",
+ "chrono",
+ "clap",
+ "commands",
+ "compaction",
+ "cost",
+ "dirs",
+ "filetime",
+ "futures",
+ "hooks",
+ "libc",
+ "mcp",
+ "orchestrator",
+ "platform-posix-minimal",
+ "predicates",
+ "protocol",
+ "secret",
+ "serde",
+ "serde_json",
+ "session",
+ "telemetry",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tools",
+ "tracing",
+ "tracing-subscriber",
+ "traits",
+ "tui",
+ "uuid",
+]
+
+[[package]]
+name = "cli-demo"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "api-client",
+ "clap",
+ "engine",
+ "platform-posix-minimal",
+ "protocol",
+ "tokio",
+ "traits",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
+
+[[package]]
+name = "commands"
+version = "0.8.0"
+dependencies = [
+ "api-client",
+ "async-trait",
+ "compaction",
+ "cost",
+ "engine",
+ "orchestrator",
+ "protocol",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "telemetry",
+ "thiserror 2.0.18",
+ "tokio",
+ "tools",
+ "tracing",
+ "traits",
+]
+
+[[package]]
+name = "compaction"
+version = "0.8.0"
+dependencies = [
+ "api-client",
+ "async-trait",
+ "cost",
+ "engine",
+ "hooks",
+ "protocol",
+ "serde",
+ "serde_json",
+ "sidequery",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "traits",
+]
 
 [[package]]
 name = "console"
@@ -398,10 +591,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "coordinator"
+version = "0.8.0"
+dependencies = [
+ "agent",
+ "async-trait",
+ "engine",
+ "memory",
+ "protocol",
+ "serde",
+ "serde_json",
+ "tasks",
+ "thiserror 2.0.18",
+ "tokio",
+ "tools",
+ "tracing",
+ "traits",
+ "uuid",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "cost"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "protocol",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "thiserror 2.0.18",
+ "tokio",
+ "traits",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -419,6 +647,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "cron"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "protocol",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "tasks",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "traits",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -647,6 +893,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "figment",
+ "protocol",
+ "schemars",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -703,6 +966,17 @@ dependencies = [
  "toml",
  "uncased",
  "version_check",
+]
+
+[[package]]
+name = "filestate"
+version = "0.8.0"
+dependencies = [
+ "serde",
+ "sha2",
+ "thiserror 2.0.18",
+ "tracing",
+ "traits",
 ]
 
 [[package]]
@@ -1019,6 +1293,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "hooks"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "engine",
+ "protocol",
+ "regex",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "traits",
+ "url",
+]
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1303,6 +1595,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonrpc"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "dashmap",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1347,890 +1655,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e02f3bb43d335493c96bf3fd3a321600bf6bd07ed34bc64118e9293bdffea46c"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "lingxi-agent"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "lingxi-core",
- "lingxi-hooks",
- "lingxi-mcp",
- "lingxi-memory",
- "lingxi-permission",
- "lingxi-protocol",
- "lingxi-sidequery",
- "lingxi-test-harness",
- "lingxi-tools",
- "lingxi-traits",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-anthropic-oauth"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "base64",
- "futures",
- "lingxi-api-client",
- "lingxi-protocol",
- "lingxi-secret",
- "lingxi-telemetry",
- "lingxi-traits",
- "loom",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "url",
- "urlencoding",
-]
-
-[[package]]
-name = "lingxi-api-client"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "futures",
- "futures-core",
- "http-body-util",
- "hyper",
- "hyper-util",
- "lingxi-cost",
- "lingxi-protocol",
- "lingxi-telemetry",
- "lingxi-traits",
- "rand 0.8.6",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-bridge"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "dirs",
- "http",
- "lingxi-jsonrpc",
- "lingxi-mcp",
- "lingxi-platform-common",
- "lingxi-protocol",
- "lingxi-secret",
- "lingxi-traits",
- "rand 0.9.4",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.21.0",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-cli"
-version = "0.8.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "async-trait",
- "chrono",
- "clap",
- "dirs",
- "filetime",
- "futures",
- "libc",
- "lingxi-agent",
- "lingxi-anthropic-oauth",
- "lingxi-api-client",
- "lingxi-commands",
- "lingxi-compaction",
- "lingxi-cost",
- "lingxi-hooks",
- "lingxi-mcp",
- "lingxi-orchestrator",
- "lingxi-platform-posix-minimal",
- "lingxi-protocol",
- "lingxi-secret",
- "lingxi-session",
- "lingxi-telemetry",
- "lingxi-tools",
- "lingxi-traits",
- "lingxi-tui",
- "predicates",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "lingxi-cli-demo"
-version = "0.8.0"
-dependencies = [
- "anyhow",
- "clap",
- "lingxi-api-client",
- "lingxi-core",
- "lingxi-platform-posix-minimal",
- "lingxi-protocol",
- "lingxi-traits",
- "tokio",
-]
-
-[[package]]
-name = "lingxi-commands"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "lingxi-api-client",
- "lingxi-compaction",
- "lingxi-core",
- "lingxi-cost",
- "lingxi-orchestrator",
- "lingxi-protocol",
- "lingxi-telemetry",
- "lingxi-tools",
- "lingxi-traits",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-compaction"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "lingxi-api-client",
- "lingxi-core",
- "lingxi-cost",
- "lingxi-hooks",
- "lingxi-protocol",
- "lingxi-sidequery",
- "lingxi-traits",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-coordinator"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "lingxi-agent",
- "lingxi-core",
- "lingxi-memory",
- "lingxi-protocol",
- "lingxi-tasks",
- "lingxi-tools",
- "lingxi-traits",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "lingxi-core"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "figment",
- "lingxi-protocol",
- "lingxi-telemetry",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-cost"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "chrono",
- "lingxi-protocol",
- "lingxi-telemetry",
- "lingxi-traits",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "lingxi-cron"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "libc",
- "lingxi-protocol",
- "lingxi-tasks",
- "lingxi-traits",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "lingxi-filestate"
-version = "0.8.0"
-dependencies = [
- "lingxi-traits",
- "serde",
- "sha2",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-hooks"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "lingxi-core",
- "lingxi-protocol",
- "lingxi-telemetry",
- "lingxi-traits",
- "regex",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "lingxi-jsonrpc"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "bytes",
- "dashmap",
- "futures",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-lsp"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "futures",
- "lingxi-jsonrpc",
- "lingxi-platform-posix",
- "lingxi-protocol",
- "lingxi-test-harness",
- "lingxi-traits",
- "lsp-types",
- "once_cell",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "lingxi-mcp"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "bytes",
- "lingxi-jsonrpc",
- "lingxi-protocol",
- "lingxi-traits",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-memory"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "filetime",
- "lingxi-api-client",
- "lingxi-protocol",
- "lingxi-secret",
- "lingxi-sidequery",
- "lingxi-telemetry",
- "lingxi-traits",
- "regex",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "walkdir",
-]
-
-[[package]]
-name = "lingxi-msgqueue"
-version = "0.8.0"
-dependencies = [
- "lingxi-protocol",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "lingxi-orchestrator"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "chrono",
- "dirs",
- "futures",
- "lingxi-agent",
- "lingxi-api-client",
- "lingxi-compaction",
- "lingxi-core",
- "lingxi-cost",
- "lingxi-hooks",
- "lingxi-mcp",
- "lingxi-memory",
- "lingxi-permission",
- "lingxi-platform-posix",
- "lingxi-protocol",
- "lingxi-session",
- "lingxi-sidequery",
- "lingxi-telemetry",
- "lingxi-tools",
- "lingxi-traits",
- "once_cell",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "lingxi-outputstyles"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "lingxi-protocol",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "lingxi-permission"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "lingxi-protocol",
- "lingxi-telemetry",
- "lingxi-tools",
- "lingxi-traits",
- "regex",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-platform-common"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "axum",
- "bytes",
- "eventsource-stream",
- "futures",
- "futures-util",
- "http",
- "lingxi-jsonrpc",
- "lingxi-traits",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.21.0",
- "tokio-util",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "lingxi-platform-posix"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "axum",
- "bytes",
- "fs2",
- "futures",
- "futures-core",
- "futures-util",
- "hex",
- "libc",
- "lingxi-api-client",
- "lingxi-jsonrpc",
- "lingxi-lsp",
- "lingxi-mcp",
- "lingxi-platform-common",
- "lingxi-protocol",
- "lingxi-sandbox",
- "lingxi-traits",
- "nix",
- "notify",
- "notify-debouncer-mini",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "unicode-normalization",
- "url",
- "which",
-]
-
-[[package]]
-name = "lingxi-platform-posix-minimal"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "fs2",
- "futures-core",
- "futures-util",
- "lingxi-protocol",
- "lingxi-traits",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-platform-windows"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "axum",
- "bytes",
- "fs2",
- "futures",
- "futures-core",
- "futures-util",
- "lingxi-api-client",
- "lingxi-jsonrpc",
- "lingxi-lsp",
- "lingxi-platform-common",
- "lingxi-protocol",
- "lingxi-traits",
- "notify",
- "notify-debouncer-mini",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-plugin"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "lingxi-agent",
- "lingxi-commands",
- "lingxi-hooks",
- "lingxi-lsp",
- "lingxi-mcp",
- "lingxi-outputstyles",
- "lingxi-protocol",
- "lingxi-secret",
- "lingxi-skills",
- "lingxi-tools",
- "lingxi-traits",
- "semver",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "lingxi-protocol"
-version = "0.8.0"
-dependencies = [
- "secrecy",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "lingxi-sandbox"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "lingxi-permission",
- "lingxi-protocol",
- "lingxi-traits",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "which",
-]
-
-[[package]]
-name = "lingxi-secret"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "lingxi-protocol",
- "lingxi-traits",
- "regex",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-session"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "chrono",
- "filetime",
- "lingxi-core",
- "lingxi-filestate",
- "lingxi-platform-posix",
- "lingxi-protocol",
- "lingxi-traits",
- "once_cell",
- "pretty_assertions",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "lingxi-sidequery"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "lingxi-api-client",
- "lingxi-core",
- "lingxi-cost",
- "lingxi-protocol",
- "lingxi-tools",
- "lingxi-traits",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-skills"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "lingxi-agent",
- "lingxi-mcp",
- "lingxi-permission",
- "lingxi-protocol",
- "lingxi-sidequery",
- "lingxi-tools",
- "lingxi-traits",
- "once_cell",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-tasks"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "futures",
- "lingxi-agent",
- "lingxi-core",
- "lingxi-hooks",
- "lingxi-protocol",
- "lingxi-test-harness",
- "lingxi-tools",
- "lingxi-traits",
- "rand 0.9.4",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-telemetry"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "lingxi-protocol",
- "lingxi-telemetry-macros",
- "lingxi-traits",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lingxi-telemetry-macros"
-version = "0.8.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
- "trybuild",
-]
-
-[[package]]
-name = "lingxi-test-harness"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "crossterm 0.28.1",
- "filetime",
- "futures",
- "futures-core",
- "http-body-util",
- "hyper",
- "hyper-util",
- "lingxi-anthropic-oauth",
- "lingxi-api-client",
- "lingxi-commands",
- "lingxi-compaction",
- "lingxi-coordinator",
- "lingxi-core",
- "lingxi-cost",
- "lingxi-hooks",
- "lingxi-lsp",
- "lingxi-mcp",
- "lingxi-memory",
- "lingxi-orchestrator",
- "lingxi-permission",
- "lingxi-platform-posix",
- "lingxi-platform-posix-minimal",
- "lingxi-platform-windows",
- "lingxi-protocol",
- "lingxi-sandbox",
- "lingxi-session",
- "lingxi-telemetry",
- "lingxi-tools",
- "lingxi-traits",
- "lingxi-tui",
- "proptest",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "lingxi-tools"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "axum",
- "filetime",
- "futures",
- "globset",
- "grep-matcher",
- "grep-regex",
- "grep-searcher",
- "ignore",
- "lingxi-api-client",
- "lingxi-core",
- "lingxi-jsonrpc",
- "lingxi-lsp",
- "lingxi-mcp",
- "lingxi-permission",
- "lingxi-platform-posix",
- "lingxi-protocol",
- "lingxi-sandbox",
- "lingxi-telemetry",
- "lingxi-test-harness",
- "lingxi-traits",
- "once_cell",
- "rand 0.9.4",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "url",
- "walkdir",
-]
-
-[[package]]
-name = "lingxi-traits"
-version = "0.8.0"
-dependencies = [
- "async-trait",
- "futures-core",
- "lingxi-protocol",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio-util",
-]
-
-[[package]]
-name = "lingxi-tui"
-version = "0.8.0"
-dependencies = [
- "assert_cmd",
- "async-trait",
- "chrono",
- "crossterm 0.28.1",
- "dirs",
- "futures",
- "insta",
- "iocraft",
- "lingxi-commands",
- "lingxi-core",
- "lingxi-memory",
- "lingxi-orchestrator",
- "lingxi-permission",
- "lingxi-protocol",
- "lingxi-session",
- "lingxi-telemetry",
- "lingxi-traits",
- "predicates",
- "pulldown-cmark",
- "serde",
- "serde_json",
- "similar",
- "syntect",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "unicode-segmentation",
- "unicode-width",
- "uuid",
-]
-
-[[package]]
-name = "lingxi-uniffi-bridge"
-version = "0.8.0"
-dependencies = [
- "lingxi-core",
- "lingxi-protocol",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
@@ -2292,6 +1716,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
+name = "lsp"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "jsonrpc",
+ "lsp-types",
+ "once_cell",
+ "platform-posix",
+ "protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "test-harness",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "traits",
+ "url",
+]
+
+[[package]]
 name = "lsp-types"
 version = "0.95.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2320,6 +1767,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
+name = "mcp"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "jsonrpc",
+ "protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "traits",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2332,6 +1796,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "memory"
+version = "0.8.0"
+dependencies = [
+ "api-client",
+ "async-trait",
+ "filetime",
+ "protocol",
+ "regex",
+ "secret",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sidequery",
+ "telemetry",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "traits",
+ "walkdir",
 ]
 
 [[package]]
@@ -2372,6 +1859,16 @@ dependencies = [
 name = "mock_stdio_mcp"
 version = "0.8.0"
 dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "msgqueue"
+version = "0.8.0"
+dependencies = [
+ "protocol",
  "serde",
  "serde_json",
  "tokio",
@@ -2484,6 +1981,54 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "orchestrator"
+version = "0.8.0"
+dependencies = [
+ "agent",
+ "api-client",
+ "async-trait",
+ "chrono",
+ "compaction",
+ "cost",
+ "dirs",
+ "engine",
+ "futures",
+ "hooks",
+ "mcp",
+ "memory",
+ "once_cell",
+ "permission",
+ "platform-posix",
+ "protocol",
+ "serde",
+ "serde_json",
+ "session",
+ "sidequery",
+ "telemetry",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tools",
+ "tracing",
+ "tracing-subscriber",
+ "traits",
+ "uuid",
+]
+
+[[package]]
+name = "outputstyles"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2536,10 +2081,137 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "permission"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "protocol",
+ "regex",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "thiserror 2.0.18",
+ "tokio",
+ "tools",
+ "tracing",
+ "traits",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "platform-common"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bytes",
+ "eventsource-stream",
+ "futures",
+ "futures-util",
+ "http",
+ "jsonrpc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.21.0",
+ "tokio-util",
+ "tracing",
+ "traits",
+ "url",
+]
+
+[[package]]
+name = "platform-posix"
+version = "0.8.0"
+dependencies = [
+ "api-client",
+ "async-trait",
+ "axum",
+ "bytes",
+ "fs2",
+ "futures",
+ "futures-core",
+ "futures-util",
+ "hex",
+ "jsonrpc",
+ "libc",
+ "lsp",
+ "mcp",
+ "nix",
+ "notify",
+ "notify-debouncer-mini",
+ "platform-common",
+ "protocol",
+ "reqwest",
+ "sandbox",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "traits",
+ "unicode-normalization",
+ "url",
+ "which",
+]
+
+[[package]]
+name = "platform-posix-minimal"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "fs2",
+ "futures-core",
+ "futures-util",
+ "protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "traits",
+]
+
+[[package]]
+name = "platform-windows"
+version = "0.8.0"
+dependencies = [
+ "api-client",
+ "async-trait",
+ "axum",
+ "bytes",
+ "fs2",
+ "futures",
+ "futures-core",
+ "futures-util",
+ "jsonrpc",
+ "lsp",
+ "notify",
+ "notify-debouncer-mini",
+ "platform-common",
+ "protocol",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "traits",
+]
 
 [[package]]
 name = "plist"
@@ -2552,6 +2224,32 @@ dependencies = [
  "quick-xml",
  "serde",
  "time",
+]
+
+[[package]]
+name = "plugin"
+version = "0.8.0"
+dependencies = [
+ "agent",
+ "async-trait",
+ "commands",
+ "hooks",
+ "lsp",
+ "mcp",
+ "outputstyles",
+ "protocol",
+ "secret",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "skills",
+ "thiserror 2.0.18",
+ "tokio",
+ "tools",
+ "tracing",
+ "traits",
+ "url",
 ]
 
 [[package]]
@@ -2649,6 +2347,18 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
+]
+
+[[package]]
+name = "protocol"
+version = "0.8.0"
+dependencies = [
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -3054,6 +2764,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "sandbox"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "permission",
+ "protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "traits",
+ "which",
+]
+
+[[package]]
 name = "schemars"
 version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3097,6 +2824,21 @@ checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
 dependencies = [
  "serde",
  "zeroize",
+]
+
+[[package]]
+name = "secret"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "protocol",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "traits",
 ]
 
 [[package]]
@@ -3217,6 +2959,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "session"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "engine",
+ "filestate",
+ "filetime",
+ "once_cell",
+ "platform-posix",
+ "pretty_assertions",
+ "protocol",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "traits",
+ "uuid",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3252,6 +3018,24 @@ name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+
+[[package]]
+name = "sidequery"
+version = "0.8.0"
+dependencies = [
+ "api-client",
+ "async-trait",
+ "cost",
+ "engine",
+ "protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tools",
+ "tracing",
+ "traits",
+]
 
 [[package]]
 name = "signal-hook"
@@ -3295,6 +3079,27 @@ name = "similar"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+
+[[package]]
+name = "skills"
+version = "0.8.0"
+dependencies = [
+ "agent",
+ "async-trait",
+ "mcp",
+ "once_cell",
+ "permission",
+ "protocol",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sidequery",
+ "thiserror 2.0.18",
+ "tokio",
+ "tools",
+ "tracing",
+ "traits",
+]
 
 [[package]]
 name = "slab"
@@ -3394,6 +3199,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "tasks"
+version = "0.8.0"
+dependencies = [
+ "agent",
+ "async-trait",
+ "engine",
+ "futures",
+ "hooks",
+ "protocol",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "test-harness",
+ "thiserror 2.0.18",
+ "tokio",
+ "tools",
+ "tracing",
+ "traits",
+]
+
+[[package]]
+name = "telemetry"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "protocol",
+ "serde",
+ "serde_json",
+ "telemetry-macros",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "traits",
+]
+
+[[package]]
+name = "telemetry-macros"
+version = "0.8.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+ "trybuild",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3420,6 +3272,53 @@ name = "termtree"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
+
+[[package]]
+name = "test-harness"
+version = "0.8.0"
+dependencies = [
+ "anthropic-oauth",
+ "api-client",
+ "async-trait",
+ "commands",
+ "compaction",
+ "coordinator",
+ "cost",
+ "crossterm 0.28.1",
+ "engine",
+ "filetime",
+ "futures",
+ "futures-core",
+ "hooks",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "lsp",
+ "mcp",
+ "memory",
+ "orchestrator",
+ "permission",
+ "platform-posix",
+ "platform-posix-minimal",
+ "platform-windows",
+ "proptest",
+ "protocol",
+ "regex",
+ "sandbox",
+ "serde",
+ "serde_json",
+ "session",
+ "sha2",
+ "telemetry",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tools",
+ "tracing",
+ "traits",
+ "tui",
+ "uuid",
+]
 
 [[package]]
 name = "thiserror"
@@ -3660,6 +3559,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
+name = "tools"
+version = "0.8.0"
+dependencies = [
+ "api-client",
+ "async-trait",
+ "axum",
+ "engine",
+ "filetime",
+ "futures",
+ "globset",
+ "grep-matcher",
+ "grep-regex",
+ "grep-searcher",
+ "ignore",
+ "jsonrpc",
+ "lsp",
+ "mcp",
+ "once_cell",
+ "permission",
+ "platform-posix",
+ "protocol",
+ "rand 0.9.4",
+ "regex",
+ "sandbox",
+ "serde",
+ "serde_json",
+ "telemetry",
+ "tempfile",
+ "test-harness",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "traits",
+ "url",
+ "walkdir",
+]
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3768,6 +3705,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "traits"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "futures-core",
+ "protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio-util",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3785,6 +3735,44 @@ dependencies = [
  "serde_json",
  "termcolor",
  "toml",
+]
+
+[[package]]
+name = "tui"
+version = "0.8.0"
+dependencies = [
+ "assert_cmd",
+ "async-trait",
+ "chrono",
+ "commands",
+ "crossterm 0.28.1",
+ "dirs",
+ "engine",
+ "futures",
+ "insta",
+ "iocraft",
+ "memory",
+ "orchestrator",
+ "permission",
+ "predicates",
+ "protocol",
+ "pulldown-cmark",
+ "serde",
+ "serde_json",
+ "session",
+ "similar",
+ "syntect",
+ "telemetry",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "traits",
+ "unicode-segmentation",
+ "unicode-width",
+ "uuid",
 ]
 
 [[package]]
@@ -3891,6 +3879,18 @@ name = "unicode-width"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
+
+[[package]]
+name = "uniffi-bridge"
+version = "0.8.0"
+dependencies = [
+ "engine",
+ "protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
 
 [[package]]
 name = "unsafe-libyaml"

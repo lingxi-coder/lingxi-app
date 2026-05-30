@@ -1,11 +1,11 @@
 //! T4 tests — populate a tempdir, assert `list_recent_sessions` returns sorted desc.
 
-use lingxi_platform_posix::fs::PosixFileSystem;
-use lingxi_session::jsonl::{list_recent_sessions, project_dir_name, LoaderError};
-use lingxi_traits::FileSystem;
+use platform_posix::fs::PosixFileSystem;
+use session::jsonl::{list_recent_sessions, project_dir_name, LoaderError};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
+use traits::FileSystem;
 use uuid::Uuid;
 
 /// Build a tempdir that mimics `<claude_home>/projects/<sanitize(cwd)>/` and

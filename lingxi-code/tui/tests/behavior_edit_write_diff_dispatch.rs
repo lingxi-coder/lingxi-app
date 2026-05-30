@@ -14,12 +14,12 @@
 //! the plain `└ ` body with no `-`/`+` sigils.
 
 use iocraft::prelude::*;
-use lingxi_protocol::ToolUseId;
-use lingxi_tui::components::messages::user_tool_result::UserToolResultMessage;
-use lingxi_tui::events::orchestrator_bridge::TurnEvent;
-use lingxi_tui::state::{AppState, RenderedMessage, StatusSnapshot};
-use lingxi_tui::streaming::apply_event;
+use protocol::ToolUseId;
 use tokio::sync::Notify;
+use tui::components::messages::user_tool_result::UserToolResultMessage;
+use tui::events::orchestrator_bridge::TurnEvent;
+use tui::state::{AppState, RenderedMessage, StatusSnapshot};
+use tui::streaming::apply_event;
 
 /// Drive `ToolUseStart` + `ToolUseResult` through `apply_event`, then render the
 /// resulting `UserToolResult` entry through the SAME mapping the scrollback

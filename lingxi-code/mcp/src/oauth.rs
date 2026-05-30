@@ -42,15 +42,15 @@ pub enum OAuthState {
     /// Tokens acquired and ready for use.
     Authenticated {
         /// Bearer access token.
-        access_token: lingxi_protocol::Secret<String>,
+        access_token: protocol::Secret<String>,
         /// Optional long-lived refresh token.
-        refresh_token: Option<lingxi_protocol::Secret<String>>,
+        refresh_token: Option<protocol::Secret<String>>,
         /// Expiry of the current access token.
         expires_at: SystemTime,
     },
     /// Refreshing the access token using the refresh token.
     Refreshing {
         /// Refresh token being exchanged.
-        refresh_token: lingxi_protocol::Secret<String>,
+        refresh_token: protocol::Secret<String>,
     },
 }

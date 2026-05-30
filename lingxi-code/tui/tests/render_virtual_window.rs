@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use iocraft::prelude::*;
-use lingxi_tui::components::virtual_message_list::{HeightCache, VirtualMessageList};
-use lingxi_tui::state::RenderedMessage;
+use tui::components::virtual_message_list::{HeightCache, VirtualMessageList};
+use tui::state::RenderedMessage;
 
 #[test]
 fn window_three_mixed_messages_fixed_offset() {
@@ -34,7 +34,7 @@ fn window_three_mixed_messages_fixed_offset() {
             scroll_offset: 0_usize,
             viewport_height: 8_usize,
             expanded: HashMap::new(),
-            focused_tool_id: Option::<lingxi_protocol::ToolUseId>::None,
+            focused_tool_id: Option::<protocol::ToolUseId>::None,
         )
     };
     insta::assert_snapshot!("window_three_mixed_fixed_offset", element.to_string());

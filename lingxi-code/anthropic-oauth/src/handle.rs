@@ -6,7 +6,7 @@
 //! binary): M5-12 will replace this wrapper with a real impl that drives
 //! the existing [`ClaudeAiOAuthClient::build_authorize_url`] + the
 //! `callback::await_callback` loopback listener and persists tokens via
-//! [`lingxi_secret::CredentialManager`].
+//! [`secret::CredentialManager`].
 //!
 //! Until then, [`OAuthHandle::login`] returns
 //! [`AuthError::ServerError`] with a clear "not wired in M5-11" payload —
@@ -17,8 +17,8 @@
 
 use crate::client::ClaudeAiOAuthClient;
 use async_trait::async_trait;
-use lingxi_traits::{AuthError, AuthHandle, LoginInfo};
 use std::sync::Arc;
+use traits::{AuthError, AuthHandle, LoginInfo};
 
 /// `AuthHandle` impl wrapping the `ClaudeAiOAuthClient`. Thin in M5-11;
 /// M5-12 (CLI binary) replaces the bodies with a real PKCE drive + keychain
@@ -45,7 +45,7 @@ impl AuthHandle for OAuthHandle {
         // 3. `await_callback(...)` on the loopback listener.
         // 4. Exchange the code for tokens.
         // 5. Decode the ID token → email + org_id.
-        // 6. Persist via `lingxi_secret::CredentialManager`.
+        // 6. Persist via `secret::CredentialManager`.
         // 7. Return LoginInfo.
         Err(AuthError::ServerError(
             "interactive login not yet wired in v0.6.0 (M5-11); CLI binary in M5-12 will plug this in"
@@ -61,7 +61,7 @@ impl AuthHandle for OAuthHandle {
     }
 
     async fn current_user(&self) -> Option<LoginInfo> {
-        // M5-12 will read `lingxi_secret::CredentialManager` and decode the
+        // M5-12 will read `secret::CredentialManager` and decode the
         // cached ID token. Until then, we have no source of truth — return
         // `None` so `/status` shows the "not logged in" branch.
         None

@@ -93,8 +93,8 @@ mod jittered_delay {
 }
 
 use crate::error::ApiError;
-use lingxi_protocol::HttpResponse;
-use lingxi_traits::HttpError;
+use protocol::HttpResponse;
+use traits::HttpError;
 
 /// Wraps an HTTP call in exponential backoff with jitter.
 ///
@@ -172,7 +172,7 @@ where
 #[cfg(test)]
 mod with_retry_tests {
     use super::*;
-    use lingxi_protocol::HttpResponse;
+    use protocol::HttpResponse;
     use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::Arc;
 

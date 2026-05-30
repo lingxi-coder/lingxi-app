@@ -14,14 +14,14 @@
 //! # Dispatch
 //!
 //! [`dispatcher::RegistrySlashDispatcher`] implements
-//! [`lingxi_traits::SlashCommandDispatcher`]. It strips a leading `/`,
+//! [`traits::SlashCommandDispatcher`]. It strips a leading `/`,
 //! parses the remainder via [`parser::parse_slash_command`], looks up the
 //! handler in the [`CommandRegistry`], and returns one of:
 //!
-//! - [`lingxi_traits::SlashDispatchResult::Handled`] for known commands
-//! - [`lingxi_traits::SlashDispatchResult::Unknown`] with the locked literal
+//! - [`traits::SlashDispatchResult::Handled`] for known commands
+//! - [`traits::SlashDispatchResult::Unknown`] with the locked literal
 //!   `"Unknown command: /{name}"` for unregistered names
-//! - [`lingxi_traits::SlashDispatchResult::NotASlashCommand`] for inputs that
+//! - [`traits::SlashDispatchResult::NotASlashCommand`] for inputs that
 //!   don't start with `/`
 //!
 //! # Count history
@@ -35,13 +35,13 @@
 //! After [`register_core_batch_1`] runs against a fully-initialised registry,
 //! the 6 batch-1 commands are wired to real implementations:
 //!
-//! - `/clear` — calls [`lingxi_traits::OrchestratorHandle::clear_session`]
-//! - `/compact` — calls [`lingxi_traits::OrchestratorHandle::force_compact`]
+//! - `/clear` — calls [`traits::OrchestratorHandle::clear_session`]
+//! - `/compact` — calls [`traits::OrchestratorHandle::force_compact`]
 //! - `/help` — renders the locked 100-line table via
 //!   [`builtin::help_render::render_help_screen`]
-//! - `/exit` — calls [`lingxi_traits::OrchestratorHandle::request_exit`]
+//! - `/exit` — calls [`traits::OrchestratorHandle::request_exit`]
 //! - `/memory` — calls
-//!   [`lingxi_traits::OrchestratorHandle::open_memory_editor`] which spawns
+//!   [`traits::OrchestratorHandle::open_memory_editor`] which spawns
 //!   `$EDITOR` (with `VISUAL` fallback, then `vi`/`notepad.exe`)
 //! - `/init` — emits [`crate::CommandResult::InjectMessage`] carrying the
 //!   byte-locked [`builtin::OLD_INIT_PROMPT`] template (1592 bytes, 21
@@ -49,7 +49,7 @@
 //!
 //! Each command emits 3 telemetry events
 //! (`tengu_command_<name>_{started,completed,failed}`) defined in
-//! [`lingxi_telemetry::tengu::command`]. The total tengu registry grew
+//! [`telemetry::tengu::command`]. The total tengu registry grew
 //! from 258 → 276 events.
 //!
 //! # Batch 2 (M5-11)
@@ -72,7 +72,7 @@
 //!
 //! Each command emits 3 telemetry events
 //! (`tengu_command_<name>_{started,completed,failed}`) defined in
-//! [`lingxi_telemetry::tengu::command`]. The total tengu registry grew
+//! [`telemetry::tengu::command`]. The total tengu registry grew
 //! from 276 → **312** events (+36 for the 12 batch-2 commands × 3 phases).
 //!
 //! # Plan reference

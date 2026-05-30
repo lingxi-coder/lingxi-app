@@ -11,11 +11,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use engine::settings::tracer::{ProvenanceTrace, Source};
+use engine::settings::{EffectiveSettings, SettingsJson};
 use iocraft::prelude::*;
-use lingxi_core::settings::tracer::{ProvenanceTrace, Source};
-use lingxi_core::settings::{EffectiveSettings, SettingsJson};
-use lingxi_traits::{CostSnapshot, StatusSnapshot};
-use lingxi_tui::screens::settings::{SettingsData, SettingsScreen, SettingsState, SettingsTab};
+use traits::{CostSnapshot, StatusSnapshot};
+use tui::screens::settings::{SettingsData, SettingsScreen, SettingsState, SettingsTab};
 
 fn fixture() -> SettingsData {
     let mut trace = ProvenanceTrace::default();

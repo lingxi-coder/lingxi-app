@@ -8,7 +8,7 @@
 //!
 //! Behavioural notes:
 //!
-//! - `clear_session` wipes [`lingxi_core::SessionState::history`] and mints
+//! - `clear_session` wipes [`engine::SessionState::history`] and mints
 //!   a fresh `SessionId`.
 //! - `force_compact` is a thin shim — for M5-10 it reports the current
 //!   history length as both `messages_before` and `messages_after` (no-op)
@@ -24,24 +24,24 @@
 
 use crate::ConversationOrchestrator;
 use async_trait::async_trait;
-use lingxi_traits::{
-    AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo, McpServerInfo,
-    MemoryEditorOutcome, OrchestratorHandle, StatusSnapshot,
-};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use tokio::process::Command;
+use traits::{
+    AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo, McpServerInfo,
+    MemoryEditorOutcome, OrchestratorHandle, StatusSnapshot,
+};
 
 #[async_trait]
 impl OrchestratorHandle for ConversationOrchestrator {
-    async fn current_session_id(&self) -> lingxi_protocol::SessionId {
+    async fn current_session_id(&self) -> protocol::SessionId {
         self.session.lock().await.session_id
     }
 
     async fn clear_session(&self) -> Result<(), HandleError> {
         let mut s = self.session.lock().await;
         s.history.clear();
-        s.session_id = lingxi_protocol::SessionId::new();
+        s.session_id = protocol::SessionId::new();
         // Reset the JSONL parent-uuid chain (M5-07) since we minted a new
         // session id; downstream appends should not chain to the prior
         // session's last entry.
@@ -200,33 +200,27 @@ impl OrchestratorHandle for ConversationOrchestrator {
         &self,
         prompt: &str,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<lingxi_traits::TurnOutcome, HandleError> {
+    ) -> Result<traits::TurnOutcome, HandleError> {
         // Delegate to the inherent method on `ConversationOrchestrator`
         // (M6-03 T1). Disambiguate via fully-qualified call syntax since
         // the trait method has the same name.
         match crate::ConversationOrchestrator::run_turn_streaming_with_cancel(self, prompt, cancel)
             .await
         {
-            Ok(crate::conversation::TurnOutcome::EndTurn) => {
-                Ok(lingxi_traits::TurnOutcome::EndTurn)
-            }
-            Ok(crate::conversation::TurnOutcome::MaxTurns) => {
-                Ok(lingxi_traits::TurnOutcome::MaxTurns)
-            }
-            Ok(crate::conversation::TurnOutcome::Cancelled) => {
-                Ok(lingxi_traits::TurnOutcome::Cancelled)
-            }
+            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(traits::TurnOutcome::EndTurn),
+            Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(traits::TurnOutcome::MaxTurns),
+            Ok(crate::conversation::TurnOutcome::Cancelled) => Ok(traits::TurnOutcome::Cancelled),
             Err(e) => Err(HandleError::ActionFailed(e.to_string())),
         }
     }
 }
 
 /// Stable string label for a `HookEventType`, used by [`list_hooks`] to
-/// populate [`lingxi_traits::HookInfo::event`]. Avoids `Debug` derive
+/// populate [`traits::HookInfo::event`]. Avoids `Debug` derive
 /// drift — the locked names are part of the M6-07 surface and the
 /// claude-code parity. (M6-07)
-fn event_str(et: &lingxi_hooks::events::HookEventType) -> &'static str {
-    use lingxi_hooks::events::HookEventType as E;
+fn event_str(et: &hooks::events::HookEventType) -> &'static str {
+    use hooks::events::HookEventType as E;
     match et {
         E::PreToolUse => "PreToolUse",
         E::PostToolUse => "PostToolUse",

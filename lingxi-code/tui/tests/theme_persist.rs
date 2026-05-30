@@ -1,8 +1,8 @@
 //! M7-15 Task 9 — best-effort theme persistence via `~/.claude/settings.json`
 //! `theme` field. Round-trips through the explicit-path test seams.
 
-use lingxi_tui::theme::{ThemeName, ThemeSetting};
-use lingxi_tui::theme_persist;
+use tui::theme::{ThemeName, ThemeSetting};
+use tui::theme_persist;
 
 #[test]
 fn save_then_load_roundtrips_via_settings_json() {

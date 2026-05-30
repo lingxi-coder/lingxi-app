@@ -7,13 +7,13 @@
 use crate::config::ClaudeAiOAuthConfig;
 use crate::pkce::{generate_pkce, generate_state_token};
 use crate::refresh::{AuthState, RefreshDriver};
-use lingxi_api_client::oauth_hook::register_oauth_hook;
-use lingxi_protocol::Secret;
-use lingxi_secret::CredentialManager;
-use lingxi_traits::HttpTransport;
+use api_client::oauth_hook::register_oauth_hook;
+use protocol::Secret;
+use secret::CredentialManager;
 use std::sync::Arc;
 use std::time::SystemTime;
 use thiserror::Error;
+use traits::HttpTransport;
 
 /// OAuth-flow failures.
 #[derive(Debug, Error)]
@@ -114,11 +114,11 @@ pub async fn init_refresh_driver(
     access_token: Secret<String>,
     refresh_token: Option<Secret<String>>,
     expires_at: SystemTime,
-    http: Arc<dyn lingxi_traits::HttpTransport>,
-    clock: Arc<dyn lingxi_traits::Clock>,
-    bus: Option<Arc<lingxi_telemetry::AnalyticsBus>>,
-    credentials: Option<Arc<lingxi_secret::CredentialManager>>,
-    spawner: Arc<dyn lingxi_traits::RuntimeSpawner>,
+    http: Arc<dyn traits::HttpTransport>,
+    clock: Arc<dyn traits::Clock>,
+    bus: Option<Arc<telemetry::AnalyticsBus>>,
+    credentials: Option<Arc<secret::CredentialManager>>,
+    spawner: Arc<dyn traits::RuntimeSpawner>,
 ) -> Result<Arc<AuthState>, OAuthError> {
     let state = AuthState::new(
         config,
@@ -130,7 +130,7 @@ pub async fn init_refresh_driver(
         bus,
         credentials,
     );
-    let driver: Arc<dyn lingxi_api_client::oauth_hook::OAuthRefreshHook> =
+    let driver: Arc<dyn api_client::oauth_hook::OAuthRefreshHook> =
         Arc::new(RefreshDriver::new(state.clone()));
     // Process-global registration. Second-call-in-same-process is a logic
     // bug but not fatal in tests; tolerate by warning.

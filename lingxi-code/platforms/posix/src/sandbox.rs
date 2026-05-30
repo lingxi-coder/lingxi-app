@@ -1,6 +1,6 @@
 //! Real POSIX `Sandbox` implementation.
 //!
-//! Linux / WSL2 → bwrap via [`lingxi_sandbox::wrap_with_sandbox`].
+//! Linux / WSL2 → bwrap via [`sandbox::wrap_with_sandbox`].
 //! macOS → `sandbox-exec -f` with an SBPL profile written to a tempfile.
 //! WSL1 / unknown POSIX → `is_available()` returns `false`, `prepare()` falls
 //! back to a `Wrapped { backend: None }` no-op so callers that ignore the
@@ -11,14 +11,14 @@
 //! string, and the `bwrap` / `sandbox-exec` argv shape.
 
 use async_trait::async_trait;
-use lingxi_sandbox::dependency_check::{
+use sandbox::dependency_check::{
     check_dependencies, sandbox_unavailable_reason, SandboxDependencyCheck,
 };
-use lingxi_sandbox::runtime_config::{
+use sandbox::runtime_config::{
     FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, SandboxRuntimeConfig,
 };
-use lingxi_sandbox::wrap::wrap_with_sandbox;
-use lingxi_traits::{
+use sandbox::wrap::wrap_with_sandbox;
+use traits::{
     NetworkPolicy, ProcessCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
     SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };

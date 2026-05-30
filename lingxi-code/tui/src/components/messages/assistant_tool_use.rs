@@ -8,7 +8,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use iocraft::prelude::*;
-use lingxi_protocol::ToolUseId;
+use protocol::ToolUseId;
 
 /// Marker glyph. 3-byte UTF-8.
 pub const MARKER: &str = "●";

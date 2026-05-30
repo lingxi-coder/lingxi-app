@@ -8,12 +8,12 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
 use std::sync::Arc;
+use telemetry::tengu::command as cmd_evt;
+use traits::OrchestratorHandle;
 
 /// `/exit` handler — calls
-/// [`OrchestratorHandle::request_exit`](lingxi_traits::OrchestratorHandle::request_exit)
+/// [`OrchestratorHandle::request_exit`](traits::OrchestratorHandle::request_exit)
 /// and renders `"Exiting."`.
 ///
 /// `request_exit` is infallible — the `_failed` telemetry slot is reserved
@@ -34,9 +34,9 @@ impl ExitHandler {
 #[async_trait]
 impl BuiltinCommandHandler for ExitHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::EXIT_STARTED);
+        telemetry::emit_command_started(cmd_evt::EXIT_STARTED);
         self.handle.request_exit().await;
-        lingxi_telemetry::emit_command_completed(cmd_evt::EXIT_COMPLETED, "");
+        telemetry::emit_command_completed(cmd_evt::EXIT_COMPLETED, "");
         CommandResult::Done {
             display: Some("Exiting.".to_string()),
         }
@@ -54,7 +54,7 @@ impl BuiltinCommandHandler for ExitHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
+    use orchestrator::test_support::MockOrchestratorHandle;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {

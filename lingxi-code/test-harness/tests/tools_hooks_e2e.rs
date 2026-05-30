@@ -1,12 +1,12 @@
 //! Verify hook integration: a `PreToolUse` hook can block a tool call.
-use lingxi_hooks::{
+use hooks::{
     BuiltinHookHandler, HookContext, HookDecision, HookDefinition, HookEvent, HookEventType,
     HookExecutor, HookExecutorImpl, HookOutcome, HookRegistry, HookResponse, HookResult,
     HookSource,
 };
-use lingxi_protocol::{HookId, SessionId, ToolUseId};
-use lingxi_test_harness::mocks::{MockHttpTransport, MockRuntimeSpawner};
+use protocol::{HookId, SessionId, ToolUseId};
 use std::sync::Arc;
+use test_harness::mocks::{MockHttpTransport, MockRuntimeSpawner};
 use tokio::sync::RwLock;
 
 struct BlockingBuiltin;

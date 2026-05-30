@@ -147,7 +147,7 @@ pub struct FileTreeEntry {
 
 /// One loaded CLAUDE.md (or `CLAUDE.local.md`) file.
 ///
-/// Distinct from [`lingxi_memory::claude_md::LoadedFile`] — the
+/// Distinct from [`memory::claude_md::LoadedFile`] — the
 /// assembler keeps a leaner representation post-trim.
 #[derive(Debug, Clone)]
 pub struct MemoryFile {

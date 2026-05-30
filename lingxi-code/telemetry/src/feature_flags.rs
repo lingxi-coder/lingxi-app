@@ -5,11 +5,11 @@
 //! refreshes on a fixed interval via the [`RuntimeSpawner`] trait so engine
 //! code never spawns tasks directly.
 
-use lingxi_traits::{RuntimeError, RuntimeSpawner};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
+use traits::{RuntimeError, RuntimeSpawner};
 
 /// Polymorphic feature-flag value.
 ///

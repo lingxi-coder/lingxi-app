@@ -9,11 +9,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lingxi_commands::dispatcher::RegistrySlashDispatcher;
-use lingxi_commands::registry::{register_all_builtin_commands, CommandRegistry};
-use lingxi_permission::PermissionMode;
-use lingxi_tui::state::StatusSnapshot;
+use commands::dispatcher::RegistrySlashDispatcher;
+use commands::registry::{register_all_builtin_commands, CommandRegistry};
+use permission::PermissionMode;
 use tokio::sync::RwLock;
+use tui::state::StatusSnapshot;
 
 /// Fixed status snapshot reused across tests.
 pub fn fake_status() -> StatusSnapshot {

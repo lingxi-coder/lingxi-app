@@ -11,7 +11,7 @@
 
 use crate::budget::{BudgetCheckResult, BudgetEnforcer};
 use async_trait::async_trait;
-use lingxi_traits::budget::{BudgetEnforcerHandle, BudgetError};
+use traits::budget::{BudgetEnforcerHandle, BudgetError};
 
 #[async_trait]
 impl BudgetEnforcerHandle for BudgetEnforcer {
@@ -39,7 +39,7 @@ mod tests {
     use crate::tracker::CostTracker;
     use crate::usage::{TokenUsage, Usage};
     use crate::{BudgetConfig, BudgetExceedPolicy, ModelRef};
-    use lingxi_protocol::SessionId;
+    use protocol::SessionId;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::mpsc;

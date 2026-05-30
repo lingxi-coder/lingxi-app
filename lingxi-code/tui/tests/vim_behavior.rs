@@ -2,7 +2,7 @@
 //! motion correctness is table-driven so the matrix is scannable and dense.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lingxi_tui::components::prompt_input::vim::{
+use tui::components::prompt_input::vim::{
     handle_vim_key, Register, VimEffect, VimMode, VimOutcome, VimState,
 };
 
@@ -149,8 +149,8 @@ fn dollar_on_wrapped_line_is_logical_line_end() {
 
 // ===== Task 12: full handle_live_key seam (multi-line + vim-disabled) =====
 
-use lingxi_tui::root::handle_live_key;
-use lingxi_tui::state::{AppState, StatusSnapshot};
+use tui::root::handle_live_key;
+use tui::state::{AppState, StatusSnapshot};
 
 // iocraft's KeyEvent is `KeyEvent::new(kind, code)` with a public `modifiers`
 // field; build a Press event for a char, carrying SHIFT for capitals.
@@ -248,11 +248,11 @@ fn plain_normal_motion_keys_still_move_cursor() {
 fn permission_dialog_wins_over_ctrl_alt_v() {
     // Priority order guard: a pending permission (priority 1) must consume
     // Ctrl-Alt-V before the toggle ever fires. vim stays enabled.
-    use lingxi_permission::gate::PermissionRequest;
+    use permission::gate::PermissionRequest;
     let mut st = AppState::new(StatusSnapshot::default());
     st.vim_enabled = true;
     st.vim.mode = VimMode::Normal;
-    st.pending_permission = Some(lingxi_tui::state::PendingPermission {
+    st.pending_permission = Some(tui::state::PendingPermission {
         request: PermissionRequest::BypassPermissionsMode,
     });
     handle_live_key(&mut st, &live_ctrl_alt_v(), 24);

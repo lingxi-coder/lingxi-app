@@ -1,4 +1,4 @@
-use lingxi_telemetry::tengu::memory;
+use telemetry::tengu::memory;
 
 #[test]
 fn all_12_memory_event_names_are_locked() {
@@ -28,7 +28,7 @@ fn all_12_memory_event_names_are_locked() {
 
 #[test]
 fn case_mismatch_payload_routes_path_via_pii_tagged() {
-    use lingxi_telemetry::{pii::PiiTagged, Verified};
+    use telemetry::{pii::PiiTagged, Verified};
     let p = memory::CaseMismatchPayload {
         actual_name: Verified::assert_safe("claude.md".into()),
         path: PiiTagged::assert_pii_tagged_column("/Users/u/proj/claude.md".into()),

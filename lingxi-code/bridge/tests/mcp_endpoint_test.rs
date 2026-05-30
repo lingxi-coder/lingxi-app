@@ -5,7 +5,7 @@
 //!   accepts the WS upgrade with the matching token, and `shutdown` removes
 //!   the lockfile via the embedded `LockfileGuard`.
 
-use lingxi_bridge::{IdeBridge, IdeLockfile, McpEndpoint};
+use bridge::{IdeBridge, IdeLockfile, McpEndpoint};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 
 #[tokio::test]

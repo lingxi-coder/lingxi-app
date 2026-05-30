@@ -11,13 +11,13 @@ use crate::tool_trait::{
     ValidationError,
 };
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 
 /// 10-minute cap on the sleep duration — matches BashTool's max.
 pub const SLEEP_MAX_DURATION_MS: u64 = 600_000;
@@ -161,7 +161,7 @@ impl Tool for SleepTool {
 mod tests {
     use super::*;
     use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use lingxi_traits::process::ProcessOutput;
+    use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {

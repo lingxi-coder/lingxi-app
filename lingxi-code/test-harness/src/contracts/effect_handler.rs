@@ -21,8 +21,8 @@
 //! subsystem — rather than the full enum, so it stays useful as the
 //! [`Effect`] enum grows without needing a churn-per-variant update.
 
-use lingxi_protocol::{Effect, RedactableContent, RequestId, SessionId, ToolUseId};
-use lingxi_traits::EffectHandler;
+use protocol::{Effect, RedactableContent, RequestId, SessionId, ToolUseId};
+use traits::EffectHandler;
 
 /// Run the standard [`EffectHandler`] contract against an impl.
 ///
@@ -126,7 +126,7 @@ async fn test_scan_for_secrets_handled<H: EffectHandler>(h: &H) {
 // ---------------------------------------------------------------------------
 
 use async_trait::async_trait;
-use lingxi_protocol::{EffectError, EffectResult};
+use protocol::{EffectError, EffectResult};
 
 /// Minimal [`EffectHandler`] that acks every variant. Suitable as a
 /// stand-in subject for the contract suite; real handlers are exercised

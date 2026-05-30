@@ -30,7 +30,7 @@ pub const TURN_STREAMING_STARTED: &str = "tengu_orchestrator_turn_streaming_star
 pub const TURN_STREAMING_COMPLETED: &str = "tengu_orchestrator_turn_streaming_completed";
 
 /// Permission prompt about to be shown to the user. Fired by
-/// [`lingxi_permission::InteractivePromptingGate::prompt_user`]
+/// [`permission::InteractivePromptingGate::prompt_user`]
 /// immediately before each stderr write — once on the initial prompt and
 /// once per retry. (M5-05)
 pub const PERMISSION_PROMPTED: &str = "tengu_orchestrator_permission_prompted";

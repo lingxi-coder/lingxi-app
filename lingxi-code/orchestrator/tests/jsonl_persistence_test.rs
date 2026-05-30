@@ -5,18 +5,18 @@
 //! `parentUuid` chain — proves on-disk persistence is wired correctly and
 //! the chain is monotonic.
 
-use lingxi_api_client::types::ContentBlockApi;
-use lingxi_orchestrator::test_support::{
+use api_client::types::ContentBlockApi;
+use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_platform_posix::fs::PosixFileSystem;
-use lingxi_session::jsonl::reader::JsonlReader;
-use lingxi_session::jsonl::writer::JsonlWriter;
-use lingxi_traits::FileSystem;
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use platform_posix::fs::PosixFileSystem;
+use session::jsonl::reader::JsonlReader;
+use session::jsonl::writer::JsonlWriter;
 use std::sync::Arc;
 use tempfile::tempdir;
+use traits::FileSystem;
 
 #[tokio::test]
 async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
@@ -42,9 +42,9 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     );
     let api = Arc::new(MockApiClient::new(vec![r1, r2]));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tools::registry::ToolRegistry::new());
 
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -99,7 +99,7 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     // (8-4-4-4-12 lowercase hex — see `jsonl::uuid::validate_uuid`).
     for (i, m) in msgs.iter().enumerate() {
         assert!(
-            lingxi_session::jsonl::uuid::validate_uuid(&m.uuid),
+            session::jsonl::uuid::validate_uuid(&m.uuid),
             "entry {i} uuid {:?} fails validate_uuid",
             m.uuid,
         );
@@ -109,7 +109,7 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     let snap = output.snapshot().await;
     let end_turns = snap
         .iter()
-        .filter(|e| matches!(e, lingxi_traits::OutputEvent::EndTurn { .. }))
+        .filter(|e| matches!(e, traits::OutputEvent::EndTurn { .. }))
         .count();
     assert_eq!(end_turns, 2, "expected 2 EndTurn events; got snap {snap:?}");
 }
@@ -128,9 +128,9 @@ async fn orchestrator_without_writer_creates_no_file() {
     );
     let api = Arc::new(MockApiClient::new(vec![response]));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tools::registry::ToolRegistry::new());
 
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),

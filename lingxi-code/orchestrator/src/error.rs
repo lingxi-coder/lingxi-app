@@ -4,7 +4,7 @@
 //! `"Reached maximum number of turns (<n>)"` — verified against
 //! `claude-code/src/QueryEngine.ts:870` on 2026-05-25.
 
-use lingxi_api_client::ApiError;
+use api_client::ApiError;
 use thiserror::Error;
 
 /// Failure modes of `ConversationOrchestrator::run_turn`.
@@ -56,7 +56,7 @@ pub enum OrchestratorError {
 
     /// Compaction layer surfaced an error. (M6-08)
     #[error("compaction failed: {0}")]
-    Compaction(#[from] lingxi_compaction::CompactionError),
+    Compaction(#[from] compaction::CompactionError),
 
     /// `force_compact` was cancelled mid-run by the supplied
     /// `CancellationToken`. (M6-08)
@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn streaming_display_starts_with_locked_prefix() {
-        let e = OrchestratorError::Streaming(ApiError::Http(lingxi_traits::HttpError::Connection(
+        let e = OrchestratorError::Streaming(ApiError::Http(traits::HttpError::Connection(
             "nope".into(),
         )));
         let s = format!("{e}");
@@ -122,9 +122,8 @@ mod tests {
 
     #[test]
     fn compaction_variant_projects_to_string() {
-        let api_err =
-            lingxi_api_client::ApiError::Http(lingxi_traits::HttpError::Connection("nope".into()));
-        let compact_err = lingxi_compaction::CompactionError::Api(api_err);
+        let api_err = api_client::ApiError::Http(traits::HttpError::Connection("nope".into()));
+        let compact_err = compaction::CompactionError::Api(api_err);
         let e = OrchestratorError::Compaction(compact_err);
         let s = e.to_string();
         assert!(s.contains("compaction"), "got: {s}");

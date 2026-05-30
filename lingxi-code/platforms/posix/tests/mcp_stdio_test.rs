@@ -1,8 +1,8 @@
 //! Integration test: drive the mock stdio MCP fixture binary through
 //! `spawn_stdio` and verify a JSON-RPC `ping` request round-trips.
 
-use lingxi_platform_common::mcp_stdio::StdioConfig;
-use lingxi_platform_posix::mcp::spawn_stdio;
+use platform_common::mcp_stdio::StdioConfig;
+use platform_posix::mcp::spawn_stdio;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;

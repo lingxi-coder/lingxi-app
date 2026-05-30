@@ -6,7 +6,7 @@
 //! - remaining = 30 sec -> lead = 15 sec (debug-token short TTL)
 //! - remaining = 0      -> lead = 0 (refresh immediately)
 
-use lingxi_anthropic_oauth::refresh::proactive_lead;
+use anthropic_oauth::refresh::proactive_lead;
 use std::time::Duration;
 
 #[test]

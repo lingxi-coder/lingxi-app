@@ -4,9 +4,9 @@
 //! specs to the shared connectors rather than returning
 //! `UnsupportedTransport`.
 
-use lingxi_platform_windows::WindowsMcpTransport;
-use lingxi_traits::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
+use platform_windows::WindowsMcpTransport;
 use std::collections::HashMap;
+use traits::{McpError, McpTransport, McpTransportKind, McpTransportSpec};
 
 #[tokio::test]
 async fn connect_sse_does_not_return_unsupported_transport() {

@@ -13,8 +13,8 @@
 //! (`platforms/posix/src/secure_storage/`); this contract sits at the trait
 //! surface only.
 
-use lingxi_protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
-use lingxi_traits::SecureStorage;
+use protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
+use traits::SecureStorage;
 
 const SERVICE: &str = "lingxi-contract-test";
 const ACCOUNT: &str = "contract@test.local";

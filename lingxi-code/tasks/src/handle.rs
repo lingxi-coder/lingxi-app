@@ -14,7 +14,7 @@ use crate::registry::TaskRegistry;
 use crate::state::{TaskState, TaskStatus};
 use crate::task_trait::{TaskError, TaskSpawnInput};
 use async_trait::async_trait;
-use lingxi_traits::task_registry::{
+use traits::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
 };
@@ -106,7 +106,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             timeout: None,
         },
         TaskType::LocalAgent => TaskSpawnInput::LocalAgent {
-            agent_id: lingxi_protocol::AgentId::nil(),
+            agent_id: protocol::AgentId::nil(),
             prompt: String::new(),
             is_backgrounded: false,
         },
@@ -115,7 +115,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             prompt: String::new(),
         },
         TaskType::InProcessTeammate => TaskSpawnInput::InProcessTeammate {
-            agent_id: lingxi_protocol::AgentId::nil(),
+            agent_id: protocol::AgentId::nil(),
             name: String::new(),
         },
         TaskType::LocalWorkflow => TaskSpawnInput::LocalWorkflow {
@@ -251,11 +251,11 @@ mod tests {
     use super::*;
     use crate::output_manager::TaskOutputManager;
     use async_trait::async_trait;
-    use lingxi_test_harness::mocks::MockRuntimeSpawner;
-    use lingxi_traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::tempdir;
+    use test_harness::mocks::MockRuntimeSpawner;
+    use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 
     use std::collections::HashMap;
     use tokio::sync::Mutex as TokioMutex;

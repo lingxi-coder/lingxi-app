@@ -5,8 +5,8 @@
 //! `lingxi-platform-posix`: terminate the entire descendant tree of a
 //! background process and treat "process not found" as success.
 
-use lingxi_traits::ProcessError;
 use tokio::process::Command;
+use traits::ProcessError;
 
 /// Terminate the process tree rooted at `pid` via `taskkill /T /F /PID`.
 ///

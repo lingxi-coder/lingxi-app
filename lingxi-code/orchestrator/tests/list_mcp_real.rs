@@ -1,20 +1,20 @@
 //! M6-07 — `list_mcp_servers` reads the wired `Arc<McpRegistry>`.
 
 use async_trait::async_trait;
-use lingxi_mcp::{ConfigScope, McpRegistry, McpServerConfig};
-use lingxi_orchestrator::test_support::{
+use mcp::{ConfigScope, McpRegistry, McpServerConfig};
+use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_protocol::McpConnectionId as ConnId;
-use lingxi_traits::{
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use protocol::McpConnectionId as ConnId;
+use serde_json::Value;
+use std::sync::Arc;
+use traits::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpStatus, McpToolDto,
     McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, OrchestratorHandle,
     ServerCapabilitiesDto,
 };
-use serde_json::Value;
-use std::sync::Arc;
 
 struct StubTransport;
 
@@ -91,7 +91,7 @@ fn build_orch() -> ConversationOrchestrator {
     ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![])),
-        Arc::new(lingxi_tools::registry::ToolRegistry::new()),
+        Arc::new(tools::registry::ToolRegistry::new()),
         noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),
@@ -114,14 +114,14 @@ async fn list_mcp_servers_returns_two_when_two_registered() {
         let mut c = reg.connections.write().await;
         c.insert(
             "memory".into(),
-            lingxi_mcp::McpConnectionState::Disconnected {
+            mcp::McpConnectionState::Disconnected {
                 config: stdio_cfg("memory"),
                 last_error: None,
             },
         );
         c.insert(
             "filesystem".into(),
-            lingxi_mcp::McpConnectionState::Disconnected {
+            mcp::McpConnectionState::Disconnected {
                 config: stdio_cfg("filesystem"),
                 last_error: None,
             },

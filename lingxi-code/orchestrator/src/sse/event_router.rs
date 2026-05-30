@@ -13,10 +13,10 @@
 
 use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use super::StreamingError;
-use lingxi_api_client::types::{ContentBlockApi, ContentDelta, StreamEvent};
-use lingxi_protocol::{ContentBlock, ToolUseId};
-use lingxi_traits::OutputStream;
+use api_client::types::{ContentBlockApi, ContentDelta, StreamEvent};
+use protocol::{ContentBlock, ToolUseId};
 use std::sync::Arc;
+use traits::OutputStream;
 
 /// Result of routing one `StreamEvent`. The streaming loop acts on each.
 #[derive(Debug, Clone)]
@@ -147,7 +147,7 @@ pub async fn dispatch_event(
 mod tests {
     use super::*;
     use crate::test_support::MockOutputStream;
-    use lingxi_api_client::types::MessageDeltaPayload;
+    use api_client::types::MessageDeltaPayload;
 
     #[tokio::test]
     async fn text_delta_emits_to_output_and_accumulates() {

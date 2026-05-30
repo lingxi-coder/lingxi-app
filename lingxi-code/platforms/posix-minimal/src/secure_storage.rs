@@ -3,8 +3,8 @@
 //! implementation (and the OS keychain variants) ships in Plan 17.
 
 use async_trait::async_trait;
-use lingxi_protocol::SecureStorageData;
-use lingxi_traits::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use protocol::SecureStorageData;
+use traits::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 /// Stub secure storage — declares the plaintext backend without persisting.
 #[derive(Default)]

@@ -2,14 +2,12 @@
 //!
 //! One MCP server is modelled as a config plus a state. The registry
 //! (`registry.rs`) drives transitions between the variants below using
-//! the platform-supplied [`lingxi_traits::McpTransport`].
+//! the platform-supplied [`traits::McpTransport`].
 
-use lingxi_protocol::McpConnectionId;
-use lingxi_traits::{
-    McpPromptDto, McpResourceDto, McpToolDto, McpTransportSpec, ServerCapabilitiesDto,
-};
+use protocol::McpConnectionId;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
+use traits::{McpPromptDto, McpResourceDto, McpToolDto, McpTransportSpec, ServerCapabilitiesDto};
 
 /// Static configuration for one MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -6,8 +6,8 @@
 
 use crate::content_replacement::ContentReplacementState;
 use crate::registry::ToolRegistry;
-use lingxi_core::SessionState;
-use lingxi_protocol::{AgentId, McpConnectionId, ToolUseId};
+use engine::SessionState;
+use protocol::{AgentId, McpConnectionId, ToolUseId};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -21,7 +21,7 @@ pub struct ToolUseContext {
     /// Static per-call options (debug flags, budget, system-prompt overrides).
     pub options: ToolUseOptions,
     /// Conversation history up to (but not including) the current call.
-    pub messages: Vec<lingxi_protocol::ConversationMessage>,
+    pub messages: Vec<protocol::ConversationMessage>,
     /// The tool-use id assigned by the model, if this call is bound to one.
     pub tool_use_id: Option<ToolUseId>,
     /// The agent that issued this call, if known.

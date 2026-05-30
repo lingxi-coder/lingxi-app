@@ -19,9 +19,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use lingxi_permission::gate::{PermissionRequest, PermissionResponse};
-use lingxi_permission::PermissionMode;
-use lingxi_protocol::ToolUseId;
+use permission::gate::{PermissionRequest, PermissionResponse};
+use permission::PermissionMode;
+use protocol::ToolUseId;
 use tokio::sync::oneshot;
 
 use crate::components::prompt_input::completion::CompletionState;
@@ -60,7 +60,7 @@ pub enum RenderedMessage {
     /// Per-id expanded state lives in `AppState.expanded`.
     AssistantToolUse {
         /// Correlator (model-supplied `tool_use_id`).
-        id: lingxi_protocol::ToolUseId,
+        id: protocol::ToolUseId,
         /// Tool name (e.g. `"Read"`, `"Bash"`).
         tool: String,
         /// JSON input the tool was invoked with.
@@ -72,7 +72,7 @@ pub enum RenderedMessage {
     /// line plus a `(+N lines)` suffix.
     UserToolResult {
         /// Correlator matching the paired `AssistantToolUse.id`.
-        id: lingxi_protocol::ToolUseId,
+        id: protocol::ToolUseId,
         /// Tool name (used to gate Bash → ANSI parser).
         tool: String,
         /// JSON result payload.
@@ -243,7 +243,7 @@ pub enum RenderedMessage {
         /// Shared tool name for the group.
         tool: String,
         /// First child's id — the per-group expanded-map key.
-        group_id: lingxi_protocol::ToolUseId,
+        group_id: protocol::ToolUseId,
         /// `(input, result)` pairs in group order.
         entries: Vec<(serde_json::Value, serde_json::Value)>,
     },
@@ -259,7 +259,7 @@ pub enum RenderedMessage {
         /// `true` while the group is still streaming (present-tense verbs).
         is_active: bool,
         /// Expanded-map key (first child's id).
-        group_id: lingxi_protocol::ToolUseId,
+        group_id: protocol::ToolUseId,
         /// Per-entry display lines, shown when expanded.
         entries: Vec<String>,
     },
@@ -919,7 +919,7 @@ mod tests {
     /// blocks (not the M6-03 `SystemText` placeholders).
     #[test]
     fn rendered_message_carries_tool_use_and_result() {
-        use lingxi_protocol::ToolUseId;
+        use protocol::ToolUseId;
         let id = ToolUseId::new();
         let call = RenderedMessage::AssistantToolUse {
             id,
@@ -942,7 +942,7 @@ mod tests {
     /// scrollback order; past either end stays put (no wrap-around).
     #[test]
     fn focus_walks_through_tool_calls_in_order() {
-        use lingxi_protocol::ToolUseId;
+        use protocol::ToolUseId;
         let mut st = AppState::new(fake_status());
         let a = ToolUseId::new();
         let b = ToolUseId::new();
@@ -1033,7 +1033,7 @@ mod tests {
     /// on the first toggle.
     #[test]
     fn toggle_expanded_flips_per_id() {
-        use lingxi_protocol::ToolUseId;
+        use protocol::ToolUseId;
         let mut st = AppState::new(fake_status());
         let id = ToolUseId::new();
         assert!(!st.expanded.contains_key(&id));

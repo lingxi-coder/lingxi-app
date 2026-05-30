@@ -10,9 +10,9 @@
 
 use crate::mailbox::{MailboxRouter, MessageSender, TeammateMessage};
 use async_trait::async_trait;
-use lingxi_protocol::AgentId;
-use lingxi_traits::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
+use protocol::AgentId;
 use std::time::SystemTime;
+use traits::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
 use uuid::Uuid;
 
 /// Byte-locked teammate claim window (spec §7 line 498).

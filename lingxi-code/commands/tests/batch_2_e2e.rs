@@ -6,18 +6,18 @@
 //! M5-11 Task 15.
 
 use async_trait::async_trait;
-use lingxi_commands::dispatcher::RegistrySlashDispatcher;
-use lingxi_commands::registry::{
+use commands::dispatcher::RegistrySlashDispatcher;
+use commands::registry::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2, CommandRegistry,
 };
-use lingxi_orchestrator::test_support::MockOrchestratorHandle;
-use lingxi_traits::{
-    AgentInfo, AuthError, AuthHandle, CostSnapshot, HookInfo, LoginInfo, McpServerInfo, McpStatus,
-    SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
-};
+use orchestrator::test_support::MockOrchestratorHandle;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use tokio::sync::RwLock;
+use traits::{
+    AgentInfo, AuthError, AuthHandle, CostSnapshot, HookInfo, LoginInfo, McpServerInfo, McpStatus,
+    SlashCommandDispatcher, SlashDispatchResult, StatusSnapshot,
+};
 
 struct MockAuth {
     result: StdMutex<Result<LoginInfo, AuthError>>,

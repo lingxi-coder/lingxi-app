@@ -1,13 +1,13 @@
 //! `JsonlReader` full + lite parity.
 
-use lingxi_platform_posix::fs::PosixFileSystem;
-use lingxi_session::jsonl::reader::{JsonlReader, SessionMetadata};
-use lingxi_session::jsonl::schema::JsonlMessage;
-use lingxi_session::jsonl::writer::JsonlWriter;
-use lingxi_traits::FileSystem;
+use platform_posix::fs::PosixFileSystem;
 use serde_json::{json, Map};
+use session::jsonl::reader::{JsonlReader, SessionMetadata};
+use session::jsonl::schema::JsonlMessage;
+use session::jsonl::writer::JsonlWriter;
 use std::sync::Arc;
 use tempfile::tempdir;
+use traits::FileSystem;
 
 fn user_msg(n: u8) -> JsonlMessage {
     JsonlMessage {

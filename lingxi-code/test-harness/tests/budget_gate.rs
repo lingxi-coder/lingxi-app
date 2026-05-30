@@ -1,8 +1,8 @@
 //! Integration test — `BudgetEnforcer` halts subsequent calls after the
 //! cumulative session cost crosses the configured ceiling.
 
-use lingxi_cost::{BudgetConfig, BudgetEnforcer, BudgetExceedPolicy, CostTracker, PricingCatalog};
-use lingxi_protocol::SessionId;
+use cost::{BudgetConfig, BudgetEnforcer, BudgetExceedPolicy, CostTracker, PricingCatalog};
+use protocol::SessionId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -23,12 +23,12 @@ async fn budget_halts_after_three_expensive_calls() {
     };
     let enforcer = BudgetEnforcer::new(cfg, tracker.clone());
 
-    let mr = lingxi_cost::ModelRef {
-        provider: lingxi_cost::ProviderId::Anthropic,
+    let mr = cost::ModelRef {
+        provider: cost::ProviderId::Anthropic,
         model: "claude-opus-4-6".into(),
     };
-    let u = lingxi_cost::Usage {
-        tokens: lingxi_cost::TokenUsage {
+    let u = cost::Usage {
+        tokens: cost::TokenUsage {
             input: 2000,
             output: 0,
             ..Default::default()
@@ -39,8 +39,7 @@ async fn budget_halts_after_three_expensive_calls() {
     // Call 1: under budget, expect Ok or ThresholdWarning (0.5 threshold may fire).
     assert!(matches!(
         enforcer.check_pre_api_call(10_000_000).await,
-        lingxi_cost::BudgetCheckResult::Ok
-            | lingxi_cost::BudgetCheckResult::ThresholdWarning { .. }
+        cost::BudgetCheckResult::Ok | cost::BudgetCheckResult::ThresholdWarning { .. }
     ));
     tracker
         .record_api_response(mr.clone(), u, std::time::Duration::from_millis(100), 0)
@@ -56,8 +55,5 @@ async fn budget_halts_after_three_expensive_calls() {
 
     // Call 3: now over, expect Halt.
     let result = enforcer.check_pre_api_call(15_000_000).await;
-    assert!(matches!(
-        result,
-        lingxi_cost::BudgetCheckResult::Halt { .. }
-    ));
+    assert!(matches!(result, cost::BudgetCheckResult::Halt { .. }));
 }

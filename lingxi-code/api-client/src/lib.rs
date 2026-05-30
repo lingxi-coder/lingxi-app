@@ -1,6 +1,6 @@
 //! Anthropic / OpenAI-compatible API client.
 //!
-//! All network I/O routes through `lingxi_traits::HttpTransport`. The client
+//! All network I/O routes through `traits::HttpTransport`. The client
 //! itself is purely about request shape + SSE parsing + retry policy. M3-03
 //! extends with non-streaming `messages.create` + `count_tokens`, retry
 //! middleware (3 attempts: 500ms / 1s / 2s ± 20% jitter), rate-limit

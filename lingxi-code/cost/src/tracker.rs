@@ -12,12 +12,12 @@ use crate::{
     usage::Usage,
     ModelRef,
 };
-use lingxi_protocol::SessionId;
-use lingxi_telemetry::AnalyticsBus;
+use protocol::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+use telemetry::AnalyticsBus;
 use tokio::sync::{mpsc, RwLock};
 
 /// Persisted snapshot of one session's cumulative cost and usage.
@@ -289,8 +289,8 @@ mod tests {
     #[tokio::test]
     async fn record_v2_tracks_cache_tokens_and_emits_event() {
         use async_trait::async_trait;
-        use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
         use std::sync::Mutex;
+        use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
 
         #[derive(Default)]
         struct CaptureSink {

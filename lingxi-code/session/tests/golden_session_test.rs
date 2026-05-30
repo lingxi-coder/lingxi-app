@@ -2,15 +2,15 @@
 //! The writer's output, given the same `JsonlMessage` sequence, MUST be
 //! byte-for-byte identical to the on-disk fixture after token substitution.
 
-use lingxi_platform_posix::fs::PosixFileSystem;
-use lingxi_session::jsonl::reader::JsonlReader;
-use lingxi_session::jsonl::schema::JsonlMessage;
-use lingxi_session::jsonl::writer::JsonlWriter;
-use lingxi_traits::FileSystem;
+use platform_posix::fs::PosixFileSystem;
 use pretty_assertions::assert_eq;
 use serde_json::{json, Map, Value};
+use session::jsonl::reader::JsonlReader;
+use session::jsonl::schema::JsonlMessage;
+use session::jsonl::writer::JsonlWriter;
 use std::sync::Arc;
 use tempfile::tempdir;
+use traits::FileSystem;
 
 const UUID1: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const UUID2: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";

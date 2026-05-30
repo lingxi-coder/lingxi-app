@@ -170,7 +170,7 @@ pub struct MemoryEntry {
     pub size_bytes: u64,
 }
 
-/// Cross-crate stand-in for `lingxi_memory::MemoryTier`.
+/// Cross-crate stand-in for `memory::MemoryTier`.
 ///
 /// Defined here to keep `lingxi-protocol` free of platform deps; the richer
 /// variants (`Project { repo_root }`, etc.) live in `lingxi-memory::tier`.

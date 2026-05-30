@@ -16,7 +16,6 @@
 
 use crate::client::LspClient;
 use crate::open_file_tracker::OpenFileTracker;
-use lingxi_traits::LspServerConfig;
 use lsp_types::{
     CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCallsParams,
     CallHierarchyPrepareParams, DocumentSymbolParams, Position, ReferenceContext, ReferenceParams,
@@ -28,6 +27,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 use thiserror::Error;
 use tokio::fs;
+use traits::LspServerConfig;
 
 /// Upper bound on LSP-eligible file size (10 MB). Matches claude-code's
 /// `MAX_LSP_FILE_SIZE_BYTES = 10_000_000` constant verbatim.
@@ -103,7 +103,7 @@ pub enum LspOperationError {
     NotUtf8(String),
     /// Underlying LSP transport / server error.
     #[error("lsp: {0}")]
-    Lsp(#[from] lingxi_traits::LspError),
+    Lsp(#[from] traits::LspError),
 }
 
 /// Convert a 1-based UI position to the 0-based LSP wire position.

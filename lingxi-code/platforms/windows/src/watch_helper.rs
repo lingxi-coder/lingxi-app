@@ -15,7 +15,6 @@
 //! `src/utils/hooks/fileChangedWatcher.ts:69-77`.
 
 use futures_core::stream::Stream;
-use lingxi_traits::{FileEvent, FileEventKind, FsError};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEvent, DebouncedEventKind, Debouncer};
 use std::path::Path;
@@ -23,6 +22,7 @@ use std::pin::Pin;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use traits::{FileEvent, FileEventKind, FsError};
 
 /// Default stability threshold (chokidar 4 parity).
 pub const DEFAULT_STABILITY_THRESHOLD_MS: u64 = 500;

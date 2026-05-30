@@ -2,9 +2,9 @@
 //! PARITY (design §0 Q3): we snapshot STRUCTURE — line count, and per span
 //! whether it is "colored" (fg != default) or "plain" — NOT exact colors.
 //! Concrete colors are normalized so a syntect theme bump never breaks us.
-use lingxi_tui::render::syntax::highlight;
-use lingxi_tui::render::{StyleColor, StyledLine};
-use lingxi_tui::theme::ThemeName;
+use tui::render::syntax::highlight;
+use tui::render::{StyleColor, StyledLine};
+use tui::theme::ThemeName;
 
 /// Render each line as "C"/"P" per span (Colored / Plain) + the text, so the
 /// snapshot captures structure without baking in concrete ANSI colors.

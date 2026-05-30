@@ -2,7 +2,7 @@
 //! Reference values computed by running the TS function in Node.js
 //! (see plan T2 step 1).
 
-use lingxi_session::jsonl::djb2::djb2_hash;
+use session::jsonl::djb2::djb2_hash;
 
 #[test]
 fn empty_string_is_zero() {

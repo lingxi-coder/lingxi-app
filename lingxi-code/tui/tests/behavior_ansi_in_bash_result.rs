@@ -1,11 +1,11 @@
 //! M6-04 T12: Bash result bodies pass through the ANSI parser; non-Bash
 //! tools keep the bytes literal.
 
-use lingxi_protocol::ToolUseId;
-use lingxi_tui::components::messages::user_tool_result::{
+use protocol::ToolUseId;
+use tui::components::messages::user_tool_result::{
     render_user_tool_result_body_spans, UserToolResultProps,
 };
-use lingxi_tui::render::{NamedColor, StyleColor};
+use tui::render::{NamedColor, StyleColor};
 
 #[test]
 fn bash_result_with_red_err_yields_red_span() {

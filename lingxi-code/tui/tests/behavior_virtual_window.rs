@@ -1,11 +1,9 @@
 //! M7-03 behavior tests: line-based scroll, windowing, telemetry, cache.
 
-use lingxi_tui::app::scroll_with_viewport;
-use lingxi_tui::components::virtual_message_list::{
-    render_window, render_window_counted, HeightCache,
-};
-use lingxi_tui::events::keymap::ScrollDir;
-use lingxi_tui::state::{AppState, RenderedMessage};
+use tui::app::scroll_with_viewport;
+use tui::components::virtual_message_list::{render_window, render_window_counted, HeightCache};
+use tui::events::keymap::ScrollDir;
+use tui::state::{AppState, RenderedMessage};
 
 mod support;
 use support::fake_status;

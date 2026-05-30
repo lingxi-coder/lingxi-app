@@ -14,14 +14,14 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use lingxi_protocol::{HttpRequest, HttpResponse, SseEvent};
-use lingxi_traits::{HttpError, HttpTransport};
+use protocol::{HttpRequest, HttpResponse, SseEvent};
 use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpListener;
+use traits::{HttpError, HttpTransport};
 
 #[derive(Clone, Debug)]
 pub struct MockResp {
@@ -139,8 +139,8 @@ impl RealTransport {
 impl HttpTransport for RealTransport {
     async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
         let method = match req.method {
-            lingxi_protocol::HttpMethod::Get => reqwest::Method::GET,
-            lingxi_protocol::HttpMethod::Post => reqwest::Method::POST,
+            protocol::HttpMethod::Get => reqwest::Method::GET,
+            protocol::HttpMethod::Post => reqwest::Method::POST,
             _ => return Err(HttpError::InvalidRequest("unsupported method".into())),
         };
         let mut rb = self.client.request(method, &req.url);
@@ -171,10 +171,7 @@ impl HttpTransport for RealTransport {
         })
     }
 
-    async fn stream_sse(
-        &self,
-        _req: HttpRequest,
-    ) -> Result<lingxi_traits::http::SseStream, HttpError> {
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<traits::http::SseStream, HttpError> {
         let s: Pin<Box<dyn Stream<Item = Result<SseEvent, HttpError>> + Send>> =
             Box::pin(futures::stream::empty());
         Ok(s)

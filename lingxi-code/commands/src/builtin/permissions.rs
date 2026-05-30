@@ -8,9 +8,9 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
 use std::sync::Arc;
+use telemetry::tengu::command as cmd_evt;
+use traits::OrchestratorHandle;
 
 /// `/permissions` handler — opens `$EDITOR` on the permissions file.
 #[derive(Clone)]
@@ -29,10 +29,10 @@ impl PermissionsHandler {
 #[async_trait]
 impl BuiltinCommandHandler for PermissionsHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::PERMISSIONS_STARTED);
+        telemetry::emit_command_started(cmd_evt::PERMISSIONS_STARTED);
         match self.handle.edit_permissions_file().await {
             Ok(o) => {
-                lingxi_telemetry::emit_command_completed(cmd_evt::PERMISSIONS_COMPLETED, "");
+                telemetry::emit_command_completed(cmd_evt::PERMISSIONS_COMPLETED, "");
                 CommandResult::Done {
                     display: Some(format!(
                         "Edited {} (exit {}).",
@@ -43,7 +43,7 @@ impl BuiltinCommandHandler for PermissionsHandler {
             }
             Err(e) => {
                 let msg = e.to_string();
-                lingxi_telemetry::emit_command_failed(cmd_evt::PERMISSIONS_FAILED, &msg);
+                telemetry::emit_command_failed(cmd_evt::PERMISSIONS_FAILED, &msg);
                 CommandResult::Done {
                     display: Some(format!("Could not edit permissions: {msg}")),
                 }
@@ -61,7 +61,7 @@ impl BuiltinCommandHandler for PermissionsHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
+    use orchestrator::test_support::MockOrchestratorHandle;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {

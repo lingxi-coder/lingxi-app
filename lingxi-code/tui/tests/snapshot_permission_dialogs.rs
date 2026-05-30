@@ -7,10 +7,10 @@
 //! review` hasn't been run.
 
 use iocraft::prelude::*;
-use lingxi_tui::components::permissions::bypass_permissions::BypassPermissionsMode;
-use lingxi_tui::components::permissions::exit_plan_mode::ExitPlanMode;
-use lingxi_tui::components::permissions::tool_use_confirm::ToolUseConfirm;
-use lingxi_tui::components::permissions::DialogFocus;
+use tui::components::permissions::bypass_permissions::BypassPermissionsMode;
+use tui::components::permissions::exit_plan_mode::ExitPlanMode;
+use tui::components::permissions::tool_use_confirm::ToolUseConfirm;
+use tui::components::permissions::DialogFocus;
 
 #[test]
 fn snapshot_tool_use_confirm_default_state() {

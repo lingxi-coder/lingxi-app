@@ -13,13 +13,13 @@ use crate::error::OrchestratorError;
 use crate::sse::accumulator::BlockAccumulator;
 use crate::sse::event_router::{dispatch_event, RouterAction};
 use crate::turn_loop::dispatch_tool_uses;
+use api_client::types::StreamEvent;
+use api_client::ApiError;
 use futures::stream::{BoxStream, StreamExt};
-use lingxi_api_client::types::StreamEvent;
-use lingxi_api_client::ApiError;
-use lingxi_protocol::{ContentBlock, ToolUseId};
-use lingxi_traits::OutputStream;
+use protocol::{ContentBlock, ToolUseId};
 use serde_json::Value;
 use std::sync::Arc;
+use traits::OutputStream;
 
 /// One tool dispatch request observed during the stream. Carries the
 /// id/name/input the orchestrator must invoke. The dispatch itself is
@@ -161,7 +161,7 @@ mod tests {
         input_json_delta, message_delta_stop, message_start, message_stop, text_delta,
     };
     use futures::stream;
-    use lingxi_protocol::ToolUseId;
+    use protocol::ToolUseId;
 
     fn boxed(events: Vec<StreamEvent>) -> BoxStream<'static, Result<StreamEvent, ApiError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
@@ -247,7 +247,7 @@ mod tests {
         let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
         let s: BoxStream<'static, Result<StreamEvent, ApiError>> = stream::iter(vec![
             Ok(message_start("m1", "claude-opus-4-7")),
-            Err(ApiError::Http(lingxi_traits::HttpError::Connection(
+            Err(ApiError::Http(traits::HttpError::Connection(
                 "dropped".into(),
             ))),
         ])

@@ -1,6 +1,6 @@
 //! `OpenFileTracker` — dedup of `textDocument/didOpen` per (server, uri).
 
-use lingxi_lsp::OpenFileTracker;
+use lsp::OpenFileTracker;
 use lsp_types::Url;
 
 #[tokio::test]

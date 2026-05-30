@@ -14,9 +14,9 @@
 //!   stay DEFERRED — no clean/aggregated emit site, so registering them would
 //!   mint dead names (the M6 "330 vs 326" lesson).
 
-use lingxi_permission::gate::PermissionResponse;
+use permission::gate::PermissionResponse;
 
-pub use lingxi_telemetry::tengu::tui::{
+pub use telemetry::tengu::tui::{
     FIRST_RENDER, PERMISSION_DIALOG_RESOLVED, PERMISSION_DIALOG_SHOWN, RESIZE, SCREEN_CLOSED,
     SCREEN_OPENED, SCROLL_ENDED, SCROLL_STARTED, SEARCH_OPENED, SESSION_ENDED, SESSION_STARTED,
     STREAMING_RENDER_ENDED, STREAMING_RENDER_STARTED,

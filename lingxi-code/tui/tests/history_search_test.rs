@@ -2,8 +2,8 @@
 //! Enter accepts into the prompt, Esc restores the pre-search prompt.
 
 use iocraft::prelude::*;
-use lingxi_tui::root::handle_live_key;
-use lingxi_tui::state::{AppState, StatusSnapshot};
+use tui::root::handle_live_key;
+use tui::state::{AppState, StatusSnapshot};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(KeyEventKind::Press, code)

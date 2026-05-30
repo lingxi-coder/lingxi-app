@@ -1,15 +1,15 @@
 [package]
-name = "lingxi-api-client"
+name = "api-client"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
-lingxi-telemetry = { path = "../telemetry" }
-lingxi-cost = { path = "../cost" }
+protocol = { path = "../protocol" }
+traits = { path = "../traits" }
+telemetry = { path = "../telemetry" }
+cost = { path = "../cost" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

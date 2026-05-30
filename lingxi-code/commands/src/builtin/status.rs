@@ -9,9 +9,9 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::{OrchestratorHandle, StatusSnapshot};
 use std::sync::Arc;
+use telemetry::tengu::command as cmd_evt;
+use traits::{OrchestratorHandle, StatusSnapshot};
 
 /// `/status` handler — renders the locked 11-line panel.
 #[derive(Clone)]
@@ -30,9 +30,9 @@ impl StatusHandler {
 #[async_trait]
 impl BuiltinCommandHandler for StatusHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::STATUS_STARTED);
+        telemetry::emit_command_started(cmd_evt::STATUS_STARTED);
         let snap = self.handle.get_status_snapshot().await;
-        lingxi_telemetry::emit_command_completed(cmd_evt::STATUS_COMPLETED, "");
+        telemetry::emit_command_completed(cmd_evt::STATUS_COMPLETED, "");
         CommandResult::Done {
             display: Some(render_status(&snap)),
         }
@@ -86,7 +86,7 @@ fn push_row(out: &mut String, label: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
+    use orchestrator::test_support::MockOrchestratorHandle;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {

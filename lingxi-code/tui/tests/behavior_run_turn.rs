@@ -3,10 +3,10 @@
 //! and the prompt was cleared.
 
 use async_trait::async_trait;
-use lingxi_tui::app::{dispatch, run_one_submit, ConversationOrchestratorTrait, TurnTextOutcome};
-use lingxi_tui::events::keymap::KeyAction;
-use lingxi_tui::state::{AppState, RenderedMessage};
 use tokio_util::sync::CancellationToken;
+use tui::app::{dispatch, run_one_submit, ConversationOrchestratorTrait, TurnTextOutcome};
+use tui::events::keymap::KeyAction;
+use tui::state::{AppState, RenderedMessage};
 
 mod support;
 use support::{fake_dispatcher, fake_status};

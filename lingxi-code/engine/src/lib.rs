@@ -7,7 +7,7 @@
 //! - `session::SessionState` — persisted session model
 //!
 //! No I/O. No `tokio::spawn`. All side effects are returned as
-//! `lingxi_protocol::Effect` values.
+//! `protocol::Effect` values.
 
 #![forbid(unsafe_code)]
 

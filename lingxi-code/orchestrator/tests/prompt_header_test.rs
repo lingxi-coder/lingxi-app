@@ -1,6 +1,6 @@
 //! Byte-locks for the system prompt header (M5-03 Task 4).
 
-use lingxi_orchestrator::prompt::locked_templates::{HEADER, SECTION_SEP, TRAILING_NL};
+use orchestrator::prompt::locked_templates::{HEADER, SECTION_SEP, TRAILING_NL};
 
 #[test]
 fn header_starts_with_you_are_claude_code() {

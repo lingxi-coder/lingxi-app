@@ -1,14 +1,14 @@
 //! M5-02 Task 9: smoke test that drives `ConversationOrchestrator::run_turn`
 //! happy path — single turn, no tools.
 
-use lingxi_api_client::types::ContentBlockApi;
-use lingxi_orchestrator::test_support::{
+use api_client::types::ContentBlockApi;
+use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use lingxi_traits::OutputEvent;
+use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use std::sync::Arc;
+use traits::OutputEvent;
 
 #[tokio::test]
 async fn single_turn_no_tools_returns_end_turn_and_emits_text_and_end_turn() {
@@ -20,9 +20,9 @@ async fn single_turn_no_tools_returns_end_turn_and_emits_text_and_end_turn() {
     );
     let api = Arc::new(MockApiClient::new(vec![response]));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tools::registry::ToolRegistry::new());
 
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),

@@ -7,24 +7,24 @@
 #![cfg(unix)]
 
 use async_trait::async_trait;
-use lingxi_permission::PermissionMode;
-use lingxi_platform_posix::process::PosixProcess;
-use lingxi_sandbox::decision::ProjectTrustLevel;
-use lingxi_sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
-use lingxi_telemetry::AnalyticsBus;
-use lingxi_tools::builtin::bash::BashTool;
-use lingxi_tools::builtin::repl::REPLTool;
-use lingxi_tools::builtin::BuiltinToolContext;
-use lingxi_tools::context::{ToolUseContext, ToolUseOptions};
-use lingxi_tools::progress::progress_channel;
-use lingxi_tools::tool_trait::Tool;
-use lingxi_traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-use lingxi_traits::sandbox::{
+use permission::PermissionMode;
+use platform_posix::process::PosixProcess;
+use sandbox::decision::ProjectTrustLevel;
+use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
+use serde_json::json;
+use std::sync::Arc;
+use telemetry::AnalyticsBus;
+use tools::builtin::bash::BashTool;
+use tools::builtin::repl::REPLTool;
+use tools::builtin::BuiltinToolContext;
+use tools::context::{ToolUseContext, ToolUseOptions};
+use tools::progress::progress_channel;
+use tools::tool_trait::Tool;
+use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use traits::sandbox::{
     ProcessCommand as SbxCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
     SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
-use serde_json::json;
-use std::sync::Arc;
 
 struct PanickingFs;
 #[async_trait]
@@ -114,7 +114,7 @@ impl Sandbox for BypassSandbox {
 }
 
 struct RealClock;
-impl lingxi_traits::Clock for RealClock {
+impl traits::Clock for RealClock {
     fn now(&self) -> std::time::SystemTime {
         std::time::SystemTime::now()
     }
@@ -139,7 +139,7 @@ fn make_ctx() -> BuiltinToolContext {
             Platform::Linux
         },
         http: Arc::new(NoopHttp),
-        provider: Arc::new(lingxi_api_client::AnthropicProvider::new("test-key", None)),
+        provider: Arc::new(api_client::AnthropicProvider::new("test-key", None)),
         default_model: "claude-sonnet-4-20250514".to_string(),
         worktree: Arc::new(NoopWorktree),
         subagent_spawner: None,
@@ -155,32 +155,30 @@ fn make_ctx() -> BuiltinToolContext {
 // `BuiltinToolContext` is satisfied by an unsupported stub.
 struct NoopWorktree;
 #[async_trait::async_trait]
-impl lingxi_traits::worktree::WorktreeManager for NoopWorktree {
+impl traits::worktree::WorktreeManager for NoopWorktree {
     async fn create_worktree(
         &self,
         _: &str,
         _: Option<&str>,
         _: &[std::path::PathBuf],
-    ) -> Result<lingxi_traits::worktree::WorktreeHandle, lingxi_traits::worktree::WorktreeError>
-    {
-        Err(lingxi_traits::worktree::WorktreeError::Unsupported)
+    ) -> Result<traits::worktree::WorktreeHandle, traits::worktree::WorktreeError> {
+        Err(traits::worktree::WorktreeError::Unsupported)
     }
     async fn remove_worktree(
         &self,
-        _: &lingxi_traits::worktree::WorktreeHandle,
-    ) -> Result<(), lingxi_traits::worktree::WorktreeError> {
-        Err(lingxi_traits::worktree::WorktreeError::Unsupported)
+        _: &traits::worktree::WorktreeHandle,
+    ) -> Result<(), traits::worktree::WorktreeError> {
+        Err(traits::worktree::WorktreeError::Unsupported)
     }
     async fn list_worktrees(
         &self,
-    ) -> Result<Vec<lingxi_traits::worktree::WorktreeInfo>, lingxi_traits::worktree::WorktreeError>
-    {
+    ) -> Result<Vec<traits::worktree::WorktreeInfo>, traits::worktree::WorktreeError> {
         Ok(Vec::new())
     }
     async fn cleanup_stale(
         &self,
         _: std::time::Duration,
-    ) -> Result<Vec<std::path::PathBuf>, lingxi_traits::worktree::WorktreeError> {
+    ) -> Result<Vec<std::path::PathBuf>, traits::worktree::WorktreeError> {
         Ok(Vec::new())
     }
     fn is_supported(&self) -> bool {
@@ -190,20 +188,20 @@ impl lingxi_traits::worktree::WorktreeManager for NoopWorktree {
 
 struct NoopHttp;
 #[async_trait::async_trait]
-impl lingxi_traits::http::HttpTransport for NoopHttp {
+impl traits::http::HttpTransport for NoopHttp {
     async fn request(
         &self,
-        _: lingxi_protocol::HttpRequest,
-    ) -> Result<lingxi_protocol::HttpResponse, lingxi_traits::http::HttpError> {
-        Err(lingxi_traits::http::HttpError::InvalidRequest(
+        _: protocol::HttpRequest,
+    ) -> Result<protocol::HttpResponse, traits::http::HttpError> {
+        Err(traits::http::HttpError::InvalidRequest(
             "NoopHttp: not configured for shell integration".into(),
         ))
     }
     async fn stream_sse(
         &self,
-        _: lingxi_protocol::HttpRequest,
-    ) -> Result<lingxi_traits::http::SseStream, lingxi_traits::http::HttpError> {
-        Err(lingxi_traits::http::HttpError::InvalidRequest(
+        _: protocol::HttpRequest,
+    ) -> Result<traits::http::SseStream, traits::http::HttpError> {
+        Err(traits::http::HttpError::InvalidRequest(
             "NoopHttp: stream_sse not supported".into(),
         ))
     }

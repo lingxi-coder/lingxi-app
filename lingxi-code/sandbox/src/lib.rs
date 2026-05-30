@@ -42,16 +42,16 @@ pub use decision::{
 pub use dependency_check::{
     check_dependencies, sandbox_unavailable_reason, MissingDeps, SandboxDependencyCheck,
 };
-pub use lingxi_traits::{
-    NetworkPolicy, ResourceLimits, Sandbox, SandboxBackend, SandboxError, SandboxPolicy,
-    SandboxedCommand, SandboxedTag,
-};
 pub use path_pattern::resolve_path_pattern_for_sandbox;
 pub use policy::default_policy;
 pub use policy_convert::{convert_settings_to_runtime_config, linux_glob_pattern_warnings};
 pub use runtime_config::{
     FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, RipgrepConfig,
     SandboxRuntimeConfig, SandboxSettingsJson, SettingsJson, SettingsPermissions,
+};
+pub use traits::{
+    NetworkPolicy, ResourceLimits, Sandbox, SandboxBackend, SandboxError, SandboxPolicy,
+    SandboxedCommand, SandboxedTag,
 };
 pub use violation_store::{
     SandboxViolationEvent, SandboxViolationKind, SandboxViolationStore, SANDBOX_VIOLATION_STORE_CAP,
@@ -66,19 +66,19 @@ pub use wrap::{wrap_with_sandbox, SandboxWrapError};
 /// process to write outside the project.
 ///
 /// # Errors
-/// Returns [`lingxi_traits::SandboxError::PathCanonicalize`] if the kernel
+/// Returns [`traits::SandboxError::PathCanonicalize`] if the kernel
 /// canonicalization itself fails, or
-/// [`lingxi_traits::SandboxError::SymlinkEscape`] when the canonical path
+/// [`traits::SandboxError::SymlinkEscape`] when the canonical path
 /// resolves outside `workspace`.
 pub fn canonicalize_safely(
     path: &std::path::Path,
     workspace: &std::path::Path,
-) -> Result<std::path::PathBuf, lingxi_traits::SandboxError> {
+) -> Result<std::path::PathBuf, traits::SandboxError> {
     let canon = path
         .canonicalize()
-        .map_err(|e| lingxi_traits::SandboxError::PathCanonicalize(e.to_string()))?;
+        .map_err(|e| traits::SandboxError::PathCanonicalize(e.to_string()))?;
     if !canon.starts_with(workspace) {
-        return Err(lingxi_traits::SandboxError::SymlinkEscape(
+        return Err(traits::SandboxError::SymlinkEscape(
             path.display().to_string(),
         ));
     }

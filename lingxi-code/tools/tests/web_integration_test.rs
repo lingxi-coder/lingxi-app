@@ -9,25 +9,25 @@
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::similar_names)]
 
+use api_client::AnthropicProvider;
 use async_trait::async_trait;
 use axum::{routing::get, Router};
-use lingxi_api_client::AnthropicProvider;
-use lingxi_permission::PermissionMode;
-use lingxi_sandbox::decision::ProjectTrustLevel;
-use lingxi_sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
-use lingxi_telemetry::sinks::InMemorySink;
-use lingxi_telemetry::AnalyticsBus;
-use lingxi_test_harness::mocks::{MockHttpTransport, ScriptedResponse};
-use lingxi_tools::builtin::BuiltinToolContext;
-use lingxi_tools::context::{ToolUseContext, ToolUseOptions};
-use lingxi_tools::progress::progress_channel;
-use lingxi_tools::tool_trait::{Tool, ToolError};
-use lingxi_tools::{WebFetchTool, WebSearchTool};
-use lingxi_traits::filesystem::FileSystem;
-use lingxi_traits::http::HttpTransport;
+use permission::PermissionMode;
+use sandbox::decision::ProjectTrustLevel;
+use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use telemetry::sinks::InMemorySink;
+use telemetry::AnalyticsBus;
+use test_harness::mocks::{MockHttpTransport, ScriptedResponse};
+use tools::builtin::BuiltinToolContext;
+use tools::context::{ToolUseContext, ToolUseOptions};
+use tools::progress::progress_channel;
+use tools::tool_trait::{Tool, ToolError};
+use tools::{WebFetchTool, WebSearchTool};
+use traits::filesystem::FileSystem;
+use traits::http::HttpTransport;
 
 // ---- minimal local stubs (same shape as foundation_integration_test) -----
 
@@ -39,10 +39,10 @@ impl FileSystem for PanickingFs {
         _: &str,
         _: Option<u64>,
         _: Option<u64>,
-    ) -> Result<lingxi_traits::filesystem::FileContent, lingxi_traits::filesystem::FsError> {
+    ) -> Result<traits::filesystem::FileContent, traits::filesystem::FsError> {
         panic!("web integration test does not use FileSystem")
     }
-    async fn write_file(&self, _: &str, _: &str) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn write_file(&self, _: &str, _: &str) -> Result<(), traits::filesystem::FsError> {
         panic!("not used")
     }
     fn is_within_workspace(&self, _: &str) -> bool {
@@ -52,67 +52,62 @@ impl FileSystem for PanickingFs {
         &self,
         _: &str,
     ) -> Result<
-        std::pin::Pin<Box<dyn futures::Stream<Item = lingxi_traits::filesystem::FileEvent> + Send>>,
-        lingxi_traits::filesystem::FsError,
+        std::pin::Pin<Box<dyn futures::Stream<Item = traits::filesystem::FileEvent> + Send>>,
+        traits::filesystem::FsError,
     > {
         panic!("not used")
     }
-    async fn append_file(
-        &self,
-        _: &str,
-        _: &str,
-    ) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn append_file(&self, _: &str, _: &str) -> Result<(), traits::filesystem::FsError> {
         panic!("not used")
     }
-    async fn truncate(&self, _: &str, _: u64) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn truncate(&self, _: &str, _: u64) -> Result<(), traits::filesystem::FsError> {
         panic!("not used")
     }
     async fn file_mtime(
         &self,
         _: &str,
-    ) -> Result<std::time::SystemTime, lingxi_traits::filesystem::FsError> {
+    ) -> Result<std::time::SystemTime, traits::filesystem::FsError> {
         panic!("not used")
     }
-    async fn file_size(&self, _: &str) -> Result<u64, lingxi_traits::filesystem::FsError> {
+    async fn file_size(&self, _: &str) -> Result<u64, traits::filesystem::FsError> {
         panic!("not used")
     }
-    async fn delete_file(&self, _: &str) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn delete_file(&self, _: &str) -> Result<(), traits::filesystem::FsError> {
         panic!("not used")
     }
-    async fn symlink(&self, _: &str, _: &str) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn symlink(&self, _: &str, _: &str) -> Result<(), traits::filesystem::FsError> {
         panic!("not used")
     }
     async fn flock_exclusive(
         &self,
         _: &str,
-    ) -> Result<Box<dyn lingxi_traits::filesystem::FlockGuard>, lingxi_traits::filesystem::FsError>
-    {
+    ) -> Result<Box<dyn traits::filesystem::FlockGuard>, traits::filesystem::FsError> {
         panic!("not used")
     }
-    async fn fsync(&self, _: &str) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn fsync(&self, _: &str) -> Result<(), traits::filesystem::FsError> {
         panic!("not used")
     }
 }
 
 struct NoopProcess;
 #[async_trait]
-impl lingxi_traits::process::ProcessRunner for NoopProcess {
+impl traits::process::ProcessRunner for NoopProcess {
     async fn run(
         &self,
-        _: &lingxi_traits::sandbox::SandboxedCommand,
-    ) -> Result<lingxi_traits::process::ProcessOutput, lingxi_traits::process::ProcessError> {
+        _: &traits::sandbox::SandboxedCommand,
+    ) -> Result<traits::process::ProcessOutput, traits::process::ProcessError> {
         panic!("web integration test does not use ProcessRunner")
     }
     async fn spawn_background(
         &self,
-        _: &lingxi_traits::sandbox::SandboxedCommand,
-    ) -> Result<lingxi_traits::process::ProcessHandle, lingxi_traits::process::ProcessError> {
+        _: &traits::sandbox::SandboxedCommand,
+    ) -> Result<traits::process::ProcessHandle, traits::process::ProcessError> {
         panic!("not used")
     }
     async fn kill(
         &self,
-        _: &lingxi_traits::process::ProcessHandle,
-    ) -> Result<(), lingxi_traits::process::ProcessError> {
+        _: &traits::process::ProcessHandle,
+    ) -> Result<(), traits::process::ProcessError> {
         Ok(())
     }
     fn is_available(&self) -> bool {
@@ -122,49 +117,48 @@ impl lingxi_traits::process::ProcessRunner for NoopProcess {
 
 struct BypassSandbox;
 #[async_trait]
-impl lingxi_traits::sandbox::Sandbox for BypassSandbox {
+impl traits::sandbox::Sandbox for BypassSandbox {
     fn is_available(&self) -> bool {
         true
     }
-    fn backend(&self) -> lingxi_traits::sandbox::SandboxBackend {
-        lingxi_traits::sandbox::SandboxBackend::None
+    fn backend(&self) -> traits::sandbox::SandboxBackend {
+        traits::sandbox::SandboxBackend::None
     }
     fn prepare(
         &self,
-        cmd: lingxi_traits::sandbox::ProcessCommand,
-        _policy: &lingxi_traits::sandbox::SandboxPolicy,
-    ) -> Result<lingxi_traits::sandbox::SandboxedCommand, lingxi_traits::sandbox::SandboxError>
-    {
-        Ok(lingxi_traits::sandbox::SandboxedCommand::__new_sandboxed(
+        cmd: traits::sandbox::ProcessCommand,
+        _policy: &traits::sandbox::SandboxPolicy,
+    ) -> Result<traits::sandbox::SandboxedCommand, traits::sandbox::SandboxError> {
+        Ok(traits::sandbox::SandboxedCommand::__new_sandboxed(
             cmd,
-            lingxi_traits::sandbox::SandboxedTag::BypassAuditedWithReason {
+            traits::sandbox::SandboxedTag::BypassAuditedWithReason {
                 reason: "integ".into(),
             },
         ))
     }
     fn bypass_with_audit(
         &self,
-        cmd: lingxi_traits::sandbox::ProcessCommand,
+        cmd: traits::sandbox::ProcessCommand,
         reason: &str,
-    ) -> lingxi_traits::sandbox::SandboxedCommand {
-        lingxi_traits::sandbox::SandboxedCommand::__new_sandboxed(
+    ) -> traits::sandbox::SandboxedCommand {
+        traits::sandbox::SandboxedCommand::__new_sandboxed(
             cmd,
-            lingxi_traits::sandbox::SandboxedTag::BypassAuditedWithReason {
+            traits::sandbox::SandboxedTag::BypassAuditedWithReason {
                 reason: reason.into(),
             },
         )
     }
-    async fn probe_capability(&self) -> lingxi_traits::sandbox::SandboxCapability {
-        lingxi_traits::sandbox::SandboxCapability {
+    async fn probe_capability(&self) -> traits::sandbox::SandboxCapability {
+        traits::sandbox::SandboxCapability {
             available: true,
             reason: None,
-            features: lingxi_traits::sandbox::SandboxFeatures::default(),
+            features: traits::sandbox::SandboxFeatures::default(),
         }
     }
 }
 
 struct RealClock;
-impl lingxi_traits::Clock for RealClock {
+impl traits::Clock for RealClock {
     fn now(&self) -> std::time::SystemTime {
         std::time::SystemTime::now()
     }
@@ -209,32 +203,30 @@ fn make_web_ctx(http: Arc<dyn HttpTransport>) -> (BuiltinToolContext, Arc<InMemo
 // `BuiltinToolContext` is satisfied by an unsupported stub.
 struct NoopWorktree;
 #[async_trait::async_trait]
-impl lingxi_traits::worktree::WorktreeManager for NoopWorktree {
+impl traits::worktree::WorktreeManager for NoopWorktree {
     async fn create_worktree(
         &self,
         _: &str,
         _: Option<&str>,
         _: &[std::path::PathBuf],
-    ) -> Result<lingxi_traits::worktree::WorktreeHandle, lingxi_traits::worktree::WorktreeError>
-    {
-        Err(lingxi_traits::worktree::WorktreeError::Unsupported)
+    ) -> Result<traits::worktree::WorktreeHandle, traits::worktree::WorktreeError> {
+        Err(traits::worktree::WorktreeError::Unsupported)
     }
     async fn remove_worktree(
         &self,
-        _: &lingxi_traits::worktree::WorktreeHandle,
-    ) -> Result<(), lingxi_traits::worktree::WorktreeError> {
-        Err(lingxi_traits::worktree::WorktreeError::Unsupported)
+        _: &traits::worktree::WorktreeHandle,
+    ) -> Result<(), traits::worktree::WorktreeError> {
+        Err(traits::worktree::WorktreeError::Unsupported)
     }
     async fn list_worktrees(
         &self,
-    ) -> Result<Vec<lingxi_traits::worktree::WorktreeInfo>, lingxi_traits::worktree::WorktreeError>
-    {
+    ) -> Result<Vec<traits::worktree::WorktreeInfo>, traits::worktree::WorktreeError> {
         Ok(Vec::new())
     }
     async fn cleanup_stale(
         &self,
         _: std::time::Duration,
-    ) -> Result<Vec<std::path::PathBuf>, lingxi_traits::worktree::WorktreeError> {
+    ) -> Result<Vec<std::path::PathBuf>, traits::worktree::WorktreeError> {
         Ok(Vec::new())
     }
     fn is_supported(&self) -> bool {
@@ -287,7 +279,7 @@ async fn start_mock_http(
 }
 
 fn real_http() -> Arc<dyn HttpTransport> {
-    Arc::new(lingxi_platform_posix::http::PosixHttp::new())
+    Arc::new(platform_posix::http::PosixHttp::new())
 }
 
 // ---- WebFetch integration tests (axum-backed) -----------------------------
@@ -375,7 +367,7 @@ async fn websearch_happy_path_with_mock_messages_response() {
         "stop_reason": "end_turn",
         "usage": { "input_tokens": 5, "output_tokens": 3 }
     });
-    http.enqueue(ScriptedResponse::Sync(lingxi_protocol::HttpResponse {
+    http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
         status: 200,
         headers: vec![],
         body: resp_body.to_string(),
@@ -406,7 +398,7 @@ async fn websearch_happy_path_with_mock_messages_response() {
 #[tokio::test]
 async fn websearch_503_returns_transport_err_without_retry() {
     let http = Arc::new(MockHttpTransport::new());
-    http.enqueue(ScriptedResponse::Sync(lingxi_protocol::HttpResponse {
+    http.enqueue(ScriptedResponse::Sync(protocol::HttpResponse {
         status: 503,
         headers: vec![],
         body: "unavailable".into(),

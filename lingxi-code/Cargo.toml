@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "protocol",
-    "core",
+    "engine",
     "traits",
     "api-client",
     "test-harness",
@@ -50,7 +50,7 @@ members = [
 # build only the real crates, not the integration-test fixtures.
 default-members = [
     "protocol",
-    "core",
+    "engine",
     "traits",
     "api-client",
     "test-harness",
@@ -126,7 +126,7 @@ tokio-stream = "0.1"
 
 [workspace.lints.rust]
 # Workspace-wide default: `deny` (not `forbid`) so the one module in
-# `lingxi-platform-posix` that needs `libc::setsid()` via `pre_exec`
+# `platform-posix` that needs `libc::setsid()` via `pre_exec`
 # can opt into `#![allow(unsafe_code)]`. Every other crate in the
 # workspace adds a crate-level `#![forbid(unsafe_code)]` in its
 # `lib.rs`, which preserves the original hard constraint.

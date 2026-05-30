@@ -159,7 +159,7 @@ impl Settings {
     ///
     /// Synchronous [`Settings::load`] stays available for callers that don't
     /// want async-color. This one is async because
-    /// [`lingxi_telemetry::AnalyticsBus::log_event`] is async.
+    /// [`telemetry::AnalyticsBus::log_event`] is async.
     ///
     /// Three events fire:
     /// - `tengu_settings_loaded` on every successful load,
@@ -177,7 +177,7 @@ impl Settings {
     #[allow(clippy::too_many_lines)]
     pub async fn load_with_telemetry(
         inputs: LoadInputs<'_>,
-        bus: Option<&std::sync::Arc<lingxi_telemetry::AnalyticsBus>>,
+        bus: Option<&std::sync::Arc<telemetry::AnalyticsBus>>,
     ) -> Result<EffectiveSettings, SettingsError> {
         let LoadInputs {
             env,
@@ -243,19 +243,17 @@ impl Settings {
         // Emit per-invalid-env event before the loaded event.
         if let Some(bus) = bus {
             for (var, value) in invalid_env {
-                let mut md = lingxi_telemetry::LogEventMetadata::new();
+                let mut md = telemetry::LogEventMetadata::new();
                 md.insert(
                     "var".into(),
-                    lingxi_telemetry::AnalyticsValue::String(
-                        lingxi_telemetry::Verified::assert_safe(var)
-                            .as_str()
-                            .to_string(),
+                    telemetry::AnalyticsValue::String(
+                        telemetry::Verified::assert_safe(var).as_str().to_string(),
                     ),
                 );
                 md.insert(
                     "_PROTO_value".into(),
-                    lingxi_telemetry::AnalyticsValue::String(
-                        lingxi_telemetry::PiiTagged::assert_pii_tagged_column(value).into_inner(),
+                    telemetry::AnalyticsValue::String(
+                        telemetry::PiiTagged::assert_pii_tagged_column(value).into_inner(),
                     ),
                 );
                 bus.log_event("tengu_settings_invalid_env", md).await;
@@ -264,23 +262,21 @@ impl Settings {
 
         // Emit the success event.
         if let Some(bus) = bus {
-            let mut md = lingxi_telemetry::LogEventMetadata::new();
+            let mut md = telemetry::LogEventMetadata::new();
             md.insert(
                 "layers_present".into(),
-                lingxi_telemetry::AnalyticsValue::Int(layers_present),
+                telemetry::AnalyticsValue::Int(layers_present),
             );
             md.insert(
                 "had_env_override".into(),
-                lingxi_telemetry::AnalyticsValue::Bool(had_env_override),
+                telemetry::AnalyticsValue::Bool(had_env_override),
             );
             if let Some(up) = &user_path {
                 md.insert(
                     "_PROTO_user_path".into(),
-                    lingxi_telemetry::AnalyticsValue::String(
-                        lingxi_telemetry::PiiTagged::assert_pii_tagged_column(
-                            up.display().to_string(),
-                        )
-                        .into_inner(),
+                    telemetry::AnalyticsValue::String(
+                        telemetry::PiiTagged::assert_pii_tagged_column(up.display().to_string())
+                            .into_inner(),
                     ),
                 );
             }
@@ -299,17 +295,16 @@ impl Settings {
 /// error class lives in a `Verified` field — never echo the raw error message
 /// because it may include file content.
 async fn emit_parse_error(
-    bus: Option<&std::sync::Arc<lingxi_telemetry::AnalyticsBus>>,
+    bus: Option<&std::sync::Arc<telemetry::AnalyticsBus>>,
     path: &std::path::Path,
     err: &SettingsError,
 ) {
     let Some(bus) = bus else { return };
-    let mut md = lingxi_telemetry::LogEventMetadata::new();
+    let mut md = telemetry::LogEventMetadata::new();
     md.insert(
         "_PROTO_path".into(),
-        lingxi_telemetry::AnalyticsValue::String(
-            lingxi_telemetry::PiiTagged::assert_pii_tagged_column(path.display().to_string())
-                .into_inner(),
+        telemetry::AnalyticsValue::String(
+            telemetry::PiiTagged::assert_pii_tagged_column(path.display().to_string()).into_inner(),
         ),
     );
     // Structural error class only — never the raw error message which may
@@ -323,8 +318,8 @@ async fn emit_parse_error(
     };
     md.insert(
         "error".into(),
-        lingxi_telemetry::AnalyticsValue::String(
-            lingxi_telemetry::Verified::assert_safe(class.into())
+        telemetry::AnalyticsValue::String(
+            telemetry::Verified::assert_safe(class.into())
                 .as_str()
                 .to_string(),
         ),
@@ -459,8 +454,8 @@ mod load_tests {
     #[allow(clippy::await_holding_lock)]
     async fn emits_tengu_settings_loaded_with_pii_routing() {
         use async_trait::async_trait;
-        use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
         use std::sync::{Arc, Mutex};
+        use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
 
         #[derive(Default)]
         struct CaptureSink {
@@ -523,8 +518,8 @@ mod load_tests {
     #[allow(clippy::await_holding_lock)]
     async fn emits_tengu_settings_invalid_env_for_bad_bool() {
         use async_trait::async_trait;
-        use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
         use std::sync::{Arc, Mutex};
+        use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
 
         #[derive(Default)]
         struct CaptureSink {
@@ -584,8 +579,8 @@ mod load_tests {
     #[allow(clippy::await_holding_lock)]
     async fn emits_tengu_settings_parse_error_on_malformed_project_json() {
         use async_trait::async_trait;
-        use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
         use std::sync::{Arc, Mutex};
+        use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
 
         #[derive(Default)]
         struct CaptureSink {

@@ -6,7 +6,7 @@
 //! Do not change this string without updating M2-02b §"Critical 1:1 fidelity
 //! items" AND M2-07 integration tests in lockstep.
 
-use lingxi_traits::McpError;
+use traits::McpError;
 
 #[test]
 fn timeout_display_format_matches_claude_code() {

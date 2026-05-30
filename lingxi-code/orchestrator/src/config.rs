@@ -36,7 +36,7 @@ pub struct OrchestratorConfig {
     pub system_prompt_override: Option<String>,
 
     /// When `true`, M5-12 CLI binary wires
-    /// [`lingxi_permission::InteractivePromptingGate`] over real stdin /
+    /// [`permission::InteractivePromptingGate`] over real stdin /
     /// stderr; when `false` (default), it wires
     /// [`crate::test_support::NoOpPermissionGate`]. The orchestrator
     /// itself doesn't read this flag — the `perms: Arc<dyn PermissionGate>`

@@ -39,13 +39,13 @@ pub struct LspServerConfig {
 
 /// Handle returned by a successful [`LspTransport::start_server`].
 ///
-/// Reuses [`lingxi_protocol::McpConnectionId`] to keep the connection-id
+/// Reuses [`protocol::McpConnectionId`] to keep the connection-id
 /// namespace shared between MCP and LSP — both are connection-level
 /// routing keys handled by the same registry machinery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspRawConnection {
     /// Stable connection identifier.
-    pub connection_id: lingxi_protocol::McpConnectionId,
+    pub connection_id: protocol::McpConnectionId,
 }
 
 /// Server capability flags returned by `initialize`.
@@ -134,7 +134,7 @@ pub trait LspTransport: Send + Sync {
     /// # Errors
     /// Returns [`LspError::Transport`] when the shutdown cannot be
     /// completed gracefully.
-    async fn shutdown(&self, conn_id: lingxi_protocol::McpConnectionId) -> Result<(), LspError>;
+    async fn shutdown(&self, conn_id: protocol::McpConnectionId) -> Result<(), LspError>;
 
     /// Whether this transport can carry LSP traffic on the current platform.
     fn is_available(&self) -> bool;

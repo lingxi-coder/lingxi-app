@@ -23,26 +23,24 @@
 //! permission gate, hook executor, MCP/agent registries.
 
 use crate::argv::Argv;
-use lingxi_anthropic_oauth::client::ClaudeAiOAuthClient;
-use lingxi_anthropic_oauth::config::ClaudeAiOAuthConfig;
-use lingxi_anthropic_oauth::handle::OAuthHandle;
-use lingxi_api_client::AnthropicProvider;
-use lingxi_commands::dispatcher::RegistrySlashDispatcher;
-use lingxi_commands::registry::{
+use anthropic_oauth::client::ClaudeAiOAuthClient;
+use anthropic_oauth::config::ClaudeAiOAuthConfig;
+use anthropic_oauth::handle::OAuthHandle;
+use api_client::AnthropicProvider;
+use commands::dispatcher::RegistrySlashDispatcher;
+use commands::registry::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2, CommandRegistry,
 };
-use lingxi_orchestrator::test_support::{
-    noop_hook_executor, NoOpPermissionGate, StaticMemoryProvider,
-};
-use lingxi_orchestrator::{
+use orchestrator::test_support::{noop_hook_executor, NoOpPermissionGate, StaticMemoryProvider};
+use orchestrator::{
     AnthropicProviderAdapter, ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig,
 };
-use lingxi_platform_posix_minimal::{PlainTextSecureStorage, PosixClock, PosixHttp, PosixMcp};
-use lingxi_secret::CredentialManager;
-use lingxi_tools::registry::ToolRegistry;
-use lingxi_traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
+use platform_posix_minimal::{PlainTextSecureStorage, PosixClock, PosixHttp, PosixMcp};
+use secret::CredentialManager;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tools::registry::ToolRegistry;
+use traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 
 /// Bundle of everything `run_cli` needs to drive a conversation.
 pub struct Runtime {
@@ -59,16 +57,16 @@ pub struct Runtime {
 ///
 /// Returns the standard [`Runtime`] plus the bridge receiver the TUI
 /// drains for streaming events. The orchestrator inside `runtime` is
-/// constructed with a [`lingxi_tui::BridgeOutputStream`] as its `output`,
+/// constructed with a [`tui::BridgeOutputStream`] as its `output`,
 /// so every `emit_text` / `emit_tool_call` / `emit_end_turn` lands on
-/// `bridge_rx` as a [`lingxi_tui::TurnEvent`].
+/// `bridge_rx` as a [`tui::TurnEvent`].
 pub struct TuiBuild {
     /// Standard runtime bundle.
     pub runtime: Runtime,
     /// Bridge receiver — the TUI render loop drains this into
-    /// `lingxi_tui::streaming::apply_event`.
+    /// `tui::streaming::apply_event`.
     pub bridge_rx:
-        tokio::sync::mpsc::UnboundedReceiver<lingxi_tui::events::orchestrator_bridge::TurnEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<tui::events::orchestrator_bridge::TurnEvent>,
 }
 
 /// Errors surfaced while building a [`Runtime`].
@@ -158,9 +156,9 @@ pub async fn build_runtime(
         // Discard snapshots — v0.7.0 does not persist cost.
         while cost_persist_rx.recv().await.is_some() {}
     });
-    let cost_tracker = Arc::new(lingxi_cost::CostTracker::new(
-        lingxi_protocol::SessionId::new(),
-        Arc::new(lingxi_cost::PricingCatalog::builtin_reference()),
+    let cost_tracker = Arc::new(cost::CostTracker::new(
+        protocol::SessionId::new(),
+        Arc::new(cost::PricingCatalog::builtin_reference()),
         cost_persist_tx,
     ));
 
@@ -170,7 +168,7 @@ pub async fn build_runtime(
     let tools = Arc::new(ToolRegistry::new());
     let hooks = noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
-    let memory: Arc<dyn lingxi_orchestrator::prompt::MemoryHierarchyProvider> =
+    let memory: Arc<dyn orchestrator::prompt::MemoryHierarchyProvider> =
         Arc::new(StaticMemoryProvider::empty());
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
@@ -182,17 +180,16 @@ pub async fn build_runtime(
         |d| d.join("lingxi").join("mcp.json"),
     );
     let project_mcp_path = cwd.join(".mcp.json");
-    let mcp_configs =
-        lingxi_mcp::load_mcp_json_with_precedence(&project_mcp_path, &global_mcp_path);
+    let mcp_configs = mcp::load_mcp_json_with_precedence(&project_mcp_path, &global_mcp_path);
     let mcp_transport: Arc<dyn McpTransport> = Arc::new(PosixMcp::new());
-    let mcp_registry = Arc::new(lingxi_mcp::McpRegistry::new(mcp_transport));
+    let mcp_registry = Arc::new(mcp::McpRegistry::new(mcp_transport));
     {
         let mut conns = mcp_registry.connections.write().await;
         for cfg_entry in mcp_configs {
             let name = cfg_entry.name.clone();
             conns.insert(
                 name,
-                lingxi_mcp::McpConnectionState::Disconnected {
+                mcp::McpConnectionState::Disconnected {
                     config: cfg_entry,
                     last_error: None,
                 },
@@ -205,24 +202,21 @@ pub async fn build_runtime(
     //       or platform config_dir equivalent), in that order so project
     //       wins on identical command registration (the registry currently
     //       de-dupes by HookId, not name — both register; /hooks lists both).
-    let mut hook_registry = lingxi_hooks::HookRegistry::new();
+    let mut hook_registry = hooks::HookRegistry::new();
     let project_settings_path = cwd.join(".claude").join("settings.json");
     let user_settings_path = dirs::config_dir().map_or_else(
         || std::path::PathBuf::from("/dev/null"),
         |d| d.join("claude").join("settings.json"),
     );
     for (path, source) in [
-        (
-            user_settings_path,
-            lingxi_hooks::definition::HookSource::User,
-        ),
+        (user_settings_path, hooks::definition::HookSource::User),
         (
             project_settings_path,
-            lingxi_hooks::definition::HookSource::Project,
+            hooks::definition::HookSource::Project,
         ),
     ] {
         if let Ok(raw) = tokio::fs::read_to_string(&path).await {
-            match lingxi_hooks::parse_hooks_from_settings_json(&raw, source) {
+            match hooks::parse_hooks_from_settings_json(&raw, source) {
                 Ok(hooks_vec) => {
                     for h in hooks_vec {
                         hook_registry.register(h);
@@ -246,15 +240,9 @@ pub async fn build_runtime(
         || std::path::PathBuf::from("/dev/null"),
         |h| h.join(".claude").join("agents"),
     );
-    let agents = lingxi_agent::load_agents_from_dirs(&[
-        (
-            user_agents_dir,
-            lingxi_agent::definition::AgentSource::UserDefined,
-        ),
-        (
-            project_agents_dir,
-            lingxi_agent::definition::AgentSource::Project,
-        ),
+    let agents = agent::load_agents_from_dirs(&[
+        (user_agents_dir, agent::definition::AgentSource::UserDefined),
+        (project_agents_dir, agent::definition::AgentSource::Project),
     ])
     .await;
     let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
@@ -264,7 +252,7 @@ pub async fn build_runtime(
     //       window. Default Autocompactor (no `with_forked_runner`)
     //       returns a stub summary string; real LLM summarization lands
     //       in M7 when the ForkedAgentRunner pool is wired.
-    let compactor = Arc::new(lingxi_compaction::CompactionOrchestrator::new(150_000));
+    let compactor = Arc::new(compaction::CompactionOrchestrator::new(150_000));
 
     let orch = Arc::new(
         ConversationOrchestrator::new(cfg, api_client, tools, hooks, perms, output, memory, cwd)
@@ -293,14 +281,14 @@ pub async fn build_runtime(
 
 /// TUI variant of [`build_runtime`]. (M6-03)
 ///
-/// Constructs the orchestrator with [`lingxi_tui::BridgeOutputStream`] as
+/// Constructs the orchestrator with [`tui::BridgeOutputStream`] as
 /// its `output` so streaming `emit_text` calls route into the bridge
 /// channel returned alongside the runtime. The TUI render loop drains
-/// this channel through `lingxi_tui::streaming::apply_event`.
+/// this channel through `tui::streaming::apply_event`.
 #[allow(clippy::unused_async)]
 pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
-    let bridge: Arc<dyn OutputStream> = Arc::new(lingxi_tui::BridgeOutputStream::new(bridge_tx));
+    let bridge: Arc<dyn OutputStream> = Arc::new(tui::BridgeOutputStream::new(bridge_tx));
     let runtime = build_runtime(argv, bridge).await?;
     Ok(TuiBuild { runtime, bridge_rx })
 }
@@ -323,7 +311,7 @@ mod tests {
             no_tui: false,
         };
         let output: Arc<dyn OutputStream> =
-            Arc::new(lingxi_orchestrator::test_support::MockOutputStream::new());
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
         let r = build_runtime(&argv, output).await;
         let r = r.expect("build_runtime failed");
         // M6-06: cost tracker must be wired.

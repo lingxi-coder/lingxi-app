@@ -1,9 +1,9 @@
 //! Memory file editor screen (M7-14).
 //!
 //! A `MemoryFileSelector` lists the project/user CLAUDE.md tiers (resolved
-//! via [`lingxi_memory::claude_md::hierarchy::walk`]); selecting a tier
+//! via [`memory::claude_md::hierarchy::walk`]); selecting a tier
 //! opens an inline edit view. Reads go through the M3 loader
-//! ([`lingxi_memory::claude_md::loader::load_file`]); writes go back to the
+//! ([`memory::claude_md::loader::load_file`]); writes go back to the
 //! same on-disk path (the M3 store — §4 R7, no new persistence).
 
 use std::io;
@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use iocraft::prelude::*;
 
-use lingxi_memory::claude_md::hierarchy::{walk, FILE_NAME};
-use lingxi_memory::claude_md::loader::{load_file, LoaderError};
+use memory::claude_md::hierarchy::{walk, FILE_NAME};
+use memory::claude_md::loader::{load_file, LoaderError};
 
 /// One resolved memory tier the selector lists. The project/user tiers are
 /// always offered (even when the file does not exist yet — marked `(new)`);

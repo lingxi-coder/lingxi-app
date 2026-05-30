@@ -13,13 +13,13 @@
 #![forbid(unsafe_code)]
 
 use super::StreamingError;
-use lingxi_protocol::ToolUseId;
+use protocol::ToolUseId;
 use serde_json::Value;
 use std::collections::HashMap;
 
 /// Tag identifying what kind of content block is being accumulated.
 ///
-/// Constructed from a [`lingxi_api_client::types::StreamEvent::ContentBlockStart`]
+/// Constructed from a [`api_client::types::StreamEvent::ContentBlockStart`]
 /// payload at the call site. `ToolUse` carries the API-provided id + name
 /// verbatim; the input JSON is reassembled from `input_json_delta`
 /// chunks.

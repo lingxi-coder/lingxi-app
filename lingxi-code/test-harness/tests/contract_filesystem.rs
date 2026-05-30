@@ -3,8 +3,8 @@
 //! one more `#[tokio::test]` here that points at the same suite — that's the
 //! whole shape of contract testing.
 
-use lingxi_platform_posix_minimal::PosixFileSystem;
-use lingxi_test_harness::contracts::filesystem::filesystem_contract_tests;
+use platform_posix_minimal::PosixFileSystem;
+use test_harness::contracts::filesystem::filesystem_contract_tests;
 
 #[tokio::test]
 async fn posix_filesystem_passes_contract() {

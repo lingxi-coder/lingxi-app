@@ -6,9 +6,9 @@
 //! than a silent no-op. Plan 17 swaps this for a `reqwest`-backed transport.
 
 use async_trait::async_trait;
-use lingxi_protocol::{HttpRequest, HttpResponse};
-use lingxi_traits::http::SseStream;
-use lingxi_traits::{HttpError, HttpTransport};
+use protocol::{HttpRequest, HttpResponse};
+use traits::http::SseStream;
+use traits::{HttpError, HttpTransport};
 
 /// Stub HTTP transport — see module docs.
 #[derive(Default)]

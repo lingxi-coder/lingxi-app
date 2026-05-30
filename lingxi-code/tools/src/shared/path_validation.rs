@@ -6,16 +6,16 @@
 //! caller is expected to emit the `tengu_file_path_blocked` event via
 //! [`emit_blocked_event`].
 
-use lingxi_telemetry::pii::{PiiTagged, Verified};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::AnalyticsBus;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use telemetry::pii::{PiiTagged, Verified};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::AnalyticsBus;
 use thiserror::Error;
 
 /// Event-name lock for path-blocked rejections.
 ///
-/// This event does NOT live in `lingxi_telemetry::tengu::tool` (it is
+/// This event does NOT live in `telemetry::tengu::tool` (it is
 /// cross-cutting, fired from this module, not from a specific tool).
 /// Declared inline as a string literal so M4-01 can ship without a
 /// telemetry-schema bump; M5 may relocate to `tengu/tool.rs`.
@@ -105,8 +105,8 @@ pub async fn emit_blocked_event(bus: &AnalyticsBus, tool_name: &str, path: &Path
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_telemetry::InMemorySink;
     use std::sync::Arc;
+    use telemetry::InMemorySink;
     use tempfile::TempDir;
 
     #[test]

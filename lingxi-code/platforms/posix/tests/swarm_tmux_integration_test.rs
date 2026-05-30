@@ -2,9 +2,9 @@
 //!   `cargo test -p lingxi-platform-posix --test swarm_tmux_integration_test -- --ignored`
 //! Requires tmux >= 3.2 on PATH.
 
-use lingxi_platform_posix::swarm::TmuxBackend;
-use lingxi_protocol::AgentId;
-use lingxi_traits::{PanePosition, SwarmBackend, SwarmLayout};
+use platform_posix::swarm::TmuxBackend;
+use protocol::AgentId;
+use traits::{PanePosition, SwarmBackend, SwarmLayout};
 
 #[tokio::test]
 #[ignore = "requires real tmux >= 3.2 on host"]

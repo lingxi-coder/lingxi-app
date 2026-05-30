@@ -1,18 +1,18 @@
 //! M5-13 T2: tests for `run_turn_with_cancel`, `TurnOutcome`, and
 //! `current_should_exit`.
 
-use lingxi_api_client::types::ContentBlockApi;
-use lingxi_orchestrator::test_support::{
+use api_client::types::ContentBlockApi;
+use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig, TurnOutcome};
-use lingxi_traits::OrchestratorHandle;
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig, TurnOutcome};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use traits::OrchestratorHandle;
 
 fn build_orch_with_response(
-    response: lingxi_api_client::types::MessageResponse,
+    response: api_client::types::MessageResponse,
 ) -> (
     ConversationOrchestrator,
     Arc<MockApiClient>,
@@ -20,9 +20,9 @@ fn build_orch_with_response(
 ) {
     let api = Arc::new(MockApiClient::new(vec![response]));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
-    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tools::registry::ToolRegistry::new());
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         api.clone(),
@@ -89,7 +89,7 @@ async fn current_should_exit_returns_true_after_request_exit() {
     let (orch, _, _) = build_orch_with_response(resp);
     // Call through OrchestratorHandle trait.
     let handle: Arc<dyn OrchestratorHandle> =
-        Arc::new(lingxi_orchestrator::test_support::MockOrchestratorHandle::default());
+        Arc::new(orchestrator::test_support::MockOrchestratorHandle::default());
     handle.request_exit().await;
     assert!(handle.current_should_exit().await);
 

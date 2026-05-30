@@ -10,9 +10,9 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::{McpServerInfo, McpStatus, OrchestratorHandle};
 use std::sync::Arc;
+use telemetry::tengu::command as cmd_evt;
+use traits::{McpServerInfo, McpStatus, OrchestratorHandle};
 
 /// `/mcp` handler — list mode.
 #[derive(Clone)]
@@ -31,11 +31,11 @@ impl McpHandler {
 #[async_trait]
 impl BuiltinCommandHandler for McpHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::MCP_STARTED);
+        telemetry::emit_command_started(cmd_evt::MCP_STARTED);
         let servers = self.handle.list_mcp_servers().await;
         let rows: Vec<String> = servers.iter().map(format_row).collect();
         let s = render_list("MCP servers", rows, "No MCP servers configured");
-        lingxi_telemetry::emit_command_completed(cmd_evt::MCP_COMPLETED, "");
+        telemetry::emit_command_completed(cmd_evt::MCP_COMPLETED, "");
         CommandResult::Done { display: Some(s) }
     }
     fn name(&self) -> &str {
@@ -58,7 +58,7 @@ fn format_row(s: &McpServerInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
+    use orchestrator::test_support::MockOrchestratorHandle;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {

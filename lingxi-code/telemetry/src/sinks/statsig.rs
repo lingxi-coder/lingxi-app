@@ -11,7 +11,7 @@ use crate::error::TelemetryError;
 use crate::pii::strip_proto_fields;
 use crate::sink::{AnalyticsSink, AnalyticsValue, LogEventMetadata};
 use async_trait::async_trait;
-use lingxi_protocol::Secret;
+use protocol::Secret;
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 

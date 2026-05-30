@@ -1,7 +1,7 @@
 //! In-memory registry of slash commands with alias and plugin-scoped lookup.
 
 use crate::model::{BuiltinCommandHandler, CommandSource, SlashCommand, SlashCommandKind};
-use lingxi_protocol::PluginId;
+use protocol::PluginId;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -140,7 +140,7 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
 /// `Arc<dyn OrchestratorHandle>`.
 pub fn register_core_batch_1(
     reg: &mut CommandRegistry,
-    handle: Arc<dyn lingxi_traits::OrchestratorHandle>,
+    handle: Arc<dyn traits::OrchestratorHandle>,
 ) {
     use crate::builtin::{
         ClearHandler, CompactHandler, ExitHandler, HelpHandler, InitHandler, MemoryHandler,
@@ -171,8 +171,8 @@ pub fn register_core_batch_1(
 /// `Arc<dyn AuthHandle>` instances.
 pub fn register_core_batch_2(
     reg: &mut CommandRegistry,
-    handle: Arc<dyn lingxi_traits::OrchestratorHandle>,
-    auth: Arc<dyn lingxi_traits::AuthHandle>,
+    handle: Arc<dyn traits::OrchestratorHandle>,
+    auth: Arc<dyn traits::AuthHandle>,
 ) {
     use crate::builtin::{
         AgentsHandler, ConfigHandler, CostHandler, DoctorHandler, HooksHandler, LoginHandler,
@@ -263,7 +263,7 @@ mod batch_1_tests {
     use super::*;
     use crate::model::CommandResult;
     use crate::parser::ParsedSlashCommand;
-    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
+    use orchestrator::test_support::MockOrchestratorHandle;
 
     #[tokio::test]
     async fn clear_after_batch_1_returns_real_literal() {

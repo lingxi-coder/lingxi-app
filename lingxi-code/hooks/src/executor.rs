@@ -18,12 +18,12 @@ use crate::registry::{HookContext, HookRegistry};
 use crate::response::{AggregateHookResult, HookOutcome, HookResult};
 use crate::ssrf_guard::SsrfGuard;
 use async_trait::async_trait;
-use lingxi_traits::subagent_spawn::SubagentSpawner;
-use lingxi_traits::{HttpTransport, RuntimeSpawner};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
+use traits::subagent_spawn::SubagentSpawner;
+use traits::{HttpTransport, RuntimeSpawner};
 
 /// Default HTTP hook timeout (10 minutes — matches
 /// `claude-code/src/utils/hooks/execHttpHook.ts:12` `DEFAULT_HTTP_HOOK_TIMEOUT_MS`).
@@ -322,7 +322,7 @@ fn emit_http_signal(hook: &HookDefinition, signal: &HttpExecutionSignal, timeout
     match signal {
         HttpExecutionSignal::SsrfBlocked(reason) => {
             tracing::info!(
-                event = lingxi_telemetry::tengu::orchestrator::HOOK_HTTP_SKIPPED_SSRF,
+                event = telemetry::tengu::orchestrator::HOOK_HTTP_SKIPPED_SSRF,
                 hook_id = %hook.id,
                 reason = %reason,
             );
@@ -332,7 +332,7 @@ fn emit_http_signal(hook: &HookDefinition, signal: &HttpExecutionSignal, timeout
             #[allow(clippy::cast_possible_truncation)]
             let timeout_ms = timeout.as_millis() as u64;
             tracing::info!(
-                event = lingxi_telemetry::tengu::orchestrator::HOOK_TIMEOUT,
+                event = telemetry::tengu::orchestrator::HOOK_TIMEOUT,
                 hook_id = %hook.id,
                 hook_kind = "http",
                 timeout_ms = timeout_ms,
@@ -348,7 +348,7 @@ fn emit_agent_signal(hook: &HookDefinition, signal: &AgentExecutionSignal, timeo
         #[allow(clippy::cast_possible_truncation)]
         let timeout_ms = timeout.as_millis() as u64;
         tracing::info!(
-            event = lingxi_telemetry::tengu::orchestrator::HOOK_TIMEOUT,
+            event = telemetry::tengu::orchestrator::HOOK_TIMEOUT,
             hook_id = %hook.id,
             hook_kind = "agent",
             timeout_ms = timeout_ms,

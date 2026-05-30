@@ -1,6 +1,6 @@
 //! T7 tests — stdio picker behavior using `tokio::io::duplex`.
 
-use lingxi_session::jsonl::{select_session_interactive, LoaderError, SessionMetadata};
+use session::jsonl::{select_session_interactive, LoaderError, SessionMetadata};
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};

@@ -1,4 +1,4 @@
-//! Verify `lingxi_mcp::McpClient` can be constructed on top of the
+//! Verify `mcp::McpClient` can be constructed on top of the
 //! `Connection` produced by `spawn_stdio` and successfully run an
 //! `initialize` handshake (plus a `ping` liveness probe) against the
 //! mock fixture binary.
@@ -11,9 +11,9 @@
 //! end without any plumbing surprises (Arc wrapping, async constructor,
 //! capability decode from the wire payload, etc.).
 
-use lingxi_mcp::McpClient;
-use lingxi_platform_common::mcp_stdio::StdioConfig;
-use lingxi_platform_posix::mcp::spawn_stdio;
+use mcp::McpClient;
+use platform_common::mcp_stdio::StdioConfig;
+use platform_posix::mcp::spawn_stdio;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

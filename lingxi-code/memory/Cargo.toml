@@ -1,17 +1,17 @@
 [package]
-name = "lingxi-memory"
+name = "memory"
 version = "0.8.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
-lingxi-api-client = { path = "../api-client" }
-lingxi-sidequery = { path = "../sidequery" }
-lingxi-secret = { path = "../secret" }
-lingxi-telemetry = { path = "../telemetry" }
+protocol = { path = "../protocol" }
+traits = { path = "../traits" }
+api-client = { path = "../api-client" }
+sidequery = { path = "../sidequery" }
+secret = { path = "../secret" }
+telemetry = { path = "../telemetry" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"

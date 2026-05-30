@@ -101,7 +101,7 @@ pub fn BypassPermissionsMode(props: &BypassPermissionsProps) -> impl Into<AnyEle
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use lingxi_permission::gate::PermissionResponse;
+    use permission::gate::PermissionResponse;
 
     fn k(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

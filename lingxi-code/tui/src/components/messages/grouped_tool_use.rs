@@ -14,7 +14,7 @@
 #![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
 
 use iocraft::prelude::*;
-use lingxi_protocol::ToolUseId;
+use protocol::ToolUseId;
 
 use crate::components::messages::assistant_tool_use::{
     render_assistant_tool_use_to_string, AssistantToolUseProps,

@@ -50,7 +50,7 @@ pub trait BridgeTransport: Send + Sync {
 ///
 /// `jwt_token` is treated as a secret at use sites — the field is excluded
 /// from serialization to avoid leaking it through diagnostics. Wrap with
-/// [`lingxi_protocol::Secret`] before passing it through user-visible code.
+/// [`protocol::Secret`] before passing it through user-visible code.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfig {
     /// WebSocket-style endpoint URL, e.g. `ws://127.0.0.1:8765/bridge`.

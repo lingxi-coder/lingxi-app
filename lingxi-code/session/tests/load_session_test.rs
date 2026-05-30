@@ -1,11 +1,11 @@
 //! T5 tests — `load_session` validates chain + `sessionId` consistency.
 
-use lingxi_platform_posix::fs::PosixFileSystem;
-use lingxi_session::jsonl::{load_session, project_dir_name, LoaderError};
-use lingxi_traits::FileSystem;
+use platform_posix::fs::PosixFileSystem;
 use serde_json::json;
+use session::jsonl::{load_session, project_dir_name, LoaderError};
 use std::sync::Arc;
 use tempfile::TempDir;
+use traits::FileSystem;
 use uuid::Uuid;
 
 async fn setup_cwd() -> (

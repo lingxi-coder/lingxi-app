@@ -2,7 +2,7 @@
 //!
 //! Owns the per-connection state machine (`connection.rs`), the
 //! [`registry::McpRegistry`] that drives transitions through a
-//! platform-supplied [`lingxi_traits::McpTransport`], the OAuth 2.1
+//! platform-supplied [`traits::McpTransport`], the OAuth 2.1
 //! handshake skeleton (`oauth.rs`), the approval policy (`approval.rs`),
 //! the per-agent connection bookkeeping (`agent_scope.rs`), and the
 //! `client::McpClient` JSON-RPC client built on top of `lingxi-jsonrpc`

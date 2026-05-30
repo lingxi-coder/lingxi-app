@@ -7,7 +7,7 @@
 //! `lingxi-tools` (so the production `MailboxRouter` cannot be path-dep'd
 //! from here). The tool exposes the byte-locked schema + claim-window
 //! constant + telemetry events; the actual routing through
-//! `lingxi_coordinator::MailboxRouter::route` happens in the coordinator's
+//! `coordinator::MailboxRouter::route` happens in the coordinator's
 //! tool-wiring step post-M5.
 
 use std::collections::HashMap;
@@ -15,17 +15,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::Verified;
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{
-    SEND_MESSAGE_COMPLETED, SEND_MESSAGE_FAILED, SEND_MESSAGE_STARTED,
-};
-use lingxi_telemetry::AnalyticsBus;
-use lingxi_traits::mailbox::MailboxMessage;
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
+use telemetry::pii::Verified;
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{SEND_MESSAGE_COMPLETED, SEND_MESSAGE_FAILED, SEND_MESSAGE_STARTED};
+use telemetry::AnalyticsBus;
+use traits::mailbox::MailboxMessage;
 
 use crate::builtin::BuiltinToolContext;
 use crate::context::ToolUseContext;
@@ -243,7 +241,7 @@ impl Tool for SendMessageTool {
         // absent we synthesise a nil id — the production agent always has
         // one, so this only happens in narrowly scoped tests.
         let from_str = ctx.agent_id.map_or_else(
-            || lingxi_protocol::AgentId::nil().as_uuid().to_string(),
+            || protocol::AgentId::nil().as_uuid().to_string(),
             |a| a.as_uuid().to_string(),
         );
 

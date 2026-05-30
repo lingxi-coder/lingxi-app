@@ -1,7 +1,7 @@
 //! Wall-clock implementation using `std::time::SystemTime`.
 
-use lingxi_traits::Clock;
 use std::time::SystemTime;
+use traits::Clock;
 
 /// Production system clock.
 #[derive(Default)]

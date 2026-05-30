@@ -31,8 +31,8 @@ pub use path::{project_dir_name, session_path};
 // re-exported as `jsonl::SessionMetadata`; M5-08 introduces a different
 // `SessionMetadata` for the resume picker (uuid + title + mtime + line
 // count). Callers that need the M5-07 type reach it via
-// `lingxi_session::JsonlSessionMetadata` (crate-root alias) or the
-// fully-qualified `lingxi_session::jsonl::reader::SessionMetadata`.
+// `session::JsonlSessionMetadata` (crate-root alias) or the
+// fully-qualified `session::jsonl::reader::SessionMetadata`.
 pub use reader::JsonlReader;
 pub use schema::JsonlMessage;
 pub use uuid::validate_uuid;

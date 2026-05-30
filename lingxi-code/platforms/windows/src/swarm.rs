@@ -11,8 +11,8 @@
 //! (M2-01) must remain unchanged — only the module doc was updated here.
 
 use async_trait::async_trait;
-use lingxi_protocol::AgentId;
-use lingxi_traits::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+use protocol::AgentId;
+use traits::{PaneId, PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 
 /// Windows-side [`SwarmBackend`] — always reports unsupported.
 #[derive(Default)]
@@ -52,8 +52,8 @@ impl SwarmBackend for WindowsSwarmBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_protocol::AgentId;
-    use lingxi_traits::{PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
+    use protocol::AgentId;
+    use traits::{PanePosition, SwarmBackend, SwarmError, SwarmHandle, SwarmLayout};
 
     #[test]
     fn is_available_returns_false() {

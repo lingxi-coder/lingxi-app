@@ -2,7 +2,7 @@
 //! mirrors the other `render_*` tests in this crate (see `render_status_line.rs`).
 
 use iocraft::prelude::*;
-use lingxi_tui::components::prompt_input::palette::{PaletteOverlay, PaletteState};
+use tui::components::prompt_input::palette::{PaletteOverlay, PaletteState};
 
 fn render(el: impl Into<AnyElement<'static>>) -> String {
     let mut canvas = element! { View(width: 60u16) { #(el.into()) } };
@@ -19,7 +19,7 @@ fn palette_dropdown_three_filtered_commands() {
     insta::assert_snapshot!(out);
 }
 
-use lingxi_tui::components::prompt_input::completion::CompletionOverlay;
+use tui::components::prompt_input::completion::CompletionOverlay;
 
 #[test]
 fn completion_dropdown_three_paths() {
@@ -42,8 +42,8 @@ fn completion_empty_state_no_query() {
     insta::assert_snapshot!(out);
 }
 
-use lingxi_tui::app::render_screen;
-use lingxi_tui::state::{AppState, StatusSnapshot};
+use tui::app::render_screen;
+use tui::state::{AppState, StatusSnapshot};
 
 #[test]
 fn repl_screen_shows_palette_above_prompt() {

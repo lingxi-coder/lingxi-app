@@ -1,14 +1,14 @@
 //! M5-02 Task 15: verify orchestrator emits the 3 lifecycle events.
 
-use lingxi_api_client::types::ContentBlockApi;
-use lingxi_orchestrator::test_support::{
+use api_client::types::ContentBlockApi;
+use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_telemetry::tengu::orchestrator as orch_events;
-use lingxi_tools::registry::ToolRegistry;
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::{Arc, Mutex as StdMutex};
+use telemetry::tengu::orchestrator as orch_events;
+use tools::registry::ToolRegistry;
 use tracing::field::Field;
 use tracing::Event;
 use tracing::Subscriber;
@@ -57,7 +57,7 @@ async fn run_turn_emits_started_and_completed_in_order() {
     );
     let api = Arc::new(MockApiClient::new(vec![resp]));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let tools = Arc::new(ToolRegistry::new());
 
@@ -114,7 +114,7 @@ async fn run_turn_emits_failed_on_max_turns_error() {
             .collect(),
     ));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let tools = Arc::new(ToolRegistry::new());
 

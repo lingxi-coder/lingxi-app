@@ -1,12 +1,12 @@
-//! Translation helpers between `lingxi_api_client::types::UsageApi` and
-//! `lingxi_cost::Usage` plus model-string → `ProviderId` resolution.
+//! Translation helpers between `api_client::types::UsageApi` and
+//! `cost::Usage` plus model-string → `ProviderId` resolution.
 //!
 //! Used by M6-06 to feed `MessageResponse.usage` into `CostTracker`.
 
-use lingxi_api_client::types::UsageApi;
-use lingxi_cost::pricing::ProviderId;
-use lingxi_cost::usage::{TokenUsage, Usage};
-use lingxi_cost::ModelRef;
+use api_client::types::UsageApi;
+use cost::pricing::ProviderId;
+use cost::usage::{TokenUsage, Usage};
+use cost::ModelRef;
 
 /// Translate an API-client `UsageApi` into the cost crate's `Usage` shape.
 ///

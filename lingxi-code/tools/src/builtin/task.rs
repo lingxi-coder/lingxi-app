@@ -8,7 +8,7 @@
 //! `lingxi-tools`, blocking a direct path-dep from this crate to the task
 //! registry. The six tools here therefore expose the byte-locked schema
 //! surface (tool names, telemetry events, task-id regex, error formats,
-//! status/type enums) without consuming `lingxi_tasks::TaskRegistry`
+//! status/type enums) without consuming `tasks::TaskRegistry`
 //! directly. The shape-correct stubs accept input and emit the locked
 //! lifecycle events; the actual registry mutation happens in
 //! `lingxi-coordinator` post-M5 when the cycle is resolved.
@@ -18,23 +18,21 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::Verified;
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{
+use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
+use serde_json::{json, Value};
+use telemetry::pii::Verified;
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{
     TASK_CREATE_COMPLETED, TASK_CREATE_FAILED, TASK_CREATE_STARTED, TASK_GET_COMPLETED,
     TASK_GET_FAILED, TASK_GET_STARTED, TASK_LIST_COMPLETED, TASK_LIST_FAILED, TASK_LIST_STARTED,
     TASK_OUTPUT_COMPLETED, TASK_OUTPUT_FAILED, TASK_OUTPUT_STARTED, TASK_STOP_COMPLETED,
     TASK_STOP_FAILED, TASK_STOP_STARTED, TASK_UPDATE_COMPLETED, TASK_UPDATE_FAILED,
     TASK_UPDATE_STARTED,
 };
-use lingxi_telemetry::AnalyticsBus;
-use lingxi_traits::task_registry::{
-    TaskCreateInput, TaskListFilter, TaskRegistryError, TaskUpdatePatch,
-};
-use once_cell::sync::Lazy;
-use serde_json::{json, Value};
+use telemetry::AnalyticsBus;
+use traits::task_registry::{TaskCreateInput, TaskListFilter, TaskRegistryError, TaskUpdatePatch};
 
 use crate::builtin::BuiltinToolContext;
 use crate::context::ToolUseContext;
@@ -58,7 +56,7 @@ pub const TASK_STOP_TOOL_NAME: &str = "TaskStop";
 pub const TASK_OUTPUT_TOOL_NAME: &str = "TaskOutput";
 
 /// The 7 task-type wire strings accepted by `TaskCreate`. Byte-aligned with
-/// `lingxi_tasks::TaskType` variants (snake_case).
+/// `tasks::TaskType` variants (snake_case).
 pub const TASK_TYPES: &[&str] = &[
     "local_bash",
     "local_agent",
@@ -101,7 +99,7 @@ pub fn validate_task_id(s: &str) -> Result<(), String> {
 
 /// Generate a fresh task-id matching the M1 format (`[bartwmd][0-9a-z]{8}`).
 ///
-/// Mirrors `lingxi_tasks::id::generate_task_id` without taking the
+/// Mirrors `tasks::id::generate_task_id` without taking the
 /// cyclic dep on `lingxi-tasks`. Retained for test fixtures + parity
 /// (the regex test in this file generates ids locally to verify they
 /// match the locked regex without depending on the registry being wired).

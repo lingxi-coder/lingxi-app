@@ -9,7 +9,7 @@ pub mod keymap;
 pub mod orchestrator_bridge;
 
 use crossterm::event::KeyEvent;
-use lingxi_traits::OutputEvent;
+use traits::OutputEvent;
 
 /// Newtype around `OutputEvent` retained from M6-01 for the legacy
 /// `TuiEvent::OrchestratorMessage` payload. M6-03 introduces the richer
@@ -43,7 +43,7 @@ pub enum TuiEvent {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use lingxi_traits::OutputEvent;
+    use traits::OutputEvent;
 
     #[test]
     fn key_variant_constructs() {

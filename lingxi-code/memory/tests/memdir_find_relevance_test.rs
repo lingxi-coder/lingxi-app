@@ -4,9 +4,9 @@
 //! and content, runs `scan_memdir_at` + `find_relevant`, and asserts the
 //! top-`k` matches the deterministic expected ordering.
 
-use lingxi_memory::memdir::find::{find_relevant, RelevanceInputs};
-use lingxi_memory::memdir::paths::memdir_path;
-use lingxi_memory::memdir::scan::scan_memdir_at;
+use memory::memdir::find::{find_relevant, RelevanceInputs};
+use memory::memdir::paths::memdir_path;
+use memory::memdir::scan::scan_memdir_at;
 use std::fs;
 use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
@@ -92,7 +92,7 @@ fn ranking_is_deterministic_across_repeated_runs() {
             team_boost_enabled: false,
         },
     );
-    let names = |v: &[lingxi_protocol::MemoryEntry]| -> Vec<String> {
+    let names = |v: &[protocol::MemoryEntry]| -> Vec<String> {
         v.iter()
             .map(|e| e.path.to_string_lossy().to_string())
             .collect()

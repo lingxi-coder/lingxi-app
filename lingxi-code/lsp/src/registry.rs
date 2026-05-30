@@ -17,12 +17,12 @@
 
 use crate::client::LspClient;
 use crate::connection::LspConnectionState;
-use lingxi_protocol::{McpConnectionId, PluginId};
-use lingxi_traits::{LspError, LspServerConfig, LspTransport};
+use protocol::{McpConnectionId, PluginId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use traits::{LspError, LspServerConfig, LspTransport};
 
 /// Per-host LSP registry.
 ///

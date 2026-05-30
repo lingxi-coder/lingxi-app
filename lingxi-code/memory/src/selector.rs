@@ -7,7 +7,7 @@
 //! memory file paths to surface in the next prompt.
 
 use crate::file::{MemoryError, MemoryFile};
-use lingxi_sidequery::{QuerySource, SideQueryClient, SideQueryRequest};
+use sidequery::{QuerySource, SideQueryClient, SideQueryRequest};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -64,8 +64,8 @@ impl MemorySelector {
         let req = SideQueryRequest {
             model: self.selector_model.clone(),
             system_prompt: Some("You select memory files relevant to the query.".into()),
-            messages: vec![lingxi_protocol::ConversationMessage::user(
-                lingxi_protocol::MessageId::new(),
+            messages: vec![protocol::ConversationMessage::user(
+                protocol::MessageId::new(),
                 prompt,
             )],
             tools: vec![],

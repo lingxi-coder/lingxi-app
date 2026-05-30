@@ -1,13 +1,11 @@
 //! Parity driver: assert that `messages_create_non_stream` builds a wire
 //! request whose URL + locked headers byte-match claude-code @ 6a25909.
 
-use lingxi_api_client::anthropic::{
-    user_agent, AnthropicProvider, ANTHROPIC_VERSION, DEFAULT_BASE_URL,
-};
-use lingxi_api_client::betas::{assemble_beta_header, Endpoint, Provider};
-use lingxi_test_harness::parity::load_fixture;
+use api_client::anthropic::{user_agent, AnthropicProvider, ANTHROPIC_VERSION, DEFAULT_BASE_URL};
+use api_client::betas::{assemble_beta_header, Endpoint, Provider};
 use serde::Deserialize;
 use serde_json::Value;
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 struct Fixture {

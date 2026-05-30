@@ -1,9 +1,9 @@
 //! Tool result storage — overflow-to-disk for large results.
 
-use lingxi_protocol::ToolUseId;
-use lingxi_traits::FileSystem;
+use protocol::ToolUseId;
 use std::path::PathBuf;
 use std::sync::Arc;
+use traits::FileSystem;
 
 /// Storage for large tool results that overflow the message budget.
 pub struct ToolResultStorage {
@@ -26,7 +26,7 @@ impl ToolResultStorage {
         &self,
         tool_use_id: &ToolUseId,
         content: &str,
-    ) -> Result<PathBuf, lingxi_traits::FsError> {
+    ) -> Result<PathBuf, traits::FsError> {
         let path = self.storage_dir.join(format!("{tool_use_id}.txt"));
         self.fs
             .write_file(path.to_str().expect("utf8 path"), content)

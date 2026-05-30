@@ -4,13 +4,13 @@
 //! Worktrees live at `<repo_root>\.claude\worktrees\<flatten_slug(slug)>`
 //! and use the branch-name prefix `worktree-`. Behavioral parity with the
 //! posix implementation is intentional — see
-//! [`lingxi_platform_posix::worktree`] for the canonical doc.
+//! [`platform_posix::worktree`] for the canonical doc.
 
 use async_trait::async_trait;
-use lingxi_traits::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
+use traits::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 
 /// Maximum allowed total length of a worktree slug.
 ///
@@ -324,9 +324,9 @@ mod slug_tests {
 #[cfg(test)]
 mod create_tests {
     use super::*;
-    use lingxi_traits::WorktreeManager;
     use tempfile::TempDir;
     use tokio::process::Command;
+    use traits::WorktreeManager;
 
     /// Initialize a fresh git repo with one commit so worktree commands have
     /// something to branch from.

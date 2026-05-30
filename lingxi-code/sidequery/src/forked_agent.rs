@@ -22,14 +22,14 @@
 
 use crate::cache_safe_params::CacheSafeParams;
 use crate::purposes::QuerySource;
-use lingxi_protocol::ConversationMessage;
+use protocol::ConversationMessage;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
 
 /// Pool-shaped abstraction that lets the runner allocate forked slots
 /// without depending on `lingxi-agent`. Implemented by
-/// `lingxi_agent::StateMachinePool` in the wiring layer (later plan).
+/// `agent::StateMachinePool` in the wiring layer (later plan).
 ///
 /// M1.14 only requires `Send + Sync` so the runner can hold an `Arc`.
 pub trait SubagentSlotProvider: Send + Sync {}
@@ -78,7 +78,7 @@ pub struct ForkedAgentResult {
     /// Aggregated final assistant text.
     pub final_text: String,
     /// Token / cost usage for COGS attribution.
-    pub usage: lingxi_cost::Usage,
+    pub usage: cost::Usage,
 }
 
 /// Forked-agent failure surface.
@@ -132,7 +132,7 @@ impl ForkedAgentRunner {
         let _ = req;
         Ok(ForkedAgentResult {
             final_text: "[forked-agent-stub]".into(),
-            usage: lingxi_cost::Usage::default(),
+            usage: cost::Usage::default(),
         })
     }
 }

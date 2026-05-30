@@ -8,14 +8,14 @@
 //! See spec §2.3 (key traits) for the matched design.
 
 use async_trait::async_trait;
-use lingxi_protocol::SessionId;
+use protocol::SessionId;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
 
 /// Snapshot of cumulative cost at a single point in time.
 ///
-/// Lightweight echo of `lingxi_cost::SessionCostSummary` — see that type for
+/// Lightweight echo of `cost::SessionCostSummary` — see that type for
 /// the canonical session-scope rollup. We keep a leaf-friendly mirror here
 /// so `lingxi-traits` does not need to depend on `lingxi-cost`.
 ///
@@ -63,7 +63,7 @@ pub struct CompactionSummary {
 
 /// Errors surfaced through the orchestrator's public handle.
 ///
-/// Distinct from `lingxi_orchestrator::OrchestratorError` because the
+/// Distinct from `orchestrator::OrchestratorError` because the
 /// handle surface deliberately hides the API-error variants from slash
 /// command authors (they cannot meaningfully act on a 429). Implementations
 /// MAY wrap `OrchestratorError` and project a coarse `HandleError`.
@@ -84,9 +84,9 @@ pub enum HandleError {
 /// Outcome of a TUI-driven turn invoked via
 /// [`OrchestratorHandle::run_turn_streaming_with_cancel`]. (M6-03)
 ///
-/// Mirrors `lingxi_orchestrator::TurnOutcome` so the trait surface in
+/// Mirrors `orchestrator::TurnOutcome` so the trait surface in
 /// `lingxi-traits` does not depend on the orchestrator crate. Map between
-/// the two in `lingxi_orchestrator::handle_impl`.
+/// the two in `orchestrator::handle_impl`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnOutcome {
     /// Model returned a natural stop reason and the turn loop ended.
@@ -364,7 +364,7 @@ pub enum OutputEvent {
         /// Stable id (the `tool_use_id` echoed in the matching `ToolResult`).
         /// Added in M6-04 so the TUI can correlate calls with results and
         /// key the per-tool expanded-state map.
-        id: lingxi_protocol::ToolUseId,
+        id: protocol::ToolUseId,
         /// Name of the tool being invoked.
         tool: String,
         /// JSON input passed to the tool.
@@ -373,7 +373,7 @@ pub enum OutputEvent {
     /// A tool result returning to the conversation.
     ToolResult {
         /// Correlator with the matching `ToolCall`.
-        id: lingxi_protocol::ToolUseId,
+        id: protocol::ToolUseId,
         /// Name of the tool that returned.
         tool: String,
         /// JSON result payload.
@@ -414,17 +414,12 @@ pub trait OutputStream: Send + Sync {
     ///
     /// `id` is the `tool_use_id` echoed in the matching ToolResult. Added
     /// in M6-04 so consumers can correlate calls with results.
-    async fn emit_tool_call(
-        &self,
-        id: &lingxi_protocol::ToolUseId,
-        tool: &str,
-        input: &serde_json::Value,
-    );
+    async fn emit_tool_call(&self, id: &protocol::ToolUseId, tool: &str, input: &serde_json::Value);
 
     /// Emit a tool-result notification immediately after dispatch.
     async fn emit_tool_result(
         &self,
-        id: &lingxi_protocol::ToolUseId,
+        id: &protocol::ToolUseId,
         tool: &str,
         result: &serde_json::Value,
     );
@@ -473,7 +468,7 @@ mod tests {
     /// expanded-state map.
     #[test]
     fn output_event_tool_call_carries_tool_use_id() {
-        use lingxi_protocol::ToolUseId;
+        use protocol::ToolUseId;
         let id = ToolUseId::new();
         let ev = OutputEvent::ToolCall {
             id,
@@ -488,7 +483,7 @@ mod tests {
     /// M6-04 Task 1: same for `OutputEvent::ToolResult`.
     #[test]
     fn output_event_tool_result_carries_tool_use_id() {
-        use lingxi_protocol::ToolUseId;
+        use protocol::ToolUseId;
         let id = ToolUseId::new();
         let ev = OutputEvent::ToolResult {
             id,

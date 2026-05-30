@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn searches_tool_use_and_result_text() {
-        let id = lingxi_protocol::ToolUseId::new();
+        let id = protocol::ToolUseId::new();
         let msgs = vec![RenderedMessage::AssistantToolUse {
             id,
             tool: "Bash".into(),

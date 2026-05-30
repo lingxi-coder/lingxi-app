@@ -9,7 +9,7 @@ use crate::context::SubagentContext;
 use crate::definition::AgentDefinition;
 use crate::pool::{PoolError, StateMachinePool};
 use crate::runner::SubagentEvent;
-use lingxi_protocol::AgentId;
+use protocol::AgentId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 

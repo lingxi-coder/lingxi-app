@@ -17,11 +17,11 @@
 use std::time::Duration;
 
 use iocraft::prelude::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use lingxi_permission::gate::{PermissionRequest, PermissionResponse, PromptDefault};
-use lingxi_tui::root::handle_live_key;
-use lingxi_tui::state::{AppState, PendingPermission, StatusSnapshot};
+use permission::gate::{PermissionRequest, PermissionResponse, PromptDefault};
 use serde_json::json;
 use tokio::sync::oneshot;
+use tui::root::handle_live_key;
+use tui::state::{AppState, PendingPermission, StatusSnapshot};
 
 /// Build an iocraft (crossterm-0.29) key-press event.
 fn key(code: KeyCode) -> KeyEvent {

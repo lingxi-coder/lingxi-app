@@ -1,5 +1,5 @@
 //! M4-09 parity driver — every builtin tool that produces variable-length
-//! output routes it through `lingxi_tools::shared::truncate` (or the
+//! output routes it through `tools::shared::truncate` (or the
 //! tool_trait-level `OutputTruncated` enforcement), with the
 //! `MAX_TOOL_OUTPUT_LENGTH = 30_000` and the locked suffix.
 //!
@@ -12,10 +12,10 @@
 
 #![allow(clippy::unwrap_used)]
 
-use lingxi_tools::shared::{MAX_TOOL_OUTPUT_LENGTH, TRUNCATION_SUFFIX};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
+use tools::shared::{MAX_TOOL_OUTPUT_LENGTH, TRUNCATION_SUFFIX};
 
 /// Each entry MUST carry a one-line justification.
 fn exempt_tools() -> HashSet<&'static str> {

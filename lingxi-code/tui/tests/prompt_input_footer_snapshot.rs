@@ -1,6 +1,6 @@
 //! M7-06 snapshots: the `PromptInput` footer surface and a 3-line input.
 use iocraft::prelude::*;
-use lingxi_tui::components::prompt_input::{FooterMode, PromptInput, PromptInputFooter};
+use tui::components::prompt_input::{FooterMode, PromptInput, PromptInputFooter};
 
 #[test]
 fn footer_prompt_mode_with_placeholder() {

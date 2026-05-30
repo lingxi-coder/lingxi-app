@@ -1,6 +1,6 @@
 //! Microcompact — clears stale large tool results without involving the LLM.
 
-use lingxi_protocol::{ContentBlock, ConversationMessage};
+use protocol::{ContentBlock, ConversationMessage};
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
@@ -119,7 +119,7 @@ impl Microcompactor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_protocol::{MessageId, ToolUseId};
+    use protocol::{MessageId, ToolUseId};
 
     #[test]
     fn clears_large_tool_results() {

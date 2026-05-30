@@ -2,8 +2,8 @@
 
 use insta::assert_snapshot;
 use iocraft::prelude::*;
-use lingxi_protocol::ToolUseId;
-use lingxi_tui::components::messages::user_tool_result::{
+use protocol::ToolUseId;
+use tui::components::messages::user_tool_result::{
     render_user_tool_result_to_string, UserToolResultMessage, UserToolResultProps,
 };
 
@@ -122,8 +122,8 @@ fn bash_expanded_single_line_stays_one_body_row() {
 /// that future unification work consciously revisits it.
 #[test]
 fn bash_expanded_measured_height_pins_bare_string_proxy() {
-    use lingxi_tui::components::virtual_message_list::measured_height;
-    use lingxi_tui::state::RenderedMessage;
+    use tui::components::virtual_message_list::measured_height;
+    use tui::state::RenderedMessage;
 
     let msg = RenderedMessage::UserToolResult {
         id: id(),

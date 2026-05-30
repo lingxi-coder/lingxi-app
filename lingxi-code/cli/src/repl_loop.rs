@@ -6,11 +6,11 @@
 use crate::output::OutputSink;
 use crate::sigint::SigintSource;
 use futures::future::BoxFuture;
-use lingxi_orchestrator::{OrchestratorError, TurnOutcome};
-use lingxi_traits::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
+use orchestrator::{OrchestratorError, TurnOutcome};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
+use traits::{OrchestratorHandle, SlashCommandDispatcher, SlashDispatchResult};
 
 /// Outcome returned by [`step`] — tells the outer loop what to do next.
 #[derive(Debug, Clone, PartialEq, Eq)]

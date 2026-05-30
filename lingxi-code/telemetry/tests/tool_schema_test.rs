@@ -1,4 +1,4 @@
-use lingxi_telemetry::tengu::tool;
+use telemetry::tengu::tool;
 
 #[test]
 fn all_40_tool_event_names_are_locked() {
@@ -59,9 +59,9 @@ fn all_40_tool_event_names_are_locked() {
 
 #[test]
 fn bash_started_payload_uses_pii_tagged_for_command() {
-    use lingxi_telemetry::pii::PiiTagged;
+    use telemetry::pii::PiiTagged;
     let p = tool::BashStartedPayload {
-        invocation_id: lingxi_telemetry::Verified::assert_safe("inv-1".into()),
+        invocation_id: telemetry::Verified::assert_safe("inv-1".into()),
         command: PiiTagged::assert_pii_tagged_column("echo hi".into()),
         timeout_ms: 30_000,
     };

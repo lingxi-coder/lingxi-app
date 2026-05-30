@@ -15,15 +15,15 @@ use crate::tool_trait::{
     ValidationError,
 };
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{BASH_COMPLETED, BASH_FAILED, BASH_STARTED, BASH_TIMEOUT};
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{BASH_COMPLETED, BASH_FAILED, BASH_STARTED, BASH_TIMEOUT};
 
 // ===== Locked constants =====================================================
 
@@ -58,7 +58,7 @@ pub fn resolve_shell_path() -> &'static str {
 
 /// Compute the per-task output file path used when `run_in_background=true`.
 ///
-/// Mirrors `lingxi_platform_posix::process::task_output_path` (which we
+/// Mirrors `platform_posix::process::task_output_path` (which we
 /// cannot depend on from this crate without forming a Cargo cycle —
 /// lingxi-tools → lingxi-platform-posix → lingxi-lsp → lingxi-tools).
 #[must_use]
@@ -89,7 +89,7 @@ fn cmd_hash(s: &str) -> String {
 }
 
 async fn emit_failed(
-    bus: &lingxi_telemetry::AnalyticsBus,
+    bus: &telemetry::AnalyticsBus,
     request_id: &str,
     error_kind: &str,
     started_at: SystemTime,
@@ -224,9 +224,9 @@ impl Tool for BashTool {
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        use lingxi_sandbox::decision::{should_use_sandbox, SandboxDecision};
-        use lingxi_sandbox::wrap::wrap_with_sandbox;
-        use lingxi_traits::sandbox::ProcessCommand as SbxCommand;
+        use sandbox::decision::{should_use_sandbox, SandboxDecision};
+        use sandbox::wrap::wrap_with_sandbox;
+        use traits::sandbox::ProcessCommand as SbxCommand;
 
         let cmd_str = input
             .get("command")
@@ -283,12 +283,12 @@ impl Tool for BashTool {
             SandboxDecision::Sandbox { policy: _ } => {
                 match wrap_with_sandbox(&cmd_str, &self.ctx.sandbox_runtime, self.ctx.platform) {
                     Ok(wrapped) => wrapped,
-                    Err(lingxi_sandbox::wrap::SandboxWrapError::Unsupported(s)) => {
+                    Err(sandbox::wrap::SandboxWrapError::Unsupported(s)) => {
                         emit_failed(&self.ctx.bus, &request_id, "sandbox_refused", started_at)
                             .await;
                         return Err(ToolError::InvalidInput(s));
                     }
-                    Err(lingxi_sandbox::wrap::SandboxWrapError::SbplWrite(s)) => {
+                    Err(sandbox::wrap::SandboxWrapError::SbplWrite(s)) => {
                         emit_failed(
                             &self.ctx.bus,
                             &request_id,
@@ -393,7 +393,7 @@ impl Tool for BashTool {
                     mcp_meta: None,
                 })
             }
-            Err(lingxi_traits::process::ProcessError::Timeout) => {
+            Err(traits::process::ProcessError::Timeout) => {
                 let mut meta: LogEventMetadata = HashMap::new();
                 meta.insert(
                     "request_id".into(),
@@ -415,7 +415,7 @@ impl Tool for BashTool {
 mod tests {
     use super::*;
     use crate::builtin::test_support::{fresh_tx, shell_test_ctx};
-    use lingxi_traits::process::ProcessOutput;
+    use traits::process::ProcessOutput;
 
     fn use_ctx() -> ToolUseContext {
         crate::builtin::test_support::fresh_ctx()
@@ -566,9 +566,9 @@ mod tests {
 
     // ----- Background path: bespoke stub that returns a fake ProcessHandle. -----
 
-    use lingxi_traits::process::{ProcessError, ProcessHandle, ProcessRunner};
-    use lingxi_traits::sandbox::SandboxedCommand;
     use std::sync::Arc;
+    use traits::process::{ProcessError, ProcessHandle, ProcessRunner};
+    use traits::sandbox::SandboxedCommand;
 
     struct BgStub;
     #[async_trait]

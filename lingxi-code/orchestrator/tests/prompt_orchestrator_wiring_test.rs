@@ -2,15 +2,15 @@
 //! system prompt via `assemble_system_prompt` and passes it to the
 //! API client.
 
-use lingxi_api_client::types::ContentBlockApi;
-use lingxi_orchestrator::test_support::{
+use api_client::types::ContentBlockApi;
+use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_tools::registry::ToolRegistry;
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;
 use tempfile::TempDir;
+use tools::registry::ToolRegistry;
 
 #[tokio::test]
 async fn run_turn_passes_assembled_system_prompt_to_api_client() {
@@ -20,7 +20,7 @@ async fn run_turn_passes_assembled_system_prompt_to_api_client() {
         Some("end_turn"),
     )]));
     let tools = Arc::new(ToolRegistry::new());
-    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let output = Arc::new(MockOutputStream::new());
     let memory = Arc::new(StaticMemoryProvider::empty());

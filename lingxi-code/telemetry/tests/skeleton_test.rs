@@ -3,7 +3,7 @@
 
 #[test]
 fn telemetry_error_has_spec_variants() {
-    use lingxi_telemetry::TelemetryError;
+    use telemetry::TelemetryError;
     let e1 = TelemetryError::UnknownEvent {
         name: "tengu_unknown".to_string(),
     };
@@ -25,7 +25,7 @@ fn telemetry_error_has_spec_variants() {
 
 #[test]
 fn overflow_policy_default_is_drop_oldest() {
-    use lingxi_telemetry::{AnalyticsBus, OverflowPolicy};
+    use telemetry::{AnalyticsBus, OverflowPolicy};
     let bus = AnalyticsBus::new();
     assert!(matches!(bus.overflow_policy(), OverflowPolicy::DropOldest));
 }
@@ -33,7 +33,7 @@ fn overflow_policy_default_is_drop_oldest() {
 #[test]
 fn tengu_module_compiles() {
     // Reach for the registry constant; subsequent tasks populate it.
-    let all: &[&'static str] = lingxi_telemetry::tengu::ALL_EVENT_NAMES;
+    let all: &[&'static str] = telemetry::tengu::ALL_EVENT_NAMES;
     // After Task 1 the registry is empty; once Tasks 2-9 land it grows monotonically.
     // We don't assert an exact length here so this skeleton doesn't churn per task.
     // M4-09 added `lingxi_core_v0_5_0_released` (release marker — not a
@@ -48,6 +48,6 @@ fn tengu_module_compiles() {
 fn sinks_module_compiles() {
     // Module exists but is empty; just confirm the path resolves.
     let _: fn() = || {
-        let _ = lingxi_telemetry::sinks::_module_marker();
+        let _ = telemetry::sinks::_module_marker();
     };
 }

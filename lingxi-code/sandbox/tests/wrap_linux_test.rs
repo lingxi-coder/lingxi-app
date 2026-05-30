@@ -1,7 +1,7 @@
-use lingxi_sandbox::runtime_config::{
+use sandbox::runtime_config::{
     FilesystemRestrictionConfig, NetworkRestrictionConfig, Platform, SandboxRuntimeConfig,
 };
-use lingxi_sandbox::wrap::wrap_with_sandbox;
+use sandbox::wrap::wrap_with_sandbox;
 
 fn cfg(allow_write: Vec<&str>, allowed_domains: Vec<&str>) -> SandboxRuntimeConfig {
     SandboxRuntimeConfig {

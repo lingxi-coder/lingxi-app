@@ -36,7 +36,7 @@ pub struct AgentDefinition {
     /// MCP servers the agent should connect to.
     pub mcp_servers: Vec<AgentMcpServerSpec>,
     /// Hooks declared inside the agent's frontmatter.
-    pub frontmatter_hooks: Vec<lingxi_hooks::HookDefinition>,
+    pub frontmatter_hooks: Vec<hooks::HookDefinition>,
     /// Optional emoji or short icon for the UI.
     pub icon: Option<String>,
     /// Allow-list of tool names appended to the resolver output. Often used
@@ -107,14 +107,14 @@ pub enum AgentSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentMcpServerSpec {
     /// Refer to a server already registered by name in the host's
-    /// [`lingxi_mcp::McpRegistry`].
+    /// [`mcp::McpRegistry`].
     ByName(String),
     /// Provide a full inline configuration, registered on demand.
     Inline {
         /// Logical name of the inline server.
         name: String,
         /// Connection configuration.
-        config: lingxi_mcp::McpServerConfig,
+        config: mcp::McpServerConfig,
     },
 }
 

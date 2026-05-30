@@ -7,20 +7,18 @@
 //!
 //! Fails to compile until Tasks 6, 8, 9, 12 land the streaming surface.
 
-use lingxi_orchestrator::test_support::{
+use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::test_support_stream::{
+use orchestrator::test_support_stream::{
     content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
     text_delta, MockStreamingApiClient,
 };
-use lingxi_orchestrator::{
-    scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig,
-};
-use lingxi_tools::registry::ToolRegistry;
-use lingxi_traits::OutputEvent;
+use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tools::registry::ToolRegistry;
+use traits::OutputEvent;
 
 #[tokio::test]
 async fn streaming_text_only_three_deltas() {
@@ -39,7 +37,7 @@ async fn streaming_text_only_three_deltas() {
     let batched = Arc::new(MockApiClient::new(Vec::new()));
     let output = Arc::new(MockOutputStream::new());
     let tools = Arc::new(ToolRegistry::new());
-    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
 

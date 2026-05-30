@@ -1,4 +1,4 @@
-//! Adapter that bridges [`lingxi_traits::OutputStream`] emissions from
+//! Adapter that bridges [`traits::OutputStream`] emissions from
 //! the orchestrator into the CLI's [`crate::output::OutputSink`].
 //!
 //! Wired in M5-12 Task 9: when the orchestrator emits a `Text` content
@@ -8,8 +8,8 @@
 
 use crate::output::OutputSink;
 use async_trait::async_trait;
-use lingxi_traits::{CostSnapshot, OutputStream};
 use std::sync::Arc;
+use traits::{CostSnapshot, OutputStream};
 
 /// Concrete adapter — owns an `Arc<dyn OutputSink>` and projects every
 /// `OutputStream` method through it.
@@ -32,7 +32,7 @@ impl OutputStream for SinkAdapter {
     }
     async fn emit_tool_call(
         &self,
-        _id: &lingxi_protocol::ToolUseId,
+        _id: &protocol::ToolUseId,
         tool: &str,
         input: &serde_json::Value,
     ) {
@@ -44,7 +44,7 @@ impl OutputStream for SinkAdapter {
     }
     async fn emit_tool_result(
         &self,
-        _id: &lingxi_protocol::ToolUseId,
+        _id: &protocol::ToolUseId,
         tool: &str,
         result: &serde_json::Value,
     ) {

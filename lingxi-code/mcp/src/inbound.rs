@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use lingxi_jsonrpc::{InboundHandler, Request, Response};
+use jsonrpc::{InboundHandler, Request, Response};
 use serde_json::json;
 
 /// Handler for inbound `roots/list` requests from the MCP server.
@@ -49,7 +49,7 @@ impl InboundHandler for ElicitationCreateHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_jsonrpc::Id;
+    use jsonrpc::Id;
 
     fn req(method: &str) -> Request {
         Request::new(method, None, Id::Number(1))

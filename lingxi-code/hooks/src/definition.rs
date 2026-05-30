@@ -1,7 +1,7 @@
 //! Hook definition + executor / source taxonomy (spec §9.2, §9.3).
 
 use crate::events::HookEventType;
-use lingxi_protocol::HookId;
+use protocol::HookId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;

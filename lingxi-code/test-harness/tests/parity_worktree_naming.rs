@@ -11,12 +11,12 @@
 //! - Slug validation: each `/`-separated segment matches
 //!   `[a-zA-Z0-9._-]+`, total length 1..=64.
 
-use lingxi_test_harness::parity::load_fixture;
-use lingxi_traits::worktree::{WorktreeError, WorktreeManager};
 use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
+use test_harness::parity::load_fixture;
+use traits::worktree::{WorktreeError, WorktreeManager};
 
 #[derive(Deserialize)]
 struct Case {
@@ -58,7 +58,7 @@ async fn worktree_branch_naming_matches_claude_code() {
         // Canonicalize so symlink-prefixed temp dirs (e.g. /var → /private/var
         // on macOS) match the canonicalised path git emits below.
         let root_canon = std::fs::canonicalize(tmp.path()).expect("canonicalize repo root");
-        let manager = lingxi_platform_posix::PosixWorktreeManager::new(root_canon.clone());
+        let manager = platform_posix::PosixWorktreeManager::new(root_canon.clone());
 
         let handle = manager
             .create_worktree(&case.slug, None, &[])
@@ -89,7 +89,7 @@ async fn worktree_branch_naming_matches_claude_code() {
         let tmp = TempDir::new().expect("tempdir");
         init_git_repo(tmp.path());
         let root_canon = std::fs::canonicalize(tmp.path()).expect("canonicalize repo root");
-        let manager = lingxi_platform_posix::PosixWorktreeManager::new(root_canon);
+        let manager = platform_posix::PosixWorktreeManager::new(root_canon);
         let r = manager.create_worktree(bad, None, &[]).await;
         match r {
             Err(WorktreeError::InvalidSlug(_)) => {}

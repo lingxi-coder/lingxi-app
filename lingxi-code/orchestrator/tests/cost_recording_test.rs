@@ -2,17 +2,17 @@
 //! recorded the response's token usage and computed a non-zero cost.
 #![allow(clippy::field_reassign_with_default)]
 
-use lingxi_api_client::types::{MessageResponse, UsageApi};
-use lingxi_cost::pricing::PricingCatalog;
-use lingxi_cost::CostTracker;
-use lingxi_orchestrator::test_support::{
+use api_client::types::{MessageResponse, UsageApi};
+use cost::pricing::PricingCatalog;
+use cost::CostTracker;
+use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_protocol::SessionId;
-use lingxi_tools::registry::ToolRegistry;
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use protocol::SessionId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tools::registry::ToolRegistry;
 
 /// Build a `MessageResponse` that emulates a single `end_turn` API reply with
 /// the given token usage.

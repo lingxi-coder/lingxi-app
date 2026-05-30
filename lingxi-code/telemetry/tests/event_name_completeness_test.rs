@@ -2,7 +2,7 @@
 //! is in test-harness's `parity_tengu_events.rs`; this test guards the count
 //! and uniqueness without crossing the workspace boundary).
 
-use lingxi_telemetry::tengu::ALL_EVENT_NAMES;
+use telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
 fn registry_is_exactly_330_entries() {
@@ -131,19 +131,19 @@ fn m7_16_deferred_candidates_not_registered() {
 #[test]
 fn release_marker_constant_matches() {
     assert_eq!(
-        lingxi_telemetry::tengu::release::LINGXI_CORE_V0_5_0_RELEASED,
+        telemetry::tengu::release::LINGXI_CORE_V0_5_0_RELEASED,
         "lingxi_core_v0_5_0_released"
     );
     assert_eq!(
-        lingxi_telemetry::tengu::release::LINGXI_CORE_V0_6_0_RELEASED,
+        telemetry::tengu::release::LINGXI_CORE_V0_6_0_RELEASED,
         "lingxi_core_v0_6_0_released"
     );
     assert_eq!(
-        lingxi_telemetry::tengu::release::LINGXI_CORE_V0_7_0_RELEASED,
+        telemetry::tengu::release::LINGXI_CORE_V0_7_0_RELEASED,
         "lingxi_core_v0_7_0_released"
     );
     assert_eq!(
-        lingxi_telemetry::tengu::release::LINGXI_CORE_V0_8_0_RELEASED,
+        telemetry::tengu::release::LINGXI_CORE_V0_8_0_RELEASED,
         "lingxi_core_v0_8_0_released"
     );
 }

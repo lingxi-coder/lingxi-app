@@ -6,12 +6,12 @@
 
 use crate::client::McpClient;
 use crate::connection::{McpConnectionState, McpServerConfig};
-use lingxi_protocol::{AgentId, McpConnectionId};
-use lingxi_traits::{McpError, McpTransport};
+use protocol::{AgentId, McpConnectionId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
+use traits::{McpError, McpTransport};
 
 /// In-memory registry of every known MCP connection.
 pub struct McpRegistry {
@@ -166,16 +166,16 @@ impl McpRegistry {
     }
 
     /// Project every known connection into the trait-facing
-    /// [`lingxi_traits::McpServerInfo`] shape. Used by
+    /// [`traits::McpServerInfo`] shape. Used by
     /// `OrchestratorHandle::list_mcp_servers` (M6-07) so `/mcp` can list
     /// the registry without exposing the internal state-machine enum.
     ///
     /// Returned list is sorted by `name` for stable display order.
-    pub async fn snapshot(&self) -> Vec<lingxi_traits::McpServerInfo> {
+    pub async fn snapshot(&self) -> Vec<traits::McpServerInfo> {
         let conns = self.connections.read().await;
-        let mut out: Vec<lingxi_traits::McpServerInfo> = conns
+        let mut out: Vec<traits::McpServerInfo> = conns
             .values()
-            .map(|s| lingxi_traits::McpServerInfo {
+            .map(|s| traits::McpServerInfo {
                 name: s.name().to_string(),
                 status: project_status(s),
                 transport: s.transport_kind().to_string(),
@@ -187,9 +187,9 @@ impl McpRegistry {
 }
 
 /// Project a [`McpConnectionState`] variant onto the trait-facing
-/// [`lingxi_traits::McpStatus`] (M6-07).
-fn project_status(state: &McpConnectionState) -> lingxi_traits::McpStatus {
-    use lingxi_traits::McpStatus;
+/// [`traits::McpStatus`] (M6-07).
+fn project_status(state: &McpConnectionState) -> traits::McpStatus {
+    use traits::McpStatus;
     match state {
         McpConnectionState::Connected { .. } => McpStatus::Connected,
         McpConnectionState::Disconnected {
@@ -216,15 +216,15 @@ mod snapshot_tests {
     use super::*;
     use crate::connection::{ConfigScope, McpServerConfig};
     use async_trait::async_trait;
-    use lingxi_protocol::McpConnectionId as ConnId;
-    use lingxi_traits::{
+    use protocol::McpConnectionId as ConnId;
+    use serde_json::Value;
+    use std::sync::Arc;
+    use traits::{
         ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
         McpRawConnection, McpResourceContentDto, McpResourceDto, McpServerInfo, McpStatus,
         McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
         ServerCapabilitiesDto,
     };
-    use serde_json::Value;
-    use std::sync::Arc;
 
     /// Minimal in-crate stub transport — only `connections` matters for
     /// `snapshot`, so every method panics if called.

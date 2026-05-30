@@ -1,4 +1,4 @@
-use lingxi_sandbox::path_pattern::resolve_path_pattern_for_sandbox;
+use sandbox::path_pattern::resolve_path_pattern_for_sandbox;
 use std::path::PathBuf;
 
 #[test]

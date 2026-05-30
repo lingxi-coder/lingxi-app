@@ -74,9 +74,9 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
             // `PermissionRequest` enum lives on the dedicated
             // `mpsc<PermissionExchange>` channel owned by
             // `TuiPermissionGate` (see `permission_bridge.rs`).
-            let default_decision = lingxi_permission::tool_default(&tool);
+            let default_decision = permission::tool_default(&tool);
             state.pending_permission = Some(PendingPermission {
-                request: lingxi_permission::gate::PermissionRequest::ToolUseConfirm {
+                request: permission::gate::PermissionRequest::ToolUseConfirm {
                     tool_name: tool,
                     tool_input: input,
                     default_decision,
@@ -200,7 +200,7 @@ mod tests {
         s.cancel_token = Some(tokio_util::sync::CancellationToken::new());
         apply_event(
             &mut s,
-            TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::EndTurn),
+            TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn),
             &n,
         );
         assert!(s.streaming.is_none());

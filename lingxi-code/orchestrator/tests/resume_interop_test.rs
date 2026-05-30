@@ -2,15 +2,13 @@
 //! append a 3rd message using the replayed `last_message_uuid` as parent,
 //! re-read via `JsonlReader`, confirm the full 3-link chain.
 
-use lingxi_orchestrator::replay_session_state;
-use lingxi_platform_posix::fs::PosixFileSystem;
-use lingxi_session::jsonl::{
-    project_dir_name, session_path, JsonlMessage, JsonlReader, JsonlWriter,
-};
-use lingxi_traits::FileSystem;
+use orchestrator::replay_session_state;
+use platform_posix::fs::PosixFileSystem;
 use serde_json::json;
+use session::jsonl::{project_dir_name, session_path, JsonlMessage, JsonlReader, JsonlWriter};
 use std::sync::Arc;
 use tempfile::TempDir;
+use traits::FileSystem;
 use uuid::Uuid;
 
 fn build_msg(

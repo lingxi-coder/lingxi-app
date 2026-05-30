@@ -15,8 +15,8 @@
 //! Drift on this format breaks cross-version OAuth token lookup on macOS,
 //! so a parity test is the right place to lock it.
 
-use lingxi_test_harness::parity::load_fixture;
 use serde::Deserialize;
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 struct Case {
@@ -36,7 +36,7 @@ struct Fixture {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn keychain_service_name_matches_claude_code() {
-    use lingxi_platform_posix::secure_storage::full_service_name;
+    use platform_posix::secure_storage::full_service_name;
 
     let fx: Fixture = load_fixture("secure_storage_macos_service_name");
     for case in &fx.cases {

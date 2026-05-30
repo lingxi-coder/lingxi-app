@@ -5,8 +5,8 @@
 //! 3.17 spec, framed with `Content-Length` headers, then follow with an
 //! `"initialized"` notification once the server has responded.
 
-use lingxi_jsonrpc::Connection;
-use lingxi_lsp::client::LspClient;
+use jsonrpc::Connection;
+use lsp::client::LspClient;
 use lsp_types::ServerCapabilities;
 use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};

@@ -18,16 +18,16 @@ use std::sync::Arc;
 pub struct PanickingFs;
 
 #[async_trait]
-impl lingxi_traits::filesystem::FileSystem for PanickingFs {
+impl traits::filesystem::FileSystem for PanickingFs {
     async fn read_file(
         &self,
         _: &str,
         _: Option<u64>,
         _: Option<u64>,
-    ) -> Result<lingxi_traits::filesystem::FileContent, lingxi_traits::filesystem::FsError> {
+    ) -> Result<traits::filesystem::FileContent, traits::filesystem::FsError> {
         panic!("M4-01 builtin tools do not call FileSystem::read_file");
     }
-    async fn write_file(&self, _: &str, _: &str) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn write_file(&self, _: &str, _: &str) -> Result<(), traits::filesystem::FsError> {
         panic!("M4-01 builtin tools do not call FileSystem::write_file")
     }
     fn is_within_workspace(&self, _: &str) -> bool {
@@ -37,50 +37,45 @@ impl lingxi_traits::filesystem::FileSystem for PanickingFs {
         &self,
         _: &str,
     ) -> Result<
-        std::pin::Pin<Box<dyn futures::Stream<Item = lingxi_traits::filesystem::FileEvent> + Send>>,
-        lingxi_traits::filesystem::FsError,
+        std::pin::Pin<Box<dyn futures::Stream<Item = traits::filesystem::FileEvent> + Send>>,
+        traits::filesystem::FsError,
     > {
         panic!("not called")
     }
-    async fn append_file(
-        &self,
-        _: &str,
-        _: &str,
-    ) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn append_file(&self, _: &str, _: &str) -> Result<(), traits::filesystem::FsError> {
         panic!("not called")
     }
-    async fn truncate(&self, _: &str, _: u64) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn truncate(&self, _: &str, _: u64) -> Result<(), traits::filesystem::FsError> {
         panic!("not called")
     }
     async fn file_mtime(
         &self,
         _: &str,
-    ) -> Result<std::time::SystemTime, lingxi_traits::filesystem::FsError> {
+    ) -> Result<std::time::SystemTime, traits::filesystem::FsError> {
         panic!("not called")
     }
-    async fn file_size(&self, _: &str) -> Result<u64, lingxi_traits::filesystem::FsError> {
+    async fn file_size(&self, _: &str) -> Result<u64, traits::filesystem::FsError> {
         panic!("not called")
     }
-    async fn delete_file(&self, _: &str) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn delete_file(&self, _: &str) -> Result<(), traits::filesystem::FsError> {
         panic!("not called")
     }
-    async fn symlink(&self, _: &str, _: &str) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn symlink(&self, _: &str, _: &str) -> Result<(), traits::filesystem::FsError> {
         panic!("not called")
     }
     async fn flock_exclusive(
         &self,
         _: &str,
-    ) -> Result<Box<dyn lingxi_traits::filesystem::FlockGuard>, lingxi_traits::filesystem::FsError>
-    {
+    ) -> Result<Box<dyn traits::filesystem::FlockGuard>, traits::filesystem::FsError> {
         panic!("not called")
     }
-    async fn fsync(&self, _: &str) -> Result<(), lingxi_traits::filesystem::FsError> {
+    async fn fsync(&self, _: &str) -> Result<(), traits::filesystem::FsError> {
         panic!("not called")
     }
 }
 
 /// Convenience: return a `PanickingFs` wrapped as `Arc<dyn FileSystem>`.
-pub fn make_dummy_fs() -> Arc<dyn lingxi_traits::filesystem::FileSystem> {
+pub fn make_dummy_fs() -> Arc<dyn traits::filesystem::FileSystem> {
     Arc::new(PanickingFs) as _
 }
 
@@ -125,12 +120,12 @@ pub fn fresh_tx() -> ToolProgressSender {
 
 // ===== M4-02 shell-tool test stubs ==========================================
 
-use lingxi_traits::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
-use lingxi_traits::sandbox::{
+use std::sync::Mutex;
+use traits::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner};
+use traits::sandbox::{
     ProcessCommand as SbxCommand, Sandbox, SandboxBackend, SandboxCapability, SandboxError,
     SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
-use std::sync::Mutex;
 
 /// In-test `ProcessRunner` that returns a canned [`ProcessOutput`] for each
 /// `run` call. Panics on `spawn_background` (most tests don't need it; the
@@ -256,7 +251,7 @@ impl Default for StubClock {
     }
 }
 
-impl lingxi_traits::Clock for StubClock {
+impl traits::Clock for StubClock {
     fn now(&self) -> std::time::SystemTime {
         *self.now.lock().unwrap()
     }
@@ -264,7 +259,7 @@ impl lingxi_traits::Clock for StubClock {
 
 /// Convenience: wrap a fresh `StubClock` in `Arc<dyn Clock>`.
 #[must_use]
-pub fn make_stub_clock() -> Arc<dyn lingxi_traits::Clock> {
+pub fn make_stub_clock() -> Arc<dyn traits::Clock> {
     Arc::new(StubClock::new())
 }
 
@@ -273,20 +268,20 @@ pub fn make_stub_clock() -> Arc<dyn lingxi_traits::Clock> {
 pub struct PanickingHttp;
 
 #[async_trait]
-impl lingxi_traits::http::HttpTransport for PanickingHttp {
+impl traits::http::HttpTransport for PanickingHttp {
     async fn request(
         &self,
-        _: lingxi_protocol::HttpRequest,
-    ) -> Result<lingxi_protocol::HttpResponse, lingxi_traits::http::HttpError> {
-        Err(lingxi_traits::http::HttpError::InvalidRequest(
+        _: protocol::HttpRequest,
+    ) -> Result<protocol::HttpResponse, traits::http::HttpError> {
+        Err(traits::http::HttpError::InvalidRequest(
             "stub PanickingHttp: not configured for this test".into(),
         ))
     }
     async fn stream_sse(
         &self,
-        _: lingxi_protocol::HttpRequest,
-    ) -> Result<lingxi_traits::http::SseStream, lingxi_traits::http::HttpError> {
-        Err(lingxi_traits::http::HttpError::InvalidRequest(
+        _: protocol::HttpRequest,
+    ) -> Result<traits::http::SseStream, traits::http::HttpError> {
+        Err(traits::http::HttpError::InvalidRequest(
             "stub PanickingHttp: stream_sse not supported".into(),
         ))
     }
@@ -294,15 +289,15 @@ impl lingxi_traits::http::HttpTransport for PanickingHttp {
 
 /// Convenience: wrap [`PanickingHttp`] in `Arc<dyn HttpTransport>`.
 #[must_use]
-pub fn make_stub_http() -> Arc<dyn lingxi_traits::http::HttpTransport> {
+pub fn make_stub_http() -> Arc<dyn traits::http::HttpTransport> {
     Arc::new(PanickingHttp)
 }
 
 // ===== M4-04 workflow-tool test stubs =======================================
 
-use lingxi_traits::worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 use std::path::PathBuf;
 use std::time::Duration;
+use traits::worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
 
 /// In-memory `WorktreeManager` for hermetic tests. Tracks every call so tests
 /// can assert on `created`, `removed`, `listed`. Reuses the M2-01 slug helpers
@@ -467,13 +462,13 @@ fn flatten_slug_inline(slug: &str) -> String {
 /// the struct shape without affecting file-tool behavior).
 #[must_use]
 pub fn ctx_for_file_tools(
-    fs: Arc<dyn lingxi_traits::filesystem::FileSystem>,
-    bus: Arc<lingxi_telemetry::AnalyticsBus>,
+    fs: Arc<dyn traits::filesystem::FileSystem>,
+    bus: Arc<telemetry::AnalyticsBus>,
     trusted_dirs: Vec<std::path::PathBuf>,
 ) -> super::BuiltinToolContext {
-    use lingxi_permission::PermissionMode;
-    use lingxi_sandbox::decision::ProjectTrustLevel;
-    use lingxi_sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
+    use permission::PermissionMode;
+    use sandbox::decision::ProjectTrustLevel;
+    use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 
     let workspace = trusted_dirs
         .first()
@@ -503,7 +498,7 @@ pub fn ctx_for_file_tools(
             Platform::Linux
         },
         http: make_stub_http(),
-        provider: Arc::new(lingxi_api_client::AnthropicProvider::new("test-key", None)),
+        provider: Arc::new(api_client::AnthropicProvider::new("test-key", None)),
         default_model: "claude-sonnet-4-20250514".to_string(),
         worktree: make_mock_worktree(),
         subagent_spawner: None,
@@ -519,11 +514,11 @@ pub fn ctx_for_file_tools(
 #[must_use]
 #[allow(dead_code)] // used by M4-02 shell-tool tests (bash/powershell/repl/sleep)
 pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
-    use lingxi_permission::PermissionMode;
-    use lingxi_sandbox::decision::ProjectTrustLevel;
-    use lingxi_sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
-    use lingxi_telemetry::AnalyticsBus;
+    use permission::PermissionMode;
+    use sandbox::decision::ProjectTrustLevel;
+    use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
     use std::path::PathBuf;
+    use telemetry::AnalyticsBus;
 
     super::BuiltinToolContext {
         fs: make_dummy_fs(),
@@ -543,7 +538,7 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
             Platform::Linux
         },
         http: make_stub_http(),
-        provider: Arc::new(lingxi_api_client::AnthropicProvider::new("test-key", None)),
+        provider: Arc::new(api_client::AnthropicProvider::new("test-key", None)),
         default_model: "claude-sonnet-4-20250514".to_string(),
         worktree: make_mock_worktree(),
         subagent_spawner: None,

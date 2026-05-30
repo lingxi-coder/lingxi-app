@@ -1,12 +1,12 @@
 //! End-to-end: drive the reducer through a complete single-turn conversation
 //! against `MockHttpTransport`. This is the M1.1 acceptance test.
 
-use lingxi_api_client::AnthropicProvider;
-use lingxi_core::{reduce, ConversationState, Event, SessionState, Usage};
-use lingxi_protocol::{ConversationMessage, Effect, HttpResponse, MessageId, RequestId, SessionId};
-use lingxi_test_harness::mocks::{MockHttpTransport, ScriptedResponse};
-use lingxi_traits::HttpTransport;
+use api_client::AnthropicProvider;
+use engine::{reduce, ConversationState, Event, SessionState, Usage};
+use protocol::{ConversationMessage, Effect, HttpResponse, MessageId, RequestId, SessionId};
 use std::sync::Arc;
+use test_harness::mocks::{MockHttpTransport, ScriptedResponse};
+use traits::HttpTransport;
 
 #[tokio::test]
 async fn single_turn_conversation_against_mock_http() {
@@ -64,7 +64,7 @@ async fn single_turn_conversation_against_mock_http() {
 
     let final_message = ConversationMessage::Assistant {
         id: MessageId::new(),
-        content: vec![lingxi_protocol::ContentBlock::Text {
+        content: vec![protocol::ContentBlock::Text {
             text: "Hello!".into(),
         }],
         stop_reason: Some("end_turn".into()),

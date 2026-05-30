@@ -8,9 +8,9 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::OrchestratorHandle;
 use std::sync::Arc;
+use telemetry::tengu::command as cmd_evt;
+use traits::OrchestratorHandle;
 
 /// `/clear` handler — wipes the in-memory conversation.
 ///
@@ -33,17 +33,17 @@ impl ClearHandler {
 #[async_trait]
 impl BuiltinCommandHandler for ClearHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::CLEAR_STARTED);
+        telemetry::emit_command_started(cmd_evt::CLEAR_STARTED);
         match self.handle.clear_session().await {
             Ok(()) => {
-                lingxi_telemetry::emit_command_completed(cmd_evt::CLEAR_COMPLETED, "");
+                telemetry::emit_command_completed(cmd_evt::CLEAR_COMPLETED, "");
                 CommandResult::Done {
                     display: Some("Conversation cleared.".to_string()),
                 }
             }
             Err(e) => {
                 let msg = e.to_string();
-                lingxi_telemetry::emit_command_failed(cmd_evt::CLEAR_FAILED, &msg);
+                telemetry::emit_command_failed(cmd_evt::CLEAR_FAILED, &msg);
                 CommandResult::Done {
                     display: Some(format!("Could not clear conversation: {msg}")),
                 }
@@ -63,7 +63,7 @@ impl BuiltinCommandHandler for ClearHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
+    use orchestrator::test_support::MockOrchestratorHandle;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {

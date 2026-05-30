@@ -3,7 +3,7 @@
 //! Spec §7 line 730-745. The three M3-05-emitted events
 //! (`tengu_cost_recorded`, `tengu_cost_budget_warning`,
 //! `tengu_cost_budget_exceeded`) byte-match the wire shape locked by
-//! `lingxi_cost::events::emit_cost_recorded` (§4 Flow B). The remaining 7
+//! `cost::events::emit_cost_recorded` (§4 Flow B). The remaining 7
 //! schemas are M4-staged but locked here so M4 can emit without bumping
 //! the schema tree.
 

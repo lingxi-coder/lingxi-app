@@ -96,25 +96,25 @@ pub const TENGU_MEMORY_CASE_MISMATCH: &str = "tengu_memory_case_mismatch";
 /// `actual` is the filename component (NOT the full path); the full path is
 /// PII-tagged via `_PROTO_path`. No-op when `bus` is `None`.
 pub async fn emit_case_mismatch(
-    bus: Option<&Arc<lingxi_telemetry::AnalyticsBus>>,
+    bus: Option<&Arc<telemetry::AnalyticsBus>>,
     path: &std::path::Path,
     actual: &str,
 ) {
     let Some(bus) = bus else {
         return;
     };
-    let mut md = lingxi_telemetry::sink::LogEventMetadata::new();
+    let mut md = telemetry::sink::LogEventMetadata::new();
     md.insert(
         "_PROTO_path".into(),
-        lingxi_telemetry::sink::AnalyticsValue::String(
-            lingxi_telemetry::pii::PiiTagged::assert_pii_tagged_column(path.display().to_string())
+        telemetry::sink::AnalyticsValue::String(
+            telemetry::pii::PiiTagged::assert_pii_tagged_column(path.display().to_string())
                 .into_inner(),
         ),
     );
     md.insert(
         "actual".into(),
-        lingxi_telemetry::sink::AnalyticsValue::String(
-            lingxi_telemetry::pii::Verified::assert_safe(actual.to_string()).into_inner(),
+        telemetry::sink::AnalyticsValue::String(
+            telemetry::pii::Verified::assert_safe(actual.to_string()).into_inner(),
         ),
     );
     bus.log_event(TENGU_MEMORY_CASE_MISMATCH, md).await;
@@ -213,8 +213,8 @@ mod tests {
 #[cfg(test)]
 mod telemetry_tests {
     use super::*;
-    use lingxi_telemetry::{sink::LogEventMetadata, AnalyticsBus, AnalyticsSink, AnalyticsValue};
     use std::sync::{Arc, Mutex};
+    use telemetry::{sink::LogEventMetadata, AnalyticsBus, AnalyticsSink, AnalyticsValue};
 
     struct CapturingSink {
         events: Mutex<Vec<(String, LogEventMetadata)>>,

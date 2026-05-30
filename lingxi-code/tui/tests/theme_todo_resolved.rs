@@ -29,7 +29,7 @@ fn no_m7_15_todo_markers_remain() {
 
 #[test]
 fn system_text_warning_reads_theme_warning_color() {
-    use lingxi_tui::theme::Theme;
+    use tui::theme::Theme;
     let dark = Theme::dark();
     let light = Theme::light();
     // Sanity: the warning color differs between themes, so the renderer reading

@@ -1,11 +1,11 @@
 //! Error type for the API client layer.
 //!
-//! Wraps transport errors from [`lingxi_traits::HttpError`] and adds
+//! Wraps transport errors from [`traits::HttpError`] and adds
 //! semantic variants that downstream layers (retry, prompt-too-long
 //! handler) match on.
 
-use lingxi_traits::HttpError;
 use thiserror::Error;
+use traits::HttpError;
 
 /// Errors returned by the API client.
 #[derive(Debug, Clone, Error)]

@@ -2,7 +2,7 @@
 //! file/skill attachments. Plans 09 (skills) and 10 (session) inject real data;
 //! M1.7 ships the shape only.
 
-use lingxi_protocol::ConversationMessage;
+use protocol::ConversationMessage;
 
 /// Output of [`PostCompactBuilder::build`].
 #[derive(Debug, Clone)]
@@ -23,7 +23,7 @@ impl PostCompactBuilder {
     pub fn build(summary_text: &str) -> PostCompactMessages {
         PostCompactMessages {
             summary_messages: vec![ConversationMessage::System {
-                id: lingxi_protocol::MessageId::new(),
+                id: protocol::MessageId::new(),
                 content: format!("Compact boundary:\n{summary_text}"),
             }],
             attachments: Vec::new(),

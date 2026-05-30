@@ -10,13 +10,13 @@
 
 use crate::source::PluginSource;
 use crate::trust::PluginTrustLevel;
-use lingxi_hooks::HookDefinition;
-use lingxi_mcp::McpServerConfig;
-use lingxi_protocol::PluginId;
-use lingxi_traits::LspServerConfig;
+use hooks::HookDefinition;
+use mcp::McpServerConfig;
+use protocol::PluginId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use traits::LspServerConfig;
 
 /// Top-level plugin manifest.
 ///
@@ -45,7 +45,7 @@ pub struct PluginManifest {
     /// Plugin ids this plugin depends on.
     pub depends_on: Vec<PluginId>,
     /// Optional user-config schema. Sensitive fields are resolved through
-    /// the [`lingxi_secret::CredentialManager`] at load time.
+    /// the [`secret::CredentialManager`] at load time.
     pub user_config: Option<UserConfigSchema>,
     /// Plugin-declared channels (each binds an MCP server to a channel name).
     pub channels: Vec<PluginChannel>,
@@ -86,7 +86,7 @@ pub struct ComponentPath {
 
 /// User-config schema declared by a plugin.
 ///
-/// Sensitive fields are routed through [`lingxi_secret::CredentialManager`];
+/// Sensitive fields are routed through [`secret::CredentialManager`];
 /// non-sensitive required fields are pulled from
 /// [`PluginManifest::settings`] at load time.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

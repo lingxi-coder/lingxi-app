@@ -1,8 +1,6 @@
 //! Full `assemble_system_prompt` byte-locks (M5-03 Task 11).
 
-use lingxi_orchestrator::prompt::{
-    assemble_system_prompt, FileTree, MemoryFile, SystemPromptContext,
-};
+use orchestrator::prompt::{assemble_system_prompt, FileTree, MemoryFile, SystemPromptContext};
 use std::path::PathBuf;
 
 fn ctx_minimal() -> SystemPromptContext {
@@ -89,8 +87,5 @@ fn footer_byte_length_locked() {
     //
     // If this fails after a claude-code rebase, re-measure with a
     // one-off `println!("{}", FOOTER.len())` probe and update.
-    assert_eq!(
-        lingxi_orchestrator::prompt::locked_templates::FOOTER.len(),
-        633
-    );
+    assert_eq!(orchestrator::prompt::locked_templates::FOOTER.len(), 633);
 }

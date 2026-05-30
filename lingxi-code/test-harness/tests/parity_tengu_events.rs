@@ -4,8 +4,8 @@
 //! the M3-06 event-name list. Any drift from `ALL_EVENT_NAMES` indicates an
 //! append-only-violation per spec §7 line 787-789.
 
-use lingxi_test_harness::parity::load_fixture;
 use serde::Deserialize;
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 struct SamplePayload {
@@ -22,7 +22,7 @@ struct Fixture {
 #[test]
 fn event_names_match_registry_byte_for_byte() {
     let fx: Fixture = load_fixture("tengu_events");
-    let registry = lingxi_telemetry::tengu::ALL_EVENT_NAMES;
+    let registry = telemetry::tengu::ALL_EVENT_NAMES;
     assert_eq!(
         fx.event_names.len(),
         registry.len(),
@@ -40,9 +40,9 @@ fn event_names_match_registry_byte_for_byte() {
 
 #[test]
 fn cost_sample_payloads_match_mock_statsig_wire() {
-    use lingxi_protocol::Secret;
-    use lingxi_telemetry::{AnalyticsValue, LogEventMetadata, MockStatsigSink};
+    use protocol::Secret;
     use std::collections::HashMap;
+    use telemetry::{AnalyticsValue, LogEventMetadata, MockStatsigSink};
 
     let fx: Fixture = load_fixture("tengu_events");
     let sink = MockStatsigSink::new(Secret::new("test-sdk-key".into()));

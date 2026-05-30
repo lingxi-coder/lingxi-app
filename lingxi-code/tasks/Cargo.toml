@@ -1,16 +1,16 @@
 [package]
-name = "lingxi-tasks"
+name = "tasks"
 version = "0.8.0"
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-lingxi-protocol = { path = "../protocol" }
-lingxi-traits = { path = "../traits" }
-lingxi-core = { path = "../core" }
-lingxi-agent = { path = "../agent" }
-lingxi-tools = { path = "../tools" }
-lingxi-hooks = { path = "../hooks" }
+protocol = { path = "../protocol" }
+traits = { path = "../traits" }
+engine = { path = "../engine" }
+agent = { path = "../agent" }
+tools = { path = "../tools" }
+hooks = { path = "../hooks" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -20,7 +20,7 @@ tokio = { version = "1", features = ["sync"] }
 tracing.workspace = true
 
 [dev-dependencies]
-lingxi-test-harness = { path = "../test-harness" }
+test-harness = { path = "../test-harness" }
 tempfile = "3.13"
 futures = "0.3"
 tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }

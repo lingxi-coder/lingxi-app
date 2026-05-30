@@ -1,16 +1,16 @@
 //! M6-06 — verify the new `cost_tracker` field + builder are present
 //! and wired correctly.
 
-use lingxi_cost::pricing::PricingCatalog;
-use lingxi_cost::CostTracker;
-use lingxi_orchestrator::test_support::{
+use cost::pricing::PricingCatalog;
+use cost::CostTracker;
+use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_protocol::SessionId;
-use lingxi_tools::registry::ToolRegistry;
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use protocol::SessionId;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tools::registry::ToolRegistry;
 
 fn make_tracker() -> Arc<CostTracker> {
     let (tx, _rx) = mpsc::channel(8);

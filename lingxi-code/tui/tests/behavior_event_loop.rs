@@ -4,7 +4,7 @@
 //! when it grows the event loop with real component dispatch.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lingxi_tui::{
+use tui::{
     events::keymap::{classify, KeyClass},
     TuiApp, TuiEvent,
 };

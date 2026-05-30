@@ -1,13 +1,13 @@
 //! End-to-end: build an `AnalyticsBus` with each sink in turn, emit a few
 //! representative events from each tengu category, assert the sink saw them.
 
-use lingxi_protocol::Secret;
-use lingxi_telemetry::{
+use protocol::Secret;
+use std::collections::HashMap;
+use std::sync::Arc;
+use telemetry::{
     AnalyticsBus, AnalyticsValue, InMemorySink, LogEventMetadata, MockStatsigSink, NoOpSink,
     StatsigSink,
 };
-use std::collections::HashMap;
-use std::sync::Arc;
 
 #[tokio::test]
 async fn noop_sink_e2e_no_crash() {

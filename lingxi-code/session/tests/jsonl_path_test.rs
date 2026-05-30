@@ -1,7 +1,7 @@
 //! Project-dir + session-path resolver parity with
 //! claude-code/src/utils/sessionStoragePortable.ts:293-331.
 
-use lingxi_session::jsonl::path::{project_dir_name, session_path, MAX_SANITIZED_LENGTH};
+use session::jsonl::path::{project_dir_name, session_path, MAX_SANITIZED_LENGTH};
 use std::path::Path;
 
 #[test]

@@ -5,7 +5,7 @@ use crate::autocompact::{Autocompactor, CompactionError};
 use crate::microcompact::{Microcompactor, TimeBasedMCConfig};
 use crate::snip::SnipCompactor;
 use crate::thresholds::CompactionLayer;
-use lingxi_protocol::ConversationMessage;
+use protocol::ConversationMessage;
 use std::time::SystemTime;
 
 /// Result of one orchestrator pass.

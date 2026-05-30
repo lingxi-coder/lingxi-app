@@ -7,7 +7,7 @@
 //!
 //! M4-08 does NOT register the job into a scheduler — it parses, computes
 //! the next fire time, and persists the job descriptor. Production hosts
-//! pick the file up via `lingxi_cron::scheduler::CronScheduler`.
+//! pick the file up via `cron::scheduler::CronScheduler`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,16 +15,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::{PiiTagged, Verified};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{
+use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
+use serde_json::{json, Value};
+use telemetry::pii::{PiiTagged, Verified};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{
     SCHEDULE_CRON_COMPLETED, SCHEDULE_CRON_FAILED, SCHEDULE_CRON_STARTED,
 };
-use lingxi_telemetry::AnalyticsBus;
-use once_cell::sync::Lazy;
-use serde_json::{json, Value};
+use telemetry::AnalyticsBus;
 
 use crate::context::ToolUseContext;
 use crate::progress::ToolProgressSender;
@@ -33,9 +33,9 @@ use crate::tool_trait::{
     ToolStaticContext, ValidationError,
 };
 
-// -- Inlined 5-field cron parser (mirrors lingxi_cron::schedule) -------------
+// -- Inlined 5-field cron parser (mirrors cron::schedule) -------------
 //
-// We mirror the M1.17 lingxi_cron::schedule::{parse_cron, CronExpression,
+// We mirror the M1.17 cron::schedule::{parse_cron, CronExpression,
 // CronField, decompose} surface inline because the natural dependency
 // `lingxi-tools → lingxi-cron` would form a workspace cycle through
 // `lingxi-cron → lingxi-tasks → lingxi-agent → lingxi-memory →
@@ -113,7 +113,7 @@ fn field_match(field: &CronField, value: u32) -> bool {
 
 #[allow(clippy::cast_possible_truncation)]
 fn decompose(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
-    // Mirrors lingxi_cron::schedule::decompose (crude UTC; sufficient for matches()).
+    // Mirrors cron::schedule::decompose (crude UTC; sufficient for matches()).
     let minute = (secs / 60 % 60) as u32;
     let hour = (secs / 3600 % 24) as u32;
     let day = (secs / 86_400 % 30 + 1) as u32;
@@ -472,7 +472,7 @@ impl Tool for ScheduleCronTool {
 mod tests {
     use super::*;
     use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, HOME_LOCK};
-    use lingxi_traits::process::ProcessOutput;
+    use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {

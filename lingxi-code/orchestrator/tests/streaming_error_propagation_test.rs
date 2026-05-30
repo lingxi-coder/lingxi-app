@@ -1,20 +1,20 @@
 //! Mid-stream `Err` propagates as [`OrchestratorError::Streaming`] (M5-04 Task 17).
 
-use lingxi_api_client::ApiError;
-use lingxi_orchestrator::test_support::{
+use api_client::ApiError;
+use orchestrator::test_support::{
     content_block_start_text, message_start, text_delta, MockApiClient, MockOutputStream,
     MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig, OrchestratorError};
-use lingxi_tools::registry::ToolRegistry;
-use lingxi_traits::HttpError;
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig, OrchestratorError};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tools::registry::ToolRegistry;
+use traits::HttpError;
 
 #[tokio::test]
 async fn mid_stream_err_surfaces_as_streaming_variant() {
     // First three events OK, fourth event is an Err.
-    let turn: Vec<Result<lingxi_api_client::types::StreamEvent, ApiError>> = vec![
+    let turn: Vec<Result<api_client::types::StreamEvent, ApiError>> = vec![
         Ok(message_start("m1", "claude-opus-4-7")),
         Ok(content_block_start_text(0)),
         Ok(text_delta(0, "before err")),
@@ -31,7 +31,7 @@ async fn mid_stream_err_surfaces_as_streaming_variant() {
         batched,
         api,
         Arc::new(ToolRegistry::new()),
-        lingxi_orchestrator::test_support::noop_hook_executor(),
+        orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         output,
         Arc::new(StaticMemoryProvider::empty()),

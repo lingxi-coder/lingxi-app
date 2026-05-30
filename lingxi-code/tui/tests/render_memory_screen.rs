@@ -1,7 +1,7 @@
 //! M7-14 snapshot: the memory tier selector.
 
 use iocraft::prelude::*;
-use lingxi_tui::screens::memory::{MemoryScreen, MemoryTierEntry};
+use tui::screens::memory::{MemoryScreen, MemoryTierEntry};
 
 #[test]
 fn snapshot_memory_selector() {

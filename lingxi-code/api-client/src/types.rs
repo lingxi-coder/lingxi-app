@@ -1,7 +1,7 @@
 //! API-shape DTOs. Provider-neutral where possible; Anthropic-specific
 //! fields are flagged in their docs.
 
-use lingxi_protocol::{ConversationMessage, ToolUseId};
+use protocol::{ConversationMessage, ToolUseId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -47,7 +47,7 @@ pub struct MessageResponse {
 
 /// Wire-format content block emitted by the API.
 ///
-/// Distinct from `lingxi_protocol::ContentBlock` because the API shape carries
+/// Distinct from `protocol::ContentBlock` because the API shape carries
 /// raw `serde_json::Value` tool input and Anthropic-specific thinking blocks.
 ///
 /// Mirrors claude-code's `content_block` matrix in

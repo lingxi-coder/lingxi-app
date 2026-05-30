@@ -6,17 +6,17 @@ use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
 use crate::test_support::{HookExecutor, PermissionGate};
 use crate::turn_loop::{execute_one_turn, TurnStepOutcome};
+use api_client::{types::MessageResponse, AnthropicProvider, ApiError};
 use async_trait::async_trait;
-use lingxi_api_client::{types::MessageResponse, AnthropicProvider, ApiError};
-use lingxi_core::SessionState;
-use lingxi_protocol::{ConversationMessage, MessageId, SessionId};
-use lingxi_session::JsonlWriter;
-use lingxi_telemetry::tengu::orchestrator as orch_events;
-use lingxi_tools::registry::ToolRegistry;
-use lingxi_traits::{HttpTransport, OutputStream};
+use engine::SessionState;
+use protocol::{ConversationMessage, MessageId, SessionId};
+use session::JsonlWriter;
 use std::sync::Arc;
+use telemetry::tengu::orchestrator as orch_events;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use tools::registry::ToolRegistry;
+use traits::{HttpTransport, OutputStream};
 
 /// Minimal contract the orchestrator needs from the API client.
 ///
@@ -64,10 +64,7 @@ pub trait StreamingApiClient: Send + Sync {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<
-        futures::stream::BoxStream<
-            'static,
-            Result<lingxi_api_client::types::StreamEvent, ApiError>,
-        >,
+        futures::stream::BoxStream<'static, Result<api_client::types::StreamEvent, ApiError>>,
         ApiError,
     >;
 }
@@ -122,7 +119,7 @@ pub struct ConversationOrchestrator {
     /// caller can mix batched and streaming turns transparently.
     pub(crate) streaming_api: Arc<dyn StreamingApiClient>,
     pub(crate) tools: Arc<ToolRegistry>,
-    pub(crate) hooks: Arc<HookExecutor>, // = lingxi_hooks::HookExecutorImpl (M5-06)
+    pub(crate) hooks: Arc<HookExecutor>, // = hooks::HookExecutorImpl (M5-06)
     pub(crate) perms: Arc<dyn PermissionGate>,
     pub(crate) output: Arc<dyn OutputStream>,
     pub(crate) session: Arc<Mutex<SessionState>>,
@@ -141,7 +138,7 @@ pub struct ConversationOrchestrator {
     /// Cached UUID of the last persisted JSONL entry — used to populate
     /// `parentUuid` on the next append. Reset to `None` for fresh sessions.
     pub(crate) last_jsonl_uuid: Mutex<Option<String>>,
-    /// Set by [`lingxi_traits::OrchestratorHandle::request_exit`] (M5-10).
+    /// Set by [`traits::OrchestratorHandle::request_exit`] (M5-10).
     /// The REPL (M5-13) checks this flag at the start of each iteration
     /// and breaks the loop. Wraps `AtomicBool` so reads are lock-free.
     /// Once `true`, this flag is never cleared (idempotent `/exit`).
@@ -151,36 +148,36 @@ pub struct ConversationOrchestrator {
     /// zero-shaped stub. The CLI binary (M6-06 init.rs) always populates
     /// this so production `lingxi-cli` reports real cost; library callers
     /// (e.g. unit tests) may leave it `None`.
-    pub(crate) cost_tracker: Option<Arc<lingxi_cost::CostTracker>>,
+    pub(crate) cost_tracker: Option<Arc<cost::CostTracker>>,
     /// Monotonic timestamp captured at orchestrator construction. Used by
     /// `snapshot_cost` to compute the `session_duration` field of the
-    /// returned [`lingxi_traits::CostSnapshot`]. Stored as `std::time::Instant`
+    /// returned [`traits::CostSnapshot`]. Stored as `std::time::Instant`
     /// (not `tokio::time::Instant`) so the orchestrator can be constructed
     /// outside a tokio runtime if needed.
     pub(crate) session_started_at: std::time::Instant,
     /// Count of API responses successfully recorded into `cost_tracker`.
     /// Used to populate `CostSnapshot::api_calls`. Lives on the orchestrator
-    /// (rather than `lingxi_cost::CostState`) because `lingxi_cost::Usage`
+    /// (rather than `cost::CostState`) because `cost::Usage`
     /// does not carry a per-call counter; `ModelUsage::usage.add()` merges
     /// the token totals but not "how many times we recorded".
     pub(crate) api_calls_recorded: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// MCP registry (M2-02b). `None` when not wired — `list_mcp_servers`
     /// then returns `vec![]`. The CLI binary (M6-07 init.rs) populates
     /// this from `.mcp.json` + `~/.config/lingxi/mcp.json`.
-    pub(crate) mcp_registry: Option<Arc<lingxi_mcp::McpRegistry>>,
+    pub(crate) mcp_registry: Option<Arc<mcp::McpRegistry>>,
     /// Hook registry (M5-06). `None` when not wired — `list_hooks` then
     /// returns `vec![]`. The CLI binary populates from settings + plugin
     /// sources at startup.
-    pub(crate) hook_registry: Option<Arc<tokio::sync::RwLock<lingxi_hooks::HookRegistry>>>,
+    pub(crate) hook_registry: Option<Arc<tokio::sync::RwLock<hooks::HookRegistry>>>,
     /// Subagent catalog (M6-07). `None` when not wired — `list_agents`
     /// then returns `vec![]`. The CLI binary populates from
     /// `~/.claude/agents/` + project `.claude/agents/`.
-    pub(crate) agent_catalog: Option<Arc<tokio::sync::RwLock<Vec<lingxi_agent::AgentDefinition>>>>,
+    pub(crate) agent_catalog: Option<Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>>>,
     /// Compaction engine (M3-05) wired by `with_compaction`. `None` when
     /// not configured — `force_compact` then falls back to the legacy
     /// no-op semantics. The CLI binary (M6-08 init.rs) always populates
     /// this. (M6-08)
-    pub(crate) compaction: Option<Arc<lingxi_compaction::CompactionOrchestrator>>,
+    pub(crate) compaction: Option<Arc<compaction::CompactionOrchestrator>>,
 }
 
 impl ConversationOrchestrator {
@@ -204,7 +201,7 @@ impl ConversationOrchestrator {
         cwd: std::path::PathBuf,
     ) -> Self {
         // M5-14 Task 10: emit release markers once per process lifetime.
-        lingxi_telemetry::emit_release_markers_once();
+        telemetry::emit_release_markers_once();
         let session = SessionState::empty(SessionId::new(), config.model.clone());
         Self {
             config,
@@ -238,16 +235,16 @@ impl ConversationOrchestrator {
         self
     }
 
-    /// Attach a [`lingxi_cost::CostTracker`] so `snapshot_cost` returns
+    /// Attach a [`cost::CostTracker`] so `snapshot_cost` returns
     /// real numbers. Without this, `snapshot_cost` keeps the M5-10
     /// zero-shaped stub shape. (M6-06)
     #[must_use]
-    pub fn with_cost_tracker(mut self, tracker: Arc<lingxi_cost::CostTracker>) -> Self {
+    pub fn with_cost_tracker(mut self, tracker: Arc<cost::CostTracker>) -> Self {
         self.cost_tracker = Some(tracker);
         self
     }
 
-    /// Whether a [`lingxi_cost::CostTracker`] has been wired via
+    /// Whether a [`cost::CostTracker`] has been wired via
     /// [`Self::with_cost_tracker`]. (M6-06)
     #[must_use]
     pub fn has_cost_tracker(&self) -> bool {
@@ -257,7 +254,7 @@ impl ConversationOrchestrator {
     /// Attach an MCP registry so `list_mcp_servers` reports real data.
     /// Without this, the trait method returns `vec![]`. (M6-07)
     #[must_use]
-    pub fn with_mcp_registry(mut self, mcp: Arc<lingxi_mcp::McpRegistry>) -> Self {
+    pub fn with_mcp_registry(mut self, mcp: Arc<mcp::McpRegistry>) -> Self {
         self.mcp_registry = Some(mcp);
         self
     }
@@ -269,7 +266,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_hook_registry(
         mut self,
-        hooks: Arc<tokio::sync::RwLock<lingxi_hooks::HookRegistry>>,
+        hooks: Arc<tokio::sync::RwLock<hooks::HookRegistry>>,
     ) -> Self {
         self.hook_registry = Some(hooks);
         self
@@ -281,7 +278,7 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_agent_catalog(
         mut self,
-        agents: Arc<tokio::sync::RwLock<Vec<lingxi_agent::AgentDefinition>>>,
+        agents: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>>,
     ) -> Self {
         self.agent_catalog = Some(agents);
         self
@@ -308,19 +305,16 @@ impl ConversationOrchestrator {
         self.agent_catalog.is_some()
     }
 
-    /// Attach a [`lingxi_compaction::CompactionOrchestrator`] so
+    /// Attach a [`compaction::CompactionOrchestrator`] so
     /// `force_compact` performs real history compaction. Without this,
     /// `force_compact` retains the M5-10 no-op shape. (M6-08)
     #[must_use]
-    pub fn with_compaction(
-        mut self,
-        compactor: Arc<lingxi_compaction::CompactionOrchestrator>,
-    ) -> Self {
+    pub fn with_compaction(mut self, compactor: Arc<compaction::CompactionOrchestrator>) -> Self {
         self.compaction = Some(compactor);
         self
     }
 
-    /// Whether a [`lingxi_compaction::CompactionOrchestrator`] has been
+    /// Whether a [`compaction::CompactionOrchestrator`] has been
     /// wired via [`Self::with_compaction`]. (M6-08)
     #[must_use]
     pub fn has_compaction(&self) -> bool {
@@ -349,13 +343,13 @@ impl ConversationOrchestrator {
     pub async fn force_compact_with_cancel(
         &self,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<lingxi_traits::CompactionSummary, lingxi_traits::HandleError> {
+    ) -> Result<traits::CompactionSummary, traits::HandleError> {
         let Some(compactor) = self.compaction.clone() else {
             // No compactor wired — fall back to the M5-10 no-op shape so
             // pre-M6-08 callers do not break.
             let s = self.session.lock().await;
             let count = u32::try_from(s.history.len()).unwrap_or(u32::MAX);
-            return Ok(lingxi_traits::CompactionSummary {
+            return Ok(traits::CompactionSummary {
                 messages_before: count,
                 messages_after: count,
                 bytes_saved: 0,
@@ -369,10 +363,7 @@ impl ConversationOrchestrator {
             s.history.clone()
         };
         let messages_before = u32::try_from(history_before.len()).unwrap_or(u32::MAX);
-        let bytes_before: u64 = history_before
-            .iter()
-            .map(lingxi_protocol::text_byte_size)
-            .sum();
+        let bytes_before: u64 = history_before.iter().map(protocol::text_byte_size).sum();
 
         // Fast-path: if already cancelled, exit without invoking the
         // compactor. tokio::select! random-polls between ready arms,
@@ -380,7 +371,7 @@ impl ConversationOrchestrator {
         // deterministic even when process_iteration completes synchronously
         // (e.g. the M3 stub Autocompactor path).
         if cancel.is_cancelled() {
-            return Err(lingxi_traits::HandleError::ActionFailed(
+            return Err(traits::HandleError::ActionFailed(
                 "compaction cancelled".into(),
             ));
         }
@@ -393,12 +384,12 @@ impl ConversationOrchestrator {
         let result = tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                return Err(lingxi_traits::HandleError::ActionFailed(
+                return Err(traits::HandleError::ActionFailed(
                     "compaction cancelled".into(),
                 ));
             }
             r = compactor.process_iteration(history_before, 0) => r
-                .map_err(|e| lingxi_traits::HandleError::ActionFailed(format!("compaction failed: {e}")))?,
+                .map_err(|e| traits::HandleError::ActionFailed(format!("compaction failed: {e}")))?,
         };
 
         let mut history_after = result.messages;
@@ -412,10 +403,7 @@ impl ConversationOrchestrator {
         history_after.push(marker);
 
         let messages_after = u32::try_from(history_after.len()).unwrap_or(u32::MAX);
-        let bytes_after: u64 = history_after
-            .iter()
-            .map(lingxi_protocol::text_byte_size)
-            .sum();
+        let bytes_after: u64 = history_after.iter().map(protocol::text_byte_size).sum();
         let bytes_saved = bytes_before.saturating_sub(bytes_after);
 
         // Swap history under the same lock.
@@ -429,7 +417,7 @@ impl ConversationOrchestrator {
             .emit_compaction_completed(messages_before, messages_after, bytes_saved)
             .await;
 
-        Ok(lingxi_traits::CompactionSummary {
+        Ok(traits::CompactionSummary {
             messages_before,
             messages_after,
             bytes_saved,
@@ -440,30 +428,30 @@ impl ConversationOrchestrator {
     /// Returns `None` if no tracker was attached. Exposed so future M7
     /// renderers (per-model breakdown view) can access
     /// `CostState.per_model_usage` without going through the leaf-friendly
-    /// [`lingxi_traits::CostSnapshot`] projection. (M6-06)
-    pub async fn cost_state(&self) -> Option<lingxi_cost::CostState> {
+    /// [`traits::CostSnapshot`] projection. (M6-06)
+    pub async fn cost_state(&self) -> Option<cost::CostState> {
         let t = self.cost_tracker.as_ref()?;
         Some(t.snapshot().await)
     }
 
-    /// Project the wired [`lingxi_cost::CostTracker`] state onto the
-    /// leaf-friendly [`lingxi_traits::CostSnapshot`]. Used by both the
+    /// Project the wired [`cost::CostTracker`] state onto the
+    /// leaf-friendly [`traits::CostSnapshot`]. Used by both the
     /// trait method `snapshot_cost` and the per-turn end-of-turn emitter
     /// (`OutputStream::emit_end_turn`). (M6-06)
     ///
     /// If no tracker is wired, returns a zero-valued snapshot keyed to
     /// the current session id (backward-compat shape).
-    pub async fn snapshot_cost_real(&self) -> lingxi_traits::CostSnapshot {
+    pub async fn snapshot_cost_real(&self) -> traits::CostSnapshot {
         let session_id = self.session.lock().await.session_id;
         let Some(tracker) = self.cost_tracker.as_ref() else {
-            return lingxi_traits::CostSnapshot {
+            return traits::CostSnapshot {
                 session_id,
-                ..lingxi_traits::CostSnapshot::default()
+                ..traits::CostSnapshot::default()
             };
         };
         let state = tracker.snapshot().await;
         // Sum per-model usage into aggregate token counters. api_calls comes
-        // from our own counter because lingxi_cost::Usage does not carry a
+        // from our own counter because cost::Usage does not carry a
         // per-call count (its `add()` merges token totals only).
         let (mut input_tokens, mut output_tokens) = (0u64, 0u64);
         for entry in state.per_model_usage.values() {
@@ -476,7 +464,7 @@ impl ConversationOrchestrator {
         #[allow(clippy::cast_precision_loss)]
         let total_usd = (state.total_nano_usd as f64) / 1_000_000_000.0;
         let session_duration = self.session_started_at.elapsed();
-        lingxi_traits::CostSnapshot {
+        traits::CostSnapshot {
             session_id,
             total_nano_usd: state.total_nano_usd,
             total_tokens: input_tokens.saturating_add(output_tokens),
@@ -500,7 +488,7 @@ impl ConversationOrchestrator {
         msg: &ConversationMessage,
         session_id: &str,
         parent_uuid: Option<String>,
-    ) -> lingxi_session::JsonlMessage {
+    ) -> session::JsonlMessage {
         let (kind, inner_message) = match msg {
             ConversationMessage::User { content, .. } => (
                 "user",
@@ -519,7 +507,7 @@ impl ConversationOrchestrator {
         // form which carries the `"msg:"` prefix — that prefix would break the
         // byte-equivalent JSONL schema (see `JsonlMessage::uuid` doc) and the
         // `validate_uuid` regex.
-        lingxi_session::JsonlMessage {
+        session::JsonlMessage {
             message_type: kind.to_string(),
             uuid: msg.id().as_uuid().to_string(),
             parent_uuid,
@@ -557,11 +545,11 @@ impl ConversationOrchestrator {
         match writer.append(&jmsg).await {
             Ok(()) => {
                 *self.last_jsonl_uuid.lock().await = Some(uuid_for_chain.clone());
-                lingxi_telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
+                telemetry::emit_session_appended(&session_id_str, &uuid_for_chain);
             }
             Err(e) => {
                 tracing::error!(error = %e, "jsonl writer append failed");
-                lingxi_telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
+                telemetry::emit_session_corrupted(&session_id_str, &e.to_string());
             }
         }
     }
@@ -723,7 +711,7 @@ impl ConversationOrchestrator {
         prompt: &str,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         use crate::streaming_loop::{dispatch_tool_uses_concurrent, pump_stream};
-        use lingxi_protocol::ContentBlock;
+        use protocol::ContentBlock;
 
         // 0. Build the system prompt for THIS turn. Override always wins.
         let system_prompt: Option<String> = match &self.config.system_prompt_override {
@@ -922,7 +910,7 @@ impl ConversationOrchestrator {
     ///
     /// The REPL checks this after each dispatch and breaks the loop if
     /// `true`. The flag is set via
-    /// [`lingxi_traits::OrchestratorHandle::request_exit`]; once set it
+    /// [`traits::OrchestratorHandle::request_exit`]; once set it
     /// never resets (idempotent `/exit`).
     pub fn current_should_exit(&self) -> bool {
         self.should_exit.load(std::sync::atomic::Ordering::SeqCst)
@@ -1095,10 +1083,7 @@ impl<T: HttpTransport + Send + Sync + 'static> StreamingApiClient
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<
-        futures::stream::BoxStream<
-            'static,
-            Result<lingxi_api_client::types::StreamEvent, ApiError>,
-        >,
+        futures::stream::BoxStream<'static, Result<api_client::types::StreamEvent, ApiError>>,
         ApiError,
     > {
         self.provider
@@ -1125,13 +1110,10 @@ impl StreamingApiClient for NoStreamingApiClient {
         _messages: Vec<ConversationMessage>,
         _tools: Vec<serde_json::Value>,
     ) -> Result<
-        futures::stream::BoxStream<
-            'static,
-            Result<lingxi_api_client::types::StreamEvent, ApiError>,
-        >,
+        futures::stream::BoxStream<'static, Result<api_client::types::StreamEvent, ApiError>>,
         ApiError,
     > {
-        Err(ApiError::Http(lingxi_traits::HttpError::Connection(
+        Err(ApiError::Http(traits::HttpError::Connection(
             "no streaming client configured".into(),
         )))
     }

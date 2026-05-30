@@ -1,14 +1,14 @@
 //! User-config loader.
 //!
 //! Resolves `user_config` field values declared by a [`crate::manifest::PluginManifest`].
-//! Sensitive fields go through [`lingxi_secret::CredentialManager`];
+//! Sensitive fields go through [`secret::CredentialManager`];
 //! non-sensitive required fields are pulled from
 //! [`crate::manifest::PluginManifest::settings`].
 //!
 //! See spec §15.4.
 
 use crate::manifest::PluginManifest;
-use lingxi_secret::CredentialManager;
+use secret::CredentialManager;
 use serde_json::{Map, Value};
 use thiserror::Error;
 

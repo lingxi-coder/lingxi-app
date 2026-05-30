@@ -10,9 +10,9 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::{CheckStatus, DoctorReport, OrchestratorHandle};
 use std::sync::Arc;
+use telemetry::tengu::command as cmd_evt;
+use traits::{CheckStatus, DoctorReport, OrchestratorHandle};
 
 /// `/doctor` handler — renders the locked diagnostic panel.
 #[derive(Clone)]
@@ -31,9 +31,9 @@ impl DoctorHandler {
 #[async_trait]
 impl BuiltinCommandHandler for DoctorHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::DOCTOR_STARTED);
+        telemetry::emit_command_started(cmd_evt::DOCTOR_STARTED);
         let report = self.handle.run_doctor_checks().await;
-        lingxi_telemetry::emit_command_completed(cmd_evt::DOCTOR_COMPLETED, "");
+        telemetry::emit_command_completed(cmd_evt::DOCTOR_COMPLETED, "");
         CommandResult::Done {
             display: Some(render_doctor(&report)),
         }
@@ -71,8 +71,8 @@ pub fn render_doctor(r: &DoctorReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
-    use lingxi_traits::{DoctorCheck, DoctorSummary};
+    use orchestrator::test_support::MockOrchestratorHandle;
+    use traits::{DoctorCheck, DoctorSummary};
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {

@@ -196,7 +196,7 @@ impl BudgetEnforcer {
     pub async fn check_post_api_call_with_bus(
         &self,
         _realized_cost: u64,
-        bus: Option<&Arc<lingxi_telemetry::AnalyticsBus>>,
+        bus: Option<&Arc<telemetry::AnalyticsBus>>,
     ) {
         let total = self.cost_tracker.total_nano_usd().await;
         let Some(max) = self.config.max_session_nano_usd else {
@@ -248,12 +248,12 @@ impl BudgetEnforcer {
 /// below `i64::MAX`, so the cast is exact and round-trips losslessly back to
 /// the `u64` schema field at the `StatsigSink` wire-encode site).
 async fn emit_budget_warning(
-    bus: &Arc<lingxi_telemetry::AnalyticsBus>,
+    bus: &Arc<telemetry::AnalyticsBus>,
     limit_nano_usd: u64,
     current_nano_usd: u64,
     percent_bps: u32,
 ) {
-    use lingxi_telemetry::{AnalyticsValue, LogEventMetadata};
+    use telemetry::{AnalyticsValue, LogEventMetadata};
     let mut m = LogEventMetadata::new();
     m.insert(
         "limit_usd".into(),
@@ -274,11 +274,11 @@ async fn emit_budget_warning(
 
 /// Emit `tengu_cost_budget_exceeded` with the 2-key spec-locked payload.
 async fn emit_budget_exceeded(
-    bus: &Arc<lingxi_telemetry::AnalyticsBus>,
+    bus: &Arc<telemetry::AnalyticsBus>,
     limit_nano_usd: u64,
     current_nano_usd: u64,
 ) {
-    use lingxi_telemetry::{AnalyticsValue, LogEventMetadata};
+    use telemetry::{AnalyticsValue, LogEventMetadata};
     let mut m = LogEventMetadata::new();
     m.insert(
         "limit_usd".into(),
@@ -308,10 +308,10 @@ mod tests {
     use crate::usage::{TokenUsage, Usage};
     use crate::ModelRef;
     use async_trait::async_trait;
-    use lingxi_protocol::SessionId;
-    use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
+    use protocol::SessionId;
     use std::sync::Mutex;
     use std::time::Duration;
+    use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
     use tokio::sync::mpsc;
 
     fn make_tracker() -> Arc<CostTracker> {

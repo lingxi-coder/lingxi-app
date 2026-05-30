@@ -7,7 +7,7 @@
 //!   always emits camelCase (upstream parity).
 //!
 //! M4-08 stops at the local-file read/write; it does NOT consult the broader
-//! `lingxi_settings::SettingsJson` (whose schema currently locks
+//! `settings::SettingsJson` (whose schema currently locks
 //! `outputStyle: Option<BTreeMap>` rather than a string, conflicting with the
 //! plan's 4-field byte-lock). Operating directly on the JSON keeps ConfigTool
 //! aligned with the spec's wire allowlist while leaving the M3-01 schema
@@ -23,14 +23,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::{PiiTagged, Verified};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{CONFIG_COMPLETED, CONFIG_FAILED, CONFIG_STARTED};
-use lingxi_telemetry::AnalyticsBus;
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Map, Value};
+use telemetry::pii::{PiiTagged, Verified};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{CONFIG_COMPLETED, CONFIG_FAILED, CONFIG_STARTED};
+use telemetry::AnalyticsBus;
 
 use crate::context::ToolUseContext;
 use crate::progress::ToolProgressSender;
@@ -410,7 +410,7 @@ impl Tool for ConfigTool {
 mod tests {
     use super::*;
     use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, HOME_LOCK};
-    use lingxi_traits::process::ProcessOutput;
+    use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {

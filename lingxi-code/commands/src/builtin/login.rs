@@ -8,9 +8,9 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::AuthHandle;
 use std::sync::Arc;
+use telemetry::tengu::command as cmd_evt;
+use traits::AuthHandle;
 
 /// `/login` handler — drives the [`AuthHandle::login`] flow.
 #[derive(Clone)]
@@ -29,10 +29,10 @@ impl LoginHandler {
 #[async_trait]
 impl BuiltinCommandHandler for LoginHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::LOGIN_STARTED);
+        telemetry::emit_command_started(cmd_evt::LOGIN_STARTED);
         match self.auth.login().await {
             Ok(info) => {
-                lingxi_telemetry::emit_command_completed(cmd_evt::LOGIN_COMPLETED, &info.org_id);
+                telemetry::emit_command_completed(cmd_evt::LOGIN_COMPLETED, &info.org_id);
                 CommandResult::Done {
                     display: Some(format!(
                         "Logged in as {} (org: {}).",
@@ -42,7 +42,7 @@ impl BuiltinCommandHandler for LoginHandler {
             }
             Err(e) => {
                 let msg = e.to_string();
-                lingxi_telemetry::emit_command_failed(cmd_evt::LOGIN_FAILED, &msg);
+                telemetry::emit_command_failed(cmd_evt::LOGIN_FAILED, &msg);
                 CommandResult::Done {
                     display: Some(format!("Could not log in: {msg}")),
                 }
@@ -60,8 +60,8 @@ impl BuiltinCommandHandler for LoginHandler {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use lingxi_traits::{AuthError, LoginInfo};
     use std::sync::Mutex as StdMutex;
+    use traits::{AuthError, LoginInfo};
 
     /// Test double for [`AuthHandle`]. Exposes the same `Ok` / `Err`
     /// constructors as the test helpers in M5-11 T9.

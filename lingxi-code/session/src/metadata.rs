@@ -4,7 +4,7 @@
 //! model selection, enabled plugins, and other context that does not live
 //! inside the conversation itself.
 
-use lingxi_protocol::{PluginId, SessionId};
+use protocol::{PluginId, SessionId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;

@@ -18,13 +18,13 @@ use crate::tool_trait::{
     ValidationError,
 };
 use async_trait::async_trait;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 
 /// 2-minute REPL timeout (no per-call override).
 pub const REPL_DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -146,7 +146,7 @@ impl Tool for REPLTool {
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        use lingxi_traits::sandbox::ProcessCommand as SbxCommand;
+        use traits::sandbox::ProcessCommand as SbxCommand;
 
         let lang = input
             .get("language")
@@ -219,7 +219,7 @@ impl Tool for REPLTool {
 mod tests {
     use super::*;
     use crate::builtin::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use lingxi_traits::process::ProcessOutput;
+    use traits::process::ProcessOutput;
 
     #[test]
     fn lang_exec_python_routes_via_stdin() {

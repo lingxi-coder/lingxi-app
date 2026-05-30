@@ -4,8 +4,8 @@
 
 #![allow(clippy::unwrap_used)]
 
-use lingxi_test_harness::parity::load_fixture;
 use serde::Deserialize;
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 struct ToolNames {
@@ -55,48 +55,45 @@ fn fx() -> Fixture {
 #[test]
 fn agent_task_tool_names_match_production_constants() {
     let f = fx();
-    assert_eq!(
-        f.tool_names.agent,
-        lingxi_tools::builtin::agent::AGENT_TOOL_NAME
-    );
+    assert_eq!(f.tool_names.agent, tools::builtin::agent::AGENT_TOOL_NAME);
     assert_eq!(
         f.tool_names.agent_legacy_alias,
-        lingxi_tools::builtin::agent::LEGACY_AGENT_TOOL_NAME
+        tools::builtin::agent::LEGACY_AGENT_TOOL_NAME
     );
     assert_eq!(
         f.tool_names.send_message,
-        lingxi_tools::builtin::send_message::SEND_MESSAGE_TOOL_NAME
+        tools::builtin::send_message::SEND_MESSAGE_TOOL_NAME
     );
     assert_eq!(
         f.tool_names.task_create,
-        lingxi_tools::builtin::task::TASK_CREATE_TOOL_NAME
+        tools::builtin::task::TASK_CREATE_TOOL_NAME
     );
     assert_eq!(
         f.tool_names.task_get,
-        lingxi_tools::builtin::task::TASK_GET_TOOL_NAME
+        tools::builtin::task::TASK_GET_TOOL_NAME
     );
     assert_eq!(
         f.tool_names.task_list,
-        lingxi_tools::builtin::task::TASK_LIST_TOOL_NAME
+        tools::builtin::task::TASK_LIST_TOOL_NAME
     );
     assert_eq!(
         f.tool_names.task_update,
-        lingxi_tools::builtin::task::TASK_UPDATE_TOOL_NAME
+        tools::builtin::task::TASK_UPDATE_TOOL_NAME
     );
     assert_eq!(
         f.tool_names.task_stop,
-        lingxi_tools::builtin::task::TASK_STOP_TOOL_NAME
+        tools::builtin::task::TASK_STOP_TOOL_NAME
     );
     assert_eq!(
         f.tool_names.task_output,
-        lingxi_tools::builtin::task::TASK_OUTPUT_TOOL_NAME
+        tools::builtin::task::TASK_OUTPUT_TOOL_NAME
     );
 }
 
 #[test]
 fn six_builtin_subagent_types_match_production() {
     let f = fx();
-    let prod: Vec<String> = lingxi_tools::builtin::agent::BUILTIN_SUBAGENT_TYPES
+    let prod: Vec<String> = tools::builtin::agent::BUILTIN_SUBAGENT_TYPES
         .iter()
         .map(|s| (*s).to_string())
         .collect();
@@ -109,7 +106,7 @@ fn send_message_claim_window_matches_production() {
     let f = fx();
     assert_eq!(f.send_message_claim_window_secs, 30);
     assert_eq!(
-        lingxi_tools::builtin::send_message::SEND_MESSAGE_CLAIM_WINDOW.as_secs(),
+        tools::builtin::send_message::SEND_MESSAGE_CLAIM_WINDOW.as_secs(),
         f.send_message_claim_window_secs
     );
 }
@@ -126,7 +123,7 @@ fn task_id_regex_matches_validate_task_id_acceptance() {
             "fixture regex must accept {id} (prefix={prefix})"
         );
         assert!(
-            lingxi_tools::builtin::task::validate_task_id(&id).is_ok(),
+            tools::builtin::task::validate_task_id(&id).is_ok(),
             "validate_task_id must accept {id}"
         );
     }
@@ -139,7 +136,7 @@ fn task_id_regex_matches_validate_task_id_acceptance() {
 #[test]
 fn task_types_match_production() {
     let f = fx();
-    let prod: Vec<String> = lingxi_tools::builtin::task::TASK_TYPES
+    let prod: Vec<String> = tools::builtin::task::TASK_TYPES
         .iter()
         .map(|s| (*s).to_string())
         .collect();
@@ -149,7 +146,7 @@ fn task_types_match_production() {
 #[test]
 fn task_status_values_match_production() {
     let f = fx();
-    let prod: Vec<String> = lingxi_tools::builtin::task::TASK_STATUSES
+    let prod: Vec<String> = tools::builtin::task::TASK_STATUSES
         .iter()
         .map(|s| (*s).to_string())
         .collect();
@@ -162,7 +159,7 @@ fn telemetry_events_present_in_tengu_tool_names_array() {
     assert_eq!(f.telemetry_events.len(), 24, "M4-05 locks 24 events");
     for name in &f.telemetry_events {
         assert!(
-            lingxi_telemetry::tengu::ALL_EVENT_NAMES.contains(&name.as_str()),
+            telemetry::tengu::ALL_EVENT_NAMES.contains(&name.as_str()),
             "fixture event {name} missing from tengu::ALL_EVENT_NAMES"
         );
     }
@@ -172,7 +169,7 @@ fn telemetry_events_present_in_tengu_tool_names_array() {
 fn budget_denied_byte_lock_matches_m3_05_format() {
     let f = fx();
     // Production formatter mirrors `cost/src/budget.rs` test fixture string.
-    let built = lingxi_tools::builtin::agent::format_budget_denied(150_750_000_000);
+    let built = tools::builtin::agent::format_budget_denied(150_750_000_000);
     assert_eq!(built, f.constants_lock.m3_05_byte_locked_budget_example);
     assert_eq!(built, "Budget exceeded ($150.75); stopped.");
 }
@@ -182,15 +179,15 @@ fn constants_lock_block_matches_production() {
     let f = fx();
     assert_eq!(
         f.constants_lock.agent_tool_name,
-        lingxi_tools::builtin::agent::AGENT_TOOL_NAME
+        tools::builtin::agent::AGENT_TOOL_NAME
     );
     assert_eq!(
         f.constants_lock.legacy_agent_tool_name,
-        lingxi_tools::builtin::agent::LEGACY_AGENT_TOOL_NAME
+        tools::builtin::agent::LEGACY_AGENT_TOOL_NAME
     );
     assert_eq!(
         f.constants_lock.send_message_tool_name,
-        lingxi_tools::builtin::send_message::SEND_MESSAGE_TOOL_NAME
+        tools::builtin::send_message::SEND_MESSAGE_TOOL_NAME
     );
     assert_eq!(
         f.constants_lock.send_message_claim_window_rust,
@@ -198,6 +195,6 @@ fn constants_lock_block_matches_production() {
     );
     assert_eq!(
         f.constants_lock.subagent_budget_denied_prefix,
-        lingxi_tools::builtin::agent::SUBAGENT_BUDGET_DENIED_PREFIX
+        tools::builtin::agent::SUBAGENT_BUDGET_DENIED_PREFIX
     );
 }

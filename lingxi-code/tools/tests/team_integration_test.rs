@@ -5,16 +5,16 @@
 #![allow(clippy::too_many_lines)]
 
 use async_trait::async_trait;
-use lingxi_telemetry::AnalyticsBus;
-use lingxi_tools::builtin::{BuiltinToolContext, TeamCreateTool, TeamDeleteTool};
-use lingxi_tools::context::{ToolUseContext, ToolUseOptions};
-use lingxi_tools::progress::progress_channel;
-use lingxi_tools::tool_trait::{Tool, ToolError};
-use lingxi_traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use serde_json::json;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use telemetry::AnalyticsBus;
 use tempfile::TempDir;
+use tools::builtin::{BuiltinToolContext, TeamCreateTool, TeamDeleteTool};
+use tools::context::{ToolUseContext, ToolUseOptions};
+use tools::progress::progress_channel;
+use tools::tool_trait::{Tool, ToolError};
+use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 
 // `std::env::set_var` mutates process-wide state. The four tests in this file
 // each redirect HOME, so we serialize them through a global Mutex to prevent
@@ -85,23 +85,23 @@ impl FileSystem for PanickingFs {
 // Minimal stubs for the other `BuiltinToolContext` fields.
 struct NoopProcess;
 #[async_trait]
-impl lingxi_traits::process::ProcessRunner for NoopProcess {
+impl traits::process::ProcessRunner for NoopProcess {
     async fn run(
         &self,
-        _: &lingxi_traits::sandbox::SandboxedCommand,
-    ) -> Result<lingxi_traits::process::ProcessOutput, lingxi_traits::process::ProcessError> {
+        _: &traits::sandbox::SandboxedCommand,
+    ) -> Result<traits::process::ProcessOutput, traits::process::ProcessError> {
         panic!("team integration tests do not invoke process runner")
     }
     async fn spawn_background(
         &self,
-        _: &lingxi_traits::sandbox::SandboxedCommand,
-    ) -> Result<lingxi_traits::process::ProcessHandle, lingxi_traits::process::ProcessError> {
+        _: &traits::sandbox::SandboxedCommand,
+    ) -> Result<traits::process::ProcessHandle, traits::process::ProcessError> {
         panic!("not called")
     }
     async fn kill(
         &self,
-        _: &lingxi_traits::process::ProcessHandle,
-    ) -> Result<(), lingxi_traits::process::ProcessError> {
+        _: &traits::process::ProcessHandle,
+    ) -> Result<(), traits::process::ProcessError> {
         Ok(())
     }
     fn is_available(&self) -> bool {
@@ -111,49 +111,48 @@ impl lingxi_traits::process::ProcessRunner for NoopProcess {
 
 struct NoopSandbox;
 #[async_trait]
-impl lingxi_traits::sandbox::Sandbox for NoopSandbox {
+impl traits::sandbox::Sandbox for NoopSandbox {
     fn is_available(&self) -> bool {
         true
     }
-    fn backend(&self) -> lingxi_traits::sandbox::SandboxBackend {
-        lingxi_traits::sandbox::SandboxBackend::None
+    fn backend(&self) -> traits::sandbox::SandboxBackend {
+        traits::sandbox::SandboxBackend::None
     }
     fn prepare(
         &self,
-        cmd: lingxi_traits::sandbox::ProcessCommand,
-        _: &lingxi_traits::sandbox::SandboxPolicy,
-    ) -> Result<lingxi_traits::sandbox::SandboxedCommand, lingxi_traits::sandbox::SandboxError>
-    {
-        Ok(lingxi_traits::sandbox::SandboxedCommand::__new_sandboxed(
+        cmd: traits::sandbox::ProcessCommand,
+        _: &traits::sandbox::SandboxPolicy,
+    ) -> Result<traits::sandbox::SandboxedCommand, traits::sandbox::SandboxError> {
+        Ok(traits::sandbox::SandboxedCommand::__new_sandboxed(
             cmd,
-            lingxi_traits::sandbox::SandboxedTag::BypassAuditedWithReason {
+            traits::sandbox::SandboxedTag::BypassAuditedWithReason {
                 reason: "test".into(),
             },
         ))
     }
     fn bypass_with_audit(
         &self,
-        cmd: lingxi_traits::sandbox::ProcessCommand,
+        cmd: traits::sandbox::ProcessCommand,
         reason: &str,
-    ) -> lingxi_traits::sandbox::SandboxedCommand {
-        lingxi_traits::sandbox::SandboxedCommand::__new_sandboxed(
+    ) -> traits::sandbox::SandboxedCommand {
+        traits::sandbox::SandboxedCommand::__new_sandboxed(
             cmd,
-            lingxi_traits::sandbox::SandboxedTag::BypassAuditedWithReason {
+            traits::sandbox::SandboxedTag::BypassAuditedWithReason {
                 reason: reason.into(),
             },
         )
     }
-    async fn probe_capability(&self) -> lingxi_traits::sandbox::SandboxCapability {
-        lingxi_traits::sandbox::SandboxCapability {
+    async fn probe_capability(&self) -> traits::sandbox::SandboxCapability {
+        traits::sandbox::SandboxCapability {
             available: true,
             reason: None,
-            features: lingxi_traits::sandbox::SandboxFeatures::default(),
+            features: traits::sandbox::SandboxFeatures::default(),
         }
     }
 }
 
 struct NoopClock;
-impl lingxi_traits::Clock for NoopClock {
+impl traits::Clock for NoopClock {
     fn now(&self) -> std::time::SystemTime {
         std::time::UNIX_EPOCH
     }
@@ -161,20 +160,20 @@ impl lingxi_traits::Clock for NoopClock {
 
 struct NoopHttp;
 #[async_trait]
-impl lingxi_traits::http::HttpTransport for NoopHttp {
+impl traits::http::HttpTransport for NoopHttp {
     async fn request(
         &self,
-        _: lingxi_protocol::HttpRequest,
-    ) -> Result<lingxi_protocol::HttpResponse, lingxi_traits::http::HttpError> {
-        Err(lingxi_traits::http::HttpError::InvalidRequest(
+        _: protocol::HttpRequest,
+    ) -> Result<protocol::HttpResponse, traits::http::HttpError> {
+        Err(traits::http::HttpError::InvalidRequest(
             "NoopHttp: not configured for team integration".into(),
         ))
     }
     async fn stream_sse(
         &self,
-        _: lingxi_protocol::HttpRequest,
-    ) -> Result<lingxi_traits::http::SseStream, lingxi_traits::http::HttpError> {
-        Err(lingxi_traits::http::HttpError::InvalidRequest(
+        _: protocol::HttpRequest,
+    ) -> Result<traits::http::SseStream, traits::http::HttpError> {
+        Err(traits::http::HttpError::InvalidRequest(
             "NoopHttp: stream_sse not supported".into(),
         ))
     }
@@ -182,32 +181,30 @@ impl lingxi_traits::http::HttpTransport for NoopHttp {
 
 struct NoopWorktree;
 #[async_trait]
-impl lingxi_traits::worktree::WorktreeManager for NoopWorktree {
+impl traits::worktree::WorktreeManager for NoopWorktree {
     async fn create_worktree(
         &self,
         _: &str,
         _: Option<&str>,
         _: &[std::path::PathBuf],
-    ) -> Result<lingxi_traits::worktree::WorktreeHandle, lingxi_traits::worktree::WorktreeError>
-    {
-        Err(lingxi_traits::worktree::WorktreeError::Unsupported)
+    ) -> Result<traits::worktree::WorktreeHandle, traits::worktree::WorktreeError> {
+        Err(traits::worktree::WorktreeError::Unsupported)
     }
     async fn remove_worktree(
         &self,
-        _: &lingxi_traits::worktree::WorktreeHandle,
-    ) -> Result<(), lingxi_traits::worktree::WorktreeError> {
-        Err(lingxi_traits::worktree::WorktreeError::Unsupported)
+        _: &traits::worktree::WorktreeHandle,
+    ) -> Result<(), traits::worktree::WorktreeError> {
+        Err(traits::worktree::WorktreeError::Unsupported)
     }
     async fn list_worktrees(
         &self,
-    ) -> Result<Vec<lingxi_traits::worktree::WorktreeInfo>, lingxi_traits::worktree::WorktreeError>
-    {
+    ) -> Result<Vec<traits::worktree::WorktreeInfo>, traits::worktree::WorktreeError> {
         Ok(Vec::new())
     }
     async fn cleanup_stale(
         &self,
         _: std::time::Duration,
-    ) -> Result<Vec<std::path::PathBuf>, lingxi_traits::worktree::WorktreeError> {
+    ) -> Result<Vec<std::path::PathBuf>, traits::worktree::WorktreeError> {
         Ok(Vec::new())
     }
     fn is_supported(&self) -> bool {
@@ -216,9 +213,9 @@ impl lingxi_traits::worktree::WorktreeManager for NoopWorktree {
 }
 
 fn make_ctx(home: &std::path::Path) -> BuiltinToolContext {
-    use lingxi_permission::PermissionMode;
-    use lingxi_sandbox::decision::ProjectTrustLevel;
-    use lingxi_sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
+    use permission::PermissionMode;
+    use sandbox::decision::ProjectTrustLevel;
+    use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 
     BuiltinToolContext {
         fs: Arc::new(PanickingFs),
@@ -238,7 +235,7 @@ fn make_ctx(home: &std::path::Path) -> BuiltinToolContext {
             Platform::Linux
         },
         http: Arc::new(NoopHttp),
-        provider: Arc::new(lingxi_api_client::AnthropicProvider::new("test-key", None)),
+        provider: Arc::new(api_client::AnthropicProvider::new("test-key", None)),
         default_model: "claude-sonnet-4-20250514".to_string(),
         worktree: Arc::new(NoopWorktree),
         subagent_spawner: None,

@@ -4,13 +4,11 @@
 //! 2. `LspRegistry::register_config` is NOT callable from outside the
 //!    `lingxi-lsp` crate. A doctest with `compile_fail` proves this.
 
-use lingxi_lsp::LspRegistry;
-use lingxi_protocol::PluginId;
-use lingxi_traits::{
-    LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
-};
+use lsp::LspRegistry;
+use protocol::PluginId;
 use std::collections::HashMap;
 use std::sync::Arc;
+use traits::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 
 struct DummyTransport;
 
@@ -42,7 +40,7 @@ impl LspTransport for DummyTransport {
     ) -> Result<(), LspError> {
         Err(LspError::Unavailable)
     }
-    async fn shutdown(&self, _: lingxi_protocol::McpConnectionId) -> Result<(), LspError> {
+    async fn shutdown(&self, _: protocol::McpConnectionId) -> Result<(), LspError> {
         Err(LspError::Unavailable)
     }
     fn is_available(&self) -> bool {
@@ -73,8 +71,8 @@ async fn register_plugin_servers_is_public_and_works() {
 /// the `lingxi-lsp` crate.
 ///
 /// ```compile_fail
-/// use lingxi_lsp::LspRegistry;
-/// use lingxi_traits::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
+/// use lsp::LspRegistry;
+/// use traits::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 /// use std::sync::Arc;
 ///
 /// struct T;
@@ -85,7 +83,7 @@ async fn register_plugin_servers_is_public_and_works() {
 ///     async fn initialize(&self, _: &LspRawConnection, _: &str) -> Result<LspServerCapabilities, LspError> { Err(LspError::Unavailable) }
 ///     async fn request(&self, _: &LspRawConnection, _: &str, _: serde_json::Value) -> Result<serde_json::Value, LspError> { Err(LspError::Unavailable) }
 ///     async fn notify(&self, _: &LspRawConnection, _: &str, _: serde_json::Value) -> Result<(), LspError> { Err(LspError::Unavailable) }
-///     async fn shutdown(&self, _: lingxi_protocol::McpConnectionId) -> Result<(), LspError> { Err(LspError::Unavailable) }
+///     async fn shutdown(&self, _: protocol::McpConnectionId) -> Result<(), LspError> { Err(LspError::Unavailable) }
 ///     fn is_available(&self) -> bool { false }
 /// }
 ///

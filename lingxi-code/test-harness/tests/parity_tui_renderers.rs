@@ -4,10 +4,10 @@
 //! same function the iocraft component delegates to — and asserts the
 //! rendered text matches the golden expected string in the JSON fixture:
 //!
-//! - `StatusLine`   → `lingxi_tui::components::status_line::format_status_line`
-//! - `Spinner`      → `lingxi_tui::components::spinner::{frame_at_index,
+//! - `StatusLine`   → `tui::components::status_line::format_status_line`
+//! - `Spinner`      → `tui::components::spinner::{frame_at_index,
 //!                      verb_at_index, format_spinner_line}` (frames 0/5/9)
-//! - 4 message renderers → `lingxi_tui::components::messages::render_entry_to_string`
+//! - 4 message renderers → `tui::components::messages::render_entry_to_string`
 //!   (`UserText` / `AssistantText` / `AssistantToolUse` collapsed /
 //!   `UserToolResult` collapsed), driven through the `RenderedMessage` enum.
 //!
@@ -17,14 +17,14 @@
 //!
 //! See plan `docs/superpowers/plans/2026-05-28-m6-09-release-v0.7.0.md` Task 5.
 
-use lingxi_permission::PermissionMode;
-use lingxi_protocol::ToolUseId;
-use lingxi_tui::components::messages::render_entry_to_string;
-use lingxi_tui::components::spinner::{format_spinner_line, frame_at_index, verb_at_index};
-use lingxi_tui::components::status_line::format_status_line;
-use lingxi_tui::state::RenderedMessage;
+use permission::PermissionMode;
+use protocol::ToolUseId;
 use serde_json::Value;
 use std::path::Path;
+use tui::components::messages::render_entry_to_string;
+use tui::components::spinner::{format_spinner_line, frame_at_index, verb_at_index};
+use tui::components::status_line::format_status_line;
+use tui::state::RenderedMessage;
 
 const FIXTURE: &str = include_str!("../src/parity/fixtures/tui_renderers.json");
 

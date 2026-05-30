@@ -1,12 +1,12 @@
 //! Integration test: a successful 200 response triggers
 //! `tracker.record_api_response_v2(...)` and emits `tengu_cost_recorded`.
 
+use api_client::anthropic::AnthropicProvider;
 use async_trait::async_trait;
-use lingxi_api_client::anthropic::AnthropicProvider;
-use lingxi_cost::{CostTracker, PricingCatalog};
-use lingxi_protocol::{ContentBlock, ConversationMessage, MessageId, SessionId};
-use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
+use cost::{CostTracker, PricingCatalog};
+use protocol::{ContentBlock, ConversationMessage, MessageId, SessionId};
 use std::sync::{Arc, Mutex};
+use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, LogEventMetadata};
 use tokio::sync::mpsc;
 
 mod mock_server;

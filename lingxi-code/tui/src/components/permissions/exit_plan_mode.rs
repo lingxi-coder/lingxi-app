@@ -87,7 +87,7 @@ pub fn ExitPlanMode(props: &ExitPlanModeProps) -> impl Into<AnyElement<'static>>
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use lingxi_permission::gate::PermissionResponse;
+    use permission::gate::PermissionResponse;
 
     fn k(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

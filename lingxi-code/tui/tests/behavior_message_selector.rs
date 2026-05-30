@@ -1,11 +1,11 @@
 //! M7-14 behavior: search overlay routing, jump-back, export safety.
 
-use lingxi_tui::components::message_selector::{
+use tui::components::message_selector::{
     export_transcript, handle_message_selector_key, message_line_offset, ExportError,
     SelectorAction, SelectorMode,
 };
-use lingxi_tui::components::virtual_message_list::HeightCache;
-use lingxi_tui::state::{AppState, RenderedMessage};
+use tui::components::virtual_message_list::HeightCache;
+use tui::state::{AppState, RenderedMessage};
 
 mod support;
 use support::fake_status;
@@ -30,7 +30,7 @@ fn live_key(code: iocraft::prelude::KeyCode) -> iocraft::prelude::KeyEvent {
 /// so assertions exercise the same component the binary draws.
 fn render_overlay(st: &AppState) -> String {
     use iocraft::ElementExt;
-    let mut el = lingxi_tui::app::render_screen(st, 20, 80);
+    let mut el = tui::app::render_screen(st, 20, 80);
     el.to_string()
 }
 
@@ -119,7 +119,7 @@ fn export_default_path_and_overwrite_confirm() {
 /// Type a string into the live export flow via `handle_live_key`.
 fn type_live(st: &mut AppState, text: &str) {
     for c in text.chars() {
-        lingxi_tui::root::handle_live_key(st, &live_key(iocraft::prelude::KeyCode::Char(c)), 20);
+        tui::root::handle_live_key(st, &live_key(iocraft::prelude::KeyCode::Char(c)), 20);
     }
 }
 
@@ -128,8 +128,8 @@ fn type_live(st: &mut AppState, text: &str) {
 /// search box. Pre-fix this opened `MessageSelectorState::open()` (search).
 #[test]
 fn slash_export_opens_export_flow_not_search() {
-    use lingxi_tui::app::dispatch;
-    use lingxi_tui::events::keymap::KeyAction;
+    use tui::app::dispatch;
+    use tui::events::keymap::KeyAction;
     let mut st = AppState::new(fake_status());
     push(&mut st, "hello");
 
@@ -192,7 +192,7 @@ fn export_flow_enter_writes_file_and_reports_path() {
     assert_eq!(st.message_selector.export.filename, "myexport.txt");
 
     // Enter confirms → write happens on the live key path.
-    lingxi_tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Enter), 20);
+    tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Enter), 20);
 
     let target = tmp.path().join("myexport.txt");
     assert!(target.exists(), "file must be written to the export dir");
@@ -232,7 +232,7 @@ fn export_flow_overwrite_confirm_protects_existing_file() {
     type_live(&mut st, "dup.txt");
 
     // First Enter → target exists, write REFUSED, overwrite prompt armed.
-    lingxi_tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Enter), 20);
+    tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Enter), 20);
     assert!(
         st.message_selector.export.awaiting_overwrite,
         "must arm the overwrite-confirm prompt"
@@ -257,13 +257,9 @@ fn export_flow_overwrite_confirm_protects_existing_file() {
         st_no.message_selector.export_dir_override = Some(tmp.path().to_path_buf());
         st_no.message_selector.export.filename.clear();
         type_live(&mut st_no, "dup.txt");
-        lingxi_tui::root::handle_live_key(
-            &mut st_no,
-            &live_key(iocraft::prelude::KeyCode::Enter),
-            20,
-        );
+        tui::root::handle_live_key(&mut st_no, &live_key(iocraft::prelude::KeyCode::Enter), 20);
         assert!(st_no.message_selector.export.awaiting_overwrite);
-        lingxi_tui::root::handle_live_key(
+        tui::root::handle_live_key(
             &mut st_no,
             &live_key(iocraft::prelude::KeyCode::Char('n')),
             20,
@@ -281,7 +277,7 @@ fn export_flow_overwrite_confirm_protects_existing_file() {
     }
 
     // Pressing 'y' confirms → now it is overwritten.
-    lingxi_tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Char('y')), 20);
+    tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Char('y')), 20);
     let body = fs::read_to_string(&target).unwrap();
     assert!(
         body.contains("new transcript content"),
@@ -313,7 +309,7 @@ fn export_flow_esc_cancels_and_writes_nothing() {
     type_live(&mut st, "wont-write.txt");
 
     // Esc cancels.
-    lingxi_tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Esc), 20);
+    tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Esc), 20);
     assert_eq!(
         st.message_selector.export.status.as_deref(),
         Some("Export cancelled"),
@@ -330,6 +326,6 @@ fn export_flow_esc_cancels_and_writes_nothing() {
         "Esc must write nothing"
     );
     // The next key dismisses the overlay (closes).
-    lingxi_tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Char(' ')), 20);
+    tui::root::handle_live_key(&mut st, &live_key(iocraft::prelude::KeyCode::Char(' ')), 20);
     assert!(!st.message_selector.open, "overlay closed after dismiss");
 }

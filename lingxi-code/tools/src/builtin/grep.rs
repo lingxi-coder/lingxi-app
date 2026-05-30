@@ -20,16 +20,16 @@ use globset::Glob;
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{sinks::UTF8, SearcherBuilder};
 use ignore::WalkBuilder;
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_telemetry::pii::{PiiTagged, Verified};
-use lingxi_telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use lingxi_telemetry::tengu::tool::{GREP_COMPLETED, GREP_FAILED, GREP_STARTED};
 use once_cell::sync::Lazy;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
+use telemetry::pii::{PiiTagged, Verified};
+use telemetry::sink::{AnalyticsValue, LogEventMetadata};
+use telemetry::tengu::tool::{GREP_COMPLETED, GREP_FAILED, GREP_STARTED};
 
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "Grep";
@@ -325,8 +325,8 @@ impl Tool for GrepTool {
 mod tests {
     use super::*;
     use crate::builtin::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
-    use lingxi_telemetry::{AnalyticsBus, InMemorySink};
     use std::sync::Arc;
+    use telemetry::{AnalyticsBus, InMemorySink};
     use tempfile::TempDir;
 
     pub(crate) fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {

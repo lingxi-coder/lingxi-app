@@ -8,7 +8,7 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
+use telemetry::tengu::command as cmd_evt;
 
 /// `/help` handler — pure function of the static command tables.
 ///
@@ -28,10 +28,10 @@ impl HelpHandler {
 #[async_trait]
 impl BuiltinCommandHandler for HelpHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::HELP_STARTED);
+        telemetry::emit_command_started(cmd_evt::HELP_STARTED);
         let s = render_help_screen();
         let details = format!("{{\"lines\":{}}}", s.matches('\n').count());
-        lingxi_telemetry::emit_command_completed(cmd_evt::HELP_COMPLETED, &details);
+        telemetry::emit_command_completed(cmd_evt::HELP_COMPLETED, &details);
         CommandResult::Done { display: Some(s) }
     }
 

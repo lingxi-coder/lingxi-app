@@ -3,10 +3,10 @@
 //! copy-paste the compiler can't).
 #![allow(clippy::doc_markdown)]
 
-use lingxi_protocol::ToolUseId;
-use lingxi_tui::components::messages::attachment::Attachment;
-use lingxi_tui::components::messages::render_entry_to_string;
-use lingxi_tui::state::RenderedMessage;
+use protocol::ToolUseId;
+use tui::components::messages::attachment::Attachment;
+use tui::components::messages::render_entry_to_string;
+use tui::state::RenderedMessage;
 
 fn s(m: &RenderedMessage) -> String {
     render_entry_to_string(m, /*focused*/ false, /*expanded*/ false)

@@ -1,8 +1,8 @@
 //! Round-trip parity for `JsonlMessage` — every byte we read we re-emit.
 
-use lingxi_session::jsonl::schema::JsonlMessage;
 use pretty_assertions::assert_eq;
 use serde_json::{json, Map, Value};
+use session::jsonl::schema::JsonlMessage;
 
 #[test]
 fn user_message_round_trip_is_byte_equivalent() {

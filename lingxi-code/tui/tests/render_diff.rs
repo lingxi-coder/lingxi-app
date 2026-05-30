@@ -2,9 +2,9 @@
 //! PARITY (design §0 Q3): snapshot STRUCTURE — sigils (+/-/space), gutter line
 //! numbers, hunk headers, and per span Colored/Plain/Emphasized — NOT exact
 //! per-token colors. Concrete colors are normalized to C/P/E flags.
-use lingxi_tui::render::diff::{add_word_bg, remove_word_bg, render};
-use lingxi_tui::render::{StyleColor, StyledLine};
-use lingxi_tui::theme::ThemeName;
+use tui::render::diff::{add_word_bg, remove_word_bg, render};
+use tui::render::{StyleColor, StyledLine};
+use tui::theme::ThemeName;
 
 /// Flag each span: 'E' if it carries a word-emphasis bg, 'C' if fg colored,
 /// else 'P'. Prefix each span with the flag + its literal text so the snapshot

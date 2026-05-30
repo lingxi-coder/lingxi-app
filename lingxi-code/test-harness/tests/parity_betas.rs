@@ -1,8 +1,8 @@
 //! Parity driver: per-provider × per-endpoint expected `anthropic-beta` header.
 
-use lingxi_api_client::betas::{assemble_beta_header, Endpoint, Provider};
-use lingxi_test_harness::parity::load_fixture;
+use api_client::betas::{assemble_beta_header, Endpoint, Provider};
 use serde::Deserialize;
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 struct Fixture {

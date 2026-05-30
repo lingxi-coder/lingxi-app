@@ -3,11 +3,11 @@
 //! See spec §6.6 / D8 — task output is materialized as files under a
 //! sandbox directory, with a per-file and total byte budget.
 
-use lingxi_traits::FileSystem;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use thiserror::Error;
+use traits::FileSystem;
 
 /// Owner of the task-output sandbox directory.
 pub struct TaskOutputManager {

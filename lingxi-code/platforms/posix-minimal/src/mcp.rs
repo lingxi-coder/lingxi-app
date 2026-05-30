@@ -2,14 +2,14 @@
 
 use async_trait::async_trait;
 use futures_util::stream::empty;
-use lingxi_protocol::McpConnectionId;
-use lingxi_traits::mcp::{
+use protocol::McpConnectionId;
+use serde_json::Value;
+use std::collections::HashMap;
+use traits::mcp::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
-use serde_json::Value;
-use std::collections::HashMap;
 
 /// Stub MCP transport.
 #[derive(Default)]

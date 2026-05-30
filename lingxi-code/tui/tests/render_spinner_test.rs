@@ -4,7 +4,7 @@
 //! the start, midpoint, and second-cycle position of the 12-frame loop.
 
 use insta::assert_snapshot;
-use lingxi_tui::components::spinner::format_spinner_line;
+use tui::components::spinner::format_spinner_line;
 
 #[test]
 fn spinner_frame_0_crunching() {

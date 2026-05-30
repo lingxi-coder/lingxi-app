@@ -4,8 +4,8 @@
 
 #![allow(clippy::unwrap_used)]
 
-use lingxi_test_harness::parity::load_fixture;
 use serde_json::Value;
+use test_harness::parity::load_fixture;
 
 fn fx() -> Value {
     load_fixture::<Value>("team_tools")
@@ -16,11 +16,11 @@ fn team_tool_names_match_production_constants() {
     let fx = fx();
     assert_eq!(
         fx["tool_names"]["team_create"].as_str().unwrap(),
-        lingxi_tools::builtin::team::TEAM_CREATE_TOOL_NAME
+        tools::builtin::team::TEAM_CREATE_TOOL_NAME
     );
     assert_eq!(
         fx["tool_names"]["team_delete"].as_str().unwrap(),
-        lingxi_tools::builtin::team::TEAM_DELETE_TOOL_NAME
+        tools::builtin::team::TEAM_DELETE_TOOL_NAME
     );
 }
 
@@ -34,33 +34,33 @@ fn wire_identifiers_match_production_constants() {
     // local mirror AND the upstream M3-02 symbol equal the fixture literal.
     assert_eq!(
         w["team_mem_subdir"].as_str().unwrap(),
-        lingxi_tools::builtin::team::TEAM_MEM_SUBDIR
+        tools::builtin::team::TEAM_MEM_SUBDIR
     );
     assert_eq!(
         w["team_mem_subdir"].as_str().unwrap(),
-        lingxi_memory::memdir::paths::TEAM_MEM_SUBDIR
+        memory::memdir::paths::TEAM_MEM_SUBDIR
     );
     // And the two mirrors must agree with each other.
     assert_eq!(
-        lingxi_tools::builtin::team::TEAM_MEM_SUBDIR,
-        lingxi_memory::memdir::paths::TEAM_MEM_SUBDIR
+        tools::builtin::team::TEAM_MEM_SUBDIR,
+        memory::memdir::paths::TEAM_MEM_SUBDIR
     );
 
     assert_eq!(
         w["team_config_filename"].as_str().unwrap(),
-        lingxi_tools::builtin::team::TEAM_CONFIG_FILENAME
+        tools::builtin::team::TEAM_CONFIG_FILENAME
     );
     assert_eq!(
         w["default_team_name"].as_str().unwrap(),
-        lingxi_tools::builtin::team::DEFAULT_TEAM_NAME
+        tools::builtin::team::DEFAULT_TEAM_NAME
     );
     assert_eq!(
         w["max_team_name_len"].as_u64().unwrap(),
-        lingxi_tools::builtin::team::MAX_TEAM_NAME_LEN as u64
+        tools::builtin::team::MAX_TEAM_NAME_LEN as u64
     );
     assert_eq!(
         w["team_name_pattern_desc"].as_str().unwrap(),
-        lingxi_tools::builtin::team::TEAM_NAME_PATTERN_DESC
+        tools::builtin::team::TEAM_NAME_PATTERN_DESC
     );
 }
 
@@ -80,7 +80,7 @@ fn telemetry_events_present_in_tengu_tool_names_array() {
     );
     for name in &events {
         assert!(
-            lingxi_telemetry::tengu::ALL_EVENT_NAMES.contains(name),
+            telemetry::tengu::ALL_EVENT_NAMES.contains(name),
             "fixture event {name} missing from tengu::ALL_EVENT_NAMES \
              (which sources tengu::tool::NAMES)"
         );
@@ -89,7 +89,7 @@ fn telemetry_events_present_in_tengu_tool_names_array() {
 
 #[test]
 fn telemetry_constant_symbols_match_event_strings() {
-    use lingxi_telemetry::tengu::tool::{
+    use telemetry::tengu::tool::{
         TEAM_CREATE_COMPLETED, TEAM_CREATE_FAILED, TEAM_CREATE_STARTED, TEAM_DELETE_COMPLETED,
         TEAM_DELETE_FAILED, TEAM_DELETE_STARTED,
     };
@@ -109,7 +109,7 @@ fn team_dir_template_matches_resolve_team_dir() {
     let tmpl = fx["team_dir_template"].as_str().unwrap();
     assert_eq!(tmpl, "~/.claude/team-mem/<team_name>/");
     let home = std::path::PathBuf::from("/tmp/parity-home");
-    let dir = lingxi_tools::builtin::team::resolve_team_dir(&home, "example");
+    let dir = tools::builtin::team::resolve_team_dir(&home, "example");
     assert_eq!(
         dir,
         std::path::PathBuf::from("/tmp/parity-home/.claude/team-mem/example")
@@ -156,30 +156,30 @@ fn constants_lock_block_mirrors_production() {
     let c = &fx["constants_lock"];
     assert_eq!(
         c["TEAM_CREATE_TOOL_NAME"].as_str().unwrap(),
-        lingxi_tools::builtin::team::TEAM_CREATE_TOOL_NAME
+        tools::builtin::team::TEAM_CREATE_TOOL_NAME
     );
     assert_eq!(
         c["TEAM_DELETE_TOOL_NAME"].as_str().unwrap(),
-        lingxi_tools::builtin::team::TEAM_DELETE_TOOL_NAME
+        tools::builtin::team::TEAM_DELETE_TOOL_NAME
     );
     assert_eq!(
         c["DEFAULT_TEAM_NAME"].as_str().unwrap(),
-        lingxi_tools::builtin::team::DEFAULT_TEAM_NAME
+        tools::builtin::team::DEFAULT_TEAM_NAME
     );
     assert_eq!(
         c["TEAM_CONFIG_FILENAME"].as_str().unwrap(),
-        lingxi_tools::builtin::team::TEAM_CONFIG_FILENAME
+        tools::builtin::team::TEAM_CONFIG_FILENAME
     );
     assert_eq!(
         c["MAX_TEAM_NAME_LEN"].as_u64().unwrap(),
-        lingxi_tools::builtin::team::MAX_TEAM_NAME_LEN as u64
+        tools::builtin::team::MAX_TEAM_NAME_LEN as u64
     );
     assert_eq!(
         c["TEAM_NAME_PATTERN_DESC"].as_str().unwrap(),
-        lingxi_tools::builtin::team::TEAM_NAME_PATTERN_DESC
+        tools::builtin::team::TEAM_NAME_PATTERN_DESC
     );
     assert_eq!(
         c["M3_02_TEAM_MEM_SUBDIR"].as_str().unwrap(),
-        lingxi_memory::memdir::paths::TEAM_MEM_SUBDIR
+        memory::memdir::paths::TEAM_MEM_SUBDIR
     );
 }

@@ -1,7 +1,7 @@
 //! M7-04 Task 11: every batch-1 variant routes through `render_entry_to_string`
 //! to its renderer's output. Guards the dispatch table.
-use lingxi_tui::components::messages::render_entry_to_string;
-use lingxi_tui::state::{AdvisorKind, PlanApprovalKind, RenderedMessage, SystemLevel};
+use tui::components::messages::render_entry_to_string;
+use tui::state::{AdvisorKind, PlanApprovalKind, RenderedMessage, SystemLevel};
 
 #[test]
 fn each_variant_routes_to_its_renderer() {

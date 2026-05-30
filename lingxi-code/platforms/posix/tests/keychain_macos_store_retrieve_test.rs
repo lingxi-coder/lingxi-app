@@ -7,11 +7,11 @@
 
 #![cfg(target_os = "macos")]
 
-use lingxi_platform_posix::secure_storage::MacOsKeychainStorage;
-use lingxi_protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
-use lingxi_traits::SecureStorage;
+use platform_posix::secure_storage::MacOsKeychainStorage;
+use protocol::{SecretKindDto, SecureStorageData, SecureStorageMetadata};
 use std::path::PathBuf;
 use std::time::SystemTime;
+use traits::SecureStorage;
 
 fn unique_account() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};

@@ -6,9 +6,9 @@
 //! (Wincred) backend is a separate follow-up task.
 
 use async_trait::async_trait;
-use lingxi_protocol::SecureStorageData;
-use lingxi_traits::{SecureStorage, SecureStorageBackend, SecureStorageError};
+use protocol::SecureStorageData;
 use std::path::PathBuf;
+use traits::{SecureStorage, SecureStorageBackend, SecureStorageError};
 
 /// Plain-text file-based secure storage rooted at a base directory.
 pub struct PlainTextSecureStorage {

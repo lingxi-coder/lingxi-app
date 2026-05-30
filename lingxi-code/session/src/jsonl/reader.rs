@@ -5,10 +5,10 @@
 //! we extract (`sessionId`, `cwd`, `type`) live on line 1.
 
 use crate::jsonl::schema::JsonlMessage;
-use lingxi_traits::{FileSystem, FsError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+use traits::{FileSystem, FsError};
 
 /// Failure modes for [`JsonlReader`].
 #[derive(Debug, Error)]

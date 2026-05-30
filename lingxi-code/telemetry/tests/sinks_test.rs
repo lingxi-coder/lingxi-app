@@ -1,8 +1,8 @@
 //! `NoOpSink` + `InMemorySink` + `with_default_sink` behavior.
 
-use lingxi_telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, InMemorySink, NoOpSink};
 use std::collections::HashMap;
 use std::sync::Arc;
+use telemetry::{AnalyticsBus, AnalyticsSink, AnalyticsValue, InMemorySink, NoOpSink};
 
 #[tokio::test]
 async fn noop_sink_swallows_events_silently() {

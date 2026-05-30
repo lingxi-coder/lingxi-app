@@ -4,23 +4,23 @@
 //! `register_all_builtin_tools` entrypoint that future sub-plans extend.
 
 use crate::registry::ToolRegistry;
-use lingxi_api_client::AnthropicProvider;
-use lingxi_permission::PermissionMode;
-use lingxi_sandbox::decision::ProjectTrustLevel;
-use lingxi_sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
-use lingxi_telemetry::AnalyticsBus;
-use lingxi_traits::budget::BudgetEnforcerHandle;
-use lingxi_traits::clock::Clock;
-use lingxi_traits::filesystem::FileSystem;
-use lingxi_traits::http::HttpTransport;
-use lingxi_traits::mailbox::MailboxRouterHandle;
-use lingxi_traits::process::ProcessRunner;
-use lingxi_traits::sandbox::Sandbox;
-use lingxi_traits::subagent_spawn::SubagentSpawner;
-use lingxi_traits::task_registry::TaskRegistryHandle;
-use lingxi_traits::worktree::WorktreeManager;
+use api_client::AnthropicProvider;
+use permission::PermissionMode;
+use sandbox::decision::ProjectTrustLevel;
+use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
+use telemetry::AnalyticsBus;
+use traits::budget::BudgetEnforcerHandle;
+use traits::clock::Clock;
+use traits::filesystem::FileSystem;
+use traits::http::HttpTransport;
+use traits::mailbox::MailboxRouterHandle;
+use traits::process::ProcessRunner;
+use traits::sandbox::Sandbox;
+use traits::subagent_spawn::SubagentSpawner;
+use traits::task_registry::TaskRegistryHandle;
+use traits::worktree::WorktreeManager;
 
 pub mod agent;
 pub mod ask_user_question;
@@ -135,23 +135,23 @@ pub struct BuiltinToolContext {
     pub default_model: String,
     /// Worktree manager (M2-01 trait) — backs `EnterWorktree` + `ExitWorktree`
     /// (M4-04). Tests inject `MockWorktreeManager`; production uses
-    /// `lingxi_platform_posix::PosixWorktreeManager`.
+    /// `platform_posix::PosixWorktreeManager`.
     pub worktree: Arc<dyn WorktreeManager>,
 
     // ===== M4-05 wiring (Phase 3) =====
     /// Subagent spawner — `AgentTool` dispatches recursive subagent runs
     /// through this seam. `None` when the host has not wired a state-
     /// machine pool yet; in that case `AgentTool::call` surfaces a clear
-    /// internal error. Production wires `lingxi_agent::PoolSubagentSpawner`.
+    /// internal error. Production wires `agent::PoolSubagentSpawner`.
     pub subagent_spawner: Option<Arc<dyn SubagentSpawner>>,
     /// Task registry — the 6 `Task*` tools dispatch CRUD through this seam.
-    /// Production wires `lingxi_tasks::TaskRegistry`.
+    /// Production wires `tasks::TaskRegistry`.
     pub task_registry: Option<Arc<dyn TaskRegistryHandle>>,
     /// Mailbox router — `SendMessageTool` dispatches teammate routing
-    /// through this seam. Production wires `lingxi_coordinator::MailboxRouter`.
+    /// through this seam. Production wires `coordinator::MailboxRouter`.
     pub mailbox_router: Option<Arc<dyn MailboxRouterHandle>>,
     /// Budget enforcer — `AgentTool` gates spawn calls through this seam.
-    /// Production wires `lingxi_cost::BudgetEnforcer`.
+    /// Production wires `cost::BudgetEnforcer`.
     pub budget_enforcer: Option<Arc<dyn BudgetEnforcerHandle>>,
 
     // ===== M4-07 wiring (Phase 7) =====
@@ -159,12 +159,12 @@ pub struct BuiltinToolContext {
     /// `ListMcpResourcesTool`, `ReadMcpResourceTool`) dispatch through this
     /// seam. `None` when the host has not wired an MCP layer; tools surface
     /// a "MCP registry not configured" error in that case. Production wires
-    /// `lingxi_mcp::McpRegistry` populated by the platform.
-    pub mcp_registry: Option<Arc<lingxi_mcp::registry::McpRegistry>>,
+    /// `mcp::McpRegistry` populated by the platform.
+    pub mcp_registry: Option<Arc<::mcp::registry::McpRegistry>>,
     /// LSP registry — `LSPTool` dispatches through this seam. `None` when
     /// the host has not wired an LSP layer. Production wires
-    /// `lingxi_lsp::registry::LspRegistry` populated by plugin registration.
-    pub lsp_registry: Option<Arc<lingxi_lsp::registry::LspRegistry>>,
+    /// `lsp::registry::LspRegistry` populated by plugin registration.
+    pub lsp_registry: Option<Arc<::lsp::registry::LspRegistry>>,
 }
 
 /// Register every M4-01 foundation tool against `registry`.
@@ -232,14 +232,14 @@ mod tests {
     use super::*;
     use crate::builtin::test_support::make_dummy_fs;
     use crate::registry::ToolRegistry;
-    use lingxi_telemetry::AnalyticsBus;
     use std::path::PathBuf;
+    use telemetry::AnalyticsBus;
 
     fn dummy_ctx() -> BuiltinToolContext {
         use crate::builtin::test_support::{
             make_bypass_sandbox, make_stub_clock, make_stub_http, make_stub_process,
         };
-        use lingxi_traits::process::ProcessOutput;
+        use traits::process::ProcessOutput;
         BuiltinToolContext {
             fs: make_dummy_fs(),
             bus: Arc::new(AnalyticsBus::new()),

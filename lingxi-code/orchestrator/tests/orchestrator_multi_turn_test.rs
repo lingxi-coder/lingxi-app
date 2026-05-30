@@ -1,24 +1,24 @@
 //! M5-02 Task 11: multi-turn loop with one `tool_use` in the first response.
 
+use api_client::types::ContentBlockApi;
 use async_trait::async_trait;
-use lingxi_api_client::types::ContentBlockApi;
-use lingxi_orchestrator::test_support::{
+use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
     StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
-use lingxi_permission::result::PermissionMetadata;
-use lingxi_permission::{PermissionDecisionReason, PermissionResult};
-use lingxi_protocol::ToolUseId;
-use lingxi_tools::progress::ToolProgressSender;
-use lingxi_tools::registry::ToolRegistry;
-use lingxi_tools::tool_trait::{
+use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
+use protocol::ToolUseId;
+use serde_json::json;
+use std::sync::Arc;
+use tools::progress::ToolProgressSender;
+use tools::registry::ToolRegistry;
+use tools::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use lingxi_traits::OutputEvent;
-use serde_json::json;
-use std::sync::Arc;
+use traits::OutputEvent;
 
 /// Mock tool that always returns `{"ok": true}`.
 struct AlwaysOkTool;
@@ -48,14 +48,14 @@ impl Tool for AlwaysOkTool {
     async fn validate_input(
         &self,
         _input: &serde_json::Value,
-        _ctx: &lingxi_tools::context::ToolUseContext,
+        _ctx: &tools::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
         _input: &serde_json::Value,
-        _ctx: &lingxi_tools::context::ToolUseContext,
+        _ctx: &tools::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
@@ -75,7 +75,7 @@ impl Tool for AlwaysOkTool {
     async fn call(
         &self,
         _input: serde_json::Value,
-        _ctx: lingxi_tools::context::ToolUseContext,
+        _ctx: tools::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
@@ -111,7 +111,7 @@ async fn two_turns_with_one_tool_use_drives_loop_to_end_turn() {
     );
     let api = Arc::new(MockApiClient::new(vec![r1, r2]));
     let output = Arc::new(MockOutputStream::new());
-    let hooks = lingxi_orchestrator::test_support::noop_hook_executor();
+    let hooks = orchestrator::test_support::noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let mut registry = ToolRegistry::new();
     registry.register_builtin(Arc::new(AlwaysOkTool));

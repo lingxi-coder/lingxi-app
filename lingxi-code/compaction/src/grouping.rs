@@ -1,7 +1,7 @@
 //! Group messages into "API rounds" (one user → assistant turn boundary). Used
 //! by PTL retry to truncate by-the-round instead of by-the-message.
 
-use lingxi_protocol::ConversationMessage;
+use protocol::ConversationMessage;
 
 /// A contiguous range of messages forming one API round.
 #[derive(Debug, Clone)]

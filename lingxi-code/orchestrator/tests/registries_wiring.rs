@@ -1,24 +1,24 @@
 //! M6-07 — `with_mcp_registry` / `with_hook_registry` / `with_agent_catalog`
 //! builders attach the three optional registries onto
-//! [`lingxi_orchestrator::ConversationOrchestrator`].
+//! [`orchestrator::ConversationOrchestrator`].
 
+use agent::AgentDefinition;
 use async_trait::async_trait;
-use lingxi_agent::AgentDefinition;
-use lingxi_hooks::HookRegistry;
-use lingxi_mcp::McpRegistry;
-use lingxi_orchestrator::test_support::{
+use hooks::HookRegistry;
+use mcp::McpRegistry;
+use orchestrator::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_orchestrator::{ConversationOrchestrator, OrchestratorConfig};
-use lingxi_protocol::McpConnectionId as ConnId;
-use lingxi_traits::{
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use protocol::McpConnectionId as ConnId;
+use serde_json::Value;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use traits::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
-use serde_json::Value;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 struct StubTransport;
 
@@ -81,7 +81,7 @@ impl McpTransport for StubTransport {
 #[tokio::test]
 async fn with_mcp_hook_agent_builders_store_fields() {
     let api = Arc::new(MockApiClient::new(vec![]));
-    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tools::registry::ToolRegistry::new());
     let hooks = noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let output = Arc::new(MockOutputStream::new());
@@ -113,7 +113,7 @@ async fn with_mcp_hook_agent_builders_store_fields() {
 #[tokio::test]
 async fn default_orchestrator_has_no_registries() {
     let api = Arc::new(MockApiClient::new(vec![]));
-    let tools = Arc::new(lingxi_tools::registry::ToolRegistry::new());
+    let tools = Arc::new(tools::registry::ToolRegistry::new());
     let hooks = noop_hook_executor();
     let perms = Arc::new(NoOpPermissionGate);
     let output = Arc::new(MockOutputStream::new());

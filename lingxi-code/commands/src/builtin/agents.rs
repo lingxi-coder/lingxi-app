@@ -11,9 +11,9 @@ use crate::builtin::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
-use lingxi_telemetry::tengu::command as cmd_evt;
-use lingxi_traits::{AgentInfo, OrchestratorHandle};
 use std::sync::Arc;
+use telemetry::tengu::command as cmd_evt;
+use traits::{AgentInfo, OrchestratorHandle};
 
 /// `/agents` handler — list mode.
 #[derive(Clone)]
@@ -32,11 +32,11 @@ impl AgentsHandler {
 #[async_trait]
 impl BuiltinCommandHandler for AgentsHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
-        lingxi_telemetry::emit_command_started(cmd_evt::AGENTS_STARTED);
+        telemetry::emit_command_started(cmd_evt::AGENTS_STARTED);
         let agents = self.handle.list_agents().await;
         let rows: Vec<String> = agents.iter().map(format_row).collect();
         let s = render_list("Agents", rows, "No subagents configured");
-        lingxi_telemetry::emit_command_completed(cmd_evt::AGENTS_COMPLETED, "");
+        telemetry::emit_command_completed(cmd_evt::AGENTS_COMPLETED, "");
         CommandResult::Done { display: Some(s) }
     }
     fn name(&self) -> &str {
@@ -72,7 +72,7 @@ fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lingxi_orchestrator::test_support::MockOrchestratorHandle;
+    use orchestrator::test_support::MockOrchestratorHandle;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {

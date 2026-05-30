@@ -11,19 +11,16 @@
 //!    connection reader task in `lingxi-jsonrpc` would otherwise panic on
 //!    a missing stream — we bail with [`LspError::Transport`] first.
 //!    (claude-code makes the same guard explicit, see `LSPClient.ts:106`.)
-//! 3. Build a `lingxi_jsonrpc::Connection::new_lsp` over the stdout
-//!    reader + stdin writer, then wrap it in [`lingxi_lsp::LspClient`].
+//! 3. Build a `jsonrpc::Connection::new_lsp` over the stdout
+//!    reader + stdin writer, then wrap it in [`lsp::LspClient`].
 //!
 //! The trait's untyped `request/notify` methods delegate to the typed
 //! client via `Value` serialization.
 
 use async_trait::async_trait;
-use lingxi_jsonrpc::Connection;
-use lingxi_lsp::LspClient;
-use lingxi_protocol::McpConnectionId;
-use lingxi_traits::{
-    LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
-};
+use jsonrpc::Connection;
+use lsp::LspClient;
+use protocol::McpConnectionId;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -31,6 +28,7 @@ use std::sync::Arc;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::warn;
+use traits::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 
 /// Per-connection bundle: the child process handle + the typed client.
 struct ConnectionEntry {

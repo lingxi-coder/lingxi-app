@@ -6,17 +6,17 @@
 
 use std::sync::Arc;
 
+use engine::settings::tracer::ProvenanceTrace;
+use engine::settings::{EffectiveSettings, SettingsJson};
 use iocraft::prelude::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use lingxi_core::settings::tracer::ProvenanceTrace;
-use lingxi_core::settings::{EffectiveSettings, SettingsJson};
-use lingxi_orchestrator::test_support::MockOrchestratorHandle;
-use lingxi_traits::{CostSnapshot, OrchestratorHandle, StatusSnapshot};
-use lingxi_tui::root::handle_live_key;
-use lingxi_tui::screens::settings::{
+use orchestrator::test_support::MockOrchestratorHandle;
+use traits::{CostSnapshot, OrchestratorHandle, StatusSnapshot};
+use tui::root::handle_live_key;
+use tui::screens::settings::{
     apply_settings_key, SettingsData, SettingsOutcome, SettingsState, SettingsTab,
 };
-use lingxi_tui::screens::Screen;
-use lingxi_tui::state::{AppState, StatusSnapshot as TuiStatus};
+use tui::screens::Screen;
+use tui::state::{AppState, StatusSnapshot as TuiStatus};
 
 fn key(code: KeyCode) -> KeyEvent {
     let mut k = KeyEvent::new(KeyEventKind::Press, code);
@@ -179,11 +179,11 @@ async fn edit_goes_through_existing_edit_config_file_handle() {
 
 // ---- Cross-state seam: permission (priority 1) wins over screen (priority 2) ----
 
-use lingxi_permission::gate::{PermissionRequest, PermissionResponse, PromptDefault};
-use lingxi_tui::state::PendingPermission;
+use permission::gate::{PermissionRequest, PermissionResponse, PromptDefault};
 use serde_json::json;
 use std::time::Duration;
 use tokio::sync::oneshot;
+use tui::state::PendingPermission;
 
 #[tokio::test]
 async fn permission_pending_wins_over_open_settings_screen() {
@@ -238,9 +238,9 @@ async fn permission_pending_wins_over_open_settings_screen() {
 // (it can't `.await` the snapshot); the async `pump_open_settings` (the ticker
 // `use_future` in `root.rs`) observes the flag and opens the screen.
 
-use lingxi_tui::root::pump_open_settings;
-use lingxi_tui::state::AppState as TuiAppState;
 use tokio::sync::Mutex as TokioMutex;
+use tui::root::pump_open_settings;
+use tui::state::AppState as TuiAppState;
 
 fn iocraft_ctrl_g() -> KeyEvent {
     let mut k = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('g'));
@@ -378,8 +378,8 @@ async fn open_screen_blocks_pump_open() {
 /// synchronously.
 #[test]
 fn slash_config_and_status_submit_raise_open_request() {
-    use lingxi_tui::app::dispatch;
-    use lingxi_tui::events::keymap::KeyAction;
+    use tui::app::dispatch;
+    use tui::events::keymap::KeyAction;
 
     let mut app = AppState::new(TuiStatus::default());
     app.prompt_text = "/config".to_string();
@@ -395,7 +395,7 @@ fn slash_config_and_status_submit_raise_open_request() {
     assert!(
         !matches!(
             app.messages.last(),
-            Some(lingxi_tui::state::RenderedMessage::UserText { .. })
+            Some(tui::state::RenderedMessage::UserText { .. })
         ),
         "/config must not echo as a user message"
     );

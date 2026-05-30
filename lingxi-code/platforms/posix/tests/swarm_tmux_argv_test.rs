@@ -2,7 +2,7 @@
 //! that the argv constructed by `TmuxBackend` matches what would be passed to
 //! `tmux` on the shell.
 
-use lingxi_platform_posix::swarm::tmux::{
+use platform_posix::swarm::tmux::{
     agent_color_to_tmux, build_select_pane_color_argv, build_send_keys_argv,
     build_set_pane_border_argv, build_set_pane_border_format_argv, build_split_window_argv,
     AgentColor, SwarmConstants,

@@ -1,15 +1,15 @@
 //! M6-07 parity — locks `/mcp`, `/hooks`, `/agents` empty-state literals
 //! and one non-empty sample for each.
 
-use lingxi_commands::builtin::agents::AgentsHandler;
-use lingxi_commands::builtin::hooks::HooksHandler;
-use lingxi_commands::builtin::mcp::McpHandler;
-use lingxi_commands::model::{BuiltinCommandHandler, CommandResult};
-use lingxi_commands::parser::ParsedSlashCommand;
-use lingxi_orchestrator::test_support::MockOrchestratorHandle;
-use lingxi_traits::{AgentInfo, HookInfo, McpServerInfo, McpStatus};
+use commands::builtin::agents::AgentsHandler;
+use commands::builtin::hooks::HooksHandler;
+use commands::builtin::mcp::McpHandler;
+use commands::model::{BuiltinCommandHandler, CommandResult};
+use commands::parser::ParsedSlashCommand;
+use orchestrator::test_support::MockOrchestratorHandle;
 use serde_json::Value;
 use std::sync::Arc;
+use traits::{AgentInfo, HookInfo, McpServerInfo, McpStatus};
 
 const FIXTURE: &str = include_str!("../src/parity/fixtures/tui_listings.json");
 

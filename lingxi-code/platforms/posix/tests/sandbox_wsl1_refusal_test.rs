@@ -2,14 +2,14 @@
 //!
 //! Exercises the `parse_wsl_kind` parser against synthetic `/proc/version`
 //! markup and confirms that
-//! [`lingxi_sandbox::dependency_check::sandbox_unavailable_reason`] produces
+//! [`sandbox::dependency_check::sandbox_unavailable_reason`] produces
 //! the exact byte-for-byte WSL1 refusal string.
 
-use lingxi_platform_posix::wsl_detect::{parse_wsl_kind, WslKind};
-use lingxi_sandbox::dependency_check::{
+use platform_posix::wsl_detect::{parse_wsl_kind, WslKind};
+use sandbox::dependency_check::{
     error_strings, sandbox_unavailable_reason, SandboxDependencyCheck,
 };
-use lingxi_sandbox::runtime_config::Platform;
+use sandbox::runtime_config::Platform;
 
 #[test]
 fn wsl1_detected_from_proc_version_emits_exact_refusal_string() {

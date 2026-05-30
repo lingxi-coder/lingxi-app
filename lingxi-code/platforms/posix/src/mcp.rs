@@ -9,20 +9,15 @@
 //!
 //! M2.02c also lands `spawn_stdio`: a low-level helper that spawns a child
 //! MCP server, frames its stdio with NDJSON, drains stderr into a 64 MB
-//! ring, and returns a fully-wired `lingxi_jsonrpc::Connection`. Used by
+//! ring, and returns a fully-wired `jsonrpc::Connection`. Used by
 //! the `Stdio` arm here as well as by callers that want stdio plumbing
 //! without going through the trait surface.
 
 use async_trait::async_trait;
-use lingxi_jsonrpc::Connection;
-use lingxi_platform_common::mcp_stdio::{StderrRing, StdioConfig};
-use lingxi_platform_common::{connect_http, connect_sse};
-use lingxi_protocol::McpConnectionId;
-use lingxi_traits::{
-    ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
-    McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
-    McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
-};
+use jsonrpc::Connection;
+use platform_common::mcp_stdio::{StderrRing, StdioConfig};
+use platform_common::{connect_http, connect_sse};
+use protocol::McpConnectionId;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -30,6 +25,11 @@ use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
 use tokio::sync::Mutex as AsyncMutex;
+use traits::{
+    ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+    McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
+    McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+};
 
 /// Per-connection state held by `PosixMcpTransport`.
 ///
@@ -239,7 +239,7 @@ pub enum McpTransportError {
 }
 
 /// Spawn an MCP child over stdio and return a fully-wired
-/// `lingxi_jsonrpc::Connection`.
+/// `jsonrpc::Connection`.
 ///
 /// - Frames stdin/stdout with `LineCodec` (NDJSON: one JSON object per
 ///   `\n`-terminated line).
@@ -276,11 +276,9 @@ pub struct StdioHandles {
 }
 
 // Re-export the shared WebSocket connector so callers can use a single path
-// (`lingxi_platform_posix::mcp::connect_ws`) without reaching into the
+// (`platform_posix::mcp::connect_ws`) without reaching into the
 // `lingxi_platform_common` crate directly.
-pub use lingxi_platform_common::mcp_ws::{
-    connect_ws, WsConnectError, AUTH_HEADER_NAME, WS_SUBPROTOCOL,
-};
+pub use platform_common::mcp_ws::{connect_ws, WsConnectError, AUTH_HEADER_NAME, WS_SUBPROTOCOL};
 
 /// Same as [`spawn_stdio`] but also surfaces the shared stderr ring buffer
 /// so callers can inspect captured stderr after the child exits or hangs.
@@ -367,7 +365,7 @@ pub async fn spawn_stdio_with_handles(cfg: StdioConfig) -> Result<StdioHandles, 
 #[cfg(test)]
 mod re_export_tests {
     /// Verify the posix crate exposes the public `connect_ws` symbol at
-    /// `lingxi_platform_posix::mcp::connect_ws` (callers should not have to
+    /// `platform_posix::mcp::connect_ws` (callers should not have to
     /// import from `lingxi_platform_common` directly).
     #[allow(unused_imports)]
     use crate::mcp::connect_ws;

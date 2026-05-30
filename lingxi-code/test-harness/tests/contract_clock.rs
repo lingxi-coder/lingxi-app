@@ -3,8 +3,8 @@
 //! The mock impl, the posix impl (Linux/macOS), and the windows impl all
 //! exercise the same `clock_contract_tests` body.
 
-use lingxi_test_harness::contracts::clock::clock_contract_tests;
-use lingxi_test_harness::mocks::MockClock;
+use test_harness::contracts::clock::clock_contract_tests;
+use test_harness::mocks::MockClock;
 
 #[tokio::test]
 async fn mock_clock_passes_contract() {
@@ -17,13 +17,13 @@ async fn mock_clock_passes_contract() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn posix_clock_passes_contract() {
-    let c = lingxi_platform_posix::PosixClock::new();
+    let c = platform_posix::PosixClock::new();
     clock_contract_tests(&c).await;
 }
 
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn windows_clock_passes_contract() {
-    let c = lingxi_platform_windows::WindowsClock::new();
+    let c = platform_windows::WindowsClock::new();
     clock_contract_tests(&c).await;
 }

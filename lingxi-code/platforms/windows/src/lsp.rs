@@ -6,12 +6,9 @@
 //! `windowsHide: true` spawn option (`claude-code/src/services/lsp/LSPClient.ts:103`).
 
 use async_trait::async_trait;
-use lingxi_jsonrpc::Connection;
-use lingxi_lsp::LspClient;
-use lingxi_protocol::McpConnectionId;
-use lingxi_traits::{
-    LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport,
-};
+use jsonrpc::Connection;
+use lsp::LspClient;
+use protocol::McpConnectionId;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -19,6 +16,7 @@ use std::sync::Arc;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::warn;
+use traits::{LspError, LspRawConnection, LspServerCapabilities, LspServerConfig, LspTransport};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;

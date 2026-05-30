@@ -2,7 +2,7 @@
 //! `posix-minimal` platform.
 //!
 //! Reads one line at a time from stdin, feeds it to
-//! [`lingxi_core::reduce`] as an [`Event::UserMessage`], then walks the
+//! [`engine::reduce`] as an [`Event::UserMessage`], then walks the
 //! returned [`Effect`] vector and prints a human-readable trace. The CLI
 //! deliberately does NOT make a live API call — Plan 17 wires the real
 //! run loop (drive `SendApiRequest` through `HttpTransport`, fold the
@@ -14,11 +14,11 @@
 #![allow(missing_docs)]
 #![forbid(unsafe_code)]
 
+use api_client::AnthropicProvider;
 use clap::Parser;
-use lingxi_api_client::AnthropicProvider;
-use lingxi_core::{reduce, ConversationState, Event, SessionState};
-use lingxi_platform_posix_minimal::{PosixFileSystem, PosixHttp, PosixRuntime};
-use lingxi_protocol::{Effect, MessageId, RequestId, SessionId};
+use engine::{reduce, ConversationState, Event, SessionState};
+use platform_posix_minimal::{PosixFileSystem, PosixHttp, PosixRuntime};
+use protocol::{Effect, MessageId, RequestId, SessionId};
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 

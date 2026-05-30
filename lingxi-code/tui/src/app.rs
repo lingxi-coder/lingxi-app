@@ -333,7 +333,7 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
 pub async fn handle_submit_line(
     st: &mut AppState,
     line: &str,
-    dispatcher: &dyn lingxi_traits::SlashCommandDispatcher,
+    dispatcher: &dyn traits::SlashCommandDispatcher,
 ) -> bool {
     if let Some(cmd) = line.strip_prefix('/') {
         // Local intercepts (M5-09 stubs don't yet do these).
@@ -353,15 +353,15 @@ pub async fn handle_submit_line(
         // Fall through to the registry for everything else.
         let outcome = dispatcher.dispatch(line).await;
         match outcome {
-            lingxi_traits::SlashDispatchResult::Handled { display }
-            | lingxi_traits::SlashDispatchResult::Unknown { display, .. } => {
+            traits::SlashDispatchResult::Handled { display }
+            | traits::SlashDispatchResult::Unknown { display, .. } => {
                 st.push_message(RenderedMessage::SystemText {
                     body: display,
                     timestamp: chrono::Utc::now().timestamp(),
                     is_error: false,
                 });
             }
-            lingxi_traits::SlashDispatchResult::NotASlashCommand => {
+            traits::SlashDispatchResult::NotASlashCommand => {
                 // Shouldn't happen — we stripped the leading "/" already.
             }
         }
@@ -396,7 +396,7 @@ pub fn render_screen(
         use crate::components::permissions::bypass_permissions::BypassPermissionsMode;
         use crate::components::permissions::exit_plan_mode::ExitPlanMode;
         use crate::components::permissions::tool_use_confirm::ToolUseConfirm;
-        use lingxi_permission::gate::PermissionRequest;
+        use permission::gate::PermissionRequest;
         return match &pp.request {
             PermissionRequest::ToolUseConfirm {
                 tool_name,
@@ -606,7 +606,7 @@ pub async fn run_one_submit(
     st: &mut AppState,
     submitted: &str,
     orch: &dyn ConversationOrchestratorTrait,
-    dispatcher: &dyn lingxi_traits::SlashCommandDispatcher,
+    dispatcher: &dyn traits::SlashCommandDispatcher,
 ) {
     let should_run = handle_submit_line(st, submitted, dispatcher).await;
     if !should_run {
@@ -677,7 +677,7 @@ pub fn handle_ctrl_c(state: &mut AppState) {
 #[must_use]
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_streaming_turn(
-    handle: std::sync::Arc<dyn lingxi_traits::OrchestratorHandle>,
+    handle: std::sync::Arc<dyn traits::OrchestratorHandle>,
     prompt: String,
     tx: tokio::sync::mpsc::UnboundedSender<crate::events::orchestrator_bridge::TurnEvent>,
 ) -> tokio_util::sync::CancellationToken {
@@ -702,7 +702,7 @@ pub fn spawn_streaming_turn(
                 tracing::error!(error = ?e, "streaming turn failed");
                 // Surface error completion as a clean EndTurn for now;
                 // M7 may introduce a dedicated TurnEnded(Error) variant.
-                TurnEvent::TurnEnded(lingxi_traits::TurnOutcome::EndTurn)
+                TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn)
             }
         };
         let _ = tx_clone.send(ev);
@@ -785,7 +785,7 @@ mod dispatch_tests {
     use super::*;
     use crate::events::keymap::{KeyAction, ScrollDir};
     use crate::state::{AppState, RenderedMessage, StatusSnapshot};
-    use lingxi_permission::PermissionMode;
+    use permission::PermissionMode;
     use std::path::PathBuf;
 
     fn s() -> AppState {
@@ -879,9 +879,9 @@ mod dispatch_tests {
     }
 
     /// Build a `RegistrySlashDispatcher` seeded with the M5-09 built-ins.
-    fn dispatcher() -> lingxi_commands::dispatcher::RegistrySlashDispatcher {
-        use lingxi_commands::dispatcher::RegistrySlashDispatcher;
-        use lingxi_commands::registry::{register_all_builtin_commands, CommandRegistry};
+    fn dispatcher() -> commands::dispatcher::RegistrySlashDispatcher {
+        use commands::dispatcher::RegistrySlashDispatcher;
+        use commands::registry::{register_all_builtin_commands, CommandRegistry};
         use std::sync::Arc;
         use tokio::sync::RwLock;
         let mut reg = CommandRegistry::new();

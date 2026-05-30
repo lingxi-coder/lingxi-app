@@ -1,4 +1,4 @@
-//! `McpClient` wrapping `lingxi_jsonrpc::Connection`.
+//! `McpClient` wrapping `jsonrpc::Connection`.
 //!
 //! Full RPC body (initialize, tools/list, tools/call, prompts/list,
 //! prompts/get, resources/list, resources/read, ping) lands in M2-02b
@@ -11,11 +11,11 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use lingxi_traits::{
+use serde::Deserialize;
+use traits::{
     McpPromptDto, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     ServerCapabilitiesDto,
 };
-use serde::Deserialize;
 
 use crate::inbound::{ElicitationCreateHandler, RootsListHandler};
 use crate::initialize_params::InitializeParams;
@@ -80,7 +80,7 @@ fn decode_server_capabilities(raw: &serde_json::Value) -> ServerCapabilitiesDto 
     }
 }
 
-/// Async MCP client built on top of a [`lingxi_jsonrpc::Connection`].
+/// Async MCP client built on top of a [`jsonrpc::Connection`].
 ///
 /// One instance per server connection; owns its `Connection` and inbound
 /// handler registrations.
@@ -92,7 +92,7 @@ pub struct McpClient {
     cwd: PathBuf,
     /// Underlying JSON-RPC connection produced by the platform transport.
     #[allow(dead_code)] // wired further in Tasks 9-12 (tools/list, ...)
-    connection: Arc<lingxi_jsonrpc::Connection>,
+    connection: Arc<jsonrpc::Connection>,
     /// Server capabilities snapshot from the `initialize` response.
     server_capabilities: RwLock<Option<ServerCapabilitiesDto>>,
     /// Server-provided instructions string from the `initialize` response,
@@ -115,13 +115,13 @@ impl McpClient {
     /// absolute path before passing it here (typically via
     /// `std::env::current_dir()`).
     ///
-    /// Async because `lingxi_jsonrpc::Connection::register_handler` is async
+    /// Async because `jsonrpc::Connection::register_handler` is async
     /// (the dispatcher map is behind an async `RwLock`). The plan's pseudo-
     /// signature was synchronous; the real M2-02a API requires `.await`.
     pub async fn new(
         server_name: impl Into<String>,
         cwd: PathBuf,
-        connection: Arc<lingxi_jsonrpc::Connection>,
+        connection: Arc<jsonrpc::Connection>,
     ) -> Self {
         connection
             .register_handler(
@@ -512,7 +512,7 @@ pub enum McpClientError {
 mod constructor_tests {
     use super::*;
     use bytes::Bytes;
-    use lingxi_jsonrpc::{Connection, Mode};
+    use jsonrpc::{Connection, Mode};
     use tokio::sync::mpsc;
 
     /// Build a `Connection` over a fresh pair of `mpsc<Bytes>` channels and

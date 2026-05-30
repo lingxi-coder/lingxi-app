@@ -11,8 +11,8 @@
 //! latter is what surfaces in CLI / `/doctor` output and must stay stable
 //! across releases.
 
-use lingxi_test_harness::parity::load_fixture;
 use serde::Deserialize;
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 #[allow(clippy::struct_field_names)] // mirrors the JSON fixture's `expected_*` keys
@@ -25,10 +25,10 @@ struct Fixture {
 #[cfg(target_os = "windows")]
 #[tokio::test]
 async fn windows_swarm_refuses_tmux_with_claude_code_message() {
-    use lingxi_traits::swarm::{SwarmBackend, SwarmError, SwarmLayout};
+    use traits::swarm::{SwarmBackend, SwarmError, SwarmLayout};
 
     let fx: Fixture = load_fixture("tmux_windows_refusal");
-    let s = lingxi_platform_windows::WindowsSwarmBackend::new();
+    let s = platform_windows::WindowsSwarmBackend::new();
 
     assert_eq!(
         s.is_available(),
@@ -63,7 +63,7 @@ fn windows_swarm_fixture_loads_on_non_windows() {
     // on POSIX hosts (where the variant is identical — only the platform
     // gating of the test driver differs).
     let fx: Fixture = load_fixture("tmux_windows_refusal");
-    let err = lingxi_traits::swarm::SwarmError::Unsupported;
+    let err = traits::swarm::SwarmError::Unsupported;
     let displayed = format!("{err}");
     assert!(!fx.expected_is_available, "Windows must report unavailable");
     assert_eq!(

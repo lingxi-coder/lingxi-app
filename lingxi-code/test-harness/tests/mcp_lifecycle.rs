@@ -4,10 +4,10 @@
 //! state machine walks `Disconnected → Connecting → Connected` and
 //! discovers the canned tool catalog.
 
-use lingxi_mcp::{ConfigScope, McpRegistry, McpServerConfig};
-use lingxi_test_harness::mocks::MockMcpTransport;
-use lingxi_traits::McpTransportSpec;
+use mcp::{ConfigScope, McpRegistry, McpServerConfig};
 use std::sync::Arc;
+use test_harness::mocks::MockMcpTransport;
+use traits::McpTransportSpec;
 
 #[tokio::test]
 async fn connect_initializes_and_lists_tools() {

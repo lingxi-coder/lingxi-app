@@ -5,7 +5,7 @@
 //! teammates.
 
 use crate::mailbox::{MailboxRouter, TeammateMailbox};
-use lingxi_protocol::AgentId;
+use protocol::AgentId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;

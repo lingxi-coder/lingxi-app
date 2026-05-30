@@ -2,7 +2,7 @@
 //!
 //! Asserts that the fixture `registry_40_tools.json` declares exactly 40
 //! tools across 9 categories AND that each declared name is a known
-//! `*_TOOL_NAME` constant in production (`lingxi_tools::builtin`).
+//! `*_TOOL_NAME` constant in production (`tools::builtin`).
 //!
 //! This is a byte-lock parity driver in the M4-01..08 style: it does NOT
 //! dispatch tools at runtime (that machinery lives behind `dummy_ctx` in
@@ -14,9 +14,9 @@
 
 #![allow(clippy::unwrap_used)]
 
-use lingxi_test_harness::parity::load_fixture;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
+use test_harness::parity::load_fixture;
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -73,7 +73,7 @@ fn registry_40_tools_fixture_categories_locked() {
 /// the in-module `TOOL_NAME` constants (single-tool modules).
 #[test]
 fn fixture_names_match_production_constants() {
-    use lingxi_tools::builtin;
+    use tools::builtin;
 
     let f = fx();
     let names: BTreeSet<String> = f

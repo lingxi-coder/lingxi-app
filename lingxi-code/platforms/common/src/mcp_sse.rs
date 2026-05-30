@@ -13,12 +13,12 @@ use std::collections::HashMap;
 
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
-use lingxi_jsonrpc::messages::Message as JsonRpcMessage;
-use lingxi_jsonrpc::{BrokerError, Connection, ConnectionError};
-use lingxi_traits::mcp::McpError;
+use jsonrpc::messages::Message as JsonRpcMessage;
+use jsonrpc::{BrokerError, Connection, ConnectionError};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, USER_AGENT};
 use thiserror::Error;
 use tokio::sync::mpsc;
+use traits::mcp::McpError;
 
 /// Header name used by claude-code IDE plugins for the auth token.
 /// LITERAL — must match claude-code byte-for-byte.

@@ -27,7 +27,7 @@ pub trait MemoryHierarchyProvider: Send + Sync {
     async fn load(&self, cwd: &Path) -> Vec<MemoryFile>;
 }
 
-/// Production implementation — wraps `lingxi_memory::claude_md::walk` +
+/// Production implementation — wraps `memory::claude_md::walk` +
 /// `load_file`. Reverses the walk order so the returned vec is in spec
 /// splice order (home → repo → local-override).
 pub struct RealMemoryHierarchyProvider;
@@ -38,7 +38,7 @@ impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
         let Some(home) = dirs::home_dir() else {
             return Vec::new();
         };
-        let h = lingxi_memory::claude_md::hierarchy::walk(cwd, &home);
+        let h = memory::claude_md::hierarchy::walk(cwd, &home);
         // walk() returns innermost-first; reverse to home → outer → cwd.
         // Within the same dir, M3-02 emits `CLAUDE.local.md` BEFORE
         // `CLAUDE.md` (so local-override shadows canonical). After
@@ -48,7 +48,7 @@ impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
         entries.reverse();
         let mut out = Vec::with_capacity(entries.len());
         for e in entries {
-            match lingxi_memory::claude_md::loader::load_file(&e.path, None) {
+            match memory::claude_md::loader::load_file(&e.path, None) {
                 Ok(loaded) => {
                     let body = loaded.body.trim().to_string();
                     if body.is_empty() {

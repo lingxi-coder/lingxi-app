@@ -45,6 +45,25 @@ impl SkillRegistry {
         self.skills.get(name)
     }
 
+    /// All registered skill names (unsorted). Used by `skill-builtin` and the
+    /// composition-root snapshot tests to lock the assembled skill set.
+    #[must_use]
+    pub fn names(&self) -> Vec<&str> {
+        self.skills.keys().map(String::as_str).collect()
+    }
+
+    /// Number of registered skills.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.skills.len()
+    }
+
+    /// True when no skills are registered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty()
+    }
+
     /// Return all skills whose triggers appear (substring match) in `query`.
     ///
     /// Match is case-insensitive on the trigger keyword. Each skill appears

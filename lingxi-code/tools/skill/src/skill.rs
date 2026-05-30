@@ -4,7 +4,7 @@
 //! - Descriptor cap: 1024 chars.
 //!
 //! Hermetic by default: the `EmptySkillLoader` always returns "skill not
-//! found". Production hosts inject a loader backed by `skills::registry`.
+//! found". Production hosts inject a loader backed by `skill_api::registry`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ pub const MAX_SKILL_DESCRIPTOR_LEN: usize = 1024;
 pub const MAX_SKILL_NAME_LEN: usize = 128;
 
 /// Minimal skill descriptor returned to the model. Subset of
-/// `skills::model::Skill` — only the fields the model actually needs.
+/// `skill_api::model::Skill` — only the fields the model actually needs.
 #[derive(Debug, Clone)]
 pub struct SkillDescriptor {
     /// Canonical name (matches the input field).
@@ -46,7 +46,7 @@ pub struct SkillDescriptor {
     pub body: String,
 }
 
-/// Loader trait — production wraps `skills::registry::SkillRegistry`;
+/// Loader trait — production wraps `skill_api::registry::SkillRegistry`;
 /// tests inject a fixed map.
 #[async_trait]
 pub trait SkillLoader: Send + Sync {

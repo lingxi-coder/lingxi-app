@@ -15,6 +15,10 @@ tool-api = { path = "../../tool-api" }
 traits = { path = "../../traits" }
 commands = { path = "../../commands" }
 
+# Skill composition (P8): the abstraction crate + the builtin skill set.
+skill-api = { path = "../../skill-api" }
+skill-builtin = { path = "../../skills/builtin" }
+
 # The 14 desktop builtin tool crates (9 cross-platform + 5 desktop-only).
 tool-file = { path = "../../tools/file" }
 tool-shell = { path = "../../tools/shell" }

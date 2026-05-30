@@ -918,6 +918,8 @@ version = "0.9.0"
 dependencies = [
  "commands",
  "insta",
+ "skill-api",
+ "skill-builtin",
  "tool-agent",
  "tool-api",
  "tool-cron",
@@ -2270,7 +2272,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "skills",
+ "skill-api",
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
@@ -3108,24 +3110,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
-name = "skills"
+name = "skill-api"
 version = "0.8.0"
 dependencies = [
- "agent",
- "async-trait",
- "mcp",
- "once_cell",
- "permission",
  "protocol",
  "serde",
- "serde_json",
  "serde_yaml",
- "sidequery",
  "thiserror 2.0.18",
- "tokio",
- "tool-api",
- "tracing",
  "traits",
+]
+
+[[package]]
+name = "skill-builtin"
+version = "0.8.0"
+dependencies = [
+ "skill-api",
 ]
 
 [[package]]

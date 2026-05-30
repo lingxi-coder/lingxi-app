@@ -29,6 +29,7 @@
 use commands::registry::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2, CommandRegistry,
 };
+use skill_api::SkillRegistry;
 use std::sync::Arc;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use traits::{AuthHandle, OrchestratorHandle};
@@ -86,6 +87,19 @@ pub fn register_desktop_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
     tool_worktree::register_all(reg, ctx.clone());
     tool_mcp::register_all(reg, ctx.clone());
     tool_lsp::register_all(reg, ctx);
+}
+
+/// Assemble the desktop builtin **skill** registry.
+///
+/// Delegates to `skill_builtin::register_desktop`, the single place that names
+/// the desktop builtin skill set. Empty in M8 (no Rust-bundled skills yet —
+/// skills are markdown loaded from disk by the session loader); the mobile
+/// composition root will call `skill_builtin::register_mobile` instead.
+#[must_use]
+pub fn desktop_skill_registry() -> SkillRegistry {
+    let mut reg = SkillRegistry::new();
+    skill_builtin::register_desktop(&mut reg);
+    reg
 }
 
 /// Assemble the desktop slash-command registry.

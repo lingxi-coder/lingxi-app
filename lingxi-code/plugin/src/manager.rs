@@ -22,7 +22,7 @@ use mcp::McpRegistry;
 use outputstyles::OutputStyleRegistry;
 use protocol::PluginId;
 use secret::CredentialManager;
-use skills::SkillRegistry;
+use skill_api::SkillRegistry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -26,6 +26,7 @@ pub mod state;
 pub mod streaming;
 pub mod telemetry;
 pub(crate) mod terminal;
+pub mod multiagent;
 pub mod theme;
 pub mod theme_persist;
 

@@ -587,6 +587,10 @@ pub struct AppState {
     /// (mutually exclusive with the M7-07 palette/completion + M7-10
     /// history-search overlays); `open` ⇒ it owns all live keys.
     pub message_selector: crate::components::message_selector::MessageSelectorState,
+    /// (M9-01) Multi-agent presentation state (tasks + workers). Mutated only
+    /// by `multiagent::apply::apply_multiagent_event`. Renderers (M9-03+) read
+    /// it; empty until a feed is mounted (M9-05).
+    pub multiagent: crate::multiagent::MultiAgentState,
 }
 
 impl AppState {
@@ -634,6 +638,7 @@ impl AppState {
             paste: crate::components::prompt_input::PasteState::default(),
             active_screen: None,
             message_selector: crate::components::message_selector::MessageSelectorState::default(),
+            multiagent: crate::multiagent::MultiAgentState::default(),
         }
     }
 
@@ -1041,5 +1046,12 @@ mod tests {
         assert_eq!(st.expanded.get(&id), Some(&true));
         st.toggle_expanded(&id);
         assert_eq!(st.expanded.get(&id), Some(&false));
+    }
+
+    #[test]
+    fn app_state_carries_empty_multiagent_state() {
+        let s = AppState::default_for_tests();
+        assert!(s.multiagent.tasks.is_empty());
+        assert!(s.multiagent.workers.is_empty());
     }
 }

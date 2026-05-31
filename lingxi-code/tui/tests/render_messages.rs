@@ -61,3 +61,16 @@ fn user_agent_notification_completed() {
     };
     insta::assert_snapshot!("user_agent_notification_completed", element.to_string());
 }
+
+#[test]
+fn user_channel_with_user() {
+    let mut element = element! {
+        tui::components::messages::user_channel::UserChannelMessage(
+            server: "plugin:slack:slack".to_string(),
+            user: Some("bob".to_string()),
+            content: "deploy is green".to_string(),
+            theme: tui::theme::Theme::dark(),
+        )
+    };
+    insta::assert_snapshot!("user_channel_with_user", element.to_string());
+}

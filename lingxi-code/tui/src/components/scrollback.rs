@@ -38,6 +38,7 @@ use crate::components::messages::{
     task_assignment::TaskAssignmentMessage,
     thinking::AssistantThinkingMessage,
     user_agent_notification::UserAgentNotificationMessage,
+    user_channel::UserChannelMessage,
     user_text::UserTextMessage,
     user_tool_result::UserToolResultMessage,
 };
@@ -56,7 +57,7 @@ use crate::theme::{Theme, ThemeName};
 /// whole list, so message colors follow the highlighted theme.
 #[must_use]
 #[allow(clippy::implicit_hasher)] // always called with `AppState.expanded`'s std hasher
-#[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (27 variants)
+#[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (28 variants)
 pub fn render_message(
     m: RenderedMessage,
     expanded: &HashMap<ToolUseId, bool>,
@@ -283,6 +284,14 @@ pub fn render_message(
         .into_any(),
         RenderedMessage::AgentNotification { summary, status } => element! {
             UserAgentNotificationMessage(summary: summary, status: status, theme: theme,)
+        }
+        .into_any(),
+        RenderedMessage::ChannelMessage {
+            server,
+            user,
+            content,
+        } => element! {
+            UserChannelMessage(server: server, user: user, content: content, theme: theme,)
         }
         .into_any(),
     }

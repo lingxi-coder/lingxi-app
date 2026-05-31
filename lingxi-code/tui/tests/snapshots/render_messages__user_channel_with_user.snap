@@ -1,0 +1,6 @@
+---
+source: tui/tests/render_messages.rs
+assertion_line: 75
+expression: element.to_string()
+---
+← slack · bob: deploy is green

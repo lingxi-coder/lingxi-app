@@ -31,6 +31,7 @@ pub mod system_text;
 pub mod task_assignment;
 pub mod thinking;
 pub mod user_agent_notification;
+pub mod user_channel;
 pub mod user_text;
 pub mod user_tool_result;
 
@@ -46,7 +47,7 @@ use user_tool_result::{render_user_tool_result_to_string, UserToolResultProps};
 /// `AppState.focused_tool_id`. `expanded` is `AppState.expanded.get(&id)`
 /// (default `false`).
 #[must_use]
-#[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (27 variants)
+#[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (28 variants)
 pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: bool) -> String {
     match entry {
         RenderedMessage::UserText { body, .. } => format!("> {body}"),
@@ -156,6 +157,16 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
                 },
             )
         }
+        RenderedMessage::ChannelMessage {
+            server,
+            user,
+            content,
+        } => user_channel::render_user_channel_to_string(user_channel::UserChannelProps {
+            server: server.clone(),
+            user: user.clone(),
+            content: content.clone(),
+            theme: crate::theme::Theme::dark(),
+        }),
         RenderedMessage::Advisor { kind, verbose } => {
             advisor::render_advisor_to_string(advisor::AdvisorProps {
                 kind: kind.clone(),

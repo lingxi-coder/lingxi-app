@@ -166,6 +166,15 @@ pub enum RenderedMessage {
         /// Optional status string.
         status: Option<String>,
     },
+    /// (M9-03) Inbound channel message — claude-code `UserChannelMessage`.
+    ChannelMessage {
+        /// Source server (raw; renderer takes the leaf after the last `:`).
+        server: String,
+        /// Optional sender user.
+        user: Option<String>,
+        /// Message content (renderer collapses whitespace + truncates to 60).
+        content: String,
+    },
     /// (M7-04) Advisor block.
     Advisor {
         /// Advisor block content kind.

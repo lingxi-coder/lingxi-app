@@ -84,7 +84,7 @@ pub fn measured_height(msg: &RenderedMessage, width: usize) -> usize {
 /// you MUST update this function to match and extend the
 /// `measured_height_pins_*` lock tests below. Drift here corrupts the
 /// line-based scroll math.
-#[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (27 variants)
+#[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (28 variants)
 fn render_text_for_measure(msg: &RenderedMessage) -> String {
     match msg {
         RenderedMessage::UserText { body, .. }
@@ -355,6 +355,16 @@ fn render_text_for_measure(msg: &RenderedMessage) -> String {
                 crate::components::messages::user_agent_notification::UserAgentNotificationProps {
                     summary: summary.clone(),
                     status: status.clone(),
+                    theme: crate::theme::Theme::dark(),
+                },
+            )
+        }
+        RenderedMessage::ChannelMessage { server, user, content } => {
+            crate::components::messages::user_channel::render_user_channel_to_string(
+                crate::components::messages::user_channel::UserChannelProps {
+                    server: server.clone(),
+                    user: user.clone(),
+                    content: content.clone(),
                     theme: crate::theme::Theme::dark(),
                 },
             )

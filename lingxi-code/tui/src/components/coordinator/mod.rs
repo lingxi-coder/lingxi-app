@@ -4,3 +4,4 @@
 
 pub mod format_num;
 pub mod team_status;
+pub mod teammate_view_header;

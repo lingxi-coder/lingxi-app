@@ -620,6 +620,16 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
     }
     // === end Shift+Down open binding ===
 
+    // === (M9-06) Teammate-view mode: Esc returns to the normal transcript.
+    // Sits after the permission (1) + active_screen (2) + overlay (3) gates so
+    // those still win. Runs before vim (3.5/4) and default editor input so the
+    // Esc key is fully consumed and never leaks to the prompt buffer. ===
+    if st.viewing_teammate.is_some() && k.code == KeyCode::Esc {
+        st.leave_teammate_view();
+        return;
+    }
+    // === end teammate-view Esc ===
+
     // === PRIORITY 3.5: vim toggle (M7-08 review). The Ctrl-Alt-V binding must
     // be modal-independent — it flips `vim_enabled` from ANY vim mode (Normal or
     // Insert) or when vim is off. It sits AFTER the permission (1) and overlay

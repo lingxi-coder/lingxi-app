@@ -661,6 +661,10 @@ pub struct AppState {
     /// by `multiagent::apply::apply_multiagent_event`. Renderers (M9-03+) read
     /// it; empty until a feed is mounted (M9-05).
     pub multiagent: crate::multiagent::MultiAgentState,
+    /// (M9-06) When `Some`, the transcript is in teammate-view mode for this
+    /// teammate name; `Esc` returns. Entry is programmatic until the worker
+    /// feed is live (R4/R5).
+    pub viewing_teammate: Option<String>,
 }
 
 impl AppState {
@@ -709,6 +713,7 @@ impl AppState {
             active_screen: None,
             message_selector: crate::components::message_selector::MessageSelectorState::default(),
             multiagent: crate::multiagent::MultiAgentState::default(),
+            viewing_teammate: None,
         }
     }
 
@@ -758,6 +763,16 @@ impl AppState {
             crate::screens::theme::ThemePickerState::new(self.theme_setting),
         ));
         crate::telemetry::screen_opened("theme");
+    }
+
+    /// (M9-06) Enter teammate-view for `name`.
+    pub fn enter_teammate_view(&mut self, name: String) {
+        self.viewing_teammate = Some(name);
+    }
+
+    /// (M9-06) Leave teammate-view. Returns `true` if a view was active.
+    pub fn leave_teammate_view(&mut self) -> bool {
+        self.viewing_teammate.take().is_some()
     }
 
     /// (M7-11) Close any active screen, returning to the REPL. Generic — every

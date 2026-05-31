@@ -1,4 +1,4 @@
-//! M9-06 — coordinator chrome snapshots + a fixture WorkersRefreshed check.
+//! M9-06 — coordinator chrome snapshots + a fixture WorkersRefreshed check + state tests.
 
 use tui::components::coordinator::agent_progress::{
     render_agent_progress_line, AgentProgressState,
@@ -57,4 +57,16 @@ fn agent_progress_tree() {
     );
     let b = render_agent_progress_line("bob", true, 1, 512, &AgentProgressState::Done);
     insta::assert_snapshot!("coord_agent_progress", format!("{a}\n{b}"));
+}
+
+#[test]
+fn teammate_view_enter_leave() {
+    // Uses the public AppState helpers (constructed via `default_for_tests`).
+    let mut s = tui::state::AppState::default_for_tests();
+    assert!(s.viewing_teammate.is_none());
+    s.enter_teammate_view("alice".into());
+    assert_eq!(s.viewing_teammate.as_deref(), Some("alice"));
+    assert!(s.leave_teammate_view());
+    assert!(s.viewing_teammate.is_none());
+    assert!(!s.leave_teammate_view());
 }

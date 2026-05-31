@@ -1,0 +1,6 @@
+---
+source: tui/tests/render_task_rows.rs
+assertion_line: 39
+expression: "render_task_row(&row(\"local_workflow\", \"running\", \"pipeline\"))"
+---
+pipeline (running)

@@ -1,0 +1,6 @@
+---
+source: tui/tests/render_task_rows.rs
+assertion_line: 34
+expression: "render_task_row(&row(\"in_process_teammate\", \"running\", \"alice\"))"
+---
+@alice (running)

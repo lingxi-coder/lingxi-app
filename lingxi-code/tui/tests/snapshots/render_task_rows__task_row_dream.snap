@@ -1,0 +1,6 @@
+---
+source: tui/tests/render_task_rows.rs
+assertion_line: 49
+expression: "render_task_row(&row(\"dream\", \"running\", \"nightly\"))"
+---
+nightly (running)

@@ -1,0 +1,6 @@
+---
+source: tui/tests/render_task_rows.rs
+assertion_line: 24
+expression: "render_task_row(&row(\"local_agent\", \"completed\", \"review\"))"
+---
+review (done, unread)

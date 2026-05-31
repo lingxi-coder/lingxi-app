@@ -29,6 +29,7 @@ pub mod shutdown;
 pub mod system_api_error;
 pub mod system_text;
 pub mod task_assignment;
+pub mod team_mem_saved;
 pub mod thinking;
 pub mod user_agent_notification;
 pub mod user_channel;

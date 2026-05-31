@@ -1,0 +1,8 @@
+---
+source: tui/tests/agents_screen.rs
+expression: render_agents_to_string(&s)
+---
+Agents
+❯ explorer · opus
+  writer
+Press ↑↓ to navigate · Enter to select · Esc to go back

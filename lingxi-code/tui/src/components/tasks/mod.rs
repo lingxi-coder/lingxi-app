@@ -3,6 +3,7 @@
 //! string renderers — the iocraft components + dialog that display them are
 //! M9-05.
 
+pub mod detail;
 pub mod format;
 pub mod output_tail;
 pub mod rows;

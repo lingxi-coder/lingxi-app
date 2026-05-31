@@ -4,6 +4,7 @@
 //! route-state (`Screen` + `AppState.active_screen`); later sub-plans add
 //! `Resume` (M7-12), `Settings` (M7-13), `Memory` (M7-14).
 
+pub mod background_tasks;
 pub mod doctor;
 pub mod memory;
 pub mod repl;

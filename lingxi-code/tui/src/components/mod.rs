@@ -3,6 +3,7 @@
 //! Each submodule exports one component (or a small family of related
 //! components) plus its `Props` struct.
 
+pub mod coordinator;
 pub mod message_selector;
 pub mod messages;
 pub mod permissions;

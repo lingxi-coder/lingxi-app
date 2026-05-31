@@ -81,6 +81,7 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
                     tool_input: input,
                     default_decision,
                 },
+                worker: None,
             });
             state.pending_permission_started_at = Some(std::time::Instant::now());
             state.tool_use_dialog_state =

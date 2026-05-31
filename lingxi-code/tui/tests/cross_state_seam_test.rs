@@ -58,6 +58,7 @@ fn arm_permission(st: &mut AppState) {
             tool_input: json!({"command": "ls"}),
             default_decision: PromptDefault::DenyByDefault,
         },
+        worker: None,
     });
     st.pending_permission_started_at = Some(std::time::Instant::now());
 }

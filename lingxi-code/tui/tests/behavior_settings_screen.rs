@@ -201,6 +201,7 @@ async fn permission_pending_wins_over_open_settings_screen() {
             tool_input: json!({"command": "ls"}),
             default_decision: PromptDefault::DenyByDefault,
         },
+        worker: None,
     });
     app.pending_permission_resp_tx = Some(tx);
     app.pending_permission_started_at = Some(std::time::Instant::now());
@@ -334,6 +335,7 @@ async fn pending_permission_blocks_pump_open() {
             tool_input: json!({"command": "ls"}),
             default_decision: PromptDefault::DenyByDefault,
         },
+        worker: None,
     });
     let state = Arc::new(TokioMutex::new(app));
 

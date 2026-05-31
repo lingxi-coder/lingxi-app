@@ -478,6 +478,10 @@ pub struct TurnInFlight {
 pub struct PendingPermission {
     /// The full request the orchestrator is awaiting an answer for.
     pub request: PermissionRequest,
+    /// (M9-07) Worker identity when this request is worker-originated (TUI-side;
+    /// the `PermissionRequest` enum is in frozen `traits/`). Fixture/test-set
+    /// until the worker pool is live.
+    pub worker: Option<crate::components::permissions::worker::WorkerPermissionInfo>,
 }
 
 impl PendingPermission {

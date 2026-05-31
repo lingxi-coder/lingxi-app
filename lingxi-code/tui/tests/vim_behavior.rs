@@ -254,6 +254,7 @@ fn permission_dialog_wins_over_ctrl_alt_v() {
     st.vim.mode = VimMode::Normal;
     st.pending_permission = Some(tui::state::PendingPermission {
         request: PermissionRequest::BypassPermissionsMode,
+        worker: None,
     });
     handle_live_key(&mut st, &live_ctrl_alt_v(), 24);
     assert!(

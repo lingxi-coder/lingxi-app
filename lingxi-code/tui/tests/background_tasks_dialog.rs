@@ -185,6 +185,7 @@ mod routing_seam {
                 tool_input: json!({"command": "ls"}),
                 default_decision: PromptDefault::DenyByDefault,
             },
+            worker: None,
         });
         st.pending_permission_resp_tx = Some(tx);
         st.pending_permission_started_at = Some(std::time::Instant::now());

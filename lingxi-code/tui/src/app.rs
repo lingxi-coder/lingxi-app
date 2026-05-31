@@ -406,11 +406,16 @@ pub fn render_screen(
                 let pretty = serde_json::to_string_pretty(tool_input).unwrap_or_default();
                 let tool_name = tool_name.clone();
                 let focus = state.tool_use_dialog_state.focus;
+                let worker_badge = pp
+                    .worker
+                    .as_ref()
+                    .map(|w| crate::components::permissions::worker::render_worker_badge(&w.name));
                 element! {
                     ToolUseConfirm(
                         tool_name: tool_name,
                         tool_input_pretty: pretty,
                         focus: focus,
+                        worker_badge: worker_badge,
                     )
                 }
                 .into_any()

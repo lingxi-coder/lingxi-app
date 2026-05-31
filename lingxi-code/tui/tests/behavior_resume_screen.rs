@@ -96,6 +96,7 @@ fn permission_dialog_outranks_resume_screen() {
     // A permission dialog is also pending (priority 1).
     app.pending_permission = Some(PendingPermission {
         request: PermissionRequest::BypassPermissionsMode,
+        worker: None,
     });
 
     // Down arrow: priority 1 (permission) consumes it; the Resume screen's

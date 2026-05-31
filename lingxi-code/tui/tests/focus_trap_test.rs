@@ -23,6 +23,7 @@ fn dialog_open_prompt_input_not_mutated() {
             tool_input: json!({}),
             default_decision: PromptDefault::DenyByDefault,
         },
+        worker: None,
     });
     // User types 'h' — must NOT append to prompt_text.
     handle_key(&mut state, k('h'));

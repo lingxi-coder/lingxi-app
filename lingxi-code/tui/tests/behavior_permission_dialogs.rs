@@ -25,6 +25,7 @@ fn open_tool_use_dialog(state: &mut AppState) -> oneshot::Receiver<PermissionRes
             tool_input: json!({"command": "ls"}),
             default_decision: PromptDefault::DenyByDefault,
         },
+        worker: None,
     });
     state.pending_permission_resp_tx = Some(tx);
     state.pending_permission_started_at = Some(std::time::Instant::now());
@@ -82,6 +83,7 @@ fn open_bypass_dialog(state: &mut AppState) -> oneshot::Receiver<PermissionRespo
     let (tx, rx) = oneshot::channel();
     state.pending_permission = Some(PendingPermission {
         request: PermissionRequest::BypassPermissionsMode,
+        worker: None,
     });
     state.pending_permission_resp_tx = Some(tx);
     state.pending_permission_started_at = Some(std::time::Instant::now());

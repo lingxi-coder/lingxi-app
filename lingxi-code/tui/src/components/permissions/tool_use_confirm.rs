@@ -40,6 +40,9 @@ pub struct ToolUseConfirmProps {
     pub tool_input_pretty: String,
     /// Which button to highlight on this render.
     pub focus: DialogFocus,
+    /// (M9-07) Worker badge `● @name` prepended when worker-originated.
+    /// `None` (the live default) leaves the dialog byte-identical to before.
+    pub worker_badge: Option<String>,
 }
 
 /// Pure key handler. Returns `Some(resolution)` when the user picks an
@@ -69,6 +72,7 @@ pub fn ToolUseConfirm(props: &ToolUseConfirmProps) -> impl Into<AnyElement<'stat
     let header = format!("Claude needs your permission to use {}", props.tool_name);
     let input_line = format!("Input: {}", props.tool_input_pretty);
     let focus = props.focus;
+    let worker_badge = props.worker_badge.clone();
     let button_label = move |for_focus: DialogFocus, label: &str| -> String {
         if for_focus == focus {
             format!("> {label}")
@@ -85,6 +89,9 @@ pub fn ToolUseConfirm(props: &ToolUseConfirmProps) -> impl Into<AnyElement<'stat
             border_style: BorderStyle::Round,
             padding: 1,
         ) {
+            #(worker_badge.as_deref().map(|badge| element! {
+                Text(content: badge.to_string())
+            }))
             Text(content: header)
             Text(content: input_line)
             View(flex_direction: FlexDirection::Column, padding_top: 1) {

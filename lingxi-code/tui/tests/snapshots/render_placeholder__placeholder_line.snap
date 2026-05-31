@@ -1,5 +1,5 @@
 ---
-source: crates/tui/tests/render_placeholder.rs
+source: tui/tests/render_placeholder.rs
 expression: line
 ---
-lingxi-tui v0.8.0
+lingxi-tui v0.10.0

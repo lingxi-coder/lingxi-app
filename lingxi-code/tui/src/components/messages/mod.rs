@@ -32,6 +32,7 @@ pub mod task_assignment;
 pub mod thinking;
 pub mod user_agent_notification;
 pub mod user_channel;
+pub mod user_teammate;
 pub mod user_text;
 pub mod user_tool_result;
 
@@ -165,6 +166,16 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             server: server.clone(),
             user: user.clone(),
             content: content.clone(),
+            theme: crate::theme::Theme::dark(),
+        }),
+        RenderedMessage::UserTeammate {
+            display_name,
+            color,
+            kind,
+        } => user_teammate::render_user_teammate_to_string(user_teammate::UserTeammateProps {
+            display_name: display_name.clone(),
+            color: color.clone(),
+            kind: kind.clone(),
             theme: crate::theme::Theme::dark(),
         }),
         RenderedMessage::Advisor { kind, verbose } => {

@@ -74,3 +74,36 @@ fn user_channel_with_user() {
     };
     insta::assert_snapshot!("user_channel_with_user", element.to_string());
 }
+
+#[test]
+fn user_teammate_task_completed() {
+    let mut element = element! {
+        tui::components::messages::user_teammate::UserTeammateMessage(
+            display_name: "alice".to_string(),
+            color: Some("magenta".to_string()),
+            kind: tui::state::UserTeammateKind::TaskCompleted {
+                task_id: "456".to_string(),
+                task_subject: Some("Setup DB".to_string()),
+            },
+            theme: tui::theme::Theme::dark(),
+        )
+    };
+    insta::assert_snapshot!("user_teammate_task_completed", element.to_string());
+}
+
+#[test]
+fn user_teammate_note_transcript() {
+    let mut element = element! {
+        tui::components::messages::user_teammate::UserTeammateMessage(
+            display_name: "bob".to_string(),
+            color: None,
+            kind: tui::state::UserTeammateKind::Note {
+                summary: Some("done".to_string()),
+                content: Some("line1\nline2".to_string()),
+                is_transcript_mode: true,
+            },
+            theme: tui::theme::Theme::dark(),
+        )
+    };
+    insta::assert_snapshot!("user_teammate_note_transcript", element.to_string());
+}

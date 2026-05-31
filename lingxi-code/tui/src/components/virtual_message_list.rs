@@ -369,6 +369,16 @@ fn render_text_for_measure(msg: &RenderedMessage) -> String {
                 },
             )
         }
+        RenderedMessage::UserTeammate { display_name, color, kind } => {
+            crate::components::messages::user_teammate::render_user_teammate_to_string(
+                crate::components::messages::user_teammate::UserTeammateProps {
+                    display_name: display_name.clone(),
+                    color: color.clone(),
+                    kind: kind.clone(),
+                    theme: crate::theme::Theme::dark(),
+                },
+            )
+        }
     }
 }
 

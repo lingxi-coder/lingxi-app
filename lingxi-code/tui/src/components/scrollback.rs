@@ -39,6 +39,7 @@ use crate::components::messages::{
     thinking::AssistantThinkingMessage,
     user_agent_notification::UserAgentNotificationMessage,
     user_channel::UserChannelMessage,
+    user_teammate::UserTeammateMessage,
     user_text::UserTextMessage,
     user_tool_result::UserToolResultMessage,
 };
@@ -292,6 +293,14 @@ pub fn render_message(
             content,
         } => element! {
             UserChannelMessage(server: server, user: user, content: content, theme: theme,)
+        }
+        .into_any(),
+        RenderedMessage::UserTeammate {
+            display_name,
+            color,
+            kind,
+        } => element! {
+            UserTeammateMessage(display_name: display_name, color: color, kind: kind, theme: theme,)
         }
         .into_any(),
     }

@@ -175,6 +175,16 @@ pub enum RenderedMessage {
         /// Message content (renderer collapses whitespace + truncates to 60).
         content: String,
     },
+    /// (M9-03) Teammate message — claude-code `UserTeammateMessage`
+    /// (task-completed + plain-note sub-types).
+    UserTeammate {
+        /// Display name (`leader` or teammate id).
+        display_name: String,
+        /// Optional agent color name (→ `agent_color_from_name`).
+        color: Option<String>,
+        /// Sub-type payload.
+        kind: UserTeammateKind,
+    },
     /// (M7-04) Advisor block.
     Advisor {
         /// Advisor block content kind.
@@ -339,6 +349,31 @@ impl Default for AdvisorKind {
     fn default() -> Self {
         Self::RedactedResult
     }
+}
+
+/// (M9-03) `UserTeammate` sub-type payloads (claude-code
+/// `UserTeammateMessage`). plan-approval/shutdown reuse the existing
+/// `PlanApproval`/`Shutdown` variants; `idle_notification` is suppressed at
+/// the drain (M9-06), so it has no payload here.
+#[derive(Debug, Clone)]
+pub enum UserTeammateKind {
+    /// `✓ Completed task #{task_id}` + optional ` ({task_subject})`.
+    TaskCompleted {
+        /// Completed task id.
+        task_id: String,
+        /// Optional task subject.
+        task_subject: Option<String>,
+    },
+    /// Plain teammate note: optional summary + optional full content
+    /// (shown indented when `is_transcript_mode`).
+    Note {
+        /// Optional one-line summary.
+        summary: Option<String>,
+        /// Optional full content.
+        content: Option<String>,
+        /// `true` → show full content (transcript mode).
+        is_transcript_mode: bool,
+    },
 }
 
 /// (M7-04) Plan-approval request/response kinds.

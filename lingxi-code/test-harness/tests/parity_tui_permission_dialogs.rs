@@ -96,6 +96,7 @@ fn open_tool_use(state: &mut AppState) -> oneshot::Receiver<PermissionResponse> 
             tool_input: json!({}),
             default_decision: PromptDefault::DenyByDefault,
         },
+        worker: None,
     });
     state.pending_permission_resp_tx = Some(tx);
     state.pending_permission_started_at = Some(std::time::Instant::now());
@@ -108,6 +109,7 @@ fn open_exit_plan(state: &mut AppState) -> oneshot::Receiver<PermissionResponse>
         request: PermissionRequest::ExitPlanMode {
             plan: "1. Do x".to_string(),
         },
+        worker: None,
     });
     state.pending_permission_resp_tx = Some(tx);
     state.pending_permission_started_at = Some(std::time::Instant::now());
@@ -118,6 +120,7 @@ fn open_bypass(state: &mut AppState) -> oneshot::Receiver<PermissionResponse> {
     let (tx, rx) = oneshot::channel();
     state.pending_permission = Some(PendingPermission {
         request: PermissionRequest::BypassPermissionsMode,
+        worker: None,
     });
     state.pending_permission_resp_tx = Some(tx);
     state.pending_permission_started_at = Some(std::time::Instant::now());

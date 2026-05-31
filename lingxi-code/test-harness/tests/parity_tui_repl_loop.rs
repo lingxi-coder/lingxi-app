@@ -72,6 +72,11 @@ fn kind_of(m: &RenderedMessage) -> &'static str {
         RenderedMessage::Attachment { .. } => "Attachment",
         RenderedMessage::GroupedToolUse { .. } => "GroupedToolUse",
         RenderedMessage::CollapsedReadSearch { .. } => "CollapsedReadSearch",
+        // (M9-03) multi-agent message variants.
+        RenderedMessage::TaskAssignment { .. } => "TaskAssignment",
+        RenderedMessage::AgentNotification { .. } => "AgentNotification",
+        RenderedMessage::ChannelMessage { .. } => "ChannelMessage",
+        RenderedMessage::UserTeammate { .. } => "UserTeammate",
     }
 }
 
@@ -160,6 +165,7 @@ fn turn_with_tool_use_and_permission() {
             tool_input: tu["input"].clone(),
             default_decision: PromptDefault::DenyByDefault,
         },
+        worker: None,
     });
     state.pending_permission_resp_tx = Some(tx);
     state.pending_permission_started_at = Some(std::time::Instant::now());

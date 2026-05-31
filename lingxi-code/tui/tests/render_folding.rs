@@ -47,6 +47,9 @@ fn collapsed_finalized_summary() {
         read: 1,
         list: 0,
         is_active: false,
+        mem_read: 0,
+        mem_search: 0,
+        mem_write: 0,
     };
     let s = render_collapsed_to_string(&c, &[], /*expanded*/ false);
     assert_eq!(s, "  \u{23BF}  Searched for 2 patterns, read 1 file");
@@ -59,6 +62,9 @@ fn collapsed_active_present_tense() {
         read: 3,
         list: 0,
         is_active: true,
+        mem_read: 0,
+        mem_search: 0,
+        mem_write: 0,
     };
     let s = render_collapsed_to_string(&c, &[], false);
     assert_eq!(s, "  \u{23BF}  Reading 3 files");
@@ -71,6 +77,9 @@ fn collapsed_list_directories_plural() {
         read: 0,
         list: 2,
         is_active: false,
+        mem_read: 0,
+        mem_search: 0,
+        mem_write: 0,
     };
     assert_eq!(
         render_collapsed_to_string(&c, &[], false),
@@ -91,6 +100,9 @@ fn collapsed_expanded_lists_entries() {
         read: 2,
         list: 0,
         is_active: false,
+        mem_read: 0,
+        mem_search: 0,
+        mem_write: 0,
     };
     let entries = vec!["a.rs".to_string(), "b.rs".to_string()];
     let s = render_collapsed_to_string(&c, &entries, true);

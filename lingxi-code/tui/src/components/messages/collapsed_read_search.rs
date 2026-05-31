@@ -21,7 +21,7 @@ use crate::theme::TuiTheme;
 /// 2 spaces).
 pub const GUTTER: &str = "  \u{23BF}  ";
 
-/// The three M7-05 counts + active flag.
+/// The three M7-05 counts + active flag + team-memory counts.
 #[derive(Debug, Clone, Default)]
 pub struct CollapsedCounts {
     /// Search (Grep/Glob) tool uses.
@@ -32,6 +32,12 @@ pub struct CollapsedCounts {
     pub list: u64,
     /// `true` → present-tense verbs.
     pub is_active: bool,
+    /// Team memories recalled.
+    pub mem_read: u64,
+    /// Team-memory searches.
+    pub mem_search: u64,
+    /// Team memories written.
+    pub mem_write: u64,
 }
 
 fn cap_first(s: &str) -> String {
@@ -68,6 +74,29 @@ pub fn render_summary(c: &CollapsedCounts) -> String {
             "directories"
         };
         parts.push(format!("{verb} {} {noun}", c.list));
+    }
+    if c.mem_read > 0 {
+        let verb = if c.is_active { "recalling" } else { "recalled" };
+        let noun = if c.mem_read == 1 {
+            "team memory"
+        } else {
+            "team memories"
+        };
+        parts.push(format!("{verb} {} {noun}", c.mem_read));
+    }
+    if c.mem_search > 0 {
+        // claude-code shows NO count for searches — always "team memories".
+        let verb = if c.is_active { "searching" } else { "searched" };
+        parts.push(format!("{verb} team memories"));
+    }
+    if c.mem_write > 0 {
+        let verb = if c.is_active { "writing" } else { "wrote" };
+        let noun = if c.mem_write == 1 {
+            "team memory"
+        } else {
+            "team memories"
+        };
+        parts.push(format!("{verb} {} {noun}", c.mem_write));
     }
     if parts.is_empty() {
         return String::new();
@@ -147,6 +176,9 @@ mod tests {
             read: 1,
             list: 0,
             is_active: false,
+            mem_read: 0,
+            mem_search: 0,
+            mem_write: 0,
         };
         assert_eq!(
             render_collapsed_to_string(&c, &[], false),
@@ -161,6 +193,9 @@ mod tests {
             read: 3,
             list: 0,
             is_active: true,
+            mem_read: 0,
+            mem_search: 0,
+            mem_write: 0,
         };
         assert_eq!(
             render_collapsed_to_string(&c, &[], false),
@@ -175,6 +210,9 @@ mod tests {
             read: 0,
             list: 2,
             is_active: false,
+            mem_read: 0,
+            mem_search: 0,
+            mem_write: 0,
         };
         assert_eq!(
             render_collapsed_to_string(&c, &[], false),
@@ -189,6 +227,9 @@ mod tests {
             read: 0,
             list: 0,
             is_active: false,
+            mem_read: 0,
+            mem_search: 0,
+            mem_write: 0,
         };
         assert_eq!(
             render_collapsed_to_string(&c, &[], false),
@@ -200,5 +241,48 @@ mod tests {
     fn zero_counts_empty() {
         let c = CollapsedCounts::default();
         assert_eq!(render_collapsed_to_string(&c, &[], false), "");
+    }
+
+    #[test]
+    fn team_mem_parts_append() {
+        let c = CollapsedCounts {
+            search: 0,
+            read: 1,
+            list: 0,
+            is_active: false,
+            mem_read: 2,
+            mem_search: 0,
+            mem_write: 1,
+        };
+        // "Read 1 file" then ", recalled 2 team memories, wrote 1 team memory"
+        assert_eq!(
+            render_collapsed_to_string(&c, &[], false),
+            "  \u{23BF}  Read 1 file, recalled 2 team memories, wrote 1 team memory"
+        );
+    }
+
+    #[test]
+    fn team_mem_only_capitalizes_first() {
+        let c = CollapsedCounts {
+            mem_read: 3,
+            ..CollapsedCounts::default()
+        };
+        assert_eq!(
+            render_collapsed_to_string(&c, &[], false),
+            "  \u{23BF}  Recalled 3 team memories"
+        );
+    }
+
+    #[test]
+    fn team_mem_search_has_no_count() {
+        let c = CollapsedCounts {
+            mem_search: 4,
+            ..CollapsedCounts::default()
+        };
+        // Search never shows a count; capitalized as the only/first part.
+        assert_eq!(
+            render_collapsed_to_string(&c, &[], false),
+            "  \u{23BF}  Searched team memories"
+        );
     }
 }

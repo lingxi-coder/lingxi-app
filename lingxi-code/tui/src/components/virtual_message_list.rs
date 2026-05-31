@@ -322,6 +322,9 @@ fn render_text_for_measure(msg: &RenderedMessage) -> String {
             read_count,
             list_count,
             is_active,
+            mem_read,
+            mem_search,
+            mem_write,
             ..
         } => {
             let counts = crate::components::messages::collapsed_read_search::CollapsedCounts {
@@ -329,6 +332,9 @@ fn render_text_for_measure(msg: &RenderedMessage) -> String {
                 read: *read_count,
                 list: *list_count,
                 is_active: *is_active,
+                mem_read: *mem_read,
+                mem_search: *mem_search,
+                mem_write: *mem_write,
             };
             crate::components::messages::collapsed_read_search::render_collapsed_to_string(
                 &counts,
@@ -1237,6 +1243,9 @@ mod tests {
             is_active: false,
             group_id: ToolUseId::new(),
             entries: vec![],
+            mem_read: 0,
+            mem_search: 0,
+            mem_write: 0,
         };
         assert_eq!(measured_height(&m, 80), 1);
         // All-zero counts → empty proxy text → 1 row (a blank logical line).
@@ -1247,6 +1256,9 @@ mod tests {
             is_active: false,
             group_id: ToolUseId::new(),
             entries: vec![],
+            mem_read: 0,
+            mem_search: 0,
+            mem_write: 0,
         };
         assert_eq!(measured_height(&empty, 80), 1);
     }

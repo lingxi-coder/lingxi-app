@@ -252,6 +252,9 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
             list_count,
             is_active,
             entries,
+            mem_read,
+            mem_search,
+            mem_write,
             ..
         } => {
             let counts = collapsed_read_search::CollapsedCounts {
@@ -259,6 +262,9 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
                 read: *read_count,
                 list: *list_count,
                 is_active: *is_active,
+                mem_read: *mem_read,
+                mem_search: *mem_search,
+                mem_write: *mem_write,
             };
             collapsed_read_search::render_collapsed_to_string(&counts, entries, expanded)
         }

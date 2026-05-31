@@ -255,6 +255,9 @@ pub fn render_message(
             is_active,
             group_id,
             entries,
+            mem_read,
+            mem_search,
+            mem_write,
         } => {
             let is_expanded = expanded.get(&group_id).copied().unwrap_or(false);
             let counts = CollapsedCounts {
@@ -262,6 +265,9 @@ pub fn render_message(
                 read: read_count,
                 list: list_count,
                 is_active,
+                mem_read,
+                mem_search,
+                mem_write,
             };
             element! {
                 CollapsedReadSearchContent(counts: counts, entries: entries, expanded: is_expanded)

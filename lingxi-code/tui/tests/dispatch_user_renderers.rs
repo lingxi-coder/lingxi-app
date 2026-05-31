@@ -128,6 +128,9 @@ fn dispatch_collapsed_read_search() {
         is_active: false,
         group_id: ToolUseId::new(),
         entries: vec![],
+        mem_read: 0,
+        mem_search: 0,
+        mem_write: 0,
     };
     assert_eq!(s(&m), "  \u{23BF}  Read 1 file");
 }

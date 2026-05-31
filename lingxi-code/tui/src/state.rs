@@ -301,6 +301,12 @@ pub enum RenderedMessage {
         group_id: protocol::ToolUseId,
         /// Per-entry display lines, shown when expanded.
         entries: Vec<String>,
+        /// Team memories recalled (M9-03; data feed wired later).
+        mem_read: u64,
+        /// Team-memory searches (M9-03; data feed wired later).
+        mem_search: u64,
+        /// Team memories written (M9-03; data feed wired later).
+        mem_write: u64,
     },
 }
 

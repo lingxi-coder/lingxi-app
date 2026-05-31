@@ -252,6 +252,7 @@ mod tests {
                 assigned_by: assigned_by.clone(),
                 subject: subject.clone(),
                 description: description.clone(),
+                theme: crate::theme::Theme::dark(),
             },
         ),
 ```
@@ -695,7 +696,7 @@ claude-code: `components/messages/UserTeammateMessage.tsx`. The `@{displayName}�
 - Create: `tui/src/components/messages/user_teammate.rs`
 - Modify: `tui/src/components/messages/mod.rs`, `tui/src/state.rs`, `tui/tests/render_messages.rs`
 
-- [ ] **Step 1: Read the reference** — read `UserTeammateMessage.tsx` (focus the `TeammateMessageContent` + task-completed branches, ~lines 120–175). Confirm: the exact spacing between `❯` and `✓`, whether the header and the completed text share one line, the `(subject)` formatting, the summary placement, and the transcript indentation. Adjust the string-form below to match byte-for-byte if it differs.
+- [ ] **Step 1: Read the reference** — read `UserTeammateMessage.tsx` (the task-completed branch ~lines 118–136 and `TeammateMessageContent` ~lines 150+). The layout below is already reconciled to the source: **task-completed is TWO lines** — the `@name❯` header on its own line (the outer `Box` is `flexDirection="column"`), then a `MessageResponse`-wrapped line. `MessageResponse` (claude-code `MessageResponse.tsx`) prepends the gutter `  ⎿  ` (2 spaces + U+23BF + 2 spaces), so line 2 is `  ⎿  ✓ Completed task #{task_id}` + optional ` ({task_subject})` (dim). **Note** is one line `@name❯ {summary}` (inner `Box` is row; summary `<Text>` has a leading space) with no gutter; transcript mode adds the content in a `paddingLeft={2}` box. Confirm these against the source; the code below already encodes them.
 
 - [ ] **Step 2: Add the variant + kind enum** — in `state.rs`, add the enum near the other message-payload enums (e.g. next to `PlanApprovalKind`):
 
@@ -747,11 +748,13 @@ And add to `RenderedMessage` (after `ChannelMessage`):
 //! `UserTeammateMessage` — teammate transcript message.
 //!
 //! Literal lock (claude-code `UserTeammateMessage.tsx`): `@{display_name}❯`
-//! header in the teammate's agent color. TaskCompleted →
-//! `@name❯ ✓ Completed task #{task_id}` + optional ` ({task_subject})` (dim).
-//! Note → `@name❯` + optional ` {summary}`; transcript mode appends the full
-//! content, each line indented 2. (plan-approval/shutdown sub-types reuse the
-//! existing renderers; `idle_notification` is suppressed upstream.)
+//! header in the teammate's agent color. TaskCompleted → TWO lines: the header
+//! line, then a `MessageResponse`-guttered line
+//! `  ⎿  ✓ Completed task #{task_id}` + optional ` ({task_subject})` (dim).
+//! Note → `@name❯` + optional ` {summary}` (same line); transcript mode
+//! appends the full content, each line indented 2. (plan-approval/shutdown
+//! sub-types reuse the existing renderers; `idle_notification` is suppressed
+//! upstream.)
 #![allow(clippy::needless_pass_by_value)]
 
 use iocraft::prelude::*;
@@ -764,6 +767,9 @@ use crate::theme::Theme;
 pub const POINTER: &str = "\u{276F}";
 /// `✓` completed check (U+2713).
 pub const CHECK: &str = "\u{2713}";
+/// `  ⎿  ` MessageResponse gutter (2 spaces + U+23BF + 2 spaces) — prefixes
+/// the task-completed line (claude-code `MessageResponse.tsx`).
+pub const GUTTER: &str = "  \u{23BF}  ";
 
 /// Props for [`UserTeammateMessage`].
 #[derive(Debug, Clone, Props)]
@@ -802,11 +808,12 @@ pub fn render_user_teammate_to_string(props: UserTeammateProps) -> String {
             task_id,
             task_subject,
         } => {
-            let mut out = format!("{header} {CHECK} Completed task #{task_id}");
+            // Two lines: header, then the MessageResponse-guttered completed line.
+            let mut line2 = format!("{GUTTER}{CHECK} Completed task #{task_id}");
             if let Some(s) = task_subject {
-                out.push_str(&format!(" ({s})"));
+                line2.push_str(&format!(" ({s})"));
             }
-            out
+            format!("{header}\n{line2}")
         }
         UserTeammateKind::Note {
             summary,
@@ -846,19 +853,19 @@ pub fn UserTeammateMessage(props: &UserTeammateProps) -> impl Into<AnyElement<'s
             task_id,
             task_subject,
         } => {
-            let head = format!("{header} ");
             let completed = format!(" Completed task #{task_id}");
-            let subject = task_subject
-                .as_ref()
-                .map(|s| format!(" ({s})"));
+            let subject = task_subject.as_ref().map(|s| format!(" ({s})"));
             element! {
-                View(flex_direction: FlexDirection::Row) {
-                    Text(content: head, color: accent)
-                    Text(content: CHECK, color: theme.success)
-                    Text(content: completed, color: theme.text)
-                    #(subject.map(|s| element! {
-                        Text(content: s, color: theme.dim)
-                    }))
+                View(flex_direction: FlexDirection::Column) {
+                    Text(content: header.clone(), color: accent)
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: GUTTER, color: theme.dim)
+                        Text(content: CHECK, color: theme.success)
+                        Text(content: completed, color: theme.text)
+                        #(subject.map(|s| element! {
+                            Text(content: s, color: theme.dim)
+                        }))
+                    }
                 }
             }
             .into_any()
@@ -903,6 +910,8 @@ mod tests {
     fn glyph_bytes() {
         assert_eq!(POINTER, "\u{276F}");
         assert_eq!(CHECK, "\u{2713}");
+        // ⎿ = U+23BF; gutter = 2 spaces + ⎿ + 2 spaces.
+        assert_eq!(GUTTER.as_bytes(), &[0x20, 0x20, 0xE2, 0x8E, 0xBF, 0x20, 0x20]);
     }
 
     #[test]
@@ -916,7 +925,10 @@ mod tests {
             },
             theme: Theme::dark(),
         });
-        assert_eq!(out, "@alice\u{276F} \u{2713} Completed task #456 (Setup DB)");
+        assert_eq!(
+            out,
+            "@alice\u{276F}\n  \u{23BF}  \u{2713} Completed task #456 (Setup DB)"
+        );
     }
 
     #[test]
@@ -930,7 +942,7 @@ mod tests {
             },
             theme: Theme::dark(),
         });
-        assert_eq!(out, "@lead\u{276F} \u{2713} Completed task #1");
+        assert_eq!(out, "@lead\u{276F}\n  \u{23BF}  \u{2713} Completed task #1");
     }
 
     #[test]

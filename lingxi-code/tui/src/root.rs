@@ -43,6 +43,12 @@ use crate::telemetry::{
 /// constructing the props and the closure spawned inside `use_future`.
 pub type BridgeRxSlot = Arc<std::sync::Mutex<Option<UnboundedReceiver<TurnEvent>>>>;
 
+/// (M9-05) Slot carrying the `MultiAgentEvent` receiver, mirroring
+/// [`BridgeRxSlot`]. The second render-loop pump `take()`s it once (first
+/// render) and owns it thereafter, draining it into `apply_multiagent_event`.
+pub type MultiAgentRxSlot =
+    Arc<std::sync::Mutex<Option<UnboundedReceiver<crate::multiagent::MultiAgentEvent>>>>;
+
 /// Props for the iocraft root component.
 #[derive(Default, Props)]
 pub struct TuiRootProps {
@@ -64,6 +70,10 @@ pub struct TuiRootProps {
     /// is unreachable without a handle, which is correct for those bridge-less
     /// mounts.
     pub orchestrator: Option<Arc<dyn traits::OrchestratorHandle>>,
+    /// (M9-05) `MultiAgentEvent` receiver slot, drained by the second pump (a
+    /// `use_future` mirroring the bridge pump). `None` (resume picker, smoke
+    /// gates, bridge-less mounts) makes the pump inert — it returns immediately.
+    pub multiagent_rx: Option<MultiAgentRxSlot>,
 }
 
 /// Map an iocraft `KeyEvent` into the workspace's `KeyAction` enum.
@@ -859,6 +869,34 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 apply_event(&mut st, ev, &notify);
                 drop(st);
                 tick_for_bridge.set(tick_for_bridge.get().wrapping_add(1));
+            }
+        });
+    }
+
+    // ---- MultiAgent pump (M9-05): drain MultiAgentEvent → AppState ------
+    // A second channel + drain loop EXACTLY mirroring the bridge pump above,
+    // but carrying `MultiAgentEvent` and mutating ONLY via the single
+    // `apply_multiagent_event` seam (pump discipline: one drain loop per
+    // channel). Fed by `pump_once(PollerFeed)` on the ticker (Task 7); inert
+    // (returns immediately) when `multiagent_rx` is `None`.
+    {
+        let state = state.clone();
+        let rx_slot = props.multiagent_rx.clone();
+        let mut tick_for_ma = tick;
+        hooks.use_future(async move {
+            let Some(slot) = rx_slot else {
+                return;
+            };
+            let Some(mut rx) = slot.lock().expect("multiagent rx slot poisoned").take() else {
+                // Already taken (component re-mounted) — no-op.
+                return;
+            };
+            let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+            while let Some(ev) = rx.recv().await {
+                let mut st = state.lock().await;
+                crate::multiagent::apply_multiagent_event(&mut st, ev, &notify);
+                drop(st);
+                tick_for_ma.set(tick_for_ma.get().wrapping_add(1));
             }
         });
     }

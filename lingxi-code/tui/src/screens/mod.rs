@@ -63,4 +63,13 @@ pub enum Screen {
     /// setting. Persists through the existing `~/.claude/settings.json` `theme`
     /// field (§4 R7 — best-effort, session-only on failure).
     Theme(theme::ThemePickerState),
+    /// (M9-05) The background-tasks dialog — claude-code
+    /// `BackgroundTasksDialog.tsx`. Carries its own list↔detail state
+    /// (selection + mode + the open task's output tail). Interactive like
+    /// Resume/Settings/Memory/Theme: `root::handle_screen_key` runs the pure
+    /// `background_tasks::handle_background_tasks_key` (↑/↓ move, Enter open
+    /// detail, Esc/`q` close; in detail Esc/`←` returns to the list). Opened
+    /// from normal editing by Shift+Down; the task list it browses lives in
+    /// `AppState.multiagent.tasks` (driven by the M9-05 MultiAgent pump).
+    BackgroundTasks(background_tasks::BackgroundTasksState),
 }

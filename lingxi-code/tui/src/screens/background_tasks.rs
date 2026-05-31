@@ -16,7 +16,12 @@ pub enum TaskDialogMode {
 }
 
 /// Dialog state (selection + mode + the open task's tail buffer).
-#[derive(Debug, Clone, Default)]
+///
+/// (M9-05 Task 5) `PartialEq, Eq` is REQUIRED so the carrying
+/// `Screen::BackgroundTasks(..)` variant can keep `Screen: PartialEq`. Every
+/// field supports it: `usize`, `TaskDialogMode` (`PartialEq, Eq`),
+/// `Option<String>`, and `OutputTailState` (`PartialEq, Eq`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackgroundTasksState {
     /// Selected row index (clamped to the live task count).
     pub selected: usize,

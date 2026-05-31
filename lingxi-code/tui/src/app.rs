@@ -481,6 +481,23 @@ pub fn render_screen(
                 }
                 .into_any()
             }
+            Screen::BackgroundTasks(bts) => {
+                // (M9-05) The background-tasks dialog renders the pure
+                // `render_background_tasks_to_string` body (list↔detail, snapshot-
+                // tested) line-by-line. The list it browses lives in
+                // `AppState.multiagent.tasks`, kept fresh by the MultiAgent pump.
+                use crate::screens::background_tasks::render_background_tasks_to_string;
+                let body = render_background_tasks_to_string(bts, &state.multiagent.tasks);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().map(|line| element! {
+                            Text(content: line)
+                        }))
+                    }
+                }
+                .into_any()
+            }
         };
     }
     // (M7-14) Message search overlay renders over the REPL at priority 3 (after

@@ -371,6 +371,33 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 }
             }
         }
+        Some(Screen::BackgroundTasks(state)) => {
+            // (M9-05) Background-tasks dialog. Pure list↔detail reducer over the
+            // LIVE task ids (read from `AppState.multiagent.tasks`, kept fresh by
+            // the MultiAgent pump). Mirrors the Memory/Resume arms: bridge the
+            // iocraft key to crossterm-0.28, run the reducer, act on its outcome.
+            //   - Close       → back to REPL (the shared `close_screen` path).
+            //   - Stay         → selection/mode changed or inert; keep open.
+            //   - OpenedDetail → entered a task's detail; the ticker pump (Task 7)
+            //     drives the output tail, so there is nothing to do synchronously.
+            use crate::screens::background_tasks::{
+                handle_background_tasks_key, TaskDialogOutcome,
+            };
+            let ids: Vec<String> = st
+                .multiagent
+                .tasks
+                .iter()
+                .map(|t| t.task_id.clone())
+                .collect();
+            let ct = iocraft_to_crossterm028_key(k);
+            match handle_background_tasks_key(state, &ids, ct.code) {
+                TaskDialogOutcome::Close => st.close_screen(),
+                TaskDialogOutcome::Stay => { /* keep the screen open */ }
+                TaskDialogOutcome::OpenedDetail(_id) => {
+                    // Tailing is driven by the ticker pump (Task 7); nothing here.
+                }
+            }
+        }
         None => {}
     }
 }
@@ -548,6 +575,31 @@ pub fn handle_live_key(st: &mut AppState, k: &KeyEvent, viewport: usize) {
         return;
     }
     // === end Ctrl-T open binding ===
+
+    // === Priority 3 open binding: Shift+Down opens the background-tasks dialog
+    // (M9-05, claude-code `BackgroundTaskStatus.tsx` ` · ↓ to view`). Mirrors
+    // the Ctrl-R / Ctrl-T open bindings: it fires only from the normal editing
+    // state — the permission (1) and screen (2) gates returned above, and we
+    // gate on no priority-3 overlay (palette/completion/history-search/message-
+    // selector) being open so the opener never preempts an overlay that owns the
+    // key. (`active_screen` is already `None` here — the priority-2 gate above
+    // returns whenever a screen is open — so opening can never clobber one.)
+    // Seeds a fresh `BackgroundTasksState`; the dialog then browses the live
+    // `AppState.multiagent.tasks` list. ===
+    if !st.palette.open
+        && !st.completion.open
+        && st.history_search.is_none()
+        && !st.message_selector.open
+        && matches!(k.code, KeyCode::Down)
+        && k.modifiers.contains(KeyModifiers::SHIFT)
+    {
+        st.active_screen = Some(crate::screens::Screen::BackgroundTasks(
+            crate::screens::background_tasks::BackgroundTasksState::default(),
+        ));
+        crate::telemetry::screen_opened("background_tasks");
+        return;
+    }
+    // === end Shift+Down open binding ===
 
     // === PRIORITY 3.5: vim toggle (M7-08 review). The Ctrl-Alt-V binding must
     // be modal-independent — it flips `vim_enabled` from ANY vim mode (Normal or

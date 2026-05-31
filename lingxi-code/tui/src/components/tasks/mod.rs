@@ -4,6 +4,7 @@
 //! M9-05.
 
 pub mod format;
+pub mod output_tail;
 pub mod rows;
 pub mod shell_progress;
 pub mod status_text;

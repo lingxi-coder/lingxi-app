@@ -4,6 +4,7 @@
 //! route-state (`Screen` + `AppState.active_screen`); later sub-plans add
 //! `Resume` (M7-12), `Settings` (M7-13), `Memory` (M7-14).
 
+pub mod agents;
 pub mod background_tasks;
 pub mod doctor;
 pub mod memory;
@@ -72,4 +73,12 @@ pub enum Screen {
     /// from normal editing by Shift+Down; the task list it browses lives in
     /// `AppState.multiagent.tasks` (driven by the M9-05 `MultiAgent` pump).
     BackgroundTasks(background_tasks::BackgroundTasksState),
+    /// (M9-08) The agent-discovery screen — claude-code `AgentsList.tsx` +
+    /// `AgentDetail.tsx`. Carries its own list↔detail state (selection + mode
+    /// + the agent catalog rows). Interactive like BackgroundTasks:
+    /// `root::handle_screen_key` runs the pure `agents::handle_agents_key`
+    /// (↑/↓ move, Enter open detail, Esc/`q` close; in detail Esc/`←`/`q`
+    /// returns to the list). Opened by `/agents`; rows come from
+    /// `OrchestratorHandle::list_agents` (name/description/tools_allowed).
+    Agents(agents::AgentsScreenState),
 }

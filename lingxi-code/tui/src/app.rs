@@ -503,6 +503,22 @@ pub fn render_screen(
                 }
                 .into_any()
             }
+            Screen::Agents(ags) => {
+                // (M9-08) The agent-discovery screen renders the pure
+                // `render_agents_to_string` body (list↔detail, snapshot-tested)
+                // line-by-line in a column View. Mirrors the BackgroundTasks arm.
+                use crate::screens::agents::render_agents_to_string;
+                let body = render_agents_to_string(ags);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().map(|line| element! {
+                            Text(content: line)
+                        }))
+                    }
+                }
+                .into_any()
+            }
         };
     }
     // (M7-14) Message search overlay renders over the REPL at priority 3 (after

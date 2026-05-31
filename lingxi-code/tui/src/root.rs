@@ -417,6 +417,20 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 }
             }
         }
+        Some(Screen::Agents(state)) => {
+            // (M9-08) Agent-discovery screen. Pure list↔detail reducer over the
+            // agent catalog rows (carried in the `Screen::Agents` variant). Mirrors
+            // the BackgroundTasks arm: bridge the iocraft key to crossterm-0.28,
+            // run the reducer, act on its outcome.
+            //   - Close → back to REPL (the shared `close_screen` path).
+            //   - Stay  → selection/mode changed or inert; keep open.
+            use crate::screens::agents::{handle_agents_key, AgentsOutcome};
+            let ct_key = iocraft_to_crossterm028_key(k);
+            match handle_agents_key(state, ct_key.code) {
+                AgentsOutcome::Close => st.close_screen(),
+                AgentsOutcome::Stay => {}
+            }
+        }
         None => {}
     }
 }

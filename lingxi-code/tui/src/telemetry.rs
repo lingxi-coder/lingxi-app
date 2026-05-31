@@ -84,8 +84,9 @@ pub fn scroll_ended() {
 
 /// (M7-16) Fire when a full-page screen opens (`AppState.active_screen`
 /// transitions `None → Some(_)`). `screen` is one of `"doctor"`, `"resume"`,
-/// `"settings"`, `"memory"`, `"theme"`. Called from each `AppState::open_*`
-/// helper.
+/// `"settings"`, `"memory"`, `"theme"`, `"background_tasks"` (M9-05),
+/// `"agents"` (M9-08). Called from each `AppState::open_*` helper and the
+/// M9-05 background-tasks opener in `root`.
 pub fn screen_opened(screen: &str) {
     tracing::info!(
         target: "lingxi.tengu",

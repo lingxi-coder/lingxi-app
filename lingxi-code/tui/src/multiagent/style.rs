@@ -97,6 +97,27 @@ pub fn agent_color(c: AgentColor) -> Color {
     }
 }
 
+/// Map a claude-code agent **color name** (e.g. `"cyan"`, `"orange"`) to a
+/// render [`Color`]. Case-insensitive. Unknown / empty names fall back to
+/// cyan — claude-code's `cyan_FOR_SUBAGENTS_ONLY` default (`toInkColor`).
+#[must_use]
+pub fn agent_color_from_name(name: &str) -> Color {
+    let c = match name.to_ascii_lowercase().as_str() {
+        "magenta" => AgentColor::Magenta,
+        "yellow" => AgentColor::Yellow,
+        "green" => AgentColor::Green,
+        "blue" => AgentColor::Blue,
+        "red" => AgentColor::Red,
+        "orange" => AgentColor::Orange,
+        "purple" => AgentColor::Purple,
+        "pink" => AgentColor::Pink,
+        "teal" => AgentColor::Teal,
+        // "cyan" and anything unknown → cyan.
+        _ => AgentColor::Cyan,
+    };
+    agent_color(c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +141,26 @@ mod tests {
         assert_eq!(task_status_color("running", &t), t.dim);
         assert_eq!(task_status_color("pending", &t), t.dim);
         assert_eq!(task_status_color("unknown", &t), t.dim);
+    }
+
+    #[test]
+    fn agent_color_from_name_maps_known_and_falls_back_to_cyan() {
+        // Known names resolve to the same Color as the enum path.
+        assert_eq!(
+            agent_color_from_name("magenta"),
+            agent_color(AgentColor::Magenta)
+        );
+        assert_eq!(
+            agent_color_from_name("Orange"),
+            agent_color(AgentColor::Orange)
+        );
+        assert_eq!(agent_color_from_name("teal"), agent_color(AgentColor::Teal));
+        // Unknown / empty → cyan fallback (claude-code cyan_FOR_SUBAGENTS_ONLY).
+        assert_eq!(
+            agent_color_from_name("chartreuse"),
+            agent_color(AgentColor::Cyan)
+        );
+        assert_eq!(agent_color_from_name(""), agent_color(AgentColor::Cyan));
     }
 
     #[test]

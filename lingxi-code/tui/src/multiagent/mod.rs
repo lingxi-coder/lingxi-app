@@ -15,4 +15,6 @@ pub use event::MultiAgentEvent;
 pub use fixture::FixtureFeed;
 pub use poller::{task_row_from_record, PollerFeed};
 pub use state::{MultiAgentState, TaskRow, WorkerRow};
-pub use style::{agent_color, task_status_color, task_status_icon, AgentColor};
+pub use style::{
+    agent_color, agent_color_from_name, task_status_color, task_status_icon, AgentColor,
+};

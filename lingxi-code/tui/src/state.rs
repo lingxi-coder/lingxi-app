@@ -157,6 +157,15 @@ pub enum RenderedMessage {
         /// Optional task description.
         description: Option<String>,
     },
+    /// (M9-03) Background-agent notification — claude-code
+    /// `UserAgentNotificationMessage`. `status`: completed/failed/killed/other
+    /// → marker color.
+    AgentNotification {
+        /// Summary line (empty → renders nothing).
+        summary: String,
+        /// Optional status string.
+        status: Option<String>,
+    },
     /// (M7-04) Advisor block.
     Advisor {
         /// Advisor block content kind.

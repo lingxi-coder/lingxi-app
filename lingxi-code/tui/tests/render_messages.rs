@@ -49,3 +49,15 @@ fn task_assignment_with_description() {
     };
     insta::assert_snapshot!("task_assignment_with_description", element.to_string());
 }
+
+#[test]
+fn user_agent_notification_completed() {
+    let mut element = element! {
+        tui::components::messages::user_agent_notification::UserAgentNotificationMessage(
+            summary: "Background task finished".to_string(),
+            status: Some("completed".to_string()),
+            theme: tui::theme::Theme::dark(),
+        )
+    };
+    insta::assert_snapshot!("user_agent_notification_completed", element.to_string());
+}

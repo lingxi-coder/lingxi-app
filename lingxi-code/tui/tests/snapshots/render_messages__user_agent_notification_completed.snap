@@ -1,0 +1,6 @@
+---
+source: tui/tests/render_messages.rs
+assertion_line: 62
+expression: element.to_string()
+---
+● Background task finished

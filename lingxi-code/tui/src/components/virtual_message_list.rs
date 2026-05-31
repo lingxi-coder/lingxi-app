@@ -350,6 +350,15 @@ fn render_text_for_measure(msg: &RenderedMessage) -> String {
                 theme: crate::theme::Theme::dark(),
             },
         ),
+        RenderedMessage::AgentNotification { summary, status } => {
+            crate::components::messages::user_agent_notification::render_user_agent_notification_to_string(
+                crate::components::messages::user_agent_notification::UserAgentNotificationProps {
+                    summary: summary.clone(),
+                    status: status.clone(),
+                    theme: crate::theme::Theme::dark(),
+                },
+            )
+        }
     }
 }
 

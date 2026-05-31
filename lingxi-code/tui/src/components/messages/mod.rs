@@ -30,6 +30,7 @@ pub mod system_api_error;
 pub mod system_text;
 pub mod task_assignment;
 pub mod thinking;
+pub mod user_agent_notification;
 pub mod user_text;
 pub mod user_tool_result;
 
@@ -146,6 +147,15 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
                 theme: crate::theme::Theme::dark(),
             },
         ),
+        RenderedMessage::AgentNotification { summary, status } => {
+            user_agent_notification::render_user_agent_notification_to_string(
+                user_agent_notification::UserAgentNotificationProps {
+                    summary: summary.clone(),
+                    status: status.clone(),
+                    theme: crate::theme::Theme::dark(),
+                },
+            )
+        }
         RenderedMessage::Advisor { kind, verbose } => {
             advisor::render_advisor_to_string(advisor::AdvisorProps {
                 kind: kind.clone(),

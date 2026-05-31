@@ -37,6 +37,7 @@ use crate::components::messages::{
     system_text::SystemTextMessage,
     task_assignment::TaskAssignmentMessage,
     thinking::AssistantThinkingMessage,
+    user_agent_notification::UserAgentNotificationMessage,
     user_text::UserTextMessage,
     user_tool_result::UserToolResultMessage,
 };
@@ -278,6 +279,10 @@ pub fn render_message(
                 description: description,
                 theme: theme,
             )
+        }
+        .into_any(),
+        RenderedMessage::AgentNotification { summary, status } => element! {
+            UserAgentNotificationMessage(summary: summary, status: status, theme: theme,)
         }
         .into_any(),
     }

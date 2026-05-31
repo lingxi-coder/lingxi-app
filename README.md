@@ -2,6 +2,12 @@
 
 Platform-agnostic Rust engine for an AI coding assistant with 1:1 behavioral
 parity to claude-code (2026-03-31 TypeScript reference) on desktop OSes.
+v0.10.0 (M9) completes the **Multi-Agent TUI Surface**: team message renderers,
+background-task rows + footer + dialog (live `TaskRegistryHandle` output
+tailing), coordinator/team status chrome, worker-permission chrome, and a
+read-only `/agents` discovery screen — built UI-first against a presentation
+adapter (real data where the engine is live, deterministic fixtures where the
+execution pool is stubbed).
 v0.8.0 (M7) ships the **TUI Surface**: the full single-user terminal UI on top
 of the v0.7.0 foundation — full ANSI/markdown/syntect rendering + StructuredDiff,
 ~22 message renderers, a windowed `VirtualMessageList` scrollback, an advanced
@@ -55,7 +61,7 @@ subsystems (Settings, Memory, API client, OAuth refresh, cost events,
 telemetry schema) identically. See `docs/PLATFORMS.md` for the per-OS
 setup notes + the "M3 engine subsystems" section.
 
-## Subsystem status (v0.8.0)
+## Subsystem status (v0.10.0)
 
 | Subsystem | Status | Milestone |
 |---|---|---|

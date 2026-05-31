@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.10.0] — M9 Multi-Agent TUI Surface
+
+Completes the multi-agent TUI: the message types, status chrome, dialogs, and
+read-only agent discovery a user sees when subagents, in-process teammates, and
+background tasks are active — built UI-first against a presentation adapter,
+rendering real data on the live `TaskRegistryHandle` path and deterministic
+fixtures where the execution pool is still stubbed.
+
+Highlights:
+
+- **Team message renderers (M9-03):** `TaskAssignment`, `UserTeammate`
+  (task-completed + note), `UserAgentNotification`, `UserChannel`, plus
+  team-memory collapse/saved parts — literal-locked to claude-code.
+- **Background tasks (M9-04/05):** per-`TaskState` row renderers (7) +
+  `ShellProgress` + live output tailing (`TaskRegistryHandle::output`); the
+  `BackgroundTaskStatus` footer + `BackgroundTasksDialog` (list↔detail) routed
+  via `active_screen`; the real `tasks::TaskRegistry` wired into the desktop
+  composition root + a `MultiAgentEvent` render-loop pump.
+- **Coordinator chrome (M9-06):** `TeamStatus` footer, `TeammateViewHeader`,
+  `AgentProgressLine` (tree-char progress), `CoordinatorAgentStatus` panel +
+  teammate-view mode.
+- **Worker permissions (M9-07):** `WorkerBadge` + `WorkerPendingPermission` in
+  the M6 permission focus-trap, with a cross-state-seam test.
+- **Agent discovery (M9-08):** read-only `AgentsList` + `AgentDetail` via a
+  `/agents` screen (catalog from `OrchestratorHandle::list_agents`).
+- **Validation (M9-09):** `parity_tui_multiagent` fixture; repaired the
+  `test-harness` parity suite for the new `Screen`/`RenderedMessage` variants.
+
+**Versioning note:** M8 documented `[0.9.0]` in this changelog but never bumped
+the crate versions (they stayed `0.8.0`). v0.10.0 bumps all workspace crates
+`0.8.0` → `0.10.0` in one step; there is no `v0.9.0` tag.
+
 ## [0.9.0] — M8 Composable Engine + Mobile
 
 Restructured the workspace from a `crates/`-wrapped, `lingxi-`-prefixed,

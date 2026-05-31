@@ -15,6 +15,7 @@
 pub mod bypass_permissions;
 pub mod exit_plan_mode;
 pub mod tool_use_confirm;
+pub mod worker;
 
 use permission::gate::PermissionResponse;
 

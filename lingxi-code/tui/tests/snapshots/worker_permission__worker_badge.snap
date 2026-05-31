@@ -1,0 +1,5 @@
+---
+source: tui/tests/worker_permission.rs
+expression: "render_worker_badge(\"alice\")"
+---
+● @alice

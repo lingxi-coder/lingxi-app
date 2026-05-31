@@ -74,6 +74,15 @@ pub struct TuiRootProps {
     /// `use_future` mirroring the bridge pump). `None` (resume picker, smoke
     /// gates, bridge-less mounts) makes the pump inert — it returns immediately.
     pub multiagent_rx: Option<MultiAgentRxSlot>,
+    /// (M9-05) Live multi-agent feed (the desktop `PollerFeed` over the real
+    /// `TaskRegistryHandle`). The ticker calls `pump_once(feed, tx)` each tick;
+    /// the produced events flow back through `multiagent_rx` into `AppState`.
+    /// `None` skips the ticker poll (no live task surface for that mount).
+    pub multiagent_feed: Option<Arc<dyn crate::multiagent::MultiAgentFeed>>,
+    /// (M9-05) Sender paired with `multiagent_rx`. The ticker pushes the feed's
+    /// events onto it via `pump_once`. `None` skips the ticker poll.
+    pub multiagent_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::multiagent::MultiAgentEvent>>,
 }
 
 /// Map an iocraft `KeyEvent` into the workspace's `KeyAction` enum.
@@ -910,6 +919,12 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         // pump below. `None` (resume picker / smoke gates) leaves Settings
         // unreachable, which is correct for those bridge-less mounts.
         let orchestrator = props.orchestrator.clone();
+        // (M9-05) The live multi-agent feed + its sender. Each tick we
+        // `pump_once(feed, tx)` so registry state flows into the channel; the
+        // MultiAgent pump (above) drains it and bumps the redraw tick. `None`
+        // (no `TaskRegistry` wired) skips the poll entirely.
+        let multiagent_feed = props.multiagent_feed.clone();
+        let multiagent_tx = props.multiagent_tx.clone();
         hooks.use_future(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -945,6 +960,15 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                     if pump_open_settings(&state, handle).await {
                         needs_redraw = true;
                     }
+                }
+                // (M9-05) Poll the live multi-agent feed once on the SAME
+                // cadence and forward its events into the channel. We do NOT bump
+                // `tick` here — the MultiAgent pump (which drains the channel)
+                // bumps its own redraw tick after `apply_multiagent_event`, the
+                // same decoupling the bridge pump uses. No-op when no feed/sender
+                // is wired (the desktop mount supplies both; others pass `None`).
+                if let (Some(feed), Some(tx)) = (multiagent_feed.as_ref(), multiagent_tx.as_ref()) {
+                    let _sent = crate::multiagent::pump_once(feed.as_ref(), tx).await;
                 }
                 let streaming = state.lock().await.streaming.is_some();
                 if streaming || needs_redraw {

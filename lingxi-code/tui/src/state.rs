@@ -146,6 +146,17 @@ pub enum RenderedMessage {
         /// `true` → rejected response; `false` → request.
         rejected: bool,
     },
+    /// (M9-03) Task assignment notice — claude-code `TaskAssignmentMessage`.
+    TaskAssignment {
+        /// Task id, rendered as `#{task_id}`.
+        task_id: String,
+        /// Assigning agent's name.
+        assigned_by: String,
+        /// Task subject / title.
+        subject: String,
+        /// Optional task description.
+        description: Option<String>,
+    },
     /// (M7-04) Advisor block.
     Advisor {
         /// Advisor block content kind.

@@ -336,6 +336,20 @@ fn render_text_for_measure(msg: &RenderedMessage) -> String {
                 false,
             )
         }
+        RenderedMessage::TaskAssignment {
+            task_id,
+            assigned_by,
+            subject,
+            description,
+        } => crate::components::messages::task_assignment::render_task_assignment_to_string(
+            crate::components::messages::task_assignment::TaskAssignmentProps {
+                task_id: task_id.clone(),
+                assigned_by: assigned_by.clone(),
+                subject: subject.clone(),
+                description: description.clone(),
+                theme: crate::theme::Theme::dark(),
+            },
+        ),
     }
 }
 

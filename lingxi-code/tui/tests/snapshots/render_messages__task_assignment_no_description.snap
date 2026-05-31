@@ -1,0 +1,9 @@
+---
+source: tui/tests/render_messages.rs
+assertion_line: 36
+expression: element.to_string()
+---
+╭───────────────────────────╮
+│Task #123 assigned by alice│
+│Set up DB                  │
+╰───────────────────────────╯

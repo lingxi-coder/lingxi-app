@@ -21,3 +21,31 @@ fn assistant_text_three_lines() {
     };
     insta::assert_snapshot!("assistant_text_three_lines", element.to_string());
 }
+
+#[test]
+fn task_assignment_no_description() {
+    let mut element = element! {
+        tui::components::messages::task_assignment::TaskAssignmentMessage(
+            task_id: "123".to_string(),
+            assigned_by: "alice".to_string(),
+            subject: "Set up DB".to_string(),
+            description: None,
+            theme: tui::theme::Theme::dark(),
+        )
+    };
+    insta::assert_snapshot!("task_assignment_no_description", element.to_string());
+}
+
+#[test]
+fn task_assignment_with_description() {
+    let mut element = element! {
+        tui::components::messages::task_assignment::TaskAssignmentMessage(
+            task_id: "7".to_string(),
+            assigned_by: "lead".to_string(),
+            subject: "Migrate".to_string(),
+            description: Some("Move tables".to_string()),
+            theme: tui::theme::Theme::dark(),
+        )
+    };
+    insta::assert_snapshot!("task_assignment_with_description", element.to_string());
+}

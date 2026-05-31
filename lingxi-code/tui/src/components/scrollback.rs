@@ -35,6 +35,7 @@ use crate::components::messages::{
     shutdown::ShutdownMessage,
     system_api_error::SystemApiErrorMessage,
     system_text::SystemTextMessage,
+    task_assignment::TaskAssignmentMessage,
     thinking::AssistantThinkingMessage,
     user_text::UserTextMessage,
     user_tool_result::UserToolResultMessage,
@@ -264,5 +265,20 @@ pub fn render_message(
             }
             .into_any()
         }
+        RenderedMessage::TaskAssignment {
+            task_id,
+            assigned_by,
+            subject,
+            description,
+        } => element! {
+            TaskAssignmentMessage(
+                task_id: task_id,
+                assigned_by: assigned_by,
+                subject: subject,
+                description: description,
+                theme: theme,
+            )
+        }
+        .into_any(),
     }
 }

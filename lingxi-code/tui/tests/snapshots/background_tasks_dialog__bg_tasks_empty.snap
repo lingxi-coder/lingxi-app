@@ -1,0 +1,7 @@
+---
+source: tui/tests/background_tasks_dialog.rs
+assertion_line: 26
+expression: "render_background_tasks_to_string(&state, &[])"
+---
+Background tasks
+(no background tasks)

@@ -83,6 +83,50 @@ pub fn handle_background_tasks_key(
     }
 }
 
+use crate::components::tasks::detail::render_task_detail;
+use crate::components::tasks::render_task_row;
+use crate::multiagent::state::TaskRow;
+
+/// Render the dialog body to a string. List mode: a `>`-marked selectable list
+/// (claude-code `BackgroundTasksDialog.tsx`); detail mode: the open task's
+/// detail. Header line + a trailing key-hint line.
+#[must_use]
+pub fn render_background_tasks_to_string(
+    state: &BackgroundTasksState,
+    tasks: &[TaskRow],
+) -> String {
+    match state.mode {
+        TaskDialogMode::List => {
+            let mut out = String::from("Background tasks\n");
+            if tasks.is_empty() {
+                out.push_str("(no background tasks)");
+                return out;
+            }
+            for (i, row) in tasks.iter().enumerate() {
+                let marker = if i == state.selected { "> " } else { "  " };
+                out.push_str(marker);
+                out.push_str(&render_task_row(row));
+                out.push('\n');
+            }
+            out.push_str("\u{2191}\u{2193} move \u{00B7} enter open \u{00B7} esc close");
+            out
+        }
+        TaskDialogMode::Detail => {
+            let row = state
+                .detail_task_id
+                .as_ref()
+                .and_then(|id| tasks.iter().find(|t| &t.task_id == id));
+            match row {
+                Some(r) => format!(
+                    "{}\n\u{2190} back \u{00B7} esc close",
+                    render_task_detail(r, &state.tail)
+                ),
+                None => "Background tasks\n(task no longer available)".to_string(),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

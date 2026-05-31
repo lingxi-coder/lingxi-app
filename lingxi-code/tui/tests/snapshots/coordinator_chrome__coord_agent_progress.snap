@@ -1,0 +1,9 @@
+---
+source: tui/tests/coordinator_chrome.rs
+assertion_line: 35
+expression: "format!(\"{a}\\n{b}\")"
+---
+├─ alice · 2 tool uses · 5.1k tokens
+│  ⎿  Reading
+└─ bob · 1 tool use · 512 tokens
+   ⎿  Done

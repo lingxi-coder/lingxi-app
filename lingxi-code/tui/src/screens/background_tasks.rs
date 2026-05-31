@@ -145,10 +145,10 @@ mod tests {
             TaskDialogOutcome::Stay
         );
         assert_eq!(s.selected, 1);
-        handle_background_tasks_key(&mut s, &t, KeyCode::Down);
-        handle_background_tasks_key(&mut s, &t, KeyCode::Down); // clamps at 2
+        let _ = handle_background_tasks_key(&mut s, &t, KeyCode::Down);
+        let _ = handle_background_tasks_key(&mut s, &t, KeyCode::Down); // clamps at 2
         assert_eq!(s.selected, 2);
-        handle_background_tasks_key(&mut s, &t, KeyCode::Up);
+        let _ = handle_background_tasks_key(&mut s, &t, KeyCode::Up);
         assert_eq!(s.selected, 1);
     }
 

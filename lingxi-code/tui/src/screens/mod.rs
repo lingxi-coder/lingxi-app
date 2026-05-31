@@ -70,6 +70,6 @@ pub enum Screen {
     /// `background_tasks::handle_background_tasks_key` (↑/↓ move, Enter open
     /// detail, Esc/`q` close; in detail Esc/`←` returns to the list). Opened
     /// from normal editing by Shift+Down; the task list it browses lives in
-    /// `AppState.multiagent.tasks` (driven by the M9-05 MultiAgent pump).
+    /// `AppState.multiagent.tasks` (driven by the M9-05 `MultiAgent` pump).
     BackgroundTasks(background_tasks::BackgroundTasksState),
 }

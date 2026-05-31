@@ -31,6 +31,8 @@ cost = { path = "../../cost" }
 dirs = "5"
 tui = { path = "../../tui" }
 session = { path = "../../session" }
+# M9-05: desktop TaskRegistry construction (background-task surface wiring).
+tasks = { path = "../../tasks" }
 anthropic-oauth = { path = "../../anthropic-oauth" }
 secret = { path = "../../secret" }
 # Tool-context construction (BuiltinToolContext + ToolRegistry + policy types).

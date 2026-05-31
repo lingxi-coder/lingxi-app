@@ -51,6 +51,10 @@ pub struct Runtime {
     /// (`SettingsData::snapshot`). `None` (smoke gates / no-bridge mounts)
     /// leaves Settings unreachable — correct for those mounts.
     pub orchestrator: Option<Arc<dyn traits::OrchestratorHandle>>,
+    /// (M9-05) Live multi-agent feed (desktop `PollerFeed` over the real
+    /// `TaskRegistryHandle`). Drives the background-task footer + dialog. `None`
+    /// (smoke gates / resume picker) leaves the task surface empty.
+    pub multiagent_feed: Option<Arc<dyn crate::multiagent::MultiAgentFeed>>,
 }
 
 impl Runtime {
@@ -62,6 +66,7 @@ impl Runtime {
             bridge: None,
             status: StatusSnapshot::default(),
             orchestrator: None,
+            multiagent_feed: None,
         }
     }
 
@@ -77,6 +82,7 @@ impl Runtime {
             bridge: Some(bridge),
             status,
             orchestrator: None,
+            multiagent_feed: None,
         }
     }
 
@@ -85,6 +91,19 @@ impl Runtime {
     #[must_use]
     pub fn with_orchestrator(mut self, orchestrator: Arc<dyn traits::OrchestratorHandle>) -> Self {
         self.orchestrator = Some(orchestrator);
+        self
+    }
+
+    /// (M9-05) Attach the live multi-agent feed (a `PollerFeed` over the real
+    /// `TaskRegistryHandle`). The render loop polls it on the ticker and drains
+    /// the produced events into `AppState.multiagent`, lighting up the
+    /// background-task footer + dialog. Without it the task surface stays empty.
+    #[must_use]
+    pub fn with_multiagent_feed(
+        mut self,
+        feed: Arc<dyn crate::multiagent::MultiAgentFeed>,
+    ) -> Self {
+        self.multiagent_feed = Some(feed);
         self
     }
 }
@@ -132,6 +151,20 @@ pub async fn run_tui_session(
     let rx_slot: BridgeRxSlot =
         Arc::new(std::sync::Mutex::new(runtime.bridge.take().map(|b| b.rx)));
 
+    // (M9-05) The MultiAgent channel — paired tx/rx for the live task surface.
+    // The ticker pushes `pump_once(feed)` events onto `ma_tx`; the second pump
+    // drains `ma_rx` into `AppState.multiagent`. Wired only when a feed is
+    // present (`multiagent_feed`); otherwise all three props are `None` and the
+    // pump/ticker poll stay inert. Mirrors the `rx_slot` take-once discipline.
+    let (multiagent_rx, multiagent_tx) = match runtime.multiagent_feed.as_ref() {
+        Some(_) => {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let slot: crate::root::MultiAgentRxSlot = Arc::new(std::sync::Mutex::new(Some(rx)));
+            (Some(slot), Some(tx))
+        }
+        None => (None, None),
+    };
+
     let result = element! {
         TuiRoot(
             state: Some(state.clone()),
@@ -140,6 +173,9 @@ pub async fn run_tui_session(
             session_id: Some(runtime.session_id),
             started_at: Some(started),
             orchestrator: runtime.orchestrator.clone(),
+            multiagent_rx: multiagent_rx,
+            multiagent_tx: multiagent_tx,
+            multiagent_feed: runtime.multiagent_feed.clone(),
         )
     }
     .fullscreen()

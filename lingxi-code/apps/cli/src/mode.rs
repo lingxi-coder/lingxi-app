@@ -126,8 +126,18 @@ pub async fn dispatch(
             if let Ok(cwd) = std::env::current_dir() {
                 status.cwd = cwd;
             }
+            // (M9-05) Wrap the desktop TaskRegistry in a `PollerFeed` so the TUI
+            // background-task footer + dialog read live state. The registry is
+            // the SAME one wired into the tool context (tools that spawn tasks
+            // update it; the feed polls it). Coerced to the narrow `traits`
+            // handle at the seam.
+            let task_feed: Arc<dyn tui::multiagent::MultiAgentFeed> = Arc::new(
+                tui::multiagent::PollerFeed::new(tui_build.runtime.task_registry.clone()
+                    as Arc<dyn traits::task_registry::TaskRegistryHandle>),
+            );
             let tui_runtime = tui::session::Runtime::with_bridge(session_id, bridge, status)
-                .with_orchestrator(orchestrator);
+                .with_orchestrator(orchestrator)
+                .with_multiagent_feed(task_feed);
             let cancel = CancellationToken::new();
             match tui::run_tui_session(tui_runtime, cancel).await {
                 Ok(()) => exit_codes::SUCCESS,

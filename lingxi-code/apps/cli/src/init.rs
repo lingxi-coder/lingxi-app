@@ -36,7 +36,7 @@ use orchestrator::{
 use permission::PermissionMode;
 use platform_posix_minimal::{
     PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixMcp, PosixProcess,
-    PosixSandbox, PosixWorktree,
+    PosixRuntime, PosixSandbox, PosixWorktree,
 };
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
@@ -55,6 +55,10 @@ pub struct Runtime {
     pub dispatcher: RegistrySlashDispatcher,
     /// Auth handle for `/login` and `/logout`.
     pub auth: Arc<dyn AuthHandle>,
+    /// (M9-05) The desktop task registry shared with the tool context. The TUI
+    /// mount wraps it in a `PollerFeed` so the background-task footer + dialog
+    /// read live state.
+    pub task_registry: Arc<tasks::registry::TaskRegistry>,
 }
 
 /// Build-result for the TUI startup path. (M6-03)
@@ -266,6 +270,25 @@ pub async fn build_runtime(
     //       in M7 when the ForkedAgentRunner pool is wired.
     let compactor = Arc::new(compaction::CompactionOrchestrator::new(150_000));
 
+    // (5.45) M9-05: construct the real desktop `TaskRegistry` and wire it into
+    //        the tool context (`task_registry: Some(..)`, replacing the M8
+    //        `None`). Tasks materialize their stdout/stderr under a sandboxed
+    //        output dir (`<cwd>/.claude/tasks-output`); the spawner is the
+    //        tokio-backed `PosixRuntime` (the `RuntimeSpawner` impl — NOT
+    //        `PosixProcess`, which is the `ProcessRunner`). The same handle is
+    //        handed to the TUI as a `PollerFeed` so the background-task footer +
+    //        dialog read live state (the M9 §4 gate). Coerced to the narrow
+    //        `traits` handle at the tool-context + TUI seams.
+    let task_output_dir = cwd.join(".claude").join("tasks-output");
+    let task_registry = Arc::new(tasks::registry::TaskRegistry::new(
+        Arc::new(PosixRuntime::new()),
+        Arc::new(PosixFileSystem::new(cwd.clone())),
+        Arc::new(tasks::output_manager::TaskOutputManager::new(
+            task_output_dir,
+            Arc::new(PosixFileSystem::new(cwd.clone())),
+        )),
+    ));
+
     // (5.5) M8-P6: assemble the desktop tool registry through the composition
     //       root. The orchestrator previously received an empty
     //       `ToolRegistry::new()`; `engine-desktop` now owns the desktop tool
@@ -295,7 +318,9 @@ pub async fn build_runtime(
         default_model: cfg.model.clone(),
         worktree: Arc::new(PosixWorktree::new()),
         subagent_spawner: None,
-        task_registry: None,
+        task_registry: Some(
+            task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>
+        ),
         mailbox_router: None,
         budget_enforcer: None,
         mcp_registry: Some(mcp_registry.clone()),
@@ -329,6 +354,7 @@ pub async fn build_runtime(
         orchestrator: orch,
         dispatcher,
         auth,
+        task_registry,
     })
 }
 

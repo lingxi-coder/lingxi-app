@@ -89,6 +89,11 @@ pub struct ReplScreenProps {
     /// (M7-15) Active theme name (clone of `AppState.theme_setting.resolve()`).
     /// Drives syntect-colored diffs in scrollback.
     pub theme_name: crate::theme::ThemeName,
+    /// (M9-05) Background-task footer pill (claude-code `BackgroundTaskStatus`):
+    /// `{n} background task[s] · ↓ to view`, or `None` when hidden (no tasks /
+    /// all teammates). Computed by `render_task_footer(&AppState.multiagent.tasks)`
+    /// and rendered as the bottom-most row in `theme.dim`.
+    pub task_footer: Option<String>,
 }
 
 impl Default for ReplScreenProps {
@@ -113,6 +118,7 @@ impl Default for ReplScreenProps {
             history_search: None,
             theme: crate::theme::Theme::dark(),
             theme_name: crate::theme::ThemeName::Dark,
+            task_footer: None,
         }
     }
 }
@@ -144,6 +150,8 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let history_search = props.history_search.clone();
     let theme = props.theme;
     let theme_name = props.theme_name;
+    let task_footer = props.task_footer.clone();
+    let dim = theme.dim;
     element! {
         View(flex_direction: FlexDirection::Column, width: 100pct, height: 100pct) {
             StatusLine(
@@ -212,6 +220,13 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 vim_mode: vim_mode,
                 vim_visual_linewise: vim_visual_linewise,
             )
+            // (M9-05) Background-task footer pill, drawn bottom-most when present
+            // (claude-code `BackgroundTaskStatus`). Hidden (no row) when `None`.
+            #(task_footer.map(|line| element! {
+                View(flex_direction: FlexDirection::Row) {
+                    Text(content: line, color: dim)
+                }
+            }))
         }
     }
 }

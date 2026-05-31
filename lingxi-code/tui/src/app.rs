@@ -584,6 +584,11 @@ pub fn render_screen(
             // (M7-15) active palette + theme name → whole REPL recolors live.
             theme: state.theme,
             theme_name: state.theme_setting.resolve(),
+            // (M9-05) Background-task footer pill (hidden when no tasks / all
+            // teammates). Driven by the live `multiagent.tasks` list.
+            task_footer: crate::components::tasks::status_footer::render_task_footer(
+                &state.multiagent.tasks,
+            ),
         )
     }
     .into_any()

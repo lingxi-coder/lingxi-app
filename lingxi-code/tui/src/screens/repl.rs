@@ -94,6 +94,15 @@ pub struct ReplScreenProps {
     /// all teammates). Computed by `render_task_footer(&AppState.multiagent.tasks)`
     /// and rendered as the bottom-most row in `theme.dim`.
     pub task_footer: Option<String>,
+    /// (M9-06) Team-status footer pill (claude-code `TeamStatus`):
+    /// `{n} teammate[s]`, or `None` when there are no teammates (excluding
+    /// `team-lead`). Computed by `render_team_footer(&AppState.multiagent.workers, false)`
+    /// and rendered adjacent to the task footer in `theme.dim`.
+    pub team_footer: Option<String>,
+    /// (M9-06) Name of the teammate currently being viewed (`Some`) or `None`
+    /// in normal mode. When `Some`, the `TeammateViewHeader` renders above the
+    /// transcript in `theme.claude`.
+    pub viewing_teammate: Option<String>,
 }
 
 impl Default for ReplScreenProps {
@@ -119,6 +128,8 @@ impl Default for ReplScreenProps {
             theme: crate::theme::Theme::dark(),
             theme_name: crate::theme::ThemeName::Dark,
             task_footer: None,
+            team_footer: None,
+            viewing_teammate: None,
         }
     }
 }
@@ -151,6 +162,8 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let theme = props.theme;
     let theme_name = props.theme_name;
     let task_footer = props.task_footer.clone();
+    let team_footer = props.team_footer.clone();
+    let viewing_teammate = props.viewing_teammate.clone();
     let dim = theme.dim;
     element! {
         View(flex_direction: FlexDirection::Column, width: 100pct, height: 100pct) {
@@ -162,6 +175,12 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 permission_mode: permission_mode,
                 theme: theme,
             )
+            // (M9-06) Teammate-view header: renders above the transcript when a
+            // teammate is being viewed. Hidden (no row) in normal mode.
+            #(viewing_teammate.as_ref().map(|name| {
+                let header = crate::components::coordinator::teammate_view_header::render_teammate_view_header(name, "");
+                element! { View(flex_direction: FlexDirection::Column) { Text(content: header, color: theme.claude) } }
+            }))
             VirtualMessageList(
                 messages: messages,
                 cache: cache,
@@ -223,6 +242,13 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
             // (M9-05) Background-task footer pill, drawn bottom-most when present
             // (claude-code `BackgroundTaskStatus`). Hidden (no row) when `None`.
             #(task_footer.map(|line| element! {
+                View(flex_direction: FlexDirection::Row) {
+                    Text(content: line, color: dim)
+                }
+            }))
+            // (M9-06) Team-status footer pill (claude-code `TeamStatus`).
+            // Hidden (no row) when `None` (no teammates / only `team-lead`).
+            #(team_footer.map(|line| element! {
                 View(flex_direction: FlexDirection::Row) {
                     Text(content: line, color: dim)
                 }

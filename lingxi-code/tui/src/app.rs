@@ -589,6 +589,15 @@ pub fn render_screen(
             task_footer: crate::components::tasks::status_footer::render_task_footer(
                 &state.multiagent.tasks,
             ),
+            // (M9-06) Team-status footer pill (hidden when no teammates /
+            // only `team-lead`). Driven by the live `multiagent.workers` list.
+            team_footer: crate::components::coordinator::team_status::render_team_footer(
+                &state.multiagent.workers,
+                false,
+            ),
+            // (M9-06) Teammate-view mode: `Some(name)` renders the header
+            // above the transcript; `None` leaves normal mode unchanged.
+            viewing_teammate: state.viewing_teammate.clone(),
         )
     }
     .into_any()

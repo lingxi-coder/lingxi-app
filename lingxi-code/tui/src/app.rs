@@ -213,6 +213,18 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                     return false;
                 }
             }
+            // (M9-08) `/agents` opens the agent-discovery screen. Like
+            // `/config`/`/status`, the open needs an async
+            // `OrchestratorHandle::list_agents()` call — which the sync `dispatch`
+            // seam can't `.await`. So we RAISE `pending_open_agents`; the async
+            // open pump in `root.rs` (`pump_open_agents`) fetches the catalog and
+            // opens the screen. No echo, no turn.
+            if st.prompt_text.trim() == "/agents" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.pending_open_agents = true;
+                return false;
+            }
             let line = std::mem::take(&mut st.prompt_text);
             st.prompt_cursor = 0;
             st.history.push(line.clone());

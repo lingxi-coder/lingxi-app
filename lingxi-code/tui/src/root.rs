@@ -826,6 +826,55 @@ pub async fn pump_open_settings(
     true
 }
 
+/// (M9-08) Async agent-discovery open pump.
+///
+/// Mirrors `pump_open_settings`. The sync `/agents` submit path raises
+/// `AppState.pending_open_agents = true` (it cannot `.await
+/// OrchestratorHandle::list_agents`). This pump — driven by the same 100ms
+/// ticker `use_future` — observes the flag, fetches the catalog outside the
+/// lock, and calls `AppState::open_agents`. Same priority guard as Settings:
+/// never fires while a permission dialog (priority 1) or another screen
+/// (priority 2) owns the surface. Returns `true` iff the screen was opened.
+pub async fn pump_open_agents(
+    state: &Arc<Mutex<AppState>>,
+    handle: &Arc<dyn traits::OrchestratorHandle>,
+) -> bool {
+    // 1) Take the request under the lock, respecting priority.
+    {
+        let mut st = state.lock().await;
+        if !st.pending_open_agents {
+            return false;
+        }
+        if st.pending_permission.is_some() || st.active_screen.is_some() {
+            // Priority 1/2 own the surface: leave the flag and retry next tick.
+            return false;
+        }
+        st.pending_open_agents = false;
+    }
+
+    // 2) Fetch the agent catalog OUTSIDE the lock.
+    let infos = handle.list_agents().await;
+    let rows: Vec<crate::screens::agents::AgentRow> = infos
+        .into_iter()
+        .map(|i| crate::screens::agents::AgentRow {
+            name: i.name,
+            description: i.description,
+            tools: i.tools_allowed,
+            ..Default::default()
+        })
+        .collect();
+
+    // 3) Re-acquire the lock and open — re-check priority guard.
+    let mut st = state.lock().await;
+    if st.pending_permission.is_some() || st.active_screen.is_some() {
+        // Lost the race: re-raise so the next tick retries.
+        st.pending_open_agents = true;
+        return false;
+    }
+    st.open_agents(rows);
+    true
+}
+
 /// (M7-13 review) Load the 4-layer effective settings the Settings screen
 /// displays, mirroring the M3 `Settings::load` read API (the ONLY settings read
 /// path; §4 R7). A load error degrades gracefully to defaults so the screen can
@@ -982,6 +1031,10 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // pending or no handle is wired.
                 if let Some(handle) = orchestrator.as_ref() {
                     if pump_open_settings(&state, handle).await {
+                        needs_redraw = true;
+                    }
+                    // (M9-08) Agent-discovery open pump — mirrors Settings.
+                    if pump_open_agents(&state, handle).await {
                         needs_redraw = true;
                     }
                 }

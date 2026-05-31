@@ -669,6 +669,13 @@ pub struct AppState {
     /// teammate name; `Esc` returns. Entry is programmatic until the worker
     /// feed is live (R4/R5).
     pub viewing_teammate: Option<String>,
+    /// (M9-08) Set by the `/agents` submit intercept: a request to open the
+    /// agent-discovery screen. The SYNC submit path can't `.await
+    /// OrchestratorHandle::list_agents`, so it only RAISES this flag; the async
+    /// open pump in `root.rs` (the ticker `use_future`) observes it, fetches the
+    /// catalog, and calls [`Self::open_agents`]. Mirrors
+    /// `pending_open_settings`.
+    pub pending_open_agents: bool,
 }
 
 impl AppState {
@@ -718,6 +725,7 @@ impl AppState {
             message_selector: crate::components::message_selector::MessageSelectorState::default(),
             multiagent: crate::multiagent::MultiAgentState::default(),
             viewing_teammate: None,
+            pending_open_agents: false,
         }
     }
 
@@ -767,6 +775,18 @@ impl AppState {
             crate::screens::theme::ThemePickerState::new(self.theme_setting),
         ));
         crate::telemetry::screen_opened("theme");
+    }
+
+    /// (M9-08) Open the agents screen with the given catalog rows.
+    pub fn open_agents(&mut self, rows: Vec<crate::screens::agents::AgentRow>) {
+        self.active_screen = Some(crate::screens::Screen::Agents(
+            crate::screens::agents::AgentsScreenState {
+                rows,
+                selected: 0,
+                mode: crate::screens::agents::AgentsDialogMode::List,
+            },
+        ));
+        crate::telemetry::screen_opened("agents");
     }
 
     /// (M9-06) Enter teammate-view for `name`.

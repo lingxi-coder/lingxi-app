@@ -1096,6 +1096,19 @@ Then add a test asserting the team-mem parts append after read/search/list, lowe
             "  \u{23BF}  Recalled 3 team memories"
         );
     }
+
+    #[test]
+    fn team_mem_search_has_no_count() {
+        let c = CollapsedCounts {
+            mem_search: 4,
+            ..CollapsedCounts::default()
+        };
+        // Search never shows a count; capitalized as the only/first part.
+        assert_eq!(
+            render_collapsed_to_string(&c, &[], false),
+            "  \u{23BF}  Searched team memories"
+        );
+    }
 ```
 
 > Update the 5 **existing** tests in this file that construct `CollapsedCounts { search, read, list, is_active }` with explicit fields: append `mem_read: 0, mem_search: 0, mem_write: 0,` to each (or switch them to `..CollapsedCounts::default()`). They must still compile and pass unchanged in output.
@@ -1114,9 +1127,9 @@ Expected: the new tests FAIL (parts not emitted); existing tests PASS after the 
         parts.push(format!("{verb} {} {noun}", c.mem_read));
     }
     if c.mem_search > 0 {
+        // claude-code shows NO count for searches — always "team memories".
         let verb = if c.is_active { "searching" } else { "searched" };
-        let noun = if c.mem_search == 1 { "team memory" } else { "team memories" };
-        parts.push(format!("{verb} {} {noun}", c.mem_search));
+        parts.push(format!("{verb} team memories"));
     }
     if c.mem_write > 0 {
         let verb = if c.is_active { "writing" } else { "wrote" };

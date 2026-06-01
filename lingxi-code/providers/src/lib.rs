@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod anthropic;
+pub mod anthropic_wire;
 pub mod auth;
 pub mod authenticator;
 pub mod aws_creds;
@@ -17,6 +18,7 @@ pub mod capabilities;
 pub mod client;
 pub mod codec;
 pub mod error;
+pub mod eventstream;
 pub mod gemini;
 pub mod model_spec;
 /// `OpenAI` / OpenAI-compatible chat-completions codec.

@@ -58,10 +58,9 @@ pub(crate) fn provider_from_model(model: &str) -> ProviderId {
 /// model id, so Anthropic cost attribution is byte-identical to before.
 #[must_use]
 pub(crate) fn model_ref_from_string(model: &str) -> ModelRef {
-    let spec = ModelSpec::parse(model);
     ModelRef {
-        provider: provider_id_for_profile(&spec.profile),
-        model: spec.model,
+        provider: provider_from_model(model),
+        model: ModelSpec::parse(model).model,
     }
 }
 

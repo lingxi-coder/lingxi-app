@@ -15,6 +15,7 @@ pub mod client;
 pub mod codec;
 pub mod error;
 pub mod model_spec;
+pub mod profile;
 pub mod provider;
 pub mod request;
 
@@ -28,5 +29,6 @@ pub use client::GenericClient;
 pub use codec::{SseDecoder, WireCodec};
 pub use error::CodecError;
 pub use model_spec::{ModelSpec, DEFAULT_PROFILE};
+pub use profile::{builtin_profiles, parse_profiles, ProviderKind, ProviderProfile};
 pub use provider::LlmProvider;
 pub use request::{CanonicalRequest, DEFAULT_MAX_TOKENS};

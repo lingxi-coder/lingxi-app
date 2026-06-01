@@ -743,6 +743,7 @@ pub fn handle_ctrl_c(state: &mut AppState) {
 pub fn spawn_streaming_turn(
     handle: std::sync::Arc<dyn traits::OrchestratorHandle>,
     prompt: String,
+    image_paths: Vec<std::path::PathBuf>,
     tx: tokio::sync::mpsc::UnboundedSender<crate::events::orchestrator_bridge::TurnEvent>,
 ) -> tokio_util::sync::CancellationToken {
     use crate::events::orchestrator_bridge::TurnEvent;
@@ -758,7 +759,7 @@ pub fn spawn_streaming_turn(
 
     tokio::spawn(async move {
         let outcome = handle
-            .run_turn_streaming_with_cancel(&prompt, cancel_clone)
+            .run_turn_streaming_with_images(&prompt, &image_paths, cancel_clone)
             .await;
         let ev = match outcome {
             Ok(o) => TurnEvent::TurnEnded(o),

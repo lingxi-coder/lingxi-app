@@ -340,6 +340,22 @@ pub trait OrchestratorHandle: Send + Sync {
             "run_turn_streaming_with_cancel".into(),
         ))
     }
+
+    /// Streaming turn carrying pasted image file paths (TUI paste→image). Each
+    /// path is read + base64-encoded into a `ContentBlock::Image` on the
+    /// outgoing user message.
+    ///
+    /// Default delegates to [`Self::run_turn_streaming_with_cancel`] ignoring
+    /// images, so non-TUI handle impls need no override.
+    async fn run_turn_streaming_with_images(
+        &self,
+        prompt: &str,
+        image_paths: &[std::path::PathBuf],
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<TurnOutcome, HandleError> {
+        let _ = image_paths;
+        self.run_turn_streaming_with_cancel(prompt, cancel).await
+    }
 }
 
 /// Captured output emission. Useful for tests and (M5-13) the stdio sink.

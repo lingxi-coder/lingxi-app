@@ -86,6 +86,25 @@ impl Default for PasteState {
     }
 }
 
+impl PasteState {
+    /// Drain recorded image attachments into their file paths and reset the
+    /// registry. Excludes the `"clipboard"` placeholder (empty macOS image
+    /// paste, where no path is known). A turn-submit site calls this to hand
+    /// the pasted image paths to the streaming turn, so the next prompt starts
+    /// with a fresh, empty attachment registry.
+    #[must_use]
+    pub fn take_image_paths(&mut self) -> Vec<std::path::PathBuf> {
+        let paths = self
+            .attachments
+            .iter()
+            .filter(|a| a.kind == AttachmentKind::Image && a.source != "clipboard")
+            .map(|a| std::path::PathBuf::from(&a.source))
+            .collect();
+        *self = Self::default();
+        paths
+    }
+}
+
 /// The result of processing one coalesced paste block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PasteOutcome {
@@ -322,6 +341,30 @@ mod tests {
 
     fn fresh() -> PasteState {
         PasteState::default()
+    }
+
+    #[test]
+    fn take_image_paths_drains_paths_and_resets() {
+        // Paste two images + a clipboard placeholder.
+        let mut st = fresh();
+        st = process_paste("/tmp/a.png", st).state;
+        st = process_paste("/tmp/b.jpg", st).state;
+        st.attachments.push(Attachment {
+            id: 99,
+            kind: AttachmentKind::Image,
+            source: "clipboard".to_string(),
+        });
+        let paths = st.take_image_paths();
+        assert_eq!(
+            paths,
+            vec![
+                std::path::PathBuf::from("/tmp/a.png"),
+                std::path::PathBuf::from("/tmp/b.jpg"),
+            ]
+        );
+        // "clipboard" placeholder excluded; state reset to default.
+        assert_eq!(st, PasteState::default());
+        assert!(st.take_image_paths().is_empty());
     }
 
     #[test]

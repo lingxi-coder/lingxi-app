@@ -19,6 +19,7 @@ pub mod cost_wiring;
 pub mod diagnostics;
 pub mod error;
 pub mod handle_impl;
+pub mod image_input;
 pub mod prompt;
 pub mod provider_adapter;
 pub mod resume;

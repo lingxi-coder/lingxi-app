@@ -223,6 +223,28 @@ impl OrchestratorHandle for ConversationOrchestrator {
             Err(e) => Err(HandleError::ActionFailed(e.to_string())),
         }
     }
+
+    async fn run_turn_streaming_with_images(
+        &self,
+        prompt: &str,
+        image_paths: &[std::path::PathBuf],
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<traits::TurnOutcome, HandleError> {
+        // Delegate to the inherent image-aware streaming entry point.
+        match crate::ConversationOrchestrator::run_turn_streaming_with_cancel_images(
+            self,
+            prompt,
+            image_paths,
+            cancel,
+        )
+        .await
+        {
+            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(traits::TurnOutcome::EndTurn),
+            Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(traits::TurnOutcome::MaxTurns),
+            Ok(crate::conversation::TurnOutcome::Cancelled) => Ok(traits::TurnOutcome::Cancelled),
+            Err(e) => Err(HandleError::ActionFailed(e.to_string())),
+        }
+    }
 }
 
 /// Stable string label for a `HookEventType`, used by [`list_hooks`] to

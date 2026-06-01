@@ -693,7 +693,7 @@ impl ConversationOrchestrator {
             event = orch_events::TURN_STREAMING_STARTED,
             prompt_len = prompt.len()
         );
-        let result = self.try_run_turn_streaming(prompt).await;
+        let result = self.try_run_turn_streaming(prompt, &[]).await;
         match &result {
             Ok(ConversationOutcome::EndTurn { turn_count, .. }) => {
                 tracing::info!(
@@ -717,6 +717,7 @@ impl ConversationOrchestrator {
     async fn try_run_turn_streaming(
         &self,
         prompt: &str,
+        image_paths: &[std::path::PathBuf],
     ) -> Result<ConversationOutcome, OrchestratorError> {
         use crate::streaming_loop::{dispatch_tool_uses_concurrent, pump_stream};
         use protocol::ContentBlock;
@@ -727,8 +728,10 @@ impl ConversationOrchestrator {
             None => Some(self.build_system_prompt().await),
         };
 
-        // 1. Append the user prompt to session history.
-        let user_msg = ConversationMessage::user(MessageId::new(), prompt.to_string());
+        // 1. Append the user prompt (+ any pasted images) to session history.
+        let images = Self::load_images(image_paths)?;
+        let user_msg =
+            ConversationMessage::user_with_images(MessageId::new(), prompt.to_string(), images);
         {
             let mut s = self.session.lock().await;
             s.history.push(user_msg.clone());
@@ -942,6 +945,20 @@ impl ConversationOrchestrator {
         prompt: &str,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        self.run_turn_streaming_with_cancel_images(prompt, &[], cancel)
+            .await
+    }
+
+    /// As [`Self::run_turn_streaming_with_cancel`], but carrying pasted image
+    /// file paths that are loaded + base64-encoded into `ContentBlock::Image`
+    /// blocks on the outgoing user message (TUI paste→image). A failed image
+    /// read aborts the turn with `Err` before any API call.
+    pub async fn run_turn_streaming_with_cancel_images(
+        &self,
+        prompt: &str,
+        image_paths: &[std::path::PathBuf],
+        cancel: CancellationToken,
+    ) -> Result<TurnOutcome, OrchestratorError> {
         tracing::info!(
             event = orch_events::TURN_STREAMING_STARTED,
             prompt_len = prompt.len()
@@ -952,7 +969,7 @@ impl ConversationOrchestrator {
         tokio::select! {
             biased;
             () = cancel.cancelled() => Ok(TurnOutcome::Cancelled),
-            r = self.try_run_turn_streaming(prompt) => match r {
+            r = self.try_run_turn_streaming(prompt, image_paths) => match r {
                 Ok(ConversationOutcome::EndTurn { turn_count, .. }) => {
                     tracing::info!(
                         event = orch_events::TURN_STREAMING_COMPLETED,
@@ -966,6 +983,16 @@ impl ConversationOrchestrator {
                 Err(e) => Err(e),
             },
         }
+    }
+
+    /// Load + base64-encode each pasted image path into an [`ImageSource`].
+    fn load_images(
+        image_paths: &[std::path::PathBuf],
+    ) -> Result<Vec<protocol::ImageSource>, OrchestratorError> {
+        image_paths
+            .iter()
+            .map(|p| crate::image_input::load_image_source(p))
+            .collect()
     }
 
     /// Build the per-turn system prompt by gathering cwd / git / file

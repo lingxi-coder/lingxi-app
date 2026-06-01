@@ -2,7 +2,7 @@
 source: tui/src/screens/settings/status.rs
 expression: out
 ---
-Version: lingxi-cli v0.10.0
+Version: lingxi-cli v0.11.0
 Session name: /rename to add a name
 Session ID: sess-abc123
 cwd: /home/u/proj

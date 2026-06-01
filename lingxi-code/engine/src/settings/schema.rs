@@ -42,6 +42,9 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     ("sandbox", MergeStrategy::DeepMerge),
     ("hooks", MergeStrategy::DeepMerge),
     ("outputStyle", MergeStrategy::DeepMerge),
+    // LingXi extension — deep-merge so multiple settings layers can each
+    // declare a subset of provider profiles.
+    ("providers", MergeStrategy::DeepMerge),
 ];
 
 /// Look up the merge strategy for a field name.
@@ -103,6 +106,13 @@ pub struct SettingsJson {
     /// Scalar field (later source wins). Default model alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+
+    /// Object-merge field (deep-merge). `LingXi` extension (claude-code has no
+    /// such key): named LLM provider profiles, e.g.
+    /// `{ "groq": { "type": "openai", "baseUrl": "...", "apiKeyEnv": "GROQ_API_KEY" } }`.
+    /// Parsed into typed profiles by `providers::parse_profiles`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<BTreeMap<String, Value>>,
 }
 
 impl SettingsJson {
@@ -217,5 +227,14 @@ mod tests {
         let json = r#"{"trustedDirectories": ["/foo"], "telemetryEnabled": true}"#;
         let parsed: SettingsJson = serde_json::from_str(json).unwrap();
         assert!(parsed.validate().is_ok());
+    }
+
+    #[test]
+    fn providers_field_roundtrips() {
+        let raw = r#"{"providers":{"groq":{"type":"openai","baseUrl":"https://api.groq.com/openai/v1","apiKeyEnv":"GROQ_API_KEY"}}}"#;
+        let parsed: SettingsJson = serde_json::from_str(raw).expect("parse");
+        assert!(parsed.providers.is_some());
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(back.contains("\"providers\""));
     }
 }

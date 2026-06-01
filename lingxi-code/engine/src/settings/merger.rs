@@ -29,6 +29,7 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         // Scalar fields — Override semantics: next wins when set, else prev.
         telemetry_enabled: next.telemetry_enabled.or(prev.telemetry_enabled),
         model: next.model.or(prev.model),
+        providers: deep_merge_object(prev.providers, next.providers),
     }
 }
 
@@ -260,5 +261,19 @@ mod tests {
             Some(false),
             "next is None, so prev survives"
         );
+    }
+
+    #[test]
+    fn providers_deep_merge_combines_profiles() {
+        use serde_json::json;
+        use std::collections::BTreeMap;
+        let mut p = BTreeMap::new();
+        p.insert("groq".to_string(), json!({"type": "openai"}));
+        let mut n = BTreeMap::new();
+        n.insert("ollama".to_string(), json!({"type": "openai"}));
+        let prev = SettingsJson { providers: Some(p), ..Default::default() };
+        let next = SettingsJson { providers: Some(n), ..Default::default() };
+        let merged = merge(prev, next).providers.unwrap();
+        assert!(merged.contains_key("groq") && merged.contains_key("ollama"));
     }
 }

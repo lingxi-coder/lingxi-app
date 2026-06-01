@@ -12,7 +12,7 @@
 //! 3. **`credential_process`** — `$AWS_CONFIG_FILE` or `~/.aws/config`, the
 //!    profile's `credential_process` command (this is how `aws configure sso`
 //!    / `aws-vault` typically surface short-lived SSO credentials).
-//! 4. **IMDSv2** — the EC2 instance metadata service (token + role creds),
+//! 4. **`IMDSv2`** — the EC2 instance metadata service (token + role creds),
 //!    issued over the injected [`HttpTransport`]. Skipped when no transport.
 //!
 //! Native `sso_session` config (the cached OIDC token in `~/.aws/sso/cache`) is
@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use traits::HttpTransport;
 
-/// Resolved static AWS credentials for SigV4 signing.
+/// Resolved static AWS credentials for `SigV4` signing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwsCreds {
     /// `AWS_ACCESS_KEY_ID`.
@@ -156,7 +156,7 @@ fn config_path() -> Option<std::path::PathBuf> {
     home_dir().map(|h| h.join(".aws").join("config"))
 }
 
-/// Fetch instance-role credentials over IMDSv2 using the injected transport.
+/// Fetch instance-role credentials over `IMDSv2` using the injected transport.
 ///
 /// Uses a short timeout per call so a non-EC2 host fails fast. Returns `None`
 /// on any error (treated as "not on EC2 / no role").

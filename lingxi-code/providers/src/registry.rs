@@ -183,8 +183,10 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
             }
             ProviderKind::Bedrock => {
                 let region = profile.region.clone().unwrap_or_default();
-                let authenticator = Arc::new(crate::authenticator::SigV4Authenticator::new(region.clone()))
-                    as Arc<dyn crate::authenticator::Authenticator>;
+                let authenticator = Arc::new(crate::authenticator::SigV4Authenticator::with_transport(
+                    region.clone(),
+                    self.transport.clone(),
+                )) as Arc<dyn crate::authenticator::Authenticator>;
                 let provider = crate::bedrock::BedrockProvider::new(region, self.transport.clone(), authenticator);
                 Arc::new(provider) as Arc<dyn crate::provider::LlmProvider>
             }

@@ -5,15 +5,18 @@
 //! [`Auth`] header styles (API keys); signed authenticators land in later phases.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use aws_credential_types::Credentials;
 use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4;
 
 use crate::auth::Auth;
+use crate::aws_creds::AwsCreds;
 use api_client::ApiError;
 use async_trait::async_trait;
 use protocol::HttpRequest;
+use traits::HttpTransport;
 
 /// Attaches authentication to a fully-built request immediately before it is
 /// sent. Object-safe so `GenericClient` can hold an `Arc<dyn Authenticator>`.
@@ -88,17 +91,58 @@ impl Authenticator for GcpTokenAuthenticator {
     }
 }
 
-/// Signs Bedrock requests with AWS `SigV4` using environment-variable credentials
-/// (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / optional `AWS_SESSION_TOKEN`).
+/// Signs Bedrock requests with AWS `SigV4`. Credentials come from the layered
+/// discovery chain in [`crate::aws_creds`] (env → shared credentials file →
+/// `credential_process` → IMDSv2), resolved lazily and cached for
+/// [`CRED_TTL`]. The IMDS step is only attempted when a transport is supplied
+/// via [`SigV4Authenticator::with_transport`].
 pub struct SigV4Authenticator {
     region: String,
+    /// Shared transport used for the IMDSv2 credential fetch (None → IMDS skipped).
+    transport: Option<Arc<dyn HttpTransport>>,
+    /// Cached resolved credentials + the instant they were resolved.
+    cache: tokio::sync::Mutex<Option<(AwsCreds, std::time::Instant)>>,
 }
 
+/// How long resolved credentials are cached before re-resolution. Bounds both
+/// env/file re-reads and IMDS round-trips while staying well inside the
+/// ~6h lifetime of IMDS-issued credentials.
+const CRED_TTL: Duration = Duration::from_secs(300);
+
 impl SigV4Authenticator {
-    /// Construct for an AWS region (e.g. `us-east-1`).
+    /// Construct for an AWS region (e.g. `us-east-1`) with no transport — the
+    /// IMDS step is skipped (env / credentials file / `credential_process` only).
     #[must_use]
     pub fn new(region: String) -> Self {
-        Self { region }
+        Self {
+            region,
+            transport: None,
+            cache: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Construct with a shared transport so the IMDSv2 credential source is
+    /// available (for EC2/ECS instance-role credentials).
+    #[must_use]
+    pub fn with_transport(region: String, transport: Arc<dyn HttpTransport>) -> Self {
+        Self {
+            region,
+            transport: Some(transport),
+            cache: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Resolve credentials via the discovery chain, caching for [`CRED_TTL`].
+    async fn resolve_cached(&self) -> Result<AwsCreds, ApiError> {
+        let mut guard = self.cache.lock().await;
+        if let Some((creds, at)) = guard.as_ref() {
+            if at.elapsed() < CRED_TTL {
+                return Ok(creds.clone());
+            }
+        }
+        let fresh = crate::aws_creds::resolve(self.transport.as_ref()).await?;
+        *guard = Some((fresh.clone(), std::time::Instant::now()));
+        Ok(fresh)
     }
 
     /// Sign `req` in-place using the supplied credentials and timestamp.
@@ -177,16 +221,12 @@ impl SigV4Authenticator {
 #[async_trait]
 impl Authenticator for SigV4Authenticator {
     async fn authorize(&self, req: &mut HttpRequest) -> Result<(), ApiError> {
-        let access_key = std::env::var("AWS_ACCESS_KEY_ID")
-            .map_err(|_| ApiError::Unauthorized("AWS_ACCESS_KEY_ID not set".to_string()))?;
-        let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
-            .map_err(|_| ApiError::Unauthorized("AWS_SECRET_ACCESS_KEY not set".to_string()))?;
-        let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
+        let creds = self.resolve_cached().await?;
         self.sign_in_place(
             req,
-            &access_key,
-            &secret_key,
-            session_token.as_deref(),
+            &creds.access_key,
+            &creds.secret_key,
+            creds.session_token.as_deref(),
             std::time::SystemTime::now(),
         )
     }

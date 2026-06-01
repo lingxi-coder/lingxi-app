@@ -57,3 +57,6 @@ __pycache__/
 
 # Visual brainstorming sessions (superpowers:brainstorming skill)
 .superpowers/
+
+# stray local build artifact (not part of the project)
+lingxi-code/test_entry

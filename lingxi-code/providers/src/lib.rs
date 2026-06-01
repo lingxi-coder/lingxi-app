@@ -14,6 +14,7 @@ pub mod capabilities;
 pub mod client;
 pub mod codec;
 pub mod error;
+pub mod model_spec;
 pub mod provider;
 pub mod request;
 
@@ -26,5 +27,6 @@ pub use capabilities::{Capabilities, ReasoningSupport, SystemStyle};
 pub use client::GenericClient;
 pub use codec::{SseDecoder, WireCodec};
 pub use error::CodecError;
+pub use model_spec::{ModelSpec, DEFAULT_PROFILE};
 pub use provider::LlmProvider;
 pub use request::{CanonicalRequest, DEFAULT_MAX_TOKENS};

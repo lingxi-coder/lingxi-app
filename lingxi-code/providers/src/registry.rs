@@ -134,6 +134,36 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
                 );
                 Arc::new(client) as Arc<dyn crate::provider::LlmProvider>
             }
+            ProviderKind::AzureOpenAi => {
+                let key = self.api_key_for(profile);
+                let auth = if key.is_empty() {
+                    crate::auth::Auth::None
+                } else {
+                    crate::auth::Auth::Header {
+                        name: "api-key".to_string(),
+                        value: key,
+                    }
+                };
+                let authenticator = Arc::new(crate::authenticator::StaticAuth::new(auth))
+                    as Arc<dyn crate::authenticator::Authenticator>;
+                let codec = crate::openai::OpenAiCodec::new_azure(
+                    profile.base_url.clone().unwrap_or_default(),
+                    profile.azure_deployment.clone().unwrap_or_default(),
+                    profile.azure_api_version.clone().unwrap_or_default(),
+                    profile.reasoning_effort,
+                );
+                let id = cost::ProviderId::OpenAICompatible {
+                    name: name.to_string(),
+                };
+                let client = crate::client::GenericClient::new(
+                    codec,
+                    authenticator,
+                    self.transport.clone(),
+                    id,
+                    crate::capabilities::Capabilities::openai(),
+                );
+                Arc::new(client) as Arc<dyn crate::provider::LlmProvider>
+            }
         }
     }
 }
@@ -220,6 +250,8 @@ mod tests {
                 api_key_env: Some("GROQ_API_KEY".to_string()),
                 reasoning_effort: None,
                 thinking_budget: None,
+                azure_deployment: None,
+                azure_api_version: None,
             },
         );
         let r = registry(extra);
@@ -230,6 +262,30 @@ mod tests {
             cost::ProviderId::OpenAICompatible {
                 name: "groq".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn azure_profile_resolves() {
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "azure".to_string(),
+            ProviderProfile {
+                kind: ProviderKind::AzureOpenAi,
+                base_url: Some("https://r.openai.azure.com".to_string()),
+                api_key_env: Some("AZURE_OPENAI_KEY".to_string()),
+                reasoning_effort: None,
+                thinking_budget: None,
+                azure_deployment: Some("gpt-4o".to_string()),
+                azure_api_version: Some("2024-10-21".to_string()),
+            },
+        );
+        let r = registry(extra);
+        let resolved = r.resolve("azure/gpt-4o").expect("azure resolves");
+        assert_eq!(resolved.model, "gpt-4o");
+        assert_eq!(
+            resolved.provider.id(),
+            cost::ProviderId::OpenAICompatible { name: "azure".to_string() }
         );
     }
 

@@ -13,6 +13,8 @@ pub enum ProviderKind {
     OpenAi,
     /// Google Gemini generateContent (codec lands in P4).
     Gemini,
+    /// Azure `OpenAI` (`OpenAI` chat wire over a deployment URL + `api-key` header).
+    AzureOpenAi,
 }
 
 impl ProviderKind {
@@ -25,8 +27,9 @@ impl ProviderKind {
             "anthropic" => Ok(Self::Anthropic),
             "openai" => Ok(Self::OpenAi),
             "gemini" => Ok(Self::Gemini),
+            "azureOpenAi" | "azure" => Ok(Self::AzureOpenAi),
             other => Err(CodecError::Unsupported(format!(
-                "unknown provider type {other:?} (expected anthropic|openai|gemini)"
+                "unknown provider type {other:?} (expected anthropic|openai|gemini|azureOpenAi)"
             ))),
         }
     }
@@ -49,6 +52,12 @@ pub struct ProviderProfile {
     /// Thinking-token budget for Gemini 2.5 models. When set, the Gemini
     /// codec emits `generationConfig.thinkingConfig`.
     pub thinking_budget: Option<u32>,
+    /// Azure deployment name (e.g. `gpt-4o`). Used only when `kind` is
+    /// [`ProviderKind::AzureOpenAi`].
+    pub azure_deployment: Option<String>,
+    /// Azure REST API version query parameter (e.g. `2024-10-21`). Used only
+    /// when `kind` is [`ProviderKind::AzureOpenAi`].
+    pub azure_api_version: Option<String>,
 }
 
 /// Built-in profiles, keyed by name. `anthropic` uses `anthropic_base` (the
@@ -65,6 +74,8 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
             reasoning_effort: None,
             thinking_budget: None,
+            azure_deployment: None,
+            azure_api_version: None,
         },
     );
     m.insert(
@@ -75,6 +86,8 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             api_key_env: Some("OPENAI_API_KEY".to_string()),
             reasoning_effort: None,
             thinking_budget: None,
+            azure_deployment: None,
+            azure_api_version: None,
         },
     );
     m.insert(
@@ -85,6 +98,8 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             api_key_env: Some("GEMINI_API_KEY".to_string()),
             reasoning_effort: None,
             thinking_budget: None,
+            azure_deployment: None,
+            azure_api_version: None,
         },
     );
     m
@@ -133,6 +148,14 @@ pub fn parse_profiles(
             .get("thinkingBudget")
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| u32::try_from(n).ok());
+        let azure_deployment = obj
+            .get("azureDeployment")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let azure_api_version = obj
+            .get("azureApiVersion")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
         out.insert(
             name.clone(),
             ProviderProfile {
@@ -141,6 +164,8 @@ pub fn parse_profiles(
                 api_key_env,
                 reasoning_effort,
                 thinking_budget,
+                azure_deployment,
+                azure_api_version,
             },
         );
     }
@@ -208,6 +233,20 @@ mod tests {
         let mut raw = BTreeMap::new();
         raw.insert("x".to_string(), json!({"baseUrl": "http://x"}));
         assert!(parse_profiles(Some(&raw)).is_err());
+    }
+
+    #[test]
+    fn parse_azure_profile() {
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "azure".to_string(),
+            json!({"type":"azureOpenAi","baseUrl":"https://r.openai.azure.com",
+                   "azureDeployment":"gpt-4o","azureApiVersion":"2024-10-21","apiKeyEnv":"AZURE_OPENAI_KEY"}),
+        );
+        let p = parse_profiles(Some(&raw)).unwrap();
+        assert_eq!(p["azure"].kind, ProviderKind::AzureOpenAi);
+        assert_eq!(p["azure"].azure_deployment.as_deref(), Some("gpt-4o"));
+        assert_eq!(p["azure"].azure_api_version.as_deref(), Some("2024-10-21"));
     }
 
     #[test]

@@ -13,10 +13,24 @@ use protocol::{HttpMethod, HttpRequest};
 
 use encode::OPENAI_DEFAULT_BASE;
 
+/// How the `OpenAI` codec builds its request URL.
+enum UrlStyle {
+    /// `{base_url}/chat/completions` (`OpenAI` + OpenAI-compatible).
+    OpenAi,
+    /// `{base_url}/openai/deployments/{deployment}/chat/completions?api-version=…` (Azure).
+    Azure {
+        /// Azure deployment name.
+        deployment: String,
+        /// Azure `api-version` query value.
+        api_version: String,
+    },
+}
+
 /// `WireCodec` for `OpenAI` chat-completions. `base_url` is the API base (no
 /// trailing slash); `None` uses [`OPENAI_DEFAULT_BASE`].
 pub struct OpenAiCodec {
     base_url: String,
+    url_style: UrlStyle,
     /// Profile-level reasoning effort override (applied when the request itself
     /// does not specify one).
     reasoning_effort: Option<crate::request::ReasoningEffort>,
@@ -32,6 +46,24 @@ impl OpenAiCodec {
     ) -> Self {
         Self {
             base_url: base_url.unwrap_or_else(|| OPENAI_DEFAULT_BASE.to_string()),
+            url_style: UrlStyle::OpenAi,
+            reasoning_effort,
+        }
+    }
+
+    /// Construct an Azure `OpenAI` codec: the `OpenAI` body over Azure's
+    /// deployment URL. `base_url` is the resource endpoint
+    /// (e.g. `https://my-resource.openai.azure.com`).
+    #[must_use]
+    pub fn new_azure(
+        base_url: String,
+        deployment: String,
+        api_version: String,
+        reasoning_effort: Option<crate::request::ReasoningEffort>,
+    ) -> Self {
+        Self {
+            base_url,
+            url_style: UrlStyle::Azure { deployment, api_version },
             reasoning_effort,
         }
     }
@@ -45,9 +77,16 @@ impl WireCodec for OpenAiCodec {
         if req.stream {
             headers.push(("accept".to_string(), "text/event-stream".to_string()));
         }
+        let url = match &self.url_style {
+            UrlStyle::OpenAi => format!("{}/chat/completions", self.base_url),
+            UrlStyle::Azure { deployment, api_version } => format!(
+                "{}/openai/deployments/{deployment}/chat/completions?api-version={api_version}",
+                self.base_url
+            ),
+        };
         Ok(HttpRequest {
             method: HttpMethod::Post,
-            url: format!("{}/chat/completions", self.base_url),
+            url,
             headers,
             body: Some(body.to_string()),
             timeout: Some(std::time::Duration::from_secs(600)),
@@ -86,5 +125,20 @@ mod tests {
             .encode_request(&CanonicalRequest::new("llama"))
             .unwrap();
         assert_eq!(http.url, "https://api.groq.com/openai/v1/chat/completions");
+    }
+
+    #[test]
+    fn azure_url_style_targets_deployment_path() {
+        let codec = OpenAiCodec::new_azure(
+            "https://r.openai.azure.com".to_string(),
+            "gpt-4o".to_string(),
+            "2024-10-21".to_string(),
+            None,
+        );
+        let http = codec.encode_request(&CanonicalRequest::new("gpt-4o")).unwrap();
+        assert_eq!(
+            http.url,
+            "https://r.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21"
+        );
     }
 }

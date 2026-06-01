@@ -38,6 +38,14 @@ pub trait OrchestratorApiClient: Send + Sync {
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
     ) -> Result<MessageResponse, ApiError>;
+
+    /// Enumerate available `provider/model` ids + `@aliases` for `/model`'s
+    /// list mode. Default returns empty so non-routing impls (mocks / the
+    /// no-streaming stub) need no override; `ProviderApiAdapter` overrides it
+    /// to delegate to the router.
+    fn available_models(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Streaming-API surface used by the orchestrator's streaming turn loop.

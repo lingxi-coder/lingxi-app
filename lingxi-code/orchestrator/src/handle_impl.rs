@@ -184,12 +184,18 @@ impl OrchestratorHandle for ConversationOrchestrator {
         spawn_editor_on(target, "{}\n").await
     }
 
-    /// Model names shown by the no-arg `/model` display. Purely informational —
-    /// `switch_model` accepts any string. Includes the Anthropic defaults plus
-    /// `provider/model` examples so the multi-provider syntax is discoverable;
-    /// actual availability of a non-Anthropic provider depends on its API key /
-    /// settings profile (see `docs/LLM_PROVIDERS.md`).
+    /// Model names shown by the no-arg `/model` display. Surfaces the real
+    /// configured profiles + aliases via the API-client seam
+    /// (`ProviderApiAdapter` → `ModelRouter::available_models`, emitting
+    /// `provider/model` ids and `@aliases`). Falls back to the static example
+    /// list when no routing client is wired (library / test callers, or the
+    /// no-streaming stub). `switch_model` still accepts any string; actual
+    /// availability depends on the profile's API key (see `docs/LLM_PROVIDERS.md`).
     async fn list_available_models(&self) -> Vec<String> {
+        let models = self.api.available_models();
+        if !models.is_empty() {
+            return models;
+        }
         vec![
             "claude-opus-4-7".to_string(),
             "claude-sonnet-4-6".to_string(),

@@ -85,6 +85,20 @@ Azure uses the OpenAI chat body over
 `…/openai/deployments/{deployment}/chat/completions?api-version=…` with an
 `api-key` header.
 
+**Azure AD (Entra ID) auth** is also supported: when `apiKeyEnv` yields no key
+and an `azureAd` block is configured, a bearer token is minted via the OAuth2
+client-credentials grant and cached until it expires.
+
+```jsonc
+"azure": {
+  "type": "azureOpenAi",
+  "baseUrl": "https://my-resource.openai.azure.com",
+  "azureDeployment": "gpt-4o",
+  "azureApiVersion": "2024-10-21",
+  "azureAd": { "tenant": "<tenant-id>", "clientIdEnv": "AZURE_CLIENT_ID", "clientSecretEnv": "AZURE_CLIENT_SECRET" }
+}
+```
+
 ## Vertex AI (Gemini)
 
 ```jsonc
@@ -112,10 +126,22 @@ service-account key file, or rely on gcloud ADC / the metadata server.
 }
 ```
 
-Bedrock runs Claude via `InvokeModel` (the Anthropic Messages body) with AWS
-SigV4 signing. Set credentials via `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
-and (optionally) `AWS_SESSION_TOKEN`. Bedrock is non-streaming — the full
-response is re-emitted as a single-shot synthetic stream.
+Bedrock runs Claude via the Anthropic Messages body with AWS SigV4 signing.
+Non-streaming turns use `InvokeModel`; **streaming turns use
+`InvokeModelWithResponseStream`** and decode the AWS binary event-stream
+incrementally (each chunk is mapped to a canonical streaming event), so Bedrock
+streams token-by-token like the other providers.
+
+**Credential discovery** follows a layered chain (no AWS SDK runtime — kept off
+to preserve the Rust 1.82 toolchain): environment
+(`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / optional `AWS_SESSION_TOKEN`)
+→ the shared credentials file (`~/.aws/credentials`, honoring `AWS_PROFILE` /
+`AWS_SHARED_CREDENTIALS_FILE`) → a profile's `credential_process` (the common
+way `aws configure sso` / `aws-vault` surface short-lived SSO credentials)
+→ IMDSv2 (EC2/ECS instance-role credentials). Resolved credentials are cached
+for 5 minutes. Native `sso_session` config (the cached OIDC token in
+`~/.aws/sso/cache`) is not read directly — use `credential_process` or run
+`aws sso login`.
 
 ## Routing — aliases, fallback, retry
 
@@ -153,13 +179,14 @@ vector alongside any `ContentBlock::Text` blocks. Each provider translates the
 block to its native wire format automatically (`base64` for Anthropic/Gemini,
 `image_url` for OpenAI).
 
-**TUI paste-to-image wiring is a tracked follow-up.** The M7-10 paste path
-records only a file-path `source` string per detected image in `PasteState`
-(see `tui/src/components/prompt_input/image_paste.rs`); no bytes are read or
-retained. At the submit site (`app.rs` `run_one_submit` / `dispatch
-KeyAction::Submit`) only the plain prompt text string reaches the orchestrator
-— the `paste` state is never consulted. Until the TUI wiring lands, image
-references appear as `[Image #N]` placeholder text in submitted messages.
+**TUI paste-to-image** is wired end-to-end through the orchestrator: the M7-10
+paste path records image file paths in `PasteState`; `PasteState::take_image_paths()`
+drains them at submit time into `OrchestratorHandle::run_turn_streaming_with_images`,
+which reads each file, detects the media type, base64-encodes it, and appends a
+`ContentBlock::Image` to the outgoing user message (a read/type error aborts the
+turn cleanly). The only remaining hookup is the TUI's streaming submit loop
+calling `spawn_streaming_turn` (not yet bound to a key handler this milestone);
+the orchestrator/protocol path and the path-extraction API are complete.
 
 ## Capabilities & limitations (v2)
 
@@ -170,21 +197,24 @@ references appear as `[Image #N]` placeholder text in submitted messages.
   supported as described above.
 - **Anthropic-only features** (prompt caching, server tools, citations) are
   omitted on other providers — never fabricated.
-- **Documented limitations / follow-ups:**
-  - **Bedrock is non-streaming** — it uses `InvokeModel` and re-emits the full
-    response as a single-shot synthetic stream (the engine's HTTP transport
-    exposes SSE / full-body, not AWS event-stream framing). Real token
-    streaming for Bedrock is a follow-up.
-  - **Signed-auth credentials** come from the environment (GCP
-    `GOOGLE_APPLICATION_CREDENTIALS` / ADC; AWS env vars). SSO / IMDS / profile
-    discovery and Azure AD tokens are follow-ups.
-  - **Cost** is attributed per provider; Bedrock maps to Anthropic pricing and
-    unpriced model ids record zero cost rather than an invented rate
-    (Bedrock-specific rates are a follow-up).
-  - **TUI paste-to-image** wiring is a tracked follow-up (see above; the API
-    path works today).
-  - **`/model` shows example model names** rather than the live configured set
-    because the `ConversationOrchestrator` holds the API client as
-    `Arc<dyn OrchestratorApiClient>` (no `available_models()` method), not as
-    `Arc<dyn ModelRouter>`. The configured list is enumerable via
-    `ModelRouter::available_models()` where the `ProviderRegistry` is in scope.
+- **Bedrock streams** token-by-token via `InvokeModelWithResponseStream` (AWS
+  event-stream decoded by a crate-local pure-Rust frame decoder — the official
+  `aws-smithy-eventstream` floors `aws-smithy-types` at a rustc-1.88 version,
+  incompatible with the pinned Rust 1.82 toolchain).
+- **Signed-auth credential discovery** is layered: AWS (env → shared
+  credentials file → `credential_process` → IMDSv2), GCP
+  (`GOOGLE_APPLICATION_CREDENTIALS` / ADC / metadata), and Azure AD
+  (client-credentials token). Native AWS `sso_session` config is read only via
+  `credential_process` (run `aws sso login`).
+- **Cost** is attributed per provider: Bedrock has its own reference price rows
+  (`ProviderId::AmazonBedrock`); Vertex reuses Gemini and Azure reuses OpenAI
+  list prices. Unpriced model ids still record zero cost rather than an
+  invented rate.
+- **`/model` lists the live configured set** — `provider/model` ids plus
+  `@aliases` — via `OrchestratorApiClient::available_models()` (delegating to
+  `ModelRouter`), falling back to a static example list only when no router is
+  wired. Declare provider-local model ids with the `models` profile field
+  (e.g. `"groq": { "type": "openAi", …, "models": ["llama-3.3-70b"] }`).
+- **Remaining follow-up:** binding the TUI streaming submit loop to a key
+  handler so pasted images flow from the prompt UI (the orchestrator/protocol
+  path is complete).

@@ -11,7 +11,10 @@ execution pool is stubbed).
 v0.12.0 extends the provider layer (**LLM Providers v2**): image/vision input,
 reasoning-model controls (effort / thinking budget), managed-cloud providers
 (Azure OpenAI, Vertex AI, Bedrock), and a core router (model aliases, fallback
-chains, retry). See `docs/LLM_PROVIDERS.md`.
+chains, retry). The post-v0.12.0 follow-ups are now closed too: real Bedrock
+token streaming, layered AWS / GCP / Azure-AD credential discovery,
+Bedrock-specific pricing, live `/model` listing, and paste→image ingestion.
+See `docs/LLM_PROVIDERS.md`.
 v0.11.0 adds **multi-LLM-provider support**: an in-engine provider layer so
 LingXi can use OpenAI / OpenAI-compatible (Groq, Together, Ollama, vLLM,
 OpenRouter, …) and Google Gemini as the model backend, selected via a

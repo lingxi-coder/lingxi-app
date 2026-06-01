@@ -97,12 +97,9 @@ pub fn decode_chat_response(status: u16, body: &str) -> Result<MessageResponse, 
     })
 }
 
-/// Map `OpenAI` `usage` to canonical `UsageApi`. Cached input tokens (when
-/// present under `prompt_tokens_details.cached_tokens`) map to `cache_read`.
-fn decode_usage(usage: Option<&Value>) -> UsageApi {
-    let Some(u) = usage else {
-        return UsageApi::default();
-    };
+/// Map a non-null `OpenAI` `usage` object to canonical `UsageApi`.
+#[must_use]
+pub(crate) fn usage_from_value(u: &Value) -> UsageApi {
     let input = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
     let output = u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
     let cache_read = u
@@ -115,6 +112,15 @@ fn decode_usage(usage: Option<&Value>) -> UsageApi {
         output_tokens: output,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: cache_read,
+    }
+}
+
+/// Map `OpenAI` `usage` to canonical `UsageApi`. Cached input tokens (when
+/// present under `prompt_tokens_details.cached_tokens`) map to `cache_read`.
+fn decode_usage(usage: Option<&Value>) -> UsageApi {
+    match usage {
+        Some(u) => usage_from_value(u),
+        None => UsageApi::default(),
     }
 }
 

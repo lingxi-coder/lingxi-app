@@ -121,7 +121,7 @@ fn encode_user(content: &[ContentBlock], id_to_name: &BTreeMap<String, String>) 
                 };
                 parts.push(json!({"functionResponse": {"name": name, "response": response}}));
             }
-            ContentBlock::Thinking { .. } | ContentBlock::ToolUse { .. } => {}
+            ContentBlock::Thinking { .. } | ContentBlock::ToolUse { .. } | ContentBlock::Image { .. } => {}
         }
     }
     if parts.is_empty() {
@@ -140,7 +140,7 @@ fn encode_assistant(content: &[ContentBlock]) -> Option<Value> {
             ContentBlock::ToolUse { name, input, .. } => {
                 parts.push(json!({"functionCall": {"name": name, "args": input}}));
             }
-            ContentBlock::ToolResult { .. } | ContentBlock::Thinking { .. } => {}
+            ContentBlock::ToolResult { .. } | ContentBlock::Thinking { .. } | ContentBlock::Image { .. } => {}
         }
     }
     if parts.is_empty() {

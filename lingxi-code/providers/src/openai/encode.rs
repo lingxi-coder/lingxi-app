@@ -1,7 +1,7 @@
 //! Canonical request → `OpenAI` `/chat/completions` request body (pure).
 
 use crate::request::CanonicalRequest;
-use protocol::{ContentBlock, ConversationMessage};
+use protocol::{ContentBlock, ConversationMessage, ImageSource};
 use serde_json::{json, Map, Value};
 
 /// Default `OpenAI` API base URL (no trailing slash).
@@ -70,10 +70,12 @@ fn encode_message(msg: &ConversationMessage, out: &mut Vec<Value>) {
     }
 }
 
-/// User content: text blocks → one `user` message; tool results → `tool`
-/// messages (each `OpenAI` `tool` message answers one `tool_call_id`).
+/// User content: text + images → one `user` message (string `content` when
+/// text-only, else an array of `text`/`image_url` parts); tool results → `tool`
+/// messages (each answers one `tool_call_id`).
 fn encode_user(content: &[ContentBlock], out: &mut Vec<Value>) {
     let mut text = String::new();
+    let mut images: Vec<Value> = Vec::new();
     for block in content {
         match block {
             ContentBlock::Text { text: t } => {
@@ -81,6 +83,12 @@ fn encode_user(content: &[ContentBlock], out: &mut Vec<Value>) {
                     text.push('\n');
                 }
                 text.push_str(t);
+            }
+            ContentBlock::Image { source } => {
+                images.push(json!({
+                    "type": "image_url",
+                    "image_url": {"url": openai_image_url(source)},
+                }));
             }
             ContentBlock::ToolResult {
                 tool_use_id,
@@ -103,8 +111,26 @@ fn encode_user(content: &[ContentBlock], out: &mut Vec<Value>) {
             ContentBlock::Thinking { .. } | ContentBlock::ToolUse { .. } => {}
         }
     }
-    if !text.is_empty() {
-        out.push(json!({"role": "user", "content": text}));
+    if images.is_empty() {
+        if !text.is_empty() {
+            out.push(json!({"role": "user", "content": text}));
+        }
+    } else {
+        let mut parts: Vec<Value> = Vec::new();
+        if !text.is_empty() {
+            parts.push(json!({"type": "text", "text": text}));
+        }
+        parts.extend(images);
+        out.push(json!({"role": "user", "content": Value::Array(parts)}));
+    }
+}
+
+/// Build an `OpenAI` `image_url.url` from a canonical image source: base64 → a
+/// `data:` URL; a remote URL passes through unchanged.
+fn openai_image_url(source: &ImageSource) -> String {
+    match source {
+        ImageSource::Base64 { media_type, data } => format!("data:{media_type};base64,{data}"),
+        ImageSource::Url { url } => url.clone(),
     }
 }
 
@@ -123,7 +149,7 @@ fn encode_assistant(content: &[ContentBlock], out: &mut Vec<Value>) {
                     "function": {"name": name, "arguments": input.to_string()},
                 }));
             }
-            ContentBlock::ToolResult { .. } | ContentBlock::Thinking { .. } => {}
+            ContentBlock::ToolResult { .. } | ContentBlock::Thinking { .. } | ContentBlock::Image { .. } => {}
         }
     }
     let mut m = Map::new();
@@ -146,7 +172,7 @@ fn encode_assistant(content: &[ContentBlock], out: &mut Vec<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+    use protocol::{ContentBlock, ConversationMessage, ImageSource, MessageId, ToolUseId};
 
     fn user_text(s: &str) -> ConversationMessage {
         ConversationMessage::User {
@@ -249,5 +275,52 @@ mod tests {
         let body = encode_chat_body(&req);
         assert_eq!(body["messages"][0]["content"], "answer");
         assert!(body["messages"][0].get("thinking").is_none());
+    }
+
+    #[test]
+    fn text_only_user_stays_string_content() {
+        let mut req = CanonicalRequest::new("gpt-4o");
+        req.messages = vec![user_text("hi")];
+        let body = encode_chat_body(&req);
+        assert_eq!(body["messages"][0]["content"], "hi"); // string, not array
+    }
+
+    #[test]
+    fn user_image_emits_parts_array_with_data_url() {
+        let mut req = CanonicalRequest::new("gpt-4o");
+        req.messages = vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![
+                ContentBlock::Text { text: "look".to_string() },
+                ContentBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type: "image/png".to_string(),
+                        data: "YWJj".to_string(),
+                    },
+                },
+            ],
+        }];
+        let body = encode_chat_body(&req);
+        let parts = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "look");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,YWJj");
+    }
+
+    #[test]
+    fn user_image_url_passes_through() {
+        let mut req = CanonicalRequest::new("gpt-4o");
+        req.messages = vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Image {
+                source: ImageSource::Url { url: "https://x/y.png".to_string() },
+            }],
+        }];
+        let body = encode_chat_body(&req);
+        assert_eq!(
+            body["messages"][0]["content"][0]["image_url"]["url"],
+            "https://x/y.png"
+        );
     }
 }

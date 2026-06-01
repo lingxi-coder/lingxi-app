@@ -1,7 +1,6 @@
 //! `ProviderRegistry` resolves a model string to a provider via `ModelSpec`,
-//! caching one `LlmProvider` per profile. P3 constructs `anthropic` and
-//! `openai` (+ OpenAI-compatible) providers; `gemini` profiles resolve to a
-//! clear "codec not available until P4" error rather than a fake stub.
+//! caching one `LlmProvider` per profile. All three v1 codecs (`anthropic`,
+//! `openai`/OpenAI-compatible, `gemini`) resolve to live providers.
 
 use crate::anthropic::AnthropicLlmProvider;
 use crate::model_spec::ModelSpec;
@@ -34,8 +33,7 @@ pub trait ModelRouter: Send + Sync {
     /// Resolve `model` to a provider + local model id.
     ///
     /// # Errors
-    /// Returns an [`ApiError`] if the profile is unknown or its codec is not
-    /// available yet.
+    /// Returns an [`ApiError`] if the profile name is unknown.
     fn resolve(&self, model: &str) -> Result<Resolved, ApiError>;
 
     /// Profile names available for selection (for `/model` listing).
@@ -77,11 +75,7 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
             .unwrap_or_default()
     }
 
-    fn build(
-        &self,
-        name: &str,
-        profile: &ProviderProfile,
-    ) -> Result<Arc<dyn LlmProvider>, ApiError> {
+    fn build(&self, name: &str, profile: &ProviderProfile) -> Arc<dyn LlmProvider> {
         match profile.kind {
             ProviderKind::Anthropic => {
                 let key = self.api_key_for(profile);
@@ -90,7 +84,7 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
                     profile.base_url.clone(),
                     self.transport.clone(),
                 );
-                Ok(Arc::new(provider) as Arc<dyn LlmProvider>)
+                Arc::new(provider) as Arc<dyn LlmProvider>
             }
             ProviderKind::OpenAi => {
                 let key = self.api_key_for(profile);
@@ -114,11 +108,28 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
                     id,
                     crate::capabilities::Capabilities::openai(),
                 );
-                Ok(std::sync::Arc::new(client) as std::sync::Arc<dyn crate::provider::LlmProvider>)
+                std::sync::Arc::new(client) as std::sync::Arc<dyn crate::provider::LlmProvider>
             }
-            ProviderKind::Gemini => Err(ApiError::Http(HttpError::InvalidRequest(format!(
-                "provider profile {name:?} uses the gemini codec, which is not available until P4"
-            )))),
+            ProviderKind::Gemini => {
+                let key = self.api_key_for(profile);
+                let auth = if key.is_empty() {
+                    crate::auth::Auth::None
+                } else {
+                    crate::auth::Auth::Header {
+                        name: "x-goog-api-key".to_string(),
+                        value: key,
+                    }
+                };
+                let codec = crate::gemini::GeminiCodec::new(profile.base_url.clone());
+                let client = crate::client::GenericClient::new(
+                    codec,
+                    auth,
+                    self.transport.clone(),
+                    cost::ProviderId::GoogleGemini,
+                    crate::capabilities::Capabilities::gemini(),
+                );
+                std::sync::Arc::new(client) as std::sync::Arc<dyn crate::provider::LlmProvider>
+            }
         }
     }
 }
@@ -141,7 +152,7 @@ impl<T: HttpTransport + Send + Sync + 'static> ModelRouter for ProviderRegistry<
                 model: spec.model,
             });
         }
-        let provider = self.build(&spec.profile, profile)?;
+        let provider = self.build(&spec.profile, profile);
         cache.insert(spec.profile.clone(), provider.clone());
         Ok(Resolved {
             provider,
@@ -249,24 +260,10 @@ mod tests {
     }
 
     #[test]
-    fn gemini_profile_errors_codec_unavailable_in_p2() {
+    fn gemini_profile_resolves_now() {
         let r = registry(BTreeMap::new());
-        let err = r
-            .resolve("gemini/gemini-2.0-flash")
-            .expect_err("no gemini codec in P2");
-        match err {
-            api_client::ApiError::Http(traits::HttpError::InvalidRequest(msg)) => {
-                assert!(msg.contains("gemini"), "msg: {msg}");
-            }
-            other => panic!("expected InvalidRequest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn codec_unavailable_errors_are_repeatable() {
-        // gemini failures are not cached, so they keep erroring (until P4).
-        let r = registry(BTreeMap::new());
-        assert!(r.resolve("gemini/gemini-2.0-flash").is_err());
-        assert!(r.resolve("gemini/gemini-2.0-flash").is_err());
+        let resolved = r.resolve("gemini/gemini-2.0-flash").expect("gemini resolves in P4");
+        assert_eq!(resolved.model, "gemini-2.0-flash");
+        assert_eq!(resolved.provider.id(), cost::ProviderId::GoogleGemini);
     }
 }

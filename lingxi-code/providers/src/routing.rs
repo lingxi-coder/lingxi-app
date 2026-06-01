@@ -137,6 +137,48 @@ impl LlmProvider for FallbackProvider {
     }
 }
 
+/// Parse the settings `routing` object into a [`RoutingConfig`]. Tolerates
+/// missing keys. Shape: `{ "aliases": {alias: "provider/model"},
+/// "fallback": {key: ["provider/model", …]}, "retry": {"maxAttempts": n, "backoffMs": n} }`.
+#[must_use]
+pub fn parse_routing(raw: Option<&serde_json::Value>) -> RoutingConfig {
+    let mut cfg = RoutingConfig::default();
+    let Some(obj) = raw.and_then(serde_json::Value::as_object) else {
+        return cfg;
+    };
+    if let Some(aliases) = obj.get("aliases").and_then(serde_json::Value::as_object) {
+        for (k, v) in aliases {
+            if let Some(s) = v.as_str() {
+                cfg.aliases.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    if let Some(fb) = obj.get("fallback").and_then(serde_json::Value::as_object) {
+        for (k, v) in fb {
+            if let Some(arr) = v.as_array() {
+                let targets: Vec<String> =
+                    arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+                if !targets.is_empty() {
+                    cfg.fallback.insert(k.clone(), targets);
+                }
+            }
+        }
+    }
+    if let Some(retry) = obj.get("retry").and_then(serde_json::Value::as_object) {
+        let max_attempts = retry
+            .get("maxAttempts")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(3);
+        let backoff_ms = retry
+            .get("backoffMs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(250);
+        cfg.retry = Some(RetryPolicy { max_attempts, backoff_ms });
+    }
+    cfg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +334,27 @@ mod tests {
         let provider = FallbackProvider::new(members);
         let result = provider.complete(dummy_req()).await;
         assert!(result.is_ok(), "expected fallback to succeed via mock_b");
+    }
+
+    // ── parse_routing tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_routing_reads_aliases_fallback_retry() {
+        use serde_json::json;
+        let raw = json!({
+            "aliases": {"fast": "openai/gpt-4o"},
+            "fallback": {"fast": ["anthropic/claude-opus-4-7"]},
+            "retry": {"maxAttempts": 2, "backoffMs": 100}
+        });
+        let cfg = super::parse_routing(Some(&raw));
+        assert_eq!(cfg.aliases.get("fast").map(String::as_str), Some("openai/gpt-4o"));
+        assert_eq!(
+            cfg.fallback.get("fast").map(Vec::as_slice),
+            Some(["anthropic/claude-opus-4-7".to_string()].as_slice())
+        );
+        let retry = cfg.retry.expect("retry must be set");
+        assert_eq!(retry.max_attempts, 2);
+        assert_eq!(retry.backoff_ms, 100);
     }
 
     #[tokio::test]

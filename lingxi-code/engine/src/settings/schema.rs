@@ -45,6 +45,9 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     // LingXi extension — deep-merge so multiple settings layers can each
     // declare a subset of provider profiles.
     ("providers", MergeStrategy::DeepMerge),
+    // LingXi extension — deep-merge so multiple settings layers can each
+    // contribute routing aliases, fallback chains, and retry policy.
+    ("routing", MergeStrategy::DeepMerge),
 ];
 
 /// Look up the merge strategy for a field name.
@@ -113,6 +116,14 @@ pub struct SettingsJson {
     /// Parsed into typed profiles by `providers::parse_profiles`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<BTreeMap<String, Value>>,
+
+    /// Object-merge field (deep-merge). `LingXi` extension: routing config
+    /// for model aliases, fallback chains, and retry policy. Shape:
+    /// `{ "aliases": {alias: "provider/model"}, "fallback": {key: ["provider/model", …]},
+    ///    "retry": {"maxAttempts": n, "backoffMs": n} }`.
+    /// Parsed by `providers::parse_routing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<Value>,
 }
 
 impl SettingsJson {
@@ -236,5 +247,14 @@ mod tests {
         assert!(parsed.providers.is_some());
         let back = serde_json::to_string(&parsed).expect("serialize");
         assert!(back.contains("\"providers\""));
+    }
+
+    #[test]
+    fn routing_field_roundtrips() {
+        let raw = r#"{"routing":{"aliases":{"fast":"openai/gpt-4o"},"retry":{"maxAttempts":2,"backoffMs":100}}}"#;
+        let parsed: SettingsJson = serde_json::from_str(raw).expect("parse");
+        assert!(parsed.routing.is_some());
+        let back = serde_json::to_string(&parsed).expect("serialize");
+        assert!(back.contains("\"routing\""));
     }
 }

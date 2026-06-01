@@ -70,3 +70,10 @@ references appear as `[Image #N]` placeholder text in submitted messages.
   Azure OpenAI's deployment URL template, and Vertex/Bedrock signed auth. Cost
   is attributed per provider; unpriced models record zero cost rather than an
   invented rate.
+- **`/model` shows example model names** rather than the live configured set
+  because the `ConversationOrchestrator` holds the API client as
+  `Arc<dyn OrchestratorApiClient>` (which has no `available_models()` method),
+  not as `Arc<dyn ModelRouter>`; the full list of configured models is
+  enumerable via `ModelRouter::available_models()` where the
+  `ProviderRegistry` is directly in scope (e.g. in `apps/cli/src/init.rs`
+  after registry construction).

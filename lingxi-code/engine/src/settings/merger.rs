@@ -30,6 +30,7 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         telemetry_enabled: next.telemetry_enabled.or(prev.telemetry_enabled),
         model: next.model.or(prev.model),
         providers: deep_merge_object(prev.providers, next.providers),
+        routing: deep_merge_value_opt(prev.routing, next.routing),
     }
 }
 
@@ -76,6 +77,22 @@ fn deep_merge_object(
             }
             Some(p)
         }
+    }
+}
+
+/// Deep-merge two `Option<serde_json::Value>` fields.
+///
+/// Both sides `None` → `None`. One side `None` → the other side. Both sides
+/// `Some` → recurse via [`deep_merge_value`] (object keys merged; scalar/array
+/// mismatch takes `next`).
+fn deep_merge_value_opt(
+    prev: Option<serde_json::Value>,
+    next: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    match (prev, next) {
+        (None, None) => None,
+        (Some(v), None) | (None, Some(v)) => Some(v),
+        (Some(p), Some(n)) => Some(deep_merge_value(p, n)),
     }
 }
 

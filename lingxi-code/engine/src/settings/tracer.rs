@@ -80,6 +80,7 @@ fn field_presence(layer: &SettingsJson) -> Vec<(&'static str, bool)> {
         ("telemetryEnabled", layer.telemetry_enabled.is_some()),
         ("model", layer.model.is_some()),
         ("providers", layer.providers.is_some()),
+        ("routing", layer.routing.is_some()),
     ]
 }
 

@@ -44,4 +44,4 @@ pub use profile::{builtin_profiles, parse_profiles, ProviderKind, ProviderProfil
 pub use provider::LlmProvider;
 pub use registry::{ModelRouter, ProviderRegistry, Resolved};
 pub use request::{CanonicalRequest, ReasoningEffort, DEFAULT_MAX_TOKENS};
-pub use routing::{FallbackProvider, RetryPolicy, RetryingProvider, RoutingConfig};
+pub use routing::{parse_routing, FallbackProvider, RetryPolicy, RetryingProvider, RoutingConfig};

@@ -38,7 +38,7 @@ use platform_posix_minimal::{
     PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixMcp, PosixProcess,
     PosixRuntime, PosixSandbox, PosixWorktree,
 };
-use providers::{builtin_profiles, parse_profiles, ModelRouter, ProviderRegistry, RoutingConfig};
+use providers::{builtin_profiles, parse_profiles, parse_routing, ModelRouter, ProviderRegistry};
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
@@ -116,6 +116,24 @@ fn load_provider_profiles() -> Option<std::collections::BTreeMap<String, serde_j
         .and_then(|eff| eff.settings.providers)
 }
 
+/// Load the merged settings `routing` object (project + user + env layers).
+///
+/// Mirrors [`load_provider_profiles`] but reads the `routing` field. Returns
+/// `None` on any load failure or when no `routing` block is set; callers then
+/// fall back to the default (empty) routing config.
+fn load_routing() -> Option<serde_json::Value> {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir: &project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|eff| eff.settings.routing)
+}
+
 /// Build the full runtime from parsed argv + the chosen output stream.
 ///
 /// `output` is the sink the orchestrator will push turn events to (plain
@@ -160,13 +178,13 @@ pub async fn build_runtime(
         Ok(extra) => profiles.extend(extra),
         Err(e) => tracing::warn!(error = %e, "ignoring malformed settings `providers` block"),
     }
-    // P7: routing config (aliases/fallback/retry) is loaded + passed in Task B;
-    // for now an empty config preserves today's direct resolution.
+    // P7 Task B: load routing config (aliases/fallback/retry) from settings.
+    let routing = parse_routing(load_routing().as_ref());
     let registry = Arc::new(ProviderRegistry::new(
         profiles,
         env_snapshot,
         http.clone(),
-        RoutingConfig::default(),
+        routing,
     ));
     let api_client: Arc<dyn OrchestratorApiClient> =
         Arc::new(ProviderApiAdapter::new(registry as Arc<dyn ModelRouter>));

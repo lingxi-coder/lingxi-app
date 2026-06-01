@@ -29,6 +29,7 @@ pub use anthropic::AnthropicLlmProvider;
 pub use auth::Auth;
 pub use capabilities::{Capabilities, ReasoningSupport, SystemStyle};
 pub use client::GenericClient;
+pub use openai::OpenAiCodec;
 pub use codec::{SseDecoder, WireCodec};
 pub use error::CodecError;
 pub use model_spec::{ModelSpec, DEFAULT_PROFILE};

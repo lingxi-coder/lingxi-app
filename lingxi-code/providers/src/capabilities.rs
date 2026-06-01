@@ -44,6 +44,22 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
+    /// Capabilities for an `OpenAI` / OpenAI-compatible provider (v1: text +
+    /// native tools, no vision/cache/thinking-in-history).
+    #[must_use]
+    pub fn openai() -> Self {
+        Self {
+            native_tools: true,
+            streaming: true,
+            vision: false,
+            prompt_cache: false,
+            reasoning: ReasoningSupport::None,
+            parallel_tool_calls: true,
+            max_output_tokens: None,
+            system_style: SystemStyle::RoleMessage,
+        }
+    }
+
     /// Capabilities for the Anthropic provider (everything native).
     #[must_use]
     pub fn anthropic() -> Self {

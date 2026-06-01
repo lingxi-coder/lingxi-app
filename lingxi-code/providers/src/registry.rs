@@ -1,7 +1,7 @@
 //! `ProviderRegistry` resolves a model string to a provider via `ModelSpec`,
-//! caching one `LlmProvider` per profile. P2 constructs only the `anthropic`
-//! provider; `openai`/`gemini` profiles resolve to a clear "codec not
-//! available until P3/P4" error rather than a fake stub.
+//! caching one `LlmProvider` per profile. P3 constructs `anthropic` and
+//! `openai` (+ OpenAI-compatible) providers; `gemini` profiles resolve to a
+//! clear "codec not available until P4" error rather than a fake stub.
 
 use crate::anthropic::AnthropicLlmProvider;
 use crate::model_spec::ModelSpec;
@@ -92,9 +92,28 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
                 );
                 Ok(Arc::new(provider) as Arc<dyn LlmProvider>)
             }
-            ProviderKind::OpenAi => Err(ApiError::Http(HttpError::InvalidRequest(format!(
-                "provider profile {name:?} uses the openai codec, which is not available until P3"
-            )))),
+            ProviderKind::OpenAi => {
+                let key = self.api_key_for(profile);
+                let auth = if key.is_empty() {
+                    crate::auth::Auth::None
+                } else {
+                    crate::auth::Auth::Bearer(key)
+                };
+                let codec = crate::openai::OpenAiCodec::new(profile.base_url.clone());
+                let id = if name == "openai" {
+                    cost::ProviderId::OpenAI
+                } else {
+                    cost::ProviderId::OpenAICompatible { name: name.to_string() }
+                };
+                let client = crate::client::GenericClient::new(
+                    codec,
+                    auth,
+                    self.transport.clone(),
+                    id,
+                    crate::capabilities::Capabilities::openai(),
+                );
+                Ok(std::sync::Arc::new(client) as std::sync::Arc<dyn crate::provider::LlmProvider>)
+            }
             ProviderKind::Gemini => Err(ApiError::Http(HttpError::InvalidRequest(format!(
                 "provider profile {name:?} uses the gemini codec, which is not available until P4"
             )))),
@@ -166,17 +185,31 @@ mod tests {
     }
 
     #[test]
-    fn openai_profile_errors_codec_unavailable_in_p2() {
+    fn openai_profile_resolves_now() {
         let r = registry(BTreeMap::new());
-        let err = r
-            .resolve("openai/gpt-4o")
-            .expect_err("no openai codec in P2");
-        match err {
-            api_client::ApiError::Http(traits::HttpError::InvalidRequest(msg)) => {
-                assert!(msg.contains("openai"), "msg: {msg}");
-            }
-            other => panic!("expected InvalidRequest, got {other:?}"),
-        }
+        let resolved = r.resolve("openai/gpt-4o").expect("openai resolves in P3");
+        assert_eq!(resolved.model, "gpt-4o");
+        assert_eq!(resolved.provider.id(), cost::ProviderId::OpenAI);
+    }
+
+    #[test]
+    fn custom_openai_compatible_profile_resolves() {
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "groq".to_string(),
+            ProviderProfile {
+                kind: ProviderKind::OpenAi,
+                base_url: Some("https://api.groq.com/openai/v1".to_string()),
+                api_key_env: Some("GROQ_API_KEY".to_string()),
+            },
+        );
+        let r = registry(extra);
+        let resolved = r.resolve("groq/llama-3.3-70b").expect("groq resolves");
+        assert_eq!(resolved.model, "llama-3.3-70b");
+        assert_eq!(
+            resolved.provider.id(),
+            cost::ProviderId::OpenAICompatible { name: "groq".to_string() }
+        );
     }
 
     #[test]
@@ -227,10 +260,9 @@ mod tests {
 
     #[test]
     fn codec_unavailable_errors_are_repeatable() {
-        // openai/gemini failures are not cached, so they keep erroring (until
-        // P3/P4 land their codecs).
+        // gemini failures are not cached, so they keep erroring (until P4).
         let r = registry(BTreeMap::new());
-        assert!(r.resolve("openai/gpt-4o").is_err());
-        assert!(r.resolve("openai/gpt-4o").is_err());
+        assert!(r.resolve("gemini/gemini-2.0-flash").is_err());
+        assert!(r.resolve("gemini/gemini-2.0-flash").is_err());
     }
 }

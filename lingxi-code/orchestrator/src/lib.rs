@@ -20,6 +20,7 @@ pub mod diagnostics;
 pub mod error;
 pub mod handle_impl;
 pub mod prompt;
+pub mod provider_adapter;
 pub mod resume;
 pub mod sse;
 pub mod streaming_loop;
@@ -48,4 +49,5 @@ pub use error::OrchestratorError;
 pub use prompt::{
     assemble_system_prompt, FileTree, FileTreeEntry, GitStatus, MemoryFile, SystemPromptContext,
 };
+pub use provider_adapter::ProviderApiAdapter;
 pub use resume::{replay_session_state, ReplayedSession, ResumeError};

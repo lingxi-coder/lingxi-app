@@ -2122,6 +2122,7 @@ dependencies = [
  "permission",
  "platform-posix",
  "protocol",
+ "providers",
  "serde",
  "serde_json",
  "session",

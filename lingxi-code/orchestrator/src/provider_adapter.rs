@@ -51,6 +51,13 @@ impl StreamingApiClient for ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
         let resolved = self.router.resolve(model)?;
+        if !tools.is_empty() && !resolved.provider.capabilities().native_tools {
+            return Err(ApiError::Http(traits::HttpError::InvalidRequest(format!(
+                "model {model:?} ({:?}) does not support tool use; \
+                 select a tool-capable model or run without tools",
+                resolved.provider.id()
+            ))));
+        }
         let mut req = CanonicalRequest::new(resolved.model);
         req.system = system.map(str::to_string);
         req.messages = messages;
@@ -182,5 +189,76 @@ mod tests {
             .expect("stream");
         assert_eq!(*provider.seen_tools_len.lock().unwrap(), Some(1));
         assert_eq!(*provider.seen_stream_flag.lock().unwrap(), Some(true));
+    }
+
+    /// A provider that reports no native tool support.
+    struct NoToolsProvider;
+
+    #[async_trait]
+    impl LlmProvider for NoToolsProvider {
+        fn id(&self) -> cost::ProviderId {
+            cost::ProviderId::Custom { name: "no-tools".to_string() }
+        }
+        fn capabilities(&self) -> &Capabilities {
+            // A leaked const ref keeps the signature `-> &Capabilities` simple
+            // for this test-only stub.
+            use std::sync::OnceLock;
+            static CAPS: OnceLock<Capabilities> = OnceLock::new();
+            CAPS.get_or_init(|| Capabilities {
+                native_tools: false,
+                streaming: true,
+                vision: false,
+                prompt_cache: false,
+                reasoning: providers::ReasoningSupport::None,
+                parallel_tool_calls: false,
+                max_output_tokens: None,
+                system_style: providers::SystemStyle::RoleMessage,
+            })
+        }
+        async fn complete(&self, _req: CanonicalRequest) -> Result<MessageResponse, ApiError> {
+            unreachable!("not used in this test")
+        }
+        async fn stream(
+            &self,
+            _req: CanonicalRequest,
+        ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
+            Ok(futures::stream::empty::<Result<StreamEvent, ApiError>>().boxed())
+        }
+    }
+
+    struct FixedRouter(std::sync::Arc<dyn LlmProvider>);
+    impl providers::ModelRouter for FixedRouter {
+        fn resolve(&self, model: &str) -> Result<providers::Resolved, ApiError> {
+            Ok(providers::Resolved { provider: self.0.clone(), model: model.to_string() })
+        }
+        fn available_profiles(&self) -> Vec<String> {
+            vec!["fixed".to_string()]
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_with_tools_on_non_tool_model_fails_fast() {
+        let router = std::sync::Arc::new(FixedRouter(std::sync::Arc::new(NoToolsProvider)));
+        let adapter = ProviderApiAdapter::new(router);
+        let tools = vec![serde_json::json!({"name": "Read"})];
+        let result = adapter
+            .stream("custom/no-tool-model", None, Vec::new(), tools)
+            .await;
+        assert!(result.is_err(), "must reject tools on a non-tool-capable model");
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected Err"),
+        };
+        assert!(matches!(err, ApiError::Http(traits::HttpError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn stream_without_tools_on_non_tool_model_is_allowed() {
+        let router = std::sync::Arc::new(FixedRouter(std::sync::Arc::new(NoToolsProvider)));
+        let adapter = ProviderApiAdapter::new(router);
+        let _s = adapter
+            .stream("custom/no-tool-model", None, Vec::new(), Vec::new())
+            .await
+            .expect("no tools → allowed");
     }
 }

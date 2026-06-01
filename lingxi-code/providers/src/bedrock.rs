@@ -90,7 +90,7 @@ fn synthesize_stream(resp: &MessageResponse) -> Vec<StreamEvent> {
 
 #[async_trait]
 impl LlmProvider for BedrockProvider {
-    fn id(&self) -> ProviderId { ProviderId::Anthropic }
+    fn id(&self) -> ProviderId { ProviderId::AmazonBedrock }
     fn capabilities(&self) -> &Capabilities { &self.capabilities }
 
     async fn complete(&self, req: CanonicalRequest) -> Result<MessageResponse, ApiError> {

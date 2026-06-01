@@ -418,7 +418,7 @@ mod tests {
         let r = registry(extra);
         let resolved = r.resolve("bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0").expect("bedrock resolves");
         assert_eq!(resolved.model, "anthropic.claude-3-5-sonnet-20241022-v2:0");
-        assert_eq!(resolved.provider.id(), cost::ProviderId::Anthropic);
+        assert_eq!(resolved.provider.id(), cost::ProviderId::AmazonBedrock);
     }
 
     #[test]

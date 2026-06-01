@@ -1,0 +1,22 @@
+[package]
+name = "providers"
+version = "0.10.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+protocol = { path = "../protocol" }
+traits = { path = "../traits" }
+api-client = { path = "../api-client" }
+cost = { path = "../cost" }
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+{
+  "name": "lingxi",
+  "version": "0.0.0-dev",
+  "description": "LingXi coding agent CLI (TUI).",
+  "license": "MIT OR Apache-2.0",
+  "bin": { "lingxi": "bin/lingxi.js" },
+  "type": "module",
+  "engines": { "node": ">=16" },
+  "files": ["bin/lingxi.js"],
+  "optionalDependencies": {
+    "lingxi-linux-x64": "0.0.0-dev",
+    "lingxi-linux-arm64": "0.0.0-dev",
+    "lingxi-darwin-x64": "0.0.0-dev",
+    "lingxi-darwin-arm64": "0.0.0-dev",
+    "lingxi-win32-x64": "0.0.0-dev",
+    "lingxi-win32-arm64": "0.0.0-dev"
+  }
+}

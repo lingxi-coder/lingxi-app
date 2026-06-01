@@ -197,7 +197,9 @@ mod tests {
     #[async_trait]
     impl LlmProvider for NoToolsProvider {
         fn id(&self) -> cost::ProviderId {
-            cost::ProviderId::Custom { name: "no-tools".to_string() }
+            cost::ProviderId::Custom {
+                name: "no-tools".to_string(),
+            }
         }
         fn capabilities(&self) -> &Capabilities {
             // A leaked const ref keeps the signature `-> &Capabilities` simple
@@ -229,7 +231,10 @@ mod tests {
     struct FixedRouter(std::sync::Arc<dyn LlmProvider>);
     impl providers::ModelRouter for FixedRouter {
         fn resolve(&self, model: &str) -> Result<providers::Resolved, ApiError> {
-            Ok(providers::Resolved { provider: self.0.clone(), model: model.to_string() })
+            Ok(providers::Resolved {
+                provider: self.0.clone(),
+                model: model.to_string(),
+            })
         }
         fn available_profiles(&self) -> Vec<String> {
             vec!["fixed".to_string()]
@@ -244,12 +249,18 @@ mod tests {
         let result = adapter
             .stream("custom/no-tool-model", None, Vec::new(), tools)
             .await;
-        assert!(result.is_err(), "must reject tools on a non-tool-capable model");
+        assert!(
+            result.is_err(),
+            "must reject tools on a non-tool-capable model"
+        );
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected Err"),
         };
-        assert!(matches!(err, ApiError::Http(traits::HttpError::InvalidRequest(_))));
+        assert!(matches!(
+            err,
+            ApiError::Http(traits::HttpError::InvalidRequest(_))
+        ));
     }
 
     #[tokio::test]

@@ -18,21 +18,27 @@ use encode::GEMINI_DEFAULT_BASE;
 /// URL path, and streaming uses a different endpoint than non-streaming.
 pub struct GeminiCodec {
     base_url: String,
+    /// Profile-level thinking-token budget override (applied when the request
+    /// itself does not specify one).
+    thinking_budget: Option<u32>,
 }
 
 impl GeminiCodec {
-    /// Construct a codec for the given base URL (or the `Gemini` default).
+    /// Construct a codec for the given base URL (or the `Gemini` default) and
+    /// an optional profile-level thinking-token budget.
     #[must_use]
-    pub fn new(base_url: Option<String>) -> Self {
+    pub fn new(base_url: Option<String>, thinking_budget: Option<u32>) -> Self {
         Self {
             base_url: base_url.unwrap_or_else(|| GEMINI_DEFAULT_BASE.to_string()),
+            thinking_budget,
         }
     }
 }
 
 impl WireCodec for GeminiCodec {
     fn encode_request(&self, req: &CanonicalRequest) -> Result<HttpRequest, CodecError> {
-        let body = encode::encode_generate_body(req);
+        let budget = req.thinking_budget.or(self.thinking_budget);
+        let body = encode::encode_generate_body(req, budget);
         let url = if req.stream {
             format!(
                 "{}/models/{}:streamGenerateContent?alt=sse",
@@ -69,7 +75,7 @@ mod tests {
 
     #[test]
     fn non_stream_url_has_model_and_generate_content() {
-        let codec = GeminiCodec::new(None);
+        let codec = GeminiCodec::new(None, None);
         let req = CanonicalRequest::new("gemini-2.0-flash");
         let http = codec.encode_request(&req).unwrap();
         assert_eq!(
@@ -84,7 +90,7 @@ mod tests {
 
     #[test]
     fn stream_url_uses_stream_endpoint() {
-        let codec = GeminiCodec::new(None);
+        let codec = GeminiCodec::new(None, None);
         let mut req = CanonicalRequest::new("gemini-2.0-flash");
         req.stream = true;
         let http = codec.encode_request(&req).unwrap();

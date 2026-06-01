@@ -42,6 +42,13 @@ pub struct ProviderProfile {
     /// Name of the env var holding the API key (e.g. `OPENAI_API_KEY`).
     /// `None` means no auth (e.g. a local Ollama endpoint).
     pub api_key_env: Option<String>,
+    /// Reasoning effort override for `OpenAI` o-series models. When set, the
+    /// `OpenAI` codec emits `reasoning_effort`, uses `max_completion_tokens`,
+    /// and omits `temperature`.
+    pub reasoning_effort: Option<crate::request::ReasoningEffort>,
+    /// Thinking-token budget for Gemini 2.5 models. When set, the Gemini
+    /// codec emits `generationConfig.thinkingConfig`.
+    pub thinking_budget: Option<u32>,
 }
 
 /// Built-in profiles, keyed by name. `anthropic` uses `anthropic_base` (the
@@ -56,6 +63,8 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             kind: ProviderKind::Anthropic,
             base_url: anthropic_base,
             api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
+            reasoning_effort: None,
+            thinking_budget: None,
         },
     );
     m.insert(
@@ -64,6 +73,8 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             kind: ProviderKind::OpenAi,
             base_url: None,
             api_key_env: Some("OPENAI_API_KEY".to_string()),
+            reasoning_effort: None,
+            thinking_budget: None,
         },
     );
     m.insert(
@@ -72,6 +83,8 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             kind: ProviderKind::Gemini,
             base_url: None,
             api_key_env: Some("GEMINI_API_KEY".to_string()),
+            reasoning_effort: None,
+            thinking_budget: None,
         },
     );
     m
@@ -112,12 +125,22 @@ pub fn parse_profiles(
             Some(serde_json::Value::String(s)) => Some(s.clone()),
             _ => None,
         };
+        let reasoning_effort = obj
+            .get("reasoningEffort")
+            .and_then(serde_json::Value::as_str)
+            .and_then(crate::request::ReasoningEffort::parse);
+        let thinking_budget = obj
+            .get("thinkingBudget")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok());
         out.insert(
             name.clone(),
             ProviderProfile {
                 kind,
                 base_url,
                 api_key_env,
+                reasoning_effort,
+                thinking_budget,
             },
         );
     }
@@ -185,5 +208,18 @@ mod tests {
         let mut raw = BTreeMap::new();
         raw.insert("x".to_string(), json!({"baseUrl": "http://x"}));
         assert!(parse_profiles(Some(&raw)).is_err());
+    }
+
+    #[test]
+    fn parse_reasoning_fields() {
+        use crate::request::ReasoningEffort;
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "o3".to_string(),
+            json!({"type": "openai", "reasoningEffort": "high", "thinkingBudget": 2048}),
+        );
+        let p = parse_profiles(Some(&raw)).unwrap();
+        assert_eq!(p["o3"].reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(p["o3"].thinking_budget, Some(2048));
     }
 }

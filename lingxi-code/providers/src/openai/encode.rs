@@ -13,8 +13,15 @@ pub const OPENAI_DEFAULT_BASE: &str = "https://api.openai.com/v1";
 /// user / assistant / tool roles), translates canonical tool schemas to
 /// `OpenAI` `function` tools, and sets `stream`. `Thinking` blocks are dropped
 /// (no `OpenAI` equivalent).
+///
+/// When `reasoning_effort` is `Some`, emits `reasoning_effort` +
+/// `max_completion_tokens` and omits `temperature`. Otherwise emits `max_tokens`
+/// and `temperature` (if set) — identical to the pre-reasoning behaviour.
 #[must_use]
-pub fn encode_chat_body(req: &CanonicalRequest) -> Value {
+pub fn encode_chat_body(
+    req: &CanonicalRequest,
+    reasoning_effort: Option<crate::request::ReasoningEffort>,
+) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     if let Some(system) = &req.system {
         messages.push(json!({"role": "system", "content": system}));
@@ -25,10 +32,15 @@ pub fn encode_chat_body(req: &CanonicalRequest) -> Value {
 
     let mut body = Map::new();
     body.insert("model".to_string(), json!(req.model));
-    body.insert("max_tokens".to_string(), json!(req.max_tokens));
     body.insert("messages".to_string(), Value::Array(messages));
-    if let Some(t) = req.temperature {
-        body.insert("temperature".to_string(), json!(t));
+    if let Some(effort) = reasoning_effort {
+        body.insert("max_completion_tokens".to_string(), json!(req.max_tokens));
+        body.insert("reasoning_effort".to_string(), json!(effort.as_str()));
+    } else {
+        body.insert("max_tokens".to_string(), json!(req.max_tokens));
+        if let Some(t) = req.temperature {
+            body.insert("temperature".to_string(), json!(t));
+        }
     }
     if !req.tools.is_empty() {
         body.insert(
@@ -188,7 +200,7 @@ mod tests {
         let mut req = CanonicalRequest::new("gpt-4o");
         req.system = Some("be helpful".to_string());
         req.messages = vec![user_text("hi")];
-        let body = encode_chat_body(&req);
+        let body = encode_chat_body(&req, None);
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[0]["content"], "be helpful");
@@ -204,7 +216,7 @@ mod tests {
             "name": "Read", "description": "read a file",
             "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}
         })];
-        let body = encode_chat_body(&req);
+        let body = encode_chat_body(&req, None);
         let tool = &body["tools"][0];
         assert_eq!(tool["type"], "function");
         assert_eq!(tool["function"]["name"], "Read");
@@ -234,7 +246,7 @@ mod tests {
         };
         let mut req = CanonicalRequest::new("gpt-4o");
         req.messages = vec![assistant, user];
-        let body = encode_chat_body(&req);
+        let body = encode_chat_body(&req, None);
         let msgs = body["messages"].as_array().unwrap();
         // assistant message with tool_calls
         assert_eq!(msgs[0]["role"], "assistant");
@@ -250,7 +262,7 @@ mod tests {
     fn stream_sets_stream_and_usage_options() {
         let mut req = CanonicalRequest::new("gpt-4o");
         req.stream = true;
-        let body = encode_chat_body(&req);
+        let body = encode_chat_body(&req, None);
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
     }
@@ -272,7 +284,7 @@ mod tests {
         };
         let mut req = CanonicalRequest::new("gpt-4o");
         req.messages = vec![assistant];
-        let body = encode_chat_body(&req);
+        let body = encode_chat_body(&req, None);
         assert_eq!(body["messages"][0]["content"], "answer");
         assert!(body["messages"][0].get("thinking").is_none());
     }
@@ -281,7 +293,7 @@ mod tests {
     fn text_only_user_stays_string_content() {
         let mut req = CanonicalRequest::new("gpt-4o");
         req.messages = vec![user_text("hi")];
-        let body = encode_chat_body(&req);
+        let body = encode_chat_body(&req, None);
         assert_eq!(body["messages"][0]["content"], "hi"); // string, not array
     }
 
@@ -300,7 +312,7 @@ mod tests {
                 },
             ],
         }];
-        let body = encode_chat_body(&req);
+        let body = encode_chat_body(&req, None);
         let parts = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(parts[0]["type"], "text");
         assert_eq!(parts[0]["text"], "look");
@@ -317,10 +329,32 @@ mod tests {
                 source: ImageSource::Url { url: "https://x/y.png".to_string() },
             }],
         }];
-        let body = encode_chat_body(&req);
+        let body = encode_chat_body(&req, None);
         assert_eq!(
             body["messages"][0]["content"][0]["image_url"]["url"],
             "https://x/y.png"
         );
+    }
+
+    #[test]
+    fn reasoning_effort_uses_max_completion_tokens_and_no_temperature() {
+        let mut req = CanonicalRequest::new("o3-mini");
+        req.temperature = Some(0.7);
+        let body = encode_chat_body(&req, Some(crate::request::ReasoningEffort::High));
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["max_completion_tokens"], req.max_tokens);
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn no_reasoning_keeps_max_tokens_and_temperature() {
+        let mut req = CanonicalRequest::new("gpt-4o");
+        req.temperature = Some(0.5);
+        let body = encode_chat_body(&req, None);
+        assert_eq!(body["max_tokens"], req.max_tokens);
+        assert_eq!(body["temperature"], 0.5);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
     }
 }

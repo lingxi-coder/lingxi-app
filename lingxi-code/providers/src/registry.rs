@@ -95,7 +95,7 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
                 };
                 let authenticator = Arc::new(crate::authenticator::StaticAuth::new(auth))
                     as Arc<dyn crate::authenticator::Authenticator>;
-                let codec = crate::openai::OpenAiCodec::new(profile.base_url.clone());
+                let codec = crate::openai::OpenAiCodec::new(profile.base_url.clone(), profile.reasoning_effort);
                 let id = if name == "openai" {
                     cost::ProviderId::OpenAI
                 } else {
@@ -124,7 +124,7 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
                 };
                 let authenticator = Arc::new(crate::authenticator::StaticAuth::new(auth))
                     as Arc<dyn crate::authenticator::Authenticator>;
-                let codec = crate::gemini::GeminiCodec::new(profile.base_url.clone());
+                let codec = crate::gemini::GeminiCodec::new(profile.base_url.clone(), profile.thinking_budget);
                 let client = crate::client::GenericClient::new(
                     codec,
                     authenticator,
@@ -218,6 +218,8 @@ mod tests {
                 kind: ProviderKind::OpenAi,
                 base_url: Some("https://api.groq.com/openai/v1".to_string()),
                 api_key_env: Some("GROQ_API_KEY".to_string()),
+                reasoning_effort: None,
+                thinking_budget: None,
             },
         );
         let r = registry(extra);

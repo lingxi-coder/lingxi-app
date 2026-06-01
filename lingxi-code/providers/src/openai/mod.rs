@@ -17,21 +17,30 @@ use encode::OPENAI_DEFAULT_BASE;
 /// trailing slash); `None` uses [`OPENAI_DEFAULT_BASE`].
 pub struct OpenAiCodec {
     base_url: String,
+    /// Profile-level reasoning effort override (applied when the request itself
+    /// does not specify one).
+    reasoning_effort: Option<crate::request::ReasoningEffort>,
 }
 
 impl OpenAiCodec {
-    /// Construct a codec for the given base URL (or the `OpenAI` default).
+    /// Construct a codec for the given base URL (or the `OpenAI` default) and
+    /// an optional profile-level reasoning-effort hint.
     #[must_use]
-    pub fn new(base_url: Option<String>) -> Self {
+    pub fn new(
+        base_url: Option<String>,
+        reasoning_effort: Option<crate::request::ReasoningEffort>,
+    ) -> Self {
         Self {
             base_url: base_url.unwrap_or_else(|| OPENAI_DEFAULT_BASE.to_string()),
+            reasoning_effort,
         }
     }
 }
 
 impl WireCodec for OpenAiCodec {
     fn encode_request(&self, req: &CanonicalRequest) -> Result<HttpRequest, CodecError> {
-        let body = encode::encode_chat_body(req);
+        let effort = req.reasoning_effort.or(self.reasoning_effort);
+        let body = encode::encode_chat_body(req, effort);
         let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
         if req.stream {
             headers.push(("accept".to_string(), "text/event-stream".to_string()));
@@ -60,7 +69,7 @@ mod tests {
 
     #[test]
     fn encode_request_targets_chat_completions() {
-        let codec = OpenAiCodec::new(None);
+        let codec = OpenAiCodec::new(None, None);
         let req = CanonicalRequest::new("gpt-4o");
         let http = codec.encode_request(&req).unwrap();
         assert_eq!(http.url, "https://api.openai.com/v1/chat/completions");
@@ -72,7 +81,7 @@ mod tests {
 
     #[test]
     fn custom_base_url_is_used() {
-        let codec = OpenAiCodec::new(Some("https://api.groq.com/openai/v1".to_string()));
+        let codec = OpenAiCodec::new(Some("https://api.groq.com/openai/v1".to_string()), None);
         let http = codec
             .encode_request(&CanonicalRequest::new("llama"))
             .unwrap();

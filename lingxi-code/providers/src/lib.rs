@@ -40,4 +40,4 @@ pub use openai::OpenAiCodec;
 pub use profile::{builtin_profiles, parse_profiles, ProviderKind, ProviderProfile};
 pub use provider::LlmProvider;
 pub use registry::{ModelRouter, ProviderRegistry, Resolved};
-pub use request::{CanonicalRequest, DEFAULT_MAX_TOKENS};
+pub use request::{CanonicalRequest, ReasoningEffort, DEFAULT_MAX_TOKENS};

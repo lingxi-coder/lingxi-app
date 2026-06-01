@@ -14,8 +14,11 @@ pub const GEMINI_DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com
 /// `model` roles + `functionCall` / `functionResponse` parts), hoists the
 /// system prompt to `systemInstruction`, and translates canonical tool schemas
 /// to `functionDeclarations`. `Thinking` blocks are dropped.
+///
+/// When `thinking_budget` is `Some`, emits `generationConfig.thinkingConfig`
+/// with `thinkingBudget` and `includeThoughts: true`.
 #[must_use]
-pub fn encode_generate_body(req: &CanonicalRequest) -> Value {
+pub fn encode_generate_body(req: &CanonicalRequest, thinking_budget: Option<u32>) -> Value {
     // Gemini pairs functionResponse → functionCall by NAME, but a canonical
     // ToolResult carries only the tool_use_id. Build id → name from every
     // ToolUse block first, so a ToolResult can recover the function name.
@@ -64,6 +67,12 @@ pub fn encode_generate_body(req: &CanonicalRequest) -> Value {
     gen_config.insert("maxOutputTokens".to_string(), json!(req.max_tokens));
     if let Some(t) = req.temperature {
         gen_config.insert("temperature".to_string(), json!(t));
+    }
+    if let Some(budget) = thinking_budget {
+        gen_config.insert(
+            "thinkingConfig".to_string(),
+            json!({"thinkingBudget": budget, "includeThoughts": true}),
+        );
     }
     body.insert("generationConfig".to_string(), Value::Object(gen_config));
     Value::Object(body)
@@ -173,7 +182,7 @@ mod tests {
                 text: "hi".to_string(),
             }],
         }];
-        let body = encode_generate_body(&req);
+        let body = encode_generate_body(&req, None);
         assert_eq!(body["systemInstruction"]["parts"][0]["text"], "be helpful");
         assert_eq!(body["contents"][0]["role"], "user");
         assert_eq!(body["contents"][0]["parts"][0]["text"], "hi");
@@ -183,7 +192,7 @@ mod tests {
     fn tools_become_function_declarations() {
         let mut req = CanonicalRequest::new("gemini-2.0-flash");
         req.tools = vec![json!({"name":"Read","description":"d","input_schema":{"type":"object"}})];
-        let body = encode_generate_body(&req);
+        let body = encode_generate_body(&req, None);
         let decl = &body["tools"][0]["functionDeclarations"][0];
         assert_eq!(decl["name"], "Read");
         assert_eq!(decl["parameters"]["type"], "object");
@@ -211,7 +220,7 @@ mod tests {
         };
         let mut req = CanonicalRequest::new("gemini-2.0-flash");
         req.messages = vec![assistant, user];
-        let body = encode_generate_body(&req);
+        let body = encode_generate_body(&req, None);
         // model turn carries the functionCall
         assert_eq!(body["contents"][0]["role"], "model");
         assert_eq!(
@@ -246,7 +255,7 @@ mod tests {
                 },
             }],
         }];
-        let body = encode_generate_body(&req);
+        let body = encode_generate_body(&req, None);
         let part = &body["contents"][0]["parts"][0];
         assert_eq!(part["inlineData"]["mimeType"], "image/png");
         assert_eq!(part["inlineData"]["data"], "YWJj");
@@ -277,10 +286,18 @@ mod tests {
             ],
             ..CanonicalRequest::new("gemini-2.0-flash")
         };
-        let body = encode_generate_body(&req);
+        let body = encode_generate_body(&req, None);
         assert_eq!(
             body["contents"][1]["parts"][0]["functionResponse"]["response"]["error"],
             "boom"
         );
+    }
+
+    #[test]
+    fn thinking_budget_emits_thinking_config() {
+        let req = CanonicalRequest::new("gemini-2.5-pro");
+        let body = encode_generate_body(&req, Some(2048));
+        assert_eq!(body["generationConfig"]["thinkingConfig"]["thinkingBudget"], 2048);
+        assert_eq!(body["generationConfig"]["thinkingConfig"]["includeThoughts"], true);
     }
 }

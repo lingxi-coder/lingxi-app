@@ -8,6 +8,7 @@
 //! See `docs/superpowers/specs/2026-06-01-llm-providers-design.md`.
 #![forbid(unsafe_code)]
 
+pub mod anthropic;
 pub mod auth;
 pub mod capabilities;
 pub mod client;
@@ -19,6 +20,7 @@ pub mod request;
 #[cfg(test)]
 mod testutil;
 
+pub use anthropic::AnthropicLlmProvider;
 pub use auth::Auth;
 pub use capabilities::{Capabilities, ReasoningSupport, SystemStyle};
 pub use client::GenericClient;

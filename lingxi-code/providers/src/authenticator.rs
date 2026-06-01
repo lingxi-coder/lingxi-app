@@ -4,6 +4,8 @@
 //! minting (Vertex / Azure AD) must run. `StaticAuth` wraps the synchronous
 //! [`Auth`] header styles (API keys); signed authenticators land in later phases.
 
+use std::sync::Arc;
+
 use crate::auth::Auth;
 use api_client::ApiError;
 use async_trait::async_trait;
@@ -38,6 +40,46 @@ impl StaticAuth {
 impl Authenticator for StaticAuth {
     async fn authorize(&self, req: &mut HttpRequest) -> Result<(), ApiError> {
         self.0.apply(&mut req.headers);
+        Ok(())
+    }
+}
+
+/// Mints + caches a GCP `OAuth2` access token (service account / ADC / metadata)
+/// via `gcp_auth` and attaches it as `Authorization: Bearer …`. Used by Vertex AI.
+/// The token provider is created lazily on first use (the registry builds
+/// synchronously; `gcp_auth` provider discovery is async).
+#[derive(Default)]
+pub struct GcpTokenAuthenticator {
+    provider: tokio::sync::OnceCell<Arc<dyn gcp_auth::TokenProvider>>,
+}
+
+impl GcpTokenAuthenticator {
+    /// Construct an uninitialized authenticator (provider discovered on first use).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// GCP scope granting access to Vertex AI (and other cloud APIs).
+const GCP_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
+
+#[async_trait]
+impl Authenticator for GcpTokenAuthenticator {
+    async fn authorize(&self, req: &mut HttpRequest) -> Result<(), ApiError> {
+        let provider = self
+            .provider
+            .get_or_try_init(gcp_auth::provider)
+            .await
+            .map_err(|e| {
+                ApiError::Unauthorized(format!("GCP auth: provider discovery failed: {e}"))
+            })?;
+        let token = provider
+            .token(&[GCP_SCOPE])
+            .await
+            .map_err(|e| ApiError::Unauthorized(format!("GCP auth: token request failed: {e}")))?;
+        req.headers
+            .push(("authorization".to_string(), format!("Bearer {}", token.as_str())));
         Ok(())
     }
 }
@@ -86,5 +128,11 @@ mod tests {
         let before = r.headers.len();
         a.authorize(&mut r).await.unwrap();
         assert_eq!(r.headers.len(), before);
+    }
+
+    #[test]
+    fn gcp_authenticator_constructs() {
+        let _a = GcpTokenAuthenticator::new();
+        // authorize() needs live GCP credentials, so it is not exercised here.
     }
 }

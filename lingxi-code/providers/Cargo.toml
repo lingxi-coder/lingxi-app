@@ -14,6 +14,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 futures = { workspace = true }
+gcp_auth = "0.12"
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }

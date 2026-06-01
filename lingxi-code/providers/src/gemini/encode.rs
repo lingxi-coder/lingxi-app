@@ -1,7 +1,7 @@
 //! Canonical request → Google `Gemini` `generateContent` request body (pure).
 
 use crate::request::CanonicalRequest;
-use protocol::{ContentBlock, ConversationMessage};
+use protocol::{ContentBlock, ConversationMessage, ImageSource};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
@@ -121,7 +121,15 @@ fn encode_user(content: &[ContentBlock], id_to_name: &BTreeMap<String, String>) 
                 };
                 parts.push(json!({"functionResponse": {"name": name, "response": response}}));
             }
-            ContentBlock::Thinking { .. } | ContentBlock::ToolUse { .. } | ContentBlock::Image { .. } => {}
+            ContentBlock::Image { source } => match source {
+                ImageSource::Base64 { media_type, data } => {
+                    parts.push(json!({"inlineData": {"mimeType": media_type, "data": data}}));
+                }
+                ImageSource::Url { url } => {
+                    parts.push(json!({"fileData": {"fileUri": url}}));
+                }
+            },
+            ContentBlock::Thinking { .. } | ContentBlock::ToolUse { .. } => {}
         }
     }
     if parts.is_empty() {
@@ -153,7 +161,7 @@ fn encode_assistant(content: &[ContentBlock]) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+    use protocol::{ContentBlock, ConversationMessage, ImageSource, MessageId, ToolUseId};
 
     #[test]
     fn system_prompt_hoisted_to_system_instruction() {
@@ -224,6 +232,24 @@ mod tests {
             body["contents"][1]["parts"][0]["functionResponse"]["response"]["result"],
             "file1 file2"
         );
+    }
+
+    #[test]
+    fn user_image_emits_inline_data_part() {
+        let mut req = CanonicalRequest::new("gemini-2.0-flash");
+        req.messages = vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".to_string(),
+                    data: "YWJj".to_string(),
+                },
+            }],
+        }];
+        let body = encode_generate_body(&req);
+        let part = &body["contents"][0]["parts"][0];
+        assert_eq!(part["inlineData"]["mimeType"], "image/png");
+        assert_eq!(part["inlineData"]["data"], "YWJj");
     }
 
     #[test]

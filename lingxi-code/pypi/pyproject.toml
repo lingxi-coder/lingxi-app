@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.24.0", "packaging"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lingxi"
+version = "0.0.0-dev"
+description = "LingXi coding agent CLI (TUI)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "LingXi" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+]
+
+[project.scripts]
+lingxi = "lingxi_cli_bin:main"
+
+[tool.hatch.build]
+exclude = [".venv/**", "dist/**", "build/**"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lingxi_cli_bin"]
+include = [
+  "src/lingxi_cli_bin/lingxi-package.json",
+  "src/lingxi_cli_bin/bin/**",
+  "src/lingxi_cli_bin/lingxi-path/**",
+]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+
+[tool.hatch.build.targets.sdist]
+
+[tool.hatch.build.targets.sdist.hooks.custom]

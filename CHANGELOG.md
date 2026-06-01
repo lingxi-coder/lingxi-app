@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.11.0] — LLM Providers
+
+Multi-LLM-provider support: an integrated, in-engine provider layer so LingXi
+can use providers beyond Anthropic as the model backend.
+
+### Added
+- `providers` crate: an `LlmProvider` abstraction with a pure `WireCodec` /
+  `SseDecoder` translation core and a `GenericClient` harness; every provider
+  normalizes to the canonical Anthropic-shaped message types, so the
+  orchestrator / TUI / session / cost layers are unchanged.
+- **OpenAI / OpenAI-compatible codec** — Chat Completions encode/decode +
+  streaming tool-call reassembly. Covers OpenAI, Azure (via base URL), Groq,
+  Together, Ollama, vLLM, DeepSeek, OpenRouter, … through settings profiles.
+- **Native Google Gemini codec** — `generateContent` + `streamGenerateContent`,
+  with `functionCall`/`functionResponse` tool pairing.
+- `provider/model` selection (`openai/gpt-4o`, `gemini/gemini-2.0-flash`); bare
+  / `claude-*` strings stay on Anthropic (back-compat). Named provider profiles
+  in `settings.json` (`providers` object). `/model` surfaces the syntax.
+- Per-provider cost attribution (OpenAI + Gemini reference price tables;
+  prefix-aware `ModelRef`).
+- Capability guardrail: tools sent to a non-tool-capable model fail fast.
+
+### Unchanged
+- Anthropic is the default; the Anthropic request/response wire and cost events
+  are byte-identical (verified by the existing parity suites). `traits/` and the
+  `api-client` Anthropic path are untouched.
+
 ## [0.10.0] — M9 Multi-Agent TUI Surface
 
 Completes the multi-agent TUI: the message types, status chrome, dialogs, and

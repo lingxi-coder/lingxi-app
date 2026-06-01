@@ -3,7 +3,7 @@
 
 use providers::openai::decode::decode_chat_response;
 use providers::openai::stream::OpenAiSseDecoder;
-use providers::{Auth, CanonicalRequest, OpenAiCodec, SseDecoder, WireCodec};
+use providers::{CanonicalRequest, OpenAiCodec, SseDecoder, WireCodec};
 
 #[test]
 fn encode_request_shape_is_openai_chat_completions() {
@@ -12,9 +12,7 @@ fn encode_request_shape_is_openai_chat_completions() {
     req.system = Some("sys".to_string());
     req.tools =
         vec![serde_json::json!({"name":"Read","description":"d","input_schema":{"type":"object"}})];
-    let http = codec
-        .encode_request(&req, &Auth::Bearer("k".to_string()))
-        .unwrap();
+    let http = codec.encode_request(&req).unwrap();
     assert!(http.url.ends_with("/chat/completions"));
     let body: serde_json::Value = serde_json::from_str(http.body.as_deref().unwrap()).unwrap();
     assert_eq!(body["messages"][0]["role"], "system");

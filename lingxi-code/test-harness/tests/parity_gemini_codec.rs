@@ -3,7 +3,7 @@
 
 use providers::gemini::decode::decode_generate_response;
 use providers::gemini::stream::GeminiSseDecoder;
-use providers::{Auth, CanonicalRequest, GeminiCodec, SseDecoder, WireCodec};
+use providers::{CanonicalRequest, GeminiCodec, SseDecoder, WireCodec};
 
 #[test]
 fn encode_request_shape_is_gemini_generate_content() {
@@ -12,15 +12,7 @@ fn encode_request_shape_is_gemini_generate_content() {
     req.system = Some("sys".to_string());
     req.tools =
         vec![serde_json::json!({"name":"Read","description":"d","input_schema":{"type":"object"}})];
-    let http = codec
-        .encode_request(
-            &req,
-            &Auth::Header {
-                name: "x-goog-api-key".to_string(),
-                value: "k".to_string(),
-            },
-        )
-        .unwrap();
+    let http = codec.encode_request(&req).unwrap();
     assert!(http.url.contains(":generateContent"));
     let body: serde_json::Value = serde_json::from_str(http.body.as_deref().unwrap()).unwrap();
     assert_eq!(body["systemInstruction"]["parts"][0]["text"], "sys");

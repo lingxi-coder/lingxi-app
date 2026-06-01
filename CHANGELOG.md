@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.12.0] — LLM Providers v2
+
+Extends the v0.11.0 provider layer with multimodal input, reasoning-model
+controls, three managed-cloud providers (Azure / Vertex / Bedrock), and a core
+router — all behind the same canonical, Anthropic-shaped seam, so the
+orchestrator / TUI / session / cost layers remain unchanged.
+
+### Added
+- **Vision (image input):** a canonical `ContentBlock::Image { source }`
+  (base64 | URL) translated per provider — Anthropic native `image` block,
+  OpenAI `image_url` content parts, Gemini `inlineData`. A fail-fast guardrail
+  rejects images sent to a non-vision model.
+- **Reasoning models:** per-profile `reasoningEffort` (OpenAI o-series →
+  `reasoning_effort` + `max_completion_tokens`, no `temperature`) and
+  `thinkingBudget` (Gemini 2.5 `thinkingConfig`); reasoning traces
+  (`reasoning_content`, Gemini `thought` parts) decode into the canonical
+  `Thinking` block.
+- **Azure OpenAI** (`type: azureOpenAi`): the OpenAI body over Azure's
+  deployment URL + `api-key` header.
+- **Vertex AI** (`type: vertex`): the Gemini body over the regional
+  `aiplatform.googleapis.com` endpoint, authed with a GCP OAuth2 token
+  (`gcp_auth`; service-account / ADC credentials).
+- **Bedrock** (`type: bedrock`): Claude via `InvokeModel` with AWS SigV4
+  signing (`aws-sigv4`; environment credentials).
+- **Router** (`routing` settings): model **aliases**, **fallback** chains on
+  transient errors, and **retry** with backoff — modeled as `LlmProvider`
+  decorators over the registry.
+
+### New seams
+- An async `Authenticator` trait (replacing the synchronous auth attach) so
+  AWS SigV4 + cloud token minting run on the built request just before
+  transport; `StaticAuth` wraps the v0.11.0 API-key styles.
+
+### Unchanged / bounded
+- Anthropic stays the default; request/response/cost behavior is byte-identical
+  for image-free, reasoning-free conversations (the parity suite is the gate).
+  `traits/` is untouched.
+- Bedrock is non-streaming (a synthetic single-shot stream); signed-auth uses
+  environment credentials; `/model` shows examples (configured models are
+  enumerable via `ModelRouter::available_models()`); TUI paste-to-image and
+  Bedrock-specific pricing are tracked follow-ups.
+
 ## [0.11.0] — LLM Providers
 
 Multi-LLM-provider support: an integrated, in-engine provider layer so LingXi

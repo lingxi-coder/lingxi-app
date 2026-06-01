@@ -8,6 +8,10 @@ tailing), coordinator/team status chrome, worker-permission chrome, and a
 read-only `/agents` discovery screen — built UI-first against a presentation
 adapter (real data where the engine is live, deterministic fixtures where the
 execution pool is stubbed).
+v0.12.0 extends the provider layer (**LLM Providers v2**): image/vision input,
+reasoning-model controls (effort / thinking budget), managed-cloud providers
+(Azure OpenAI, Vertex AI, Bedrock), and a core router (model aliases, fallback
+chains, retry). See `docs/LLM_PROVIDERS.md`.
 v0.11.0 adds **multi-LLM-provider support**: an in-engine provider layer so
 LingXi can use OpenAI / OpenAI-compatible (Groq, Together, Ollama, vLLM,
 OpenRouter, …) and Google Gemini as the model backend, selected via a
@@ -67,7 +71,7 @@ subsystems (Settings, Memory, API client, OAuth refresh, cost events,
 telemetry schema) identically. See `docs/PLATFORMS.md` for the per-OS
 setup notes + the "M3 engine subsystems" section.
 
-## Subsystem status (v0.11.0)
+## Subsystem status (v0.12.0)
 
 | Subsystem | Status | Milestone |
 |---|---|---|
@@ -92,7 +96,8 @@ setup notes + the "M3 engine subsystems" section.
 | Team / Coordinator / Swarm renderers, voice, mouse mode, inline image display | Out of scope | M8 |
 | Composable engine (`engine-desktop` / `engine-mobile` composition roots, ~73 flat crates, §8.1 dep gate) | Complete | M8 / v0.9.0 |
 | Mobile platform + UniFFI callbacks (`platform-ios/android`, `tool-camera/voice/share`, `ios-framework`/`android-aar` + Swift/Kotlin skeletons) | Skeleton only — full bring-up in M9 | M8 / v0.9.0 |
-| LLM Providers (OpenAI-compatible + Gemini codecs, `provider/model` routing, per-provider cost) | Complete | v0.11.0 |
+| LLM Providers v1 (OpenAI-compatible + Gemini codecs, `provider/model` routing, per-provider cost) | Complete | v0.11.0 |
+| LLM Providers v2 (vision, reasoning params, Azure/Vertex/Bedrock, router: aliases/fallback/retry) | Complete | v0.12.0 |
 
 ## Architecture
 

@@ -12,7 +12,7 @@ pub fn ulid_or_uuid() -> String {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let micros = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
+        .map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
         .unwrap_or(0);
     format!("inv-{micros}-{n}")
 }

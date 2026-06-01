@@ -67,20 +67,19 @@ pub fn canonicalize_and_validate(
 }
 
 fn canonicalize_with_fallback(path: &Path) -> Result<PathBuf, PathValidationError> {
-    match std::fs::canonicalize(path) {
-        Ok(p) => Ok(p),
-        Err(_) => {
-            // Target does not exist — canonicalise the parent and re-join.
-            let parent = path
-                .parent()
-                .ok_or_else(|| PathValidationError::Io(format!("no parent for {path:?}")))?;
-            let file = path
-                .file_name()
-                .ok_or_else(|| PathValidationError::Io(format!("no file_name for {path:?}")))?;
-            let parent_canon = std::fs::canonicalize(parent)
-                .map_err(|e| PathValidationError::Io(e.to_string()))?;
-            Ok(parent_canon.join(file))
-        }
+    if let Ok(p) = std::fs::canonicalize(path) {
+        Ok(p)
+    } else {
+        // Target does not exist — canonicalise the parent and re-join.
+        let parent = path
+            .parent()
+            .ok_or_else(|| PathValidationError::Io(format!("no parent for {path:?}")))?;
+        let file = path
+            .file_name()
+            .ok_or_else(|| PathValidationError::Io(format!("no file_name for {path:?}")))?;
+        let parent_canon = std::fs::canonicalize(parent)
+            .map_err(|e| PathValidationError::Io(e.to_string()))?;
+        Ok(parent_canon.join(file))
     }
 }
 

@@ -203,6 +203,19 @@ mod tests {
         )
     }
 
+    fn client_with_auth(
+        transport: MockTransport,
+        authenticator: Arc<dyn crate::authenticator::Authenticator>,
+    ) -> GenericClient<MockCodec> {
+        GenericClient::new(
+            MockCodec,
+            authenticator,
+            Arc::new(transport),
+            cost::ProviderId::OpenAI,
+            Capabilities::anthropic(),
+        )
+    }
+
     #[tokio::test]
     async fn complete_runs_encode_request_decode() {
         let c = client(MockTransport::responding(200, "PONG"));
@@ -258,5 +271,58 @@ mod tests {
             "the error item, then terminate (no finish, no re-poll)"
         );
         assert!(matches!(events[0], Err(ApiError::Http(_))));
+    }
+
+    /// Regression guard: `GenericClient::complete` must call
+    /// `authenticator.authorize` between encode and transport so the
+    /// `Authorization` header is visible to the transport.
+    #[tokio::test]
+    async fn complete_attaches_auth_header_via_authenticator() {
+        let transport = MockTransport::responding(200, "PONG");
+        let handle = transport.captured_handle();
+        let auth = Arc::new(crate::authenticator::StaticAuth::new(
+            crate::auth::Auth::Bearer("sk-x".to_string()),
+        ));
+        let c = client_with_auth(transport, auth);
+        c.complete(CanonicalRequest::new("gpt-4o"))
+            .await
+            .expect("ok");
+        let captured = handle.lock().unwrap();
+        let req = captured.as_ref().expect("transport should have received a request");
+        assert!(
+            req.headers
+                .iter()
+                .any(|(k, v)| k == "authorization" && v == "Bearer sk-x"),
+            "authorization header not found in captured request; headers: {:?}",
+            req.headers
+        );
+    }
+
+    /// Regression guard: `GenericClient::stream` must call
+    /// `authenticator.authorize` between encode and transport so the
+    /// `Authorization` header is visible to the transport.
+    #[tokio::test]
+    async fn stream_attaches_auth_header_via_authenticator() {
+        let transport = MockTransport::streaming(vec!["hello"]);
+        let handle = transport.captured_handle();
+        let auth = Arc::new(crate::authenticator::StaticAuth::new(
+            crate::auth::Auth::Bearer("sk-x".to_string()),
+        ));
+        let c = client_with_auth(transport, auth);
+        let s = c
+            .stream(CanonicalRequest::new("gpt-4o"))
+            .await
+            .expect("stream");
+        // Drain the stream so the transport call is fully exercised.
+        let _events: Vec<_> = s.collect().await;
+        let captured = handle.lock().unwrap();
+        let req = captured.as_ref().expect("transport should have received a request");
+        assert!(
+            req.headers
+                .iter()
+                .any(|(k, v)| k == "authorization" && v == "Bearer sk-x"),
+            "authorization header not found in captured request; headers: {:?}",
+            req.headers
+        );
     }
 }

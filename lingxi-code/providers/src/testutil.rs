@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use futures::stream;
 use protocol::{HttpRequest, HttpResponse, SseEvent};
+use std::sync::{Arc, Mutex};
 use traits::http::SseStream;
 use traits::{HttpError, HttpTransport};
 
@@ -12,6 +13,12 @@ pub(crate) struct MockTransport {
     body: String,
     sse_frames: Vec<String>,
     error: Option<String>,
+    /// Interior-mutable slot that records the last [`HttpRequest`] received by
+    /// either [`request`](HttpTransport::request) or
+    /// [`stream_sse`](HttpTransport::stream_sse). Tests acquire a handle via
+    /// [`MockTransport::captured_handle`] before handing the transport to the
+    /// client under test.
+    captured: Arc<Mutex<Option<HttpRequest>>>,
 }
 
 impl MockTransport {
@@ -22,6 +29,7 @@ impl MockTransport {
             body: body.into(),
             sse_frames: Vec::new(),
             error: None,
+            captured: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -32,6 +40,7 @@ impl MockTransport {
             body: String::new(),
             sse_frames: frames.into_iter().map(String::from).collect(),
             error: None,
+            captured: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -42,13 +51,25 @@ impl MockTransport {
             body: String::new(),
             sse_frames: Vec::new(),
             error: Some(msg.into()),
+            captured: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Return a cloned [`Arc`] handle to the captured-request slot.
+    ///
+    /// Call this **before** handing the transport to the client; after the call
+    /// under test completes the slot holds the last [`HttpRequest`] that reached
+    /// the transport.
+    #[must_use]
+    pub(crate) fn captured_handle(&self) -> Arc<Mutex<Option<HttpRequest>>> {
+        Arc::clone(&self.captured)
     }
 }
 
 #[async_trait]
 impl HttpTransport for MockTransport {
-    async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        *self.captured.lock().unwrap() = Some(req.clone());
         Ok(HttpResponse {
             status: self.status,
             headers: Vec::new(),
@@ -56,7 +77,8 @@ impl HttpTransport for MockTransport {
         })
     }
 
-    async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+    async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError> {
+        *self.captured.lock().unwrap() = Some(req.clone());
         if let Some(msg) = &self.error {
             let one: Vec<Result<SseEvent, HttpError>> =
                 vec![Err(HttpError::Connection(msg.clone()))];

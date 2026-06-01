@@ -24,7 +24,7 @@ pub trait Authenticator: Send + Sync {
 /// enum (`None` / `Bearer` / `Header`). Performs no I/O; the async signature is
 /// uniform with the signed authenticators added later.
 #[derive(Debug, Clone)]
-pub struct StaticAuth(pub Auth);
+pub struct StaticAuth(Auth);
 
 impl StaticAuth {
     /// Wrap an [`Auth`] header style as an [`Authenticator`].

@@ -45,6 +45,9 @@ impl<T: HttpTransport + Send + Sync + 'static> LlmProvider for AnthropicLlmProvi
     }
 
     async fn complete(&self, req: CanonicalRequest) -> Result<MessageResponse, ApiError> {
+        // `messages_create_non_stream` has no `tools` parameter, so `req.tools`
+        // is intentionally not forwarded here — tool use flows through `stream`.
+        // (The orchestrator's non-streaming `messages_create` carries no tools.)
         self.inner
             .messages_create_non_stream(
                 &req.model,

@@ -7,6 +7,7 @@ use api_client::types::UsageApi;
 use cost::pricing::ProviderId;
 use cost::usage::{TokenUsage, Usage};
 use cost::ModelRef;
+use providers::ModelSpec;
 
 /// Translate an API-client `UsageApi` into the cost crate's `Usage` shape.
 ///
@@ -29,23 +30,38 @@ pub(crate) fn usage_api_to_cost_usage(api: &UsageApi) -> Usage {
     }
 }
 
-/// Resolve a model-name string to its `ProviderId`.
+/// Map a provider-profile name to its cost [`ProviderId`].
 ///
-/// v0.7.0: always `Anthropic` (the only provider lingxi-cli wires).
-/// M7 will expand to prefix-match `gpt-*` → `OpenAI`, `gemini-*` → `GoogleGemini`,
-/// etc. The `model` argument is kept so the future expansion does not
-/// need a signature change.
+/// Mirrors the registry's choice: built-in `anthropic`/`openai`/`gemini` map
+/// to their first-party ids; any other (settings-declared) profile name is an
+/// `OpenAI`-compatible endpoint.
 #[must_use]
-pub(crate) fn provider_from_model(_model: &str) -> ProviderId {
-    ProviderId::Anthropic
+fn provider_id_for_profile(profile: &str) -> ProviderId {
+    match profile {
+        "anthropic" => ProviderId::Anthropic,
+        "openai" => ProviderId::OpenAI,
+        "gemini" => ProviderId::GoogleGemini,
+        other => ProviderId::OpenAICompatible { name: other.to_string() },
+    }
 }
 
-/// Build a fully-qualified [`ModelRef`] from a model string.
+/// Resolve a model-name string to its `ProviderId` by parsing the
+/// `provider/model` prefix (bare / `claude-*` → Anthropic, for back-compat).
+#[must_use]
+pub(crate) fn provider_from_model(model: &str) -> ProviderId {
+    provider_id_for_profile(&ModelSpec::parse(model).profile)
+}
+
+/// Build a fully-qualified [`ModelRef`] from a model string: the prefix selects
+/// the provider, and the local model id (prefix stripped) is what the price
+/// catalog is keyed on. `claude-*` / bare strings keep the full string as the
+/// model id, so Anthropic cost attribution is byte-identical to before.
 #[must_use]
 pub(crate) fn model_ref_from_string(model: &str) -> ModelRef {
+    let spec = ModelSpec::parse(model);
     ModelRef {
-        provider: provider_from_model(model),
-        model: model.to_string(),
+        provider: provider_id_for_profile(&spec.profile),
+        model: spec.model,
     }
 }
 
@@ -72,17 +88,25 @@ mod tests {
     }
 
     #[test]
-    fn provider_always_anthropic_in_v070() {
+    fn provider_from_model_maps_prefixes() {
+        assert_eq!(provider_from_model("claude-opus-4-7"), ProviderId::Anthropic);
+        assert_eq!(provider_from_model("anthropic/claude-opus-4-7"), ProviderId::Anthropic);
+        assert_eq!(provider_from_model("openai/gpt-4o"), ProviderId::OpenAI);
+        assert_eq!(provider_from_model("gemini/gemini-2.0-flash"), ProviderId::GoogleGemini);
+        assert_eq!(provider_from_model("some-bare-model"), ProviderId::Anthropic);
         assert_eq!(
-            provider_from_model("claude-opus-4-7"),
-            ProviderId::Anthropic
+            provider_from_model("groq/llama-3.3-70b"),
+            ProviderId::OpenAICompatible { name: "groq".to_string() }
         );
-        assert_eq!(provider_from_model("gpt-5"), ProviderId::Anthropic);
-        assert_eq!(provider_from_model(""), ProviderId::Anthropic);
     }
 
     #[test]
-    fn model_ref_carries_provider_and_string() {
+    fn model_ref_strips_prefix_for_priced_lookup() {
+        // Prefixed → provider + stripped local id (matches price-table keys).
+        let mr = model_ref_from_string("openai/gpt-4o");
+        assert_eq!(mr.provider, ProviderId::OpenAI);
+        assert_eq!(mr.model, "gpt-4o");
+        // Anthropic back-compat: full string kept as the model id.
         let mr = model_ref_from_string("claude-opus-4-7");
         assert_eq!(mr.provider, ProviderId::Anthropic);
         assert_eq!(mr.model, "claude-opus-4-7");

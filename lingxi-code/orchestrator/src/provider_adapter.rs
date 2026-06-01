@@ -1,6 +1,7 @@
-//! Bridge: adapt any `providers::LlmProvider` to the orchestrator's
-//! `OrchestratorApiClient` / `StreamingApiClient` traits. The model string
-//! flows through unchanged; provider routing by prefix is wired in P2.
+//! Bridge: adapt a `providers::ModelRouter` to the orchestrator's
+//! `OrchestratorApiClient` / `StreamingApiClient` traits. Each call parses the
+//! model string, resolves the provider via the router, and delegates with the
+//! provider-local model id.
 
 use crate::conversation::{OrchestratorApiClient, StreamingApiClient};
 use api_client::types::{MessageResponse, StreamEvent};
@@ -8,19 +9,19 @@ use api_client::ApiError;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use protocol::ConversationMessage;
-use providers::{CanonicalRequest, LlmProvider};
+use providers::{CanonicalRequest, ModelRouter};
 use std::sync::Arc;
 
-/// Adapts an `Arc<dyn LlmProvider>` to the orchestrator's API-client traits.
+/// Adapts an `Arc<dyn ModelRouter>` to the orchestrator's API-client traits.
 pub struct ProviderApiAdapter {
-    provider: Arc<dyn LlmProvider>,
+    router: Arc<dyn ModelRouter>,
 }
 
 impl ProviderApiAdapter {
-    /// Wrap a provider.
+    /// Wrap a router.
     #[must_use]
-    pub fn new(provider: Arc<dyn LlmProvider>) -> Self {
-        Self { provider }
+    pub fn new(router: Arc<dyn ModelRouter>) -> Self {
+        Self { router }
     }
 }
 
@@ -32,10 +33,11 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
     ) -> Result<MessageResponse, ApiError> {
-        let mut req = CanonicalRequest::new(model);
+        let resolved = self.router.resolve(model)?;
+        let mut req = CanonicalRequest::new(resolved.model);
         req.system = system.map(str::to_string);
         req.messages = msgs;
-        self.provider.complete(req).await
+        resolved.provider.complete(req).await
     }
 }
 
@@ -48,12 +50,13 @@ impl StreamingApiClient for ProviderApiAdapter {
         messages: Vec<ConversationMessage>,
         tools: Vec<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
-        let mut req = CanonicalRequest::new(model);
+        let resolved = self.router.resolve(model)?;
+        let mut req = CanonicalRequest::new(resolved.model);
         req.system = system.map(str::to_string);
         req.messages = messages;
         req.tools = tools;
         req.stream = true;
-        self.provider.stream(req).await
+        resolved.provider.stream(req).await
     }
 }
 
@@ -62,22 +65,15 @@ mod tests {
     use super::*;
     use api_client::types::{ContentBlockApi, UsageApi};
     use futures::StreamExt;
-    use providers::Capabilities;
+    use providers::{Capabilities, LlmProvider, Resolved};
     use std::sync::Mutex;
 
-    /// What a `stream` call carried, for assertions.
-    struct SeenStream {
-        model: String,
-        system: Option<String>,
-        tools_len: usize,
-        stream_flag: bool,
-    }
-
-    /// Records the request it received and returns a canned response.
+    /// Records the canonical request it received and returns a canned response.
     struct StubProvider {
         seen_model: Mutex<Option<String>>,
         seen_system: Mutex<Option<String>>,
-        seen_stream: Mutex<Option<SeenStream>>,
+        seen_tools_len: Mutex<Option<usize>>,
+        seen_stream_flag: Mutex<Option<bool>>,
         caps: Capabilities,
     }
 
@@ -86,7 +82,8 @@ mod tests {
             Self {
                 seen_model: Mutex::new(None),
                 seen_system: Mutex::new(None),
-                seen_stream: Mutex::new(None),
+                seen_tools_len: Mutex::new(None),
+                seen_stream_flag: Mutex::new(None),
                 caps: Capabilities::anthropic(),
             }
         }
@@ -117,46 +114,67 @@ mod tests {
             &self,
             req: CanonicalRequest,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
-            *self.seen_stream.lock().unwrap() = Some(SeenStream {
-                model: req.model.clone(),
-                system: req.system.clone(),
-                tools_len: req.tools.len(),
-                stream_flag: req.stream,
-            });
+            *self.seen_tools_len.lock().unwrap() = Some(req.tools.len());
+            *self.seen_stream_flag.lock().unwrap() = Some(req.stream);
             Ok(futures::stream::empty::<Result<StreamEvent, ApiError>>().boxed())
         }
     }
 
+    /// Router that records the model string it was asked to resolve and always
+    /// returns the same stub provider with the prefix stripped.
+    struct StubRouter {
+        provider: Arc<StubProvider>,
+        seen_resolve: Mutex<Option<String>>,
+    }
+
+    impl ModelRouter for StubRouter {
+        fn resolve(&self, model: &str) -> Result<Resolved, ApiError> {
+            *self.seen_resolve.lock().unwrap() = Some(model.to_string());
+            // Strip a leading `profile/` so the stub sees the local id.
+            let local = model.split_once('/').map_or(model, |(_, m)| m).to_string();
+            Ok(Resolved {
+                provider: self.provider.clone(),
+                model: local,
+            })
+        }
+        fn available_profiles(&self) -> Vec<String> {
+            vec!["stub".to_string()]
+        }
+    }
+
     #[tokio::test]
-    async fn bridge_forwards_model_and_system_to_provider() {
-        let stub = Arc::new(StubProvider::new());
-        let adapter = ProviderApiAdapter::new(stub.clone());
+    async fn bridge_resolves_and_forwards_local_model() {
+        let provider = Arc::new(StubProvider::new());
+        let router = Arc::new(StubRouter {
+            provider: provider.clone(),
+            seen_resolve: Mutex::new(None),
+        });
+        let adapter = ProviderApiAdapter::new(router.clone());
         let resp = adapter
             .messages_create("openai/gpt-4o", Some("sys"), Vec::new())
             .await
             .expect("ok");
-        assert_eq!(resp.model, "openai/gpt-4o");
-        assert_eq!(
-            stub.seen_model.lock().unwrap().as_deref(),
-            Some("openai/gpt-4o")
-        );
-        assert_eq!(stub.seen_system.lock().unwrap().as_deref(), Some("sys"));
+        // Router saw the full string; provider saw the stripped local id.
+        assert_eq!(router.seen_resolve.lock().unwrap().as_deref(), Some("openai/gpt-4o"));
+        assert_eq!(provider.seen_model.lock().unwrap().as_deref(), Some("gpt-4o"));
+        assert_eq!(provider.seen_system.lock().unwrap().as_deref(), Some("sys"));
+        assert_eq!(resp.model, "gpt-4o");
     }
 
     #[tokio::test]
-    async fn bridge_forwards_stream_request_with_tools_and_flag() {
-        let stub = Arc::new(StubProvider::new());
-        let adapter = ProviderApiAdapter::new(stub.clone());
+    async fn bridge_forwards_stream_tools_and_flag() {
+        let provider = Arc::new(StubProvider::new());
+        let router = Arc::new(StubRouter {
+            provider: provider.clone(),
+            seen_resolve: Mutex::new(None),
+        });
+        let adapter = ProviderApiAdapter::new(router);
         let tools = vec![serde_json::json!({"name": "Read"})];
         let _s = adapter
             .stream("gemini/gemini-2.0-flash", Some("sys"), Vec::new(), tools)
             .await
             .expect("stream");
-        let seen = stub.seen_stream.lock().unwrap();
-        let seen = seen.as_ref().expect("stream was called");
-        assert_eq!(seen.model, "gemini/gemini-2.0-flash");
-        assert_eq!(seen.system.as_deref(), Some("sys"));
-        assert_eq!(seen.tools_len, 1);
-        assert!(seen.stream_flag, "bridge must set req.stream = true");
+        assert_eq!(*provider.seen_tools_len.lock().unwrap(), Some(1));
+        assert_eq!(*provider.seen_stream_flag.lock().unwrap(), Some(true));
     }
 }

@@ -51,6 +51,14 @@ pub fn decode_chat_response(status: u16, body: &str) -> Result<MessageResponse, 
         .ok_or_else(|| ApiError::MalformedStream("openai response: no message".to_string()))?;
 
     let mut content: Vec<ContentBlockApi> = Vec::new();
+    if let Some(reasoning) = message.get("reasoning_content").and_then(Value::as_str) {
+        if !reasoning.is_empty() {
+            content.push(ContentBlockApi::Thinking {
+                thinking: reasoning.to_string(),
+                signature: None,
+            });
+        }
+    }
     if let Some(text) = message.get("content").and_then(Value::as_str) {
         if !text.is_empty() {
             content.push(ContentBlockApi::Text {
@@ -168,6 +176,20 @@ mod tests {
             other => panic!("expected tool_use, got {other:?}"),
         }
         assert_eq!(r.usage.cache_read_input_tokens, 8);
+    }
+
+    #[test]
+    fn reasoning_content_prepended_before_text() {
+        let body = r#"{"id":"chatcmpl-r1","model":"deepseek-r1","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"let me think","content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}"#;
+        let r = decode_chat_response(200, body).unwrap();
+        match &r.content[0] {
+            ContentBlockApi::Thinking { thinking, .. } => assert_eq!(thinking, "let me think"),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+        match &r.content[1] {
+            ContentBlockApi::Text { text } => assert_eq!(text, "answer"),
+            other => panic!("expected Text, got {other:?}"),
+        }
     }
 
     #[test]

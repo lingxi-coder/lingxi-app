@@ -19,8 +19,11 @@ use std::collections::BTreeMap;
 use super::decode::map_finish_reason;
 
 /// Reassembles an `OpenAI` chat-completions stream into canonical events.
+#[allow(clippy::struct_excessive_bools)]
 pub struct OpenAiSseDecoder {
     started: bool,
+    reasoning_open: bool,
+    reasoning_index: u32,
     text_open: bool,
     text_index: u32,
     /// next canonical block index to assign.
@@ -40,6 +43,8 @@ impl OpenAiSseDecoder {
     pub fn new() -> Self {
         Self {
             started: false,
+            reasoning_open: false,
+            reasoning_index: 0,
             text_open: false,
             text_index: 0,
             next_index: 0,
@@ -72,6 +77,30 @@ impl OpenAiSseDecoder {
                 content: Vec::new(),
                 stop_reason: None,
                 usage: UsageApi::default(),
+            },
+        });
+    }
+
+    fn handle_reasoning(&mut self, text: &str, out: &mut Vec<StreamEvent>) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.reasoning_open {
+            self.reasoning_open = true;
+            self.reasoning_index = self.next_index;
+            self.next_index += 1;
+            out.push(StreamEvent::ContentBlockStart {
+                index: self.reasoning_index,
+                content_block: ContentBlockApi::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                },
+            });
+        }
+        out.push(StreamEvent::ContentBlockDelta {
+            index: self.reasoning_index,
+            delta: ContentDelta::ThinkingDelta {
+                thinking: text.to_string(),
             },
         });
     }
@@ -140,6 +169,12 @@ impl OpenAiSseDecoder {
     }
 
     fn close_open_blocks(&mut self, out: &mut Vec<StreamEvent>) {
+        if self.reasoning_open {
+            out.push(StreamEvent::ContentBlockStop {
+                index: self.reasoning_index,
+            });
+            self.reasoning_open = false;
+        }
         if self.text_open {
             out.push(StreamEvent::ContentBlockStop {
                 index: self.text_index,
@@ -193,6 +228,9 @@ impl SseDecoder for OpenAiSseDecoder {
             return out;
         };
         if let Some(delta) = choice.get("delta") {
+            if let Some(r) = delta.get("reasoning_content").and_then(Value::as_str) {
+                self.handle_reasoning(r, &mut out);
+            }
             if let Some(text) = delta.get("content").and_then(Value::as_str) {
                 self.handle_text(text, &mut out);
             }
@@ -348,6 +386,54 @@ mod tests {
                 .count(),
             1,
             "exactly one MessageDelta"
+        );
+    }
+
+    #[test]
+    fn reasoning_stream_emits_thinking_block_before_text() {
+        let events = run(&[
+            r#"{"id":"c1","model":"deepseek-r1","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"th"}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"reasoning_content":"ink"}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"content":"answer"}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+            "[DONE]",
+        ]);
+        // There is a ContentBlockStart with a Thinking block
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::ContentBlockStart {
+                content_block: ContentBlockApi::Thinking { .. },
+                ..
+            }
+        )));
+        // Two ThinkingDelta events with "th" and "ink"
+        let thinking_deltas: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ContentBlockDelta {
+                    delta: ContentDelta::ThinkingDelta { thinking },
+                    ..
+                } => Some(thinking.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking_deltas, vec!["th", "ink"]);
+        // There is also a text block
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::ContentBlockStart {
+                content_block: ContentBlockApi::Text { .. },
+                ..
+            }
+        )));
+        // Exactly one MessageStop
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::MessageStop))
+                .count(),
+            1,
+            "exactly one MessageStop"
         );
     }
 

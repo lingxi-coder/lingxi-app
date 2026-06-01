@@ -19,6 +19,8 @@ use super::decode::{map_finish_reason, usage_from_value};
 #[allow(clippy::struct_excessive_bools)]
 pub struct GeminiSseDecoder {
     started: bool,
+    reasoning_open: bool,
+    reasoning_index: u32,
     text_open: bool,
     text_index: u32,
     next_index: u32,
@@ -34,6 +36,8 @@ impl GeminiSseDecoder {
     pub fn new() -> Self {
         Self {
             started: false,
+            reasoning_open: false,
+            reasoning_index: 0,
             text_open: false,
             text_index: 0,
             next_index: 0,
@@ -61,6 +65,30 @@ impl GeminiSseDecoder {
                 content: Vec::new(),
                 stop_reason: None,
                 usage: UsageApi::default(),
+            },
+        });
+    }
+
+    fn handle_reasoning(&mut self, text: &str, out: &mut Vec<StreamEvent>) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.reasoning_open {
+            self.reasoning_open = true;
+            self.reasoning_index = self.next_index;
+            self.next_index += 1;
+            out.push(StreamEvent::ContentBlockStart {
+                index: self.reasoning_index,
+                content_block: ContentBlockApi::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                },
+            });
+        }
+        out.push(StreamEvent::ContentBlockDelta {
+            index: self.reasoning_index,
+            delta: ContentDelta::ThinkingDelta {
+                thinking: text.to_string(),
             },
         });
     }
@@ -155,7 +183,11 @@ impl SseDecoder for GeminiSseDecoder {
             .and_then(Value::as_array)
         {
             for part in parts {
-                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                if part.get("thought").and_then(Value::as_bool) == Some(true) {
+                    if let Some(t) = part.get("text").and_then(Value::as_str) {
+                        self.handle_reasoning(t, &mut out);
+                    }
+                } else if let Some(text) = part.get("text").and_then(Value::as_str) {
                     self.handle_text(text, &mut out);
                 } else if let Some(fc) = part.get("functionCall") {
                     self.handle_function_call(fc, &mut out);
@@ -173,6 +205,12 @@ impl SseDecoder for GeminiSseDecoder {
         let mut out = Vec::new();
         if self.started && !self.done {
             self.done = true;
+            if self.reasoning_open {
+                out.push(StreamEvent::ContentBlockStop {
+                    index: self.reasoning_index,
+                });
+                self.reasoning_open = false;
+            }
             if self.text_open {
                 out.push(StreamEvent::ContentBlockStop {
                     index: self.text_index,
@@ -270,6 +308,47 @@ mod tests {
             })
             .flatten();
         assert_eq!(sr.as_deref(), Some("tool_use"));
+    }
+
+    #[test]
+    fn thought_part_stream_emits_thinking_block_before_text() {
+        let events = run(&[
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"reasoning","thought":true}]}}]}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"answer"}]},"finishReason":"STOP"}]}"#,
+        ]);
+        // A Thinking ContentBlockStart was emitted
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::ContentBlockStart {
+                content_block: ContentBlockApi::Thinking { .. },
+                ..
+            }
+        )));
+        // A ThinkingDelta was emitted
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::ContentBlockDelta {
+                delta: ContentDelta::ThinkingDelta { .. },
+                ..
+            }
+        )));
+        // A Text ContentBlockStart was also emitted (the answer)
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::ContentBlockStart {
+                content_block: ContentBlockApi::Text { .. },
+                ..
+            }
+        )));
+        // Exactly one terminal MessageStop
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::MessageStop))
+                .count(),
+            1,
+            "exactly one MessageStop"
+        );
     }
 
     #[test]

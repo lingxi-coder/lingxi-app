@@ -55,7 +55,16 @@ pub fn decode_generate_response(status: u16, body: &str) -> Result<MessageRespon
         .and_then(Value::as_array)
     {
         for part in parts {
-            if let Some(text) = part.get("text").and_then(Value::as_str) {
+            if part.get("thought").and_then(Value::as_bool) == Some(true) {
+                if let Some(t) = part.get("text").and_then(Value::as_str) {
+                    if !t.is_empty() {
+                        content.push(ContentBlockApi::Thinking {
+                            thinking: t.to_string(),
+                            signature: None,
+                        });
+                    }
+                }
+            } else if let Some(text) = part.get("text").and_then(Value::as_str) {
                 if !text.is_empty() {
                     content.push(ContentBlockApi::Text {
                         text: text.to_string(),
@@ -166,6 +175,20 @@ mod tests {
             other => panic!("expected tool_use, got {other:?}"),
         }
         assert_eq!(r.usage.cache_read_input_tokens, 4);
+    }
+
+    #[test]
+    fn thought_part_decoded_as_thinking_before_text() {
+        let body = r#"{"modelVersion":"gemini-2.0-flash-thinking","candidates":[{"content":{"role":"model","parts":[{"text":"reasoning","thought":true},{"text":"answer"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3}}"#;
+        let r = decode_generate_response(200, body).unwrap();
+        match &r.content[0] {
+            ContentBlockApi::Thinking { thinking, .. } => assert_eq!(thinking, "reasoning"),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+        match &r.content[1] {
+            ContentBlockApi::Text { text } => assert_eq!(text, "answer"),
+            other => panic!("expected Text, got {other:?}"),
+        }
     }
 
     #[test]

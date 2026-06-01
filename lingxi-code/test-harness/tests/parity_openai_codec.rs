@@ -7,7 +7,7 @@ use providers::{CanonicalRequest, OpenAiCodec, SseDecoder, WireCodec};
 
 #[test]
 fn encode_request_shape_is_openai_chat_completions() {
-    let codec = OpenAiCodec::new(None);
+    let codec = OpenAiCodec::new(None, None);
     let mut req = CanonicalRequest::new("gpt-4o");
     req.system = Some("sys".to_string());
     req.tools =

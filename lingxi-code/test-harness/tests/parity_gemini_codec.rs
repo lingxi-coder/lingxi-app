@@ -7,7 +7,7 @@ use providers::{CanonicalRequest, GeminiCodec, SseDecoder, WireCodec};
 
 #[test]
 fn encode_request_shape_is_gemini_generate_content() {
-    let codec = GeminiCodec::new(None);
+    let codec = GeminiCodec::new(None, None);
     let mut req = CanonicalRequest::new("gemini-2.0-flash");
     req.system = Some("sys".to_string());
     req.tools =

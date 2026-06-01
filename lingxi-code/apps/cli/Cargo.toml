@@ -23,6 +23,8 @@ traits = { path = "../../traits" }
 api-client = { path = "../../api-client" }
 command-api = { path = "../../command-api" }
 orchestrator = { path = "../../orchestrator" }
+engine = { path = "../../engine" }
+providers = { path = "../../providers" }
 compaction = { path = "../../compaction" }
 mcp = { path = "../../mcp" }
 hooks = { path = "../../hooks" }

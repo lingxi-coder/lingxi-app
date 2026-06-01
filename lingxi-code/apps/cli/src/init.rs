@@ -31,8 +31,9 @@ use command_api::RegistrySlashDispatcher;
 use engine_desktop::{desktop_command_registry, desktop_tool_registry};
 use orchestrator::test_support::{noop_hook_executor, NoOpPermissionGate, StaticMemoryProvider};
 use orchestrator::{
-    AnthropicProviderAdapter, ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig,
+    ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
 };
+use providers::{builtin_profiles, parse_profiles, ModelRouter, ProviderRegistry};
 use permission::PermissionMode;
 use platform_posix_minimal::{
     PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixMcp, PosixProcess,
@@ -95,6 +96,31 @@ pub fn resolve_api_base() -> String {
     std::env::var("LINGXI_API_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
 }
 
+/// Resolve the project dir used for settings lookup (argv `--cwd` or process cwd).
+fn cwd_for_settings(argv: &Argv) -> std::path::PathBuf {
+    argv.cwd
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+}
+
+/// Load the merged settings `providers` object (project + user + env layers).
+/// Returns `None` if settings can't be loaded or no `providers` block is set —
+/// callers then fall back to built-in profiles only.
+fn load_provider_profiles(
+    project_dir: &std::path::Path,
+) -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = engine::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: engine::settings::schema::SettingsJson::default(),
+    };
+    engine::settings::Settings::load(inputs)
+        .ok()
+        .and_then(|eff| eff.settings.providers)
+}
+
 /// Build the full runtime from parsed argv + the chosen output stream.
 ///
 /// `output` is the sink the orchestrator will push turn events to (plain
@@ -119,18 +145,31 @@ pub async fn build_runtime(
     let clock = Arc::new(PosixClock::new());
     let storage = Arc::new(PlainTextSecureStorage::new());
 
-    // (2) Build the api-client (AnthropicProvider). Note that an empty
+    // (2) Build the api-client via ProviderRegistry. Note that an empty
     //     api_key is accepted — the orchestrator's `run_turn` will fail
     //     with a 401 if no real key is configured, but the CLI binary
     //     itself constructs successfully so slash-command dispatch still
     //     works without an API key.
-    let provider = AnthropicProvider::new(api_key.clone(), Some(api_base.clone()));
+    //
+    // M-LLM-P2: route the orchestrator's model calls through a ProviderRegistry
+    // keyed by a `provider/model` string. Built-in profiles (anthropic/openai/
+    // gemini) plus any settings-declared `providers` profiles. Bare / `claude-*`
+    // models resolve to the built-in `anthropic` profile → AnthropicLlmProvider,
+    // which delegates verbatim to AnthropicProvider (byte-identical to the prior
+    // AnthropicProviderAdapter path). openai/gemini profiles surface a clear
+    // "codec not available until P3/P4" error when selected.
+    let env_snapshot: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let settings_providers = load_provider_profiles(&cwd_for_settings(argv));
+    let mut profiles = builtin_profiles(Some(api_base.clone()));
+    match parse_profiles(settings_providers.as_ref()) {
+        Ok(extra) => profiles.extend(extra),
+        Err(e) => tracing::warn!(error = %e, "ignoring malformed settings `providers` block"),
+    }
+    let registry = Arc::new(ProviderRegistry::new(profiles, env_snapshot, http.clone()));
     let api_client: Arc<dyn OrchestratorApiClient> =
-        Arc::new(AnthropicProviderAdapter::new(provider, http.clone()));
-    // M8-P6: the tool context's WebSearch tool builds `POST /v1/messages`
-    // requests through its own `Arc<AnthropicProvider>`. `AnthropicProvider`
-    // isn't `Clone`, so build a second cheap instance (it only stores the
-    // api key + base URL).
+        Arc::new(ProviderApiAdapter::new(registry as Arc<dyn ModelRouter>));
+    // The WebSearch tool still builds Anthropic `POST /v1/messages` requests via
+    // its own provider (server-side web search is Anthropic-only in v1).
     let tool_provider = Arc::new(AnthropicProvider::new(api_key, Some(api_base.clone())));
 
     // (3) Credential manager + OAuth client (used by /login, /logout).

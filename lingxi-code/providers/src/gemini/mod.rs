@@ -32,10 +32,17 @@ impl GeminiCodec {
 }
 
 impl WireCodec for GeminiCodec {
-    fn encode_request(&self, req: &CanonicalRequest, auth: &Auth) -> Result<HttpRequest, CodecError> {
+    fn encode_request(
+        &self,
+        req: &CanonicalRequest,
+        auth: &Auth,
+    ) -> Result<HttpRequest, CodecError> {
         let body = encode::encode_generate_body(req);
         let url = if req.stream {
-            format!("{}/models/{}:streamGenerateContent?alt=sse", self.base_url, req.model)
+            format!(
+                "{}/models/{}:streamGenerateContent?alt=sse",
+                self.base_url, req.model
+            )
         } else {
             format!("{}/models/{}:generateContent", self.base_url, req.model)
         };
@@ -69,14 +76,20 @@ mod tests {
     #[test]
     fn non_stream_url_has_model_and_generate_content() {
         let codec = GeminiCodec::new(None);
-        let auth = Auth::Header { name: "x-goog-api-key".to_string(), value: "k".to_string() };
+        let auth = Auth::Header {
+            name: "x-goog-api-key".to_string(),
+            value: "k".to_string(),
+        };
         let req = CanonicalRequest::new("gemini-2.0-flash");
         let http = codec.encode_request(&req, &auth).unwrap();
         assert_eq!(
             http.url,
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
         );
-        assert!(http.headers.iter().any(|(k, v)| k == "x-goog-api-key" && v == "k"));
+        assert!(http
+            .headers
+            .iter()
+            .any(|(k, v)| k == "x-goog-api-key" && v == "k"));
     }
 
     #[test]
@@ -85,6 +98,8 @@ mod tests {
         let mut req = CanonicalRequest::new("gemini-2.0-flash");
         req.stream = true;
         let http = codec.encode_request(&req, &Auth::None).unwrap();
-        assert!(http.url.ends_with("/models/gemini-2.0-flash:streamGenerateContent?alt=sse"));
+        assert!(http
+            .url
+            .ends_with("/models/gemini-2.0-flash:streamGenerateContent?alt=sse"));
     }
 }

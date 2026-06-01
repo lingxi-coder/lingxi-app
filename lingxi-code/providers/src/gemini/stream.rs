@@ -49,7 +49,11 @@ impl GeminiSseDecoder {
             return;
         }
         self.started = true;
-        let model = root.get("modelVersion").and_then(Value::as_str).unwrap_or_default().to_string();
+        let model = root
+            .get("modelVersion")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         out.push(StreamEvent::MessageStart {
             message: MessageResponse {
                 id: String::new(),
@@ -71,12 +75,16 @@ impl GeminiSseDecoder {
             self.next_index += 1;
             out.push(StreamEvent::ContentBlockStart {
                 index: self.text_index,
-                content_block: ContentBlockApi::Text { text: String::new() },
+                content_block: ContentBlockApi::Text {
+                    text: String::new(),
+                },
             });
         }
         out.push(StreamEvent::ContentBlockDelta {
             index: self.text_index,
-            delta: ContentDelta::TextDelta { text: text.to_string() },
+            delta: ContentDelta::TextDelta {
+                text: text.to_string(),
+            },
         });
     }
 
@@ -84,8 +92,15 @@ impl GeminiSseDecoder {
         self.saw_tool = true;
         let index = self.next_index;
         self.next_index += 1;
-        let name = fc.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
-        let args = fc.get("args").cloned().unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        let name = fc
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let args = fc
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
         out.push(StreamEvent::ContentBlockStart {
             index,
             content_block: ContentBlockApi::ToolUse {
@@ -97,7 +112,9 @@ impl GeminiSseDecoder {
         // Gemini sends the whole args at once → one InputJsonDelta, then close.
         out.push(StreamEvent::ContentBlockDelta {
             index,
-            delta: ContentDelta::InputJsonDelta { partial_json: args.to_string() },
+            delta: ContentDelta::InputJsonDelta {
+                partial_json: args.to_string(),
+            },
         });
         out.push(StreamEvent::ContentBlockStop { index });
     }
@@ -132,7 +149,11 @@ impl SseDecoder for GeminiSseDecoder {
         let Some(candidate) = root.get("candidates").and_then(|c| c.get(0)) else {
             return out;
         };
-        if let Some(parts) = candidate.get("content").and_then(|c| c.get("parts")).and_then(Value::as_array) {
+        if let Some(parts) = candidate
+            .get("content")
+            .and_then(|c| c.get("parts"))
+            .and_then(Value::as_array)
+        {
             for part in parts {
                 if let Some(text) = part.get("text").and_then(Value::as_str) {
                     self.handle_text(text, &mut out);
@@ -153,11 +174,15 @@ impl SseDecoder for GeminiSseDecoder {
         if self.started && !self.done {
             self.done = true;
             if self.text_open {
-                out.push(StreamEvent::ContentBlockStop { index: self.text_index });
+                out.push(StreamEvent::ContentBlockStop {
+                    index: self.text_index,
+                });
                 self.text_open = false;
             }
             out.push(StreamEvent::MessageDelta {
-                delta: MessageDeltaPayload { stop_reason: self.terminal_stop_reason() },
+                delta: MessageDeltaPayload {
+                    stop_reason: self.terminal_stop_reason(),
+                },
                 usage: self.usage,
             });
             out.push(StreamEvent::MessageStop);
@@ -188,13 +213,28 @@ mod tests {
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"lo"}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1}}"#,
             r#"{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}]}"#,
         ]);
-        assert!(matches!(events.first(), Some(StreamEvent::MessageStart { .. })));
+        assert!(matches!(
+            events.first(),
+            Some(StreamEvent::MessageStart { .. })
+        ));
         assert!(events.iter().any(|e| matches!(
             e, StreamEvent::ContentBlockDelta { delta: ContentDelta::TextDelta { text }, .. } if text == "hel"
         )));
         // exactly one terminal MessageStop + one MessageDelta (from finish, no [DONE])
-        assert_eq!(events.iter().filter(|e| matches!(e, StreamEvent::MessageStop)).count(), 1);
-        assert_eq!(events.iter().filter(|e| matches!(e, StreamEvent::MessageDelta { .. })).count(), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::MessageStop))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::MessageDelta { .. }))
+                .count(),
+            1
+        );
         assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
     }
 
@@ -207,16 +247,28 @@ mod tests {
             e, StreamEvent::ContentBlockStart { content_block: ContentBlockApi::ToolUse { name, .. }, .. } if name == "Bash"
         )));
         // the whole args arrive as one InputJsonDelta
-        let args: String = events.iter().filter_map(|e| match e {
-            StreamEvent::ContentBlockDelta { delta: ContentDelta::InputJsonDelta { partial_json }, .. } => Some(partial_json.clone()),
-            _ => None,
-        }).collect();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&args).unwrap()["command"], "ls");
+        let args: String = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ContentBlockDelta {
+                    delta: ContentDelta::InputJsonDelta { partial_json },
+                    ..
+                } => Some(partial_json.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&args).unwrap()["command"],
+            "ls"
+        );
         // functionCall present → terminal stop_reason is tool_use
-        let sr = events.iter().find_map(|e| match e {
-            StreamEvent::MessageDelta { delta, .. } => Some(delta.stop_reason.clone()),
-            _ => None,
-        }).flatten();
+        let sr = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::MessageDelta { delta, .. } => Some(delta.stop_reason.clone()),
+                _ => None,
+            })
+            .flatten();
         assert_eq!(sr.as_deref(), Some("tool_use"));
     }
 

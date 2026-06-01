@@ -262,7 +262,9 @@ mod tests {
     #[test]
     fn gemini_profile_resolves_now() {
         let r = registry(BTreeMap::new());
-        let resolved = r.resolve("gemini/gemini-2.0-flash").expect("gemini resolves in P4");
+        let resolved = r
+            .resolve("gemini/gemini-2.0-flash")
+            .expect("gemini resolves in P4");
         assert_eq!(resolved.model, "gemini-2.0-flash");
         assert_eq!(resolved.provider.id(), cost::ProviderId::GoogleGemini);
     }

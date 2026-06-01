@@ -55,7 +55,10 @@ pub fn encode_generate_body(req: &CanonicalRequest) -> Value {
     }
     if !req.tools.is_empty() {
         let decls: Vec<Value> = req.tools.iter().map(encode_tool).collect();
-        body.insert("tools".to_string(), json!([{"functionDeclarations": decls}]));
+        body.insert(
+            "tools".to_string(),
+            json!([{"functionDeclarations": decls}]),
+        );
     }
     let mut gen_config = Map::new();
     gen_config.insert("maxOutputTokens".to_string(), json!(req.max_tokens));
@@ -158,7 +161,9 @@ mod tests {
         req.system = Some("be helpful".to_string());
         req.messages = vec![ConversationMessage::User {
             id: MessageId::new(),
-            content: vec![ContentBlock::Text { text: "hi".to_string() }],
+            content: vec![ContentBlock::Text {
+                text: "hi".to_string(),
+            }],
         }];
         let body = encode_generate_body(&req);
         assert_eq!(body["systemInstruction"]["parts"][0]["text"], "be helpful");
@@ -201,12 +206,24 @@ mod tests {
         let body = encode_generate_body(&req);
         // model turn carries the functionCall
         assert_eq!(body["contents"][0]["role"], "model");
-        assert_eq!(body["contents"][0]["parts"][0]["functionCall"]["name"], "Bash");
-        assert_eq!(body["contents"][0]["parts"][0]["functionCall"]["args"]["command"], "ls");
+        assert_eq!(
+            body["contents"][0]["parts"][0]["functionCall"]["name"],
+            "Bash"
+        );
+        assert_eq!(
+            body["contents"][0]["parts"][0]["functionCall"]["args"]["command"],
+            "ls"
+        );
         // user turn answers with functionResponse matched on the SAME name
         assert_eq!(body["contents"][1]["role"], "user");
-        assert_eq!(body["contents"][1]["parts"][0]["functionResponse"]["name"], "Bash");
-        assert_eq!(body["contents"][1]["parts"][0]["functionResponse"]["response"]["result"], "file1 file2");
+        assert_eq!(
+            body["contents"][1]["parts"][0]["functionResponse"]["name"],
+            "Bash"
+        );
+        assert_eq!(
+            body["contents"][1]["parts"][0]["functionResponse"]["response"]["result"],
+            "file1 file2"
+        );
     }
 
     #[test]
@@ -216,7 +233,11 @@ mod tests {
             messages: vec![
                 ConversationMessage::Assistant {
                     id: MessageId::new(),
-                    content: vec![ContentBlock::ToolUse { id, name: "X".to_string(), input: json!({}) }],
+                    content: vec![ContentBlock::ToolUse {
+                        id,
+                        name: "X".to_string(),
+                        input: json!({}),
+                    }],
                     stop_reason: None,
                 },
                 ConversationMessage::User {
@@ -231,6 +252,9 @@ mod tests {
             ..CanonicalRequest::new("gemini-2.0-flash")
         };
         let body = encode_generate_body(&req);
-        assert_eq!(body["contents"][1]["parts"][0]["functionResponse"]["response"]["error"], "boom");
+        assert_eq!(
+            body["contents"][1]["parts"][0]["functionResponse"]["response"]["error"],
+            "boom"
+        );
     }
 }

@@ -10,9 +10,16 @@ fn encode_request_shape_is_gemini_generate_content() {
     let codec = GeminiCodec::new(None);
     let mut req = CanonicalRequest::new("gemini-2.0-flash");
     req.system = Some("sys".to_string());
-    req.tools = vec![serde_json::json!({"name":"Read","description":"d","input_schema":{"type":"object"}})];
+    req.tools =
+        vec![serde_json::json!({"name":"Read","description":"d","input_schema":{"type":"object"}})];
     let http = codec
-        .encode_request(&req, &Auth::Header { name: "x-goog-api-key".to_string(), value: "k".to_string() })
+        .encode_request(
+            &req,
+            &Auth::Header {
+                name: "x-goog-api-key".to_string(),
+                value: "k".to_string(),
+            },
+        )
         .unwrap();
     assert!(http.url.contains(":generateContent"));
     let body: serde_json::Value = serde_json::from_str(http.body.as_deref().unwrap()).unwrap();
@@ -45,10 +52,19 @@ fn sse_stream_reassembles_text_then_function_call() {
     }
     events.extend(d.finish());
 
-    assert!(matches!(events.first(), Some(StreamEvent::MessageStart { .. })));
+    assert!(matches!(
+        events.first(),
+        Some(StreamEvent::MessageStart { .. })
+    ));
     assert!(events.iter().any(|e| matches!(
         e, StreamEvent::ContentBlockStart { content_block: ContentBlockApi::ToolUse { name, .. }, .. } if name == "Bash"
     )));
-    assert_eq!(events.iter().filter(|e| matches!(e, StreamEvent::MessageStop)).count(), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::MessageStop))
+            .count(),
+        1
+    );
     assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
 }

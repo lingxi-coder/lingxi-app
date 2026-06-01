@@ -23,13 +23,24 @@ pub fn map_finish_reason(gemini: &str) -> String {
 ///   [`ApiError::MalformedStream`].
 pub fn decode_generate_response(status: u16, body: &str) -> Result<MessageResponse, ApiError> {
     if !(200..300).contains(&status) {
-        return Err(ApiError::Server { status, body: body.to_string() });
+        return Err(ApiError::Server {
+            status,
+            body: body.to_string(),
+        });
     }
     let root: Value = serde_json::from_str(body)
         .map_err(|e| ApiError::MalformedStream(format!("gemini response decode: {e}")))?;
 
-    let id = root.get("responseId").and_then(Value::as_str).unwrap_or_default().to_string();
-    let model = root.get("modelVersion").and_then(Value::as_str).unwrap_or_default().to_string();
+    let id = root
+        .get("responseId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let model = root
+        .get("modelVersion")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
 
     let candidate = root
         .get("candidates")
@@ -38,17 +49,34 @@ pub fn decode_generate_response(status: u16, body: &str) -> Result<MessageRespon
 
     let mut content: Vec<ContentBlockApi> = Vec::new();
     let mut saw_tool = false;
-    if let Some(parts) = candidate.get("content").and_then(|c| c.get("parts")).and_then(Value::as_array) {
+    if let Some(parts) = candidate
+        .get("content")
+        .and_then(|c| c.get("parts"))
+        .and_then(Value::as_array)
+    {
         for part in parts {
             if let Some(text) = part.get("text").and_then(Value::as_str) {
                 if !text.is_empty() {
-                    content.push(ContentBlockApi::Text { text: text.to_string() });
+                    content.push(ContentBlockApi::Text {
+                        text: text.to_string(),
+                    });
                 }
             } else if let Some(fc) = part.get("functionCall") {
                 saw_tool = true;
-                let name = fc.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
-                let input = fc.get("args").cloned().unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-                content.push(ContentBlockApi::ToolUse { id: ToolUseId::new(), name, input });
+                let name = fc
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let input = fc
+                    .get("args")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                content.push(ContentBlockApi::ToolUse {
+                    id: ToolUseId::new(),
+                    name,
+                    input,
+                });
             }
         }
     }
@@ -58,12 +86,21 @@ pub fn decode_generate_response(status: u16, body: &str) -> Result<MessageRespon
     let stop_reason = if saw_tool {
         Some("tool_use".to_string())
     } else {
-        candidate.get("finishReason").and_then(Value::as_str).map(map_finish_reason)
+        candidate
+            .get("finishReason")
+            .and_then(Value::as_str)
+            .map(map_finish_reason)
     };
 
     let usage = usage_from_value(root.get("usageMetadata"));
 
-    Ok(MessageResponse { id, model, content, stop_reason, usage })
+    Ok(MessageResponse {
+        id,
+        model,
+        content,
+        stop_reason,
+        usage,
+    })
 }
 
 /// Map `Gemini` `usageMetadata` to canonical `UsageApi`.
@@ -73,10 +110,19 @@ pub fn usage_from_value(usage: Option<&Value>) -> UsageApi {
         return UsageApi::default();
     };
     UsageApi {
-        input_tokens: u.get("promptTokenCount").and_then(Value::as_u64).unwrap_or(0),
-        output_tokens: u.get("candidatesTokenCount").and_then(Value::as_u64).unwrap_or(0),
+        input_tokens: u
+            .get("promptTokenCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        output_tokens: u
+            .get("candidatesTokenCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         cache_creation_input_tokens: 0,
-        cache_read_input_tokens: u.get("cachedContentTokenCount").and_then(Value::as_u64).unwrap_or(0),
+        cache_read_input_tokens: u
+            .get("cachedContentTokenCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
     }
 }
 
@@ -89,7 +135,10 @@ mod tests {
 
     #[test]
     fn non_2xx_is_server_error() {
-        assert!(matches!(decode_generate_response(403, "denied").unwrap_err(), ApiError::Server { status: 403, .. }));
+        assert!(matches!(
+            decode_generate_response(403, "denied").unwrap_err(),
+            ApiError::Server { status: 403, .. }
+        ));
     }
 
     #[test]

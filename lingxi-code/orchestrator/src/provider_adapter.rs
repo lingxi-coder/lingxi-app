@@ -105,7 +105,6 @@ mod tests {
             &self,
             _req: CanonicalRequest,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
-            use futures::StreamExt as _;
             Ok(futures::stream::empty::<Result<StreamEvent, ApiError>>().boxed())
         }
     }

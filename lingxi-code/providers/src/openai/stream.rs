@@ -29,6 +29,9 @@ pub struct OpenAiSseDecoder {
     tool_index: BTreeMap<u64, u32>,
     stop_reason: Option<String>,
     usage: Option<UsageApi>,
+    /// Set once a terminal sequence (`MessageDelta` + `MessageStop`) has been
+    /// emitted, so the `[DONE]` and `finish()` paths stay mutually exclusive.
+    done: bool,
 }
 
 impl OpenAiSseDecoder {
@@ -43,6 +46,7 @@ impl OpenAiSseDecoder {
             tool_index: BTreeMap::new(),
             stop_reason: None,
             usage: None,
+            done: false,
         }
     }
 
@@ -149,12 +153,15 @@ impl SseDecoder for OpenAiSseDecoder {
         let mut out = Vec::new();
         let data = data.trim();
         if data == "[DONE]" {
-            self.close_open_blocks(&mut out);
-            out.push(StreamEvent::MessageDelta {
-                delta: MessageDeltaPayload { stop_reason: self.stop_reason.clone() },
-                usage: self.usage,
-            });
-            out.push(StreamEvent::MessageStop);
+            if !self.done {
+                self.done = true;
+                self.close_open_blocks(&mut out);
+                out.push(StreamEvent::MessageDelta {
+                    delta: MessageDeltaPayload { stop_reason: self.stop_reason.clone() },
+                    usage: self.usage,
+                });
+                out.push(StreamEvent::MessageStop);
+            }
             return out;
         }
         let Ok(root) = serde_json::from_str::<Value>(data) else {
@@ -187,11 +194,18 @@ impl SseDecoder for OpenAiSseDecoder {
     }
 
     fn finish(&mut self) -> Vec<StreamEvent> {
-        // If the server closed the stream without a `[DONE]` sentinel, still
-        // terminate cleanly.
+        // If the stream closed without a `[DONE]` sentinel, emit the same
+        // terminal sequence `[DONE]` would have — a complete `MessageDelta`
+        // carrying the captured stop_reason + usage, then `MessageStop` — so
+        // neither is silently dropped. No-op once `[DONE]` already terminated.
         let mut out = Vec::new();
-        if self.started {
+        if self.started && !self.done {
+            self.done = true;
             self.close_open_blocks(&mut out);
+            out.push(StreamEvent::MessageDelta {
+                delta: MessageDeltaPayload { stop_reason: self.stop_reason.clone() },
+                usage: self.usage,
+            });
             out.push(StreamEvent::MessageStop);
         }
         out
@@ -277,5 +291,53 @@ mod tests {
         assert!(matches!(events.first(), Some(StreamEvent::MessageStart { .. })));
         assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
         assert!(!events.iter().any(|e| matches!(e, StreamEvent::ContentBlockStart { .. })));
+    }
+
+    #[test]
+    fn exactly_one_message_stop_after_done_then_finish() {
+        // The real pump pushes every frame (incl. `[DONE]`) then calls finish()
+        // on wire close — it must NOT double-emit the terminal events.
+        let events = run(&[
+            r#"{"id":"c","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"hi"}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+            "[DONE]",
+        ]);
+        assert_eq!(
+            events.iter().filter(|e| matches!(e, StreamEvent::MessageStop)).count(),
+            1,
+            "exactly one MessageStop"
+        );
+        assert_eq!(
+            events.iter().filter(|e| matches!(e, StreamEvent::MessageDelta { .. })).count(),
+            1,
+            "exactly one MessageDelta"
+        );
+    }
+
+    #[test]
+    fn finish_without_done_emits_terminal_delta_and_stop() {
+        // Stream ends WITHOUT a `[DONE]` sentinel: finish() must still flush a
+        // MessageDelta carrying the captured stop_reason + usage and a single
+        // MessageStop, so neither is dropped.
+        let events = run(&[
+            r#"{"id":"c","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"hi"}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1}}"#,
+        ]);
+        let (stop_reason, usage) = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::MessageDelta { delta, usage } => {
+                    Some((delta.stop_reason.clone(), *usage))
+                }
+                _ => None,
+            })
+            .expect("finish() must emit a MessageDelta");
+        assert_eq!(stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(usage.expect("usage carried").input_tokens, 4);
+        assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
+        assert_eq!(
+            events.iter().filter(|e| matches!(e, StreamEvent::MessageStop)).count(),
+            1
+        );
     }
 }

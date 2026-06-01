@@ -57,6 +57,9 @@ fn content_blocks_to_api(blocks: &[protocol::ContentBlock]) -> Value {
             } => {
                 json!({"type": "thinking", "thinking": thinking, "signature": signature})
             }
+            ContentBlock::Image { source } => {
+                json!({"type": "image", "source": source})
+            }
         })
         .collect();
     Value::Array(arr)
@@ -91,5 +94,20 @@ mod tests {
         let messages = req["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn image_block_encodes_to_anthropic_image_shape() {
+        use protocol::{ContentBlock, ImageSource};
+        let v = content_blocks_to_api(&[ContentBlock::Image {
+            source: ImageSource::Base64 {
+                media_type: "image/png".to_string(),
+                data: "YQ==".to_string(),
+            },
+        }]);
+        assert_eq!(v[0]["type"], "image");
+        assert_eq!(v[0]["source"]["type"], "base64");
+        assert_eq!(v[0]["source"]["media_type"], "image/png");
+        assert_eq!(v[0]["source"]["data"], "YQ==");
     }
 }

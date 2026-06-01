@@ -2,6 +2,17 @@
 
 Platform-agnostic Rust engine for an AI coding assistant with 1:1 behavioral
 parity to claude-code (2026-03-31 TypeScript reference) on desktop OSes.
+
+## Install the CLI
+
+    npm install -g lingxi      # or: bun install -g lingxi
+    uv tool install lingxi     # or: uvx lingxi  /  pip install lingxi
+
+Both install the `lingxi` command (the TUI), downloading the prebuilt
+`lingxi-cli` binary for your platform (Linux x64/arm64, macOS x64/arm64,
+Windows x64/arm64). Binaries are built + published per tagged release by
+`.github/workflows/lingxi-release.yml`.
+
 v0.10.0 (M9) completes the **Multi-Agent TUI Surface**: team message renderers,
 background-task rows + footer + dialog (live `TaskRegistryHandle` output
 tailing), coordinator/team status chrome, worker-permission chrome, and a

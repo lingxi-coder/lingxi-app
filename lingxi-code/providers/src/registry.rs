@@ -6,6 +6,7 @@ use crate::anthropic::AnthropicLlmProvider;
 use crate::model_spec::ModelSpec;
 use crate::profile::{ProviderKind, ProviderProfile};
 use crate::provider::LlmProvider;
+use crate::routing::{FallbackProvider, RetryingProvider, RoutingConfig};
 use api_client::ApiError;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -38,6 +39,11 @@ pub trait ModelRouter: Send + Sync {
 
     /// Profile names available for selection (for `/model` listing).
     fn available_profiles(&self) -> Vec<String>;
+
+    /// All model names available (aliases + profile names).
+    fn available_models(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Builds and caches providers from a set of profiles, over a single shared
@@ -47,22 +53,25 @@ pub struct ProviderRegistry<T: HttpTransport + Send + Sync + 'static> {
     env: BTreeMap<String, String>,
     transport: Arc<T>,
     cache: Mutex<BTreeMap<String, Arc<dyn LlmProvider>>>,
+    routing: RoutingConfig,
 }
 
 impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
     /// Construct from a profile set (built-ins + settings), an env snapshot
-    /// (for API-key lookup), and the shared transport.
+    /// (for API-key lookup), the shared transport, and routing configuration.
     #[must_use]
     pub fn new(
         profiles: BTreeMap<String, ProviderProfile>,
         env: BTreeMap<String, String>,
         transport: Arc<T>,
+        routing: RoutingConfig,
     ) -> Self {
         Self {
             profiles,
             env,
             transport,
             cache: Mutex::new(BTreeMap::new()),
+            routing,
         }
     }
 
@@ -73,6 +82,26 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
             .and_then(|var| self.env.get(var))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Look up or build a cached provider for `profile_name`.
+    ///
+    /// # Errors
+    /// Returns [`ApiError::Http`] with [`HttpError::InvalidRequest`] if
+    /// `profile_name` is not found in the profiles map.
+    fn provider_for_profile(&self, profile_name: &str) -> Result<Arc<dyn LlmProvider>, ApiError> {
+        let profile = self.profiles.get(profile_name).ok_or_else(|| {
+            ApiError::Http(HttpError::InvalidRequest(format!(
+                "unknown provider profile {profile_name:?}; configure it under settings `providers`"
+            )))
+        })?;
+        let mut cache = self.cache.lock().expect("registry cache mutex poisoned");
+        if let Some(existing) = cache.get(profile_name) {
+            return Ok(existing.clone());
+        }
+        let provider = self.build(profile_name, profile);
+        cache.insert(profile_name.to_string(), provider.clone());
+        Ok(provider)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -195,32 +224,53 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
 
 impl<T: HttpTransport + Send + Sync + 'static> ModelRouter for ProviderRegistry<T> {
     fn resolve(&self, model: &str) -> Result<Resolved, ApiError> {
-        let spec = ModelSpec::parse(model);
-        let profile = self.profiles.get(&spec.profile).ok_or_else(|| {
-            ApiError::Http(HttpError::InvalidRequest(format!(
-                "unknown provider profile {:?}; configure it under settings `providers`",
-                spec.profile
-            )))
-        })?;
+        // Step 1: apply alias substitution.
+        let target = self.routing.aliases.get(model).map_or(model, String::as_str);
 
-        // Cache one provider per profile.
-        let mut cache = self.cache.lock().expect("registry cache mutex poisoned");
-        if let Some(existing) = cache.get(&spec.profile) {
-            return Ok(Resolved {
-                provider: existing.clone(),
-                model: spec.model,
-            });
-        }
-        let provider = self.build(&spec.profile, profile);
-        cache.insert(spec.profile.clone(), provider.clone());
-        Ok(Resolved {
-            provider,
-            model: spec.model,
-        })
+        // Step 2: parse the (possibly aliased) target.
+        let spec = ModelSpec::parse(target);
+
+        // Step 3: build the primary provider.
+        let primary = self.provider_for_profile(&spec.profile)?;
+
+        // Step 4: if a fallback chain is configured for this model or target,
+        // wrap in FallbackProvider.
+        let provider: Arc<dyn LlmProvider> = if let Some(chain) =
+            self.routing.fallback.get(model).or_else(|| self.routing.fallback.get(target))
+        {
+            let mut members: Vec<(Arc<dyn LlmProvider>, String)> =
+                vec![(primary, spec.model.clone())];
+            for fb_target in chain {
+                let fb_spec = ModelSpec::parse(fb_target);
+                let fb_provider = self.provider_for_profile(&fb_spec.profile)?;
+                members.push((fb_provider, fb_spec.model));
+            }
+            Arc::new(FallbackProvider::new(members))
+        } else {
+            primary
+        };
+
+        // Step 5: optionally wrap in RetryingProvider.
+        let provider: Arc<dyn LlmProvider> =
+            if let Some(ref policy) = self.routing.retry {
+                Arc::new(RetryingProvider::new(provider, policy.max_attempts, policy.backoff_ms))
+            } else {
+                provider
+            };
+
+        Ok(Resolved { provider, model: spec.model })
     }
 
     fn available_profiles(&self) -> Vec<String> {
         self.profiles.keys().cloned().collect()
+    }
+
+    fn available_models(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.routing.aliases.keys().cloned().collect();
+        out.extend(self.profiles.keys().cloned());
+        out.sort();
+        out.dedup();
+        out
     }
 }
 
@@ -228,6 +278,7 @@ impl<T: HttpTransport + Send + Sync + 'static> ModelRouter for ProviderRegistry<
 mod tests {
     use super::*;
     use crate::profile::builtin_profiles;
+    use crate::routing::RoutingConfig;
     use crate::testutil::MockTransport;
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -237,7 +288,7 @@ mod tests {
         profiles.extend(extra);
         let mut env = BTreeMap::new();
         env.insert("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string());
-        ProviderRegistry::new(profiles, env, Arc::new(MockTransport::responding(200, "")))
+        ProviderRegistry::new(profiles, env, Arc::new(MockTransport::responding(200, "")), RoutingConfig::default())
     }
 
     #[test]
@@ -404,5 +455,27 @@ mod tests {
             .expect("gemini resolves in P4");
         assert_eq!(resolved.model, "gemini-2.0-flash");
         assert_eq!(resolved.provider.id(), cost::ProviderId::GoogleGemini);
+    }
+
+    #[test]
+    fn alias_resolves_to_target() {
+        let profiles = builtin_profiles(Some("https://mock.local".to_string()));
+        let mut env = BTreeMap::new();
+        env.insert("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string());
+        let mut aliases = BTreeMap::new();
+        aliases.insert("fast".to_string(), "openai/gpt-4o".to_string());
+        let routing = RoutingConfig { aliases, ..RoutingConfig::default() };
+        let r = ProviderRegistry::new(profiles, env, Arc::new(MockTransport::responding(200, "")), routing);
+        let resolved = r.resolve("fast").expect("alias resolves");
+        assert_eq!(resolved.model, "gpt-4o");
+        assert_eq!(resolved.provider.id(), cost::ProviderId::OpenAI);
+    }
+
+    #[test]
+    fn no_routing_resolves_unchanged() {
+        let r = registry(BTreeMap::new());
+        let resolved = r.resolve("claude-opus-4-7").expect("resolves");
+        assert_eq!(resolved.model, "claude-opus-4-7");
+        assert_eq!(resolved.provider.id(), cost::ProviderId::Anthropic);
     }
 }

@@ -15,7 +15,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 futures = { workspace = true }
 gcp_auth = "0.12"
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 aws-sigv4 = "1"
 aws-credential-types = "1"
 

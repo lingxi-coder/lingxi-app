@@ -8,6 +8,12 @@ tailing), coordinator/team status chrome, worker-permission chrome, and a
 read-only `/agents` discovery screen — built UI-first against a presentation
 adapter (real data where the engine is live, deterministic fixtures where the
 execution pool is stubbed).
+v0.11.0 adds **multi-LLM-provider support**: an in-engine provider layer so
+LingXi can use OpenAI / OpenAI-compatible (Groq, Together, Ollama, vLLM,
+OpenRouter, …) and Google Gemini as the model backend, selected via a
+`provider/model` string. Anthropic stays the default and claude-code parity is
+unchanged — every provider normalizes to LingXi's canonical message format. See
+`docs/LLM_PROVIDERS.md`.
 v0.8.0 (M7) ships the **TUI Surface**: the full single-user terminal UI on top
 of the v0.7.0 foundation — full ANSI/markdown/syntect rendering + StructuredDiff,
 ~22 message renderers, a windowed `VirtualMessageList` scrollback, an advanced
@@ -61,7 +67,7 @@ subsystems (Settings, Memory, API client, OAuth refresh, cost events,
 telemetry schema) identically. See `docs/PLATFORMS.md` for the per-OS
 setup notes + the "M3 engine subsystems" section.
 
-## Subsystem status (v0.10.0)
+## Subsystem status (v0.11.0)
 
 | Subsystem | Status | Milestone |
 |---|---|---|
@@ -86,6 +92,7 @@ setup notes + the "M3 engine subsystems" section.
 | Team / Coordinator / Swarm renderers, voice, mouse mode, inline image display | Out of scope | M8 |
 | Composable engine (`engine-desktop` / `engine-mobile` composition roots, ~73 flat crates, §8.1 dep gate) | Complete | M8 / v0.9.0 |
 | Mobile platform + UniFFI callbacks (`platform-ios/android`, `tool-camera/voice/share`, `ios-framework`/`android-aar` + Swift/Kotlin skeletons) | Skeleton only — full bring-up in M9 | M8 / v0.9.0 |
+| LLM Providers (OpenAI-compatible + Gemini codecs, `provider/model` routing, per-provider cost) | Complete | v0.11.0 |
 
 ## Architecture
 
@@ -98,6 +105,7 @@ Full design lives in three docs:
   engine design, v0.2.0)
 
 Navigation aid: `docs/ARCHITECTURE.md`. Security model: `docs/SECURITY.md`.
+Provider configuration: `docs/LLM_PROVIDERS.md`.
 Behavioral parity guarantees with claude-code: see
 `docs/ARCHITECTURE.md#claude-code-parity-guarantees-locked-in-v030`
 (M2 v0.3.0 additions) and the

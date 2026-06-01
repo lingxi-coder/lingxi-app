@@ -6,6 +6,10 @@
 
 use std::sync::Arc;
 
+use aws_credential_types::Credentials;
+use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningSettings};
+use aws_sigv4::sign::v4;
+
 use crate::auth::Auth;
 use api_client::ApiError;
 use async_trait::async_trait;
@@ -84,6 +88,110 @@ impl Authenticator for GcpTokenAuthenticator {
     }
 }
 
+/// Signs Bedrock requests with AWS `SigV4` using environment-variable credentials
+/// (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / optional `AWS_SESSION_TOKEN`).
+pub struct SigV4Authenticator {
+    region: String,
+}
+
+impl SigV4Authenticator {
+    /// Construct for an AWS region (e.g. `us-east-1`).
+    #[must_use]
+    pub fn new(region: String) -> Self {
+        Self { region }
+    }
+
+    /// Sign `req` in-place using the supplied credentials and timestamp.
+    ///
+    /// Extracted from [`Authenticator::authorize`] so it can be called with fixed
+    /// inputs in tests (no env vars, no `SystemTime::now()` non-determinism).
+    ///
+    /// # Errors
+    /// Returns [`ApiError::Unauthorized`] if `SigV4` signing fails.
+    fn sign_in_place(
+        &self,
+        req: &mut HttpRequest,
+        access_key: &str,
+        secret_key: &str,
+        session_token: Option<&str>,
+        time: std::time::SystemTime,
+    ) -> Result<(), ApiError> {
+        let creds = Credentials::new(
+            access_key,
+            secret_key,
+            session_token.map(str::to_owned),
+            None,
+            "bedrock-env",
+        );
+        let identity = creds.into();
+
+        let settings = SigningSettings::default();
+        let signing_params = v4::SigningParams::builder()
+            .identity(&identity)
+            .region(self.region.as_str())
+            .name("bedrock")
+            .time(time)
+            .settings(settings)
+            .build()
+            .map_err(|e| ApiError::Unauthorized(format!("SigV4: failed to build signing params: {e}")))?
+            .into();
+
+        let method_str = match req.method {
+            protocol::HttpMethod::Post => "POST",
+            protocol::HttpMethod::Get => "GET",
+            protocol::HttpMethod::Put => "PUT",
+            protocol::HttpMethod::Patch => "PATCH",
+            protocol::HttpMethod::Delete => "DELETE",
+            protocol::HttpMethod::Head => "HEAD",
+            protocol::HttpMethod::Options => "OPTIONS",
+        };
+        let body_bytes: &[u8] = req.body.as_deref().map_or(&[], str::as_bytes);
+
+        // Headers must be borrowed from `req`; collect refs before calling sign.
+        let header_pairs: Vec<(&str, &str)> = req
+            .headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        let signable = SignableRequest::new(
+            method_str,
+            &req.url,
+            header_pairs.iter().copied(),
+            SignableBody::Bytes(body_bytes),
+        )
+        .map_err(|e| ApiError::Unauthorized(format!("SigV4: failed to build signable request: {e}")))?;
+
+        let (instructions, _sig) = sign(signable, &signing_params)
+            .map_err(|e| ApiError::Unauthorized(format!("SigV4: signing failed: {e}")))?
+            .into_parts();
+
+        for (name, value) in instructions.headers() {
+            req.headers.push((name.to_string(), value.to_string()));
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Authenticator for SigV4Authenticator {
+    async fn authorize(&self, req: &mut HttpRequest) -> Result<(), ApiError> {
+        let access_key = std::env::var("AWS_ACCESS_KEY_ID")
+            .map_err(|_| ApiError::Unauthorized("AWS_ACCESS_KEY_ID not set".to_string()))?;
+        let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
+            .map_err(|_| ApiError::Unauthorized("AWS_SECRET_ACCESS_KEY not set".to_string()))?;
+        let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
+        self.sign_in_place(
+            req,
+            &access_key,
+            &secret_key,
+            session_token.as_deref(),
+            std::time::SystemTime::now(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +242,30 @@ mod tests {
     fn gcp_authenticator_constructs() {
         let _a = GcpTokenAuthenticator::new();
         // authorize() needs live GCP credentials, so it is not exercised here.
+    }
+
+    #[test]
+    fn sigv4_signs_with_authorization_header_and_is_deterministic() {
+        let auth = SigV4Authenticator::new("us-east-1".to_string());
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_440_938_160);
+        let mk = || HttpRequest {
+            method: protocol::HttpMethod::Post,
+            url: "https://bedrock-runtime.us-east-1.amazonaws.com/model/m/invoke".to_string(),
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: Some("{}".to_string()),
+            timeout: None,
+        };
+        let mut a = mk();
+        auth.sign_in_place(&mut a, "AKIDEXAMPLE", "secret", None, t).unwrap();
+        let (_, v) = a
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .expect("authz header");
+        assert!(v.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/"));
+        assert!(v.contains("/us-east-1/bedrock/aws4_request"));
+        let mut b = mk();
+        auth.sign_in_place(&mut b, "AKIDEXAMPLE", "secret", None, t).unwrap();
+        assert_eq!(a.headers, b.headers); // deterministic
     }
 }

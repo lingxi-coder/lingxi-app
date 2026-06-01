@@ -29,7 +29,7 @@ mod testutil;
 
 pub use anthropic::AnthropicLlmProvider;
 pub use auth::Auth;
-pub use authenticator::{Authenticator, GcpTokenAuthenticator, StaticAuth};
+pub use authenticator::{Authenticator, GcpTokenAuthenticator, SigV4Authenticator, StaticAuth};
 pub use capabilities::{Capabilities, ReasoningSupport, SystemStyle};
 pub use client::GenericClient;
 pub use codec::{SseDecoder, WireCodec};

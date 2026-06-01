@@ -16,6 +16,8 @@ async-trait.workspace = true
 futures = { workspace = true }
 gcp_auth = "0.12"
 tokio = { workspace = true, features = ["sync"] }
+aws-sigv4 = "1"
+aws-credential-types = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }

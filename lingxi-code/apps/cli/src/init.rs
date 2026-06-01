@@ -38,7 +38,7 @@ use platform_posix_minimal::{
     PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixMcp, PosixProcess,
     PosixRuntime, PosixSandbox, PosixWorktree,
 };
-use providers::{builtin_profiles, parse_profiles, ModelRouter, ProviderRegistry};
+use providers::{builtin_profiles, parse_profiles, ModelRouter, ProviderRegistry, RoutingConfig};
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
@@ -160,7 +160,14 @@ pub async fn build_runtime(
         Ok(extra) => profiles.extend(extra),
         Err(e) => tracing::warn!(error = %e, "ignoring malformed settings `providers` block"),
     }
-    let registry = Arc::new(ProviderRegistry::new(profiles, env_snapshot, http.clone()));
+    // P7: routing config (aliases/fallback/retry) is loaded + passed in Task B;
+    // for now an empty config preserves today's direct resolution.
+    let registry = Arc::new(ProviderRegistry::new(
+        profiles,
+        env_snapshot,
+        http.clone(),
+        RoutingConfig::default(),
+    ));
     let api_client: Arc<dyn OrchestratorApiClient> =
         Arc::new(ProviderApiAdapter::new(registry as Arc<dyn ModelRouter>));
     // The WebSearch tool still builds Anthropic `POST /v1/messages` requests via

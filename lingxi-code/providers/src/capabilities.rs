@@ -45,13 +45,13 @@ pub struct Capabilities {
 
 impl Capabilities {
     /// Capabilities for an `OpenAI` / OpenAI-compatible provider (v1: text +
-    /// native tools, no vision/cache/thinking-in-history).
+    /// image + native tools, no cache/thinking-in-history).
     #[must_use]
     pub fn openai() -> Self {
         Self {
             native_tools: true,
             streaming: true,
-            vision: false,
+            vision: true,
             prompt_cache: false,
             reasoning: ReasoningSupport::None,
             parallel_tool_calls: true,
@@ -60,14 +60,14 @@ impl Capabilities {
         }
     }
 
-    /// Capabilities for a native `Gemini` provider (v1: text + native tools,
-    /// no vision/cache/thinking-in-history).
+    /// Capabilities for a native `Gemini` provider (v1: text + image + native
+    /// tools, no cache/thinking-in-history).
     #[must_use]
     pub fn gemini() -> Self {
         Self {
             native_tools: true,
             streaming: true,
-            vision: false,
+            vision: true,
             prompt_cache: false,
             reasoning: ReasoningSupport::None,
             parallel_tool_calls: true,
@@ -102,5 +102,11 @@ mod tests {
         assert!(c.native_tools);
         assert!(c.streaming);
         assert_eq!(c.system_style, SystemStyle::TopLevel);
+    }
+
+    #[test]
+    fn openai_and_gemini_support_vision() {
+        assert!(Capabilities::openai().vision);
+        assert!(Capabilities::gemini().vision);
     }
 }

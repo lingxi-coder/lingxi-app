@@ -8,7 +8,7 @@ use api_client::types::{MessageResponse, StreamEvent};
 use api_client::ApiError;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use protocol::ConversationMessage;
+use protocol::{ContentBlock, ConversationMessage};
 use providers::{CanonicalRequest, ModelRouter};
 use std::sync::Arc;
 
@@ -25,6 +25,16 @@ impl ProviderApiAdapter {
     }
 }
 
+/// Whether any message carries an image content block.
+fn messages_contain_image(msgs: &[ConversationMessage]) -> bool {
+    msgs.iter().any(|m| match m {
+        ConversationMessage::User { content, .. } | ConversationMessage::Assistant { content, .. } => {
+            content.iter().any(|b| matches!(b, ContentBlock::Image { .. }))
+        }
+        ConversationMessage::System { .. } => false,
+    })
+}
+
 #[async_trait]
 impl OrchestratorApiClient for ProviderApiAdapter {
     async fn messages_create(
@@ -34,6 +44,13 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         msgs: Vec<ConversationMessage>,
     ) -> Result<MessageResponse, ApiError> {
         let resolved = self.router.resolve(model)?;
+        if messages_contain_image(&msgs) && !resolved.provider.capabilities().vision {
+            return Err(ApiError::Http(traits::HttpError::InvalidRequest(format!(
+                "model {model:?} ({:?}) does not support image input; \
+                 select a vision-capable model or remove images",
+                resolved.provider.id()
+            ))));
+        }
         let mut req = CanonicalRequest::new(resolved.model);
         req.system = system.map(str::to_string);
         req.messages = msgs;
@@ -51,6 +68,13 @@ impl StreamingApiClient for ProviderApiAdapter {
         tools: Vec<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
         let resolved = self.router.resolve(model)?;
+        if messages_contain_image(&messages) && !resolved.provider.capabilities().vision {
+            return Err(ApiError::Http(traits::HttpError::InvalidRequest(format!(
+                "model {model:?} ({:?}) does not support image input; \
+                 select a vision-capable model or remove images",
+                resolved.provider.id()
+            ))));
+        }
         if !tools.is_empty() && !resolved.provider.capabilities().native_tools {
             return Err(ApiError::Http(traits::HttpError::InvalidRequest(format!(
                 "model {model:?} ({:?}) does not support tool use; \
@@ -253,10 +277,7 @@ mod tests {
             result.is_err(),
             "must reject tools on a non-tool-capable model"
         );
-        let err = match result {
-            Err(e) => e,
-            Ok(_) => panic!("expected Err"),
-        };
+        let Err(err) = result else { panic!("expected Err") };
         assert!(matches!(
             err,
             ApiError::Http(traits::HttpError::InvalidRequest(_))
@@ -271,5 +292,45 @@ mod tests {
             .stream("custom/no-tool-model", None, Vec::new(), Vec::new())
             .await
             .expect("no tools → allowed");
+    }
+
+    #[tokio::test]
+    async fn image_to_non_vision_model_fails_fast() {
+        use protocol::{ContentBlock, ConversationMessage, ImageSource, MessageId};
+        let router = std::sync::Arc::new(FixedRouter(std::sync::Arc::new(NoToolsProvider)));
+        let adapter = ProviderApiAdapter::new(router);
+        let msgs = vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".to_string(),
+                    data: "YWJj".to_string(),
+                },
+            }],
+        }];
+        let result = adapter.messages_create("custom/x", None, msgs).await;
+        assert!(result.is_err(), "image to a non-vision model must fail fast");
+        assert!(matches!(
+            result,
+            Err(ApiError::Http(traits::HttpError::InvalidRequest(_)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn image_to_vision_model_is_allowed() {
+        use protocol::{ContentBlock, ConversationMessage, ImageSource, MessageId};
+        let provider = Arc::new(StubProvider::new());
+        let router = Arc::new(StubRouter {
+            provider: provider.clone(),
+            seen_resolve: Mutex::new(None),
+        });
+        let adapter = ProviderApiAdapter::new(router);
+        let msgs = vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Image {
+                source: ImageSource::Url { url: "https://x/y.png".to_string() },
+            }],
+        }];
+        adapter.messages_create("anthropic/claude", None, msgs).await.expect("vision model accepts image");
     }
 }

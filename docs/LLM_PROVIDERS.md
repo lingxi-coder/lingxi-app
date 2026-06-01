@@ -41,6 +41,24 @@ it as `profilename/model`.
 }
 ```
 
+## Vision / image input
+
+Image input is supported across all three built-in providers (Anthropic,
+OpenAI, Gemini) via the **programmatic / API path**: place one or more
+`ContentBlock::Image { source: ImageSource::Base64 { media_type, data } }` (or
+`ImageSource::Url { url }`) blocks in a `ConversationMessage::User` `content`
+vector alongside any `ContentBlock::Text` blocks. Each provider translates the
+block to its native wire format automatically (`base64` for Anthropic/Gemini,
+`image_url` for OpenAI).
+
+**TUI paste-to-image wiring is a tracked follow-up.** The M7-10 paste path
+records only a file-path `source` string per detected image in `PasteState`
+(see `tui/src/components/prompt_input/image_paste.rs`); no bytes are read or
+retained. At the submit site (`app.rs` `run_one_submit` / `dispatch
+KeyAction::Submit`) only the plain prompt text string reaches the orchestrator
+— the `paste` state is never consulted. Until the TUI wiring lands, image
+references appear as `[Image #N]` placeholder text in submitted messages.
+
 ## Capabilities & limitations (v1)
 
 - **Tool use** is translated natively for all three providers (the agentic loop
@@ -48,7 +66,7 @@ it as `profilename/model`.
   rejected when tools are present, rather than silently degraded.
 - **Anthropic-only features** (prompt caching, extended-thinking blocks, server
   tools, citations) are omitted on other providers — never fabricated.
-- **Not yet supported:** image/vision input, reasoning-model parameters
-  (`max_completion_tokens`), Azure OpenAI's deployment URL template, and
-  Vertex/Bedrock signed auth. Cost is attributed per provider; unpriced models
-  record zero cost rather than an invented rate.
+- **Not yet supported:** reasoning-model parameters (`max_completion_tokens`),
+  Azure OpenAI's deployment URL template, and Vertex/Bedrock signed auth. Cost
+  is attributed per provider; unpriced models record zero cost rather than an
+  invented rate.

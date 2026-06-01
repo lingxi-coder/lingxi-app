@@ -17,6 +17,7 @@ pub mod error;
 pub mod model_spec;
 pub mod profile;
 pub mod provider;
+pub mod registry;
 pub mod request;
 
 #[cfg(test)]
@@ -31,4 +32,5 @@ pub use error::CodecError;
 pub use model_spec::{ModelSpec, DEFAULT_PROFILE};
 pub use profile::{builtin_profiles, parse_profiles, ProviderKind, ProviderProfile};
 pub use provider::LlmProvider;
+pub use registry::{ModelRouter, ProviderRegistry, Resolved};
 pub use request::{CanonicalRequest, DEFAULT_MAX_TOKENS};

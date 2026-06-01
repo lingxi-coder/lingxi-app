@@ -31,6 +31,10 @@ fn content_block_size(b: &ContentBlock) -> u64 {
             .map(|s| s.len() as u64)
             .unwrap_or(0),
         ContentBlock::Thinking { .. } => 0,
+        ContentBlock::Image { source } => match source {
+            crate::ImageSource::Base64 { data, .. } => data.len() as u64,
+            crate::ImageSource::Url { url } => url.len() as u64,
+        },
     }
 }
 
@@ -52,6 +56,20 @@ mod tests {
             content: "abc".into(),
         };
         assert_eq!(text_byte_size(&m), 3);
+    }
+
+    #[test]
+    fn image_block_sized_by_base64_data_len() {
+        let m = ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Image {
+                source: crate::ImageSource::Base64 {
+                    media_type: "image/png".to_string(),
+                    data: "YWJj".to_string(),
+                },
+            }],
+        };
+        assert_eq!(text_byte_size(&m), 4); // "YWJj".len()
     }
 
     #[test]

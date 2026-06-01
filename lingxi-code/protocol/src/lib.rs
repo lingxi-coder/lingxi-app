@@ -29,7 +29,9 @@ pub use ids::{
     SnapshotId, ToolUseId,
 };
 pub use message_size::text_byte_size;
-pub use messages::{ContentBlock, ConversationMessage, MemoryEntry, MemoryEntryTier, MessageRole};
+pub use messages::{
+    ContentBlock, ConversationMessage, ImageSource, MemoryEntry, MemoryEntryTier, MessageRole,
+};
 pub use secret::{
     RedactableContent, Secret, SecretKindDto, SecureStorageData, SecureStorageMetadata,
 };

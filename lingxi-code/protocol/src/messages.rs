@@ -53,6 +53,31 @@ pub enum ContentBlock {
         /// Optional cryptographic signature attesting to the trace.
         signature: Option<String>,
     },
+    /// An image input (vision). Serializes to the Anthropic image-block wire
+    /// shape; the OpenAI/Gemini codecs translate it to their native forms.
+    Image {
+        /// Where the image bytes come from.
+        source: ImageSource,
+    },
+}
+
+/// Source of a [`ContentBlock::Image`]. Serializes to Anthropic's
+/// `source` wire shape (`{"type":"base64",…}` / `{"type":"url",…}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageSource {
+    /// Inline base64-encoded image bytes.
+    Base64 {
+        /// MIME type, e.g. `image/png`.
+        media_type: String,
+        /// Base64-encoded image bytes (no `data:` prefix).
+        data: String,
+    },
+    /// A remote image URL the provider fetches.
+    Url {
+        /// The image URL.
+        url: String,
+    },
 }
 
 /// A single message in a conversation, role-tagged for serde.
@@ -218,6 +243,54 @@ mod tests {
         let s = serde_json::to_string(&e).unwrap();
         let e2: MemoryEntry = serde_json::from_str(&s).unwrap();
         assert_eq!(e, e2);
+    }
+
+    #[test]
+    fn image_base64_block_matches_anthropic_wire() {
+        let block = ContentBlock::Image {
+            source: ImageSource::Base64 {
+                media_type: "image/png".to_string(),
+                data: "aGVsbG8=".to_string(),
+            },
+        };
+        let v = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}
+            })
+        );
+        let back: ContentBlock = serde_json::from_value(v).unwrap();
+        assert_eq!(back, block);
+    }
+
+    #[test]
+    fn image_url_block_matches_anthropic_wire() {
+        let block = ContentBlock::Image {
+            source: ImageSource::Url { url: "https://x/y.png".to_string() },
+        };
+        let v = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"type":"image","source":{"type":"url","url":"https://x/y.png"}})
+        );
+    }
+
+    #[test]
+    fn conversation_message_with_image_roundtrips_jsonl() {
+        let m = ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/jpeg".to_string(),
+                    data: "Zm9v".to_string(),
+                },
+            }],
+        };
+        let line = serde_json::to_string(&m).unwrap();
+        let back: ConversationMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(back, m);
     }
 
     #[test]

@@ -1,0 +1,133 @@
+name: lingxi-release
+# Cross-builds lingxi-cli for 6 targets, stages npm + PyPI packages, and
+# publishes them. Publish steps are gated on secrets (NPM_TOKEN / PYPI_TOKEN),
+# so the build+stage path runs safely on any tag even without tokens.
+#
+# `ring` (a transitive dep) compiles C, so every non-host target needs a C
+# toolchain: musl targets use `cross` (containerized musl toolchain); windows
+# targets use the windows-latest runner's VS Build Tools (incl. arm64 cross).
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+concurrency:
+  group: lingxi-release
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin,       os: macos-latest,   cross: false }
+          - { target: x86_64-apple-darwin,        os: macos-latest,   cross: false }
+          - { target: x86_64-unknown-linux-musl,  os: ubuntu-latest,  cross: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest,  cross: true }
+          - { target: x86_64-pc-windows-msvc,     os: windows-latest, cross: false }
+          - { target: aarch64-pc-windows-msvc,    os: windows-latest, cross: false }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.82 + target
+        shell: bash
+        run: |
+          rustup toolchain install 1.82.0 --profile minimal
+          rustup default 1.82.0
+          rustup target add ${{ matrix.target }}
+      - name: Install cross
+        if: ${{ matrix.cross }}
+        run: cargo install cross --locked
+      - name: Build (cross)
+        if: ${{ matrix.cross }}
+        working-directory: lingxi-code
+        run: cross build --release -p cli --target ${{ matrix.target }}
+      - name: Build (cargo)
+        if: ${{ !matrix.cross }}
+        working-directory: lingxi-code
+        shell: bash
+        run: cargo build --release -p cli --target ${{ matrix.target }}
+      - name: Collect binary
+        working-directory: lingxi-code
+        shell: bash
+        run: |
+          mkdir -p out
+          ext=""; [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
+          cp "target/${{ matrix.target }}/release/lingxi-cli$ext" "out/lingxi-cli$ext"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: lingxi-code/out/*
+
+  package-and-publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Map secrets to env at the job level: the `secrets` context is NOT available
+    # in step-level `if:`, but `env` is — so the publish steps gate on these.
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Reassemble target/<triple>/release layout
+        shell: bash
+        run: |
+          cd lingxi-code
+          for d in ../artifacts/bin-*; do
+            t="$(basename "$d" | sed 's/^bin-//')"
+            mkdir -p "target/$t/release"
+            f="$(ls "$d")"
+            cp "$d/$f" "target/$t/release/$f"
+          done
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+      - uses: astral-sh/setup-uv@v5
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: echo "v=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Stage npm packages
+        working-directory: lingxi-code
+        run: |
+          for p in lingxi lingxi-linux-x64 lingxi-linux-arm64 lingxi-darwin-x64 lingxi-darwin-arm64 lingxi-win32-x64 lingxi-win32-arm64; do
+            python3 npm/scripts/build_npm_package.py --package "$p" --release-version "${{ steps.ver.outputs.v }}" --staging-dir "/tmp/npm/$p" --vendor-src target
+          done
+      - name: Build wheels (one per target)
+        working-directory: lingxi-code/pypi
+        shell: bash
+        run: |
+          declare -A TAG=(
+            [x86_64-apple-darwin]=macosx_11_0_x86_64
+            [aarch64-apple-darwin]=macosx_11_0_arm64
+            [x86_64-unknown-linux-musl]=musllinux_1_2_x86_64
+            [aarch64-unknown-linux-musl]=musllinux_1_2_aarch64
+            [x86_64-pc-windows-msvc]=win_amd64
+            [aarch64-pc-windows-msvc]=win_arm64
+          )
+          for t in "${!TAG[@]}"; do
+            rm -rf src/lingxi_cli_bin/bin && mkdir -p src/lingxi_cli_bin/bin
+            ext=""; [[ "$t" == *windows* ]] && ext=".exe"
+            cp "../target/$t/release/lingxi-cli$ext" "src/lingxi_cli_bin/bin/lingxi$ext"
+            printf '{"target":"%s"}' "$t" > src/lingxi_cli_bin/lingxi-package.json
+            LINGXI_CLI_BIN_PLATFORM_TAG="${TAG[$t]}" uv build --wheel --out-dir dist
+          done
+      - name: Publish to npm
+        if: ${{ env.NPM_TOKEN != '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for p in lingxi-linux-x64 lingxi-linux-arm64 lingxi-darwin-x64 lingxi-darwin-arm64 lingxi-win32-x64 lingxi-win32-arm64 lingxi; do
+            (cd "/tmp/npm/$p" && npm publish --access public)
+          done
+      - name: Publish to PyPI
+        if: ${{ env.PYPI_TOKEN != '' }}
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: uv publish lingxi-code/pypi/dist/*.whl

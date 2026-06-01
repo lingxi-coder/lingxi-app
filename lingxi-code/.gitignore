@@ -2,3 +2,13 @@ target/
 **/*.rs.bk
 Cargo.lock.*
 .DS_Store
+
+# packaging build output
+/npm/vendor/
+/npm/dist/
+/pypi/dist/
+/pypi/build/
+/pypi/src/lingxi_cli_bin/bin/
+/pypi/src/lingxi_cli_bin/lingxi-package.json
+/pypi/.pytest_cache/
+/out/

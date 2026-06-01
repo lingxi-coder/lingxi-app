@@ -1,7 +1,7 @@
 //! `GenericClient` drives a `WireCodec` over a `traits::HttpTransport`. This
 //! is the harness the OpenAI/Gemini codecs plug into (P3/P4).
 
-use crate::auth::Auth;
+use crate::authenticator::Authenticator;
 use crate::capabilities::Capabilities;
 use crate::codec::{SseDecoder, WireCodec};
 use crate::provider::LlmProvider;
@@ -19,25 +19,25 @@ use traits::{HttpError, HttpTransport};
 /// A codec-driven provider: encode → transport → decode.
 pub struct GenericClient<C: WireCodec> {
     codec: C,
-    auth: Auth,
+    authenticator: Arc<dyn Authenticator>,
     transport: Arc<dyn HttpTransport>,
     id: ProviderId,
     capabilities: Capabilities,
 }
 
 impl<C: WireCodec> GenericClient<C> {
-    /// Construct a client from a codec, auth, transport, identity, and caps.
+    /// Construct a client from a codec, authenticator, transport, id, and caps.
     #[must_use]
     pub fn new(
         codec: C,
-        auth: Auth,
+        authenticator: Arc<dyn Authenticator>,
         transport: Arc<dyn HttpTransport>,
         id: ProviderId,
         capabilities: Capabilities,
     ) -> Self {
         Self {
             codec,
-            auth,
+            authenticator,
             transport,
             id,
             capabilities,
@@ -106,10 +106,11 @@ impl<C: WireCodec + 'static> LlmProvider for GenericClient<C> {
     }
 
     async fn complete(&self, req: CanonicalRequest) -> Result<MessageResponse, ApiError> {
-        let http = self
+        let mut http = self
             .codec
-            .encode_request(&req, &self.auth)
+            .encode_request(&req)
             .map_err(|e| ApiError::Http(HttpError::InvalidRequest(e.to_string())))?;
+        self.authenticator.authorize(&mut http).await?;
         let resp = self.transport.request(http).await.map_err(ApiError::Http)?;
         self.codec.decode_response(resp.status, &resp.body)
     }
@@ -120,10 +121,11 @@ impl<C: WireCodec + 'static> LlmProvider for GenericClient<C> {
     ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
         let mut req = req;
         req.stream = true;
-        let http = self
+        let mut http = self
             .codec
-            .encode_request(&req, &self.auth)
+            .encode_request(&req)
             .map_err(|e| ApiError::Http(HttpError::InvalidRequest(e.to_string())))?;
+        self.authenticator.authorize(&mut http).await?;
         let wire = self
             .transport
             .stream_sse(http)
@@ -147,11 +149,7 @@ mod tests {
     struct MockCodec;
 
     impl WireCodec for MockCodec {
-        fn encode_request(
-            &self,
-            _req: &CanonicalRequest,
-            _auth: &Auth,
-        ) -> Result<HttpRequest, CodecError> {
+        fn encode_request(&self, _req: &CanonicalRequest) -> Result<HttpRequest, CodecError> {
             Ok(HttpRequest {
                 method: HttpMethod::Post,
                 url: "https://mock.local/v1/chat".to_string(),
@@ -198,7 +196,7 @@ mod tests {
     fn client(transport: MockTransport) -> GenericClient<MockCodec> {
         GenericClient::new(
             MockCodec,
-            Auth::None,
+            Arc::new(crate::authenticator::StaticAuth::new(crate::auth::Auth::None)),
             Arc::new(transport),
             cost::ProviderId::OpenAI,
             Capabilities::anthropic(),

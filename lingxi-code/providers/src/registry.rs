@@ -93,6 +93,8 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
                 } else {
                     crate::auth::Auth::Bearer(key)
                 };
+                let authenticator = Arc::new(crate::authenticator::StaticAuth::new(auth))
+                    as Arc<dyn crate::authenticator::Authenticator>;
                 let codec = crate::openai::OpenAiCodec::new(profile.base_url.clone());
                 let id = if name == "openai" {
                     cost::ProviderId::OpenAI
@@ -103,12 +105,12 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
                 };
                 let client = crate::client::GenericClient::new(
                     codec,
-                    auth,
+                    authenticator,
                     self.transport.clone(),
                     id,
                     crate::capabilities::Capabilities::openai(),
                 );
-                std::sync::Arc::new(client) as std::sync::Arc<dyn crate::provider::LlmProvider>
+                Arc::new(client) as Arc<dyn crate::provider::LlmProvider>
             }
             ProviderKind::Gemini => {
                 let key = self.api_key_for(profile);
@@ -120,15 +122,17 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
                         value: key,
                     }
                 };
+                let authenticator = Arc::new(crate::authenticator::StaticAuth::new(auth))
+                    as Arc<dyn crate::authenticator::Authenticator>;
                 let codec = crate::gemini::GeminiCodec::new(profile.base_url.clone());
                 let client = crate::client::GenericClient::new(
                     codec,
-                    auth,
+                    authenticator,
                     self.transport.clone(),
                     cost::ProviderId::GoogleGemini,
                     crate::capabilities::Capabilities::gemini(),
                 );
-                std::sync::Arc::new(client) as std::sync::Arc<dyn crate::provider::LlmProvider>
+                Arc::new(client) as Arc<dyn crate::provider::LlmProvider>
             }
         }
     }

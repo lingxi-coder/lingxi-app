@@ -4,7 +4,6 @@ pub mod decode;
 pub mod encode;
 pub mod stream;
 
-use crate::auth::Auth;
 use crate::codec::{SseDecoder, WireCodec};
 use crate::error::CodecError;
 use crate::request::CanonicalRequest;
@@ -32,11 +31,7 @@ impl GeminiCodec {
 }
 
 impl WireCodec for GeminiCodec {
-    fn encode_request(
-        &self,
-        req: &CanonicalRequest,
-        auth: &Auth,
-    ) -> Result<HttpRequest, CodecError> {
+    fn encode_request(&self, req: &CanonicalRequest) -> Result<HttpRequest, CodecError> {
         let body = encode::encode_generate_body(req);
         let url = if req.stream {
             format!(
@@ -47,7 +42,6 @@ impl WireCodec for GeminiCodec {
             format!("{}/models/{}:generateContent", self.base_url, req.model)
         };
         let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
-        auth.apply(&mut headers);
         if req.stream {
             headers.push(("accept".to_string(), "text/event-stream".to_string()));
         }
@@ -76,12 +70,8 @@ mod tests {
     #[test]
     fn non_stream_url_has_model_and_generate_content() {
         let codec = GeminiCodec::new(None);
-        let auth = Auth::Header {
-            name: "x-goog-api-key".to_string(),
-            value: "k".to_string(),
-        };
         let req = CanonicalRequest::new("gemini-2.0-flash");
-        let http = codec.encode_request(&req, &auth).unwrap();
+        let http = codec.encode_request(&req).unwrap();
         assert_eq!(
             http.url,
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
@@ -89,7 +79,7 @@ mod tests {
         assert!(http
             .headers
             .iter()
-            .any(|(k, v)| k == "x-goog-api-key" && v == "k"));
+            .any(|(k, v)| k == "content-type" && v == "application/json"));
     }
 
     #[test]
@@ -97,7 +87,7 @@ mod tests {
         let codec = GeminiCodec::new(None);
         let mut req = CanonicalRequest::new("gemini-2.0-flash");
         req.stream = true;
-        let http = codec.encode_request(&req, &Auth::None).unwrap();
+        let http = codec.encode_request(&req).unwrap();
         assert!(http
             .url
             .ends_with("/models/gemini-2.0-flash:streamGenerateContent?alt=sse"));

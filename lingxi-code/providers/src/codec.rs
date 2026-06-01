@@ -2,7 +2,6 @@
 //! builds a request, `decode_response` parses a body, and `SseDecoder`
 //! turns provider SSE frames into canonical stream events.
 
-use crate::auth::Auth;
 use crate::error::CodecError;
 use crate::request::CanonicalRequest;
 use api_client::types::{MessageResponse, StreamEvent};
@@ -11,15 +10,12 @@ use protocol::HttpRequest;
 
 /// Pure encode/decode for one provider's wire format.
 pub trait WireCodec: Send + Sync {
-    /// Build the native HTTP request for `req`, attaching `auth` headers.
+    /// Build the native HTTP request for `req` (auth-agnostic — the
+    /// `GenericClient`'s `Authenticator` attaches credentials afterward).
     ///
     /// # Errors
     /// Returns [`CodecError`] if the request cannot be represented.
-    fn encode_request(
-        &self,
-        req: &CanonicalRequest,
-        auth: &Auth,
-    ) -> Result<HttpRequest, CodecError>;
+    fn encode_request(&self, req: &CanonicalRequest) -> Result<HttpRequest, CodecError>;
 
     /// Decode a non-streaming response body into the canonical shape.
     ///

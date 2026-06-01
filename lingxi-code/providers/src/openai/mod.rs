@@ -4,7 +4,6 @@ pub mod decode;
 pub mod encode;
 pub mod stream;
 
-use crate::auth::Auth;
 use crate::codec::{SseDecoder, WireCodec};
 use crate::error::CodecError;
 use crate::request::CanonicalRequest;
@@ -31,14 +30,9 @@ impl OpenAiCodec {
 }
 
 impl WireCodec for OpenAiCodec {
-    fn encode_request(
-        &self,
-        req: &CanonicalRequest,
-        auth: &Auth,
-    ) -> Result<HttpRequest, CodecError> {
+    fn encode_request(&self, req: &CanonicalRequest) -> Result<HttpRequest, CodecError> {
         let body = encode::encode_chat_body(req);
         let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
-        auth.apply(&mut headers);
         if req.stream {
             headers.push(("accept".to_string(), "text/event-stream".to_string()));
         }
@@ -65,23 +59,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encode_request_targets_chat_completions_with_bearer() {
+    fn encode_request_targets_chat_completions() {
         let codec = OpenAiCodec::new(None);
-        let auth = Auth::Bearer("sk-test".to_string());
         let req = CanonicalRequest::new("gpt-4o");
-        let http = codec.encode_request(&req, &auth).unwrap();
+        let http = codec.encode_request(&req).unwrap();
         assert_eq!(http.url, "https://api.openai.com/v1/chat/completions");
         assert!(http
             .headers
             .iter()
-            .any(|(k, v)| k == "authorization" && v == "Bearer sk-test"));
+            .any(|(k, v)| k == "content-type" && v == "application/json"));
     }
 
     #[test]
     fn custom_base_url_is_used() {
         let codec = OpenAiCodec::new(Some("https://api.groq.com/openai/v1".to_string()));
         let http = codec
-            .encode_request(&CanonicalRequest::new("llama"), &Auth::None)
+            .encode_request(&CanonicalRequest::new("llama"))
             .unwrap();
         assert_eq!(http.url, "https://api.groq.com/openai/v1/chat/completions");
     }

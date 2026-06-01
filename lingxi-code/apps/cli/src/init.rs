@@ -33,12 +33,12 @@ use orchestrator::test_support::{noop_hook_executor, NoOpPermissionGate, StaticM
 use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
 };
-use providers::{builtin_profiles, parse_profiles, ModelRouter, ProviderRegistry};
 use permission::PermissionMode;
 use platform_posix_minimal::{
     PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixMcp, PosixProcess,
     PosixRuntime, PosixSandbox, PosixWorktree,
 };
+use providers::{builtin_profiles, parse_profiles, ModelRouter, ProviderRegistry};
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;

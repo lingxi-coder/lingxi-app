@@ -77,7 +77,11 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
             .unwrap_or_default()
     }
 
-    fn build(&self, name: &str, profile: &ProviderProfile) -> Result<Arc<dyn LlmProvider>, ApiError> {
+    fn build(
+        &self,
+        name: &str,
+        profile: &ProviderProfile,
+    ) -> Result<Arc<dyn LlmProvider>, ApiError> {
         match profile.kind {
             ProviderKind::Anthropic => {
                 let key = self.api_key_for(profile);
@@ -164,7 +168,9 @@ mod tests {
     #[test]
     fn openai_profile_errors_codec_unavailable_in_p2() {
         let r = registry(BTreeMap::new());
-        let err = r.resolve("openai/gpt-4o").expect_err("no openai codec in P2");
+        let err = r
+            .resolve("openai/gpt-4o")
+            .expect_err("no openai codec in P2");
         match err {
             api_client::ApiError::Http(traits::HttpError::InvalidRequest(msg)) => {
                 assert!(msg.contains("openai"), "msg: {msg}");
@@ -184,7 +190,10 @@ mod tests {
         let r = registry(BTreeMap::new());
         let a = r.resolve("claude-opus-4-7").unwrap();
         let b = r.resolve("claude-opus-4-7").unwrap();
-        assert!(Arc::ptr_eq(&a.provider, &b.provider), "same Arc reused from cache");
+        assert!(
+            Arc::ptr_eq(&a.provider, &b.provider),
+            "same Arc reused from cache"
+        );
     }
 
     #[test]
@@ -192,13 +201,22 @@ mod tests {
         let r = registry(BTreeMap::new());
         let mut got = r.available_profiles();
         got.sort();
-        assert_eq!(got, vec!["anthropic".to_string(), "gemini".to_string(), "openai".to_string()]);
+        assert_eq!(
+            got,
+            vec![
+                "anthropic".to_string(),
+                "gemini".to_string(),
+                "openai".to_string()
+            ]
+        );
     }
 
     #[test]
     fn gemini_profile_errors_codec_unavailable_in_p2() {
         let r = registry(BTreeMap::new());
-        let err = r.resolve("gemini/gemini-2.0-flash").expect_err("no gemini codec in P2");
+        let err = r
+            .resolve("gemini/gemini-2.0-flash")
+            .expect_err("no gemini codec in P2");
         match err {
             api_client::ApiError::Http(traits::HttpError::InvalidRequest(msg)) => {
                 assert!(msg.contains("gemini"), "msg: {msg}");

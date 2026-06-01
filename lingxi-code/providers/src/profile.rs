@@ -94,9 +94,14 @@ pub fn parse_profiles(
         let obj = value.as_object().ok_or_else(|| {
             CodecError::Unsupported(format!("provider profile {name:?} must be an object"))
         })?;
-        let type_str = obj.get("type").and_then(serde_json::Value::as_str).ok_or_else(|| {
-            CodecError::Unsupported(format!("provider profile {name:?} is missing a string \"type\""))
-        })?;
+        let type_str = obj
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                CodecError::Unsupported(format!(
+                    "provider profile {name:?} is missing a string \"type\""
+                ))
+            })?;
         let kind = ProviderKind::parse(type_str)?;
         let base_url = obj
             .get("baseUrl")
@@ -130,7 +135,10 @@ mod tests {
         assert_eq!(b["anthropic"].kind, ProviderKind::Anthropic);
         assert_eq!(b["openai"].kind, ProviderKind::OpenAi);
         assert_eq!(b["gemini"].kind, ProviderKind::Gemini);
-        assert_eq!(b["anthropic"].base_url.as_deref(), Some("https://api.anthropic.com"));
+        assert_eq!(
+            b["anthropic"].base_url.as_deref(),
+            Some("https://api.anthropic.com")
+        );
     }
 
     #[test]
@@ -147,14 +155,20 @@ mod tests {
         );
         let p = parse_profiles(Some(&raw)).unwrap();
         assert_eq!(p["groq"].kind, ProviderKind::OpenAi);
-        assert_eq!(p["groq"].base_url.as_deref(), Some("https://api.groq.com/openai/v1"));
+        assert_eq!(
+            p["groq"].base_url.as_deref(),
+            Some("https://api.groq.com/openai/v1")
+        );
         assert_eq!(p["groq"].api_key_env.as_deref(), Some("GROQ_API_KEY"));
     }
 
     #[test]
     fn parse_null_api_key_env_means_no_auth() {
         let mut raw = BTreeMap::new();
-        raw.insert("ollama".to_string(), json!({"type": "openai", "baseUrl": "http://localhost:11434/v1", "apiKeyEnv": null}));
+        raw.insert(
+            "ollama".to_string(),
+            json!({"type": "openai", "baseUrl": "http://localhost:11434/v1", "apiKeyEnv": null}),
+        );
         let p = parse_profiles(Some(&raw)).unwrap();
         assert!(p["ollama"].api_key_env.is_none());
     }

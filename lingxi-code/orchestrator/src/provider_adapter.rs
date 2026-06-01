@@ -155,8 +155,14 @@ mod tests {
             .await
             .expect("ok");
         // Router saw the full string; provider saw the stripped local id.
-        assert_eq!(router.seen_resolve.lock().unwrap().as_deref(), Some("openai/gpt-4o"));
-        assert_eq!(provider.seen_model.lock().unwrap().as_deref(), Some("gpt-4o"));
+        assert_eq!(
+            router.seen_resolve.lock().unwrap().as_deref(),
+            Some("openai/gpt-4o")
+        );
+        assert_eq!(
+            provider.seen_model.lock().unwrap().as_deref(),
+            Some("gpt-4o")
+        );
         assert_eq!(provider.seen_system.lock().unwrap().as_deref(), Some("sys"));
         assert_eq!(resp.model, "gpt-4o");
     }

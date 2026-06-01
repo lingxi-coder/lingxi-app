@@ -271,8 +271,14 @@ mod tests {
         p.insert("groq".to_string(), json!({"type": "openai"}));
         let mut n = BTreeMap::new();
         n.insert("ollama".to_string(), json!({"type": "openai"}));
-        let prev = SettingsJson { providers: Some(p), ..Default::default() };
-        let next = SettingsJson { providers: Some(n), ..Default::default() };
+        let prev = SettingsJson {
+            providers: Some(p),
+            ..Default::default()
+        };
+        let next = SettingsJson {
+            providers: Some(n),
+            ..Default::default()
+        };
         let merged = merge(prev, next).providers.unwrap();
         assert!(merged.contains_key("groq") && merged.contains_key("ollama"));
     }

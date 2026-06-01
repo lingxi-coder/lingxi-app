@@ -68,6 +68,10 @@ pub struct ProviderProfile {
     pub project: Option<String>,
     /// GCP region, e.g. `us-central1` (Vertex only).
     pub region: Option<String>,
+    /// Provider-local model ids this profile declares (e.g.
+    /// `["llama-3.3-70b"]`). Surfaced by `/model`'s list mode as
+    /// `{profile}/{model}`. Empty by default.
+    pub models: Vec<String>,
 }
 
 /// Built-in profiles, keyed by name. `anthropic` uses `anthropic_base` (the
@@ -88,6 +92,7 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             azure_api_version: None,
             project: None,
             region: None,
+            models: Vec::new(),
         },
     );
     m.insert(
@@ -102,6 +107,7 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             azure_api_version: None,
             project: None,
             region: None,
+            models: Vec::new(),
         },
     );
     m.insert(
@@ -116,6 +122,7 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             azure_api_version: None,
             project: None,
             region: None,
+            models: Vec::new(),
         },
     );
     m
@@ -180,6 +187,16 @@ pub fn parse_profiles(
             .get("region")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
+        let models = obj
+            .get("models")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         out.insert(
             name.clone(),
             ProviderProfile {
@@ -192,6 +209,7 @@ pub fn parse_profiles(
                 azure_api_version,
                 project,
                 region,
+                models,
             },
         );
     }
@@ -298,6 +316,23 @@ mod tests {
         let p = parse_profiles(Some(&raw)).unwrap();
         assert_eq!(p["bedrock"].kind, ProviderKind::Bedrock);
         assert_eq!(p["bedrock"].region.as_deref(), Some("us-east-1"));
+    }
+
+    #[test]
+    fn parse_models_array() {
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "groq".to_string(),
+            json!({"type": "openai", "models": ["llama-3.3-70b", "mixtral-8x7b"]}),
+        );
+        let p = parse_profiles(Some(&raw)).unwrap();
+        assert_eq!(p["groq"].models, vec!["llama-3.3-70b", "mixtral-8x7b"]);
+        // Absent `models` defaults to empty.
+        let mut raw2 = BTreeMap::new();
+        raw2.insert("openai".to_string(), json!({"type": "openai"}));
+        assert!(parse_profiles(Some(&raw2)).unwrap()["openai"]
+            .models
+            .is_empty());
     }
 
     #[test]

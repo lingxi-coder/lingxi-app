@@ -266,8 +266,20 @@ impl<T: HttpTransport + Send + Sync + 'static> ModelRouter for ProviderRegistry<
     }
 
     fn available_models(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.routing.aliases.keys().cloned().collect();
-        out.extend(self.profiles.keys().cloned());
+        // Spec §3.6: emit `{profile}/{model}` for each declared model, the bare
+        // profile name when a profile declares no models, and `@alias` for each
+        // routing alias.
+        let mut out: Vec<String> = Vec::new();
+        for (name, profile) in &self.profiles {
+            if profile.models.is_empty() {
+                out.push(name.clone());
+            } else {
+                for m in &profile.models {
+                    out.push(format!("{name}/{m}"));
+                }
+            }
+        }
+        out.extend(self.routing.aliases.keys().map(|a| format!("@{a}")));
         out.sort();
         out.dedup();
         out
@@ -289,6 +301,47 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string());
         ProviderRegistry::new(profiles, env, Arc::new(MockTransport::responding(200, "")), RoutingConfig::default())
+    }
+
+    #[test]
+    fn available_models_lists_provider_model_ids_and_aliases() {
+        let mut profiles = builtin_profiles(Some("https://mock.local".to_string()));
+        profiles.insert(
+            "groq".to_string(),
+            ProviderProfile {
+                kind: ProviderKind::OpenAi,
+                base_url: Some("https://api.groq.com/openai/v1".to_string()),
+                api_key_env: Some("GROQ_API_KEY".to_string()),
+                reasoning_effort: None,
+                thinking_budget: None,
+                azure_deployment: None,
+                azure_api_version: None,
+                project: None,
+                region: None,
+                models: vec!["llama-3.3-70b".to_string()],
+            },
+        );
+        let mut env = BTreeMap::new();
+        env.insert("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string());
+        let mut aliases = BTreeMap::new();
+        aliases.insert("fast".to_string(), "groq/llama-3.3-70b".to_string());
+        let routing = RoutingConfig {
+            aliases,
+            ..RoutingConfig::default()
+        };
+        let r = ProviderRegistry::new(
+            profiles,
+            env,
+            Arc::new(MockTransport::responding(200, "")),
+            routing,
+        );
+        let models = r.available_models();
+        // declared model → provider/model id
+        assert!(models.contains(&"groq/llama-3.3-70b".to_string()));
+        // alias → @alias
+        assert!(models.iter().any(|m| m == "@fast"));
+        // built-in profile with no declared models → bare name
+        assert!(models.contains(&"anthropic".to_string()));
     }
 
     #[test]
@@ -330,6 +383,7 @@ mod tests {
                 azure_api_version: None,
                 project: None,
                 region: None,
+                models: Vec::new(),
             },
         );
         let r = registry(extra);
@@ -358,6 +412,7 @@ mod tests {
                 azure_api_version: Some("2024-10-21".to_string()),
                 project: None,
                 region: None,
+                models: Vec::new(),
             },
         );
         let r = registry(extra);
@@ -384,6 +439,7 @@ mod tests {
                 azure_api_version: None,
                 project: Some("p".to_string()),
                 region: Some("us-central1".to_string()),
+                models: Vec::new(),
             },
         );
         let r = registry(extra);
@@ -413,6 +469,7 @@ mod tests {
                 azure_api_version: None,
                 project: None,
                 region: Some("us-east-1".to_string()),
+                models: Vec::new(),
             },
         );
         let r = registry(extra);

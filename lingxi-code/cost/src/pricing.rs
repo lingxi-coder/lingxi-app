@@ -217,6 +217,17 @@ impl PricingCatalog {
         c.insert_anthropic("claude-haiku-4-5", 1_000, 5_000, 1_250, 100);
         // Haiku 3.5 — $0.80/$4.
         c.insert_anthropic("claude-3-5-haiku", 800, 4_000, 1_000, 80);
+        // OpenAI reference tiers — approximate published list prices
+        // (milli-USD per Mtok; cache_read = cached-input discount, cache_write
+        // unused since OpenAI usage reports only cached read tokens).
+        c.insert_priced(ProviderId::OpenAI, "gpt-4o", 2_500, 10_000, 2_500, 1_250);
+        c.insert_priced(ProviderId::OpenAI, "gpt-4o-mini", 150, 600, 150, 75);
+        c.insert_priced(ProviderId::OpenAI, "gpt-4.1", 2_000, 8_000, 2_000, 500);
+        c.insert_priced(ProviderId::OpenAI, "gpt-4.1-mini", 400, 1_600, 400, 100);
+        // Google Gemini reference tiers — approximate published list prices.
+        c.insert_priced(ProviderId::GoogleGemini, "gemini-2.0-flash", 100, 400, 100, 25);
+        c.insert_priced(ProviderId::GoogleGemini, "gemini-1.5-pro", 1_250, 5_000, 1_250, 312);
+        c.insert_priced(ProviderId::GoogleGemini, "gemini-1.5-flash", 75, 300, 75, 18);
         c
     }
 
@@ -276,6 +287,52 @@ impl PricingCatalog {
         );
     }
 
+    /// Insert a priced model entry for any provider. Unlike
+    /// [`Self::insert_anthropic`], this adds no Anthropic-specific
+    /// non-token (web-search) rate — `OpenAI` / `Gemini` bill only tokens in
+    /// v1. Rates are milli-USD per Mtok (= nano-USD per token).
+    fn insert_priced(
+        &mut self,
+        provider: ProviderId,
+        model: &str,
+        input_per_mtok_milli_usd: u64,
+        output_per_mtok_milli_usd: u64,
+        cache_write_per_mtok_milli_usd: u64,
+        cache_read_per_mtok_milli_usd: u64,
+    ) {
+        let mr = ModelRef {
+            provider: provider.clone(),
+            model: model.into(),
+        };
+        let mut rates: HashMap<TokenClass, MoneyPerToken> = HashMap::new();
+        rates.insert(
+            TokenClass::Input,
+            MoneyPerToken { nano_usd_per_token: input_per_mtok_milli_usd },
+        );
+        rates.insert(
+            TokenClass::Output,
+            MoneyPerToken { nano_usd_per_token: output_per_mtok_milli_usd },
+        );
+        rates.insert(
+            TokenClass::CacheWrite,
+            MoneyPerToken { nano_usd_per_token: cache_write_per_mtok_milli_usd },
+        );
+        rates.insert(
+            TokenClass::CacheRead,
+            MoneyPerToken { nano_usd_per_token: cache_read_per_mtok_milli_usd },
+        );
+        self.entries.insert(
+            mr.clone(),
+            ModelPricing {
+                model_ref: mr,
+                token_rates: rates,
+                non_token_rates_nano_usd: HashMap::new(),
+                effective_from: None,
+                source: PricingSource::BuiltInReference { provider },
+            },
+        );
+    }
+
     /// Resolve a [`ModelRef`] to its pricing entry.
     ///
     /// Prefers exact-model lookup, then falls back to a provider default if
@@ -329,5 +386,33 @@ mod tests {
             c.resolve(&mr).unwrap_err(),
             CostError::UnpricedModel(_)
         ));
+    }
+
+    #[test]
+    fn builtin_has_openai_gpt_4o() {
+        let c = PricingCatalog::builtin_reference();
+        let mr = ModelRef { provider: ProviderId::OpenAI, model: "gpt-4o".into() };
+        let (p, res) = c.resolve(&mr).unwrap();
+        assert!(matches!(res, PricingResolution::ExactModel { .. }));
+        assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 2_500);
+        assert_eq!(p.token_rates[&TokenClass::Output].nano_usd_per_token, 10_000);
+    }
+
+    #[test]
+    fn builtin_has_gemini_flash() {
+        let c = PricingCatalog::builtin_reference();
+        let mr = ModelRef { provider: ProviderId::GoogleGemini, model: "gemini-2.0-flash".into() };
+        let (p, res) = c.resolve(&mr).unwrap();
+        assert!(matches!(res, PricingResolution::ExactModel { .. }));
+        assert_eq!(p.token_rates[&TokenClass::Output].nano_usd_per_token, 400);
+    }
+
+    #[test]
+    fn unknown_openai_model_is_unpriced_not_misattributed() {
+        let c = PricingCatalog::builtin_reference();
+        let mr = ModelRef { provider: ProviderId::OpenAI, model: "gpt-9-ultra".into() };
+        // No exact entry and no OpenAI provider-default registered → UnpricedModel
+        // (cost attributes to OpenAI but invents no rate).
+        assert!(c.resolve(&mr).is_err());
     }
 }

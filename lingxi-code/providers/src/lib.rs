@@ -10,6 +10,7 @@
 
 pub mod anthropic;
 pub mod auth;
+pub mod authenticator;
 pub mod capabilities;
 pub mod client;
 pub mod codec;
@@ -28,6 +29,7 @@ mod testutil;
 
 pub use anthropic::AnthropicLlmProvider;
 pub use auth::Auth;
+pub use authenticator::{Authenticator, StaticAuth};
 pub use capabilities::{Capabilities, ReasoningSupport, SystemStyle};
 pub use client::GenericClient;
 pub use codec::{SseDecoder, WireCodec};

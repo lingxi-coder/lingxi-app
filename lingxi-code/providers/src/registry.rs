@@ -194,4 +194,25 @@ mod tests {
         got.sort();
         assert_eq!(got, vec!["anthropic".to_string(), "gemini".to_string(), "openai".to_string()]);
     }
+
+    #[test]
+    fn gemini_profile_errors_codec_unavailable_in_p2() {
+        let r = registry(BTreeMap::new());
+        let err = r.resolve("gemini/gemini-2.0-flash").expect_err("no gemini codec in P2");
+        match err {
+            api_client::ApiError::Http(traits::HttpError::InvalidRequest(msg)) => {
+                assert!(msg.contains("gemini"), "msg: {msg}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn codec_unavailable_errors_are_repeatable() {
+        // openai/gemini failures are not cached, so they keep erroring (until
+        // P3/P4 land their codecs).
+        let r = registry(BTreeMap::new());
+        assert!(r.resolve("openai/gpt-4o").is_err());
+        assert!(r.resolve("openai/gpt-4o").is_err());
+    }
 }

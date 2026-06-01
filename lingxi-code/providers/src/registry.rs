@@ -75,6 +75,7 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
             .unwrap_or_default()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn build(&self, name: &str, profile: &ProviderProfile) -> Arc<dyn LlmProvider> {
         match profile.kind {
             ProviderKind::Anthropic => {
@@ -125,6 +126,23 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
                 let authenticator = Arc::new(crate::authenticator::StaticAuth::new(auth))
                     as Arc<dyn crate::authenticator::Authenticator>;
                 let codec = crate::gemini::GeminiCodec::new(profile.base_url.clone(), profile.thinking_budget);
+                let client = crate::client::GenericClient::new(
+                    codec,
+                    authenticator,
+                    self.transport.clone(),
+                    cost::ProviderId::GoogleGemini,
+                    crate::capabilities::Capabilities::gemini(),
+                );
+                Arc::new(client) as Arc<dyn crate::provider::LlmProvider>
+            }
+            ProviderKind::Vertex => {
+                let authenticator = Arc::new(crate::authenticator::GcpTokenAuthenticator::new())
+                    as Arc<dyn crate::authenticator::Authenticator>;
+                let codec = crate::gemini::GeminiCodec::new_vertex(
+                    profile.project.clone().unwrap_or_default(),
+                    profile.region.clone().unwrap_or_default(),
+                    profile.thinking_budget,
+                );
                 let client = crate::client::GenericClient::new(
                     codec,
                     authenticator,
@@ -252,6 +270,8 @@ mod tests {
                 thinking_budget: None,
                 azure_deployment: None,
                 azure_api_version: None,
+                project: None,
+                region: None,
             },
         );
         let r = registry(extra);
@@ -278,6 +298,8 @@ mod tests {
                 thinking_budget: None,
                 azure_deployment: Some("gpt-4o".to_string()),
                 azure_api_version: Some("2024-10-21".to_string()),
+                project: None,
+                region: None,
             },
         );
         let r = registry(extra);
@@ -287,6 +309,29 @@ mod tests {
             resolved.provider.id(),
             cost::ProviderId::OpenAICompatible { name: "azure".to_string() }
         );
+    }
+
+    #[test]
+    fn vertex_profile_resolves() {
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "vertex".to_string(),
+            ProviderProfile {
+                kind: ProviderKind::Vertex,
+                base_url: None,
+                api_key_env: None,
+                reasoning_effort: None,
+                thinking_budget: None,
+                azure_deployment: None,
+                azure_api_version: None,
+                project: Some("p".to_string()),
+                region: Some("us-central1".to_string()),
+            },
+        );
+        let r = registry(extra);
+        let resolved = r.resolve("vertex/gemini-2.5-pro").expect("vertex resolves");
+        assert_eq!(resolved.model, "gemini-2.5-pro");
+        assert_eq!(resolved.provider.id(), cost::ProviderId::GoogleGemini);
     }
 
     #[test]

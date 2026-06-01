@@ -13,11 +13,25 @@ use protocol::{HttpMethod, HttpRequest};
 
 use encode::GEMINI_DEFAULT_BASE;
 
+/// How the Gemini codec builds its request URL.
+enum UrlStyle {
+    /// `{base_url}/models/{model}:generateContent` (Gemini API).
+    GeminiApi,
+    /// Vertex AI regional endpoint.
+    Vertex {
+        /// GCP project id.
+        project: String,
+        /// GCP region.
+        region: String,
+    },
+}
+
 /// `WireCodec` for the native `Gemini` API. `base_url` is the API base (no
 /// trailing slash); `None` uses [`GEMINI_DEFAULT_BASE`]. The model goes in the
 /// URL path, and streaming uses a different endpoint than non-streaming.
 pub struct GeminiCodec {
     base_url: String,
+    url_style: UrlStyle,
     /// Profile-level thinking-token budget override (applied when the request
     /// itself does not specify one).
     thinking_budget: Option<u32>,
@@ -30,6 +44,17 @@ impl GeminiCodec {
     pub fn new(base_url: Option<String>, thinking_budget: Option<u32>) -> Self {
         Self {
             base_url: base_url.unwrap_or_else(|| GEMINI_DEFAULT_BASE.to_string()),
+            url_style: UrlStyle::GeminiApi,
+            thinking_budget,
+        }
+    }
+
+    /// Construct a Vertex AI Gemini codec (GCP project + region; bearer-token auth).
+    #[must_use]
+    pub fn new_vertex(project: String, region: String, thinking_budget: Option<u32>) -> Self {
+        Self {
+            base_url: String::new(),
+            url_style: UrlStyle::Vertex { project, region },
             thinking_budget,
         }
     }
@@ -39,13 +64,29 @@ impl WireCodec for GeminiCodec {
     fn encode_request(&self, req: &CanonicalRequest) -> Result<HttpRequest, CodecError> {
         let budget = req.thinking_budget.or(self.thinking_budget);
         let body = encode::encode_generate_body(req, budget);
-        let url = if req.stream {
-            format!(
-                "{}/models/{}:streamGenerateContent?alt=sse",
-                self.base_url, req.model
-            )
-        } else {
-            format!("{}/models/{}:generateContent", self.base_url, req.model)
+        let url = match &self.url_style {
+            UrlStyle::GeminiApi => {
+                if req.stream {
+                    format!(
+                        "{}/models/{}:streamGenerateContent?alt=sse",
+                        self.base_url, req.model
+                    )
+                } else {
+                    format!("{}/models/{}:generateContent", self.base_url, req.model)
+                }
+            }
+            UrlStyle::Vertex { project, region } => {
+                let host = format!("https://{region}-aiplatform.googleapis.com/v1");
+                let base = format!(
+                    "{host}/projects/{project}/locations/{region}/publishers/google/models/{}",
+                    req.model
+                );
+                if req.stream {
+                    format!("{base}:streamGenerateContent?alt=sse")
+                } else {
+                    format!("{base}:generateContent")
+                }
+            }
         };
         let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
         if req.stream {
@@ -97,5 +138,19 @@ mod tests {
         assert!(http
             .url
             .ends_with("/models/gemini-2.0-flash:streamGenerateContent?alt=sse"));
+    }
+
+    #[test]
+    fn vertex_url_targets_aiplatform_endpoint() {
+        let codec = GeminiCodec::new_vertex("p".to_string(), "us-central1".to_string(), None);
+        let http = codec.encode_request(&CanonicalRequest::new("gemini-2.5-pro")).unwrap();
+        assert_eq!(
+            http.url,
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent"
+        );
+        let mut sreq = CanonicalRequest::new("gemini-2.5-pro");
+        sreq.stream = true;
+        let shttp = codec.encode_request(&sreq).unwrap();
+        assert!(shttp.url.ends_with(":streamGenerateContent?alt=sse"));
     }
 }

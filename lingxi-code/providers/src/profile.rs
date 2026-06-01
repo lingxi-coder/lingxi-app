@@ -15,6 +15,8 @@ pub enum ProviderKind {
     Gemini,
     /// Azure `OpenAI` (`OpenAI` chat wire over a deployment URL + `api-key` header).
     AzureOpenAi,
+    /// Google Vertex AI (Gemini body over a regional URL + GCP bearer auth).
+    Vertex,
 }
 
 impl ProviderKind {
@@ -28,8 +30,9 @@ impl ProviderKind {
             "openai" => Ok(Self::OpenAi),
             "gemini" => Ok(Self::Gemini),
             "azureOpenAi" | "azure" => Ok(Self::AzureOpenAi),
+            "vertex" => Ok(Self::Vertex),
             other => Err(CodecError::Unsupported(format!(
-                "unknown provider type {other:?} (expected anthropic|openai|gemini|azureOpenAi)"
+                "unknown provider type {other:?} (expected anthropic|openai|gemini|azureOpenAi|vertex)"
             ))),
         }
     }
@@ -58,6 +61,10 @@ pub struct ProviderProfile {
     /// Azure REST API version query parameter (e.g. `2024-10-21`). Used only
     /// when `kind` is [`ProviderKind::AzureOpenAi`].
     pub azure_api_version: Option<String>,
+    /// GCP project id (Vertex only).
+    pub project: Option<String>,
+    /// GCP region, e.g. `us-central1` (Vertex only).
+    pub region: Option<String>,
 }
 
 /// Built-in profiles, keyed by name. `anthropic` uses `anthropic_base` (the
@@ -76,6 +83,8 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             thinking_budget: None,
             azure_deployment: None,
             azure_api_version: None,
+            project: None,
+            region: None,
         },
     );
     m.insert(
@@ -88,6 +97,8 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             thinking_budget: None,
             azure_deployment: None,
             azure_api_version: None,
+            project: None,
+            region: None,
         },
     );
     m.insert(
@@ -100,6 +111,8 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             thinking_budget: None,
             azure_deployment: None,
             azure_api_version: None,
+            project: None,
+            region: None,
         },
     );
     m
@@ -156,6 +169,14 @@ pub fn parse_profiles(
             .get("azureApiVersion")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
+        let project = obj
+            .get("project")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let region = obj
+            .get("region")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
         out.insert(
             name.clone(),
             ProviderProfile {
@@ -166,6 +187,8 @@ pub fn parse_profiles(
                 thinking_budget,
                 azure_deployment,
                 azure_api_version,
+                project,
+                region,
             },
         );
     }
@@ -247,6 +270,19 @@ mod tests {
         assert_eq!(p["azure"].kind, ProviderKind::AzureOpenAi);
         assert_eq!(p["azure"].azure_deployment.as_deref(), Some("gpt-4o"));
         assert_eq!(p["azure"].azure_api_version.as_deref(), Some("2024-10-21"));
+    }
+
+    #[test]
+    fn parse_vertex_profile() {
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "vertex".to_string(),
+            json!({"type": "vertex", "project": "p", "region": "us-central1"}),
+        );
+        let p = parse_profiles(Some(&raw)).unwrap();
+        assert_eq!(p["vertex"].kind, ProviderKind::Vertex);
+        assert_eq!(p["vertex"].project.as_deref(), Some("p"));
+        assert_eq!(p["vertex"].region.as_deref(), Some("us-central1"));
     }
 
     #[test]

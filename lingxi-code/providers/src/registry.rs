@@ -152,6 +152,13 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
                 );
                 Arc::new(client) as Arc<dyn crate::provider::LlmProvider>
             }
+            ProviderKind::Bedrock => {
+                let region = profile.region.clone().unwrap_or_default();
+                let authenticator = Arc::new(crate::authenticator::SigV4Authenticator::new(region.clone()))
+                    as Arc<dyn crate::authenticator::Authenticator>;
+                let provider = crate::bedrock::BedrockProvider::new(region, self.transport.clone(), authenticator);
+                Arc::new(provider) as Arc<dyn crate::provider::LlmProvider>
+            }
             ProviderKind::AzureOpenAi => {
                 let key = self.api_key_for(profile);
                 let auth = if key.is_empty() {
@@ -338,6 +345,29 @@ mod tests {
     fn unknown_profile_errors() {
         let r = registry(BTreeMap::new());
         assert!(r.resolve("nope/x").is_err());
+    }
+
+    #[test]
+    fn bedrock_profile_resolves() {
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "bedrock".to_string(),
+            ProviderProfile {
+                kind: ProviderKind::Bedrock,
+                base_url: None,
+                api_key_env: None,
+                reasoning_effort: None,
+                thinking_budget: None,
+                azure_deployment: None,
+                azure_api_version: None,
+                project: None,
+                region: Some("us-east-1".to_string()),
+            },
+        );
+        let r = registry(extra);
+        let resolved = r.resolve("bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0").expect("bedrock resolves");
+        assert_eq!(resolved.model, "anthropic.claude-3-5-sonnet-20241022-v2:0");
+        assert_eq!(resolved.provider.id(), cost::ProviderId::Anthropic);
     }
 
     #[test]

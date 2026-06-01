@@ -11,6 +11,7 @@
 pub mod anthropic;
 pub mod auth;
 pub mod authenticator;
+pub mod bedrock;
 pub mod capabilities;
 pub mod client;
 pub mod codec;
@@ -28,6 +29,7 @@ pub mod request;
 mod testutil;
 
 pub use anthropic::AnthropicLlmProvider;
+pub use bedrock::BedrockProvider;
 pub use auth::Auth;
 pub use authenticator::{Authenticator, GcpTokenAuthenticator, SigV4Authenticator, StaticAuth};
 pub use capabilities::{Capabilities, ReasoningSupport, SystemStyle};

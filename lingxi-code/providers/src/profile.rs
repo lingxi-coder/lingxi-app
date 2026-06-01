@@ -17,6 +17,8 @@ pub enum ProviderKind {
     AzureOpenAi,
     /// Google Vertex AI (Gemini body over a regional URL + GCP bearer auth).
     Vertex,
+    /// AWS Bedrock (Claude): Anthropic body over `InvokeModel` + `SigV4` auth.
+    Bedrock,
 }
 
 impl ProviderKind {
@@ -31,8 +33,9 @@ impl ProviderKind {
             "gemini" => Ok(Self::Gemini),
             "azureOpenAi" | "azure" => Ok(Self::AzureOpenAi),
             "vertex" => Ok(Self::Vertex),
+            "bedrock" => Ok(Self::Bedrock),
             other => Err(CodecError::Unsupported(format!(
-                "unknown provider type {other:?} (expected anthropic|openai|gemini|azureOpenAi|vertex)"
+                "unknown provider type {other:?} (expected anthropic|openai|gemini|azureOpenAi|vertex|bedrock)"
             ))),
         }
     }
@@ -283,6 +286,18 @@ mod tests {
         assert_eq!(p["vertex"].kind, ProviderKind::Vertex);
         assert_eq!(p["vertex"].project.as_deref(), Some("p"));
         assert_eq!(p["vertex"].region.as_deref(), Some("us-central1"));
+    }
+
+    #[test]
+    fn parse_bedrock_profile() {
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "bedrock".to_string(),
+            json!({"type": "bedrock", "region": "us-east-1"}),
+        );
+        let p = parse_profiles(Some(&raw)).unwrap();
+        assert_eq!(p["bedrock"].kind, ProviderKind::Bedrock);
+        assert_eq!(p["bedrock"].region.as_deref(), Some("us-east-1"));
     }
 
     #[test]

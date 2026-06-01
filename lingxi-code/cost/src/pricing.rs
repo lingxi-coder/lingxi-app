@@ -35,6 +35,10 @@ pub enum ProviderId {
     OpenAI,
     /// Google Gemini first-party API.
     GoogleGemini,
+    /// Amazon Bedrock (Claude-on-Bedrock) — distinct list prices from the
+    /// first-party Anthropic API; model ids are Bedrock-namespaced
+    /// (e.g. `anthropic.claude-3-5-sonnet-20241022-v2:0`).
+    AmazonBedrock,
     /// An `OpenAI`-compatible endpoint identified by name (e.g. `together`).
     OpenAICompatible {
         /// Display name for the `OpenAI`-compatible provider.
@@ -249,6 +253,41 @@ impl PricingCatalog {
             75,
             18,
         );
+        // Amazon Bedrock (Claude) — AWS published list prices (us-east-1),
+        // keyed on the Bedrock model id (the part after `bedrock/`). Cache
+        // rates mirror the equivalent Anthropic tier as a reference estimate.
+        c.insert_priced(
+            ProviderId::AmazonBedrock,
+            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            3_000,
+            15_000,
+            3_750,
+            300,
+        );
+        c.insert_priced(
+            ProviderId::AmazonBedrock,
+            "anthropic.claude-3-7-sonnet-20250219-v1:0",
+            3_000,
+            15_000,
+            3_750,
+            300,
+        );
+        c.insert_priced(
+            ProviderId::AmazonBedrock,
+            "anthropic.claude-3-5-haiku-20241022-v1:0",
+            800,
+            4_000,
+            1_000,
+            80,
+        );
+        c.insert_priced(
+            ProviderId::AmazonBedrock,
+            "anthropic.claude-3-opus-20240229-v1:0",
+            15_000,
+            75_000,
+            18_750,
+            1_500,
+        );
         c
     }
 
@@ -415,6 +454,22 @@ mod tests {
             c.resolve(&mr).unwrap_err(),
             CostError::UnpricedModel(_)
         ));
+    }
+
+    #[test]
+    fn bedrock_claude_sonnet_is_priced() {
+        let c = PricingCatalog::builtin_reference();
+        let mr = ModelRef {
+            provider: ProviderId::AmazonBedrock,
+            model: "anthropic.claude-3-5-sonnet-20241022-v2:0".into(),
+        };
+        let (p, res) = c.resolve(&mr).unwrap();
+        assert!(matches!(res, PricingResolution::ExactModel { .. }));
+        assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 3_000);
+        assert_eq!(
+            p.token_rates[&TokenClass::Output].nano_usd_per_token,
+            15_000
+        );
     }
 
     #[test]

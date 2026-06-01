@@ -138,6 +138,11 @@ A sibling `routing` block adds a thin router over the configured providers:
 - **retry** — transient errors retry up to `maxAttempts` with linear backoff.
   Failover / retry decide on the initial request only (no mid-stream switch).
 
+Fallback chains should be **capability-homogeneous**: the vision / tool-use
+guardrails gate on the *primary* member's capabilities, so every member of a
+chain should support the same modalities (e.g. don't mix a vision-capable
+primary with a text-only fallback for an image request).
+
 ## Vision / image input
 
 Image input is supported across all three built-in providers (Anthropic,

@@ -68,7 +68,10 @@ fn pump_stream(
                         st.queue.push_back(Ok(ev));
                     }
                 }
-                Some(Err(e)) => return Some((Err(ApiError::Http(e)), st)),
+                Some(Err(e)) => {
+                    st.done = true;
+                    return Some((Err(ApiError::Http(e)), st));
+                }
                 None => {
                     for ev in st.decoder.finish() {
                         st.queue.push_back(Ok(ev));
@@ -201,5 +204,23 @@ mod tests {
         assert_eq!(events.len(), 3, "2 deltas + MessageStop");
         assert!(matches!(events[0], Ok(StreamEvent::ContentBlockDelta { .. })));
         assert!(matches!(events[2], Ok(StreamEvent::MessageStop)));
+    }
+
+    #[tokio::test]
+    async fn stream_empty_yields_only_finish() {
+        let c = client(MockTransport::streaming(vec![]));
+        let s = c.stream(CanonicalRequest::new("gpt-4o")).await.expect("stream");
+        let events: Vec<_> = s.collect().await;
+        assert_eq!(events.len(), 1, "only the finish() MessageStop");
+        assert!(matches!(events[0], Ok(StreamEvent::MessageStop)));
+    }
+
+    #[tokio::test]
+    async fn stream_transport_error_is_terminal() {
+        let c = client(MockTransport::erroring("boom"));
+        let s = c.stream(CanonicalRequest::new("gpt-4o")).await.expect("stream");
+        let events: Vec<_> = s.collect().await;
+        assert_eq!(events.len(), 1, "the error item, then terminate (no finish, no re-poll)");
+        assert!(matches!(events[0], Err(ApiError::Http(_))));
     }
 }

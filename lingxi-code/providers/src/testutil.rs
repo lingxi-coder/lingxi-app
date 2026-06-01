@@ -11,12 +11,13 @@ pub(crate) struct MockTransport {
     status: u16,
     body: String,
     sse_frames: Vec<String>,
+    error: Option<String>,
 }
 
 impl MockTransport {
     /// Return one non-streaming response with `status` and `body`.
     pub(crate) fn responding(status: u16, body: impl Into<String>) -> Self {
-        Self { status, body: body.into(), sse_frames: Vec::new() }
+        Self { status, body: body.into(), sse_frames: Vec::new(), error: None }
     }
 
     /// Return `frames` as successive SSE `data:` payloads (status 200).
@@ -25,7 +26,13 @@ impl MockTransport {
             status: 200,
             body: String::new(),
             sse_frames: frames.into_iter().map(String::from).collect(),
+            error: None,
         }
+    }
+
+    /// Yield a single transport error from `stream_sse`.
+    pub(crate) fn erroring(msg: impl Into<String>) -> Self {
+        Self { status: 200, body: String::new(), sse_frames: Vec::new(), error: Some(msg.into()) }
     }
 }
 
@@ -36,6 +43,10 @@ impl HttpTransport for MockTransport {
     }
 
     async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+        if let Some(msg) = &self.error {
+            let one: Vec<Result<SseEvent, HttpError>> = vec![Err(HttpError::Connection(msg.clone()))];
+            return Ok(Box::pin(stream::iter(one)));
+        }
         let frames: Vec<Result<SseEvent, HttpError>> = self
             .sse_frames
             .iter()

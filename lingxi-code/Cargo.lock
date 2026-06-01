@@ -3460,6 +3460,7 @@ dependencies = [
  "platform-windows",
  "proptest",
  "protocol",
+ "providers",
  "regex",
  "sandbox",
  "serde",

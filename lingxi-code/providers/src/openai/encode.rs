@@ -131,7 +131,11 @@ fn encode_assistant(content: &[ContentBlock], out: &mut Vec<Value>) {
     // OpenAI requires `content` to be present (may be null) on an assistant msg.
     m.insert(
         "content".to_string(),
-        if text.is_empty() { Value::Null } else { json!(text) },
+        if text.is_empty() {
+            Value::Null
+        } else {
+            json!(text)
+        },
     );
     if !tool_calls.is_empty() {
         m.insert("tool_calls".to_string(), Value::Array(tool_calls));
@@ -147,7 +151,9 @@ mod tests {
     fn user_text(s: &str) -> ConversationMessage {
         ConversationMessage::User {
             id: MessageId::new(),
-            content: vec![ContentBlock::Text { text: s.to_string() }],
+            content: vec![ContentBlock::Text {
+                text: s.to_string(),
+            }],
         }
     }
 
@@ -228,8 +234,13 @@ mod tests {
         let assistant = ConversationMessage::Assistant {
             id: MessageId::new(),
             content: vec![
-                ContentBlock::Thinking { thinking: "hmm".to_string(), signature: None },
-                ContentBlock::Text { text: "answer".to_string() },
+                ContentBlock::Thinking {
+                    thinking: "hmm".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "answer".to_string(),
+                },
             ],
             stop_reason: None,
         };

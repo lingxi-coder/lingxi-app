@@ -103,7 +103,9 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
                 let id = if name == "openai" {
                     cost::ProviderId::OpenAI
                 } else {
-                    cost::ProviderId::OpenAICompatible { name: name.to_string() }
+                    cost::ProviderId::OpenAICompatible {
+                        name: name.to_string(),
+                    }
                 };
                 let client = crate::client::GenericClient::new(
                     codec,
@@ -208,7 +210,9 @@ mod tests {
         assert_eq!(resolved.model, "llama-3.3-70b");
         assert_eq!(
             resolved.provider.id(),
-            cost::ProviderId::OpenAICompatible { name: "groq".to_string() }
+            cost::ProviderId::OpenAICompatible {
+                name: "groq".to_string()
+            }
         );
     }
 

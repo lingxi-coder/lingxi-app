@@ -55,8 +55,16 @@ impl OpenAiSseDecoder {
             return;
         }
         self.started = true;
-        let id = root.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-        let model = root.get("model").and_then(Value::as_str).unwrap_or_default().to_string();
+        let id = root
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let model = root
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         out.push(StreamEvent::MessageStart {
             message: MessageResponse {
                 id,
@@ -78,12 +86,16 @@ impl OpenAiSseDecoder {
             self.next_index += 1;
             out.push(StreamEvent::ContentBlockStart {
                 index: self.text_index,
-                content_block: ContentBlockApi::Text { text: String::new() },
+                content_block: ContentBlockApi::Text {
+                    text: String::new(),
+                },
             });
         }
         out.push(StreamEvent::ContentBlockDelta {
             index: self.text_index,
-            delta: ContentDelta::TextDelta { text: text.to_string() },
+            delta: ContentDelta::TextDelta {
+                text: text.to_string(),
+            },
         });
     }
 
@@ -91,29 +103,26 @@ impl OpenAiSseDecoder {
         let Some(oai_idx) = tc.get("index").and_then(Value::as_u64) else {
             return;
         };
-        let idx = *self
-            .tool_index
-            .entry(oai_idx)
-            .or_insert_with(|| {
-                // First fragment for this tool-call index: open a ToolUse block.
-                let canonical = self.next_index;
-                self.next_index += 1;
-                let name = tc
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                out.push(StreamEvent::ContentBlockStart {
-                    index: canonical,
-                    content_block: ContentBlockApi::ToolUse {
-                        id: ToolUseId::new(),
-                        name,
-                        input: Value::Object(serde_json::Map::new()),
-                    },
-                });
-                canonical
+        let idx = *self.tool_index.entry(oai_idx).or_insert_with(|| {
+            // First fragment for this tool-call index: open a ToolUse block.
+            let canonical = self.next_index;
+            self.next_index += 1;
+            let name = tc
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            out.push(StreamEvent::ContentBlockStart {
+                index: canonical,
+                content_block: ContentBlockApi::ToolUse {
+                    id: ToolUseId::new(),
+                    name,
+                    input: Value::Object(serde_json::Map::new()),
+                },
             });
+            canonical
+        });
         if let Some(args) = tc
             .get("function")
             .and_then(|f| f.get("arguments"))
@@ -122,7 +131,9 @@ impl OpenAiSseDecoder {
             if !args.is_empty() {
                 out.push(StreamEvent::ContentBlockDelta {
                     index: idx,
-                    delta: ContentDelta::InputJsonDelta { partial_json: args.to_string() },
+                    delta: ContentDelta::InputJsonDelta {
+                        partial_json: args.to_string(),
+                    },
                 });
             }
         }
@@ -130,7 +141,9 @@ impl OpenAiSseDecoder {
 
     fn close_open_blocks(&mut self, out: &mut Vec<StreamEvent>) {
         if self.text_open {
-            out.push(StreamEvent::ContentBlockStop { index: self.text_index });
+            out.push(StreamEvent::ContentBlockStop {
+                index: self.text_index,
+            });
             self.text_open = false;
         }
         let mut tool_indices: Vec<u32> = self.tool_index.values().copied().collect();
@@ -157,7 +170,9 @@ impl SseDecoder for OpenAiSseDecoder {
                 self.done = true;
                 self.close_open_blocks(&mut out);
                 out.push(StreamEvent::MessageDelta {
-                    delta: MessageDeltaPayload { stop_reason: self.stop_reason.clone() },
+                    delta: MessageDeltaPayload {
+                        stop_reason: self.stop_reason.clone(),
+                    },
                     usage: self.usage,
                 });
                 out.push(StreamEvent::MessageStop);
@@ -203,7 +218,9 @@ impl SseDecoder for OpenAiSseDecoder {
             self.done = true;
             self.close_open_blocks(&mut out);
             out.push(StreamEvent::MessageDelta {
-                delta: MessageDeltaPayload { stop_reason: self.stop_reason.clone() },
+                delta: MessageDeltaPayload {
+                    stop_reason: self.stop_reason.clone(),
+                },
                 usage: self.usage,
             });
             out.push(StreamEvent::MessageStop);
@@ -236,13 +253,18 @@ mod tests {
             r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
             "[DONE]",
         ]);
-        assert!(matches!(events.first(), Some(StreamEvent::MessageStart { .. })));
+        assert!(matches!(
+            events.first(),
+            Some(StreamEvent::MessageStart { .. })
+        ));
         // text block opened, two text deltas, then closed
         assert!(events.iter().any(|e| matches!(
             e,
             StreamEvent::ContentBlockDelta { delta: ContentDelta::TextDelta { text }, .. } if text == "hel"
         )));
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::ContentBlockStop { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ContentBlockStop { .. })));
         assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
     }
 
@@ -265,9 +287,10 @@ mod tests {
         let json_frag: String = events
             .iter()
             .filter_map(|e| match e {
-                StreamEvent::ContentBlockDelta { delta: ContentDelta::InputJsonDelta { partial_json }, .. } => {
-                    Some(partial_json.clone())
-                }
+                StreamEvent::ContentBlockDelta {
+                    delta: ContentDelta::InputJsonDelta { partial_json },
+                    ..
+                } => Some(partial_json.clone()),
                 _ => None,
             })
             .collect();
@@ -277,7 +300,10 @@ mod tests {
 
     #[test]
     fn done_without_finish_still_terminates() {
-        let events = run(&[r#"{"choices":[{"index":0,"delta":{"content":"hi"}}]}"#, "[DONE]"]);
+        let events = run(&[
+            r#"{"choices":[{"index":0,"delta":{"content":"hi"}}]}"#,
+            "[DONE]",
+        ]);
         assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
     }
 
@@ -288,9 +314,14 @@ mod tests {
             "[DONE]",
         ]);
         // Only MessageStart + MessageStop; no spurious content blocks.
-        assert!(matches!(events.first(), Some(StreamEvent::MessageStart { .. })));
+        assert!(matches!(
+            events.first(),
+            Some(StreamEvent::MessageStart { .. })
+        ));
         assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
-        assert!(!events.iter().any(|e| matches!(e, StreamEvent::ContentBlockStart { .. })));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ContentBlockStart { .. })));
     }
 
     #[test]
@@ -303,12 +334,18 @@ mod tests {
             "[DONE]",
         ]);
         assert_eq!(
-            events.iter().filter(|e| matches!(e, StreamEvent::MessageStop)).count(),
+            events
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::MessageStop))
+                .count(),
             1,
             "exactly one MessageStop"
         );
         assert_eq!(
-            events.iter().filter(|e| matches!(e, StreamEvent::MessageDelta { .. })).count(),
+            events
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::MessageDelta { .. }))
+                .count(),
             1,
             "exactly one MessageDelta"
         );
@@ -336,7 +373,10 @@ mod tests {
         assert_eq!(usage.expect("usage carried").input_tokens, 4);
         assert!(matches!(events.last(), Some(StreamEvent::MessageStop)));
         assert_eq!(
-            events.iter().filter(|e| matches!(e, StreamEvent::MessageStop)).count(),
+            events
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::MessageStop))
+                .count(),
             1
         );
     }

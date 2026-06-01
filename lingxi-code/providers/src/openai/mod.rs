@@ -31,7 +31,11 @@ impl OpenAiCodec {
 }
 
 impl WireCodec for OpenAiCodec {
-    fn encode_request(&self, req: &CanonicalRequest, auth: &Auth) -> Result<HttpRequest, CodecError> {
+    fn encode_request(
+        &self,
+        req: &CanonicalRequest,
+        auth: &Auth,
+    ) -> Result<HttpRequest, CodecError> {
         let body = encode::encode_chat_body(req);
         let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
         auth.apply(&mut headers);

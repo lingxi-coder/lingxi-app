@@ -53,7 +53,9 @@ pub fn decode_chat_response(status: u16, body: &str) -> Result<MessageResponse, 
     let mut content: Vec<ContentBlockApi> = Vec::new();
     if let Some(text) = message.get("content").and_then(Value::as_str) {
         if !text.is_empty() {
-            content.push(ContentBlockApi::Text { text: text.to_string() });
+            content.push(ContentBlockApi::Text {
+                text: text.to_string(),
+            });
         }
     }
     if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
@@ -101,7 +103,10 @@ pub fn decode_chat_response(status: u16, body: &str) -> Result<MessageResponse, 
 #[must_use]
 pub(crate) fn usage_from_value(u: &Value) -> UsageApi {
     let input = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
-    let output = u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0);
+    let output = u
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let cache_read = u
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))

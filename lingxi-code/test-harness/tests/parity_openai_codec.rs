@@ -10,8 +10,11 @@ fn encode_request_shape_is_openai_chat_completions() {
     let codec = OpenAiCodec::new(None);
     let mut req = CanonicalRequest::new("gpt-4o");
     req.system = Some("sys".to_string());
-    req.tools = vec![serde_json::json!({"name":"Read","description":"d","input_schema":{"type":"object"}})];
-    let http = codec.encode_request(&req, &Auth::Bearer("k".to_string())).unwrap();
+    req.tools =
+        vec![serde_json::json!({"name":"Read","description":"d","input_schema":{"type":"object"}})];
+    let http = codec
+        .encode_request(&req, &Auth::Bearer("k".to_string()))
+        .unwrap();
     assert!(http.url.ends_with("/chat/completions"));
     let body: serde_json::Value = serde_json::from_str(http.body.as_deref().unwrap()).unwrap();
     assert_eq!(body["messages"][0]["role"], "system");
@@ -46,7 +49,10 @@ fn sse_stream_reassembles_text_then_tool_call() {
     }
     events.extend(d.finish());
 
-    assert!(matches!(events.first(), Some(StreamEvent::MessageStart { .. })));
+    assert!(matches!(
+        events.first(),
+        Some(StreamEvent::MessageStart { .. })
+    ));
     assert!(events.iter().any(|e| matches!(
         e,
         StreamEvent::ContentBlockStart { content_block: ContentBlockApi::ToolUse { name, .. }, .. } if name == "Bash"
@@ -54,7 +60,10 @@ fn sse_stream_reassembles_text_then_tool_call() {
     let args: String = events
         .iter()
         .filter_map(|e| match e {
-            StreamEvent::ContentBlockDelta { delta: ContentDelta::InputJsonDelta { partial_json }, .. } => Some(partial_json.clone()),
+            StreamEvent::ContentBlockDelta {
+                delta: ContentDelta::InputJsonDelta { partial_json },
+                ..
+            } => Some(partial_json.clone()),
             _ => None,
         })
         .collect();

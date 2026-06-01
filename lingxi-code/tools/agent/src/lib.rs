@@ -22,6 +22,7 @@ pub use agent::AgentTool;
 #[cfg(any(test, feature = "agent-test-support"))]
 pub mod agent_test_support;
 
+/// Register the agent (subagent dispatch) tools against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
     reg.register_builtin(Arc::new(AgentTool::new(ctx)));

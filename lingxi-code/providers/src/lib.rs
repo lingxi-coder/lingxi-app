@@ -7,3 +7,13 @@
 //!
 //! See `docs/superpowers/specs/2026-06-01-llm-providers-design.md`.
 #![forbid(unsafe_code)]
+
+pub mod auth;
+pub mod capabilities;
+pub mod error;
+pub mod request;
+
+pub use auth::Auth;
+pub use capabilities::{Capabilities, ReasoningSupport, SystemStyle};
+pub use error::CodecError;
+pub use request::{CanonicalRequest, DEFAULT_MAX_TOKENS};

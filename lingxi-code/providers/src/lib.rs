@@ -14,6 +14,7 @@ pub mod capabilities;
 pub mod client;
 pub mod codec;
 pub mod error;
+pub mod gemini;
 pub mod model_spec;
 /// `OpenAI` / OpenAI-compatible chat-completions codec.
 pub mod openai;

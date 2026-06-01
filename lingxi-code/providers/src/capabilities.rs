@@ -60,6 +60,22 @@ impl Capabilities {
         }
     }
 
+    /// Capabilities for a native `Gemini` provider (v1: text + native tools,
+    /// no vision/cache/thinking-in-history).
+    #[must_use]
+    pub fn gemini() -> Self {
+        Self {
+            native_tools: true,
+            streaming: true,
+            vision: false,
+            prompt_cache: false,
+            reasoning: ReasoningSupport::None,
+            parallel_tool_calls: true,
+            max_output_tokens: None,
+            system_style: SystemStyle::TopLevel,
+        }
+    }
+
     /// Capabilities for the Anthropic provider (everything native).
     #[must_use]
     pub fn anthropic() -> Self {

@@ -32,6 +32,7 @@ pub use capabilities::{Capabilities, ReasoningSupport, SystemStyle};
 pub use client::GenericClient;
 pub use codec::{SseDecoder, WireCodec};
 pub use error::CodecError;
+pub use gemini::GeminiCodec;
 pub use model_spec::{ModelSpec, DEFAULT_PROFILE};
 pub use openai::OpenAiCodec;
 pub use profile::{builtin_profiles, parse_profiles, ProviderKind, ProviderProfile};

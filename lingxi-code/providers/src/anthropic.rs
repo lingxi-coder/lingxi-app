@@ -1,8 +1,8 @@
 //! Anthropic as an `LlmProvider`. Delegates verbatim to
-//! `api_client::AnthropicProvider`, so the wire is byte-identical to today's
-//! `AnthropicProviderAdapter` and stays covered by the existing parity
-//! fixtures. Generic over the concrete transport `T`; erased to
-//! `Arc<dyn LlmProvider>` by the caller.
+//! `api_client::AnthropicProvider` — the same entry points the orchestrator's
+//! Anthropic adapter calls — so the wire stays byte-identical and covered by
+//! the existing parity fixtures. Generic over the concrete transport `T`;
+//! erased to `Arc<dyn LlmProvider>` by the caller.
 
 use crate::capabilities::Capabilities;
 use crate::provider::LlmProvider;

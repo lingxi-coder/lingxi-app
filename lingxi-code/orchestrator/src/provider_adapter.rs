@@ -65,10 +65,19 @@ mod tests {
     use providers::Capabilities;
     use std::sync::Mutex;
 
+    /// What a `stream` call carried, for assertions.
+    struct SeenStream {
+        model: String,
+        system: Option<String>,
+        tools_len: usize,
+        stream_flag: bool,
+    }
+
     /// Records the request it received and returns a canned response.
     struct StubProvider {
         seen_model: Mutex<Option<String>>,
         seen_system: Mutex<Option<String>>,
+        seen_stream: Mutex<Option<SeenStream>>,
         caps: Capabilities,
     }
 
@@ -77,6 +86,7 @@ mod tests {
             Self {
                 seen_model: Mutex::new(None),
                 seen_system: Mutex::new(None),
+                seen_stream: Mutex::new(None),
                 caps: Capabilities::anthropic(),
             }
         }
@@ -103,8 +113,14 @@ mod tests {
         }
         async fn stream(
             &self,
-            _req: CanonicalRequest,
+            req: CanonicalRequest,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
+            *self.seen_stream.lock().unwrap() = Some(SeenStream {
+                model: req.model.clone(),
+                system: req.system.clone(),
+                tools_len: req.tools.len(),
+                stream_flag: req.stream,
+            });
             Ok(futures::stream::empty::<Result<StreamEvent, ApiError>>().boxed())
         }
     }
@@ -120,5 +136,22 @@ mod tests {
         assert_eq!(resp.model, "openai/gpt-4o");
         assert_eq!(stub.seen_model.lock().unwrap().as_deref(), Some("openai/gpt-4o"));
         assert_eq!(stub.seen_system.lock().unwrap().as_deref(), Some("sys"));
+    }
+
+    #[tokio::test]
+    async fn bridge_forwards_stream_request_with_tools_and_flag() {
+        let stub = Arc::new(StubProvider::new());
+        let adapter = ProviderApiAdapter::new(stub.clone());
+        let tools = vec![serde_json::json!({"name": "Read"})];
+        let _s = adapter
+            .stream("gemini/gemini-2.0-flash", Some("sys"), Vec::new(), tools)
+            .await
+            .expect("stream");
+        let seen = stub.seen_stream.lock().unwrap();
+        let seen = seen.as_ref().expect("stream was called");
+        assert_eq!(seen.model, "gemini/gemini-2.0-flash");
+        assert_eq!(seen.system.as_deref(), Some("sys"));
+        assert_eq!(seen.tools_len, 1);
+        assert!(seen.stream_flag, "bridge must set req.stream = true");
     }
 }

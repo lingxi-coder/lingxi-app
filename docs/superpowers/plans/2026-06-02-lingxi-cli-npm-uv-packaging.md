@@ -52,6 +52,13 @@ Native host (`aarch64-apple-darwin`) must pass. Cross targets that need a linker
 - [ ] **Step 2 — record findings.** Append a short "Cross-build findings" note to this plan: which targets compiled, which need CI runners, and any target that has a hard source blocker on 1.82 (to be dropped from the matrix + package tables + launcher map with a documented note). Do NOT drop a target merely because it needs a cross-linker locally — only for a genuine source/MSRV incompatibility.
 - [ ] **Step 3 — no commit** (findings only). Proceed with the full 6-target set unless Step 2 found a hard blocker.
 
+### Cross-build findings (RESOLVED 2026-06-02 — keep all 6 targets)
+
+- **Host** `aarch64-apple-darwin`: BUILDS (`lingxi-cli 0.12.0`). `x86_64-apple-darwin`: BUILDS (cross from arm64 mac).
+- **musl x64/arm64** + **windows-msvc x64/arm64**: `NEEDS_CI_LINKER` only — **no Rust source blockers**. Verified: `platform-posix-minimal` is not unix-only (deps all cross-platform; the lone `#[cfg(unix)]` in `fs.rs:110` is paired with a `#[cfg(windows)]` arm), and `cargo check -p cli --target x86_64-pc-windows-gnu` finished clean (whole CLI type-checks for Windows).
+- **The one cross-compile complication is `ring v0.17.14`** — it compiles C, so every non-host target needs a platform C compiler: musl-gcc (linux), the Windows SDK/MSVC (windows). **Task 6 must ensure each runner has the right C toolchain** (musl-tools / `cross` for linux; the `windows-latest` runner's VS Build Tools for windows). Not a source issue; standard CI setup.
+- **Decision:** all 6 targets stay in the matrix.
+
 ---
 
 ## Task 2: npm launcher + package.json

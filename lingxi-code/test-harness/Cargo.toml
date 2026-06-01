@@ -38,6 +38,7 @@ hyper-util = { version = "0.1", features = ["server", "tokio"] }
 http-body-util = "0.1"
 
 [dev-dependencies]
+providers = { path = "../providers" }
 proptest.workspace = true
 platform-posix-minimal = { path = "../platforms/posix-minimal" }
 # Used by the M2-07 Phase B parity drivers to exercise production

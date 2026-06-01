@@ -184,15 +184,19 @@ impl OrchestratorHandle for ConversationOrchestrator {
         spawn_editor_on(target, "{}\n").await
     }
 
+    /// Model names shown by the no-arg `/model` display. Purely informational —
+    /// `switch_model` accepts any string. Includes the Anthropic defaults plus
+    /// `provider/model` examples so the multi-provider syntax is discoverable;
+    /// actual availability of a non-Anthropic provider depends on its API key /
+    /// settings profile (see `docs/LLM_PROVIDERS.md`).
     async fn list_available_models(&self) -> Vec<String> {
-        // Hardcoded list from M3-03's model catalog. The orchestrator does
-        // NOT validate names against this list — `switch_model` accepts
-        // arbitrary strings. The list is purely informational for the
-        // `/model` (no-arg) display.
         vec![
             "claude-opus-4-7".to_string(),
             "claude-sonnet-4-6".to_string(),
             "claude-haiku-4-5".to_string(),
+            "openai/gpt-4o".to_string(),
+            "openai/gpt-4o-mini".to_string(),
+            "gemini/gemini-2.0-flash".to_string(),
         ]
     }
 

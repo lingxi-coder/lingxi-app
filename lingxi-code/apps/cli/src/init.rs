@@ -96,24 +96,19 @@ pub fn resolve_api_base() -> String {
     std::env::var("LINGXI_API_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
 }
 
-/// Resolve the project dir used for settings lookup (argv `--cwd` or process cwd).
-fn cwd_for_settings(argv: &Argv) -> std::path::PathBuf {
-    argv.cwd
-        .clone()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
-}
-
 /// Load the merged settings `providers` object (project + user + env layers).
-/// Returns `None` if settings can't be loaded or no `providers` block is set —
-/// callers then fall back to built-in profiles only.
-fn load_provider_profiles(
-    project_dir: &std::path::Path,
-) -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
+///
+/// Resolves the project dir from the *current* working directory — the process
+/// has already `chdir`'d into any `--cwd` before `build_runtime` runs, so this
+/// reads the same dir as the hook loader. Returns `None` on any load failure or
+/// when no `providers` block is set; callers then fall back to built-in
+/// profiles only.
+fn load_provider_profiles() -> Option<std::collections::BTreeMap<String, serde_json::Value>> {
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
     let inputs = engine::settings::LoadInputs {
         env: &env,
-        project_dir,
+        project_dir: &project_dir,
         defaults: engine::settings::schema::SettingsJson::default(),
     };
     engine::settings::Settings::load(inputs)
@@ -159,7 +154,7 @@ pub async fn build_runtime(
     // AnthropicProviderAdapter path). openai/gemini profiles surface a clear
     // "codec not available until P3/P4" error when selected.
     let env_snapshot: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let settings_providers = load_provider_profiles(&cwd_for_settings(argv));
+    let settings_providers = load_provider_profiles();
     let mut profiles = builtin_profiles(Some(api_base.clone()));
     match parse_profiles(settings_providers.as_ref()) {
         Ok(extra) => profiles.extend(extra),

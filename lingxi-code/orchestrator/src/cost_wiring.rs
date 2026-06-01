@@ -41,7 +41,9 @@ fn provider_id_for_profile(profile: &str) -> ProviderId {
         "anthropic" => ProviderId::Anthropic,
         "openai" => ProviderId::OpenAI,
         "gemini" => ProviderId::GoogleGemini,
-        other => ProviderId::OpenAICompatible { name: other.to_string() },
+        other => ProviderId::OpenAICompatible {
+            name: other.to_string(),
+        },
     }
 }
 
@@ -88,14 +90,28 @@ mod tests {
 
     #[test]
     fn provider_from_model_maps_prefixes() {
-        assert_eq!(provider_from_model("claude-opus-4-7"), ProviderId::Anthropic);
-        assert_eq!(provider_from_model("anthropic/claude-opus-4-7"), ProviderId::Anthropic);
+        assert_eq!(
+            provider_from_model("claude-opus-4-7"),
+            ProviderId::Anthropic
+        );
+        assert_eq!(
+            provider_from_model("anthropic/claude-opus-4-7"),
+            ProviderId::Anthropic
+        );
         assert_eq!(provider_from_model("openai/gpt-4o"), ProviderId::OpenAI);
-        assert_eq!(provider_from_model("gemini/gemini-2.0-flash"), ProviderId::GoogleGemini);
-        assert_eq!(provider_from_model("some-bare-model"), ProviderId::Anthropic);
+        assert_eq!(
+            provider_from_model("gemini/gemini-2.0-flash"),
+            ProviderId::GoogleGemini
+        );
+        assert_eq!(
+            provider_from_model("some-bare-model"),
+            ProviderId::Anthropic
+        );
         assert_eq!(
             provider_from_model("groq/llama-3.3-70b"),
-            ProviderId::OpenAICompatible { name: "groq".to_string() }
+            ProviderId::OpenAICompatible {
+                name: "groq".to_string()
+            }
         );
     }
 

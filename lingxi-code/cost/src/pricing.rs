@@ -225,9 +225,30 @@ impl PricingCatalog {
         c.insert_priced(ProviderId::OpenAI, "gpt-4.1", 2_000, 8_000, 2_000, 500);
         c.insert_priced(ProviderId::OpenAI, "gpt-4.1-mini", 400, 1_600, 400, 100);
         // Google Gemini reference tiers — approximate published list prices.
-        c.insert_priced(ProviderId::GoogleGemini, "gemini-2.0-flash", 100, 400, 100, 25);
-        c.insert_priced(ProviderId::GoogleGemini, "gemini-1.5-pro", 1_250, 5_000, 1_250, 312);
-        c.insert_priced(ProviderId::GoogleGemini, "gemini-1.5-flash", 75, 300, 75, 18);
+        c.insert_priced(
+            ProviderId::GoogleGemini,
+            "gemini-2.0-flash",
+            100,
+            400,
+            100,
+            25,
+        );
+        c.insert_priced(
+            ProviderId::GoogleGemini,
+            "gemini-1.5-pro",
+            1_250,
+            5_000,
+            1_250,
+            312,
+        );
+        c.insert_priced(
+            ProviderId::GoogleGemini,
+            "gemini-1.5-flash",
+            75,
+            300,
+            75,
+            18,
+        );
         c
     }
 
@@ -307,19 +328,27 @@ impl PricingCatalog {
         let mut rates: HashMap<TokenClass, MoneyPerToken> = HashMap::new();
         rates.insert(
             TokenClass::Input,
-            MoneyPerToken { nano_usd_per_token: input_per_mtok_milli_usd },
+            MoneyPerToken {
+                nano_usd_per_token: input_per_mtok_milli_usd,
+            },
         );
         rates.insert(
             TokenClass::Output,
-            MoneyPerToken { nano_usd_per_token: output_per_mtok_milli_usd },
+            MoneyPerToken {
+                nano_usd_per_token: output_per_mtok_milli_usd,
+            },
         );
         rates.insert(
             TokenClass::CacheWrite,
-            MoneyPerToken { nano_usd_per_token: cache_write_per_mtok_milli_usd },
+            MoneyPerToken {
+                nano_usd_per_token: cache_write_per_mtok_milli_usd,
+            },
         );
         rates.insert(
             TokenClass::CacheRead,
-            MoneyPerToken { nano_usd_per_token: cache_read_per_mtok_milli_usd },
+            MoneyPerToken {
+                nano_usd_per_token: cache_read_per_mtok_milli_usd,
+            },
         );
         self.entries.insert(
             mr.clone(),
@@ -391,17 +420,26 @@ mod tests {
     #[test]
     fn builtin_has_openai_gpt_4o() {
         let c = PricingCatalog::builtin_reference();
-        let mr = ModelRef { provider: ProviderId::OpenAI, model: "gpt-4o".into() };
+        let mr = ModelRef {
+            provider: ProviderId::OpenAI,
+            model: "gpt-4o".into(),
+        };
         let (p, res) = c.resolve(&mr).unwrap();
         assert!(matches!(res, PricingResolution::ExactModel { .. }));
         assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 2_500);
-        assert_eq!(p.token_rates[&TokenClass::Output].nano_usd_per_token, 10_000);
+        assert_eq!(
+            p.token_rates[&TokenClass::Output].nano_usd_per_token,
+            10_000
+        );
     }
 
     #[test]
     fn builtin_has_gemini_flash() {
         let c = PricingCatalog::builtin_reference();
-        let mr = ModelRef { provider: ProviderId::GoogleGemini, model: "gemini-2.0-flash".into() };
+        let mr = ModelRef {
+            provider: ProviderId::GoogleGemini,
+            model: "gemini-2.0-flash".into(),
+        };
         let (p, res) = c.resolve(&mr).unwrap();
         assert!(matches!(res, PricingResolution::ExactModel { .. }));
         assert_eq!(p.token_rates[&TokenClass::Output].nano_usd_per_token, 400);
@@ -410,7 +448,10 @@ mod tests {
     #[test]
     fn unknown_openai_model_is_unpriced_not_misattributed() {
         let c = PricingCatalog::builtin_reference();
-        let mr = ModelRef { provider: ProviderId::OpenAI, model: "gpt-9-ultra".into() };
+        let mr = ModelRef {
+            provider: ProviderId::OpenAI,
+            model: "gpt-9-ultra".into(),
+        };
         // No exact entry and no OpenAI provider-default registered → UnpricedModel
         // (cost attributes to OpenAI but invents no rate).
         assert!(c.resolve(&mr).is_err());

@@ -85,7 +85,11 @@ mod tests {
     const CANNED_200: &str = r#"{"id":"msg_x","model":"claude-opus-4-7","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}"#;
 
     fn provider(t: MockTransport) -> AnthropicLlmProvider<MockTransport> {
-        AnthropicLlmProvider::new("sk-test", Some("https://mock.local".to_string()), Arc::new(t))
+        AnthropicLlmProvider::new(
+            "sk-test",
+            Some("https://mock.local".to_string()),
+            Arc::new(t),
+        )
     }
 
     #[test]
@@ -98,7 +102,10 @@ mod tests {
     #[tokio::test]
     async fn complete_decodes_canned_anthropic_response() {
         let p = provider(MockTransport::responding(200, CANNED_200));
-        let resp = p.complete(CanonicalRequest::new("claude-opus-4-7")).await.expect("ok");
+        let resp = p
+            .complete(CanonicalRequest::new("claude-opus-4-7"))
+            .await
+            .expect("ok");
         assert_eq!(resp.id, "msg_x");
         match &resp.content[0] {
             ContentBlockApi::Text { text } => assert_eq!(text, "hi"),
@@ -113,9 +120,15 @@ mod tests {
             r#"{"type":"message_stop"}"#,
         ];
         let p = provider(MockTransport::streaming(frames));
-        let s = p.stream(CanonicalRequest::new("claude-opus-4-7")).await.expect("stream");
+        let s = p
+            .stream(CanonicalRequest::new("claude-opus-4-7"))
+            .await
+            .expect("stream");
         let events: Vec<_> = s.collect().await;
-        assert!(matches!(events.first(), Some(Ok(StreamEvent::MessageStart { .. }))));
+        assert!(matches!(
+            events.first(),
+            Some(Ok(StreamEvent::MessageStart { .. }))
+        ));
         assert!(matches!(events.last(), Some(Ok(StreamEvent::MessageStop))));
     }
 }

@@ -17,7 +17,12 @@ pub(crate) struct MockTransport {
 impl MockTransport {
     /// Return one non-streaming response with `status` and `body`.
     pub(crate) fn responding(status: u16, body: impl Into<String>) -> Self {
-        Self { status, body: body.into(), sse_frames: Vec::new(), error: None }
+        Self {
+            status,
+            body: body.into(),
+            sse_frames: Vec::new(),
+            error: None,
+        }
     }
 
     /// Return `frames` as successive SSE `data:` payloads (status 200).
@@ -32,25 +37,41 @@ impl MockTransport {
 
     /// Yield a single transport error from `stream_sse`.
     pub(crate) fn erroring(msg: impl Into<String>) -> Self {
-        Self { status: 200, body: String::new(), sse_frames: Vec::new(), error: Some(msg.into()) }
+        Self {
+            status: 200,
+            body: String::new(),
+            sse_frames: Vec::new(),
+            error: Some(msg.into()),
+        }
     }
 }
 
 #[async_trait]
 impl HttpTransport for MockTransport {
     async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
-        Ok(HttpResponse { status: self.status, headers: Vec::new(), body: self.body.clone() })
+        Ok(HttpResponse {
+            status: self.status,
+            headers: Vec::new(),
+            body: self.body.clone(),
+        })
     }
 
     async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
         if let Some(msg) = &self.error {
-            let one: Vec<Result<SseEvent, HttpError>> = vec![Err(HttpError::Connection(msg.clone()))];
+            let one: Vec<Result<SseEvent, HttpError>> =
+                vec![Err(HttpError::Connection(msg.clone()))];
             return Ok(Box::pin(stream::iter(one)));
         }
         let frames: Vec<Result<SseEvent, HttpError>> = self
             .sse_frames
             .iter()
-            .map(|d| Ok(SseEvent { event_type: None, data: d.clone(), id: None }))
+            .map(|d| {
+                Ok(SseEvent {
+                    event_type: None,
+                    data: d.clone(),
+                    id: None,
+                })
+            })
             .collect();
         Ok(Box::pin(stream::iter(frames)))
     }

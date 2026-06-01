@@ -35,7 +35,13 @@ impl<C: WireCodec> GenericClient<C> {
         id: ProviderId,
         capabilities: Capabilities,
     ) -> Self {
-        Self { codec, auth, transport, id, capabilities }
+        Self {
+            codec,
+            auth,
+            transport,
+            id,
+            capabilities,
+        }
     }
 }
 
@@ -53,7 +59,12 @@ fn pump_stream(
     wire: SseStream,
     decoder: Box<dyn SseDecoder>,
 ) -> BoxStream<'static, Result<StreamEvent, ApiError>> {
-    let init = StreamPump { wire, decoder, queue: VecDeque::new(), done: false };
+    let init = StreamPump {
+        wire,
+        decoder,
+        queue: VecDeque::new(),
+        done: false,
+    };
     stream::unfold(init, |mut st| async move {
         loop {
             if let Some(item) = st.queue.pop_front() {
@@ -113,7 +124,11 @@ impl<C: WireCodec + 'static> LlmProvider for GenericClient<C> {
             .codec
             .encode_request(&req, &self.auth)
             .map_err(|e| ApiError::Http(HttpError::InvalidRequest(e.to_string())))?;
-        let wire = self.transport.stream_sse(http).await.map_err(ApiError::Http)?;
+        let wire = self
+            .transport
+            .stream_sse(http)
+            .await
+            .map_err(ApiError::Http)?;
         let decoder = self.codec.new_stream_decoder();
         Ok(pump_stream(wire, decoder))
     }
@@ -150,7 +165,9 @@ mod tests {
             Ok(MessageResponse {
                 id: "m".to_string(),
                 model: "mock".to_string(),
-                content: vec![ContentBlockApi::Text { text: body.to_string() }],
+                content: vec![ContentBlockApi::Text {
+                    text: body.to_string(),
+                }],
                 stop_reason: Some("end_turn".to_string()),
                 usage: UsageApi::default(),
             })
@@ -167,7 +184,9 @@ mod tests {
         fn push(&mut self, data: &str) -> Vec<StreamEvent> {
             vec![StreamEvent::ContentBlockDelta {
                 index: 0,
-                delta: ContentDelta::TextDelta { text: data.to_string() },
+                delta: ContentDelta::TextDelta {
+                    text: data.to_string(),
+                },
             }]
         }
 
@@ -189,7 +208,10 @@ mod tests {
     #[tokio::test]
     async fn complete_runs_encode_request_decode() {
         let c = client(MockTransport::responding(200, "PONG"));
-        let resp = c.complete(CanonicalRequest::new("gpt-4o")).await.expect("ok");
+        let resp = c
+            .complete(CanonicalRequest::new("gpt-4o"))
+            .await
+            .expect("ok");
         match &resp.content[0] {
             ContentBlockApi::Text { text } => assert_eq!(text, "PONG"),
             other => panic!("expected text, got {other:?}"),
@@ -199,17 +221,26 @@ mod tests {
     #[tokio::test]
     async fn stream_flattens_decoder_events_then_finish() {
         let c = client(MockTransport::streaming(vec!["a", "b"]));
-        let s = c.stream(CanonicalRequest::new("gpt-4o")).await.expect("stream");
+        let s = c
+            .stream(CanonicalRequest::new("gpt-4o"))
+            .await
+            .expect("stream");
         let events: Vec<_> = s.collect().await;
         assert_eq!(events.len(), 3, "2 deltas + MessageStop");
-        assert!(matches!(events[0], Ok(StreamEvent::ContentBlockDelta { .. })));
+        assert!(matches!(
+            events[0],
+            Ok(StreamEvent::ContentBlockDelta { .. })
+        ));
         assert!(matches!(events[2], Ok(StreamEvent::MessageStop)));
     }
 
     #[tokio::test]
     async fn stream_empty_yields_only_finish() {
         let c = client(MockTransport::streaming(vec![]));
-        let s = c.stream(CanonicalRequest::new("gpt-4o")).await.expect("stream");
+        let s = c
+            .stream(CanonicalRequest::new("gpt-4o"))
+            .await
+            .expect("stream");
         let events: Vec<_> = s.collect().await;
         assert_eq!(events.len(), 1, "only the finish() MessageStop");
         assert!(matches!(events[0], Ok(StreamEvent::MessageStop)));
@@ -218,9 +249,16 @@ mod tests {
     #[tokio::test]
     async fn stream_transport_error_is_terminal() {
         let c = client(MockTransport::erroring("boom"));
-        let s = c.stream(CanonicalRequest::new("gpt-4o")).await.expect("stream");
+        let s = c
+            .stream(CanonicalRequest::new("gpt-4o"))
+            .await
+            .expect("stream");
         let events: Vec<_> = s.collect().await;
-        assert_eq!(events.len(), 1, "the error item, then terminate (no finish, no re-poll)");
+        assert_eq!(
+            events.len(),
+            1,
+            "the error item, then terminate (no finish, no re-poll)"
+        );
         assert!(matches!(events[0], Err(ApiError::Http(_))));
     }
 }

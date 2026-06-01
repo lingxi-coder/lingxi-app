@@ -38,7 +38,10 @@ mod tests {
     fn bearer_appends_authorization_header() {
         let mut h = Vec::new();
         Auth::Bearer("sk-123".to_string()).apply(&mut h);
-        assert_eq!(h, vec![("authorization".to_string(), "Bearer sk-123".to_string())]);
+        assert_eq!(
+            h,
+            vec![("authorization".to_string(), "Bearer sk-123".to_string())]
+        );
     }
 
     #[test]

@@ -15,7 +15,11 @@ pub trait WireCodec: Send + Sync {
     ///
     /// # Errors
     /// Returns [`CodecError`] if the request cannot be represented.
-    fn encode_request(&self, req: &CanonicalRequest, auth: &Auth) -> Result<HttpRequest, CodecError>;
+    fn encode_request(
+        &self,
+        req: &CanonicalRequest,
+        auth: &Auth,
+    ) -> Result<HttpRequest, CodecError>;
 
     /// Decode a non-streaming response body into the canonical shape.
     ///

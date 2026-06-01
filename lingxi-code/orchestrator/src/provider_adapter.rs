@@ -106,7 +106,9 @@ mod tests {
             Ok(MessageResponse {
                 id: "stub".to_string(),
                 model: req.model,
-                content: vec![ContentBlockApi::Text { text: "ok".to_string() }],
+                content: vec![ContentBlockApi::Text {
+                    text: "ok".to_string(),
+                }],
                 stop_reason: Some("end_turn".to_string()),
                 usage: UsageApi::default(),
             })
@@ -134,7 +136,10 @@ mod tests {
             .await
             .expect("ok");
         assert_eq!(resp.model, "openai/gpt-4o");
-        assert_eq!(stub.seen_model.lock().unwrap().as_deref(), Some("openai/gpt-4o"));
+        assert_eq!(
+            stub.seen_model.lock().unwrap().as_deref(),
+            Some("openai/gpt-4o")
+        );
         assert_eq!(stub.seen_system.lock().unwrap().as_deref(), Some("sys"));
     }
 

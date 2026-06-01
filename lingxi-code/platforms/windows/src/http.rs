@@ -117,6 +117,45 @@ impl HttpTransport for WindowsHttp {
         let event_stream = sse_event_stream(byte_stream);
         Ok(Box::pin(event_stream))
     }
+
+    async fn stream_raw_bytes(
+        &self,
+        req: HttpRequest,
+    ) -> Result<traits::http::RawByteStream, HttpError> {
+        let method = match req.method {
+            protocol::HttpMethod::Get => reqwest::Method::GET,
+            protocol::HttpMethod::Post => reqwest::Method::POST,
+            protocol::HttpMethod::Put => reqwest::Method::PUT,
+            protocol::HttpMethod::Patch => reqwest::Method::PATCH,
+            protocol::HttpMethod::Delete => reqwest::Method::DELETE,
+            protocol::HttpMethod::Head => reqwest::Method::HEAD,
+            protocol::HttpMethod::Options => reqwest::Method::OPTIONS,
+        };
+        let mut rb = self.client.request(method, &req.url);
+        for (k, v) in &req.headers {
+            rb = rb.header(k, v);
+        }
+        if let Some(body) = req.body {
+            rb = rb.body(body);
+        }
+        if let Some(timeout) = req.timeout {
+            rb = rb.timeout(timeout);
+        }
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| HttpError::Connection(e.to_string()))?;
+        let status = resp.status().as_u16();
+        if status >= 400 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HttpError::Status { status, body });
+        }
+        let s = resp.bytes_stream().map(|r| {
+            r.map(|b| b.to_vec())
+                .map_err(|e| HttpError::Connection(e.to_string()))
+        });
+        Ok(Box::pin(s))
+    }
 }
 
 /// Adapt a byte stream into a stream of complete `SseEvent`s.

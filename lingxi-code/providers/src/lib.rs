@@ -33,8 +33,11 @@ mod testutil;
 pub use anthropic::AnthropicLlmProvider;
 pub use bedrock::BedrockProvider;
 pub use auth::Auth;
-pub use authenticator::{Authenticator, GcpTokenAuthenticator, SigV4Authenticator, StaticAuth};
+pub use authenticator::{
+    Authenticator, AzureAdAuthenticator, GcpTokenAuthenticator, SigV4Authenticator, StaticAuth,
+};
 pub use aws_creds::AwsCreds;
+pub use profile::AzureAdConfig;
 pub use capabilities::{Capabilities, ReasoningSupport, SystemStyle};
 pub use client::GenericClient;
 pub use codec::{SseDecoder, WireCodec};

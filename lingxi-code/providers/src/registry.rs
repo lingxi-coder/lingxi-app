@@ -192,16 +192,29 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
             }
             ProviderKind::AzureOpenAi => {
                 let key = self.api_key_for(profile);
-                let auth = if key.is_empty() {
-                    crate::auth::Auth::None
+                // Prefer the api-key header; else mint an Azure AD token when
+                // `azureAd` is configured; else no auth.
+                let authenticator: Arc<dyn crate::authenticator::Authenticator> = if !key.is_empty()
+                {
+                    Arc::new(crate::authenticator::StaticAuth::new(
+                        crate::auth::Auth::Header {
+                            name: "api-key".to_string(),
+                            value: key,
+                        },
+                    ))
+                } else if let Some(ad) = &profile.azure_ad {
+                    let client_id = self.env.get(&ad.client_id_env).cloned().unwrap_or_default();
+                    let client_secret =
+                        self.env.get(&ad.client_secret_env).cloned().unwrap_or_default();
+                    Arc::new(crate::authenticator::AzureAdAuthenticator::new(
+                        ad.tenant.clone(),
+                        client_id,
+                        client_secret,
+                        self.transport.clone(),
+                    ))
                 } else {
-                    crate::auth::Auth::Header {
-                        name: "api-key".to_string(),
-                        value: key,
-                    }
+                    Arc::new(crate::authenticator::StaticAuth::new(crate::auth::Auth::None))
                 };
-                let authenticator = Arc::new(crate::authenticator::StaticAuth::new(auth))
-                    as Arc<dyn crate::authenticator::Authenticator>;
                 let codec = crate::openai::OpenAiCodec::new_azure(
                     profile.base_url.clone().unwrap_or_default(),
                     profile.azure_deployment.clone().unwrap_or_default(),
@@ -321,6 +334,7 @@ mod tests {
                 project: None,
                 region: None,
                 models: vec!["llama-3.3-70b".to_string()],
+                azure_ad: None,
             },
         );
         let mut env = BTreeMap::new();
@@ -386,6 +400,7 @@ mod tests {
                 project: None,
                 region: None,
                 models: Vec::new(),
+                azure_ad: None,
             },
         );
         let r = registry(extra);
@@ -415,6 +430,7 @@ mod tests {
                 project: None,
                 region: None,
                 models: Vec::new(),
+                azure_ad: None,
             },
         );
         let r = registry(extra);
@@ -424,6 +440,44 @@ mod tests {
             resolved.provider.id(),
             cost::ProviderId::OpenAICompatible { name: "azure".to_string() }
         );
+    }
+
+    #[test]
+    fn azure_ad_profile_resolves_without_api_key() {
+        let mut profiles = builtin_profiles(Some("https://mock.local".to_string()));
+        profiles.insert(
+            "azure".to_string(),
+            ProviderProfile {
+                kind: ProviderKind::AzureOpenAi,
+                base_url: Some("https://r.openai.azure.com".to_string()),
+                api_key_env: None,
+                reasoning_effort: None,
+                thinking_budget: None,
+                azure_deployment: Some("gpt-4o".to_string()),
+                azure_api_version: Some("2024-10-21".to_string()),
+                project: None,
+                region: None,
+                models: Vec::new(),
+                azure_ad: Some(crate::profile::AzureAdConfig {
+                    tenant: "t".to_string(),
+                    client_id_env: "AZ_ID".to_string(),
+                    client_secret_env: "AZ_SECRET".to_string(),
+                }),
+            },
+        );
+        let mut env = BTreeMap::new();
+        env.insert("ANTHROPIC_API_KEY".to_string(), "sk".to_string());
+        env.insert("AZ_ID".to_string(), "id".to_string());
+        env.insert("AZ_SECRET".to_string(), "secret".to_string());
+        let r = ProviderRegistry::new(
+            profiles,
+            env,
+            Arc::new(MockTransport::responding(200, "")),
+            RoutingConfig::default(),
+        );
+        // Builds the AzureAdAuthenticator path (no network until authorize()).
+        let resolved = r.resolve("azure/gpt-4o").expect("azure AD profile resolves");
+        assert_eq!(resolved.model, "gpt-4o");
     }
 
     #[test]
@@ -442,6 +496,7 @@ mod tests {
                 project: Some("p".to_string()),
                 region: Some("us-central1".to_string()),
                 models: Vec::new(),
+                azure_ad: None,
             },
         );
         let r = registry(extra);
@@ -472,6 +527,7 @@ mod tests {
                 project: None,
                 region: Some("us-east-1".to_string()),
                 models: Vec::new(),
+                azure_ad: None,
             },
         );
         let r = registry(extra);

@@ -99,24 +99,33 @@ jobs:
           for p in lingxi lingxi-linux-x64 lingxi-linux-arm64 lingxi-darwin-x64 lingxi-darwin-arm64 lingxi-win32-x64 lingxi-win32-arm64; do
             python3 npm/scripts/build_npm_package.py --package "$p" --release-version "${{ steps.ver.outputs.v }}" --staging-dir "/tmp/npm/$p" --vendor-src target
           done
-      - name: Build wheels (one per target)
+      - name: Build wheels (one per target/tag)
         working-directory: lingxi-code/pypi
         shell: bash
         run: |
-          declare -A TAG=(
-            [x86_64-apple-darwin]=macosx_11_0_x86_64
-            [aarch64-apple-darwin]=macosx_11_0_arm64
-            [x86_64-unknown-linux-musl]=musllinux_1_2_x86_64
-            [aarch64-unknown-linux-musl]=musllinux_1_2_aarch64
-            [x86_64-pc-windows-msvc]=win_amd64
-            [aarch64-pc-windows-msvc]=win_arm64
+          # Inject the release version (pyproject ships a static 0.0.0-dev
+          # placeholder; without this the wheel publishes as 0.0.0.dev0 and the
+          # next tag collides on PyPI).
+          sed -i "s/^version = \"0.0.0-dev\"/version = \"${{ steps.ver.outputs.v }}\"/" pyproject.toml
+          # Platform tags per target. The Linux binary is static-musl, portable
+          # onto glibc, so we ship BOTH manylinux (glibc distros — the common
+          # case) and musllinux (Alpine) wheels so `pip`/`uv` install everywhere.
+          declare -A TAGS=(
+            [x86_64-apple-darwin]="macosx_11_0_x86_64"
+            [aarch64-apple-darwin]="macosx_11_0_arm64"
+            [x86_64-unknown-linux-musl]="manylinux_2_17_x86_64 musllinux_1_2_x86_64"
+            [aarch64-unknown-linux-musl]="manylinux_2_17_aarch64 musllinux_1_2_aarch64"
+            [x86_64-pc-windows-msvc]="win_amd64"
+            [aarch64-pc-windows-msvc]="win_arm64"
           )
-          for t in "${!TAG[@]}"; do
-            rm -rf src/lingxi_cli_bin/bin && mkdir -p src/lingxi_cli_bin/bin
+          for t in "${!TAGS[@]}"; do
             ext=""; [[ "$t" == *windows* ]] && ext=".exe"
+            rm -rf src/lingxi_cli_bin/bin && mkdir -p src/lingxi_cli_bin/bin
             cp "../target/$t/release/lingxi-cli$ext" "src/lingxi_cli_bin/bin/lingxi$ext"
             printf '{"target":"%s"}' "$t" > src/lingxi_cli_bin/lingxi-package.json
-            LINGXI_CLI_BIN_PLATFORM_TAG="${TAG[$t]}" uv build --wheel --out-dir dist
+            for tag in ${TAGS[$t]}; do
+              LINGXI_CLI_BIN_PLATFORM_TAG="$tag" uv build --wheel --out-dir dist
+            done
           done
       - name: Publish to npm
         if: ${{ env.NPM_TOKEN != '' }}

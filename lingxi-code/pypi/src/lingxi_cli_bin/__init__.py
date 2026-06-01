@@ -61,7 +61,10 @@ def main() -> int:
         except (ValueError, OSError):
             pass
 
-    return proc.wait()
+    code = proc.wait()
+    # On POSIX a child killed by signal N reports as -N; mirror the shell/JS
+    # launcher convention of 128+N so callers see the conventional exit status.
+    return code if code >= 0 else 128 + (-code)
 
 
 __all__ = [

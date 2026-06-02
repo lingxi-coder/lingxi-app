@@ -19,7 +19,7 @@
 use command_api::CommandRegistry;
 use command_core::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
-    register_core_batch_4,
+    register_core_batch_4, register_core_batch_5,
 };
 use skill_api::SkillRegistry;
 use std::sync::Arc;
@@ -87,7 +87,8 @@ pub fn mobile_command_registry(
     register_all_builtin_commands(&mut reg);
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle.clone(), auth);
-    register_core_batch_4(&mut reg, handle);
+    register_core_batch_4(&mut reg, handle.clone());
+    register_core_batch_5(&mut reg, handle);
     command_mobile::register(&mut reg);
     reg
 }

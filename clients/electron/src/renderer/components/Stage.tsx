@@ -245,8 +245,32 @@ function AudioMessage({ bars, duration }: { bars: number[]; duration: number }) 
 }
 
 // ─── STAGE (the agent run scrollback) ────────────────────────
-export function Stage({ extraMessages = [] }: { extraMessages?: RunItem[] }) {
+interface StageProps {
+  /** Per-session extras appended in the browser preview (e.g. voice messages). */
+  extraMessages?: RunItem[];
+  /**
+   * The live conversation accumulated from the bridge. When `live` is true the
+   * Stage renders {@link liveItems} (the real engine feed); otherwise it falls
+   * back to the static mock {@link RUN} so the design preview still works in a
+   * plain browser.
+   */
+  live?: boolean;
+  liveItems?: RunItem[];
+  /** True while a turn is streaming — shows the thinking affordance at the tail. */
+  running?: boolean;
+}
+
+export function Stage({ extraMessages = [], live = false, liveItems = [], running = false }: StageProps) {
   const t = useT();
+  const tailRef = useRef<HTMLDivElement>(null);
+  // Source the scrollback from the live feed when connected, else the mock RUN.
+  const items: RunItem[] = live ? liveItems : [...RUN, ...extraMessages];
+
+  // Keep the newest content in view as deltas stream in.
+  useEffect(() => {
+    tailRef.current?.scrollIntoView({ block: 'end' });
+  }, [items.length, running]);
+
   return (
     <div style={{ flex: 1, overflowY: 'auto', background: t.stageBg, position: 'relative' }}>
       <div
@@ -256,7 +280,7 @@ export function Stage({ extraMessages = [] }: { extraMessages?: RunItem[] }) {
           display: 'flex', flexDirection: 'column', gap: 18,
         }}
       >
-        {[...RUN, ...extraMessages].map((item, i) => {
+        {items.map((item, i) => {
           if (item.type === 'narration') {
             return (
               <div key={i} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
@@ -301,20 +325,42 @@ export function Stage({ extraMessages = [] }: { extraMessages?: RunItem[] }) {
           return null;
         })}
 
-        {/* /compact pill — pre-input action chip */}
-        <div style={{ marginTop: 4 }}>
-          <span
-            className="mono"
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              padding: '4px 9px', borderRadius: 99,
-              background: t.accentBg, border: `0.5px solid ${t.accentBorder}`,
-              color: t.accent, fontSize: 12, fontWeight: 500,
-            }}
-          >
-            /compact
-          </span>
-        </div>
+        {/* Streaming affordance — shown at the tail while a live turn runs. */}
+        {live && running && (
+          <div style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
+            <GutterRule />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: t.text3, fontSize: 13.5 }}>
+              <span
+                style={{
+                  width: 10, height: 10, borderRadius: 99, background: t.accent,
+                  boxShadow: `0 0 0 4px color-mix(in oklab, ${t.accent} 22%, transparent)`,
+                  animation: 'shimmer 1.3s infinite', flexShrink: 0,
+                }}
+              />
+              <span style={{ animation: 'cursor-blink 1.1s step-end infinite' }}>Thinking…</span>
+            </div>
+          </div>
+        )}
+
+        {/* /compact pill — pre-input action chip (design preview only). */}
+        {!live && (
+          <div style={{ marginTop: 4 }}>
+            <span
+              className="mono"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                padding: '4px 9px', borderRadius: 99,
+                background: t.accentBg, border: `0.5px solid ${t.accentBorder}`,
+                color: t.accent, fontSize: 12, fontWeight: 500,
+              }}
+            >
+              /compact
+            </span>
+          </div>
+        )}
+
+        {/* Scroll anchor — keeps the newest content in view as deltas arrive. */}
+        <div ref={tailRef} />
       </div>
     </div>
   );

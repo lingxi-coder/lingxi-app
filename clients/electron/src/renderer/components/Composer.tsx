@@ -10,11 +10,17 @@ interface ComposerProps {
   model: Model;
   setModel: (m: Model) => void;
   appendMessage: (msg: RunItem) => void;
+  /** Submit a text prompt to the live engine (no-op-able in browser preview). */
+  onSubmit?: (text: string) => void;
+  /** Cancel the in-flight live turn. */
+  onCancel?: () => void;
+  /** True while a live turn is streaming — shows the thinking affordance. */
+  running?: boolean;
 }
 
 const NUM_BARS = 90;
 
-export function Composer({ repo, model, setModel, appendMessage }: ComposerProps) {
+export function Composer({ repo, model, setModel, appendMessage, onSubmit, onCancel, running = false }: ComposerProps) {
   const t = useT();
   const [text, setText] = useState('');
   const [slashOpen, setSlashOpen] = useState(false);
@@ -158,6 +164,17 @@ export function Composer({ repo, model, setModel, appendMessage }: ComposerProps
 
   const filtered = SLASH_COMMANDS.filter((c) => c.cmd.startsWith(text || '/'));
 
+  // Submit the composed prompt to the live engine, then clear + reset the box.
+  const submit = () => {
+    const value = text.trim();
+    if (!value) return;
+    onSubmit?.(value);
+    setText('');
+    setSlashOpen(false);
+    const ta = taRef.current;
+    if (ta) ta.style.height = 'auto';
+  };
+
   return (
     <div style={{ padding: '0 32px 16px', flexShrink: 0, background: t.stageBg, borderTop: `0.5px solid ${t.border}` }}>
       <div style={{ maxWidth: 920, margin: '0 auto' }}>
@@ -243,6 +260,13 @@ export function Composer({ repo, model, setModel, appendMessage }: ComposerProps
               setText(e.target.value);
               e.target.style.height = 'auto';
               e.target.style.height = Math.min(e.target.scrollHeight, 220) + 'px';
+            }}
+            onKeyDown={(e) => {
+              // Enter submits; Shift+Enter (and IME composition) inserts a newline.
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                submit();
+              }
             }}
             placeholder={recording ? 'Ask for follow-up changes' : 'Type / for commands'}
             disabled={recording}
@@ -339,9 +363,43 @@ export function Composer({ repo, model, setModel, appendMessage }: ComposerProps
 
               <div style={{ flex: 1 }} />
 
-              <button title="停止" style={{ ...iconBtn(t), width: 28, height: 28, background: t.surfaceHover, color: t.text2 }}>
-                <span style={{ width: 10, height: 10, borderRadius: 2, background: t.text2 }} />
-              </button>
+              {running ? (
+                <button
+                  title="停止"
+                  onClick={() => onCancel?.()}
+                  style={{ ...iconBtn(t), width: 28, height: 28, background: t.surfaceHover, color: t.text2 }}
+                  onMouseEnter={(e) => (e.currentTarget.style.filter = 'brightness(0.95)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.filter = 'none')}
+                >
+                  <span style={{ width: 10, height: 10, borderRadius: 2, background: t.text2 }} />
+                </button>
+              ) : (
+                <button
+                  title="发送"
+                  onClick={() => submit()}
+                  disabled={text.trim().length === 0}
+                  style={{
+                    width: 28, height: 28, borderRadius: 99, border: 'none',
+                    cursor: text.trim().length === 0 ? 'default' : 'pointer',
+                    background: text.trim().length === 0 ? t.surfaceHover : t.text,
+                    color: text.trim().length === 0 ? t.text4 : t.windowBg,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    transition: 'background 0.15s ease',
+                  }}
+                  onMouseEnter={(e) => {
+                    if (text.trim().length > 0) e.currentTarget.style.filter = 'brightness(1.1)';
+                  }}
+                  onMouseLeave={(e) => (e.currentTarget.style.filter = 'none')}
+                >
+                  <svg
+                    width="14" height="14" viewBox="0 0 24 24" fill="none"
+                    stroke={text.trim().length === 0 ? t.text4 : t.windowBg}
+                    strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+                  >
+                    <path d="M12 19V5M5 12l7-7 7 7" />
+                  </svg>
+                </button>
+              )}
             </div>
           )}
         </div>

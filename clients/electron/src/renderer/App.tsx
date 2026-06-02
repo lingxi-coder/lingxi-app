@@ -9,6 +9,7 @@ import { Composer } from './components/Composer';
 import { RightPanel } from './components/RightPanel';
 import { SettingsPage } from './components/settings/SettingsPage';
 import type { Mode } from './components/primitives';
+import { useBridge } from './bridge/useBridge';
 
 export function App() {
   const [theme, setTheme] = useState<ThemeMode>('dark');
@@ -22,6 +23,12 @@ export function App() {
   const [model, setModel] = useState<Model>(MODELS[0]);
   const [extraMessages, setExtraMessages] = useState<RunItem[]>([]);
   const appendMessage = (msg: RunItem) => setExtraMessages((m) => [...m, msg]);
+
+  // Live bridge feed. When connected we render the real conversation; otherwise
+  // the Stage falls back to the static mock RUN so the design preview still
+  // works in a plain browser.
+  const bridge = useBridge();
+  const live = bridge.connected;
 
   const repo = PROJECTS.find((r) => r.id === activeRepo) || PROJECTS[0];
 
@@ -71,8 +78,21 @@ export function App() {
               setTheme={setTheme}
               sidebarCollapsed={sidebarCollapsed}
             />
-            <Stage extraMessages={extraMessages} />
-            <Composer repo={repo} model={model} setModel={setModel} appendMessage={appendMessage} />
+            <Stage
+              extraMessages={extraMessages}
+              live={live}
+              liveItems={bridge.conversation.items}
+              running={bridge.running}
+            />
+            <Composer
+              repo={repo}
+              model={model}
+              setModel={setModel}
+              appendMessage={appendMessage}
+              onSubmit={bridge.sendPrompt}
+              onCancel={bridge.cancel}
+              running={bridge.running}
+            />
           </div>
 
           {panelOpen && <RightPanel onClose={() => setPanelOpen(false)} />}

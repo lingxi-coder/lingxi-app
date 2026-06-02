@@ -40,6 +40,13 @@ pub struct SubagentContext {
     pub worktree_handle: Option<WorktreeHandle>,
     /// `true` when the agent runs asynchronously (e.g. background scan).
     pub is_async: bool,
+    /// `true` for a long-lived, message-driven teammate: after a turn-set ends
+    /// with a terminal stop the runner parks awaiting the next inbound
+    /// [`engine::Event::UserMessage`] instead of returning. Terminates only on
+    /// [`engine::Event::UserExit`] / [`engine::Event::UserInterrupt`] or when
+    /// the inbound event channel closes. Distinct from [`Self::is_async`],
+    /// which only governs background-vs-foreground scheduling.
+    pub persistent: bool,
     /// Whether the agent may surface permission prompts to the user.
     pub can_show_permission_prompts: bool,
     /// MCP connections the agent should attach to.

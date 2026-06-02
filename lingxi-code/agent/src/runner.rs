@@ -11,7 +11,11 @@
 //!   [`traits::ToolInvoker`], feed the results back as a user message, and
 //!   repeat until the model stops (`end_turn` / no tool use) or `max_turns`
 //!   is hit. A `UserExit` / `UserInterrupt` arriving on `event_rx` aborts the
-//!   loop and surfaces [`SubagentEvent::Killed`].
+//!   loop and surfaces [`SubagentEvent::Killed`]. When
+//!   [`crate::context::SubagentContext::persistent`] is set, the loop does not
+//!   return on a terminal stop: it parks awaiting the next inbound
+//!   [`engine::Event::UserMessage`], appends it to history, and runs the next
+//!   turn-set — modelling a long-lived, message-driven teammate.
 //! * **Legacy stub** (`api_client = None`): the M1.11 reducer-driven stub that
 //!   completes after the first inbound event. Retained for back-compat with
 //!   callers that haven't wired an API client yet.
@@ -191,6 +195,18 @@ async fn run_subagent_loop(
     // (racing a perpetually-ready `recv() -> None` arm would busy-loop).
     let mut event_channel_open = true;
 
+    // Outer loop: one iteration per turn-set. In non-persistent mode the
+    // turn-set runs exactly once (we `return` after it). In persistent mode the
+    // runner parks at the bottom awaiting the next inbound `UserMessage` and
+    // loops back here to run the next turn-set, retaining `history` across
+    // turn-sets (matching the TS teammate's accumulated transcript). `max_turns`
+    // is per-turn-set: the `_turn` counter re-zeroes each outer iteration, so
+    // every injected message gets a fresh budget.
+    loop {
+    // Set to `true` when the inner turn loop hits a clean terminal stop (it has
+    // already emitted its `Completed`). Stays `false` if the loop instead falls
+    // through by exhausting `max_turns`, which needs the max-turns `Completed`.
+    let mut terminated_cleanly = false;
     for _turn in 0..max_turns {
         // Race the model round-trip against a user-termination event. A
         // UserExit / UserInterrupt on event_rx aborts the loop -> Killed.
@@ -331,20 +347,66 @@ async fn run_subagent_loop(
             let _ = out_tx
                 .send(SubagentEvent::Completed { agent_id, result })
                 .await;
-            return;
+            // Terminal stop for this turn-set: leave the inner turn loop and
+            // let the persist decision below choose between returning
+            // (non-persistent) and parking for the next message (persistent).
+            terminated_cleanly = true;
+            break;
         }
         // Otherwise loop to the next turn.
     }
 
-    // max_turns exhausted without a terminal stop. claude-code surfaces this
-    // as a completion carrying a max-turns reason rather than a hard failure,
-    // so the parent can still consume whatever work was produced.
-    let _ = out_tx
-        .send(SubagentEvent::Completed {
-            agent_id,
-            result: serde_json::json!({ "reason": "max_turns_exhausted", "max_turns": max_turns }),
-        })
-        .await;
+    if !terminated_cleanly {
+        // The inner loop fell through: `max_turns` exhausted without a terminal
+        // stop. claude-code surfaces this as a completion carrying a max-turns
+        // reason rather than a hard failure, so the parent can still consume
+        // whatever work was produced.
+        let _ = out_tx
+            .send(SubagentEvent::Completed {
+                agent_id,
+                result: serde_json::json!({
+                    "reason": "max_turns_exhausted",
+                    "max_turns": max_turns,
+                }),
+            })
+            .await;
+    }
+
+    // ----- Persist decision ------------------------------------------------
+    // Non-persistent (batch-8) behavior: end after one turn-set. This preserves
+    // today's exact semantics — every existing call site sets `persistent`
+    // false, so they `return` here as before.
+    if !ctx.persistent {
+        return;
+    }
+
+    // Persistent teammate: park awaiting the next inbound `UserMessage`. If the
+    // event channel has already closed, no message can ever arrive again, so we
+    // terminate gracefully.
+    if !event_channel_open {
+        return;
+    }
+    loop {
+        match event_rx.recv().await {
+            Some(engine::Event::UserMessage { content, .. }) => {
+                // Append the injected message to history (minting our own
+                // MessageId, consistent with the assistant-id minting above —
+                // the event's message_id / request_id are the host's bookkeeping)
+                // and resume the inner turn loop with a fresh `max_turns` budget.
+                history.push(ConversationMessage::user(MessageId::new(), content));
+                break;
+            }
+            Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
+                let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
+                return;
+            }
+            // Ignore any other event while idle and keep parking.
+            Some(_) => {}
+            // Channel closed -> graceful terminate.
+            None => return,
+        }
+    }
+    }
 }
 
 /// Legacy reducer-driven stub.
@@ -619,6 +681,7 @@ mod tests {
             allowed_tools: vec![],
             worktree_handle: None,
             is_async: false,
+            persistent: false,
             can_show_permission_prompts: true,
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
@@ -1072,6 +1135,138 @@ mod tests {
         assert!(
             !evs.iter().any(|e| matches!(e, SubagentEvent::Completed { .. })),
             "no Completed when killed mid-flight; got: {evs:?}"
+        );
+    }
+
+    // ---- Persist-mode tests (ctx.persistent = true) ----------------------
+
+    #[tokio::test]
+    async fn persist_mode_processes_second_message_after_idling() {
+        // Turn-set 1: a single end_turn turn completes, then the runner parks
+        // (it does NOT return because persistent = true). We then inject a
+        // second UserMessage which un-idles it and drives turn-set 2; finally
+        // we close the channel to terminate gracefully. Asserts: exactly two
+        // model round-trips and two Completed events (one per turn-set).
+        let api = MockSubagentApiClient::new(vec![
+            Ok(text_response("answer one", Some("end_turn"))),
+            Ok(text_response("answer two", Some("end_turn"))),
+        ]);
+        let mut ctx = loop_ctx(api.clone(), None, 4);
+        ctx.persistent = true;
+
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+
+        let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+
+        // Wait for turn-set 1 to complete (the runner has now idled), then
+        // inject the second message that drives turn-set 2.
+        let mut out_rx = out_rx;
+        let first_completed = loop {
+            let ev = out_rx.recv().await.expect("turn-set 1 should complete");
+            if matches!(ev, SubagentEvent::Completed { .. }) {
+                break ev;
+            }
+        };
+        let SubagentEvent::Completed { result, .. } = &first_completed else {
+            unreachable!()
+        };
+        assert_eq!(result["text"], "answer one", "turn-set 1 result");
+
+        event_tx
+            .send(engine::Event::UserMessage {
+                message_id: MessageId::new(),
+                request_id: RequestId::new(),
+                content: "second question".into(),
+            })
+            .await
+            .unwrap();
+
+        // Wait for turn-set 2 to complete.
+        let second_completed = loop {
+            let ev = out_rx.recv().await.expect("turn-set 2 should complete");
+            if matches!(ev, SubagentEvent::Completed { .. }) {
+                break ev;
+            }
+        };
+        let SubagentEvent::Completed { result, .. } = &second_completed else {
+            unreachable!()
+        };
+        assert_eq!(result["text"], "answer two", "turn-set 2 result");
+
+        // Close the channel: the parked runner terminates gracefully.
+        drop(event_tx);
+        handle.await.unwrap();
+
+        assert_eq!(
+            api.call_count(),
+            2,
+            "exactly two model round-trips (one per turn-set)"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_mode_terminates_on_channel_close_after_turn_set() {
+        // With persistent = true, closing the event channel after the first
+        // turn-set completes makes the parked runner return gracefully (no
+        // further events, no Failed).
+        let api = MockSubagentApiClient::new(vec![Ok(text_response("done", Some("end_turn")))]);
+        let mut ctx = loop_ctx(api.clone(), None, 4);
+        ctx.persistent = true;
+
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+
+        // Drop the sender immediately: the runner runs turn-set 1, parks, sees
+        // the channel already closed, and returns.
+        drop(event_tx);
+
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        assert_eq!(api.call_count(), 1, "one turn-set ran before EOF");
+        let completed = evs
+            .iter()
+            .filter(|e| matches!(e, SubagentEvent::Completed { .. }))
+            .count();
+        assert_eq!(completed, 1, "one Completed; got: {evs:?}");
+        assert!(
+            !evs.iter().any(|e| matches!(e, SubagentEvent::Failed { .. })),
+            "no Failed on graceful EOF; got: {evs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_mode_user_exit_while_idle_surfaces_killed() {
+        // While parked between turn-sets, a UserExit terminates the teammate
+        // with Killed (cooperative shutdown).
+        let api = MockSubagentApiClient::new(vec![Ok(text_response("done", Some("end_turn")))]);
+        let mut ctx = loop_ctx(api.clone(), None, 4);
+        ctx.persistent = true;
+        let agent_id = ctx.agent_id;
+
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+
+        let handle = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+
+        let mut out_rx = out_rx;
+        // Wait for turn-set 1 to complete (runner now idle).
+        loop {
+            let ev = out_rx.recv().await.expect("turn-set 1 completes");
+            if matches!(ev, SubagentEvent::Completed { .. }) {
+                break;
+            }
+        }
+        // Deliver UserExit to the idle runner.
+        event_tx.send(engine::Event::UserExit).await.unwrap();
+        handle.await.unwrap();
+
+        let evs = drain(out_rx).await;
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, SubagentEvent::Killed { agent_id: aid } if *aid == agent_id)),
+            "UserExit while idle yields Killed; got: {evs:?}"
         );
     }
 }

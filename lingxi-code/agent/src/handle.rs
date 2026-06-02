@@ -90,6 +90,7 @@ impl PoolSubagentSpawner {
             allowed_tools: vec![],
             worktree_handle: None,
             is_async: false,
+            persistent: false,
             can_show_permission_prompts: false,
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),

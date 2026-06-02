@@ -2,6 +2,11 @@
 *.xcodeproj
 *.xcworkspace
 
+## Generated UniFFI integration artifacts (reproduce with scripts/build-xcframework.sh)
+Generated/
+Frameworks/
+*.xcframework
+
 ## Xcode
 xcuserdata/
 DerivedData/

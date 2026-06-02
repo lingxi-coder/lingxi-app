@@ -149,30 +149,61 @@ pub fn register_core_batch_4(
 
 /// Register the batch-3 (M-parity) handle-free slash commands.
 ///
-/// These 9 commands (`commit`, `commit-push-pr`, `init-verifiers`, `insights`,
-/// `pr-comments`, `review`, `security-review`, `statusline`, `stickers`) carry
-/// no orchestrator or auth handle: each is a static prompt-injection
-/// (`InjectMessage`) or a static display message (`Done`). They are wired
-/// unconditionally at the end of [`register_all_builtin_commands`], overwriting
-/// the matching pass-1 unimplemented stub entries in-place.
+/// These 11 commands (`commit`, `commit-push-pr`, `init-verifiers`,
+/// `insights`, `output-style`, `pr-comments`, `release-notes`, `review`,
+/// `security-review`, `statusline`, `stickers`) carry no orchestrator or auth
+/// handle: each is a static prompt-injection (`InjectMessage`) or a static
+/// display message (`Done`). They are wired unconditionally at the end of
+/// [`register_all_builtin_commands`], overwriting the matching pass-1
+/// unimplemented stub entries in-place.
+///
+/// `output-style` (deprecated → `/config`) and `release-notes` (the changelog
+/// URL fallback) join the batch-3 set here as handle-free `Done` displays.
 ///
 /// Deferred commands (e.g. `ant-trace`) are intentionally left on the shared
 /// [`command_api::builtin_support::UnimplementedCommandHandler`].
 pub fn register_core_batch_3(reg: &mut CommandRegistry) {
     use crate::{
         CommitHandler, CommitPushPrHandler, InitVerifiersHandler, InsightsHandler,
-        PrCommentsHandler, ReviewHandler, SecurityReviewHandler, StatuslineHandler, StickersHandler,
+        OutputStyleHandler, PrCommentsHandler, ReleaseNotesHandler, ReviewHandler,
+        SecurityReviewHandler, StatuslineHandler, StickersHandler,
     };
 
     reg.register_builtin_handler(Arc::new(CommitHandler::new()));
     reg.register_builtin_handler(Arc::new(CommitPushPrHandler::new()));
     reg.register_builtin_handler(Arc::new(InitVerifiersHandler::new()));
     reg.register_builtin_handler(Arc::new(InsightsHandler::new()));
+    reg.register_builtin_handler(Arc::new(OutputStyleHandler::new()));
     reg.register_builtin_handler(Arc::new(PrCommentsHandler::new()));
+    reg.register_builtin_handler(Arc::new(ReleaseNotesHandler::new()));
     reg.register_builtin_handler(Arc::new(ReviewHandler::new()));
     reg.register_builtin_handler(Arc::new(SecurityReviewHandler::new()));
     reg.register_builtin_handler(Arc::new(StatuslineHandler::new()));
     reg.register_builtin_handler(Arc::new(StickersHandler::new()));
+}
+
+/// Overwrite the batch-5 entry (`effort`) with its handle-bound real handler.
+///
+/// Call **after** [`register_all_builtin_commands`] and (optionally) after
+/// [`register_core_batch_4`]. The function is idempotent — calling it twice
+/// with the same `handle` produces the same final state.
+///
+/// [`crate::EffortHandler`] consumes the orchestrator handle: the
+/// `/effort` / `/effort current` branch reads the current model string via
+/// `OrchestratorHandle::get_status_snapshot` (the model-default effort resolver
+/// itself is deferred — see the handler docs). The call overwrites the matching
+/// pass-1 unimplemented stub entry in-place.
+///
+/// The composition roots (`apps/engine-desktop`, `apps/engine-mobile`) call
+/// this immediately after `register_core_batch_4`, threading the live
+/// `Arc<dyn OrchestratorHandle>`.
+pub fn register_core_batch_5(
+    reg: &mut CommandRegistry,
+    handle: Arc<dyn traits::OrchestratorHandle>,
+) {
+    use crate::EffortHandler;
+
+    reg.register_builtin_handler(Arc::new(EffortHandler::new(handle)));
 }
 
 #[cfg(test)]
@@ -390,7 +421,7 @@ mod batch_3_tests {
     }
 
     #[test]
-    fn all_9_batch_3_names_resolve_after_register_all() {
+    fn all_11_batch_3_names_resolve_after_register_all() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
         for name in [
@@ -398,7 +429,9 @@ mod batch_3_tests {
             "commit-push-pr",
             "init-verifiers",
             "insights",
+            "output-style",
             "pr-comments",
+            "release-notes",
             "review",
             "security-review",
             "statusline",
@@ -406,6 +439,81 @@ mod batch_3_tests {
         ] {
             assert!(reg.resolve(name).is_some(), "/{name} missing");
             assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
+        }
+    }
+
+    /// The two new handle-free batch-3 `Done` commands must NOT return the
+    /// locked M5 stub literal after the standard registration call.
+    #[tokio::test]
+    async fn output_style_and_release_notes_return_done_not_stub() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+
+        for name in ["output-style", "release-notes"] {
+            let h = reg
+                .get_handler(name)
+                .unwrap_or_else(|| panic!("/{name} handler missing"));
+            match h.handle(&args(name)).await {
+                CommandResult::Done { display: Some(s) } => {
+                    assert_ne!(
+                        s,
+                        format!("{name}: not implemented in v0.6.0 (M5)"),
+                        "/{name} still returns the locked stub literal"
+                    );
+                }
+                other => panic!("/{name} expected Done with display, got {other:?}"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod batch_5_tests {
+    use super::*;
+    use command_api::model::CommandResult;
+    use command_api::parser::ParsedSlashCommand;
+    use orchestrator::test_support::MockOrchestratorHandle;
+
+    fn args(name: &str) -> ParsedSlashCommand {
+        ParsedSlashCommand {
+            name: name.to_string(),
+            raw_args: String::new(),
+            positional_args: vec![],
+        }
+    }
+
+    #[test]
+    fn batch_5_name_resolves_after_overwrite() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        register_core_batch_5(&mut reg, handle);
+
+        assert!(reg.resolve("effort").is_some(), "/effort missing");
+        assert!(
+            reg.get_handler("effort").is_some(),
+            "/effort handler missing"
+        );
+    }
+
+    /// After batch-5 wiring `/effort` must NOT return the locked M5 stub
+    /// literal — it returns its real `Done` display.
+    #[tokio::test]
+    async fn effort_returns_real_display_not_stub() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        register_core_batch_5(&mut reg, handle);
+
+        let h = reg.get_handler("effort").expect("effort handler missing");
+        match h.handle(&args("effort")).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_ne!(
+                    s, "effort: not implemented in v0.6.0 (M5)",
+                    "/effort still returns the locked stub literal"
+                );
+            }
+            other => panic!("/effort expected Done with display, got {other:?}"),
         }
     }
 }

@@ -20,6 +20,10 @@ pub enum SecretKind {
     AnthropicOAuthAccessToken,
     /// Long-lived Anthropic OAuth refresh token.
     AnthropicOAuthRefreshToken,
+    /// Non-secret Anthropic OAuth session metadata (email / org / expiry /
+    /// scopes). Distinct from the access/refresh tokens so a keychain audit or
+    /// redaction-by-kind pass does not miscount it as token material.
+    AnthropicOAuthSessionMeta,
     /// AWS credentials (access key + secret pair).
     AwsCredentials,
     /// OAuth access token for an MCP server identified by `server`.

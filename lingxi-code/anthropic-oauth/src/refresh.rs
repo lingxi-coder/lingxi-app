@@ -173,23 +173,32 @@ impl AuthState {
         &self,
         refresh_token: &Secret<String>,
     ) -> Result<TokenEndpointResponse, OAuthError> {
-        let form = format!(
-            "grant_type={}&refresh_token={}&client_id={}",
-            crate::config::REFRESH_GRANT_TYPE,
-            urlencoding::encode(refresh_token.expose_secret()),
-            urlencoding::encode(&self.config.client_id),
-        );
+        // JSON body matching claude-code's `refreshOAuthToken`: includes the
+        // space-joined `scope` param the real endpoint expects.
+        let scope = {
+            let scopes = self.token.read().await.scopes.clone();
+            if scopes.is_empty() {
+                self.config.scopes.join(" ")
+            } else {
+                scopes.join(" ")
+            }
+        };
+        let payload = RefreshRequest {
+            grant_type: crate::config::REFRESH_GRANT_TYPE,
+            refresh_token: refresh_token.expose_secret(),
+            client_id: &self.config.client_id,
+            scope: &scope,
+        };
+        let body = serde_json::to_string(&payload)
+            .map_err(|e| OAuthError::TokenExchange(format!("encode: {e}")))?;
         let req = HttpRequest {
             method: HttpMethod::Post,
             url: self.config.token_endpoint.clone(),
             headers: vec![
-                (
-                    "content-type".into(),
-                    "application/x-www-form-urlencoded".into(),
-                ),
+                ("content-type".into(), "application/json".into()),
                 ("accept".into(), "application/json".into()),
             ],
-            body: Some(form),
+            body: Some(body),
             timeout: Some(Duration::from_secs(30)),
         };
         let resp = self
@@ -208,25 +217,36 @@ impl AuthState {
         }
     }
 
-    /// Persist the new [`TokenInfo`] to keychain if a `CredentialManager` is
-    /// attached. No-op (returns `Ok`) if no manager is configured (test path).
+    /// Persist the rotated [`TokenInfo`] to the keychain via
+    /// [`secret::CredentialManager::store_oauth_tokens`] if a manager is
+    /// attached. No-op (returns `Ok`) when no manager is configured (the
+    /// in-memory-only test path).
     ///
-    /// NOTE: the M2-06 [`secret::CredentialManager`] surface only
-    /// exposes an Anthropic-API-key entry point; a generic OAuth-token store
-    /// path is filed for a follow-up. For M3-04 the in-memory rotation is the
-    /// source of truth; the engine's startup wiring (Task 4 §5) will pass a
-    /// real `CredentialManager` once that path lands. The `async` signature is
-    /// retained for forward compatibility with that I/O-bound implementation.
-    #[allow(clippy::unused_async)]
+    /// A refresh response carries no identity, so the user's email / `org_id` are
+    /// read back from the previously-persisted session metadata and preserved.
+    /// If no prior session blob exists (refresh before any login persisted),
+    /// the identity falls back to empty strings — the access / refresh tokens
+    /// are still written so the next process start can use them.
     async fn persist_to_keychain(&self, info: &TokenInfo) -> Result<(), OAuthError> {
         let Some(cm) = &self.credentials else {
             return Ok(());
         };
-        // Placeholder: avoid reading the secret here until the M2-06 follow-up
-        // adds a generic store entry point. The in-memory rotation has already
-        // succeeded by the time we reach this call site.
-        let _ = cm;
-        let _ = info;
+        // Preserve the prior identity (email/org) from the stored session blob.
+        let (email, org_id) = match cm.get_oauth_tokens().await {
+            Ok(Some(prev)) => (prev.email, prev.org_id),
+            _ => (String::new(), String::new()),
+        };
+        let refresh = info.refresh_token.as_ref().map(|s| s.expose_secret().clone());
+        cm.store_oauth_tokens(
+            info.access_token.expose_secret(),
+            refresh.as_deref(),
+            info.expires_at,
+            info.scopes.clone(),
+            &email,
+            &org_id,
+        )
+        .await
+        .map_err(|e| OAuthError::TokenExchange(format!("keychain store: {e}")))?;
         Ok(())
     }
 }
@@ -274,6 +294,16 @@ impl RefreshDriver {
     pub fn new(state: Arc<AuthState>) -> Self {
         Self { state }
     }
+}
+
+/// JSON request body for the `refresh_token` grant. Field order matches
+/// claude-code's `refreshOAuthToken`.
+#[derive(Debug, serde::Serialize)]
+struct RefreshRequest<'a> {
+    grant_type: &'a str,
+    refresh_token: &'a str,
+    client_id: &'a str,
+    scope: &'a str,
 }
 
 /// Body shape returned by the token endpoint on a successful refresh.
@@ -586,6 +616,177 @@ async fn proactive_loop(state: Arc<AuthState>, spawner: Arc<dyn traits::RuntimeS
                 spawner.sleep(Duration::from_secs(30)).await;
                 continue;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod wire_and_persist_tests {
+    use super::*;
+    use crate::testsupport::{mem_credential_manager, Canned, MemStorage, MockHttp, TestClock};
+    use api_client::oauth_hook::OAuthRefreshHook;
+
+    /// Reactive refresh must send a JSON body carrying the `scope` param and
+    /// persist the rotated tokens to the attached `CredentialManager`.
+    #[tokio::test]
+    async fn reactive_refresh_sends_json_scope_and_persists() {
+        let resp = r#"{"access_token":"NEW_ACCESS","refresh_token":"NEW_REFRESH","expires_in":3600,"scope":"read:user write:messages read:projects"}"#;
+        let http = MockHttp::new(vec![(
+            "oauth/token",
+            Canned {
+                status: 200,
+                body: resp.into(),
+            },
+        )]);
+        let clock = TestClock::new(2_000);
+        let storage = MemStorage::new();
+        let cm = mem_credential_manager(storage.clone(), clock.clone());
+        // Seed a prior session so email/org are preserved across the rotation.
+        cm.store_oauth_tokens(
+            "OLD_ACCESS",
+            Some("OLD_REFRESH"),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2_010),
+            vec!["read:user".into()],
+            "user@example.com",
+            "org-uuid-9",
+        )
+        .await
+        .expect("seed session");
+
+        let cfg = ClaudeAiOAuthConfig::default_with_port(0);
+        let state = AuthState::new(
+            cfg,
+            Secret::new("OLD_ACCESS".into()),
+            Some(Secret::new("OLD_REFRESH".into())),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2_010),
+            http.clone() as Arc<dyn traits::HttpTransport>,
+            clock.clone() as Arc<dyn traits::Clock>,
+            None,
+            Some(cm.clone()),
+        );
+        let driver = RefreshDriver::new(state.clone());
+        let prev = state.token.read().await.token_hash();
+
+        let token = driver.refresh(prev).await.expect("refresh ok");
+        assert_eq!(token.0.expose_secret(), "NEW_ACCESS");
+        assert_eq!(http.call_count(), 1);
+
+        // Wire shape: POST JSON with grant_type=refresh_token + scope.
+        let req = http.last_request().expect("request made");
+        assert_eq!(req.method, HttpMethod::Post);
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "content-type" && v == "application/json"));
+        let sent: serde_json::Value =
+            serde_json::from_str(req.body.as_deref().unwrap()).expect("json body");
+        assert_eq!(sent["grant_type"], "refresh_token");
+        assert_eq!(sent["refresh_token"], "OLD_REFRESH");
+        assert_eq!(sent["client_id"], "lingxi-core");
+        assert_eq!(sent["scope"], "read:user write:messages read:projects");
+
+        // Persisted: rotated tokens written, identity preserved.
+        let persisted = cm.get_oauth_tokens().await.expect("get").expect("present");
+        assert_eq!(persisted.access_token.expose_secret(), "NEW_ACCESS");
+        assert_eq!(
+            persisted.refresh_token.as_ref().map(|s| s.expose_secret().clone()),
+            Some("NEW_REFRESH".to_string())
+        );
+        assert_eq!(persisted.email, "user@example.com");
+        assert_eq!(persisted.org_id, "org-uuid-9");
+        assert_eq!(
+            persisted.expires_at,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2_000 + 3_600)
+        );
+    }
+
+    /// Proactive loop driven by a virtual spawner (sleeps resolve instantly):
+    /// the timer fires `refresh`, and a 401 from the endpoint exits the loop.
+    /// We assert exactly one HTTP call (the loop terminates on RefreshExpired
+    /// rather than spinning).
+    #[tokio::test]
+    async fn proactive_loop_fires_then_exits_on_401() {
+        use crate::testsupport::InstantSpawner;
+
+        let http = MockHttp::new(vec![(
+            "oauth/token",
+            Canned {
+                status: 401,
+                body: r#"{"error":"invalid_grant"}"#.into(),
+            },
+        )]);
+        let clock = TestClock::new(0);
+        let cfg = ClaudeAiOAuthConfig::default_with_port(0);
+        let state = AuthState::new(
+            cfg,
+            Secret::new("ACCESS".into()),
+            Some(Secret::new("REFRESH".into())),
+            // Expires soon so the proactive lead computation yields a short sleep.
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+            http.clone() as Arc<dyn traits::HttpTransport>,
+            clock.clone() as Arc<dyn traits::Clock>,
+            None,
+            None,
+        );
+        let spawner = InstantSpawner::new();
+        RefreshDriver::spawn_proactive(state.clone(), spawner.clone() as Arc<dyn traits::RuntimeSpawner>)
+            .await
+            .expect("spawn ok");
+
+        // Advance the clock to the wake instant so `remaining` collapses and the
+        // loop reaches its refresh attempt.
+        clock.set(2);
+
+        // Poll until the single HTTP call lands (the loop exits on 401, so it
+        // never exceeds one call).
+        for _ in 0..100 {
+            if http.call_count() >= 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        // Give the loop a chance to (incorrectly) spin if it didn't exit.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            http.call_count(),
+            1,
+            "proactive fired once and exited on 401 (no spin)"
+        );
+    }
+
+    /// A 401 from the token endpoint maps to the locked re-auth error and does
+    /// NOT touch the keychain.
+    #[tokio::test]
+    async fn reactive_refresh_401_maps_to_session_expired() {
+        let http = MockHttp::new(vec![(
+            "oauth/token",
+            Canned {
+                status: 401,
+                body: r#"{"error":"invalid_grant"}"#.into(),
+            },
+        )]);
+        let clock = TestClock::new(0);
+        let cfg = ClaudeAiOAuthConfig::default_with_port(0);
+        let state = AuthState::new(
+            cfg,
+            Secret::new("ACCESS".into()),
+            Some(Secret::new("REFRESH".into())),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            http as Arc<dyn traits::HttpTransport>,
+            clock as Arc<dyn traits::Clock>,
+            None,
+            None,
+        );
+        let driver = RefreshDriver::new(state.clone());
+        let prev = state.token.read().await.token_hash();
+        let err = driver.refresh(prev).await.expect_err("401 must fail");
+        match err {
+            OAuthHookError::RefreshFailed(msg) => {
+                assert_eq!(msg, "Session expired. Re-authenticate?");
+            }
+            other => panic!("expected RefreshFailed, got {other:?}"),
         }
     }
 }

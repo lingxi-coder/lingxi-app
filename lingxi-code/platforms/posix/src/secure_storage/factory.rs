@@ -5,10 +5,14 @@
 //! runtime that blocks subprocess spawn), logs the documented warning and
 //! falls back to [`super::plaintext::PlainTextSecureStorage`].
 //!
-//! On Linux, returns plaintext directly with a
-//! `// TODO: add libsecret support for Linux` placeholder — matches
-//! claude-code's Linux behavior (`auth.ts` falls back to plaintext under the
-//! same comment).
+//! On Linux, tries [`super::linux::LinuxSecretStorage`] (the `libsecret`
+//! `secret-tool` CLI) first, falling back to plaintext on any init error
+//! (`secret-tool` absent on `$PATH`, or a runtime that blocks subprocess
+//! spawn) — the same try-then-fall-back shape as the macOS arm. This realizes
+//! the `// TODO: add libsecret support for Linux` that claude-code's
+//! `index.ts` left unimplemented (it returns plaintext directly).
+//!
+//! On any other OS, returns plaintext directly with the documented warning.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,11 +58,34 @@ pub async fn secure_storage_for_platform(
             }
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
-        // TODO: add libsecret support for Linux
-        // (matches claude-code's comment — Linux falls back to plaintext
-        //  with no further attempt.)
+        // Realizes claude-code's `// TODO: add libsecret support for Linux`:
+        // try the `libsecret` `secret-tool` backend first, falling back to
+        // plaintext (with the documented warning) when it cannot initialise —
+        // the same try-keychain-then-plaintext shape as the macOS arm.
+        let default_dir = default_claude_dir();
+        match super::linux::LinuxSecretStorage::new(
+            user.clone(),
+            config_dir.clone(),
+            default_dir,
+            String::new(),
+        ) {
+            Ok(secret) => return Ok(Arc::new(secret)),
+            Err(e) => {
+                tracing::warn!(
+                    target: "lingxi::secure_storage",
+                    error = %e,
+                    "Warning: Storing credentials in plaintext."
+                );
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        // No native backend on this OS — fall back to plaintext with the
+        // documented warning. (Windows/other; the Linux + macOS arms above
+        // only warn when their backend genuinely fails to initialise.)
         tracing::warn!(
             target: "lingxi::secure_storage",
             "Warning: Storing credentials in plaintext."
@@ -70,7 +97,7 @@ pub async fn secure_storage_for_platform(
     Ok(Arc::new(plain))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn default_claude_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         PathBuf::from(home).join(".claude")

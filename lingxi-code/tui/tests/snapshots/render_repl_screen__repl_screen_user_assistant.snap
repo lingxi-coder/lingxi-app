@@ -1,9 +1,8 @@
 ---
-source: crates/tui/tests/render_repl_screen.rs
+source: tui/tests/render_repl_screen.rs
 expression: element.to_string()
 ---
 claude-sonnet-4.5 /a/b $0.0000 42% default
-> hi
 ● Hello!
 ❯ next
 ❯

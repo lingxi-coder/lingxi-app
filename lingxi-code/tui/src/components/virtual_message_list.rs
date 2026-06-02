@@ -87,9 +87,16 @@ pub fn measured_height(msg: &RenderedMessage, width: usize) -> usize {
 #[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (28 variants)
 fn render_text_for_measure(msg: &RenderedMessage) -> String {
     match msg {
-        RenderedMessage::UserText { body, .. }
-        | RenderedMessage::AssistantText { body, .. }
-        | RenderedMessage::SystemText { body, .. } => body.clone(),
+        RenderedMessage::UserText { body, .. } | RenderedMessage::SystemText { body, .. } => {
+            body.clone()
+        }
+        // Measurement == render: route through the markdown-flattening oracle
+        // (marker + 2-col continuation indent) so the height cache counts the
+        // SAME rows the component draws. A raw `body.clone()` over-counts
+        // dropped ``` fence rows / trailing blanks once markdown is applied.
+        RenderedMessage::AssistantText { body, .. } => {
+            crate::components::messages::assistant_text::render_assistant_text_to_string(body)
+        }
         RenderedMessage::AssistantToolUse { tool, .. } => format!("● {tool}(…)"),
         RenderedMessage::UserToolResult { result, .. } => result
             .as_str()
@@ -751,12 +758,41 @@ mod tests {
 
     #[test]
     fn measured_height_pins_assistant_text() {
-        // AssistantTextMessage draws the body verbatim (`● ` prefix = cols).
+        // AssistantTextMessage now routes the body through markdown; the `● `
+        // marker + 2-col continuation indent add columns, not rows. `one\ntwo`
+        // is one paragraph with a soft break → 2 flattened lines → 2 rows.
+        use crate::components::messages::assistant_text::render_assistant_text_to_string;
+        let body = "one\ntwo";
         let m = RenderedMessage::AssistantText {
-            body: "one\ntwo".into(),
+            body: body.into(),
             timestamp: 0,
         };
         assert_eq!(measured_height(&m, 80), 2);
+        // measurement == render: pin against the renderer's own oracle.
+        assert_eq!(
+            measured_height(&m, 80),
+            render_assistant_text_to_string(body).lines().count()
+        );
+    }
+
+    #[test]
+    fn measured_height_assistant_text_matches_renderer_fenced_code() {
+        use crate::components::messages::assistant_text::render_assistant_text_to_string;
+        // Fenced code block: the ``` fence lines are dropped by markdown
+        // flattening, so the renderer draws fewer rows than the raw input.
+        // Measurement MUST equal the renderer's flattened row count, not the
+        // raw `.lines()` proxy (which would over-count the dropped fences).
+        let body = "intro\n```rust\nlet x = 1;\n```\noutro";
+        let m = RenderedMessage::AssistantText {
+            body: body.into(),
+            timestamp: 0,
+        };
+        let rendered = render_assistant_text_to_string(body);
+        assert_eq!(
+            measured_height(&m, 80),
+            rendered.lines().count(),
+            "assistant-text measurement must equal the renderer's flattened row count"
+        );
     }
 
     #[test]

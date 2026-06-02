@@ -53,7 +53,11 @@ use user_tool_result::{render_user_tool_result_to_string, UserToolResultProps};
 pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: bool) -> String {
     match entry {
         RenderedMessage::UserText { body, .. } => format!("> {body}"),
-        RenderedMessage::AssistantText { body, .. } => format!("● {body}"),
+        // Markdown-rendered body, marker-prefixed (oracle == the component's
+        // markdown-flattened layout).
+        RenderedMessage::AssistantText { body, .. } => {
+            assistant_text::render_assistant_text_to_string(body)
+        }
         RenderedMessage::SystemText { body, .. } => body.clone(),
         RenderedMessage::AssistantToolUse { id, tool, input } => {
             render_assistant_tool_use_to_string(AssistantToolUseProps {

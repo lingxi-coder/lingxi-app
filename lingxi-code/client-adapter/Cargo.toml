@@ -5,6 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# F3-02: lights up the mobile-transport surface — turns `ClientEventListener`
+# into a UniFFI callback interface and pulls the `uniffi`-typed DTOs from
+# `client-protocol`. Off by default so the bridge-server build (and every
+# host-only `cargo test`) never pulls the FFI machinery. Requires the `uniffi`
+# package vendored/pinned offline in F3-00.
+uniffi = ["dep:uniffi", "client-protocol/uniffi"]
+
 [dependencies]
 # The contract crate — the adapter's ONLY output vocabulary. Pure DTOs, no
 # engine logic (governing decision §0.2).
@@ -36,6 +45,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # edge is legal under `scripts/check_deps.py` (no `engine -> engine` rule in FORBIDDEN).
 orchestrator = { path = "../orchestrator" }
 async-trait.workspace = true
+# F3-02: optional UniFFI dep — pulled ONLY under the `uniffi` feature so the
+# `#[uniffi::export(callback_interface)]` on `ClientEventListener` compiles for
+# the mobile transport. The default (bridge-server / host-test) build never
+# pulls it. Pinned/vendored offline in F3-00 (workspace dep: 0.28.3 +
+# `tokio` for the async callback interface, F3-07).
+uniffi = { workspace = true, optional = true }
 # `mpsc` / `oneshot` / `Mutex` / `sync` for the id-keyed permission gate (F1-14)
 # and the connection-scoped sink plumbing.
 tokio = { workspace = true }

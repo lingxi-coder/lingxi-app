@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 /// [`SessionStarted`](crate::events::ClientEvent::SessionStarted) /
 /// [`SessionResumed`](crate::events::ClientEvent::SessionResumed) events.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ClientCommand {
@@ -220,6 +221,7 @@ pub enum ClientCommand {
 ///
 /// Mirrors the TUI input modes (normal chat, `!` bash, `#` memory, plan mode).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum PromptModeDto {
@@ -239,6 +241,7 @@ pub enum PromptModeDto {
 /// for the path-based engine entry. Mobile inline image *input* is itself
 /// DEFERRED (§5.12) — this DTO is the frozen shape, not a lit-up path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ImageRefDto {
     /// MIME media type (e.g. `"image/png"`, `"image/jpeg"`).
     pub media_type: String,
@@ -251,6 +254,7 @@ pub struct ImageRefDto {
 /// injected as the next turn's input. (The rich `SlashCommandKind` dispatch
 /// shape stays engine-side; this is what crosses the wire.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct CommandResultDto {
     /// User-facing display text produced by the command.
     pub display: String,
@@ -265,6 +269,7 @@ pub struct CommandResultDto {
 /// screen kind is additive. Each kind maps to a listing event in
 /// [`crate::events::ClientEvent`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ListingKindDto {

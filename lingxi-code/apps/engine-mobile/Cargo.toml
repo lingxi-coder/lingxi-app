@@ -11,11 +11,92 @@ license.workspace = true
 # the core+mobile command set. Deliberately omits the desktop-only tool crates
 # (shell/agent/mcp/lsp/team/worktree) and the device-control tools.
 
+[features]
+default = []
+# F3-02: lights up the mobile client surface — pulls the `uniffi`-typed
+# `client-protocol` DTOs and the `client-adapter` `ClientEventListener` callback
+# interface so the FFI packager crates (ios-framework / android-aar) can wrap
+# them. Off by default so the existing host build / `cargo test` never pulls the
+# FFI machinery; the full runtime/listener wiring lands in F3-03/F3-04.
+uniffi = [
+    "dep:uniffi",
+    "dep:client-adapter",
+    "dep:client-protocol",
+    "client-adapter/uniffi",
+    "client-protocol/uniffi",
+    # F3-03: the shared `build_mobile` host module pulls the runtime-wiring
+    # crates (the mobile sibling of `engine_desktop::build`). They are optional
+    # so the default host build / `cargo test` stays lean; the `uniffi` feature
+    # (the FFI surface) turns them on. All are engine-tier (no `apps/*` edge —
+    # governing decision §0.3) so the dep-rule gate stays green.
+    "dep:orchestrator",
+    "dep:protocol",
+    "dep:api-client",
+    "dep:providers",
+    "dep:anthropic-oauth",
+    "dep:secret",
+    "dep:permission",
+    "dep:sandbox",
+    "dep:telemetry",
+    "dep:platform-posix-minimal",
+    "dep:tokio",
+    # F3-05: the connection-scoped `CancellationToken` the async `submit` arms on
+    # `SendPrompt` and fires on `Cancel` (the orchestrator's
+    # `run_turn_streaming_with_cancel` takes it). Optional + uniffi-gated.
+    "dep:tokio-util",
+    "dep:tracing",
+    "dep:thiserror",
+    "dep:serde_json",
+    "dep:async-trait",
+]
+
 [dependencies]
 tool-api = { path = "../../tool-api" }
 traits = { path = "../../traits" }
 skill-api = { path = "../../skill-api" }
 command-api = { path = "../../command-api" }
+
+# F3-02: the client-surface crates — optional, pulled ONLY under the `uniffi`
+# feature. `client-adapter` carries the `ClientEventListener` callback interface
+# the mobile transport feeds; `client-protocol` is its DTO vocabulary. Both are
+# engine-tier (no `apps/*` edge), so this is a legal dependency. The full
+# orchestrator/listener wiring (build_mobile / MobileEngineHandle) lands in
+# F3-03/F3-04; F3-02 only needs the listener type reachable + the UniFFI
+# scaffolding to compile under this feature.
+client-adapter = { path = "../../client-adapter", optional = true }
+client-protocol = { path = "../../client-protocol", optional = true }
+
+# F3-04: the shared session host defines `MobileEngineHandle`
+# (`#[derive(uniffi::Object)]`) + `MobileEngineError` (`#[derive(uniffi::Error)]`),
+# so this crate carries its own `uniffi::setup_scaffolding!()` so those types'
+# FFI metadata are registered. Optional + pulled ONLY under the `uniffi` feature.
+# Pinned/vendored offline in F3-00 (workspace dep: 0.28.3 + the `tokio` feature
+# for F3-07's foreign async executor).
+uniffi = { workspace = true, optional = true }
+
+# F3-03: the runtime-wiring crates the shared `build_mobile` host module needs
+# (the mobile sibling of `engine_desktop::build`). All optional + pulled ONLY
+# under the `uniffi` feature so the default host build stays lean. Every crate
+# is engine-tier (non-leaf) so no `apps/*` dep-rule edge is introduced.
+orchestrator = { path = "../../orchestrator", optional = true }
+protocol = { path = "../../protocol", optional = true }
+api-client = { path = "../../api-client", optional = true }
+providers = { path = "../../providers", optional = true }
+anthropic-oauth = { path = "../../anthropic-oauth", optional = true }
+secret = { path = "../../secret", optional = true }
+permission = { path = "../../permission", optional = true }
+sandbox = { path = "../../sandbox", optional = true }
+telemetry = { path = "../../telemetry", optional = true }
+platform-posix-minimal = { path = "../../platforms/posix-minimal", optional = true }
+
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
+# F3-05: `CancellationToken` for the cancelable streaming turn the async `submit`
+# spawns. Optional + pulled ONLY under the `uniffi` feature (engine-tier).
+tokio-util = { workspace = true, optional = true }
+tracing = { version = "0.1", optional = true }
+thiserror = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
 
 # Cross-platform tool crates (shared with engine-desktop).
 tool-file = { path = "../../tools/file" }
@@ -45,6 +126,17 @@ platform-android = { path = "../../platforms/android" }
 [dev-dependencies]
 tool-api = { path = "../../tool-api", features = ["test-support"] }
 insta = { version = "1.40", features = ["yaml"] }
+# F3-03: a sandboxed cwd/claude_home root for the `build_mobile` determinism
+# tests (the host fake `Platform` is rooted at a temp dir).
+tempfile = "3"
+# F3-06: the `tests/skeleton_test.rs` integration test names these crates
+# directly (the in-crate optional deps are not resolvable by name from an
+# external test target). They build only when `--features uniffi` is active (the
+# test file is `#![cfg(feature = "uniffi")]`), matching the verify gate; the
+# scripted `MockStreamingApiClient` + `client_protocol` DTOs come from here.
+orchestrator = { path = "../../orchestrator" }
+client-protocol = { path = "../../client-protocol" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [lints]
 workspace = true

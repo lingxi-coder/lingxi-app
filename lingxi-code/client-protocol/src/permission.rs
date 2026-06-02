@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 /// the wire. Correlated by `request_id` so concurrent worker + main requests
 /// multiplex over one connection (the id-keyed gate, F1-14).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct PermissionRequest {
     /// Connection-scoped correlator assigned by the gate (via an `AtomicU64`,
     /// F1-14); echoed back in the matching [`PermissionResolved`].
@@ -54,6 +55,7 @@ pub struct PermissionRequest {
 /// bump). Mirrors the engine-side `traits::PermissionRequest` three-variant
 /// shape (`prompting_gate.rs:32`), but only `ToolUseConfirm` is live-sourced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum PermissionKindDto {
@@ -91,6 +93,7 @@ pub enum PermissionKindDto {
 /// is TUI-side and never crosses the engine boundary). Defined so the contract
 /// freezes now; always `None` on a live `PermissionRequest`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct WorkerInfoDto {
     /// Worker display name (rendered `@name`).
     pub name: String,
@@ -106,6 +109,7 @@ pub struct WorkerInfoDto {
 /// command) and the gate sends [`Self::response`] on the parked oneshot
 /// (F1-14).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct PermissionResolved {
     /// Correlator with the originating [`PermissionRequest::request_id`].
     pub request_id: u64,
@@ -119,6 +123,7 @@ pub struct PermissionResolved {
 /// `AllowAlways` additionally appends a session `PermissionRule` (handled in the
 /// gate, F1-14); on the wire it is just a tagged unit variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum PermissionResponseDto {

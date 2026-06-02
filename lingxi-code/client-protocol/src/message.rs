@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 /// blocks. Reproduces the assistant message a turn produced (or a resumed
 /// scrollback entry).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct MessageDto {
     /// The message role (e.g. `"assistant"`, `"user"`).
     pub role: String,
@@ -29,6 +30,7 @@ pub struct MessageDto {
 /// major bump). Internally tagged on `type`, `snake_case` (the frozen serde
 /// convention, decision §0.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MessageBlockDto {

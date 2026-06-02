@@ -5,17 +5,34 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# M8-P12: the Android UniFFI packager crate. Wraps engine-mobile behind an
-# opaque `MobileEngineHandle` and accepts foreign-supplied (Kotlin) callback
-# objects (camera / voice / share) to construct an `AndroidPlatform`.
+# M8-P12 → M10-F3: the Android UniFFI packager crate. Wraps the SHARED session
+# host (`engine_mobile::MobileEngineHandle`, F3-04 — re-exported, not re-derived)
+# behind the Android-specific `Platform`-construction wrapper, accepting
+# foreign-supplied (Kotlin) callback objects (camera / voice / share) to build an
+# `AndroidPlatform`.
 #
-# UniFFI NOTE: same as ios-framework — the `uniffi` dep + `#[uniffi::export]` +
-# Kotlin bindgen are deferred to M9 (uniffi is unavailable under `--offline`).
-# The Rust surface is shaped exactly as UniFFI will export it. See `uniffi.toml`
-# and the Kotlin skeletons under `kotlin/`.
+# UniFFI: F3-00 vendored/pinned `uniffi` 0.28.3 offline, so the `uniffi` feature
+# (default-on) lights up the real FFI surface — the re-exported handle is a
+# `uniffi::Object`, the listener a callback interface, the DTOs UniFFI types.
 
 [lib]
 crate-type = ["lib"]
+
+[features]
+# F3-04: default-on so `cargo build -p android-aar` exercises the real FFI
+# surface. It activates `engine-mobile/uniffi` (which pulls the shared session
+# host + the `client-adapter`/`client-protocol` UniFFI types) and this crate's
+# own `setup_scaffolding!`. `uniffi` is offline-clear since F3-00.
+default = ["uniffi"]
+uniffi = [
+    "dep:uniffi",
+    "dep:async-trait",
+    "dep:client-protocol",
+    "dep:platform-posix-minimal",
+    "dep:tokio",
+    "dep:orchestrator",
+    "engine-mobile/uniffi",
+]
 
 [dependencies]
 engine-mobile = { path = "../engine-mobile" }
@@ -24,8 +41,26 @@ traits = { path = "../../traits" }
 protocol = { path = "../../protocol" }
 thiserror.workspace = true
 
+# F3-04: optional UniFFI dep — pulled under the (default) `uniffi` feature so the
+# re-exported shared-host scaffolding lands in this crate's library. Pinned
+# offline in F3-00 (workspace dep: 0.28.3 + `tokio` for the F3-07 async executor).
+uniffi = { workspace = true, optional = true }
+# The host test shim (a portable fake `Platform`) + the DTO/orchestrator types
+# the F3-04 handle tests name. Optional + pulled under `uniffi` so the plain
+# (no-feature) build stays minimal. All engine-tier (no `apps/*` edge).
+async-trait = { workspace = true, optional = true }
+client-protocol = { path = "../../client-protocol", optional = true }
+platform-posix-minimal = { path = "../../platforms/posix-minimal", optional = true }
+orchestrator = { path = "../../orchestrator", optional = true }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
+
 [target.'cfg(target_os = "android")'.dependencies]
 platform-android = { path = "../../platforms/android" }
+
+[dev-dependencies]
+# F3-04: a sandboxed cwd/claude_home root for the handle-host tests (the host
+# fake `Platform` is rooted at a temp dir).
+tempfile = "3"
 
 [lints]
 workspace = true

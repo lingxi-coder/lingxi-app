@@ -27,6 +27,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod listener;
 pub mod lowering;
 pub mod output_stream;
 pub mod permission_gate;
@@ -34,6 +35,7 @@ pub mod sink;
 pub mod test_support;
 pub mod turn;
 
+pub use listener::{ClientEventListener, ListenerSink};
 pub use output_stream::AdapterOutputStream;
 pub use permission_gate::{
     AdapterPermissionGate, PermissionRequestSink, DEFAULT_PERMISSION_TIMEOUT,
@@ -44,6 +46,15 @@ pub use turn::{
     error_kind_for, map_orchestrator_error, message_complete_event, synthesize_message,
     turn_started_event, TurnWrapper,
 };
+
+// UniFFI scaffolding (F3-02). The `#[uniffi::export(callback_interface)]` on
+// `ClientEventListener` (in `listener`) registers its callback metadata through
+// this macro. It compiles ONLY under the `uniffi` feature; the default
+// (bridge-server / host-test) build never includes it. The aggregating cdylib
+// crate (ios-framework / android-aar) re-exports this scaffolding so the
+// listener's FFI symbols land in the final library.
+#[cfg(feature = "uniffi")]
+uniffi::setup_scaffolding!();
 
 #[cfg(test)]
 mod tests {

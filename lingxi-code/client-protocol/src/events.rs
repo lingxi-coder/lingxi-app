@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 /// contract freezes now, but have NO live engine source in the foundation —
 /// they are feed-deferred (decision §0.7) and round-trip only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ClientEvent {
@@ -310,6 +311,7 @@ pub enum ClientEvent {
 /// Coarse error class carried by [`ClientEvent::Error`]. Internally tagged on
 /// `type`, `snake_case`. `#[non_exhaustive]` so a future kind is additive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ErrorKindDto {
@@ -329,6 +331,7 @@ pub enum ErrorKindDto {
 /// tagged on `type`, `snake_case`. `#[non_exhaustive]` so a future outcome is
 /// additive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TurnOutcomeDto {
@@ -344,6 +347,7 @@ pub enum TurnOutcomeDto {
 /// (`Duration` → whole seconds; only the display-relevant fields, decision
 /// §0.4). Carried by [`ClientEvent::TurnEnded`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct CostDto {
     /// Cumulative cost in USD.
     pub total_usd: f64,

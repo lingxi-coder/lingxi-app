@@ -26,3 +26,12 @@ pub mod listings;
 pub mod message;
 pub mod permission;
 pub mod version;
+
+// UniFFI scaffolding (F3-01). Under the `uniffi` feature the DTOs above gain
+// `#[derive(uniffi::Enum/Record/Error)]` and this macro emits the per-crate
+// metadata + initialization the bindgen reads. It is a no-op for the default
+// (bridge-server) build, which never compiles this in. The aggregating cdylib
+// crate (ios-framework / android-aar) re-exports this scaffolding so all
+// component symbols land in the final library.
+#[cfg(feature = "uniffi")]
+uniffi::setup_scaffolding!();

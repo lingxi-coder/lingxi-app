@@ -14,11 +14,11 @@ thiserror.workspace = true
 # wire because `Value` is not UniFFI-representable).
 #
 # `uniffi` is declared as an optional dep so the SAME DTOs can compile plain
-# (bridge-server) or as UniFFI types (mobile). The `uniffi` package itself is
-# vendored/pinned in F3-00; until then the feature is declared but the optional
-# dep line below stays commented out, so the default build needs no network and
-# the `uniffi` feature is simply not buildable yet (per F1-00 plan note).
-# uniffi = { version = "0.28", optional = true }
+# (bridge-server) or as UniFFI types (mobile). The package is vendored/pinned
+# offline in F3-00 (workspace dep, 0.28.3, `default-features = false` +
+# `tokio`); it is pulled ONLY when the `uniffi` feature below is enabled, so the
+# default (bridge-server) build needs no network and adds no FFI machinery.
+uniffi = { workspace = true, optional = true }
 
 [dev-dependencies]
 # `serde_json` is a DEV-ONLY dependency: the round-trip + (F1-08) snapshot tests
@@ -29,15 +29,12 @@ serde_json.workspace = true
 
 [features]
 default = []
-# The `uniffi` feature gate is STUBBED (off by default) at F1-00 so the SAME
-# DTOs compile plain (bridge-server) and, once lit up, as UniFFI types (mobile).
-# It is declared now — and currently compiles to an empty feature — so the F1-00
-# verify gate (`cargo build -p client-protocol --features uniffi`) is recognized
-# and green without pulling `uniffi` (which is vendored/pinned offline in F3-00).
-# F3-00 turns the `uniffi` optional dep on and rewrites this to
-# `uniffi = ["dep:uniffi"]`; F3-01 adds the `#[cfg_attr(feature = "uniffi", …)]`
-# derives. No `serde_json`/`Value` dependency is ever introduced (§0.4).
-uniffi = []
+# The `uniffi` feature activates the optional `uniffi` dep so the SAME DTOs
+# compile plain (bridge-server, default build) and, when enabled, as UniFFI
+# types (mobile). F3-00 wired the optional dep + pinned `uniffi` offline; F3-01
+# adds the `#[cfg_attr(feature = "uniffi", …)]` derives + `setup_scaffolding!`.
+# No `serde_json`/`Value` dependency is ever introduced (§0.4).
+uniffi = ["dep:uniffi"]
 
 [lints]
 workspace = true

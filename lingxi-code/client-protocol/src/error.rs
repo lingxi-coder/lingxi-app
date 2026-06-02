@@ -48,6 +48,7 @@ use thiserror::Error;
 /// convention, §0.1), so it round-trips byte-stably alongside every other DTO.
 /// `#[non_exhaustive]` so a future variant is an additive (non-breaking) change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ClientError {

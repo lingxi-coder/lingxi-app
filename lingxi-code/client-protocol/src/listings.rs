@@ -57,6 +57,7 @@ use serde::{Deserialize, Serialize};
 /// `message_count` (`usize`) to a `u32`, and `uuid`/`path` to `String`s. `path`
 /// is mapped DIRECTLY (plan line 152 — it is a real field, not synthesized).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SessionRowDto {
     /// The session UUID (parsed from the filename stem), as a stable string.
     pub uuid: String,
@@ -82,6 +83,7 @@ pub struct SessionRowDto {
 /// (`traits/src/orchestrator.rs:122`). Carried by
 /// [`crate::events::ClientEvent::McpServers`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct McpServerDto {
     /// Server name as registered in settings.
     pub name: String,
@@ -99,6 +101,7 @@ pub struct McpServerDto {
 /// (decision §0.4 / plan line 154). Internally tagged on `type`, `snake_case`.
 /// `#[non_exhaustive]` so a future status is additive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum McpStatusDto {
@@ -119,6 +122,7 @@ pub enum McpStatusDto {
 /// One hook entry — the lowered `HookInfo` (`traits/src/orchestrator.rs:144`).
 /// Carried by [`crate::events::ClientEvent::Hooks`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct HookDto {
     /// Hook identifier.
     pub name: String,
@@ -138,6 +142,7 @@ pub struct HookDto {
 /// [`crate::events::ClientEvent::Agents`] (WIRE name; reconciled from spec
 /// §4.1 `AgentList`, plan line 149).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AgentDto {
     /// Agent name (matches the markdown filename without extension).
     pub name: String,
@@ -155,6 +160,7 @@ pub struct AgentDto {
 /// `description`, and a `source` classification string. Carried by
 /// [`crate::events::ClientEvent::SlashCommandCatalog`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SlashCommandDto {
     /// Command name (without the leading `/`).
     pub name: String,
@@ -171,6 +177,7 @@ pub struct SlashCommandDto {
 /// (`protocol/src/messages.rs:201`). Carried by
 /// [`crate::events::ClientEvent::MemoryEntries`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct MemoryEntryDto {
     /// Absolute path the entry was loaded from.
     pub path: String,
@@ -188,6 +195,7 @@ pub struct MemoryEntryDto {
 /// (`protocol/src/messages.rs:218`). Internally tagged on `type`, `snake_case`.
 /// `#[non_exhaustive]` so a future tier is additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum MemoryTierDto {
@@ -211,6 +219,7 @@ pub enum MemoryTierDto {
 /// `Eq` is intentionally NOT derived (matches the engine struct) because
 /// `total_cost_usd: f64` does not implement `Eq`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct StatusSnapshotDto {
     /// Current session id (as a stable string for display).
     pub session_id: String,
@@ -250,6 +259,7 @@ pub struct StatusSnapshotDto {
 /// `snake_case`. `#[non_exhaustive]` so a future state (e.g. `LoggingIn`) is
 /// additive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AuthStateDto {
@@ -270,6 +280,7 @@ pub enum AuthStateDto {
 /// (`traits/src/orchestrator.rs:168`). Carried by
 /// [`crate::events::ClientEvent::DoctorReport`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DoctorReportDto {
     /// Individual check results in execution order.
     pub checks: Vec<DoctorCheckDto>,
@@ -280,6 +291,7 @@ pub struct DoctorReportDto {
 /// One `/doctor` check result — the lowered `DoctorCheck`
 /// (`traits/src/orchestrator.rs:177`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DoctorCheckDto {
     /// Check identifier (`"config-dir"`, `"api-key"`, etc.).
     pub name: String,
@@ -294,6 +306,7 @@ pub struct DoctorCheckDto {
 /// (`traits/src/orchestrator.rs:188`). Internally tagged on `type`,
 /// `snake_case`. `#[non_exhaustive]` so a future outcome is additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CheckStatusDto {
@@ -308,6 +321,7 @@ pub enum CheckStatusDto {
 /// Pass/warn/fail tallies in a [`DoctorReportDto`] — the lowered
 /// `DoctorSummary` (`traits/src/orchestrator.rs:198`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct DoctorSummaryDto {
     /// Number of checks that returned [`CheckStatusDto::Pass`].
     pub passed: u32,
@@ -323,6 +337,7 @@ pub struct DoctorSummaryDto {
 /// The engine's `status` wire `String` is lowered to a [`TaskStatusDto`] enum.
 /// Carried by [`crate::events::ClientEvent::TaskRow`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct TaskRowDto {
     /// 9-char `[bartwmd][0-9a-z]{8}` task id.
     pub task_id: String,
@@ -338,6 +353,7 @@ pub struct TaskRowDto {
 /// 5 byte-locked statuses. Internally tagged on `type`, `snake_case`.
 /// `#[non_exhaustive]` so a future status is additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TaskStatusDto {

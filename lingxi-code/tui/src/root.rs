@@ -282,6 +282,7 @@ fn apply_vim_effect(st: &mut AppState, effect: crate::components::prompt_input::
 ///   `settings::apply_settings_key` reducer.
 ///
 /// M7-14 adds a further `match` arm here for its screen.
+#[allow(clippy::too_many_lines, reason = "flat per-screen match dispatcher; one arm per Screen variant")]
 fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
     use crate::screens::Screen;
     match &mut st.active_screen {
@@ -429,6 +430,38 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
             match handle_agents_key(state, ct_key.code) {
                 AgentsOutcome::Close => st.close_screen(),
                 AgentsOutcome::Stay => {}
+            }
+        }
+        Some(Screen::Skills(state)) => {
+            // (M9-09) Skill-registry viewer (read-only). The pure
+            // `handle_skills_key` reducer first delegates scroll keys to the
+            // embedded `ScrollState`, then closes on Esc / bare `q`. It needs
+            // the FULL `KeyEvent` (for the `q`-no-modifier guard + the scroll
+            // bindings), so we pass the bridged crossterm-0.28 event, mirroring
+            // the Resume/Theme arms.
+            //   - Close → back to REPL (the shared `close_screen` path).
+            //   - Stay  → scrolled or inert; keep open.
+            use crate::screens::skills::{handle_skills_key, SkillsOutcome};
+            let ct = iocraft_to_crossterm028_key(k);
+            match handle_skills_key(state, ct) {
+                SkillsOutcome::Close => st.close_screen(),
+                SkillsOutcome::Stay => {}
+            }
+        }
+        Some(Screen::Stats(state)) => {
+            // (M9-10) Usage-stats screen (read-only). The pure `handle_stats_key`
+            // reducer toggles the active tab on Tab/Shift-Tab (re-anchoring the
+            // embedded `ScrollState`), delegates scroll keys to it, and closes on
+            // Esc / bare `q`. It needs the FULL `KeyEvent` (the `q`-no-modifier
+            // guard + the scroll bindings), so we pass the bridged crossterm-0.28
+            // event, mirroring the Skills arm.
+            //   - Close → back to REPL (the shared `close_screen` path).
+            //   - Stay  → tab switched / scrolled / inert; keep open.
+            use crate::screens::stats::{handle_stats_key, StatsOutcome};
+            let ct = iocraft_to_crossterm028_key(k);
+            match handle_stats_key(state, ct) {
+                StatsOutcome::Close => st.close_screen(),
+                StatsOutcome::Stay => {}
             }
         }
         None => {}
@@ -875,6 +908,175 @@ pub async fn pump_open_agents(
     true
 }
 
+/// (M9-10) Async usage-stats open pump.
+///
+/// Mirrors `pump_open_agents`, but needs NO `OrchestratorHandle`: the data is a
+/// multi-project `*.jsonl` fs walk over `<claude_home>/projects/`, aggregated
+/// by the pure `stats::{parse_session, aggregate}`. The sync `/stats` submit
+/// path raises `AppState.pending_open_stats = true` (it can't `.await` the
+/// walk); this pump — driven by the same 100ms ticker `use_future` — observes
+/// the flag, walks + aggregates OUTSIDE the lock, then opens the screen under
+/// the SAME priority guard (never over a permission dialog or another screen),
+/// re-checking after the walk. Returns `true` iff the screen was opened. Called
+/// unconditionally (not gated on a wired handle).
+pub async fn pump_open_stats(state: &Arc<Mutex<AppState>>) -> bool {
+    // 1) Take the request under the lock, respecting priority.
+    {
+        let mut st = state.lock().await;
+        if !st.pending_open_stats {
+            return false;
+        }
+        if st.pending_permission.is_some() || st.active_screen.is_some() {
+            // Priority 1/2 own the surface: leave the flag and retry next tick.
+            return false;
+        }
+        st.pending_open_stats = false;
+    }
+
+    // 2) Walk + aggregate the session transcripts OUTSIDE the lock.
+    let data = aggregate_stats_from_disk().await;
+
+    // 3) Re-acquire the lock and open — re-check priority guard.
+    let mut st = state.lock().await;
+    if st.pending_permission.is_some() || st.active_screen.is_some() {
+        // Lost the race: re-raise so the next tick retries.
+        st.pending_open_stats = true;
+        return false;
+    }
+    st.open_stats(data);
+    true
+}
+
+/// (M9-10) Resolve the claude config home — the same resolution the rest of the
+/// workspace uses (`$CLAUDE_CONFIG_DIR` → `~/.claude`). Mirrors
+/// `screens::doctor::claude_home_dir`. Falls back to `.` when the home dir is
+/// unknown so the walk simply finds nothing.
+fn claude_home_dir() -> std::path::PathBuf {
+    if let Ok(explicit) = std::env::var("CLAUDE_CONFIG_DIR") {
+        if !explicit.is_empty() {
+            return std::path::PathBuf::from(explicit);
+        }
+    }
+    dirs::home_dir().map_or_else(|| std::path::PathBuf::from("."), |h| h.join(".claude"))
+}
+
+/// (M9-10) Walk every `*.jsonl` transcript under `<claude_home>/projects/`
+/// (claude-code `getAllSessionFiles`: main session files directly in each
+/// project dir + `subagents/agent-*.jsonl`), parse each into a
+/// `stats::SessionContribution`, and aggregate. Returns the empty
+/// `StatsData::default()` on any I/O failure (the screen shows the locked empty
+/// state). Runs OUTSIDE the `AppState` lock (it is `.await`ed only by
+/// `pump_open_stats`, which holds no lock across the call).
+async fn aggregate_stats_from_disk() -> crate::screens::stats::StatsData {
+    use crate::screens::stats::{aggregate, parse_session, SessionContribution};
+
+    let projects_dir = claude_home_dir().join("projects");
+    let mut contribs: Vec<SessionContribution> = Vec::new();
+
+    let Ok(mut project_entries) = tokio::fs::read_dir(&projects_dir).await else {
+        return aggregate(&contribs);
+    };
+    while let Ok(Some(project)) = project_entries.next_entry().await {
+        let project_path = project.path();
+        if !project_path.is_dir() {
+            continue;
+        }
+        let Ok(mut files) = tokio::fs::read_dir(&project_path).await else {
+            continue;
+        };
+        while let Ok(Some(file)) = files.next_entry().await {
+            let path = file.path();
+            if path.is_dir() {
+                // A session subdir may hold `subagents/agent-*.jsonl`.
+                let subagents = path.join("subagents");
+                if let Ok(mut sub) = tokio::fs::read_dir(&subagents).await {
+                    while let Ok(Some(s)) = sub.next_entry().await {
+                        let sp = s.path();
+                        let name = sp.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        if name.starts_with("agent-")
+                            && sp.extension().is_some_and(|e| e == "jsonl")
+                        {
+                            if let Ok(content) = tokio::fs::read_to_string(&sp).await {
+                                contribs.push(parse_session(&content, true));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                    contribs.push(parse_session(&content, false));
+                }
+            }
+        }
+    }
+
+    aggregate(&contribs)
+}
+
+/// (`/color`) Async agent-color persistence pump.
+///
+/// Mirrors `pump_open_stats` (no `OrchestratorHandle` needed), but it persists
+/// rather than opens a screen, so it carries NO priority guard: a metadata
+/// write is harmless under a permission dialog or another screen, and
+/// claude-code's `saveAgentColor` fires unconditionally. The sync `/color`
+/// submit path raises `AppState.pending_save_color = Some(color)` (it can't
+/// `.await` the disk append); this pump — driven by the same 100ms ticker
+/// `use_future` — takes the string, resolves the session transcript path the
+/// same way the resume loader + stats walk do
+/// (`<claude_home>/projects/<sanitize(cwd)>/<session>.jsonl`), and appends the
+/// byte-locked `agent-color` entry OUTSIDE the `AppState` lock. No-op (returns
+/// `false`) when no `/color` write is pending or no session id is wired (the
+/// resume picker / smoke gates pass `None` — there is no transcript to write).
+/// Returns `true` iff a line was written.
+pub async fn pump_save_color(
+    state: &Arc<Mutex<AppState>>,
+    session_id: Option<protocol::SessionId>,
+) -> bool {
+    use tokio::io::AsyncWriteExt;
+    // 1) Take the pending write + the cwd under the lock (no priority guard).
+    let (color, cwd) = {
+        let mut st = state.lock().await;
+        let Some(color) = st.pending_save_color.take() else {
+            return false;
+        };
+        (color, st.status.cwd.clone())
+    };
+
+    // 2) Resolve the transcript path. Without a session id there is no file to
+    //    append to — drop the (already-applied) immediate effect silently.
+    let Some(sid) = session_id else {
+        return false;
+    };
+
+    // 3) Append the `agent-color` entry OUTSIDE the lock, reusing the session
+    //    crate's byte-locked line builder + the same raw `tokio::fs` append
+    //    style as `aggregate_stats_from_disk`'s reads (no `FileSystem` dep).
+    let cwd_str = cwd.to_string_lossy();
+    let uuid = sid.as_uuid().to_string();
+    let path = session::session_path(&claude_home_dir(), &cwd_str, &uuid);
+    let entry = session::agent_color_entry(&uuid, &color);
+    let Ok(line) = serde_json::to_string(&entry) else {
+        return false;
+    };
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && tokio::fs::create_dir_all(parent).await.is_err() {
+            return false;
+        }
+    }
+    let payload = format!("{line}\n");
+    let opened = tokio::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+        .await;
+    let Ok(mut file) = opened else {
+        return false;
+    };
+    file.write_all(payload.as_bytes()).await.is_ok()
+}
+
 /// (M7-13 review) Load the 4-layer effective settings the Settings screen
 /// displays, mirroring the M3 `Settings::load` read API (the ONLY settings read
 /// path; §4 R7). A load error degrades gracefully to defaults so the screen can
@@ -998,6 +1200,9 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         // (no `TaskRegistry` wired) skips the poll entirely.
         let multiagent_feed = props.multiagent_feed.clone();
         let multiagent_tx = props.multiagent_tx.clone();
+        // (`/color`) Session id for the agent-color persistence pump. `Copy`, so
+        // capturing it here does not disturb the key handler's own use.
+        let ticker_session_id = session_id;
         hooks.use_future(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1038,6 +1243,21 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                         needs_redraw = true;
                     }
                 }
+                // (M9-10) Usage-stats open pump. Runs UNCONDITIONALLY (not gated
+                // on a wired `OrchestratorHandle`): the stats data is a
+                // multi-project `*.jsonl` fs walk that needs no handle. No-op
+                // (returns false) when no `/stats` request is pending.
+                if pump_open_stats(&state).await {
+                    needs_redraw = true;
+                }
+                // (`/color`) Agent-color persistence pump. Runs UNCONDITIONALLY
+                // (no handle, no priority guard): a pending `/color` choice is
+                // appended to the session transcript. No-op when nothing is
+                // pending or no session id is wired. We do NOT bump the redraw
+                // tick — the `system` display + the immediate `session_agent_color`
+                // were already applied synchronously by the submit intercept;
+                // only the disk write is deferred here.
+                let _wrote_color = pump_save_color(&state, ticker_session_id).await;
                 // (M9-05) Poll the live multi-agent feed once on the SAME
                 // cadence and forward its events into the channel. We do NOT bump
                 // `tick` here — the MultiAgent pump (which drains the channel)

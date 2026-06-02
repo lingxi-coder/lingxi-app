@@ -676,6 +676,34 @@ pub struct AppState {
     /// catalog, and calls [`Self::open_agents`]. Mirrors
     /// `pending_open_settings`.
     pub pending_open_agents: bool,
+    /// (M9-10) Set by the `/stats` submit intercept: a request to open the
+    /// usage-stats screen. The SYNC submit path can't `.await` the multi-project
+    /// `*.jsonl` fs walk (slow over many files), so it only RAISES this flag;
+    /// the async open pump in `root.rs` (`pump_open_stats`, on the ticker
+    /// `use_future`) walks `<claude_home>/projects/` OUTSIDE the `AppState`
+    /// lock, aggregates, and calls [`Self::open_stats`]. Mirrors
+    /// `pending_open_agents` — but the walk needs no `OrchestratorHandle`, so
+    /// the pump runs unconditionally (not gated on a wired handle).
+    pub pending_open_stats: bool,
+    /// (`/color`) Session agent-color name set by the `/color <name>` command
+    /// (claude-code `standaloneAgentContext.color`). `Some("cyan")` after
+    /// `/color cyan`; `None` after `/color default` (reset). Maps to a render
+    /// color via [`crate::multiagent::style::agent_color_from_name`]. Not
+    /// persisted here — the disk write is the separate `pending_save_color`
+    /// pump. NOTE: this field is set but NOT YET consumed by any render path —
+    /// the Rust TUI has no swarm-banner/prompt-bar color sink yet; it is exposed
+    /// (`pub`) for a future banner renderer. `/color` therefore persists + echoes
+    /// a confirmation this batch, but does not visibly recolor the session.
+    pub session_agent_color: Option<String>,
+    /// (`/color`) Set by the `/color` submit intercept: a request to PERSIST the
+    /// chosen color to the session transcript (claude-code `saveAgentColor`).
+    /// The SYNC submit path can't `.await` the disk append, so it only RAISES
+    /// the string to write — a color name, or the `"default"` reset sentinel
+    /// (NOT empty, mirroring claude-code's truthiness-guard rationale). The
+    /// async pump in `root.rs` (`pump_save_color`, on the ticker `use_future`)
+    /// resolves the transcript path and appends OUTSIDE the `AppState` lock,
+    /// then clears the flag. Mirrors `pending_open_stats` (no handle needed).
+    pub pending_save_color: Option<String>,
 }
 
 impl AppState {
@@ -726,6 +754,9 @@ impl AppState {
             multiagent: crate::multiagent::MultiAgentState::default(),
             viewing_teammate: None,
             pending_open_agents: false,
+            pending_open_stats: false,
+            session_agent_color: None,
+            pending_save_color: None,
         }
     }
 
@@ -787,6 +818,33 @@ impl AppState {
             },
         ));
         crate::telemetry::screen_opened("agents");
+    }
+
+    /// (M9-09) Open the `/skills` registry viewer with the given grouped
+    /// sections. The open is fully synchronous (like `/theme`/`/memory`): the
+    /// frozen `OrchestratorHandle` exposes no `list_skills` and `AppState`
+    /// holds no `SkillRegistry`, so the live submit path passes an EMPTY
+    /// section list — the locked `No skills found` empty state. The state is
+    /// shaped to carry real sections, so when a `list_skills` handle method is
+    /// added (out of scope here — the trait is frozen) only this call changes.
+    pub fn open_skills(&mut self, sections: Vec<crate::screens::skills::SkillSection>) {
+        self.active_screen = Some(crate::screens::Screen::Skills(
+            crate::screens::skills::SkillsState::new(sections),
+        ));
+        crate::telemetry::screen_opened("skills");
+    }
+
+    /// (M9-10) Open the `/stats` usage-stats screen with pre-aggregated data.
+    /// Unlike `/skills` (sync, empty), the data is the result of an async
+    /// multi-project `*.jsonl` fs walk + aggregation done OUTSIDE the lock by
+    /// `root::pump_open_stats` (the walk is slow over many files), so this is
+    /// the commit step the pump calls once the `StatsData` is in hand. Mirrors
+    /// `open_agents` (pump-supplied data) on the open side.
+    pub fn open_stats(&mut self, data: crate::screens::stats::StatsData) {
+        self.active_screen = Some(crate::screens::Screen::Stats(
+            crate::screens::stats::StatsState::new(data),
+        ));
+        crate::telemetry::screen_opened("stats");
     }
 
     /// (M9-06) Enter teammate-view for `name`.

@@ -225,6 +225,56 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.pending_open_agents = true;
                 return false;
             }
+            // (M9-09) `/skills` opens the read-only skill-registry viewer. Like
+            // `/theme`/`/memory` the open is fully SYNCHRONOUS: the skill
+            // catalog is in-tree but not reachable from the TUI (the frozen
+            // `OrchestratorHandle` has no `list_skills` and `AppState` holds no
+            // `SkillRegistry`), so the open passes an EMPTY section list — the
+            // locked `No skills found` empty state. No async pump needed; no
+            // echo, no turn. The `crates/commands` skills handler stays the
+            // `--no-tui` path.
+            if st.prompt_text.trim() == "/skills" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.open_skills(Vec::new());
+                return false;
+            }
+            // (M9-10) `/stats` opens the usage-stats screen. Like
+            // `/config`/`/agents`, the open needs async work the sync `dispatch`
+            // seam can't `.await`: a multi-project `*.jsonl` fs walk +
+            // aggregation (slow over many files). So we RAISE
+            // `pending_open_stats`; the async open pump in `root.rs`
+            // (`pump_open_stats`) walks `<claude_home>/projects/` OUTSIDE the
+            // `AppState` lock, aggregates, and opens the screen. No echo, no
+            // turn. The `crates/commands` stats handler stays the `--no-tui`
+            // path, untouched.
+            if st.prompt_text.trim() == "/stats" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.pending_open_stats = true;
+                return false;
+            }
+            // (`/color`) Set the prompt-bar agent color for this session. An
+            // IMMEDIATE arg command (claude-code `immediate: true`, NOT a
+            // screen): parse the arg, push the `system` display, set the
+            // session-color field for immediate effect, and RAISE
+            // `pending_save_color` so the async pump in `root.rs`
+            // (`pump_save_color`) persists the choice to the transcript
+            // (claude-code `saveAgentColor`) OUTSIDE the lock. No echo, no turn.
+            {
+                let trimmed = st.prompt_text.trim();
+                let is_color = trimmed == "/color"
+                    || trimmed.split_whitespace().next() == Some("/color");
+                if is_color {
+                    // Own the args before the `&mut st` borrow in
+                    // `apply_color_command` (which clears `prompt_text`).
+                    let args = trimmed.strip_prefix("/color").unwrap_or("").to_string();
+                    apply_color_command(st, &args);
+                    st.prompt_text.clear();
+                    st.prompt_cursor = 0;
+                    return false;
+                }
+            }
             let line = std::mem::take(&mut st.prompt_text);
             st.prompt_cursor = 0;
             st.history.push(line.clone());
@@ -326,6 +376,39 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             false
         }
     }
+}
+
+/// Apply a parsed `/color` command to `AppState`: push the `system` display
+/// message and apply the session-color + persistence effects. PURE w.r.t. I/O —
+/// the actual disk write is deferred to `root::pump_save_color` via the
+/// `pending_save_color` flag this raises. 1:1 with claude-code `color.ts`'s
+/// `onDone` + `setAppState` + `saveAgentColor` triple.
+///
+/// `args` is the text AFTER the `/color` command word (may be empty).
+fn apply_color_command(st: &mut AppState, args: &str) {
+    use crate::commands::color::{parse_color_command, ColorCommand, DEFAULT_SENTINEL};
+    let (display, is_error) = match parse_color_command(args) {
+        ColorCommand::List { display } => (display, false),
+        ColorCommand::Reset { display } => {
+            // Clear the immediate session color + persist the `"default"`
+            // sentinel (NOT empty) so resume re-applies the reset.
+            st.session_agent_color = None;
+            st.pending_save_color = Some(DEFAULT_SENTINEL.to_string());
+            (display, false)
+        }
+        ColorCommand::Set { name, display } => {
+            // Set the immediate session color + persist the name.
+            st.session_agent_color = Some(name.clone());
+            st.pending_save_color = Some(name);
+            (display, false)
+        }
+        ColorCommand::Invalid { display } => (display, true),
+    };
+    st.push_message(RenderedMessage::SystemText {
+        body: display,
+        timestamp: chrono::Utc::now().timestamp(),
+        is_error,
+    });
 }
 
 /// Process a submitted line. If `/`-prefixed → slash dispatch (with TUI
@@ -521,6 +604,39 @@ pub fn render_screen(
                 // line-by-line in a column View. Mirrors the BackgroundTasks arm.
                 use crate::screens::agents::render_agents_to_string;
                 let body = render_agents_to_string(ags);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().map(|line| element! {
+                            Text(content: line)
+                        }))
+                    }
+                }
+                .into_any()
+            }
+            Screen::Skills(sks) => {
+                // (M9-09) The skill-registry viewer renders the pure
+                // `render_skills_to_string` body (grouped sections, snapshot-
+                // tested) line-by-line in a column View. Mirrors the Agents arm.
+                use crate::screens::skills::render_skills_to_string;
+                let body = render_skills_to_string(sks);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().map(|line| element! {
+                            Text(content: line)
+                        }))
+                    }
+                }
+                .into_any()
+            }
+            Screen::Stats(sts) => {
+                // (M9-10) The usage-stats screen renders the pure
+                // `render_stats_to_string` body (tab header + active-tab body +
+                // sparkline/heatmap, snapshot-tested) line-by-line in a column
+                // View. Mirrors the Skills/Agents arms.
+                use crate::screens::stats::render_stats_to_string;
+                let body = render_stats_to_string(sts);
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {
@@ -1011,6 +1127,76 @@ mod dispatch_tests {
             !matches!(st.messages.last(), Some(RenderedMessage::UserText { .. })),
             "/doctor must not echo as a user message"
         );
+    }
+
+    #[test]
+    fn color_set_via_dispatch_sets_field_raises_save_and_pushes_system() {
+        let mut st = s();
+        st.prompt_text = "/color cyan".to_string();
+        st.prompt_cursor = "/color cyan".len();
+        let should_run = dispatch(KeyAction::Submit, &mut st);
+        assert!(!should_run, "/color is immediate, never runs a turn");
+        assert!(st.prompt_text.is_empty(), "prompt cleared on submit");
+        // Immediate session-color field set.
+        assert_eq!(st.session_agent_color.as_deref(), Some("cyan"));
+        // Persistence raised with the color name (not the sentinel).
+        assert_eq!(st.pending_save_color.as_deref(), Some("cyan"));
+        // A non-error system display, NOT an echoed user message.
+        match st.messages.last() {
+            Some(RenderedMessage::SystemText { body, is_error, .. }) => {
+                assert_eq!(body, "Session color set to: cyan");
+                assert!(!is_error);
+            }
+            other => panic!("expected SystemText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn color_reset_via_dispatch_clears_field_and_persists_default_sentinel() {
+        let mut st = s();
+        st.session_agent_color = Some("orange".to_string());
+        st.prompt_text = "/color default".to_string();
+        st.prompt_cursor = st.prompt_text.len();
+        dispatch(KeyAction::Submit, &mut st);
+        assert_eq!(st.session_agent_color, None, "reset clears the field");
+        // Reset persists the "default" sentinel (NOT empty / NOT cleared flag).
+        assert_eq!(st.pending_save_color.as_deref(), Some("default"));
+        assert!(matches!(
+            st.messages.last(),
+            Some(RenderedMessage::SystemText { is_error: false, .. })
+        ));
+    }
+
+    #[test]
+    fn color_invalid_via_dispatch_errors_without_touching_state() {
+        let mut st = s();
+        st.prompt_text = "/color chartreuse".to_string();
+        st.prompt_cursor = st.prompt_text.len();
+        dispatch(KeyAction::Submit, &mut st);
+        // No session-color change, no persistence raised.
+        assert_eq!(st.session_agent_color, None);
+        assert_eq!(st.pending_save_color, None);
+        match st.messages.last() {
+            Some(RenderedMessage::SystemText { is_error, .. }) => assert!(is_error),
+            other => panic!("expected error SystemText, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn color_bare_via_dispatch_lists_colors_without_persisting() {
+        let mut st = s();
+        st.prompt_text = "/color".to_string();
+        st.prompt_cursor = st.prompt_text.len();
+        dispatch(KeyAction::Submit, &mut st);
+        assert_eq!(st.session_agent_color, None);
+        assert_eq!(st.pending_save_color, None, "listing does not persist");
+        match st.messages.last() {
+            Some(RenderedMessage::SystemText { body, is_error, .. }) => {
+                assert!(body.contains("Available colors:"));
+                assert!(!is_error);
+            }
+            other => panic!("expected SystemText, got {other:?}"),
+        }
     }
 
     #[test]

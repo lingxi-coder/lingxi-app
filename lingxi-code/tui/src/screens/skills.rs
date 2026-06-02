@@ -1,0 +1,412 @@
+//! `/skills` registry viewer (claude-code `SkillsMenu.tsx` parity): a
+//! read-only, scrollable list of discovered skills grouped by source.
+//!
+//! Four-part split mirroring `agents.rs`/`theme.rs`: a [`SkillsState`]
+//! (grouped sections + an embedded [`ScrollState`]), a [`SkillsOutcome`]
+//! enum, a pure [`handle_skills_key`] reducer (scroll keys delegated to the
+//! shared [`crate::screens::scroll::ScrollState`]; Esc/`q` close), and a pure
+//! [`render_skills_to_string`] oracle.
+//!
+//! Literal-lock (byte-for-byte from claude-code `SkillsMenu.tsx`): the
+//! `Skills` title, the `No skills found` / `Create skills in .claude/skills/
+//! or ~/.claude/skills/` empty state, the `{N} skill(s)` subtitle, the
+//! per-section titles (`Project skills` / `User skills` / `Managed skills` /
+//! `Plugin skills` / `MCP skills`), the section RENDER ORDER (project, user,
+//! managed/policy, plugin, mcp), and the per-skill row
+//! `{name} · ~{tokens} description tokens` (with ` · {plugin}` inserted for
+//! plugin skills). The frontmatter-token estimate ports
+//! `estimateSkillFrontmatterTokens` (`round(len([name, description,
+//! when_to_use].join(' ')) / 4)`) and the `~{n}`/compact `~{n.n}k` display
+//! ports `formatTokens` (Intl compact notation, lowercased, `.0` stripped).
+//!
+//! Data note: the skill catalog lives in-tree (`skill-api`), but the frozen
+//! `OrchestratorHandle` trait exposes no `list_skills` and `AppState` holds no
+//! `SkillRegistry`, so the live `/skills` open passes an EMPTY catalog — the
+//! locked empty state. The state is shaped to carry real sections so that
+//! when a `list_skills` handle method is added (out of this batch's scope),
+//! only the open path changes; the reducer/oracle are already source-grouped.
+#![forbid(unsafe_code)]
+
+use crossterm::event::{KeyCode, KeyEvent};
+
+use crate::screens::scroll::{scroll_indicator, visible_slice, ScrollState};
+
+/// The fixed viewport height (rows of the flattened body the window shows at
+/// once before scrolling kicks in). A modest constant keeps the pure oracle
+/// deterministic; the live render is line-by-line and not height-bounded, but
+/// the embedded [`ScrollState`] keeps the screen scroll-capable and unit-
+/// testable.
+const VIEWPORT: usize = 16;
+
+/// Locked dialog title (claude-code `SkillsMenu.tsx`).
+pub const TITLE: &str = "Skills";
+/// Locked empty-state subtitle.
+pub const EMPTY_SUBTITLE: &str = "No skills found";
+/// Locked empty-state body line.
+pub const EMPTY_BODY: &str = "Create skills in .claude/skills/ or ~/.claude/skills/";
+
+/// One skill row, already reduced to display fields (claude-code `renderSkill`
+/// reads `name`, `description`, `when_to_use` for the token estimate and the
+/// optional `plugin` name badge).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SkillRow {
+    /// Canonical skill name (the command name shown on the row).
+    pub name: String,
+    /// Short description (counted toward the frontmatter-token estimate).
+    pub description: String,
+    /// Long-form `when_to_use` guidance, if any (also counted).
+    pub when_to_use: Option<String>,
+    /// Owning plugin name — shown as a ` · {plugin}` badge for plugin skills.
+    pub plugin: Option<String>,
+}
+
+impl SkillRow {
+    /// Port of `estimateSkillFrontmatterTokens`: rough token count of the
+    /// joined `[name, description, when_to_use]` frontmatter text
+    /// (`round(chars / 4)`, skipping empty parts like the TS `.filter(Boolean)`).
+    #[must_use]
+    pub fn estimated_tokens(&self) -> usize {
+        let mut parts: Vec<&str> = Vec::with_capacity(3);
+        if !self.name.is_empty() {
+            parts.push(&self.name);
+        }
+        if !self.description.is_empty() {
+            parts.push(&self.description);
+        }
+        if let Some(w) = &self.when_to_use {
+            if !w.is_empty() {
+                parts.push(w);
+            }
+        }
+        let text = parts.join(" ");
+        rough_token_count(&text)
+    }
+}
+
+/// One source section (claude-code groups skills by `source`, renders a bold
+/// dim title, then each skill row).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillSection {
+    /// Locked section title (e.g. `"Project skills"`).
+    pub title: String,
+    /// Rows in this section, pre-sorted by name.
+    pub rows: Vec<SkillRow>,
+}
+
+/// Screen state: the grouped sections + the embedded scroll window over the
+/// flattened body lines.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SkillsState {
+    /// Source sections in claude-code render order (project, user, managed,
+    /// plugin, mcp); empty sections are omitted on build.
+    pub sections: Vec<SkillSection>,
+    /// Scroll window over the flattened content lines.
+    pub scroll: ScrollState,
+}
+
+impl SkillsState {
+    /// Build from grouped sections, sizing the embedded [`ScrollState`] to the
+    /// flattened body-line count and the fixed [`VIEWPORT`].
+    #[must_use]
+    pub fn new(sections: Vec<SkillSection>) -> Self {
+        let len = content_lines(&sections).len();
+        Self {
+            sections,
+            scroll: ScrollState::new(len, VIEWPORT),
+        }
+    }
+
+    /// Total skill count across all sections (drives the `{N} skill(s)`
+    /// subtitle).
+    #[must_use]
+    pub fn total_skills(&self) -> usize {
+        self.sections.iter().map(|s| s.rows.len()).sum()
+    }
+
+    /// `true` when no skill is registered (the locked empty state).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.total_skills() == 0
+    }
+}
+
+/// Controller outcome after a key (mirrors `AgentsOutcome`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillsOutcome {
+    /// Stay open (scrolled or inert key).
+    Stay,
+    /// Close the screen (Esc / `q`).
+    Close,
+}
+
+/// Reduce one key. Scroll keys (Up/Down/PageUp/PageDown/Home/End) are handled
+/// by the embedded [`ScrollState`]; Esc and bare `q` close. Everything else is
+/// inert. Pure — the caller owns closing the screen + telemetry.
+#[must_use]
+pub fn handle_skills_key(state: &mut SkillsState, key: KeyEvent) -> SkillsOutcome {
+    // Scroll keys first (claude-code modal pager parity); `handle_scroll_key`
+    // returns `true` when it consumed the key.
+    if state.scroll.handle_scroll_key(key) {
+        return SkillsOutcome::Stay;
+    }
+    match key.code {
+        KeyCode::Esc => SkillsOutcome::Close,
+        KeyCode::Char('q') if key.modifiers == crossterm::event::KeyModifiers::NONE => {
+            SkillsOutcome::Close
+        }
+        _ => SkillsOutcome::Stay,
+    }
+}
+
+/// Port of `roughTokenCountEstimation`: `Math.round(content.length / 4)`.
+fn rough_token_count(content: &str) -> usize {
+    // `chars().count()` matches JS `string.length` for the BMP names/
+    // descriptions skills carry. `Math.round` is round-half-up; with a
+    // divisor of 4, `(chars + 2) / 4` (integer division) yields the same
+    // result (remainders 0,1 round down; 2,3 round up).
+    let chars = content.chars().count();
+    (chars + 2) / 4
+}
+
+/// The locked per-skill row text (claude-code `renderSkill`): `{name}` then the
+/// dim suffix ` · ~{tokens} description tokens`, with ` · {plugin}` inserted
+/// before the token clause for plugin skills.
+fn render_skill_row(row: &SkillRow) -> String {
+    let token_display = format!("~{}", format_tokens(row.estimated_tokens()));
+    match &row.plugin {
+        Some(p) if !p.is_empty() => {
+            format!("{} \u{00B7} {p} \u{00B7} {token_display} description tokens", row.name)
+        }
+        _ => format!("{} \u{00B7} {token_display} description tokens", row.name),
+    }
+}
+
+/// Flatten the sections to the body content lines (no title/subtitle/footer):
+/// for each non-empty section, a section-title line then one line per skill.
+/// This is the list the embedded [`ScrollState`] scrolls over.
+fn content_lines(sections: &[SkillSection]) -> Vec<String> {
+    let mut out = Vec::new();
+    for section in sections {
+        if section.rows.is_empty() {
+            continue;
+        }
+        out.push(section.title.clone());
+        for row in &section.rows {
+            out.push(render_skill_row(row));
+        }
+    }
+    out
+}
+
+/// Pure render oracle: the full screen body as text.
+///
+/// Empty: `Skills` / `No skills found` / `Create skills …`. Non-empty:
+/// `Skills` / `{N} skill(s)` subtitle, then the visible window of the
+/// flattened section/row lines, then (when scrolled) a scroll indicator, then
+/// the `Esc to close` footer.
+#[must_use]
+pub fn render_skills_to_string(state: &SkillsState) -> String {
+    let mut out = String::from(TITLE);
+    out.push('\n');
+
+    if state.is_empty() {
+        out.push_str(EMPTY_SUBTITLE);
+        out.push('\n');
+        out.push_str(EMPTY_BODY);
+        out.push('\n');
+        out.push_str("Esc to close");
+        return out;
+    }
+
+    let n = state.total_skills();
+    out.push_str(&format!("{n} {}\n", plural(n, "skill")));
+
+    let lines = content_lines(&state.sections);
+    for line in visible_slice(&lines, &state.scroll) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    if let Some(ind) = scroll_indicator(&state.scroll) {
+        out.push_str(&ind);
+        out.push('\n');
+    }
+    out.push_str("Esc to close");
+    out
+}
+
+/// `plural(n, "skill")` (claude-code `plural`): `"skill"` when `n == 1`, else
+/// `"skills"`.
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
+    }
+}
+
+/// Port of `formatTokens` (`formatNumber(count).replace('.0', '')`): values
+/// under 1000 render as the plain integer; 1000+ use compact `k`/`m` notation
+/// with one fraction digit, lowercased, trailing `.0` stripped.
+#[allow(clippy::cast_precision_loss)]
+fn format_tokens(count: usize) -> String {
+    if count < 1000 {
+        return count.to_string();
+    }
+    let (value, suffix) = if count >= 1_000_000 {
+        (count as f64 / 1_000_000.0, 'm')
+    } else {
+        (count as f64 / 1000.0, 'k')
+    };
+    // One fraction digit (Intl `maximumFractionDigits: 1`), then strip a
+    // trailing `.0` to match `formatTokens`' `.replace('.0', '')`.
+    let mut s = format!("{value:.1}");
+    if let Some(stripped) = s.strip_suffix(".0") {
+        s = stripped.to_string();
+    }
+    format!("{s}{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+
+    fn k(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn row(name: &str, desc: &str) -> SkillRow {
+        SkillRow {
+            name: name.into(),
+            description: desc.into(),
+            when_to_use: None,
+            plugin: None,
+        }
+    }
+
+    fn section(title: &str, rows: Vec<SkillRow>) -> SkillSection {
+        SkillSection {
+            title: title.into(),
+            rows,
+        }
+    }
+
+    #[test]
+    fn empty_state_is_byte_locked() {
+        let s = SkillsState::new(vec![]);
+        assert!(s.is_empty());
+        let out = render_skills_to_string(&s);
+        assert_eq!(
+            out,
+            "Skills\nNo skills found\nCreate skills in .claude/skills/ or ~/.claude/skills/\nEsc to close"
+        );
+    }
+
+    #[test]
+    fn header_and_subtitle_plural() {
+        let s = SkillsState::new(vec![section(
+            "Project skills",
+            vec![row("alpha", "a"), row("beta", "b")],
+        )]);
+        let out = render_skills_to_string(&s);
+        assert!(out.starts_with("Skills\n2 skills\n"));
+        // Single skill → singular subtitle.
+        let one = SkillsState::new(vec![section("User skills", vec![row("solo", "x")])]);
+        assert!(render_skills_to_string(&one).starts_with("Skills\n1 skill\n"));
+    }
+
+    #[test]
+    fn section_grouping_and_row_format() {
+        let s = SkillsState::new(vec![
+            section("Project skills", vec![row("alpha", "does alpha things")]),
+            section("MCP skills", vec![row("srv:beta", "beta")]),
+        ]);
+        let out = render_skills_to_string(&s);
+        // Section titles present in order.
+        let idx_proj = out.find("Project skills").expect("project title");
+        let idx_mcp = out.find("MCP skills").expect("mcp title");
+        assert!(idx_proj < idx_mcp);
+        // Row format: name · ~N description tokens.
+        assert!(out.contains("alpha \u{00B7} ~"));
+        assert!(out.contains(" description tokens"));
+    }
+
+    #[test]
+    fn plugin_badge_inserted_for_plugin_rows() {
+        let r = SkillRow {
+            name: "fmt".into(),
+            description: "format code".into(),
+            when_to_use: None,
+            plugin: Some("prettier".into()),
+        };
+        let line = render_skill_row(&r);
+        assert!(
+            line.starts_with("fmt \u{00B7} prettier \u{00B7} ~"),
+            "got: {line}"
+        );
+        assert!(line.ends_with(" description tokens"));
+    }
+
+    #[test]
+    fn token_estimate_rounds_chars_over_four() {
+        // "ab cd" → join of name+desc; len 5 (incl. the join space) → round(5/4)=1.
+        let r = row("ab", "cd");
+        assert_eq!(r.estimated_tokens(), 1);
+        // when_to_use counted too: "n" + "d" + "wwww" joined → "n d wwww" len 8 → 2.
+        let r2 = SkillRow {
+            name: "n".into(),
+            description: "d".into(),
+            when_to_use: Some("wwww".into()),
+            plugin: None,
+        };
+        assert_eq!(r2.estimated_tokens(), 2);
+    }
+
+    #[test]
+    fn format_tokens_compact() {
+        assert_eq!(format_tokens(0), "0");
+        assert_eq!(format_tokens(42), "42");
+        assert_eq!(format_tokens(999), "999");
+        assert_eq!(format_tokens(1000), "1k");
+        assert_eq!(format_tokens(1300), "1.3k");
+        assert_eq!(format_tokens(2_000_000), "2m");
+    }
+
+    #[test]
+    fn esc_and_q_close_other_keys_stay() {
+        let mut s = SkillsState::new(vec![section("User skills", vec![row("a", "x")])]);
+        assert_eq!(handle_skills_key(&mut s, k(KeyCode::Esc)), SkillsOutcome::Close);
+        assert_eq!(
+            handle_skills_key(&mut s, k(KeyCode::Char('q'))),
+            SkillsOutcome::Close
+        );
+        assert_eq!(
+            handle_skills_key(&mut s, k(KeyCode::Enter)),
+            SkillsOutcome::Stay
+        );
+    }
+
+    #[test]
+    fn scroll_keys_move_window_and_stay() {
+        // 3 sections × (1 title + many rows) → a tall body so scrolling is live.
+        let rows: Vec<SkillRow> = (0..30).map(|i| row(&format!("s{i}"), "d")).collect();
+        let mut s = SkillsState::new(vec![section("Project skills", rows)]);
+        assert!(s.scroll.is_scrollable());
+        assert_eq!(s.scroll.offset(), 0);
+        assert_eq!(handle_skills_key(&mut s, k(KeyCode::Down)), SkillsOutcome::Stay);
+        assert_eq!(s.scroll.offset(), 1);
+        // End jumps to max_offset; clamp holds.
+        assert_eq!(handle_skills_key(&mut s, k(KeyCode::End)), SkillsOutcome::Stay);
+        assert_eq!(s.scroll.offset(), s.scroll.max_offset());
+        // Further Down clamps (still Stay).
+        assert_eq!(handle_skills_key(&mut s, k(KeyCode::Down)), SkillsOutcome::Stay);
+        assert_eq!(s.scroll.offset(), s.scroll.max_offset());
+    }
+
+    #[test]
+    fn short_list_shows_no_indicator() {
+        let s = SkillsState::new(vec![section("User skills", vec![row("a", "x")])]);
+        let out = render_skills_to_string(&s);
+        assert!(!out.contains("more"));
+    }
+}

@@ -119,6 +119,34 @@ pub fn register_core_batch_2(
     reg.register_builtin_handler(Arc::new(VersionHandler::new()));
 }
 
+/// Overwrite the 4 batch-4 (engine-data) entries (`context`, `export`,
+/// `files`, `resume`) with their handle-bound real handlers.
+///
+/// Call **after** [`register_all_builtin_commands`] and (optionally) after
+/// [`register_core_batch_2`]. The function is idempotent — calling it twice
+/// with the same `handle` produces the same final state.
+///
+/// All four handlers consume the orchestrator handle: `/context` reads the
+/// context-window usage + status snapshot, `/export` reads the conversation
+/// transcript, `/files` reads the read-file-state cache, and `/resume`
+/// enumerates the on-disk session store. Each call overwrites the matching
+/// pass-1 unimplemented stub entry in-place.
+///
+/// The composition roots (`apps/engine-desktop`, `apps/engine-mobile`) call
+/// this immediately after `register_core_batch_2`, threading the live
+/// `Arc<dyn OrchestratorHandle>`.
+pub fn register_core_batch_4(
+    reg: &mut CommandRegistry,
+    handle: Arc<dyn traits::OrchestratorHandle>,
+) {
+    use crate::{ContextHandler, ExportHandler, FilesHandler, ResumeHandler};
+
+    reg.register_builtin_handler(Arc::new(ContextHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(ExportHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(FilesHandler::new(handle.clone())));
+    reg.register_builtin_handler(Arc::new(ResumeHandler::new(handle)));
+}
+
 /// Register the batch-3 (M-parity) handle-free slash commands.
 ///
 /// These 9 commands (`commit`, `commit-push-pr`, `init-verifiers`, `insights`,
@@ -378,6 +406,81 @@ mod batch_3_tests {
         ] {
             assert!(reg.resolve(name).is_some(), "/{name} missing");
             assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
+        }
+    }
+}
+
+#[cfg(test)]
+mod batch_4_tests {
+    use super::*;
+    use command_api::model::CommandResult;
+    use command_api::parser::ParsedSlashCommand;
+    use orchestrator::test_support::MockOrchestratorHandle;
+
+    fn args(name: &str) -> ParsedSlashCommand {
+        ParsedSlashCommand {
+            name: name.to_string(),
+            raw_args: String::new(),
+            positional_args: vec![],
+        }
+    }
+
+    #[test]
+    fn all_4_batch_4_names_resolve_after_overwrite() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        register_core_batch_4(&mut reg, handle);
+
+        for name in ["context", "export", "files", "resume"] {
+            assert!(reg.resolve(name).is_some(), "/{name} missing");
+            assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
+        }
+    }
+
+    /// After batch-4 wiring the names must NOT return the locked M5 stub
+    /// literal — they return their real `Done` displays. `/export` is covered
+    /// by its own test (it performs file I/O against a temp dir) and is
+    /// excluded here to keep this assertion side-effect-free.
+    #[tokio::test]
+    async fn batch_4_commands_return_real_display_not_stub() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        register_core_batch_4(&mut reg, handle);
+
+        for name in ["context", "files", "resume"] {
+            let h = reg
+                .get_handler(name)
+                .unwrap_or_else(|| panic!("/{name} handler missing"));
+            match h.handle(&args(name)).await {
+                CommandResult::Done { display: Some(s) } => {
+                    assert_ne!(
+                        s,
+                        format!("{name}: not implemented in v0.6.0 (M5)"),
+                        "/{name} still returns the locked stub literal"
+                    );
+                }
+                other => panic!("/{name} expected Done with display, got {other:?}"),
+            }
+        }
+    }
+
+    /// `/resume` against the default mock (no on-disk store) renders the
+    /// locked "none found" notice rather than the stub.
+    #[tokio::test]
+    async fn resume_renders_none_found_with_default_mock() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        register_core_batch_4(&mut reg, handle);
+
+        let h = reg.get_handler("resume").expect("resume handler missing");
+        match h.handle(&args("resume")).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, "No resumable sessions found.");
+            }
+            other => panic!("expected Done, got {other:?}"),
         }
     }
 }

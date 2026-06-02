@@ -245,7 +245,82 @@ impl OrchestratorHandle for ConversationOrchestrator {
             Err(e) => Err(HandleError::ActionFailed(e.to_string())),
         }
     }
+
+    // engine-data-commands additions:
+
+    async fn conversation_transcript(&self) -> Vec<protocol::ConversationMessage> {
+        // Clone of the live, ordered session history. Backs `/export`
+        // (transcript → file) and underpins `/summary` + `/diff`.
+        self.session.lock().await.history.clone()
+    }
+
+    async fn files_in_context(&self) -> Vec<PathBuf> {
+        // The read-file-state cache (TS `context.readFileState`) is not yet
+        // wired into `ConversationOrchestrator`, so we surface no tracked
+        // files. `/files` then renders the locked "No files in context"
+        // branch — 1:1 with `files.ts`. Wiring the cache is a separate,
+        // non-additive change to the tool-execution path.
+        Vec::new()
+    }
+
+    async fn context_window_usage(&self) -> (u64, u64) {
+        // `used_tokens` is the session's cumulative input+output token count
+        // (engine::SessionState::usage). `max_tokens` is the active model's
+        // context budget; LingXi locks the 200k Claude window (matching
+        // cost::budget). Falls back to (0, 0) when nothing has been counted.
+        let s = self.session.lock().await;
+        let usage = &s.usage.0;
+        let used = usage.input_tokens.saturating_add(usage.output_tokens);
+        (used, CONTEXT_WINDOW_MAX_TOKENS)
+    }
+
+    async fn list_resumable_sessions(&self) -> Vec<(String, String)> {
+        // Enumerate the on-disk JSONL session store the resume path reads
+        // from: `<claude_home>/projects/<project_dir_name(cwd)>/<uuid>.jsonl`.
+        // `claude_home` follows the `~/.claude` convention the CLI wires.
+        // Each entry maps to `(session_id, label)`; label is the id (the
+        // first-prompt label + interactive picker are deferred). Newest-first
+        // by mtime. Returns an empty Vec when the store is absent.
+        let Some(home) = dirs::home_dir() else {
+            return Vec::new();
+        };
+        let cwd = self.cwd.to_string_lossy();
+        let project_dir = home
+            .join(".claude")
+            .join("projects")
+            .join(session::project_dir_name(&cwd));
+        let Ok(entries) = std::fs::read_dir(&project_dir) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            found.push((mtime, stem.to_string()));
+        }
+        // Newest-first by modification time.
+        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found
+            .into_iter()
+            .map(|(_, id)| (id.clone(), id))
+            .collect()
+    }
 }
+
+/// LingXi-locked context-window budget used by [`context_window_usage`].
+/// Matches the 200k-token Claude window referenced in `cost::budget`. The
+/// rich per-model routing budget is deferred (it would require a new struct
+/// on the frozen trait surface). (engine-data-commands)
+const CONTEXT_WINDOW_MAX_TOKENS: u64 = 200_000;
 
 /// Stable string label for a `HookEventType`, used by [`list_hooks`] to
 /// populate [`traits::HookInfo::event`]. Avoids `Debug` derive

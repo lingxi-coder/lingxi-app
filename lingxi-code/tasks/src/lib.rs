@@ -20,6 +20,10 @@ pub mod registry;
 pub mod state;
 pub mod task_trait;
 
+pub use handlers::{
+    InProcessTeammateHandler, LocalAgentHandler, LocalBashHandler, MonitorMcpHandler,
+};
 pub use id::{generate_task_id, TaskType};
+pub use registry::{register_agent_handlers, register_self_contained_handlers};
 pub use state::*;
 pub use task_trait::*;

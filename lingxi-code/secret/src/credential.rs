@@ -6,13 +6,54 @@
 //! follow-up task.
 
 use protocol::{Secret, SecureStorageData, SecureStorageMetadata};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 use traits::{Clock, HttpTransport, SecureStorage, SecureStorageError};
 
 use crate::kinds::SecretKind;
+
+/// `(service, account)` keys under which the Anthropic OAuth credentials are
+/// stored. The access + refresh tokens live in separate secure-storage entries
+/// (each labelled with its own [`SecretKind`]); the non-secret session metadata
+/// (email / org / expiry / scopes) lives in a third entry so `current_user`
+/// can answer without a network round-trip.
+const OAUTH_SERVICE: &str = "lingxi";
+const OAUTH_ACCESS_ACCOUNT: &str = "anthropic-oauth-access";
+const OAUTH_REFRESH_ACCOUNT: &str = "anthropic-oauth-refresh";
+const OAUTH_META_ACCOUNT: &str = "anthropic-oauth-meta";
+
+/// A full Anthropic OAuth credential set as returned by [`CredentialManager::get_oauth_tokens`].
+///
+/// `access_token` / `refresh_token` are wrapped in [`Secret`] so they redact in
+/// logs; the remaining fields are non-secret session metadata persisted in the
+/// `anthropic-oauth-meta` entry.
+pub struct OAuthTokens {
+    /// Bearer access token.
+    pub access_token: Secret<String>,
+    /// Long-lived refresh token (absent if the provider never issued one).
+    pub refresh_token: Option<Secret<String>>,
+    /// Wall-clock expiry instant of the access token.
+    pub expires_at: SystemTime,
+    /// Scopes granted on the access token.
+    pub scopes: Vec<String>,
+    /// Signed-in user's email address.
+    pub email: String,
+    /// Anthropic organization id.
+    pub org_id: String,
+}
+
+/// Non-secret session metadata persisted alongside the OAuth tokens. Serialized
+/// to JSON and stored in the `anthropic-oauth-meta` entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OAuthSessionMeta {
+    expires_at: SystemTime,
+    scopes: Vec<String>,
+    email: String,
+    org_id: String,
+}
 
 /// Failure modes for [`CredentialManager`] operations.
 #[derive(Debug, Clone, Error)]
@@ -105,5 +146,313 @@ impl CredentialManager {
         // invalidate cache
         *self.api_key_cache.write().await = None;
         Ok(())
+    }
+
+    /// Persist a full Anthropic OAuth credential set.
+    ///
+    /// Writes three secure-storage entries under `service = "lingxi"`:
+    /// - `anthropic-oauth-access`  — the access token (`AnthropicOAuthAccessToken`)
+    /// - `anthropic-oauth-refresh` — the refresh token (`AnthropicOAuthRefreshToken`),
+    ///   deleted if `refresh` is `None`
+    /// - `anthropic-oauth-meta`    — JSON session metadata (email / org / expiry / scopes)
+    ///
+    /// Each `store` overwrites any existing entry, so this is also the rotation
+    /// path used by the reactive / proactive refresh driver.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn store_oauth_tokens(
+        &self,
+        access: &str,
+        refresh: Option<&str>,
+        expires_at: SystemTime,
+        scopes: Vec<String>,
+        email: &str,
+        org_id: &str,
+    ) -> Result<(), CredentialError> {
+        let now = self.clock.now();
+
+        let access_meta = SecureStorageMetadata {
+            created_at: now,
+            last_accessed: None,
+            kind: SecretKind::AnthropicOAuthAccessToken.as_dto(),
+        };
+        self.storage
+            .store(
+                OAUTH_SERVICE,
+                OAUTH_ACCESS_ACCOUNT,
+                SecureStorageData::new(access.as_bytes().to_vec(), access_meta),
+            )
+            .await?;
+
+        match refresh {
+            Some(refresh) => {
+                let refresh_meta = SecureStorageMetadata {
+                    created_at: now,
+                    last_accessed: None,
+                    kind: SecretKind::AnthropicOAuthRefreshToken.as_dto(),
+                };
+                self.storage
+                    .store(
+                        OAUTH_SERVICE,
+                        OAUTH_REFRESH_ACCOUNT,
+                        SecureStorageData::new(refresh.as_bytes().to_vec(), refresh_meta),
+                    )
+                    .await?;
+            }
+            None => {
+                // No refresh token this rotation — clear any stale entry.
+                self.storage
+                    .delete(OAUTH_SERVICE, OAUTH_REFRESH_ACCOUNT)
+                    .await?;
+            }
+        }
+
+        let meta = OAuthSessionMeta {
+            expires_at,
+            scopes,
+            email: email.to_string(),
+            org_id: org_id.to_string(),
+        };
+        // Serialization of this fixed-shape struct cannot fail; fall back to an
+        // empty object rather than panicking.
+        let meta_json = serde_json::to_vec(&meta).unwrap_or_else(|_| b"{}".to_vec());
+        let meta_meta = SecureStorageMetadata {
+            created_at: now,
+            last_accessed: None,
+            kind: SecretKind::AnthropicOAuthSessionMeta.as_dto(),
+        };
+        self.storage
+            .store(
+                OAUTH_SERVICE,
+                OAUTH_META_ACCOUNT,
+                SecureStorageData::new(meta_json, meta_meta),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Load the persisted Anthropic OAuth credential set.
+    ///
+    /// Returns `Ok(None)` if no access token or no session metadata is present
+    /// (a partially-written state is treated as "not logged in").
+    pub async fn get_oauth_tokens(&self) -> Result<Option<OAuthTokens>, CredentialError> {
+        let Some(access_raw) = self
+            .storage
+            .retrieve(OAUTH_SERVICE, OAUTH_ACCESS_ACCOUNT)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some(meta_raw) = self
+            .storage
+            .retrieve(OAUTH_SERVICE, OAUTH_META_ACCOUNT)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        let access = String::from_utf8(access_raw.expose_secret_bytes().to_vec())
+            .map_err(|_| CredentialError::Unavailable)?;
+        let meta: OAuthSessionMeta = serde_json::from_slice(meta_raw.expose_secret_bytes())
+            .map_err(|_| CredentialError::Unavailable)?;
+
+        let refresh = match self
+            .storage
+            .retrieve(OAUTH_SERVICE, OAUTH_REFRESH_ACCOUNT)
+            .await?
+        {
+            Some(raw) => Some(Secret::new(
+                String::from_utf8(raw.expose_secret_bytes().to_vec())
+                    .map_err(|_| CredentialError::Unavailable)?,
+            )),
+            None => None,
+        };
+
+        Ok(Some(OAuthTokens {
+            access_token: Secret::new(access),
+            refresh_token: refresh,
+            expires_at: meta.expires_at,
+            scopes: meta.scopes,
+            email: meta.email,
+            org_id: meta.org_id,
+        }))
+    }
+
+    /// Delete every persisted Anthropic OAuth entry. Idempotent — deleting a
+    /// missing entry is not an error.
+    pub async fn delete_oauth_tokens(&self) -> Result<(), CredentialError> {
+        self.storage
+            .delete(OAUTH_SERVICE, OAUTH_ACCESS_ACCOUNT)
+            .await?;
+        self.storage
+            .delete(OAUTH_SERVICE, OAUTH_REFRESH_ACCOUNT)
+            .await?;
+        self.storage
+            .delete(OAUTH_SERVICE, OAUTH_META_ACCOUNT)
+            .await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod oauth_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+    use traits::SecureStorageBackend;
+
+    /// In-memory `(service, account) -> data` store for credential tests.
+    #[derive(Default)]
+    struct MemStorage {
+        map: StdMutex<HashMap<(String, String), SecureStorageData>>,
+    }
+
+    #[async_trait]
+    impl SecureStorage for MemStorage {
+        async fn store(
+            &self,
+            service: &str,
+            account: &str,
+            data: SecureStorageData,
+        ) -> Result<(), SecureStorageError> {
+            self.map
+                .lock()
+                .unwrap()
+                .insert((service.into(), account.into()), data);
+            Ok(())
+        }
+        async fn retrieve(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .get(&(service.into(), account.into()))
+                .cloned())
+        }
+        async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+            self.map
+                .lock()
+                .unwrap()
+                .remove(&(service.into(), account.into()));
+            Ok(())
+        }
+        async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|(s, _)| s == service)
+                .map(|(_, a)| a.clone())
+                .collect())
+        }
+        fn is_encrypted(&self) -> bool {
+            false
+        }
+        fn backend(&self) -> SecureStorageBackend {
+            SecureStorageBackend::PlainText
+        }
+    }
+
+    struct FixedClock;
+    impl Clock for FixedClock {
+        fn now(&self) -> SystemTime {
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)
+        }
+    }
+
+    /// HTTP transport that panics — credential tests never make HTTP calls.
+    struct NoHttp;
+    #[async_trait]
+    impl HttpTransport for NoHttp {
+        async fn request(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            panic!("credential tests must not perform HTTP");
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            panic!("credential tests must not perform HTTP");
+        }
+    }
+
+    fn manager() -> (Arc<MemStorage>, CredentialManager) {
+        let storage = Arc::new(MemStorage::default());
+        let cm = CredentialManager::new(
+            storage.clone() as Arc<dyn SecureStorage>,
+            Arc::new(FixedClock),
+            Arc::new(NoHttp),
+        );
+        (storage, cm)
+    }
+
+    #[tokio::test]
+    async fn oauth_tokens_round_trip() {
+        let (_storage, cm) = manager();
+        let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+        cm.store_oauth_tokens(
+            "access-abc",
+            Some("refresh-xyz"),
+            expires,
+            vec!["read:user".into(), "write:messages".into()],
+            "user@example.com",
+            "org-uuid-1",
+        )
+        .await
+        .expect("store");
+
+        let got = cm.get_oauth_tokens().await.expect("get").expect("present");
+        assert_eq!(got.access_token.expose_secret(), "access-abc");
+        assert_eq!(
+            got.refresh_token.as_ref().map(|s| s.expose_secret().clone()),
+            Some("refresh-xyz".to_string())
+        );
+        assert_eq!(got.expires_at, expires);
+        assert_eq!(got.scopes, vec!["read:user", "write:messages"]);
+        assert_eq!(got.email, "user@example.com");
+        assert_eq!(got.org_id, "org-uuid-1");
+    }
+
+    #[tokio::test]
+    async fn get_returns_none_when_absent() {
+        let (_storage, cm) = manager();
+        assert!(cm.get_oauth_tokens().await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn store_without_refresh_clears_stale_refresh() {
+        let (_storage, cm) = manager();
+        let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+        // First write a refresh token.
+        cm.store_oauth_tokens("a1", Some("r1"), expires, vec![], "e@x", "o")
+            .await
+            .expect("store with refresh");
+        // Rotate to a token set with no refresh token.
+        cm.store_oauth_tokens("a2", None, expires, vec![], "e@x", "o")
+            .await
+            .expect("store without refresh");
+        let got = cm.get_oauth_tokens().await.expect("get").expect("present");
+        assert_eq!(got.access_token.expose_secret(), "a2");
+        assert!(got.refresh_token.is_none(), "stale refresh must be cleared");
+    }
+
+    #[tokio::test]
+    async fn delete_is_idempotent_and_clears() {
+        let (_storage, cm) = manager();
+        let expires = SystemTime::UNIX_EPOCH + Duration::from_secs(5_000);
+        cm.store_oauth_tokens("a", Some("r"), expires, vec![], "e@x", "o")
+            .await
+            .expect("store");
+        cm.delete_oauth_tokens().await.expect("delete");
+        assert!(cm.get_oauth_tokens().await.expect("get").is_none());
+        // Second delete on an empty store is not an error.
+        cm.delete_oauth_tokens().await.expect("idempotent delete");
     }
 }

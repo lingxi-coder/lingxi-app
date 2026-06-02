@@ -10,3 +10,13 @@ pub mod local_bash;
 pub mod local_workflow;
 pub mod monitor_mcp;
 pub mod remote_agent;
+
+// The M2 handler implementations are re-exported at the module root so
+// callers (and the registration helper) can name them without the per-type
+// submodule path.
+pub use in_process_teammate::{
+    DefaultTeammateDefinition, InProcessTeammateHandler, TeammateDefinitionResolver,
+};
+pub use local_agent::{DefaultSubagentTypeResolver, LocalAgentHandler, SubagentTypeResolver};
+pub use local_bash::{LocalBashHandler, NoopStatusSink, TaskStatusSink};
+pub use monitor_mcp::MonitorMcpHandler;

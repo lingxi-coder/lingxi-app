@@ -12,6 +12,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "agent"
 version = "0.12.0"
 dependencies = [
+ "api-client",
  "async-trait",
  "engine",
  "hooks",
@@ -778,6 +779,7 @@ dependencies = [
  "async-trait",
  "engine",
  "memory",
+ "permission",
  "protocol",
  "serde",
  "serde_json",
@@ -3676,10 +3678,12 @@ name = "tasks"
 version = "0.12.0"
 dependencies = [
  "agent",
+ "api-client",
  "async-trait",
  "engine",
  "futures",
  "hooks",
+ "mcp",
  "protocol",
  "rand 0.9.4",
  "serde",

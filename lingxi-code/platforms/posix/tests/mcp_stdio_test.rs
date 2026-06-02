@@ -83,7 +83,7 @@ async fn initialize_roundtrips_via_stdio() {
 
     assert_eq!(
         result.get("protocolVersion").and_then(|v| v.as_str()),
-        Some("2025-03-26")
+        Some("2025-11-25")
     );
     assert_eq!(
         result.pointer("/serverInfo/name").and_then(|v| v.as_str()),

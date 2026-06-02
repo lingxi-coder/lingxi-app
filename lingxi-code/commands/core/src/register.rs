@@ -41,6 +41,13 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
     // placeholders. (M5-10 removed the 6 batch-1 placeholders from this
     // pass; their real handlers are wired by `register_core_batch_1`.)
     register_core_placeholders(reg);
+
+    // Pass 3: overwrite the batch-3 (M-parity) handle-free slash commands with
+    // their real handlers. These do not need any orchestrator/auth handle, so
+    // they can be wired here unconditionally (rather than at CLI boot like
+    // batch-1/batch-2). Each call overwrites the matching pass-1 unimplemented
+    // stub entry in-place.
+    register_core_batch_3(reg);
 }
 
 /// Overwrite the 6 batch-1 entries (`clear`, `compact`, `exit`, `help`,
@@ -110,6 +117,34 @@ pub fn register_core_batch_2(
     reg.register_builtin_handler(Arc::new(PermissionsHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(StatusHandler::new(handle)));
     reg.register_builtin_handler(Arc::new(VersionHandler::new()));
+}
+
+/// Register the batch-3 (M-parity) handle-free slash commands.
+///
+/// These 9 commands (`commit`, `commit-push-pr`, `init-verifiers`, `insights`,
+/// `pr-comments`, `review`, `security-review`, `statusline`, `stickers`) carry
+/// no orchestrator or auth handle: each is a static prompt-injection
+/// (`InjectMessage`) or a static display message (`Done`). They are wired
+/// unconditionally at the end of [`register_all_builtin_commands`], overwriting
+/// the matching pass-1 unimplemented stub entries in-place.
+///
+/// Deferred commands (e.g. `ant-trace`) are intentionally left on the shared
+/// [`command_api::builtin_support::UnimplementedCommandHandler`].
+pub fn register_core_batch_3(reg: &mut CommandRegistry) {
+    use crate::{
+        CommitHandler, CommitPushPrHandler, InitVerifiersHandler, InsightsHandler,
+        PrCommentsHandler, ReviewHandler, SecurityReviewHandler, StatuslineHandler, StickersHandler,
+    };
+
+    reg.register_builtin_handler(Arc::new(CommitHandler::new()));
+    reg.register_builtin_handler(Arc::new(CommitPushPrHandler::new()));
+    reg.register_builtin_handler(Arc::new(InitVerifiersHandler::new()));
+    reg.register_builtin_handler(Arc::new(InsightsHandler::new()));
+    reg.register_builtin_handler(Arc::new(PrCommentsHandler::new()));
+    reg.register_builtin_handler(Arc::new(ReviewHandler::new()));
+    reg.register_builtin_handler(Arc::new(SecurityReviewHandler::new()));
+    reg.register_builtin_handler(Arc::new(StatuslineHandler::new()));
+    reg.register_builtin_handler(Arc::new(StickersHandler::new()));
 }
 
 #[cfg(test)]
@@ -242,6 +277,105 @@ mod batch_1_tests {
         register_core_batch_1(&mut reg, handle);
 
         for name in ["clear", "compact", "exit", "help", "init", "memory"] {
+            assert!(reg.resolve(name).is_some(), "/{name} missing");
+            assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
+        }
+    }
+}
+
+#[cfg(test)]
+mod batch_3_tests {
+    use super::*;
+    use command_api::model::CommandResult;
+    use command_api::parser::ParsedSlashCommand;
+
+    fn args(name: &str) -> ParsedSlashCommand {
+        ParsedSlashCommand {
+            name: name.to_string(),
+            raw_args: String::new(),
+            positional_args: vec![],
+        }
+    }
+
+    /// `register_all_builtin_commands` now wires batch-3 unconditionally (no
+    /// handle needed), so the batch-3 names must NOT return the locked M5 stub
+    /// literal after the standard registration call.
+    #[tokio::test]
+    async fn batch_3_inject_commands_return_inject_message_not_stub() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+
+        // Sample of the InjectMessage (`inject`-kind) batch-3 commands.
+        for name in ["commit", "review", "security-review", "init-verifiers"] {
+            let h = reg
+                .get_handler(name)
+                .unwrap_or_else(|| panic!("/{name} handler missing"));
+            match h.handle(&args(name)).await {
+                CommandResult::InjectMessage { content } => {
+                    assert!(!content.is_empty(), "/{name} injected empty content");
+                    assert_ne!(
+                        content,
+                        format!("{name}: not implemented in v0.6.0 (M5)"),
+                        "/{name} still returns the locked stub literal"
+                    );
+                }
+                other => panic!("/{name} expected InjectMessage, got {other:?}"),
+            }
+        }
+    }
+
+    /// The single `display`-kind batch-3 command (`stickers`) returns `Done`
+    /// with a real display message rather than the locked stub literal.
+    #[tokio::test]
+    async fn stickers_returns_done_not_stub() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+
+        let h = reg.get_handler("stickers").expect("stickers handler missing");
+        match h.handle(&args("stickers")).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_ne!(
+                    s, "stickers: not implemented in v0.6.0 (M5)",
+                    "/stickers still returns the locked stub literal"
+                );
+            }
+            other => panic!("/stickers expected Done with display, got {other:?}"),
+        }
+    }
+
+    /// Deferred commands stay on the unimplemented handler: `ant-trace` must
+    /// still return the locked M5 stub literal after batch-3 wiring.
+    #[tokio::test]
+    async fn deferred_command_still_returns_stub_after_batch_3() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+
+        let h = reg
+            .get_handler("ant-trace")
+            .expect("ant-trace handler missing");
+        match h.handle(&args("ant-trace")).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, "ant-trace: not implemented in v0.6.0 (M5)");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn all_9_batch_3_names_resolve_after_register_all() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        for name in [
+            "commit",
+            "commit-push-pr",
+            "init-verifiers",
+            "insights",
+            "pr-comments",
+            "review",
+            "security-review",
+            "statusline",
+            "stickers",
+        ] {
             assert!(reg.resolve(name).is_some(), "/{name} missing");
             assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
         }

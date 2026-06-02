@@ -15,7 +15,15 @@ pub mod mailbox;
 pub mod mode;
 pub mod swarm;
 pub mod team_registry;
+pub mod tool_send_message;
+pub mod tool_synthetic_output;
+pub mod tool_team_create;
+pub mod tool_team_delete;
 
 pub use mailbox::{MailboxError, MailboxRouter, MessageSender, TeammateMailbox, TeammateMessage};
 pub use mode::CoordinatorMode;
 pub use team_registry::{TeamRegistry, WorkerAgent, WorkerStatus};
+pub use tool_send_message::{SendMessageTool, SEND_MESSAGE_TOOL_NAME};
+pub use tool_synthetic_output::{SyntheticOutputTool, SYNTHETIC_OUTPUT_TOOL_NAME};
+pub use tool_team_create::{TeamCreateTool, TEAM_CREATE_TOOL_NAME};
+pub use tool_team_delete::{TeamDeleteTool, TEAM_DELETE_TOOL_NAME};

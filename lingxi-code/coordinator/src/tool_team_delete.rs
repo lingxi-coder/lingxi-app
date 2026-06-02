@@ -1,0 +1,357 @@
+//! `TeamDeleteTool` — coordinator-only tool that removes a worker from the
+//! [`TeamRegistry`] and unregisters its mailbox.
+//!
+//! 1:1 Rust port of the TS `TeamDeleteTool` (`src/tools/TeamDeleteTool/`).
+//! The TS tool name is `"TeamDelete"` and `userFacingName()` returns `''`.
+//!
+//! Adaptation note: the lingxi `coordinator::TeamRegistry` tracks workers
+//! 1:per-`AgentId` (rather than the TS per-team-file model), and its
+//! operational mutator is [`TeamRegistry::delete_worker`]. The TS schema is
+//! `z.strictObject({})` (team name read from session `AppState`); the lingxi
+//! port instead takes the target worker `agent_id` as input — required so the
+//! tool can perform `delete_worker(&agent_id)` and map an unknown id to the
+//! trait's `InvalidInput` error variant (the lingxi-side equivalent of the
+//! TS "nothing to clean up" / active-member guards). Schema shape
+//! (`type:object`, `additionalProperties:false`) mirrors the TS strict object.
+
+use std::sync::{Arc, OnceLock};
+
+use async_trait::async_trait;
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+use protocol::AgentId;
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
+use tool_api::tool_trait::{
+    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
+    ToolStaticContext,
+};
+
+use crate::team_registry::TeamRegistry;
+
+/// Canonical tool name in the registry (matches TS `TEAM_DELETE_TOOL_NAME`).
+pub const TEAM_DELETE_TOOL_NAME: &str = "TeamDelete";
+
+/// Backing store for the cached input schema (built once, on first access).
+///
+/// `std::sync::OnceLock` is used instead of `once_cell::sync::Lazy` so the
+/// coordinator crate does not take a new dependency on `once_cell` (mirrors the
+/// sibling coordinator tools `tool_team_create.rs` / `tool_send_message.rs` /
+/// `tool_synthetic_output.rs`).
+static TEAM_DELETE_SCHEMA: OnceLock<Value> = OnceLock::new();
+
+/// Input schema. Mirrors the TS `z.strictObject` shape
+/// (`additionalProperties:false`) but exposes the `agent_id` the lingxi
+/// registry needs to identify the worker to remove.
+fn team_delete_schema() -> &'static Value {
+    TEAM_DELETE_SCHEMA.get_or_init(|| {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["agent_id"],
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent ID (UUID) of the worker to remove from the team."
+                }
+            }
+        })
+    })
+}
+
+/// Coordinator-only tool: remove a worker and unregister its mailbox.
+pub struct TeamDeleteTool {
+    team: Arc<TeamRegistry>,
+}
+
+impl TeamDeleteTool {
+    /// Construct a new tool wired to the shared coordinator registry.
+    #[must_use]
+    pub fn new(team: Arc<TeamRegistry>) -> Self {
+        Self { team }
+    }
+}
+
+#[async_trait]
+impl Tool for TeamDeleteTool {
+    fn name(&self) -> &str {
+        TEAM_DELETE_TOOL_NAME
+    }
+
+    fn input_schema(&self) -> &Value {
+        team_delete_schema()
+    }
+
+    fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+        // TS: isEnabled() => isAgentSwarmsEnabled(). Coordinator tools are only
+        // wired into the registry when coordinator mode is enabled, so the
+        // gate is upstream; this tool is always enabled once present.
+        true
+    }
+
+    fn should_defer(&self) -> bool {
+        // TS: shouldDefer: true.
+        true
+    }
+
+    fn search_hint(&self) -> Option<&str> {
+        // TS: searchHint: 'disband a swarm team and clean up'.
+        Some("disband a swarm team and clean up")
+    }
+
+    fn max_result_size_chars(&self) -> usize {
+        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
+    }
+
+    fn is_concurrency_safe(&self, _: &Value) -> bool {
+        // Mutates the shared worker map, but the registry is RwLock-guarded.
+        true
+    }
+
+    fn is_read_only(&self, _: &Value) -> bool {
+        false
+    }
+
+    fn is_destructive(&self, _: &Value) -> bool {
+        // Mirrors the destructive `TeamDeleteTool` semantics: removes a worker.
+        true
+    }
+
+    fn is_open_world(&self, _: &Value) -> bool {
+        false
+    }
+
+    fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
+        InterruptBehavior::Block
+    }
+
+    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+        // TS: no explicit checkPermissions override -> allow. The tool only
+        // mutates coordinator-local in-memory team state.
+        PermissionResult::Allow {
+            reason: PermissionDecisionReason::Other {
+                reason: "TeamDelete mutates coordinator-local team state only".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: PermissionMetadata::default(),
+        }
+    }
+
+    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+        // TS: 'Clean up team and task directories when the swarm is complete'.
+        "Clean up team and task directories when the swarm is complete".into()
+    }
+
+    async fn prompt(&self, _: &PromptOptions) -> String {
+        // 1:1 with TS `getPrompt()`.
+        "# TeamDelete\n\nRemove team and task directories when the swarm work is complete.\n\nThis operation:\n- Removes the team directory (`~/.claude/teams/{team-name}/`)\n- Removes the task directory (`~/.claude/tasks/{team-name}/`)\n- Clears team context from the current session\n\n**IMPORTANT**: TeamDelete will fail if the team still has active members. Gracefully terminate teammates first, then call TeamDelete after all teammates have shut down.\n\nUse this when all teammates have finished their work and you want to clean up the team resources. The team name is automatically determined from the current session's team context.".into()
+    }
+
+    async fn call(
+        &self,
+        input: Value,
+        _ctx: ToolUseContext,
+        _progress: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        // Parse the target worker id defensively (do not rely on schema alone).
+        let agent_id_str = input
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ToolError::InvalidInput("TeamDelete: missing 'agent_id'".into()))?
+            .trim();
+
+        if agent_id_str.is_empty() {
+            return Err(ToolError::InvalidInput(
+                "TeamDelete: 'agent_id' is required".into(),
+            ));
+        }
+
+        let uuid = Uuid::parse_str(agent_id_str).map_err(|_| {
+            ToolError::InvalidInput(format!(
+                "TeamDelete: 'agent_id' is not a valid UUID: {agent_id_str}"
+            ))
+        })?;
+        let agent_id = AgentId::from_uuid(uuid);
+
+        // `delete_worker` is infallible and a no-op for unknown ids, so probe
+        // the registry first to surface an unknown-agent error to the model.
+        let known = self
+            .team
+            .list()
+            .await
+            .into_iter()
+            .any(|w| w.agent_id == agent_id);
+        if !known {
+            return Err(ToolError::InvalidInput(format!(
+                "TeamDelete: unknown agent id: {agent_id_str}"
+            )));
+        }
+
+        // Remove the worker and unregister its mailbox.
+        self.team.delete_worker(&agent_id).await;
+
+        Ok(ToolCallResult {
+            data: json!({
+                "success": true,
+                "message": format!("Removed worker {agent_id_str} from the team"),
+                "agent_id": agent_id_str,
+            }),
+            new_messages: Vec::new(),
+            context_modifier: None,
+            mcp_meta: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tool_api::context::{ToolUseContext, ToolUseOptions};
+    use tool_api::progress::progress_channel;
+
+    fn fresh_ctx() -> ToolUseContext {
+        ToolUseContext {
+            options: ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model: "test".into(),
+                max_budget_nano_usd: None,
+                mcp_clients: vec![],
+                is_non_interactive_session: false,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+            },
+            messages: vec![],
+            tool_use_id: None,
+            agent_id: None,
+            content_replacement_state: None,
+            session: None,
+            subagent_registry: None,
+        }
+    }
+
+    fn fresh_tx() -> ToolProgressSender {
+        let (tx, _rx) = progress_channel();
+        tx
+    }
+
+    fn registry() -> Arc<TeamRegistry> {
+        Arc::new(TeamRegistry::new(AgentId::new()))
+    }
+
+    #[test]
+    fn name_matches_ts_constant() {
+        let tool = TeamDeleteTool::new(registry());
+        assert_eq!(tool.name(), "TeamDelete");
+        assert_eq!(tool.name(), TEAM_DELETE_TOOL_NAME);
+    }
+
+    #[test]
+    fn schema_is_strict_object() {
+        let tool = TeamDeleteTool::new(registry());
+        let schema = tool.input_schema();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["agent_id"]["type"], "string");
+    }
+
+    #[test]
+    fn flags_match_ts() {
+        let tool = TeamDeleteTool::new(registry());
+        assert!(tool.should_defer());
+        assert!(tool.is_destructive(&json!({})));
+        assert!(!tool.is_read_only(&json!({})));
+        assert!(tool.is_enabled(&ToolStaticContext::default()));
+    }
+
+    #[tokio::test]
+    async fn deletes_existing_worker() {
+        let team = registry();
+        let agent_id = team
+            .spawn_worker("explorer".into(), "alice".into(), "task-1".into())
+            .await
+            .expect("spawn must succeed");
+        assert_eq!(team.list().await.len(), 1);
+
+        let tool = TeamDeleteTool::new(team.clone());
+        let res = tool
+            .call(
+                json!({ "agent_id": agent_id.as_uuid().to_string() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("delete must succeed for a known worker");
+
+        assert_eq!(res.data["success"], true);
+        assert_eq!(res.data["agent_id"], agent_id.as_uuid().to_string());
+
+        // Effect: worker is gone from the registry.
+        assert!(team.list().await.is_empty());
+
+        // Effect: the mailbox was unregistered — routing to it now fails.
+        let route_err = team
+            .mailbox_router
+            .route(
+                &agent_id,
+                crate::mailbox::TeammateMessage {
+                    from: crate::mailbox::MessageSender::Coordinator,
+                    content: "ping".into(),
+                    message_id: "m1".into(),
+                    timestamp: std::time::SystemTime::now(),
+                },
+            )
+            .await;
+        assert!(matches!(
+            route_err,
+            Err(crate::mailbox::MailboxError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_agent_id_is_invalid_input() {
+        let team = registry();
+        let tool = TeamDeleteTool::new(team);
+        let err = tool
+            .call(
+                json!({ "agent_id": Uuid::new_v4().to_string() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("delete must fail for an unknown agent id");
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+        assert!(format!("{err}").contains("unknown agent id"));
+    }
+
+    #[tokio::test]
+    async fn missing_agent_id_is_invalid_input() {
+        let team = registry();
+        let tool = TeamDeleteTool::new(team);
+        let err = tool
+            .call(json!({}), fresh_ctx(), fresh_tx())
+            .await
+            .expect_err("delete must fail when agent_id is absent");
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn malformed_uuid_is_invalid_input() {
+        let team = registry();
+        let tool = TeamDeleteTool::new(team);
+        let err = tool
+            .call(
+                json!({ "agent_id": "not-a-uuid" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("delete must fail for a malformed UUID");
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+        assert!(format!("{err}").contains("valid UUID"));
+    }
+}

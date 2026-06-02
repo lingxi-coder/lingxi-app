@@ -14,39 +14,92 @@
 //! without going through the trait surface.
 
 use async_trait::async_trait;
-use jsonrpc::Connection;
+use jsonrpc::{Connection, ConnectionError, InboundHandler, Request, Response, RouterError};
 use platform_common::mcp_stdio::{StderrRing, StdioConfig};
 use platform_common::{connect_http, connect_sse};
 use protocol::McpConnectionId;
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::AsyncReadExt;
-use tokio::process::Child;
 use tokio::sync::Mutex as AsyncMutex;
 use traits::{
-    ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
-    McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
-    McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    ElicitRequestDto, ElicitResultDto, McpError, McpNotificationDto, McpNotificationStream,
+    McpPromptDto, McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto,
+    McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
+
+/// MCP protocol version this transport advertises in `initialize`.
+///
+/// Matches the SDK 1.25.3 `LATEST_PROTOCOL_VERSION` that claude-code bundles.
+/// A spec-compliant server negotiates down if it only supports an older
+/// version; advertising the latest avoids being rejected by a newer server
+/// that no longer accepts `2025-03-26`. For stdio we always advertise the
+/// latest supported value (there is no `MCP-Protocol-Version` header to echo
+/// as there would be for Streamable HTTP).
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Per-call timeout budget for `tools/call`, in whole seconds. Surfaced in the
+/// load-bearing [`McpError::Timeout`] Display string when exceeded.
+const TOOL_CALL_TIMEOUT_SECS: u64 = 60;
 
 /// Per-connection state held by `PosixMcpTransport`.
 ///
 /// Different transports keep slightly different ownership: `Stdio` owns the
-/// spawned child so `disconnect` can kill it; SSE / HTTP just own the
+/// spawned child so `disconnect` can force-kill it; SSE / HTTP just own the
 /// JSON-RPC `Connection` (the underlying `reqwest` tasks live inside the
 /// connection's broker).
 pub(crate) enum PosixMcpConnection {
-    /// `Stdio` connection — owns the child process and the JSON-RPC link.
+    /// `Stdio` connection — owns the JSON-RPC link to the spawned child.
+    ///
+    /// The child process is owned by the reaper task spawned inside
+    /// [`spawn_stdio_with_handles`]. Per-connection teardown REQUIRES the
+    /// explicit [`disconnect`](PosixMcpTransport::disconnect) path: it signals
+    /// the reaper (via [`reaper_kill`](PosixMcpConnection::Stdio::reaper_kill))
+    /// to `child.start_kill()` so even a server that ignores stdin-EOF is
+    /// force-terminated, then closes the [`Connection`] to abort the broker.
+    ///
+    /// A plain `Arc<Connection>` drop with the runtime still alive does NOT
+    /// abort the broker, does NOT close the child's stdin, and does NOT trigger
+    /// `kill_on_drop` (the reaper task is detached and still owns the `Child`),
+    /// so the child would leak. `kill_on_drop(true)` only ever fires on full
+    /// runtime shutdown. Always go through `disconnect`.
     Stdio {
-        /// Owned child process; killed on `disconnect`.
-        child: Child,
+        /// Fully-wired JSON-RPC `Connection` over the child's NDJSON stdio,
+        /// wrapped in an `Arc` so request methods can cheaply clone a handle
+        /// out from under the map lock and `.await` without holding the guard.
+        /// (`Connection` itself is not `Clone`.)
+        connection: Arc<Connection>,
+        /// Shared `StderrRing` populated by the stderr-drain task — held so
+        /// `disconnect` (or a future crash path) can snapshot child stderr.
+        #[allow(dead_code)]
+        stderr: Arc<AsyncMutex<StderrRing>>,
+        /// Fires the reaper task's `child.start_kill()` so `disconnect` can
+        /// force-terminate a non-cooperative server. `Mutex<Option<…>>`
+        /// because the oneshot sender is consumed on the first send.
+        reaper_kill: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     },
-    /// `Sse` connection — owns the JSON-RPC connection over the HTTP+SSE pair.
-    Sse,
-    /// `Http` connection — owns the JSON-RPC connection over Streamable HTTP.
-    Http,
+    /// `Sse` connection — owns the JSON-RPC link over the HTTP+SSE pair.
+    ///
+    /// Unlike `Stdio`, there is no owned child process, so no reaper or
+    /// `stderr` ring is needed: the underlying `reqwest` GET/POST tasks live
+    /// inside the connection's broker. Teardown is just dropping this
+    /// `Arc<Connection>` (or calling [`Connection::close`]), which aborts the
+    /// broker and the spawned `reqwest` tasks. Wrapped in an `Arc` for the same
+    /// reason as `Stdio.connection`: `Connection` is not `Clone` (its
+    /// `broadcast::Receiver` blocks the derive), and request methods clone a
+    /// cheap handle out from under the map lock before they `.await`.
+    Sse { connection: Arc<Connection> },
+    /// `Http` connection — owns the JSON-RPC link over Streamable HTTP.
+    ///
+    /// Same ownership shape as `Sse`: no owned child, so teardown is just
+    /// dropping the `Arc<Connection>` (or `.close()`), which aborts the broker
+    /// and the spawned `reqwest` POST task. `Arc` because `Connection` is not
+    /// `Clone` (see `Sse` / `Stdio.connection`).
+    Http { connection: Arc<Connection> },
 }
 
 /// POSIX MCP transport.
@@ -75,6 +128,129 @@ impl PosixMcpTransport {
             guard.insert(id, conn);
         }
     }
+
+    /// Clone the JSON-RPC [`Connection`] for `id` out of the map, dropping the
+    /// std `MutexGuard` before the caller `.await`s.
+    ///
+    /// `Arc::clone` is cheap, so we clone the `Arc` out under the lock and drop
+    /// the std `MutexGuard` before the caller `.await`s (`Connection` itself is
+    /// not `Clone` — its `broadcast::Receiver` blocks the derive, which is why
+    /// it is wrapped in an `Arc`).
+    fn connection_for(&self, id: McpConnectionId) -> Result<Arc<Connection>, McpError> {
+        let guard = self
+            .connections
+            .lock()
+            .map_err(|_| McpError::Internal("connection map mutex poisoned".into()))?;
+        // Every transport variant now stores a fully-wired `Arc<Connection>`,
+        // so the request surface is transport-agnostic: clone the handle out
+        // and let the caller `.await` after the std `MutexGuard` is dropped.
+        // The or-pattern is exhaustive over `Some(_)` for the three variants;
+        // adding a new variant without a `Connection` would require an arm.
+        match guard.get(&id) {
+            Some(
+                PosixMcpConnection::Stdio { connection, .. }
+                | PosixMcpConnection::Sse { connection }
+                | PosixMcpConnection::Http { connection },
+            ) => Ok(Arc::clone(connection)),
+            None => Err(McpError::Connection(format!("no such connection: {id}"))),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wire-shape deserialization structs for MCP `*/list` and `*/read` results.
+// Field renames bridge the wire's camelCase to our snake_case DTOs.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ToolsListResult {
+    #[serde(default)]
+    tools: Vec<RawTool>,
+}
+
+#[derive(Deserialize)]
+struct RawTool {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(rename = "inputSchema", default)]
+    input_schema: Value,
+}
+
+#[derive(Deserialize)]
+struct ToolCallResult {
+    #[serde(default)]
+    content: Value,
+    #[serde(rename = "isError", default)]
+    is_error: bool,
+}
+
+#[derive(Deserialize)]
+struct ResourcesListResult {
+    #[serde(default)]
+    resources: Vec<RawResource>,
+}
+
+#[derive(Deserialize)]
+struct RawResource {
+    uri: String,
+    #[serde(default)]
+    name: String,
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ResourceReadResult {
+    #[serde(default)]
+    contents: Vec<RawResourceContent>,
+}
+
+#[derive(Deserialize)]
+struct RawResourceContent {
+    uri: Option<String>,
+    text: Option<String>,
+    blob: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PromptsListResult {
+    #[serde(default)]
+    prompts: Vec<RawPrompt>,
+}
+
+#[derive(Deserialize)]
+struct RawPrompt {
+    name: String,
+    description: Option<String>,
+}
+
+/// Map a [`ConnectionError`] from an outbound call into the generic
+/// [`McpError::Internal`] surface (used by every method except the ones with
+/// a more specific mapping, e.g. `call_tool`'s timeout / not-found paths).
+fn map_call_err(e: &ConnectionError) -> McpError {
+    McpError::Internal(e.to_string())
+}
+
+/// True when `e` is a remote JSON-RPC error carrying the
+/// `METHOD_NOT_FOUND` (-32601) code — the MCP convention for "unknown tool".
+fn is_method_not_found(e: &ConnectionError) -> bool {
+    matches!(
+        e,
+        ConnectionError::Router(RouterError::Remote(re)) if re.code == jsonrpc::METHOD_NOT_FOUND
+    )
+}
+
+/// Inbound handler answering server-initiated `ping` requests with an empty
+/// result object `{}`, as the MCP spec requires (a Rust client must still
+/// answer inbound pings even though it declares no special capabilities).
+struct PingHandler;
+
+#[async_trait]
+impl InboundHandler for PingHandler {
+    async fn handle(&self, req: Request) -> Response {
+        Response::success(req.id, json!({}))
+    }
 }
 
 #[async_trait]
@@ -83,35 +259,69 @@ impl McpTransport for PosixMcpTransport {
         let id = McpConnectionId::new();
         match spec {
             McpTransportSpec::Stdio { command, args, env } => {
-                let mut cmd = tokio::process::Command::new(command);
-                cmd.args(args);
-                for (k, v) in env {
-                    cmd.env(k, v);
-                }
-                cmd.stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped());
-                let child = cmd
-                    .spawn()
+                // Build a fully-wired JSON-RPC `Connection` over the child's
+                // NDJSON stdio instead of spawning a raw `Command` (the old
+                // code dropped the link, leaving every request method a stub).
+                // `spawn_stdio_with_handles` sets `kill_on_drop(true)`, frames
+                // stdio, drains stderr into a 64 MB ring, and reaps the child.
+                let cfg = StdioConfig {
+                    cmd: command.clone(),
+                    args: args.clone(),
+                    env: env.clone(),
+                    // `McpTransportSpec::Stdio` carries no cwd field, so the
+                    // child inherits the parent's working directory.
+                    cwd: None,
+                };
+                let handles = spawn_stdio_with_handles(cfg)
+                    .await
                     .map_err(|e| McpError::Connection(e.to_string()))?;
-                self.insert(id, PosixMcpConnection::Stdio { child });
+                let connection = Arc::new(handles.connection);
+                // A spec-compliant server may send us inbound `ping` requests
+                // for keepalive (the SDK does this). With no handler the
+                // Dispatcher answers METHOD_NOT_FOUND (-32601), which the
+                // server reads as a protocol error and may disconnect. Answer
+                // inbound pings with an empty result `{}` per the MCP spec.
+                connection
+                    .register_handler("ping", Arc::new(PingHandler))
+                    .await;
+                self.insert(
+                    id,
+                    PosixMcpConnection::Stdio {
+                        connection,
+                        stderr: handles.stderr,
+                        reaper_kill: Mutex::new(Some(handles.reaper_kill)),
+                    },
+                );
             }
             McpTransportSpec::Sse { url, headers, .. } => {
-                // Delegate to the shared connector. The OAuth + headers_helper
-                // arms are out of scope for M2-02d's dispatch task; the
-                // transport currently passes only the static `headers` map
-                // and no auth token. OAuth integration lands in M2-06.
-                let _conn = connect_sse(url, None, headers)
-                    .await
-                    .map_err(McpError::from)?;
-                self.insert(id, PosixMcpConnection::Sse);
+                // Delegate to the shared connector and RETAIN the returned
+                // `Connection` (the old code dropped it, tearing down the
+                // HTTP+SSE tasks immediately). The OAuth + headers_helper arms
+                // are out of scope for M2-02d's dispatch task; the transport
+                // passes only the static `headers` map and no auth token. The
+                // `..` rest-pattern skips `headers_helper`/`oauth`. OAuth
+                // integration lands in M2-06.
+                let connection =
+                    Arc::new(connect_sse(url, None, headers).await.map_err(McpError::from)?);
+                // Answer server-initiated keepalive pings with `{}` for parity
+                // with the `Stdio` arm (see its `register_handler` comment).
+                connection
+                    .register_handler("ping", Arc::new(PingHandler))
+                    .await;
+                self.insert(id, PosixMcpConnection::Sse { connection });
             }
             McpTransportSpec::Http { url, headers, .. } => {
-                // See `Sse` arm — OAuth + per-request headers_helper deferred.
-                let _conn = connect_http(url, None, headers)
-                    .await
-                    .map_err(McpError::from)?;
-                self.insert(id, PosixMcpConnection::Http);
+                // See `Sse` arm — retain the `Connection`; OAuth + per-request
+                // headers_helper deferred (M2-06).
+                let connection = Arc::new(
+                    connect_http(url, None, headers)
+                        .await
+                        .map_err(McpError::from)?,
+                );
+                connection
+                    .register_handler("ping", Arc::new(PingHandler))
+                    .await;
+                self.insert(id, PosixMcpConnection::Http { connection });
             }
             other => return Err(McpError::UnsupportedTransport(map_kind(other))),
         }
@@ -120,66 +330,232 @@ impl McpTransport for PosixMcpTransport {
 
     async fn initialize(
         &self,
-        _conn: &McpRawConnection,
+        conn: &McpRawConnection,
     ) -> Result<ServerCapabilitiesDto, McpError> {
-        // M2.02 stub — full `JSON-RPC` initialize lands in M2 phase 3.
-        Ok(ServerCapabilitiesDto {
-            tools: true,
-            resources: false,
-            prompts: false,
-            logging: false,
-            experimental: HashMap::new(),
-        })
+        let connection = self.connection_for(conn.connection_id)?;
+
+        // Send the MCP `initialize` request. We declare empty `capabilities`
+        // (no roots/elicitation wiring yet) and identify ourselves as lingxi.
+        let result: Value = connection
+            .call(
+                "initialize",
+                json!({
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "lingxi",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
+                }),
+            )
+            .await
+            // A failed initialize is a handshake failure, not a generic error.
+            .map_err(|e| McpError::Handshake(e.to_string()))?;
+
+        // The server's declared capabilities live under `result.capabilities`
+        // as a presence map (e.g. `{ "tools": {} }`). Map by presence.
+        let caps = result
+            .get("capabilities")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                McpError::Handshake("initialize result missing `capabilities` object".into())
+            })?;
+
+        let dto = ServerCapabilitiesDto {
+            tools: caps.contains_key("tools"),
+            resources: caps.contains_key("resources"),
+            prompts: caps.contains_key("prompts"),
+            logging: caps.contains_key("logging"),
+            experimental: caps
+                .get("experimental")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default(),
+        };
+
+        // Per the MCP spec, the client sends `notifications/initialized` once
+        // the handshake result is in hand (fire-and-forget, synchronous).
+        connection
+            .notify("notifications/initialized", json!({}))
+            .map_err(|e| McpError::Handshake(e.to_string()))?;
+
+        Ok(dto)
     }
 
-    async fn list_tools(&self, _conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
-        Err(McpError::Internal(
-            "posix mcp list_tools delegated to lingxi-mcp::McpClient (M2-02b)".into(),
-        ))
+    async fn list_tools(&self, conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+        let connection = self.connection_for(conn.connection_id)?;
+        let raw: Value = connection
+            .call("tools/list", json!({}))
+            .await
+            .map_err(|e| map_call_err(&e))?;
+        let parsed: ToolsListResult =
+            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+
+        // The trait's `connect`/`list_tools` carry no logical server name —
+        // only an `McpConnectionId`. We leave `server_name` empty (and the
+        // `full_name` FQN unprefixed by a server) and let the `lingxi-mcp`
+        // layer rewrite the FQN once it knows the registry key.
+        let server_name = String::new();
+        Ok(parsed
+            .tools
+            .into_iter()
+            .map(|t| McpToolDto {
+                full_name: format!("mcp__{server_name}__{}", t.name),
+                server_name: server_name.clone(),
+                tool_name: t.name,
+                description: t.description,
+                input_schema: t.input_schema,
+            })
+            .collect())
     }
 
     async fn list_resources(
         &self,
-        _conn: &McpRawConnection,
+        conn: &McpRawConnection,
     ) -> Result<Vec<McpResourceDto>, McpError> {
-        Ok(Vec::new())
+        let connection = self.connection_for(conn.connection_id)?;
+        let raw: Value = connection
+            .call("resources/list", json!({}))
+            .await
+            .map_err(|e| map_call_err(&e))?;
+        let parsed: ResourcesListResult =
+            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+        Ok(parsed
+            .resources
+            .into_iter()
+            .map(|r| McpResourceDto {
+                uri: r.uri,
+                name: r.name,
+                mime_type: r.mime_type,
+            })
+            .collect())
     }
 
-    async fn list_prompts(&self, _conn: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
-        Ok(Vec::new())
+    async fn list_prompts(&self, conn: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
+        let connection = self.connection_for(conn.connection_id)?;
+        let raw: Value = connection
+            .call("prompts/list", json!({}))
+            .await
+            .map_err(|e| map_call_err(&e))?;
+        let parsed: PromptsListResult =
+            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+        Ok(parsed
+            .prompts
+            .into_iter()
+            .map(|p| McpPromptDto {
+                name: p.name,
+                description: p.description,
+            })
+            .collect())
     }
 
     async fn call_tool(
         &self,
-        _conn: &McpRawConnection,
-        _tool: &str,
-        _input: Value,
+        conn: &McpRawConnection,
+        tool: &str,
+        input: Value,
     ) -> Result<McpToolResultDto, McpError> {
-        Err(McpError::Internal(
-            "posix mcp call_tool delegated to lingxi-mcp::McpClient (M2-02b)".into(),
-        ))
+        let connection = self.connection_for(conn.connection_id)?;
+        let timeout = Duration::from_secs(TOOL_CALL_TIMEOUT_SECS);
+        let raw: Value = connection
+            .call_with_timeout(
+                "tools/call",
+                json!({ "name": tool, "arguments": input }),
+                timeout,
+            )
+            .await
+            .map_err(|e| match &e {
+                // Honor the per-call budget with the load-bearing Display
+                // string. `tool` is the unprefixed name; no logical server
+                // name is available at this layer, so it is left empty.
+                ConnectionError::Router(RouterError::Timeout(_)) => McpError::Timeout {
+                    server: String::new(),
+                    tool: tool.to_string(),
+                    secs: TOOL_CALL_TIMEOUT_SECS,
+                },
+                // The server reports an unknown tool via -32601.
+                _ if is_method_not_found(&e) => McpError::ToolNotFound(tool.to_string()),
+                _ => map_call_err(&e),
+            })?;
+        let parsed: ToolCallResult =
+            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+        Ok(McpToolResultDto {
+            content: parsed.content,
+            is_error: parsed.is_error,
+        })
     }
 
     async fn read_resource(
         &self,
-        _conn: &McpRawConnection,
-        _uri: &str,
+        conn: &McpRawConnection,
+        uri: &str,
     ) -> Result<McpResourceContentDto, McpError> {
-        Err(McpError::Internal(
-            "posix mcp read_resource delegated to lingxi-mcp::McpClient (M2-02b)".into(),
-        ))
+        let connection = self.connection_for(conn.connection_id)?;
+        let raw: Value = connection
+            .call("resources/read", json!({ "uri": uri }))
+            .await
+            .map_err(|e| map_call_err(&e))?;
+        let parsed: ResourceReadResult =
+            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+        // Take the first contents block. `McpResourceContentDto.content` is a
+        // single `String` whose documented contract is "text-encoded; binaries
+        // are base64": map a UTF-8 `text` block through verbatim, and for a
+        // binary `blob` block carry the base64 payload through UNDECODED (per
+        // that contract) so the `lingxi-mcp` layer can base64-decode it when it
+        // knows the resource is binary. Echo the request URI when the response
+        // omits one.
+        let first = parsed
+            .contents
+            .into_iter()
+            .next()
+            .ok_or_else(|| McpError::Internal("resources/read returned no contents".into()))?;
+        let content = first.text.or(first.blob).unwrap_or_default();
+        Ok(McpResourceContentDto {
+            uri: first.uri.unwrap_or_else(|| uri.to_string()),
+            content,
+        })
     }
 
-    async fn ping(&self, _conn_id: McpConnectionId) -> Result<(), McpError> {
+    async fn ping(&self, conn_id: McpConnectionId) -> Result<(), McpError> {
+        let connection = self.connection_for(conn_id)?;
+        // Discard the result body (mock answers `{ "pong": true }`; the spec
+        // answers `{}`). A failed ping is a connection-level failure.
+        let _: Value = connection
+            .call("ping", json!({}))
+            .await
+            .map_err(|e| McpError::Connection(e.to_string()))?;
         Ok(())
     }
 
     async fn notifications(
         &self,
-        _conn: &McpRawConnection,
+        conn: &McpRawConnection,
     ) -> Result<McpNotificationStream, McpError> {
-        use futures::stream::empty;
-        Ok(Box::pin(empty()))
+        use futures::stream::unfold;
+        let connection = self.connection_for(conn.connection_id)?;
+        let rx = connection.notifications();
+        // Adapt the `broadcast::Receiver<Notification>` into the trait's
+        // `Stream<Item = McpNotificationDto>`. Lagged/closed receivers end the
+        // stream; we drop lagged items rather than surfacing an error.
+        let stream = unfold(rx, |mut rx| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(n) => {
+                        return Some((
+                            McpNotificationDto {
+                                method: n.method,
+                                params: n.params.unwrap_or(Value::Null),
+                            },
+                            rx,
+                        ));
+                    }
+                    // Lagged: skip dropped notifications, keep listening.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    // Closed: the sender (broker) is gone — end the stream.
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        });
+        Ok(Box::pin(stream))
     }
 
     async fn handle_elicitation(
@@ -198,11 +574,45 @@ impl McpTransport for PosixMcpTransport {
             .lock()
             .ok()
             .and_then(|mut g| g.remove(&conn_id));
-        if let Some(PosixMcpConnection::Stdio { mut child }) = entry {
-            let _ = child.kill().await;
+        match entry {
+            Some(PosixMcpConnection::Stdio {
+                connection,
+                reaper_kill,
+                ..
+            }) => {
+                // Actively kill the child rather than rely on stdin-EOF:
+                // signal the reaper task to `child.start_kill()` so a server
+                // that ignores stdin EOF is still force-terminated.
+                // `kill_on_drop(true)` does NOT save us here because the
+                // detached reaper owns the `Child`.
+                if let Ok(mut guard) = reaper_kill.lock() {
+                    if let Some(tx) = guard.take() {
+                        // The receiver is only dropped if the reaper already
+                        // observed child exit; a send error just means the
+                        // child is already gone, which is the desired end
+                        // state.
+                        let _ = tx.send(());
+                    }
+                }
+                // Abort the broker reader/writer tasks (outbound calls now
+                // fail with WriterClosed). Dropping the sink also closes the
+                // child's stdin, but the explicit kill above is what
+                // guarantees teardown.
+                connection.close();
+            }
+            // For Sse / Http there is no owned child. Closing the connection
+            // aborts the broker (and the spawned reqwest GET/POST tasks)
+            // deterministically, even if another `Arc` clone is briefly
+            // outstanding (e.g. an in-flight `connection_for` handle) — the
+            // bare entry drop would otherwise wait for the last `Arc` to go.
+            Some(
+                PosixMcpConnection::Sse { connection }
+                | PosixMcpConnection::Http { connection },
+            ) => {
+                connection.close();
+            }
+            None => {}
         }
-        // For Sse / Http there is no owned child; dropping the entry tears
-        // down the JSON-RPC connection (and its background tasks) naturally.
         Ok(())
     }
 
@@ -246,8 +656,12 @@ pub enum McpTransportError {
 /// - Drains stderr into a 64 MB `StderrRing` (drop-oldest on overflow). The
 ///   buffer is held behind the returned [`StdioHandles::stderr`] handle so
 ///   the caller can snapshot stderr if the child crashes during initialize.
-/// - Sets `kill_on_drop(true)` on the child so dropping the returned
-///   `Connection` (and its sibling handles) tears the child down.
+/// - Sets `kill_on_drop(true)` on the child as a backstop for full runtime
+///   shutdown, and spawns a reaper task that owns the `Child`. The reaper
+///   waits on either child exit OR a one-shot kill signal
+///   ([`StdioHandles::reaper_kill`]); on the kill signal it calls
+///   `child.start_kill()` and awaits exit, so a non-cooperative server that
+///   ignores stdin-EOF is still force-terminated on disconnect.
 /// - Propagates child exit by closing the connection's broker (via the
 ///   spawned waiter task on stdout EOF, which the broker observes
 ///   naturally).
@@ -266,13 +680,19 @@ pub async fn spawn_stdio(cfg: StdioConfig) -> Result<Connection, McpTransportErr
 
 /// Handles returned by [`spawn_stdio_with_handles`] — the same `Connection`
 /// that [`spawn_stdio`] returns, plus a shared handle on the stderr ring
-/// buffer so callers can snapshot any buffered stderr if the child misbehaves.
+/// buffer so callers can snapshot any buffered stderr if the child misbehaves,
+/// plus a one-shot kill signal that force-terminates the child.
 #[non_exhaustive]
 pub struct StdioHandles {
     /// The fully-wired JSON-RPC `Connection` over the child's stdio.
     pub connection: Connection,
     /// Shared `StderrRing` populated by a background drain task.
     pub stderr: Arc<AsyncMutex<StderrRing>>,
+    /// Send `()` to make the reaper task call `child.start_kill()`, then await
+    /// its exit. This is the only reliable way to force-kill a child that
+    /// ignores stdin-EOF: the reaper owns the `Child`, so `kill_on_drop(true)`
+    /// alone never fires until full runtime shutdown.
+    pub reaper_kill: tokio::sync::oneshot::Sender<()>,
 }
 
 // Re-export the shared WebSocket connector so callers can use a single path
@@ -349,16 +769,48 @@ pub async fn spawn_stdio_with_handles(cfg: StdioConfig) -> Result<StdioHandles, 
     // `kill_on_drop(true)` makes the child die if this task is dropped
     // (e.g. on runtime shutdown). When the child exits normally, its
     // stdout closes and the broker shuts down without further action.
+    //
+    // A `disconnect`/teardown path sends on `reaper_kill`, which makes the
+    // reaper call `child.start_kill()` and await exit — this force-kills a
+    // server that would otherwise ignore stdin-EOF and run forever.
+    let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-        match child.wait().await {
-            Ok(status) => tracing::debug!(?status, "mcp stdio child exited"),
-            Err(e) => tracing::warn!(error = %e, "mcp stdio child wait failed"),
+        tokio::select! {
+            wait = child.wait() => match wait {
+                Ok(status) => tracing::debug!(?status, "mcp stdio child exited"),
+                Err(e) => tracing::warn!(error = %e, "mcp stdio child wait failed"),
+            },
+            recv = kill_rx => match recv {
+                // Explicit kill requested via `disconnect`: force-terminate the
+                // child and reap it so it does not linger as a zombie.
+                Ok(()) => {
+                    if let Err(e) = child.start_kill() {
+                        tracing::warn!(error = %e, "mcp stdio child start_kill failed");
+                    }
+                    match child.wait().await {
+                        Ok(status) => tracing::debug!(?status, "mcp stdio child killed"),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "mcp stdio child wait-after-kill failed");
+                        }
+                    }
+                }
+                // Sender dropped WITHOUT a kill request (e.g. a `spawn_stdio`
+                // caller that does not retain the handle). Do NOT kill — fall
+                // back to reaping the child on its own exit, preserving the
+                // pre-kill-channel behavior. `kill_on_drop(true)` still backs
+                // us up on full runtime shutdown.
+                Err(_) => match child.wait().await {
+                    Ok(status) => tracing::debug!(?status, "mcp stdio child exited"),
+                    Err(e) => tracing::warn!(error = %e, "mcp stdio child wait failed"),
+                },
+            }
         }
     });
 
     Ok(StdioHandles {
         connection,
         stderr: stderr_ring,
+        reaper_kill: kill_tx,
     })
 }
 
@@ -369,4 +821,63 @@ mod re_export_tests {
     /// import from `lingxi_platform_common` directly).
     #[allow(unused_imports)]
     use crate::mcp::connect_ws;
+}
+
+#[cfg(test)]
+mod error_mapping_tests {
+    use super::{is_method_not_found, map_call_err, TOOL_CALL_TIMEOUT_SECS};
+    use jsonrpc::{ConnectionError, JsonRpcError, RouterError};
+    use std::time::Duration;
+    use traits::McpError;
+
+    /// A remote `-32601` is recognized as a method-not-found error (the MCP
+    /// convention for an unknown tool); other remote codes are not.
+    #[test]
+    fn is_method_not_found_matches_only_minus_32601() {
+        let mnf = ConnectionError::Router(RouterError::Remote(JsonRpcError {
+            code: jsonrpc::METHOD_NOT_FOUND,
+            message: "unknown tool: nope".into(),
+            data: None,
+        }));
+        assert!(is_method_not_found(&mnf));
+
+        let other = ConnectionError::Router(RouterError::Remote(JsonRpcError {
+            code: -32000,
+            message: "server error".into(),
+            data: None,
+        }));
+        assert!(!is_method_not_found(&other));
+
+        // A non-remote error (e.g. timeout) is never method-not-found.
+        assert!(!is_method_not_found(&ConnectionError::Router(
+            RouterError::Timeout(Duration::from_secs(1))
+        )));
+    }
+
+    /// `map_call_err` funnels into the generic `McpError::Internal` surface,
+    /// preserving the underlying Display string.
+    #[test]
+    fn map_call_err_is_internal() {
+        let e = ConnectionError::Router(RouterError::WriterClosed);
+        match map_call_err(&e) {
+            McpError::Internal(s) => assert_eq!(s, e.to_string()),
+            other => panic!("expected McpError::Internal, got {other:?}"),
+        }
+    }
+
+    /// The load-bearing `McpError::Timeout` Display string (matched by REPL /
+    /// integration surfaces) must carry the server, tool, and seconds in the
+    /// documented `traits` format.
+    #[test]
+    fn timeout_display_string_is_load_bearing() {
+        let err = McpError::Timeout {
+            server: String::new(),
+            tool: "echo".into(),
+            secs: TOOL_CALL_TIMEOUT_SECS,
+        };
+        assert_eq!(
+            err.to_string(),
+            format!("MCP server \"\" tool \"echo\" timed out after {TOOL_CALL_TIMEOUT_SECS}s")
+        );
+    }
 }

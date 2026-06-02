@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
+mcp = { path = "../mcp" }
 engine = { path = "../engine" }
 agent = { path = "../agent" }
 hooks = { path = "../hooks" }
@@ -20,6 +21,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 test-harness = { path = "../test-harness" }
+api-client = { path = "../api-client" }
 tempfile = "3.13"
 futures = "0.3"
 tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }

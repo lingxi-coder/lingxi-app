@@ -29,7 +29,7 @@ use anthropic_oauth::handle::OAuthHandle;
 use api_client::AnthropicProvider;
 use command_api::RegistrySlashDispatcher;
 use engine_desktop::{desktop_command_registry, desktop_tool_registry};
-use orchestrator::test_support::{noop_hook_executor, NoOpPermissionGate, StaticMemoryProvider};
+use orchestrator::test_support::{NoOpPermissionGate, StaticMemoryProvider};
 use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
 };
@@ -196,11 +196,46 @@ pub async fn build_runtime(
     let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
     let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
     let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
-        oauth_cfg,
+        oauth_cfg.clone(),
         http.clone(),
-        credentials,
+        credentials.clone(),
     ));
     let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(oauth_client));
+
+    // (3.1) M5-13: attach the OAuth refresh driver to the api-client when the
+    //        keychain already holds a logged-in OAuth token. `init_refresh_driver`
+    //        registers the process-global `OAuthRefreshHook` (so the api-client's
+    //        401-retry path calls `refresh` instead of `NoOpOAuthHook`) and spawns
+    //        the proactive-refresh task. It MUST be called at most once per
+    //        process; gating it on "tokens present" keeps the API-key path on the
+    //        correct `NoOpOAuthHook`. When no OAuth token is stored (the common
+    //        API-key case) we skip it entirely.
+    match credentials.get_oauth_tokens().await {
+        Ok(Some(tokens)) => {
+            if let Err(e) = anthropic_oauth::client::init_refresh_driver(
+                oauth_cfg,
+                tokens.access_token,
+                tokens.refresh_token,
+                tokens.expires_at,
+                http.clone(),
+                clock.clone(),
+                Some(Arc::new(telemetry::AnalyticsBus::new())),
+                Some(credentials.clone()),
+                Arc::new(PosixRuntime::new()),
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "failed to attach OAuth refresh driver; 401 auto-refresh disabled");
+            }
+        }
+        Ok(None) => {
+            // No stored OAuth session — API-key path. Leave `current_hook()` as
+            // the NoOpOAuthHook (correct: nothing to refresh).
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read OAuth tokens from keychain; skipping refresh-driver wiring");
+        }
+    }
 
     // (4) Orchestrator config from argv. `OrchestratorConfig` does not
     //     carry a streaming toggle directly — streaming vs. batched is
@@ -241,15 +276,23 @@ pub async fn build_runtime(
     //     M8-P6: the tool registry is no longer constructed empty here — it is
     //     assembled below (after the MCP registry exists) through the desktop
     //     composition root `engine_desktop::desktop_tool_registry`.
-    let hooks = noop_hook_executor();
+    //
+    //     M5-13: the hook executor is no longer the `noop_hook_executor()`
+    //     stub. It is constructed below — after `hook_registry` exists (the
+    //     real registry must be fed into the executor, not just the
+    //     orchestrator) and after the posix process/sandbox handles are built —
+    //     so the HTTP / Agent / Command hook arms run for real.
     let perms = Arc::new(NoOpPermissionGate);
     let memory: Arc<dyn orchestrator::prompt::MemoryHierarchyProvider> =
         Arc::new(StaticMemoryProvider::empty());
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-    // (5.1) M6-07: Load `.mcp.json` (project preferred over user-global) and
-    //       pre-populate the McpRegistry with `Disconnected` state entries
-    //       so `/mcp` can list them. Real connect / health-check is M7 work.
+    // (5.1) Load `.mcp.json` (project preferred over user-global) and
+    //       auto-connect every enabled server (Plan 13). `connect_all`
+    //       seeds disabled servers as `Disconnected` so `/mcp` still lists
+    //       them, connects the rest, and records per-server failures as
+    //       loop-eligible `Disconnected { last_error }`. A background
+    //       reconnect/backoff task then retries dropped remote servers.
     let global_mcp_path = dirs::config_dir().map_or_else(
         || std::path::PathBuf::from("/dev/null"),
         |d| d.join("lingxi").join("mcp.json"),
@@ -258,19 +301,8 @@ pub async fn build_runtime(
     let mcp_configs = mcp::load_mcp_json_with_precedence(&project_mcp_path, &global_mcp_path);
     let mcp_transport: Arc<dyn McpTransport> = Arc::new(PosixMcp::new());
     let mcp_registry = Arc::new(mcp::McpRegistry::new(mcp_transport));
-    {
-        let mut conns = mcp_registry.connections.write().await;
-        for cfg_entry in mcp_configs {
-            let name = cfg_entry.name.clone();
-            conns.insert(
-                name,
-                mcp::McpConnectionState::Disconnected {
-                    config: cfg_entry,
-                    last_error: None,
-                },
-            );
-        }
-    }
+    mcp_registry.connect_all(mcp_configs).await;
+    tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
 
     // (5.2) M6-07: HookRegistry — read settings.json hooks block from
     //       project (cwd/.claude/settings.json) and user (~/.claude/settings.json
@@ -307,6 +339,31 @@ pub async fn build_runtime(
     }
     let hook_registry = Arc::new(tokio::sync::RwLock::new(hook_registry));
 
+    // (5.25) M5-13: build the real hook executor now that `hook_registry`
+    //        exists. This replaces the `noop_hook_executor()` stub (which fed
+    //        `UnusedHttp` + `UnusedRuntime` and a `(None, None)` Command guard):
+    //        - `http.clone()` is the real `PosixHttp`, so the HTTP arm performs
+    //          real (SSRF-guarded) requests.
+    //        - `PosixRuntime` is the real `RuntimeSpawner`.
+    //        - `with_process_runner(PosixProcess, PosixSandbox)` makes the
+    //          Command arm spawn real child processes (the runner only accepts a
+    //          `SandboxedCommand`, which the sandbox mints).
+    //        The Agent arm stays "not wired" until a `SubagentSpawner` pool
+    //        exists (no `.with_agent_spawner(..)` yet — M9+). The orchestrator's
+    //        `hooks` param is the concrete `Arc<hooks::HookExecutorImpl>`, so no
+    //        trait-object coercion is needed.
+    let hooks = Arc::new(
+        hooks::HookExecutorImpl::new(
+            hook_registry.clone(),
+            http.clone(),
+            Arc::new(PosixRuntime::new()),
+        )
+        .with_process_runner(
+            Arc::new(PosixProcess::new()) as Arc<dyn traits::ProcessRunner>,
+            Arc::new(PosixSandbox::new()) as Arc<dyn traits::Sandbox>,
+        ),
+    );
+
     // (5.3) M6-07: Agent catalog — load from project + user agents/.
     //       Project wins on agent_type collision because it is passed
     //       SECOND to load_agents_from_dirs (later paths win).
@@ -339,14 +396,25 @@ pub async fn build_runtime(
     //        dialog read live state (the M9 §4 gate). Coerced to the narrow
     //        `traits` handle at the tool-context + TUI seams.
     let task_output_dir = cwd.join(".claude").join("tasks-output");
-    let task_registry = Arc::new(tasks::registry::TaskRegistry::new(
+    let mut task_registry_inner = tasks::registry::TaskRegistry::new(
         Arc::new(PosixRuntime::new()),
         Arc::new(PosixFileSystem::new(cwd.clone())),
         Arc::new(tasks::output_manager::TaskOutputManager::new(
             task_output_dir,
             Arc::new(PosixFileSystem::new(cwd.clone())),
         )),
-    ));
+    );
+    // Register the M2 self-contained per-type handlers (LocalBash + MonitorMcp)
+    // before the registry is shared. Both depend only on platform traits we
+    // already build here; agent/teammate/workflow/remote/dream handlers register
+    // once their production pools are wired (M9+).
+    tasks::registry::register_self_contained_handlers(
+        &mut task_registry_inner,
+        Arc::new(PosixProcess::new()),
+        Arc::new(PosixSandbox::new()),
+        mcp_registry.clone(),
+    );
+    let task_registry = Arc::new(task_registry_inner);
 
     // (5.5) M8-P6: assemble the desktop tool registry through the composition
     //       root. The orchestrator previously received an empty

@@ -9,6 +9,7 @@ license.workspace = true
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }
+api-client = { path = "../api-client" }
 tool-api = { path = "../tool-api" }
 mcp = { path = "../mcp" }
 memory = { path = "../memory" }

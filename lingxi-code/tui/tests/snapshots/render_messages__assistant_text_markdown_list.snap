@@ -2,6 +2,6 @@
 source: tui/tests/render_messages.rs
 expression: element.to_string()
 ---
-● line one
-  line two
-  line three
+● - one
+  - two
+  - three

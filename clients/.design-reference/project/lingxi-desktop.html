@@ -1,0 +1,3370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>灵犀 Code · Desktop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: rgba(120,100,180,0.18); border-radius: 99px; }
+*::-webkit-scrollbar-thumb:hover { background: rgba(120,100,180,0.32); }
+*::-webkit-scrollbar-track { background: transparent; }
+html, body, #root { height: 100%; }
+body {
+  font-family: 'Inter', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv11', 'ss01';
+  overflow: hidden;
+  background: #1a1a1d;
+}
+@keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes slide-in-r { from { opacity: 0; transform: translateX(8px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes shimmer { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.85; } }
+@keyframes pulse-ring { 0% { box-shadow: 0 0 0 0 var(--ring); } 100% { box-shadow: 0 0 0 8px transparent; } }
+@keyframes cursor-blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
+@keyframes scan { 0% { transform: translateY(-100%); } 100% { transform: translateY(100%); } }
+.mono { font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo, createContext, useContext } = React;
+
+// ─── DESIGN TOKENS — Lingxi Code dark/light ─────────────────
+const tokens = (dark) => dark ? {
+  appBg: '#0c0b10',
+  windowBg: 'oklch(14% 0.012 270)',
+  sidebarBg: 'oklch(12% 0.012 270)',
+  stageBg: 'oklch(15% 0.012 270)',
+  surface: 'oklch(18% 0.015 270)',
+  surfaceHover: 'oklch(22% 0.020 270)',
+  surfaceActive: 'oklch(26% 0.028 270)',
+  border: 'oklch(26% 0.015 270 / 0.65)',
+  borderStrong: 'oklch(34% 0.020 270 / 0.8)',
+  text: 'oklch(96% 0.005 270)',
+  text2: 'oklch(74% 0.015 270)',
+  text3: 'oklch(54% 0.020 270)',
+  text4: 'oklch(40% 0.020 270)',
+  accent: 'oklch(72% 0.18 268)',
+  accentBg: 'oklch(72% 0.18 268 / 0.14)',
+  accentBorder: 'oklch(72% 0.18 268 / 0.35)',
+  accent2: 'oklch(72% 0.18 320)',
+  accent3: 'oklch(74% 0.16 195)',
+  ok: 'oklch(72% 0.16 155)',
+  warn: 'oklch(76% 0.15 75)',
+  danger: 'oklch(68% 0.20 25)',
+  add: 'oklch(72% 0.16 155)',
+  del: 'oklch(68% 0.20 25)',
+  windowShadow: '0 30px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
+} : {
+  appBg: '#dcd7e4',
+  windowBg: '#fbf9f5',
+  sidebarBg: '#f4f1ec',
+  stageBg: '#fbf9f5',
+  surface: '#ffffff',
+  surfaceHover: 'oklch(96% 0.008 270)',
+  surfaceActive: 'oklch(92% 0.020 270)',
+  border: 'oklch(88% 0.008 270)',
+  borderStrong: 'oklch(82% 0.012 270)',
+  text: 'oklch(20% 0.018 270)',
+  text2: 'oklch(40% 0.020 270)',
+  text3: 'oklch(58% 0.020 270)',
+  text4: 'oklch(70% 0.015 270)',
+  accent: 'oklch(50% 0.22 268)',
+  accentBg: 'oklch(50% 0.22 268 / 0.10)',
+  accentBorder: 'oklch(50% 0.22 268 / 0.30)',
+  accent2: 'oklch(55% 0.22 320)',
+  accent3: 'oklch(52% 0.18 195)',
+  ok: 'oklch(50% 0.16 155)',
+  warn: 'oklch(58% 0.16 65)',
+  danger: 'oklch(56% 0.22 25)',
+  add: 'oklch(50% 0.16 155)',
+  del: 'oklch(56% 0.22 25)',
+  windowShadow: '0 30px 80px rgba(60,40,120,0.18), 0 0 0 1px rgba(0,0,0,0.05)',
+};
+
+const Theme = createContext(null);
+const useT = () => useContext(Theme);
+
+// ─── DATA ───────────────────────────────────────────────────
+// Projects = repos, each with a list of recent coding sessions
+const PROJECTS = [
+  {
+    id: 'mlplatform', name: 'MLPlatform', scope: 'axielix', branch: 'main',
+    sessions: [
+      { id: 'mlp-1', title: 'Mediapipe',                    activity: '',     kbd: '⌘1' },
+    ],
+  },
+  {
+    id: 'agai',       name: 'agai_inspection', scope: 'axielix', branch: 'main',
+    sessions: [
+      { id: 'ag-1', title: '调整未打卡首页布局',           kbd: '⌘2' },
+      { id: 'ag-2', title: '分析宇宙起源答答正确性',         kbd: '⌘3' },
+      { id: 'ag-3', title: 'Rust 代码以 iOS/Android 调用', kbd: '⌘4' },
+      { id: 'ag-4', title: '更新打卡与 feature 配置逻辑',    kbd: '⌘5' },
+      { id: 'ag-5', title: '修复 TCP H264/H265 延迟',          kbd: '⌘6' },
+      { id: 'ag-6', title: '环境变量读取 fallback',           hidden: true },
+      { id: 'ag-7', title: '进程权限重试',                hidden: true },
+    ],
+  },
+  {
+    id: 'visionx',    name: 'visionx-android', scope: 'axielix', branch: 'main',
+    sessions: [],
+  },
+  {
+    id: 'lingxi-next', name: 'LingXi-Next', scope: 'axielix', branch: 'main', dirty: true, diff: { add: 287, del: 0 },
+    sessions: [
+      { id: 'lxn-1', title: 'Review lingxi core rust engine', activity: '2h', active: true },
+    ],
+  },
+  {
+    id: 'lingxi',     name: 'lingxi', scope: 'axielix', branch: 'main',
+    sessions: [
+      { id: 'lx-1',  title: '添加 Android 特有技能',   activity: '23h' },
+      { id: 'lx-2',  title: '调研 harness agent 记忆压缩', activity: '3d' },
+      { id: 'lx-3',  title: '对齐 iOS 和 Android 项目',     activity: '1w' },
+    ],
+  },
+  {
+    id: 'telegram',   name: 'Telegram', scope: 'tg-mirror', branch: 'master',
+    sessions: [
+      { id: 'tg-1', title: '币安 c2c 购买 usdt 后 提币金额…', activity: '1w' },
+      { id: 'tg-2', title: 'iOS',     activity: '2w' },
+      { id: 'tg-3', title: 'Android', activity: '3w' },
+    ],
+  },
+];
+
+// flat lookup
+const ALL_REPOS = PROJECTS;
+const ALL_SESSIONS = PROJECTS.flatMap(p => p.sessions.map(s => ({ ...s, projectId: p.id })));
+
+// agent run = the "Ran an agent" receipt cards in the screenshot
+// types: dispatch (heading), narration (plain text), agent (card), thinking
+const RUN = [
+  { type: 'narration', text: 'Dispatching Task 1: Bootstrap workspace', tone: 'muted' },
+  { type: 'agent', state: 'done',    title: 'Ran an agent', expandable: true },
+  { type: 'narration', text: 'Task 1 implementer DONE. Dispatching spec compliance reviewer.' },
+  { type: 'agent', state: 'done',    title: 'Ran agent',    sub: 'Spec review Task 1' },
+  { type: 'narration', text: 'Spec compliance ✓. Dispatching code quality reviewer.' },
+  { type: 'agent', state: 'done',    title: 'Ran agent',    sub: 'Code quality review Task 1' },
+  { type: 'narration', text: 'Task 1 complete: ✓ Spec compliant + ✓ Code quality approved.', strong: true },
+
+  { type: 'narration', text: 'Dispatching Task 2: Create lingxi-protocol crate skeleton', tone: 'muted' },
+  { type: 'agent', state: 'done',    title: 'Ran an agent', expandable: true },
+  { type: 'narration', text: "Task 2 implementer DONE_WITH_CONCERNS — concern is about plan-sequencing (the validation command can't run until all 5 members have Cargo.tomls due to Cargo's workspace resolution). The files themselves match spec; concern is an observation about the plan, not a correctness issue. The implementer verified files are syntactically valid by isolating them in /tmp. Proceeding to spec review." },
+  { type: 'agent', state: 'done',    title: 'Ran agent',    sub: 'Spec review Task 2' },
+  { type: 'narration', text: 'Spec compliance ✓. Dispatching code quality reviewer for Task 2.' },
+  { type: 'agent', state: 'done',    title: 'Ran an agent', expandable: true },
+  { type: 'narration', text: 'Task 2 ✓ complete. Moving to Task 3.', strong: true },
+
+  { type: 'narration', text: 'Dispatching Task 3: IDs (newtype wrappers)', tone: 'muted' },
+  { type: 'agent', state: 'running', title: 'Running agent', sub: 'Implement Task 3: ID newtypes', link: true },
+
+  { type: 'meta', dur: '13m 54s', tokens: '281.8k tokens' },
+];
+
+const FILES_CHANGED = [
+  { path: 'Cargo.toml',                     add: 18, del: 0,  status: 'M' },
+  { path: 'crates/lingxi-core/Cargo.toml',  add: 24, del: 0,  status: 'A' },
+  { path: 'crates/lingxi-core/src/lib.rs',  add: 42, del: 0,  status: 'A' },
+  { path: 'crates/lingxi-protocol/Cargo.toml', add: 19, del: 0, status: 'A' },
+  { path: 'crates/lingxi-protocol/src/lib.rs', add: 8,  del: 0, status: 'A' },
+  { path: 'crates/lingxi-protocol/src/agent.rs', add: 64, del: 0, status: 'A' },
+  { path: 'crates/lingxi-protocol/src/codec.rs', add: 38, del: 0, status: 'A' },
+  { path: 'crates/lingxi-store/Cargo.toml', add: 21, del: 0,  status: 'A' },
+  { path: 'crates/lingxi-runtime/Cargo.toml', add: 22, del: 0, status: 'A' },
+  { path: 'crates/lingxi-cli/Cargo.toml',   add: 17, del: 0,  status: 'A' },
+  { path: 'README.md',                      add: 14, del: 0,  status: 'M' },
+];
+
+const SLASH_COMMANDS = [
+  { cmd: '/compact',   desc: '压缩上下文 · 把过往消息折叠为摘要',           sub: 'Used' },
+  { cmd: '/plan',      desc: '规划：把任务拆解成可调度子任务',                hint: 'Plan' },
+  { cmd: '/review',    desc: '让 reviewer agent 审一遍 diff',               hint: 'QA' },
+  { cmd: '/run',       desc: '在沙箱里跑一条 shell / cargo / npm 命令',     hint: 'Exec' },
+  { cmd: '/branch',    desc: '切换或新建分支',                              hint: 'Git' },
+  { cmd: '/explain',   desc: '解释某个文件或函数',                          hint: 'Read' },
+];
+
+const MODELS = [
+  { id: 'lx-47',     name: 'Lingxi 4.7',        tag: '',       desc: '默认 · 200K 上下文',     color: 'oklch(72% 0.18 268)' },
+  { id: 'lx-47-1m',  name: 'Lingxi 4.7',  variant: '1M', tag: 'Max', desc: '深度推理 · 100万 token 上下文', color: 'oklch(72% 0.18 268)' },
+  { id: 'lx-46s',    name: 'Sonata 4.6',        tag: '',       desc: '快速响应 · 日常交互',         color: 'oklch(74% 0.16 195)' },
+  { id: 'lx-45h',    name: 'Mini 4.5',          tag: '',       desc: '极速 · 轻量调用',                color: 'oklch(74% 0.16 155)' },
+  { id: 'lx-46l',    name: 'Lingxi 4.6', variant: 'Legacy', tag: '', desc: '上一代 · 兼容性保留',  color: 'oklch(60% 0.04 270)' },
+];
+
+const EFFORTS = [
+  { id: 'low',    label: 'Low',        desc: '一次调用·不多推理' },
+  { id: 'medium', label: 'Medium',     desc: '默认 · 平衡费用与准确性' },
+  { id: 'high',   label: 'High',       desc: '反复检查 · 适合理解复杂代码' },
+  { id: 'xhigh',  label: 'Extra high', desc: '多路探索 · 取最佳' },
+  { id: 'max',    label: 'Max',        desc: '拼一次 · 限时任务使用' },
+];
+
+const PLAN_USAGE = [
+  { label: '5-hour limit',        used: 22, reset: 'resets 2h',  color: 'accent' },
+  { label: 'Weekly · all models',  used: 31, reset: 'resets 5d',  color: 'accent' },
+  { label: 'Weekly · Lingxi 4.7',  used: 4,  reset: 'resets 5d',  color: 'accent2' },
+  { label: 'Sonata only',          used: 6,  reset: 'resets 5d',  color: 'accent3' },
+];
+
+// ─── ICONS ──────────────────────────────────────────────────
+const Icon = ({ name, size = 16, color = 'currentColor', stroke = 1.6 }) => {
+  const p = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: color, strokeWidth: stroke, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  switch (name) {
+    case 'sidebar': return <svg {...p}><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>;
+    case 'sidebarR': return <svg {...p}><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></svg>;
+    case 'search': return <svg {...p}><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>;
+    case 'plus': return <svg {...p}><path d="M12 5v14M5 12h14"/></svg>;
+    case 'minus': return <svg {...p}><path d="M5 12h14"/></svg>;
+    case 'check': return <svg {...p}><path d="M20 6 9 17l-5-5"/></svg>;
+    case 'chevron': return <svg {...p}><path d="m6 9 6 6 6-6"/></svg>;
+    case 'chevronR': return <svg {...p}><path d="m9 18 6-6-6-6"/></svg>;
+    case 'chevronL': return <svg {...p}><path d="m15 18-6-6 6-6"/></svg>;
+    case 'code':   return <svg {...p}><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></svg>;
+    case 'chat':   return <svg {...p}><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>;
+    case 'cowork': return <svg {...p}><path d="M9 6l-6 6 6 6M15 6l6 6-6 6"/><path d="M14 4l-4 16"/></svg>;
+    case 'spark':  return <svg {...p}><path d="M5 3v4M3 5h4M19 17v4M17 19h4M13 3l3 8 8 3-8 3-3 8-3-8-8-3 8-3z"/></svg>;
+    case 'bolt':   return <svg {...p}><path d="m13 2-10 12h7l-1 8 10-12h-7z"/></svg>;
+    case 'box':    return <svg {...p}><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></svg>;
+    case 'more':   return <svg {...p}><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5"  cy="12" r="1"/></svg>;
+    case 'mic':    return <svg {...p}><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>;
+    case 'send':   return <svg {...p}><path d="M22 2 11 13"/><path d="M22 2 15 22 11 13 2 9z"/></svg>;
+    case 'stop':   return <svg {...p}><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>;
+    case 'sun':    return <svg {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>;
+    case 'moon':   return <svg {...p}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
+    case 'branch': return <svg {...p}><circle cx="6" cy="3" r="2"/><circle cx="6" cy="21" r="2"/><circle cx="18" cy="6" r="2"/><path d="M6 5v14M6 13a8 8 0 0 0 8 8M14 7h2a2 2 0 0 1 2 2v3"/></svg>;
+    case 'git':    return <svg {...p}><circle cx="12" cy="12" r="3"/><path d="M21 12h-6M9 12H3M12 9V3M12 21v-6"/></svg>;
+    case 'file':   return <svg {...p}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>;
+    case 'folder': return <svg {...p}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>;
+    case 'terminal': return <svg {...p}><path d="m4 7 6 5-6 5M12 19h8"/></svg>;
+    case 'cog':    return <svg {...p}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1A1.7 1.7 0 0 0 19.4 9 1.7 1.7 0 0 0 21 10H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>;
+    case 'arrowU': return <svg {...p} fill={color} stroke="none"><path d="M12 4l-7 8h4v8h6v-8h4z"/></svg>;
+    case 'play':   return <svg {...p} fill={color} stroke="none"><path d="M6 4l14 8-14 8z"/></svg>;
+    case 'x':      return <svg {...p}><path d="M18 6 6 18M6 6l12 12"/></svg>;
+    case 'tasks':  return <svg {...p}><path d="M12 2 4 9l8 7 8-7z"/><path d="m4 15 8 7 8-7"/></svg>;
+    case 'dot':    return <svg {...p}><circle cx="12" cy="12" r="3" fill={color} stroke="none"/></svg>;
+    case 'circle': return <svg {...p}><circle cx="12" cy="12" r="6"/></svg>;
+    case 'pencil': return <svg {...p}><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>;
+    case 'sliders': return <svg {...p}><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>;
+    default: return null;
+  }
+};
+
+// ─── REUSABLE ────────────────────────────────────────────────
+const Kbd = ({ children }) => {
+  const t = useT();
+  return <span style={{
+    fontSize: 10.5, color: t.text3, padding: '2px 6px', borderRadius: 5,
+    background: t.surface, border: `0.5px solid ${t.border}`,
+    fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif', fontWeight: 500,
+    lineHeight: 1,
+  }}>{children}</span>;
+};
+
+const ModeTabs = ({ mode, setMode }) => {
+  const t = useT();
+  const tabs = [
+    { id: 'chat',   icon: 'chat',   label: 'Chat' },
+    { id: 'cowork', icon: 'cowork', label: 'Cowork' },
+    { id: 'code',   icon: 'code',   label: 'Code' },
+  ];
+  return (
+    <div style={{
+      display: 'flex', gap: 2, padding: 3, borderRadius: 9,
+      background: t.surface, border: `0.5px solid ${t.border}`,
+    }}>
+      {tabs.map(x => {
+        const active = mode === x.id;
+        return (
+          <button key={x.id} onClick={() => setMode(x.id)} style={{
+            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+            padding: '5px 8px', borderRadius: 7, border: 'none', cursor: 'pointer',
+            background: active ? (x.id === 'code' ? t.windowBg : t.surfaceActive) : 'transparent',
+            color: active ? t.text : t.text3,
+            fontSize: 12, fontWeight: active ? 600 : 500, fontFamily: 'inherit',
+            boxShadow: active ? '0 1px 2px rgba(0,0,0,0.04), 0 0 0 0.5px ' + t.border : 'none',
+            transition: 'all 0.12s',
+          }}>
+            <Icon name={x.icon} size={12.5} stroke={1.9} />
+            {x.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+};
+
+// ─── SIDEBAR ─────────────────────────────────────────────────
+function Sidebar({ mode, setMode, activeRepo, setActiveRepo, activeSession, setActiveSession, openSettings, collapsed, setCollapsed }) {
+  const t = useT();
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [hoverProject, setHoverProject] = useState(null);
+  const [menuProject, setMenuProject] = useState(null);
+  const [menuPos, setMenuPos] = useState(null);
+
+  // Position the project context menu — flip above when there isn't room below.
+  React.useLayoutEffect(() => {
+    if (!menuProject) { setMenuPos(null); return; }
+    const trigger = document.querySelector(`[data-project-row="${menuProject}"]`);
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const MENU_H = 268;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const flipUp = spaceBelow < MENU_H + 12;
+    setMenuPos({
+      left: rect.left + 16,
+      top: flipUp ? Math.max(8, rect.top - MENU_H - 4) : rect.bottom + 2,
+    });
+  }, [menuProject]);
+  // expand state per project — default: open the project that owns the active session, plus a couple by default
+  const [expanded, setExpanded] = useState({ mlplatform: true, agai: true, visionx: true, 'lingxi-next': true, lingxi: true, telegram: true });
+  const [showMore, setShowMore] = useState({}); // per-project show-hidden flag
+  const toggle = (id) => setExpanded(o => ({ ...o, [id]: !o[id] }));
+
+  if (collapsed) {
+    return (
+      <div style={{
+        width: 52, flexShrink: 0, background: t.sidebarBg,
+        borderRight: `0.5px solid ${t.border}`, paddingTop: 40,
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
+      }}>
+        <button onClick={() => setCollapsed(false)} title="展开" style={iconBtn(t)}>
+          <Icon name="sidebar" size={15} color={t.text2} stroke={1.7} />
+        </button>
+        <button title="搜索" style={iconBtn(t)}><Icon name="search" size={15} color={t.text2} stroke={1.7} /></button>
+        <div style={{ height: 1, width: 28, background: t.border, margin: '6px 0' }} />
+        <button title="新建会话" style={iconBtn(t)}><Icon name="plus" size={15} color={t.text2} stroke={1.7} /></button>
+        <button title="Routines" style={iconBtn(t)}><Icon name="bolt" size={15} color={t.text2} stroke={1.7} /></button>
+        <button title="Customize" style={iconBtn(t)}><Icon name="box" size={15} color={t.text2} stroke={1.7} /></button>
+        <div style={{ flex: 1 }} />
+        <button onClick={openSettings} title="设置" style={iconBtn(t)}><Icon name="cog" size={15} color={t.text2} stroke={1.7} /></button>
+        <div style={{
+          width: 28, height: 28, borderRadius: 7, marginBottom: 10,
+          background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
+          color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 11, fontWeight: 600,
+        }}>LL</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      width: 260, flexShrink: 0, background: t.sidebarBg,
+      borderRight: `0.5px solid ${t.border}`,
+      display: 'flex', flexDirection: 'column', paddingTop: 38,
+    }}>
+      {/* Top icon row */}
+      <div style={{ padding: '4px 10px 6px', display: 'flex', alignItems: 'center', gap: 2 }}>
+        <button onClick={() => setCollapsed(true)} title="收起边栏" style={iconBtn(t)}
+          onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <Icon name="sidebar" size={15} color={t.text2} stroke={1.7} />
+        </button>
+        <button title="搜索 ⌘K" style={iconBtn(t)}
+          onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <Icon name="search" size={15} color={t.text2} stroke={1.7} />
+        </button>
+        <div style={{ flex: 1 }} />
+      </div>
+
+      {/* Mode tabs — full width below icons */}
+      <div style={{ padding: '0 10px 10px' }}>
+        <ModeTabs mode={mode} setMode={setMode} />
+      </div>
+
+      {/* Primary actions */}
+      <div style={{ padding: '0 10px 6px' }}>
+        {[
+          { icon: 'plus',    label: '新建会话',  kbd: '⌘ N',  bold: true },
+          { icon: 'bolt',    label: 'Routines',  desc: '自动化工作流' },
+          { icon: 'box',     label: 'Customize', desc: '指令与角色' },
+        ].map(item => (
+          <button key={item.label} style={{
+            display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+            padding: '8px 10px', borderRadius: 8, border: 'none', cursor: 'pointer',
+            background: 'transparent', color: t.text,
+            fontSize: 13, fontWeight: item.bold ? 600 : 500,
+            fontFamily: 'inherit', textAlign: 'left',
+            transition: 'background 0.12s',
+          }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+            <Icon name={item.icon} size={item.icon === 'bolt' ? 14 : 15} color={item.bold ? t.text : t.text2} stroke={1.8} />
+            <span style={{ flex: 1 }}>{item.label}</span>
+            {item.kbd && <Kbd>{item.kbd}</Kbd>}
+          </button>
+        ))}
+        <button onClick={() => setMoreOpen(!moreOpen)} style={{
+          display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+          padding: '8px 10px', borderRadius: 8, border: 'none', cursor: 'pointer',
+          background: 'transparent', color: t.text2,
+          fontSize: 13, fontWeight: 500, fontFamily: 'inherit', textAlign: 'left',
+        }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+           onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <Icon name="chevron" size={14} stroke={2} color={t.text2} style={{ transform: moreOpen ? 'rotate(180deg)' : '' }} />
+          <span style={{ flex: 1 }}>More</span>
+        </button>
+        {moreOpen && (
+          <div style={{ paddingLeft: 26, paddingBottom: 4, animation: 'fade-in 0.15s ease' }}>
+            {['Routines · 历史', '快捷指令', '导入 / 导出', '帮助'].map(label => (
+              <div key={label} style={{
+                padding: '6px 10px', borderRadius: 6, fontSize: 12.5, color: t.text3, cursor: 'pointer',
+              }} onMouseEnter={e => { e.currentTarget.style.background = t.surfaceHover; e.currentTarget.style.color = t.text2; }}
+                 onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = t.text3; }}>{label}</div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Projects header */}
+      <div style={{
+        padding: '14px 8px 4px 14px', display: 'flex', alignItems: 'center', gap: 4,
+      }}>
+        <span style={{
+          flex: 1, fontSize: 12.5, color: t.text2, fontWeight: 600,
+          display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer',
+        }}>Projects <Icon name="chevron" size={11} color={t.text3} stroke={2} /></span>
+        <button title="全部折叠" onClick={() => setExpanded({})} style={{ ...iconBtn(t), width: 22, height: 22 }}
+          onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={t.text3} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M4 4l6 6M20 4l-6 6M4 20l6-6M20 20l-6-6"/>
+          </svg>
+        </button>
+        <button title="更多" style={{ ...iconBtn(t), width: 22, height: 22 }}
+          onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <Icon name="more" size={13} color={t.text3} stroke={2} />
+        </button>
+        <button title="新建项目" style={{ ...iconBtn(t), width: 22, height: 22 }}
+          onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={t.text3} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+            <path d="M12 12v4M10 14h4"/>
+          </svg>
+        </button>
+      </div>
+
+      {/* Project tree */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '2px 8px 8px' }}>
+        {PROJECTS.map(p => {
+          const open = !!expanded[p.id];
+          const visibleSessions = open
+            ? (showMore[p.id] ? p.sessions : p.sessions.filter(s => !s.hidden))
+            : [];
+          const hiddenCount = p.sessions.filter(s => s.hidden).length;
+          const projectActive = p.id === activeRepo;
+          return (
+            <div key={p.id} style={{ marginBottom: 2, position: 'relative' }}>
+              {/* Project header */}
+              <div data-project-row={p.id}
+                   onClick={() => { toggle(p.id); setActiveRepo(p.id); }}
+                   onMouseEnter={() => setHoverProject(p.id)}
+                   onMouseLeave={() => setHoverProject(null)}
+                   style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                height: 30, padding: '0 6px 0 8px', borderRadius: 7, cursor: 'pointer',
+                color: t.text2,
+                background: (hoverProject === p.id || menuProject === p.id) ? t.surfaceHover : 'transparent',
+                transition: 'background 0.12s',
+              }}>
+                <Icon name="folder" size={14} color={t.text3} stroke={1.7} />
+                <span style={{
+                  flex: 1, fontSize: 13, fontWeight: 500, color: t.text,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>{p.name}</span>
+
+                {(hoverProject === p.id || menuProject === p.id) ? (
+                  <div style={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                    <button onClick={(e) => { e.stopPropagation(); setMenuProject(menuProject === p.id ? null : p.id); }} title="更多" style={{
+                      width: 20, height: 20, borderRadius: 5, border: 'none', cursor: 'pointer',
+                      background: menuProject === p.id ? t.surfaceActive : 'transparent',
+                      color: t.text2, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }} onMouseEnter={e => { if (menuProject !== p.id) e.currentTarget.style.background = t.surfaceActive; }}
+                       onMouseLeave={e => { if (menuProject !== p.id) e.currentTarget.style.background = 'transparent'; }}>
+                      <Icon name="more" size={13} stroke={2} />
+                    </button>
+                    <button onClick={(e) => { e.stopPropagation(); }} title="新会话" style={{
+                      width: 20, height: 20, borderRadius: 5, border: 'none', cursor: 'pointer',
+                      background: 'transparent', color: t.text2,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceActive}
+                       onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                      <Icon name="pencil" size={12} stroke={1.8} />
+                    </button>
+                  </div>
+                ) : p.dirty ? (
+                  <span style={{
+                    width: 6, height: 6, borderRadius: 99,
+                    background: t.warn, flexShrink: 0,
+                    boxShadow: `0 0 0 2px color-mix(in oklab, ${t.warn} 25%, transparent)`,
+                  }} />
+                ) : null}
+              </div>
+
+              {/* Context menu */}
+              {menuProject === p.id && menuPos && (
+                <>
+                  <div onClick={() => setMenuProject(null)} style={{ position: 'fixed', inset: 0, zIndex: 49 }} />
+                  <div style={{
+                    position: 'fixed', left: menuPos.left, top: menuPos.top, zIndex: 50,
+                    background: t.surface, border: `0.5px solid ${t.borderStrong}`,
+                    borderRadius: 11, padding: 6, minWidth: 230,
+                    boxShadow: '0 16px 40px rgba(0,0,0,0.28)',
+                    animation: 'fade-in 0.12s ease',
+                  }}>
+                    {[
+                      { icon: 'pin',     label: 'Pin project' },
+                      { icon: 'finder',  label: 'Open in Finder' },
+                      { icon: 'tree',    label: 'Create permanent worktree' },
+                      { icon: 'rename',  label: 'Rename project' },
+                      { icon: 'archive', label: 'Archive chats' },
+                      { divider: true },
+                      { icon: 'x',       label: 'Remove', danger: true },
+                    ].map((mi, i) => mi.divider ? (
+                      <div key={i} style={{ height: 0.5, background: t.border, margin: '4px 6px' }} />
+                    ) : (
+                      <div key={mi.label} onClick={() => setMenuProject(null)} style={{
+                        display: 'flex', alignItems: 'center', gap: 10,
+                        padding: '6px 10px', borderRadius: 6, cursor: 'pointer',
+                        color: mi.danger ? t.danger : t.text,
+                      }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+                         onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                        <ProjectMenuIcon name={mi.icon} color={mi.danger ? t.danger : t.text2} />
+                        <span style={{ fontSize: 13, fontWeight: 500 }}>{mi.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {/* Sessions */}
+              {open && (
+                <div style={{ paddingLeft: 6, paddingBottom: 4, animation: 'fade-in 0.15s ease' }}>
+                  {p.sessions.length === 0 ? (
+                    <div style={{
+                      padding: '6px 10px 6px 30px', fontSize: 12.5, color: t.text4,
+                    }}>No chats</div>
+                  ) : (
+                    <>
+                      {visibleSessions.map(s => {
+                        const active = s.id === activeSession;
+                        return (
+                          <div key={s.id} onClick={() => { setActiveSession(s.id); setActiveRepo(p.id); }} style={{
+                            display: 'flex', alignItems: 'center', gap: 6,
+                            padding: '5px 10px 5px 30px', borderRadius: 6, cursor: 'pointer',
+                            background: active ? t.surfaceActive : 'transparent',
+                            color: active ? t.text : t.text2,
+                            transition: 'background 0.12s', position: 'relative',
+                          }} onMouseEnter={e => { if (!active) e.currentTarget.style.background = t.surfaceHover; }}
+                             onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}>
+                            {active && <div style={{ position: 'absolute', left: 20, top: 6, bottom: 6, width: 2, background: t.accent, borderRadius: 99 }} />}
+                            <span style={{
+                              flex: 1, fontSize: 12.5, fontWeight: active ? 600 : 500,
+                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                            }}>{s.title}</span>
+                            {s.kbd && <Kbd>{s.kbd}</Kbd>}
+                            {s.activity && <span style={{ fontSize: 11, color: t.text4, fontFamily: 'inherit' }}>{s.activity}</span>}
+                          </div>
+                        );
+                      })}
+                      {hiddenCount > 0 && (
+                        <div onClick={() => setShowMore(o => ({ ...o, [p.id]: !o[p.id] }))} style={{
+                          padding: '4px 10px 6px 30px', fontSize: 11.5, color: t.text3, cursor: 'pointer',
+                        }} onMouseEnter={e => e.currentTarget.style.color = t.text2}
+                           onMouseLeave={e => e.currentTarget.style.color = t.text3}>
+                          {showMore[p.id] ? 'Show less' : 'Show more'}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Account row */}
+      <div style={{ borderTop: `0.5px solid ${t.border}`, padding: '8px 10px 12px', position: 'relative' }}>
+        <div onClick={() => setAccountOpen(!accountOpen)} style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '6px 8px', borderRadius: 8, cursor: 'pointer',
+          background: accountOpen ? t.surfaceHover : 'transparent',
+          transition: 'background 0.12s',
+        }} onMouseEnter={e => { if (!accountOpen) e.currentTarget.style.background = t.surfaceHover; }}
+           onMouseLeave={e => { if (!accountOpen) e.currentTarget.style.background = 'transparent'; }}>
+          <div style={{
+            width: 28, height: 28, borderRadius: 7,
+            background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
+            color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 11, fontWeight: 600,
+          }}>LL</div>
+          <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'baseline', gap: 6 }}>
+            <span style={{ fontSize: 13, fontWeight: 500, color: t.text }}>lingfeng</span>
+            <span style={{ color: t.text4 }}>·</span>
+            <span style={{ fontSize: 12, color: t.text3 }}>Max</span>
+          </div>
+          <Icon name="chevron" size={13} color={t.text3} stroke={2} style={{ transform: accountOpen ? '' : 'rotate(180deg)' }} />
+        </div>
+
+        {accountOpen && (
+          <>
+            <div onClick={() => setAccountOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 49 }} />
+            <div style={{
+              position: 'absolute', bottom: 'calc(100% - 4px)', left: 10, right: 10, zIndex: 50,
+              background: t.surface, border: `0.5px solid ${t.borderStrong}`,
+              borderRadius: 12, padding: 6,
+              boxShadow: '0 16px 40px rgba(0,0,0,0.32)',
+              animation: 'fade-in 0.15s ease',
+            }}>
+              <div style={{ padding: '8px 10px 10px', fontSize: 12.5, color: t.text3 }}>
+                luolingfeng.flare@gmail.com
+              </div>
+              <AccountMenuItem icon="cog"     label="Settings"  kbd="⌘," onClick={() => { setAccountOpen(false); openSettings(); }} />
+              <AccountMenuItem icon="globe"   label="Language"  arrow />
+              <AccountMenuItem icon="help"    label="Get help" />
+              <div style={{ height: 0.5, background: t.border, margin: '6px 6px' }} />
+              <AccountMenuItem icon="plans"   label="View all plans" />
+              <AccountMenuItem icon="download" label="Get apps and extensions" />
+              <AccountMenuItem icon="gift"    label="Gift Lingxi" />
+              <AccountMenuItem icon="news"    label="View changelog" />
+              <AccountMenuItem icon="info"    label="Learn more" arrow />
+              <div style={{ height: 0.5, background: t.border, margin: '6px 6px' }} />
+              <AccountMenuItem icon="logout"  label="Log out" />
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const iconBtn = (t) => ({
+  width: 30, height: 30, borderRadius: 7, border: 'none', cursor: 'pointer',
+  background: 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center',
+  transition: 'background 0.12s',
+});
+
+// ─── PROJECT CONTEXT MENU ICONS ────────────────────────
+const ProjectMenuIcon = ({ name, color }) => {
+  const p = { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: color, strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  switch (name) {
+    case 'pin':     return <svg {...p}><path d="m9 4 9 9-2 2-1-1-3 3v4l-2-2-2 2v-4l3-3-1-1z"/></svg>;
+    case 'finder':  return <svg {...p}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M14 13l3-3M17 13l-3-3"/></svg>;
+    case 'tree':    return <svg {...p}><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><path d="M6 8v3a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8M12 13v3"/></svg>;
+    case 'rename':  return <svg {...p}><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>;
+    case 'archive': return <svg {...p}><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></svg>;
+    case 'x':       return <svg {...p}><path d="M18 6 6 18M6 6l12 12"/></svg>;
+    default: return null;
+  }
+};
+
+// ─── ACCOUNT MENU ITEM ────────────────────────────
+const AccountIcon = ({ name, color, size = 16 }) => {
+  const p = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: color, strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  switch (name) {
+    case 'cog':      return <svg {...p}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1A1.7 1.7 0 0 0 19.4 9 1.7 1.7 0 0 0 21 10H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>;
+    case 'globe':    return <svg {...p}><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>;
+    case 'help':     return <svg {...p}><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><circle cx="12" cy="17" r="0.6" fill={color} stroke="none"/></svg>;
+    case 'plans':    return <svg {...p}><path d="m9 11 3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>;
+    case 'download': return <svg {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>;
+    case 'gift':     return <svg {...p}><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M12 8v13M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7M7.5 8a2.5 2.5 0 0 1 0-5C11 3 12 8 12 8s1-5 4.5-5a2.5 2.5 0 0 1 0 5"/></svg>;
+    case 'news':     return <svg {...p}><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 8h18M7 13h4M7 17h10"/></svg>;
+    case 'info':     return <svg {...p}><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v5h1"/></svg>;
+    case 'logout':   return <svg {...p}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>;
+    default: return null;
+  }
+};
+
+function AccountMenuItem({ icon, label, kbd, arrow, onClick }) {
+  const t = useT();
+  return (
+    <div onClick={onClick} style={{
+      display: 'flex', alignItems: 'center', gap: 12,
+      padding: '7px 10px', borderRadius: 7, cursor: 'pointer',
+    }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+       onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+      <AccountIcon name={icon} color={t.text2} size={15} />
+      <span style={{ flex: 1, fontSize: 13, color: t.text, fontWeight: 500 }}>{label}</span>
+      {kbd && <span style={{ fontSize: 11.5, color: t.text4, fontFamily: 'inherit' }}>{kbd}</span>}
+      {arrow && <Icon name="chevronR" size={13} color={t.text3} stroke={2} />}
+    </div>
+  );
+}
+
+// ─── BACKGROUND TASKS PANEL ──────────────────────────────────
+const BG_TASKS_RUNNING = [
+  { id: 'r1', title: 'Write Plan M2-02 (jsonrpc + MCP + bridge)', dur: '11m 45s', tokens: '137.0k', tools: 34, tool: 'Bash' },
+  { id: 'r2', title: 'Write Plan M2-06 (SecureStorage + SSE + Process)', dur: '8m 26s',  tokens: '96.8k',  tools: 38, tool: 'Bash' },
+  { id: 'r3', title: 'Write Plan M2-07 (tests + docs + release)',        dur: '7m 31s',  tokens: '91.8k',  tools: 20, tool: 'Bash' },
+];
+const BG_TASKS_FINISHED = [
+  { id: 'f1', title: 'Write Plan M2-04 (Sandbox runtime)',           kind: 'Agent', dur: '10m 12s', tokens: '160.7k', tools: 31 },
+  { id: 'f2', title: 'Write Plan M2-05 (FS watch + Swarm)',          kind: 'Agent', dur: '9m 29s',  tokens: '135.5k', tools: 35 },
+  { id: 'f3', title: 'Write Plan M2-03 (LSP)',                       kind: 'Agent', dur: '8m 49s',  tokens: '160.8k', tools: 33 },
+  { id: 'f4', title: 'Write Plan M2-01 (corrections)',               kind: 'Agent', dur: '8m 8s',   tokens: '147.1k', tools: 40 },
+  { id: 'f5', title: 'Find writing-plans skill location',            kind: 'Bash',  dur: null,      tokens: null,     tools: null },
+  { id: 'f6', title: "Verify Codex's 6 spec corrections against claude-code source", kind: 'Agent', dur: '2m 23s', tokens: '62.1k', tools: 32 },
+  { id: 'f7', title: 'T1 steps 1–3: scaffold dir, install graphify',  kind: 'Bash',  dur: null,      tokens: null,     tools: null },
+];
+
+// Mock transcript steps for the detail view
+const TRANSCRIPT_DEMO = [
+  { kind: 'tool',  label: 'Ran Check McpTransportSpec variants exa…', expandable: true },
+  { kind: 'tool',  label: 'Read',     target: 'mcp.rs',     expandable: true },
+  { kind: 'tool',  label: 'Read',     target: 'Cargo.toml', expandable: true },
+  { kind: 'tool',  label: 'Read',     target: 'Cargo.toml', expandable: true },
+  { kind: 'tool',  label: 'Ran List existing plans', expanded: true },
+  { kind: 'bash',
+    cmd: 'ls /Users/luolingfeng/Projects/LingXi-Next/docs/superpowers/plans/ 2>/dev/null | head -20',
+    out: [
+      '2026-05-21-claw-code-staged-graphify.md',
+      '2026-05-22-lingxi-core-m1-01-foundation.md',
+      '2026-05-22-lingxi-core-m1-02-security-cost.md',
+      '2026-05-22-lingxi-core-m1-03-tools-hooks.md',
+      '2026-05-22-lingxi-core-m1-04-sessions.md',
+      '2026-05-22-lingxi-core-m1-05-cli-shell.md',
+      '2026-05-22-lingxi-core-m2-01-jsonrpc.md',
+    ],
+  },
+  { kind: 'tool', label: 'Read',  target: 'transport.rs', expandable: true },
+  { kind: 'tool', label: 'Edit',  target: 'transport.rs', expandable: true },
+];
+
+function BackgroundTasks({ open, setOpen }) {
+  const t = useT();
+  const [view, setView] = useState({ name: 'list', task: null });
+
+  // reset to list whenever panel re-opens
+  useEffect(() => { if (open) setView({ name: 'list', task: null }); }, [open]);
+
+  if (!open) return null;
+
+  return (
+    <>
+      <div onClick={() => setOpen(false)} style={{
+        position: 'absolute', inset: 0, zIndex: 48,
+        background: 'transparent',
+      }} />
+      <div style={{
+        position: 'absolute', top: 0, right: 0, bottom: 0, zIndex: 49,
+        width: 440, background: t.sidebarBg,
+        borderLeft: `0.5px solid ${t.border}`,
+        boxShadow: '-12px 0 32px rgba(0,0,0,0.18)',
+        display: 'flex', flexDirection: 'column',
+        animation: 'slide-in-r 0.22s ease',
+      }} onClick={e => e.stopPropagation()}>
+        {view.name === 'list' ? (
+          <BgTasksList onClose={() => setOpen(false)} onOpenTranscript={task => setView({ name: 'transcript', task })} />
+        ) : (
+          <BgTasksTranscript task={view.task} onBack={() => setView({ name: 'list', task: null })} onClose={() => setOpen(false)} />
+        )}
+      </div>
+    </>
+  );
+}
+
+function BgTasksList({ onClose, onOpenTranscript, embedded }) {
+  const t = useT();
+  return (
+    <>
+      {!embedded && (
+        <div style={{
+          padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 8,
+          borderBottom: `0.5px solid ${t.border}`, flexShrink: 0,
+        }}>
+          <span style={{ flex: 1, fontSize: 14, color: t.text, fontWeight: 600 }}>Background tasks</span>
+          <button onClick={onClose} style={iconBtn(t)}
+            onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+            <Icon name="x" size={14} color={t.text3} stroke={1.8} />
+          </button>
+        </div>
+      )}
+
+      {/* Scroll body */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {BG_TASKS_RUNNING.map(r => <TaskCard key={r.id} item={r} running onOpenTranscript={() => onOpenTranscript(r)} />)}
+        </div>
+
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '14px 4px 8px',
+        }}>
+          <span style={{ flex: 1, fontSize: 12, color: t.text3, fontWeight: 500 }}>Finished</span>
+          <button style={{
+            background: 'transparent', border: 'none', cursor: 'pointer',
+            color: t.text3, fontSize: 12, fontFamily: 'inherit', padding: '2px 6px', borderRadius: 5,
+          }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>Clear</button>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {BG_TASKS_FINISHED.map(f => <TaskCard key={f.id} item={f} onOpenTranscript={() => onOpenTranscript(f)} />)}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function TaskCard({ item, running, onOpenTranscript }) {
+  const t = useT();
+  const isBashOnly = item.kind === 'Bash' && !item.dur;
+  return (
+    <div style={{
+      padding: '10px 12px',
+      background: t.surfaceHover,
+      borderRadius: 8,
+      display: 'flex', flexDirection: 'column', gap: 6,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+        <span style={{
+          width: 8, height: 8, borderRadius: 99, marginTop: 6, flexShrink: 0,
+          background: running ? t.accent : t.text4,
+          boxShadow: running ? `0 0 0 3px color-mix(in oklab, ${t.accent} 22%, transparent)` : 'none',
+        }} />
+        <span style={{ flex: 1, fontSize: 13, color: t.text, fontWeight: 600, lineHeight: 1.4 }}>
+          {item.title}
+        </span>
+        {running && (
+          <button style={{
+            background: t.surface, border: `0.5px solid ${t.border}`,
+            color: t.text2, fontSize: 11.5, fontFamily: 'inherit',
+            padding: '3px 9px', borderRadius: 6, cursor: 'pointer',
+          }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceActive}
+             onMouseLeave={e => e.currentTarget.style.background = t.surface}>Stop</button>
+        )}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 11.5, color: t.text3, paddingLeft: 16, flexWrap: 'wrap' }}>
+        {running ? (
+          <>
+            <span>Running agent</span>
+            <span>{item.dur}</span>
+          </>
+        ) : (
+          <>
+            <span>{item.kind}</span>
+            <span>Completed</span>
+            {item.dur && <span>{item.dur}</span>}
+          </>
+        )}
+      </div>
+      {!isBashOnly && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 11.5, color: t.text3, paddingLeft: 16, flexWrap: 'wrap' }}>
+          {item.tokens && <span>{item.tokens} Tokens</span>}
+          {item.tools != null && <span>{item.tools} Tool uses</span>}
+          {running && item.tool && <span>{item.tool}</span>}
+          {!running && (
+            <a onClick={onOpenTranscript} style={{ color: t.link || t.accent2 || t.accent, cursor: 'pointer', textDecoration: 'none', fontWeight: 500 }}>View transcript</a>
+          )}
+        </div>
+      )}
+      {running && (
+        <div style={{ paddingLeft: 16 }}>
+          <a onClick={onOpenTranscript} style={{ color: t.link || t.accent2 || t.accent, fontSize: 11.5, cursor: 'pointer', textDecoration: 'none', fontWeight: 500 }}>View transcript</a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BgTasksTranscript({ task, onBack, onClose, embedded }) {
+  const t = useT();
+  return (
+    <>
+      <div style={{
+        padding: '10px 10px 10px 6px', display: 'flex', alignItems: 'center', gap: 4,
+        borderBottom: `0.5px solid ${t.border}`, flexShrink: 0,
+      }}>
+        <button onClick={onBack} style={iconBtn(t)}
+          onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={t.text2} strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+        </button>
+        <span style={{ flex: 1, fontSize: 13.5, color: t.text, fontWeight: 600,
+                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={task?.title}>
+          {task?.title || 'Transcript'}
+        </span>
+        {!embedded && (
+          <button onClick={onClose} style={iconBtn(t)}
+            onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+            <Icon name="x" size={14} color={t.text3} stroke={1.8} />
+          </button>
+        )}
+      </div>
+
+      {/* Scroll body */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {TRANSCRIPT_DEMO.map((step, i) => <TranscriptStep key={i} step={step} />)}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function TranscriptStep({ step }) {
+  const t = useT();
+  const [open, setOpen] = useState(!!step.expanded);
+
+  if (step.kind === 'tool') {
+    return (
+      <button onClick={() => setOpen(o => !o)} style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        padding: '2px 4px', borderRadius: 6,
+        border: 'none', background: 'transparent', cursor: 'pointer',
+        color: t.text2, fontSize: 13.5, fontFamily: 'inherit',
+        textAlign: 'left', lineHeight: 1.45,
+      }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+         onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+        <span style={{ color: t.text3 }}>{step.label}</span>
+        {step.target && <span style={{ color: t.text, fontWeight: 600 }}>{step.target}</span>}
+        <Icon name="chevron" size={12} color={t.text4} stroke={2}
+          {...(open ? {} : {})} />
+      </button>
+    );
+  }
+
+  if (step.kind === 'bash') {
+    return (
+      <div style={{
+        background: t.surface, border: `0.5px solid ${t.border}`,
+        borderRadius: 10, overflow: 'hidden',
+      }}>
+        <div style={{
+          padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8,
+          borderBottom: `0.5px solid ${t.border}`,
+        }}>
+          <span style={{ flex: 1, fontSize: 12.5, color: t.text3, fontWeight: 500 }}>Bash</span>
+          <button style={iconBtn(t)}
+            onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={t.text3} strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+          </button>
+        </div>
+        <div className="mono" style={{
+          padding: '10px 12px', fontSize: 12, lineHeight: 1.55,
+          color: t.text2, wordBreak: 'break-all',
+        }}>
+          <div style={{ color: t.add }}>
+            <span style={{ color: t.text3, marginRight: 6 }}>$</span>
+            {step.cmd}
+          </div>
+          <div style={{ height: 8 }} />
+          {step.out.map((line, i) => (
+            <div key={i} style={{ color: t.text2 }}>{line}</div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  return null;
+}
+
+// ─── TOP BAR (repo breadcrumb + window actions) ──────────────
+function TopBar({ repo, onTogglePanel, panelOpen, theme, setTheme, sidebarCollapsed }) {
+  const t = useT();
+  return (
+    <div style={{
+      height: 44, flexShrink: 0, padding: '0 14px 0 16px',
+      display: 'flex', alignItems: 'center', gap: 6,
+      borderBottom: `0.5px solid ${t.border}`, position: 'relative', zIndex: 5,
+      // when sidebar is collapsed, traffic lights are on the main area side so we add left padding for them
+      paddingLeft: sidebarCollapsed ? 92 : 16,
+    }}>
+      {/* Breadcrumb */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <Icon name="folder" size={13} color={t.text3} stroke={1.7} />
+        <span style={{ fontSize: 13, color: t.text2, fontWeight: 500 }}>{repo.scope}</span>
+        <span style={{ color: t.text4 }}>/</span>
+        <span style={{ fontSize: 13, color: t.text, fontWeight: 600 }}>{repo.name}</span>
+        <button style={{
+          display: 'flex', alignItems: 'center', gap: 4, marginLeft: 4,
+          padding: '3px 6px', borderRadius: 6, border: 'none', cursor: 'pointer',
+          background: 'transparent', color: t.text3,
+        }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+           onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <Icon name="chevron" size={13} stroke={2} />
+        </button>
+      </div>
+
+      <div style={{ flex: 1 }} />
+
+      {/* Branch chip */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        padding: '4px 9px', borderRadius: 7,
+        background: t.surface, border: `0.5px solid ${t.border}`,
+      }}>
+        <Icon name="branch" size={12} color={t.text3} stroke={1.8} />
+        <span className="mono" style={{ fontSize: 11.5, color: t.text2, fontWeight: 500 }}>{repo.branch}</span>
+      </div>
+
+      {/* Diff pill */}
+      {repo.diff && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 0, padding: '4px 4px',
+          borderRadius: 7, background: t.accentBg, border: `0.5px solid ${t.accentBorder}`,
+        }}>
+          <span style={{
+            display: 'flex', alignItems: 'center', gap: 4,
+            padding: '0 6px', fontSize: 11.5, color: t.accent, fontWeight: 600,
+          }}>
+            <span style={{ width: 14, height: 14, borderRadius: 4, background: `color-mix(in oklab, ${t.accent} 25%, transparent)`, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Icon name="pencil" size={9} color={t.accent} stroke={2.2} />
+            </span>
+            <span className="mono">{repo.diff.add}</span>
+          </span>
+        </div>
+      )}
+
+      <div style={{ width: 1, height: 18, background: t.border, margin: '0 4px' }} />
+
+      {/* Theme */}
+      <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="主题" style={iconBtn(t)}
+        onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+        onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+        <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={15} color={t.text2} stroke={1.7} />
+      </button>
+
+      {/* Right panel toggle */}
+      <button onClick={onTogglePanel} title="右侧面板" style={{
+        ...iconBtn(t),
+        background: panelOpen ? t.surfaceActive : 'transparent',
+        color: panelOpen ? t.accent : t.text2,
+      }} onMouseEnter={e => { if (!panelOpen) e.currentTarget.style.background = t.surfaceHover; }}
+         onMouseLeave={e => { if (!panelOpen) e.currentTarget.style.background = 'transparent'; }}>
+        <Icon name="sidebarR" size={15} stroke={1.7} />
+      </button>
+    </div>
+  );
+}
+
+// ─── RUN ITEMS ───────────────────────────────────────────────
+function GutterRule({ state }) {
+  const t = useT();
+  // a small monospace tick column like the screenshot's "—" marks
+  return (
+    <div style={{
+      width: 22, flexShrink: 0, paddingTop: 6,
+      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
+      color: t.text4,
+    }}>
+      <span className="mono" style={{ fontSize: 11, lineHeight: 1 }}>—</span>
+    </div>
+  );
+}
+
+function AgentCard({ item }) {
+  const t = useT();
+  const running = item.state === 'running';
+  return (
+    <div style={{
+      background: t.surface, border: `0.5px solid ${t.border}`,
+      borderRadius: 10, padding: '10px 14px',
+      display: 'flex', flexDirection: 'column', gap: 4,
+      maxWidth: 640, position: 'relative', overflow: 'hidden',
+    }}>
+      {running && (
+        <div style={{
+          position: 'absolute', inset: 0, pointerEvents: 'none',
+          background: `linear-gradient(180deg, transparent, ${t.accentBg}, transparent)`,
+          animation: 'scan 2.4s linear infinite',
+        }} />
+      )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative' }}>
+        {running ? (
+          <span style={{
+            width: 12, height: 12, borderRadius: 99, background: t.accent,
+            boxShadow: `0 0 0 4px color-mix(in oklab, ${t.accent} 22%, transparent)`,
+            animation: 'shimmer 1.3s infinite',
+            flexShrink: 0,
+          }} />
+        ) : (
+          <span style={{
+            width: 16, height: 16, borderRadius: 4, flexShrink: 0,
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            background: t.text3, color: t.windowBg,
+          }}>
+            <Icon name="check" size={11} stroke={3} />
+          </span>
+        )}
+        <span style={{ fontSize: 14, fontWeight: 500, color: t.text }}>{item.title}</span>
+        {item.expandable && (
+          <Icon name="chevronR" size={13} color={t.text3} stroke={2} />
+        )}
+      </div>
+      {item.sub && (
+        <div style={{
+          fontSize: 14, color: item.link ? t.accent : t.text2,
+          marginLeft: 24, fontWeight: 500,
+          textDecoration: item.link ? 'underline' : 'none',
+          textDecorationColor: item.link ? t.accentBorder : 'transparent',
+          textUnderlineOffset: 3,
+        }}>{item.sub}</div>
+      )}
+    </div>
+  );
+}
+
+function NarrationLine({ item }) {
+  const t = useT();
+  const color = item.tone === 'muted' ? t.text3 : t.text;
+  // tokenize check/x emojis
+  const parts = item.text.split(/(✓|✗)/g);
+  return (
+    <div style={{
+      fontSize: 14.5, lineHeight: 1.7, color,
+      fontWeight: item.strong ? 500 : 400,
+      maxWidth: 880,
+    }}>
+      {parts.map((p, i) => {
+        if (p === '✓') return (
+          <span key={i} style={{
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            width: 16, height: 16, borderRadius: 4, background: t.ok, color: '#fff',
+            verticalAlign: -3, margin: '0 1px',
+          }}>
+            <Icon name="check" size={11} stroke={3} color="#fff" />
+          </span>
+        );
+        if (p === '✗') return (
+          <span key={i} style={{
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            width: 16, height: 16, borderRadius: 4, background: t.danger, color: '#fff',
+            verticalAlign: -3, margin: '0 1px',
+          }}>
+            <Icon name="x" size={11} stroke={3} color="#fff" />
+          </span>
+        );
+        return <span key={i}>{p}</span>;
+      })}
+    </div>
+  );
+}
+
+// ─── AUDIO MESSAGE (user voice message bubble with static waveform) ─
+function AudioMessage({ bars, duration }) {
+  const t = useT();
+  const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(0); // 0..1
+  const rafRef = useRef(null);
+  const startRef = useRef(0);
+
+  useEffect(() => {
+    if (!playing) return;
+    startRef.current = performance.now() - progress * duration * 1000;
+    const tick = () => {
+      const elapsed = (performance.now() - startRef.current) / 1000;
+      const p = Math.min(1, elapsed / duration);
+      setProgress(p);
+      if (p >= 1) { setPlaying(false); setProgress(0); return; }
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  }, [playing, duration]);
+
+  const fmt = (s) => {
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60).toString().padStart(2, '0');
+    return `${m}:${sec}`;
+  };
+
+  // Downsample bars to a tidy fixed count for display
+  const N = 56;
+  const display = useMemo(() => {
+    if (!bars || bars.length === 0) return new Array(N).fill(0);
+    const out = new Array(N).fill(0);
+    const step = bars.length / N;
+    for (let i = 0; i < N; i++) {
+      const lo = Math.floor(i * step);
+      const hi = Math.max(lo + 1, Math.floor((i + 1) * step));
+      let max = 0;
+      for (let j = lo; j < hi && j < bars.length; j++) max = Math.max(max, bars[j]);
+      out[i] = max;
+    }
+    return out;
+  }, [bars]);
+
+  const W = 220, H = 28;
+  const slot = W / N;
+  const barW = 1.8;
+  const played = Math.floor(progress * N);
+
+  return (
+    <div style={{
+      display: 'inline-flex', alignItems: 'center', gap: 12,
+      padding: '8px 12px 8px 8px', borderRadius: 18,
+      background: t.accentBg,
+      border: `0.5px solid ${t.accentBorder}`,
+      maxWidth: 360,
+    }}>
+      <button onClick={() => setPlaying(p => !p)} style={{
+        width: 30, height: 30, borderRadius: 99, border: 'none', cursor: 'pointer',
+        background: t.accent, color: '#fff',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }} onMouseEnter={e => e.currentTarget.style.filter = 'brightness(1.08)'}
+         onMouseLeave={e => e.currentTarget.style.filter = 'none'}>
+        {playing ? (
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="#fff"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+        ) : (
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="#fff"><path d="M7 4l13 8-13 8z"/></svg>
+        )}
+      </button>
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ display: 'block', flexShrink: 0 }}>
+        {/* dotted baseline */}
+        {Array.from({ length: Math.floor(W / 5) }).map((_, i) => (
+          <rect key={`d${i}`} x={i * 5} y={H / 2 - 0.5} width={1.5} height={1} fill={t.text4} opacity={0.55} />
+        ))}
+        {/* bars */}
+        {display.map((v, i) => {
+          if (v <= 0.003) return null;
+          const h = Math.max(2, Math.min(H * 0.92, v * H * 3.6));
+          const x = i * slot + (slot - barW) / 2;
+          const active = i < played;
+          return (
+            <rect key={i} x={x} y={H / 2 - h / 2} width={barW} height={h}
+              rx={0.6}
+              fill={active ? t.accent2 || t.accent : t.text}
+              opacity={active ? 1 : 0.85} />
+          );
+        })}
+      </svg>
+      <span className="mono" style={{
+        fontSize: 12, color: t.text2, fontVariantNumeric: 'tabular-nums',
+        minWidth: 30, textAlign: 'right',
+      }}>{fmt(duration)}</span>
+    </div>
+  );
+}
+
+// ─── STAGE (the agent run scrollback) ────────────────────────
+function Stage({ extraMessages = [] }) {
+  const t = useT();
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', background: t.stageBg, position: 'relative' }}>
+      <div style={{
+        maxWidth: 920, margin: '0 auto',
+        padding: '28px 32px 12px',
+        display: 'flex', flexDirection: 'column', gap: 18,
+      }}>
+        {[...RUN, ...extraMessages].map((item, i) => {
+          if (item.type === 'narration') {
+            return (
+              <div key={i} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
+                <GutterRule />
+                <NarrationLine item={item} />
+              </div>
+            );
+          }
+          if (item.type === 'agent') {
+            return (
+              <div key={i} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
+                <GutterRule />
+                <div style={{ flex: 1 }}>
+                  <AgentCard item={item} />
+                </div>
+              </div>
+            );
+          }
+          if (item.type === 'meta') {
+            return (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0 6px',
+                fontSize: 11.5, color: t.text4, marginTop: 8,
+              }}>
+                <span style={{
+                  width: 8, height: 8, borderRadius: 99,
+                  background: `color-mix(in oklab, ${t.warn} 50%, transparent)`,
+                }} />
+                <span className="mono">{item.dur}</span>
+                <span>·</span>
+                <span className="mono">{item.tokens}</span>
+              </div>
+            );
+          }
+          if (item.type === 'audio') {
+            return (
+              <div key={i} style={{
+                display: 'flex', justifyContent: 'flex-end',
+                animation: 'fade-in 0.3s ease',
+              }}>
+                <AudioMessage bars={item.bars} duration={item.duration} />
+              </div>
+            );
+          }
+          return null;
+        })}
+
+        {/* /compact pill — pre-input action chip */}
+        <div style={{ marginTop: 4 }}>
+          <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            padding: '4px 9px', borderRadius: 99,
+            background: t.accentBg, border: `0.5px solid ${t.accentBorder}`,
+            color: t.accent, fontSize: 12, fontWeight: 500,
+          }} className="mono">/compact</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── COMPOSER (slash command input + diff bar + controls) ────
+function Composer({ repo, model, setModel, panelOpen, setPanelOpen, appendMessage }) {
+  const t = useT();
+  const [text, setText] = useState('');
+  const [slashOpen, setSlashOpen] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
+  const [permMode, setPermMode] = useState('bypass');
+  const [permOpen, setPermOpen] = useState(false);
+  const [effort, setEffort] = useState('max');
+  const [fastMode, setFastMode] = useState(true);
+  const taRef = useRef(null);
+
+  // ─── Audio recording ─────────────────────────────────────
+  const [recording, setRecording] = useState(false);
+  const [recSecs, setRecSecs] = useState(0);
+  const [micDenied, setMicDenied] = useState(false);
+  const waveCanvasRef = useRef(null);
+  const audioCtxRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
+  const barsRef = useRef([]);
+  const NUM_BARS = 90;
+
+  useEffect(() => {
+    if (!recording) return;
+    barsRef.current = new Array(NUM_BARS).fill(0);
+    const startTime = performance.now();
+    let cancelled = false;
+
+    (async () => {
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        if (!cancelled) { setMicDenied(true); setRecording(false); }
+        return;
+      }
+      if (cancelled) { stream.getTracks().forEach(tr => tr.stop()); return; }
+      streamRef.current = stream;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const audioCtx = new AC();
+      audioCtxRef.current = audioCtx;
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.4;
+      source.connect(analyser);
+      const buffer = new Uint8Array(analyser.fftSize);
+
+      const drawWaveform = () => {
+        const canvas = waveCanvasRef.current;
+        if (!canvas) return;
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        if (canvas.width !== Math.round(rect.width * dpr) ||
+            canvas.height !== Math.round(rect.height * dpr)) {
+          canvas.width = Math.round(rect.width * dpr);
+          canvas.height = Math.round(rect.height * dpr);
+        }
+        const ctx2d = canvas.getContext('2d');
+        ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx2d.clearRect(0, 0, rect.width, rect.height);
+
+        const cy = rect.height / 2;
+        const dotColor = t.text4;
+        const barColor = t.text;
+
+        // dotted baseline
+        ctx2d.fillStyle = dotColor;
+        for (let x = 0; x < rect.width; x += 5) {
+          ctx2d.fillRect(x, cy - 0.5, 1.5, 1);
+        }
+
+        // scrolling bars (right-anchored)
+        const bars = barsRef.current;
+        const barW = 1.8;
+        const gap = 2.4;
+        const slot = barW + gap;
+        const maxBarsThatFit = Math.floor(rect.width / slot);
+        const visible = Math.min(bars.length, maxBarsThatFit);
+        ctx2d.fillStyle = barColor;
+        for (let i = bars.length - visible; i < bars.length; i++) {
+          const v = bars[i];
+          if (v <= 0.002) continue; // gap in baseline where silence
+          const h = Math.max(1.5, Math.min(rect.height * 0.92, v * rect.height * 3.6));
+          const x = rect.width - (bars.length - i) * slot;
+          ctx2d.fillRect(x, cy - h / 2, barW, h);
+        }
+      };
+
+      const tick = () => {
+        if (cancelled) return;
+        analyser.getByteTimeDomainData(buffer);
+        let sum = 0;
+        for (let i = 0; i < buffer.length; i++) {
+          const v = (buffer[i] - 128) / 128;
+          sum += v * v;
+        }
+        const rms = Math.sqrt(sum / buffer.length);
+        barsRef.current.shift();
+        barsRef.current.push(rms);
+        drawWaveform();
+        const elapsed = Math.floor((performance.now() - startTime) / 1000);
+        setRecSecs(elapsed);
+        rafRef.current = requestAnimationFrame(tick);
+      };
+      rafRef.current = requestAnimationFrame(tick);
+    })();
+
+    return () => {
+      cancelled = true;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(tr => tr.stop());
+        streamRef.current = null;
+      }
+      if (audioCtxRef.current) {
+        try { audioCtxRef.current.close(); } catch (e) {}
+        audioCtxRef.current = null;
+      }
+      setRecSecs(0);
+    };
+  }, [recording, t.text, t.text4]);
+
+  const fmtTime = (s) => {
+    const m = Math.floor(s / 60);
+    const sec = (s % 60).toString().padStart(2, '0');
+    return `${m}:${sec}`;
+  };
+
+  useEffect(() => {
+    if (text.startsWith('/')) setSlashOpen(true);
+    else setSlashOpen(false);
+  }, [text]);
+
+  const filtered = SLASH_COMMANDS.filter(c => c.cmd.startsWith(text || '/'));
+
+  return (
+    <div style={{
+      padding: '0 32px 16px', flexShrink: 0,
+      background: t.stageBg, borderTop: `0.5px solid ${t.border}`,
+    }}>
+      <div style={{ maxWidth: 920, margin: '0 auto' }}>
+        {/* Diff/commit bar */}
+        {repo.diff && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            padding: '10px 4px 12px',
+          }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '6px 12px', borderRadius: 8,
+              background: t.surface, border: `0.5px solid ${t.border}`,
+            }}>
+              <span style={{
+                width: 6, height: 6, borderRadius: 99, background: t.warn,
+              }} />
+              <span style={{ fontSize: 12.5, color: t.text, fontWeight: 500 }}>{repo.name}</span>
+              <span className="mono" style={{ fontSize: 12, color: t.text3 }}>{repo.branch}</span>
+            </div>
+            <div style={{ flex: 1 }} />
+            <div className="mono" style={{
+              display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 600,
+            }}>
+              <span style={{ color: t.add }}>+{repo.diff.add}</span>
+              <span style={{ color: t.text4 }}>−{repo.diff.del}</span>
+            </div>
+            <button style={{
+              padding: '7px 14px', borderRadius: 8,
+              background: 'transparent', color: t.text3,
+              border: `0.5px solid ${t.border}`, cursor: 'not-allowed',
+              fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
+            }}>Commit changes</button>
+          </div>
+        )}
+
+        {/* Slash menu */}
+        {slashOpen && filtered.length > 0 && (
+          <div style={{
+            background: t.surface, border: `0.5px solid ${t.borderStrong}`,
+            borderRadius: 10, padding: 4, marginBottom: 6,
+            boxShadow: '0 12px 32px rgba(0,0,0,0.25)',
+            animation: 'fade-in 0.15s ease', maxHeight: 280, overflowY: 'auto',
+          }}>
+            {filtered.map(c => (
+              <div key={c.cmd} onMouseDown={(e) => { e.preventDefault(); setText(c.cmd + ' '); setSlashOpen(false); taRef.current?.focus(); }} style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '8px 10px', borderRadius: 7, cursor: 'pointer',
+              }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+                 onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                <span className="mono" style={{
+                  fontSize: 12.5, color: t.accent, fontWeight: 600,
+                  background: t.accentBg, padding: '2px 7px', borderRadius: 5,
+                  border: `0.5px solid ${t.accentBorder}`,
+                  minWidth: 80,
+                }}>{c.cmd}</span>
+                <span style={{ flex: 1, fontSize: 12.5, color: t.text2 }}>{c.desc}</span>
+                {c.hint && <span style={{ fontSize: 10.5, color: t.text4 }}>{c.hint}</span>}
+                {c.sub && <span style={{ fontSize: 10.5, color: t.text4 }}>{c.sub}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Composer */}
+        <div style={{
+          background: t.surface, border: `0.5px solid ${t.borderStrong}`,
+          borderRadius: 12, padding: '10px 12px 8px',
+        }}>
+          <textarea ref={taRef} value={text} onChange={e => {
+            setText(e.target.value);
+            e.target.style.height = 'auto';
+            e.target.style.height = Math.min(e.target.scrollHeight, 220) + 'px';
+          }} placeholder={recording ? 'Ask for follow-up changes' : 'Type / for commands'}
+            disabled={recording}
+            rows={1}
+            style={{
+              width: '100%', border: 'none', outline: 'none', resize: 'none',
+              background: 'transparent', color: t.text, fontSize: 14.5,
+              lineHeight: 1.55, fontFamily: 'inherit',
+              minHeight: 22, maxHeight: 220,
+              opacity: recording ? 0.55 : 1,
+            }} />
+          {recording ? (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8, marginTop: 6,
+            }}>
+              <button title="附加上下文" style={iconBtn(t)}
+                onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                <Icon name="plus" size={14} color={t.text3} stroke={2} />
+              </button>
+              <canvas ref={waveCanvasRef} style={{
+                flex: 1, height: 28, minWidth: 0, display: 'block',
+              }} />
+              <span className="mono" style={{
+                fontSize: 12.5, color: t.text2, fontVariantNumeric: 'tabular-nums',
+                minWidth: 30, textAlign: 'right',
+              }}>{fmtTime(recSecs)}</span>
+              <button title="停止录音" onClick={() => setRecording(false)} style={{
+                width: 28, height: 28, borderRadius: 99, border: 'none', cursor: 'pointer',
+                background: t.surfaceActive, color: t.text2,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }} onMouseEnter={e => e.currentTarget.style.filter = 'brightness(0.95)'}
+                 onMouseLeave={e => e.currentTarget.style.filter = 'none'}>
+                <span style={{ width: 9, height: 9, borderRadius: 1.5, background: t.text }} />
+              </button>
+              <button title="发送" onClick={() => {
+                const bars = (barsRef.current || []).slice();
+                const duration = Math.max(1, recSecs);
+                if (appendMessage) appendMessage({ type: 'audio', bars, duration });
+                setRecording(false);
+              }} style={{
+                width: 28, height: 28, borderRadius: 99, border: 'none', cursor: 'pointer',
+                background: t.text, color: t.windowBg,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }} onMouseEnter={e => e.currentTarget.style.filter = 'brightness(1.1)'}
+                 onMouseLeave={e => e.currentTarget.style.filter = 'none'}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={t.windowBg} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 19V5M5 12l7-7 7 7"/>
+                </svg>
+              </button>
+            </div>
+          ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6, position: 'relative' }}>
+            {/* Permission mode picker */}
+            <PermissionPicker mode={permMode} setMode={setPermMode} open={permOpen} setOpen={setPermOpen} />
+            <button title="附加上下文" style={iconBtn(t)}
+              onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+              <Icon name="plus" size={14} color={t.text3} stroke={2} />
+            </button>
+            <button title={micDenied ? '麦克风权限被拒' : '语音'} onClick={() => { setMicDenied(false); setRecording(true); }} style={iconBtn(t)}
+              onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+              <Icon name="mic" size={13} color={micDenied ? t.danger : t.text3} stroke={1.8} />
+            </button>
+            <button title="语音选项" style={{ ...iconBtn(t), width: 18 }}
+              onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+              <Icon name="chevron" size={11} color={t.text3} stroke={2} />
+            </button>
+
+            <div style={{ flex: 1 }} />
+
+            {/* Stop / run pill */}
+            <button title="停止" style={{
+              ...iconBtn(t), width: 28, height: 28,
+              background: t.surfaceHover, color: t.text2,
+            }}>
+              <span style={{ width: 10, height: 10, borderRadius: 2, background: t.text2 }} />
+            </button>
+          </div>
+          )}
+        </div>
+
+        {/* Footer status row */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '8px 4px 0', fontSize: 11.5, color: t.text4,
+        }}>
+          <span style={{ flex: 1 }} />
+          <ModelPicker model={model} setModel={setModel} open={modelOpen} setOpen={setModelOpen}
+            effort={effort} setEffort={setEffort} fastMode={fastMode} setFastMode={setFastMode} />
+          <ContextPicker open={contextOpen} setOpen={setContextOpen}
+            model={model} effort={effort} fastMode={fastMode} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── PERMISSION MODE PICKER ──────────────────────────────
+const PERM_MODES = [
+  { id: 'ask',     label: 'Ask permissions' },
+  { id: 'accept',  label: 'Accept edits' },
+  { id: 'plan',    label: 'Plan mode' },
+  { id: 'auto',    label: 'Auto mode' },
+  { id: 'bypass',  label: 'Bypass permissions' },
+];
+const PERM_DEFAULT = 'bypass';
+function PermissionPicker({ mode, setMode, open, setOpen }) {
+  const t = useT();
+  const current = PERM_MODES.find(m => m.id === mode) || PERM_MODES[4];
+  const isWarn = mode === 'bypass';
+  return (
+    <div style={{ position: 'relative' }}>
+      <button onClick={() => setOpen(!open)} style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        padding: '4px 9px', borderRadius: 7, border: 'none', cursor: 'pointer',
+        background: open ? t.surfaceHover : 'transparent',
+        color: isWarn ? t.warn : t.text2,
+        fontSize: 12, fontFamily: 'inherit', fontWeight: 500,
+      }} onMouseEnter={e => { if (!open) e.currentTarget.style.background = t.surfaceHover; }}
+         onMouseLeave={e => { if (!open) e.currentTarget.style.background = 'transparent'; }}>
+        <span>{current.label}</span>
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 49 }} />
+          <div style={{
+            position: 'absolute', bottom: 'calc(100% + 8px)', left: 0, zIndex: 50,
+            background: t.surface, border: `0.5px solid ${t.borderStrong}`,
+            borderRadius: 12, padding: 6, minWidth: 290,
+            boxShadow: '0 16px 40px rgba(0,0,0,0.22)',
+            animation: 'fade-in 0.15s ease',
+          }}>
+            {/* Header */}
+            <div style={{ padding: '8px 10px 4px', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ flex: 1, fontSize: 12, color: t.text3, fontWeight: 500 }}>Mode</span>
+              <Kbd>⇧</Kbd><Kbd>⌘</Kbd><Kbd>M</Kbd>
+            </div>
+            {/* Current / default row */}
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '6px 10px 10px',
+            }}>
+              <span style={{ flex: 1, fontSize: 13.5, color: t.text, fontWeight: 500 }}>
+                {current.label}
+                {mode === PERM_DEFAULT && <span style={{ color: t.text4, fontWeight: 500 }}> · Default</span>}
+              </span>
+              <Icon name="check" size={13} color={t.text2} stroke={2.2} />
+            </div>
+            <div style={{ height: 0.5, background: t.border, margin: '0 4px 4px' }} />
+            {/* Mode list */}
+            {PERM_MODES.map((m, i) => {
+              const active = m.id === mode;
+              return (
+                <div key={m.id} onClick={() => { setMode(m.id); setOpen(false); }} style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '7px 10px', borderRadius: 7, cursor: 'pointer',
+                }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+                   onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                  <span style={{ flex: 1, fontSize: 13.5, color: t.text, fontWeight: 500 }}>{m.label}</span>
+                  {active && <Icon name="check" size={13} color={t.text2} stroke={2.2} />}
+                  <span style={{ fontSize: 11.5, color: t.text4, fontFamily: 'inherit', minWidth: 10, textAlign: 'right' }}>{i + 1}</span>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── MODEL PICKER (with Effort + Fast mode) ──────────────
+function ModelPicker({ model, setModel, open, setOpen, effort, setEffort, fastMode, setFastMode }) {
+  const t = useT();
+  return (
+    <div style={{ position: 'relative' }}>
+      <button onClick={() => { setOpen(!open); }} style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        padding: '4px 10px', borderRadius: 7, border: 'none', cursor: 'pointer',
+        background: open ? t.surfaceHover : 'transparent',
+        color: t.text2, fontSize: 11.5, fontFamily: 'inherit',
+      }} onMouseEnter={e => { if (!open) e.currentTarget.style.background = t.surfaceHover; }}
+         onMouseLeave={e => { if (!open) e.currentTarget.style.background = 'transparent'; }}>
+        <span style={{ fontWeight: 600, color: t.text }}>{model.name}</span>
+        {model.variant && <span style={{ color: t.text3, fontWeight: 500 }}>{model.variant}</span>}
+        <span style={{ color: t.text4 }}>·</span>
+        <span>{EFFORTS.find(e => e.id === effort)?.label}</span>
+        {fastMode && <>
+          <span style={{ color: t.text4 }}>·</span>
+          <span>Fast</span>
+        </>}
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 49 }} />
+          <div style={{
+            position: 'absolute', bottom: 'calc(100% + 8px)', right: 0, zIndex: 50,
+            background: t.surface, border: `0.5px solid ${t.borderStrong}`,
+            borderRadius: 12, padding: 6, minWidth: 320,
+            boxShadow: '0 16px 40px rgba(0,0,0,0.28)',
+            animation: 'fade-in 0.15s ease',
+          }}>
+            {/* Models section */}
+            <div style={{ padding: '8px 10px 4px', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ flex: 1, fontSize: 11.5, color: t.text3, fontWeight: 500 }}>Models</span>
+              <Kbd>⇧</Kbd><Kbd>⌘</Kbd><Kbd>I</Kbd>
+            </div>
+            {MODELS.map((m, i) => {
+              const active = m.id === model.id;
+              return (
+                <div key={m.id} onClick={() => setModel(m)} style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  padding: '6px 10px', borderRadius: 7, cursor: 'pointer',
+                  background: active ? t.surfaceHover : 'transparent',
+                }} onMouseEnter={e => { if (!active) e.currentTarget.style.background = t.surfaceHover; }}
+                   onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}>
+                  <span style={{ flex: 1, display: 'flex', alignItems: 'baseline', gap: 6, fontSize: 13.5, color: t.text }}>
+                    <span style={{ fontWeight: 500 }}>{m.name}</span>
+                    {m.variant && <span style={{ color: t.text3, fontWeight: 500, fontSize: 13 }}>{m.variant}</span>}
+                  </span>
+                  {active ? <Icon name="check" size={13} color={t.accent} stroke={2.4} /> : <span style={{ width: 13 }} />}
+                  <span style={{ fontSize: 11.5, color: t.text4, fontFamily: 'inherit', minWidth: 10, textAlign: 'right' }}>{i + 1}</span>
+                </div>
+              );
+            })}
+
+            <div style={{ height: 0.5, background: t.border, margin: '6px 10px' }} />
+
+            {/* Effort section */}
+            <div style={{ padding: '4px 10px 4px', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ flex: 1, fontSize: 11.5, color: t.text3, fontWeight: 500 }}>Effort</span>
+              <Kbd>⇧</Kbd><Kbd>⌘</Kbd><Kbd>E</Kbd>
+            </div>
+            {EFFORTS.map(e => {
+              const active = e.id === effort;
+              return (
+                <div key={e.id} onClick={() => setEffort(e.id)} style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  padding: '6px 10px', borderRadius: 7, cursor: 'pointer',
+                  background: active ? t.surfaceHover : 'transparent',
+                }} onMouseEnter={ev => { if (!active) ev.currentTarget.style.background = t.surfaceHover; }}
+                   onMouseLeave={ev => { if (!active) ev.currentTarget.style.background = 'transparent'; }}>
+                  <span style={{ flex: 1, fontSize: 13.5, color: t.text, fontWeight: 500 }}>{e.label}</span>
+                  {active && <Icon name="check" size={13} color={t.accent} stroke={2.4} />}
+                </div>
+              );
+            })}
+
+            <div style={{ height: 0.5, background: t.border, margin: '6px 10px' }} />
+
+            {/* Fast mode */}
+            <div style={{ padding: '4px 10px 4px' }}>
+              <span style={{ fontSize: 11.5, color: t.text3, fontWeight: 500 }}>Fast mode</span>
+            </div>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '8px 10px', borderRadius: 7,
+            }}>
+              <span style={{ flex: 1, fontSize: 13.5, color: t.text }}>Enable fast mode</span>
+              <button onClick={() => setFastMode(!fastMode)} style={{
+                width: 34, height: 20, borderRadius: 99, border: 'none', cursor: 'pointer', padding: 0,
+                background: fastMode ? t.accent : t.surfaceActive,
+                position: 'relative', transition: 'background 0.15s',
+              }}>
+                <span style={{
+                  position: 'absolute', top: 2, left: fastMode ? 16 : 2,
+                  width: 16, height: 16, borderRadius: '50%', background: '#fff',
+                  transition: 'left 0.15s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                }} />
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── CONTEXT PICKER (window usage + plan usage) ────────────
+function ContextPicker({ open, setOpen, model, effort, fastMode }) {
+  const t = useT();
+  const colorMap = { accent: t.accent, accent2: t.accent2, accent3: t.accent3 };
+  return (
+    <div style={{ position: 'relative' }}>
+      <button onClick={() => setOpen(!open)} title="上下文与额度" style={{
+        marginLeft: 4, width: 22, height: 22, borderRadius: 99,
+        border: 'none', cursor: 'pointer', padding: 0,
+        background: 'transparent', position: 'relative',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+         onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+        {/* donut showing context fill */}
+        <svg width="14" height="14" viewBox="0 0 14 14">
+          <circle cx="7" cy="7" r="5.4" fill="none" stroke={t.text4} strokeWidth="1.4" opacity="0.5" />
+          <circle cx="7" cy="7" r="5.4" fill="none" stroke={t.accent} strokeWidth="1.6"
+            strokeDasharray={`${(7/100) * 33.93} 33.93`} strokeLinecap="round"
+            transform="rotate(-90 7 7)" />
+        </svg>
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 49 }} />
+          <div style={{
+            position: 'absolute', bottom: 'calc(100% + 8px)', right: -4, zIndex: 50,
+            background: t.surface, border: `0.5px solid ${t.borderStrong}`,
+            borderRadius: 12, padding: '14px 16px', minWidth: 380,
+            boxShadow: '0 16px 40px rgba(0,0,0,0.28)',
+            animation: 'fade-in 0.15s ease',
+          }}>
+            {/* Context window */}
+            <div style={{
+              display: 'flex', alignItems: 'center', cursor: 'pointer',
+              marginBottom: 6,
+            }}>
+              <span style={{ flex: 1, fontSize: 13, color: t.text3, fontWeight: 500 }}>Context window</span>
+              <span className="mono" style={{ fontSize: 12.5, color: t.text2 }}>67.9k / 1.0M <span style={{ color: t.text4 }}>(7%)</span></span>
+              <Icon name="chevronR" size={13} color={t.text4} stroke={2} />
+            </div>
+            <div style={{ height: 5, borderRadius: 99, background: t.surfaceActive, overflow: 'hidden', marginBottom: 14 }}>
+              <div style={{ width: '7%', height: '100%', background: t.accent, borderRadius: 99 }} />
+            </div>
+
+            <div style={{ height: 0.5, background: t.border, margin: '0 -16px 12px' }} />
+
+            {/* Plan usage */}
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10, cursor: 'pointer' }}>
+              <span style={{ flex: 1, fontSize: 13, color: t.text3, fontWeight: 500 }}>Plan usage</span>
+              <span style={{ display: 'inline-flex', color: t.text4 }}>
+                <Icon name="chevronR" size={13} stroke={2} />
+              </span>
+            </div>
+
+            {PLAN_USAGE.map(u => (
+              <div key={u.label} style={{ marginBottom: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', marginBottom: 5 }}>
+                  <span style={{ flex: 1, fontSize: 13.5, color: t.text, fontWeight: 500 }}>{u.label}</span>
+                  <span style={{ fontSize: 12, color: t.text3 }}>
+                    <span style={{ color: t.text2, fontWeight: 500 }}>{u.used}%</span>
+                    <span style={{ margin: '0 4px', color: t.text4 }}>·</span>
+                    <span>{u.reset}</span>
+                  </span>
+                </div>
+                <div style={{ height: 4, borderRadius: 99, background: t.surfaceActive, overflow: 'hidden' }}>
+                  <div style={{ width: u.used + '%', height: '100%', background: colorMap[u.color], borderRadius: 99 }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── RIGHT PANEL (file tree + diff viewer) ───────────────────
+function RightPanel({ onClose }) {
+  const t = useT();
+  const [tab, setTab] = useState('files');
+  const [activeFile, setActiveFile] = useState(FILES_CHANGED[5].path);
+  const [tasksView, setTasksView] = useState({ name: 'list', task: null });
+
+  // Simple synthetic diff for the active file
+  const diffLines = useMemo(() => {
+    const f = FILES_CHANGED.find(x => x.path === activeFile);
+    if (!f) return [];
+    // generate a fake but plausible diff preview
+    const base = [
+      { t: 'meta', n: '', s: '', text: `@@ ${f.status === 'A' ? '0,0 +1,' + Math.min(f.add, 40) : '1,3 +1,' + (f.add+3)} @@` },
+    ];
+    const lines = [];
+    if (activeFile.endsWith('.toml')) {
+      lines.push(
+        { t: 'add', n: 1, text: '[package]' },
+        { t: 'add', n: 2, text: 'name = "lingxi-protocol"' },
+        { t: 'add', n: 3, text: 'version = "0.1.0"' },
+        { t: 'add', n: 4, text: 'edition = "2021"' },
+        { t: 'add', n: 5, text: '' },
+        { t: 'add', n: 6, text: '[dependencies]' },
+        { t: 'add', n: 7, text: 'serde = { version = "1", features = ["derive"] }' },
+        { t: 'add', n: 8, text: 'serde_json = "1"' },
+        { t: 'add', n: 9, text: 'thiserror = "1"' },
+        { t: 'add', n: 10, text: 'bytes = "1.6"' },
+      );
+    } else if (activeFile.endsWith('.rs')) {
+      lines.push(
+        { t: 'add', n: 1, text: '//! Wire protocol for Lingxi agents.' },
+        { t: 'add', n: 2, text: '' },
+        { t: 'add', n: 3, text: 'use serde::{Deserialize, Serialize};' },
+        { t: 'add', n: 4, text: '' },
+        { t: 'add', n: 5, text: '#[derive(Debug, Clone, Serialize, Deserialize)]' },
+        { t: 'add', n: 6, text: 'pub struct AgentId(pub u64);' },
+        { t: 'add', n: 7, text: '' },
+        { t: 'add', n: 8, text: '#[derive(Debug, Clone, Serialize, Deserialize)]' },
+        { t: 'add', n: 9, text: 'pub struct TaskId(pub u64);' },
+        { t: 'add', n: 10, text: '' },
+        { t: 'add', n: 11, text: 'impl AgentId {' },
+        { t: 'add', n: 12, text: '    pub fn new() -> Self { Self(0) }' },
+        { t: 'add', n: 13, text: '}' },
+      );
+    } else {
+      lines.push(
+        { t: 'ctx', n: 1, text: '# ' + f.path },
+        { t: 'add', n: 2, text: '' },
+        { t: 'add', n: 3, text: '## Lingxi-Next workspace' },
+        { t: 'add', n: 4, text: '' },
+        { t: 'add', n: 5, text: 'Rust workspace with 5 crates:' },
+        { t: 'add', n: 6, text: '- lingxi-core' },
+        { t: 'add', n: 7, text: '- lingxi-protocol' },
+        { t: 'add', n: 8, text: '- lingxi-store' },
+      );
+    }
+    return [...base, ...lines];
+  }, [activeFile]);
+
+  return (
+    <div style={{
+      width: 380, flexShrink: 0, background: t.sidebarBg,
+      borderLeft: `0.5px solid ${t.border}`,
+      display: 'flex', flexDirection: 'column',
+      animation: 'slide-in-r 0.18s ease',
+    }}>
+      {/* Tab header */}
+      <div style={{
+        height: 44, flexShrink: 0, padding: '0 8px 0 14px',
+        display: 'flex', alignItems: 'center', gap: 2,
+        borderBottom: `0.5px solid ${t.border}`,
+      }}>
+        {[
+          { id: 'files',    icon: 'file',     label: 'Diff', count: FILES_CHANGED.length },
+          { id: 'plan',     icon: 'box',      label: 'Plan' },
+          { id: 'tasks',    icon: 'tasks',    label: 'Tasks', count: BG_TASKS_RUNNING.length },
+          { id: 'terminal', icon: 'terminal', label: 'Shell' },
+        ].map(x => {
+          const active = tab === x.id;
+          return (
+            <button key={x.id} onClick={() => setTab(x.id)} style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '6px 10px', borderRadius: 7, border: 'none', cursor: 'pointer',
+              background: active ? t.surfaceActive : 'transparent',
+              color: active ? t.text : t.text3,
+              fontSize: 12, fontWeight: active ? 600 : 500, fontFamily: 'inherit',
+            }} onMouseEnter={e => { if (!active) e.currentTarget.style.background = t.surfaceHover; }}
+               onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}>
+              <Icon name={x.icon} size={13} stroke={1.8} />
+              {x.label}
+              {x.count !== undefined && (
+                <span style={{ fontSize: 10, color: active ? t.accent : t.text4, fontWeight: 700, marginLeft: 1 }}>{x.count}</span>
+              )}
+            </button>
+          );
+        })}
+        <div style={{ flex: 1 }} />
+        <button onClick={onClose} style={iconBtn(t)}
+          onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <Icon name="x" size={14} color={t.text3} stroke={2} />
+        </button>
+      </div>
+
+      {tab === 'files' && (
+        <>
+          {/* File list */}
+          <div style={{ flexShrink: 0, maxHeight: 260, overflowY: 'auto', padding: '6px 6px', borderBottom: `0.5px solid ${t.border}` }}>
+            {FILES_CHANGED.map(f => {
+              const active = f.path === activeFile;
+              return (
+                <div key={f.path} onClick={() => setActiveFile(f.path)} style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '5px 8px', borderRadius: 6, cursor: 'pointer',
+                  background: active ? t.surfaceActive : 'transparent',
+                }} onMouseEnter={e => { if (!active) e.currentTarget.style.background = t.surfaceHover; }}
+                   onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}>
+                  <span style={{
+                    width: 16, height: 16, borderRadius: 3, flexShrink: 0,
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 9.5, fontWeight: 700, fontFamily: 'inherit',
+                    background: f.status === 'A' ? `color-mix(in oklab, ${t.add} 22%, transparent)` :
+                                f.status === 'M' ? `color-mix(in oklab, ${t.accent} 22%, transparent)` :
+                                `color-mix(in oklab, ${t.del} 22%, transparent)`,
+                    color: f.status === 'A' ? t.add : f.status === 'M' ? t.accent : t.del,
+                  }}>{f.status}</span>
+                  <span className="mono" style={{
+                    flex: 1, fontSize: 11.5, color: active ? t.text : t.text2,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', textAlign: 'left',
+                  }}>{f.path}</span>
+                  <span className="mono" style={{ fontSize: 10.5, color: t.add, fontWeight: 600 }}>+{f.add}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Diff body */}
+          <div style={{ flex: 1, overflow: 'auto', padding: '8px 0', background: t.windowBg }}>
+            <div style={{ padding: '4px 14px 10px', borderBottom: `0.5px solid ${t.border}`, marginBottom: 6 }}>
+              <div className="mono" style={{ fontSize: 11.5, color: t.text2, fontWeight: 600 }}>{activeFile}</div>
+            </div>
+            <div className="mono" style={{ fontSize: 11.5, lineHeight: 1.55, padding: '0 0 8px' }}>
+              {diffLines.map((l, i) => {
+                if (l.t === 'meta') return (
+                  <div key={i} style={{
+                    padding: '4px 14px', fontSize: 10.5,
+                    color: t.text4, background: t.surfaceHover, marginBottom: 4,
+                  }}>{l.text}</div>
+                );
+                const bg = l.t === 'add' ? `color-mix(in oklab, ${t.add} 8%, transparent)` :
+                           l.t === 'del' ? `color-mix(in oklab, ${t.del} 10%, transparent)` :
+                           'transparent';
+                const sigil = l.t === 'add' ? '+' : l.t === 'del' ? '−' : ' ';
+                const sigilColor = l.t === 'add' ? t.add : l.t === 'del' ? t.del : t.text4;
+                return (
+                  <div key={i} style={{ display: 'flex', background: bg }}>
+                    <span style={{ width: 38, textAlign: 'right', color: t.text4, padding: '0 8px', flexShrink: 0, userSelect: 'none' }}>{l.n}</span>
+                    <span style={{ width: 16, color: sigilColor, flexShrink: 0, fontWeight: 600 }}>{sigil}</span>
+                    <span style={{ color: l.t === 'ctx' ? t.text3 : t.text, paddingRight: 14, whiteSpace: 'pre' }}>{l.text}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
+
+      {tab === 'plan' && (
+        <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
+          <div style={{ fontSize: 11, color: t.text4, fontWeight: 600, letterSpacing: 0.6, textTransform: 'uppercase', marginBottom: 10 }}>Implementation plan</div>
+          {[
+            { i: 1, t: 'Bootstrap workspace',           s: 'done',    d: 'Cargo.toml + readme', dur: '2m 14s' },
+            { i: 2, t: 'Create lingxi-protocol skeleton', s: 'done',  d: '5 crates · 11 files', dur: '4m 02s' },
+            { i: 3, t: 'IDs (newtype wrappers)',        s: 'running', d: 'AgentId · TaskId · MessageId', dur: '38s' },
+            { i: 4, t: 'Codec — bincode + serde',       s: 'todo' },
+            { i: 5, t: 'Async runtime trait',           s: 'todo' },
+            { i: 6, t: 'CLI entrypoint',                s: 'todo' },
+            { i: 7, t: 'Integration tests',             s: 'todo' },
+          ].map(s => (
+            <div key={s.i} style={{ display: 'flex', gap: 12, padding: '10px 0', borderBottom: `0.5px solid ${t.border}` }}>
+              <div style={{
+                width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 1,
+                background: s.s === 'done' ? `color-mix(in oklab, ${t.ok} 22%, transparent)` :
+                            s.s === 'running' ? t.accentBg : 'transparent',
+                border: `1px solid ${s.s === 'done' ? `color-mix(in oklab, ${t.ok} 35%, transparent)` : s.s === 'running' ? t.accentBorder : t.border}`,
+              }}>
+                {s.s === 'done' && <Icon name="check" size={11} color={t.ok} stroke={2.5} />}
+                {s.s === 'running' && <span style={{ width: 6, height: 6, borderRadius: 99, background: t.accent, animation: 'shimmer 1.3s infinite' }} />}
+                {s.s === 'todo' && <span style={{ fontSize: 10, color: t.text4, fontWeight: 500 }}>{s.i}</span>}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: 13, color: s.s === 'todo' ? t.text3 : t.text, fontWeight: 500 }}>{s.t}</span>
+                  {s.dur && <span className="mono" style={{ fontSize: 10.5, color: t.text4, marginLeft: 'auto' }}>{s.dur}</span>}
+                </div>
+                {s.d && <div style={{ fontSize: 11.5, color: t.text3, marginTop: 3, lineHeight: 1.45 }}>{s.d}</div>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === 'tasks' && (
+        tasksView.name === 'list' ? (
+          <BgTasksList embedded onClose={onClose}
+            onOpenTranscript={task => setTasksView({ name: 'transcript', task })} />
+        ) : (
+          <BgTasksTranscript embedded task={tasksView.task}
+            onBack={() => setTasksView({ name: 'list', task: null })}
+            onClose={onClose} />
+        )
+      )}
+
+      {tab === 'terminal' && (
+        <div style={{ flex: 1, overflowY: 'auto', padding: 14, background: t.windowBg }} className="mono">
+          <div style={{ fontSize: 11.5, color: t.text3, lineHeight: 1.7 }}>
+            <div><span style={{ color: t.accent }}>~/lingxi-next</span> <span style={{ color: t.text4 }}>on</span> <span style={{ color: t.warn }}>main *</span></div>
+            <div><span style={{ color: t.add }}>$</span> <span style={{ color: t.text }}>cargo check --workspace</span></div>
+            <div style={{ color: t.text2 }}>    Checking lingxi-core v0.1.0</div>
+            <div style={{ color: t.text2 }}>    Checking lingxi-protocol v0.1.0</div>
+            <div style={{ color: t.text2 }}>    Checking lingxi-store v0.1.0</div>
+            <div style={{ color: t.text2 }}>    Checking lingxi-runtime v0.1.0</div>
+            <div style={{ color: t.add }}>    Finished `dev` profile [unoptimized] in 4.82s</div>
+            <div style={{ marginTop: 8 }}>
+              <span style={{ color: t.accent }}>~/lingxi-next</span> <span style={{ color: t.text4 }}>on</span> <span style={{ color: t.warn }}>main *</span>
+            </div>
+            <div>
+              <span style={{ color: t.add }}>$</span>
+              <span style={{ display: 'inline-block', width: 8, height: 13, background: t.text, marginLeft: 6, verticalAlign: -2, animation: 'cursor-blink 1s infinite' }} />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SETTINGS PAGE (full window) ─────────────────────────────
+const SETTINGS_NAV = [
+  { group: null, items: [
+    { id: 'general',     label: 'General' },
+    { id: 'account',     label: 'Account' },
+    { id: 'privacy',     label: 'Privacy' },
+    { id: 'billing',     label: 'Billing' },
+    { id: 'usage',       label: 'Usage' },
+    { id: 'capabilities',label: 'Capabilities' },
+    { id: 'connectors',  label: 'Connectors' },
+    { id: 'code',        label: 'Lingxi Code' },
+    { id: 'cowork',      label: 'Cowork' },
+    { id: 'chrome',      label: 'Lingxi in Chrome', tag: 'Beta' },
+  ] },
+  { group: 'Desktop app', items: [
+    { id: 'dt-extensions',label: 'Extensions' },
+    { id: 'dt-developer', label: 'Developer' },
+  ] },
+];
+
+function Segmented({ value, onChange, options }) {
+  const t = useT();
+  return (
+    <div style={{
+      display: 'inline-flex', padding: 3, gap: 2, borderRadius: 9,
+      background: t.sidebarBg, border: `0.5px solid ${t.border}`,
+    }}>
+      {options.map(o => {
+        const active = value === o.id;
+        return (
+          <button key={o.id} onClick={() => onChange(o.id)} disabled={o.disabled} style={{
+            padding: '5px 14px', borderRadius: 7, border: 'none', cursor: o.disabled ? 'not-allowed' : 'pointer',
+            background: active ? t.surface : 'transparent',
+            color: active ? t.text : (o.disabled ? t.text4 : t.text3),
+            fontSize: 12.5, fontWeight: active ? 600 : 500, fontFamily: 'inherit',
+            boxShadow: active ? '0 1px 2px rgba(0,0,0,0.06), 0 0 0 0.5px ' + t.border : 'none',
+            transition: 'all 0.12s',
+          }}>{o.label}</button>
+        );
+      })}
+    </div>
+  );
+}
+
+function Toggle({ value, onChange }) {
+  const t = useT();
+  return (
+    <button onClick={() => onChange(!value)} style={{
+      width: 38, height: 22, borderRadius: 99, border: 'none', cursor: 'pointer', padding: 0,
+      background: value ? t.accent : t.surfaceActive,
+      position: 'relative', transition: 'background 0.15s', flexShrink: 0,
+    }}>
+      <span style={{
+        position: 'absolute', top: 2, left: value ? 18 : 2,
+        width: 18, height: 18, borderRadius: '50%', background: '#fff',
+        transition: 'left 0.15s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+      }} />
+    </button>
+  );
+}
+
+function SettingsSelect({ value, options, onChange, placeholder }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const selected = options.find(o => o.id === value);
+  return (
+    <div style={{ position: 'relative', minWidth: 260 }}>
+      <button onClick={() => setOpen(!open)} style={{
+        width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+        padding: '8px 12px', borderRadius: 8, cursor: 'pointer',
+        background: t.surface, border: `0.5px solid ${t.border}`,
+        color: t.text, fontSize: 13, fontFamily: 'inherit', textAlign: 'left',
+      }} onMouseEnter={e => e.currentTarget.style.borderColor = t.borderStrong}
+         onMouseLeave={e => e.currentTarget.style.borderColor = t.border}>
+        <span style={{ flex: 1 }}>{selected ? selected.label : placeholder}</span>
+        <Icon name="chevron" size={13} color={t.text3} stroke={2} />
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 49 }} />
+          <div style={{
+            position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 50,
+            background: t.surface, border: `0.5px solid ${t.borderStrong}`,
+            borderRadius: 10, padding: 4,
+            boxShadow: '0 12px 32px rgba(0,0,0,0.25)',
+            animation: 'fade-in 0.15s ease',
+          }}>
+            {options.map(o => (
+              <div key={o.id} onClick={() => { onChange(o.id); setOpen(false); }} style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '7px 10px', borderRadius: 6, cursor: 'pointer',
+                background: o.id === value ? t.surfaceHover : 'transparent',
+                color: t.text, fontSize: 13,
+              }} onMouseEnter={e => { if (o.id !== value) e.currentTarget.style.background = t.surfaceHover; }}
+                 onMouseLeave={e => { if (o.id !== value) e.currentTarget.style.background = 'transparent'; }}>
+                {o.dot && <span style={{ width: 12, height: 12, borderRadius: 3, background: o.dot, flexShrink: 0, border: `0.5px solid ${t.border}` }} />}
+                <span style={{ flex: 1 }}>{o.label}</span>
+                {o.id === value && <Icon name="check" size={12} color={t.accent} stroke={2.5} />}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SettingsRow({ title, desc, children }) {
+  const t = useT();
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'flex-start', gap: 24, padding: '18px 0',
+      borderBottom: `0.5px solid ${t.border}`,
+    }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 14, fontWeight: 500, color: t.text }}>{title}</div>
+        {desc && <div style={{ fontSize: 12.5, color: t.text3, marginTop: 4, lineHeight: 1.5, maxWidth: 620 }}>{desc}</div>}
+      </div>
+      <div style={{ flexShrink: 0, paddingTop: 1 }}>{children}</div>
+    </div>
+  );
+}
+
+function SectionTitle({ children }) {
+  const t = useT();
+  return <div style={{ fontSize: 16, fontWeight: 600, color: t.text, paddingTop: 32, paddingBottom: 4 }}>{children}</div>;
+}
+
+const CODE_THEMES = {
+  light: [
+    { id: 'lingxi-light', label: 'Lingxi Light',    dot: '#fbf9f5' },
+    { id: 'gh-light',     label: 'GitHub Light',    dot: '#ffffff' },
+    { id: 'solarized',    label: 'Solarized Light', dot: '#fdf6e3' },
+    { id: 'paper',        label: 'Paper',           dot: '#f5f1e8' },
+  ],
+  dark: [
+    { id: 'lingxi-dark',  label: 'Lingxi Dark',     dot: '#15131a' },
+    { id: 'midnight',     label: 'Midnight',        dot: '#0a0a0e' },
+    { id: 'tokyo',        label: 'Tokyo Night',     dot: '#1a1b26' },
+    { id: 'monokai',      label: 'Monokai',         dot: '#272822' },
+  ],
+};
+
+function CodePreview({ theme }) {
+  const c = theme === 'dark' ? {
+    bg: '#15131a', text: '#dfd9eb', mute: '#7a7286',
+    kw: '#c084e8', fn: '#7dd3a3', str: '#e8a872', name: '#8db8e8',
+    addBg: '#0e2818', delBg: '#2a1418', addText: '#a5e8b8', delText: '#e8a5a5',
+  } : {
+    bg: '#fbf9f5', text: '#2c2a32', mute: '#8a8294',
+    kw: '#7a3fb8', fn: '#1f7a4d', str: '#a85a1e', name: '#3460a8',
+    addBg: '#e1f5e7', delBg: '#fde2e2', addText: '#1a6a36', delText: '#9a2828',
+  };
+  const lines = [
+    { n: 1, t: 'ctx', text: <><span style={{ color: c.kw }}>function</span> <span style={{ color: c.fn }}>greet</span>(<span style={{ color: c.name }}>name</span>: <span style={{ color: c.kw }}>string</span>) {'{'}</> },
+    { n: 2, t: 'del', text: <>{'  '}<span style={{ color: c.kw }}>return</span> <span style={{ color: c.str }}>"Hello, "</span> + <span style={{ color: c.name }}>name</span>;</> },
+    { n: 2, t: 'add', text: <>{'  '}<span style={{ color: c.kw }}>return</span> <span style={{ color: c.str }}>{'`Hello, ${name}!`'}</span>;</> },
+    { n: 3, t: 'ctx', text: '}' },
+  ];
+  return (
+    <div className="mono" style={{
+      background: c.bg, color: c.text,
+      borderRadius: 10, overflow: 'hidden',
+      fontSize: 12.5, lineHeight: 1.75, flex: 1, minWidth: 0,
+      border: theme === 'light' ? '0.5px solid rgba(0,0,0,0.08)' : 'none',
+    }}>
+      {lines.map((l, i) => {
+        const bg = l.t === 'add' ? c.addBg : l.t === 'del' ? c.delBg : 'transparent';
+        const sigil = l.t === 'add' ? '+' : l.t === 'del' ? '−' : ' ';
+        const sigilColor = l.t === 'add' ? c.addText : l.t === 'del' ? c.delText : c.mute;
+        return (
+          <div key={i} style={{ display: 'flex', background: bg }}>
+            <span style={{ width: 38, textAlign: 'right', color: c.mute, padding: '0 10px', flexShrink: 0 }}>{l.n}</span>
+            <span style={{ width: 16, color: sigilColor, flexShrink: 0, fontWeight: 600 }}>{sigil}</span>
+            <span style={{ paddingRight: 14, whiteSpace: 'pre' }}>{l.text}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function SettingsCodePage() {
+  const t = useT();
+  const [darkVariant, setDarkVariant] = useState('dark');
+  const [interfaceFont, setInterfaceFont] = useState('lingxi');
+  const [textSize, setTextSize] = useState('medium');
+  const [codeFont, setCodeFont] = useState('');
+  const [lightCodeTheme, setLightCodeTheme] = useState('lingxi-light');
+  const [darkCodeTheme, setDarkCodeTheme] = useState('lingxi-dark');
+  const [classify, setClassify] = useState(true);
+  const [bypass, setBypass] = useState(true);
+
+  return (
+    <div>
+      <SectionTitle>Appearance</SectionTitle>
+      <SettingsRow title="Dark mode" desc="How dark the interface looks when using dark mode.">
+        <Segmented value={darkVariant} onChange={setDarkVariant} options={[
+          { id: 'dark',     label: 'Dark' },
+          { id: 'midnight', label: 'Midnight' },
+        ]} />
+      </SettingsRow>
+      <SettingsRow title="Interface font" desc="Font for the Lingxi Code interface — menus, sidebar, and chat.">
+        <Segmented value={interfaceFont} onChange={setInterfaceFont} options={[
+          { id: 'lingxi', label: 'Lingxi Sans' },
+          { id: 'system', label: 'System' },
+        ]} />
+      </SettingsRow>
+      <SettingsRow title="Transcript text size" desc="Size of the conversation transcript text.">
+        <Segmented value={textSize} onChange={setTextSize} options={[
+          { id: 'small',  label: 'Small' },
+          { id: 'medium', label: 'Medium' },
+          { id: 'large',  label: 'Large' },
+        ]} />
+      </SettingsRow>
+
+      <SectionTitle>Code appearance</SectionTitle>
+      <SettingsRow title="Code font" desc="Set a custom monospace font for code and terminal.">
+        <input value={codeFont} onChange={e => setCodeFont(e.target.value)}
+          placeholder="e.g. JetBrains Mono"
+          style={{
+            width: 280, padding: '8px 12px', borderRadius: 8,
+            background: t.surface, border: `0.5px solid ${t.border}`,
+            color: t.text, fontSize: 13, fontFamily: 'inherit', outline: 'none',
+          }} />
+      </SettingsRow>
+      <div style={{ display: 'flex', gap: 14, padding: '14px 0 22px', borderBottom: `0.5px solid ${t.border}` }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <SettingsSelect value={lightCodeTheme} onChange={setLightCodeTheme} options={CODE_THEMES.light} />
+          <div style={{ marginTop: 12 }}><CodePreview theme="light" /></div>
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <SettingsSelect value={darkCodeTheme} onChange={setDarkCodeTheme} options={CODE_THEMES.dark} />
+          <div style={{ marginTop: 12 }}><CodePreview theme="dark" /></div>
+        </div>
+      </div>
+
+      <SectionTitle>General</SectionTitle>
+      <SettingsRow title="Classify session states"
+        desc="Allow Lingxi to automatically classify sessions as blocked, ready for review, or done. Classifying sessions counts towards your plan usage. Applies to new sessions.">
+        <Toggle value={classify} onChange={setClassify} />
+      </SettingsRow>
+
+      <SectionTitle>Local sessions</SectionTitle>
+      <SettingsRow title="Allow bypass permissions mode"
+        desc="Bypass all permission checks and let Lingxi work uninterrupted. This works well for workflows like fixing lint errors or generating boilerplate code. Letting Lingxi run arbitrary commands is risky and can result in data loss, system corruption, or data exfiltration (e.g. prompt injection).">
+        <Toggle value={bypass} onChange={setBypass} />
+      </SettingsRow>
+      <div style={{ height: 60 }} />
+    </div>
+  );
+}
+
+function SettingsAccountPage() {
+  const t = useT();
+  return (
+    <div>
+      <SectionTitle>Profile</SectionTitle>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 18, padding: '18px 0',
+        borderBottom: `0.5px solid ${t.border}`,
+      }}>
+        <div style={{
+          width: 56, height: 56, borderRadius: 12,
+          background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
+          color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 22, fontWeight: 600,
+        }}>LL</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: t.text }}>lingfeng</div>
+          <div style={{ fontSize: 12.5, color: t.text3, marginTop: 3 }}>luolingfeng.flare@gmail.com · Max plan</div>
+        </div>
+        <button style={{
+          padding: '8px 14px', borderRadius: 8,
+          background: t.surface, color: t.text,
+          border: `0.5px solid ${t.border}`, cursor: 'pointer',
+          fontSize: 12.5, fontWeight: 500, fontFamily: 'inherit',
+        }}>Edit profile</button>
+      </div>
+      <SettingsRow title="Display name" desc="Shown next to your messages and on shared conversations.">
+        <input defaultValue="lingfeng" style={{
+          width: 220, padding: '8px 12px', borderRadius: 8,
+          background: t.surface, border: `0.5px solid ${t.border}`,
+          color: t.text, fontSize: 13, fontFamily: 'inherit', outline: 'none',
+        }} />
+      </SettingsRow>
+      <SettingsRow title="Email" desc="Used for sign-in and account recovery.">
+        <span style={{ fontSize: 13, color: t.text2 }}>luolingfeng.flare@gmail.com</span>
+      </SettingsRow>
+      <SettingsRow title="Sign out everywhere" desc="Revoke all active sessions on other devices.">
+        <button style={{
+          padding: '8px 14px', borderRadius: 8,
+          background: 'transparent', color: t.danger,
+          border: `0.5px solid color-mix(in oklab, ${t.danger} 40%, transparent)`, cursor: 'pointer',
+          fontSize: 12.5, fontWeight: 500, fontFamily: 'inherit',
+        }}>Sign out</button>
+      </SettingsRow>
+      <div style={{ height: 60 }} />
+    </div>
+  );
+}
+
+function SettingsUsagePage() {
+  const t = useT();
+  const [credits, setCredits] = useState(false);
+
+  const Bar = ({ pct }) => (
+    <div style={{
+      flex: 1, height: 6, borderRadius: 99,
+      background: t.surfaceActive, overflow: 'hidden',
+    }}>
+      <div style={{ width: `${pct}%`, height: '100%', background: t.accent, borderRadius: 99 }} />
+    </div>
+  );
+
+  const Row = ({ name, sub, pct, right, info }) => (
+    <div style={{
+      display: 'grid', gridTemplateColumns: '1fr 1.6fr auto', gap: 24,
+      alignItems: 'center', padding: '14px 0',
+    }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 13.5, color: t.text, fontWeight: 500 }}>{name}</span>
+          {info && (
+            <span style={{
+              width: 14, height: 14, borderRadius: 99,
+              border: `1px solid ${t.border}`, color: t.text4,
+              fontSize: 9, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              fontStyle: 'italic', fontFamily: 'Georgia, serif', fontWeight: 600, cursor: 'help',
+            }} title={info}>i</span>
+          )}
+        </div>
+        {sub && <div style={{ fontSize: 12, color: t.text4, marginTop: 3 }}>{sub}</div>}
+      </div>
+      <Bar pct={pct} />
+      <span style={{ fontSize: 12.5, color: t.text2, minWidth: 56, textAlign: 'right' }}>{right}</span>
+    </div>
+  );
+
+  return (
+    <div>
+      {/* Plan usage limits */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, paddingTop: 32, paddingBottom: 4 }}>
+        <span style={{ fontSize: 16, fontWeight: 600, color: t.text }}>Plan usage limits</span>
+        <span style={{ fontSize: 13, color: t.text3 }}>Max (20×)</span>
+      </div>
+
+      <div style={{ paddingTop: 10, borderBottom: `0.5px solid ${t.border}`, paddingBottom: 10 }}>
+        <Row
+          name="Current session"
+          sub="Resets in 1 hr 3 min"
+          pct={60}
+          right="60% used"
+        />
+      </div>
+
+      {/* Weekly limits */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, paddingTop: 32, paddingBottom: 4 }}>
+        <span style={{ fontSize: 16, fontWeight: 600, color: t.text }}>Weekly limits</span>
+      </div>
+      <a style={{
+        display: 'inline-block', marginTop: 14, marginBottom: 6,
+        fontSize: 13, color: t.link || t.accent2 || t.accent,
+        textDecoration: 'underline',
+        textDecorationColor: `color-mix(in oklab, ${t.accent2 || t.accent} 40%, transparent)`,
+        textUnderlineOffset: 3, cursor: 'pointer', fontWeight: 500,
+      }}>Learn more about usage limits</a>
+
+      <div style={{ paddingTop: 4 }}>
+        <Row name="All models"     sub="Resets Thu 11:59 AM" pct={51} right="51% used" />
+        <Row name="Lingxi 4.7"     sub="Resets Thu 12:00 PM" pct={9}  right="9% used"  info="Per-model weekly quota for Lingxi 4.7." />
+        <Row name="Lingxi Design"  sub="Resets Thu 12:00 PM" pct={14} right="14% used" info="Quota for design-mode generations." />
+      </div>
+
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        paddingTop: 12, paddingBottom: 12,
+      }}>
+        <span style={{ fontSize: 12, color: t.text4 }}>Last updated: 3 minutes ago</span>
+        <button style={{
+          width: 20, height: 20, borderRadius: 99,
+          border: 'none', background: 'transparent', cursor: 'pointer',
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          color: t.text3,
+        }} title="Refresh"
+           onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+           onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/>
+          </svg>
+        </button>
+      </div>
+
+      {/* Additional features */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, paddingTop: 24, paddingBottom: 4 }}>
+        <span style={{ fontSize: 16, fontWeight: 600, color: t.text }}>Additional features</span>
+      </div>
+      <div style={{ paddingTop: 10 }}>
+        <Row
+          name="Daily included routine runs"
+          sub="You haven't run any routines yet"
+          pct={0.5}
+          right="0 / 15"
+          info="Scheduled background routines included with your Max plan."
+        />
+      </div>
+
+      {/* Usage credits */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, paddingTop: 28, paddingBottom: 4 }}>
+        <span style={{ fontSize: 16, fontWeight: 600, color: t.text }}>Usage credits</span>
+      </div>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 24,
+        padding: '18px 0', borderBottom: `0.5px solid ${t.border}`,
+      }}>
+        <div style={{ flex: 1, fontSize: 13, color: t.text, lineHeight: 1.55 }}>
+          Turn on usage credits to keep using Lingxi if you hit a limit.{' '}
+          <a style={{
+            color: t.link || t.accent2 || t.accent,
+            textDecoration: 'underline',
+            textDecorationColor: `color-mix(in oklab, ${t.accent2 || t.accent} 40%, transparent)`,
+            textUnderlineOffset: 3, cursor: 'pointer', fontWeight: 500,
+          }}>Learn more</a>
+        </div>
+        <Toggle value={credits} onChange={setCredits} />
+      </div>
+      <div style={{ height: 60 }} />
+    </div>
+  );
+}
+
+function SettingsBillingPage() {
+  const t = useT();
+  const invoices = [
+    { date: 'May 11, 2026', total: '$109.48', status: 'Paid' },
+    { date: 'May 8, 2026',  total: '$90.69',  status: 'Paid' },
+    { date: 'Apr 22, 2026', total: '$20.00',  status: 'Paid' },
+  ];
+  return (
+    <div>
+      <SectionTitle>Plan</SectionTitle>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 18, padding: '18px 0',
+        borderBottom: `0.5px solid ${t.border}`,
+      }}>
+        <div style={{
+          width: 56, height: 56, borderRadius: 12,
+          background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
+          color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+          flexShrink: 0,
+        }}>
+          {/* Constellation mark */}
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="5" r="1.8" fill="currentColor" />
+            <circle cx="5"  cy="12" r="1.5" fill="currentColor" />
+            <circle cx="19" cy="12" r="1.5" fill="currentColor" />
+            <circle cx="8"  cy="19" r="1.3" fill="currentColor" />
+            <circle cx="16" cy="19" r="1.3" fill="currentColor" />
+            <path d="M12 6.5v5M6.4 12.6 11 13M17.6 12.6 13 13M9 18l2.5-4M15 18l-2.5-4" />
+          </svg>
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: t.text }}>Lingxi Max</div>
+          <div style={{ fontSize: 12.5, color: t.text3, marginTop: 3 }}>20× more usage than Pro</div>
+          <div style={{ fontSize: 12.5, color: t.text4, marginTop: 2 }}>
+            Your subscription will auto renew on Jun 11, 2026.
+          </div>
+        </div>
+        <button style={{
+          padding: '8px 14px', borderRadius: 8,
+          background: t.surface, color: t.text,
+          border: `0.5px solid ${t.border}`, cursor: 'pointer',
+          fontSize: 12.5, fontWeight: 500, fontFamily: 'inherit',
+        }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+           onMouseLeave={e => e.currentTarget.style.background = t.surface}>Adjust plan</button>
+      </div>
+
+      <SectionTitle>Payment</SectionTitle>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 24, padding: '18px 0',
+        borderBottom: `0.5px solid ${t.border}`,
+      }}>
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{
+            width: 36, height: 26, borderRadius: 5,
+            background: '#1a1f36',
+            position: 'relative', overflow: 'hidden', flexShrink: 0,
+          }}>
+            <span style={{
+              position: 'absolute', top: 6, left: 6, width: 14, height: 14, borderRadius: '50%',
+              background: '#eb001b',
+            }} />
+            <span style={{
+              position: 'absolute', top: 6, right: 6, width: 14, height: 14, borderRadius: '50%',
+              background: '#f79e1b', opacity: 0.95,
+            }} />
+            <span style={{
+              position: 'absolute', top: 6, left: 13, width: 10, height: 14, borderRadius: '50%',
+              background: '#ff5f00',
+            }} />
+          </div>
+          <span style={{ fontSize: 13.5, color: t.text }}>Mastercard •••• 2526</span>
+        </div>
+        <button style={{
+          padding: '8px 14px', borderRadius: 8,
+          background: t.surface, color: t.text,
+          border: `0.5px solid ${t.border}`, cursor: 'pointer',
+          fontSize: 12.5, fontWeight: 500, fontFamily: 'inherit',
+        }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+           onMouseLeave={e => e.currentTarget.style.background = t.surface}>Update</button>
+      </div>
+
+      <SectionTitle>Invoices</SectionTitle>
+      <div style={{ paddingTop: 14 }}>
+        <div style={{
+          display: 'grid', gridTemplateColumns: '1.4fr 1fr 1fr 0.6fr', gap: 12,
+          padding: '10px 4px', fontSize: 12, color: t.text3, fontWeight: 500,
+          borderBottom: `0.5px solid ${t.border}`,
+        }}>
+          <span>Date</span>
+          <span>Total</span>
+          <span>Status</span>
+          <span style={{ textAlign: 'right' }}>Actions</span>
+        </div>
+        {invoices.map((inv, i) => (
+          <div key={i} style={{
+            display: 'grid', gridTemplateColumns: '1.4fr 1fr 1fr 0.6fr', gap: 12,
+            padding: '14px 4px', fontSize: 13, color: t.text,
+            borderBottom: i < invoices.length - 1 ? `0.5px solid ${t.border}` : 'none',
+            alignItems: 'center',
+          }}>
+            <span>{inv.date}</span>
+            <span style={{ color: t.text }}>{inv.total}</span>
+            <span style={{ color: t.text2 }}>{inv.status}</span>
+            <a style={{
+              color: t.link || t.accent2 || t.accent,
+              textAlign: 'right', textDecoration: 'underline',
+              textDecorationColor: `color-mix(in oklab, ${t.accent2 || t.accent} 40%, transparent)`,
+              textUnderlineOffset: 3, cursor: 'pointer', fontWeight: 500,
+            }}>View</a>
+          </div>
+        ))}
+      </div>
+
+      <SectionTitle>Cancellation</SectionTitle>
+      <SettingsRow title="Cancel plan" desc="You'll keep your Max plan features until Jun 11, 2026, then return to the free tier.">
+        <button style={{
+          padding: '8px 16px', borderRadius: 8,
+          background: t.danger, color: '#fff',
+          border: 'none', cursor: 'pointer',
+          fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
+        }} onMouseEnter={e => e.currentTarget.style.filter = 'brightness(0.92)'}
+           onMouseLeave={e => e.currentTarget.style.filter = 'none'}>Cancel</button>
+      </SettingsRow>
+      <div style={{ height: 60 }} />
+    </div>
+  );
+}
+
+function SettingsGeneralPage({ theme, setTheme }) {
+  const t = useT();
+  const [fullName, setFullName] = useState('lingfeng luo');
+  const [nickname, setNickname] = useState('lingfeng');
+  const [role, setRole] = useState('');
+  const [instructions, setInstructions] = useState('');
+  const [chatFont, setChatFont] = useState('lingxi-sans');
+  const [voice, setVoice] = useState('mellow');
+  const [voiceSpeed, setVoiceSpeed] = useState('fast');
+  const [notif, setNotif] = useState({
+    responseDone: true, codeUpdates: true, permission: true, email: false, dispatch: true,
+  });
+  const setN = (k, v) => setNotif(n => ({ ...n, [k]: v }));
+
+  // Desktop + Browser Use
+  const [runOnStartup, setRunOnStartup] = useState(false);
+  const [quickShortcut, setQuickShortcut] = useState('opt2');
+  const [voiceShortcut, setVoiceShortcut] = useState('caps');
+  const [menuBar, setMenuBar] = useState(true);
+  const [keepAwake, setKeepAwake] = useState(true);
+  const [allowBrowser, setAllowBrowser] = useState(true);
+  const [computerUse, setComputerUse] = useState(true);
+  const [unhide, setUnhide] = useState(true);
+
+  // Tri-state appearance
+  const [appearance, setAppearance] = useState(theme);
+  const applyAppearance = (mode) => {
+    setAppearance(mode);
+    if (mode === 'light' || mode === 'dark') setTheme(mode);
+    else if (typeof window !== 'undefined' && window.matchMedia) {
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      setTheme(prefersDark ? 'dark' : 'light');
+    }
+  };
+
+  // ── shared styles ──
+  const link = t.link || t.accent2 || t.accent;
+  const linkStyle = {
+    color: link, textDecoration: 'underline',
+    textDecorationColor: `color-mix(in oklab, ${link} 40%, transparent)`,
+    textUnderlineOffset: 3, cursor: 'pointer', fontWeight: 500,
+  };
+  const inputStyle = {
+    width: 260, padding: '7px 12px', borderRadius: 8,
+    background: t.surface, border: `0.5px solid ${t.border}`,
+    color: t.text, fontSize: 13, fontFamily: 'inherit', outline: 'none',
+  };
+  const pillStyle = {
+    fontSize: 11, padding: '3px 9px', borderRadius: 5,
+    background: t.surfaceHover, color: t.text3, fontWeight: 600,
+  };
+  const ROW_PAD = '16px 0';
+  const titleStyle = { fontSize: 14, fontWeight: 500, color: t.text, lineHeight: 1.35 };
+  const descStyle  = { fontSize: 12.5, color: t.text3, marginTop: 4, lineHeight: 1.5, maxWidth: 620 };
+
+  // ── row helpers ──
+  // Inline row: title+desc on left, control on right.
+  const Row = ({ title, desc, badge, children, align = 'start' }) => (
+    <div style={{
+      display: 'flex', alignItems: align === 'center' ? 'center' : 'flex-start',
+      gap: 24, padding: ROW_PAD,
+      borderBottom: `0.5px solid ${t.border}`,
+    }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={titleStyle}>{title}</span>
+          {badge && <span style={pillStyle}>{badge}</span>}
+        </div>
+        {desc && <div style={descStyle}>{desc}</div>}
+      </div>
+      <div style={{ flexShrink: 0, paddingTop: align === 'center' ? 0 : 1 }}>{children}</div>
+    </div>
+  );
+
+  // Block row: title+desc full-width, then block content beneath (for cards/empty states).
+  const BlockRow = ({ title, desc, action, children }) => (
+    <div style={{ padding: ROW_PAD, borderBottom: `0.5px solid ${t.border}` }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 24 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={titleStyle}>{title}</div>
+          {desc && <div style={descStyle}>{desc}</div>}
+        </div>
+        {action && <div style={{ flexShrink: 0 }}>{action}</div>}
+      </div>
+      {children && <div style={{ marginTop: 12 }}>{children}</div>}
+    </div>
+  );
+
+  // Appearance tri-state button
+  const AppearanceBtn = ({ mode, children }) => {
+    const active = appearance === mode;
+    return (
+      <button onClick={() => applyAppearance(mode)} title={mode}
+        style={{
+          width: 32, height: 26, padding: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          border: active ? `0.5px solid ${t.border}` : '0.5px solid transparent',
+          background: active ? t.surface : 'transparent',
+          color: active ? t.text : t.text3,
+          borderRadius: 7, cursor: 'pointer',
+          boxShadow: active ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
+          transition: 'all 0.12s',
+        }}
+        onMouseEnter={e => { if (!active) e.currentTarget.style.color = t.text2; }}
+        onMouseLeave={e => { if (!active) e.currentTarget.style.color = t.text3; }}>
+        {children}
+      </button>
+    );
+  };
+
+  // Subtle ghost button used for "Recheck", "Add app"
+  const GhostBtn = ({ children, leading }) => (
+    <button style={{
+      display: 'inline-flex', alignItems: 'center', gap: 6,
+      padding: '6px 12px', borderRadius: 7,
+      background: t.surface, border: `0.5px solid ${t.border}`,
+      color: t.text2, fontSize: 12, fontWeight: 500, fontFamily: 'inherit',
+      cursor: 'pointer',
+    }} onMouseEnter={e => e.currentTarget.style.borderColor = t.borderStrong}
+       onMouseLeave={e => e.currentTarget.style.borderColor = t.border}>
+      {leading}
+      {children}
+    </button>
+  );
+
+  return (
+    <div>
+      <SectionTitle>Profile</SectionTitle>
+
+      <Row title="Avatar" align="center">
+        <div style={{
+          width: 32, height: 32, borderRadius: 99,
+          background: t.surfaceActive, color: t.text,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 12, fontWeight: 600, letterSpacing: 0.5,
+        }}>LL</div>
+      </Row>
+
+      <Row title="Full name" align="center">
+        <input value={fullName} onChange={e => setFullName(e.target.value)} style={inputStyle} />
+      </Row>
+
+      <Row title="What should Lingxi call you?" align="center">
+        <input value={nickname} onChange={e => setNickname(e.target.value)} style={inputStyle} />
+      </Row>
+
+      <Row title="What best describes your work?" align="center">
+        <SettingsSelect value={role} placeholder="Select" onChange={setRole} options={[
+          { id: 'eng',     label: 'Engineering / Software' },
+          { id: 'design',  label: 'Design' },
+          { id: 'pm',      label: 'Product management' },
+          { id: 'data',    label: 'Data / Research' },
+          { id: 'writing', label: 'Writing' },
+          { id: 'ops',     label: 'Operations' },
+          { id: 'edu',     label: 'Education' },
+          { id: 'other',   label: 'Other' },
+        ]} />
+      </Row>
+
+      <BlockRow
+        title="Instructions for Lingxi"
+        desc={<>Lingxi will keep these in mind across chats and Cowork sessions within{' '}
+          <a style={linkStyle}>Lingxi's guidelines</a>. <a style={linkStyle}>Learn more</a></>}>
+        <textarea value={instructions} onChange={e => setInstructions(e.target.value)}
+          placeholder="e.g. keep explanations brief and to the point"
+          style={{
+            width: '100%', padding: '12px 14px', borderRadius: 10,
+            background: t.surface, border: `0.5px solid ${t.border}`,
+            color: t.text, fontSize: 13, fontFamily: 'inherit', outline: 'none',
+            minHeight: 88, resize: 'vertical', lineHeight: 1.55, boxSizing: 'border-box',
+          }} />
+      </BlockRow>
+
+      <SectionTitle>Preferences</SectionTitle>
+
+      <Row title="Appearance" align="center">
+        <div style={{
+          display: 'inline-flex', padding: 2, gap: 2, borderRadius: 9,
+          background: t.sidebarBg, border: `0.5px solid ${t.border}`,
+        }}>
+          <AppearanceBtn mode="system">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>
+            </svg>
+          </AppearanceBtn>
+          <AppearanceBtn mode="light">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="4"/>
+              <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+            </svg>
+          </AppearanceBtn>
+          <AppearanceBtn mode="dark">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+            </svg>
+          </AppearanceBtn>
+        </div>
+      </Row>
+
+      <Row title="Chat font" align="center">
+        <SettingsSelect value={chatFont} onChange={setChatFont} options={[
+          { id: 'lingxi-sans',  label: 'Lingxi Sans' },
+          { id: 'lingxi-serif', label: 'Lingxi Serif' },
+          { id: 'system',       label: 'System default' },
+          { id: 'mono',         label: 'Monospace' },
+        ]} />
+      </Row>
+
+      <Row title="Voice" align="center">
+        <SettingsSelect value={voice} onChange={setVoice} options={[
+          { id: 'mellow', label: 'Mellow' },
+          { id: 'bright', label: 'Bright' },
+          { id: 'calm',   label: 'Calm' },
+          { id: 'crisp',  label: 'Crisp' },
+        ]} />
+      </Row>
+
+      <Row title="Voice speed" align="center">
+        <SettingsSelect value={voiceSpeed} onChange={setVoiceSpeed} options={[
+          { id: 'slow',   label: 'Slow' },
+          { id: 'normal', label: 'Normal' },
+          { id: 'fast',   label: 'Fast' },
+          { id: 'turbo',  label: 'Turbo' },
+        ]} />
+      </Row>
+
+      <SectionTitle>Notifications</SectionTitle>
+
+      <Row title="Response completions"
+        desc="Get notified when Lingxi has finished a response. Useful for long-running tasks.">
+        <Toggle value={notif.responseDone} onChange={v => setN('responseDone', v)} />
+      </Row>
+      <Row title="Code notifications"
+        desc="Lingxi can choose to notify you about important updates from a Code session.">
+        <Toggle value={notif.codeUpdates} onChange={v => setN('codeUpdates', v)} />
+      </Row>
+      <Row title="Code permission requests"
+        desc="Get a push notification when Lingxi needs your approval to run a command in a Code session.">
+        <Toggle value={notif.permission} onChange={v => setN('permission', v)} />
+      </Row>
+      <Row title="Emails from Lingxi Code on the web"
+        desc="Get an email when Lingxi Code on the web has finished building or needs your response.">
+        <Toggle value={notif.email} onChange={v => setN('email', v)} />
+      </Row>
+      <Row title="Dispatch messages"
+        desc="Get a push notification on your phone when Lingxi messages you in Dispatch.">
+        <Toggle value={notif.dispatch} onChange={v => setN('dispatch', v)} />
+      </Row>
+
+      <SectionTitle>General desktop settings</SectionTitle>
+
+      <Row title="Run on startup"
+        desc="Automatically start Lingxi when you log in to your computer.">
+        <Toggle value={runOnStartup} onChange={setRunOnStartup} />
+      </Row>
+
+      <Row title="Quick access shortcut"
+        desc="Message Lingxi from anywhere on your desktop.">
+        <SettingsSelect value={quickShortcut} onChange={setQuickShortcut} options={[
+          { id: 'opt2',    label: 'Tap Option twice' },
+          { id: 'cmd2',    label: 'Tap Command twice' },
+          { id: 'ctrl2',   label: 'Tap Control twice' },
+          { id: 'shift2',  label: 'Tap Shift twice' },
+          { id: 'off',     label: 'Off' },
+        ]} />
+      </Row>
+
+      <Row title="Voice shortcut"
+        desc={<>Speak to Lingxi from anywhere on your desktop. Press once to start dictation,
+          and press again when you're done speaking.</>}>
+        <SettingsSelect value={voiceShortcut} onChange={setVoiceShortcut} options={[
+          { id: 'caps',  label: 'Caps Lock' },
+          { id: 'fn',    label: 'Fn' },
+          { id: 'rcmd',  label: 'Right ⌘' },
+          { id: 'ropt',  label: 'Right ⌥' },
+          { id: 'off',   label: 'Off' },
+        ]} />
+      </Row>
+
+      <Row title="Menu bar"
+        desc="Show Lingxi in the menu bar.">
+        <Toggle value={menuBar} onChange={setMenuBar} />
+      </Row>
+
+      <Row title="Keep computer awake"
+        desc={<>Prevent your computer from idle-sleeping while Lingxi is open so scheduled tasks
+          can run. Your display can still turn off. Closing the laptop lid will still put it to sleep.</>}>
+        <Toggle value={keepAwake} onChange={setKeepAwake} />
+      </Row>
+
+      <SectionTitle>Browser use</SectionTitle>
+
+      <Row title="Allow all browser actions"
+        desc={<>Lingxi will browse and interact with any website in Chrome without asking.
+          Applies to new sessions. This setting can put your data at risk.{' '}
+          <a style={linkStyle}>Learn more</a></>}>
+        <Toggle value={allowBrowser} onChange={setAllowBrowser} />
+      </Row>
+
+      <BlockRow
+        title="Connected browsers"
+        desc="Chrome instances signed in to your account that Lingxi can automate.">
+        <div style={{
+          border: `0.5px solid ${t.border}`, borderRadius: 10,
+          background: t.surface, overflow: 'hidden',
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '12px 14px',
+          }}>
+            <span style={{ flex: 1, fontSize: 13, color: t.text }}>No browsers connected</span>
+            <GhostBtn leading={
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/>
+              </svg>
+            }>Recheck</GhostBtn>
+          </div>
+          <div style={{
+            padding: '10px 14px', fontSize: 12, color: t.text3,
+            borderTop: `0.5px solid ${t.border}`, background: t.sidebarBg,
+          }}>
+            No Chrome instances are connected. Open Chrome with the Lingxi extension and sign in.
+          </div>
+        </div>
+      </BlockRow>
+
+      <Row title="Computer use" badge="Beta"
+        desc={<>Let Lingxi take screenshots and control your keyboard and mouse in apps you allow.{' '}
+          <a style={linkStyle}>Learn more</a></>}>
+        <Toggle value={computerUse} onChange={setComputerUse} />
+      </Row>
+
+      <Row title="Unhide apps when Lingxi finishes"
+        desc="Apps hidden during a task are restored when Lingxi stops.">
+        <Toggle value={unhide} onChange={setUnhide} />
+      </Row>
+
+      <BlockRow
+        title="Denied apps"
+        desc={<>Any request Lingxi makes to access these apps is automatically rejected.
+          Lingxi may still affect them indirectly through actions in allowed apps.</>}
+        action={<GhostBtn>Add app <Icon name="chevron" size={11} color={t.text3} stroke={2} /></GhostBtn>}>
+        <div style={{
+          padding: '12px 14px', fontSize: 12, color: t.text3,
+          border: `0.5px dashed ${t.border}`, borderRadius: 10,
+          background: t.surface,
+        }}>
+          No apps denied. Add an app to automatically reject Lingxi's requests for it.
+        </div>
+      </BlockRow>
+
+      <Row title="Accessibility" align="center">
+        <span style={pillStyle}>Granted</span>
+      </Row>
+
+      <Row title="Screen recording" align="center">
+        <span style={pillStyle}>Granted</span>
+      </Row>
+
+      <div style={{ height: 60 }} />
+    </div>
+  );
+}
+
+function SettingsPrivacyPage() {
+  const t = useT();
+  const [locMeta, setLocMeta] = useState(true);
+  const [improve, setImprove] = useState(true);
+  const link = t.link || t.accent2 || t.accent;
+  const linkStyle = {
+    color: link, textDecoration: 'underline',
+    textDecorationColor: `color-mix(in oklab, ${link} 40%, transparent)`,
+    textUnderlineOffset: 3, cursor: 'pointer', fontWeight: 500,
+  };
+
+  const DataRow = ({ label, last }) => (
+    <button style={{
+      width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+      padding: '14px 16px', background: 'transparent',
+      border: 'none', borderTop: `0.5px solid ${t.border}`,
+      cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+      borderBottomLeftRadius: last ? 11 : 0, borderBottomRightRadius: last ? 11 : 0,
+    }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+       onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+      <span style={{ flex: 1, fontSize: 13.5, color: t.text }}>{label}</span>
+      <Icon name="chevron" size={13} color={t.text3} stroke={2}
+        {...{ style: { transform: 'rotate(-90deg)' } }} />
+    </button>
+  );
+
+  return (
+    <div>
+      <div style={{ height: 24 }} />
+
+      {/* Top callout card */}
+      <div style={{
+        background: t.surface, border: `0.5px solid ${t.border}`,
+        borderRadius: 12, overflow: 'hidden',
+      }}>
+        <div style={{ padding: '16px 18px', fontSize: 13, color: t.text2, lineHeight: 1.6 }}>
+          Lingxi is built on transparent data practices. Learn how your workspaces, chats and code
+          are protected when using Lingxi, and visit our{' '}
+          <a style={linkStyle}>Trust Center</a> and{' '}
+          <a style={linkStyle}>Privacy Policy</a> for details.
+        </div>
+        <DataRow label="How we protect your data" />
+        <DataRow label="How we use your data" last />
+      </div>
+
+      <SectionTitle>Preferences</SectionTitle>
+      <SettingsRow
+        title="Location metadata"
+        desc={<>Allow Lingxi to use coarse location metadata (city/region) to improve product experiences. <a style={linkStyle}>Learn more</a>.</>}>
+        <Toggle value={locMeta} onChange={setLocMeta} />
+      </SettingsRow>
+      <SettingsRow
+        title="Help improve Lingxi"
+        desc={<>Allow the use of your chats and coding sessions to train and improve Lingxi models. <a style={linkStyle}>Learn more</a>.</>}>
+        <Toggle value={improve} onChange={setImprove} />
+      </SettingsRow>
+      <SettingsRow
+        title="Workspace telemetry"
+        desc={<>Anonymous usage metrics about features and performance — no chat content, no code. Used only to fix bugs and improve UX.</>}>
+        <Toggle value={true} onChange={() => {}} />
+      </SettingsRow>
+
+      <SectionTitle>Your data</SectionTitle>
+      <SettingsRow
+        title="Export data"
+        desc="Download a copy of your chats, projects, sessions and uploaded files as a .zip archive.">
+        <button style={{
+          padding: '8px 14px', borderRadius: 8,
+          background: t.surface, color: t.text,
+          border: `0.5px solid ${t.border}`, cursor: 'pointer',
+          fontSize: 12.5, fontWeight: 500, fontFamily: 'inherit',
+        }} onMouseEnter={e => e.currentTarget.style.borderColor = t.borderStrong}
+           onMouseLeave={e => e.currentTarget.style.borderColor = t.border}>Export data</button>
+      </SettingsRow>
+      <SettingsRow
+        title="Shared chats"
+        desc="View and revoke public links you've created to share conversations or artifacts.">
+        <button style={{
+          padding: '8px 14px', borderRadius: 8,
+          background: t.surface, color: t.text,
+          border: `0.5px solid ${t.border}`, cursor: 'pointer',
+          fontSize: 12.5, fontWeight: 500, fontFamily: 'inherit',
+        }} onMouseEnter={e => e.currentTarget.style.borderColor = t.borderStrong}
+           onMouseLeave={e => e.currentTarget.style.borderColor = t.border}>Manage</button>
+      </SettingsRow>
+      <SettingsRow
+        title="Memory preferences"
+        desc="What Lingxi remembers across sessions — project facts, style preferences, recent files.">
+        <button style={{
+          padding: '8px 14px', borderRadius: 8,
+          background: t.surface, color: t.text,
+          border: `0.5px solid ${t.border}`, cursor: 'pointer',
+          fontSize: 12.5, fontWeight: 500, fontFamily: 'inherit',
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+        }} onMouseEnter={e => e.currentTarget.style.borderColor = t.borderStrong}
+           onMouseLeave={e => e.currentTarget.style.borderColor = t.border}>
+          Manage
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={t.text3} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M7 17 17 7M9 7h8v8"/>
+          </svg>
+        </button>
+      </SettingsRow>
+      <SettingsRow
+        title="Delete account"
+        desc="Permanently remove your account, all workspaces and stored data. This cannot be undone.">
+        <button style={{
+          padding: '8px 14px', borderRadius: 8,
+          background: 'transparent', color: t.danger,
+          border: `0.5px solid color-mix(in oklab, ${t.danger} 40%, transparent)`,
+          cursor: 'pointer', fontSize: 12.5, fontWeight: 500, fontFamily: 'inherit',
+        }}>Delete account</button>
+      </SettingsRow>
+
+      <div style={{ height: 60 }} />
+    </div>
+  );
+}
+
+function SettingsGenericPage({ title, blurb }) {
+  const t = useT();
+  return (
+    <div>
+      <SectionTitle>{title}</SectionTitle>
+      <div style={{ fontSize: 13, color: t.text3, padding: '14px 0', lineHeight: 1.6 }}>{blurb}</div>
+      <div style={{
+        marginTop: 8, padding: '40px 24px',
+        background: t.surface, border: `0.5px dashed ${t.border}`, borderRadius: 12,
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+      }}>
+        <div style={{ width: 44, height: 44, borderRadius: 12, background: t.surfaceHover, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name="cog" size={22} color={t.text3} stroke={1.5} />
+        </div>
+        <div style={{ fontSize: 13.5, color: t.text2, fontWeight: 500 }}>{title} settings</div>
+        <div style={{ fontSize: 12, color: t.text4 }}>Placeholder for the desktop mock.</div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsPage({ open, onClose, theme, setTheme }) {
+  const t = useT();
+  const [tab, setTab] = useState('general');
+  if (!open) return null;
+
+  let content;
+  if (tab === 'code')         content = <SettingsCodePage />;
+  else if (tab === 'account') content = <SettingsAccountPage />;
+  else if (tab === 'general') content = <SettingsGeneralPage theme={theme} setTheme={setTheme} />;
+  else if (tab === 'privacy') content = <SettingsPrivacyPage />;
+  else if (tab === 'billing') content = <SettingsBillingPage />;
+  else if (tab === 'usage')   content = <SettingsUsagePage />;
+  else if (tab === 'capabilities') content = <SettingsGenericPage title="Capabilities" blurb="Enable or disable tools: web, code execution, file editing, MCP servers." />;
+  else if (tab === 'connectors')   content = <SettingsGenericPage title="Connectors"   blurb="GitHub, Linear, Notion, Slack, Drive, and custom MCP servers." />;
+  else if (tab === 'cowork')  content = <SettingsGenericPage title="Cowork"      blurb="Real-time collaboration: presence, cursors, shared canvases." />;
+  else if (tab === 'chrome')  content = <SettingsGenericPage title="Lingxi in Chrome" blurb="Browser extension (Beta) — page-level context, screenshots, form-fill." />;
+  else if (tab === 'dt-extensions')content = <SettingsGenericPage title="Extensions" blurb="Local plugins and CLI integrations." />;
+  else if (tab === 'dt-developer') content = <SettingsGenericPage title="Developer"  blurb="Verbose logs, devtools, API key management." />;
+
+  return (
+    <div style={{
+      position: 'absolute', inset: 0, zIndex: 90,
+      background: t.windowBg, display: 'flex', flexDirection: 'column',
+      animation: 'fade-in 0.18s ease',
+    }}>
+      {/* Title bar */}
+      <div style={{
+        height: 56, flexShrink: 0, padding: '0 22px 0 88px',
+        display: 'flex', alignItems: 'center', gap: 14,
+        borderBottom: `0.5px solid ${t.border}`,
+      }}>
+        <button onClick={onClose} style={{
+          width: 28, height: 28, borderRadius: 7, border: 'none', cursor: 'pointer',
+          background: 'transparent', color: t.text2,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+           onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <Icon name="chevronL" size={18} stroke={1.8} />
+        </button>
+        <span style={{ fontSize: 16, fontWeight: 600, color: t.text }}>Settings</span>
+        <div style={{ flex: 1 }} />
+      </div>
+
+      {/* Body */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        {/* Left nav */}
+        <div style={{
+          width: 240, flexShrink: 0,
+          padding: '20px 14px',
+          borderRight: `0.5px solid ${t.border}`, overflowY: 'auto',
+        }}>
+          {SETTINGS_NAV.map((g, gi) => (
+            <div key={gi} style={{ marginBottom: 6 }}>
+              {g.group && (
+                <div style={{
+                  fontSize: 11, color: t.text4, fontWeight: 600, letterSpacing: 0.5,
+                  textTransform: 'uppercase', padding: '14px 10px 6px',
+                }}>{g.group}</div>
+              )}
+              {g.items.map(it => {
+                const active = tab === it.id;
+                return (
+                  <div key={it.id} onClick={() => setTab(it.id)} style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '7px 10px', borderRadius: 7, cursor: 'pointer',
+                    background: active ? t.surfaceActive : 'transparent',
+                    color: active ? t.text : t.text2,
+                    fontSize: 13, fontWeight: active ? 600 : 500,
+                    transition: 'background 0.12s',
+                  }} onMouseEnter={e => { if (!active) e.currentTarget.style.background = t.surfaceHover; }}
+                     onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}>
+                    <span style={{ flex: 1 }}>{it.label}</span>
+                    {it.tag && (
+                      <span style={{
+                        fontSize: 10, padding: '1px 6px', borderRadius: 4,
+                        background: t.surfaceHover, color: t.text3, fontWeight: 600,
+                      }}>{it.tag}</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+
+        {/* Content */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 56px 60px', minWidth: 0 }}>
+          <div style={{ maxWidth: 920, margin: '0 auto' }}>
+            {content}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ROOT APP ────────────────────────────────────────────────
+function App() {
+  const [theme, setTheme] = useState('dark');
+  const t = useMemo(() => tokens(theme === 'dark'), [theme]);
+  const [mode, setMode] = useState('code');
+  const [activeRepo, setActiveRepo] = useState('lingxi-next');
+  const [activeSession, setActiveSession] = useState('lxn-1');
+  const [panelOpen, setPanelOpen] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [model, setModel] = useState(MODELS[0]);
+  const [extraMessages, setExtraMessages] = useState([]);
+  const appendMessage = (msg) => setExtraMessages(m => [...m, msg]);
+
+  const repo = PROJECTS.find(r => r.id === activeRepo) || PROJECTS[0];
+
+  return (
+    <Theme.Provider value={t}>
+      <div style={{
+        width: '100vw', height: '100vh', background: t.appBg,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        overflow: 'hidden', transition: 'background 0.3s ease',
+      }} data-screen-label="灵犀 Code Desktop">
+        <div style={{
+          width: '100%', height: '100%',
+          background: t.windowBg, overflow: 'hidden',
+          display: 'flex', position: 'relative',
+          boxShadow: t.windowShadow,
+        }}>
+          {/* Traffic lights */}
+          <div style={{
+            position: 'absolute', top: 14, left: 16, zIndex: 30,
+            display: 'flex', gap: 8,
+          }}>
+            {['#ff5f57', '#febc2e', '#28c840'].map(c => (
+              <div key={c} style={{ width: 12, height: 12, borderRadius: '50%', background: c, border: '0.5px solid rgba(0,0,0,0.1)' }} />
+            ))}
+          </div>
+
+          <Sidebar
+            mode={mode} setMode={setMode}
+            activeRepo={activeRepo} setActiveRepo={setActiveRepo}
+            activeSession={activeSession} setActiveSession={setActiveSession}
+            openSettings={() => setSettingsOpen(true)}
+            collapsed={sidebarCollapsed} setCollapsed={setSidebarCollapsed}
+          />
+
+          {/* Main */}
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, background: t.windowBg }}>
+            <TopBar repo={repo}
+              onTogglePanel={() => setPanelOpen(!panelOpen)} panelOpen={panelOpen}
+              theme={theme} setTheme={setTheme}
+              sidebarCollapsed={sidebarCollapsed} />
+            <Stage extraMessages={extraMessages} />
+            <Composer repo={repo} model={model} setModel={setModel}
+              panelOpen={panelOpen} setPanelOpen={setPanelOpen}
+              appendMessage={appendMessage} />
+          </div>
+
+          {panelOpen && <RightPanel onClose={() => setPanelOpen(false)} />}
+        </div>
+
+        <SettingsPage open={settingsOpen} onClose={() => setSettingsOpen(false)} theme={theme} setTheme={setTheme} />
+      </div>
+    </Theme.Provider>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>

@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>灵犀 · iPad</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+*::-webkit-scrollbar { width: 4px; height: 4px; }
+*::-webkit-scrollbar-thumb { background: rgba(120,100,180,0.20); border-radius: 99px; }
+*::-webkit-scrollbar-track { background: transparent; }
+html, body, #root { height: 100%; }
+body {
+  font-family: 'Inter', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv11', 'ss01';
+  overflow: hidden;
+  background: #0a0a0c;
+}
+@keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes slide-up { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes shimmer { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.7; } }
+@keyframes slide-in-right { from { transform: translateX(100%); } to { transform: translateX(0); } }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo, createContext, useContext } = React;
+
+// ─── DESIGN TOKENS — IDENTICAL to macOS file ──────────────────
+const tokens = (dark) => dark ? {
+  appBg: '#0a0a0c',
+  windowBg: 'oklch(15% 0.012 270)',
+  sidebarBg: 'oklch(13% 0.012 270)',
+  surface: 'oklch(18% 0.015 270)',
+  surfaceHover: 'oklch(22% 0.020 270)',
+  surfaceActive: 'oklch(28% 0.030 270)',
+  border: 'oklch(28% 0.015 270 / 0.6)',
+  borderStrong: 'oklch(35% 0.020 270 / 0.8)',
+  text: 'oklch(96% 0.005 270)',
+  text2: 'oklch(72% 0.015 270)',
+  text3: 'oklch(52% 0.020 270)',
+  text4: 'oklch(38% 0.020 270)',
+  accent: 'oklch(70% 0.18 268)',
+  accentBg: 'oklch(70% 0.18 268 / 0.15)',
+  accentBorder: 'oklch(70% 0.18 268 / 0.35)',
+  accent2: 'oklch(70% 0.18 320)',
+  accent3: 'oklch(72% 0.16 195)',
+  ok: 'oklch(70% 0.15 155)',
+  composerBg: 'oklch(20% 0.015 270)',
+  ambient: 'radial-gradient(ellipse 60% 50% at 50% 0%, oklch(40% 0.15 268 / 0.18), transparent 70%)',
+} : {
+  appBg: '#cfc9d8',
+  windowBg: '#faf8f5',
+  sidebarBg: 'oklch(96% 0.005 270)',
+  surface: '#ffffff',
+  surfaceHover: 'oklch(96% 0.008 270)',
+  surfaceActive: 'oklch(92% 0.020 270)',
+  border: 'oklch(88% 0.008 270)',
+  borderStrong: 'oklch(82% 0.012 270)',
+  text: 'oklch(20% 0.018 270)',
+  text2: 'oklch(40% 0.020 270)',
+  text3: 'oklch(58% 0.020 270)',
+  text4: 'oklch(70% 0.015 270)',
+  accent: 'oklch(50% 0.22 268)',
+  accentBg: 'oklch(50% 0.22 268 / 0.10)',
+  accentBorder: 'oklch(50% 0.22 268 / 0.30)',
+  accent2: 'oklch(55% 0.22 320)',
+  accent3: 'oklch(52% 0.18 195)',
+  ok: 'oklch(55% 0.16 155)',
+  composerBg: '#ffffff',
+  ambient: 'radial-gradient(ellipse 60% 50% at 50% 0%, oklch(80% 0.10 268 / 0.4), transparent 70%)',
+};
+
+const Theme = createContext(null);
+const useT = () => useContext(Theme);
+
+const WORKSPACES = [
+  { id: 'personal', name: '个人', icon: '◐', color: 'oklch(70% 0.18 268)' },
+  { id: 'work', name: '工作', icon: '◑', color: 'oklch(70% 0.16 195)' },
+  { id: 'research', name: '研究', icon: '◒', color: 'oklch(72% 0.18 320)' },
+  { id: 'creative', name: '创作', icon: '◓', color: 'oklch(72% 0.16 75)' },
+];
+
+const SESSIONS = [
+  { id: 's1', wsId: 'work', title: '设计灵犀 iPad 版', group: '今天', preview: '类 macOS 缩小版布局', activity: '刚刚', pinned: true },
+  { id: 's2', wsId: 'work', title: '重装 Claude Code 最新版', group: '今天', preview: 'nvm 残留清理完成', activity: '2 小时前' },
+  { id: 's3', wsId: 'work', title: '整理 Q2 OKR', group: '今天', preview: '产品/技术/增长已对齐', activity: '5 小时前' },
+  { id: 's4', wsId: 'work', title: '周报自动化模板', group: '昨天', preview: '从 Linear/GitHub 聚合', activity: '昨天' },
+  { id: 's5', wsId: 'work', title: 'WebSocket 重连排查', group: '昨天', preview: '指数退避方案', activity: '昨天' },
+  { id: 's6', wsId: 'work', title: 'PRD v2 评审反馈', group: '本周', preview: '12 条评论 → 4 待办', activity: '周一' },
+  { id: 's7', wsId: 'work', title: '客户邮件模板', group: '本周', preview: '4 套话术', activity: '周二' },
+  { id: 's8', wsId: 'work', title: '上海差旅规划', group: '更早', preview: '机酒 + 路线', activity: '4月29日' },
+];
+
+const MESSAGES_DEFAULT = [
+  { role: 'user', text: '帮我做一版 iPad 上的灵犀 AI，需要适配横屏，侧栏可折叠，主对话区充分利用屏幕宽度。' },
+  { role: 'ai', tag: '思考了 56 秒', text: '已完成。\n\n**iPad 版本三大调整**：\n\n1. **侧栏自适应**：横屏默认展开 260px，竖屏自动折叠为悬浮抽屉，避免挤占阅读宽度。\n2. **触摸友好**：所有可点击元素 ≥ 44pt，按住会话条 0.4 秒弹出快捷菜单。\n3. **底部胶囊 composer**：脱离侧栏边界悬浮，键盘弹出时自动避让。\n\n你现在看到的是横屏 13" iPad Pro 形态。点击左上角图标可折叠侧栏。' },
+  { role: 'user', text: '能加上 Apple Pencil 标注/手写笔记的入口吗？' },
+  { role: 'ai', tag: '思考了 22 秒', text: '已加入。Composer 左侧多了 **✎ 标注** 按钮，点击进入手写画布；可以直接在 AI 回复上批注，AI 会读你的批注并回应。\n\n竖屏使用 Pencil 时，侧栏自动隐藏以最大化画布面积。' },
+];
+
+const MODELS = [
+  { id: 'lx-72b', name: 'Lingxi-72B', desc: '主力', tag: '默认', color: 'oklch(70% 0.18 268)' },
+  { id: 'lx-72b-r', name: 'Lingxi-72B-R', desc: '深度推理', tag: '慢', color: 'oklch(72% 0.18 320)' },
+  { id: 'lx-32b', name: 'Lingxi-32B', desc: '高速', tag: '快', color: 'oklch(72% 0.16 195)' },
+  { id: 'lx-code', name: 'Lingxi-Code', desc: '代码', tag: '编程', color: 'oklch(72% 0.16 155)' },
+];
+
+const Icon = ({ name, size = 18, color = 'currentColor', stroke = 1.6 }) => {
+  const p = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: color, strokeWidth: stroke, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  switch (name) {
+    case 'edit': return <svg {...p}><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>;
+    case 'search': return <svg {...p}><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>;
+    case 'sparkle': return <svg {...p}><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/><circle cx="12" cy="12" r="2.5"/></svg>;
+    case 'book': return <svg {...p}><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>;
+    case 'workflow': return <svg {...p}><rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="15" y="3" width="6" height="6" rx="1.5"/><rect x="9" y="15" width="6" height="6" rx="1.5"/><path d="M6 9v2a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V9"/><path d="M12 13v2"/></svg>;
+    case 'cog': return <svg {...p}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>;
+    case 'plus': return <svg {...p}><path d="M12 5v14M5 12h14"/></svg>;
+    case 'mic': return <svg {...p}><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>;
+    case 'paperclip': return <svg {...p}><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.83l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>;
+    case 'pen': return <svg {...p}><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="m18 13-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="m2 2 7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>;
+    case 'chevron': return <svg {...p}><path d="m6 9 6 6 6-6"/></svg>;
+    case 'chevronR': return <svg {...p}><path d="m9 18 6-6-6-6"/></svg>;
+    case 'sun': return <svg {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>;
+    case 'moon': return <svg {...p}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
+    case 'pin': return <svg {...p}><path d="M12 17v5M9 10.76V3h6v7.76l3 1.94v3.3H6v-3.3l3-1.94z"/></svg>;
+    case 'sidebar': return <svg {...p}><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>;
+    case 'check': return <svg {...p}><path d="M20 6 9 17l-5-5"/></svg>;
+    case 'brain': return <svg {...p}><path d="M9.5 2a2.5 2.5 0 0 1 2.5 2.5v15a2.5 2.5 0 0 1-4.96.44A2.5 2.5 0 0 1 4.5 17a2.5 2.5 0 0 1-2-3.65A2.5 2.5 0 0 1 4 8.5a2.5 2.5 0 0 1 2.5-2.5A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2a2.5 2.5 0 0 0-2.5 2.5v15a2.5 2.5 0 0 0 4.96.44A2.5 2.5 0 0 0 19.5 17a2.5 2.5 0 0 0 2-3.65A2.5 2.5 0 0 0 20 8.5a2.5 2.5 0 0 0-2.5-2.5A2.5 2.5 0 0 0 14.5 2z"/></svg>;
+    case 'arrowUp': return <svg {...p} fill={color} stroke="none"><path d="M12 4l-7 8h4v8h6v-8h4z"/></svg>;
+    case 'wifi': return <svg {...p}><path d="M5 12.55a11 11 0 0 1 14.08 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/></svg>;
+    case 'battery': return <svg {...p}><rect x="2" y="7" width="18" height="10" rx="2"/><line x1="22" y1="11" x2="22" y2="13"/></svg>;
+    default: return null;
+  }
+};
+
+const Pill = ({ children, color, style = {} }) => {
+  const t = useT();
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4,
+      padding: '2px 8px', borderRadius: 6, fontSize: 11, fontWeight: 500,
+      background: color ? `color-mix(in oklab, ${color} 16%, transparent)` : t.surface,
+      color: color || t.text3,
+      border: `0.5px solid ${color ? `color-mix(in oklab, ${color} 30%, transparent)` : t.border}`,
+      ...style,
+    }}>{children}</span>
+  );
+};
+
+// ─── iPad STATUS BAR ─────────────────────────────────────────
+function StatusBar({ dark }) {
+  const color = dark ? '#fff' : '#000';
+  return (
+    <div style={{
+      height: 24, padding: '0 28px',
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      fontSize: 14, fontWeight: 600, color,
+      fontFamily: '-apple-system, "SF Pro"',
+      flexShrink: 0,
+    }}>
+      <span>9:41</span>
+      <span style={{ fontWeight: 500, opacity: 0.85, fontSize: 12 }}>灵犀</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <Icon name="wifi" size={14} color={color} stroke={2.5} />
+        <span style={{ fontSize: 11, marginLeft: 2 }}>87%</span>
+        <Icon name="battery" size={20} color={color} stroke={2} />
+      </div>
+    </div>
+  );
+}
+
+// ─── SIDEBAR ─────────────────────────────────────────────────
+function Sidebar({ activeWs, setActiveWs, activeSession, setActiveSession, collapsed, setCollapsed }) {
+  const t = useT();
+  const ws = WORKSPACES.find(w => w.id === activeWs);
+  const sessions = SESSIONS.filter(s => s.wsId === activeWs);
+  const grouped = sessions.reduce((acc, s) => { (acc[s.group] = acc[s.group] || []).push(s); return acc; }, {});
+
+  if (collapsed) {
+    return (
+      <div style={{
+        width: 60, flexShrink: 0,
+        background: t.sidebarBg, borderRight: `0.5px solid ${t.border}`,
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+        paddingTop: 12, gap: 8,
+      }}>
+        <button onClick={() => setCollapsed(false)} style={{ width: 40, height: 40, borderRadius: 10, background: 'transparent', border: 'none', cursor: 'pointer', color: t.text2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name="sidebar" size={20} stroke={1.7} />
+        </button>
+        <div style={{ height: 8 }} />
+        {WORKSPACES.map(w => (
+          <button key={w.id} onClick={() => setActiveWs(w.id)} style={{
+            width: 40, height: 40, borderRadius: 10, border: 'none', cursor: 'pointer',
+            background: w.id === activeWs ? `color-mix(in oklab, ${w.color} 22%, ${t.surface})` : 'transparent',
+            color: w.color, fontSize: 16, fontWeight: 700,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            border: w.id === activeWs ? `0.5px solid color-mix(in oklab, ${w.color} 35%, transparent)` : 'none',
+          }}>{w.icon}</button>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{
+      width: 260, flexShrink: 0,
+      background: t.sidebarBg, borderRight: `0.5px solid ${t.border}`,
+      display: 'flex', flexDirection: 'column',
+    }}>
+      {/* Header */}
+      <div style={{ padding: '12px 14px 8px', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <button onClick={() => setCollapsed(true)} style={{ width: 34, height: 34, borderRadius: 8, background: 'transparent', border: 'none', cursor: 'pointer', color: t.text3, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name="sidebar" size={18} stroke={1.7} />
+        </button>
+        <div style={{ fontSize: 15, fontWeight: 700, color: t.text, letterSpacing: -0.2 }}>灵犀</div>
+        <div style={{ flex: 1 }} />
+        <button style={{ width: 34, height: 34, borderRadius: 8, background: 'transparent', border: 'none', cursor: 'pointer', color: t.accent, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name="edit" size={18} stroke={1.8} />
+        </button>
+      </div>
+
+      {/* Workspace switcher pills */}
+      <div style={{ padding: '4px 14px 10px', display: 'flex', gap: 4, overflowX: 'auto' }}>
+        {WORKSPACES.map(w => (
+          <button key={w.id} onClick={() => setActiveWs(w.id)} style={{
+            padding: '6px 10px', borderRadius: 99, border: 'none', cursor: 'pointer',
+            background: w.id === activeWs ? `color-mix(in oklab, ${w.color} 18%, transparent)` : t.surface,
+            color: w.id === activeWs ? w.color : t.text3,
+            fontSize: 12, fontWeight: 500, fontFamily: 'inherit', whiteSpace: 'nowrap',
+            border: `0.5px solid ${w.id === activeWs ? `color-mix(in oklab, ${w.color} 35%, transparent)` : t.border}`,
+            display: 'flex', alignItems: 'center', gap: 4,
+          }}>
+            <span style={{ fontSize: 11 }}>{w.icon}</span> {w.name}
+          </button>
+        ))}
+      </div>
+
+      {/* Search */}
+      <div style={{ padding: '0 14px 10px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderRadius: 10, background: t.surface, border: `0.5px solid ${t.border}` }}>
+          <Icon name="search" size={14} color={t.text4} stroke={2} />
+          <span style={{ fontSize: 13, color: t.text4 }}>搜索</span>
+        </div>
+      </div>
+
+      {/* Quick links */}
+      <div style={{ padding: '4px 10px' }}>
+        {[
+          { icon: 'sparkle', label: '今日时间线', count: '6' },
+          { icon: 'workflow', label: '工作流', count: '3', highlight: true },
+          { icon: 'book', label: '知识库', count: '24' },
+          { icon: 'brain', label: '记忆', count: '42' },
+        ].map((item, i) => (
+          <div key={i} style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            padding: '9px 12px', borderRadius: 8, cursor: 'pointer',
+            color: t.text2, fontSize: 13.5,
+          }}>
+            <Icon name={item.icon} size={16} stroke={1.7} />
+            <span style={{ flex: 1 }}>{item.label}</span>
+            <span style={{ fontSize: 11, color: item.highlight ? t.accent : t.text4, fontWeight: item.highlight ? 600 : 400 }}>{item.count}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Sessions */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 10px' }}>
+        {Object.entries(grouped).map(([group, items]) => (
+          <div key={group} style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 10.5, color: t.text4, fontWeight: 600, padding: '6px 10px', letterSpacing: 0.6, textTransform: 'uppercase' }}>{group}</div>
+            {items.map(s => (
+              <div key={s.id} onClick={() => setActiveSession(s.id)} style={{
+                padding: '9px 12px', borderRadius: 8, cursor: 'pointer',
+                background: s.id === activeSession ? t.surfaceActive : 'transparent',
+                color: s.id === activeSession ? t.text : t.text2,
+                position: 'relative',
+              }}>
+                {s.id === activeSession && <div style={{ position: 'absolute', left: 0, top: 10, bottom: 10, width: 2, background: t.accent, borderRadius: 99 }} />}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {s.pinned && <Icon name="pin" size={11} color={t.accent} stroke={2.2} />}
+                  <div style={{ fontSize: 13.5, fontWeight: s.id === activeSession ? 600 : 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.title}</div>
+                </div>
+                <div style={{ fontSize: 11.5, color: t.text4, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.activity} · {s.preview}</div>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      {/* Bottom */}
+      <div style={{ padding: '8px 10px 12px', borderTop: `0.5px solid ${t.border}` }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8 }}>
+          <div style={{ width: 30, height: 30, borderRadius: '50%', background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 12, fontWeight: 600 }}>Y</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, color: t.text, fontWeight: 500 }}>Yuxin Yang</div>
+            <div style={{ fontSize: 10.5, color: t.text4 }}>Pro · 5.5 / 8 段</div>
+          </div>
+          <Icon name="cog" size={16} color={t.text3} stroke={1.6} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MESSAGE ─────────────────────────────────────────────────
+function Message({ m }) {
+  const t = useT();
+  if (m.role === 'user') {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 28, animation: 'fade-in 0.3s ease' }}>
+        <div style={{ maxWidth: '70%', padding: '14px 20px', borderRadius: 20, borderTopRightRadius: 6, background: t.surface, border: `0.5px solid ${t.border}`, fontSize: 16, lineHeight: 1.55, color: t.text, whiteSpace: 'pre-wrap' }}>{m.text}</div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: 'flex', gap: 14, marginBottom: 32, alignItems: 'flex-start', animation: 'fade-in 0.3s ease' }}>
+      <div style={{ width: 32, height: 32, borderRadius: 9, flexShrink: 0, background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: `0 4px 12px color-mix(in oklab, ${t.accent} 30%, transparent)` }}>
+        <Icon name="sparkle" size={16} color="#fff" stroke={2} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {m.tag && <div style={{ marginBottom: 8 }}><Pill color={t.accent}>{m.tag}</Pill></div>}
+        <div style={{ fontSize: 16, lineHeight: 1.65, color: t.text, whiteSpace: 'pre-wrap' }} dangerouslySetInnerHTML={{ __html: m.text.replace(/\*\*(.+?)\*\*/g, `<strong style="font-weight:600;color:${t.text}">$1</strong>`) }} />
+      </div>
+    </div>
+  );
+}
+
+// ─── COMPOSER ────────────────────────────────────────────────
+function Composer({ onSend, model, setModel }) {
+  const t = useT();
+  const [text, setText] = useState('');
+  const [modelOpen, setModelOpen] = useState(false);
+  const send = () => { if (text.trim()) { onSend(text); setText(''); } };
+  return (
+    <div style={{ padding: '12px 24px 22px', position: 'relative' }}>
+      <div style={{
+        background: t.composerBg, border: `0.5px solid ${t.borderStrong}`,
+        borderRadius: 22, padding: '12px 16px',
+        boxShadow: '0 8px 24px rgba(0,0,0,0.08)',
+      }}>
+        <textarea value={text} onChange={e => setText(e.target.value)}
+          placeholder="向灵犀提问，或拖入文件、拍照、用 Pencil 标注…"
+          rows={1}
+          style={{
+            width: '100%', border: 'none', outline: 'none', resize: 'none',
+            background: 'transparent', color: t.text, fontSize: 16, lineHeight: 1.5,
+            fontFamily: 'inherit', minHeight: 28, maxHeight: 120,
+          }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6, position: 'relative' }}>
+          {['paperclip', 'pen', 'mic'].map(n => (
+            <button key={n} style={{ width: 36, height: 36, borderRadius: 9, background: 'transparent', border: 'none', cursor: 'pointer', color: t.text3, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Icon name={n} size={18} stroke={1.7} />
+            </button>
+          ))}
+          <div style={{ width: 1, height: 18, background: t.border, margin: '0 4px' }} />
+
+          <button onClick={() => setModelOpen(!modelOpen)} style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '6px 10px', borderRadius: 8, background: modelOpen ? t.surfaceHover : 'transparent',
+            border: 'none', cursor: 'pointer', color: t.text2, fontSize: 13, fontFamily: 'inherit',
+          }}>
+            <span style={{ width: 7, height: 7, borderRadius: 99, background: model.color }} />
+            <span style={{ fontWeight: 500 }}>{model.name}</span>
+            <Icon name="chevron" size={13} stroke={2} color={t.text4} />
+          </button>
+          {modelOpen && (
+            <div style={{ position: 'absolute', bottom: '100%', left: 110, marginBottom: 6, zIndex: 50, background: t.surface, border: `0.5px solid ${t.borderStrong}`, borderRadius: 10, padding: 4, minWidth: 200, boxShadow: '0 12px 32px rgba(0,0,0,0.25)' }}>
+              {MODELS.map(m => (
+                <div key={m.id} onClick={() => { setModel(m); setModelOpen(false); }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 7, cursor: 'pointer', background: m.id === model.id ? t.accentBg : 'transparent' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 99, background: m.color }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, color: t.text, fontWeight: 500 }}>{m.name}</div>
+                    <div style={{ fontSize: 11, color: t.text3 }}>{m.desc}</div>
+                  </div>
+                  <Pill color={m.color}>{m.tag}</Pill>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ flex: 1 }} />
+          <button onClick={send} disabled={!text.trim()} style={{
+            width: 36, height: 36, borderRadius: 10, border: 'none', cursor: text.trim() ? 'pointer' : 'default',
+            background: text.trim() ? t.accent : t.surfaceHover, color: text.trim() ? '#fff' : t.text4,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            boxShadow: text.trim() ? `0 4px 12px color-mix(in oklab, ${t.accent} 40%, transparent)` : 'none',
+          }}>
+            <Icon name="arrowUp" size={17} color="currentColor" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── WORKFLOW BAR ────────────────────────────────────────────
+function WorkflowBar() {
+  const t = useT();
+  const steps = [
+    { i: 1, l: '理解需求', s: 'done' },
+    { i: 2, l: '检索 iPad HIG', s: 'done' },
+    { i: 3, l: '适配横/竖屏', s: 'done' },
+    { i: 4, l: 'Pencil 集成', s: 'running' },
+    { i: 5, l: '导出', s: 'todo' },
+  ];
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 24px', borderBottom: `0.5px solid ${t.border}`, overflowX: 'auto', background: t.windowBg }}>
+      <div style={{ fontSize: 10.5, color: t.text4, fontWeight: 600, letterSpacing: 0.8, textTransform: 'uppercase', marginRight: 6, flexShrink: 0 }}>WORKFLOW</div>
+      {steps.map((s, i) => (
+        <React.Fragment key={s.i}>
+          <div style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 11px', borderRadius: 99,
+            background: s.s === 'done' ? `color-mix(in oklab, ${t.ok} 14%, transparent)` : s.s === 'running' ? t.accentBg : 'transparent',
+            color: s.s === 'done' ? t.ok : s.s === 'running' ? t.accent : t.text4,
+            border: `0.5px solid ${s.s === 'done' ? `color-mix(in oklab, ${t.ok} 28%, transparent)` : s.s === 'running' ? t.accentBorder : `color-mix(in oklab, ${t.text4} 30%, transparent)`}`,
+            borderStyle: s.s === 'todo' ? 'dashed' : 'solid',
+            fontSize: 11.5, fontWeight: 500, whiteSpace: 'nowrap',
+          }}>
+            {s.s === 'done' && <Icon name="check" size={11} stroke={2.5} />}
+            {s.s === 'running' && <span style={{ width: 6, height: 6, borderRadius: 99, background: t.accent, animation: 'shimmer 1.4s infinite' }} />}
+            {s.s === 'todo' && <span style={{ width: 6, height: 6, borderRadius: 99, border: `1px solid ${t.text4}` }} />}
+            <span>{s.i}. {s.l}</span>
+          </div>
+          {i < steps.length - 1 && <div style={{ width: 6, height: 1, background: t.border }} />}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+// ─── CHAT AREA ───────────────────────────────────────────────
+function ChatArea({ session, theme, setTheme }) {
+  const t = useT();
+  const [messages, setMessages] = useState(MESSAGES_DEFAULT);
+  const [model, setModel] = useState(MODELS[0]);
+  const [streaming, setStreaming] = useState(false);
+  const scrollRef = useRef(null);
+
+  const send = (txt) => {
+    setMessages(ms => [...ms, { role: 'user', text: txt }]);
+    setStreaming(true);
+    setTimeout(() => {
+      setMessages(ms => [...ms, { role: 'ai', tag: '思考了 14 秒', text: '已根据你的描述更新方案。继续追问。' }]);
+      setStreaming(false);
+    }, 1200);
+  };
+
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [messages, streaming]);
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: t.windowBg, minWidth: 0, position: 'relative' }}>
+      <div style={{ position: 'absolute', inset: 0, background: t.ambient, pointerEvents: 'none' }} />
+
+      {/* Top bar */}
+      <div style={{ height: 52, flexShrink: 0, padding: '0 24px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: `0.5px solid ${t.border}`, position: 'relative', zIndex: 2 }}>
+        <div style={{ fontSize: 14.5, fontWeight: 600, color: t.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{session.title}</div>
+        <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} style={{ width: 34, height: 34, borderRadius: 8, border: 'none', cursor: 'pointer', background: 'transparent', color: t.text2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={17} stroke={1.7} />
+        </button>
+        <button style={{ width: 34, height: 34, borderRadius: 8, border: 'none', cursor: 'pointer', background: 'transparent', color: t.text2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name="cog" size={17} stroke={1.7} />
+        </button>
+      </div>
+
+      <WorkflowBar />
+
+      <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', position: 'relative', zIndex: 2 }}>
+        <div style={{ maxWidth: 720, margin: '0 auto', padding: '28px 24px 12px' }}>
+          {messages.map((m, i) => <Message key={i} m={m} />)}
+          {streaming && (
+            <div style={{ display: 'flex', gap: 14, alignItems: 'center', marginBottom: 32 }}>
+              <div style={{ width: 32, height: 32, borderRadius: 9, background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Icon name="sparkle" size={16} color="#fff" stroke={2} />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: t.text3, fontSize: 14 }}>
+                <span style={{ animation: 'shimmer 1.4s infinite' }}>思考中</span>
+                <div style={{ display: 'flex', gap: 3 }}>
+                  {[0, 1, 2].map(i => <span key={i} style={{ width: 4, height: 4, borderRadius: 99, background: t.accent, animation: `shimmer 1.2s infinite ${i * 0.15}s` }} />)}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 720, margin: '0 auto', width: '100%', position: 'relative', zIndex: 2 }}>
+        <Composer onSend={send} model={model} setModel={setModel} />
+      </div>
+    </div>
+  );
+}
+
+// ─── APP ─────────────────────────────────────────────────────
+function App() {
+  const [theme, setTheme] = useState('dark');
+  const t = useMemo(() => tokens(theme === 'dark'), [theme]);
+  const [activeWs, setActiveWs] = useState('work');
+  const [activeSession, setActiveSession] = useState('s1');
+  const [collapsed, setCollapsed] = useState(false);
+
+  const session = SESSIONS.find(s => s.id === activeSession);
+
+  // iPad Pro 13" landscape: 1366 x 1024 logical
+  const W = 1366, H = 1024;
+  const [scale, setScale] = useState(1);
+
+  useEffect(() => {
+    const fit = () => {
+      const sw = window.innerWidth - 80, sh = window.innerHeight - 80;
+      setScale(Math.min(sw / W, sh / H, 1));
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, []);
+
+  return (
+    <Theme.Provider value={t}>
+      <div style={{
+        width: '100vw', height: '100vh', background: '#0a0a0c',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        overflow: 'hidden',
+        backgroundImage: 'radial-gradient(ellipse 80% 60% at 50% 30%, oklch(20% 0.05 268), #0a0a0c 70%)',
+      }} data-screen-label="灵犀 iPad">
+        {/* iPad bezel */}
+        <div style={{
+          width: W, height: H, transform: `scale(${scale})`, transformOrigin: 'center',
+          background: '#1a1a1d', borderRadius: 36, padding: 14,
+          boxShadow: '0 0 0 2px #2a2a2e, 0 50px 100px rgba(0,0,0,0.6)',
+          position: 'relative',
+        }}>
+          {/* Camera */}
+          <div style={{ position: 'absolute', top: 7, left: '50%', transform: 'translateX(-50%)', width: 8, height: 8, borderRadius: '50%', background: '#0a0a0c', border: '0.5px solid #2a2a2e' }} />
+
+          <div style={{ width: '100%', height: '100%', borderRadius: 24, overflow: 'hidden', background: t.windowBg, display: 'flex', flexDirection: 'column' }}>
+            <StatusBar dark={theme === 'dark'} />
+            <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+              <Sidebar activeWs={activeWs} setActiveWs={setActiveWs} activeSession={activeSession} setActiveSession={setActiveSession} collapsed={collapsed} setCollapsed={setCollapsed} />
+              <ChatArea session={session} theme={theme} setTheme={setTheme} />
+            </div>
+          </div>
+        </div>
+      </div>
+    </Theme.Provider>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>

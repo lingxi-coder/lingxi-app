@@ -256,6 +256,53 @@ for sw in "${GEN_DIR}"/*.swift; do
   mv "${tmp}" "${sw}"
 done
 
+# ---------------------------------------------------------------------------
+# 1d. Force callback-vtable registration in `buildIosEngine`
+# ---------------------------------------------------------------------------
+# UniFFI registers a `callback_interface`'s foreign vtable inside its namespace's
+# `private` lazy `initializationResult`, which is forced ONLY by that namespace's
+# `uniffiEnsureInitialized()` — called from async FFI calls or the SYNCHRONOUS
+# `makeRustCall`/`rustCallWithError` paths' callers, but NOT by the generated
+# `buildIosEngine` itself (it is a bare `rustCallWithError` that lowers the
+# listener WITHOUT first forcing `ios_framework`'s init). The engine then streams
+# events into the registered `IosEventListener` foreign vtable — but if nothing
+# forced `ios_framework`'s `initializationResult`, that vtable is never set, and
+# the first inbound event panics in Rust with `uniffi_core … "Foreign pointer not
+# set"`. (The pre-P4 EngineModule link smoke only called a C contract-version
+# function, never built a handle, so this latent gap went unobserved.)
+#
+# Fix (deterministic, no bindgen/engine-semantics change): make `buildIosEngine`
+# call `ios_framework`'s `uniffiEnsureInitialized()` as its FIRST statement, so
+# the `uniffiCallbackInitIosEventListener()` inside the lazy init runs before the
+# foreign listener is lowered and handed to the engine. The function/types are
+# unchanged; this only forces the same one-time init UniFFI already runs for
+# async entrypoints. Idempotent: skipped if the call is already present.
+log "Forcing IosEventListener callback-vtable init in buildIosEngine…"
+IOSF="${GEN_DIR}/ios_framework.swift"
+[[ -f "${IOSF}" ]] || { echo "ERROR: ${IOSF} missing after bindgen" >&2; exit 1; }
+if ! grep -qF 'func buildIosEngine' "${IOSF}"; then
+  echo "ERROR: buildIosEngine not found in ${IOSF}; bindgen output shape changed" >&2
+  exit 1
+fi
+if ! grep -q 'uniffiEnsureInitialized() // M10-P4: register IosEventListener vtable' "${IOSF}"; then
+  tmp="${IOSF}.initpatch"
+  awk '
+    # Match the generated signature line exactly, then inject the ensure-init
+    # call as the first body statement (4-space indent matches UniFFI output).
+    /^public func buildIosEngine\(/ {
+      print
+      print "    uniffiEnsureInitialized() // M10-P4: register IosEventListener vtable before lowering the foreign listener"
+      next
+    }
+    { print }
+  ' "${IOSF}" > "${tmp}"
+  grep -q 'uniffiEnsureInitialized() // M10-P4' "${tmp}" || {
+    echo "ERROR: failed to inject uniffiEnsureInitialized() into buildIosEngine" >&2
+    exit 1
+  }
+  mv "${tmp}" "${IOSF}"
+fi
+
 SWIFT_COUNT="$(ls "${GEN_DIR}"/*.swift 2>/dev/null | wc -l | tr -d ' ')"
 [[ "${SWIFT_COUNT}" -gt 0 ]] || { echo "ERROR: no Swift bindings generated in ${GEN_DIR}" >&2; exit 1; }
 log "Swift bindings: ${SWIFT_COUNT} .swift file(s) + headers + module.modulemap (single-module deduped)"

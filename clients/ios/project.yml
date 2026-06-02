@@ -44,3 +44,41 @@ targets:
         GENERATE_INFOPLIST_FILE: true
         MARKETING_VERSION: "2.4.1"
         CURRENT_PROJECT_VERSION: "8721"
+
+  # XCTest simulator e2e (M10 A2 / P4): builds the in-process engine via
+  # `buildIosEngine`, submits a prompt, and asserts the streamed ClientEvent path
+  # reaches a test `IosEventListener` — proving SwiftUI→UniFFI→engine→listener
+  # in-process. Passes KEYLESS: with no ANTHROPIC_API_KEY the turn surfaces a
+  # terminal `.error` event. Hosted in the app target so it shares the app's
+  # compiled UniFFI bindings; also links the FFI xcframework so the per-namespace
+  # `engine_mobileFFI` clang module is importable here.
+  LingxiCodeTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Tests
+    dependencies:
+      - target: LingxiCode
+      - framework: Frameworks/LingxiCodeFFI.xcframework
+        embed: false
+        link: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.tests
+        GENERATE_INFOPLIST_FILE: true
+
+# Run the unit tests under the app scheme so `xcodebuild -scheme LingxiCode test`
+# executes the engine round-trip suite.
+schemes:
+  LingxiCode:
+    build:
+      targets:
+        LingxiCode: all
+        LingxiCodeTests: [test]
+    test:
+      targets:
+        - LingxiCodeTests
+      gatherCoverageData: false
+    run:
+      config: Debug

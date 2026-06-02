@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Bare platform theme used only by the system before Compose takes over
+      (splash / window background). All real theming is done in Compose via
+      LingXiTheme. We extend a non-AppCompat Material theme with no action bar
+      so the single Activity can draw edge-to-edge.
+    -->
+    <style name="Theme.LingXiCode" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>

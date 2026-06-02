@@ -129,9 +129,93 @@ for mm in "${GEN_DIR}"/*.modulemap; do
 done
 shopt -u nullglob
 
+# ---------------------------------------------------------------------------
+# 1b. Single-Swift-module dedup pass
+# ---------------------------------------------------------------------------
+# UniFFI 0.28 `--library` mode emits ONE self-contained `.swift` per namespace
+# (client_protocol / client_adapter / engine_mobile / ios_framework). The iOS
+# app compiles all four into ONE Swift module — which UniFFI itself REQUIRES for
+# cross-namespace (external) type access: a throwing method in `engine_mobile`
+# (`MobileEngineHandle.submit`) references `FfiConverterTypeClientError` /
+# `FfiConverterTypeClientCommand` that are DEFINED in `client_protocol` with no
+# explicit Swift import (UniFFI docs, types/remote_ext_types.md: "all generated
+# .swift files must be compiled together in a single module").
+#
+# But each file ALSO emits its own copy of the shared runtime scaffolding
+# (RustBuffer/Data readers+writers, the `FfiConverter` / `FfiConverterRustBuffer`
+# protocols, `rustCall`, `UniffiHandleMap`, `UniffiInternalError`, …) marked
+# `private`/`fileprivate` (file-scoped) so the copies don't COLLIDE in one
+# module. That compiles for every namespace in isolation, but breaks the ONE
+# cross-file reference that matters: `engine_mobile.swift` calling
+# `FfiConverterTypeClientError.lift` — a `public` converter type whose `lift`
+# witness comes from `client_protocol.swift`'s `private protocol
+# FfiConverterRustBuffer`, so it is "inaccessible due to 'private' protection"
+# from another file. (Swift error: engine_mobile.swift … 'lift' is inaccessible.)
+#
+# Fix (deterministic, no engine/bindgen-semantics change): keep the shared
+# scaffolding in ONE canonical file and make it module-visible; strip the
+# duplicate scaffolding from the others so module-internal references resolve to
+# the single canonical copy. The scaffolding block is bounded EXACTLY by
+# UniFFI's stable markers: it runs from the first line AFTER the per-namespace
+#   `#if canImport(<ns>FFI) … #endif`
+# import block, up to (but excluding) the line `// Public interface members
+# begin here.`. The per-file `#if canImport(<ns>FFI)` import is PRESERVED in
+# every file (each namespace still imports its own C/FFI module), and every
+# below-marker per-namespace helper (`uniffiEnsureInitialized`, the async
+# future callbacks, the checksum `initializationResult`) stays file-local.
+#
+# Canonical file = client_protocol.swift: it defines the cross-referenced
+# `ClientCommand` / `ClientError`, so its namespace's `ffi_client_protocol_
+# rustbuffer_*` symbols (used by the shared `RustBuffer` extension) are the ones
+# the deduped scaffolding calls — all present in the linked staticlib.
+log "Deduplicating shared Swift scaffolding into a single module…"
+CANON="client_protocol"
+MARKER="// Public interface members begin here."
+
+# Sanity: every generated file must carry the marker (else the bindgen output
+# changed shape and this surgery would be unsafe — fail loudly rather than
+# emit a silently-broken module).
+for sw in "${GEN_DIR}"/*.swift; do
+  grep -qF "${MARKER}" "${sw}" || {
+    echo "ERROR: dedup: marker not found in ${sw}; bindgen output shape changed" >&2
+    exit 1
+  }
+done
+
+for sw in "${GEN_DIR}"/*.swift; do
+  stem="$(basename "${sw}" .swift)"
+  tmp="${sw}.dedup"
+  if [[ "${stem}" == "${CANON}" ]]; then
+    # Canonical: drop the leading `private `/`fileprivate ` from TOP-LEVEL
+    # (column-0) scaffolding decls ABOVE the marker so the kept copy is
+    # module-internal and the `public` converter types' inherited `lift`/`lower`
+    # witnesses are reachable from the other namespaces' files. Lines from the
+    # marker onward are emitted verbatim.
+    awk -v marker="${MARKER}" '
+      index($0, marker) == 1 { seen_marker = 1 }
+      !seen_marker && /^(private|fileprivate) (func|protocol|struct|enum|class|extension|let|var|typealias) / {
+        sub(/^(private|fileprivate) /, "")
+      }
+      { print }
+    ' "${sw}" > "${tmp}"
+  else
+    # Non-canonical: delete the scaffolding block — everything from the line
+    # AFTER the `#endif` that closes the `#if canImport(<ns>FFI)` import up to
+    # the line BEFORE the marker. The import block (and the marker + all
+    # below-marker namespace code) is preserved verbatim.
+    awk -v marker="${MARKER}" '
+      index($0, marker) == 1 { in_scaffold = 0 }                 # marker ends the strip region
+      in_scaffold { next }                                       # drop scaffolding lines
+      { print }
+      !done_import && $0 ~ /^#endif$/ { in_scaffold = 1; done_import = 1 }  # first #endif = end of canImport block
+    ' "${sw}" > "${tmp}"
+  fi
+  mv "${tmp}" "${sw}"
+done
+
 SWIFT_COUNT="$(ls "${GEN_DIR}"/*.swift 2>/dev/null | wc -l | tr -d ' ')"
 [[ "${SWIFT_COUNT}" -gt 0 ]] || { echo "ERROR: no Swift bindings generated in ${GEN_DIR}" >&2; exit 1; }
-log "Swift bindings: ${SWIFT_COUNT} .swift file(s) + headers + module.modulemap"
+log "Swift bindings: ${SWIFT_COUNT} .swift file(s) + headers + module.modulemap (single-module deduped)"
 
 # ---------------------------------------------------------------------------
 # 2. Per-arch staticlib builds

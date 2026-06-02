@@ -19,6 +19,19 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: Sources
+      # Generated UniFFI Swift bindings (reproduce via scripts/build-xcframework.sh).
+      # Gitignored; compiled directly into this app target. They import the
+      # per-namespace C/FFI clang modules from LingxiCodeFFI.xcframework below.
+      - path: Generated
+    dependencies:
+      # UniFFI FFI static-library xcframework: exports the engine_mobile /
+      # client_protocol C symbols the generated bindings call, and ships the
+      # clang modulemap (module.modulemap) that defines the *FFI modules the
+      # generated Swift imports via `#if canImport(...)`. Static archive →
+      # link into the binary, do NOT embed (no dylib to copy).
+      - framework: Frameworks/LingxiCodeFFI.xcframework
+        embed: false
+        link: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code

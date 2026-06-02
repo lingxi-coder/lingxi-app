@@ -30,11 +30,13 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
+import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
 import com.lingxi.code.model.MockData
 import com.lingxi.code.model.Workspace
@@ -249,6 +251,7 @@ private fun SectionTab(
             .background(if (active) t.surfaceActive else Color.Transparent)
             .border(0.5.dp, if (active) t.border else Color.Transparent, shape)
             .clickable { onSelect(id) }
+            .testTag(UiTags.drawerTab(id.key))
             .padding(horizontal = 4.dp, vertical = 9.dp),
     ) {
         LXIcon(name = icon, size = 14.dp, color = if (active) t.text else t.text3, stroke = 1.8f)

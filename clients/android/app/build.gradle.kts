@@ -53,6 +53,13 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    testOptions {
+        // JVM unit tests only touch pure-Kotlin code (Color value-class, mock
+        // data); returning defaults for any stray android.jar stub keeps them
+        // off an emulator. Instrumented (androidTest) UI tests need a device.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {

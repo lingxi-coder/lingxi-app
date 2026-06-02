@@ -37,6 +37,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -45,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
+import com.lingxi.code.components.UiTags
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.theme.LingXiTheme
 
@@ -150,7 +152,13 @@ private fun TopBar(
             .padding(horizontal = 12.dp)
             .padding(top = 6.dp, bottom = 10.dp),
     ) {
-        IconButton(name = LXIconName.Menu, color = t.text, size = 20.dp, onClick = onOpenDrawer)
+        IconButton(
+            name = LXIconName.Menu,
+            color = t.text,
+            size = 20.dp,
+            onClick = onOpenDrawer,
+            modifier = Modifier.testTag(UiTags.OPEN_DRAWER),
+        )
         Spacer(Modifier.weight(1f))
         Text(
             text = title,
@@ -173,9 +181,15 @@ private fun TopBar(
 
 /** A 38×38 tappable icon button (the iOS `iconButton` frame). */
 @Composable
-private fun IconButton(name: LXIconName, color: Color, size: Dp, onClick: () -> Unit) {
+private fun IconButton(
+    name: LXIconName,
+    color: Color,
+    size: Dp,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Box(
-        modifier = Modifier.size(38.dp).clip(CircleShape).clickable(onClick = onClick),
+        modifier = modifier.size(38.dp).clip(CircleShape).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         LXIcon(name = name, size = size, color = color, stroke = 1.8f)

@@ -1,51 +1,32 @@
 //! Build the full orchestrator pipeline from an [`Argv`].
 //!
-//! M5-12 baseline wiring — assembles the existing crates into a runnable
-//! [`Runtime`]:
+//! **F2-01**: the ~270-line runtime wiring was lifted into the desktop
+//! composition root — [`engine_desktop::build`] now assembles the orchestrator
+//! pipeline from a deterministic [`engine_desktop::DesktopConfig`]. This module
+//! keeps the *env/argv-reading* half: it resolves every `DesktopConfig` field
+//! from `Argv` + `std::env` (the bridge-server fills the same config without
+//! ever touching the process environment), then delegates the actual assembly.
 //!
-//! 1. `lingxi-platform-posix-minimal` provides `HttpTransport` + `Clock` +
+//! The wiring that now lives in `engine-desktop`:
+//!
+//! 1. `platform-posix-minimal` provides `HttpTransport` + `Clock` +
 //!    `SecureStorage`.
-//! 2. `lingxi-api-client::AnthropicProvider` is built from the resolved
-//!    `LINGXI_API_BASE_URL` (default `https://api.anthropic.com`) +
-//!    `ANTHROPIC_API_KEY` (when present).
-//! 3. `lingxi-anthropic-oauth::ClaudeAiOAuthClient` wraps the credential
-//!    manager so `/login` + `/logout` (M5-11) have a real handle.
-//! 4. `lingxi-orchestrator::ConversationOrchestrator` is constructed with
-//!    `test_support` fillers for the hook/permission/memory slots that
-//!    don't yet have production constructors — documented inherited gap
-//!    from M5-10 / M5-11 `handle_impl` stubs.
-//! 5. `lingxi-commands::RegistrySlashDispatcher` wraps a `CommandRegistry`
-//!    populated by `register_all_builtin_commands` → `register_core_batch_1`
-//!    → `register_core_batch_2` (the orchestrator implements both
-//!    `OrchestratorHandle` via M5-10/M5-11).
-//!
-//! Future work (M5-13/M5-14): swap the `test_support` fillers for real
-//! permission gate, hook executor, MCP/agent registries.
+//! 2. The api-client is built from the resolved `LINGXI_API_BASE_URL` (default
+//!    `https://api.anthropic.com`) + `ANTHROPIC_API_KEY` (when present).
+//! 3. `anthropic-oauth::ClaudeAiOAuthClient` wraps the credential manager so
+//!    `/login` + `/logout` have a real handle.
+//! 4. `orchestrator::ConversationOrchestrator` is constructed with
+//!    `test_support` fillers for the hook/memory slots and the CLI's
+//!    `NoOpPermissionGate` (the CLI sets `use_noop_permission_gate: true`).
+//! 5. `command-api::RegistrySlashDispatcher` wraps the `CommandRegistry`
+//!    populated through the desktop composition root.
 
 use crate::argv::Argv;
-use anthropic_oauth::client::ClaudeAiOAuthClient;
-use anthropic_oauth::config::ClaudeAiOAuthConfig;
-use anthropic_oauth::handle::OAuthHandle;
-use api_client::AnthropicProvider;
-use command_api::RegistrySlashDispatcher;
-use engine_desktop::{desktop_command_registry, desktop_tool_registry};
-use orchestrator::test_support::{noop_hook_executor, NoOpPermissionGate, StaticMemoryProvider};
-use orchestrator::{
-    ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
-};
-use permission::PermissionMode;
-use platform_posix_minimal::{
-    PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixMcp, PosixProcess,
-    PosixRuntime, PosixSandbox, PosixWorktree,
-};
-use providers::{builtin_profiles, parse_profiles, parse_routing, ModelRouter, ProviderRegistry};
-use sandbox::decision::ProjectTrustLevel;
-use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
-use secret::CredentialManager;
+use async_trait::async_trait;
+use client_protocol::permission::PermissionRequest as PermissionRequestDto;
+use engine_desktop::{build, DesktopConfig, DesktopRuntime};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tool_api::BuiltinToolContext;
-use traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
+use traits::{AuthHandle, OutputStream};
 
 /// Bundle of everything `run_cli` needs to drive a conversation.
 pub struct Runtime {
@@ -79,6 +60,10 @@ pub struct TuiBuild {
 }
 
 /// Errors surfaced while building a [`Runtime`].
+///
+/// F2-01: the underlying assembly moved to [`engine_desktop::build`]; this enum
+/// is a thin projection of [`engine_desktop::BuildError`] kept for source
+/// compatibility with the CLI's existing call sites.
 #[derive(Debug, thiserror::Error)]
 pub enum InitError {
     /// API base URL resolution / construction failed.
@@ -87,6 +72,32 @@ pub enum InitError {
     /// Orchestrator construction failed (currently infallible).
     #[error("orchestrator construction failed: {0}")]
     Orchestrator(String),
+}
+
+impl From<engine_desktop::BuildError> for InitError {
+    fn from(e: engine_desktop::BuildError) -> Self {
+        match e {
+            engine_desktop::BuildError::ApiBase(m) => Self::ApiBase(m),
+            engine_desktop::BuildError::Orchestrator(m) => Self::Orchestrator(m),
+        }
+    }
+}
+
+/// A no-op [`PermissionRequestSink`] for the CLI path.
+///
+/// The CLI builds with `use_noop_permission_gate: true`, so
+/// [`engine_desktop::build`] binds the always-allow `NoOpPermissionGate` and
+/// NEVER constructs an `AdapterPermissionGate` — the sink is therefore never
+/// invoked. It exists only to satisfy `build`'s signature (the bridge-server
+/// passes a real WS-backed sink instead).
+struct NoopPermissionRequestSink;
+
+#[async_trait]
+impl client_adapter::PermissionRequestSink for NoopPermissionRequestSink {
+    async fn emit_request(&self, _request: PermissionRequestDto) {
+        // Unreachable on the CLI path (NoOpPermissionGate never emits).
+        debug_assert!(false, "CLI uses NoOpPermissionGate — no request is emitted");
+    }
 }
 
 /// Resolve the API base URL: honours `LINGXI_API_BASE_URL` (used by tests

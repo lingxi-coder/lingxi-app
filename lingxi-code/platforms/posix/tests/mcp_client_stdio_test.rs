@@ -64,12 +64,13 @@ async fn mcp_client_initialize_handshake_completes_over_stdio() {
         .expect("initialize timed out")
         .expect("initialize returned an error");
 
-    // The fixture advertises `"capabilities": {"tools": {}}` — presence of
-    // the key (even with an empty object) must decode to `tools: true`.
+    // The fixture advertises `tools`/`resources`/`prompts`/`logging` (each as
+    // an empty object) plus an `experimental` map — presence of each key must
+    // decode to `true`.
     assert!(caps.tools, "expected tools capability from fixture");
-    assert!(!caps.resources);
-    assert!(!caps.prompts);
-    assert!(!caps.logging);
+    assert!(caps.resources, "expected resources capability from fixture");
+    assert!(caps.prompts, "expected prompts capability from fixture");
+    assert!(caps.logging, "expected logging capability from fixture");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

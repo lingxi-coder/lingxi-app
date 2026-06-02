@@ -31,10 +31,11 @@ enum class ThemeMode(val raw: String) {
     }
 }
 
-/** UI density (matches the prototype's Appearance density radio). */
+/** UI density (matches the prototype's Appearance density radio: 紧凑/舒适/宽松). */
 enum class Density(val raw: String) {
+    Compact("compact"),
     Comfortable("comfortable"),
-    Compact("compact");
+    Spacious("spacious");
 
     companion object {
         fun from(raw: String?): Density = entries.firstOrNull { it.raw == raw } ?: Comfortable

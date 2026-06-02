@@ -4,11 +4,20 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import com.lingxi.code.settings.SettingsHost
 import com.lingxi.code.theme.AppearancePrefs
 import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.theme.LingXiTheme
@@ -37,15 +46,35 @@ class MainActivity : ComponentActivity() {
                 ThemeMode.Light -> false
                 ThemeMode.System -> isSystemInDarkTheme()
             }
+            // Settings is a full-surface overlay that slides up over the
+            // conversation (the Android analog of the iOS settings sheet); the
+            // drawer's account row opens it, system-back / close dismisses it.
+            var settingsOpen by remember { mutableStateOf(false) }
+
             LingXiTheme(darkTheme = darkTheme, accentId = prefs.accentId) {
-                RootScreen(
-                    isDark = darkTheme,
-                    onToggleTheme = {
-                        scope.launch {
-                            store.setThemeMode(if (darkTheme) ThemeMode.Light else ThemeMode.Dark)
-                        }
-                    },
-                )
+                Box(Modifier.fillMaxSize()) {
+                    RootScreen(
+                        isDark = darkTheme,
+                        onToggleTheme = {
+                            scope.launch {
+                                store.setThemeMode(if (darkTheme) ThemeMode.Light else ThemeMode.Dark)
+                            }
+                        },
+                        onOpenSettings = { settingsOpen = true },
+                    )
+                    AnimatedVisibility(
+                        visible = settingsOpen,
+                        enter = slideInVertically(initialOffsetY = { it }),
+                        exit = slideOutVertically(targetOffsetY = { it }),
+                    ) {
+                        SettingsHost(
+                            appearanceStore = store,
+                            isDark = darkTheme,
+                            accentId = prefs.accentId,
+                            onClose = { settingsOpen = false },
+                        )
+                    }
+                }
             }
         }
     }

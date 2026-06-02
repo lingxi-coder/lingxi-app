@@ -17,7 +17,10 @@
 #![forbid(unsafe_code)]
 
 use command_api::CommandRegistry;
-use command_core::{register_all_builtin_commands, register_core_batch_1, register_core_batch_2};
+use command_core::{
+    register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
+    register_core_batch_4,
+};
 use skill_api::SkillRegistry;
 use std::sync::Arc;
 use tool_api::{BuiltinToolContext, ToolRegistry};
@@ -83,7 +86,8 @@ pub fn mobile_command_registry(
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
     register_core_batch_1(&mut reg, handle.clone());
-    register_core_batch_2(&mut reg, handle, auth);
+    register_core_batch_2(&mut reg, handle.clone(), auth);
+    register_core_batch_4(&mut reg, handle);
     command_mobile::register(&mut reg);
     reg
 }

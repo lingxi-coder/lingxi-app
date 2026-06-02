@@ -15,9 +15,12 @@ pub mod commit;
 pub mod commit_push_pr;
 pub mod compact;
 pub mod config;
+pub mod context;
 pub mod cost;
 pub mod doctor;
 pub mod exit;
+pub mod export;
+pub mod files;
 pub mod help;
 pub mod hooks;
 pub mod init;
@@ -31,6 +34,7 @@ pub mod model;
 pub mod permissions;
 pub mod pr_comments;
 pub mod register;
+pub mod resume;
 pub mod review;
 pub mod security_review;
 pub mod status;
@@ -47,9 +51,12 @@ pub use commit::CommitHandler;
 pub use commit_push_pr::CommitPushPrHandler;
 pub use compact::CompactHandler;
 pub use config::ConfigHandler;
+pub use context::ContextHandler;
 pub use cost::CostHandler;
 pub use doctor::DoctorHandler;
 pub use exit::ExitHandler;
+pub use export::ExportHandler;
+pub use files::FilesHandler;
 pub use help::HelpHandler;
 pub use hooks::HooksHandler;
 pub use init::InitHandler;
@@ -62,6 +69,7 @@ pub use memory::MemoryHandler;
 pub use model::ModelHandler;
 pub use permissions::PermissionsHandler;
 pub use pr_comments::PrCommentsHandler;
+pub use resume::ResumeHandler;
 pub use review::ReviewHandler;
 pub use security_review::SecurityReviewHandler;
 pub use status::StatusHandler;
@@ -72,5 +80,5 @@ pub use version::VersionHandler;
 
 pub use register::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
-    register_core_batch_3,
+    register_core_batch_3, register_core_batch_4,
 };

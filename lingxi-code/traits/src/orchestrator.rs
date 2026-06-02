@@ -356,6 +356,63 @@ pub trait OrchestratorHandle: Send + Sync {
         let _ = image_paths;
         self.run_turn_streaming_with_cancel(prompt, cancel).await
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // engine-data-commands additions (`/export`, `/files`, `/context`,
+    // `/resume`). Each carries a benign default so the production
+    // `ConversationOrchestrator` (orchestrator/src/handle_impl.rs) and the
+    // test `MockOrchestratorHandle` (orchestrator/src/test_support.rs) keep
+    // compiling unchanged; the production impl overrides them with real data.
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Clone of the live, ordered conversation history.
+    ///
+    /// Single read-only accessor backing `/export` (render the transcript to
+    /// a file) and underpinning `/summary` and `/diff`. Returns the already
+    /// public [`protocol::ConversationMessage`] so no new type is introduced.
+    ///
+    /// Default returns an empty `Vec`, so handle impls that do not track a
+    /// session (e.g. the test mock) need no override.
+    async fn conversation_transcript(&self) -> Vec<protocol::ConversationMessage> {
+        Vec::new()
+    }
+
+    /// File paths currently tracked in the session's read-file-state cache.
+    ///
+    /// Backs `/files`, which renders each path relative to the cwd (cwd comes
+    /// from [`Self::get_status_snapshot`]) and prints `"No files in context"`
+    /// when empty — 1:1 with `files.ts`.
+    ///
+    /// Default returns an empty `Vec`, matching the TS "No files in context"
+    /// branch when no read-file-state cache is wired.
+    async fn files_in_context(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+
+    /// `(used_tokens, max_tokens)` for the current context window.
+    ///
+    /// Minimal primitive-tuple accessor backing the `/context` flat panel
+    /// (`**Tokens:** {used} / {max} ({pct}%)`). `used_tokens` comes from the
+    /// session's cumulative usage; `max_tokens` from the active model's
+    /// context budget. The model name itself already comes from
+    /// [`Self::get_status_snapshot`], so no new struct is needed.
+    ///
+    /// Default returns `(0, 0)` when no usage is recorded.
+    async fn context_window_usage(&self) -> (u64, u64) {
+        (0, 0)
+    }
+
+    /// `Vec<(session_id, label)>` of prior on-disk sessions, newest-first.
+    ///
+    /// Single accessor for a non-interactive `/resume` listing (one
+    /// `id` + `label` per line), built from `std` types only. The interactive
+    /// picker and replaying a chosen session are handled elsewhere; this
+    /// delivers only the enumeration half.
+    ///
+    /// Default returns an empty `Vec` when no on-disk store is present.
+    async fn list_resumable_sessions(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// Captured output emission. Useful for tests and (M5-13) the stdio sink.

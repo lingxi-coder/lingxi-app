@@ -1,0 +1,4 @@
+{
+  "type": "run_slash_command",
+  "raw": "/model opus"
+}

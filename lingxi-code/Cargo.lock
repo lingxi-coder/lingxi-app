@@ -674,6 +674,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "client-adapter"
+version = "0.1.0"
+dependencies = [
+ "api-client",
+ "async-trait",
+ "chrono",
+ "client-protocol",
+ "orchestrator",
+ "permission",
+ "protocol",
+ "serde_json",
+ "session",
+ "tokio",
+ "tokio-util",
+ "traits",
+ "uuid",
+]
+
+[[package]]
+name = "client-protocol"
+version = "0.1.0"
+dependencies = [
+ "protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

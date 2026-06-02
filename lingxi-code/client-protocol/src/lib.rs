@@ -1,0 +1,28 @@
+//! `client-protocol` — the versioned, transport-agnostic DTO contract shared by
+//! every M10 native-app client transport (bridge-server WebSocket/JSON-RPC for
+//! Electron, UniFFI for iOS/Android).
+//!
+//! This crate is **pure contract**: it defines the [`commands`], [`events`],
+//! [`message`], [`permission`], [`listings`], and [`error`] DTOs plus the
+//! [`version`] constant. It contains NO engine logic — the engine→DTO lowering
+//! lives in the separate `client-adapter` crate (governing decision §0.2).
+//!
+//! Governing constraints frozen here (see the M10 foundation plan §0):
+//! - Tool payloads are JSON **Strings** on the wire (`input_json`/`result_json`,
+//!   `effective_json`/`provenance_json`); `serde_json::Value` is NOT a dependency
+//!   of this crate because it is not UniFFI-representable (§0.4).
+//! - The SAME DTOs compile plain (bridge-server) and, under the `uniffi`
+//!   feature, as UniFFI types (mobile) — the feature is declared here and lit
+//!   up in F3 once `uniffi` is vendored/pinned offline (F3-00).
+//!
+//! At F1-00 the modules are empty stubs; subsequent F1-* tasks fill them in.
+
+#![forbid(unsafe_code)]
+
+pub mod commands;
+pub mod error;
+pub mod events;
+pub mod listings;
+pub mod message;
+pub mod permission;
+pub mod version;

@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "protocol",
+    "client-protocol",
+    "client-adapter",
     "tool-api",
     "tools/file",
     "tools/shell",
@@ -81,6 +83,8 @@ members = [
 # build only the real crates, not the integration-test fixtures.
 default-members = [
     "protocol",
+    "client-protocol",
+    "client-adapter",
     "tool-api",
     "tools/file",
     "tools/shell",

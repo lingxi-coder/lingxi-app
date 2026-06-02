@@ -29,7 +29,23 @@ permission = { path = "../../permission" }
 # production runtime the router is built from (F2-05 binary path).
 traits = { path = "../../traits" }
 command-api = { path = "../../command-api" }
+# S1: the production TurnDriver (`src/driver.rs`) drives a real
+# ConversationOrchestrator's cancelable streaming entry, so `orchestrator` is now
+# a LIBRARY dependency (it was dev-only when the only driver was the test one).
+orchestrator = { path = "../../orchestrator" }
+# S2: the real binary resolves a DesktopConfig from env/argv and assembles the
+# production runtime through the desktop composition root. app→app is permitted
+# by the dependency gate (apps are leaves; the rule only forbids non-leaf→leaf).
+engine-desktop = { path = "../engine-desktop" }
+# S2: `boot::load_settings_blocks` reads the layered settings `providers` /
+# `routing` blocks (same loader the CLI uses) to fill the DesktopConfig.
+engine = { path = "../../engine" }
+# S2: resolve `~/.claude` (claude_home) + the global `.mcp.json` path, and the
+# F2-04 `~/.claude/bridge/<port>.lock` discovery dir.
+dirs = "5"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync"] }
+# `CancellationToken` (the per-turn cancel seam) is available in the default
+# surface of tokio-util 0.7 — no extra feature needed.
 tokio-util = { workspace = true }
 async-trait.workspace = true
 serde_json.workspace = true
@@ -40,8 +56,9 @@ anyhow = "1"
 [dev-dependencies]
 # F2-06 e2e: drive a REAL streaming turn (mock streaming client + a real tool)
 # through the connection-scoped AdapterPermissionGate + AdapterOutputStream, then
-# exercise the permission round-trip over a live WebSocket.
-orchestrator = { path = "../../orchestrator" }
+# exercise the permission round-trip over a live WebSocket. `orchestrator` itself
+# is a normal dependency above (S1); the mocks it re-exports are available to
+# tests through it without a separate dev-dep entry.
 protocol = { path = "../../protocol" }
 tool-api = { path = "../../tool-api" }
 # F2-08 routing tests: the real builtin slash-command set the desktop
@@ -52,6 +69,8 @@ tokio-tungstenite = "0.21"
 futures-util.workspace = true
 http = "1"
 once_cell = "1"
+# S2: deterministic sandbox dirs for the boot/assembly + end-to-end serve tests.
+tempfile = "3"
 
 [lints]
 workspace = true

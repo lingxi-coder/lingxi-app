@@ -5,8 +5,12 @@
 //!   accepts the WS upgrade with the matching token, and `shutdown` removes
 //!   the lockfile via the embedded `LockfileGuard`.
 
-use bridge::{IdeBridge, IdeLockfile, McpEndpoint};
+use bridge::wire::Frame;
+use bridge::{FramePump, FrameSink, IdeBridge, IdeLockfile, McpEndpoint};
+use client_protocol::events::{ClientEvent, ErrorKindDto};
+use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
 async fn rejects_upgrade_without_auth_header() {
@@ -116,4 +120,81 @@ async fn bridge_writes_lockfile_then_round_trips_ws_upgrade() {
         !path.exists(),
         "lockfile must be removed after IdeBridge::shutdown"
     );
+}
+
+/// A stub [`FramePump`] that, on every inbound [`Frame`], pushes a single
+/// deterministic [`Frame::Event`] back out through the connection's sink — the
+/// minimal proof that the generalized read/write pump (F2-03) is wired:
+/// inbound frame deserialized → pump invoked → outbound frame delivered.
+struct EchoPump;
+
+#[async_trait::async_trait]
+impl FramePump for EchoPump {
+    async fn on_frame(&self, _frame: Frame, out: FrameSink) {
+        let reply = Frame::Event(ClientEvent::TextDelta {
+            text: "pong".to_string(),
+        });
+        let _ = out.send(reply);
+    }
+}
+
+#[tokio::test]
+async fn frame_pump_invoked_on_inbound_frame() {
+    let endpoint = McpEndpoint::start_on_ephemeral_port_with_pump(std::sync::Arc::new(EchoPump))
+        .await
+        .expect("endpoint must start");
+    endpoint.set_auth_token("pump-token-32chars000000000000000".into());
+
+    let port = endpoint.port();
+    let url = format!("ws://127.0.0.1:{port}/mcp");
+    let req = http::Request::builder()
+        .method("GET")
+        .uri(&url)
+        .header("host", format!("127.0.0.1:{port}"))
+        .header("connection", "upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", generate_key())
+        .header("sec-websocket-protocol", "mcp")
+        .header(
+            "x-claude-code-ide-authorization",
+            "pump-token-32chars000000000000000",
+        )
+        .body(())
+        .unwrap();
+    let (mut ws, response) = tokio_tungstenite::connect_async(req)
+        .await
+        .expect("ws upgrade must succeed");
+    assert_eq!(response.status(), 101, "upgrade must return 101");
+
+    // Send an inbound frame. The pump should fire and echo a frame back.
+    let inbound = Frame::Event(ClientEvent::Error {
+        kind: ErrorKindDto::Transport,
+        message: "ping".to_string(),
+    });
+    let inbound_text = serde_json::to_string(&inbound).expect("serialize inbound frame");
+    ws.send(Message::Text(inbound_text))
+        .await
+        .expect("send inbound frame");
+
+    // Read the echoed frame back (bounded so the test cannot hang forever).
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("pump must echo a frame within the timeout")
+        .expect("stream must yield a message")
+        .expect("message must not be an error");
+    let text = match msg {
+        Message::Text(t) => t,
+        other => panic!("expected a text frame, got {other:?}"),
+    };
+    let echoed: Frame = serde_json::from_str(&text).expect("deserialize echoed frame");
+    assert_eq!(
+        echoed,
+        Frame::Event(ClientEvent::TextDelta {
+            text: "pong".to_string()
+        }),
+        "the stub pump must have echoed its deterministic reply frame"
+    );
+
+    endpoint.shutdown().await;
 }

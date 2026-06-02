@@ -7,24 +7,27 @@
 //! from `Argv` + `std::env` (the bridge-server fills the same config without
 //! ever touching the process environment), then delegates the actual assembly.
 //!
-//! The wiring that now lives in `engine-desktop`:
+//! The wiring that now lives in `engine-desktop` (`apps/engine-desktop/src/lib.rs`):
 //!
 //! 1. `platform-posix-minimal` provides `HttpTransport` + `Clock` +
 //!    `SecureStorage`.
-//! 2. The api-client is built from the resolved `LINGXI_API_BASE_URL` (default
-//!    `https://api.anthropic.com`) + `ANTHROPIC_API_KEY` (when present).
+//! 2. The api-client is built (via `ProviderRegistry`) from `cfg.api_base`
+//!    (default `https://api.anthropic.com`) + `cfg.api_key`.
 //! 3. `anthropic-oauth::ClaudeAiOAuthClient` wraps the credential manager so
 //!    `/login` + `/logout` have a real handle.
 //! 4. `orchestrator::ConversationOrchestrator` is constructed with
-//!    `test_support` fillers for the hook/memory slots and the CLI's
-//!    `NoOpPermissionGate` (the CLI sets `use_noop_permission_gate: true`).
+//!    `test_support` fillers for the hook/memory slots and — because the CLI
+//!    sets `use_noop_permission_gate: true` — the always-allow
+//!    `NoOpPermissionGate`.
 //! 5. `command-api::RegistrySlashDispatcher` wraps the `CommandRegistry`
 //!    populated through the desktop composition root.
 
 use crate::argv::Argv;
 use async_trait::async_trait;
 use client_protocol::permission::PermissionRequest as PermissionRequestDto;
-use engine_desktop::{build, DesktopConfig, DesktopRuntime};
+use command_api::RegistrySlashDispatcher;
+use engine_desktop::{build, DesktopConfig};
+use orchestrator::ConversationOrchestrator;
 use std::sync::Arc;
 use traits::{AuthHandle, OutputStream};
 
@@ -145,6 +148,61 @@ fn load_routing() -> Option<serde_json::Value> {
         .and_then(|eff| eff.settings.routing)
 }
 
+/// Resolve a deterministic [`DesktopConfig`] from `Argv` + `std::env`.
+///
+/// **F2-01**: this is the *only* half of the old `build_runtime` that remains
+/// in `apps/cli` — every env / argv / `dirs` read that the engine-tier
+/// `engine_desktop::build` must NOT perform (so the bridge-server can build an
+/// identical runtime without touching the process environment). Each field
+/// mirrors the concrete read the pre-lift `build_runtime` made:
+///
+/// - `api_base` ← `resolve_api_base()` (env `LINGXI_API_BASE_URL`).
+/// - `api_key` ← env `ANTHROPIC_API_KEY` (empty string is valid).
+/// - `cwd` ← `std::env::current_dir()` (the process has already `chdir`'d into
+///   any `--cwd`).
+/// - `claude_home` ← `~/.claude` (the hook / agents / settings loader root).
+/// - `default_model` ← `Argv::model`, else the desktop default.
+/// - `provider_profiles` ← settings `providers` block (`load_provider_profiles`).
+/// - `routing` ← settings `routing` block (`load_routing`).
+/// - `mcp_paths` ← `[<cwd>/.mcp.json, <config_dir>/lingxi/mcp.json]` (project
+///   preferred over global), matching the precedence the old loader used.
+/// - `use_noop_permission_gate` ← `true` (the CLI always binds the always-allow
+///   `NoOpPermissionGate`; a transport binds `AdapterPermissionGate`).
+#[must_use]
+fn resolve_desktop_config(argv: &Argv) -> DesktopConfig {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let claude_home = dirs::home_dir().map_or_else(
+        || std::path::PathBuf::from("/dev/null"),
+        |h| h.join(".claude"),
+    );
+    let project_mcp_path = cwd.join(".mcp.json");
+    let global_mcp_path = dirs::config_dir().map_or_else(
+        || std::path::PathBuf::from("/dev/null"),
+        |d| d.join("lingxi").join("mcp.json"),
+    );
+
+    let mut default_model = DesktopConfig::default().default_model;
+    if let Some(m) = &argv.model {
+        default_model.clone_from(m);
+    }
+    // `--no-stream` is always honoured in the baseline pipeline (only the
+    // batched constructor is wired). Read the flag to silence the unused-field
+    // warning and preserve the pre-lift behavior.
+    let _ = argv.no_stream;
+
+    DesktopConfig {
+        api_base: resolve_api_base(),
+        api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+        cwd,
+        claude_home,
+        default_model,
+        provider_profiles: load_provider_profiles(),
+        routing: load_routing(),
+        mcp_paths: vec![project_mcp_path, global_mcp_path],
+        use_noop_permission_gate: true,
+    }
+}
+
 /// Build the full runtime from parsed argv + the chosen output stream.
 ///
 /// `output` is the sink the orchestrator will push turn events to (plain
@@ -152,279 +210,26 @@ fn load_routing() -> Option<serde_json::Value> {
 /// `crate::output_adapter::SinkAdapter`). M5-12 Task 9 wires this end-to-end
 /// so `--json` produces NDJSON `text` / `tool_call` / `turn_end` lines.
 ///
-/// Currently no `.await` is needed inside the constructor, but the signature
-/// remains `async` so future iterations (real OAuth token bootstrap, MCP
-/// server connect) can plug in without changing every call site.
-#[allow(clippy::unused_async, clippy::too_many_lines)]
+/// **F2-01**: the actual assembly is delegated to [`engine_desktop::build`].
+/// This function only resolves a [`DesktopConfig`] from `Argv`/env
+/// ([`resolve_desktop_config`]) and projects the returned
+/// [`engine_desktop::DesktopRuntime`] into the CLI's [`Runtime`]. The CLI sets
+/// `use_noop_permission_gate: true`, so the supplied [`NoopPermissionRequestSink`]
+/// is never invoked (the no-op gate never emits a request) and the returned
+/// `permission_gate` handle is always `None`.
 pub async fn build_runtime(
     argv: &Argv,
     output: Arc<dyn OutputStream>,
 ) -> Result<Runtime, InitError> {
-    let api_base = resolve_api_base();
-    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-
-    // (1) Platform-minimal façade (http + clock + storage). These exist in
-    //     production today; nothing experimental here.
-    let http = Arc::new(PosixHttp::new());
-    let clock = Arc::new(PosixClock::new());
-    let storage = Arc::new(PlainTextSecureStorage::new());
-
-    // (2) Build the api-client via ProviderRegistry. Note that an empty
-    //     api_key is accepted — the orchestrator's `run_turn` will fail
-    //     with a 401 if no real key is configured, but the CLI binary
-    //     itself constructs successfully so slash-command dispatch still
-    //     works without an API key.
-    //
-    // M-LLM-P2: route the orchestrator's model calls through a ProviderRegistry
-    // keyed by a `provider/model` string. Built-in profiles (anthropic/openai/
-    // gemini) plus any settings-declared `providers` profiles. Bare / `claude-*`
-    // models resolve to the built-in `anthropic` profile → AnthropicLlmProvider,
-    // which delegates verbatim to AnthropicProvider (byte-identical to the prior
-    // AnthropicProviderAdapter path). openai/gemini profiles surface a clear
-    // "codec not available until P3/P4" error when selected.
-    let env_snapshot: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let settings_providers = load_provider_profiles();
-    let mut profiles = builtin_profiles(Some(api_base.clone()));
-    match parse_profiles(settings_providers.as_ref()) {
-        Ok(extra) => profiles.extend(extra),
-        Err(e) => tracing::warn!(error = %e, "ignoring malformed settings `providers` block"),
-    }
-    // P7 Task B: load routing config (aliases/fallback/retry) from settings.
-    let routing = parse_routing(load_routing().as_ref());
-    let registry = Arc::new(ProviderRegistry::new(
-        profiles,
-        env_snapshot,
-        http.clone(),
-        routing,
-    ));
-    let api_client: Arc<dyn OrchestratorApiClient> =
-        Arc::new(ProviderApiAdapter::new(registry as Arc<dyn ModelRouter>));
-    // The WebSearch tool still builds Anthropic `POST /v1/messages` requests via
-    // its own provider (server-side web search is Anthropic-only in v1).
-    let tool_provider = Arc::new(AnthropicProvider::new(api_key, Some(api_base.clone())));
-
-    // (3) Credential manager + OAuth client (used by /login, /logout).
-    let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
-    let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
-    let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
-        oauth_cfg,
-        http.clone(),
-        credentials,
-    ));
-    let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(oauth_client));
-
-    // (4) Orchestrator config from argv. `OrchestratorConfig` does not
-    //     carry a streaming toggle directly — streaming vs. batched is
-    //     picked by which constructor the caller uses (`new` = batched
-    //     only, `new_with_streaming` = both). M5-12 baseline always
-    //     constructs via `new` (batched), honouring `--no-stream` by
-    //     default. Live `--stream` lands when `new_with_streaming` is
-    //     wired in a future plan.
-    let mut cfg = OrchestratorConfig::default();
-    if let Some(m) = &argv.model {
-        cfg.model.clone_from(m);
-    }
-    // `--no-stream` is always honoured in M5-12 because the baseline
-    // pipeline only wires the batched constructor. Read the flag (silence
-    // unused-field warning) and proceed.
-    let _ = argv.no_stream;
-
-    // (4.5) M6-06: Construct one CostTracker per process. The persist
-    //       channel drains into a fire-and-forget task that discards
-    //       snapshots in v0.7.0 — on-disk cost-state persistence is M7
-    //       work. Channel depth 64 absorbs short bursts without blocking
-    //       record_api_response_v2.
-    let (cost_persist_tx, mut cost_persist_rx) = tokio::sync::mpsc::channel(64);
-    tokio::spawn(async move {
-        // Discard snapshots — v0.7.0 does not persist cost.
-        while cost_persist_rx.recv().await.is_some() {}
-    });
-    let cost_tracker = Arc::new(cost::CostTracker::new(
-        protocol::SessionId::new(),
-        Arc::new(cost::PricingCatalog::builtin_reference()),
-        cost_persist_tx,
-    ));
-
-    // (5) Build the orchestrator using test_support fillers for the
-    //     hook/permission/memory slots. These are the documented inherited
-    //     M5-10/M5-11 gaps — production constructors land in M5-13+.
-    //
-    //     M8-P6: the tool registry is no longer constructed empty here — it is
-    //     assembled below (after the MCP registry exists) through the desktop
-    //     composition root `engine_desktop::desktop_tool_registry`.
-    let hooks = noop_hook_executor();
-    let perms = Arc::new(NoOpPermissionGate);
-    let memory: Arc<dyn orchestrator::prompt::MemoryHierarchyProvider> =
-        Arc::new(StaticMemoryProvider::empty());
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-    // (5.1) M6-07: Load `.mcp.json` (project preferred over user-global) and
-    //       pre-populate the McpRegistry with `Disconnected` state entries
-    //       so `/mcp` can list them. Real connect / health-check is M7 work.
-    let global_mcp_path = dirs::config_dir().map_or_else(
-        || std::path::PathBuf::from("/dev/null"),
-        |d| d.join("lingxi").join("mcp.json"),
-    );
-    let project_mcp_path = cwd.join(".mcp.json");
-    let mcp_configs = mcp::load_mcp_json_with_precedence(&project_mcp_path, &global_mcp_path);
-    let mcp_transport: Arc<dyn McpTransport> = Arc::new(PosixMcp::new());
-    let mcp_registry = Arc::new(mcp::McpRegistry::new(mcp_transport));
-    {
-        let mut conns = mcp_registry.connections.write().await;
-        for cfg_entry in mcp_configs {
-            let name = cfg_entry.name.clone();
-            conns.insert(
-                name,
-                mcp::McpConnectionState::Disconnected {
-                    config: cfg_entry,
-                    last_error: None,
-                },
-            );
-        }
-    }
-
-    // (5.2) M6-07: HookRegistry — read settings.json hooks block from
-    //       project (cwd/.claude/settings.json) and user (~/.claude/settings.json
-    //       or platform config_dir equivalent), in that order so project
-    //       wins on identical command registration (the registry currently
-    //       de-dupes by HookId, not name — both register; /hooks lists both).
-    let mut hook_registry = hooks::HookRegistry::new();
-    let project_settings_path = cwd.join(".claude").join("settings.json");
-    let user_settings_path = dirs::config_dir().map_or_else(
-        || std::path::PathBuf::from("/dev/null"),
-        |d| d.join("claude").join("settings.json"),
-    );
-    for (path, source) in [
-        (user_settings_path, hooks::definition::HookSource::User),
-        (
-            project_settings_path,
-            hooks::definition::HookSource::Project,
-        ),
-    ] {
-        if let Ok(raw) = tokio::fs::read_to_string(&path).await {
-            match hooks::parse_hooks_from_settings_json(&raw, source) {
-                Ok(hooks_vec) => {
-                    for h in hooks_vec {
-                        hook_registry.register(h);
-                    }
-                }
-                Err(e) => tracing::warn!(
-                    error = %e,
-                    path = %path.display(),
-                    "skipping malformed settings hooks"
-                ),
-            }
-        }
-    }
-    let hook_registry = Arc::new(tokio::sync::RwLock::new(hook_registry));
-
-    // (5.3) M6-07: Agent catalog — load from project + user agents/.
-    //       Project wins on agent_type collision because it is passed
-    //       SECOND to load_agents_from_dirs (later paths win).
-    let project_agents_dir = cwd.join(".claude").join("agents");
-    let user_agents_dir = dirs::home_dir().map_or_else(
-        || std::path::PathBuf::from("/dev/null"),
-        |h| h.join(".claude").join("agents"),
-    );
-    let agents = agent::load_agents_from_dirs(&[
-        (user_agents_dir, agent::definition::AgentSource::UserDefined),
-        (project_agents_dir, agent::definition::AgentSource::Project),
-    ])
-    .await;
-    let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
-
-    // (5.4) M6-08: Real compaction. Threshold defaults to 150_000 tokens —
-    //       matches M3's design lock for the Anthropic prod context
-    //       window. Default Autocompactor (no `with_forked_runner`)
-    //       returns a stub summary string; real LLM summarization lands
-    //       in M7 when the ForkedAgentRunner pool is wired.
-    let compactor = Arc::new(compaction::CompactionOrchestrator::new(150_000));
-
-    // (5.45) M9-05: construct the real desktop `TaskRegistry` and wire it into
-    //        the tool context (`task_registry: Some(..)`, replacing the M8
-    //        `None`). Tasks materialize their stdout/stderr under a sandboxed
-    //        output dir (`<cwd>/.claude/tasks-output`); the spawner is the
-    //        tokio-backed `PosixRuntime` (the `RuntimeSpawner` impl — NOT
-    //        `PosixProcess`, which is the `ProcessRunner`). The same handle is
-    //        handed to the TUI as a `PollerFeed` so the background-task footer +
-    //        dialog read live state (the M9 §4 gate). Coerced to the narrow
-    //        `traits` handle at the tool-context + TUI seams.
-    let task_output_dir = cwd.join(".claude").join("tasks-output");
-    let task_registry = Arc::new(tasks::registry::TaskRegistry::new(
-        Arc::new(PosixRuntime::new()),
-        Arc::new(PosixFileSystem::new(cwd.clone())),
-        Arc::new(tasks::output_manager::TaskOutputManager::new(
-            task_output_dir,
-            Arc::new(PosixFileSystem::new(cwd.clone())),
-        )),
-    ));
-
-    // (5.5) M8-P6: assemble the desktop tool registry through the composition
-    //       root. The orchestrator previously received an empty
-    //       `ToolRegistry::new()`; `engine-desktop` now owns the desktop tool
-    //       set (14 tool crates) and we build the `BuiltinToolContext` from the
-    //       posix platform handles + session policy. MCP tools share the
-    //       orchestrator's `McpRegistry`; subagent/task/mailbox/budget/LSP seams
-    //       stay `None` until their production pools are wired (M9+).
-    let tool_ctx = BuiltinToolContext {
-        fs: Arc::new(PosixFileSystem::new(cwd.clone())),
-        bus: Arc::new(telemetry::AnalyticsBus::new()),
-        trusted_dirs: vec![cwd.clone()],
-        process: Arc::new(PosixProcess::new()),
-        sandbox: Arc::new(PosixSandbox::new()),
-        clock: clock.clone(),
-        sandbox_runtime: SandboxRuntimeConfig::default(),
-        permission_mode: PermissionMode::Default,
-        project_trust: ProjectTrustLevel::Trusted,
-        sandbox_available: false,
-        workspace: cwd.clone(),
-        platform: if cfg!(target_os = "macos") {
-            SandboxPlatform::Mac
-        } else {
-            SandboxPlatform::Linux
-        },
-        http: http.clone(),
-        provider: tool_provider,
-        default_model: cfg.model.clone(),
-        worktree: Arc::new(PosixWorktree::new()),
-        subagent_spawner: None,
-        task_registry: Some(
-            task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>
-        ),
-        mailbox_router: None,
-        budget_enforcer: None,
-        mcp_registry: Some(mcp_registry.clone()),
-        lsp_registry: None,
-        // Mobile / device-control capabilities are not wired on desktop (M8).
-        camera: None,
-        voice: None,
-        share: None,
-        computer_control: None,
-    };
-    let tools = Arc::new(desktop_tool_registry(tool_ctx));
-
-    let orch = Arc::new(
-        ConversationOrchestrator::new(cfg, api_client, tools, hooks, perms, output, memory, cwd)
-            .with_cost_tracker(cost_tracker)
-            .with_mcp_registry(mcp_registry)
-            .with_hook_registry(hook_registry)
-            .with_agent_catalog(agent_catalog)
-            .with_compaction(compactor),
-    );
-
-    // (6) Build the command registry through the desktop composition root.
-    //     The orchestrator implements `OrchestratorHandle` via M5-10 + M5-11;
-    //     `engine_desktop::desktop_command_registry` owns the seed →
-    //     batch-1 → batch-2 sequence that was previously inlined here.
-    let handle: Arc<dyn OrchestratorHandle> = orch.clone();
-    let reg = desktop_command_registry(handle, auth.clone());
-    let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
-
+    let cfg = resolve_desktop_config(argv);
+    let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+        Arc::new(NoopPermissionRequestSink);
+    let rt = build(cfg, output, permission_sink).await?;
     Ok(Runtime {
-        orchestrator: orch,
-        dispatcher,
-        auth,
-        task_registry,
+        orchestrator: rt.orchestrator,
+        dispatcher: rt.dispatcher,
+        auth: rt.auth,
+        task_registry: rt.task_registry,
     })
 }
 
@@ -434,7 +239,6 @@ pub async fn build_runtime(
 /// its `output` so streaming `emit_text` calls route into the bridge
 /// channel returned alongside the runtime. The TUI render loop drains
 /// this channel through `tui::streaming::apply_event`.
-#[allow(clippy::unused_async)]
 pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
     let bridge: Arc<dyn OutputStream> = Arc::new(tui::BridgeOutputStream::new(bridge_tx));

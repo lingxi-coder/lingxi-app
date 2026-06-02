@@ -179,6 +179,7 @@ thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"
 futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 
 # dev-only
 proptest = "1"

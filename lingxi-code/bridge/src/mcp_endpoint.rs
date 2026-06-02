@@ -8,12 +8,15 @@
 //! The literal header name and `mcp` subprotocol mirror the client side in
 //! `lingxi-platform-common::mcp_ws` and `claude-code/src/services/mcp/client.ts`.
 
+use crate::wire::Frame;
+use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue, StatusCode};
+use tokio_tungstenite::tungstenite::Message;
 
 /// Header name (canonical case) for the IDE auth token — matches the literal
 /// `X-Claude-Code-Ide-Authorization` claude-code clients send.
@@ -28,6 +31,63 @@ pub const WS_SUBPROTOCOL: &str = "mcp";
 /// Body of the 401 response sent on missing / mismatched auth — exact bytes
 /// pinned by [`mcp_endpoint_test.rs`].
 const UNAUTHORIZED_BODY: &str = "unauthorized\n";
+
+/// A connection-scoped outbound sink the [`FramePump`] uses to push [`Frame`]s
+/// back to the client — both the synchronous reply to an inbound command AND
+/// later UNSOLICITED server pushes (streamed turn events, permission requests).
+///
+/// Cloneable: a pump can keep a clone alive past `on_frame` returning (e.g. a
+/// spawned turn task that streams `Frame::Event`s) — sends keep flowing until
+/// every clone is dropped or the client disconnects. Sending after the
+/// connection has closed is a silent no-op (the write task is gone); the pump
+/// does not need to handle that error.
+#[derive(Clone)]
+pub struct FrameSink {
+    tx: mpsc::UnboundedSender<Frame>,
+}
+
+impl FrameSink {
+    /// Queue `frame` for delivery to the client. Returns `true` if it was
+    /// accepted into the outbound buffer, `false` if the connection's write
+    /// task has already ended (the frame is dropped). Never blocks.
+    ///
+    /// The result is informational: fire-and-forget pushes may discard it
+    /// (`let _ = sink.send(..)`) since a closed connection is not an error the
+    /// pump must handle.
+    #[must_use]
+    pub fn send(&self, frame: Frame) -> bool {
+        self.tx.send(frame).is_ok()
+    }
+}
+
+/// A per-connection read/write pump callback supplied by the caller
+/// (bridge-server). It is the seam between the proven transport (auth + upgrade
+/// + framing, owned by [`McpEndpoint`]) and the engine routing (owned by the
+/// caller, F2-05+).
+///
+/// For each inbound text frame the endpoint deserializes a [`Frame`] and calls
+/// [`on_frame`](FramePump::on_frame), handing it the connection's [`FrameSink`]
+/// for replies/pushes. `on_frame` should return promptly: long-running work
+/// (driving an orchestrator turn) is spawned by the pump itself, keeping a
+/// clone of the sink to stream events. One pump instance is shared across all
+/// connections (`Arc<dyn FramePump>`); per-connection state lives behind the
+/// `&self`/`FrameSink` boundary.
+#[async_trait::async_trait]
+pub trait FramePump: Send + Sync + 'static {
+    /// Handle one inbound [`Frame`]. Use `out` to send reply / push frames.
+    async fn on_frame(&self, frame: Frame, out: FrameSink);
+
+    /// Called exactly once when the connection ends — the client disconnected,
+    /// sent a Close, or the read side errored. The default is a no-op so
+    /// hold-open pumps (e.g. the `EchoPump` test fixture) need no override.
+    ///
+    /// The bridge-server connection pump (F2-06) overrides this to DRAIN its
+    /// `AdapterPermissionGate` (fail-closed): any in-flight permission `check()`
+    /// parked on a oneshot resolves `Deny` the moment the resolving transport
+    /// task vanishes, so a turn future can never hang waiting for an approval
+    /// from a client that is gone.
+    async fn on_close(&self) {}
+}
 
 /// Endpoint handle. Holds the listener port and the auth-token cell.
 ///
@@ -49,6 +109,30 @@ impl McpEndpoint {
     /// cannot be reserved (extremely rare; usually only when 127.0.0.1 itself
     /// is unreachable).
     pub async fn start_on_ephemeral_port() -> std::io::Result<Self> {
+        Self::start_inner(None).await
+    }
+
+    /// Like [`start_on_ephemeral_port`](Self::start_on_ephemeral_port) but
+    /// installs a [`FramePump`] driving each connection's read/write loop.
+    ///
+    /// The auth + upgrade + subprotocol handshake is IDENTICAL — only the
+    /// post-upgrade behavior differs: with a pump, inbound text frames are
+    /// deserialized to [`Frame`] and handed to the pump (which streams
+    /// outbound frames back through the connection's [`FrameSink`]); without a
+    /// pump, the socket is just held open until the client disconnects.
+    ///
+    /// # Errors
+    /// Same as [`start_on_ephemeral_port`](Self::start_on_ephemeral_port): the
+    /// I/O error from `TcpListener::bind` if the loopback port cannot be bound.
+    pub async fn start_on_ephemeral_port_with_pump(
+        pump: Arc<dyn FramePump>,
+    ) -> std::io::Result<Self> {
+        Self::start_inner(Some(pump)).await
+    }
+
+    /// Shared accept-loop constructor. `pump` is threaded to every connection
+    /// task; `None` reproduces the historical hold-open behavior.
+    async fn start_inner(pump: Option<Arc<dyn FramePump>>) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
         let auth_token: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
@@ -68,7 +152,8 @@ impl McpEndpoint {
                             }
                         };
                         let auth_for_conn = auth_for_task.clone();
-                        tokio::spawn(handle_connection(stream, addr, auth_for_conn));
+                        let pump_for_conn = pump.clone();
+                        tokio::spawn(handle_connection(stream, addr, auth_for_conn, pump_for_conn));
                     }
                 }
             }
@@ -109,9 +194,15 @@ impl McpEndpoint {
 }
 
 /// Per-connection task. Captures the expected token at handshake time, runs
-/// `accept_hdr_async` with an auth-validating callback, and (on success) holds
-/// the upgraded WebSocket open until the client disconnects.
-async fn handle_connection(stream: TcpStream, addr: SocketAddr, auth: Arc<RwLock<Option<String>>>) {
+/// `accept_hdr_async` with an auth-validating callback, and (on success)
+/// either drives the [`FramePump`] read/write loop (when one was supplied) or
+/// holds the upgraded WebSocket open until the client disconnects.
+async fn handle_connection(
+    stream: TcpStream,
+    addr: SocketAddr,
+    auth: Arc<RwLock<Option<String>>>,
+    pump: Option<Arc<dyn FramePump>>,
+) {
     // Snapshot the expected token BEFORE upgrade so the synchronous callback
     // can compare without re-acquiring the lock.
     let expected = auth.read().ok().and_then(|g| g.clone());
@@ -160,16 +251,94 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr, auth: Arc<RwLock
     match tokio_tungstenite::accept_hdr_async(stream, cb).await {
         Ok(ws) => {
             tracing::debug!(?addr, "bridge: client connected");
-            // The JSON-RPC plumbing (adapt `ws` onto a `jsonrpc::Connection`
-            // and dispatch into `lingxi_mcp`) is wired by `IdeBridge` /
-            // Task 12's happy-path roundtrip. Here we just hold the socket
-            // open until the client disconnects so the upgrade succeeds.
-            let _ = ws;
+            match pump {
+                // With a pump: drive the real read/write frame loop.
+                Some(pump) => run_frame_pump(ws, addr, pump).await,
+                // Without a pump: historical behavior — hold the socket open
+                // until the client disconnects so the upgrade succeeds. (This
+                // is the path `mcp_endpoint_test.rs`'s upgrade test exercises.)
+                None => {
+                    let _ = ws;
+                }
+            }
         }
         Err(e) => {
             tracing::debug!(?addr, error = %e, "bridge: handshake rejected");
         }
     }
+}
+
+/// Drive the post-upgrade read/write loop for a connection that has a
+/// [`FramePump`].
+///
+/// Outbound frames flow through an unbounded mpsc channel ([`FrameSink`]) so
+/// the pump can push from spawned tasks (e.g. a streamed turn) decoupled from
+/// the read side. The loop ends when the client disconnects, sends a Close, or
+/// every [`FrameSink`] clone is dropped AND the socket has no more inbound
+/// frames.
+async fn run_frame_pump<S>(ws: S, addr: SocketAddr, pump: Arc<dyn FramePump>)
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Send
+        + 'static,
+{
+    let (mut write, mut read) = ws.split();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Frame>();
+    let sink = FrameSink { tx: out_tx };
+
+    loop {
+        tokio::select! {
+            // Outbound: a frame the pump queued → serialize + write. `recv`
+            // only yields `None` once EVERY `FrameSink` clone is dropped; the
+            // loop holds `sink` for its whole lifetime, so that arm is
+            // effectively unreachable here and is treated as a no-op.
+            maybe_out = out_rx.recv() => {
+                if let Some(frame) = maybe_out {
+                    match serde_json::to_string(&frame) {
+                        Ok(text) => {
+                            if write.send(Message::Text(text)).await.is_err() {
+                                tracing::debug!(?addr, "bridge: write closed; ending pump");
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(?addr, error = %e, "bridge: outbound frame serialize failed");
+                        }
+                    }
+                }
+            }
+            // Inbound: a message from the client.
+            maybe_in = read.next() => {
+                match maybe_in {
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<Frame>(&text) {
+                            Ok(frame) => pump.on_frame(frame, sink.clone()).await,
+                            Err(e) => {
+                                tracing::debug!(?addr, error = %e, "bridge: undecodable inbound frame ignored");
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        tracing::debug!(?addr, "bridge: client disconnected");
+                        break;
+                    }
+                    // Ping/Pong/Binary are not part of the JSON frame protocol;
+                    // tungstenite auto-replies to Ping, so we just ignore them.
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        tracing::debug!(?addr, error = %e, "bridge: read error; ending pump");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // The connection ended (disconnect / Close / read error). Notify the pump so
+    // it can run fail-closed teardown (the bridge-server connection drains its
+    // permission gate here — F2-06).
+    pump.on_close().await;
 }
 
 /// Constant-time byte-slice equality. Length-mismatch is short-circuited

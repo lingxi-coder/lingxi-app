@@ -15,12 +15,43 @@ publish = false
 name = "bridge-server"
 path = "src/main.rs"
 
+[lib]
+name = "bridge_server"
+path = "src/lib.rs"
+
 [dependencies]
 bridge = { path = "../../bridge" }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+client-protocol = { path = "../../client-protocol" }
+client-adapter = { path = "../../client-adapter" }
+permission = { path = "../../permission" }
+# F2-08: the full command-routing seam reaches the engine handles (in `traits`)
+# and the slash-command dispatcher (`command-api`). engine-desktop wires the
+# production runtime the router is built from (F2-05 binary path).
+traits = { path = "../../traits" }
+command-api = { path = "../../command-api" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync"] }
+tokio-util = { workspace = true }
+async-trait.workspace = true
+serde_json.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+
+[dev-dependencies]
+# F2-06 e2e: drive a REAL streaming turn (mock streaming client + a real tool)
+# through the connection-scoped AdapterPermissionGate + AdapterOutputStream, then
+# exercise the permission round-trip over a live WebSocket.
+orchestrator = { path = "../../orchestrator" }
+protocol = { path = "../../protocol" }
+tool-api = { path = "../../tool-api" }
+# F2-08 routing tests: the real builtin slash-command set the desktop
+# composition root seeds, so `RunSlashCommand` routes through the production
+# registry (not a test-only stub).
+command-core = { path = "../../commands/core" }
+tokio-tungstenite = "0.21"
+futures-util.workspace = true
+http = "1"
+once_cell = "1"
 
 [lints]
 workspace = true

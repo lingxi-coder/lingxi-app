@@ -14,34 +14,33 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
-# M8-P6: nested under apps/, so workspace-crate paths gain one `..`. The tool
-# set + command set come from the desktop composition root; this binary only
-# supplies platform handles + session policy.
+# M8-P6 / F2-01: the desktop composition root owns the orchestrator assembly.
+# `engine_desktop::build(DesktopConfig)` now constructs the full runtime; this
+# binary only resolves a `DesktopConfig` from `Argv`/env and delegates. The
+# ~270-line wiring (and the dozen crates it pulled in — api-client, providers,
+# compaction, mcp, hooks, agent, cost, anthropic-oauth, secret, tool-api,
+# permission, sandbox) moved with it and is no longer a direct CLI dependency.
 engine-desktop = { path = "../engine-desktop" }
+# F2-01: `engine_desktop::build` takes an `Arc<dyn client_adapter::PermissionRequestSink>`
+# whose method carries a `client_protocol::permission::PermissionRequest`. The CLI
+# defines a no-op sink (it opts into `NoOpPermissionGate`), so it names both
+# engine-tier crates. Legal: the dep rule (§0.3) only forbids
+# client-protocol/client-adapter → apps/*, not apps/* → client-protocol/client-adapter.
+client-protocol = { path = "../../client-protocol" }
+client-adapter = { path = "../../client-adapter" }
 protocol = { path = "../../protocol" }
 traits = { path = "../../traits" }
-api-client = { path = "../../api-client" }
 command-api = { path = "../../command-api" }
 orchestrator = { path = "../../orchestrator" }
 engine = { path = "../../engine" }
-providers = { path = "../../providers" }
-compaction = { path = "../../compaction" }
-mcp = { path = "../../mcp" }
-hooks = { path = "../../hooks" }
-agent = { path = "../../agent" }
-cost = { path = "../../cost" }
 dirs = "5"
 tui = { path = "../../tui" }
 session = { path = "../../session" }
-# M9-05: desktop TaskRegistry construction (background-task surface wiring).
+# M9-05: desktop TaskRegistry type (the `Runtime` bundle re-surfaces the handle
+# built by `engine_desktop::build` for the TUI poller).
 tasks = { path = "../../tasks" }
-anthropic-oauth = { path = "../../anthropic-oauth" }
-secret = { path = "../../secret" }
-# Tool-context construction (BuiltinToolContext + ToolRegistry + policy types).
-tool-api = { path = "../../tool-api" }
-permission = { path = "../../permission" }
-sandbox = { path = "../../sandbox" }
 telemetry = { path = "../../telemetry" }
+# Session resume loader (`run.rs`) constructs a `PosixFileSystem` directly.
 platform-posix-minimal = { path = "../../platforms/posix-minimal" }
 
 # clap 4.6+ requires edition2024; pin to a release compatible with Rust 1.82.

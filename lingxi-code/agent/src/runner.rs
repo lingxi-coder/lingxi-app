@@ -1,9 +1,20 @@
 //! Subagent state-machine loop.
 //!
 //! [`run_subagent`] is the future that
-//! [`crate::pool::StateMachinePool::allocate`] hands to the runtime. M1.11
-//! ships a stub completion after the first inbound event; the full agentic
-//! loop in Plan 09+ uses `§22 SessionStorage` and `§23 FileStateCache`.
+//! [`crate::pool::StateMachinePool::allocate`] hands to the runtime.
+//!
+//! Two modes coexist, selected on [`SubagentContext::api_client`]:
+//!
+//! * **Real multi-turn loop** (`api_client = Some`): an imperative loop that
+//!   mirrors the orchestrator's `execute_one_turn` — call the model, append
+//!   the assistant turn, dispatch any `tool_use` blocks through the inherited
+//!   [`traits::ToolInvoker`], feed the results back as a user message, and
+//!   repeat until the model stops (`end_turn` / no tool use) or `max_turns`
+//!   is hit. A `UserExit` / `UserInterrupt` arriving on `event_rx` aborts the
+//!   loop and surfaces [`SubagentEvent::Killed`].
+//! * **Legacy stub** (`api_client = None`): the M1.11 reducer-driven stub that
+//!   completes after the first inbound event. Retained for back-compat with
+//!   callers that haven't wired an API client yet.
 
 use crate::context::SubagentContext;
 use protocol::AgentId;
@@ -52,11 +63,297 @@ pub enum SubagentEvent {
 
 /// Subagent state-machine loop.
 ///
-/// Drives [`engine::reduce`] over `event_rx` and emits
-/// [`SubagentEvent`]s on `out_tx`. M1.11 stubs completion after the first
-/// event so the pool can be wired end-to-end before the full agentic loop
-/// arrives in Plan 09+.
+/// When [`SubagentContext::api_client`] is `Some`, drives the real
+/// multi-turn agentic loop (see [`run_subagent_loop`]). Otherwise falls back
+/// to the legacy reducer-driven stub (see [`run_subagent_stub`]). Both emit
+/// [`SubagentEvent`]s on `out_tx`.
 pub async fn run_subagent(
+    ctx: SubagentContext,
+    event_rx: mpsc::Receiver<engine::Event>,
+    out_tx: mpsc::Sender<SubagentEvent>,
+) {
+    if ctx.api_client.is_some() {
+        run_subagent_loop(ctx, event_rx, out_tx).await;
+    } else {
+        run_subagent_stub(ctx, event_rx, out_tx).await;
+    }
+}
+
+/// Resolve the wire model string from the agent definition.
+fn resolve_model(ctx: &SubagentContext) -> String {
+    match &ctx.agent_definition.model {
+        crate::definition::AgentModel::Inherit => "inherit".to_string(),
+        crate::definition::AgentModel::Alias(n) | crate::definition::AgentModel::Explicit(n) => {
+            n.clone()
+        }
+    }
+}
+
+/// Aggregate the text from an assistant message's content blocks.
+fn aggregate_text(content: &[protocol::ContentBlock]) -> String {
+    let mut out = String::new();
+    for blk in content {
+        if let protocol::ContentBlock::Text { text } = blk {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(text);
+        }
+    }
+    out
+}
+
+/// Translate api-client content blocks into protocol content blocks.
+///
+/// Mirrors the orchestrator's `translate_response_blocks`: `Text` /
+/// `ToolUse` / `Thinking` map through; server-side variants are dropped.
+fn translate_response_blocks(
+    content: &[api_client::types::ContentBlockApi],
+) -> Vec<protocol::ContentBlock> {
+    use api_client::types::ContentBlockApi;
+    content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlockApi::Text { text } => {
+                Some(protocol::ContentBlock::Text { text: text.clone() })
+            }
+            ContentBlockApi::ToolUse { id, name, input } => Some(protocol::ContentBlock::ToolUse {
+                id: *id,
+                name: name.clone(),
+                input: input.clone(),
+            }),
+            ContentBlockApi::Thinking {
+                thinking,
+                signature,
+            } => Some(protocol::ContentBlock::Thinking {
+                thinking: thinking.clone(),
+                signature: signature.clone(),
+            }),
+            ContentBlockApi::ServerToolUse { .. }
+            | ContentBlockApi::ConnectorText { .. }
+            | ContentBlockApi::AdvisorToolResult { .. } => None,
+        })
+        .collect()
+}
+
+/// Emit `msg` as a [`SubagentEvent::Message`] on `out_tx`.
+async fn emit_message(
+    out_tx: &mpsc::Sender<SubagentEvent>,
+    agent_id: AgentId,
+    msg: &protocol::ConversationMessage,
+) {
+    let _ = out_tx
+        .send(SubagentEvent::Message {
+            agent_id,
+            message: serde_json::to_value(msg).unwrap_or(serde_json::Value::Null),
+        })
+        .await;
+}
+
+/// Real multi-turn agentic loop.
+///
+/// Imperative — mirrors `orchestrator::turn_loop::execute_one_turn`: call the
+/// model, append the assistant turn, dispatch `tool_use` blocks through the
+/// inherited [`traits::ToolInvoker`], feed results back as a user message,
+/// and repeat. Each model round-trip races a `UserExit` / `UserInterrupt`
+/// on `event_rx` via [`tokio::select!`]; a termination event aborts the loop
+/// and surfaces [`SubagentEvent::Killed`].
+#[allow(
+    clippy::too_many_lines,
+    reason = "imperative multi-turn agentic loop — splitting the turn body hurts readability"
+)]
+async fn run_subagent_loop(
+    ctx: SubagentContext,
+    mut event_rx: mpsc::Receiver<engine::Event>,
+    out_tx: mpsc::Sender<SubagentEvent>,
+) {
+    use protocol::{ContentBlock, ConversationMessage, MessageId};
+
+    let agent_id = ctx.agent_id;
+    let api_client = ctx
+        .api_client
+        .clone()
+        .expect("run_subagent_loop requires an api_client");
+    let model = resolve_model(&ctx);
+    let system: Option<String> = ctx.rendered_system_prompt.as_ref().map(std::string::ToString::to_string);
+
+    // Seed history: fork-context prefix (if any) followed by the prompt.
+    let mut history: Vec<ConversationMessage> = Vec::new();
+    if let Some(fork) = &ctx.fork_context_messages {
+        history.extend(fork.iter().cloned());
+    }
+    history.extend(ctx.prompt_messages.iter().cloned());
+
+    let max_turns = ctx.agent_definition.max_turns;
+
+    // Once the cancellation channel closes, no UserExit / UserInterrupt can
+    // ever arrive, so we stop racing it and await the API future directly
+    // (racing a perpetually-ready `recv() -> None` arm would busy-loop).
+    let mut event_channel_open = true;
+
+    for _turn in 0..max_turns {
+        // Race the model round-trip against a user-termination event. A
+        // UserExit / UserInterrupt on event_rx aborts the loop -> Killed.
+        // Any other inbound event is ignored (the loop is self-driving) and
+        // we re-issue the round-trip on the next iteration.
+        let response = loop {
+            let api_call = api_client.messages_create(&model, system.as_deref(), history.clone());
+            if !event_channel_open {
+                break api_call.await;
+            }
+            tokio::select! {
+                biased;
+                ev = event_rx.recv() => {
+                    match ev {
+                        Some(engine::Event::UserExit | engine::Event::UserInterrupt) => {
+                            let _ = out_tx.send(SubagentEvent::Killed { agent_id }).await;
+                            return;
+                        }
+                        // Non-termination event: drop the in-flight API future
+                        // and retry the round-trip on the next iteration.
+                        Some(_) => continue,
+                        // Channel closed: stop racing it from now on.
+                        None => {
+                            event_channel_open = false;
+                            continue;
+                        }
+                    }
+                }
+                resp = api_call => break resp,
+            }
+        };
+
+        let response = match response {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = out_tx
+                    .send(SubagentEvent::Failed {
+                        agent_id,
+                        error: format!("subagent api error: {e}"),
+                    })
+                    .await;
+                return;
+            }
+        };
+
+        // Build the assistant turn and append to history.
+        let assistant_blocks = translate_response_blocks(&response.content);
+        let stop_reason = response.stop_reason.clone();
+        let assistant_msg = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: assistant_blocks.clone(),
+            stop_reason: stop_reason.clone(),
+        };
+        history.push(assistant_msg.clone());
+        emit_message(&out_tx, agent_id, &assistant_msg).await;
+
+        // Extract tool_use blocks.
+        let tool_uses: Vec<(protocol::ToolUseId, String, serde_json::Value)> = assistant_blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, name, input } => {
+                    Some((*id, name.clone(), input.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        // Dispatch any tool_use blocks FIRST, then decide loop disposition by
+        // stop_reason — mirroring the orchestrator references. `execute_one_turn`
+        // (turn_loop.rs:111) always dispatches tool_uses when present regardless
+        // of stop_reason, and the streaming path (conversation.rs:815-839) only
+        // continues on `Some("tool_use")` with non-empty tool_uses, terminating
+        // on end_turn / None / any other reason. Deciding terminality *before*
+        // dispatch (the prior `tool_uses.is_empty() || end_turn` test) silently
+        // dropped tool calls on an `end_turn`+tool_use response (MAJOR #1) and
+        // looped to max_turns on a truncated/refused turn that still carried
+        // tool_uses (MAJOR #2).
+        if !tool_uses.is_empty() {
+            // Dispatch each tool_use through the inherited invoker.
+            let Some(invoker) = &ctx.tool_invoker else {
+                let _ = out_tx
+                    .send(SubagentEvent::Failed {
+                        agent_id,
+                        error: "subagent requested a tool but no tool_invoker was inherited"
+                            .to_string(),
+                    })
+                    .await;
+                return;
+            };
+
+            let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
+            for (tool_use_id, name, input) in &tool_uses {
+                let inv_ctx = traits::tool_invoker::SubagentInvocationContext {
+                    parent_agent_id: ctx.parent_agent_id,
+                };
+                match invoker.invoke(name, input.clone(), inv_ctx).await {
+                    Ok(value) => {
+                        let content = match &value {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id: *tool_use_id,
+                            content,
+                            is_error: false,
+                        });
+                    }
+                    Err(e) => {
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id: *tool_use_id,
+                            content: format!("tool error: {e}"),
+                            is_error: true,
+                        });
+                    }
+                }
+            }
+
+            let tool_results_msg = ConversationMessage::User {
+                id: MessageId::new(),
+                content: tool_results,
+            };
+            history.push(tool_results_msg.clone());
+            emit_message(&out_tx, agent_id, &tool_results_msg).await;
+        }
+
+        // Loop disposition. Continue ONLY when the model asked to use tools and
+        // actually emitted some; every other case is terminal — including
+        // `end_turn`, a stream with no stop_reason (`None`), and any other
+        // reason (max_tokens / stop_sequence / pause_turn / refusal), even when
+        // the truncated turn carried tool_uses we just dispatched.
+        let should_continue =
+            stop_reason.as_deref() == Some("tool_use") && !tool_uses.is_empty();
+        if !should_continue {
+            let result = serde_json::json!({
+                "text": aggregate_text(&assistant_blocks),
+                "stop_reason": stop_reason,
+            });
+            let _ = out_tx
+                .send(SubagentEvent::Completed { agent_id, result })
+                .await;
+            return;
+        }
+        // Otherwise loop to the next turn.
+    }
+
+    // max_turns exhausted without a terminal stop. claude-code surfaces this
+    // as a completion carrying a max-turns reason rather than a hard failure,
+    // so the parent can still consume whatever work was produced.
+    let _ = out_tx
+        .send(SubagentEvent::Completed {
+            agent_id,
+            result: serde_json::json!({ "reason": "max_turns_exhausted", "max_turns": max_turns }),
+        })
+        .await;
+}
+
+/// Legacy reducer-driven stub.
+///
+/// Drives [`engine::reduce`] over `event_rx` and emits [`SubagentEvent`]s on
+/// `out_tx`. M1.11 stubs completion after the first event so the pool can be
+/// wired end-to-end before the real agentic loop arrives. Selected when
+/// [`SubagentContext::api_client`] is `None`.
+async fn run_subagent_stub(
     ctx: SubagentContext,
     mut event_rx: mpsc::Receiver<engine::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
@@ -175,10 +472,124 @@ mod tests {
         AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
     };
     use crate::display::{AgentColor, AgentDisplay};
+    use async_trait::async_trait;
     use engine::token::Usage;
-    use protocol::{ContentBlock, ConversationMessage, MessageId, RequestId};
-    use std::sync::Arc;
+    use protocol::{ContentBlock, ConversationMessage, MessageId, RequestId, ToolUseId};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
+
+    // ---- Scripted loop-mode fixtures -------------------------------------
+
+    /// `SubagentApiClient` that hands back a pre-scripted queue of responses,
+    /// one per `messages_create` call. Counts calls so tests can assert the
+    /// number of model round-trips (`max_turns` bound, multi-turn loop).
+    struct MockSubagentApiClient {
+        responses: Mutex<VecDeque<Result<api_client::MessageResponse, api_client::ApiError>>>,
+        calls: AtomicUsize,
+    }
+
+    impl MockSubagentApiClient {
+        fn new(
+            responses: Vec<Result<api_client::MessageResponse, api_client::ApiError>>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                calls: AtomicUsize::new(0),
+            })
+        }
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl crate::api::SubagentApiClient for MockSubagentApiClient {
+        async fn messages_create(
+            &self,
+            _model: &str,
+            _system: Option<&str>,
+            _messages: Vec<ConversationMessage>,
+        ) -> Result<api_client::MessageResponse, api_client::ApiError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.responses.lock().unwrap().pop_front().unwrap_or_else(|| {
+                // Out of scripted responses: a non-terminal, no-tool turn keeps
+                // the loop honest (it terminates on empty tool_uses).
+                Ok(text_response("(exhausted)", Some("end_turn")))
+            })
+        }
+    }
+
+    /// `ToolInvoker` that counts invocations and returns a canned value.
+    struct CountingInvoker {
+        calls: AtomicUsize,
+    }
+    impl CountingInvoker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicUsize::new(0),
+            })
+        }
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+    #[async_trait]
+    impl traits::ToolInvoker for CountingInvoker {
+        async fn invoke(
+            &self,
+            _name: &str,
+            _input: serde_json::Value,
+            _ctx: traits::tool_invoker::SubagentInvocationContext,
+        ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!("tool-output"))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// Build an api-client `MessageResponse` carrying a single text block.
+    fn text_response(text: &str, stop_reason: Option<&str>) -> api_client::MessageResponse {
+        api_client::MessageResponse {
+            id: "mock".into(),
+            model: "mock".into(),
+            content: vec![api_client::types::ContentBlockApi::Text { text: text.into() }],
+            stop_reason: stop_reason.map(str::to_string),
+            usage: api_client::types::UsageApi::default(),
+        }
+    }
+
+    /// Build a `MessageResponse` carrying one `tool_use` block (+ the given `stop_reason`).
+    fn tool_use_response(name: &str, stop_reason: Option<&str>) -> api_client::MessageResponse {
+        api_client::MessageResponse {
+            id: "mock".into(),
+            model: "mock".into(),
+            content: vec![api_client::types::ContentBlockApi::ToolUse {
+                id: ToolUseId::new(),
+                name: name.into(),
+                input: serde_json::json!({}),
+            }],
+            stop_reason: stop_reason.map(str::to_string),
+            usage: api_client::types::UsageApi::default(),
+        }
+    }
+
+    /// `fresh_subagent_ctx` plus a scripted `api_client` (and optional invoker),
+    /// raising `max_turns` so multi-turn loops are reachable.
+    fn loop_ctx(
+        api_client: Arc<dyn crate::api::SubagentApiClient>,
+        tool_invoker: Option<Arc<dyn traits::ToolInvoker>>,
+        max_turns: u32,
+    ) -> SubagentContext {
+        let mut ctx = fresh_subagent_ctx();
+        ctx.agent_definition.max_turns = max_turns;
+        ctx.api_client = Some(api_client);
+        ctx.tool_invoker = tool_invoker;
+        ctx
+    }
 
     /// Build a `SubagentContext` with the minimum fields the runner reads.
     fn fresh_subagent_ctx() -> SubagentContext {
@@ -218,6 +629,8 @@ mod tests {
                 color: AgentColor::Cyan,
                 icon: None,
             },
+            api_client: None,
+            tool_invoker: None,
         }
     }
 
@@ -458,6 +871,207 @@ mod tests {
         assert_eq!(
             completed_count, 0,
             "no Completed expected; got events: {evs:?}"
+        );
+    }
+
+    // ---- Loop-mode tests (api_client = Some) -----------------------------
+
+    /// Pull the single `Completed.result` payload (panics if none / many).
+    fn one_completed(evs: &[SubagentEvent]) -> serde_json::Value {
+        let mut found = evs.iter().filter_map(|e| match e {
+            SubagentEvent::Completed { result, .. } => Some(result.clone()),
+            _ => None,
+        });
+        let r = found.next().expect("exactly one Completed");
+        assert!(found.next().is_none(), "more than one Completed: {evs:?}");
+        r
+    }
+
+    #[tokio::test]
+    async fn loop_single_end_turn_completes_with_aggregated_text() {
+        // One turn: end_turn, no tools. Asserts the terminal-text path and the
+        // `{text, stop_reason}` result shape, and that the model was called once.
+        let api = MockSubagentApiClient::new(vec![Ok(text_response("final answer", Some("end_turn")))]);
+        let ctx = loop_ctx(api.clone(), None, 4);
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        assert_eq!(api.call_count(), 1, "exactly one model round-trip");
+        let result = one_completed(&evs);
+        assert_eq!(result["text"], "final answer");
+        assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn loop_tool_use_then_end_turn_invokes_tool_and_runs_two_turns() {
+        // Core happy path: turn 1 emits a tool_use (stop_reason tool_use) ->
+        // tool is invoked -> results fed back -> turn 2 ends. Asserts 2 model
+        // calls, exactly one tool invocation, and final aggregated text.
+        let api = MockSubagentApiClient::new(vec![
+            Ok(tool_use_response("Read", Some("tool_use"))),
+            Ok(text_response("done", Some("end_turn"))),
+        ]);
+        let invoker = CountingInvoker::new();
+        let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        assert_eq!(api.call_count(), 2, "two model round-trips");
+        assert_eq!(invoker.call_count(), 1, "tool invoked once (1:1 with tool_use)");
+        let result = one_completed(&evs);
+        assert_eq!(result["text"], "done");
+        assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn loop_end_turn_with_tool_use_still_dispatches_then_completes() {
+        // MAJOR #1 regression: an `end_turn` response that ALSO carries a
+        // tool_use must NOT silently drop the tool. The reference dispatches
+        // tools whenever present, then terminates on end_turn. Assert the tool
+        // was invoked AND the run completed in a single turn (no continuation).
+        let api =
+            MockSubagentApiClient::new(vec![Ok(tool_use_response("Read", Some("end_turn")))]);
+        let invoker = CountingInvoker::new();
+        let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        assert_eq!(api.call_count(), 1, "end_turn terminates after one round-trip");
+        assert_eq!(
+            invoker.call_count(),
+            1,
+            "tool_use on an end_turn response is still dispatched"
+        );
+        let result = one_completed(&evs);
+        assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn loop_truncated_tool_use_terminates_instead_of_looping() {
+        // MAJOR #2 regression: a non-`tool_use` reason (e.g. max_tokens) that
+        // also carried a tool_use must dispatch the tool then TERMINATE — not
+        // continue looping until max_turns. With max_turns=4 the loop would
+        // make 4 calls if it (incorrectly) continued; the fix caps it at 1.
+        let api =
+            MockSubagentApiClient::new(vec![Ok(tool_use_response("Read", Some("max_tokens")))]);
+        let invoker = CountingInvoker::new();
+        let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        assert_eq!(
+            api.call_count(),
+            1,
+            "max_tokens terminates after one round-trip (no loop-to-max_turns)"
+        );
+        assert_eq!(invoker.call_count(), 1, "the truncated turn's tool is still dispatched");
+        let result = one_completed(&evs);
+        assert_eq!(result["stop_reason"], "max_tokens");
+    }
+
+    #[tokio::test]
+    async fn loop_api_error_surfaces_failed() {
+        let api = MockSubagentApiClient::new(vec![Err(api_client::ApiError::Http(
+            traits::HttpError::InvalidRequest("boom".into()),
+        ))]);
+        let ctx = loop_ctx(api.clone(), None, 4);
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        let failed = evs.iter().find_map(|e| match e {
+            SubagentEvent::Failed { error, .. } => Some(error.clone()),
+            _ => None,
+        });
+        let err = failed.expect("Failed on api error");
+        assert!(err.starts_with("subagent api error:"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn loop_tool_use_without_invoker_fails() {
+        // A tool_use with tool_invoker = None surfaces Failed.
+        let api =
+            MockSubagentApiClient::new(vec![Ok(tool_use_response("Read", Some("tool_use")))]);
+        let ctx = loop_ctx(api.clone(), None, 4);
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        let failed = evs.iter().find_map(|e| match e {
+            SubagentEvent::Failed { error, .. } => Some(error.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            failed.as_deref(),
+            Some("subagent requested a tool but no tool_invoker was inherited")
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_exhausts_max_turns_when_never_terminal() {
+        // Every turn emits a tool_use with stop_reason tool_use, so the loop
+        // continues. With max_turns=3 it makes exactly 3 model calls then
+        // surfaces Completed{reason: "max_turns_exhausted"}.
+        let api = MockSubagentApiClient::new(vec![
+            Ok(tool_use_response("Read", Some("tool_use"))),
+            Ok(tool_use_response("Read", Some("tool_use"))),
+            Ok(tool_use_response("Read", Some("tool_use"))),
+            // a 4th would only be reached on an off-by-one bug:
+            Ok(text_response("should-not-reach", Some("end_turn"))),
+        ]);
+        let invoker = CountingInvoker::new();
+        let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 3);
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        assert_eq!(api.call_count(), 3, "exactly max_turns model round-trips");
+        assert_eq!(invoker.call_count(), 3, "one tool dispatch per turn");
+        let result = one_completed(&evs);
+        assert_eq!(result["reason"], "max_turns_exhausted");
+        assert_eq!(result["max_turns"], 3);
+    }
+
+    #[tokio::test]
+    async fn loop_user_interrupt_mid_flight_surfaces_killed() {
+        // A UserInterrupt delivered while the loop is racing the API future
+        // aborts to Killed. We pre-load the event so the biased select! takes
+        // the termination arm on the first poll.
+        let api = MockSubagentApiClient::new(vec![Ok(text_response("unused", Some("end_turn")))]);
+        let ctx = loop_ctx(api.clone(), None, 4);
+
+        let (event_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        event_tx.send(engine::Event::UserInterrupt).await.unwrap();
+
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        assert!(
+            evs.iter().any(|e| matches!(e, SubagentEvent::Killed { .. })),
+            "expected Killed on UserInterrupt; got: {evs:?}"
+        );
+        assert!(
+            !evs.iter().any(|e| matches!(e, SubagentEvent::Completed { .. })),
+            "no Completed when killed mid-flight; got: {evs:?}"
         );
     }
 }

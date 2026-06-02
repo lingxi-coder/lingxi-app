@@ -62,6 +62,30 @@ impl OrchestratorApiClient for ProviderApiAdapter {
     }
 }
 
+/// Subagent API seam (M5-Wire).
+///
+/// The `agent` crate's multi-turn subagent loop calls the model through the
+/// narrow [`agent::SubagentApiClient`] trait, which lives in the agent crate so
+/// the agent never takes a (cyclic) dep on the orchestrator. The seam's
+/// `messages_create` shape is byte-identical to [`OrchestratorApiClient`], so
+/// this impl simply forwards to the existing orchestrator path — image/vision
+/// gating, router resolution, and provider delegation all flow through the one
+/// implementation above. Wiring an `Arc<dyn agent::SubagentApiClient>` (this
+/// adapter) into `agent::PoolSubagentSpawner::with_api_client` lets spawned
+/// subagents drive real model round-trips instead of the legacy stub.
+#[async_trait]
+impl agent::SubagentApiClient for ProviderApiAdapter {
+    async fn messages_create(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+    ) -> Result<MessageResponse, ApiError> {
+        // Delegate to the orchestrator impl so the two seams never diverge.
+        OrchestratorApiClient::messages_create(self, model, system, messages).await
+    }
+}
+
 #[async_trait]
 impl StreamingApiClient for ProviderApiAdapter {
     async fn stream(
@@ -333,6 +357,35 @@ mod tests {
             result,
             Err(ApiError::Http(traits::HttpError::InvalidRequest(_)))
         ));
+    }
+
+    #[tokio::test]
+    async fn subagent_api_client_seam_forwards_through_trait_object() {
+        // M5-Wire proof: `ProviderApiAdapter` implements the agent crate's
+        // `SubagentApiClient` seam, it is object-safe (coerces to
+        // `Arc<dyn agent::SubagentApiClient>`), and the call forwards to the
+        // same router/provider path as `OrchestratorApiClient`. This is what
+        // `PoolSubagentSpawner::with_api_client` consumes, so the subagent loop
+        // drives real model round-trips once boot wiring lands.
+        let provider = Arc::new(StubProvider::new());
+        let router = Arc::new(StubRouter {
+            provider: provider.clone(),
+            seen_resolve: Mutex::new(None),
+        });
+        let seam: Arc<dyn agent::SubagentApiClient> =
+            Arc::new(ProviderApiAdapter::new(router.clone()));
+        let resp = seam
+            .messages_create("openai/gpt-4o", Some("sys"), Vec::new())
+            .await
+            .expect("seam ok");
+        // Router saw the full string; provider saw the stripped local id —
+        // identical behaviour to the OrchestratorApiClient path.
+        assert_eq!(
+            router.seen_resolve.lock().unwrap().as_deref(),
+            Some("openai/gpt-4o")
+        );
+        assert_eq!(provider.seen_model.lock().unwrap().as_deref(), Some("gpt-4o"));
+        assert_eq!(resp.model, "gpt-4o");
     }
 
     #[tokio::test]

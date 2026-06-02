@@ -55,4 +55,12 @@ pub struct SubagentContext {
     pub agent_memory: Option<AgentMemorySnapshot>,
     /// UI display configuration (color, icon).
     pub display: AgentDisplay,
+    /// Model API seam used by the multi-turn [`crate::runner::run_subagent`]
+    /// loop. `None` keeps the legacy stub behavior (no real API calls) for
+    /// back-compat with callers that haven't wired an API client yet.
+    pub api_client: Option<Arc<dyn crate::api::SubagentApiClient>>,
+    /// Tool dispatch seam inherited from the parent via
+    /// [`traits::subagent_spawn::SubagentInheritance`]. `None` means the agent
+    /// cannot dispatch tools — a `tool_use` in that state surfaces a failure.
+    pub tool_invoker: Option<Arc<dyn traits::ToolInvoker>>,
 }

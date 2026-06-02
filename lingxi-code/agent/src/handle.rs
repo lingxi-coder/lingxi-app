@@ -11,6 +11,7 @@
 //! `Arc<dyn BudgetEnforcerHandle>`) — the adapter stashes them on the child
 //! `SubagentContext` so the child runner sees the same `Arc`s as the parent.
 
+use crate::api::SubagentApiClient;
 use crate::context::SubagentContext;
 use crate::definition::{
     AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
@@ -36,13 +37,30 @@ use traits::subagent_spawn::{
 /// cloning them.
 pub struct PoolSubagentSpawner {
     pool: Arc<StateMachinePool>,
+    /// Optional model API seam handed to every child runner via the
+    /// child's [`SubagentContext`]. `None` keeps the legacy stub behavior
+    /// (the runner emits a synthetic completion without calling the model).
+    api_client: Option<Arc<dyn SubagentApiClient>>,
 }
 
 impl PoolSubagentSpawner {
-    /// Construct an adapter wrapping `pool`.
+    /// Construct an adapter wrapping `pool` with no API client (legacy stub
+    /// runner). Use [`Self::with_api_client`] to enable the real multi-turn
+    /// loop.
     #[must_use]
     pub fn new(pool: Arc<StateMachinePool>) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            api_client: None,
+        }
+    }
+
+    /// Builder: attach the model API seam the child runner uses to drive the
+    /// real multi-turn loop. Without this, `spawn` produces stub completions.
+    #[must_use]
+    pub fn with_api_client(mut self, api_client: Arc<dyn SubagentApiClient>) -> Self {
+        self.api_client = Some(api_client);
+        self
     }
 
     fn make_subagent_context(subagent_type: &str, prompt: &str) -> SubagentContext {
@@ -82,6 +100,10 @@ impl PoolSubagentSpawner {
                 color: AgentColor::Cyan,
                 icon: None,
             },
+            // Set by `spawn` from `self.api_client` / `inherit.tool_invoker`
+            // just before pool allocation.
+            api_client: None,
+            tool_invoker: None,
         }
     }
 }
@@ -92,12 +114,18 @@ impl SubagentSpawner for PoolSubagentSpawner {
         &self,
         request: SubagentSpawnRequest,
         // `inherit` carries the parent's Arc<dyn ToolInvoker> +
-        // Arc<dyn BudgetEnforcerHandle>. The adapter holds these on the
-        // child's runner so the recursion-lock + budget-inheritance
-        // invariants survive across the spawn boundary.
-        _inherit: SubagentInheritance,
+        // Arc<dyn BudgetEnforcerHandle>. The adapter stashes the tool invoker
+        // on the child's `SubagentContext` so the recursion-lock + budget-
+        // inheritance invariants survive across the spawn boundary; the
+        // child runner dispatches `tool_use` blocks through the very same
+        // `Arc<dyn ToolInvoker>` the parent holds.
+        inherit: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError> {
-        let ctx = Self::make_subagent_context(&request.subagent_type, &request.prompt);
+        let mut ctx = Self::make_subagent_context(&request.subagent_type, &request.prompt);
+        // Hand the child the parent's tool invoker and our model API seam so
+        // the runner can drive the real multi-turn loop.
+        ctx.tool_invoker = Some(inherit.tool_invoker);
+        ctx.api_client.clone_from(&self.api_client);
         let agent_id = ctx.agent_id;
         let (_aid, mut rx) = self
             .pool
@@ -105,9 +133,9 @@ impl SubagentSpawner for PoolSubagentSpawner {
             .await
             .map_err(|e| SubagentSpawnError::Runtime(e.to_string()))?;
 
-        // Pump the slot until terminal. The M1.11 runner stub completes
-        // after the first inbound event; we still drain the channel for
-        // robustness against future runner expansions.
+        // Pump the slot until terminal. The runner emits Progress/Message
+        // events as it streams turns; we ignore those here and surface only
+        // the terminal Completed/Failed/Killed.
         let result = loop {
             match rx.recv().await {
                 Some(SubagentEvent::Completed { result, .. }) => {

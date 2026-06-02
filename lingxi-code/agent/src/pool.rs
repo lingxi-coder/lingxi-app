@@ -169,6 +169,8 @@ mod tests {
                 color: AgentColor::Cyan,
                 icon: None,
             },
+            api_client: None,
+            tool_invoker: None,
         };
         let aid = ctx.agent_id;
         let (id, _rx) = pool.allocate(ctx).await.unwrap();

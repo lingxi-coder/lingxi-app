@@ -1,8 +1,9 @@
 //! Owns every MCP connection and drives the state machine.
 //!
 //! Engine code holds an `Arc<McpRegistry>` and uses [`Self::connect`] /
-//! [`Self::disconnect`] to manage servers. Health checks and reconnects
-//! land in Plan 13.
+//! [`Self::disconnect`] to manage servers. Startup auto-connect
+//! ([`McpRegistry::connect_all`]) and the reconnect/backoff loop
+//! ([`McpRegistry::run_reconnect_loop`]) implement the "Plan 13" wiring.
 
 use crate::client::McpClient;
 use crate::connection::{McpConnectionState, McpServerConfig};
@@ -12,6 +13,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
 use traits::{McpError, McpTransport};
+
+/// Initial reconnect backoff (claude-code `INITIAL_BACKOFF_MS = 1000`).
+const INITIAL_BACKOFF: Duration = Duration::from_millis(1000);
+/// Ceiling on reconnect backoff (claude-code `MAX_BACKOFF_MS = 30000`).
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// In-memory registry of every known MCP connection.
 pub struct McpRegistry {
@@ -38,7 +44,9 @@ pub struct McpRegistry {
     #[allow(dead_code)] // consumed by the health-check loop in Plan 13
     pub health_check_interval: Duration,
     /// Maximum consecutive reconnect attempts before declaring `Failed`.
-    #[allow(dead_code)] // consumed by the reconnect loop in Plan 13
+    ///
+    /// Consumed by [`Self::run_reconnect_loop`]; matches claude-code's
+    /// `MAX_RECONNECT_ATTEMPTS = 5`.
     pub max_retry_count: u32,
 }
 
@@ -150,6 +158,173 @@ impl McpRegistry {
         Ok(connection_id)
     }
 
+    /// Connect every server in `configs` at startup, mirroring claude-code's
+    /// `loadAndConnectMcpConfigs` (services/mcp/useManageMCPConnections.ts).
+    ///
+    /// For each config:
+    /// - **Disabled** servers (`config.disabled`) are seeded as
+    ///   `Disconnected { last_error: None }` and skipped — `/mcp` still lists
+    ///   them but they never auto-connect. This subsumes the manual
+    ///   pre-population block in `apps/cli/src/init.rs`.
+    /// - Otherwise [`Self::connect`] is invoked. On error the state is
+    ///   overwritten with `Disconnected { last_error: Some(..) }` so the
+    ///   reconnect loop ([`Self::run_reconnect_loop`]) can pick it up — note
+    ///   [`Self::connect`] itself leaves the state stuck in `Connecting` on a
+    ///   transport error, which this wrapper compensates for.
+    ///
+    /// One server's failure never aborts the batch; per-server failures are
+    /// logged via `tracing::warn!`. Returns the per-server outcome in the same
+    /// order as `configs`.
+    pub async fn connect_all(
+        &self,
+        configs: Vec<McpServerConfig>,
+    ) -> Vec<(String, Result<McpConnectionId, McpError>)> {
+        let mut out = Vec::with_capacity(configs.len());
+        for config in configs {
+            let name = config.name.clone();
+            if config.disabled {
+                self.connections.write().await.insert(
+                    name.clone(),
+                    McpConnectionState::Disconnected {
+                        config,
+                        last_error: None,
+                    },
+                );
+                tracing::debug!(server = %name, "skipping disabled MCP server");
+                continue;
+            }
+
+            let result = self.connect(config.clone()).await;
+            if let Err(ref e) = result {
+                tracing::warn!(server = %name, error = %e, "MCP auto-connect failed");
+                // `connect` leaves the state in `Connecting` on a transport
+                // error; reset it to a loop-eligible `Disconnected`.
+                self.connections.write().await.insert(
+                    name.clone(),
+                    McpConnectionState::Disconnected {
+                        config,
+                        last_error: Some(e.to_string()),
+                    },
+                );
+            }
+            out.push((name, result));
+        }
+        out
+    }
+
+    /// Background reconnect/backoff loop (claude-code `reconnectWithBackoff`).
+    ///
+    /// Spawn with `tokio::spawn(registry.clone().run_reconnect_loop())`. The
+    /// loop periodically scans `connections` for servers eligible to retry —
+    /// `Disconnected { last_error: Some(_) }` (a failed connect) or
+    /// `Reconnecting { .. }` (a retry already in flight) — and drives each
+    /// through [`Self::reconnect_one`].
+    ///
+    /// Per claude-code, stdio servers are NOT auto-reconnected (a dead local
+    /// process won't recover on its own); only remote transports are enrolled.
+    pub async fn run_reconnect_loop(self: Arc<Self>) {
+        loop {
+            let candidates: Vec<McpServerConfig> = {
+                let conns = self.connections.read().await;
+                conns
+                    .values()
+                    .filter_map(|state| match state {
+                        McpConnectionState::Disconnected {
+                            config,
+                            last_error: Some(_),
+                        }
+                        | McpConnectionState::Reconnecting { config, .. } => Some(config.clone()),
+                        _ => None,
+                    })
+                    .filter(|config| !config.disabled && config.spec.kind() != "stdio")
+                    .collect()
+            };
+
+            for config in candidates {
+                Arc::clone(&self).reconnect_one(config).await;
+            }
+
+            tokio::time::sleep(self.health_check_interval).await;
+        }
+    }
+
+    /// Drive a single server through the reconnect/backoff schedule.
+    ///
+    /// Attempts `connect` up to `self.max_retry_count` times. Between attempts
+    /// the server rests in `Reconnecting { retry_count, next_retry_at }` and
+    /// the task sleeps for `min(INITIAL_BACKOFF * 2^(attempt-1), MAX_BACKOFF)`
+    /// — i.e. 1s, 2s, 4s, 8s, 16s for attempts 1-4 (capped at 30s). On success
+    /// the server is left `Connected` (set by [`Self::connect`]); after the
+    /// final attempt fails it transitions to `Failed { error, attempts }`.
+    ///
+    /// Aborts without marking `Failed` if the server is concurrently `Stopped`
+    /// or its config is flipped to `disabled` (claude-code disabled-mid-wait
+    /// guard).
+    async fn reconnect_one(self: Arc<Self>, config: McpServerConfig) {
+        let name = config.name.clone();
+        let max = self.max_retry_count.max(1);
+
+        for attempt in 1..=max {
+            // Disabled/stopped guard: re-read state before each attempt.
+            match self.connections.read().await.get(&name) {
+                Some(McpConnectionState::Stopped { .. }) | None => {
+                    tracing::debug!(server = %name, "reconnect aborted: server stopped");
+                    return;
+                }
+                Some(state) if state_is_disabled(state) => {
+                    tracing::debug!(server = %name, "reconnect aborted: server disabled");
+                    return;
+                }
+                _ => {}
+            }
+
+            let backoff = backoff_for(attempt);
+            let next_retry_at = SystemTime::now() + backoff;
+            self.connections.write().await.insert(
+                name.clone(),
+                McpConnectionState::Reconnecting {
+                    config: config.clone(),
+                    retry_count: attempt,
+                    next_retry_at,
+                },
+            );
+
+            tokio::time::sleep(backoff).await;
+
+            match self.connect(config.clone()).await {
+                Ok(_) => {
+                    tracing::info!(server = %name, attempt, "MCP reconnect succeeded");
+                    return;
+                }
+                Err(e) => {
+                    if attempt == max {
+                        tracing::warn!(
+                            server = %name,
+                            attempts = attempt,
+                            error = %e,
+                            "MCP reconnect exhausted; marking Failed"
+                        );
+                        self.connections.write().await.insert(
+                            name.clone(),
+                            McpConnectionState::Failed {
+                                config: config.clone(),
+                                error: e.to_string(),
+                                attempts: attempt,
+                            },
+                        );
+                        return;
+                    }
+                    tracing::debug!(
+                        server = %name,
+                        attempt,
+                        error = %e,
+                        "MCP reconnect attempt failed; backing off"
+                    );
+                }
+            }
+        }
+    }
+
     /// Drop the named connection and transition it to `Stopped`.
     pub async fn disconnect(&self, name: &str) -> Result<(), McpError> {
         let mut conns = self.connections.write().await;
@@ -183,6 +358,30 @@ impl McpRegistry {
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
+    }
+}
+
+/// Exponential backoff for reconnect `attempt` (1-based), capped at
+/// [`MAX_BACKOFF`]. Mirrors claude-code's
+/// `min(INITIAL_BACKOFF_MS * 2^(attempt-1), MAX_BACKOFF_MS)`.
+fn backoff_for(attempt: u32) -> Duration {
+    let factor = 1u64.checked_shl(attempt.saturating_sub(1)).unwrap_or(u64::MAX);
+    let base = u64::try_from(INITIAL_BACKOFF.as_millis()).unwrap_or(u64::MAX);
+    let millis = base.saturating_mul(factor);
+    Duration::from_millis(millis).min(MAX_BACKOFF)
+}
+
+/// Whether a state's config is flagged `disabled` (mid-reconnect guard).
+fn state_is_disabled(state: &McpConnectionState) -> bool {
+    match state {
+        McpConnectionState::Disconnected { config, .. }
+        | McpConnectionState::Connecting { config, .. }
+        | McpConnectionState::AwaitingOAuth { config, .. }
+        | McpConnectionState::Connected { config, .. }
+        | McpConnectionState::HealthChecking { config, .. }
+        | McpConnectionState::Reconnecting { config, .. }
+        | McpConnectionState::Failed { config, .. }
+        | McpConnectionState::Stopped { config } => config.disabled,
     }
 }
 

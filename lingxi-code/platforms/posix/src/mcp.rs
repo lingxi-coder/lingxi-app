@@ -82,14 +82,24 @@ pub(crate) enum PosixMcpConnection {
         /// because the oneshot sender is consumed on the first send.
         reaper_kill: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     },
-    /// `Sse` connection — placeholder marker. NOTE: the real `connect_sse`
-    /// `Connection` is currently dropped at the end of `connect` (the
-    /// underlying HTTP+SSE tasks tear down with it); SSE wiring lands later and
-    /// must retain the `Connection` here (mirroring `Stdio`) when it does.
-    Sse,
-    /// `Http` connection — placeholder marker. NOTE: same as `Sse` — the real
-    /// `connect_http` `Connection` is currently dropped at the end of `connect`.
-    Http,
+    /// `Sse` connection — owns the JSON-RPC link over the HTTP+SSE pair.
+    ///
+    /// Unlike `Stdio`, there is no owned child process, so no reaper or
+    /// `stderr` ring is needed: the underlying `reqwest` GET/POST tasks live
+    /// inside the connection's broker. Teardown is just dropping this
+    /// `Arc<Connection>` (or calling [`Connection::close`]), which aborts the
+    /// broker and the spawned `reqwest` tasks. Wrapped in an `Arc` for the same
+    /// reason as `Stdio.connection`: `Connection` is not `Clone` (its
+    /// `broadcast::Receiver` blocks the derive), and request methods clone a
+    /// cheap handle out from under the map lock before they `.await`.
+    Sse { connection: Arc<Connection> },
+    /// `Http` connection — owns the JSON-RPC link over Streamable HTTP.
+    ///
+    /// Same ownership shape as `Sse`: no owned child, so teardown is just
+    /// dropping the `Arc<Connection>` (or `.close()`), which aborts the broker
+    /// and the spawned `reqwest` POST task. `Arc` because `Connection` is not
+    /// `Clone` (see `Sse` / `Stdio.connection`).
+    Http { connection: Arc<Connection> },
 }
 
 /// POSIX MCP transport.
@@ -131,11 +141,17 @@ impl PosixMcpTransport {
             .connections
             .lock()
             .map_err(|_| McpError::Internal("connection map mutex poisoned".into()))?;
+        // Every transport variant now stores a fully-wired `Arc<Connection>`,
+        // so the request surface is transport-agnostic: clone the handle out
+        // and let the caller `.await` after the std `MutexGuard` is dropped.
+        // The or-pattern is exhaustive over `Some(_)` for the three variants;
+        // adding a new variant without a `Connection` would require an arm.
         match guard.get(&id) {
-            Some(PosixMcpConnection::Stdio { connection, .. }) => Ok(Arc::clone(connection)),
-            Some(_) => Err(McpError::Connection(
-                "connection is not a stdio transport".into(),
-            )),
+            Some(
+                PosixMcpConnection::Stdio { connection, .. }
+                | PosixMcpConnection::Sse { connection }
+                | PosixMcpConnection::Http { connection },
+            ) => Ok(Arc::clone(connection)),
             None => Err(McpError::Connection(format!("no such connection: {id}"))),
         }
     }
@@ -278,21 +294,34 @@ impl McpTransport for PosixMcpTransport {
                 );
             }
             McpTransportSpec::Sse { url, headers, .. } => {
-                // Delegate to the shared connector. The OAuth + headers_helper
-                // arms are out of scope for M2-02d's dispatch task; the
-                // transport currently passes only the static `headers` map
-                // and no auth token. OAuth integration lands in M2-06.
-                let _conn = connect_sse(url, None, headers)
-                    .await
-                    .map_err(McpError::from)?;
-                self.insert(id, PosixMcpConnection::Sse);
+                // Delegate to the shared connector and RETAIN the returned
+                // `Connection` (the old code dropped it, tearing down the
+                // HTTP+SSE tasks immediately). The OAuth + headers_helper arms
+                // are out of scope for M2-02d's dispatch task; the transport
+                // passes only the static `headers` map and no auth token. The
+                // `..` rest-pattern skips `headers_helper`/`oauth`. OAuth
+                // integration lands in M2-06.
+                let connection =
+                    Arc::new(connect_sse(url, None, headers).await.map_err(McpError::from)?);
+                // Answer server-initiated keepalive pings with `{}` for parity
+                // with the `Stdio` arm (see its `register_handler` comment).
+                connection
+                    .register_handler("ping", Arc::new(PingHandler))
+                    .await;
+                self.insert(id, PosixMcpConnection::Sse { connection });
             }
             McpTransportSpec::Http { url, headers, .. } => {
-                // See `Sse` arm — OAuth + per-request headers_helper deferred.
-                let _conn = connect_http(url, None, headers)
-                    .await
-                    .map_err(McpError::from)?;
-                self.insert(id, PosixMcpConnection::Http);
+                // See `Sse` arm — retain the `Connection`; OAuth + per-request
+                // headers_helper deferred (M2-06).
+                let connection = Arc::new(
+                    connect_http(url, None, headers)
+                        .await
+                        .map_err(McpError::from)?,
+                );
+                connection
+                    .register_handler("ping", Arc::new(PingHandler))
+                    .await;
+                self.insert(id, PosixMcpConnection::Http { connection });
             }
             other => return Err(McpError::UnsupportedTransport(map_kind(other))),
         }
@@ -545,31 +574,45 @@ impl McpTransport for PosixMcpTransport {
             .lock()
             .ok()
             .and_then(|mut g| g.remove(&conn_id));
-        if let Some(PosixMcpConnection::Stdio {
-            connection,
-            reaper_kill,
-            ..
-        }) = entry
-        {
-            // Actively kill the child rather than rely on stdin-EOF: signal
-            // the reaper task to `child.start_kill()` so a server that ignores
-            // stdin EOF is still force-terminated. `kill_on_drop(true)` does
-            // NOT save us here because the detached reaper owns the `Child`.
-            if let Ok(mut guard) = reaper_kill.lock() {
-                if let Some(tx) = guard.take() {
-                    // The receiver is only dropped if the reaper already
-                    // observed child exit; a send error just means the child
-                    // is already gone, which is the desired end state.
-                    let _ = tx.send(());
+        match entry {
+            Some(PosixMcpConnection::Stdio {
+                connection,
+                reaper_kill,
+                ..
+            }) => {
+                // Actively kill the child rather than rely on stdin-EOF:
+                // signal the reaper task to `child.start_kill()` so a server
+                // that ignores stdin EOF is still force-terminated.
+                // `kill_on_drop(true)` does NOT save us here because the
+                // detached reaper owns the `Child`.
+                if let Ok(mut guard) = reaper_kill.lock() {
+                    if let Some(tx) = guard.take() {
+                        // The receiver is only dropped if the reaper already
+                        // observed child exit; a send error just means the
+                        // child is already gone, which is the desired end
+                        // state.
+                        let _ = tx.send(());
+                    }
                 }
+                // Abort the broker reader/writer tasks (outbound calls now
+                // fail with WriterClosed). Dropping the sink also closes the
+                // child's stdin, but the explicit kill above is what
+                // guarantees teardown.
+                connection.close();
             }
-            // Abort the broker reader/writer tasks (outbound calls now fail
-            // with WriterClosed). Dropping the sink also closes the child's
-            // stdin, but the explicit kill above is what guarantees teardown.
-            connection.close();
+            // For Sse / Http there is no owned child. Closing the connection
+            // aborts the broker (and the spawned reqwest GET/POST tasks)
+            // deterministically, even if another `Arc` clone is briefly
+            // outstanding (e.g. an in-flight `connection_for` handle) — the
+            // bare entry drop would otherwise wait for the last `Arc` to go.
+            Some(
+                PosixMcpConnection::Sse { connection }
+                | PosixMcpConnection::Http { connection },
+            ) => {
+                connection.close();
+            }
+            None => {}
         }
-        // For Sse / Http there is no owned child; dropping the entry tears
-        // down the JSON-RPC connection (and its background tasks) naturally.
         Ok(())
     }
 

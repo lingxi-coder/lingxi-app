@@ -247,9 +247,12 @@ pub async fn build_runtime(
         Arc::new(StaticMemoryProvider::empty());
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-    // (5.1) M6-07: Load `.mcp.json` (project preferred over user-global) and
-    //       pre-populate the McpRegistry with `Disconnected` state entries
-    //       so `/mcp` can list them. Real connect / health-check is M7 work.
+    // (5.1) Load `.mcp.json` (project preferred over user-global) and
+    //       auto-connect every enabled server (Plan 13). `connect_all`
+    //       seeds disabled servers as `Disconnected` so `/mcp` still lists
+    //       them, connects the rest, and records per-server failures as
+    //       loop-eligible `Disconnected { last_error }`. A background
+    //       reconnect/backoff task then retries dropped remote servers.
     let global_mcp_path = dirs::config_dir().map_or_else(
         || std::path::PathBuf::from("/dev/null"),
         |d| d.join("lingxi").join("mcp.json"),
@@ -258,19 +261,8 @@ pub async fn build_runtime(
     let mcp_configs = mcp::load_mcp_json_with_precedence(&project_mcp_path, &global_mcp_path);
     let mcp_transport: Arc<dyn McpTransport> = Arc::new(PosixMcp::new());
     let mcp_registry = Arc::new(mcp::McpRegistry::new(mcp_transport));
-    {
-        let mut conns = mcp_registry.connections.write().await;
-        for cfg_entry in mcp_configs {
-            let name = cfg_entry.name.clone();
-            conns.insert(
-                name,
-                mcp::McpConnectionState::Disconnected {
-                    config: cfg_entry,
-                    last_error: None,
-                },
-            );
-        }
-    }
+    mcp_registry.connect_all(mcp_configs).await;
+    tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
 
     // (5.2) M6-07: HookRegistry — read settings.json hooks block from
     //       project (cwd/.claude/settings.json) and user (~/.claude/settings.json

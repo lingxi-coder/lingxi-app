@@ -396,14 +396,25 @@ pub async fn build_runtime(
     //        dialog read live state (the M9 §4 gate). Coerced to the narrow
     //        `traits` handle at the tool-context + TUI seams.
     let task_output_dir = cwd.join(".claude").join("tasks-output");
-    let task_registry = Arc::new(tasks::registry::TaskRegistry::new(
+    let mut task_registry_inner = tasks::registry::TaskRegistry::new(
         Arc::new(PosixRuntime::new()),
         Arc::new(PosixFileSystem::new(cwd.clone())),
         Arc::new(tasks::output_manager::TaskOutputManager::new(
             task_output_dir,
             Arc::new(PosixFileSystem::new(cwd.clone())),
         )),
-    ));
+    );
+    // Register the M2 self-contained per-type handlers (LocalBash + MonitorMcp)
+    // before the registry is shared. Both depend only on platform traits we
+    // already build here; agent/teammate/workflow/remote/dream handlers register
+    // once their production pools are wired (M9+).
+    tasks::registry::register_self_contained_handlers(
+        &mut task_registry_inner,
+        Arc::new(PosixProcess::new()),
+        Arc::new(PosixSandbox::new()),
+        mcp_registry.clone(),
+    );
+    let task_registry = Arc::new(task_registry_inner);
 
     // (5.5) M8-P6: assemble the desktop tool registry through the composition
     //       root. The orchestrator previously received an empty

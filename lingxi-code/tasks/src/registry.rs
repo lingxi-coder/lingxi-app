@@ -3,6 +3,7 @@
 //! The registry owns the in-memory map of task IDs to [`TaskState`] and to
 //! the [`BackgroundTaskHandle`]s returned by the [`RuntimeSpawner`].
 
+use crate::handlers::{LocalBashHandler, MonitorMcpHandler};
 use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
 use crate::state::{TaskState, TaskStateBase, TaskStatus};
@@ -11,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
-use traits::{BackgroundTaskHandle, FileSystem, RuntimeSpawner};
+use traits::{BackgroundTaskHandle, FileSystem, ProcessRunner, RuntimeSpawner, Sandbox};
 
 /// Tracks running tasks and dispatches lifecycle operations to handlers.
 pub struct TaskRegistry {
@@ -160,4 +161,40 @@ impl TaskRegistry {
         }
         Ok(())
     }
+}
+
+/// Register the M2 *self-contained* per-type handlers — the ones whose only
+/// dependencies are platform traits already available at boot (no agent /
+/// subagent pool, mailbox, or budget enforcer). Today that is
+/// [`TaskType::LocalBash`] and [`TaskType::MonitorMcp`].
+///
+/// `process` + `sandbox` are required because they are absent from
+/// [`crate::task_trait::TaskContext`] yet [`LocalBashHandler`] cannot run a
+/// command without them. The spool [`TaskOutputManager`] is shared with the
+/// registry's own (`reg.output_manager`) so handler-allocated spool paths land
+/// in the same sandboxed output dir the registry hands the TUI. `mcp` drives
+/// [`MonitorMcpHandler`]'s catalog polls.
+///
+/// Call this *before* the registry is wrapped in an [`Arc`] — registration
+/// takes `&mut self`. The remaining five task types (agent/teammate/workflow/
+/// remote/dream) register once their production pools are wired (M9+).
+pub fn register_self_contained_handlers(
+    reg: &mut TaskRegistry,
+    process: Arc<dyn ProcessRunner>,
+    sandbox: Arc<dyn Sandbox>,
+    mcp: Arc<mcp::McpRegistry>,
+) {
+    let output_manager = reg.output_manager.clone();
+    reg.register_handler(
+        TaskType::LocalBash,
+        Arc::new(LocalBashHandler::new(
+            process,
+            sandbox,
+            output_manager.clone(),
+        )),
+    );
+    reg.register_handler(
+        TaskType::MonitorMcp,
+        Arc::new(MonitorMcpHandler::with_default_interval(mcp, output_manager)),
+    );
 }

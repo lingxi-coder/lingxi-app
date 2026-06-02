@@ -3681,6 +3681,7 @@ dependencies = [
  "engine",
  "futures",
  "hooks",
+ "mcp",
  "protocol",
  "rand 0.9.4",
  "serde",

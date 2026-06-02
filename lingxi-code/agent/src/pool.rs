@@ -200,6 +200,7 @@ mod tests {
             },
             api_client: None,
             tool_invoker: None,
+            budget: None,
         }
     }
 

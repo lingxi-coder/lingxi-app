@@ -107,6 +107,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
         },
         TaskType::LocalAgent => TaskSpawnInput::LocalAgent {
             agent_id: protocol::AgentId::nil(),
+            subagent_type: String::new(),
             prompt: String::new(),
             is_backgrounded: false,
         },

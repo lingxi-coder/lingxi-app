@@ -101,10 +101,11 @@ impl PoolSubagentSpawner {
                 color: AgentColor::Cyan,
                 icon: None,
             },
-            // Set by `spawn` from `self.api_client` / `inherit.tool_invoker`
-            // just before pool allocation.
+            // Set by `spawn` from `self.api_client` / `inherit.tool_invoker` /
+            // `inherit.budget` just before pool allocation.
             api_client: None,
             tool_invoker: None,
+            budget: None,
         }
     }
 }
@@ -123,9 +124,11 @@ impl SubagentSpawner for PoolSubagentSpawner {
         inherit: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         let mut ctx = Self::make_subagent_context(&request.subagent_type, &request.prompt);
-        // Hand the child the parent's tool invoker and our model API seam so
-        // the runner can drive the real multi-turn loop.
+        // Hand the child the parent's tool invoker, the parent's budget
+        // enforcer, and our model API seam so the runner can drive the real
+        // multi-turn loop and enforce the inherited budget per turn.
         ctx.tool_invoker = Some(inherit.tool_invoker);
+        ctx.budget = Some(inherit.budget);
         ctx.api_client.clone_from(&self.api_client);
         let agent_id = ctx.agent_id;
         let (_aid, mut rx) = self

@@ -4,7 +4,7 @@
 //! the [`BackgroundTaskHandle`]s returned by the [`RuntimeSpawner`].
 
 use crate::handlers::{
-    InProcessTeammateHandler, LocalAgentHandler, LocalBashHandler, MonitorMcpHandler,
+    DreamHandler, InProcessTeammateHandler, LocalAgentHandler, LocalBashHandler, MonitorMcpHandler,
 };
 use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
@@ -225,9 +225,10 @@ pub fn register_self_contained_handlers(
 /// preserves pointer identity, which the recursion-lock + budget-aggregation
 /// invariants rely on). The spool [`TaskOutputManager`] is shared with the
 /// registry's own (`reg.output_manager`). Both handlers default their narrow
-/// resolver/status-sink seams; callers needing the registry-status adapter or a
-/// real `AgentDefinition` / `subagent_type` resolver can build the handlers
-/// directly and `register_handler` them instead.
+/// status-sink seam; callers needing the registry-status adapter can build the
+/// handlers directly and `register_handler` them instead. The subagent type
+/// arrives already resolved on the [`crate::task_trait::TaskSpawnInput::LocalAgent`]
+/// variant, so no resolver injection is needed here.
 ///
 /// Call this *before* the registry is wrapped in an [`Arc`] — registration
 /// takes `&mut self`.
@@ -255,5 +256,38 @@ pub fn register_agent_handlers(
             InProcessTeammateHandler::new(pool, output_manager, api_client)
                 .with_tool_invoker(tool_invoker),
         ),
+    );
+}
+
+/// Register the M2 *agent-backed* dream handler — [`TaskType::Dream`] — a
+/// one-shot forked subagent that runs the memory-consolidation prompt through a
+/// [`SubagentSpawner`].
+///
+/// Split out for the same reason as [`register_agent_handlers`]: the dream
+/// handler needs the production agent pipeline (a concrete [`SubagentSpawner`]
+/// plus the parent's [`ToolInvoker`] + [`BudgetEnforcerHandle`]) that the
+/// task-registry construction site does not have at boot today. The boot site
+/// (`apps/cli/src/init.rs`) wires this once the subagent pool lands (M9+) — the
+/// same deferred-wiring note the agent handlers carry. The helper exists now so
+/// the wire step can call it once those pools land, and so the handler is
+/// reachable + tested in the interim.
+///
+/// `tool_invoker` + `budget` are passed through *unchanged* (cloning the `Arc`
+/// preserves pointer identity, which the recursion-lock + budget-aggregation
+/// invariants rely on). The spool [`TaskOutputManager`] is shared with the
+/// registry's own (`reg.output_manager`).
+///
+/// Call this *before* the registry is wrapped in an [`Arc`] — registration
+/// takes `&mut self`.
+pub fn register_dream_handler(
+    reg: &mut TaskRegistry,
+    spawner: Arc<dyn SubagentSpawner>,
+    tool_invoker: Arc<dyn ToolInvoker>,
+    budget: Arc<dyn BudgetEnforcerHandle>,
+) {
+    let output_manager = reg.output_manager.clone();
+    reg.register_handler(
+        TaskType::Dream,
+        Arc::new(DreamHandler::new(spawner, tool_invoker, budget, output_manager)),
     );
 }

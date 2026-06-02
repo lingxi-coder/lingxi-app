@@ -208,6 +208,10 @@ impl InProcessTeammateHandler {
             },
             api_client: Some(self.api_client.clone()),
             tool_invoker: self.tool_invoker.clone(),
+            // Teammates do not currently inherit a budget enforcer; `None`
+            // preserves today's behavior (no per-turn budget gate) and is
+            // purely additive.
+            budget: None,
         }
     }
 }

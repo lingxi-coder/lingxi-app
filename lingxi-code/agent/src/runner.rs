@@ -178,6 +178,10 @@ async fn run_subagent_loop(
         .api_client
         .clone()
         .expect("run_subagent_loop requires an api_client");
+    // Inherited budget enforcer (cloned Option<Arc> — cheap refcount bump).
+    // `Some` consults the parent's cumulative cost once per turn; `None`
+    // disables enforcement (legacy/test contexts).
+    let budget = ctx.budget.clone();
     let model = resolve_model(&ctx);
     let system: Option<String> = ctx.rendered_system_prompt.as_ref().map(std::string::ToString::to_string);
 
@@ -208,6 +212,44 @@ async fn run_subagent_loop(
     // through by exhausting `max_turns`, which needs the max-turns `Completed`.
     let mut terminated_cleanly = false;
     for _turn in 0..max_turns {
+        // Per-turn budget gate. This is the achievable analog of
+        // `QueryEngine.ts`'s `error_max_budget_usd` loop-terminator, built on
+        // the same frozen seam `AgentTool`'s pre-spawn gate uses
+        // (tools/agent/src/agent.rs:321): charge 0 to ask "is cumulative cost
+        // already over the configured limit?" without pricing tokens (the
+        // agent crate can't depend on lingxi-cost; the enforcer tracks cost
+        // globally, exactly like TS reading `getTotalCost()`).
+        //
+        // It intentionally diverges from QueryEngine in two ways, both forced
+        // by the frozen `BudgetEnforcerHandle` surface: (1) PLACEMENT — checked
+        // at the TOP of the turn (stop before spending) rather than TS's
+        // post-message check, so an already-over budget makes zero round-trips;
+        // (2) STRING — the denial reports the *current* cost (`format_budget_denied`
+        // byte-for-byte), not TS's "Reached maximum budget ($limit)", because the
+        // handle exposes the cumulative total but never the configured limit.
+        if let Some(b) = &budget {
+            if let Err(traits::budget::BudgetError::Exceeded { current_nano_usd }) =
+                b.check_and_charge(0).await
+            {
+                // Stop with a budget-exhausted terminal carrying the M3-05
+                // byte-locked denial string (matches `format_budget_denied`:
+                // nano_usd / 1e9, `{:.2}`). Reproduced inline because the agent
+                // crate cannot depend on lingxi-tools / lingxi-cost.
+                #[allow(clippy::cast_precision_loss)]
+                let dollars = current_nano_usd as f64 / 1_000_000_000.0;
+                let _ = out_tx
+                    .send(SubagentEvent::Failed {
+                        agent_id,
+                        error: format!("Budget exceeded (${dollars:.2}); stopped."),
+                    })
+                    .await;
+                return;
+            }
+            // `Ok` and `BudgetError::Internal` fall through to the round-trip:
+            // TS has no analog branch that errors the loop on an internal
+            // budget condition, so an internal failure is non-fatal here.
+        }
+
         // Race the model round-trip against a user-termination event. A
         // UserExit / UserInterrupt on event_rx aborts the loop -> Killed.
         // Any other inbound event is ignored (the loop is self-driving) and
@@ -613,6 +655,30 @@ mod tests {
         }
     }
 
+    /// `BudgetEnforcerHandle` that reports the budget already exhausted when
+    /// `exceeded` is set. `check_and_charge` returns
+    /// `Err(BudgetError::Exceeded { current_nano_usd: 1_500_000_000 })`
+    /// (i.e. $1.50) when exhausted, else `Ok`. Mirrors the real enforcer's
+    /// charge-0 consult used by the per-turn budget gate.
+    struct MockBudget {
+        exceeded: bool,
+    }
+    #[async_trait]
+    impl traits::budget::BudgetEnforcerHandle for MockBudget {
+        async fn check_and_charge(&self, _: u64) -> Result<(), traits::budget::BudgetError> {
+            if self.exceeded {
+                Err(traits::budget::BudgetError::Exceeded {
+                    current_nano_usd: 1_500_000_000,
+                })
+            } else {
+                Ok(())
+            }
+        }
+        async fn snapshot_total_nano_usd(&self) -> u64 {
+            1_500_000_000
+        }
+    }
+
     /// Build an api-client `MessageResponse` carrying a single text block.
     fn text_response(text: &str, stop_reason: Option<&str>) -> api_client::MessageResponse {
         api_client::MessageResponse {
@@ -694,6 +760,7 @@ mod tests {
             },
             api_client: None,
             tool_invoker: None,
+            budget: None,
         }
     }
 
@@ -956,6 +1023,62 @@ mod tests {
         // `{text, stop_reason}` result shape, and that the model was called once.
         let api = MockSubagentApiClient::new(vec![Ok(text_response("final answer", Some("end_turn")))]);
         let ctx = loop_ctx(api.clone(), None, 4);
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        assert_eq!(api.call_count(), 1, "exactly one model round-trip");
+        let result = one_completed(&evs);
+        assert_eq!(result["text"], "final answer");
+        assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn loop_budget_exhausted_stops_before_any_round_trip() {
+        // Test A: the inherited budget is already over the limit. The per-turn
+        // gate fires BEFORE the first model round-trip, so the loop emits a
+        // single budget-exhausted Failed and makes ZERO model calls. The error
+        // is the M3-05 byte-locked denial string formatted from the enforcer's
+        // current_nano_usd (1.5e9 -> "$1.50").
+        let api = MockSubagentApiClient::new(vec![Ok(text_response("unused", Some("end_turn")))]);
+        let mut ctx = loop_ctx(api.clone(), None, 4);
+        ctx.budget = Some(Arc::new(MockBudget { exceeded: true }));
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        assert_eq!(
+            api.call_count(),
+            0,
+            "the budget gate precedes messages_create — no round-trip"
+        );
+        let failed = evs.iter().find_map(|e| match e {
+            SubagentEvent::Failed { error, .. } => Some(error.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            failed.as_deref(),
+            Some("Budget exceeded ($1.50); stopped."),
+            "byte-locked M3-05 denial string; got events: {evs:?}"
+        );
+        assert!(
+            !evs.iter().any(|e| matches!(e, SubagentEvent::Completed { .. })),
+            "no Completed when stopped on budget; got events: {evs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_budget_ok_does_not_interfere_with_completion() {
+        // Test B (non-interference): a within-limit budget lets the existing
+        // single-end_turn path complete with aggregated text and the api is
+        // called exactly once — the gate is transparent when `Ok`.
+        let api = MockSubagentApiClient::new(vec![Ok(text_response("final answer", Some("end_turn")))]);
+        let mut ctx = loop_ctx(api.clone(), None, 4);
+        ctx.budget = Some(Arc::new(MockBudget { exceeded: false }));
 
         let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
         let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);

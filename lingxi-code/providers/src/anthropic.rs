@@ -45,14 +45,19 @@ impl<T: HttpTransport + Send + Sync + 'static> LlmProvider for AnthropicLlmProvi
     }
 
     async fn complete(&self, req: CanonicalRequest) -> Result<MessageResponse, ApiError> {
-        // `messages_create_non_stream` has no `tools` parameter, so `req.tools`
-        // is intentionally not forwarded here — tool use flows through `stream`.
-        // (The orchestrator's non-streaming `messages_create` carries no tools.)
+        // Forward the full request options via the opts entrypoint: it threads
+        // `req.tools` / `req.max_tokens` / `req.temperature` onto the wire (the
+        // `tools` body key only appears when the list is non-empty, matching
+        // the `MessageRequest` serde rules). This is what stops the non-stream
+        // path from dropping these once `CanonicalRequest.tools` is populated.
         self.inner
-            .messages_create_non_stream(
+            .messages_create_non_stream_with_opts(
                 &req.model,
                 req.system.as_deref(),
                 req.messages,
+                req.max_tokens,
+                req.tools,
+                req.temperature,
                 self.transport.as_ref(),
             )
             .await

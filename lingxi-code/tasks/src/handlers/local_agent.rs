@@ -26,22 +26,18 @@
 //! worker. Dropping the worker future drops the pending `spawner.spawn(..)`
 //! await, which is the cooperative-cancel contract the runtime documents.
 //!
-//! ## The `agent_id` ↔ `subagent_type` mismatch
+//! ## `agent_id` and `subagent_type` are independent sibling fields
 //!
-//! [`TaskSpawnInput::LocalAgent`] carries only an [`protocol::AgentId`] (a
-//! per-instance identity UUID), `prompt`, and `is_backgrounded`. But
-//! [`SubagentSpawnRequest`] needs a `subagent_type: String` (one of the
-//! built-in subagent-type *names*). On the TS side these are two distinct
-//! fields: `LocalAgentTaskState` carries BOTH `agentId` (instance id) AND
-//! `agentType` (resolved from the `AgentDefinition` frontmatter `name`, with a
-//! `'general-purpose'` fallback). The Rust variant currently lacks the
-//! resolved type, so the handler cannot derive it from the bare UUID. Until the
-//! variant grows a `subagent_type` field (the preferred fix — parity with TS
-//! `agentType`, set by the caller that already resolved the `AgentDefinition`),
-//! this handler resolves the type through an injected
-//! [`SubagentTypeResolver`]; the default [`DefaultSubagentTypeResolver`] returns
-//! `"general-purpose"` (the same TS fallback) for every id. `context_paths`
-//! likewise has no source on the variant, so [`Vec::new`] is passed.
+//! [`TaskSpawnInput::LocalAgent`] carries BOTH an [`protocol::AgentId`] (a
+//! per-instance identity UUID) AND a resolved `subagent_type: String` (one of
+//! the built-in subagent-type *names*), exactly mirroring the TS
+//! `LocalAgentTaskState` shape (`agentId` + `agentType`). The caller that
+//! already resolved the `AgentDefinition` stamps `subagent_type` (applying the
+//! `'general-purpose'` fallback when the definition has none, matching the TS
+//! `selectedAgent.agentType ?? 'general-purpose'`), so this handler forwards
+//! the value verbatim into [`SubagentSpawnRequest`] with no `AgentId`-to-type
+//! derivation. `context_paths` has no source on the variant, so [`Vec::new`] is
+//! passed.
 
 use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;
@@ -66,37 +62,6 @@ pub use crate::handlers::local_bash::{NoopStatusSink, TaskStatusSink};
 /// step uses.
 const HANDLER_NAME: &str = "local_agent";
 
-/// The claude-code default subagent type used when none is resolved
-/// (`registerAsyncAgent`: `agentType = selectedAgent.agentType ?? 'general-purpose'`).
-const DEFAULT_SUBAGENT_TYPE: &str = "general-purpose";
-
-/// Resolves a [`protocol::AgentId`] (per-instance identity) to a
-/// `subagent_type` name accepted by [`SubagentSpawnRequest`].
-///
-/// This bridges the [`TaskSpawnInput::LocalAgent`] → [`SubagentSpawnRequest`]
-/// field mismatch (see the module docs). It is a *stopgap* until the spawn-input
-/// variant carries the resolved `subagent_type` directly (parity with the TS
-/// `agentType` field). The wire step can inject a resolver backed by the same
-/// `AgentDefinition` registry the TS `loadAgentsDir` populates.
-pub trait SubagentTypeResolver: Send + Sync {
-    /// Map an agent instance id to its subagent-type name. Implementations
-    /// that cannot resolve the id should fall back to
-    /// [`DEFAULT_SUBAGENT_TYPE`] rather than fail the spawn (matching the TS
-    /// `?? 'general-purpose'` fallback).
-    fn resolve(&self, agent_id: &protocol::AgentId) -> String;
-}
-
-/// Default [`SubagentTypeResolver`]: every id resolves to
-/// `"general-purpose"` (the TS fallback). A placeholder until the spawn-input
-/// variant carries the resolved type.
-pub struct DefaultSubagentTypeResolver;
-
-impl SubagentTypeResolver for DefaultSubagentTypeResolver {
-    fn resolve(&self, _agent_id: &protocol::AgentId) -> String {
-        DEFAULT_SUBAGENT_TYPE.to_string()
-    }
-}
-
 /// A worker-cancel record: the [`BackgroundTaskHandle`] returned by
 /// [`RuntimeSpawner::spawn`] plus the `runtime` Arc that minted it.
 ///
@@ -119,9 +84,10 @@ pub struct WorkerCancel {
 /// Holds the constructor-injected dependencies that are *not* on
 /// [`TaskContext`] — the subagent spawner, the parent's `tool_invoker` +
 /// `budget` (bundled into a per-spawn [`SubagentInheritance`]), the spool
-/// manager, the `AgentId → subagent_type` resolver, and the terminal-status
-/// sink — plus the shared worker-handle map keyed by `task_id` so
-/// [`Task::kill`] can cancel the in-flight worker future.
+/// manager, and the terminal-status sink — plus the shared worker-handle map
+/// keyed by `task_id` so [`Task::kill`] can cancel the in-flight worker future.
+/// The `subagent_type` is no longer derived here: it arrives already resolved
+/// on the [`TaskSpawnInput::LocalAgent`] variant and is forwarded verbatim.
 pub struct LocalAgentHandler {
     /// Allocates a subagent slot and pumps it to a terminal [`SubagentResult`].
     spawner: Arc<dyn SubagentSpawner>,
@@ -133,8 +99,6 @@ pub struct LocalAgentHandler {
     budget: Arc<dyn BudgetEnforcerHandle>,
     /// Owns the spool directory + path allocation for the result payload.
     output_manager: Arc<TaskOutputManager>,
-    /// Maps the spawn-input `agent_id` to a `subagent_type` (stopgap; see docs).
-    type_resolver: Arc<dyn SubagentTypeResolver>,
     /// Where terminal status transitions / token usage are reported.
     status_sink: Arc<dyn TaskStatusSink>,
     /// `task_id` → live worker-cancel record. Populated for the duration of the
@@ -154,8 +118,9 @@ impl LocalAgentHandler {
     /// deliberately *not* injected here. `tool_invoker` + `budget` are stored
     /// so each spawn can bundle them into a [`SubagentInheritance`] (cloning the
     /// `Arc` preserves pointer identity — required by the recursion-lock +
-    /// budget-aggregation invariants). The `AgentId → subagent_type` resolver
-    /// defaults to [`DefaultSubagentTypeResolver`] (`"general-purpose"`).
+    /// budget-aggregation invariants). The `subagent_type` is supplied per-spawn
+    /// on the [`TaskSpawnInput::LocalAgent`] variant, so there is nothing to
+    /// inject here.
     #[must_use]
     pub fn new(
         spawner: Arc<dyn SubagentSpawner>,
@@ -168,7 +133,6 @@ impl LocalAgentHandler {
             tool_invoker,
             budget,
             output_manager,
-            type_resolver: Arc::new(DefaultSubagentTypeResolver),
             status_sink: Arc::new(NoopStatusSink),
             workers: Arc::new(Mutex::new(HashMap::new())),
             pending_kill: Arc::new(Mutex::new(HashMap::new())),
@@ -180,15 +144,6 @@ impl LocalAgentHandler {
     #[must_use]
     pub fn with_status_sink(mut self, sink: Arc<dyn TaskStatusSink>) -> Self {
         self.status_sink = sink;
-        self
-    }
-
-    /// Override the `AgentId → subagent_type` resolver (the stopgap bridge for
-    /// the spawn-input field mismatch — see the module docs). The wire step can
-    /// inject one backed by the resolved `AgentDefinition` registry.
-    #[must_use]
-    pub fn with_type_resolver(mut self, resolver: Arc<dyn SubagentTypeResolver>) -> Self {
-        self.type_resolver = resolver;
         self
     }
 
@@ -231,7 +186,8 @@ impl Task for LocalAgentHandler {
     ) -> Result<TaskHandle, TaskError> {
         // 1. Only the LocalAgent variant is accepted; reject the other six.
         let TaskSpawnInput::LocalAgent {
-            agent_id,
+            agent_id: _agent_id,
+            subagent_type,
             prompt,
             is_backgrounded: _is_backgrounded,
         } = input
@@ -256,10 +212,10 @@ impl Task for LocalAgentHandler {
             .ok_or_else(|| TaskError::Internal("spool path is not valid UTF-8".into()))?
             .to_owned();
 
-        // 3. Resolve the subagent_type (the AgentId → type bridge; see docs)
-        //    and build the spawn request. `context_paths` has no source on the
-        //    variant, so an empty vec is passed.
-        let subagent_type = self.type_resolver.resolve(&agent_id);
+        // 3. Build the spawn request, forwarding the already-resolved
+        //    `subagent_type` verbatim (parity with TS `agentType`).
+        //    `context_paths` has no source on the variant, so an empty vec is
+        //    passed.
         let request = SubagentSpawnRequest {
             subagent_type,
             prompt,
@@ -649,6 +605,7 @@ mod tests {
     fn local_agent_input(prompt: &str) -> TaskSpawnInput {
         TaskSpawnInput::LocalAgent {
             agent_id: protocol::AgentId::new(),
+            subagent_type: "general-purpose".into(),
             prompt: prompt.into(),
             is_backgrounded: true,
         }
@@ -880,38 +837,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn type_resolver_override_drives_subagent_type() {
-        struct FixedResolver;
-        impl SubagentTypeResolver for FixedResolver {
-            fn resolve(&self, _agent_id: &protocol::AgentId) -> String {
-                "code-reviewer".into()
-            }
-        }
-
+    async fn variant_subagent_type_drives_the_request() {
         let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
         let spawner = MockSpawner::new(CannedResult::Completed(json!("ok"), 0));
         let (_dir, mgr) = make_output_manager(fs.clone());
         let sink = Arc::new(RecordingSink::default());
 
-        let handler = LocalAgentHandler::new(
-            spawner.clone(),
-            Arc::new(MockInvoker),
-            Arc::new(MockBudget),
-            mgr,
-        )
-        .with_status_sink(sink.clone())
-        .with_type_resolver(Arc::new(FixedResolver));
+        let handler = make_handler(spawner.clone(), mgr, sink.clone());
 
-        handler
-            .spawn(local_agent_input("p"), make_ctx(fs))
-            .await
-            .unwrap();
+        // A non-default subagent_type on the variant must flow through verbatim
+        // (parity with TS `agentType` — no AgentId-to-type derivation).
+        let input = TaskSpawnInput::LocalAgent {
+            agent_id: protocol::AgentId::new(),
+            subagent_type: "code-reviewer".into(),
+            prompt: "p".into(),
+            is_backgrounded: true,
+        };
+
+        handler.spawn(input, make_ctx(fs)).await.unwrap();
 
         await_terminal(&sink).await;
         assert_eq!(
             spawner.request().unwrap().subagent_type,
             "code-reviewer",
-            "injected resolver drives the subagent_type"
+            "the variant's subagent_type drives the request verbatim"
         );
     }
 

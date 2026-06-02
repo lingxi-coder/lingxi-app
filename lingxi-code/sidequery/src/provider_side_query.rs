@@ -10,16 +10,18 @@
 //!
 //! ## Field-forwarding gap (documented)
 //!
-//! [`AnthropicProvider::messages_create_non_stream`] only forwards `model`,
-//! `system`, and `messages` (it hard-codes `max_tokens: 4096` and ignores
-//! `tools`, `tool_choice`, `output_format`, `temperature`, `stop_sequences`,
-//! `max_retries`, and `thinking_budget`). This client therefore wires only
-//! those three fields through to the wire request. That is sufficient for the
-//! §6.3 memory selector, which relies on JSON-shaped *text* output (decoded
-//! here into [`SideQueryResponse::structured`]) rather than a server-side
-//! `response_format`. A follow-up that adds a richer provider entrypoint can
-//! forward the remaining fields; until then they are accepted on the request
-//! and intentionally dropped.
+//! This client wires the request through
+//! [`AnthropicProvider::messages_create_non_stream_with_opts`], which forwards
+//! `model`, `system`, `messages`, `max_tokens`, `tools`, and `temperature`
+//! (the `tools` body key appears only when the list is non-empty, matching the
+//! `MessageRequest` serde rules). The remaining DTO fields — `tool_choice`,
+//! `output_format`, `stop_sequences`, `max_retries`, and `thinking_budget` —
+//! are still unforwardable (no wire body key on the provider entrypoint yet)
+//! and are intentionally dropped. That is sufficient for the §6.3 memory
+//! selector, which relies on JSON-shaped *text* output (decoded here into
+//! [`SideQueryResponse::structured`]) rather than a server-side
+//! `response_format`. A follow-up that adds the missing body keys can forward
+//! the rest; until then they are accepted on the request and dropped.
 
 use crate::side_query::{SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse};
 use api_client::types::ContentBlockApi;
@@ -167,18 +169,26 @@ fn decode_response(resp: MessageResponse, want_structured: bool) -> SideQueryRes
 #[async_trait]
 impl SideQueryClient for ProviderSideQueryClient {
     async fn query(&self, request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
-        // `messages_create_non_stream<T: HttpTransport>` carries an implicit
-        // `Sized` bound, so we pass a sized `&ArcTransport` (which delegates to
-        // the stored `Arc<dyn HttpTransport>`) rather than an unsized
-        // `&dyn HttpTransport`. The `?` auto-converts `ApiError` ->
-        // `SideQueryError::Api` via the `#[from]` on the enum.
+        // `messages_create_non_stream_with_opts<T: HttpTransport>` carries an
+        // implicit `Sized` bound, so we pass a sized `&ArcTransport` (which
+        // delegates to the stored `Arc<dyn HttpTransport>`) rather than an
+        // unsized `&dyn HttpTransport`. The `?` auto-converts `ApiError` ->
+        // `SideQueryError::Api` via the `#[from]` on the enum. The opts
+        // entrypoint forwards `max_tokens` / `tools` / `temperature`; the
+        // `tools` body key only appears when the list is non-empty (per the
+        // `MessageRequest` serde rules). `tool_choice` / `stop_sequences` /
+        // `thinking_budget` / `output_format` / `max_retries` stay
+        // unforwardable (no body key yet) — see the module-level note.
         let transport = ArcTransport(Arc::clone(&self.transport));
         let resp = self
             .provider
-            .messages_create_non_stream(
+            .messages_create_non_stream_with_opts(
                 &request.model,
                 request.system_prompt.as_deref(),
                 request.messages,
+                request.max_tokens,
+                request.tools,
+                request.temperature,
                 &transport,
             )
             .await?;
@@ -291,7 +301,7 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(raw_body).expect("request body is JSON");
 
-        // The three forwarded fields reach the wire body.
+        // The forwarded fields reach the wire body.
         assert_eq!(body["model"].as_str(), Some("claude-haiku-4-5"));
         assert_eq!(body["system"].as_str(), Some("system"));
         assert_eq!(
@@ -300,13 +310,25 @@ mod tests {
             "the single request message is forwarded"
         );
 
-        // The documented forwarding gap holds: `max_tokens` is hard-coded to
-        // 4096 by the provider (NOT the request's `max_tokens: 1024`), and the
-        // dropped DTO fields never appear on the wire.
-        assert_eq!(body["max_tokens"].as_u64(), Some(4096));
-        assert!(body.get("tools").is_none(), "tools dropped");
+        // `max_tokens` now carries the request's value (1024), and the request's
+        // `temperature: Some(0.0)` is forwarded — both via the opts entrypoint.
+        assert_eq!(
+            body["max_tokens"].as_u64(),
+            Some(1024),
+            "request max_tokens (1024) forwarded, not the legacy 4096"
+        );
+        assert_eq!(
+            body["temperature"].as_f64(),
+            Some(0.0),
+            "request temperature (0.0) forwarded"
+        );
+        // `tools` is empty on this request, so the `is_empty` guard keeps the
+        // body key absent. The remaining DTO fields stay unforwardable.
+        assert!(
+            body.get("tools").is_none(),
+            "tools absent when the request list is empty"
+        );
         assert!(body.get("tool_choice").is_none(), "tool_choice dropped");
-        assert!(body.get("temperature").is_none(), "temperature dropped");
         assert!(
             body.get("stop_sequences").is_none(),
             "stop_sequences dropped"

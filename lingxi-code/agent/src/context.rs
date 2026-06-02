@@ -70,4 +70,9 @@ pub struct SubagentContext {
     /// [`traits::subagent_spawn::SubagentInheritance`]. `None` means the agent
     /// cannot dispatch tools — a `tool_use` in that state surfaces a failure.
     pub tool_invoker: Option<Arc<dyn traits::ToolInvoker>>,
+    /// Inherited budget enforcer (from `SubagentInheritance::budget`). When
+    /// `Some`, the multi-turn loop consults it once per turn and stops with a
+    /// budget-exhausted terminal when the cumulative cost is over the limit.
+    /// `None` disables budget enforcement (legacy/test contexts).
+    pub budget: Option<Arc<dyn traits::budget::BudgetEnforcerHandle>>,
 }

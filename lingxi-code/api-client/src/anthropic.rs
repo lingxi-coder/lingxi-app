@@ -196,8 +196,45 @@ impl AnthropicProvider {
             .map_err(|e| crate::ApiError::MalformedStream(e.to_string()))
     }
 
+    /// Build the JSON body for a non-streaming `POST /v1/messages` request.
+    ///
+    /// Produces `{"model","max_tokens","messages"}` and, mirroring
+    /// [`Self::messages_create_stream`] and the [`crate::types::MessageRequest`]
+    /// serde rules (`skip_serializing_if`): sets `body["system"]` only when
+    /// `system.is_some()`, `body["tools"]` only when `!tools.is_empty()`, and
+    /// `body["temperature"]` only when `temperature.is_some()`. Wire keys are
+    /// the exact Anthropic names `"max_tokens"` / `"tools"` / `"temperature"`.
+    fn build_messages_body(
+        model: &str,
+        system: Option<&str>,
+        msgs: &[ConversationMessage],
+        max_tokens: u32,
+        tools: &[Value],
+        temperature: Option<f32>,
+    ) -> Value {
+        let mut body = serde_json::json!({
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": msgs,
+        });
+        if let Some(s) = system {
+            body["system"] = Value::String(s.to_string());
+        }
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(tools.to_vec());
+        }
+        if let Some(t) = temperature {
+            body["temperature"] = serde_json::json!(t);
+        }
+        body
+    }
+
     /// Non-streaming `POST /v1/messages` with retry + rate-limit + OAuth-hook
-    /// middleware.
+    /// middleware. Legacy 4-arg entrypoint preserved byte-identically for all
+    /// existing callers: it forwards `max_tokens = 4096`, no tools, and no
+    /// temperature. Richer callers (provider / sidequery) use
+    /// [`Self::messages_create_non_stream_with_opts`] to carry the real
+    /// `max_tokens` / `tools` / `temperature`.
     ///
     /// Spec §4 Flow B. Retry budget = 3 attempts (500ms / 1s / 2s ± 20% jitter).
     /// On 401, calls the OAuth hook ONCE per request; on a second 401 the
@@ -215,18 +252,55 @@ impl AnthropicProvider {
         msgs: Vec<ConversationMessage>,
         transport: &T,
     ) -> Result<MessageResponse, ApiError> {
+        self.messages_create_non_stream_with_opts(
+            model,
+            system,
+            msgs,
+            4096,
+            Vec::new(),
+            None,
+            transport,
+        )
+        .await
+    }
+
+    /// Non-streaming `POST /v1/messages` carrying the full request options
+    /// (`max_tokens` / `tools` / `temperature`). Same retry + rate-limit +
+    /// OAuth-hook + cost middleware as [`Self::messages_create_non_stream`];
+    /// only the body construction differs (it threads the supplied options via
+    /// [`Self::build_messages_body`] instead of hard-coding 4096 / no-tools /
+    /// no-temperature). The thin legacy wrapper above forwards the historical
+    /// defaults so existing callers and integration tests stay byte-identical.
+    ///
+    /// Spec §4 Flow B. Retry budget = 3 attempts (500ms / 1s / 2s ± 20% jitter).
+    /// On 401, calls the OAuth hook ONCE per request; on a second 401 the
+    /// [`ApiError::Unauthorized`] propagates without further refresh attempts.
+    /// On 429, parses Retry-After / anthropic-ratelimit-requests-reset and
+    /// sleeps before counting another retry. Emits four `tengu_api_*`
+    /// telemetry events through the optional `AnalyticsBus`.
+    ///
+    /// # Errors
+    /// See [`ApiError`] for the full failure taxonomy.
+    // `msgs` / `tools` are taken by value to match the owned-`Vec` public
+    // shape of `messages_create_non_stream` / `messages_create_stream` (and
+    // every caller hands over an owned `Vec`); the body builder borrows them
+    // as slices, so the by-value is intentional for API symmetry.
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    pub async fn messages_create_non_stream_with_opts<T: HttpTransport>(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        max_tokens: u32,
+        tools: Vec<Value>,
+        temperature: Option<f32>,
+        transport: &T,
+    ) -> Result<MessageResponse, ApiError> {
         let request_id = new_request_id();
         let started = std::time::Instant::now();
         telemetry::emit_started(&self.bus, model, &request_id, false).await;
 
-        let mut body = serde_json::json!({
-            "model": model,
-            "max_tokens": 4096u32,
-            "messages": msgs,
-        });
-        if let Some(s) = system {
-            body["system"] = serde_json::Value::String(s.to_string());
-        }
+        let body = Self::build_messages_body(model, system, &msgs, max_tokens, &tools, temperature);
 
         let resp_result = self.drive_retry_loop_with_429(&body, transport).await;
         let outcome = self

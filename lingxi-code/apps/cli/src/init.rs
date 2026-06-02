@@ -186,8 +186,16 @@ pub async fn build_runtime(
         http.clone(),
         routing,
     ));
-    let api_client: Arc<dyn OrchestratorApiClient> =
-        Arc::new(ProviderApiAdapter::new(registry as Arc<dyn ModelRouter>));
+    // Build the CONCRETE adapter first so it can be coerced to BOTH the
+    // orchestrator seam (`OrchestratorApiClient`) and the agent seam
+    // (`agent::SubagentApiClient`). `ProviderApiAdapter` impls both (see
+    // orchestrator/src/provider_adapter.rs); type-erasing to one trait object
+    // up front would forfeit the other coercion.
+    let provider_adapter = Arc::new(ProviderApiAdapter::new(
+        Arc::clone(&registry) as Arc<dyn ModelRouter>,
+    ));
+    let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
+    let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
     // The WebSearch tool still builds Anthropic `POST /v1/messages` requests via
     // its own provider (server-side web search is Anthropic-only in v1).
     let tool_provider = Arc::new(AnthropicProvider::new(api_key, Some(api_base.clone())));
@@ -269,6 +277,40 @@ pub async fn build_runtime(
         cost_persist_tx,
     ));
 
+    // (4.6) Subagent spawner pool + budget enforcer for the `AgentTool` seam.
+    //       `AgentTool::call` requires BOTH `subagent_spawner` and
+    //       `budget_enforcer` to be `Some` — wiring the spawner alone is inert.
+    //
+    //       The pool is the production `StateMachinePool` driven by the posix
+    //       `RuntimeSpawner`; `max_concurrent = 4` matches the agent-crate
+    //       fixtures. `with_api_client(subagent_api)` hands the child runner the
+    //       real model seam so spawned subagents drive the multi-turn
+    //       `run_subagent_loop` (gated on `ctx.api_client.is_some()`) instead of
+    //       the legacy stub completion.
+    let subagent_pool =
+        Arc::new(agent::StateMachinePool::new(Arc::new(PosixRuntime::new()), 4));
+    let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> = Arc::new(
+        agent::PoolSubagentSpawner::new(subagent_pool).with_api_client(subagent_api),
+    );
+
+    //       The budget enforcer is an unlimited / non-blocking config (every
+    //       limit `None`, no warning thresholds, `WarnOnly` policy) so it never
+    //       halts a turn — `BudgetConfig` has no production `Default`, so all
+    //       five fields are spelled out. It shares the process `CostTracker`
+    //       (cloned because the tracker is also moved into `.with_cost_tracker`
+    //       below).
+    let budget_enforcer: Arc<dyn traits::budget::BudgetEnforcerHandle> =
+        Arc::new(cost::BudgetEnforcer::new(
+            cost::BudgetConfig {
+                max_session_nano_usd: None,
+                max_turn_nano_usd: None,
+                max_turn_tokens: None,
+                warning_thresholds: Vec::new(),
+                on_exceed: cost::BudgetExceedPolicy::WarnOnly,
+            },
+            cost_tracker.clone(),
+        ));
+
     // (5) Build the orchestrator using test_support fillers for the
     //     hook/permission/memory slots. These are the documented inherited
     //     M5-10/M5-11 gaps — production constructors land in M5-13+.
@@ -348,10 +390,13 @@ pub async fn build_runtime(
     //        - `with_process_runner(PosixProcess, PosixSandbox)` makes the
     //          Command arm spawn real child processes (the runner only accepts a
     //          `SandboxedCommand`, which the sandbox mints).
-    //        The Agent arm stays "not wired" until a `SubagentSpawner` pool
-    //        exists (no `.with_agent_spawner(..)` yet — M9+). The orchestrator's
-    //        `hooks` param is the concrete `Arc<hooks::HookExecutorImpl>`, so no
-    //        trait-object coercion is needed.
+    //        The hooks Agent arm stays "not wired" (no `.with_agent_spawner(..)`
+    //        builder on `HookExecutorImpl` yet — M9+). NOTE: this is a *separate*
+    //        seam from the tool-context `subagent_spawner`, which IS now wired
+    //        below (4.6) — the hooks Agent arm and the `AgentTool` spawner are
+    //        distinct injection points. The orchestrator's `hooks` param is the
+    //        concrete `Arc<hooks::HookExecutorImpl>`, so no trait-object coercion
+    //        is needed.
     let hooks = Arc::new(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
@@ -421,8 +466,12 @@ pub async fn build_runtime(
     //       `ToolRegistry::new()`; `engine-desktop` now owns the desktop tool
     //       set (14 tool crates) and we build the `BuiltinToolContext` from the
     //       posix platform handles + session policy. MCP tools share the
-    //       orchestrator's `McpRegistry`; subagent/task/mailbox/budget/LSP seams
-    //       stay `None` until their production pools are wired (M9+).
+    //       orchestrator's `McpRegistry`. The subagent spawner (the production
+    //       `StateMachinePool`-backed `PoolSubagentSpawner`) and the budget
+    //       enforcer are now wired (built above at 4.6) — `AgentTool` requires
+    //       BOTH, so they land together. The mailbox/LSP seams stay `None` until
+    //       their production pools are wired (teammate routing + LSP are separate
+    //       work items).
     let tool_ctx = BuiltinToolContext {
         fs: Arc::new(PosixFileSystem::new(cwd.clone())),
         bus: Arc::new(telemetry::AnalyticsBus::new()),
@@ -444,12 +493,12 @@ pub async fn build_runtime(
         provider: tool_provider,
         default_model: cfg.model.clone(),
         worktree: Arc::new(PosixWorktree::new()),
-        subagent_spawner: None,
+        subagent_spawner: Some(subagent_spawner),
         task_registry: Some(
             task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>
         ),
         mailbox_router: None,
-        budget_enforcer: None,
+        budget_enforcer: Some(budget_enforcer),
         mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: None,
         // Mobile / device-control capabilities are not wired on desktop (M8).

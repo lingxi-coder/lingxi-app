@@ -11,11 +11,24 @@ struct ChatView: View {
     /// hold 0.6s to set true; release sets false.
     @Binding var voiceActive: Bool
 
-    @State private var messages = MockData.messagesDefault
-    @State private var isNew = false
-    @State private var streaming = false
-    @State private var model = MockData.models[0]
+    /// The conversation source (mock or engine-over-UniFFI). ChatView renders its
+    /// published `model` and forwards user input to it — it no longer owns the
+    /// transcript or the canned reply timer.
+    let source: any ConversationSource
+    @ObservedObject private var convo: ConversationModel
+
     @State private var dotPulse = false
+
+    init(session: SessionRef,
+         openDrawer: @escaping () -> Void,
+         voiceActive: Binding<Bool>,
+         source: any ConversationSource) {
+        self.session = session
+        self.openDrawer = openDrawer
+        self._voiceActive = voiceActive
+        self.source = source
+        self.convo = source.model
+    }
 
     var body: some View {
         ZStack {
@@ -30,7 +43,7 @@ struct ChatView: View {
                 topBar
                 WorkflowBar()
                 messageList
-                Composer(model: $model, onSend: send)
+                Composer(model: $convo.model, onSend: send)
             }
         }
         // Voice flow: hold anywhere 0.6s to enter immersive recording; release sends.
@@ -49,9 +62,6 @@ struct ChatView: View {
                     if voiceActive { withAnimation(.easeOut(duration: 0.25)) { voiceActive = false } }
                 }
         )
-        .onChange(of: session.id) { _, _ in
-            isNew = false; streaming = false; messages = MockData.messagesDefault
-        }
         .onAppear { withAnimation(.easeInOut(duration: 1.2).repeatForever()) { dotPulse = true } }
     }
 
@@ -60,7 +70,7 @@ struct ChatView: View {
         HStack(spacing: 4) {
             iconButton(.menu, color: t.text, action: openDrawer)
             Spacer()
-            Text(isNew ? "新对话" : session.title)
+            Text(convo.isNew ? "新对话" : session.title)
                 .font(.system(size: 14.5, weight: .semibold))
                 .foregroundColor(t.text)
                 .lineLimit(1)
@@ -83,17 +93,18 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 0) {
-                    if isNew && messages.isEmpty && !streaming { emptyState }
-                    ForEach(Array(messages.enumerated()), id: \.element.id) { _, m in
+                    if convo.isNew && convo.messages.isEmpty && !convo.streaming { emptyState }
+                    ForEach(Array(convo.messages.enumerated()), id: \.element.id) { _, m in
                         MessageBubble(message: m)
                     }
-                    if streaming { streamingRow }
+                    if convo.streaming { streamingRow }
+                    if let status = convo.statusLine { statusRow(status) }
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
             }
-            .onChange(of: messages.count) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
-            .onChange(of: streaming) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
+            .onChange(of: convo.messages.count) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
+            .onChange(of: convo.streaming) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
         }
     }
 
@@ -130,16 +141,19 @@ struct ChatView: View {
         .padding(.bottom, 26)
     }
 
-    // MARK: actions
-    private func newChat() { messages = []; streaming = false; isNew = true }
-
-    private func send(_ txt: String) {
-        isNew = false
-        messages.append(Message(role: .user, text: txt))
-        streaming = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
-            messages.append(Message(role: .ai, tag: "思考了 8 秒", text: "已记入。继续追问。"))
-            streaming = false
+    // A dim, single-line status row (engine errors / tool activity).
+    private func statusRow(_ status: String) -> some View {
+        HStack {
+            Text(status)
+                .font(.system(size: 12.5))
+                .foregroundColor(t.text4)
+            Spacer()
         }
+        .padding(.bottom, 18)
     }
+
+    // MARK: actions
+    private func newChat() { source.startNewConversation() }
+
+    private func send(_ txt: String) { source.send(txt) }
 }

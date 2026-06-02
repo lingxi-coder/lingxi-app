@@ -12,6 +12,10 @@ struct RootView: View {
     @State private var settingsOpen = false
     @State private var voiceActive = false
 
+    /// The conversation source ChatView drives — the real in-process engine when
+    /// available (P3a), otherwise the canned mock. Held once for the app session.
+    @State private var source: any ConversationSource = ConversationSourceFactory.make()
+
     private var session: SessionRef { MockData.session(activeSession) }
 
     var body: some View {
@@ -20,7 +24,8 @@ struct RootView: View {
 
             ChatView(session: session,
                      openDrawer: { withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { drawerOpen = true } },
-                     voiceActive: $voiceActive)
+                     voiceActive: $voiceActive,
+                     source: source)
 
             // Drawer overlay
             if drawerOpen {

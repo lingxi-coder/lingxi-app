@@ -124,6 +124,207 @@ pub fn build_mobile_engine(
     }
 }
 
+// ---------------------------------------------------------------------------
+// M10-P3a: the foreign-callable engine constructor.
+// ---------------------------------------------------------------------------
+//
+// `build_mobile_engine` (above) takes an `Arc<dyn Platform>` + the foreign
+// callback objects (camera / voice / share) — none of which are UniFFI types —
+// so it cannot itself cross the FFI boundary. The Swift app needs SOME exported
+// constructor to obtain a `MobileEngineHandle`; the only piece it must supply
+// for a text conversation is the `ClientEventListener` (already a UniFFI
+// callback interface) — the engine's own `IosPlatform` supplies fs / http /
+// clock from `platform-posix-minimal`, and a text turn never touches the
+// camera / voice / share device capabilities.
+//
+// So this thin `#[uniffi::export]` wrapper takes ONLY UniFFI-marshalable inputs
+// (the listener + plain config strings), constructs default device-capability
+// stubs + a no-op permission sink on the Rust side, threads the runtime config
+// (api base / key / model) into a `MobileConfig`, and delegates to the shared
+// `build_mobile_engine`. This is ADDITIVE FFI packaging only — it changes no
+// engine semantics and touches neither the `traits` crate nor Android.
+//
+// SECRETS: `api_key` arrives as a parameter the Swift side reads from the
+// process environment (`ANTHROPIC_API_KEY`) / an app setting at runtime; it is
+// NEVER hardcoded, logged, or persisted here. An empty key is valid — the
+// orchestrator only fails at `run_turn` with a 401 (mirrors `MobileConfig`).
+
+/// Device-capability stubs used when the foreign host does not (yet) wire the
+/// camera / voice / share callbacks. A text conversation never invokes these;
+/// each method returns the trait's "unavailable" error so an accidental call is
+/// a clean error rather than a panic. M9 replaces these with the real
+/// Swift-backed callback objects threaded through a richer constructor.
+///
+/// Constructed only on the device/simulator (`target_os = "ios"`) path of
+/// [`build_ios_engine`]; on the host bindgen build that path is `cfg`'d out, so
+/// the stubs are dead there — `allow(dead_code)` keeps the host build warning-clean.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+mod stub_capabilities {
+    use async_trait::async_trait;
+    use traits::{
+        CameraControl, CameraError, CapturePhotoOpts, CapturedImage, ShareError, SharePayload,
+        ShareResult, SharingService, VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts,
+    };
+
+    /// No-op camera: capture / pick both report the hardware as unavailable.
+    pub struct StubCamera;
+
+    #[async_trait]
+    impl CameraControl for StubCamera {
+        async fn capture_photo(
+            &self,
+            _opts: CapturePhotoOpts,
+        ) -> Result<CapturedImage, CameraError> {
+            Err(CameraError::DeviceUnavailable)
+        }
+        async fn pick_from_library(&self) -> Result<CapturedImage, CameraError> {
+            Err(CameraError::DeviceUnavailable)
+        }
+    }
+
+    /// No-op voice recorder: never records.
+    pub struct StubVoice;
+
+    #[async_trait]
+    impl VoiceRecorder for StubVoice {
+        async fn start_recording(&self, _opts: VoiceRecordingOpts) -> Result<(), VoiceError> {
+            Err(VoiceError::Other("voice capture not wired".to_string()))
+        }
+        async fn stop_recording(&self) -> Result<VoiceRecording, VoiceError> {
+            Err(VoiceError::NotRecording)
+        }
+        async fn is_recording(&self) -> bool {
+            false
+        }
+    }
+
+    /// No-op share service: reports sharing unsupported.
+    pub struct StubShare;
+
+    #[async_trait]
+    impl SharingService for StubShare {
+        async fn share(&self, _payload: SharePayload) -> Result<ShareResult, ShareError> {
+            Err(ShareError::Unsupported)
+        }
+    }
+}
+
+/// A [`PermissionRequestSink`] that drops outbound permission requests. Mobile
+/// always binds the adapter permission gate; with no foreign permission UI yet,
+/// a request that is never answered simply parks the turn (the conversation can
+/// still cancel it). Lighting up a real permission dialog is additive: a future
+/// constructor will accept a foreign `PermissionRequestSink` callback interface.
+///
+/// Constructed only on the `target_os = "ios"` path; `allow(dead_code)` on the
+/// host bindgen build (where that path is `cfg`'d out).
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+struct NoopPermissionSink;
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl engine_mobile::PermissionRequestSink for NoopPermissionSink {
+    async fn emit_request(&self, _request: client_protocol::permission::PermissionRequest) {}
+}
+
+// The foreign event listener (`IosEventListener`) is a callback interface
+// DEFINED IN THIS CRATE so its UniFFI `FfiConverterArc` lands under
+// `ios_framework`'s tag — a prerequisite for naming it in a `#[uniffi::export]`
+// function here. (The shared `client_adapter::ClientEventListener` registers its
+// converter under `client_adapter`'s tag, so it cannot be a parameter type in
+// an export from a different crate.) `IosListenerBridge` adapts this crate-local
+// interface to the shared `ClientEventListener` the engine actually feeds.
+/// The Swift-implemented event listener the iOS app registers when it builds the
+/// engine. Defined in this crate (not re-used from `client-adapter`) so its
+/// UniFFI converter registers under `ios_framework`'s tag — see [`build_ios_engine`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosEventListener: Send + Sync {
+    /// Deliver one fully-lowered [`client_protocol::events::ClientEvent`] to the
+    /// Swift host. Implementations enqueue onto the UI's event stream and return
+    /// promptly — they must not block the engine turn loop.
+    async fn on_event(&self, event: client_protocol::events::ClientEvent);
+}
+
+/// Adapts the crate-local [`IosEventListener`] callback interface to the shared
+/// [`ClientEventListener`] the engine's adapter sink expects. One forwarding hop
+/// per event; no transformation. (UniFFI lifts a `callback_interface` as a
+/// `Box<dyn …>`, so the bridge owns the boxed foreign object directly.)
+#[cfg(feature = "uniffi")]
+struct IosListenerBridge {
+    inner: Box<dyn IosEventListener>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl ClientEventListener for IosListenerBridge {
+    async fn on_event(&self, event: client_protocol::events::ClientEvent) {
+        self.inner.on_event(event).await;
+    }
+}
+
+/// Foreign-callable constructor for the iOS app (plan M10-P3a).
+///
+/// Builds a fully-wired [`MobileEngineHandle`] from the Swift-supplied event
+/// listener + runtime config. The handle owns its tokio runtime and streams
+/// every [`client_protocol::events::ClientEvent`] to `listener.on_event(..)`;
+/// the app drives turns via [`MobileEngineHandle::submit`].
+///
+/// - `api_base`  — Anthropic-compatible base URL (e.g. `https://api.anthropic.com`).
+/// - `api_key`   — read by Swift from `ANTHROPIC_API_KEY` / an app setting at
+///   runtime. Empty is valid (turns 401 at `run_turn`); never hardcoded here.
+/// - `model`     — default model id for new turns.
+/// - `app_sandbox_root` — the app container path the engine roots its filesystem
+///   + `~/.claude`-equivalent under.
+/// - `listener`  — the foreign [`IosEventListener`] the adapter feeds (bridged to
+///   the shared [`ClientEventListener`]).
+///
+/// On non-iOS hosts (and the iOS *simulator* IS `target_os = "ios"`, so it takes
+/// the real path) this delegates to [`build_mobile_engine`]; off-device it
+/// returns [`MobileEngineError::PlatformUnavailable`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn build_ios_engine(
+    api_base: String,
+    api_key: String,
+    model: String,
+    app_sandbox_root: String,
+    listener: Box<dyn IosEventListener>,
+) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
+    let listener: Arc<dyn ClientEventListener> = Arc::new(IosListenerBridge { inner: listener });
+    #[cfg(target_os = "ios")]
+    {
+        use platform_ios::{IosPlatform, IosPlatformInputs};
+        let mut cfg = MobileConfig {
+            cwd: std::path::PathBuf::from(&app_sandbox_root),
+            claude_home: std::path::PathBuf::from(&app_sandbox_root).join(".claude"),
+            ..MobileConfig::default()
+        };
+        if !api_base.is_empty() {
+            cfg.api_base = api_base;
+        }
+        cfg.api_key = api_key;
+        if !model.is_empty() {
+            cfg.default_model = model;
+        }
+        let platform: Arc<dyn Platform> = Arc::new(IosPlatform::new(IosPlatformInputs {
+            app_sandbox_root: std::path::PathBuf::from(app_sandbox_root),
+            camera: Arc::new(stub_capabilities::StubCamera),
+            voice: Arc::new(stub_capabilities::StubVoice),
+            share: Arc::new(stub_capabilities::StubShare),
+        }));
+        let permission_sink: Arc<dyn PermissionRequestSink> = Arc::new(NoopPermissionSink);
+        engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (api_base, api_key, model, app_sandbox_root, listener);
+        Err(MobileEngineError::PlatformUnavailable)
+    }
+}
+
 // F3-04: re-export `engine-mobile`'s UniFFI scaffolding so the shared host's FFI
 // symbols (the re-exported `MobileEngineHandle` / `MobileEngineError`) land in
 // this crate's final library. Under the `uniffi` feature only.

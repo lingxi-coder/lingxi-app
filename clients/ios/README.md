@@ -1,8 +1,10 @@
 # 灵犀 Code · iPhone (SwiftUI)
 
 A native SwiftUI recreation of the LingXi Code iPhone design prototype
-(`clients/.design-reference/project/lingxi-iphone.html`). UI shell with the
-prototype's mock data — no backend/engine wiring (a later milestone).
+(`clients/.design-reference/project/lingxi-iphone.html`). The conversation
+surface drives the real in-process engine over UniFFI (M10-P3a) through a
+`ConversationSource` seam; the rest of the UI still renders the prototype's
+mock data (later milestones).
 
 ## Requirements
 
@@ -29,6 +31,30 @@ It builds a host cdylib + per-arch staticlibs, generates the Swift bindings
 (deduped into a single Swift module), and assembles the xcframework. No secrets
 are baked in — the engine reads `ANTHROPIC_API_KEY` from the runtime
 environment, never from the framework.
+
+## Conversation source (mock vs. real engine)
+
+`Sources/Conversation/ConversationSource.swift` defines the seam `ChatView`
+talks to. `ConversationSourceFactory.make()` picks the implementation at app
+start:
+
+- **`EngineConversationSource`** — the real in-process engine over UniFFI. It
+  builds a `MobileEngineHandle` via the generated `buildIosEngine(...)`,
+  registers a Swift `IosEventListener` whose `onEvent(_:)` maps each inbound
+  `ClientEvent` (`textDelta` / `toolUse*` / `turnStarted` / `turnEnded` /
+  `error` / …) onto `@MainActor`-published SwiftUI state, and submits turns with
+  `handle.submit(.sendPrompt(...))`.
+- **`MockConversationSource`** — the prior canned reply (used when the engine is
+  not opted in, e.g. previews / no-key runs).
+
+The engine is selected when its bindings are linked **and** it is opted in:
+either `LINGXI_USE_ENGINE=1` or a non-empty `ANTHROPIC_API_KEY` in the
+environment. Runtime config is read from the environment by
+`EngineConfig.fromEnvironment` — `ANTHROPIC_API_KEY` (the key, **never**
+hardcoded), optional `ANTHROPIC_BASE_URL`, optional `LINGXI_MODEL`. Set these in
+the Xcode scheme's *Run → Arguments → Environment Variables* (or the launching
+shell). The engine roots its filesystem under the app's Application Support
+container.
 
 ## Build & run
 
@@ -63,7 +89,8 @@ is linked (not embedded — it wraps a static archive); both are referenced from
 | `Sources/Theme` | `DesignTokens` (oklch→sRGB palettes), `Theme` env + `AppState` (theme/accent persistence) |
 | `Sources/Models` | Domain models, verbatim mock data, settings store |
 | `Sources/Components` | `LXIcon` (SVG icon set), `Pill`, `LXToggle`, status bar, home indicator, `color-mix` helper |
-| `Sources/Conversation` | `ChatView`, `Composer`, `MessageBubble`, `WorkflowBar` |
+| `Sources/Conversation` | `ChatView`, `Composer`, `MessageBubble`, `WorkflowBar`, and the `ConversationSource` seam (`MockConversationSource` + `EngineConversationSource` over UniFFI) |
+| `Sources/Bridge` | `EngineModule` — UniFFI linkage smoke (force-links the engine static archive) |
 | `Sources/Drawer` | `Drawer` (workspace pills, chats/projects/crons, knowledge/memory, account) |
 | `Sources/Settings` | Settings sheet host + every page (LLM/search/fetch providers, voice, skills, MCP, dream, appearance, language, etc.) |
 | `Sources/Voice` | `VoiceFlowView` (long-press immersive recording) |

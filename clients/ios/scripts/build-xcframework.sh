@@ -213,6 +213,49 @@ for sw in "${GEN_DIR}"/*.swift; do
   mv "${tmp}" "${sw}"
 done
 
+# ---------------------------------------------------------------------------
+# 1c. Async-foreign-future scaffolding dedup (BELOW-marker)
+# ---------------------------------------------------------------------------
+# UniFFI emits a small async-foreign-future support block — including the
+# MODULE-INTERNAL `protocol UniffiForeignFutureTask { func cancel() }` and its
+# `extension Task: UniffiForeignFutureTask {}` conformance — ONCE PER NAMESPACE
+# that exports an async callback interface. With >1 such namespace in the single
+# Swift module (M10-P3a added `IosEventListener` in `ios_framework` alongside the
+# pre-existing `ClientEventListener` in `client_adapter`), those two
+# non-`private` declarations COLLIDE: "invalid redeclaration of
+# 'UniffiForeignFutureTask'" / "ambiguous for type lookup". They sit BELOW the
+# `// Public interface members begin here.` marker, so the §1b pass (which only
+# touches the above-marker runtime block) does not catch them.
+#
+# Fix (deterministic, no bindgen-semantics change): keep this protocol + its
+# `Task` conformance in exactly ONE keeper file and delete BOTH lines from every
+# other file. The two declarations are identical across namespaces and
+# module-internal, so module-internal references resolve to the single kept copy.
+# Keeper = client_adapter.swift (the established async-callback-interface file;
+# it is always present whenever any async callback interface exists). The
+# per-namespace `private UNIFFI_FOREIGN_FUTURE_HANDLE_MAP`, the `private`
+# `uniffiTraitInterfaceCallAsync*` helpers, and the namespaced
+# `uniffiForeignFutureHandleCount<Ns>()` are file-local / uniquely named and are
+# left untouched.
+log "Deduplicating async-foreign-future task protocol into a single module copy…"
+FUTURE_KEEPER="client_adapter"
+for sw in "${GEN_DIR}"/*.swift; do
+  stem="$(basename "${sw}" .swift)"
+  [[ "${stem}" == "${FUTURE_KEEPER}" ]] && continue
+  tmp="${sw}.fdedup"
+  # Strip the `protocol UniffiForeignFutureTask { … }` block (column-0 `protocol`
+  # line through its closing column-0 `}`) and the immediately-following
+  # `extension Task: UniffiForeignFutureTask {}` one-liner. Other lines verbatim.
+  awk '
+    /^protocol UniffiForeignFutureTask / { in_proto = 1; next }
+    in_proto && /^}/                     { in_proto = 0; next }
+    in_proto                             { next }
+    /^extension Task: UniffiForeignFutureTask \{\}/ { next }
+    { print }
+  ' "${sw}" > "${tmp}"
+  mv "${tmp}" "${sw}"
+done
+
 SWIFT_COUNT="$(ls "${GEN_DIR}"/*.swift 2>/dev/null | wc -l | tr -d ' ')"
 [[ "${SWIFT_COUNT}" -gt 0 ]] || { echo "ERROR: no Swift bindings generated in ${GEN_DIR}" >&2; exit 1; }
 log "Swift bindings: ${SWIFT_COUNT} .swift file(s) + headers + module.modulemap (single-module deduped)"

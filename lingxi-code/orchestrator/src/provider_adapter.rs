@@ -56,6 +56,10 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         req.messages = msgs;
         resolved.provider.complete(req).await
     }
+
+    fn available_models(&self) -> Vec<String> {
+        self.router.available_models()
+    }
 }
 
 #[async_trait]
@@ -171,6 +175,9 @@ mod tests {
         fn available_profiles(&self) -> Vec<String> {
             vec!["stub".to_string()]
         }
+        fn available_models(&self) -> Vec<String> {
+            vec!["stub/model-a".to_string(), "@fast".to_string()]
+        }
     }
 
     #[tokio::test]
@@ -196,6 +203,18 @@ mod tests {
         );
         assert_eq!(provider.seen_system.lock().unwrap().as_deref(), Some("sys"));
         assert_eq!(resp.model, "gpt-4o");
+    }
+
+    #[test]
+    fn available_models_delegates_to_router() {
+        let provider = Arc::new(StubProvider::new());
+        let router = Arc::new(StubRouter {
+            provider,
+            seen_resolve: Mutex::new(None),
+        });
+        let adapter = ProviderApiAdapter::new(router);
+        let models = OrchestratorApiClient::available_models(&adapter);
+        assert_eq!(models, vec!["stub/model-a".to_string(), "@fast".to_string()]);
     }
 
     #[tokio::test]

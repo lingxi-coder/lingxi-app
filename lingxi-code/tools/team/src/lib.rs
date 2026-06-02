@@ -16,6 +16,7 @@
 )]
 pub mod team;
 pub use team::{TeamCreateTool, TeamDeleteTool};
+/// Register the team create/delete tools against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
     reg.register_builtin(Arc::new(TeamCreateTool::new(ctx.clone())));

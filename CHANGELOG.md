@@ -1,5 +1,46 @@
 # Changelog
 
+## [Unreleased] — LLM Providers v2 deferrals finished
+
+Closes the bounded follow-ups documented in the v0.12.0 "Unchanged / bounded"
+notes, plus pre-existing tooling debt.
+
+### Added
+- **Real Bedrock streaming:** `stream()` now uses
+  `InvokeModelWithResponseStream` and decodes the AWS binary event-stream
+  incrementally over a new additive `HttpTransport::stream_raw_bytes` (default
+  buffer-the-body impl → all existing transports compile unchanged; reqwest
+  transports override for true incremental bytes). Frames are decoded by a
+  crate-local pure-Rust decoder (`providers::eventstream`) — the official
+  `aws-smithy-eventstream` floors `aws-smithy-types` at a rustc-1.88 version,
+  incompatible with the pinned Rust 1.82 toolchain. A shared
+  `providers::anthropic_wire` mapper keeps Bedrock + live-Anthropic decoding in
+  lockstep.
+- **Signed-auth credential discovery:** AWS SigV4 now resolves credentials via
+  a layered chain (env → `~/.aws/credentials` profile → `credential_process`
+  → IMDSv2 over the shared transport, cached 5 min) instead of env-only — no
+  `aws-config` SDK (kept off for the 1.82 toolchain). New `AzureAdAuthenticator`
+  (OAuth2 client-credentials) for Azure OpenAI when no `apiKeyEnv` is set,
+  configured via an `azureAd` profile block. GCP discovery error messages now
+  name the fix.
+- **Bedrock / cloud pricing:** `cost::ProviderId::AmazonBedrock` with
+  Claude-on-Bedrock reference price rows; `bedrock`/`vertex`/`azure` profiles
+  now map to the correct price table (Bedrock own, Vertex→Gemini, Azure→OpenAI)
+  instead of resolving unpriced.
+- **`/model` live listing:** `OrchestratorApiClient::available_models()`
+  surfaces the real configured `provider/model` ids + `@aliases` (via
+  `ModelRouter`); new optional `models` profile field declares provider-local
+  model ids.
+- **TUI paste→image:** pasted image paths are read, base64-encoded, and routed
+  into `ContentBlock::Image` on the outgoing user message via a new additive
+  `OrchestratorHandle::run_turn_streaming_with_images` +
+  `PasteState::take_image_paths()` (the prompt-UI submit-loop hookup remains).
+
+### Fixed
+- `tool-api` tests now compile (`futures` added to dev-dependencies).
+- Documented the 11 `register_all()` functions across `tool-*` crates
+  (clears the `missing_docs` warnings).
+
 ## [0.12.0] — LLM Providers v2
 
 Extends the v0.11.0 provider layer with multimodal input, reasoning-model

@@ -9,13 +9,16 @@
 #![forbid(unsafe_code)]
 
 pub mod anthropic;
+pub mod anthropic_wire;
 pub mod auth;
 pub mod authenticator;
+pub mod aws_creds;
 pub mod bedrock;
 pub mod capabilities;
 pub mod client;
 pub mod codec;
 pub mod error;
+pub mod eventstream;
 pub mod gemini;
 pub mod model_spec;
 /// `OpenAI` / OpenAI-compatible chat-completions codec.
@@ -32,7 +35,11 @@ mod testutil;
 pub use anthropic::AnthropicLlmProvider;
 pub use bedrock::BedrockProvider;
 pub use auth::Auth;
-pub use authenticator::{Authenticator, GcpTokenAuthenticator, SigV4Authenticator, StaticAuth};
+pub use authenticator::{
+    Authenticator, AzureAdAuthenticator, GcpTokenAuthenticator, SigV4Authenticator, StaticAuth,
+};
+pub use aws_creds::AwsCreds;
+pub use profile::AzureAdConfig;
 pub use capabilities::{Capabilities, ReasoningSupport, SystemStyle};
 pub use client::GenericClient;
 pub use codec::{SseDecoder, WireCodec};

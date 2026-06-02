@@ -25,6 +25,7 @@ pub use brief::BriefTool;
 pub use send_message::SendMessageTool;
 pub use sleep::SleepTool;
 pub use synthetic_output::SyntheticOutputTool;
+/// Register the synthetic-output (UI) tool against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
     reg.register_builtin(Arc::new(SleepTool::new(ctx.clone())));

@@ -17,6 +17,7 @@
 )]
 pub mod plan_mode;
 pub use plan_mode::{EnterPlanModeTool, ExitPlanModeTool};
+/// Register the plan-mode enter/exit tools against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
     reg.register_builtin(Arc::new(EnterPlanModeTool::new(ctx.clone())));

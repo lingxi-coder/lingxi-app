@@ -184,12 +184,18 @@ impl OrchestratorHandle for ConversationOrchestrator {
         spawn_editor_on(target, "{}\n").await
     }
 
-    /// Model names shown by the no-arg `/model` display. Purely informational —
-    /// `switch_model` accepts any string. Includes the Anthropic defaults plus
-    /// `provider/model` examples so the multi-provider syntax is discoverable;
-    /// actual availability of a non-Anthropic provider depends on its API key /
-    /// settings profile (see `docs/LLM_PROVIDERS.md`).
+    /// Model names shown by the no-arg `/model` display. Surfaces the real
+    /// configured profiles + aliases via the API-client seam
+    /// (`ProviderApiAdapter` → `ModelRouter::available_models`, emitting
+    /// `provider/model` ids and `@aliases`). Falls back to the static example
+    /// list when no routing client is wired (library / test callers, or the
+    /// no-streaming stub). `switch_model` still accepts any string; actual
+    /// availability depends on the profile's API key (see `docs/LLM_PROVIDERS.md`).
     async fn list_available_models(&self) -> Vec<String> {
+        let models = self.api.available_models();
+        if !models.is_empty() {
+            return models;
+        }
         vec![
             "claude-opus-4-7".to_string(),
             "claude-sonnet-4-6".to_string(),
@@ -210,6 +216,28 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // the trait method has the same name.
         match crate::ConversationOrchestrator::run_turn_streaming_with_cancel(self, prompt, cancel)
             .await
+        {
+            Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(traits::TurnOutcome::EndTurn),
+            Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(traits::TurnOutcome::MaxTurns),
+            Ok(crate::conversation::TurnOutcome::Cancelled) => Ok(traits::TurnOutcome::Cancelled),
+            Err(e) => Err(HandleError::ActionFailed(e.to_string())),
+        }
+    }
+
+    async fn run_turn_streaming_with_images(
+        &self,
+        prompt: &str,
+        image_paths: &[std::path::PathBuf],
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<traits::TurnOutcome, HandleError> {
+        // Delegate to the inherent image-aware streaming entry point.
+        match crate::ConversationOrchestrator::run_turn_streaming_with_cancel_images(
+            self,
+            prompt,
+            image_paths,
+            cancel,
+        )
+        .await
         {
             Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(traits::TurnOutcome::EndTurn),
             Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(traits::TurnOutcome::MaxTurns),

@@ -18,6 +18,7 @@
 )]
 pub mod lsp_tool;
 pub use lsp_tool::LSPTool;
+/// Register the LSP tool against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
     reg.register_builtin(Arc::new(LSPTool::new(ctx)));

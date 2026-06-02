@@ -18,6 +18,7 @@ pub mod remote_trigger;
 pub mod schedule_cron;
 pub use remote_trigger::RemoteTriggerTool;
 pub use schedule_cron::ScheduleCronTool;
+/// Register the cron scheduling tool against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
     reg.register_builtin(Arc::new(ScheduleCronTool::new(ctx.clone())));

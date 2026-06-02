@@ -41,6 +41,18 @@ impl ProviderKind {
     }
 }
 
+/// Azure AD (Entra ID) client-credentials config for an Azure `OpenAI` profile.
+/// Used to mint a bearer token when no `apiKeyEnv` is configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AzureAdConfig {
+    /// Azure AD tenant id (the `{tenant}` in the `OAuth2` token URL).
+    pub tenant: String,
+    /// Env var holding the AD application's client id.
+    pub client_id_env: String,
+    /// Env var holding the AD application's client secret.
+    pub client_secret_env: String,
+}
+
 /// One provider profile: a wire format plus its endpoint + key source.
 #[derive(Debug, Clone)]
 pub struct ProviderProfile {
@@ -68,6 +80,13 @@ pub struct ProviderProfile {
     pub project: Option<String>,
     /// GCP region, e.g. `us-central1` (Vertex only).
     pub region: Option<String>,
+    /// Provider-local model ids this profile declares (e.g.
+    /// `["llama-3.3-70b"]`). Surfaced by `/model`'s list mode as
+    /// `{profile}/{model}`. Empty by default.
+    pub models: Vec<String>,
+    /// Azure AD client-credentials config (Azure `OpenAI` only). When set and
+    /// `api_key_env` yields no key, the registry uses `AzureAdAuthenticator`.
+    pub azure_ad: Option<AzureAdConfig>,
 }
 
 /// Built-in profiles, keyed by name. `anthropic` uses `anthropic_base` (the
@@ -88,6 +107,8 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             azure_api_version: None,
             project: None,
             region: None,
+            models: Vec::new(),
+            azure_ad: None,
         },
     );
     m.insert(
@@ -102,6 +123,8 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             azure_api_version: None,
             project: None,
             region: None,
+            models: Vec::new(),
+            azure_ad: None,
         },
     );
     m.insert(
@@ -116,6 +139,8 @@ pub fn builtin_profiles(anthropic_base: Option<String>) -> BTreeMap<String, Prov
             azure_api_version: None,
             project: None,
             region: None,
+            models: Vec::new(),
+            azure_ad: None,
         },
     );
     m
@@ -180,6 +205,24 @@ pub fn parse_profiles(
             .get("region")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
+        let models = obj
+            .get("models")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let azure_ad = obj.get("azureAd").and_then(|v| {
+            let o = v.as_object()?;
+            Some(AzureAdConfig {
+                tenant: o.get("tenant")?.as_str()?.to_string(),
+                client_id_env: o.get("clientIdEnv")?.as_str()?.to_string(),
+                client_secret_env: o.get("clientSecretEnv")?.as_str()?.to_string(),
+            })
+        });
         out.insert(
             name.clone(),
             ProviderProfile {
@@ -192,6 +235,8 @@ pub fn parse_profiles(
                 azure_api_version,
                 project,
                 region,
+                models,
+                azure_ad,
             },
         );
     }
@@ -298,6 +343,43 @@ mod tests {
         let p = parse_profiles(Some(&raw)).unwrap();
         assert_eq!(p["bedrock"].kind, ProviderKind::Bedrock);
         assert_eq!(p["bedrock"].region.as_deref(), Some("us-east-1"));
+    }
+
+    #[test]
+    fn parse_models_array() {
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "groq".to_string(),
+            json!({"type": "openai", "models": ["llama-3.3-70b", "mixtral-8x7b"]}),
+        );
+        let p = parse_profiles(Some(&raw)).unwrap();
+        assert_eq!(p["groq"].models, vec!["llama-3.3-70b", "mixtral-8x7b"]);
+        // Absent `models` defaults to empty.
+        let mut raw2 = BTreeMap::new();
+        raw2.insert("openai".to_string(), json!({"type": "openai"}));
+        assert!(parse_profiles(Some(&raw2)).unwrap()["openai"]
+            .models
+            .is_empty());
+    }
+
+    #[test]
+    fn parse_azure_ad_config() {
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "azure".to_string(),
+            json!({"type":"azureOpenAi","baseUrl":"https://r.openai.azure.com",
+                   "azureDeployment":"gpt-4o","azureApiVersion":"2024-10-21",
+                   "azureAd":{"tenant":"t-123","clientIdEnv":"AZ_ID","clientSecretEnv":"AZ_SECRET"}}),
+        );
+        let p = parse_profiles(Some(&raw)).unwrap();
+        let ad = p["azure"].azure_ad.as_ref().expect("azure_ad parsed");
+        assert_eq!(ad.tenant, "t-123");
+        assert_eq!(ad.client_id_env, "AZ_ID");
+        assert_eq!(ad.client_secret_env, "AZ_SECRET");
+        // Absent azureAd → None.
+        let mut raw2 = BTreeMap::new();
+        raw2.insert("a2".to_string(), json!({"type":"azureOpenAi"}));
+        assert!(parse_profiles(Some(&raw2)).unwrap()["a2"].azure_ad.is_none());
     }
 
     #[test]

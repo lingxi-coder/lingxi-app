@@ -19,6 +19,7 @@ pub mod web_fetch;
 pub mod web_search;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
+/// Register the web fetch + search tools against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
     reg.register_builtin(Arc::new(WebFetchTool::new(ctx.clone())));

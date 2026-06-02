@@ -16,6 +16,7 @@
 )]
 pub mod skill;
 pub use skill::SkillTool;
+/// Register the skill-management tool against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
     reg.register_builtin(Arc::new(SkillTool::new(ctx)));

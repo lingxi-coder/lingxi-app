@@ -183,23 +183,38 @@ impl<T: HttpTransport + Send + Sync + 'static> ProviderRegistry<T> {
             }
             ProviderKind::Bedrock => {
                 let region = profile.region.clone().unwrap_or_default();
-                let authenticator = Arc::new(crate::authenticator::SigV4Authenticator::new(region.clone()))
-                    as Arc<dyn crate::authenticator::Authenticator>;
+                let authenticator = Arc::new(crate::authenticator::SigV4Authenticator::with_transport(
+                    region.clone(),
+                    self.transport.clone(),
+                )) as Arc<dyn crate::authenticator::Authenticator>;
                 let provider = crate::bedrock::BedrockProvider::new(region, self.transport.clone(), authenticator);
                 Arc::new(provider) as Arc<dyn crate::provider::LlmProvider>
             }
             ProviderKind::AzureOpenAi => {
                 let key = self.api_key_for(profile);
-                let auth = if key.is_empty() {
-                    crate::auth::Auth::None
+                // Prefer the api-key header; else mint an Azure AD token when
+                // `azureAd` is configured; else no auth.
+                let authenticator: Arc<dyn crate::authenticator::Authenticator> = if !key.is_empty()
+                {
+                    Arc::new(crate::authenticator::StaticAuth::new(
+                        crate::auth::Auth::Header {
+                            name: "api-key".to_string(),
+                            value: key,
+                        },
+                    ))
+                } else if let Some(ad) = &profile.azure_ad {
+                    let client_id = self.env.get(&ad.client_id_env).cloned().unwrap_or_default();
+                    let client_secret =
+                        self.env.get(&ad.client_secret_env).cloned().unwrap_or_default();
+                    Arc::new(crate::authenticator::AzureAdAuthenticator::new(
+                        ad.tenant.clone(),
+                        client_id,
+                        client_secret,
+                        self.transport.clone(),
+                    ))
                 } else {
-                    crate::auth::Auth::Header {
-                        name: "api-key".to_string(),
-                        value: key,
-                    }
+                    Arc::new(crate::authenticator::StaticAuth::new(crate::auth::Auth::None))
                 };
-                let authenticator = Arc::new(crate::authenticator::StaticAuth::new(auth))
-                    as Arc<dyn crate::authenticator::Authenticator>;
                 let codec = crate::openai::OpenAiCodec::new_azure(
                     profile.base_url.clone().unwrap_or_default(),
                     profile.azure_deployment.clone().unwrap_or_default(),
@@ -266,8 +281,20 @@ impl<T: HttpTransport + Send + Sync + 'static> ModelRouter for ProviderRegistry<
     }
 
     fn available_models(&self) -> Vec<String> {
-        let mut out: Vec<String> = self.routing.aliases.keys().cloned().collect();
-        out.extend(self.profiles.keys().cloned());
+        // Spec §3.6: emit `{profile}/{model}` for each declared model, the bare
+        // profile name when a profile declares no models, and `@alias` for each
+        // routing alias.
+        let mut out: Vec<String> = Vec::new();
+        for (name, profile) in &self.profiles {
+            if profile.models.is_empty() {
+                out.push(name.clone());
+            } else {
+                for m in &profile.models {
+                    out.push(format!("{name}/{m}"));
+                }
+            }
+        }
+        out.extend(self.routing.aliases.keys().map(|a| format!("@{a}")));
         out.sort();
         out.dedup();
         out
@@ -289,6 +316,48 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string());
         ProviderRegistry::new(profiles, env, Arc::new(MockTransport::responding(200, "")), RoutingConfig::default())
+    }
+
+    #[test]
+    fn available_models_lists_provider_model_ids_and_aliases() {
+        let mut profiles = builtin_profiles(Some("https://mock.local".to_string()));
+        profiles.insert(
+            "groq".to_string(),
+            ProviderProfile {
+                kind: ProviderKind::OpenAi,
+                base_url: Some("https://api.groq.com/openai/v1".to_string()),
+                api_key_env: Some("GROQ_API_KEY".to_string()),
+                reasoning_effort: None,
+                thinking_budget: None,
+                azure_deployment: None,
+                azure_api_version: None,
+                project: None,
+                region: None,
+                models: vec!["llama-3.3-70b".to_string()],
+                azure_ad: None,
+            },
+        );
+        let mut env = BTreeMap::new();
+        env.insert("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string());
+        let mut aliases = BTreeMap::new();
+        aliases.insert("fast".to_string(), "groq/llama-3.3-70b".to_string());
+        let routing = RoutingConfig {
+            aliases,
+            ..RoutingConfig::default()
+        };
+        let r = ProviderRegistry::new(
+            profiles,
+            env,
+            Arc::new(MockTransport::responding(200, "")),
+            routing,
+        );
+        let models = r.available_models();
+        // declared model → provider/model id
+        assert!(models.contains(&"groq/llama-3.3-70b".to_string()));
+        // alias → @alias
+        assert!(models.iter().any(|m| m == "@fast"));
+        // built-in profile with no declared models → bare name
+        assert!(models.contains(&"anthropic".to_string()));
     }
 
     #[test]
@@ -330,6 +399,8 @@ mod tests {
                 azure_api_version: None,
                 project: None,
                 region: None,
+                models: Vec::new(),
+                azure_ad: None,
             },
         );
         let r = registry(extra);
@@ -358,6 +429,8 @@ mod tests {
                 azure_api_version: Some("2024-10-21".to_string()),
                 project: None,
                 region: None,
+                models: Vec::new(),
+                azure_ad: None,
             },
         );
         let r = registry(extra);
@@ -367,6 +440,44 @@ mod tests {
             resolved.provider.id(),
             cost::ProviderId::OpenAICompatible { name: "azure".to_string() }
         );
+    }
+
+    #[test]
+    fn azure_ad_profile_resolves_without_api_key() {
+        let mut profiles = builtin_profiles(Some("https://mock.local".to_string()));
+        profiles.insert(
+            "azure".to_string(),
+            ProviderProfile {
+                kind: ProviderKind::AzureOpenAi,
+                base_url: Some("https://r.openai.azure.com".to_string()),
+                api_key_env: None,
+                reasoning_effort: None,
+                thinking_budget: None,
+                azure_deployment: Some("gpt-4o".to_string()),
+                azure_api_version: Some("2024-10-21".to_string()),
+                project: None,
+                region: None,
+                models: Vec::new(),
+                azure_ad: Some(crate::profile::AzureAdConfig {
+                    tenant: "t".to_string(),
+                    client_id_env: "AZ_ID".to_string(),
+                    client_secret_env: "AZ_SECRET".to_string(),
+                }),
+            },
+        );
+        let mut env = BTreeMap::new();
+        env.insert("ANTHROPIC_API_KEY".to_string(), "sk".to_string());
+        env.insert("AZ_ID".to_string(), "id".to_string());
+        env.insert("AZ_SECRET".to_string(), "secret".to_string());
+        let r = ProviderRegistry::new(
+            profiles,
+            env,
+            Arc::new(MockTransport::responding(200, "")),
+            RoutingConfig::default(),
+        );
+        // Builds the AzureAdAuthenticator path (no network until authorize()).
+        let resolved = r.resolve("azure/gpt-4o").expect("azure AD profile resolves");
+        assert_eq!(resolved.model, "gpt-4o");
     }
 
     #[test]
@@ -384,6 +495,8 @@ mod tests {
                 azure_api_version: None,
                 project: Some("p".to_string()),
                 region: Some("us-central1".to_string()),
+                models: Vec::new(),
+                azure_ad: None,
             },
         );
         let r = registry(extra);
@@ -413,12 +526,14 @@ mod tests {
                 azure_api_version: None,
                 project: None,
                 region: Some("us-east-1".to_string()),
+                models: Vec::new(),
+                azure_ad: None,
             },
         );
         let r = registry(extra);
         let resolved = r.resolve("bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0").expect("bedrock resolves");
         assert_eq!(resolved.model, "anthropic.claude-3-5-sonnet-20241022-v2:0");
-        assert_eq!(resolved.provider.id(), cost::ProviderId::Anthropic);
+        assert_eq!(resolved.provider.id(), cost::ProviderId::AmazonBedrock);
     }
 
     #[test]

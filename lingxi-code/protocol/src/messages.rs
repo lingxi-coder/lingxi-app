@@ -119,6 +119,22 @@ impl ConversationMessage {
         }
     }
 
+    /// Construct a user message with a leading text block (when non-empty)
+    /// followed by one [`ContentBlock::Image`] per source. Used by the TUI
+    /// paste→image path; with no images this is equivalent to [`Self::user`]
+    /// (modulo an empty-text message carrying no blocks).
+    #[must_use]
+    pub fn user_with_images(id: MessageId, text: String, images: Vec<ImageSource>) -> Self {
+        let mut content = Vec::with_capacity(1 + images.len());
+        if !text.is_empty() {
+            content.push(ContentBlock::Text { text });
+        }
+        for source in images {
+            content.push(ContentBlock::Image { source });
+        }
+        Self::User { id, content }
+    }
+
     /// Return the role of this message.
     #[must_use]
     pub fn role(&self) -> MessageRole {
@@ -243,6 +259,36 @@ mod tests {
         let s = serde_json::to_string(&e).unwrap();
         let e2: MemoryEntry = serde_json::from_str(&s).unwrap();
         assert_eq!(e, e2);
+    }
+
+    #[test]
+    fn user_with_images_appends_image_blocks_after_text() {
+        let img = ImageSource::Base64 {
+            media_type: "image/png".to_string(),
+            data: "AAAA".to_string(),
+        };
+        let m = ConversationMessage::user_with_images(
+            MessageId::new(),
+            "look:".to_string(),
+            vec![img.clone()],
+        );
+        match &m {
+            ConversationMessage::User { content, .. } => {
+                assert_eq!(content.len(), 2);
+                assert!(matches!(&content[0], ContentBlock::Text { text } if text == "look:"));
+                assert!(matches!(&content[1], ContentBlock::Image { source } if *source == img));
+            }
+            _ => panic!("expected user message"),
+        }
+        // Empty text → only the image block (no empty text block).
+        let m2 = ConversationMessage::user_with_images(MessageId::new(), String::new(), vec![img]);
+        match m2 {
+            ConversationMessage::User { content, .. } => {
+                assert_eq!(content.len(), 1);
+                assert!(matches!(content[0], ContentBlock::Image { .. }));
+            }
+            _ => panic!("expected user message"),
+        }
     }
 
     #[test]

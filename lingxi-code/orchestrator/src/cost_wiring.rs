@@ -33,14 +33,21 @@ pub(crate) fn usage_api_to_cost_usage(api: &UsageApi) -> Usage {
 /// Map a provider-profile name to its cost [`ProviderId`].
 ///
 /// Mirrors the registry's choice: built-in `anthropic`/`openai`/`gemini` map
-/// to their first-party ids; any other (settings-declared) profile name is an
-/// `OpenAI`-compatible endpoint.
+/// to their first-party ids. The managed-cloud profiles map to the price
+/// table that applies: `bedrock` has its own (`AmazonBedrock`); `vertex`
+/// reuses Gemini list prices (Vertex *is* Gemini); `azure` reuses `OpenAI`
+/// list prices (wire-compatible). Any other (settings-declared) profile name
+/// is an `OpenAI`-compatible endpoint.
 #[must_use]
 fn provider_id_for_profile(profile: &str) -> ProviderId {
     match profile {
         "anthropic" => ProviderId::Anthropic,
-        "openai" => ProviderId::OpenAI,
-        "gemini" => ProviderId::GoogleGemini,
+        // `azure` reuses OpenAI list prices (wire-compatible).
+        "openai" | "azure" => ProviderId::OpenAI,
+        // Vertex *is* Gemini — reuse the Gemini price table.
+        "gemini" | "vertex" => ProviderId::GoogleGemini,
+        // Bedrock has its own price table.
+        "bedrock" => ProviderId::AmazonBedrock,
         other => ProviderId::OpenAICompatible {
             name: other.to_string(),
         },
@@ -113,6 +120,20 @@ mod tests {
                 name: "groq".to_string()
             }
         );
+    }
+
+    #[test]
+    fn managed_cloud_profiles_map_to_priced_providers() {
+        // Bedrock has its own price table; Vertex reuses Gemini; Azure reuses OpenAI.
+        assert_eq!(
+            provider_from_model("bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0"),
+            ProviderId::AmazonBedrock
+        );
+        assert_eq!(
+            provider_from_model("vertex/gemini-2.0-flash"),
+            ProviderId::GoogleGemini
+        );
+        assert_eq!(provider_from_model("azure/gpt-4o"), ProviderId::OpenAI);
     }
 
     #[test]

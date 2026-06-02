@@ -18,6 +18,7 @@ pub mod config;
 pub mod tool_search;
 pub use config::ConfigTool;
 pub use tool_search::ToolSearchTool;
+/// Register the meta tools (tool search) against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
     reg.register_builtin(Arc::new(ConfigTool::new(ctx.clone())));

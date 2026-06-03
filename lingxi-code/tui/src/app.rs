@@ -257,6 +257,32 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.pending_open_model = true;
                 return false;
             }
+            // `/vim` toggles the editor's vim keybindings (claude-code
+            // `commands/vim/vim.ts`). An IMMEDIATE command (not a screen): flip
+            // the existing `vim_enabled` — mirroring the Ctrl-Alt-V `ToggleVim`
+            // keybinding (reset the `VimState` to Insert on enable) — then echo
+            // claude-code's exact mode message. Session-only: the existing toggle
+            // does not persist `editorMode` to settings.json either (that persist
+            // is a deferred follow-up).
+            if st.prompt_text.trim() == "/vim" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.vim_enabled = !st.vim_enabled;
+                let body = if st.vim_enabled {
+                    st.vim = crate::components::prompt_input::VimState::default();
+                    "Editor mode set to vim. Use Escape key to toggle between INSERT and NORMAL modes."
+                        .to_string()
+                } else {
+                    "Editor mode set to normal. Using standard (readline) keyboard bindings."
+                        .to_string()
+                };
+                st.push_message(RenderedMessage::SystemText {
+                    body,
+                    timestamp: chrono::Utc::now().timestamp(),
+                    is_error: false,
+                });
+                return false;
+            }
             // (M9-09) `/skills` opens the read-only skill-registry viewer. Like
             // `/agents`/`/stats`, the open needs async work the sync `dispatch`
             // seam can't `.await`: an on-disk `.claude/skills/` dir walk (the
@@ -1146,6 +1172,43 @@ mod dispatch_tests {
         dispatch(KeyAction::Cancel, &mut st);
         assert_eq!(st.prompt_text, "");
         assert!(st.sigint_armed_at.is_none());
+    }
+
+    #[test]
+    fn vim_command_toggles_mode_and_echoes() {
+        let mut st = s();
+        // `/vim` → enable: `vim_enabled` flips true, prompt cleared, exact echo
+        // (claude-code commands/vim/vim.ts).
+        st.prompt_text = "/vim".to_string();
+        dispatch(KeyAction::Submit, &mut st);
+        assert!(st.vim_enabled);
+        assert_eq!(st.prompt_text, "");
+        match st.messages.last() {
+            Some(RenderedMessage::SystemText {
+                body,
+                is_error: false,
+                ..
+            }) => assert_eq!(
+                body,
+                "Editor mode set to vim. Use Escape key to toggle between INSERT and NORMAL modes."
+            ),
+            other => panic!("expected vim-on SystemText, got {other:?}"),
+        }
+        // `/vim` again → disable.
+        st.prompt_text = "/vim".to_string();
+        dispatch(KeyAction::Submit, &mut st);
+        assert!(!st.vim_enabled);
+        match st.messages.last() {
+            Some(RenderedMessage::SystemText {
+                body,
+                is_error: false,
+                ..
+            }) => assert_eq!(
+                body,
+                "Editor mode set to normal. Using standard (readline) keyboard bindings."
+            ),
+            other => panic!("expected vim-off SystemText, got {other:?}"),
+        }
     }
 
     /// Build a `RegistrySlashDispatcher` seeded with the M5-09 built-ins.

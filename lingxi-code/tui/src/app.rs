@@ -225,6 +225,27 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.pending_open_agents = true;
                 return false;
             }
+            // `/mcp` opens the read-only MCP-server viewer. Like `/agents`, the
+            // open needs an async `OrchestratorHandle::list_mcp_servers()` call
+            // the sync `dispatch` seam can't `.await`, so we RAISE
+            // `pending_open_mcp`; `root::pump_open_mcp` fetches the servers and
+            // opens the screen. The `crates/commands` mcp handler stays the
+            // `--no-tui` text path.
+            if st.prompt_text.trim() == "/mcp" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.pending_open_mcp = true;
+                return false;
+            }
+            // `/hooks` opens the read-only hooks viewer. Same recipe as `/mcp`,
+            // backed by `OrchestratorHandle::list_hooks()` via
+            // `root::pump_open_hooks`.
+            if st.prompt_text.trim() == "/hooks" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.pending_open_hooks = true;
+                return false;
+            }
             // (M9-09) `/skills` opens the read-only skill-registry viewer. Like
             // `/agents`/`/stats`, the open needs async work the sync `dispatch`
             // seam can't `.await`: an on-disk `.claude/skills/` dir walk (the
@@ -608,6 +629,38 @@ pub fn render_screen(
                 // line-by-line in a column View. Mirrors the BackgroundTasks arm.
                 use crate::screens::agents::render_agents_to_string;
                 let body = render_agents_to_string(ags);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().map(|line| element! {
+                            Text(content: line)
+                        }))
+                    }
+                }
+                .into_any()
+            }
+            Screen::Mcp(m) => {
+                // The read-only MCP-server viewer renders the pure
+                // `render_mcp_to_string` body (list↔detail, snapshot-tested)
+                // line-by-line in a column View. Mirrors the Agents arm.
+                use crate::screens::mcp::render_mcp_to_string;
+                let body = render_mcp_to_string(m);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().map(|line| element! {
+                            Text(content: line)
+                        }))
+                    }
+                }
+                .into_any()
+            }
+            Screen::Hooks(h) => {
+                // The read-only hooks viewer renders the pure
+                // `render_hooks_to_string` body (list↔detail, snapshot-tested)
+                // line-by-line in a column View. Mirrors the Agents/Mcp arm.
+                use crate::screens::hooks::render_hooks_to_string;
+                let body = render_hooks_to_string(h);
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {

@@ -67,6 +67,8 @@ fn active_screen_name(st: &AppState) -> Option<&'static str> {
         Some(Screen::Agents(_)) => Some("agents"),
         Some(Screen::Skills(_)) => Some("skills"),
         Some(Screen::Stats(_)) => Some("stats"),
+        Some(Screen::Mcp(_)) => Some("mcp"),
+        Some(Screen::Hooks(_)) => Some("hooks"),
         None => None,
     }
 }

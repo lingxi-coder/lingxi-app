@@ -7,6 +7,8 @@
 pub mod agents;
 pub mod background_tasks;
 pub mod doctor;
+pub mod hooks;
+pub mod mcp;
 pub mod memory;
 pub mod repl;
 pub mod resume;
@@ -108,4 +110,21 @@ pub enum Screen {
     /// `StatsData` carries only integer/string fields (no `f64`), so the
     /// `Screen: PartialEq` bound is satisfiable.
     Stats(stats::StatsState),
+    /// The `/mcp` server viewer — claude-code `MCPSettings`. A read-only
+    /// list↔detail of the configured MCP servers (name · status · transport).
+    /// Interactive like Agents: `root::handle_screen_key` runs the pure
+    /// `mcp::handle_mcp_key` (↑/↓ move, Enter detail, Esc/`q` close; in detail
+    /// Esc/`←`/`q` returns to the list). Opened by `/mcp` via the async
+    /// `pump_open_mcp` over the real `OrchestratorHandle::list_mcp_servers`. The
+    /// MANAGEMENT actions (connect/reconnect/auth/toggle) of claude-code's full
+    /// `/mcp` are deferred (need connection/auth seams).
+    Mcp(mcp::McpScreenState),
+    /// The `/hooks` viewer — claude-code `HooksConfigMenu`. A read-only
+    /// list↔detail of the configured hooks (name · event; matcher + timeout in
+    /// detail). Interactive like Agents/Mcp: `root::handle_screen_key` runs the
+    /// pure `hooks::handle_hooks_key`. Opened by `/hooks` via the async
+    /// `pump_open_hooks` over the real `OrchestratorHandle::list_hooks`. The
+    /// CONFIGURATION (add/edit/remove → settings write) of claude-code's full
+    /// `/hooks` is deferred (needs a settings-write seam).
+    Hooks(hooks::HooksScreenState),
 }

@@ -7,6 +7,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import com.lingxi.code.vision.CameraController
 import com.lingxi.code.share.ShareController
+import com.lingxi.code.notify.NotificationController
 import com.lingxi.code.voice.recorder.RecorderController
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
@@ -71,6 +72,11 @@ class MainActivity : ComponentActivity() {
         // the FFI seam to run a MediaRecorder mic session (engine-driven through
         // tool-voice; no UI button, unlike the STT hold-to-talk path).
         RecorderController.attach(applicationContext)
+        // Device-notifications: hand the application Context to the process-global
+        // NotificationController, which the UniFFI AndroidNotification adapter
+        // drives across the FFI seam to post to the system NotificationManager
+        // (engine-driven through tool-notification; no UI affordance).
+        NotificationController.attach(applicationContext)
 
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -122,6 +128,7 @@ class MainActivity : ComponentActivity() {
         CameraController.detach()
         ShareController.detach()
         RecorderController.detach()
+        NotificationController.detach()
         super.onDestroy()
     }
 }

@@ -114,6 +114,7 @@ pub fn build_mobile_engine(
             share: impls.share,
             stt: None,
             tts: None,
+            notifications: None,
         }));
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
@@ -306,6 +307,87 @@ impl traits::SharingService for AndroidShareBridge {
             Ok(ShareResultFfi::Cancelled) => Ok(traits::ShareResult::Cancelled),
             Err(ShareFfiError::Unsupported) => Err(traits::ShareError::Unsupported),
             Err(ShareFfiError::Other { message }) => Err(traits::ShareError::Other(message)),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Notifications — foreign (Kotlin) callback interface + its engine bridge.
+// ---------------------------------------------------------------------------
+//
+// Mirrors the AndroidShare pattern: the Kotlin layer implements a crate-local
+// async `AndroidNotification` callback interface (the system
+// `NotificationManager`) and hands it across the FFI seam. The engine consumes
+// the SHARED `traits::NotificationService` seam, so `AndroidNotificationBridge`
+// adapts the crate-local interface to its `traits` counterpart. The shared
+// `traits::NotificationRequest` is destructured into the flat `title` / `body`
+// / `tag` args to keep the FFI flat; the bridge maps the FFI error back onto
+// `traits::NotificationError`. This is ENGINE-DRIVEN by `tool-notification`
+// (the model posts a notification) — no user-facing UI affordance.
+
+/// FFI error surface for the Android notification callback interface. A flat
+/// enum so UniFFI can render it for an async `callback_interface` method; the
+/// bridge fans it back out onto the richer [`traits::NotificationError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum NotificationFfiError {
+    /// The user denied notification permission.
+    #[error("notification permission denied")]
+    PermissionDenied,
+    /// Any other native failure.
+    #[error("notification error: {message}")]
+    Other {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// Crate-local foreign callback interface for native notifications — the Kotlin
+/// app implements it over the system `NotificationManager`. Bridged to
+/// [`traits::NotificationService`] by [`AndroidNotificationBridge`]. The request
+/// crosses the seam as the flat `title` / `body` / `tag` args.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidNotification: Send + Sync {
+    /// Post a single local notification. `tag` (when present) lets a later post
+    /// replace an earlier one (the notification id / channel tag).
+    async fn notify(
+        &self,
+        title: String,
+        body: String,
+        tag: Option<String>,
+    ) -> Result<(), NotificationFfiError>;
+}
+
+/// Adapts the crate-local [`AndroidNotification`] callback interface to the
+/// shared [`traits::NotificationService`] seam the engine consumes.
+/// Destructures [`traits::NotificationRequest`] into the flat `title` / `body`
+/// / `tag` args and fans [`NotificationFfiError`] back out onto
+/// [`traits::NotificationError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct AndroidNotificationBridge {
+    inner: Box<dyn AndroidNotification>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::NotificationService for AndroidNotificationBridge {
+    async fn notify(
+        &self,
+        req: traits::NotificationRequest,
+    ) -> Result<(), traits::NotificationError> {
+        let traits::NotificationRequest { title, body, tag } = req;
+        match self.inner.notify(title, body, tag).await {
+            Ok(()) => Ok(()),
+            Err(NotificationFfiError::PermissionDenied) => {
+                Err(traits::NotificationError::PermissionDenied)
+            }
+            Err(NotificationFfiError::Other { message }) => {
+                Err(traits::NotificationError::Other(message))
+            }
         }
     }
 }
@@ -780,6 +862,7 @@ pub fn build_android_engine(
     camera: Box<dyn AndroidCamera>,
     share: Box<dyn AndroidShare>,
     voice: Box<dyn AndroidVoice>,
+    notifications: Box<dyn AndroidNotification>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -805,6 +888,9 @@ pub fn build_android_engine(
             share: Arc::new(AndroidShareBridge { inner: share }),
             stt: Some(Arc::new(AndroidSttBridge { inner: stt })),
             tts: Some(Arc::new(AndroidTtsBridge { inner: tts })),
+            notifications: Some(Arc::new(AndroidNotificationBridge {
+                inner: notifications,
+            })),
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> = Arc::new(NoopPermissionSink);
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
@@ -822,6 +908,7 @@ pub fn build_android_engine(
             camera,
             share,
             voice,
+            notifications,
         );
         Err(MobileEngineError::PlatformUnavailable)
     }

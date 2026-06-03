@@ -21,6 +21,7 @@ import com.lingxi.code.voice.audio.SystemSpeechRecognizerStt
 import com.lingxi.code.voice.audio.SystemTextToSpeechTts
 import com.lingxi.code.vision.AndroidCameraAdapter
 import com.lingxi.code.share.AndroidShareAdapter
+import com.lingxi.code.notify.AndroidNotificationAdapter
 import com.lingxi.code.voice.recorder.AndroidVoiceAdapter
 import kotlinx.coroutines.launch
 
@@ -76,6 +77,11 @@ fun buildVoiceEngine(
     // `traits::VoiceRecorder`, lighting up `tool-voice`'s raw mic recorder
     // on-device (distinct from the STT hold-to-talk path above).
     val voice = AndroidVoiceAdapter()
+    // Device-notifications: the notification adapter drives the process-global
+    // NotificationController, whose Context is attached by MainActivity. The
+    // engine bridges this onto `traits::NotificationService`, lighting up
+    // `tool-notification` on-device (engine-driven; no UI affordance).
+    val notifications = AndroidNotificationAdapter()
     val listener = object : AndroidEventListener {
         override suspend fun onEvent(event: ClientEvent) {
             // Minimal sink: the chat surface still streams through the mock
@@ -97,6 +103,7 @@ fun buildVoiceEngine(
             camera = camera,
             share = share,
             voice = voice,
+            notifications = notifications,
         )
     } catch (t: Throwable) {
         // PlatformUnavailable on a host build, or UnsatisfiedLinkError when the

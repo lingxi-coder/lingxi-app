@@ -975,6 +975,7 @@ pub async fn build(
         stt: None,
         tts: None,
         share: None,
+        notifications: None,
         computer_control: None,
     };
     // (5.5) M10 (T12/T13): select the team-tool variant at BUILD time. A

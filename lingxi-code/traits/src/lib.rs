@@ -21,6 +21,7 @@ pub mod http;
 pub mod lsp;
 pub mod mailbox;
 pub mod mcp;
+pub mod notification;
 pub mod orchestrator;
 pub mod permission_gate;
 pub mod platform;
@@ -56,6 +57,7 @@ pub use mailbox::{
     MailboxError as RouterMailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
 };
 pub use mcp::*;
+pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{
     AgentInfo, CheckStatus, CompactionSummary, CostSnapshot, DoctorCheck, DoctorReport,
     DoctorSummary, HandleError, HookInfo, McpServerInfo, McpStatus, MemoryEditorOutcome,

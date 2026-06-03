@@ -21,8 +21,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use traits::{
-    CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
-    SharingService, SpeechToText, TextToSpeech, VoiceRecorder, WorktreeManager,
+    CameraControl, Clock, FileSystem, HttpTransport, NotificationService, Platform, ProcessRunner,
+    Sandbox, SharingService, SpeechToText, TextToSpeech, VoiceRecorder, WorktreeManager,
 };
 
 /// Construction inputs for [`IosPlatform`].
@@ -43,6 +43,9 @@ pub struct IosPlatformInputs {
     pub stt: Option<Arc<dyn SpeechToText>>,
     /// Native text-to-speech (Swift impl), when wired.
     pub tts: Option<Arc<dyn TextToSpeech>>,
+    /// Native system notifications (Swift impl), when wired. `None` keeps the
+    /// `notification` tool reporting "unavailable".
+    pub notifications: Option<Arc<dyn NotificationService>>,
 }
 
 /// The iOS [`Platform`].
@@ -58,6 +61,7 @@ pub struct IosPlatform {
     share: Arc<dyn SharingService>,
     stt: Option<Arc<dyn SpeechToText>>,
     tts: Option<Arc<dyn TextToSpeech>>,
+    notifications: Option<Arc<dyn NotificationService>>,
 }
 
 impl IosPlatform {
@@ -79,6 +83,7 @@ impl IosPlatform {
             share: inputs.share,
             stt: inputs.stt,
             tts: inputs.tts,
+            notifications: inputs.notifications,
         }
     }
 }
@@ -116,6 +121,9 @@ impl Platform for IosPlatform {
     }
     fn tts(&self) -> Option<Arc<dyn TextToSpeech>> {
         self.tts.clone()
+    }
+    fn notifications(&self) -> Option<Arc<dyn NotificationService>> {
+        self.notifications.clone()
     }
     // computer_control() defaults to None — screen automation is not an iOS
     // capability in M8.

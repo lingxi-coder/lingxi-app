@@ -608,6 +608,44 @@ mod tests {
         assert_eq!(ev, back);
     }
 
+    /// Coordinator-activation T08: the additive `emit_coordinator_status`
+    /// PUSH hook ships as a default no-op so every pre-existing `OutputStream`
+    /// impl (TUI / CLI / `MockOutputStream`) keeps compiling without an
+    /// override. This bare unit struct implements ONLY the four required
+    /// methods and relies on the default for `emit_coordinator_status`;
+    /// driving it must neither fail to compile nor panic, for both a
+    /// `Some(team)` and a `None` team.
+    #[tokio::test]
+    async fn emit_coordinator_status_default_is_noop() {
+        struct BareSink;
+
+        #[async_trait]
+        impl OutputStream for BareSink {
+            async fn emit_text(&self, _text: &str) {}
+            async fn emit_tool_call(
+                &self,
+                _id: &protocol::ToolUseId,
+                _tool: &str,
+                _input: &serde_json::Value,
+            ) {
+            }
+            async fn emit_tool_result(
+                &self,
+                _id: &protocol::ToolUseId,
+                _tool: &str,
+                _result: &serde_json::Value,
+            ) {
+            }
+            async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
+        }
+
+        // Object-safe behind `dyn` (matches how engines hold it).
+        let sink: Box<dyn OutputStream> = Box::new(BareSink);
+        // The default no-op must simply return for both team shapes.
+        sink.emit_coordinator_status(3, Some("alpha")).await;
+        sink.emit_coordinator_status(0, None).await;
+    }
+
     /// M6-04 Task 1: `OutputEvent::ToolCall` must carry a `ToolUseId` so the
     /// TUI can correlate calls with their results and key the per-tool
     /// expanded-state map.

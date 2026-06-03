@@ -35,6 +35,11 @@
     "note": "OutputStream::emit_usage -> ClientEvent::UsageUpdate (§0.7 follow-up: event_router emits on MessageStart/MessageDelta usage)"
   },
   {
+    "rendered_message": "CoordinatorStatus",
+    "status": "live_fed",
+    "note": "OutputStream::emit_coordinator_status -> ClientEvent::CoordinatorStatus (§0.9 coordinator-activation: CoordinatorStatusSink pushes TeamRegistry::active_worker_count on worker status transitions)"
+  },
+  {
     "rendered_message": "AssistantThinking",
     "status": "reserved",
     "note": "whole-block thinking synthesized form has no live source; the live stream uses ThinkingDelta (decision §0.7)"
@@ -43,11 +48,6 @@
     "rendered_message": "RedactedThinking",
     "status": "reserved",
     "note": "carried only inside a synthesized MessageDto, not streamed live"
-  },
-  {
-    "rendered_message": "CoordinatorStatus",
-    "status": "reserved",
-    "note": "blocked on engine wiring: no TeamRegistry constructed in any runtime (decision §0.9)"
   },
   {
     "rendered_message": "ExitPlanMode",

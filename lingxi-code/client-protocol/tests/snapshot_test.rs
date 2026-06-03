@@ -774,9 +774,21 @@ fn feed_status_table_matches_golden() {
             "CompactBoundary",
             "ThinkingDelta",
             "UsageUpdate",
+            "CoordinatorStatus",
         ],
-        "the LIVE-FED set must include the §0.7 follow-up's ThinkingDelta + UsageUpdate"
+        "the LIVE-FED set must include the §0.9 coordinator-activation's CoordinatorStatus \
+         (now wired via emit_coordinator_status -> AdapterOutputStream)"
     );
+    // The §0.9 coordinator-activation program wires CoordinatorStatus to a live
+    // source (TeamRegistry::active_worker_count flows through
+    // OutputStream::emit_coordinator_status -> AdapterOutputStream). The
+    // reserved-now-live flip is a feed-status change only — the DTO
+    // {active_workers, team} is byte-identical, so no CLIENT_PROTOCOL_VERSION bump.
+    let coordinator_status = table
+        .iter()
+        .find(|e| e.rendered_message == "CoordinatorStatus")
+        .expect("CoordinatorStatus present in the feed-status table");
+    assert_eq!(coordinator_status.status, FeedStatus::LiveFed);
     // The §0.7 follow-up is taken: ThinkingDelta + UsageUpdate are now LIVE-FED.
     let thinking_delta = table
         .iter()
@@ -832,9 +844,10 @@ fn entry(rendered_message: &str, status: FeedStatus, note: &str) -> FeedStatusEn
 }
 
 /// The full feed-status table. LIVE-FED first (the adapter emits them, now incl.
-/// the §0.7 follow-up's `ThinkingDelta` + `UsageUpdate`), then RESERVED /
-/// feed-deferred (`AssistantThinking` whole-block form, `CoordinatorStatus`,
-/// `ExitPlanMode`, `BypassPermissionsMode`, the lossy session-replay events, …).
+/// the §0.7 follow-up's `ThinkingDelta` + `UsageUpdate` and the §0.9
+/// coordinator-activation's `CoordinatorStatus`), then RESERVED / feed-deferred
+/// (`AssistantThinking` whole-block form, `ExitPlanMode`, `BypassPermissionsMode`,
+/// the lossy session-replay events, …).
 fn feed_status_table() -> Vec<FeedStatusEntry> {
     use FeedStatus::*;
     vec![
@@ -874,6 +887,11 @@ fn feed_status_table() -> Vec<FeedStatusEntry> {
             LiveFed,
             "OutputStream::emit_usage -> ClientEvent::UsageUpdate (§0.7 follow-up: event_router emits on MessageStart/MessageDelta usage)",
         ),
+        entry(
+            "CoordinatorStatus",
+            LiveFed,
+            "OutputStream::emit_coordinator_status -> ClientEvent::CoordinatorStatus (§0.9 coordinator-activation: CoordinatorStatusSink pushes TeamRegistry::active_worker_count on worker status transitions)",
+        ),
         // ── RESERVED / feed-deferred ───────────────────────────────────────
         entry(
             "AssistantThinking",
@@ -884,11 +902,6 @@ fn feed_status_table() -> Vec<FeedStatusEntry> {
             "RedactedThinking",
             Reserved,
             "carried only inside a synthesized MessageDto, not streamed live",
-        ),
-        entry(
-            "CoordinatorStatus",
-            Reserved,
-            "blocked on engine wiring: no TeamRegistry constructed in any runtime (decision §0.9)",
         ),
         entry(
             "ExitPlanMode",

@@ -210,6 +210,23 @@ impl OutputStream for AdapterOutputStream {
             })
             .await;
     }
+
+    /// Coordinator-activation T09 (§0.9 reserved→live): push the live
+    /// active-worker scalar as a [`ClientEvent::CoordinatorStatus`]. Fired from
+    /// the `CoordinatorStatusSink` on every status transition that changes the
+    /// active count. Mirrors `emit_thinking`/`emit_usage`: the single
+    /// `Arc<dyn ClientEventSink>` already fans out to bridge WS + mobile UniFFI,
+    /// so there is NO transport change — only the trait override lights up the
+    /// previously-no-op (T08) default. `team` maps `Option<&str>` →
+    /// `Option<String>` 1:1 (no placeholder substitution).
+    async fn emit_coordinator_status(&self, active_workers: u32, team: Option<&str>) {
+        self.sink
+            .emit(ClientEvent::CoordinatorStatus {
+                active_workers,
+                team: team.map(str::to_string),
+            })
+            .await;
+    }
 }
 
 #[cfg(test)]
@@ -484,6 +501,48 @@ mod tests {
                 output_tokens: 48,
                 cache_read_tokens: 30,
                 cache_creation_tokens: 90,
+            }
+        );
+    }
+
+    /// Coordinator-activation T09: `emit_coordinator_status` → exactly one
+    /// `CoordinatorStatus` carrying the active-worker scalar and the (mapped)
+    /// team name. Mirrors `emit_thinking_produces_thinking_delta`.
+    #[tokio::test]
+    async fn emit_coordinator_status_produces_one_event() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        stream.emit_coordinator_status(3, Some("alpha")).await;
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            ClientEvent::CoordinatorStatus {
+                active_workers: 3,
+                team: Some("alpha".to_string()),
+            }
+        );
+    }
+
+    /// Coordinator-activation T09: a `None` team round-trips as `team: None`
+    /// (the adapter maps `Option<&str>` → `Option<String>` rather than
+    /// substituting a placeholder), proving the absent-team path.
+    #[tokio::test]
+    async fn emit_coordinator_status_none_team() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        stream.emit_coordinator_status(0, None).await;
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            ClientEvent::CoordinatorStatus {
+                active_workers: 0,
+                team: None,
             }
         );
     }

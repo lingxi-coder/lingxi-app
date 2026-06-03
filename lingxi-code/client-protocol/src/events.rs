@@ -272,13 +272,16 @@ pub enum ClientEvent {
 
     // ── Live thinking/usage (§0.7 follow-up) + reserved (§0.9) ────────────
 
-    /// Coordinator/team status. **RESERVED / feed-deferred** (decision §0.9):
-    /// coordinator/team is BLOCKED ON ENGINE WIRING (no `TeamRegistry` is
-    /// constructed in any assembled runtime — grep-zero). Defined so the
-    /// contract freezes now, but it MUST NOT be wired to a live source in the
-    /// foundation. Round-trip only.
+    /// Coordinator/team status. **LIVE-FED** (§0.9 coordinator-activation):
+    /// a coordinator-mode desktop session constructs one `TeamRegistry` per
+    /// `build()` and a `CoordinatorStatusSink` pushes the current
+    /// `active_worker_count` on each worker status transition via
+    /// `OutputStream::emit_coordinator_status` → `AdapterOutputStream`. The
+    /// reserved→live flip is a feed-status change only: the DTO is
+    /// byte-identical, so no `CLIENT_PROTOCOL_VERSION` bump. Default
+    /// (non-coordinator) sessions never source it, so `active_workers` stays `0`.
     CoordinatorStatus {
-        /// Number of active workers (always `0` in the foundation).
+        /// Number of active (non-terminal) workers in the coordinator's team.
         active_workers: u32,
         /// Optional team name. Skipped from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]

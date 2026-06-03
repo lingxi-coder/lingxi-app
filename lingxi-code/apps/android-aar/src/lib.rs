@@ -217,6 +217,130 @@ pub struct TtsAudioFfi {
     pub sample_rate_hz: u32,
 }
 
+// ---------------------------------------------------------------------------
+// Camera — foreign (Kotlin) callback interface + its engine bridge.
+// ---------------------------------------------------------------------------
+//
+// Mirrors the AndroidStt/AndroidTts speech pattern: the Kotlin layer implements
+// a crate-local async `AndroidCamera` callback interface (CameraX capture +
+// system photo picker) and hands it across the FFI seam. The engine consumes
+// the SHARED `traits::CameraControl` seam, so `AndroidCameraBridge` adapts the
+// crate-local interface to its `traits` counterpart. Camera position crosses
+// the seam as a plain `front: bool` (true = front/selfie, false = rear) to keep
+// the FFI flat; the bridge maps it to `traits::CameraPosition`.
+
+/// FFI error surface for the Android camera callback interface. A flat enum so
+/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// fans it back out onto the richer [`traits::CameraError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum CameraFfiError {
+    /// The user denied camera / photo-library permission.
+    #[error("camera permission denied")]
+    PermissionDenied,
+    /// The user cancelled the capture / picker.
+    #[error("camera capture cancelled")]
+    Cancelled,
+    /// No camera hardware is available.
+    #[error("camera device unavailable")]
+    DeviceUnavailable,
+    /// Any other native failure.
+    #[error("camera error: {message}")]
+    Other {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// FFI carrier for a captured (or picked) image crossing the callback-interface
+/// seam: JPEG-encoded bytes + the decoded pixel dimensions.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct CapturedImageFfi {
+    /// JPEG-encoded image bytes.
+    pub jpeg_bytes: Vec<u8>,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+}
+
+/// Crate-local foreign callback interface for native camera access — the Kotlin
+/// app implements it over CameraX (capture) and the system photo picker
+/// (library). Bridged to [`traits::CameraControl`] by [`AndroidCameraBridge`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidCamera: Send + Sync {
+    /// Capture a photo with the native camera UI. `front` selects the
+    /// front/selfie camera when true (rear when false); `allow_editing`
+    /// presents the native edit/crop UI after capture.
+    async fn capture_photo(
+        &self,
+        front: bool,
+        allow_editing: bool,
+    ) -> Result<CapturedImageFfi, CameraFfiError>;
+    /// Pick an existing image from the system photo library.
+    async fn pick_from_library(&self) -> Result<CapturedImageFfi, CameraFfiError>;
+}
+
+/// Adapts the crate-local [`AndroidCamera`] callback interface to the shared
+/// [`traits::CameraControl`] seam the engine consumes. Maps
+/// [`traits::CameraPosition`] onto the flat `front` bool, threads
+/// `allow_editing`, and fans [`CameraFfiError`] back out onto
+/// [`traits::CameraError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct AndroidCameraBridge {
+    inner: Box<dyn AndroidCamera>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::CameraControl for AndroidCameraBridge {
+    async fn capture_photo(
+        &self,
+        opts: traits::CapturePhotoOpts,
+    ) -> Result<traits::CapturedImage, traits::CameraError> {
+        let front = matches!(opts.position, traits::CameraPosition::Front);
+        match self.inner.capture_photo(front, opts.allow_editing).await {
+            Ok(img) => Ok(captured_image_from_ffi(img)),
+            Err(e) => Err(camera_error_from_ffi(e)),
+        }
+    }
+    async fn pick_from_library(&self) -> Result<traits::CapturedImage, traits::CameraError> {
+        match self.inner.pick_from_library().await {
+            Ok(img) => Ok(captured_image_from_ffi(img)),
+            Err(e) => Err(camera_error_from_ffi(e)),
+        }
+    }
+}
+
+/// Convert an FFI [`CapturedImageFfi`] into the shared [`traits::CapturedImage`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn captured_image_from_ffi(img: CapturedImageFfi) -> traits::CapturedImage {
+    traits::CapturedImage {
+        jpeg_bytes: img.jpeg_bytes,
+        width: img.width,
+        height: img.height,
+    }
+}
+
+/// Fan a flat [`CameraFfiError`] back out onto the richer [`traits::CameraError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn camera_error_from_ffi(e: CameraFfiError) -> traits::CameraError {
+    match e {
+        CameraFfiError::PermissionDenied => traits::CameraError::PermissionDenied,
+        CameraFfiError::Cancelled => traits::CameraError::Cancelled,
+        CameraFfiError::DeviceUnavailable => traits::CameraError::DeviceUnavailable,
+        CameraFfiError::Other { message } => traits::CameraError::Other(message),
+    }
+}
+
 /// Adapts the crate-local [`AndroidStt`] callback interface to the shared
 /// [`traits::SpeechToText`] seam the engine consumes. One forwarding hop per
 /// call; maps [`SpeechFfiError`] onto [`traits::SttError`].
@@ -420,6 +544,9 @@ impl ClientEventListener for AndroidListenerBridge {
 ///   [`ClientEventListener`]).
 /// - `stt` / `tts` — the foreign speech callbacks (bridged to
 ///   [`traits::SpeechToText`] / [`traits::TextToSpeech`]).
+/// - `camera` — the foreign camera callback (bridged to
+///   [`traits::CameraControl`]) so `tool-camera` routes through CameraX +
+///   the system photo picker.
 ///
 /// On non-Android hosts this returns [`MobileEngineError::PlatformUnavailable`]
 /// (the `AndroidPlatform` is only linked under `cfg(target_os = "android")`).
@@ -433,6 +560,7 @@ pub fn build_android_engine(
     listener: Box<dyn AndroidEventListener>,
     stt: Box<dyn AndroidStt>,
     tts: Box<dyn AndroidTts>,
+    camera: Box<dyn AndroidCamera>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -453,7 +581,7 @@ pub fn build_android_engine(
         }
         let platform: Arc<dyn Platform> = Arc::new(AndroidPlatform::new(AndroidPlatformInputs {
             app_files_root: std::path::PathBuf::from(app_files_root),
-            camera: Arc::new(stub_capabilities::StubCamera),
+            camera: Arc::new(AndroidCameraBridge { inner: camera }),
             voice: Arc::new(stub_capabilities::StubVoice),
             share: Arc::new(stub_capabilities::StubShare),
             stt: Some(Arc::new(AndroidSttBridge { inner: stt })),
@@ -464,7 +592,16 @@ pub fn build_android_engine(
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (api_base, api_key, model, app_files_root, listener, stt, tts);
+        let _ = (
+            api_base,
+            api_key,
+            model,
+            app_files_root,
+            listener,
+            stt,
+            tts,
+            camera,
+        );
         Err(MobileEngineError::PlatformUnavailable)
     }
 }

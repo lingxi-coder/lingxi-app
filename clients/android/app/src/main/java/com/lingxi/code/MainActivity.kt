@@ -4,6 +4,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import com.lingxi.code.vision.CameraController
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
@@ -35,6 +37,29 @@ import kotlinx.coroutines.launch
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Register the camera/picker launchers before the Activity is STARTED and
+        // hand them to the process-global CameraController, which the UniFFI
+        // AndroidCamera adapter drives across the FFI seam (the device-vision
+        // analog of how the mic is invoked for STT). Must run before super/
+        // setContent so registerForActivityResult is valid.
+        val cameraPermLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestPermission(),
+        ) { granted -> CameraController.onCameraPermission(granted) }
+        val takePictureLauncher = registerForActivityResult(
+            ActivityResultContracts.TakePicturePreview(),
+        ) { bitmap -> CameraController.onPictureTaken(bitmap) }
+        val pickMediaLauncher = registerForActivityResult(
+            ActivityResultContracts.PickVisualMedia(),
+        ) { uri -> CameraController.onMediaPicked(uri) }
+        CameraController.attach(
+            CameraController.makeLaunchers(
+                context = applicationContext,
+                requestCameraPermission = cameraPermLauncher,
+                takePicture = takePictureLauncher,
+                pickMedia = pickMediaLauncher,
+            ),
+        )
+
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         setContent {
@@ -77,5 +102,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        // Drop the launcher references so a finishing Activity can't be leaked by
+        // the process-global controller and any in-flight capture is cancelled.
+        CameraController.detach()
+        super.onDestroy()
     }
 }

@@ -26,14 +26,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
+import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
 import com.lingxi.code.model.MockData
 import com.lingxi.code.model.ModelOption
@@ -66,6 +72,9 @@ fun Composer(
     onMicClick: () -> Unit = {},
     onMicHoldStart: () -> Unit = {},
     onMicHoldRelease: () -> Unit = {},
+    onCameraClick: () -> Unit = {},
+    attachment: ComposerAttachment? = null,
+    onRemoveAttachment: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val hasText = text.trim().isNotEmpty()
@@ -86,6 +95,13 @@ fun Composer(
                 .padding(top = 10.dp, bottom = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            // Captured-photo attachment chip (the device-vision analog of how a
+            // voice transcript lands in the draft): a thumbnail + remove button,
+            // shown only once a camera capture has surfaced an image.
+            if (attachment != null) {
+                AttachmentThumb(attachment = attachment, onRemove = onRemoveAttachment)
+            }
+
             // Text field (1..5 lines), brand-styled with a placeholder.
             Box(modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)) {
                 if (text.isEmpty()) {
@@ -118,6 +134,16 @@ fun Composer(
                 IconHit(onClick = {}) {
                     LXIcon(name = LXIconName.Plus, size = 18.dp, color = t.text3, stroke = 1.8f)
                 }
+                // Camera affordance: tap drives a real on-device capture through
+                // the same CameraController the engine bridges onto
+                // `traits::CameraControl`; the result surfaces as the attachment
+                // chip above (mirrors the mic → transcript surfacing).
+                IconHit(
+                    onClick = onCameraClick,
+                    modifier = Modifier.testTag(UiTags.COMPOSER_CAMERA),
+                ) {
+                    LXIcon(name = LXIconName.Paperclip, size = 18.dp, color = t.text3, stroke = 1.8f)
+                }
                 ModelChip(model = model, onModelChange = onModelChange)
                 Spacer(Modifier.weight(1f))
                 if (hasText) {
@@ -143,6 +169,54 @@ fun Composer(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * A photo the user captured via the composer's camera affordance, ready to send.
+ *
+ * [thumb] is the decoded preview the composer renders; [width]/[height] carry the
+ * source dimensions surfaced by the device-vision capture (the `CapturedImageFfi`
+ * carrier the engine bridges onto `traits::CapturedImage`).
+ */
+data class ComposerAttachment(
+    val thumb: ImageBitmap,
+    val width: Int,
+    val height: Int,
+)
+
+/** A captured-photo thumbnail chip with a remove (×) affordance. */
+@Composable
+private fun AttachmentThumb(attachment: ComposerAttachment, onRemove: () -> Unit) {
+    val t = LingXiTheme.palette
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+    ) {
+        Image(
+            bitmap = attachment.thumb,
+            contentDescription = "已拍摄的照片",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(10.dp)),
+        )
+        Text(
+            text = "${attachment.width}×${attachment.height}",
+            color = t.text3,
+            fontSize = 12.sp,
+        )
+        Spacer(Modifier.weight(1f))
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(onClick = onRemove),
+            contentAlignment = Alignment.Center,
+        ) {
+            LXIcon(name = LXIconName.X, size = 14.dp, color = t.text3, stroke = 2f)
         }
     }
 }

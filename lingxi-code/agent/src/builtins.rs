@@ -34,19 +34,17 @@
 //! - **`color` / `background` / `omitClaudeMd` / `criticalSystemReminder`**:
 //!   host-display / context-trimming flags with no `AgentDefinition` field
 //!   (or no runner consumer) today — not ported.
-//! - **`model` resolution NOT wired (known gap, pre-existing)**: the `model`
-//!   values here (`Inherit` / `Alias("haiku")` / `Alias("sonnet")`) are passed
-//!   RAW to the provider by [`crate::runner`]'s `resolve_model` — there is no
-//!   `getAgentModel`-equivalent that maps `Inherit` to the parent/main-loop
-//!   model or a bare family alias to a concrete `claude-*` id. On a default
-//!   install only `Explicit("claude-…")` ids resolve via the provider router;
-//!   `"inherit"` / `"haiku"` / `"sonnet"` reach the Anthropic provider verbatim
-//!   and error unless the user configured matching `routing.aliases`. This
-//!   PREDATES batch 21 (the old spawn stub already emitted `Inherit` →
-//!   `"inherit"`), so it is not a regression; wiring real subagent model
-//!   resolution is a dedicated follow-up. The configs here are authored
-//!   faithfully so that, once resolution lands, no change is needed in this
-//!   module.
+//! - **`model` resolution (wired for the spawn path)**: the spawner resolves
+//!   these model values to a concrete wire id at spawn time via
+//!   [`crate::model_resolution::resolve_agent_model`] (`Inherit` → parent /
+//!   main-loop model; bare family alias `haiku` / `sonnet` / `opus` → concrete
+//!   `claude-*` id, or the parent's exact id when same-tier), so built-in spawns
+//!   run against a live provider. The configs here stay authored as
+//!   `Inherit` / `Alias(...)` — resolution happens at the seam, not here. The
+//!   smaller remaining deferrals (env override, boot-snapshot vs live `/model`,
+//!   Bedrock region, `opusplan`, nested-spawn parent, and the separate
+//!   `in_process_teammate` path which still passes its model raw) are documented
+//!   in [`crate::model_resolution`].
 //! - **One-shot only**: this spawn path always sets `persistent: false`, so the
 //!   reference's `ONE_SHOT_BUILTIN_AGENT_TYPES` (Explore / Plan) vs continuable
 //!   distinction has no behavioral surface here — every spawn is one-shot.

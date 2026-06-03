@@ -848,6 +848,10 @@ pub async fn build(
     .with_tool_invoker(
         teammate_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>
     )
+    // Anchor the teammate's `AgentModel::Inherit` / family aliases to the parent
+    // model — the same seam the `PoolSubagentSpawner` gets above — so a spawned
+    // teammate runs against a concrete wire id instead of passing `"inherit"` raw.
+    .with_default_model(orch_cfg.model.clone())
     .with_status_sink(coordinator_sink as Arc<dyn tasks::handlers::TaskStatusSink>);
     task_registry_inner
         .register_handler(tasks::TaskType::InProcessTeammate, Arc::new(teammate_handler));

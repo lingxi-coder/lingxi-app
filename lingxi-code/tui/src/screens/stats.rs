@@ -57,6 +57,9 @@ pub const TAB_OVERVIEW: &str = "Overview";
 pub const TAB_MODELS: &str = "Models";
 /// Locked empty-state line (claude-code `allTimeResult.type === "empty"`).
 pub const EMPTY_LINE: &str = "No stats available yet. Start using Claude Code!";
+/// Loading line shown while the background transcript walk runs (the history can
+/// be many GB, so the aggregation is done off the UI thread).
+pub const LOADING_LINE: &str = "Computing usage stats… (scanning transcript history)";
 /// Locked models-tab empty line (claude-code `modelEntries.length === 0`).
 pub const MODELS_EMPTY_LINE: &str = "No model usage data available";
 /// Locked tokens-chart heading (claude-code `ModelsTab`).
@@ -400,6 +403,10 @@ pub struct StatsState {
     pub tab: StatsTab,
     /// Scroll window over the active tab's body lines.
     pub scroll: ScrollState,
+    /// `true` while the (potentially multi-GB) transcript walk runs on the
+    /// blocking pool; the screen shows a "computing" line until [`set_data`]
+    /// fills it. Opening via [`loading`](StatsState::loading) sets this.
+    pub loading: bool,
 }
 
 impl StatsState {
@@ -413,7 +420,28 @@ impl StatsState {
             data,
             tab,
             scroll: ScrollState::new(len, VIEWPORT),
+            loading: false,
         }
+    }
+
+    /// Open in the LOADING state (empty data) while the background aggregation
+    /// runs. [`set_data`](StatsState::set_data) replaces the data and clears the
+    /// flag. Mirrors claude-code showing a spinner before the stats cache fills.
+    #[must_use]
+    pub fn loading() -> Self {
+        Self {
+            loading: true,
+            ..Self::new(StatsData::default())
+        }
+    }
+
+    /// Replace the aggregated data (clears `loading`, re-anchors the scroll to
+    /// the current tab's body length).
+    pub fn set_data(&mut self, data: StatsData) {
+        let len = body_lines(&data, self.tab).len();
+        self.data = data;
+        self.scroll = ScrollState::new(len, VIEWPORT);
+        self.loading = false;
     }
 
     /// Switch to `tab`, re-sizing the scroll window to that tab's body and
@@ -708,6 +736,9 @@ fn tab_header(active: StatsTab) -> String {
 /// Empty (no sessions): the locked `No stats available yet…` line + footer.
 #[must_use]
 pub fn render_stats_to_string(state: &StatsState) -> String {
+    if state.loading {
+        return format!("{LOADING_LINE}\n{FOOTER}");
+    }
     if state.data.is_empty() {
         return format!("{EMPTY_LINE}\n{FOOTER}");
     }
@@ -858,6 +889,22 @@ mod tests {
             out,
             "No stats available yet. Start using Claude Code!\nTab to switch · Esc to close"
         );
+    }
+
+    #[test]
+    fn loading_state_renders_loading_line_then_set_data_clears_it() {
+        // A loading screen shows the LOADING_LINE (not the empty/data view) so
+        // the user gets instant feedback while the off-thread walk runs.
+        let mut s = StatsState::loading();
+        assert!(s.loading);
+        assert_eq!(render_stats_to_string(&s), format!("{LOADING_LINE}\n{FOOTER}"));
+
+        // Filling data clears the loading flag and switches to the real render.
+        let mut data = StatsData::default();
+        data.total_sessions = 3;
+        s.set_data(data);
+        assert!(!s.loading);
+        assert!(!render_stats_to_string(&s).contains(LOADING_LINE));
     }
 
     #[test]

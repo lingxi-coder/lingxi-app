@@ -920,31 +920,45 @@ pub async fn pump_open_agents(
 /// re-checking after the walk. Returns `true` iff the screen was opened. Called
 /// unconditionally (not gated on a wired handle).
 pub async fn pump_open_stats(state: &Arc<Mutex<AppState>>) -> bool {
-    // 1) Take the request under the lock, respecting priority.
+    // PHASE 1 — a fresh `/stats` request opens the LOADING screen immediately so
+    // the user gets instant feedback. The heavy walk runs in PHASE 2 on the NEXT
+    // tick (so the loading screen renders before the multi-GB aggregation starts).
     {
         let mut st = state.lock().await;
-        if !st.pending_open_stats {
-            return false;
+        if st.pending_open_stats {
+            if st.pending_permission.is_some() || st.active_screen.is_some() {
+                // Priority 1/2 own the surface: leave the flag, retry next tick.
+                return false;
+            }
+            st.pending_open_stats = false;
+            st.open_stats_loading();
+            return true;
         }
-        if st.pending_permission.is_some() || st.active_screen.is_some() {
-            // Priority 1/2 own the surface: leave the flag and retry next tick.
-            return false;
-        }
-        st.pending_open_stats = false;
     }
 
-    // 2) Walk + aggregate the session transcripts OUTSIDE the lock.
-    let data = aggregate_stats_from_disk().await;
-
-    // 3) Re-acquire the lock and open — re-check priority guard.
-    let mut st = state.lock().await;
-    if st.pending_permission.is_some() || st.active_screen.is_some() {
-        // Lost the race: re-raise so the next tick retries.
-        st.pending_open_stats = true;
+    // PHASE 2 — if a LOADING `/stats` screen is up, aggregate + fill it. The walk
+    // runs via `spawn_blocking` (see `aggregate_stats_from_disk`) so the CPU-bound
+    // JSON parse of a possibly-multi-GB history never starves the UI executor —
+    // otherwise the cursor freezes. The lock is NOT held across the walk.
+    let needs_compute = {
+        let st = state.lock().await;
+        matches!(
+            &st.active_screen,
+            Some(crate::screens::Screen::Stats(s)) if s.loading
+        )
+    };
+    if !needs_compute {
         return false;
     }
-    st.open_stats(data);
-    true
+    let data = aggregate_stats_from_disk().await;
+    let mut st = state.lock().await;
+    if let Some(crate::screens::Screen::Stats(s)) = &mut st.active_screen {
+        if s.loading {
+            s.set_data(data);
+            return true;
+        }
+    }
+    false
 }
 
 /// (M9-10) Resolve the claude config home — the same resolution the rest of the
@@ -968,35 +982,50 @@ fn claude_home_dir() -> std::path::PathBuf {
 /// state). Runs OUTSIDE the `AppState` lock (it is `.await`ed only by
 /// `pump_open_stats`, which holds no lock across the call).
 async fn aggregate_stats_from_disk() -> crate::screens::stats::StatsData {
+    // Run the whole walk on the blocking pool: it reads + JSON-parses the entire
+    // `<claude_home>/projects/` history (can be many GB across thousands of
+    // files), which is CPU-bound and would starve the async UI executor (frozen
+    // cursor) if run inline. `spawn_blocking` keeps the executor free to render.
+    tokio::task::spawn_blocking(aggregate_stats_blocking)
+        .await
+        .unwrap_or_default()
+}
+
+/// Synchronous body of [`aggregate_stats_from_disk`], run via `spawn_blocking`.
+/// Uses blocking `std::fs` (it is already off the async executor). Returns the
+/// empty `StatsData::default()` on any I/O failure (the screen then shows the
+/// locked empty state).
+fn aggregate_stats_blocking() -> crate::screens::stats::StatsData {
     use crate::screens::stats::{aggregate, parse_session, SessionContribution};
+    use std::fs;
 
     let projects_dir = claude_home_dir().join("projects");
     let mut contribs: Vec<SessionContribution> = Vec::new();
 
-    let Ok(mut project_entries) = tokio::fs::read_dir(&projects_dir).await else {
+    let Ok(project_entries) = fs::read_dir(&projects_dir) else {
         return aggregate(&contribs);
     };
-    while let Ok(Some(project)) = project_entries.next_entry().await {
+    for project in project_entries.flatten() {
         let project_path = project.path();
         if !project_path.is_dir() {
             continue;
         }
-        let Ok(mut files) = tokio::fs::read_dir(&project_path).await else {
+        let Ok(files) = fs::read_dir(&project_path) else {
             continue;
         };
-        while let Ok(Some(file)) = files.next_entry().await {
+        for file in files.flatten() {
             let path = file.path();
             if path.is_dir() {
                 // A session subdir may hold `subagents/agent-*.jsonl`.
                 let subagents = path.join("subagents");
-                if let Ok(mut sub) = tokio::fs::read_dir(&subagents).await {
-                    while let Ok(Some(s)) = sub.next_entry().await {
+                if let Ok(sub) = fs::read_dir(&subagents) {
+                    for s in sub.flatten() {
                         let sp = s.path();
                         let name = sp.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         if name.starts_with("agent-")
                             && sp.extension().is_some_and(|e| e == "jsonl")
                         {
-                            if let Ok(content) = tokio::fs::read_to_string(&sp).await {
+                            if let Ok(content) = fs::read_to_string(&sp) {
                                 contribs.push(parse_session(&content, true));
                             }
                         }
@@ -1005,7 +1034,7 @@ async fn aggregate_stats_from_disk() -> crate::screens::stats::StatsData {
                 continue;
             }
             if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                if let Ok(content) = fs::read_to_string(&path) {
                     contribs.push(parse_session(&content, false));
                 }
             }

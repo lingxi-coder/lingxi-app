@@ -834,15 +834,14 @@ impl AppState {
         crate::telemetry::screen_opened("skills");
     }
 
-    /// (M9-10) Open the `/stats` usage-stats screen with pre-aggregated data.
-    /// Unlike `/skills` (sync, empty), the data is the result of an async
-    /// multi-project `*.jsonl` fs walk + aggregation done OUTSIDE the lock by
-    /// `root::pump_open_stats` (the walk is slow over many files), so this is
-    /// the commit step the pump calls once the `StatsData` is in hand. Mirrors
-    /// `open_agents` (pump-supplied data) on the open side.
-    pub fn open_stats(&mut self, data: crate::screens::stats::StatsData) {
+    /// (M9-10) Open the `/stats` usage-stats screen in the LOADING state.
+    /// The multi-project `*.jsonl` fs walk + aggregation can scan many GB across
+    /// thousands of files, so it MUST run off the UI thread: `root::pump_open_stats`
+    /// opens this loading screen for instant feedback, then runs the walk on the
+    /// blocking pool and calls `StatsState::set_data` on the live screen when done.
+    pub fn open_stats_loading(&mut self) {
         self.active_screen = Some(crate::screens::Screen::Stats(
-            crate::screens::stats::StatsState::new(data),
+            crate::screens::stats::StatsState::loading(),
         ));
         crate::telemetry::screen_opened("stats");
     }

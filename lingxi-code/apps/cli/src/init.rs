@@ -292,12 +292,13 @@ pub async fn build_runtime(
     // The spawner cannot receive the registry here (it is consumed into the
     // `BuiltinToolContext` below, which is what `desktop_tool_registry` then uses
     // to build the registry — a construction cycle). So we grab a clone of the
-    // spawner's set-once tool-schema cell BEFORE boxing it, and fill it once the
-    // registry exists (just after `desktop_tool_registry`, below). Spawned
-    // subagents then advertise the registry's tools to the model.
+    // spawner's set-once registry cell BEFORE boxing it, and fill it once the
+    // registry exists (just after `desktop_tool_registry`, below). Each spawn
+    // then resolves its advertised tools + allow-list from that shared registry
+    // at spawn time (see the fill site below for the snapshot semantics).
     let subagent_spawner_concrete =
         agent::PoolSubagentSpawner::new(subagent_pool).with_api_client(subagent_api);
-    let subagent_tool_schema_cell = subagent_spawner_concrete.tool_schemas_handle();
+    let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
     let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> =
         Arc::new(subagent_spawner_concrete);
 
@@ -517,32 +518,18 @@ pub async fn build_runtime(
     };
     let tools = Arc::new(desktop_tool_registry(tool_ctx));
 
-    // Break the subagent tool-schema construction cycle: now that the registry
-    // exists, serialize its enabled tools (same {name, description, input_schema}
-    // wire shape + name-sort as the orchestrator's own `build_wire_tools`) and
-    // fill the spawner's set-once cell, so spawned subagents advertise tools.
-    // NOTE: this advertises the FULL registry, NOT a per-agent
-    // `AgentToolPolicy`-filtered set — the runner enforces `ctx.allowed_tools`
-    // at dispatch, and the spawn path uses an all-tools default today (see the
-    // `SubagentContext::tool_schemas` doc). Per-agent filtering lands when the
-    // spawn path loads real `AgentDefinition`s.
-    //
-    // KNOWN GAP (set-once snapshot): the cell is filled exactly once here, so
-    // MCP tools that finish connecting AFTER this point — `connect_all` is async
-    // and `run_reconnect_loop` runs forever (above) — are NOT advertised to
-    // later spawns, even though the parent orchestrator (which rebuilds its tools
-    // per turn from the same live registry) sees them. Built-ins (the bulk) are
-    // present at fill time. The real fix is to resolve the advertised set lazily
-    // at spawn time from the registry rather than freezing it in a `OnceLock`.
-    let _ = subagent_tool_schema_cell.set(
-        tool_api::wire::tools_to_wire(
-            &tools.available_tools(&tool_api::tool_trait::ToolStaticContext::default()),
-            &tool_api::tool_trait::PromptOptions {
-                include_examples: true,
-            },
-        )
-        .await,
-    );
+    // Break the subagent tool construction cycle: now that the registry exists,
+    // hand it to the spawner's set-once cell. Each spawn resolves its advertised
+    // tools + dispatch allow-list from this registry at spawn time (via
+    // `AgentToolResolver` over the child's policy), reflecting the registry's
+    // state then rather than a one-time serialized snapshot. (This same `Arc`
+    // is shared immutably with the orchestrator's dispatch; `ToolRegistry`
+    // mutators take `&mut self`, so it is fixed once shared — boot-time state,
+    // not live post-boot mutation.) NOTE: today the spawn path uses an all-tools
+    // default, so the advertised set is the full registry; per-agent filtering
+    // auto-activates once the spawn path loads real `AgentDefinition`s (see the
+    // `SubagentContext::tool_schemas` doc).
+    let _ = subagent_tool_registry_cell.set(tools.clone());
 
     let orch = Arc::new(
         ConversationOrchestrator::new(cfg, api_client, tools, hooks, perms, output, memory, cwd)

@@ -296,8 +296,12 @@ pub async fn build_runtime(
     // registry exists (just after `desktop_tool_registry`, below). Each spawn
     // then resolves its advertised tools + allow-list from that shared registry
     // at spawn time (see the fill site below for the snapshot semantics).
-    let subagent_spawner_concrete =
-        agent::PoolSubagentSpawner::new(subagent_pool).with_api_client(subagent_api);
+    // `with_default_model` is the `AgentModel::Inherit` target + family-alias
+    // tier anchor (a boot snapshot of `cfg.model`), so built-in subagent spawns
+    // resolve to a concrete wire id instead of passing `"inherit"`/`"haiku"` raw.
+    let subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+        .with_api_client(subagent_api)
+        .with_default_model(cfg.model.clone());
     let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
     // Grab the catalog cell too (same cycle-break): the spawner is boxed here,
     // but the agent catalog is not built until after `cwd` is resolved below.

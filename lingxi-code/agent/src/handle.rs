@@ -82,6 +82,14 @@ pub struct PoolSubagentSpawner {
     /// orchestrator holds, so the spawner and `/agents` never drift. Unset (the
     /// default / tests) = built-ins only.
     agent_catalog: Arc<std::sync::OnceLock<Arc<RwLock<Vec<AgentDefinition>>>>>,
+    /// Parent / main-loop model used as the `AgentModel::Inherit` target and the
+    /// tier-match anchor when resolving a spawn's model preference to a concrete
+    /// wire id (see [`crate::model_resolution::resolve_agent_model`]). Set at
+    /// boot from `cfg.model` (a snapshot — a mid-session `/model` switch is not
+    /// reflected; documented in `model_resolution`). `None` (the default /
+    /// tests) leaves the definition's model string RAW (legacy behavior: the
+    /// runner's `resolve_model` emits `Inherit`→`"inherit"` / the bare alias).
+    default_model: Option<String>,
 }
 
 impl PoolSubagentSpawner {
@@ -100,7 +108,18 @@ impl PoolSubagentSpawner {
             tool_registry: Arc::new(std::sync::OnceLock::new()),
             builtins: Arc::new(builtins),
             agent_catalog: Arc::new(std::sync::OnceLock::new()),
+            default_model: None,
         }
+    }
+
+    /// Builder: set the parent / main-loop model used to resolve a spawn's
+    /// `AgentModel::Inherit` and bare family aliases to a concrete wire id.
+    /// Wire this from `cfg.model` at boot; without it, definition model strings
+    /// are passed through raw (legacy). See [`crate::model_resolution`].
+    #[must_use]
+    pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
+        self.default_model = Some(model.into());
+        self
     }
 
     /// Builder: attach the model API seam the child runner uses to drive the
@@ -154,13 +173,33 @@ impl PoolSubagentSpawner {
         self.agent_catalog.clone()
     }
 
-    /// Resolve a spawn's [`AgentDefinition`] from `subagent_type`.
+    /// Resolve a spawn's [`AgentDefinition`] from `subagent_type`, including its
+    /// model preference.
+    ///
+    /// First looks the definition up by precedence (see [`Self::lookup_definition`]),
+    /// then resolves its [`AgentModel`] to a concrete wire model id via
+    /// [`crate::model_resolution::resolve_agent_model`] (when a `default_model`
+    /// is wired): `Inherit`→parent model; a bare family alias→the parent's exact
+    /// id when same-tier, else the family's concrete default id. Without
+    /// `default_model` the model string is left RAW (legacy behavior).
+    async fn resolve_definition(&self, subagent_type: &str) -> AgentDefinition {
+        let mut def = self.lookup_definition(subagent_type).await;
+        if let Some(parent_model) = &self.default_model {
+            def.model = AgentModel::Explicit(crate::model_resolution::resolve_agent_model(
+                &def.model,
+                parent_model,
+            ));
+        }
+        def
+    }
+
+    /// Look up the [`AgentDefinition`] for `subagent_type` by precedence.
     ///
     /// Precedence (claude-code parity — later wins): file catalog
     /// (user/project) overrides built-ins. An unknown type defaults to
     /// `general-purpose` (claude-code's `effectiveType ?? GENERAL_PURPOSE`); a
     /// last-resort all-tools stub covers the impossible empty-built-ins case.
-    async fn resolve_definition(&self, subagent_type: &str) -> AgentDefinition {
+    async fn lookup_definition(&self, subagent_type: &str) -> AgentDefinition {
         // 1. File catalog (user/project) wins on collision.
         if let Some(catalog) = self.agent_catalog.get() {
             if let Some(def) = catalog
@@ -712,6 +751,41 @@ mod tests {
         // The catalog one (Explicit[Read]) wins over the built-in (Except[…]).
         assert!(matches!(def.tools, AgentToolPolicy::Explicit(_)));
         assert_eq!(def.system_prompt.as_deref(), Some("custom"));
+    }
+
+    // ── batch 22: model resolution wired into resolve_definition ──
+
+    #[tokio::test]
+    async fn resolve_definition_resolves_inherit_to_default_model() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // general-purpose is AgentModel::Inherit; with a default model wired it
+        // resolves to that concrete parent model id.
+        let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-opus-4-7");
+        let def = spawner.resolve_definition("general-purpose").await;
+        assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-opus-4-7"));
+    }
+
+    #[tokio::test]
+    async fn resolve_definition_resolves_family_alias_to_concrete_id() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // Explore is Alias("haiku"); parent is opus (different tier) → resolves
+        // to haiku's concrete default id, NOT the parent.
+        let spawner = PoolSubagentSpawner::new(pool).with_default_model("claude-opus-4-7");
+        let def = spawner.resolve_definition("Explore").await;
+        assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-haiku-4-5"));
+    }
+
+    #[tokio::test]
+    async fn resolve_definition_without_default_model_leaves_model_raw() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // No default model wired (legacy/tests): the alias is NOT resolved — the
+        // runner's resolve_model then emits it raw (back-compat).
+        let spawner = PoolSubagentSpawner::new(pool);
+        let def = spawner.resolve_definition("Explore").await;
+        assert!(matches!(&def.model, AgentModel::Alias(m) if m == "haiku"));
     }
 
     #[test]

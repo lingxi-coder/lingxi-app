@@ -200,6 +200,10 @@ fn resolve_desktop_config(argv: &Argv) -> DesktopConfig {
         routing: load_routing(),
         mcp_paths: vec![project_mcp_path, global_mcp_path],
         use_noop_permission_gate: true,
+        // M10: the CLI does not start a coordinator session (threading this
+        // from session metadata is a follow-up; the default is byte-identical
+        // to the pre-M10 build).
+        session_started_as_coordinator: false,
     }
 }
 

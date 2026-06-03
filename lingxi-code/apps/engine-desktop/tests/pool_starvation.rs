@@ -1,0 +1,272 @@
+//! M10 (T14) — separate-teammate-pool starvation regression.
+//!
+//! In a coordinator session `build()` gives the `InProcessTeammate` handler its
+//! OWN `StateMachinePool` (`engine_desktop::TEAMMATE_POOL_CAP`), distinct from
+//! the `AgentTool` `subagent_pool` (`PoolSubagentSpawner`, cap 4). Teammates are
+//! PERSISTENT: each parks on `wait_for_message` and NEVER frees its slot until
+//! killed. If the two shared one pool, `TEAMMATE_POOL_CAP` parked teammates
+//! would saturate it and every one-shot `AgentTool` subagent spawn would be
+//! rejected with `TooManyAgents` — a deadlock for the parent agent.
+//!
+//! This regression drives the REAL `agent::StateMachinePool` +
+//! `agent::PoolSubagentSpawner` with the tokio-backed `MockRuntimeSpawner`:
+//!
+//! * `pool_starvation_parked_teammates_do_not_starve_agent_tool` — fills a
+//!   teammate pool to its cap with parked (never-deallocated) slots, then proves
+//!   an `AgentTool` subagent still spawns to completion through the SEPARATE
+//!   subagent pool.
+//! * `pool_starvation_shared_pool_would_starve_agent_tool` — the inverted
+//!   control: routing the subagent spawn through the SAME pool the parked
+//!   teammates saturated yields a pool-full failure, proving the separate-pool
+//!   decision is load-bearing (this is the assertion that fails against a
+//!   shared-pool implementation).
+
+#![allow(clippy::unwrap_used)]
+
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use agent::api::SubagentApiClient;
+use agent::context::SubagentContext;
+use agent::definition::{
+    AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
+};
+use agent::display::{AgentColor, AgentDisplay};
+use agent::pool::StateMachinePool;
+use agent::PoolSubagentSpawner;
+use async_trait::async_trait;
+use engine_desktop::TEAMMATE_POOL_CAP;
+use protocol::AgentId;
+use test_harness::mocks::MockRuntimeSpawner;
+use traits::budget::{BudgetEnforcerHandle, BudgetError};
+use traits::subagent_spawn::{
+    SubagentInheritance, SubagentResult, SubagentSpawnRequest, SubagentSpawner,
+};
+use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+
+/// Scripted `SubagentApiClient`: one non-streaming round-trip per call, returning
+/// a single `end_turn` text turn so the non-persistent subagent loop terminates
+/// cleanly in one turn-set and the spawn surfaces `Completed`.
+struct ScriptedApiClient {
+    calls: Mutex<usize>,
+}
+
+impl ScriptedApiClient {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: Mutex::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl SubagentApiClient for ScriptedApiClient {
+    async fn messages_create(
+        &self,
+        _model: &str,
+        _system: Option<&str>,
+        _messages: Vec<protocol::ConversationMessage>,
+    ) -> Result<api_client::MessageResponse, api_client::ApiError> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(api_client::MessageResponse {
+            id: "scripted".into(),
+            model: "scripted".into(),
+            content: vec![api_client::types::ContentBlockApi::Text {
+                text: "done".into(),
+            }],
+            stop_reason: Some("end_turn".into()),
+            usage: api_client::types::UsageApi::default(),
+        })
+    }
+}
+
+/// Inert `ToolInvoker` — the scripted single-turn `end_turn` response dispatches
+/// no tools, so this is never invoked; it only satisfies the inheritance bundle.
+struct InertInvoker;
+
+#[async_trait]
+impl ToolInvoker for InertInvoker {
+    async fn invoke(
+        &self,
+        _name: &str,
+        _input: serde_json::Value,
+        _ctx: SubagentInvocationContext,
+    ) -> Result<serde_json::Value, ToolInvokerError> {
+        Ok(serde_json::Value::Null)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Permissive budget so the per-turn gate never trips.
+struct OpenBudget;
+
+#[async_trait]
+impl BudgetEnforcerHandle for OpenBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), BudgetError> {
+        Ok(())
+    }
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        0
+    }
+}
+
+/// A minimal persistent-teammate `SubagentContext` with `api_client = None`, so
+/// the slot runs the legacy stub runner. With no inbound `engine::Event` ever
+/// delivered, the stub parks forever on `event_rx.recv()` — exactly a persistent
+/// teammate idling between turn-sets. The slot is never deallocated, so it holds
+/// its pool slot for the life of the test.
+fn parked_teammate_ctx() -> SubagentContext {
+    SubagentContext {
+        agent_id: AgentId::new(),
+        parent_agent_id: None,
+        agent_definition: AgentDefinition {
+            agent_type: "teammate".into(),
+            when_to_use: String::new(),
+            tools: AgentToolPolicy::All {
+                use_exact_tools: true,
+            },
+            max_turns: 1,
+            model: AgentModel::Inherit,
+            permission_mode: AgentPermissionMode::Bubble,
+            source: AgentSource::BuiltIn,
+            base_dir: "/tmp".into(),
+            system_prompt: None,
+            mcp_servers: vec![],
+            frontmatter_hooks: vec![],
+            icon: None,
+            allowed_tools: vec![],
+            worktree_requirement: None,
+        },
+        prompt_messages: vec![],
+        fork_context_messages: None,
+        allowed_tools: vec![],
+        worktree_handle: None,
+        is_async: false,
+        // Marked persistent for fidelity; the stub runner parks regardless.
+        persistent: true,
+        can_show_permission_prompts: false,
+        mcp_clients: vec![],
+        transcript_subdir: "/tmp".into(),
+        rendered_system_prompt: None,
+        content_replacement_state: None,
+        agent_memory: None,
+        display: AgentDisplay {
+            color: AgentColor::Cyan,
+            icon: None,
+        },
+        api_client: None,
+        tool_invoker: None,
+        budget: None,
+    }
+}
+
+/// Saturate `pool` with `TEAMMATE_POOL_CAP` parked teammate slots. Returns once
+/// every slot is occupied; the slots are never deallocated, mirroring teammates
+/// parked between turn-sets.
+async fn fill_with_parked_teammates(pool: &StateMachinePool) {
+    for _ in 0..TEAMMATE_POOL_CAP {
+        pool.allocate(parked_teammate_ctx())
+            .await
+            .expect("parked teammate slot fits under TEAMMATE_POOL_CAP");
+    }
+    assert_eq!(
+        pool.slot_count().await,
+        TEAMMATE_POOL_CAP,
+        "every teammate slot is occupied and parked"
+    );
+}
+
+fn agent_tool_request() -> SubagentSpawnRequest {
+    SubagentSpawnRequest {
+        subagent_type: "general-purpose".into(),
+        prompt: "do one thing".into(),
+        context_paths: vec![],
+    }
+}
+
+fn inheritance() -> SubagentInheritance {
+    SubagentInheritance {
+        tool_invoker: Arc::new(InertInvoker),
+        budget: Arc::new(OpenBudget),
+    }
+}
+
+/// PASS path: separate pools. `TEAMMATE_POOL_CAP` parked teammates saturate the
+/// teammate pool, yet an `AgentTool` subagent still spawns to completion through
+/// the SEPARATE subagent pool.
+#[tokio::test]
+async fn pool_starvation_parked_teammates_do_not_starve_agent_tool() {
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+
+    // The teammate handler's OWN pool, saturated by parked persistent teammates.
+    let teammate_pool = StateMachinePool::new(runtime.clone(), TEAMMATE_POOL_CAP);
+    fill_with_parked_teammates(&teammate_pool).await;
+
+    // The SEPARATE `AgentTool` subagent pool (mirrors `build()`'s `subagent_pool`,
+    // cap 4). It is empty — the parked teammates live on a different pool.
+    let subagent_pool = Arc::new(StateMachinePool::new(runtime, 4));
+    let api = ScriptedApiClient::new();
+    let spawner = PoolSubagentSpawner::new(subagent_pool.clone()).with_api_client(api.clone());
+
+    let result = spawner
+        .spawn(agent_tool_request(), inheritance())
+        .await
+        .expect("AgentTool subagent spawns through the separate pool");
+
+    assert!(
+        matches!(result, SubagentResult::Completed { .. }),
+        "the subagent ran to completion despite a full teammate pool; got {result:?}"
+    );
+    assert!(
+        *api.calls.lock().unwrap() >= 1,
+        "the subagent runner actually made a model round-trip (real run, not hollow)"
+    );
+    // The teammate pool is still fully occupied — its parked slots were never freed.
+    assert_eq!(
+        teammate_pool.slot_count().await,
+        TEAMMATE_POOL_CAP,
+        "parked teammates kept their slots across the subagent spawn"
+    );
+    // The subagent freed its own slot on completion.
+    assert_eq!(
+        subagent_pool.slot_count().await,
+        0,
+        "the completed subagent deallocated its slot"
+    );
+}
+
+/// INVERTED CONTROL: one SHARED pool. Routing the `AgentTool` subagent spawn
+/// through the very pool the parked teammates saturated yields a pool-full
+/// failure — proving the separate-pool decision in `build()` is load-bearing.
+/// This assertion is what would fail under a shared-pool implementation.
+#[tokio::test]
+async fn pool_starvation_shared_pool_would_starve_agent_tool() {
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+
+    // ONE pool, sized like the teammate pool, fully occupied by parked teammates.
+    let shared_pool = Arc::new(StateMachinePool::new(runtime, TEAMMATE_POOL_CAP));
+    fill_with_parked_teammates(&shared_pool).await;
+
+    // The AgentTool spawner backed by that SAME saturated pool.
+    let api = ScriptedApiClient::new();
+    let spawner = PoolSubagentSpawner::new(shared_pool.clone()).with_api_client(api.clone());
+
+    let err = spawner
+        .spawn(agent_tool_request(), inheritance())
+        .await
+        .expect_err("a shared, teammate-saturated pool rejects the subagent spawn");
+
+    // `PoolSubagentSpawner` maps the pool's `TooManyAgents` onto `Runtime`.
+    assert!(
+        matches!(err, traits::subagent_spawn::SubagentSpawnError::Runtime(_)),
+        "shared-pool spawn fails pool-full; got {err:?}"
+    );
+    // The spawn never reached the runner, so no model round-trip occurred.
+    assert_eq!(
+        *api.calls.lock().unwrap(),
+        0,
+        "the rejected spawn never invoked the model"
+    );
+}

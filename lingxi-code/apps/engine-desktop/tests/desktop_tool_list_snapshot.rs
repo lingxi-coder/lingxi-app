@@ -22,7 +22,8 @@ fn desktop_tool_list_snapshot() {
         exit_code: 0,
         timed_out: false,
     });
-    let reg = desktop_tool_registry(ctx);
+    // `None` → default (non-coordinator) session: byte-identical to pre-M10.
+    let reg = desktop_tool_registry(ctx, None);
 
     let mut names = reg.all_names();
     names.sort();

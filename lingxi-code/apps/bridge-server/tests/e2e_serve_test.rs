@@ -51,6 +51,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         routing: None,
         mcp_paths: vec![cwd.join(".mcp.json")],
         use_noop_permission_gate: false,
+        session_started_as_coordinator: false,
     };
     (tmp, cfg)
 }

@@ -56,6 +56,77 @@ use tokio::sync::RwLock;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 
+/// M10 (T13): per-teammate `StateMachinePool` slot cap.
+///
+/// Teammates are PERSISTENT: each one parks on `wait_for_message` between
+/// turn-sets and NEVER frees its pool slot until killed. Sharing the
+/// `AgentTool` `subagent_pool` (cap 4) would let parked teammates starve
+/// one-shot subagent spawns, so the teammate handler gets its OWN pool with
+/// this cap (T14 adds the pool-starvation regression that proves the
+/// separation). Sized to match the `subagent_pool` cap so a coordinator can run
+/// a small team without immediately exhausting slots.
+///
+/// `pub` so the T14 `pool_starvation` regression test can pin its parked-teammate
+/// count to the single production source of truth (no magic-number drift).
+pub const TEAMMATE_POOL_CAP: usize = 4;
+
+/// M10 (T13): a late-bound [`traits::tool_invoker::ToolInvoker`] resolving the
+/// composition-root construction cycle.
+///
+/// The teammate handler is registered into the `TaskRegistry` (which needs
+/// `&mut self`, so BEFORE the registry is `Arc`-wrapped) yet must inherit the
+/// parent's `Arc<ToolRegistry>` as its tool-dispatch seam — and that registry is
+/// assembled AFTER the task registry exists (its `BuiltinToolContext` carries
+/// `task_registry.clone()`). Naively this is a cycle.
+///
+/// `DeferredToolInvoker` breaks it: it is constructed empty, injected into the
+/// teammate handler up front, and [`set`](Self::set) is called exactly once with
+/// the real `RegistryToolInvoker` after `tools` is built. This preserves the
+/// recursion-lock invariant (the teammate dispatches through the SAME
+/// `Arc<ToolRegistry>` the parent owns — `RegistryToolInvoker` stores that Arc
+/// verbatim) while satisfying the construction order. A teammate cannot dispatch
+/// a tool before `build()` returns, so the cell is always filled before first
+/// use.
+struct DeferredToolInvoker {
+    inner: std::sync::OnceLock<Arc<dyn traits::tool_invoker::ToolInvoker>>,
+}
+
+impl DeferredToolInvoker {
+    fn new() -> Self {
+        Self {
+            inner: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Fill the cell with the real invoker. Idempotent-safe: a second call is a
+    /// no-op (the first binding wins), matching the build-once semantics.
+    fn set(&self, invoker: Arc<dyn traits::tool_invoker::ToolInvoker>) {
+        let _ = self.inner.set(invoker);
+    }
+}
+
+#[async_trait::async_trait]
+impl traits::tool_invoker::ToolInvoker for DeferredToolInvoker {
+    async fn invoke(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        ctx: traits::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        match self.inner.get() {
+            Some(invoker) => invoker.invoke(name, input, ctx).await,
+            None => Err(traits::tool_invoker::ToolInvokerError::Internal(
+                "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
+                    .to_string(),
+            )),
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// Desktop engine knobs.
 ///
 /// Intentionally small in P6 — it grows as P8/P9 fold skills + commands and a
@@ -74,6 +145,36 @@ impl Default for DesktopEngineConfig {
     }
 }
 
+/// M10 (T12): the three coordinator handles a coordinator-capable session
+/// passes to [`register_desktop_tools`] / [`desktop_tool_registry`] so the
+/// composition root can register the coordinator `TeamCreate` / `TeamDelete`
+/// tools IN PLACE OF `tool_team`'s pair.
+///
+/// All four coordinator tool names collide byte-for-byte with the already
+/// registered `tool_team` / `tool_ui` builtins, and [`ToolRegistry`] is
+/// push-no-dedup with first-match-wins ([`ToolRegistry::find_by_name`]).
+/// Naively splicing the coordinator tools *after* `tool_team::register_all`
+/// would therefore silently shadow nothing (the `tool_team` copy wins every
+/// lookup). Mode-exclusivity is the only safe option, and the registry is
+/// built-once-and-moved, so the choice MUST be made at BUILD time — hence this
+/// is threaded through as an `Option` rather than toggled later.
+///
+/// `build()` populates this with `Some(..)` ONLY when
+/// `DesktopConfig::session_started_as_coordinator` is `true`; a default session
+/// passes `None`, leaving the assembled tool set byte-identical to the pre-M10
+/// build.
+pub struct CoordinatorWiring {
+    /// The per-session team registry the coordinator tools mutate.
+    pub team: Arc<coordinator::TeamRegistry>,
+    /// The coordinator-mode gate the tools consult in `call()`
+    /// (defense-in-depth) so a future `/coordinator exit()` can neutralize them
+    /// without rebuilding the registry.
+    pub mode: Arc<coordinator::CoordinatorMode>,
+    /// The spawn/kill seam the tools use to start / stop the real backing
+    /// `InProcessTeammate` task.
+    pub spawn_seam: Arc<dyn traits::team_spawn::TeamSpawnSeam>,
+}
+
 /// Assemble the desktop builtin **tool** registry from a freshly-built
 /// [`BuiltinToolContext`].
 ///
@@ -81,10 +182,17 @@ impl Default for DesktopEngineConfig {
 /// (`tool-file/shell/task/web/plan/meta/cron/ui/skill`) + 5 desktop-only
 /// crates (`tool-agent/team/worktree/mcp/lsp`). The mobile composition root
 /// links only the cross-platform subset plus mobile-specific crates.
+///
+/// `coordinator` selects the team-tool variant at build time: `None` registers
+/// `tool_team`'s `TeamCreate` / `TeamDelete` (default), `Some(..)` registers the
+/// coordinator pair IN PLACE OF them. See [`CoordinatorWiring`].
 #[must_use]
-pub fn desktop_tool_registry(ctx: BuiltinToolContext) -> ToolRegistry {
+pub fn desktop_tool_registry(
+    ctx: BuiltinToolContext,
+    coordinator: Option<CoordinatorWiring>,
+) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
-    register_desktop_tools(&mut reg, ctx);
+    register_desktop_tools(&mut reg, ctx, coordinator);
     reg
 }
 
@@ -92,7 +200,20 @@ pub fn desktop_tool_registry(ctx: BuiltinToolContext) -> ToolRegistry {
 ///
 /// Each `tool_*::register_all` consumes a clone of `ctx`; the final crate
 /// takes ownership to avoid a redundant clone.
-pub fn register_desktop_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
+///
+/// When `coordinator` is `Some(..)` (a coordinator-capable session), the
+/// coordinator `TeamCreate` / `TeamDelete` tools are registered IN PLACE OF
+/// `tool_team`'s pair: `tool_team::register_all` is SKIPPED entirely (it
+/// registers exactly those two and no others — see `tools/team/src/lib.rs`), and
+/// the coordinator pair is pushed instead. This keeps exactly ONE `TeamCreate`
+/// and ONE `TeamDelete` in the registry (no silent shadow, no duplicate name in
+/// the system prompt). When `None`, `tool_team::register_all` runs as before and
+/// the coordinator tools are absent — byte-identical to the pre-M10 build.
+pub fn register_desktop_tools(
+    reg: &mut ToolRegistry,
+    ctx: BuiltinToolContext,
+    coordinator: Option<CoordinatorWiring>,
+) {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
     tool_file::register_all(reg, ctx.clone());
     tool_shell::register_all(reg, ctx.clone());
@@ -105,7 +226,24 @@ pub fn register_desktop_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
     tool_task::register_all(reg, ctx.clone());
     // ----- desktop-only tool crates ----------------------------------------
     tool_agent::register_all(reg, ctx.clone());
-    tool_team::register_all(reg, ctx.clone());
+    match coordinator {
+        // Coordinator-capable session: register the coordinator `TeamCreate` /
+        // `TeamDelete` IN PLACE OF `tool_team`'s pair. `tool_team::register_all`
+        // is deliberately NOT called — splicing-after would silently shadow.
+        Some(CoordinatorWiring {
+            team,
+            mode,
+            spawn_seam,
+        }) => {
+            for tool in coordinator::internal_tools::coordinator_internal_tools(
+                team, mode, spawn_seam,
+            ) {
+                reg.register_builtin(tool);
+            }
+        }
+        // Default session: `tool_team`'s pair, coordinator tools absent.
+        None => tool_team::register_all(reg, ctx.clone()),
+    }
     tool_worktree::register_all(reg, ctx.clone());
     tool_mcp::register_all(reg, ctx.clone());
     tool_lsp::register_all(reg, ctx);
@@ -169,6 +307,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     routing: None,
 ///     mcp_paths: vec![PathBuf::from("/tmp/project/.mcp.json")],
 ///     use_noop_permission_gate: false,
+///     session_started_as_coordinator: false,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -207,6 +346,14 @@ pub struct DesktopConfig {
     /// When `true`, bind `NoOpPermissionGate` (the CLI default); when `false`,
     /// the host binds the connection-scoped `AdapterPermissionGate`.
     pub use_noop_permission_gate: bool,
+    /// M10 build-time coordinator-activation flag. When `true`, `build()`
+    /// enters coordinator multi-agent mode and registers the coordinator
+    /// `TeamCreate`/`TeamDelete` tools IN PLACE OF `tool_team`'s pair (decided
+    /// at build time — the registry is built-once-and-moved). Defaults to
+    /// `false`: a default session is byte-identical to the pre-M10 build
+    /// (mode off, `tool_team` unchanged, no teammate spawned). Additive to the
+    /// frozen field set.
+    pub session_started_as_coordinator: bool,
 }
 
 impl Default for DesktopConfig {
@@ -221,6 +368,7 @@ impl Default for DesktopConfig {
             routing: None,
             mcp_paths: Vec::new(),
             use_noop_permission_gate: true,
+            session_started_as_coordinator: false,
         }
     }
 }
@@ -270,6 +418,18 @@ pub struct DesktopRuntime {
     /// The desktop task registry shared with the tool context (the TUI / a
     /// transport wraps it in a poller to read live background-task state).
     pub task_registry: Arc<tasks::registry::TaskRegistry>,
+    /// M10: the per-session coordinator team registry. One is constructed per
+    /// `build()` regardless of mode so the status feed (and the PHASE-2 command
+    /// router) always have a handle to read; it is observable but empty (no
+    /// workers) unless a coordinator session spawns teammates via `TeamCreate`.
+    pub coordinator: Arc<coordinator::TeamRegistry>,
+    /// M10: the per-session coordinator-mode flag. Entered at build time only
+    /// when `cfg.session_started_as_coordinator` is `true`; otherwise this is
+    /// constructed disabled (`is_enabled() == false`) and a default session is
+    /// byte-identical to the pre-M10 build. A `call()`-time gate also consults
+    /// it (defense-in-depth) so a future `/coordinator exit()` can neutralize
+    /// the tools without a registry rebuild.
+    pub coordinator_mode: Arc<coordinator::CoordinatorMode>,
     /// The connection-scoped [`AdapterPermissionGate`] handle, present ONLY when
     /// `cfg.use_noop_permission_gate` is `false`. The transport calls
     /// [`AdapterPermissionGate::resolve`] on this to satisfy a parked `check()`
@@ -442,6 +602,10 @@ pub async fn build(
     //       `run_subagent_loop` (gated on `ctx.api_client.is_some()`) instead of
     //       the legacy stub completion.
     let subagent_pool = Arc::new(agent::StateMachinePool::new(Arc::new(PosixRuntime::new()), 4));
+    // Clone the subagent model seam BEFORE it is moved into the spawner — the
+    // M10 coordinator teammate handler (T13) hands the SAME seam to every
+    // spawned `InProcessTeammate` so it drives the real multi-turn loop.
+    let teammate_api = subagent_api.clone();
     let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> = Arc::new(
         agent::PoolSubagentSpawner::new(subagent_pool).with_api_client(subagent_api),
     );
@@ -605,9 +769,89 @@ pub async fn build(
         Arc::new(PosixSandbox::new()),
         mcp_registry.clone(),
     );
+
+    // (5.46) M10 (T13): construct the per-session coordinator subsystem — one
+    //        `TeamRegistry` + one `CoordinatorMode` per `build()`. The registry
+    //        is observable (the status feed / PHASE-2 command router read it)
+    //        but stays empty unless a coordinator session spawns teammates. The
+    //        mode is entered at BUILD time ONLY when the session was started as a
+    //        coordinator (the registry is built-once-and-moved, so mode-exclusive
+    //        tool selection must be decided here); a default session leaves it
+    //        DISABLED so the build is byte-identical to the pre-M10 build.
+    let coordinator_id = protocol::AgentId::new();
+    let coordinator = Arc::new(coordinator::TeamRegistry::new(coordinator_id));
+    let coordinator_mode = {
+        let mut mode = coordinator::CoordinatorMode::new();
+        mode.session_started_as_coordinator = cfg.session_started_as_coordinator;
+        if cfg.session_started_as_coordinator {
+            mode.enter();
+        }
+        Arc::new(mode)
+    };
+
+    // (5.46a) M10 (T13): register the `InProcessTeammate` handler DIRECTLY (not
+    //        via `register_agent_handlers`) so the coordinator's
+    //        `CoordinatorStatusSink` is attached — that sink maps the teammate's
+    //        `TaskStatus` transitions onto `WorkerStatus` AND pushes the live
+    //        `active_workers` scalar to the orchestrator-facing `OutputStream`.
+    //        Registration takes `&mut self`, so it MUST happen before the
+    //        registry is `Arc`-wrapped below.
+    //
+    //        Teammates run in their OWN `StateMachinePool` (`TEAMMATE_POOL_CAP`),
+    //        separate from the `AgentTool` `subagent_pool`: persistent teammates
+    //        park on `wait_for_message` and never free their slot, so a shared
+    //        pool would risk starving one-shot subagent spawns (T14 regression).
+    //
+    //        The handler's tool-dispatch seam is a `DeferredToolInvoker`: the
+    //        teammate must inherit the parent's `Arc<ToolRegistry>` (recursion
+    //        lock), but that registry is assembled AFTER this point (its
+    //        `BuiltinToolContext` carries `task_registry.clone()`). The deferred
+    //        invoker is injected now and bound to the real `RegistryToolInvoker`
+    //        once `tools` exists (5.5a). Definition resolution relies on the
+    //        handler default `DefaultTeammateDefinition` (permissive) — we do NOT
+    //        attach a catalog-backed resolver, which would return `None` for the
+    //        team-lead name and silently fail every spawn.
+    let coordinator_sink = Arc::new(coordinator::CoordinatorStatusSink::new(
+        coordinator.clone(),
+        output.clone(),
+    ));
+    let teammate_invoker = Arc::new(DeferredToolInvoker::new());
+    let teammate_pool = Arc::new(agent::StateMachinePool::new(
+        Arc::new(PosixRuntime::new()),
+        TEAMMATE_POOL_CAP,
+    ));
+    let teammate_handler = tasks::handlers::InProcessTeammateHandler::new(
+        teammate_pool,
+        task_registry_inner.output_manager.clone(),
+        teammate_api,
+    )
+    .with_tool_invoker(
+        teammate_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>
+    )
+    .with_status_sink(coordinator_sink as Arc<dyn tasks::handlers::TaskStatusSink>);
+    task_registry_inner
+        .register_handler(tasks::TaskType::InProcessTeammate, Arc::new(teammate_handler));
+
     let task_registry = Arc::new(task_registry_inner);
 
+    // (5.47) M10 (T13): the typed spawn/kill seam the coordinator's `TeamCreate` /
+    //        `TeamDelete` use to start / stop the real backing `InProcessTeammate`
+    //        task. `TaskRegistry` impls `TeamSpawnSeam` (T04); the same `Arc` the
+    //        tool context holds is reused so the spawned teammate is keyed on the
+    //        worker identity threaded through.
+    let spawn_seam: Arc<dyn traits::team_spawn::TeamSpawnSeam> = task_registry.clone();
+
     // (5.5) Assemble the desktop tool registry through the composition root.
+    //       A coordinator session shares the team's `MailboxRouter` with the
+    //       builtin `SendMessage` tool by casting it onto `tool_ctx.mailbox_router`
+    //       (the trait impl lives on `MailboxRouter`); a default session leaves it
+    //       `None` — byte-identical to the pre-M10 build.
+    let coordinator_mailbox: Option<Arc<dyn traits::mailbox::MailboxRouterHandle>> =
+        if cfg.session_started_as_coordinator {
+            Some(coordinator.mailbox_router.clone() as Arc<dyn traits::mailbox::MailboxRouterHandle>)
+        } else {
+            None
+        };
     let tool_ctx = BuiltinToolContext {
         fs: Arc::new(PosixFileSystem::new(cwd.clone())),
         bus: Arc::new(telemetry::AnalyticsBus::new()),
@@ -633,7 +877,7 @@ pub async fn build(
         task_registry: Some(
             task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>
         ),
-        mailbox_router: None,
+        mailbox_router: coordinator_mailbox,
         budget_enforcer: Some(budget_enforcer),
         mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: None,
@@ -642,7 +886,34 @@ pub async fn build(
         share: None,
         computer_control: None,
     };
-    let tools = Arc::new(desktop_tool_registry(tool_ctx));
+    // (5.5) M10 (T12/T13): select the team-tool variant at BUILD time. A
+    //        coordinator session passes `Some(CoordinatorWiring { team, mode,
+    //        spawn_seam })` so the coordinator `TeamCreate` / `TeamDelete` are
+    //        registered IN PLACE OF `tool_team`'s pair; a default session passes
+    //        `None`, leaving `tool_team`'s pair and the coordinator tools absent
+    //        — byte-identical to the pre-M10 build.
+    let coordinator_wiring = if cfg.session_started_as_coordinator {
+        Some(CoordinatorWiring {
+            team: coordinator.clone(),
+            mode: coordinator_mode.clone(),
+            spawn_seam: spawn_seam.clone(),
+        })
+    } else {
+        // Drop the spawn-seam clone path; it is unused in a default session.
+        let _ = &spawn_seam;
+        None
+    };
+    let tools = Arc::new(desktop_tool_registry(tool_ctx, coordinator_wiring));
+
+    // (5.5a) M10 (T13): bind the teammate handler's `DeferredToolInvoker` to the
+    //        real `RegistryToolInvoker` now that `tools` exists. The invoker
+    //        stores the SAME `Arc<ToolRegistry>` the orchestrator owns, so a
+    //        teammate's tool dispatch reuses the parent registry (recursion-lock
+    //        invariant). No teammate can dispatch before `build()` returns, so
+    //        the cell is always filled before first use.
+    teammate_invoker.set(Arc::new(
+        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()),
+    ));
 
     let orch = Arc::new(
         ConversationOrchestrator::new(
@@ -665,13 +936,15 @@ pub async fn build(
         dispatcher,
         auth,
         task_registry,
+        coordinator,
+        coordinator_mode,
         permission_gate: adapter_gate,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build, DesktopConfig};
+    use super::{build, desktop_tool_registry, CoordinatorWiring, DesktopConfig};
     use std::sync::Arc;
 
     /// F2-00: the deliverable-zero config is constructible from `Default` and
@@ -737,6 +1010,7 @@ mod tests {
             routing: None,
             mcp_paths: vec![cwd.join(".mcp.json")],
             use_noop_permission_gate: use_noop,
+            session_started_as_coordinator: false,
         };
         (tmp, cfg)
     }
@@ -834,5 +1108,285 @@ mod tests {
                 .await
         );
         let _ = task.await.unwrap();
+    }
+
+    /// T11: the build-time coordinator-activation flag defaults to `false`, so a
+    /// default-constructed `DesktopConfig` is NOT a coordinator session.
+    /// Additive guardrail: default sessions must be byte-identical, mode off.
+    #[test]
+    fn default_config_is_not_coordinator() {
+        let cfg = DesktopConfig::default();
+        assert!(
+            !cfg.session_started_as_coordinator,
+            "default DesktopConfig must not start as coordinator"
+        );
+
+        // The frozen field set remains reachable via struct-update syntax, and
+        // the flag flips cleanly to opt into a coordinator session.
+        let coord = DesktopConfig {
+            session_started_as_coordinator: true,
+            ..cfg
+        };
+        assert!(coord.session_started_as_coordinator);
+    }
+
+    /// T11: `build()` surfaces the per-session coordinator subsystem handles
+    /// (`TeamRegistry` + `CoordinatorMode`) on the runtime so the status feed
+    /// (and PHASE-2 command router) can read them. A default-config build is
+    /// additive-only: the mode is constructed but NOT entered.
+    #[tokio::test]
+    async fn runtime_exposes_coordinator_handles() {
+        let (_tmp, cfg) = test_config(true);
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() failed");
+
+        // The handles exist on the runtime …
+        assert!(
+            rt.coordinator.list().await.is_empty(),
+            "a fresh coordinator session has no workers"
+        );
+        // … and a default (non-coordinator) build leaves the mode disabled.
+        assert!(
+            !rt.coordinator_mode.is_enabled(),
+            "default build must not enter coordinator mode"
+        );
+    }
+
+    // ----- T12: mode-exclusive coordinator tool selection -------------------
+
+    /// No-op spawn seam — the tool-selection tests never invoke it; they only
+    /// need a concrete `Arc<dyn TeamSpawnSeam>` to construct `CoordinatorWiring`.
+    struct NoopSeam;
+
+    #[async_trait::async_trait]
+    impl traits::team_spawn::TeamSpawnSeam for NoopSeam {
+        async fn spawn_teammate(
+            &self,
+            _agent_id: protocol::AgentId,
+            _name: String,
+            _description: String,
+        ) -> Result<String, traits::team_spawn::TeamSpawnError> {
+            Ok(String::new())
+        }
+        async fn kill(
+            &self,
+            _task_id: &str,
+        ) -> Result<(), traits::team_spawn::TeamSpawnError> {
+            Ok(())
+        }
+    }
+
+    /// A fully-stubbed `BuiltinToolContext` — enough to enumerate registered
+    /// names and probe per-tool behavior markers; no tool is ever invoked.
+    fn stub_tool_ctx() -> tool_api::BuiltinToolContext {
+        tool_api::test_support::shell_test_ctx(traits::process::ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        })
+    }
+
+    fn coordinator_wiring() -> CoordinatorWiring {
+        CoordinatorWiring {
+            team: Arc::new(coordinator::TeamRegistry::new(protocol::AgentId::new())),
+            mode: Arc::new(coordinator::CoordinatorMode::new()),
+            spawn_seam: Arc::new(NoopSeam),
+        }
+    }
+
+    /// T12: a default session (`coordinator: None`) registers exactly ONE
+    /// `TeamCreate`, and it is `tool_team`'s — distinguished by its behavior
+    /// marker `max_result_size_chars() == 30_000` (`MAX_TOOL_OUTPUT_LENGTH`),
+    /// vs. the coordinator tool's `100_000`. Guardrail: byte-identical default.
+    #[test]
+    fn tool_registry_default_mode_registers_tool_team_create() {
+        let reg = desktop_tool_registry(stub_tool_ctx(), None);
+
+        let names = reg.all_names();
+        assert_eq!(
+            names.iter().filter(|n| *n == "TeamCreate").count(),
+            1,
+            "default mode must register exactly one TeamCreate"
+        );
+        assert_eq!(
+            names.iter().filter(|n| *n == "TeamDelete").count(),
+            1,
+            "default mode must register exactly one TeamDelete"
+        );
+
+        // Behavior marker: tool_team's TeamCreate caps results at 30_000;
+        // the coordinator's caps at 100_000.
+        let create = reg
+            .find_by_name("TeamCreate")
+            .expect("TeamCreate must be registered");
+        assert_eq!(
+            create.max_result_size_chars(),
+            tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH,
+            "default mode must register tool_team's TeamCreate (30_000 cap)"
+        );
+    }
+
+    /// T12: a coordinator-capable session (`coordinator: Some`) registers the
+    /// coordinator `TeamCreate` IN PLACE OF `tool_team`'s — still exactly ONE
+    /// `TeamCreate` and ONE `TeamDelete` (no silent shadow, no duplicate name
+    /// in the system prompt). The registered `TeamCreate` is the coordinator's,
+    /// distinguished by `max_result_size_chars() == 100_000`.
+    #[test]
+    fn tool_registry_coordinator_mode_registers_coordinator_create() {
+        let reg = desktop_tool_registry(stub_tool_ctx(), Some(coordinator_wiring()));
+
+        let names = reg.all_names();
+        assert_eq!(
+            names.iter().filter(|n| *n == "TeamCreate").count(),
+            1,
+            "coordinator mode must register exactly one TeamCreate (no shadow)"
+        );
+        assert_eq!(
+            names.iter().filter(|n| *n == "TeamDelete").count(),
+            1,
+            "coordinator mode must register exactly one TeamDelete (no shadow)"
+        );
+
+        // No duplicate names ANYWHERE in the assembled registry.
+        let mut sorted = names.clone();
+        sorted.sort();
+        let mut deduped = sorted.clone();
+        deduped.dedup();
+        assert_eq!(
+            sorted, deduped,
+            "no tool name may appear twice in the assembled registry"
+        );
+
+        // Behavior marker: the registered TeamCreate is the coordinator's.
+        let create = reg
+            .find_by_name("TeamCreate")
+            .expect("TeamCreate must be registered");
+        assert_eq!(
+            create.max_result_size_chars(),
+            100_000,
+            "coordinator mode must register the coordinator TeamCreate (100_000 cap)"
+        );
+    }
+
+    // ----- T13: build() composition-root coordinator wiring -----------------
+
+    /// T13: a `build()` with `session_started_as_coordinator: true` enters
+    /// coordinator mode at BUILD time, so `runtime.coordinator_mode.is_enabled()`
+    /// is `true` and the `session_started_as_coordinator` flag is recorded on the
+    /// mode. A default-config build leaves the mode disabled (asserted in
+    /// `runtime_exposes_coordinator_handles`) — the additive guardrail.
+    #[tokio::test]
+    async fn build_coordinator_session_enters_mode() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.session_started_as_coordinator = true;
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() failed");
+
+        assert!(
+            rt.coordinator_mode.is_enabled(),
+            "a coordinator session must enter coordinator mode at build time"
+        );
+        assert!(
+            rt.coordinator_mode.session_started_as_coordinator,
+            "the build-time activation flag must be recorded on the mode"
+        );
+        // A coordinator session still surfaces an (empty) registry.
+        assert!(
+            rt.coordinator.list().await.is_empty(),
+            "a freshly-built coordinator session has no workers yet"
+        );
+    }
+
+    /// T13: a coordinator session wires the shared `MailboxRouter` (the one the
+    /// `TeamRegistry` owns) into `BuiltinToolContext.mailbox_router`, so the
+    /// builtin `SendMessage` tool and coordinator routing share the SAME
+    /// mailboxes. This exercises the exact `tool_ctx.mailbox_router = Some(..)`
+    /// wiring decision T13 introduces in `build()`: we assemble the desktop tool
+    /// registry the way the coordinator branch does (the team's router cast to
+    /// `dyn MailboxRouterHandle` placed on the context), then drive the builtin
+    /// `SendMessage` tool. Because the router IS wired, a route to a registered
+    /// worker mailbox SUCCEEDS — the tool no longer takes the "router not wired"
+    /// `Internal` error path it returns when `mailbox_router` is `None`.
+    #[tokio::test]
+    async fn mailbox_router_is_wired_when_coordinator() {
+        // The shared coordinator router — exactly what `build()` clones into
+        // `tool_ctx.mailbox_router` on the coordinator branch.
+        let team = Arc::new(coordinator::TeamRegistry::new(protocol::AgentId::new()));
+        let worker = team
+            .spawn_worker("explorer".into(), "alpha".into(), String::new())
+            .await
+            .expect("spawn_worker registers a mailbox on the shared router");
+
+        // Assemble the tool registry the way `build()`'s coordinator branch does:
+        // the team's `MailboxRouter` cast to `dyn MailboxRouterHandle` on the
+        // context (the load-bearing wiring — `None` here is the pre-M10 default).
+        let mut ctx = stub_tool_ctx();
+        ctx.mailbox_router = Some(team.mailbox_router.clone()
+            as Arc<dyn traits::mailbox::MailboxRouterHandle>);
+        let wiring = CoordinatorWiring {
+            team: team.clone(),
+            mode: Arc::new(coordinator::CoordinatorMode::new()),
+            spawn_seam: Arc::new(NoopSeam),
+        };
+        let reg = desktop_tool_registry(ctx, Some(wiring));
+
+        // The builtin SendMessage tool (from `tool_ui`) reads
+        // `ctx.mailbox_router`. With the router wired, routing to the registered
+        // worker succeeds. With `None` it would return the
+        // "MailboxRouterHandle not wired" `Internal` error instead.
+        let send = reg
+            .find_by_name("SendMessage")
+            .expect("SendMessage builtin must be registered");
+        let result = send
+            .call(
+                serde_json::json!({
+                    "to_agent_id": worker.as_uuid().to_string(),
+                    "message": "hello teammate",
+                }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect("SendMessage must route through the wired router (not the unwired error path)");
+        // A successful route returns a result the tool surfaces (non-error path).
+        let _ = result;
+
+        // Negative side of the conditional: the DEFAULT branch leaves
+        // `mailbox_router` `None` (exactly what `build()` does for a non-
+        // coordinator session), so the SAME SendMessage call takes the
+        // "router not wired" `Internal` error path. This locks both sides of
+        // the T13 wiring decision so a regression in either is caught.
+        let default_reg = desktop_tool_registry(stub_tool_ctx(), None);
+        let default_send = default_reg
+            .find_by_name("SendMessage")
+            .expect("SendMessage builtin must be registered in the default set too");
+        let err = default_send
+            .call(
+                serde_json::json!({
+                    "to_agent_id": worker.as_uuid().to_string(),
+                    "message": "hello teammate",
+                }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect_err("default (unwired) SendMessage must error: no router on the context");
+        assert!(
+            format!("{err}").contains("not wired"),
+            "default session must hit the 'MailboxRouterHandle not wired' path, got: {err}"
+        );
     }
 }

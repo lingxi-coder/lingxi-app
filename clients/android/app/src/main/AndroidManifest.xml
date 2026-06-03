@@ -41,6 +41,21 @@
             </intent-filter>
         </activity>
 
+        <!-- Device-share layer: exposes JPEG bytes (written under
+             cache/shared_images) to the chooser target via a content:// Uri.
+             The authority is ${applicationId}.fileprovider so it tracks the
+             debug applicationIdSuffix; ShareController derives the same string
+             from the runtime package name. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
     </application>
 
 </manifest>

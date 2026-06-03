@@ -218,6 +218,99 @@ pub struct TtsAudioFfi {
 }
 
 // ---------------------------------------------------------------------------
+// Share — foreign (Kotlin) callback interface + its engine bridge.
+// ---------------------------------------------------------------------------
+//
+// Mirrors the AndroidStt/AndroidTts/AndroidCamera pattern: the Kotlin layer
+// implements a crate-local async `AndroidShare` callback interface (the system
+// `Intent.ACTION_SEND` share sheet) and hands it across the FFI seam. The
+// engine consumes the SHARED `traits::SharingService` seam, so
+// `AndroidShareBridge` adapts the crate-local interface to its `traits`
+// counterpart. The shared `traits::SharePayload` is destructured into the three
+// flat `text` / `url` / `image_bytes` args to keep the FFI flat; the bridge
+// maps the FFI result/error back onto `traits::ShareResult` / `traits::ShareError`.
+
+/// FFI error surface for the Android share callback interface. A flat enum so
+/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// fans it back out onto the richer [`traits::ShareError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum ShareFfiError {
+    /// Sharing is unsupported on this device / for this payload.
+    #[error("sharing unsupported")]
+    Unsupported,
+    /// Any other native failure.
+    #[error("share error: {message}")]
+    Other {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// FFI carrier for the outcome of a native share — whether the user completed
+/// or dismissed the system share sheet. Mapped to [`traits::ShareResult`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Debug, Clone)]
+pub enum ShareResultFfi {
+    /// The user completed the share (chose a target app).
+    Success,
+    /// The user dismissed the share sheet without sharing.
+    Cancelled,
+}
+
+/// Crate-local foreign callback interface for native sharing — the Kotlin app
+/// implements it over the system `Intent.ACTION_SEND` share sheet. Bridged to
+/// [`traits::SharingService`] by [`AndroidShareBridge`]. The payload crosses the
+/// seam as three flat optionals (`text` / `url` / `image_bytes`).
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidShare: Send + Sync {
+    /// Present the native share sheet for the given payload and report whether
+    /// the user completed or cancelled it.
+    async fn share(
+        &self,
+        text: Option<String>,
+        url: Option<String>,
+        image_bytes: Option<Vec<u8>>,
+    ) -> Result<ShareResultFfi, ShareFfiError>;
+}
+
+/// Adapts the crate-local [`AndroidShare`] callback interface to the shared
+/// [`traits::SharingService`] seam the engine consumes. Destructures
+/// [`traits::SharePayload`] into the flat `text` / `url` / `image_bytes` args
+/// and fans [`ShareResultFfi`] / [`ShareFfiError`] back out onto
+/// [`traits::ShareResult`] / [`traits::ShareError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct AndroidShareBridge {
+    inner: Box<dyn AndroidShare>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::SharingService for AndroidShareBridge {
+    async fn share(
+        &self,
+        payload: traits::SharePayload,
+    ) -> Result<traits::ShareResult, traits::ShareError> {
+        let traits::SharePayload {
+            text,
+            url,
+            image_bytes,
+        } = payload;
+        match self.inner.share(text, url, image_bytes).await {
+            Ok(ShareResultFfi::Success) => Ok(traits::ShareResult::Success),
+            Ok(ShareResultFfi::Cancelled) => Ok(traits::ShareResult::Cancelled),
+            Err(ShareFfiError::Unsupported) => Err(traits::ShareError::Unsupported),
+            Err(ShareFfiError::Other { message }) => Err(traits::ShareError::Other(message)),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Camera — foreign (Kotlin) callback interface + its engine bridge.
 // ---------------------------------------------------------------------------
 //
@@ -547,6 +640,9 @@ impl ClientEventListener for AndroidListenerBridge {
 /// - `camera` — the foreign camera callback (bridged to
 ///   [`traits::CameraControl`]) so `tool-camera` routes through CameraX +
 ///   the system photo picker.
+/// - `share` — the foreign share callback (bridged to
+///   [`traits::SharingService`]) so `tool-share` routes through the system
+///   `Intent.ACTION_SEND` share sheet.
 ///
 /// On non-Android hosts this returns [`MobileEngineError::PlatformUnavailable`]
 /// (the `AndroidPlatform` is only linked under `cfg(target_os = "android")`).
@@ -561,6 +657,7 @@ pub fn build_android_engine(
     stt: Box<dyn AndroidStt>,
     tts: Box<dyn AndroidTts>,
     camera: Box<dyn AndroidCamera>,
+    share: Box<dyn AndroidShare>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -583,7 +680,7 @@ pub fn build_android_engine(
             app_files_root: std::path::PathBuf::from(app_files_root),
             camera: Arc::new(AndroidCameraBridge { inner: camera }),
             voice: Arc::new(stub_capabilities::StubVoice),
-            share: Arc::new(stub_capabilities::StubShare),
+            share: Arc::new(AndroidShareBridge { inner: share }),
             stt: Some(Arc::new(AndroidSttBridge { inner: stt })),
             tts: Some(Arc::new(AndroidTtsBridge { inner: tts })),
         }));
@@ -601,6 +698,7 @@ pub fn build_android_engine(
             stt,
             tts,
             camera,
+            share,
         );
         Err(MobileEngineError::PlatformUnavailable)
     }

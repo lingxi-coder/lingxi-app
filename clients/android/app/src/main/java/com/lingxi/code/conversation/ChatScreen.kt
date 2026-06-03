@@ -83,6 +83,7 @@ fun ChatScreen(
     onCameraClick: () -> Unit = {},
     attachment: ComposerAttachment? = null,
     onRemoveAttachment: () -> Unit = {},
+    onShare: (String) -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val listState = rememberLazyListState()
@@ -120,6 +121,7 @@ fun ChatScreen(
             MessageList(
                 state = state,
                 listState = listState,
+                onShare = onShare,
                 modifier = Modifier.weight(1f),
             )
             Composer(
@@ -206,6 +208,7 @@ private fun IconButton(
 private fun MessageList(
     state: ChatState,
     listState: androidx.compose.foundation.lazy.LazyListState,
+    onShare: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     LazyColumn(
@@ -219,7 +222,7 @@ private fun MessageList(
             item(key = "empty") { EmptyState() }
         }
         items(state.messages, key = { it.id }) { m ->
-            MessageBubble(message = m)
+            MessageBubble(message = m, onShare = onShare)
         }
         if (state.streaming) {
             item(key = "streaming") { StreamingRow() }

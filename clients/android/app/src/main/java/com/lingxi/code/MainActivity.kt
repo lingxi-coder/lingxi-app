@@ -6,6 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import com.lingxi.code.vision.CameraController
+import com.lingxi.code.share.ShareController
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
@@ -59,6 +60,11 @@ class MainActivity : ComponentActivity() {
                 pickMedia = pickMediaLauncher,
             ),
         )
+        // Device-share: hand the application Context to the process-global
+        // ShareController, which the UniFFI AndroidShare adapter drives across
+        // the FFI seam to launch the system share sheet (the device analog of
+        // how the camera/picker is invoked, but with no ActivityResult to await).
+        ShareController.attach(applicationContext)
 
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -108,6 +114,7 @@ class MainActivity : ComponentActivity() {
         // Drop the launcher references so a finishing Activity can't be leaked by
         // the process-global controller and any in-flight capture is cancelled.
         CameraController.detach()
+        ShareController.detach()
         super.onDestroy()
     }
 }

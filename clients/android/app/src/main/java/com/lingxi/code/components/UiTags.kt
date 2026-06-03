@@ -17,6 +17,9 @@ object UiTags {
     /** The composer's camera affordance that triggers an on-device photo capture. */
     const val COMPOSER_CAMERA = "tag.composerCamera"
 
+    /** A message bubble's share affordance that surfaces the native share chooser. */
+    const val MESSAGE_SHARE = "tag.messageShare"
+
     /** Prefix for the drawer section tabs; suffixed with the [DrawerSection] key. */
     const val DRAWER_TAB_PREFIX = "tag.drawerTab."
 

@@ -2,6 +2,7 @@ package com.lingxi.code.conversation
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +20,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -29,6 +31,7 @@ import androidx.compose.ui.unit.sp
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.Pill
+import com.lingxi.code.components.UiTags
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
 import com.lingxi.code.theme.LingXiTheme
@@ -48,6 +51,7 @@ fun MessageBubble(
     message: Message,
     modifier: Modifier = Modifier,
     dimmed: Boolean = false,
+    onShare: (String) -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     if (message.role == Role.User) {
@@ -85,6 +89,23 @@ fun MessageBubble(
             ) {
                 message.tag?.let { Pill(text = it, color = t.accent) }
                 AIText(markdown = message.text)
+                // Share affordance: surfaces the native chooser for this reply's
+                // text through the same ShareController the engine bridges onto
+                // `traits::SharingService` — so a bubble share and a `tool-share`
+                // invocation are the identical launch path (mirrors how the
+                // composer's camera affordance reuses CameraController).
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onShare(message.text) }
+                            .testTag(UiTags.MESSAGE_SHARE),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        LXIcon(name = LXIconName.Share, size = 15.dp, color = t.text3, stroke = 1.8f)
+                    }
+                }
             }
         }
     }

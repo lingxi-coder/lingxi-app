@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider roots for the device-share layer: image bytes handed across the
+     AndroidShare FFI seam are written under cache/shared_images and exposed to
+     the chooser target via a content:// Uri. -->
+<paths>
+    <cache-path
+        name="shared_images"
+        path="shared_images/" />
+</paths>

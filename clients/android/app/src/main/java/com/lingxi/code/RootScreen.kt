@@ -29,6 +29,7 @@ import com.lingxi.code.drawer.DrawerContent
 import com.lingxi.code.drawer.rememberDrawerUiState
 import com.lingxi.code.model.MockData
 import com.lingxi.code.theme.LingXiTheme
+import com.lingxi.code.share.rememberShare
 import com.lingxi.code.vision.rememberCameraCapture
 import com.lingxi.code.voice.VoiceFlowOverlay
 import com.lingxi.code.voice.buildVoiceEngine
@@ -110,6 +111,12 @@ fun RootScreen(
         },
     )
 
+    // Device-share: tapping a message bubble's share affordance surfaces the
+    // native chooser through the same ShareController the engine bridges onto
+    // `traits::SharingService` (the device-share analog of how onCameraClick
+    // reuses CameraController for both the UI affordance and `tool-camera`).
+    val onShare = rememberShare()
+
     fun closeDrawer() = scope.launch { drawerState.close() }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -161,6 +168,7 @@ fun RootScreen(
                     onCameraClick = onCameraClick,
                     attachment = attachment,
                     onRemoveAttachment = { attachment = null },
+                    onShare = onShare,
                 )
             }
         }

@@ -31,7 +31,7 @@ import androidx.compose.ui.unit.dp
 enum class LXIconName {
     Menu, Edit, Search, Sparkle, Book, Workflow, Cog, Plus, Mic, Paperclip,
     Chevron, Sun, Moon, Check, Pin, Brain, ArrowUp, Folder, Clock, Message,
-    ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy,
+    ChevronR, Play, Pause, X, Skill, Plug, Dream, Link, Copy, Share,
 }
 
 @Composable
@@ -388,6 +388,14 @@ private fun strokePaths(name: LXIconName): List<() -> Path> = when (name) {
                 line(15f, 5f)
             }
         },
+    )
+    // Share — three nodes connected by two edges (the classic share glyph).
+    LXIconName.Share -> listOf(
+        { circle(18f, 5f, 3f) },
+        { circle(6f, 12f, 3f) },
+        { circle(18f, 19f, 3f) },
+        { line(listOf(8.59f to 13.51f, 15.42f to 17.49f)) },
+        { line(listOf(15.41f to 6.51f, 8.59f to 10.49f)) },
     )
     // Filled glyphs — no stroke geometry.
     LXIconName.ArrowUp, LXIconName.Play, LXIconName.Pause -> emptyList()

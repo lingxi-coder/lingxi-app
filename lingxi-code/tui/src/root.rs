@@ -452,6 +452,22 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 HooksOutcome::Stay => {}
             }
         }
+        Some(Screen::Model(state)) => {
+            // Model picker. The SYNC key path can't `.await switch_model`, so on
+            // Commit it raises `pending_switch_model` (the async
+            // `pump_switch_model` performs the write + refreshes the status line)
+            // and closes; Cancel just closes. Stay keeps the highlight.
+            use crate::screens::model::{handle_model_key, ModelOutcome};
+            let ct_key = iocraft_to_crossterm028_key(k);
+            match handle_model_key(state, ct_key.code) {
+                ModelOutcome::Commit(model) => {
+                    st.pending_switch_model = Some(model);
+                    st.close_screen();
+                }
+                ModelOutcome::Cancel => st.close_screen(),
+                ModelOutcome::Stay => {}
+            }
+        }
         Some(Screen::Skills(state)) => {
             // (M9-09) Skill-registry viewer (read-only). The pure
             // `handle_skills_key` reducer first delegates scroll keys to the
@@ -1008,6 +1024,80 @@ pub async fn pump_open_hooks(
         return false;
     }
     st.open_hooks(rows);
+    true
+}
+
+/// Async `/model` picker open pump. Mirrors [`pump_open_agents`]: fetches
+/// `OrchestratorHandle::list_available_models` OUTSIDE the lock under the
+/// priority guard, reads the active model from the status snapshot, then opens
+/// the picker pre-highlighted on the current model.
+pub async fn pump_open_model(
+    state: &Arc<Mutex<AppState>>,
+    handle: &Arc<dyn traits::OrchestratorHandle>,
+) -> bool {
+    {
+        let mut st = state.lock().await;
+        if !st.pending_open_model {
+            return false;
+        }
+        if st.pending_permission.is_some() || st.active_screen.is_some() {
+            return false;
+        }
+        st.pending_open_model = false;
+    }
+
+    let models = handle.list_available_models().await;
+
+    let mut st = state.lock().await;
+    if st.pending_permission.is_some() || st.active_screen.is_some() {
+        st.pending_open_model = true;
+        return false;
+    }
+    let current = st.status.model.clone();
+    st.open_model(models, current);
+    true
+}
+
+/// Async model-switch commit pump. Consumes `AppState.pending_switch_model` (set
+/// by the picker's Enter), performs the async `OrchestratorHandle::switch_model`
+/// write OUTSIDE the lock, then on success updates the status-line model (so the
+/// header reflects the change immediately) or on failure pushes an error
+/// `SystemText`. Returns `true` iff a switch was attempted (redraw needed). No
+/// priority guard: the picker already closed itself on commit.
+pub async fn pump_switch_model(
+    state: &Arc<Mutex<AppState>>,
+    handle: &Arc<dyn traits::OrchestratorHandle>,
+) -> bool {
+    let model = {
+        let mut st = state.lock().await;
+        match st.pending_switch_model.take() {
+            Some(m) => m,
+            None => return false,
+        }
+    };
+
+    let result = handle.switch_model(&model).await;
+
+    let mut st = state.lock().await;
+    match result {
+        Ok(()) => {
+            // The status line reads `status.model`; update it so the header
+            // reflects the switch immediately (the next status refresh agrees).
+            st.status.model.clone_from(&model);
+            st.push_message(crate::state::RenderedMessage::SystemText {
+                body: format!("Set model to {model}"),
+                timestamp: chrono::Utc::now().timestamp(),
+                is_error: false,
+            });
+        }
+        Err(e) => {
+            st.push_message(crate::state::RenderedMessage::SystemText {
+                body: format!("Failed to switch model: {e}"),
+                timestamp: chrono::Utc::now().timestamp(),
+                is_error: true,
+            });
+        }
+    }
     true
 }
 
@@ -1574,6 +1664,14 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                         needs_redraw = true;
                     }
                     if pump_open_hooks(&state, handle).await {
+                        needs_redraw = true;
+                    }
+                    // `/model` picker open + the model-switch commit — both
+                    // handle-backed (list_available_models / switch_model).
+                    if pump_open_model(&state, handle).await {
+                        needs_redraw = true;
+                    }
+                    if pump_switch_model(&state, handle).await {
                         needs_redraw = true;
                     }
                 }

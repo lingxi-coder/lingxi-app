@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod hooks;
 pub mod mcp;
 pub mod memory;
+pub mod model;
 pub mod repl;
 pub mod resume;
 pub mod scroll;
@@ -127,4 +128,14 @@ pub enum Screen {
     /// CONFIGURATION (add/edit/remove → settings write) of claude-code's full
     /// `/hooks` is deferred (needs a settings-write seam).
     Hooks(hooks::HooksScreenState),
+    /// The `/model` picker — claude-code `ModelPicker`. A single-select list of
+    /// the available models (current marked `(current)`, pre-highlighted).
+    /// Interactive: `root::handle_screen_key` runs the pure `model::handle_model_key`
+    /// (↑/↓ move, Enter commit, Esc/`q` cancel). Opened by `/model` via the async
+    /// `pump_open_model` over `OrchestratorHandle::list_available_models`; on
+    /// commit the runner raises `AppState.pending_switch_model`, and
+    /// `root::pump_switch_model` performs the async `switch_model` write + updates
+    /// the status-line model. Unlike `theme`, there is NO live preview (the
+    /// switch is an async write, not a sync palette swap).
+    Model(model::ModelScreenState),
 }

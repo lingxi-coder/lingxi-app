@@ -9,6 +9,7 @@ pub mod classifier;
 pub mod dangerous_patterns;
 pub mod defaults_per_tool;
 pub mod denial_tracking;
+pub mod filesystem;
 pub mod gate;
 pub mod loader;
 pub mod mode;
@@ -21,6 +22,7 @@ pub mod shadow;
 pub mod update;
 
 pub use defaults_per_tool::tool_default;
+pub use filesystem::FsRoots;
 pub use gate::{
     PermissionDecision, PermissionGate, PermissionRequest, PermissionResponse, PromptDecision,
     PromptDefault, PromptError, PromptingGate,

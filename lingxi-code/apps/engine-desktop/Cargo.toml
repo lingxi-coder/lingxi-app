@@ -56,6 +56,9 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = "0.1"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+# Phase 3a: resolve `~`-prefixed permission patterns + the home root for
+# file-path content matching (same `dirs` version as `orchestrator`).
+dirs = "5"
 
 # F2-00: `DesktopConfig` carries the settings-declared `providers` block as
 # raw JSON values so `build()` (F2-01) can feed them to

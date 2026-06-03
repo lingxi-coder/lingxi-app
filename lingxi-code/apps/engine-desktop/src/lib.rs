@@ -761,7 +761,18 @@ pub async fn build(
                 }
             }
             let rule_count = rules.len();
-            let policy = Arc::new(permission::PermissionPolicy::from_rules(mode, rules));
+            // Phase 3a: supply the filesystem roots so file-path CONTENT rules
+            // (`Edit(src/**)`, `Read(./secrets/**)`) match the input path. Roots
+            // resolve per rule source — user settings against `claude_home`,
+            // project/local against `cwd` — exactly as claude-code's
+            // `rootPathForSource` does.
+            let roots = permission::FsRoots {
+                cwd: cwd.clone(),
+                home: dirs::home_dir(),
+                claude_home: cfg.claude_home.clone(),
+            };
+            let policy =
+                Arc::new(permission::PermissionPolicy::from_rules(mode, rules).with_roots(roots));
             tracing::info!(
                 rules = rule_count,
                 mode = ?mode,

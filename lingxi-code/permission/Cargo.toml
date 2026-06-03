@@ -16,6 +16,9 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "io-std"] }
 tracing.workspace = true
 regex = "1"
+# Faithful gitignore-glob matcher for file-path permission rules (3a) — the
+# Rust analogue of claude-code's `ignore` npm lib; already in Cargo.lock.
+ignore = "0.4"
 
 [dev-dependencies]
 # M8-P7-final: the tool_name_parity_test reads TOOL_NAME constants directly from

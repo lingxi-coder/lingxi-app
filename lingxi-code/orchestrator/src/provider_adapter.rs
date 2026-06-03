@@ -73,6 +73,14 @@ impl OrchestratorApiClient for ProviderApiAdapter {
 /// implementation above. Wiring an `Arc<dyn agent::SubagentApiClient>` (this
 /// adapter) into `agent::PoolSubagentSpawner::with_api_client` lets spawned
 /// subagents drive real model round-trips instead of the legacy stub.
+///
+/// The streaming override (`messages_create_stream`) delegates to the same real
+/// SSE transport as [`StreamingApiClient::stream`], so a spawned subagent's
+/// turns flow over the streaming channel; the agent crate's accumulator
+/// reassembles the events into the identical `MessageResponse` the
+/// non-streaming seam returns. (The trait's default would instead wrap the
+/// non-streaming `messages_create`; this override is what makes subagent turns
+/// genuinely stream.)
 #[async_trait]
 impl agent::SubagentApiClient for ProviderApiAdapter {
     async fn messages_create(
@@ -83,6 +91,19 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
     ) -> Result<MessageResponse, ApiError> {
         // Delegate to the orchestrator impl so the two seams never diverge.
         OrchestratorApiClient::messages_create(self, model, system, messages).await
+    }
+
+    async fn messages_create_stream(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<ConversationMessage>,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
+        // Real SSE transport, shared with `StreamingApiClient::stream`. Subagent
+        // turns carry no tool schemas yet (the frozen `ToolInvoker` exposes
+        // none), so pass empty `tools`; the agent-crate accumulator reassembles
+        // the streamed blocks into the same `MessageResponse` shape.
+        StreamingApiClient::stream(self, model, system, messages, Vec::new()).await
     }
 }
 
@@ -386,6 +407,34 @@ mod tests {
         );
         assert_eq!(provider.seen_model.lock().unwrap().as_deref(), Some("gpt-4o"));
         assert_eq!(resp.model, "gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn subagent_streaming_seam_delegates_to_stream() {
+        // The `SubagentApiClient::messages_create_stream` override drives the
+        // real SSE transport — empty tools + stream flag set, identical to
+        // `StreamingApiClient::stream`. This is what a spawned subagent's turns
+        // flow through, with the agent-crate accumulator reassembling the
+        // streamed events into a `MessageResponse`.
+        let provider = Arc::new(StubProvider::new());
+        let router = Arc::new(StubRouter {
+            provider: provider.clone(),
+            seen_resolve: Mutex::new(None),
+        });
+        let seam: Arc<dyn agent::SubagentApiClient> =
+            Arc::new(ProviderApiAdapter::new(router.clone()));
+        let _s = seam
+            .messages_create_stream("openai/gpt-4o", Some("sys"), Vec::new())
+            .await
+            .expect("stream seam ok");
+        assert_eq!(
+            router.seen_resolve.lock().unwrap().as_deref(),
+            Some("openai/gpt-4o")
+        );
+        // Empty tools (the subagent carries no tool schemas yet) and the stream
+        // flag set — proving delegation to the SSE path, not the batched one.
+        assert_eq!(*provider.seen_tools_len.lock().unwrap(), Some(0));
+        assert_eq!(*provider.seen_stream_flag.lock().unwrap(), Some(true));
     }
 
     #[tokio::test]

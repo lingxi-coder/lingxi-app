@@ -432,6 +432,26 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 AgentsOutcome::Stay => {}
             }
         }
+        Some(Screen::Mcp(state)) => {
+            // Read-only MCP-server viewer. Pure list↔detail reducer; mirrors the
+            // Agents arm. Close → REPL (shared `close_screen`); Stay → keep open.
+            use crate::screens::mcp::{handle_mcp_key, McpOutcome};
+            let ct_key = iocraft_to_crossterm028_key(k);
+            match handle_mcp_key(state, ct_key.code) {
+                McpOutcome::Close => st.close_screen(),
+                McpOutcome::Stay => {}
+            }
+        }
+        Some(Screen::Hooks(state)) => {
+            // Read-only hooks viewer. Pure list↔detail reducer; mirrors the
+            // Agents/Mcp arm.
+            use crate::screens::hooks::{handle_hooks_key, HooksOutcome};
+            let ct_key = iocraft_to_crossterm028_key(k);
+            match handle_hooks_key(state, ct_key.code) {
+                HooksOutcome::Close => st.close_screen(),
+                HooksOutcome::Stay => {}
+            }
+        }
         Some(Screen::Skills(state)) => {
             // (M9-09) Skill-registry viewer (read-only). The pure
             // `handle_skills_key` reducer first delegates scroll keys to the
@@ -905,6 +925,89 @@ pub async fn pump_open_agents(
         return false;
     }
     st.open_agents(rows);
+    true
+}
+
+/// Async `/mcp` server-viewer open pump. Mirrors [`pump_open_agents`]: reads the
+/// real `OrchestratorHandle::list_mcp_servers` OUTSIDE the lock under the
+/// permission/screen priority guard, maps each `McpServerInfo` (rendering
+/// `McpStatus` to a display string), then opens the screen. Returns `true` iff
+/// the screen was opened.
+pub async fn pump_open_mcp(
+    state: &Arc<Mutex<AppState>>,
+    handle: &Arc<dyn traits::OrchestratorHandle>,
+) -> bool {
+    {
+        let mut st = state.lock().await;
+        if !st.pending_open_mcp {
+            return false;
+        }
+        if st.pending_permission.is_some() || st.active_screen.is_some() {
+            return false;
+        }
+        st.pending_open_mcp = false;
+    }
+
+    let infos = handle.list_mcp_servers().await;
+    let rows: Vec<crate::screens::mcp::McpRow> = infos
+        .into_iter()
+        .map(|i| {
+            let status = match i.status {
+                traits::orchestrator::McpStatus::Connected => "connected".to_string(),
+                traits::orchestrator::McpStatus::Disconnected => "disconnected".to_string(),
+                traits::orchestrator::McpStatus::Error(e) => format!("error: {e}"),
+            };
+            crate::screens::mcp::McpRow {
+                name: i.name,
+                status,
+                transport: i.transport,
+            }
+        })
+        .collect();
+
+    let mut st = state.lock().await;
+    if st.pending_permission.is_some() || st.active_screen.is_some() {
+        st.pending_open_mcp = true;
+        return false;
+    }
+    st.open_mcp(rows);
+    true
+}
+
+/// Async `/hooks` viewer open pump. Mirrors [`pump_open_mcp`], backed by the
+/// real `OrchestratorHandle::list_hooks`.
+pub async fn pump_open_hooks(
+    state: &Arc<Mutex<AppState>>,
+    handle: &Arc<dyn traits::OrchestratorHandle>,
+) -> bool {
+    {
+        let mut st = state.lock().await;
+        if !st.pending_open_hooks {
+            return false;
+        }
+        if st.pending_permission.is_some() || st.active_screen.is_some() {
+            return false;
+        }
+        st.pending_open_hooks = false;
+    }
+
+    let infos = handle.list_hooks().await;
+    let rows: Vec<crate::screens::hooks::HookRow> = infos
+        .into_iter()
+        .map(|i| crate::screens::hooks::HookRow {
+            name: i.name,
+            event: i.event,
+            matcher: i.matcher,
+            timeout_ms: i.timeout_ms,
+        })
+        .collect();
+
+    let mut st = state.lock().await;
+    if st.pending_permission.is_some() || st.active_screen.is_some() {
+        st.pending_open_hooks = true;
+        return false;
+    }
+    st.open_hooks(rows);
     true
 }
 
@@ -1463,6 +1566,14 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                     }
                     // (M9-08) Agent-discovery open pump — mirrors Settings.
                     if pump_open_agents(&state, handle).await {
+                        needs_redraw = true;
+                    }
+                    // `/mcp` + `/hooks` read-only viewer pumps — handle-backed,
+                    // so they share the wired-handle block with Agents/Settings.
+                    if pump_open_mcp(&state, handle).await {
+                        needs_redraw = true;
+                    }
+                    if pump_open_hooks(&state, handle).await {
                         needs_redraw = true;
                     }
                 }

@@ -697,6 +697,19 @@ pub struct AppState {
     /// exist on disk the sections vec is empty → the locked `No skills found`
     /// empty state.
     pub pending_open_skills: bool,
+    /// Set by the `/mcp` submit intercept: a request to open the read-only
+    /// MCP-server viewer. The SYNC submit path can't `.await`
+    /// `OrchestratorHandle::list_mcp_servers`, so it only RAISES this flag; the
+    /// async open pump in `root.rs` (`pump_open_mcp`, on the ticker `use_future`)
+    /// fetches the servers OUTSIDE the `AppState` lock and calls
+    /// [`Self::open_mcp`]. Mirrors `pending_open_agents` (handle-backed, so the
+    /// pump runs only when a handle is wired).
+    pub pending_open_mcp: bool,
+    /// Set by the `/hooks` submit intercept: a request to open the read-only
+    /// hooks viewer. Mirrors `pending_open_mcp` — the SYNC submit path can't
+    /// `.await` `OrchestratorHandle::list_hooks`, so it RAISES this flag and
+    /// `root::pump_open_hooks` fetches + opens via [`Self::open_hooks`].
+    pub pending_open_hooks: bool,
     /// (`/color`) Session agent-color name set by the `/color <name>` command
     /// (claude-code `standaloneAgentContext.color`). `Some("cyan")` after
     /// `/color cyan`; `None` after `/color default` (reset). Maps to a render
@@ -770,6 +783,8 @@ impl AppState {
             pending_open_agents: false,
             pending_open_stats: false,
             pending_open_skills: false,
+            pending_open_mcp: false,
+            pending_open_hooks: false,
             session_agent_color: None,
             pending_save_color: None,
         }
@@ -833,6 +848,32 @@ impl AppState {
             },
         ));
         crate::telemetry::screen_opened("agents");
+    }
+
+    /// Open the `/mcp` server viewer with the given rows. Called by
+    /// `root::pump_open_mcp` after the async `list_mcp_servers` fetch.
+    pub fn open_mcp(&mut self, rows: Vec<crate::screens::mcp::McpRow>) {
+        self.active_screen = Some(crate::screens::Screen::Mcp(
+            crate::screens::mcp::McpScreenState {
+                rows,
+                selected: 0,
+                mode: crate::screens::mcp::McpDialogMode::List,
+            },
+        ));
+        crate::telemetry::screen_opened("mcp");
+    }
+
+    /// Open the `/hooks` viewer with the given rows. Called by
+    /// `root::pump_open_hooks` after the async `list_hooks` fetch.
+    pub fn open_hooks(&mut self, rows: Vec<crate::screens::hooks::HookRow>) {
+        self.active_screen = Some(crate::screens::Screen::Hooks(
+            crate::screens::hooks::HooksScreenState {
+                rows,
+                selected: 0,
+                mode: crate::screens::hooks::HooksDialogMode::List,
+            },
+        ));
+        crate::telemetry::screen_opened("hooks");
     }
 
     /// (M9-09) Open the `/skills` registry viewer with the given grouped

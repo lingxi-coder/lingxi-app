@@ -13,7 +13,7 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "io-std"] }
+tokio = { workspace = true, features = ["io-util", "io-std", "fs"] }
 tracing.workspace = true
 regex = "1"
 # Faithful gitignore-glob matcher for file-path permission rules (3a) — the

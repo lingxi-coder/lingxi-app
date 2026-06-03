@@ -49,7 +49,10 @@ use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
 use permission::gate::{PermissionDecision, PermissionGate, PermissionResponse};
-use permission::PermissionRule;
+use permission::{
+    persist_permission_update, PermissionPaths, PermissionRule, PermissionUpdate,
+    PermissionUpdateDestination,
+};
 use tokio::sync::{oneshot, Mutex};
 
 use crate::lowering::{prompt_default_to_allow, value_to_json_string};
@@ -99,6 +102,10 @@ pub struct AdapterPermissionGate {
     /// Per-request timeout — a parked `check()` that is not resolved within this
     /// window resolves `Deny`.
     timeout: Duration,
+    /// (3c) Filesystem roots for persisting an `AllowAlways` choice to
+    /// `settings.local.json`. `None` → session-only (the legacy behavior); when
+    /// set, an `AllowAlways` additionally writes a durable allow rule.
+    persist_paths: Option<PermissionPaths>,
 }
 
 impl AdapterPermissionGate {
@@ -122,6 +129,7 @@ impl AdapterPermissionGate {
             next_id: Arc::new(AtomicU64::new(1)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             timeout: DEFAULT_PERMISSION_TIMEOUT,
+            persist_paths: None,
         }
     }
 
@@ -130,6 +138,14 @@ impl AdapterPermissionGate {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// (3c) Enable persisting an `AllowAlways` choice to `settings.local.json`
+    /// (under `paths.cwd/.claude/`). Without this, `AllowAlways` is session-only.
+    #[must_use]
+    pub fn with_persist(mut self, paths: PermissionPaths) -> Self {
+        self.persist_paths = Some(paths);
         self
     }
 
@@ -160,10 +176,22 @@ impl AdapterPermissionGate {
         };
 
         if matches!(response, PermissionResponseDto::AllowAlways) {
-            self.session_allow_rules
-                .lock()
-                .await
-                .push(PermissionRule::allow_tool_session(tool_name));
+            let rule = PermissionRule::allow_tool_session(tool_name);
+            self.session_allow_rules.lock().await.push(rule.clone());
+            // (3c) Durably record the choice to settings.local.json when a
+            // persist target is wired. Best-effort: a write failure must not
+            // fail the resolve (the session rule above still skips re-prompts).
+            // Skip a degenerate empty tool name (a missing request id resolves
+            // `tool_name = ""`) so we never persist `allow: [""]`.
+            if let Some(paths) = self.persist_paths.as_ref().filter(|_| !tool_name.is_empty()) {
+                let update = PermissionUpdate {
+                    rule,
+                    destination: PermissionUpdateDestination::LocalSettings,
+                };
+                if let Err(e) = persist_permission_update(&update, paths).await {
+                    tracing::warn!(error = %e, tool = tool_name, "failed to persist AllowAlways permission rule");
+                }
+            }
         }
 
         let mapped = match response {
@@ -385,6 +413,37 @@ mod tests {
         let stored = stored.lock().await;
         assert_eq!(stored.len(), 1);
         assert!(stored[0].matches_tool("Bash"));
+    }
+
+    /// (3c) `gate_persists_allow_always_writes_local_settings` — with a persist
+    /// target wired, `AllowAlways` ALSO writes a durable rule to
+    /// `<cwd>/.claude/settings.local.json` (in addition to the session rule).
+    #[tokio::test]
+    async fn gate_persists_allow_always_writes_local_settings() {
+        let tmp = std::env::temp_dir().join(format!("lx-3c-adapter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let sink = MockRequestSink::arc();
+        let gate = Arc::new(AdapterPermissionGate::new(sink.clone()).with_persist(
+            permission::PermissionPaths {
+                claude_home: tmp.join("home/.claude"),
+                cwd: tmp.join("proj"),
+            },
+        ));
+
+        let g = gate.clone();
+        let task = tokio::spawn(async move { g.check("Bash", &json!({})).await });
+        wait_for_pending(&gate, 1).await;
+        let req = sink.last().await;
+        assert!(gate.resolve(req.request_id, PermissionResponseDto::AllowAlways, "Bash").await);
+        assert_eq!(task.await.unwrap(), PermissionDecision::Allow);
+
+        // The choice was persisted to settings.local.json.
+        let path = tmp.join("proj/.claude/settings.local.json");
+        let written = std::fs::read_to_string(&path).expect("settings.local.json written");
+        let v: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(v["permissions"]["allow"], json!(["Bash"]));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// `gate_denies_on_user_deny` — `Deny` resolves to `PermissionDecision::Deny`.

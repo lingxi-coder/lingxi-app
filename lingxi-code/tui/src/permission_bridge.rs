@@ -18,7 +18,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use permission::gate::{PermissionDecision, PermissionGate, PermissionRequest, PermissionResponse};
-use permission::PermissionRule;
+use permission::{
+    persist_permission_update, PermissionPaths, PermissionRule, PermissionUpdate,
+    PermissionUpdateDestination,
+};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// One in-flight permission round-trip between the orchestrator and TUI.
@@ -44,6 +47,13 @@ pub struct TuiPermissionGate {
     /// Session-scoped allow rules. Consulted before the dialog opens;
     /// appended to when the user picks `AllowAlways`.
     pub session_allow_rules: Arc<Mutex<Vec<PermissionRule>>>,
+    /// (3c) Filesystem roots for persisting an `AllowAlways` to
+    /// `settings.local.json`. `None` → session-only. NOTE: this gate is not yet
+    /// wired into the production TUI runtime (the engine selects the
+    /// `NoOp`/`Adapter` gate at boot), so the persist path is exercised only by
+    /// tests until the TUI gate itself is wired; the capability mirrors
+    /// `AdapterPermissionGate` so it is ready when that happens.
+    persist_paths: Option<PermissionPaths>,
 }
 
 impl TuiPermissionGate {
@@ -56,7 +66,15 @@ impl TuiPermissionGate {
         Self {
             event_tx,
             session_allow_rules,
+            persist_paths: None,
         }
+    }
+
+    /// (3c) Enable persisting an `AllowAlways` choice to `settings.local.json`.
+    #[must_use]
+    pub fn with_persist(mut self, paths: PermissionPaths) -> Self {
+        self.persist_paths = Some(paths);
+        self
     }
 }
 
@@ -99,10 +117,20 @@ impl PermissionGate for TuiPermissionGate {
 
         // Step 4: persist if AllowAlways.
         if matches!(response, PermissionResponse::AllowAlways) {
-            self.session_allow_rules
-                .lock()
-                .await
-                .push(PermissionRule::allow_tool_session(name));
+            let rule = PermissionRule::allow_tool_session(name);
+            self.session_allow_rules.lock().await.push(rule.clone());
+            // (3c) Durably record the choice when a persist target is wired.
+            // Best-effort: a write failure must not fail the check. Skip a
+            // degenerate empty tool name so we never persist `allow: [""]`.
+            if let Some(paths) = self.persist_paths.as_ref().filter(|_| !name.is_empty()) {
+                let update = PermissionUpdate {
+                    rule,
+                    destination: PermissionUpdateDestination::LocalSettings,
+                };
+                if let Err(e) = persist_permission_update(&update, paths).await {
+                    tracing::warn!(error = %e, tool = name, "failed to persist AllowAlways permission rule");
+                }
+            }
         }
 
         // Step 5: map to decision.

@@ -336,6 +336,9 @@ pub async fn build_mobile_inner(
     let event_sink = ListenerSink::arc(listener.clone());
     let output: Arc<dyn OutputStream> = Arc::new(AdapterOutputStream::new(event_sink.clone()));
 
+    // (3c) No `.with_persist` on mobile: a device session has no project
+    // `.claude/settings.local.json` convention to write back to, so AllowAlways
+    // stays session-only here (the desktop transport gate persists; this does not).
     let adapter_gate = Arc::new(AdapterPermissionGate::new(permission_sink));
     let perms: Arc<dyn PermissionGate> = adapter_gate.clone();
 

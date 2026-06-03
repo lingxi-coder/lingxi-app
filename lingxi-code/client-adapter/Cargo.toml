@@ -60,6 +60,10 @@ tokio-util = { workspace = true }
 # the single crate where `serde_json::Value` is lowered to a JSON String for the
 # `input_json` / `result_json` wire fields (governing decision §0.4 / §0.10).
 serde_json.workspace = true
+# (3c) Best-effort `warn!` when persisting an `AllowAlways` choice to
+# `settings.local.json` fails — surfaced rather than swallowed (a silent
+# persist failure would mislead the user into thinking the rule was saved).
+tracing.workspace = true
 
 # NOTE: `client-adapter` must NOT depend on `tui` — `BridgeOutputStream` /
 # `TuiPermissionGate` (`tui/src/events/orchestrator_bridge.rs`,

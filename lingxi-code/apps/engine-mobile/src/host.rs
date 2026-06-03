@@ -1,0 +1,1338 @@
+//! Shared mobile session-host module (plan F3-03).
+//!
+//! This is the mobile sibling of `engine_desktop::build` (F2-01): the single
+//! place that wires an off-device-buildable [`ConversationOrchestrator`] from a
+//! deterministic [`MobileConfig`] + an `Arc<dyn Platform>`, binding the
+//! transport-agnostic [`client_adapter::AdapterOutputStream`] and the id-keyed
+//! [`client_adapter::AdapterPermissionGate`] as its sinks. The same lowering
+//! pipeline therefore feeds the mobile [`ClientEventListener`] exactly as it
+//! feeds the bridge-server WebSocket — governing decision §0.1 / §0.2.
+//!
+//! ## Why this lives in `engine-mobile` (not the FFI crates)
+//!
+//! The FFI packagers (`ios-framework` / `android-aar`) must NOT each re-derive
+//! the runtime wiring — that would let iOS and Android drift. Instead they
+//! re-export the shared host built here (F3-04 grows `MobileEngineHandle` to own
+//! a [`MobileRuntime`]; F3-05 adds the async `submit`). F3-03 only builds the
+//! orchestrator + binds the adapter sinks.
+//!
+//! ## Off-device determinism
+//!
+//! `build_mobile` reads **nothing** from `std::env` / argv: every input arrives
+//! through [`MobileConfig`] and the OS handles arrive through `Arc<dyn
+//! Platform>`. On the host (CI) a fake `Platform` shim (see the `tests` module)
+//! supplies portable handles so the orchestrator is constructed and the adapter
+//! sinks are exercised without a device — exactly the spec §8 "prove from a
+//! Swift/Kotlin unit test" smoke path, runnable on the host. The real device
+//! `Platform` (`platform-ios` / `platform-android`) is `cfg(target_os)`-gated in
+//! `Cargo.toml`, so this module never names a device crate.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anthropic_oauth::client::ClaudeAiOAuthClient;
+use anthropic_oauth::config::ClaudeAiOAuthConfig;
+use anthropic_oauth::handle::OAuthHandle;
+use api_client::AnthropicProvider;
+use async_trait::async_trait;
+use client_adapter::{
+    AdapterOutputStream, AdapterPermissionGate, ClientEventListener, ListenerSink,
+    PermissionRequestSink, TurnWrapper,
+};
+use client_protocol::commands::{ClientCommand, ListingKindDto as ProtocolListingKind};
+use client_protocol::error::ClientError;
+use client_protocol::events::ClientEvent;
+use client_protocol::permission::{
+    PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
+};
+use command_api::RegistrySlashDispatcher;
+use orchestrator::test_support::{noop_hook_executor, StaticMemoryProvider};
+use orchestrator::{
+    ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
+    StreamingApiClient,
+};
+use permission::gate::PermissionGate;
+use permission::PermissionMode;
+use providers::{builtin_profiles, parse_profiles, parse_routing, ModelRouter, ProviderRegistry};
+use sandbox::decision::ProjectTrustLevel;
+use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
+use secret::CredentialManager;
+use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
+use tool_api::BuiltinToolContext;
+use traits::http::{HttpError, RawByteStream, SseStream};
+use traits::{
+    AuthHandle, HttpTransport, OrchestratorHandle, OutputStream, Platform, SlashCommandDispatcher,
+};
+
+use crate::{mobile_command_registry, mobile_tool_registry};
+
+/// A sized newtype over the platform's `Arc<dyn HttpTransport>`.
+///
+/// [`providers::ProviderRegistry`] is generic over a **sized** `T: HttpTransport`
+/// (`providers/src/registry.rs:51`) — desktop satisfies it by passing the
+/// concrete `Arc<PosixHttp>`. Mobile reads its transport from the aggregate
+/// `Platform` as an `Arc<dyn HttpTransport>` (unsized), so we wrap it in this
+/// thin delegating newtype to satisfy the bound WITHOUT bypassing the device's
+/// HTTP backend — every call forwards verbatim to the platform transport.
+struct DynHttp(Arc<dyn HttpTransport>);
+
+#[async_trait::async_trait]
+impl HttpTransport for DynHttp {
+    async fn request(
+        &self,
+        req: protocol::HttpRequest,
+    ) -> Result<protocol::HttpResponse, HttpError> {
+        self.0.request(req).await
+    }
+    async fn stream_sse(&self, req: protocol::HttpRequest) -> Result<SseStream, HttpError> {
+        self.0.stream_sse(req).await
+    }
+    async fn stream_raw_bytes(
+        &self,
+        req: protocol::HttpRequest,
+    ) -> Result<RawByteStream, HttpError> {
+        self.0.stream_raw_bytes(req).await
+    }
+}
+
+/// Deterministic, env/argv-free recipe for building a mobile runtime.
+///
+/// The mobile analog of [`engine_desktop::DesktopConfig`]: every value the host
+/// would otherwise read from the process environment becomes an explicit field,
+/// so the FFI entry point (and the off-device host test) can build an identical
+/// runtime without touching `std::env`. The OS handles themselves arrive
+/// separately, through the `Arc<dyn Platform>` passed to [`build_mobile`].
+///
+/// Mobile deliberately omits the desktop-only `mcp_paths` and
+/// `use_noop_permission_gate` knobs: there is no `.mcp.json` discovery on a
+/// device, and a mobile client ALWAYS binds the connection-scoped
+/// [`AdapterPermissionGate`] (a phone has no always-allow CLI mode).
+#[derive(Clone, Debug)]
+pub struct MobileConfig {
+    /// API base URL (default `https://api.anthropic.com`).
+    pub api_base: String,
+    /// Anthropic API key. Empty string is valid — the orchestrator builds and
+    /// only fails at `run_turn` with a 401, so slash-command dispatch still
+    /// works with no key configured (mirrors the desktop config contract).
+    pub api_key: String,
+    /// Working directory the orchestrator + tool context are rooted at. On a
+    /// device this is the app-sandbox container root.
+    pub cwd: std::path::PathBuf,
+    /// The `~/.claude`-equivalent root the settings / agents loaders walk. On a
+    /// device this is inside the app sandbox.
+    pub claude_home: std::path::PathBuf,
+    /// Model id the build defaults to (`OrchestratorConfig.model`).
+    pub default_model: String,
+    /// Settings-declared `providers` block as raw JSON, fed verbatim to
+    /// `providers::parse_profiles`. `None` ⟶ built-in profiles only.
+    pub provider_profiles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    /// Settings-declared `routing` block as raw JSON, fed verbatim to
+    /// `providers::parse_routing`. `None` ⟶ the default (empty) routing config.
+    pub routing: Option<serde_json::Value>,
+}
+
+impl Default for MobileConfig {
+    fn default() -> Self {
+        Self {
+            api_base: "https://api.anthropic.com".to_string(),
+            api_key: String::new(),
+            cwd: std::path::PathBuf::from("."),
+            claude_home: std::path::PathBuf::new(),
+            default_model: crate::MobileEngineConfig::default().default_model,
+            provider_profiles: None,
+            routing: None,
+        }
+    }
+}
+
+/// Everything a mobile host needs to drive a conversation, built deterministically
+/// by [`build_mobile`] from a [`MobileConfig`] + an `Arc<dyn Platform>`.
+///
+/// The mobile analog of `engine_desktop::DesktopRuntime`. F3-04 grows
+/// `MobileEngineHandle` to OWN one of these (plus the handle-owned tokio
+/// runtime); F3-05 adds the async `submit` that drives the orchestrator and
+/// resolves the permission gate.
+pub struct MobileRuntime {
+    /// The fully-constructed orchestrator, bound to the adapter output stream
+    /// and the id-keyed permission gate.
+    pub orchestrator: Arc<ConversationOrchestrator>,
+    /// Slash-command dispatcher seeded with the builtin + mobile handlers.
+    pub dispatcher: RegistrySlashDispatcher,
+    /// Auth handle for `/login` and `/logout`.
+    pub auth: Arc<dyn AuthHandle>,
+    /// The connection-scoped [`AdapterPermissionGate`] handle. Mobile ALWAYS
+    /// binds the adapter gate (no always-allow mode), so unlike desktop this is
+    /// never `None`: F3-05's `submit(ApprovePermission/DenyPermission)` calls
+    /// [`AdapterPermissionGate::resolve`] on it to satisfy a parked `check()`.
+    pub permission_gate: Arc<AdapterPermissionGate>,
+    /// The registered foreign event listener. Held so F3-04's handle can own /
+    /// re-surface it; the adapter already feeds it via a [`ListenerSink`].
+    pub listener: Arc<dyn ClientEventListener>,
+    /// The connection's [`client_adapter::ClientEventSink`] (a [`ListenerSink`]
+    /// over `listener`). The orchestrator's [`AdapterOutputStream`] already pushes
+    /// streamed turn events here; F3-05's `submit` reuses the SAME sink to
+    /// synthesize boundary events (`TurnStarted` / `MessageComplete`) and emit
+    /// listing replies, so everything rides one outbound channel.
+    pub event_sink: Arc<dyn client_adapter::ClientEventSink>,
+}
+
+/// Errors surfaced while building a [`MobileRuntime`].
+///
+/// Mirrors `engine_desktop::BuildError`. Construction is effectively infallible
+/// today (the orchestrator constructor cannot fail), but the typed error is kept
+/// so a future real OAuth bootstrap can surface a cause without changing call
+/// sites.
+#[derive(Debug, thiserror::Error)]
+pub enum MobileBuildError {
+    /// api-client construction failed.
+    #[error("api base resolution failed: {0}")]
+    ApiBase(String),
+    /// Orchestrator construction failed.
+    #[error("orchestrator construction failed: {0}")]
+    Orchestrator(String),
+}
+
+/// A [`PermissionRequestSink`] that records `request_id → tool_name` and then
+/// forwards each request verbatim to the foreign sink (plan F3-05).
+///
+/// The mobile analog of bridge-server's `FramePermissionSink`: the inbound
+/// `ApprovePermission`/`DenyPermission` command carries only a `request_id`, but
+/// [`AdapterPermissionGate::resolve`] needs the tool name to append an
+/// `AllowAlways` session rule. This wrapper captures the name as the request goes
+/// out, so [`MobileEngineHandle::submit`] can look it back up on resolve. It
+/// wraps (not replaces) the foreign listener-backed sink so the host still
+/// receives every request.
+struct RecordingPermissionSink {
+    inner: Arc<dyn PermissionRequestSink>,
+    tool_names: Arc<Mutex<HashMap<u64, String>>>,
+}
+
+#[async_trait]
+impl PermissionRequestSink for RecordingPermissionSink {
+    async fn emit_request(&self, request: PermissionRequestDto) {
+        // Record the tool name (only `ToolUseConfirm` has one — the reserved
+        // kinds are never live-sourced in the foundation, decision §0.6).
+        if let PermissionKindDto::ToolUseConfirm { tool_name, .. } = &request.kind {
+            self.tool_names
+                .lock()
+                .await
+                .insert(request.request_id, tool_name.clone());
+        }
+        self.inner.emit_request(request).await;
+    }
+}
+
+/// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
+/// [`MobileConfig`] + an `Arc<dyn Platform>` (plan F3-03 — the mobile sibling of
+/// `engine_desktop::build`).
+///
+/// Off-device-deterministic: no `std::env` / argv reads. The OS handles
+/// (filesystem / http / clock / process / sandbox / worktree) and the device
+/// capabilities (camera / voice / share) are read from `platform`; everything
+/// else arrives via `cfg`. The `listener` becomes the adapter's
+/// [`client_adapter::ClientEventSink`] (wrapped in a [`ListenerSink`]) so every
+/// translated [`client_protocol::events::ClientEvent`] is delivered to the
+/// foreign host; `permission_sink` is where the [`AdapterPermissionGate`]'s
+/// outbound permission requests go.
+///
+/// Engine behavior is preserved verbatim (spec §1 non-goal): only the *source*
+/// of each input moved from env to `cfg`/`platform`, and the output / permission
+/// sinks become connection-scoped parameters — mirroring the F2-01 desktop lift.
+///
+/// # Errors
+///
+/// Returns [`MobileBuildError`] if the api-client or orchestrator cannot be
+/// constructed (effectively infallible in the current wiring).
+pub async fn build_mobile(
+    cfg: MobileConfig,
+    platform: Arc<dyn Platform>,
+    listener: Arc<dyn ClientEventListener>,
+    permission_sink: Arc<dyn PermissionRequestSink>,
+) -> Result<MobileRuntime, MobileBuildError> {
+    build_mobile_inner(cfg, platform, listener, permission_sink, None).await
+}
+
+/// As [`build_mobile`], but allows a test to substitute the streaming client.
+///
+/// Production callers use [`build_mobile`] (`streaming_override == None`), which
+/// wires the same router-backed [`ProviderApiAdapter`] for BOTH the batched and
+/// the streaming paths — a mobile client always streams its turns. The off-device
+/// walking-skeleton test (plan F3-06) passes a scripted
+/// [`orchestrator::test_support_stream::MockStreamingApiClient`] here so the turn
+/// is deterministic without a network — exactly the bridge-server e2e pattern,
+/// which builds the orchestrator with the same mock. Engine behavior is unchanged
+/// either way: only the *source* of the stream's bytes differs.
+#[doc(hidden)]
+pub async fn build_mobile_inner(
+    cfg: MobileConfig,
+    platform: Arc<dyn Platform>,
+    listener: Arc<dyn ClientEventListener>,
+    permission_sink: Arc<dyn PermissionRequestSink>,
+    streaming_override: Option<Arc<dyn StreamingApiClient>>,
+) -> Result<MobileRuntime, MobileBuildError> {
+    let cwd = cfg.cwd.clone();
+
+    // (1) OS handles from the aggregate `Platform` (NOT a concrete posix type —
+    //     the device supplies these; the host test supplies a portable shim).
+    let http = platform.http();
+    let clock = platform.clock();
+    let fs = platform.filesystem();
+    let process = platform.process();
+    let sandbox = platform.sandbox();
+    let worktree = platform.worktree();
+    let storage = Arc::new(platform_posix_minimal::PlainTextSecureStorage::new());
+
+    // (2) api-client via ProviderRegistry. An empty `api_key` is accepted (the
+    //     orchestrator builds and only fails at `run_turn` with a 401). The
+    //     settings `providers` / `routing` blocks arrive via `cfg`.
+    let env_snapshot: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut profiles = builtin_profiles(Some(cfg.api_base.clone()));
+    match parse_profiles(cfg.provider_profiles.as_ref()) {
+        Ok(extra) => profiles.extend(extra),
+        Err(e) => tracing::warn!(error = %e, "ignoring malformed settings `providers` block"),
+    }
+    let routing = parse_routing(cfg.routing.as_ref());
+    // `ProviderRegistry` needs a sized transport — wrap the platform's
+    // `Arc<dyn HttpTransport>` in the delegating `DynHttp` newtype (the device's
+    // backend is preserved, just made sized).
+    let registry = Arc::new(ProviderRegistry::new(
+        profiles,
+        env_snapshot,
+        Arc::new(DynHttp(http.clone())),
+        routing,
+    ));
+    // ONE router-backed adapter implements BOTH `OrchestratorApiClient` (batched)
+    // and `StreamingApiClient` (the streaming turn path the mobile transport
+    // always drives). Production wires it for both paths; a test may substitute
+    // the streaming side via `streaming_override` (plan F3-06).
+    let provider_adapter = Arc::new(ProviderApiAdapter::new(registry as Arc<dyn ModelRouter>));
+    let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
+    let streaming_api: Arc<dyn StreamingApiClient> =
+        streaming_override.unwrap_or(provider_adapter as Arc<dyn StreamingApiClient>);
+    // WebSearch builds Anthropic `POST /v1/messages` requests via its own
+    // provider (server-side web search is Anthropic-only in v1).
+    let tool_provider = Arc::new(AnthropicProvider::new(
+        cfg.api_key.clone(),
+        Some(cfg.api_base.clone()),
+    ));
+
+    // (3) Credential manager + OAuth client (used by /login, /logout).
+    let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
+    let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
+    let oauth_client = Arc::new(ClaudeAiOAuthClient::new(oauth_cfg, http.clone(), credentials));
+    let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(oauth_client));
+
+    // (4) Orchestrator config from `cfg` (was a host env/arg read).
+    let mut orch_cfg = OrchestratorConfig::default();
+    orch_cfg.model.clone_from(&cfg.default_model);
+
+    // (5) Connection-scoped sinks — the mobile transport's analog of the
+    //     bridge-server's WS writer:
+    //     - the `listener` becomes the `ClientEventSink` (via `ListenerSink`)
+    //       the `AdapterOutputStream` pushes turn events to;
+    //     - the `permission_sink` receives the gate's outbound requests.
+    //     Mobile ALWAYS binds the `AdapterPermissionGate` (no always-allow mode).
+    let event_sink = ListenerSink::arc(listener.clone());
+    let output: Arc<dyn OutputStream> = Arc::new(AdapterOutputStream::new(event_sink.clone()));
+
+    let adapter_gate = Arc::new(AdapterPermissionGate::new(permission_sink));
+    let perms: Arc<dyn PermissionGate> = adapter_gate.clone();
+
+    // (6) Hook / memory fillers (empty in the foundation, matching desktop).
+    let hooks = noop_hook_executor();
+    let memory: Arc<dyn orchestrator::prompt::MemoryHierarchyProvider> =
+        Arc::new(StaticMemoryProvider::empty());
+
+    // (7) Assemble the mobile tool registry through the composition root. The
+    //     device capabilities (camera / voice / share) come from `platform`;
+    //     desktop-only seams (subagent / mcp / lsp / team / worktree-tool) are
+    //     absent because `engine-mobile` does not link those tool crates.
+    let tool_ctx = BuiltinToolContext {
+        fs,
+        bus: Arc::new(telemetry::AnalyticsBus::new()),
+        trusted_dirs: vec![cwd.clone()],
+        process,
+        sandbox,
+        clock: clock.clone(),
+        sandbox_runtime: SandboxRuntimeConfig::default(),
+        permission_mode: PermissionMode::Default,
+        project_trust: ProjectTrustLevel::Trusted,
+        sandbox_available: false,
+        workspace: cwd.clone(),
+        platform: if cfg!(target_os = "macos") {
+            SandboxPlatform::Mac
+        } else {
+            SandboxPlatform::Linux
+        },
+        http: http.clone(),
+        provider: tool_provider,
+        default_model: orch_cfg.model.clone(),
+        worktree,
+        subagent_spawner: None,
+        task_registry: None,
+        mailbox_router: None,
+        budget_enforcer: None,
+        mcp_registry: None,
+        lsp_registry: None,
+        camera: platform.camera(),
+        voice: platform.voice(),
+        share: platform.share(),
+        computer_control: platform.computer_control(),
+    };
+    let tools = Arc::new(mobile_tool_registry(tool_ctx));
+
+    let orch = Arc::new(ConversationOrchestrator::new_with_streaming(
+        orch_cfg,
+        api_client,
+        streaming_api,
+        tools,
+        hooks,
+        perms,
+        output,
+        memory,
+        cwd,
+    ));
+
+    // (8) Command registry through the mobile composition root.
+    let handle: Arc<dyn OrchestratorHandle> = orch.clone();
+    let reg = mobile_command_registry(handle, auth.clone());
+    let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+
+    Ok(MobileRuntime {
+        orchestrator: orch,
+        dispatcher,
+        auth,
+        permission_gate: adapter_gate,
+        listener,
+        event_sink,
+    })
+}
+
+/// Errors surfaced to the foreign (Swift / Kotlin) host across the FFI boundary.
+///
+/// This is the SINGLE shared error vocabulary both FFI packager crates re-export
+/// (F3-04), folded from the legacy per-crate `MobileEngineError`: keeping it in
+/// the shared host crate is what prevents iOS and Android from drifting. Under
+/// the `uniffi` feature (F3-01) this becomes `#[derive(uniffi::Error)]`-able; it
+/// is intentionally flat (no embedded engine types) so it marshals across the
+/// boundary unchanged.
+#[derive(Debug, Clone, thiserror::Error)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+pub enum MobileEngineError {
+    /// The requested session id is not registered with this engine handle.
+    #[error("session not found")]
+    NotFound,
+    /// The engine is in a state that does not allow the requested operation.
+    #[error("invalid state")]
+    InvalidState,
+    /// `build_mobile_engine` was called off-device. The real device `Platform`
+    /// (`platform-ios` / `platform-android`) is `cfg(target_os)`-gated, so the
+    /// FFI constructor returns this on the host — but the shared session host
+    /// itself is fully exercised off-device via the test shim.
+    #[error("platform unavailable on this target")]
+    PlatformUnavailable,
+    /// Catch-all for engine-internal failures (the message is log-safe).
+    #[error("internal: {0}")]
+    Internal(String),
+}
+
+/// The real mobile session host (plan F3-04): the opaque handle the foreign
+/// (Swift / Kotlin) side holds for the lifetime of one engine connection.
+///
+/// This is the grown-up form of the M8 stub (which held only an `Arc<dyn
+/// Platform>` + a `skill_count` and whose `create_session` returned an
+/// `Internal` error). It now OWNS, per governing decision §0.5 (one connection ⇒
+/// one engine host):
+///
+/// - the **handle-owned tokio runtime** (`rt-multi-thread`) every turn / FFI
+///   `submit` (F3-05) is driven on — so the engine never blocks the foreign UI
+///   thread, and F3-07 registers this same runtime as UniFFI's foreign async
+///   executor;
+/// - the fully-wired [`MobileRuntime`] from [`build_mobile`] (F3-03): the
+///   orchestrator bound to the [`AdapterOutputStream`] + the id-keyed
+///   [`AdapterPermissionGate`], the slash dispatcher, the auth handle;
+/// - the registered foreign [`ClientEventListener`] (re-surfaced via
+///   [`MobileRuntime::listener`]) that the adapter feeds every translated
+///   [`client_protocol::events::ClientEvent`].
+///
+/// Both FFI packager crates (`ios-framework` / `android-aar`) RE-EXPORT this
+/// shared host rather than each re-deriving it — that is what keeps iOS and
+/// Android from drifting (plan F3-04). Under the `uniffi` feature this becomes
+/// `#[derive(uniffi::Object)]`.
+///
+/// The connection-scoped adapter sinks (output stream / permission gate /
+/// listener) survive an in-place orchestrator swap on New / Resume (§0.5); F3-05
+/// adds the async `submit` that resolves the parked permission gate from inbound
+/// commands and drives the turn on the owned runtime.
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
+pub struct MobileEngineHandle {
+    /// The handle-owned multi-thread tokio runtime. Owned (not borrowed) so the
+    /// engine outlives any single FFI call and F3-05's `submit(SendPrompt)` can
+    /// `spawn` a streaming turn that returns promptly while results stream to the
+    /// listener. F3-07 registers this runtime as the foreign async executor.
+    runtime: tokio::runtime::Runtime,
+    /// The fully-wired mobile runtime: orchestrator + dispatcher + auth + the
+    /// connection-scoped [`AdapterPermissionGate`] + the registered listener.
+    inner: MobileRuntime,
+    /// The connection's event sink (a [`ListenerSink`] over the registered
+    /// listener). Held so [`Self::submit`] can synthesize boundary events
+    /// (`TurnStarted` / `MessageComplete`) and push listing replies to the SAME
+    /// outbound channel the streamed turn events ride.
+    event_sink: Arc<dyn client_adapter::ClientEventSink>,
+    /// The cancellation token for the IN-FLIGHT turn, armed by
+    /// `submit(SendPrompt)` and fired by `submit(Cancel)`. `None` when no turn is
+    /// active. One connection ⇒ one in-flight turn (§0.5), so a single slot.
+    active_cancel: Arc<Mutex<Option<CancellationToken>>>,
+    /// `request_id → tool_name` recorded as each permission request is emitted, so
+    /// an inbound `ApprovePermission`/`DenyPermission` (which carries only the
+    /// `request_id`) can supply the tool name back to
+    /// [`AdapterPermissionGate::resolve`] (needed for the `AllowAlways` rule
+    /// append). The mobile analog of bridge-server's `FramePermissionSink` map.
+    tool_names: Arc<Mutex<HashMap<u64, String>>>,
+    /// Number of builtin mobile skills assembled (the M8 smoke signal, retained
+    /// so the existing Swift/Kotlin smoke test keeps working).
+    skill_count: usize,
+}
+
+impl MobileEngineHandle {
+    /// Number of builtin mobile skills assembled. (Under `uniffi`:
+    /// `#[uniffi::export]`.)
+    #[must_use]
+    pub fn skill_count(&self) -> u32 {
+        self.skill_count as u32
+    }
+
+    /// Create a conversation session for `model`.
+    ///
+    /// No longer stubbed (F3-04): the handle now owns a real, fully-wired
+    /// [`MobileRuntime`], so a session is a live attribute of THIS connection
+    /// (§0.5 — `session_id` is a connection attribute, not a per-command param).
+    /// Returns the connection's session ref. The full New/Resume orchestrator
+    /// swap lands with the command path (F3-05); here we confirm the host is no
+    /// longer a stub by returning the live session ref instead of an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MobileEngineError::InvalidState`] only if the handle were ever
+    /// torn down mid-call (cannot happen with `&self`); kept typed so the FFI
+    /// signature is stable for the F3-05 command path.
+    pub fn create_session(&self, _model: String) -> Result<u64, MobileEngineError> {
+        // One connection ⇒ one engine host ⇒ a single session ref (1). The
+        // orchestrator is already constructed and bound; New/Resume swap it in
+        // place (F3-05) without minting a new handle.
+        Ok(1)
+    }
+
+    /// Borrow the owned tokio runtime (F3-05 spawns the streaming turn on it;
+    /// F3-07 registers it as the foreign async executor).
+    #[must_use]
+    pub fn runtime(&self) -> &tokio::runtime::Runtime {
+        &self.runtime
+    }
+
+    /// The identity of the handle-owned tokio runtime (F3-07), as a stable
+    /// string token.
+    ///
+    /// UniFFI's `#[uniffi::export(async_runtime = "tokio")]` drives every async
+    /// export (`submit`, the async inspection helpers) on a tokio runtime via the
+    /// `tokio` feature's foreign-executor scaffolding; the host registers THIS
+    /// owned `rt-multi-thread` runtime as that executor (decision §0.5 — one
+    /// connection ⇒ one engine host owning one runtime). The
+    /// `async_submit_resolves_on_handle_runtime` test compares this token against
+    /// the one an async export observes via [`Self::observed_runtime_id`] to PROVE
+    /// the export awaits on this runtime — not a transient ambient one.
+    /// (`tokio::runtime::Id` is not UniFFI-representable, so the token is its
+    /// `Debug` form, which is stable for the lifetime of the runtime.)
+    #[doc(hidden)]
+    #[must_use]
+    pub fn runtime_id(&self) -> String {
+        format!("{:?}", self.runtime.handle().id())
+    }
+
+    /// Borrow the wired [`MobileRuntime`] (orchestrator / dispatcher / auth /
+    /// gate / listener) the F3-05 command path drives.
+    #[must_use]
+    pub fn inner(&self) -> &MobileRuntime {
+        &self.inner
+    }
+
+    /// The connection-scoped [`AdapterPermissionGate`] — F3-05's
+    /// `submit(ApprovePermission/DenyPermission)` calls `resolve` on it to
+    /// satisfy a parked `check()`.
+    #[must_use]
+    pub fn permission_gate(&self) -> Arc<AdapterPermissionGate> {
+        self.inner.permission_gate.clone()
+    }
+
+    /// The registered foreign event listener the adapter feeds.
+    #[must_use]
+    pub fn listener(&self) -> Arc<dyn ClientEventListener> {
+        self.inner.listener.clone()
+    }
+
+    /// Test/inspection helper: `true` iff the in-flight turn's cancellation token
+    /// has been fired. Used by the F3-05 `submit_cancel_fires_token` test.
+    #[doc(hidden)]
+    pub async fn active_turn_is_cancelled(&self) -> bool {
+        self.active_cancel
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+    }
+}
+
+// F3-05: the inbound command path — the async FFI entry point. Under the
+// `uniffi` feature this impl block is a `#[uniffi::export(async_runtime =
+// "tokio")]` so `submit` is exported as an async foreign method that resolves on
+// the handle-owned tokio runtime (the runtime F3-07 registers as the foreign
+// executor). Plain (non-FFI) on the host build so `cargo test` exercises the
+// SAME method body.
+#[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
+impl MobileEngineHandle {
+    /// Submit one [`ClientCommand`] to the engine (plan F3-05).
+    ///
+    /// This is the mobile analog of the bridge-server's inbound frame dispatch
+    /// (`apps/bridge-server/src/server.rs`): it never blocks the foreign UI
+    /// thread for a whole turn. `SendPrompt` SPAWNS the streaming turn on the
+    /// handle-owned runtime and returns promptly (results stream via the
+    /// listener); the other commands resolve their engine entry and return.
+    ///
+    /// Command routing (decision §0.2 — the same lowering surface both transports
+    /// share):
+    /// - `SendPrompt` → arm a fresh [`CancellationToken`], synthesize
+    ///   `TurnStarted`, SPAWN `run_turn_streaming_with_cancel` on the owned
+    ///   runtime, return immediately. The orchestrator's [`AdapterOutputStream`]
+    ///   streams `TextDelta` / `ToolUse*` / `CostUpdate` / `TurnEnded` to the
+    ///   listener as side effects. Inline `images` are DEFERRED on mobile
+    ///   (§0.8 / §5.12) — carried in the DTO, not fed to the engine.
+    /// - `Cancel` → fire the in-flight cancellation token.
+    /// - `ApprovePermission` / `DenyPermission` → resolve the parked oneshot on
+    ///   the connection-scoped [`AdapterPermissionGate`] (F1-14), looking the
+    ///   recorded tool name back up for an `AllowAlways` rule append.
+    /// - `SetModel` → [`OrchestratorHandle::switch_model`], confirmed by a
+    ///   `ModelChanged` event.
+    /// - `RunSlashCommand` → the mobile slash dispatcher (LOSSY display surfaced
+    ///   as a `TextDelta`, mirroring the bridge-server router).
+    /// - `RefreshListings` / `ListModels` → the `list_*` handle reads, lowered to
+    ///   their listing events through the shared `client_adapter::lowering` fns.
+    /// - `ForceCompact` / `ClearSession` / `RequestExit` / `Login` / `Logout` →
+    ///   their `OrchestratorHandle` / `AuthHandle` entries.
+    ///
+    /// Reserved / host-driven commands (`NewSession`/`ResumeSession`/`ListSessions`,
+    /// the task commands — mobile binds no `TaskRegistry`) are accepted and
+    /// no-op'd in the foundation (the `#[non_exhaustive]` enum also requires a
+    /// catch-all); lighting them up is additive and does not change this seam.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when a command's engine entry fails synchronously
+    /// (e.g. `SetModel` on an unknown model → [`ClientError::Internal`]). A turn
+    /// failure is NOT surfaced here — it streams as a `ClientEvent::Error` to the
+    /// listener (the turn is spawned, so `submit` has already returned `Ok`).
+    // One match over the full command surface — the one-place-routes-everything
+    // map this entry exists to be (same convention as `EngineCommandRouter::route`
+    // and `engine_desktop::build`).
+    #[allow(clippy::too_many_lines)]
+    pub async fn submit(&self, command: ClientCommand) -> Result<(), ClientError> {
+        match command {
+            // ── Turn driving (SPAWN + return promptly) ─────────────────────
+            ClientCommand::SendPrompt {
+                text, turn_id, ..
+            } => {
+                // Arm a fresh cancellation token for this turn and record it so
+                // a later `Cancel` can fire it (one in-flight turn per
+                // connection, §0.5).
+                let cancel = CancellationToken::new();
+                *self.active_cancel.lock().await = Some(cancel.clone());
+
+                // Synthesize `TurnStarted` (the engine never emits it) on the
+                // shared event sink BEFORE spawning, so it precedes the streamed
+                // turn events.
+                let wrapper = TurnWrapper::new(self.event_sink.clone());
+                wrapper.emit_turn_started(turn_id).await;
+
+                // Spawn the streaming turn on the handle-owned runtime so this
+                // FFI call returns promptly. The `AdapterOutputStream` streams
+                // every turn event (`TextDelta` / `ToolUse*` / `CostUpdate` /
+                // `TurnEnded`) to the listener as a side effect; on a turn
+                // `Err(OrchestratorError)` we push the lowered `Error` event so
+                // the foreign host learns the turn failed (the cancelable entry
+                // returns `TurnOutcome`, not the `PumpedTurn` blocks, so there is
+                // no `MessageComplete` to synthesize here — `TurnEnded` is the
+                // boundary, matching the bridge-server turn driver).
+                let orch = self.inner.orchestrator.clone();
+                let sink = self.event_sink.clone();
+                self.runtime.spawn(async move {
+                    if let Err(err) = orch.run_turn_streaming_with_cancel(&text, cancel).await {
+                        sink.emit(client_adapter::map_orchestrator_error(&err)).await;
+                    }
+                });
+                Ok(())
+            }
+
+            ClientCommand::Cancel { .. } => {
+                if let Some(token) = self.active_cancel.lock().await.as_ref() {
+                    token.cancel();
+                }
+                Ok(())
+            }
+
+            // ── Permission resolution (resolve the parked oneshot, F1-14) ───
+            ClientCommand::ApprovePermission {
+                request_id,
+                response,
+            } => {
+                self.resolve_permission(request_id, response).await;
+                Ok(())
+            }
+            ClientCommand::DenyPermission { request_id } => {
+                self.resolve_permission(request_id, PermissionResponseDto::Deny)
+                    .await;
+                Ok(())
+            }
+
+            // ── Model ──────────────────────────────────────────────────────
+            ClientCommand::SetModel { model } => {
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                handle.switch_model(&model).await.map_err(|e| {
+                    ClientError::Internal {
+                        message: format!("switch_model failed: {e}"),
+                    }
+                })?;
+                self.event_sink
+                    .emit(ClientEvent::ModelChanged { model })
+                    .await;
+                Ok(())
+            }
+            ClientCommand::ListModels => {
+                self.emit_listing(ProtocolListingKind::Models).await;
+                Ok(())
+            }
+
+            // ── Slash commands (LOSSY: display surfaced as a TextDelta) ─────
+            ClientCommand::RunSlashCommand { raw } => {
+                let display = match self.inner.dispatcher.dispatch(&raw).await {
+                    traits::SlashDispatchResult::Handled { display }
+                    | traits::SlashDispatchResult::Unknown { display, .. } => display,
+                    traits::SlashDispatchResult::NotASlashCommand => {
+                        format!("not a slash command: {raw}")
+                    }
+                };
+                self.event_sink
+                    .emit(ClientEvent::TextDelta { text: display })
+                    .await;
+                Ok(())
+            }
+
+            // ── Listings ────────────────────────────────────────────────────
+            ClientCommand::RefreshListings { which } => {
+                for kind in which {
+                    self.emit_listing(kind).await;
+                }
+                Ok(())
+            }
+
+            // ── Auth ─────────────────────────────────────────────────────────
+            ClientCommand::Login => {
+                let state = match self.inner.auth.login().await {
+                    Ok(li) => lower_auth_state(Some(li)),
+                    Err(e) => {
+                        self.event_sink
+                            .emit(ClientEvent::Error {
+                                kind: client_protocol::events::ErrorKindDto::Internal,
+                                message: format!("login failed: {e}"),
+                            })
+                            .await;
+                        lower_auth_state(self.inner.auth.current_user().await)
+                    }
+                };
+                self.event_sink
+                    .emit(ClientEvent::AuthState { state })
+                    .await;
+                Ok(())
+            }
+            ClientCommand::Logout => {
+                if let Err(e) = self.inner.auth.logout().await {
+                    self.event_sink
+                        .emit(ClientEvent::Error {
+                            kind: client_protocol::events::ErrorKindDto::Internal,
+                            message: format!("logout failed: {e}"),
+                        })
+                        .await;
+                }
+                self.event_sink
+                    .emit(ClientEvent::AuthState {
+                        state: lower_auth_state(self.inner.auth.current_user().await),
+                    })
+                    .await;
+                Ok(())
+            }
+
+            // ── Compaction ─────────────────────────────────────────────────
+            ClientCommand::ForceCompact => {
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                match handle.force_compact().await {
+                    Ok(summary) => {
+                        self.event_sink
+                            .emit(ClientEvent::CompactionCompleted {
+                                messages_before: summary.messages_before,
+                                messages_after: summary.messages_after,
+                                bytes_saved: summary.bytes_saved,
+                            })
+                            .await;
+                        Ok(())
+                    }
+                    Err(e) => Err(ClientError::Internal {
+                        message: format!("force_compact failed: {e}"),
+                    }),
+                }
+            }
+
+            // ── Session control ──────────────────────────────────────────────
+            ClientCommand::ClearSession => {
+                // Mid-turn semantics (plan §2): reject while a turn is in flight.
+                let mid_turn = self
+                    .active_cancel
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|t| !t.is_cancelled());
+                if mid_turn {
+                    return Err(ClientError::Rejected {
+                        message: "cannot clear the session while a turn is in flight".into(),
+                    });
+                }
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                handle.clear_session().await.map_err(|e| ClientError::Internal {
+                    message: format!("clear_session failed: {e}"),
+                })?;
+                self.event_sink.emit(ClientEvent::SessionEnded).await;
+                Ok(())
+            }
+            ClientCommand::RequestExit => {
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                handle.request_exit().await;
+                Ok(())
+            }
+
+            // ── Host-driven / reserved in the foundation ────────────────────
+            //
+            // Session New/Resume + `ListSessions` are HOST-owned orchestrator
+            // swaps (§0.5); the task commands have no engine handle on mobile
+            // (`build_mobile` binds `task_registry: None`). They are accepted and
+            // no-op'd here — lighting them up is additive and does not change this
+            // seam's shape. The `#[non_exhaustive]` enum also requires a
+            // catch-all.
+            other => {
+                tracing::debug!(?other, "engine-mobile: command not routed by submit in the foundation");
+                Ok(())
+            }
+        }
+    }
+
+    /// The tokio runtime [`tokio::runtime::Id`] (as a string token) this async
+    /// export RESOLVES ON (plan F3-07).
+    ///
+    /// This is a genuine async `#[uniffi::export(async_runtime = "tokio")]`
+    /// method, so polling it travels the EXACT foreign-executor path `submit`
+    /// does: `UniFFI` hands the returned future to the registered tokio runtime —
+    /// the handle-owned `rt-multi-thread` runtime — which polls it to completion.
+    /// It reads `tokio::runtime::Handle::current()` (which panics outside a tokio
+    /// context) and returns that runtime's id token. The
+    /// `async_submit_resolves_on_handle_runtime` test asserts the returned token
+    /// equals [`Self::runtime_id`], proving the async export awaits on the
+    /// handle-owned runtime rather than a transient ambient one — i.e. that the
+    /// foreign async executor is registered to THIS runtime.
+    pub async fn observed_runtime_id(&self) -> String {
+        // `Handle::current()` resolves the runtime the polling thread is bound to.
+        // Yield once so the value is read AFTER an actual await point — the future
+        // is genuinely driven by the executor, not resolved eagerly on the caller.
+        tokio::task::yield_now().await;
+        format!("{:?}", tokio::runtime::Handle::current().id())
+    }
+}
+
+impl MobileEngineHandle {
+    /// Resolve a parked permission request on the connection-scoped gate (the
+    /// inbound side of the inverted handshake). Looks the recorded tool name back
+    /// up so an `AllowAlways` can append the right session rule.
+    async fn resolve_permission(&self, request_id: u64, response: PermissionResponseDto) {
+        let tool_name = self
+            .tool_names
+            .lock()
+            .await
+            .remove(&request_id)
+            .unwrap_or_default();
+        let resolved = self
+            .inner
+            .permission_gate
+            .resolve(request_id, response, &tool_name)
+            .await;
+        if !resolved {
+            tracing::debug!(
+                request_id,
+                "engine-mobile: resolve for unknown / already-resolved permission id"
+            );
+        }
+    }
+
+    /// Pull a single listing kind and emit its listing event through the
+    /// connection's event sink, reusing the shared `client_adapter::lowering`
+    /// parity fns (decision §0.2). Listing kinds with no engine handle on mobile
+    /// (`Sessions` / `Memory` / `Settings` / `SlashCommands` / `Tasks`) are
+    /// skipped — the same foundation reality as the bridge-server router.
+    async fn emit_listing(&self, kind: ProtocolListingKind) {
+        use client_adapter::lowering::{
+            lower_agent_info, lower_doctor_report, lower_hook_info, lower_mcp_server_info,
+            lower_status_snapshot,
+        };
+        let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+        match kind {
+            ProtocolListingKind::Models => {
+                let models = handle.list_available_models().await;
+                let current = handle.get_status_snapshot().await.model;
+                self.event_sink
+                    .emit(ClientEvent::ModelList { models, current })
+                    .await;
+            }
+            ProtocolListingKind::Mcp => {
+                let servers = handle
+                    .list_mcp_servers()
+                    .await
+                    .iter()
+                    .map(lower_mcp_server_info)
+                    .collect();
+                self.event_sink
+                    .emit(ClientEvent::McpServers { servers })
+                    .await;
+            }
+            ProtocolListingKind::Hooks => {
+                let hooks = handle.list_hooks().await.iter().map(lower_hook_info).collect();
+                self.event_sink.emit(ClientEvent::Hooks { hooks }).await;
+            }
+            ProtocolListingKind::Agents => {
+                let agents = handle.list_agents().await.iter().map(lower_agent_info).collect();
+                self.event_sink.emit(ClientEvent::Agents { agents }).await;
+            }
+            ProtocolListingKind::Status => {
+                let snapshot = lower_status_snapshot(&handle.get_status_snapshot().await);
+                self.event_sink
+                    .emit(ClientEvent::StatusSnapshot { snapshot })
+                    .await;
+            }
+            ProtocolListingKind::Doctor => {
+                let report = lower_doctor_report(&handle.run_doctor_checks().await);
+                self.event_sink
+                    .emit(ClientEvent::DoctorReport { report })
+                    .await;
+            }
+            ProtocolListingKind::Auth => {
+                let state = lower_auth_state(self.inner.auth.current_user().await);
+                self.event_sink.emit(ClientEvent::AuthState { state }).await;
+            }
+            // No engine handle on mobile in the foundation — additive to wire.
+            _ => {
+                tracing::debug!(?kind, "engine-mobile: listing kind unhandled in the foundation");
+            }
+        }
+    }
+}
+
+/// Lower an `Option<LoginInfo>` to the auth-state DTO (the inverse copy of the
+/// bridge-server router's helper — kept private to the shared host so iOS /
+/// Android cannot drift).
+fn lower_auth_state(info: Option<traits::auth::LoginInfo>) -> client_protocol::listings::AuthStateDto {
+    match info {
+        Some(li) => client_protocol::listings::AuthStateDto::SignedIn {
+            email: li.email,
+            org_id: li.org_id,
+        },
+        None => client_protocol::listings::AuthStateDto::SignedOut,
+    }
+}
+
+/// Build the shared mobile session host (plan F3-04): construct the
+/// handle-owned tokio runtime, build the [`MobileRuntime`] on it, and return the
+/// opaque [`MobileEngineHandle`] both FFI crates re-export.
+///
+/// The FFI packager crates (`ios-framework` / `android-aar`) call THIS after
+/// constructing the device `Platform` from the foreign callbacks — so the
+/// runtime / adapter / listener wiring lives in exactly one place and iOS /
+/// Android cannot drift. `listener` is the foreign [`ClientEventListener`] the
+/// host registers; it is stored on the runtime and fed by the adapter.
+/// `permission_sink` is where the gate's outbound permission requests go (on
+/// mobile, also the listener's transport).
+///
+/// Off-device-deterministic: the heavy lifting is [`build_mobile`], which reads
+/// nothing from `std::env`. The owned runtime is a fresh `rt-multi-thread`
+/// runtime; `build_mobile` (async) is driven to completion on it via
+/// `block_on`, after which it owns the orchestrator's spawned work.
+///
+/// # Errors
+///
+/// Returns [`MobileEngineError::Internal`] if the tokio runtime cannot be built
+/// or [`build_mobile`] fails (effectively infallible in the current wiring).
+pub fn build_mobile_engine(
+    cfg: MobileConfig,
+    platform: Arc<dyn Platform>,
+    listener: Arc<dyn ClientEventListener>,
+    permission_sink: Arc<dyn PermissionRequestSink>,
+) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
+    build_mobile_engine_inner(cfg, platform, listener, permission_sink, None)
+}
+
+/// As [`build_mobile_engine`], but allows a test to substitute the streaming
+/// client (plan F3-06 — the off-device walking skeleton). Production callers use
+/// [`build_mobile_engine`] (`streaming_override == None`); the host skeleton test
+/// passes a scripted
+/// [`orchestrator::test_support_stream::MockStreamingApiClient`] so
+/// `submit(SendPrompt)` drives a deterministic turn without a network. The whole
+/// session-host wiring (the runtime, the recording permission sink, the adapter
+/// sinks) is identical to production — only the stream's source differs.
+#[doc(hidden)]
+pub fn build_mobile_engine_inner(
+    cfg: MobileConfig,
+    platform: Arc<dyn Platform>,
+    listener: Arc<dyn ClientEventListener>,
+    permission_sink: Arc<dyn PermissionRequestSink>,
+    streaming_override: Option<Arc<dyn StreamingApiClient>>,
+) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
+    // The handle OWNS its runtime (§0.5). A multi-thread runtime so a streaming
+    // turn spawned by F3-05 runs concurrently with the FFI read path.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| MobileEngineError::Internal(format!("tokio runtime build failed: {e}")))?;
+
+    // F3-05: interpose a recording sink so the inbound `ApprovePermission` /
+    // `DenyPermission` command path (which carries only the `request_id`) can
+    // recover the tool name for an `AllowAlways` rule append. The foreign sink
+    // still receives every request — the recorder wraps, never replaces it.
+    let tool_names: Arc<Mutex<HashMap<u64, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let recording_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink {
+        inner: permission_sink,
+        tool_names: tool_names.clone(),
+    });
+
+    // `build_mobile` is async; drive it on the owned runtime so any spawned work
+    // it does is owned by this handle's runtime, not an ambient one.
+    let inner = runtime
+        .block_on(build_mobile_inner(
+            cfg,
+            platform,
+            listener,
+            recording_sink,
+            streaming_override,
+        ))
+        .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
+
+    let skill_count = crate::mobile_skill_registry().len();
+    let event_sink = inner.event_sink.clone();
+
+    Ok(Arc::new(MobileEngineHandle {
+        runtime,
+        inner,
+        event_sink,
+        active_cancel: Arc::new(Mutex::new(None)),
+        tool_names,
+        skill_count,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use client_adapter::{ClientEventListener, PermissionRequestSink};
+
+    use super::{build_mobile, MobileConfig};
+    // F3-06: the off-device host shim now lives in `crate::test_support` (the
+    // single, non-drifting definition shared with the `skeleton_test.rs`
+    // integration test). The in-crate F3-03/F3-05 unit tests reuse it. The
+    // collecting permission sink is aliased to the legacy name these test bodies
+    // already use.
+    use crate::test_support::{
+        test_config, CollectingPermissionSink as RecordingPermissionSink, FakeListener,
+        HostFakePlatform,
+    };
+
+    /// F3-03: `MobileConfig::default` is constructible and its frozen field set
+    /// is reachable — the mobile analog of `desktop_config_default_is_constructible`.
+    #[test]
+    fn mobile_config_default_is_constructible() {
+        let cfg = MobileConfig::default();
+        assert_eq!(cfg.api_base, "https://api.anthropic.com");
+        assert!(cfg.api_key.is_empty());
+        assert_eq!(cfg.cwd, std::path::PathBuf::from("."));
+        assert_eq!(cfg.default_model, "claude-sonnet-4-20250514");
+        assert!(cfg.provider_profiles.is_none());
+        assert!(cfg.routing.is_none());
+        let _clone = cfg.clone();
+        let _ = format!("{cfg:?}");
+    }
+
+    /// F3-03: `build_mobile` constructs a real `ConversationOrchestrator`
+    /// off-device, from a `MobileConfig` + a host fake `Platform` alone — no
+    /// `std::env`, no device. This is the mobile sibling of
+    /// `build_constructs_runtime_deterministically`.
+    #[tokio::test]
+    async fn build_mobile_constructs_orchestrator() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build_mobile(test_config(tmp.path()), platform, listener, perm_sink)
+            .await
+            .expect("build_mobile failed");
+
+        // The orchestrator exists and exposes the `OrchestratorHandle` surface
+        // the command registry binds to. Constructing it at all proves the full
+        // mobile assembly (tool registry + command registry + adapter sinks).
+        let _handle: Arc<dyn traits::OrchestratorHandle> = rt.orchestrator.clone();
+    }
+
+    /// F3-03: the built runtime binds the adapter sinks — the
+    /// `AdapterPermissionGate` (proven by parking a real `check()` that lands on
+    /// the recording sink) and the listener-backed output stream (proven by the
+    /// returned listener being the one we registered).
+    #[tokio::test]
+    async fn mobile_runtime_binds_adapter_sinks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let sink = Arc::new(RecordingPermissionSink::default());
+        let perm_sink: Arc<dyn PermissionRequestSink> = sink.clone();
+
+        let rt = build_mobile(test_config(tmp.path()), platform, listener, perm_sink)
+            .await
+            .expect("build_mobile failed");
+
+        // Drive a `check()` on a spawned task; a deny-by-default tool parks a
+        // request on the sink (proving the adapter gate is bound, not a no-op).
+        let gate = rt.permission_gate.clone();
+        let g = gate.clone();
+        let task = tokio::spawn(async move {
+            use permission::gate::PermissionGate;
+            g.check("Bash", &serde_json::json!({"command": "ls"})).await
+        });
+
+        for _ in 0..2000 {
+            if sink.count.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            sink.count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "adapter gate must emit a PermissionRequest"
+        );
+
+        // Resolve so the parked future returns (request id starts at 1).
+        assert!(
+            gate.resolve(1, client_protocol::permission::PermissionResponseDto::Deny, "Bash")
+                .await
+        );
+        let _ = task.await.unwrap();
+    }
+
+    // ── F3-05: the async `submit` FFI entry point ───────────────────────────
+
+    use super::{build_mobile_engine, MobileEngineHandle};
+    use client_protocol::commands::ClientCommand;
+    use client_protocol::events::ClientEvent as Ev;
+    use client_protocol::permission::PermissionResponseDto;
+
+    /// Build a real, fully-wired [`MobileEngineHandle`] off-device (host fake
+    /// `Platform`) so the F3-05 `submit` path is exercised on CI. Returns the
+    /// handle plus the recording listener so a test can read back delivered
+    /// events.
+    fn build_submit_handle(
+        root: &std::path::Path,
+    ) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(root.to_path_buf()));
+        let listener = Arc::new(FakeListener::default());
+        let listener_dyn: Arc<dyn ClientEventListener> = listener.clone();
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let handle = build_mobile_engine(test_config(root), platform, listener_dyn, perm_sink)
+            .expect("build_mobile_engine failed");
+        (handle, listener)
+    }
+
+    /// F3-05: `submit(SendPrompt)` MUST spawn the streaming turn on the
+    /// handle-owned runtime and RETURN PROMPTLY — it must not block for the
+    /// whole turn (results stream via the listener). We prove the call resolves
+    /// `Ok(())` without a `TurnEnded` having been delivered yet (the spawned turn
+    /// against the host fake `Platform` does not complete synchronously inside
+    /// the `submit` call).
+    #[test]
+    fn submit_send_prompt_returns_promptly() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        let result = handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::SendPrompt {
+                    text: "hello".into(),
+                    prompt_mode: None,
+                    images: Vec::new(),
+                    turn_id: Some(7),
+                })
+                .await
+        });
+        assert!(result.is_ok(), "submit(SendPrompt) returned an error: {result:?}");
+
+        // The turn was SPAWNED, so `submit` returned before any `TurnEnded` was
+        // delivered to the listener. (A `TurnStarted` may have been synthesized
+        // synchronously, but the terminal `TurnEnded` must not have fired.)
+        let saw_turn_ended = handle.runtime().block_on(async {
+            listener
+                .received
+                .lock()
+                .await
+                .iter()
+                .any(|e| matches!(e, Ev::TurnEnded { .. }))
+        });
+        assert!(
+            !saw_turn_ended,
+            "submit must return promptly — TurnEnded must not fire inside the call"
+        );
+    }
+
+    /// F3-05: `submit(Cancel)` fires the connection-scoped cancellation token so
+    /// an in-flight streaming turn unwinds. We arm a turn (`SendPrompt`), then
+    /// `submit(Cancel)`, and assert the handle's active cancel token is now
+    /// cancelled.
+    #[test]
+    fn submit_cancel_fires_token() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, _listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            // Arm a turn so a cancel token is in flight.
+            handle
+                .submit(ClientCommand::SendPrompt {
+                    text: "drive a turn".into(),
+                    prompt_mode: None,
+                    images: Vec::new(),
+                    turn_id: None,
+                })
+                .await
+                .expect("submit(SendPrompt) ok");
+
+            assert!(
+                !handle.active_turn_is_cancelled().await,
+                "the freshly-armed turn token must not be cancelled yet"
+            );
+
+            handle
+                .submit(ClientCommand::Cancel { turn_id: None })
+                .await
+                .expect("submit(Cancel) ok");
+
+            assert!(
+                handle.active_turn_is_cancelled().await,
+                "submit(Cancel) must fire the in-flight cancellation token"
+            );
+        });
+    }
+
+    /// F3-05: `submit(ApprovePermission)` resolves a parked `check()` oneshot on
+    /// the connection-scoped [`AdapterPermissionGate`] (F1-14) — the inbound
+    /// command side of the inverted permission handshake. A parked `check()`
+    /// returns `Allow` once the approval arrives via `submit`.
+    #[test]
+    fn submit_approve_resolves_oneshot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, _listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            // Park a real `check()` on the gate from a spawned task (the engine
+            // turn side); it blocks on the oneshot until `submit` resolves it.
+            let gate = handle.permission_gate();
+            let g = gate.clone();
+            let parked = handle.runtime().spawn(async move {
+                use permission::gate::PermissionGate;
+                g.check("Bash", &serde_json::json!({"command": "ls"})).await
+            });
+
+            // Spin until the gate has parked exactly one request (id starts at
+            // 1). A short async sleep (not a bare `yield_now`) lets the spawned
+            // `check()` make progress even if the worker pool is momentarily busy.
+            for _ in 0..2000 {
+                if gate.pending_count().await == 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            assert_eq!(gate.pending_count().await, 1, "check() must park a request");
+
+            // Approve via the FFI command path — resolves the parked oneshot.
+            handle
+                .submit(ClientCommand::ApprovePermission {
+                    request_id: 1,
+                    response: PermissionResponseDto::AllowOnce,
+                })
+                .await
+                .expect("submit(ApprovePermission) ok");
+
+            let decision = parked.await.expect("parked check joined");
+            assert_eq!(decision, permission::gate::PermissionDecision::Allow);
+        });
+    }
+
+    // ── F3-07: async-over-FFI runtime registration ──────────────────────────
+
+    /// F3-07: the async FFI exports resolve on the HANDLE-OWNED tokio runtime.
+    ///
+    /// UniFFI's `#[uniffi::export(async_runtime = "tokio")]` (plus the workspace
+    /// `uniffi` dep's `tokio` feature, pinned in F3-00) registers a tokio runtime
+    /// as the foreign async executor; the mobile host registers the
+    /// handle-owned `rt-multi-thread` runtime (§0.5 — one connection ⇒ one engine
+    /// host owning one runtime). This proves the registration actually takes: the
+    /// async `observed_runtime_id` export — driven through the SAME executor path
+    /// `submit` uses — resolves on the runtime whose id matches the handle's owned
+    /// runtime, NOT a transient ambient one.
+    #[test]
+    fn async_submit_resolves_on_handle_runtime() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, _listener) = build_submit_handle(tmp.path());
+
+        // The handle-owned runtime's identity token (the runtime F3-07 registers
+        // as the foreign async executor).
+        let owned_id = handle.runtime_id();
+
+        // Drive the async export on the handle-owned runtime — exactly what the
+        // UniFFI tokio foreign executor does for a foreign caller. The future
+        // awaits (a real yield point) and then reads the runtime it is bound to.
+        let observed_id = handle
+            .runtime()
+            .block_on(async { handle.observed_runtime_id().await });
+
+        assert_eq!(
+            observed_id, owned_id,
+            "the async FFI export must resolve on the handle-owned tokio runtime \
+             (foreign async executor = the handle's runtime), got {observed_id} vs owned {owned_id}"
+        );
+
+        // And the inbound `submit` async export resolves on that same runtime: a
+        // `Cancel` (no in-flight turn) drives the full `submit` future through the
+        // executor and returns `Ok` — proving the async entry point itself awaits
+        // on the registered runtime, not just the inspection helper.
+        let cancel_result = handle
+            .runtime()
+            .block_on(async { handle.submit(ClientCommand::Cancel { turn_id: None }).await });
+        assert!(
+            cancel_result.is_ok(),
+            "submit must resolve on the handle-owned runtime: {cancel_result:?}"
+        );
+    }
+}

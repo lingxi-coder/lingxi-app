@@ -1,0 +1,8 @@
+{
+  "type": "model_list",
+  "models": [
+    "claude-opus-4-7",
+    "claude-sonnet-4-5"
+  ],
+  "current": "claude-opus-4-7"
+}

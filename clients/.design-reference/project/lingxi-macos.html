@@ -1,0 +1,1221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>灵犀 · macOS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-thumb { background: rgba(120,100,180,0.20); border-radius: 99px; }
+*::-webkit-scrollbar-thumb:hover { background: rgba(120,100,180,0.35); }
+*::-webkit-scrollbar-track { background: transparent; }
+html, body, #root { height: 100%; }
+body {
+  font-family: 'Inter', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv11', 'ss01';
+  overflow: hidden;
+  background: #1a1a1d;
+}
+@keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes shimmer { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.7; } }
+@keyframes cursor-blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+.thinking-cursor { display: inline-block; width: 8px; height: 14px; background: currentColor; margin-left: 3px; vertical-align: middle; animation: cursor-blink 1s infinite; border-radius: 1px; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo, createContext, useContext } = React;
+
+// ─── DESIGN TOKENS — shared across iPhone/iPad/macOS ─────────────
+const tokens = (dark) => dark ? {
+  // DARK
+  appBg: '#0e0d12',
+  windowBg: 'oklch(15% 0.012 270)',
+  sidebarBg: 'oklch(13% 0.012 270)',
+  surface: 'oklch(18% 0.015 270)',
+  surfaceHover: 'oklch(22% 0.020 270)',
+  surfaceActive: 'oklch(28% 0.030 270)',
+  border: 'oklch(28% 0.015 270 / 0.6)',
+  borderStrong: 'oklch(35% 0.020 270 / 0.8)',
+  text: 'oklch(96% 0.005 270)',
+  text2: 'oklch(72% 0.015 270)',
+  text3: 'oklch(52% 0.020 270)',
+  text4: 'oklch(38% 0.020 270)',
+  accent: 'oklch(70% 0.18 268)',
+  accentBg: 'oklch(70% 0.18 268 / 0.15)',
+  accentBorder: 'oklch(70% 0.18 268 / 0.35)',
+  accent2: 'oklch(70% 0.18 320)',  // pink-violet
+  accent3: 'oklch(72% 0.16 195)',  // cyan
+  warn: 'oklch(72% 0.15 75)',
+  ok: 'oklch(70% 0.15 155)',
+  danger: 'oklch(65% 0.20 25)',
+  composerBg: 'oklch(20% 0.015 270)',
+  windowShadow: '0 30px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.06)',
+  ambient: 'radial-gradient(ellipse 60% 50% at 50% 0%, oklch(40% 0.15 268 / 0.18), transparent 70%)',
+} : {
+  // LIGHT
+  appBg: '#d8d4e0',
+  windowBg: '#faf8f5',
+  sidebarBg: 'oklch(96% 0.005 270)',
+  surface: '#ffffff',
+  surfaceHover: 'oklch(96% 0.008 270)',
+  surfaceActive: 'oklch(92% 0.020 270)',
+  border: 'oklch(88% 0.008 270)',
+  borderStrong: 'oklch(82% 0.012 270)',
+  text: 'oklch(20% 0.018 270)',
+  text2: 'oklch(40% 0.020 270)',
+  text3: 'oklch(58% 0.020 270)',
+  text4: 'oklch(70% 0.015 270)',
+  accent: 'oklch(50% 0.22 268)',
+  accentBg: 'oklch(50% 0.22 268 / 0.10)',
+  accentBorder: 'oklch(50% 0.22 268 / 0.30)',
+  accent2: 'oklch(55% 0.22 320)',
+  accent3: 'oklch(52% 0.18 195)',
+  warn: 'oklch(60% 0.17 65)',
+  ok: 'oklch(55% 0.16 155)',
+  danger: 'oklch(58% 0.22 25)',
+  composerBg: '#ffffff',
+  windowShadow: '0 30px 80px rgba(60,40,120,0.18), 0 0 0 1px rgba(0,0,0,0.05)',
+  ambient: 'radial-gradient(ellipse 60% 50% at 50% 0%, oklch(80% 0.10 268 / 0.4), transparent 70%)',
+};
+
+const Theme = createContext(null);
+const useT = () => useContext(Theme);
+
+// ─── DATA ─────────────────────────────────────────────────────
+const WORKSPACES = [
+  { id: 'personal', name: '个人', icon: '◐', color: 'oklch(70% 0.18 268)', desc: '日常事务与生活' },
+  { id: 'work', name: '工作', icon: '◑', color: 'oklch(70% 0.16 195)', desc: 'AxieLix · 灵犀产品组' },
+  { id: 'research', name: '研究', icon: '◒', color: 'oklch(72% 0.18 320)', desc: 'AI 系统与多智能体' },
+  { id: 'creative', name: '创作', icon: '◓', color: 'oklch(72% 0.16 75)', desc: '写作 · 设计 · 视频' },
+];
+
+// 临时对话 — 一次性 Q&A，无长期上下文
+const CHATS = [
+  { id: 'c1', wsId: 'work', title: '重装 Claude Code 最新版', group: '今天', preview: 'nvm 全局残留清理完成', activity: '2 小时前', model: 'Lingxi-72B', msgs: 12 },
+  { id: 'c2', wsId: 'work', title: '客户邮件批量回复模板', group: '昨天', preview: '已生成 4 套话术', activity: '昨天 18:42', model: 'Lingxi-32B', msgs: 5 },
+  { id: 'c3', wsId: 'work', title: '上海差旅行程规划', group: '本周', preview: '机酒 + 客户拜访路线', activity: '周二', model: 'Lingxi-32B', msgs: 14 },
+  { id: 'c4', wsId: 'work', title: '招聘 JD：高级前端', group: '更早', preview: '已对齐 HRBP', activity: '5月3日', model: 'Lingxi-32B', msgs: 9 },
+];
+
+// 项目 — 长期主题，每个项目维护多个 session、共享知识库与记忆
+const PROJECTS = [
+  {
+    id: 'p1', wsId: 'work', name: '灵犀 OS 设计', icon: '◑', color: 'oklch(70% 0.18 268)',
+    desc: '多端 UI · 14 文件 · 8 记忆',
+    sessions: [
+      { id: 's1', title: '设计灵犀 OS macOS 版', activity: '刚刚', preview: 'Claude 风格侧栏 + 主对话区', model: 'Lingxi-72B', pinned: true, msgs: 8 },
+      { id: 'p1s2', title: 'iPad 横屏布局推演', activity: '昨天', preview: '280 侧栏 + Pencil 标注', model: 'Lingxi-72B', msgs: 14 },
+      { id: 'p1s3', title: '深色模式色板校准', activity: '5月3日', preview: 'oklch 节点对齐', model: 'Lingxi-72B-Reasoning', msgs: 22 },
+    ],
+  },
+  {
+    id: 'p2', wsId: 'work', name: 'Q2 OKR & 周报', icon: '◐', color: 'oklch(72% 0.16 195)',
+    desc: '目标对齐 · 6 文件 · 3 记忆',
+    sessions: [
+      { id: 'p2s1', title: '整理 Q2 OKR 草案', activity: '5 小时前', preview: '已对齐产品/技术/增长三方', model: 'Lingxi-72B-Reasoning', msgs: 24 },
+      { id: 'p2s2', title: '周报自动化模板讨论', activity: '昨天', preview: '从 Linear/GitHub/日历聚合', model: 'Lingxi-32B', msgs: 6 },
+    ],
+  },
+  {
+    id: 'p3', wsId: 'work', name: 'Code & 工程', icon: '◇', color: 'oklch(72% 0.16 155)',
+    desc: 'Bug 排查 · 23 文件 · 12 记忆',
+    sessions: [
+      { id: 'p3s1', title: 'WebSocket 重连 Bug', activity: '昨天', preview: '指数退避 + 心跳超时', model: 'Lingxi-Code', msgs: 31 },
+      { id: 'p3s2', title: 'PRD v2 评审反馈整理', activity: '周一', preview: '12 条评论 → 4 个待办', model: 'Lingxi-72B', msgs: 18 },
+    ],
+  },
+];
+
+// 定时任务 — Cron 表达式自动触发的 AI 工作流
+const CRONS = [
+  { id: 'cr1', wsId: 'work', title: '每日晨报', cron: '工作日 08:30', next: '明早 08:30', desc: '聚合昨日 Linear / GitHub / 邮件 → 早会摘要', enabled: true, lastRun: '今早 08:30', model: 'Lingxi-32B' },
+  { id: 'cr2', wsId: 'work', title: '周报自动生成', cron: '每周五 17:00', next: '周五 17:00', desc: 'git 提交 + 日历事件 → 周报草稿', enabled: true, lastRun: '上周五', model: 'Lingxi-72B' },
+  { id: 'cr3', wsId: 'work', title: '客户反馈周聚合', cron: '每周一 09:00', next: '下周一 09:00', desc: '7 天工单聚类 + 情感分析', enabled: true, lastRun: '本周一', model: 'Lingxi-72B-Reasoning' },
+  { id: 'cr4', wsId: 'work', title: '凌晨日志巡检', cron: '每日 03:00', next: '— 已暂停', desc: '错误日志分类 + 异常告警', enabled: false, lastRun: '5月1日', model: 'Lingxi-Code' },
+];
+
+// Flat lookup
+const ALL_SESSIONS = [
+  ...CHATS,
+  ...PROJECTS.flatMap(p => p.sessions.map(s => ({ ...s, projectId: p.id, projectName: p.name, wsId: p.wsId }))),
+];
+
+const MESSAGES = [
+  { role: 'user', text: '帮我设计一套 macOS 版的灵犀 AI 助手 UI，参考 Claude 桌面端的布局：左侧 workspace 切换 + session 列表，右侧主对话区。要求支持多工作区、知识库、设置入口。深浅双模。' },
+  { role: 'ai', tag: '思考了 1 分 24 秒', text: '已整理完成。\n\n核心结构：\n\n**1. 左侧栏（260px）** — 顶部 Workspace pill 切换，中部 Session 列表（按"今天/昨天/本周/更早"分组），底部知识库/自动化/设置三个固定入口。\n\n**2. 主对话区** — 顶部细工具栏（会话标题 + 模型选择器 + 分享/...），中部 message thread，底部胶囊型 composer（多模态附件 + 模型 + 发送）。\n\n**3. 右侧抽屉（可选 360px）** — 当前会话的知识引用、记忆、工作流 step 详情。\n\n**设计语言**：\n- 灵犀靛紫 `oklch(50% 0.22 268)` 作为强调色，从手机端延续\n- 4px 间距步进，14/15/17 三档正文字号\n- 卡片极简：1px 描边 + 8/12/16 圆角，不做强阴影\n- 深色用 `oklch(15% 0.012 270)` 午夜底，浅色用 `#faf8f5` 暖白底\n\n你现在看到的就是这个 macOS 版本。点击左侧 session 切换会话，顶部右上角可以切换主题、打开知识库抽屉。' },
+  { role: 'user', text: '看起来不错。能不能在主对话区上方加一条 workflow 进度条？我经常会让 AI 跑多步任务，希望能看到当前在哪一步。' },
+  { role: 'ai', tag: '思考了 38 秒', text: '已添加。\n\n现在每个有 workflow 的 session 顶部都会出现一条 **Steps Bar**：横向 chip 列表，已完成的实心、进行中的脉冲发光、待办的虚线描边。点击任一 chip 跳到对应消息节点。\n\n你也可以在右侧抽屉里看到完整的 step 树（包含子任务、工具调用、文件引用）。\n\n要不要我演示一下"重装 Claude Code"那个 session 的多步进度？' },
+];
+
+const KNOWLEDGE = [
+  { id: 'k1', type: 'file', name: '灵犀设计规范 v3.2.md', size: '142 KB', tag: '设计' },
+  { id: 'k2', type: 'file', name: '品牌色板 + Typography', size: '38 KB', tag: '设计' },
+  { id: 'k3', type: 'file', name: 'macOS HIG 节选', size: '2.1 MB', tag: '参考' },
+  { id: 'k4', type: 'memory', name: '用户偏好深色 + 中文', size: '记忆', tag: '记忆' },
+  { id: 'k5', type: 'memory', name: '常用工作流：周报/复盘', size: '记忆', tag: '记忆' },
+  { id: 'k6', type: 'url', name: 'claude.ai/desktop', size: '链接', tag: '参考' },
+];
+
+const MODELS = [
+  { id: 'lx-72b', name: 'Lingxi-72B', desc: '主力 · 平衡', tag: '默认', color: 'oklch(70% 0.18 268)' },
+  { id: 'lx-72b-r', name: 'Lingxi-72B-Reasoning', desc: '深度推理', tag: '慢', color: 'oklch(72% 0.18 320)' },
+  { id: 'lx-32b', name: 'Lingxi-32B', desc: '高速响应', tag: '快', color: 'oklch(72% 0.16 195)' },
+  { id: 'lx-code', name: 'Lingxi-Code', desc: '代码专长', tag: '编程', color: 'oklch(72% 0.16 155)' },
+  { id: 'lx-vision', name: 'Lingxi-Vision', desc: '多模态', tag: '视觉', color: 'oklch(72% 0.16 75)' },
+];
+
+// ─── ICONS ──────────────────────────────────────────────────
+const Icon = ({ name, size = 16, color = 'currentColor', stroke = 1.6 }) => {
+  const p = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: color, strokeWidth: stroke, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  switch (name) {
+    case 'edit': return <svg {...p}><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>;
+    case 'search': return <svg {...p}><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>;
+    case 'sparkle': return <svg {...p}><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/><circle cx="12" cy="12" r="2.5"/></svg>;
+    case 'book': return <svg {...p}><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>;
+    case 'workflow': return <svg {...p}><rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="15" y="3" width="6" height="6" rx="1.5"/><rect x="9" y="15" width="6" height="6" rx="1.5"/><path d="M6 9v2a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V9"/><path d="M12 13v2"/></svg>;
+    case 'cog': return <svg {...p}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>;
+    case 'send': return <svg {...p}><path d="M22 2 11 13"/><path d="M22 2 15 22 11 13 2 9z"/></svg>;
+    case 'plus': return <svg {...p}><path d="M12 5v14M5 12h14"/></svg>;
+    case 'mic': return <svg {...p}><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>;
+    case 'paperclip': return <svg {...p}><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.83l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>;
+    case 'image': return <svg {...p}><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.5-3.5a2 2 0 0 0-2.83 0L5 21"/></svg>;
+    case 'chevron': return <svg {...p}><path d="m6 9 6 6 6-6"/></svg>;
+    case 'chevronR': return <svg {...p}><path d="m9 18 6-6-6-6"/></svg>;
+    case 'sun': return <svg {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>;
+    case 'moon': return <svg {...p}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
+    case 'pin': return <svg {...p}><path d="M12 17v5M9 10.76V3h6v7.76l3 1.94v3.3H6v-3.3l3-1.94z"/></svg>;
+    case 'dots': return <svg {...p}><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>;
+    case 'share': return <svg {...p}><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.59 13.51 6.83 3.98M15.41 6.51l-6.82 3.98"/></svg>;
+    case 'panelRight': return <svg {...p}><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/></svg>;
+    case 'check': return <svg {...p}><path d="M20 6 9 17l-5-5"/></svg>;
+    case 'copy': return <svg {...p}><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>;
+    case 'refresh': return <svg {...p}><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg>;
+    case 'file': return <svg {...p}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>;
+    case 'brain': return <svg {...p}><path d="M9.5 2a2.5 2.5 0 0 1 2.5 2.5v15a2.5 2.5 0 0 1-4.96.44A2.5 2.5 0 0 1 4.5 17a2.5 2.5 0 0 1-2-3.65A2.5 2.5 0 0 1 4 8.5a2.5 2.5 0 0 1 2.5-2.5A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2a2.5 2.5 0 0 0-2.5 2.5v15a2.5 2.5 0 0 0 4.96.44A2.5 2.5 0 0 0 19.5 17a2.5 2.5 0 0 0 2-3.65A2.5 2.5 0 0 0 20 8.5a2.5 2.5 0 0 0-2.5-2.5A2.5 2.5 0 0 0 14.5 2z"/></svg>;
+    case 'link': return <svg {...p}><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>;
+    case 'x': return <svg {...p}><path d="M18 6 6 18M6 6l18 12"/></svg>;
+    case 'arrowUp': return <svg {...p} fill={color} stroke="none"><path d="M12 4l-7 8h4v8h6v-8h4z"/></svg>;
+    case 'folder': return <svg {...p}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>;
+    case 'clock': return <svg {...p}><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>;
+    case 'message': return <svg {...p}><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>;
+    case 'play': return <svg {...p} fill={color} stroke="none"><path d="M6 4l14 8-14 8z"/></svg>;
+    case 'pause': return <svg {...p}><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>;
+    default: return null;
+  }
+};
+
+// ─── REUSABLE COMPONENTS ────────────────────────────────────
+const HoverItem = ({ active, children, onClick, style = {} }) => {
+  const t = useT();
+  const [hover, setHover] = useState(false);
+  return (
+    <div onClick={onClick} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      style={{
+        cursor: 'pointer', transition: 'background 0.12s ease, color 0.12s ease',
+        background: active ? t.surfaceActive : (hover ? t.surfaceHover : 'transparent'),
+        color: active ? t.text : t.text2,
+        ...style,
+      }}>{children}</div>
+  );
+};
+
+const Pill = ({ children, color, style = {} }) => {
+  const t = useT();
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4,
+      padding: '2px 7px', borderRadius: 5, fontSize: 10.5, fontWeight: 500,
+      background: color ? `color-mix(in oklab, ${color} 16%, transparent)` : t.surface,
+      color: color || t.text3,
+      border: `0.5px solid ${color ? `color-mix(in oklab, ${color} 30%, transparent)` : t.border}`,
+      ...style,
+    }}>{children}</span>
+  );
+};
+
+// ─── SIDEBAR ─────────────────────────────────────────────────
+function Sidebar({ activeWs, setActiveWs, activeSession, setActiveSession, openSettings, openKnowledge }) {
+  const t = useT();
+  const [query, setQuery] = useState('');
+  const [wsOpen, setWsOpen] = useState(false);
+  const ws = WORKSPACES.find(w => w.id === activeWs) || WORKSPACES[0];
+
+  const [section, setSection] = useState('chats'); // chats | projects | crons
+  const [openProjects, setOpenProjects] = useState({ p1: true });
+
+  const chats = CHATS.filter(c => c.wsId === activeWs && (!query || c.title.includes(query)));
+  const groupedChats = chats.reduce((acc, s) => { (acc[s.group] = acc[s.group] || []).push(s); return acc; }, {});
+  const projects = PROJECTS.filter(p => p.wsId === activeWs && (!query || p.name.includes(query) || p.sessions.some(s => s.title.includes(query))));
+  const crons = CRONS.filter(c => c.wsId === activeWs && (!query || c.title.includes(query)));
+
+  const counts = { chats: chats.length, projects: projects.length, crons: crons.length };
+
+  return (
+    <div style={{
+      width: 270, flexShrink: 0,
+      background: t.sidebarBg,
+      borderRight: `0.5px solid ${t.border}`,
+      display: 'flex', flexDirection: 'column',
+      paddingTop: 40, // space for traffic lights area
+    }}>
+      {/* Workspace switcher */}
+      <div style={{ padding: '4px 12px 10px', position: 'relative' }}>
+        <div onClick={() => setWsOpen(!wsOpen)} style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
+          background: wsOpen ? t.surfaceHover : 'transparent',
+          transition: 'background 0.12s',
+        }}>
+          <div style={{
+            width: 26, height: 26, borderRadius: 7,
+            background: `color-mix(in oklab, ${ws.color} 22%, ${t.surface})`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            border: `0.5px solid color-mix(in oklab, ${ws.color} 35%, transparent)`,
+            fontSize: 13, color: ws.color, fontWeight: 700,
+          }}>{ws.icon}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: t.text, lineHeight: 1.2 }}>{ws.name}</div>
+            <div style={{ fontSize: 11, color: t.text3, marginTop: 2, lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ws.desc}</div>
+          </div>
+          <span style={{ color: t.text4, transform: wsOpen ? 'rotate(180deg)' : '', transition: 'transform 0.15s' }}><Icon name="chevron" size={14} stroke={2} /></span>
+        </div>
+
+        {wsOpen && (
+          <div style={{
+            position: 'absolute', top: '100%', left: 12, right: 12, zIndex: 50,
+            background: t.surface, border: `0.5px solid ${t.borderStrong}`,
+            borderRadius: 10, padding: 4, marginTop: -2,
+            boxShadow: '0 12px 32px rgba(0,0,0,0.25)',
+            animation: 'fade-in 0.15s ease',
+          }}>
+            {WORKSPACES.map(w => (
+              <div key={w.id} onClick={() => { setActiveWs(w.id); setWsOpen(false); }} style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '7px 8px', borderRadius: 7, cursor: 'pointer',
+                background: w.id === activeWs ? t.accentBg : 'transparent',
+              }} onMouseEnter={e => e.currentTarget.style.background = w.id === activeWs ? t.accentBg : t.surfaceHover}
+                 onMouseLeave={e => e.currentTarget.style.background = w.id === activeWs ? t.accentBg : 'transparent'}>
+                <div style={{
+                  width: 22, height: 22, borderRadius: 6,
+                  background: `color-mix(in oklab, ${w.color} 22%, ${t.surface})`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 11, color: w.color, fontWeight: 700,
+                }}>{w.icon}</div>
+                <div style={{ flex: 1, fontSize: 13, color: t.text, fontWeight: 500 }}>{w.name}</div>
+                {w.id === activeWs && <Icon name="check" size={14} color={t.accent} />}
+              </div>
+            ))}
+            <div style={{ height: 1, background: t.border, margin: '4px 4px' }} />
+            <div style={{ padding: '7px 8px', display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', borderRadius: 7, color: t.text3, fontSize: 13 }}
+                 onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+                 onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+              <Icon name="plus" size={14} /> 新建工作区
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* New Chat */}
+      <div style={{ padding: '0 12px 6px' }}>
+        <button onClick={() => setActiveSession('s0')} style={{
+          display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+          padding: '8px 12px', borderRadius: 8, border: 'none', cursor: 'pointer',
+          background: 'transparent', color: t.text,
+          fontSize: 13.5, fontWeight: 500, fontFamily: 'inherit', textAlign: 'left',
+          transition: 'background 0.12s',
+        }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+           onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <Icon name="edit" size={15} color={t.text2} stroke={1.8} />
+          <span>新对话</span>
+          <span style={{ marginLeft: 'auto', fontSize: 11, color: t.text4, fontFamily: '-apple-system' }}>⌘ N</span>
+        </button>
+
+        {/* Search */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '7px 12px', borderRadius: 8,
+          background: t.surface, border: `0.5px solid ${t.border}`,
+          marginTop: 4,
+        }}>
+          <Icon name="search" size={13} color={t.text4} stroke={2} />
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索会话与知识库"
+            style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', color: t.text, fontSize: 12.5, fontFamily: 'inherit' }} />
+          <span style={{ fontSize: 10, color: t.text4, fontFamily: '-apple-system' }}>⌘ K</span>
+        </div>
+      </div>
+
+      {/* Section tabs */}
+      <div style={{ padding: '10px 12px 6px', display: 'flex', gap: 4 }}>
+        {[
+          { id: 'chats', icon: 'message', label: '对话', count: counts.chats },
+          { id: 'projects', icon: 'folder', label: '项目', count: counts.projects },
+          { id: 'crons', icon: 'clock', label: '定时', count: counts.crons },
+        ].map(tab => {
+          const active = section === tab.id;
+          return (
+            <div key={tab.id} onClick={() => setSection(tab.id)} style={{
+              flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+              padding: '6px 4px', borderRadius: 7, cursor: 'pointer',
+              background: active ? t.surfaceActive : 'transparent',
+              color: active ? t.text : t.text3,
+              fontSize: 12, fontWeight: active ? 600 : 500,
+              border: active ? `0.5px solid ${t.border}` : '0.5px solid transparent',
+              transition: 'all 0.12s',
+            }} onMouseEnter={e => { if (!active) e.currentTarget.style.background = t.surfaceHover; }}
+               onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}>
+              <Icon name={tab.icon} size={13} stroke={1.8} />
+              <span>{tab.label}</span>
+              <span style={{ fontSize: 10, color: active ? t.accent : t.text4, fontWeight: 600, minWidth: 12, textAlign: 'center' }}>{tab.count}</span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Section body */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '4px 8px 8px' }}>
+        {section === 'chats' && (
+          <>
+            {Object.entries(groupedChats).map(([group, items]) => (
+              <div key={group} style={{ marginBottom: 6 }}>
+                <div style={{ fontSize: 10, color: t.text4, fontWeight: 600, padding: '8px 8px 4px', letterSpacing: 0.6, textTransform: 'uppercase' }}>{group}</div>
+                {items.map(s => (
+                  <div key={s.id} onClick={() => setActiveSession(s.id)} style={{
+                    padding: '7px 10px', borderRadius: 7, cursor: 'pointer',
+                    background: s.id === activeSession ? t.surfaceActive : 'transparent',
+                    color: s.id === activeSession ? t.text : t.text2,
+                    transition: 'background 0.12s', position: 'relative',
+                  }} onMouseEnter={e => { if (s.id !== activeSession) e.currentTarget.style.background = t.surfaceHover; }}
+                     onMouseLeave={e => { if (s.id !== activeSession) e.currentTarget.style.background = 'transparent'; }}>
+                    {s.id === activeSession && <div style={{ position: 'absolute', left: 0, top: 8, bottom: 8, width: 2, background: t.accent, borderRadius: 99 }} />}
+                    <div style={{ fontSize: 13, fontWeight: s.id === activeSession ? 600 : 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</div>
+                    <div style={{ fontSize: 11, color: t.text4, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.activity} · {s.preview}</div>
+                  </div>
+                ))}
+              </div>
+            ))}
+            <div style={{ fontSize: 10.5, color: t.text4, padding: '12px 10px', lineHeight: 1.5 }}>
+              临时对话 30 天后自动归档 · <span style={{ color: t.accent, cursor: 'pointer' }}>转为项目</span>
+            </div>
+          </>
+        )}
+
+        {section === 'projects' && (
+          <div style={{ paddingTop: 4 }}>
+            {projects.map(p => {
+              const open = !!openProjects[p.id];
+              const hasActive = p.sessions.some(s => s.id === activeSession);
+              return (
+                <div key={p.id} style={{ marginBottom: 4 }}>
+                  <div onClick={() => setOpenProjects(o => ({ ...o, [p.id]: !open }))} style={{
+                    display: 'flex', alignItems: 'center', gap: 9,
+                    padding: '7px 8px', borderRadius: 7, cursor: 'pointer',
+                    background: hasActive && !open ? t.surfaceActive : 'transparent',
+                    transition: 'background 0.12s',
+                  }} onMouseEnter={e => { if (!(hasActive && !open)) e.currentTarget.style.background = t.surfaceHover; }}
+                     onMouseLeave={e => { if (!(hasActive && !open)) e.currentTarget.style.background = 'transparent'; }}>
+                    <span style={{ color: t.text4, transform: open ? 'rotate(90deg)' : '', transition: 'transform 0.15s', display: 'inline-flex' }}>
+                      <Icon name="chevronR" size={11} stroke={2} />
+                    </span>
+                    <div style={{
+                      width: 22, height: 22, borderRadius: 6, flexShrink: 0,
+                      background: `color-mix(in oklab, ${p.color} 18%, ${t.surface})`,
+                      border: `0.5px solid color-mix(in oklab, ${p.color} 28%, transparent)`,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      fontSize: 11, color: p.color, fontWeight: 700,
+                    }}>{p.icon}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: t.text, lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</div>
+                      <div style={{ fontSize: 10.5, color: t.text4, marginTop: 2, lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.desc}</div>
+                    </div>
+                    <span style={{ fontSize: 10, color: t.text4, fontWeight: 500, flexShrink: 0 }}>{p.sessions.length}</span>
+                  </div>
+
+                  {open && (
+                    <div style={{ paddingLeft: 18, marginTop: 2, position: 'relative' }}>
+                      <div style={{ position: 'absolute', left: 16, top: 4, bottom: 4, width: 1, background: t.border }} />
+                      {p.sessions.map(s => (
+                        <div key={s.id} onClick={() => setActiveSession(s.id)} style={{
+                          padding: '5px 10px 5px 14px', marginLeft: 4, borderRadius: 6, cursor: 'pointer',
+                          background: s.id === activeSession ? t.surfaceActive : 'transparent',
+                          color: s.id === activeSession ? t.text : t.text2,
+                          transition: 'background 0.12s', position: 'relative',
+                        }} onMouseEnter={e => { if (s.id !== activeSession) e.currentTarget.style.background = t.surfaceHover; }}
+                           onMouseLeave={e => { if (s.id !== activeSession) e.currentTarget.style.background = 'transparent'; }}>
+                          {s.id === activeSession && <div style={{ position: 'absolute', left: -3, top: 6, bottom: 6, width: 2, background: p.color, borderRadius: 99 }} />}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                            {s.pinned && <Icon name="pin" size={10} color={p.color} stroke={2.2} />}
+                            <div style={{ fontSize: 12.5, fontWeight: s.id === activeSession ? 600 : 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.title}</div>
+                          </div>
+                          <div style={{ fontSize: 10.5, color: t.text4, marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.activity} · {s.msgs} 条</div>
+                        </div>
+                      ))}
+                      <div style={{
+                        padding: '5px 10px 5px 14px', marginLeft: 4, fontSize: 11.5, color: t.text4, cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', gap: 5,
+                      }} onMouseEnter={e => e.currentTarget.style.color = t.text2}
+                         onMouseLeave={e => e.currentTarget.style.color = t.text4}>
+                        <Icon name="plus" size={10} stroke={2} /> 新会话
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+              margin: '10px 4px 4px', padding: '8px', borderRadius: 7,
+              border: `1px dashed ${t.border}`, color: t.text3, fontSize: 12, cursor: 'pointer',
+            }} onMouseEnter={e => { e.currentTarget.style.borderColor = t.accent; e.currentTarget.style.color = t.accent; }}
+               onMouseLeave={e => { e.currentTarget.style.borderColor = t.border; e.currentTarget.style.color = t.text3; }}>
+              <Icon name="plus" size={12} stroke={2} /> 新建项目
+            </div>
+          </div>
+        )}
+
+        {section === 'crons' && (
+          <div style={{ paddingTop: 4 }}>
+            {crons.map(c => (
+              <div key={c.id} style={{
+                padding: '9px 10px', marginBottom: 4, borderRadius: 8,
+                background: t.surface, border: `0.5px solid ${t.border}`,
+                opacity: c.enabled ? 1 : 0.55,
+                cursor: 'pointer', transition: 'background 0.12s, border-color 0.12s',
+              }} onMouseEnter={e => { e.currentTarget.style.background = t.surfaceHover; e.currentTarget.style.borderColor = t.borderStrong; }}
+                 onMouseLeave={e => { e.currentTarget.style.background = t.surface; e.currentTarget.style.borderColor = t.border; }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <div style={{
+                    width: 7, height: 7, borderRadius: 99,
+                    background: c.enabled ? t.accent : t.text4,
+                    boxShadow: c.enabled ? `0 0 0 3px color-mix(in oklab, ${t.accent} 18%, transparent)` : 'none',
+                  }} />
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: t.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.title}</div>
+                  <Icon name={c.enabled ? 'pause' : 'play'} size={11} color={t.text4} stroke={1.8} />
+                </div>
+                <div style={{ fontSize: 10.5, color: t.text3, lineHeight: 1.4, marginBottom: 5 }}>{c.desc}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, fontFamily: '-apple-system, ui-monospace, monospace' }}>
+                  <span style={{
+                    padding: '2px 5px', borderRadius: 4, background: t.surfaceActive,
+                    color: t.text2, fontWeight: 500,
+                  }}>{c.cron}</span>
+                  <span style={{ color: t.text4 }}>→</span>
+                  <span style={{ color: c.enabled ? t.accent : t.text4, fontWeight: 500 }}>{c.next}</span>
+                </div>
+              </div>
+            ))}
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+              margin: '10px 4px 4px', padding: '8px', borderRadius: 7,
+              border: `1px dashed ${t.border}`, color: t.text3, fontSize: 12, cursor: 'pointer',
+            }} onMouseEnter={e => { e.currentTarget.style.borderColor = t.accent; e.currentTarget.style.color = t.accent; }}
+               onMouseLeave={e => { e.currentTarget.style.borderColor = t.border; e.currentTarget.style.color = t.text3; }}>
+              <Icon name="plus" size={12} stroke={2} /> 新建定时任务
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Knowledge / Memory shortcuts */}
+      <div style={{ padding: '6px 10px 0', display: 'flex', gap: 4, borderTop: `0.5px solid ${t.border}` }}>
+        {[
+          { icon: 'book', label: '知识库', count: KNOWLEDGE.length, onClick: openKnowledge },
+          { icon: 'brain', label: '记忆', count: 42 },
+        ].map((item, i) => (
+          <div key={i} onClick={item.onClick} style={{
+            flex: 1, display: 'flex', alignItems: 'center', gap: 6,
+            padding: '7px 8px', borderRadius: 7, cursor: 'pointer', color: t.text3, fontSize: 12,
+            transition: 'background 0.12s, color 0.12s',
+          }} onMouseEnter={e => { e.currentTarget.style.background = t.surfaceHover; e.currentTarget.style.color = t.text; }}
+             onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = t.text3; }}>
+            <Icon name={item.icon} size={13} stroke={1.8} />
+            <span style={{ flex: 1 }}>{item.label}</span>
+            <span style={{ fontSize: 10, color: t.text4 }}>{item.count}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Bottom: account + settings */}
+      <div style={{ padding: '8px 12px 12px', borderTop: `0.5px solid ${t.border}` }}>
+        <div onClick={openSettings} style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '7px 8px', borderRadius: 8, cursor: 'pointer',
+        }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+           onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+          <div style={{ width: 26, height: 26, borderRadius: '50%', background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 11, fontWeight: 600 }}>Y</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 12.5, color: t.text, fontWeight: 500 }}>Yuxin Yang</div>
+            <div style={{ fontSize: 10.5, color: t.text4 }}>Pro · 5.5 / 8 段</div>
+          </div>
+          <Icon name="cog" size={15} color={t.text3} stroke={1.6} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── WORKFLOW PROGRESS BAR ──────────────────────────────────
+function WorkflowBar() {
+  const t = useT();
+  const steps = [
+    { id: 1, label: '理解需求', state: 'done' },
+    { id: 2, label: '检索 HIG + Claude UI', state: 'done' },
+    { id: 3, label: '生成组件结构', state: 'done' },
+    { id: 4, label: '应用 workflow bar', state: 'running' },
+    { id: 5, label: '右侧抽屉联动', state: 'todo' },
+    { id: 6, label: '导出 + 总结', state: 'todo' },
+  ];
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 6, padding: '10px 24px',
+      background: t.windowBg, borderBottom: `0.5px solid ${t.border}`,
+      overflowX: 'auto',
+    }}>
+      <div style={{ fontSize: 11, color: t.text4, fontWeight: 600, letterSpacing: 0.8, textTransform: 'uppercase', marginRight: 8, flexShrink: 0 }}>WORKFLOW</div>
+      {steps.map((s, i) => (
+        <React.Fragment key={s.id}>
+          <div style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            padding: '4px 10px', borderRadius: 99,
+            background: s.state === 'done' ? `color-mix(in oklab, ${t.ok} 14%, transparent)` :
+                        s.state === 'running' ? t.accentBg : 'transparent',
+            color: s.state === 'done' ? t.ok :
+                   s.state === 'running' ? t.accent : t.text4,
+            border: `0.5px solid ${s.state === 'done' ? `color-mix(in oklab, ${t.ok} 28%, transparent)` : s.state === 'running' ? t.accentBorder : `color-mix(in oklab, ${t.text4} 30%, transparent)`}`,
+            borderStyle: s.state === 'todo' ? 'dashed' : 'solid',
+            fontSize: 11.5, fontWeight: 500,
+            whiteSpace: 'nowrap',
+            cursor: 'pointer', transition: 'all 0.15s',
+            position: 'relative',
+          }}>
+            {s.state === 'done' && <Icon name="check" size={11} stroke={2.5} />}
+            {s.state === 'running' && (
+              <span style={{ width: 6, height: 6, borderRadius: 99, background: t.accent, animation: 'shimmer 1.4s infinite' }} />
+            )}
+            {s.state === 'todo' && <span style={{ width: 6, height: 6, borderRadius: 99, border: `1px solid ${t.text4}` }} />}
+            <span>{i + 1}. {s.label}</span>
+          </div>
+          {i < steps.length - 1 && <div style={{ width: 8, height: 1, background: t.border }} />}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+// ─── MESSAGE BUBBLE ──────────────────────────────────────────
+function Message({ m, ws }) {
+  const t = useT();
+  if (m.role === 'user') {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 32, animation: 'fade-in 0.3s ease' }}>
+        <div style={{
+          maxWidth: '72%', padding: '12px 18px', borderRadius: 18, borderTopRightRadius: 6,
+          background: t.surface, border: `0.5px solid ${t.border}`,
+          fontSize: 15, lineHeight: 1.6, color: t.text, fontWeight: 400,
+          whiteSpace: 'pre-wrap',
+        }}>{m.text}</div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: 'flex', gap: 14, marginBottom: 36, alignItems: 'flex-start', animation: 'fade-in 0.3s ease' }}>
+      <div style={{
+        width: 30, height: 30, borderRadius: 8, flexShrink: 0,
+        background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        boxShadow: `0 4px 12px color-mix(in oklab, ${t.accent} 30%, transparent)`,
+      }}>
+        <Icon name="sparkle" size={15} color="#fff" stroke={2} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {m.tag && (
+          <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Pill color={t.accent}>{m.tag}</Pill>
+            <Icon name="chevronR" size={11} color={t.text4} />
+          </div>
+        )}
+        <div style={{
+          fontSize: 15, lineHeight: 1.7, color: t.text, fontWeight: 400,
+          whiteSpace: 'pre-wrap',
+        }} dangerouslySetInnerHTML={{ __html: m.text.replace(/\*\*(.+?)\*\*/g, `<strong style="font-weight:600;color:${t.text}">$1</strong>`).replace(/`(.+?)`/g, `<code style="background:${t.surface};padding:1px 6px;border-radius:5px;font-size:13px;font-family:'SF Mono',monospace;color:${t.accent};border:0.5px solid ${t.border}">$1</code>`) }} />
+        <div style={{ marginTop: 12, display: 'flex', gap: 4, opacity: 0.6 }}>
+          {['copy', 'refresh', 'share'].map(n => (
+            <button key={n} style={{ background: 'transparent', border: 'none', padding: 5, borderRadius: 6, cursor: 'pointer', color: t.text3 }}
+                    onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+              <Icon name={n} size={13} stroke={1.8} />
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── COMPOSER ─────────────────────────────────────────────────
+function Composer({ model, setModel, onSend }) {
+  const t = useT();
+  const [text, setText] = useState('');
+  const [modelOpen, setModelOpen] = useState(false);
+  const taRef = useRef(null);
+  const send = () => { if (text.trim()) { onSend(text); setText(''); if (taRef.current) taRef.current.style.height = 'auto'; } };
+  return (
+    <div style={{ padding: '0 24px 22px', position: 'relative' }}>
+      <div style={{
+        background: t.composerBg, border: `0.5px solid ${t.borderStrong}`,
+        borderRadius: 16, padding: '12px 14px 10px',
+        boxShadow: '0 10px 30px rgba(0,0,0,0.06)',
+      }}>
+        <textarea ref={taRef} value={text} onChange={e => { setText(e.target.value); e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
+          onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); } }}
+          placeholder="向灵犀提问，或拖入文件、图片、网页链接…"
+          rows={1}
+          style={{
+            width: '100%', border: 'none', outline: 'none', resize: 'none',
+            background: 'transparent', color: t.text, fontSize: 15,
+            lineHeight: 1.55, fontFamily: 'inherit', fontWeight: 400,
+            minHeight: 24, maxHeight: 200,
+          }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6, position: 'relative' }}>
+          {[
+            { icon: 'paperclip', tip: '附件' },
+            { icon: 'image', tip: '图片' },
+            { icon: 'mic', tip: '语音' },
+          ].map(b => (
+            <button key={b.icon} title={b.tip} style={{ background: 'transparent', border: 'none', padding: 6, borderRadius: 7, cursor: 'pointer', color: t.text3, display: 'flex', alignItems: 'center' }}
+                    onMouseEnter={e => { e.currentTarget.style.background = t.surfaceHover; e.currentTarget.style.color = t.text; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = t.text3; }}>
+              <Icon name={b.icon} size={15} stroke={1.7} />
+            </button>
+          ))}
+          <div style={{ width: 1, height: 16, background: t.border, margin: '0 4px' }} />
+
+          {/* Model picker */}
+          <button onClick={() => setModelOpen(!modelOpen)} style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '4px 9px', borderRadius: 7,
+            background: modelOpen ? t.surfaceHover : 'transparent',
+            border: 'none', cursor: 'pointer', color: t.text2,
+            fontSize: 12, fontFamily: 'inherit',
+          }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+             onMouseLeave={e => e.currentTarget.style.background = modelOpen ? t.surfaceHover : 'transparent'}>
+            <span style={{ width: 6, height: 6, borderRadius: 99, background: model.color }} />
+            <span style={{ fontWeight: 500 }}>{model.name}</span>
+            <Icon name="chevron" size={12} stroke={2} color={t.text4} />
+          </button>
+          {modelOpen && (
+            <div style={{
+              position: 'absolute', bottom: '100%', left: 80, marginBottom: 6, zIndex: 50,
+              background: t.surface, border: `0.5px solid ${t.borderStrong}`,
+              borderRadius: 10, padding: 4, minWidth: 220,
+              boxShadow: '0 12px 32px rgba(0,0,0,0.25)',
+              animation: 'fade-in 0.15s ease',
+            }}>
+              {MODELS.map(m => (
+                <div key={m.id} onClick={() => { setModel(m); setModelOpen(false); }} style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '7px 9px', borderRadius: 7, cursor: 'pointer',
+                  background: m.id === model.id ? t.accentBg : 'transparent',
+                }} onMouseEnter={e => { if (m.id !== model.id) e.currentTarget.style.background = t.surfaceHover; }}
+                   onMouseLeave={e => { if (m.id !== model.id) e.currentTarget.style.background = 'transparent'; }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 99, background: m.color }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, color: t.text, fontWeight: 500 }}>{m.name}</div>
+                    <div style={{ fontSize: 11, color: t.text3 }}>{m.desc}</div>
+                  </div>
+                  {m.tag && <Pill color={m.color}>{m.tag}</Pill>}
+                </div>
+              ))}
+              <div style={{ height: 1, background: t.border, margin: '4px 4px' }} />
+              <div style={{ padding: '7px 9px', display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5, color: t.text3, borderRadius: 7 }}
+                   onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+                   onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                <Icon name="cog" size={13} /> 模型设置
+              </div>
+            </div>
+          )}
+
+          {/* depth selector */}
+          <button style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            padding: '4px 9px', borderRadius: 7,
+            background: 'transparent', border: 'none', cursor: 'pointer', color: t.text2, fontSize: 12, fontFamily: 'inherit',
+          }} onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+            <span style={{ fontWeight: 500 }}>深度</span>
+            <span style={{ color: t.accent, fontWeight: 600 }}>Medium</span>
+          </button>
+
+          <div style={{ flex: 1 }} />
+          <div style={{ fontSize: 11, color: t.text4, marginRight: 4 }}>{text.length > 0 ? `${text.length} 字 · ⌘↩ 发送` : ''}</div>
+          <button onClick={send} disabled={!text.trim()} style={{
+            width: 30, height: 30, borderRadius: 8, border: 'none', cursor: text.trim() ? 'pointer' : 'default',
+            background: text.trim() ? t.accent : t.surfaceHover,
+            color: text.trim() ? '#fff' : t.text4,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            transition: 'all 0.15s',
+            boxShadow: text.trim() ? `0 4px 12px color-mix(in oklab, ${t.accent} 40%, transparent)` : 'none',
+          }}>
+            <Icon name="arrowUp" size={15} color="currentColor" />
+          </button>
+        </div>
+      </div>
+      <div style={{ textAlign: 'center', fontSize: 10.5, color: t.text4, marginTop: 6 }}>
+        灵犀可能会出错。请核对重要信息。
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN CHAT AREA ──────────────────────────────────────────
+function ChatArea({ session, knowledgeOpen, setKnowledgeOpen, theme, setTheme }) {
+  const t = useT();
+  const [messages, setMessages] = useState(MESSAGES);
+  const [model, setModel] = useState(MODELS[0]);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const scrollRef = useRef(null);
+
+  const send = (txt) => {
+    setMessages(ms => [...ms, { role: 'user', text: txt }]);
+    setIsStreaming(true);
+    setTimeout(() => {
+      setMessages(ms => [...ms, { role: 'ai', tag: '思考了 12 秒', text: '收到。已根据你的描述更新方案。\n\n你可以在 **右侧抽屉**（点击右上角面板图标）查看刚刚生成的组件树与文件引用。' }]);
+      setIsStreaming(false);
+    }, 1400);
+  };
+
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [messages, isStreaming]);
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: t.windowBg, minWidth: 0, position: 'relative' }}>
+      {/* Ambient gradient */}
+      <div style={{ position: 'absolute', inset: 0, background: t.ambient, pointerEvents: 'none' }} />
+
+      {/* Top bar */}
+      <div style={{
+        height: 52, flexShrink: 0,
+        padding: '0 20px 0 20px',
+        display: 'flex', alignItems: 'center', gap: 10,
+        borderBottom: `0.5px solid ${t.border}`,
+        position: 'relative', zIndex: 2,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: t.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{session.title}</div>
+          <span style={{ fontSize: 12, color: t.text4 }}>· {session.msgs} 条消息</span>
+        </div>
+        <div style={{ flex: 1 }} />
+
+        {/* Theme toggle */}
+        <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="切换主题" style={{
+          width: 32, height: 32, borderRadius: 8, border: 'none', cursor: 'pointer',
+          background: 'transparent', color: t.text2,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }} onMouseEnter={e => { e.currentTarget.style.background = t.surfaceHover; e.currentTarget.style.color = t.text; }}
+           onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = t.text2; }}>
+          <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} stroke={1.7} />
+        </button>
+
+        {[
+          { icon: 'share', tip: '分享' },
+          { icon: 'dots', tip: '更多' },
+          { icon: 'panelRight', tip: '抽屉', onClick: () => setKnowledgeOpen(!knowledgeOpen), active: knowledgeOpen },
+        ].map(b => (
+          <button key={b.icon} onClick={b.onClick} title={b.tip} style={{
+            width: 32, height: 32, borderRadius: 8, border: 'none', cursor: 'pointer',
+            background: b.active ? t.surfaceActive : 'transparent', color: b.active ? t.accent : t.text2,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }} onMouseEnter={e => { if (!b.active) { e.currentTarget.style.background = t.surfaceHover; e.currentTarget.style.color = t.text; } }}
+             onMouseLeave={e => { if (!b.active) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = t.text2; } }}>
+            <Icon name={b.icon} size={16} stroke={1.7} />
+          </button>
+        ))}
+      </div>
+
+      <WorkflowBar />
+
+      {/* Messages */}
+      <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', position: 'relative', zIndex: 2 }}>
+        <div style={{ maxWidth: 780, margin: '0 auto', padding: '32px 24px 16px' }}>
+          {messages.map((m, i) => <Message key={i} m={m} />)}
+          {isStreaming && (
+            <div style={{ display: 'flex', gap: 14, marginBottom: 36, alignItems: 'center' }}>
+              <div style={{ width: 30, height: 30, borderRadius: 8, background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Icon name="sparkle" size={15} color="#fff" stroke={2} />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: t.text3, fontSize: 13 }}>
+                <span style={{ animation: 'shimmer 1.4s infinite' }}>思考中</span>
+                <div style={{ display: 'flex', gap: 3 }}>
+                  {[0, 1, 2].map(i => <span key={i} style={{ width: 4, height: 4, borderRadius: 99, background: t.accent, animation: `shimmer 1.2s infinite ${i * 0.15}s` }} />)}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 780, margin: '0 auto', width: '100%', position: 'relative', zIndex: 2 }}>
+        <Composer model={model} setModel={setModel} onSend={send} />
+      </div>
+    </div>
+  );
+}
+
+// ─── KNOWLEDGE PANEL (right drawer) ──────────────────────────
+function KnowledgePanel({ open, onClose }) {
+  const t = useT();
+  if (!open) return null;
+  return (
+    <div style={{
+      width: 340, flexShrink: 0,
+      background: t.sidebarBg, borderLeft: `0.5px solid ${t.border}`,
+      display: 'flex', flexDirection: 'column',
+      animation: 'fade-in 0.2s ease',
+      paddingTop: 0,
+    }}>
+      {/* Tabs */}
+      <div style={{ display: 'flex', padding: '46px 16px 0', gap: 4, borderBottom: `0.5px solid ${t.border}` }}>
+        {['知识引用', '记忆', 'Steps'].map((tab, i) => (
+          <button key={tab} style={{
+            padding: '9px 12px', border: 'none', background: 'transparent', cursor: 'pointer',
+            fontSize: 12.5, fontWeight: 500, fontFamily: 'inherit',
+            color: i === 0 ? t.text : t.text3,
+            borderBottom: i === 0 ? `2px solid ${t.accent}` : '2px solid transparent',
+            marginBottom: -0.5,
+          }}>{tab}</button>
+        ))}
+        <div style={{ flex: 1 }} />
+        <button onClick={onClose} style={{ background: 'transparent', border: 'none', padding: 6, cursor: 'pointer', color: t.text3, alignSelf: 'center' }}>
+          <Icon name="x" size={15} />
+        </button>
+      </div>
+
+      <div style={{ padding: '12px 16px', borderBottom: `0.5px solid ${t.border}` }}>
+        <div style={{ fontSize: 11, color: t.text4, fontWeight: 600, letterSpacing: 0.6, textTransform: 'uppercase', marginBottom: 8 }}>本会话引用了</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {KNOWLEDGE.slice(0, 4).map(k => (
+            <div key={k.id} style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
+              background: t.surface, border: `0.5px solid ${t.border}`,
+            }} onMouseEnter={e => e.currentTarget.style.borderColor = t.accentBorder}
+               onMouseLeave={e => e.currentTarget.style.borderColor = t.border}>
+              <div style={{ width: 26, height: 26, borderRadius: 6, background: t.surfaceHover, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Icon name={k.type === 'file' ? 'file' : k.type === 'memory' ? 'brain' : 'link'} size={13} color={k.type === 'memory' ? t.accent2 : t.accent} stroke={1.8} />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, color: t.text, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{k.name}</div>
+                <div style={{ fontSize: 10.5, color: t.text4, marginTop: 1 }}>{k.size}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ padding: '12px 16px', flex: 1, overflowY: 'auto' }}>
+        <div style={{ fontSize: 11, color: t.text4, fontWeight: 600, letterSpacing: 0.6, textTransform: 'uppercase', marginBottom: 10 }}>工作流详情</div>
+        {[
+          { i: 1, t: '理解需求', s: 'done', d: '解析用户描述，识别出 3 个核心约束', dur: '0.4s' },
+          { i: 2, t: '检索 HIG + Claude UI', s: 'done', d: '4 个文档，2 个截图', dur: '8s' },
+          { i: 3, t: '生成组件结构', s: 'done', d: '17 个组件 / 4 个文件', dur: '22s' },
+          { i: 4, t: '应用 workflow bar', s: 'running', d: '正在渲染顶部 chip 列表…', dur: '12s' },
+          { i: 5, t: '右侧抽屉联动', s: 'todo' },
+          { i: 6, t: '导出 + 总结', s: 'todo' },
+        ].map(s => (
+          <div key={s.i} style={{ display: 'flex', gap: 10, padding: '8px 0', borderBottom: `0.5px solid ${t.border}` }}>
+            <div style={{
+              width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: s.s === 'done' ? `color-mix(in oklab, ${t.ok} 18%, transparent)` :
+                          s.s === 'running' ? t.accentBg : 'transparent',
+              border: `0.5px solid ${s.s === 'done' ? `color-mix(in oklab, ${t.ok} 30%, transparent)` : s.s === 'running' ? t.accentBorder : t.border}`,
+            }}>
+              {s.s === 'done' && <Icon name="check" size={11} color={t.ok} stroke={2.5} />}
+              {s.s === 'running' && <span style={{ width: 6, height: 6, borderRadius: 99, background: t.accent, animation: 'shimmer 1.4s infinite' }} />}
+              {s.s === 'todo' && <span style={{ fontSize: 10, color: t.text4 }}>{s.i}</span>}
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 12.5, color: s.s === 'todo' ? t.text3 : t.text, fontWeight: 500 }}>{s.t}</span>
+                {s.dur && <span style={{ fontSize: 10.5, color: t.text4, marginLeft: 'auto' }}>{s.dur}</span>}
+              </div>
+              {s.d && <div style={{ fontSize: 11.5, color: t.text3, marginTop: 2, lineHeight: 1.45 }}>{s.d}</div>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── SETTINGS MODAL ──────────────────────────────────────────
+function SettingsModal({ open, onClose, theme, setTheme }) {
+  const t = useT();
+  const [tab, setTab] = useState('account');
+  if (!open) return null;
+  const tabs = [
+    { id: 'account', label: '账户', icon: 'cog' },
+    { id: 'models', label: '模型', icon: 'sparkle' },
+    { id: 'knowledge', label: '知识库', icon: 'book' },
+    { id: 'shortcuts', label: '快捷键', icon: 'workflow' },
+    { id: 'appearance', label: '外观', icon: 'sun' },
+  ];
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 100,
+      background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(8px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      animation: 'fade-in 0.18s ease',
+    }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{
+        width: 880, height: 600,
+        background: t.windowBg, borderRadius: 14,
+        border: `0.5px solid ${t.borderStrong}`,
+        boxShadow: t.windowShadow,
+        display: 'flex', overflow: 'hidden',
+      }}>
+        {/* Tab sidebar */}
+        <div style={{ width: 220, background: t.sidebarBg, borderRight: `0.5px solid ${t.border}`, padding: '20px 12px', flexShrink: 0 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: t.text, padding: '0 8px 14px' }}>设置</div>
+          {tabs.map(x => (
+            <div key={x.id} onClick={() => setTab(x.id)} style={{
+              display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 7, cursor: 'pointer',
+              background: tab === x.id ? t.surfaceActive : 'transparent',
+              color: tab === x.id ? t.text : t.text2,
+              fontSize: 13, fontWeight: tab === x.id ? 500 : 400,
+            }} onMouseEnter={e => { if (tab !== x.id) e.currentTarget.style.background = t.surfaceHover; }}
+               onMouseLeave={e => { if (tab !== x.id) e.currentTarget.style.background = 'transparent'; }}>
+              <Icon name={x.icon} size={14} stroke={1.7} />
+              {x.label}
+            </div>
+          ))}
+        </div>
+
+        {/* Content */}
+        <div style={{ flex: 1, padding: '28px 36px', overflowY: 'auto', position: 'relative' }}>
+          <button onClick={onClose} style={{ position: 'absolute', top: 14, right: 14, background: 'transparent', border: 'none', padding: 6, cursor: 'pointer', color: t.text3, borderRadius: 6 }}
+                  onMouseEnter={e => e.currentTarget.style.background = t.surfaceHover}
+                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+            <Icon name="x" size={16} />
+          </button>
+
+          {tab === 'account' && (
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: t.text, marginBottom: 6 }}>账户</div>
+              <div style={{ fontSize: 13, color: t.text3, marginBottom: 28 }}>你的灵犀账户信息与订阅。</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: 18, background: t.surface, border: `0.5px solid ${t.border}`, borderRadius: 12 }}>
+                <div style={{ width: 56, height: 56, borderRadius: '50%', background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 22, fontWeight: 600 }}>Y</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 16, fontWeight: 600, color: t.text }}>Yuxin Yang</div>
+                  <div style={{ fontSize: 12.5, color: t.text3, marginTop: 2 }}>yuxin@axielix.com</div>
+                  <div style={{ marginTop: 8, display: 'flex', gap: 6 }}>
+                    <Pill color={t.accent}>Pro 计划</Pill>
+                    <Pill>API 已连接</Pill>
+                  </div>
+                </div>
+                <button style={{ padding: '8px 14px', borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.surface, color: t.text, fontSize: 12.5, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit' }}>管理订阅</button>
+              </div>
+              <div style={{ marginTop: 24, padding: 18, background: t.surface, border: `0.5px solid ${t.border}`, borderRadius: 12 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: t.text, marginBottom: 12 }}>本月用量</div>
+                {[
+                  { l: '对话次数', v: '247 / 1000', p: 0.247 },
+                  { l: '推理时长', v: '5.5 / 8 小时', p: 0.69 },
+                  { l: '存储', v: '1.2 GB / 10 GB', p: 0.12 },
+                ].map(u => (
+                  <div key={u.l} style={{ marginBottom: 12 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, marginBottom: 5 }}>
+                      <span style={{ color: t.text2 }}>{u.l}</span>
+                      <span style={{ color: t.text3 }}>{u.v}</span>
+                    </div>
+                    <div style={{ height: 4, borderRadius: 99, background: t.surfaceHover, overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${u.p * 100}%`, background: `linear-gradient(90deg, ${t.accent}, ${t.accent2})`, borderRadius: 99 }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {tab === 'models' && (
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: t.text, marginBottom: 6 }}>模型</div>
+              <div style={{ fontSize: 13, color: t.text3, marginBottom: 24 }}>选择默认模型与上下文策略。</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {MODELS.map((m, i) => (
+                  <div key={m.id} style={{
+                    display: 'flex', alignItems: 'center', gap: 14, padding: 14,
+                    background: t.surface, border: `0.5px solid ${i === 0 ? t.accentBorder : t.border}`,
+                    borderRadius: 10,
+                  }}>
+                    <div style={{ width: 36, height: 36, borderRadius: 8, background: `color-mix(in oklab, ${m.color} 20%, ${t.surface})`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <span style={{ width: 10, height: 10, borderRadius: 99, background: m.color }} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontSize: 14, fontWeight: 600, color: t.text }}>{m.name}</span>
+                        {m.tag && <Pill color={m.color}>{m.tag}</Pill>}
+                      </div>
+                      <div style={{ fontSize: 12, color: t.text3, marginTop: 3 }}>{m.desc}</div>
+                    </div>
+                    <div style={{
+                      width: 36, height: 22, borderRadius: 99,
+                      background: i === 0 ? t.accent : t.surfaceHover,
+                      position: 'relative', cursor: 'pointer', transition: 'background 0.15s',
+                    }}>
+                      <div style={{ position: 'absolute', top: 2, left: i === 0 ? 16 : 2, width: 18, height: 18, borderRadius: '50%', background: '#fff', transition: 'left 0.15s', boxShadow: '0 1px 3px rgba(0,0,0,0.15)' }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {tab === 'appearance' && (
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: t.text, marginBottom: 6 }}>外观</div>
+              <div style={{ fontSize: 13, color: t.text3, marginBottom: 24 }}>主题、字号、密度。</div>
+              <div style={{ fontSize: 13, fontWeight: 500, color: t.text2, marginBottom: 10 }}>主题</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+                {[
+                  { id: 'light', label: '浅色', bg: '#faf8f5' },
+                  { id: 'dark', label: '深色', bg: '#15131a' },
+                  { id: 'auto', label: '跟随系统', bg: 'linear-gradient(135deg, #faf8f5 50%, #15131a 50%)' },
+                ].map(o => (
+                  <div key={o.id} onClick={() => o.id !== 'auto' && setTheme(o.id)} style={{
+                    padding: 14, borderRadius: 10, cursor: 'pointer',
+                    background: t.surface, border: `1.5px solid ${theme === o.id ? t.accent : t.border}`,
+                  }}>
+                    <div style={{ height: 60, borderRadius: 6, background: o.bg, marginBottom: 8, border: `0.5px solid ${t.border}` }} />
+                    <div style={{ fontSize: 12.5, color: t.text, fontWeight: 500, textAlign: 'center' }}>{o.label}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 24 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, color: t.text2, marginBottom: 10 }}>强调色</div>
+                <div style={{ display: 'flex', gap: 10 }}>
+                  {['oklch(50% 0.22 268)', 'oklch(55% 0.22 320)', 'oklch(52% 0.20 195)', 'oklch(55% 0.20 155)', 'oklch(60% 0.18 65)', 'oklch(58% 0.22 25)'].map((c, i) => (
+                    <div key={i} style={{
+                      width: 32, height: 32, borderRadius: '50%', background: c, cursor: 'pointer',
+                      border: i === 0 ? `2px solid ${t.text}` : '2px solid transparent',
+                      boxShadow: i === 0 ? `0 0 0 2px ${t.windowBg}, 0 0 0 4px ${c}` : 'none',
+                    }} />
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab === 'shortcuts' && (
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: t.text, marginBottom: 6 }}>快捷键</div>
+              <div style={{ fontSize: 13, color: t.text3, marginBottom: 24 }}>全局与会话内快捷键。</div>
+              <div style={{ background: t.surface, border: `0.5px solid ${t.border}`, borderRadius: 10, overflow: 'hidden' }}>
+                {[
+                  { l: '新建对话', k: '⌘ N' },
+                  { l: '搜索', k: '⌘ K' },
+                  { l: '切换工作区', k: '⌘ ⇧ W' },
+                  { l: '打开知识库抽屉', k: '⌘ /' },
+                  { l: '发送消息', k: '⌘ ↩' },
+                  { l: '切换深/浅色', k: '⌘ ⇧ L' },
+                  { l: '打开设置', k: '⌘ ,' },
+                ].map((s, i, arr) => (
+                  <div key={s.l} style={{ display: 'flex', alignItems: 'center', padding: '12px 16px', borderBottom: i < arr.length - 1 ? `0.5px solid ${t.border}` : 'none' }}>
+                    <span style={{ flex: 1, fontSize: 13, color: t.text }}>{s.l}</span>
+                    <span style={{ fontSize: 12, color: t.text3, fontFamily: '-apple-system', padding: '3px 8px', background: t.surfaceHover, borderRadius: 5, border: `0.5px solid ${t.border}` }}>{s.k}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {tab === 'knowledge' && (
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 600, color: t.text, marginBottom: 6 }}>知识库</div>
+              <div style={{ fontSize: 13, color: t.text3, marginBottom: 24 }}>{KNOWLEDGE.length} 项 · 全局可被任何工作区引用。</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {KNOWLEDGE.map(k => (
+                  <div key={k.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: t.surface, border: `0.5px solid ${t.border}`, borderRadius: 9 }}>
+                    <div style={{ width: 32, height: 32, borderRadius: 7, background: t.surfaceHover, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <Icon name={k.type === 'file' ? 'file' : k.type === 'memory' ? 'brain' : 'link'} size={15} color={k.type === 'memory' ? t.accent2 : t.accent} stroke={1.7} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13.5, fontWeight: 500, color: t.text }}>{k.name}</div>
+                      <div style={{ fontSize: 11.5, color: t.text4, marginTop: 1 }}>{k.size} · {k.tag}</div>
+                    </div>
+                    <Icon name="dots" size={14} color={t.text3} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ROOT APP ────────────────────────────────────────────────
+function App() {
+  const [theme, setTheme] = useState('dark');
+  const t = useMemo(() => tokens(theme === 'dark'), [theme]);
+  const [activeWs, setActiveWs] = useState('work');
+  const [activeSession, setActiveSession] = useState('s1');
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  const session = ALL_SESSIONS.find(s => s.id === activeSession) || ALL_SESSIONS[0];
+
+  return (
+    <Theme.Provider value={t}>
+      <div style={{
+        width: '100vw', height: '100vh',
+        background: t.appBg,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: 0, overflow: 'hidden',
+        transition: 'background 0.3s ease',
+      }} data-screen-label="灵犀 macOS">
+        {/* macOS Window */}
+        <div style={{
+          width: '100%', height: '100%',
+          background: t.windowBg, borderRadius: 0, overflow: 'hidden',
+          boxShadow: t.windowShadow,
+          display: 'flex', position: 'relative',
+        }}>
+          {/* Traffic lights (overlay on top of sidebar) */}
+          <div style={{
+            position: 'absolute', top: 14, left: 16, zIndex: 30,
+            display: 'flex', gap: 8,
+          }}>
+            {['#ff5f57', '#febc2e', '#28c840'].map(c => (
+              <div key={c} style={{ width: 12, height: 12, borderRadius: '50%', background: c, border: '0.5px solid rgba(0,0,0,0.1)' }} />
+            ))}
+          </div>
+
+          <Sidebar
+            activeWs={activeWs} setActiveWs={setActiveWs}
+            activeSession={activeSession} setActiveSession={setActiveSession}
+            openSettings={() => setSettingsOpen(true)}
+            openKnowledge={() => setKnowledgeOpen(true)}
+          />
+          <ChatArea session={session} knowledgeOpen={knowledgeOpen} setKnowledgeOpen={setKnowledgeOpen} theme={theme} setTheme={setTheme} />
+          <KnowledgePanel open={knowledgeOpen} onClose={() => setKnowledgeOpen(false)} />
+        </div>
+
+        <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} theme={theme} setTheme={setTheme} />
+      </div>
+    </Theme.Provider>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>

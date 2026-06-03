@@ -118,9 +118,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
+      # cargo-deny's metadata pass must PARSE every manifest in the lock,
+      # including the WASI-only `wit-bindgen 0.57.x` whose manifest declares
+      # `edition = "2024"` — unparseable by the workspace MSRV (1.82). Pin a
+      # newer toolchain for THIS job only (the workspace still BUILDS on 1.82
+      # because that WASI branch never compiles for the host target). See the
+      # TOOLCHAIN NOTE header in lingxi-code/deny.toml (M10 F3-00).
+      - uses: dtolnay/rust-toolchain@1.85.0
       - name: Install cargo-deny
-        run: cargo install cargo-deny --locked --version '^0.16'
+        # >= 0.19 required so the bundled `rustsec` parser understands the
+        # CVSS-4.0 advisory entries now present in the live RUSTSEC DB.
+        run: cargo install cargo-deny --locked --version '^0.19'
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --version '^0.21'
       - name: Install cargo-vet
@@ -128,8 +136,9 @@ jobs:
       - name: cargo deny check
         working-directory: lingxi-code
         # Uses lingxi-code/deny.toml for license/advisory/duplicate-version
-        # policy. The architectural dependency-graph rules (design §8.1) are a
-        # separate step below.
+        # policy. Runs under the 1.85.0 toolchain pinned above so the metadata
+        # pass can parse the edition2024 WASI manifest. The architectural
+        # dependency-graph rules (design §8.1) are a separate step below.
         run: cargo deny check
       - name: scripts/check-deps.sh (M8 dependency-graph gate)
         working-directory: lingxi-code

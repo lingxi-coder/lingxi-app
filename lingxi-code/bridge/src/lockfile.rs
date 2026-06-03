@@ -11,8 +11,13 @@ use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The literal `ideName` value we publish in the lockfile.
+/// The literal `ideName` value we publish in the `~/.claude/ide/` lockfile,
+/// scanned by the real IDE peer (claude-code, VS Code Claude, …).
 pub const IDE_NAME: &str = "LingXi";
+/// The literal `ideName` value we publish in the dedicated `~/.claude/bridge/`
+/// discovery lockfile. Deliberately DISTINCT from [`IDE_NAME`] so the real IDE
+/// peer's `~/.claude/ide/` scan never picks up the bridge's lockfile.
+pub const BRIDGE_IDE_NAME: &str = "LingXi-Bridge";
 /// The literal `transport` value we publish — always `"ws"` for this bridge.
 pub const TRANSPORT: &str = "ws";
 
@@ -66,13 +71,24 @@ impl IdeLockfile {
         out
     }
 
-    /// Build a lockfile body with a fresh auth token.
+    /// Build a lockfile body with a fresh auth token and the IDE-peer
+    /// [`IDE_NAME`].
     #[must_use]
     pub fn new_body(workspace_folders: Vec<PathBuf>) -> LockfileBody {
+        Self::new_body_with_ide_name(IDE_NAME, workspace_folders)
+    }
+
+    /// Build a lockfile body with a fresh auth token and an explicit `ide_name`
+    /// (e.g. [`BRIDGE_IDE_NAME`] for the dedicated bridge discovery file).
+    #[must_use]
+    pub fn new_body_with_ide_name(
+        ide_name: &str,
+        workspace_folders: Vec<PathBuf>,
+    ) -> LockfileBody {
         LockfileBody {
             pid: std::process::id(),
             workspace_folders,
-            ide_name: IDE_NAME.to_string(),
+            ide_name: ide_name.to_string(),
             transport: TRANSPORT.to_string(),
             running_in_windows: cfg!(target_os = "windows"),
             auth_token: Self::generate_auth_token(),
@@ -102,6 +118,42 @@ impl IdeLockfile {
             ide_dir,
             port,
             body: Self::new_body(workspace_folders),
+        }
+    }
+
+    /// Construct a DEDICATED bridge discovery lockfile rooted at the user's
+    /// `~/.claude/bridge` dir, carrying the distinct [`BRIDGE_IDE_NAME`].
+    /// Creates the dir on first call (mode 0o755 on Unix).
+    ///
+    /// This is the F2-04 discovery file the Electron app reads: it lives in its
+    /// own directory with its own `ideName` so it never collides with the real
+    /// IDE peer scanning `~/.claude/ide/`.
+    ///
+    /// # Errors
+    /// Returns I/O errors if the home directory cannot be resolved or the
+    /// `~/.claude/bridge` directory cannot be created.
+    pub fn for_bridge(port: u16, workspace_folders: Vec<PathBuf>) -> std::io::Result<Self> {
+        let home = dirs::home_dir().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory")
+        })?;
+        let bridge_dir = home.join(".claude").join("bridge");
+        std::fs::create_dir_all(&bridge_dir)?;
+        Ok(Self::new_for_bridge_dir(bridge_dir, port, workspace_folders))
+    }
+
+    /// Construct a bridge discovery lockfile rooted at an arbitrary
+    /// `bridge_dir`, carrying the distinct [`BRIDGE_IDE_NAME`]. Used by tests
+    /// with `tempfile::TempDir` instead of `$HOME`.
+    #[must_use]
+    pub fn new_for_bridge_dir(
+        bridge_dir: PathBuf,
+        port: u16,
+        workspace_folders: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            ide_dir: bridge_dir,
+            port,
+            body: Self::new_body_with_ide_name(BRIDGE_IDE_NAME, workspace_folders),
         }
     }
 

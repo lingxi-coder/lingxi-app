@@ -9,10 +9,12 @@
 //! `SEND_MESSAGE_CLAIM_WINDOW` in `lingxi-tool_api::builtin::send_message`.
 
 use crate::mailbox::{MailboxRouter, MessageSender, TeammateMessage};
+use crate::team_registry::{TeamRegistry, WorkerStatus};
 use async_trait::async_trait;
 use protocol::AgentId;
 use std::time::SystemTime;
 use traits::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
+use traits::team_registry::{TeamRegistryHandle, WorkerInfo};
 use uuid::Uuid;
 
 /// Byte-locked teammate claim window (spec §7 line 498).
@@ -56,6 +58,43 @@ impl MailboxRouterHandle for MailboxRouter {
             Err(crate::mailbox::MailboxError::Full) => Err(MailboxError::Full),
             Err(crate::mailbox::MailboxError::Closed) => Err(MailboxError::Closed),
         }
+    }
+}
+
+/// Canonical lowering of [`WorkerStatus`] to the simplified `WorkerInfo.status`
+/// label string consumed by the bridge roster DTO (T18) and the TUI
+/// `WorkerRow` (T20). Defined here so the read seam and the (future) lowering
+/// share one source of truth.
+#[must_use]
+pub fn worker_status_label(status: &WorkerStatus) -> String {
+    match status {
+        WorkerStatus::Idle => "idle",
+        WorkerStatus::Working { .. } => "working",
+        WorkerStatus::AwaitingMessage => "awaiting_message",
+        WorkerStatus::Completed => "completed",
+        WorkerStatus::Failed { .. } => "failed",
+        WorkerStatus::Killed => "killed",
+    }
+    .to_string()
+}
+
+#[async_trait]
+impl TeamRegistryHandle for TeamRegistry {
+    async fn list_workers(&self) -> Vec<WorkerInfo> {
+        self.list()
+            .await
+            .into_iter()
+            .map(|w| WorkerInfo {
+                agent_id: w.agent_id.to_string(),
+                agent_type: w.agent_type,
+                name: w.name,
+                status: worker_status_label(&w.status),
+            })
+            .collect()
+    }
+
+    async fn team_name(&self) -> Option<String> {
+        TeamRegistry::team_name(self).await
     }
 }
 
@@ -114,5 +153,70 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, MailboxError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn team_registry_handle_lists_workers() {
+        let reg = TeamRegistry::new(AgentId::new());
+        let alpha = reg
+            .spawn_worker("explorer".into(), "alpha".into(), String::new())
+            .await
+            .unwrap();
+        let _beta = reg
+            .spawn_worker("writer".into(), "beta".into(), String::new())
+            .await
+            .unwrap();
+
+        // Drive one worker to a non-default status so the label mapping is exercised.
+        reg.update_status(
+            &alpha,
+            WorkerStatus::Working {
+                activity: "running".into(),
+            },
+        )
+        .await;
+        reg.set_team_name(Some("squad".into())).await;
+
+        let handle: &dyn TeamRegistryHandle = &reg;
+        let mut workers = handle.list_workers().await;
+        assert_eq!(workers.len(), 2);
+
+        // Order is map-iteration-dependent; sort by name for deterministic asserts.
+        workers.sort_by(|a, b| a.name.cmp(&b.name));
+
+        assert_eq!(workers[0].name, "alpha");
+        assert_eq!(workers[0].agent_type, "explorer");
+        assert_eq!(workers[0].agent_id, alpha.to_string());
+        assert_eq!(workers[0].status, "working");
+
+        assert_eq!(workers[1].name, "beta");
+        assert_eq!(workers[1].agent_type, "writer");
+        // Freshly spawned, untouched → Idle.
+        assert_eq!(workers[1].status, "idle");
+
+        assert_eq!(handle.team_name().await, Some("squad".to_string()));
+    }
+
+    #[test]
+    fn worker_status_label_covers_all_variants() {
+        assert_eq!(worker_status_label(&WorkerStatus::Idle), "idle");
+        assert_eq!(
+            worker_status_label(&WorkerStatus::Working {
+                activity: "x".into()
+            }),
+            "working"
+        );
+        assert_eq!(
+            worker_status_label(&WorkerStatus::AwaitingMessage),
+            "awaiting_message"
+        );
+        assert_eq!(worker_status_label(&WorkerStatus::Completed), "completed");
+        assert_eq!(
+            worker_status_label(&WorkerStatus::Failed {
+                error: "e".into()
+            }),
+            "failed"
+        );
+        assert_eq!(worker_status_label(&WorkerStatus::Killed), "killed");
     }
 }

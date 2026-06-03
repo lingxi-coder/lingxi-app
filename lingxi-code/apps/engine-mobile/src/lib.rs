@@ -26,6 +26,52 @@ use std::sync::Arc;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use traits::{AuthHandle, OrchestratorHandle};
 
+// F3-03: the shared mobile session-host module — `MobileConfig` +
+// `build_mobile(MobileConfig, Platform, listener, sink) -> MobileRuntime`. It
+// lives under the `uniffi` feature because it wires the `client-adapter` sinks
+// (`AdapterOutputStream` / `AdapterPermissionGate`) + the `ClientEventListener`,
+// which are pulled ONLY under that feature (the FFI surface). Both FFI packager
+// crates (`ios-framework` / `android-aar`) re-export this shared host (F3-04) so
+// iOS and Android cannot drift.
+#[cfg(feature = "uniffi")]
+mod host;
+
+#[cfg(feature = "uniffi")]
+pub use host::{
+    build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
+    MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle, MobileRuntime,
+};
+
+// F3-06: the host-only walking-skeleton support — a portable fake `Platform`
+// shim (fs/http/clock stubs over a temp root), a recording `ClientEventListener`,
+// a collecting `PermissionRequestSink`, and a streaming-injecting engine
+// constructor. Lives behind the `uniffi` feature (it names the FFI-surface
+// types) and is exposed so both the in-crate F3-03/F3-05 unit tests AND the
+// `tests/skeleton_test.rs` integration test build the SAME off-device host. The
+// real device `Platform` is `cfg(target_os)`-gated, so this shim is what proves
+// the skeleton on CI — exactly the spec §8 "prove from a Swift/Kotlin unit test"
+// smoke path, runnable on the host.
+#[cfg(feature = "uniffi")]
+pub mod test_support;
+
+// F3-04: re-export the FFI-visible adapter types both packager crates name when
+// they call `build_mobile_engine` (the foreign `ClientEventListener` they
+// register and the `PermissionRequestSink` the gate emits to). Re-exporting them
+// from the shared host crate keeps the FFI crates free of a direct
+// `client-adapter` import for these types — the shared host is the single seam.
+#[cfg(feature = "uniffi")]
+pub use client_adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
+
+// F3-04: this crate now DEFINES UniFFI-exported types (`MobileEngineHandle` as a
+// `uniffi::Object`, `MobileEngineError` as a `uniffi::Error` — see `host`), so it
+// must register their FFI metadata via the scaffolding macro. The aggregating
+// cdylib crates (`ios-framework` / `android-aar`) re-export this scaffolding so
+// the symbols land in the final library (the same pattern `client-adapter` uses
+// for the `ClientEventListener` callback interface). Compiles ONLY under the
+// `uniffi` feature; the default host build never includes it.
+#[cfg(feature = "uniffi")]
+uniffi::setup_scaffolding!();
+
 /// Mobile engine knobs.
 #[derive(Clone, Debug)]
 pub struct MobileEngineConfig {

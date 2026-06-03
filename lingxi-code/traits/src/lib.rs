@@ -33,6 +33,8 @@ pub mod share;
 pub mod subagent_spawn;
 pub mod swarm;
 pub mod task_registry;
+pub mod team_registry;
+pub mod team_spawn;
 pub mod tool_invoker;
 pub mod voice;
 pub mod worktree;
@@ -79,6 +81,8 @@ pub use task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
 };
+pub use team_registry::{TeamRegistryHandle, WorkerInfo};
+pub use team_spawn::{TeamSpawnError, TeamSpawnSeam};
 pub use tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 pub use voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
 #[allow(unused_imports)]

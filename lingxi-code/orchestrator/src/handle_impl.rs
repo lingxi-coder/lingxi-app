@@ -165,6 +165,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
             n_agents: 0,
             started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             cwd: self.cwd.clone(),
+            // This handle is not coordinator-wired; the count is 0 (T21).
+            active_workers: 0,
         }
     }
 

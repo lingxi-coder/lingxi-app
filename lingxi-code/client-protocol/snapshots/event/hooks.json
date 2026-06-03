@@ -1,0 +1,11 @@
+{
+  "type": "hooks",
+  "hooks": [
+    {
+      "name": "format-on-write",
+      "event": "PostToolUse",
+      "matcher": "Write|Edit",
+      "timeout_ms": 60000
+    }
+  ]
+}

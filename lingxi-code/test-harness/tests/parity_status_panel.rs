@@ -20,6 +20,7 @@ fn status_panel_layout_matches_golden() {
         n_agents: 5,
         started_at: "2026-05-26T10:00:00Z".into(),
         cwd: std::path::PathBuf::from("/repo"),
+        active_workers: 0,
     };
     assert_eq!(render_status(&snap), GOLDEN);
 }

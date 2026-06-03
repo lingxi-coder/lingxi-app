@@ -13,7 +13,7 @@
 
 use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use super::StreamingError;
-use api_client::types::{ContentBlockApi, ContentDelta, StreamEvent};
+use api_client::types::{ContentBlockApi, ContentDelta, StreamEvent, UsageApi};
 use protocol::{ContentBlock, ToolUseId};
 use std::sync::Arc;
 use traits::OutputStream;
@@ -57,10 +57,16 @@ pub async fn dispatch_event(
     output: &Arc<dyn OutputStream>,
 ) -> Result<RouterAction, StreamingError> {
     match event {
-        StreamEvent::MessageStart { .. } => {
-            // No-op; the loop already knows the model + id from the
-            // turn invocation. claude-code captures `partialMessage`
+        StreamEvent::MessageStart { message } => {
+            // No-op for state; the loop already knows the model + id from
+            // the turn invocation. claude-code captures `partialMessage`
             // and `ttftMs` here; we don't need those at the M5-04 wire.
+            //
+            // §0.7 "light up thinking/usage": `message_start` carries the
+            // initial usage snapshot (input + cache-read tokens). Surface
+            // it to the output sink so consumers see an early token count;
+            // the final `message_delta` usage supersedes it.
+            emit_usage_if_present(output, &message.usage).await;
             Ok(RouterAction::Continue)
         }
         StreamEvent::ContentBlockStart {
@@ -95,6 +101,12 @@ pub async fn dispatch_event(
                 }
                 ContentDelta::ThinkingDelta { thinking } => {
                     acc.append_text(index, &thinking)?;
+                    // §0.7 "light up thinking/usage": stream the reasoning
+                    // delta to the output sink RIGHT NOW, mirroring the
+                    // `TextDelta` arm above. `signature` is `None` on the
+                    // live delta — the cryptographic signature only arrives
+                    // on the completed thinking block (`SignatureDelta`).
+                    output.emit_thinking(&thinking, None).await;
                 }
                 ContentDelta::SignatureDelta { signature } => {
                     acc.set_signature(index, &signature)?;
@@ -127,7 +139,14 @@ pub async fn dispatch_event(
                 CompletedBlock::Skipped => Ok(RouterAction::Continue),
             }
         }
-        StreamEvent::MessageDelta { delta, .. } => {
+        StreamEvent::MessageDelta { delta, usage } => {
+            // §0.7 "light up thinking/usage": `message_delta` carries the
+            // final usage snapshot. Surface it to the output sink BEFORE
+            // computing the router action — the stop-reason behavior below
+            // is unchanged.
+            if let Some(usage) = usage {
+                emit_usage_if_present(output, &usage).await;
+            }
             if let Some(sr) = delta.stop_reason {
                 Ok(RouterAction::RecordStopReason(sr))
             } else {
@@ -141,6 +160,25 @@ pub async fn dispatch_event(
             error.kind, error.message
         ))),
     }
+}
+
+/// Surface an SSE `usage` snapshot to the output sink as a live usage
+/// update (§0.7 "light up thinking/usage").
+///
+/// Maps `UsageApi` onto the four bare `u64` arguments of
+/// [`OutputStream::emit_usage`] with the SAME field mapping the cost
+/// pipeline uses (`api-client/src/anthropic.rs`): `input` ←
+/// `input_tokens`, `output` ← `output_tokens`, `cache_read` ←
+/// `cache_read_input_tokens`, `cache_write` ← `cache_creation_input_tokens`.
+async fn emit_usage_if_present(output: &Arc<dyn OutputStream>, usage: &UsageApi) {
+    output
+        .emit_usage(
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_input_tokens,
+            usage.cache_creation_input_tokens,
+        )
+        .await;
 }
 
 #[cfg(test)]

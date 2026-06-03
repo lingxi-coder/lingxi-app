@@ -25,11 +25,13 @@ pub mod transport;
 /// Named `wire` to avoid shadowing the `protocol` crate dependency.
 pub mod wire;
 
-pub use lockfile::{IdeLockfile, LockfileBody, LockfileGuard, IDE_NAME, TRANSPORT};
-pub use mcp_endpoint::{McpEndpoint, AUTH_HEADER_NAME, WS_SUBPROTOCOL};
+pub use lockfile::{
+    IdeLockfile, LockfileBody, LockfileGuard, BRIDGE_IDE_NAME, IDE_NAME, TRANSPORT,
+};
+pub use mcp_endpoint::{FramePump, FrameSink, McpEndpoint, AUTH_HEADER_NAME, WS_SUBPROTOCOL};
 pub use state::BridgeState;
 pub use transport::{BridgeError, IdeBridge};
 pub use wire::{
-    AuthChallenge, AuthResponse, BridgeRequest, BridgeResponse, BridgeWireError, Capabilities,
-    ClientHello, ServerHello, BRIDGE_PROTOCOL_VERSION,
+    version_compatible, AuthChallenge, AuthResponse, BridgeRequest, BridgeResponse, BridgeWireError,
+    Capabilities, ClientHello, Frame, ServerHello, BRIDGE_PROTOCOL_VERSION,
 };

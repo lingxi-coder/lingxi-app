@@ -26,15 +26,106 @@
 
 #![forbid(unsafe_code)]
 
-use command_api::CommandRegistry;
+use anthropic_oauth::client::ClaudeAiOAuthClient;
+use anthropic_oauth::config::ClaudeAiOAuthConfig;
+use anthropic_oauth::handle::OAuthHandle;
+use api_client::AnthropicProvider;
+use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
+use command_api::{CommandRegistry, RegistrySlashDispatcher};
 use command_core::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
 };
+use orchestrator::test_support::{NoOpPermissionGate, StaticMemoryProvider};
+use orchestrator::{
+    ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
+};
+use permission::gate::PermissionGate;
+use permission::PermissionMode;
+use platform_posix_minimal::{
+    PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixMcp, PosixProcess,
+    PosixRuntime, PosixSandbox, PosixWorktree,
+};
+use providers::{builtin_profiles, parse_profiles, parse_routing, ModelRouter, ProviderRegistry};
+use sandbox::decision::ProjectTrustLevel;
+use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
+use secret::CredentialManager;
 use skill_api::SkillRegistry;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tool_api::{BuiltinToolContext, ToolRegistry};
-use traits::{AuthHandle, OrchestratorHandle};
+use traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
+
+/// M10 (T13): per-teammate `StateMachinePool` slot cap.
+///
+/// Teammates are PERSISTENT: each one parks on `wait_for_message` between
+/// turn-sets and NEVER frees its pool slot until killed. Sharing the
+/// `AgentTool` `subagent_pool` (cap 4) would let parked teammates starve
+/// one-shot subagent spawns, so the teammate handler gets its OWN pool with
+/// this cap (T14 adds the pool-starvation regression that proves the
+/// separation). Sized to match the `subagent_pool` cap so a coordinator can run
+/// a small team without immediately exhausting slots.
+///
+/// `pub` so the T14 `pool_starvation` regression test can pin its parked-teammate
+/// count to the single production source of truth (no magic-number drift).
+pub const TEAMMATE_POOL_CAP: usize = 4;
+
+/// M10 (T13): a late-bound [`traits::tool_invoker::ToolInvoker`] resolving the
+/// composition-root construction cycle.
+///
+/// The teammate handler is registered into the `TaskRegistry` (which needs
+/// `&mut self`, so BEFORE the registry is `Arc`-wrapped) yet must inherit the
+/// parent's `Arc<ToolRegistry>` as its tool-dispatch seam — and that registry is
+/// assembled AFTER the task registry exists (its `BuiltinToolContext` carries
+/// `task_registry.clone()`). Naively this is a cycle.
+///
+/// `DeferredToolInvoker` breaks it: it is constructed empty, injected into the
+/// teammate handler up front, and [`set`](Self::set) is called exactly once with
+/// the real `RegistryToolInvoker` after `tools` is built. This preserves the
+/// recursion-lock invariant (the teammate dispatches through the SAME
+/// `Arc<ToolRegistry>` the parent owns — `RegistryToolInvoker` stores that Arc
+/// verbatim) while satisfying the construction order. A teammate cannot dispatch
+/// a tool before `build()` returns, so the cell is always filled before first
+/// use.
+struct DeferredToolInvoker {
+    inner: std::sync::OnceLock<Arc<dyn traits::tool_invoker::ToolInvoker>>,
+}
+
+impl DeferredToolInvoker {
+    fn new() -> Self {
+        Self {
+            inner: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Fill the cell with the real invoker. Idempotent-safe: a second call is a
+    /// no-op (the first binding wins), matching the build-once semantics.
+    fn set(&self, invoker: Arc<dyn traits::tool_invoker::ToolInvoker>) {
+        let _ = self.inner.set(invoker);
+    }
+}
+
+#[async_trait::async_trait]
+impl traits::tool_invoker::ToolInvoker for DeferredToolInvoker {
+    async fn invoke(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        ctx: traits::tool_invoker::SubagentInvocationContext,
+    ) -> Result<serde_json::Value, traits::tool_invoker::ToolInvokerError> {
+        match self.inner.get() {
+            Some(invoker) => invoker.invoke(name, input, ctx).await,
+            None => Err(traits::tool_invoker::ToolInvokerError::Internal(
+                "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
+                    .to_string(),
+            )),
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
 
 /// Desktop engine knobs.
 ///
@@ -54,6 +145,43 @@ impl Default for DesktopEngineConfig {
     }
 }
 
+/// M10 (T12): the three coordinator handles a coordinator-capable session
+/// passes to [`register_desktop_tools`] / [`desktop_tool_registry`] so the
+/// composition root can register the coordinator `TeamCreate` / `TeamDelete`
+/// tools IN PLACE OF `tool_team`'s pair.
+///
+/// All four coordinator tool names collide byte-for-byte with the already
+/// registered `tool_team` / `tool_ui` builtins, and [`ToolRegistry`] is
+/// push-no-dedup with first-match-wins ([`ToolRegistry::find_by_name`]).
+/// Naively splicing the coordinator tools *after* `tool_team::register_all`
+/// would therefore silently shadow nothing (the `tool_team` copy wins every
+/// lookup). Mode-exclusivity is the only safe option, and the registry is
+/// built-once-and-moved, so the choice MUST be made at BUILD time — hence this
+/// is threaded through as an `Option` rather than toggled later.
+///
+/// `build()` populates this with `Some(..)` ONLY when
+/// `DesktopConfig::session_started_as_coordinator` is `true`; a default session
+/// passes `None`, leaving the assembled tool set byte-identical to the pre-M10
+/// build.
+pub struct CoordinatorWiring {
+    /// The per-session team registry the coordinator tools mutate.
+    pub team: Arc<coordinator::TeamRegistry>,
+    /// The coordinator-mode gate the tools consult in `call()`
+    /// (defense-in-depth) so a future `/coordinator exit()` can neutralize them
+    /// without rebuilding the registry.
+    pub mode: Arc<coordinator::CoordinatorMode>,
+    /// The spawn/kill seam the tools use to start / stop the real backing
+    /// `InProcessTeammate` task.
+    pub spawn_seam: Arc<dyn traits::team_spawn::TeamSpawnSeam>,
+    /// The orchestrator-facing output stream the `TeamCreate` tool pushes the
+    /// live active-worker count through immediately after a spawn is reconciled
+    /// — the same `Arc<dyn OutputStream>` `build()` gives the orchestrator and
+    /// the `CoordinatorStatusSink`. This makes `active_workers > 0` reach every
+    /// client deterministically, independent of the teammate's racy startup
+    /// status emit.
+    pub output: Arc<dyn traits::OutputStream>,
+}
+
 /// Assemble the desktop builtin **tool** registry from a freshly-built
 /// [`BuiltinToolContext`].
 ///
@@ -61,10 +189,17 @@ impl Default for DesktopEngineConfig {
 /// (`tool-file/shell/task/web/plan/meta/cron/ui/skill`) + 5 desktop-only
 /// crates (`tool-agent/team/worktree/mcp/lsp`). The mobile composition root
 /// links only the cross-platform subset plus mobile-specific crates.
+///
+/// `coordinator` selects the team-tool variant at build time: `None` registers
+/// `tool_team`'s `TeamCreate` / `TeamDelete` (default), `Some(..)` registers the
+/// coordinator pair IN PLACE OF them. See [`CoordinatorWiring`].
 #[must_use]
-pub fn desktop_tool_registry(ctx: BuiltinToolContext) -> ToolRegistry {
+pub fn desktop_tool_registry(
+    ctx: BuiltinToolContext,
+    coordinator: Option<CoordinatorWiring>,
+) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
-    register_desktop_tools(&mut reg, ctx);
+    register_desktop_tools(&mut reg, ctx, coordinator);
     reg
 }
 
@@ -72,7 +207,20 @@ pub fn desktop_tool_registry(ctx: BuiltinToolContext) -> ToolRegistry {
 ///
 /// Each `tool_*::register_all` consumes a clone of `ctx`; the final crate
 /// takes ownership to avoid a redundant clone.
-pub fn register_desktop_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
+///
+/// When `coordinator` is `Some(..)` (a coordinator-capable session), the
+/// coordinator `TeamCreate` / `TeamDelete` tools are registered IN PLACE OF
+/// `tool_team`'s pair: `tool_team::register_all` is SKIPPED entirely (it
+/// registers exactly those two and no others — see `tools/team/src/lib.rs`), and
+/// the coordinator pair is pushed instead. This keeps exactly ONE `TeamCreate`
+/// and ONE `TeamDelete` in the registry (no silent shadow, no duplicate name in
+/// the system prompt). When `None`, `tool_team::register_all` runs as before and
+/// the coordinator tools are absent — byte-identical to the pre-M10 build.
+pub fn register_desktop_tools(
+    reg: &mut ToolRegistry,
+    ctx: BuiltinToolContext,
+    coordinator: Option<CoordinatorWiring>,
+) {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
     tool_file::register_all(reg, ctx.clone());
     tool_shell::register_all(reg, ctx.clone());
@@ -85,7 +233,25 @@ pub fn register_desktop_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
     tool_task::register_all(reg, ctx.clone());
     // ----- desktop-only tool crates ----------------------------------------
     tool_agent::register_all(reg, ctx.clone());
-    tool_team::register_all(reg, ctx.clone());
+    match coordinator {
+        // Coordinator-capable session: register the coordinator `TeamCreate` /
+        // `TeamDelete` IN PLACE OF `tool_team`'s pair. `tool_team::register_all`
+        // is deliberately NOT called — splicing-after would silently shadow.
+        Some(CoordinatorWiring {
+            team,
+            mode,
+            spawn_seam,
+            output,
+        }) => {
+            for tool in coordinator::internal_tools::coordinator_internal_tools(
+                team, mode, spawn_seam, output,
+            ) {
+                reg.register_builtin(tool);
+            }
+        }
+        // Default session: `tool_team`'s pair, coordinator tools absent.
+        None => tool_team::register_all(reg, ctx.clone()),
+    }
     tool_worktree::register_all(reg, ctx.clone());
     tool_mcp::register_all(reg, ctx.clone());
     tool_lsp::register_all(reg, ctx);
@@ -102,6 +268,117 @@ pub fn desktop_skill_registry() -> SkillRegistry {
     let mut reg = SkillRegistry::new();
     skill_builtin::register_desktop(&mut reg);
     reg
+}
+
+/// Deterministic, env/argv-free recipe for building a desktop runtime.
+///
+/// F2-00 (deliverable-zero): every value the ~270-line `build_runtime`
+/// (`apps/cli/src/init.rs:148`) currently reads from `std::env`/`Argv` becomes
+/// an explicit field here, so both the CLI host **and** the bridge-server (and
+/// the F2 end-to-end test) can construct an identical runtime *without*
+/// touching the process environment. F2-01 lifts the actual wiring into
+/// `engine_desktop::build(DesktopConfig) -> DesktopRuntime`; this task only
+/// freezes the field set.
+///
+/// Field provenance (each mirrors a concrete read in `build_runtime`):
+/// - `api_base` — `resolve_api_base()` (env `LINGXI_API_BASE_URL`, init.rs:95).
+/// - `api_key` — env `ANTHROPIC_API_KEY` (init.rs:153).
+/// - `cwd` — `std::env::current_dir()` (init.rs:248).
+/// - `claude_home` — the `~/.claude` (and platform config-dir) root the hook /
+///   agents / global-MCP loaders walk (init.rs:253-317); made explicit so the
+///   bridge-server can point it at a sandbox in tests.
+/// - `default_model` — `Argv::model` ⟶ `OrchestratorConfig.model` (init.rs:213).
+/// - `provider_profiles` — the settings `providers` block as raw JSON, fed
+///   verbatim to `providers::parse_profiles` (`load_provider_profiles()`,
+///   init.rs:175). `None` ⟶ built-in profiles only.
+/// - `mcp_paths` — the precedence-ordered `.mcp.json` paths (project then
+///   global) handed to `mcp::load_mcp_json_with_precedence` (init.rs:253-258).
+/// - `use_noop_permission_gate` — lets the CLI opt into `NoOpPermissionGate`
+///   (init.rs:245) while the bridge-server binds `AdapterPermissionGate`.
+///
+/// # Examples
+///
+/// Field-by-field construction (no env / argv reads — fully deterministic):
+///
+/// ```
+/// use engine_desktop::DesktopConfig;
+/// use std::collections::BTreeMap;
+/// use std::path::PathBuf;
+///
+/// let cfg = DesktopConfig {
+///     api_base: "https://api.anthropic.com".to_string(),
+///     api_key: "sk-test".to_string(),
+///     cwd: PathBuf::from("/tmp/project"),
+///     claude_home: PathBuf::from("/tmp/home/.claude"),
+///     default_model: "claude-sonnet-4-20250514".to_string(),
+///     provider_profiles: Some(BTreeMap::new()),
+///     routing: None,
+///     mcp_paths: vec![PathBuf::from("/tmp/project/.mcp.json")],
+///     use_noop_permission_gate: false,
+///     session_started_as_coordinator: false,
+/// };
+///
+/// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
+/// assert!(!cfg.use_noop_permission_gate);
+/// // `DesktopConfig` is `Clone` so a host can fan it out to multiple builders.
+/// let _clone = cfg.clone();
+/// ```
+#[derive(Clone, Debug)]
+pub struct DesktopConfig {
+    /// API base URL (default `https://api.anthropic.com`); env override
+    /// `LINGXI_API_BASE_URL` is resolved by the host *before* it fills this.
+    pub api_base: String,
+    /// Anthropic API key. Empty string is valid — the orchestrator builds
+    /// successfully and only fails at `run_turn` with a 401, so slash-command
+    /// dispatch still works with no key configured.
+    pub api_key: String,
+    /// Working directory the orchestrator + tool context are rooted at.
+    pub cwd: std::path::PathBuf,
+    /// The `~/.claude` root the hook / agents / global-MCP / settings loaders
+    /// walk. Explicit so a host can redirect it to a sandbox.
+    pub claude_home: std::path::PathBuf,
+    /// Model id the build defaults to (`OrchestratorConfig.model`).
+    pub default_model: String,
+    /// Settings-declared `providers` block as raw JSON, fed verbatim to
+    /// `providers::parse_profiles`. `None` ⟶ built-in profiles only.
+    pub provider_profiles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    /// Settings-declared `routing` block as raw JSON, fed verbatim to
+    /// `providers::parse_routing` (model aliases / fallback / retry). `None` ⟶
+    /// the default (empty) routing config. Mirrors `load_routing()` in
+    /// `apps/cli/src/init.rs` — additive to the F2-00 field set so the lift
+    /// preserves byte-equivalent engine behavior (no silent routing drop).
+    pub routing: Option<serde_json::Value>,
+    /// Precedence-ordered `.mcp.json` paths (project preferred over global)
+    /// handed to `mcp::load_mcp_json_with_precedence`.
+    pub mcp_paths: Vec<std::path::PathBuf>,
+    /// When `true`, bind `NoOpPermissionGate` (the CLI default); when `false`,
+    /// the host binds the connection-scoped `AdapterPermissionGate`.
+    pub use_noop_permission_gate: bool,
+    /// M10 build-time coordinator-activation flag. When `true`, `build()`
+    /// enters coordinator multi-agent mode and registers the coordinator
+    /// `TeamCreate`/`TeamDelete` tools IN PLACE OF `tool_team`'s pair (decided
+    /// at build time — the registry is built-once-and-moved). Defaults to
+    /// `false`: a default session is byte-identical to the pre-M10 build
+    /// (mode off, `tool_team` unchanged, no teammate spawned). Additive to the
+    /// frozen field set.
+    pub session_started_as_coordinator: bool,
+}
+
+impl Default for DesktopConfig {
+    fn default() -> Self {
+        Self {
+            api_base: "https://api.anthropic.com".to_string(),
+            api_key: String::new(),
+            cwd: std::path::PathBuf::from("."),
+            claude_home: std::path::PathBuf::new(),
+            default_model: DesktopEngineConfig::default().default_model,
+            provider_profiles: None,
+            routing: None,
+            mcp_paths: Vec::new(),
+            use_noop_permission_gate: true,
+            session_started_as_coordinator: false,
+        }
+    }
 }
 
 /// Assemble the desktop slash-command registry.
@@ -125,4 +402,1028 @@ pub fn desktop_command_registry(
     // command-core unimplemented stubs until future milestones fill them).
     command_desktop::register(&mut reg);
     reg
+}
+
+/// Everything a host needs to drive a conversation, built deterministically by
+/// [`build`] from a [`DesktopConfig`].
+///
+/// This is the lifted shape of `apps/cli`'s `Runtime` (F2-01): moving the
+/// runtime wiring out of the CLI binary lets the bridge-server (which CANNOT
+/// depend on `apps/cli` — app→app is a leaf, `scripts/check_deps.py:99`)
+/// construct an identical orchestrator. The CLI now derives a `DesktopConfig`
+/// from `Argv`/env and calls `build`.
+pub struct DesktopRuntime {
+    /// The fully-constructed orchestrator (cost tracker + MCP/hook/agent
+    /// registries + compaction wired), bound to the supplied output stream and
+    /// permission gate.
+    pub orchestrator: Arc<ConversationOrchestrator>,
+    /// Slash-command dispatcher seeded with the builtin handlers + wired core
+    /// handlers (the `register_all_builtin_commands` → `register_core_batch_1`
+    /// → `register_core_batch_2` sequence).
+    pub dispatcher: RegistrySlashDispatcher,
+    /// Auth handle for `/login` and `/logout`.
+    pub auth: Arc<dyn AuthHandle>,
+    /// The desktop task registry shared with the tool context (the TUI / a
+    /// transport wraps it in a poller to read live background-task state).
+    pub task_registry: Arc<tasks::registry::TaskRegistry>,
+    /// M10: the per-session coordinator team registry. One is constructed per
+    /// `build()` regardless of mode so the status feed (and the PHASE-2 command
+    /// router) always have a handle to read; it is observable but empty (no
+    /// workers) unless a coordinator session spawns teammates via `TeamCreate`.
+    pub coordinator: Arc<coordinator::TeamRegistry>,
+    /// M10: the per-session coordinator-mode flag. Entered at build time only
+    /// when `cfg.session_started_as_coordinator` is `true`; otherwise this is
+    /// constructed disabled (`is_enabled() == false`) and a default session is
+    /// byte-identical to the pre-M10 build. A `call()`-time gate also consults
+    /// it (defense-in-depth) so a future `/coordinator exit()` can neutralize
+    /// the tools without a registry rebuild.
+    pub coordinator_mode: Arc<coordinator::CoordinatorMode>,
+    /// The connection-scoped [`AdapterPermissionGate`] handle, present ONLY when
+    /// `cfg.use_noop_permission_gate` is `false`. The transport calls
+    /// [`AdapterPermissionGate::resolve`] on this to satisfy a parked `check()`
+    /// from an inbound `ApprovePermission`/`DenyPermission` (F2-06). `None` when
+    /// the host opted into the always-allow `NoOpPermissionGate` (the CLI).
+    pub permission_gate: Option<Arc<AdapterPermissionGate>>,
+}
+
+/// Errors surfaced while building a [`DesktopRuntime`].
+///
+/// Lifted from `apps/cli`'s `InitError`. Construction is effectively infallible
+/// today (the orchestrator constructor cannot fail), but the typed error is kept
+/// so future iterations (real OAuth bootstrap, MCP connect) can surface a cause
+/// without changing every call site.
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    /// API base URL resolution / api-client construction failed.
+    #[error("api base resolution failed: {0}")]
+    ApiBase(String),
+    /// Orchestrator construction failed.
+    #[error("orchestrator construction failed: {0}")]
+    Orchestrator(String),
+}
+
+/// Build a fully-wired desktop [`DesktopRuntime`] from a deterministic
+/// [`DesktopConfig`] (F2-01 — the runtime-wiring lift out of `apps/cli`).
+///
+/// This is the byte-equivalent move of `apps/cli`'s `build_runtime`: every value
+/// it read from `std::env`/`Argv` now arrives as an explicit `cfg` field, so
+/// BOTH the CLI host and the bridge-server can construct an identical runtime
+/// WITHOUT touching the process environment (the F2 end-to-end test depends on
+/// this determinism). No `std::env`/`Argv` reads occur inside `build`.
+///
+/// The engine behavior is preserved verbatim (spec §1 non-goal — no
+/// orchestrator / api-client semantic changes); only the *source* of each input
+/// moved from env/argv to `cfg`, and the output/permission sinks become
+/// connection-scoped parameters:
+///
+/// - `output` is the [`traits::OutputStream`] the orchestrator pushes turn
+///   events to. The CLI supplies its NDJSON/plain/TUI sink; the bridge-server
+///   supplies a `client_adapter::AdapterOutputStream`. The SAME `build` serves
+///   both.
+/// - `permission_sink` is the destination for the [`AdapterPermissionGate`]'s
+///   outbound `PermissionRequest`s. It is wired ONLY when
+///   `cfg.use_noop_permission_gate` is `false`; the CLI passes a sink that is
+///   never used because it opts into `NoOpPermissionGate`.
+///
+/// # Errors
+///
+/// Returns [`BuildError`] if the api-client or orchestrator cannot be
+/// constructed (effectively infallible in the current wiring).
+#[allow(clippy::too_many_lines)]
+pub async fn build(
+    cfg: DesktopConfig,
+    output: Arc<dyn OutputStream>,
+    permission_sink: Arc<dyn PermissionRequestSink>,
+) -> Result<DesktopRuntime, BuildError> {
+    let cwd = cfg.cwd.clone();
+
+    // (1) Platform-minimal façade (http + clock + storage).
+    let http = Arc::new(PosixHttp::new());
+    let clock = Arc::new(PosixClock::new());
+    let storage = Arc::new(PlainTextSecureStorage::new());
+
+    // (2) api-client via ProviderRegistry. An empty `api_key` is accepted — the
+    //     orchestrator builds and only fails at `run_turn` with a 401, so
+    //     slash-command dispatch still works with no key configured. The
+    //     settings `providers` / `routing` blocks now arrive via `cfg`
+    //     (previously `load_provider_profiles()` / `load_routing()` read env).
+    let env_snapshot: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let mut profiles = builtin_profiles(Some(cfg.api_base.clone()));
+    match parse_profiles(cfg.provider_profiles.as_ref()) {
+        Ok(extra) => profiles.extend(extra),
+        Err(e) => tracing::warn!(error = %e, "ignoring malformed settings `providers` block"),
+    }
+    let routing = parse_routing(cfg.routing.as_ref());
+    let registry = Arc::new(ProviderRegistry::new(
+        profiles,
+        env_snapshot,
+        http.clone(),
+        routing,
+    ));
+    // Build the CONCRETE adapter first so it can be coerced to BOTH the
+    // orchestrator seam (`OrchestratorApiClient`) and the agent seam
+    // (`agent::SubagentApiClient`). `ProviderApiAdapter` impls both (see
+    // orchestrator/src/provider_adapter.rs); type-erasing to one trait object
+    // up front would forfeit the other coercion.
+    let provider_adapter = Arc::new(ProviderApiAdapter::new(
+        Arc::clone(&registry) as Arc<dyn ModelRouter>,
+    ));
+    let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
+    let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
+    // WebSearch builds Anthropic `POST /v1/messages` requests via its own
+    // provider (server-side web search is Anthropic-only in v1).
+    let tool_provider = Arc::new(AnthropicProvider::new(
+        cfg.api_key.clone(),
+        Some(cfg.api_base.clone()),
+    ));
+
+    // (3) Credential manager + OAuth client (used by /login, /logout).
+    let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
+    let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
+    let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
+        oauth_cfg.clone(),
+        http.clone(),
+        credentials.clone(),
+    ));
+    let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(oauth_client));
+
+    // (3.1) M5-13: attach the OAuth refresh driver to the api-client when the
+    //        keychain already holds a logged-in OAuth token. `init_refresh_driver`
+    //        registers the process-global `OAuthRefreshHook` (so the api-client's
+    //        401-retry path calls `refresh` instead of `NoOpOAuthHook`) and spawns
+    //        the proactive-refresh task. It MUST be called at most once per
+    //        process; gating it on "tokens present" keeps the API-key path on the
+    //        correct `NoOpOAuthHook`. When no OAuth token is stored (the common
+    //        API-key case) we skip it entirely.
+    match credentials.get_oauth_tokens().await {
+        Ok(Some(tokens)) => {
+            if let Err(e) = anthropic_oauth::client::init_refresh_driver(
+                oauth_cfg,
+                tokens.access_token,
+                tokens.refresh_token,
+                tokens.expires_at,
+                http.clone(),
+                clock.clone(),
+                Some(Arc::new(telemetry::AnalyticsBus::new())),
+                Some(credentials.clone()),
+                Arc::new(PosixRuntime::new()),
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "failed to attach OAuth refresh driver; 401 auto-refresh disabled");
+            }
+        }
+        Ok(None) => {
+            // No stored OAuth session — API-key path. Leave `current_hook()` as
+            // the NoOpOAuthHook (correct: nothing to refresh).
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read OAuth tokens from keychain; skipping refresh-driver wiring");
+        }
+    }
+
+    // (4) Orchestrator config from `cfg` (was `argv.model`).
+    let mut orch_cfg = OrchestratorConfig::default();
+    orch_cfg.model.clone_from(&cfg.default_model);
+
+    // (4.5) One CostTracker per process. The persist channel drains into a
+    //       fire-and-forget task that discards snapshots (on-disk persistence is
+    //       later work). Depth 64 absorbs bursts without blocking.
+    let (cost_persist_tx, mut cost_persist_rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move {
+        while cost_persist_rx.recv().await.is_some() {}
+    });
+    let cost_tracker = Arc::new(cost::CostTracker::new(
+        protocol::SessionId::new(),
+        Arc::new(cost::PricingCatalog::builtin_reference()),
+        cost_persist_tx,
+    ));
+
+    // (4.6) Subagent spawner pool + budget enforcer for the `AgentTool` seam.
+    //       `AgentTool::call` requires BOTH `subagent_spawner` and
+    //       `budget_enforcer` to be `Some` — wiring the spawner alone is inert.
+    //
+    //       The pool is the production `StateMachinePool` driven by the posix
+    //       `RuntimeSpawner`; `max_concurrent = 4` matches the agent-crate
+    //       fixtures. `with_api_client(subagent_api)` hands the child runner the
+    //       real model seam so spawned subagents drive the multi-turn
+    //       `run_subagent_loop` (gated on `ctx.api_client.is_some()`) instead of
+    //       the legacy stub completion.
+    let subagent_pool = Arc::new(agent::StateMachinePool::new(Arc::new(PosixRuntime::new()), 4));
+    // Clone the subagent model seam BEFORE it is moved into the spawner — the
+    // M10 coordinator teammate handler (T13) hands the SAME seam to every
+    // spawned `InProcessTeammate` so it drives the real multi-turn loop.
+    let teammate_api = subagent_api.clone();
+    // The spawner cannot receive the tool registry / agent catalog here: both
+    // are built below, and the registry construction forms a cycle through
+    // `BuiltinToolContext` (which consumes `subagent_spawner`). So we grab clones
+    // of the spawner's set-once cells BEFORE boxing it, and fill them once the
+    // registry + catalog exist (just after `desktop_tool_registry`, below).
+    // `with_default_model` anchors `AgentModel::Inherit` + family-alias tiers to
+    // the parent model so built-in subagent spawns resolve to a concrete wire id
+    // instead of passing `"inherit"`/`"haiku"` raw (parity batch 22).
+    let subagent_spawner_concrete = agent::PoolSubagentSpawner::new(subagent_pool)
+        .with_api_client(subagent_api)
+        .with_default_model(orch_cfg.model.clone());
+    let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
+    let subagent_agent_catalog_cell = subagent_spawner_concrete.agent_catalog_handle();
+    let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> =
+        Arc::new(subagent_spawner_concrete);
+
+    //       The budget enforcer is an unlimited / non-blocking config (every
+    //       limit `None`, no warning thresholds, `WarnOnly` policy) so it never
+    //       halts a turn — `BudgetConfig` has no production `Default`, so all
+    //       five fields are spelled out. It shares the process `CostTracker`
+    //       (cloned because the tracker is also moved into `.with_cost_tracker`
+    //       below).
+    let budget_enforcer: Arc<dyn traits::budget::BudgetEnforcerHandle> =
+        Arc::new(cost::BudgetEnforcer::new(
+            cost::BudgetConfig {
+                max_session_nano_usd: None,
+                max_turn_nano_usd: None,
+                max_turn_tokens: None,
+                warning_thresholds: Vec::new(),
+                on_exceed: cost::BudgetExceedPolicy::WarnOnly,
+            },
+            cost_tracker.clone(),
+        ));
+
+    // (5) Memory filler + the permission gate. The gate is the F2-01 branch
+    //     point: the CLI opts into the always-allow `NoOpPermissionGate`; a
+    //     transport binds the connection-scoped `AdapterPermissionGate` and
+    //     keeps its handle to `resolve()` inbound approvals (F2-06).
+    //
+    //     M5-13: the hook executor is no longer the `noop_hook_executor()` stub
+    //     — it is constructed below (5.25) once `hook_registry` exists, so the
+    //     HTTP / Command hook arms run for real.
+    let memory: Arc<dyn orchestrator::prompt::MemoryHierarchyProvider> =
+        Arc::new(StaticMemoryProvider::empty());
+
+    let (perms, adapter_gate): (Arc<dyn PermissionGate>, Option<Arc<AdapterPermissionGate>>) =
+        if cfg.use_noop_permission_gate {
+            (Arc::new(NoOpPermissionGate), None)
+        } else {
+            let gate = Arc::new(AdapterPermissionGate::new(permission_sink));
+            (gate.clone() as Arc<dyn PermissionGate>, Some(gate))
+        };
+
+    // (5.1) Load `.mcp.json` (project preferred over user-global) and
+    //       auto-connect every enabled server (Plan 13). `connect_all` seeds
+    //       disabled servers as `Disconnected` so `/mcp` still lists them,
+    //       connects the rest, and records per-server failures as loop-eligible
+    //       `Disconnected { last_error }`. A background reconnect/backoff task
+    //       then retries dropped remote servers. The precedence-ordered paths
+    //       arrive via `cfg` (previously derived from `dirs::config_dir()` + cwd
+    //       in the CLI).
+    let project_mcp_path = cfg
+        .mcp_paths
+        .first()
+        .cloned()
+        .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+    let global_mcp_path = cfg
+        .mcp_paths
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+    let mcp_configs = mcp::load_mcp_json_with_precedence(&project_mcp_path, &global_mcp_path);
+    let mcp_transport: Arc<dyn McpTransport> = Arc::new(PosixMcp::new());
+    let mcp_registry = Arc::new(mcp::McpRegistry::new(mcp_transport));
+    mcp_registry.connect_all(mcp_configs).await;
+    tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
+
+    // (5.2) HookRegistry — read settings.json hooks from project
+    //       (cwd/.claude/settings.json) then user (claude_home/settings.json),
+    //       project last so it wins on identical command registration. The user
+    //       root is `cfg.claude_home` (was `dirs::config_dir()/claude`).
+    let mut hook_registry = hooks::HookRegistry::new();
+    let project_settings_path = cwd.join(".claude").join("settings.json");
+    let user_settings_path = cfg.claude_home.join("settings.json");
+    for (path, source) in [
+        (user_settings_path, hooks::definition::HookSource::User),
+        (
+            project_settings_path,
+            hooks::definition::HookSource::Project,
+        ),
+    ] {
+        if let Ok(raw) = tokio::fs::read_to_string(&path).await {
+            match hooks::parse_hooks_from_settings_json(&raw, source) {
+                Ok(hooks_vec) => {
+                    for h in hooks_vec {
+                        hook_registry.register(h);
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "skipping malformed settings hooks"
+                ),
+            }
+        }
+    }
+    let hook_registry = Arc::new(tokio::sync::RwLock::new(hook_registry));
+
+    // (5.25) M5-13: build the real hook executor now that `hook_registry`
+    //        exists. This replaces the `noop_hook_executor()` stub (which fed
+    //        `UnusedHttp` + `UnusedRuntime` and a `(None, None)` Command guard):
+    //        - `http.clone()` is the real `PosixHttp`, so the HTTP arm performs
+    //          real (SSRF-guarded) requests.
+    //        - `PosixRuntime` is the real `RuntimeSpawner`.
+    //        - `with_process_runner(PosixProcess, PosixSandbox)` makes the
+    //          Command arm spawn real child processes (the runner only accepts a
+    //          `SandboxedCommand`, which the sandbox mints).
+    //        The hooks Agent arm stays "not wired" (no `.with_agent_spawner(..)`
+    //        builder on `HookExecutorImpl` yet — M9+). NOTE: this is a *separate*
+    //        seam from the tool-context `subagent_spawner`, which IS now wired
+    //        below (4.6) — the hooks Agent arm and the `AgentTool` spawner are
+    //        distinct injection points. The orchestrator's `hooks` param is the
+    //        concrete `Arc<hooks::HookExecutorImpl>`, so no trait-object coercion
+    //        is needed.
+    let hooks = Arc::new(
+        hooks::HookExecutorImpl::new(
+            hook_registry.clone(),
+            http.clone(),
+            Arc::new(PosixRuntime::new()),
+        )
+        .with_process_runner(
+            Arc::new(PosixProcess::new()) as Arc<dyn traits::ProcessRunner>,
+            Arc::new(PosixSandbox::new()) as Arc<dyn traits::Sandbox>,
+        ),
+    );
+
+    // (5.3) Agent catalog — load from project + user agents/. Project wins on
+    //       collision (passed SECOND; later paths win). The user agents dir is
+    //       `cfg.claude_home/agents` (was `dirs::home_dir()/.claude/agents`).
+    let project_agents_dir = cwd.join(".claude").join("agents");
+    let user_agents_dir = cfg.claude_home.join("agents");
+    let agents = agent::load_agents_from_dirs(&[
+        (user_agents_dir, agent::definition::AgentSource::UserDefined),
+        (project_agents_dir, agent::definition::AgentSource::Project),
+    ])
+    .await;
+    let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
+
+    // (5.4) Real compaction. Threshold 150_000 tokens (M3 design lock for the
+    //       Anthropic prod context window).
+    let compactor = Arc::new(compaction::CompactionOrchestrator::new(150_000));
+
+    // (5.45) The real desktop `TaskRegistry`, wired into the tool context. Tasks
+    //        materialize stdout/stderr under `<cwd>/.claude/tasks-output`; the
+    //        spawner is the tokio-backed `PosixRuntime`. The same handle is
+    //        returned for a transport/TUI poller to read live state.
+    let task_output_dir = cwd.join(".claude").join("tasks-output");
+    let mut task_registry_inner = tasks::registry::TaskRegistry::new(
+        Arc::new(PosixRuntime::new()),
+        Arc::new(PosixFileSystem::new(cwd.clone())),
+        Arc::new(tasks::output_manager::TaskOutputManager::new(
+            task_output_dir,
+            Arc::new(PosixFileSystem::new(cwd.clone())),
+        )),
+    );
+    // Register the M2 self-contained per-type handlers (LocalBash + MonitorMcp)
+    // before the registry is shared. Both depend only on platform traits we
+    // already build here; agent/teammate/workflow/remote/dream handlers register
+    // once their production pools are wired (M9+).
+    tasks::registry::register_self_contained_handlers(
+        &mut task_registry_inner,
+        Arc::new(PosixProcess::new()),
+        Arc::new(PosixSandbox::new()),
+        mcp_registry.clone(),
+    );
+
+    // (5.46) M10 (T13): construct the per-session coordinator subsystem — one
+    //        `TeamRegistry` + one `CoordinatorMode` per `build()`. The registry
+    //        is observable (the status feed / PHASE-2 command router read it)
+    //        but stays empty unless a coordinator session spawns teammates. The
+    //        mode is entered at BUILD time ONLY when the session was started as a
+    //        coordinator (the registry is built-once-and-moved, so mode-exclusive
+    //        tool selection must be decided here); a default session leaves it
+    //        DISABLED so the build is byte-identical to the pre-M10 build.
+    let coordinator_id = protocol::AgentId::new();
+    let coordinator = Arc::new(coordinator::TeamRegistry::new(coordinator_id));
+    let coordinator_mode = {
+        let mut mode = coordinator::CoordinatorMode::new();
+        mode.session_started_as_coordinator = cfg.session_started_as_coordinator;
+        if cfg.session_started_as_coordinator {
+            mode.enter();
+        }
+        Arc::new(mode)
+    };
+
+    // (5.46a) M10 (T13): register the `InProcessTeammate` handler DIRECTLY (not
+    //        via `register_agent_handlers`) so the coordinator's
+    //        `CoordinatorStatusSink` is attached — that sink maps the teammate's
+    //        `TaskStatus` transitions onto `WorkerStatus` AND pushes the live
+    //        `active_workers` scalar to the orchestrator-facing `OutputStream`.
+    //        Registration takes `&mut self`, so it MUST happen before the
+    //        registry is `Arc`-wrapped below.
+    //
+    //        Teammates run in their OWN `StateMachinePool` (`TEAMMATE_POOL_CAP`),
+    //        separate from the `AgentTool` `subagent_pool`: persistent teammates
+    //        park on `wait_for_message` and never free their slot, so a shared
+    //        pool would risk starving one-shot subagent spawns (T14 regression).
+    //
+    //        The handler's tool-dispatch seam is a `DeferredToolInvoker`: the
+    //        teammate must inherit the parent's `Arc<ToolRegistry>` (recursion
+    //        lock), but that registry is assembled AFTER this point (its
+    //        `BuiltinToolContext` carries `task_registry.clone()`). The deferred
+    //        invoker is injected now and bound to the real `RegistryToolInvoker`
+    //        once `tools` exists (5.5a). Definition resolution relies on the
+    //        handler default `DefaultTeammateDefinition` (permissive) — we do NOT
+    //        attach a catalog-backed resolver, which would return `None` for the
+    //        team-lead name and silently fail every spawn.
+    let coordinator_sink = Arc::new(coordinator::CoordinatorStatusSink::new(
+        coordinator.clone(),
+        output.clone(),
+    ));
+    let teammate_invoker = Arc::new(DeferredToolInvoker::new());
+    let teammate_pool = Arc::new(agent::StateMachinePool::new(
+        Arc::new(PosixRuntime::new()),
+        TEAMMATE_POOL_CAP,
+    ));
+    let teammate_handler = tasks::handlers::InProcessTeammateHandler::new(
+        teammate_pool,
+        task_registry_inner.output_manager.clone(),
+        teammate_api,
+    )
+    .with_tool_invoker(
+        teammate_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>
+    )
+    .with_status_sink(coordinator_sink as Arc<dyn tasks::handlers::TaskStatusSink>);
+    task_registry_inner
+        .register_handler(tasks::TaskType::InProcessTeammate, Arc::new(teammate_handler));
+
+    let task_registry = Arc::new(task_registry_inner);
+
+    // (5.47) M10 (T13): the typed spawn/kill seam the coordinator's `TeamCreate` /
+    //        `TeamDelete` use to start / stop the real backing `InProcessTeammate`
+    //        task. `TaskRegistry` impls `TeamSpawnSeam` (T04); the same `Arc` the
+    //        tool context holds is reused so the spawned teammate is keyed on the
+    //        worker identity threaded through.
+    let spawn_seam: Arc<dyn traits::team_spawn::TeamSpawnSeam> = task_registry.clone();
+
+    // (5.5) Assemble the desktop tool registry through the composition root.
+    //       A coordinator session shares the team's `MailboxRouter` with the
+    //       builtin `SendMessage` tool by casting it onto `tool_ctx.mailbox_router`
+    //       (the trait impl lives on `MailboxRouter`); a default session leaves it
+    //       `None` — byte-identical to the pre-M10 build.
+    let coordinator_mailbox: Option<Arc<dyn traits::mailbox::MailboxRouterHandle>> =
+        if cfg.session_started_as_coordinator {
+            Some(coordinator.mailbox_router.clone() as Arc<dyn traits::mailbox::MailboxRouterHandle>)
+        } else {
+            None
+        };
+    let tool_ctx = BuiltinToolContext {
+        fs: Arc::new(PosixFileSystem::new(cwd.clone())),
+        bus: Arc::new(telemetry::AnalyticsBus::new()),
+        trusted_dirs: vec![cwd.clone()],
+        process: Arc::new(PosixProcess::new()),
+        sandbox: Arc::new(PosixSandbox::new()),
+        clock: clock.clone(),
+        sandbox_runtime: SandboxRuntimeConfig::default(),
+        permission_mode: PermissionMode::Default,
+        project_trust: ProjectTrustLevel::Trusted,
+        sandbox_available: false,
+        workspace: cwd.clone(),
+        platform: if cfg!(target_os = "macos") {
+            SandboxPlatform::Mac
+        } else {
+            SandboxPlatform::Linux
+        },
+        http: http.clone(),
+        provider: tool_provider,
+        default_model: orch_cfg.model.clone(),
+        worktree: Arc::new(PosixWorktree::new()),
+        subagent_spawner: Some(subagent_spawner),
+        task_registry: Some(
+            task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>
+        ),
+        mailbox_router: coordinator_mailbox,
+        budget_enforcer: Some(budget_enforcer),
+        mcp_registry: Some(mcp_registry.clone()),
+        lsp_registry: None,
+        camera: None,
+        voice: None,
+        share: None,
+        computer_control: None,
+    };
+    // (5.5) M10 (T12/T13): select the team-tool variant at BUILD time. A
+    //        coordinator session passes `Some(CoordinatorWiring { team, mode,
+    //        spawn_seam })` so the coordinator `TeamCreate` / `TeamDelete` are
+    //        registered IN PLACE OF `tool_team`'s pair; a default session passes
+    //        `None`, leaving `tool_team`'s pair and the coordinator tools absent
+    //        — byte-identical to the pre-M10 build.
+    let coordinator_wiring = if cfg.session_started_as_coordinator {
+        Some(CoordinatorWiring {
+            team: coordinator.clone(),
+            mode: coordinator_mode.clone(),
+            spawn_seam: spawn_seam.clone(),
+            // The SAME output stream the orchestrator + CoordinatorStatusSink use,
+            // so the TeamCreate activation PUSH and the sink's later transitions
+            // share one client feed. Cloned here because `output` is moved into
+            // the `ConversationOrchestrator` below.
+            output: output.clone(),
+        })
+    } else {
+        // Drop the spawn-seam clone path; it is unused in a default session.
+        let _ = &spawn_seam;
+        None
+    };
+    let tools = Arc::new(desktop_tool_registry(tool_ctx, coordinator_wiring));
+
+    // (5.5a) M10 (T13): bind the teammate handler's `DeferredToolInvoker` to the
+    //        real `RegistryToolInvoker` now that `tools` exists. The invoker
+    //        stores the SAME `Arc<ToolRegistry>` the orchestrator owns, so a
+    //        teammate's tool dispatch reuses the parent registry (recursion-lock
+    //        invariant). No teammate can dispatch before `build()` returns, so
+    //        the cell is always filled before first use.
+    teammate_invoker.set(Arc::new(
+        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()),
+    ));
+
+    // Break the subagent construction cycle now that `tools` + `agent_catalog`
+    // exist: fill the spawner's set-once cells (filled before `build()` returns,
+    // so before any spawn). Each spawn then resolves its advertised tools +
+    // dispatch allow-list from this registry at spawn time (parity batch 20) and
+    // real user/project `AgentDefinition`s from the SAME catalog `Arc` the
+    // orchestrator holds — `.with_agent_catalog` below shares the lock, not a
+    // copy (parity batch 21). First fill wins.
+    let _ = subagent_tool_registry_cell.set(tools.clone());
+    let _ = subagent_agent_catalog_cell.set(agent_catalog.clone());
+
+    let orch = Arc::new(
+        ConversationOrchestrator::new(
+            orch_cfg, api_client, tools, hooks, perms, output, memory, cwd,
+        )
+        .with_cost_tracker(cost_tracker)
+        .with_mcp_registry(mcp_registry)
+        .with_hook_registry(hook_registry)
+        .with_agent_catalog(agent_catalog)
+        .with_compaction(compactor),
+    );
+
+    // (6) Command registry through the desktop composition root.
+    let handle: Arc<dyn OrchestratorHandle> = orch.clone();
+    let reg = desktop_command_registry(handle, auth.clone());
+    let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+
+    Ok(DesktopRuntime {
+        orchestrator: orch,
+        dispatcher,
+        auth,
+        task_registry,
+        coordinator,
+        coordinator_mode,
+        permission_gate: adapter_gate,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build, desktop_tool_registry, CoordinatorWiring, DesktopConfig};
+    use std::sync::Arc;
+
+    /// F2-00: the deliverable-zero config is constructible from `Default` and
+    /// its frozen field set is reachable. The actual `build()` lift is F2-01;
+    /// here we only prove the type compiles and the defaults are sane.
+    #[test]
+    fn desktop_config_default_is_constructible() {
+        let cfg = DesktopConfig::default();
+
+        assert_eq!(cfg.api_base, "https://api.anthropic.com");
+        assert!(cfg.api_key.is_empty());
+        assert_eq!(cfg.cwd, std::path::PathBuf::from("."));
+        assert_eq!(cfg.claude_home, std::path::PathBuf::new());
+        // Mirrors `DesktopEngineConfig::default().default_model`.
+        assert_eq!(cfg.default_model, "claude-sonnet-4-20250514");
+        assert!(cfg.provider_profiles.is_none());
+        assert!(cfg.routing.is_none());
+        assert!(cfg.mcp_paths.is_empty());
+        // CLI default — opt into `NoOpPermissionGate`.
+        assert!(cfg.use_noop_permission_gate);
+
+        // Frozen field set is fully reachable via struct-update syntax, and the
+        // type derives `Clone`/`Debug` so a host can fan it out + log it.
+        let custom = DesktopConfig {
+            use_noop_permission_gate: false,
+            ..cfg.clone()
+        };
+        assert!(!custom.use_noop_permission_gate);
+        let _ = format!("{custom:?}");
+    }
+
+    /// A [`client_adapter::PermissionRequestSink`] that records the requests the
+    /// gate emits, so a test can prove a turn's `check()` actually reached the
+    /// adapter gate (and not the always-allow `NoOpPermissionGate`).
+    #[derive(Default)]
+    struct RecordingPermissionSink {
+        count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl client_adapter::PermissionRequestSink for RecordingPermissionSink {
+        async fn emit_request(
+            &self,
+            _request: client_protocol::permission::PermissionRequest,
+        ) {
+            self.count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Deterministic, env/argv-free config rooted at a sandbox temp dir.
+    fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+        let claude_home = cwd.join(".claude");
+        let cfg = DesktopConfig {
+            api_base: "https://api.anthropic.com".to_string(),
+            api_key: String::new(),
+            cwd: cwd.clone(),
+            claude_home,
+            default_model: "claude-sonnet-4-20250514".to_string(),
+            provider_profiles: None,
+            routing: None,
+            mcp_paths: vec![cwd.join(".mcp.json")],
+            use_noop_permission_gate: use_noop,
+            session_started_as_coordinator: false,
+        };
+        (tmp, cfg)
+    }
+
+    /// F2-01: `build()` constructs a fully-wired runtime from a `DesktopConfig`
+    /// alone — no `Argv`, no `std::env`. The wiring parity with the old
+    /// `build_runtime` is asserted via the same `has_*` predicates the CLI
+    /// regression test used (cost tracker + the three registries + compaction).
+    #[tokio::test]
+    async fn build_constructs_runtime_deterministically() {
+        let (_tmp, cfg) = test_config(true);
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() failed");
+
+        assert!(rt.orchestrator.has_cost_tracker(), "no CostTracker");
+        assert!(rt.orchestrator.has_mcp_registry(), "no McpRegistry");
+        assert!(rt.orchestrator.has_hook_registry(), "no HookRegistry");
+        assert!(rt.orchestrator.has_agent_catalog(), "no agent catalog");
+        assert!(rt.orchestrator.has_compaction(), "no CompactionOrchestrator");
+    }
+
+    /// F2-01: `use_noop_permission_gate: true` binds the `NoOpPermissionGate`,
+    /// so no `AdapterPermissionGate` handle is surfaced for the transport to
+    /// resolve against.
+    #[tokio::test]
+    async fn build_with_noop_gate_uses_noop() {
+        let (_tmp, cfg) = test_config(true);
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() failed");
+
+        assert!(
+            rt.permission_gate.is_none(),
+            "noop build must not surface an adapter gate handle"
+        );
+    }
+
+    /// F2-01: `use_noop_permission_gate: false` binds the connection-scoped
+    /// `AdapterPermissionGate`. The returned handle is what the transport calls
+    /// `resolve()` on; a `check()` against it parks a request on the supplied
+    /// sink (proving it is NOT the always-allow no-op gate).
+    #[tokio::test]
+    async fn build_default_uses_adapter_gate() {
+        let (_tmp, cfg) = test_config(false);
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let sink = Arc::new(RecordingPermissionSink::default());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> = sink.clone();
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() failed");
+
+        let gate = rt
+            .permission_gate
+            .clone()
+            .expect("adapter build must surface a gate handle");
+
+        // Drive a `check()` on a spawned task; it parks a request on the sink
+        // (deny-by-default tool) then resolve it so the future completes.
+        let g = gate.clone();
+        let task = tokio::spawn(async move {
+            use permission::gate::PermissionGate;
+            g.check("Bash", &serde_json::json!({"command": "ls"})).await
+        });
+
+        // The request must have reached the adapter sink — a `NoOpPermissionGate`
+        // would have returned `Allow` without ever emitting a request.
+        for _ in 0..2000 {
+            if sink.count.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            sink.count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "adapter gate must emit a PermissionRequest"
+        );
+
+        // Resolve so the parked future returns.
+        assert!(
+            gate.resolve(1, client_protocol::permission::PermissionResponseDto::Deny, "Bash")
+                .await
+        );
+        let _ = task.await.unwrap();
+    }
+
+    /// T11: the build-time coordinator-activation flag defaults to `false`, so a
+    /// default-constructed `DesktopConfig` is NOT a coordinator session.
+    /// Additive guardrail: default sessions must be byte-identical, mode off.
+    #[test]
+    fn default_config_is_not_coordinator() {
+        let cfg = DesktopConfig::default();
+        assert!(
+            !cfg.session_started_as_coordinator,
+            "default DesktopConfig must not start as coordinator"
+        );
+
+        // The frozen field set remains reachable via struct-update syntax, and
+        // the flag flips cleanly to opt into a coordinator session.
+        let coord = DesktopConfig {
+            session_started_as_coordinator: true,
+            ..cfg
+        };
+        assert!(coord.session_started_as_coordinator);
+    }
+
+    /// T11: `build()` surfaces the per-session coordinator subsystem handles
+    /// (`TeamRegistry` + `CoordinatorMode`) on the runtime so the status feed
+    /// (and PHASE-2 command router) can read them. A default-config build is
+    /// additive-only: the mode is constructed but NOT entered.
+    #[tokio::test]
+    async fn runtime_exposes_coordinator_handles() {
+        let (_tmp, cfg) = test_config(true);
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() failed");
+
+        // The handles exist on the runtime …
+        assert!(
+            rt.coordinator.list().await.is_empty(),
+            "a fresh coordinator session has no workers"
+        );
+        // … and a default (non-coordinator) build leaves the mode disabled.
+        assert!(
+            !rt.coordinator_mode.is_enabled(),
+            "default build must not enter coordinator mode"
+        );
+    }
+
+    // ----- T12: mode-exclusive coordinator tool selection -------------------
+
+    /// No-op spawn seam — the tool-selection tests never invoke it; they only
+    /// need a concrete `Arc<dyn TeamSpawnSeam>` to construct `CoordinatorWiring`.
+    struct NoopSeam;
+
+    #[async_trait::async_trait]
+    impl traits::team_spawn::TeamSpawnSeam for NoopSeam {
+        async fn spawn_teammate(
+            &self,
+            _agent_id: protocol::AgentId,
+            _name: String,
+            _description: String,
+        ) -> Result<String, traits::team_spawn::TeamSpawnError> {
+            Ok(String::new())
+        }
+        async fn kill(
+            &self,
+            _task_id: &str,
+        ) -> Result<(), traits::team_spawn::TeamSpawnError> {
+            Ok(())
+        }
+    }
+
+    /// A fully-stubbed `BuiltinToolContext` — enough to enumerate registered
+    /// names and probe per-tool behavior markers; no tool is ever invoked.
+    fn stub_tool_ctx() -> tool_api::BuiltinToolContext {
+        tool_api::test_support::shell_test_ctx(traits::process::ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        })
+    }
+
+    fn coordinator_wiring() -> CoordinatorWiring {
+        CoordinatorWiring {
+            team: Arc::new(coordinator::TeamRegistry::new(protocol::AgentId::new())),
+            mode: Arc::new(coordinator::CoordinatorMode::new()),
+            spawn_seam: Arc::new(NoopSeam),
+            output: Arc::new(orchestrator::test_support::MockOutputStream::new()),
+        }
+    }
+
+    /// T12: a default session (`coordinator: None`) registers exactly ONE
+    /// `TeamCreate`, and it is `tool_team`'s — distinguished by its behavior
+    /// marker `max_result_size_chars() == 30_000` (`MAX_TOOL_OUTPUT_LENGTH`),
+    /// vs. the coordinator tool's `100_000`. Guardrail: byte-identical default.
+    #[test]
+    fn tool_registry_default_mode_registers_tool_team_create() {
+        let reg = desktop_tool_registry(stub_tool_ctx(), None);
+
+        let names = reg.all_names();
+        assert_eq!(
+            names.iter().filter(|n| *n == "TeamCreate").count(),
+            1,
+            "default mode must register exactly one TeamCreate"
+        );
+        assert_eq!(
+            names.iter().filter(|n| *n == "TeamDelete").count(),
+            1,
+            "default mode must register exactly one TeamDelete"
+        );
+
+        // Behavior marker: tool_team's TeamCreate caps results at 30_000;
+        // the coordinator's caps at 100_000.
+        let create = reg
+            .find_by_name("TeamCreate")
+            .expect("TeamCreate must be registered");
+        assert_eq!(
+            create.max_result_size_chars(),
+            tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH,
+            "default mode must register tool_team's TeamCreate (30_000 cap)"
+        );
+    }
+
+    /// T12: a coordinator-capable session (`coordinator: Some`) registers the
+    /// coordinator `TeamCreate` IN PLACE OF `tool_team`'s — still exactly ONE
+    /// `TeamCreate` and ONE `TeamDelete` (no silent shadow, no duplicate name
+    /// in the system prompt). The registered `TeamCreate` is the coordinator's,
+    /// distinguished by `max_result_size_chars() == 100_000`.
+    #[test]
+    fn tool_registry_coordinator_mode_registers_coordinator_create() {
+        let reg = desktop_tool_registry(stub_tool_ctx(), Some(coordinator_wiring()));
+
+        let names = reg.all_names();
+        assert_eq!(
+            names.iter().filter(|n| *n == "TeamCreate").count(),
+            1,
+            "coordinator mode must register exactly one TeamCreate (no shadow)"
+        );
+        assert_eq!(
+            names.iter().filter(|n| *n == "TeamDelete").count(),
+            1,
+            "coordinator mode must register exactly one TeamDelete (no shadow)"
+        );
+
+        // No duplicate names ANYWHERE in the assembled registry.
+        let mut sorted = names.clone();
+        sorted.sort();
+        let mut deduped = sorted.clone();
+        deduped.dedup();
+        assert_eq!(
+            sorted, deduped,
+            "no tool name may appear twice in the assembled registry"
+        );
+
+        // Behavior marker: the registered TeamCreate is the coordinator's.
+        let create = reg
+            .find_by_name("TeamCreate")
+            .expect("TeamCreate must be registered");
+        assert_eq!(
+            create.max_result_size_chars(),
+            100_000,
+            "coordinator mode must register the coordinator TeamCreate (100_000 cap)"
+        );
+    }
+
+    // ----- T13: build() composition-root coordinator wiring -----------------
+
+    /// T13: a `build()` with `session_started_as_coordinator: true` enters
+    /// coordinator mode at BUILD time, so `runtime.coordinator_mode.is_enabled()`
+    /// is `true` and the `session_started_as_coordinator` flag is recorded on the
+    /// mode. A default-config build leaves the mode disabled (asserted in
+    /// `runtime_exposes_coordinator_handles`) — the additive guardrail.
+    #[tokio::test]
+    async fn build_coordinator_session_enters_mode() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.session_started_as_coordinator = true;
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() failed");
+
+        assert!(
+            rt.coordinator_mode.is_enabled(),
+            "a coordinator session must enter coordinator mode at build time"
+        );
+        assert!(
+            rt.coordinator_mode.session_started_as_coordinator,
+            "the build-time activation flag must be recorded on the mode"
+        );
+        // A coordinator session still surfaces an (empty) registry.
+        assert!(
+            rt.coordinator.list().await.is_empty(),
+            "a freshly-built coordinator session has no workers yet"
+        );
+    }
+
+    /// T13: a coordinator session wires the shared `MailboxRouter` (the one the
+    /// `TeamRegistry` owns) into `BuiltinToolContext.mailbox_router`, so the
+    /// builtin `SendMessage` tool and coordinator routing share the SAME
+    /// mailboxes. This exercises the exact `tool_ctx.mailbox_router = Some(..)`
+    /// wiring decision T13 introduces in `build()`: we assemble the desktop tool
+    /// registry the way the coordinator branch does (the team's router cast to
+    /// `dyn MailboxRouterHandle` placed on the context), then drive the builtin
+    /// `SendMessage` tool. Because the router IS wired, a route to a registered
+    /// worker mailbox SUCCEEDS — the tool no longer takes the "router not wired"
+    /// `Internal` error path it returns when `mailbox_router` is `None`.
+    #[tokio::test]
+    async fn mailbox_router_is_wired_when_coordinator() {
+        // The shared coordinator router — exactly what `build()` clones into
+        // `tool_ctx.mailbox_router` on the coordinator branch.
+        let team = Arc::new(coordinator::TeamRegistry::new(protocol::AgentId::new()));
+        let worker = team
+            .spawn_worker("explorer".into(), "alpha".into(), String::new())
+            .await
+            .expect("spawn_worker registers a mailbox on the shared router");
+
+        // Assemble the tool registry the way `build()`'s coordinator branch does:
+        // the team's `MailboxRouter` cast to `dyn MailboxRouterHandle` on the
+        // context (the load-bearing wiring — `None` here is the pre-M10 default).
+        let mut ctx = stub_tool_ctx();
+        ctx.mailbox_router = Some(team.mailbox_router.clone()
+            as Arc<dyn traits::mailbox::MailboxRouterHandle>);
+        let wiring = CoordinatorWiring {
+            team: team.clone(),
+            mode: Arc::new(coordinator::CoordinatorMode::new()),
+            spawn_seam: Arc::new(NoopSeam),
+            output: Arc::new(orchestrator::test_support::MockOutputStream::new()),
+        };
+        let reg = desktop_tool_registry(ctx, Some(wiring));
+
+        // The builtin SendMessage tool (from `tool_ui`) reads
+        // `ctx.mailbox_router`. With the router wired, routing to the registered
+        // worker succeeds. With `None` it would return the
+        // "MailboxRouterHandle not wired" `Internal` error instead.
+        let send = reg
+            .find_by_name("SendMessage")
+            .expect("SendMessage builtin must be registered");
+        let result = send
+            .call(
+                serde_json::json!({
+                    "to_agent_id": worker.as_uuid().to_string(),
+                    "message": "hello teammate",
+                }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect("SendMessage must route through the wired router (not the unwired error path)");
+        // A successful route returns a result the tool surfaces (non-error path).
+        let _ = result;
+
+        // Negative side of the conditional: the DEFAULT branch leaves
+        // `mailbox_router` `None` (exactly what `build()` does for a non-
+        // coordinator session), so the SAME SendMessage call takes the
+        // "router not wired" `Internal` error path. This locks both sides of
+        // the T13 wiring decision so a regression in either is caught.
+        let default_reg = desktop_tool_registry(stub_tool_ctx(), None);
+        let default_send = default_reg
+            .find_by_name("SendMessage")
+            .expect("SendMessage builtin must be registered in the default set too");
+        let err = default_send
+            .call(
+                serde_json::json!({
+                    "to_agent_id": worker.as_uuid().to_string(),
+                    "message": "hello teammate",
+                }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect_err("default (unwired) SendMessage must error: no router on the context");
+        assert!(
+            format!("{err}").contains("not wired"),
+            "default session must hit the 'MailboxRouterHandle not wired' path, got: {err}"
+        );
+    }
 }

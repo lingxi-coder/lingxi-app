@@ -1,0 +1,1018 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>灵犀 OS — AI智能手机界面</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet" />
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script type="text/babel" src="ios-frame.jsx"></script>
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0a0a0f;
+    font-family: 'Noto Sans SC', -apple-system, system-ui, sans-serif;
+    overflow: hidden; height: 100vh; width: 100vw;
+  }
+  @keyframes pulse-glow {
+    0%, 100% { opacity: 0.6; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.05); }
+  }
+  @keyframes float-up {
+    0% { opacity: 0; transform: translateY(8px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes blink-cursor {
+    0%, 100% { opacity: 1; } 50% { opacity: 0; }
+  }
+  @keyframes shimmer {
+    0% { background-position: -200% center; }
+    100% { background-position: 200% center; }
+  }
+  @keyframes spin-slow {
+    from { transform: rotate(0deg); } to { transform: rotate(360deg); }
+  }
+  @keyframes ripple {
+    0% { transform: scale(0.8); opacity: 1; }
+    100% { transform: scale(2.4); opacity: 0; }
+  }
+  /* Hide scrollbars throughout the phone screens */
+  * { scrollbar-width: none; -ms-overflow-style: none; }
+  *::-webkit-scrollbar { display: none; }
+</style>
+</head>
+<body>
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ─── THEME SYSTEM ────────────────────────────────────────────
+const ThemeContext = React.createContext(null);
+const useTheme = () => React.useContext(ThemeContext);
+
+function makeTheme(isDark) {
+  if (isDark) return {
+    isDark: true,
+    phoneBg: '#050310',
+    canvasBg: '#04030e',
+    canvasGrad: 'radial-gradient(ellipse 80% 60% at 30% 20%, oklch(20% 0.12 258 / 0.6), transparent), radial-gradient(ellipse 60% 50% at 80% 80%, oklch(18% 0.12 300 / 0.5), transparent)',
+    screenBgCss: 'radial-gradient(ellipse 120% 60% at 50% 0%, oklch(30% 0.15 258 / 0.7) 0%, transparent 65%), radial-gradient(ellipse 80% 40% at 80% 100%, oklch(28% 0.15 300 / 0.5) 0%, transparent 60%), linear-gradient(160deg, #08061280 0%, #06050f 100%)',
+    glass: 'rgba(255,255,255,0.06)',
+    glassBorder: 'rgba(255,255,255,0.12)',
+    accent: 'oklch(72% 0.18 258)',
+    accentSoft: 'oklch(72% 0.18 258 / 0.2)',
+    accent2: 'oklch(72% 0.18 300)',
+    accent3: 'oklch(72% 0.18 200)',
+    textPrimary: 'rgba(255,255,255,0.95)',
+    textSecondary: 'rgba(255,255,255,0.55)',
+    textMuted: 'rgba(255,255,255,0.28)',
+    success: 'oklch(72% 0.18 155)',
+    warning: 'oklch(72% 0.18 80)',
+    danger: 'oklch(72% 0.18 30)',
+    titlePillBg: 'rgba(255,255,255,0.05)',
+    titlePillBorder: 'rgba(255,255,255,0.10)',
+    navBtnActive: 'linear-gradient(135deg, oklch(50% 0.2 258), oklch(50% 0.2 300))',
+    navBtnInactive: 'rgba(255,255,255,0.05)',
+    navBtnActiveText: '#fff',
+    navBtnInactiveText: 'rgba(255,255,255,0.45)',
+    frameBoxShadow: '0 40px 80px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.08), inset 0 0 0 1px rgba(255,255,255,0.04)',
+    statusBarColor: 'rgba(255,255,255,0.9)',
+    homeIndicator: 'rgba(255,255,255,0.5)',
+    orb1: 'radial-gradient(circle, oklch(40% 0.2 258 / 0.3) 0%, transparent 70%)',
+    orb2: 'radial-gradient(circle, oklch(40% 0.2 300 / 0.25) 0%, transparent 70%)',
+  };
+  // ── LIGHT THEME ──
+  return {
+    isDark: false,
+    phoneBg: '#f0eef8',
+    canvasBg: '#e8e5f5',
+    canvasGrad: 'radial-gradient(ellipse 80% 60% at 30% 20%, oklch(85% 0.08 258 / 0.8), transparent), radial-gradient(ellipse 60% 50% at 80% 80%, oklch(85% 0.08 300 / 0.6), transparent)',
+    screenBgCss: 'radial-gradient(ellipse 120% 60% at 50% 0%, oklch(88% 0.10 258 / 0.8) 0%, transparent 65%), radial-gradient(ellipse 80% 40% at 80% 100%, oklch(87% 0.10 300 / 0.6) 0%, transparent 60%), linear-gradient(160deg, #ede9fa 0%, #f5f3fc 100%)',
+    glass: 'rgba(255,255,255,0.55)',
+    glassBorder: 'rgba(140,120,200,0.20)',
+    accent: 'oklch(52% 0.20 258)',
+    accentSoft: 'oklch(52% 0.20 258 / 0.12)',
+    accent2: 'oklch(52% 0.20 300)',
+    accent3: 'oklch(52% 0.20 200)',
+    textPrimary: 'rgba(20,10,50,0.92)',
+    textSecondary: 'rgba(60,40,120,0.60)',
+    textMuted: 'rgba(80,60,140,0.38)',
+    success: 'oklch(52% 0.18 155)',
+    warning: 'oklch(52% 0.18 80)',
+    danger: 'oklch(52% 0.18 30)',
+    titlePillBg: 'rgba(255,255,255,0.65)',
+    titlePillBorder: 'rgba(140,120,200,0.25)',
+    navBtnActive: 'linear-gradient(135deg, oklch(52% 0.20 258), oklch(52% 0.20 300))',
+    navBtnInactive: 'rgba(255,255,255,0.55)',
+    navBtnActiveText: '#fff',
+    navBtnInactiveText: 'rgba(60,40,120,0.55)',
+    frameBoxShadow: '0 40px 80px rgba(100,80,180,0.18), 0 0 0 1px rgba(140,120,200,0.25), inset 0 0 0 1px rgba(255,255,255,0.7)',
+    statusBarColor: 'rgba(20,10,50,0.85)',
+    homeIndicator: 'rgba(80,60,140,0.35)',
+    orb1: 'radial-gradient(circle, oklch(80% 0.12 258 / 0.5) 0%, transparent 70%)',
+    orb2: 'radial-gradient(circle, oklch(80% 0.12 300 / 0.4) 0%, transparent 70%)',
+  };
+}
+
+// Reactive tokens — components call useTheme() to get T
+let T = makeTheme(true); // fallback for non-context usage
+
+// Glass card — reads theme from context
+const GlassCard = ({ children, style = {}, onClick }) => {
+  const th = useTheme() || T;
+  return (
+    <div onClick={onClick} style={{
+      background: th.glass,
+      border: `0.5px solid ${th.glassBorder}`,
+      backdropFilter: 'blur(20px) saturate(180%)',
+      WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+      borderRadius: 20,
+      ...style,
+    }}>{children}</div>
+  );
+};
+
+// Glow dot
+const GlowDot = ({ color, size = 6 }) => {
+  const th = useTheme() || T;
+  const c = color || th.accent;
+  return (
+    <div style={{
+      width: size, height: size, borderRadius: '50%',
+      background: c,
+      boxShadow: `0 0 ${size * 2}px ${c}`,
+    }} />
+  );
+};
+
+// ScreenBg — renders the gradient bg layer
+const ScreenBg = () => {
+  const th = useTheme() || T;
+  return <div style={{ position: 'absolute', inset: 0, background: th.screenBgCss }} />;
+};
+
+// ─── SCREEN 1: LOCK SCREEN ───────────────────────────────────
+function LockScreen({ active }) {
+  const th = useTheme() || T;
+  const [unlocked, setUnlocked] = useState(false);
+  const [time, setTime] = useState('');
+  const [date, setDate] = useState('');
+
+  useEffect(() => {
+    const update = () => {
+      const now = new Date();
+      setTime(now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }));
+      setDate(now.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }));
+    };
+    update();
+    const t = setInterval(update, 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden' }}>
+      <ScreenBg />
+      {/* Ambient orbs */}
+      <div style={{ position: 'absolute', top: -60, left: -40, width: 260, height: 260, borderRadius: '50%', background: th.orb1, animation: 'pulse-glow 4s ease-in-out infinite' }} />
+      <div style={{ position: 'absolute', bottom: 80, right: -60, width: 200, height: 200, borderRadius: '50%', background: th.orb2, animation: 'pulse-glow 5s ease-in-out infinite 1s' }} />
+
+      <div style={{ position: 'relative', zIndex: 2, display: 'flex', flexDirection: 'column', alignItems: 'center', height: '100%', paddingTop: 64 }}>
+        {/* Time */}
+        <div style={{
+          fontSize: 80, fontWeight: 200, color: th.textPrimary, letterSpacing: -4,
+          lineHeight: 1, fontVariantNumeric: 'tabular-nums',
+          fontFamily: '-apple-system, system-ui',
+          textShadow: `0 0 40px ${th.accent}80`,
+        }}>{time || '09:41'}</div>
+        <div style={{ fontSize: 17, color: th.textSecondary, marginTop: 12, fontWeight: 300 }}>
+          {date || '2026年5月2日 星期六'}
+        </div>
+
+        {/* AI Summary card */}
+        <GlassCard style={{ margin: '32px 16px 0', padding: '16px 20px', width: 'calc(100% - 32px)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+            <div style={{ width: 28, height: 28, borderRadius: 8, background: 'linear-gradient(135deg, oklch(60% 0.2 258), oklch(60% 0.2 300))', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="5" stroke="white" strokeWidth="1.5"/><path d="M7 4v3l2 2" stroke="white" strokeWidth="1.5" strokeLinecap="round"/></svg>
+            </div>
+            <span style={{ fontSize: 13, color: th.textSecondary, fontWeight: 500, letterSpacing: 0.3 }}>灵犀 · 今日摘要</span>
+          </div>
+          <div style={{ fontSize: 15, color: th.textPrimary, lineHeight: 1.6, fontWeight: 300 }}>
+            今天有 <span style={{ color: th.accent, fontWeight: 500 }}>3个会议</span>，下午有一个重要的产品评审。明天飞上海的机票已确认，需要提前 2 小时到达机场。
+          </div>
+        </GlassCard>
+
+        {/* Notification pills */}
+        <div style={{ width: 'calc(100% - 32px)', display: 'flex', flexDirection: 'column', gap: 8, marginTop: 16 }}>
+          {[
+            { app: '微信', msg: '张总: 明天的方案确认一下', time: '刚刚', color: th.success },
+            { app: '灵犀提醒', msg: '10:30 产品周会 — 15分钟后', time: '10:15', color: th.warning },
+          ].map((n, i) => (
+            <GlassCard key={i} style={{ padding: '12px 16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <GlowDot color={n.color} size={7} />
+                <span style={{ fontSize: 12, color: th.textSecondary, fontWeight: 500 }}>{n.app}</span>
+                <span style={{ marginLeft: 'auto', fontSize: 11, color: th.textMuted }}>{n.time}</span>
+              </div>
+              <div style={{ fontSize: 14, color: th.textPrimary, marginTop: 5, fontWeight: 300 }}>{n.msg}</div>
+            </GlassCard>
+          ))}
+        </div>
+
+        {/* Unlock hint */}
+        <div style={{ marginTop: 32, marginBottom: 24, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+          <div style={{ position: 'relative', width: 56, height: 56 }}>
+            <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', border: `1.5px solid ${th.accent}`, animation: 'ripple 2s ease-out infinite' }} />
+            <div style={{ position: 'absolute', inset: 6, borderRadius: '50%', background: th.accentSoft, border: `1px solid ${th.accent}60`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <svg width="18" height="22" viewBox="0 0 18 22" fill="none"><rect x="3" y="10" width="12" height="10" rx="2.5" stroke={th.accent} strokeWidth="1.5"/><path d="M5 10V6.5a4 4 0 018 0V10" stroke={th.accent} strokeWidth="1.5" strokeLinecap="round"/></svg>
+            </div>
+          </div>
+          <span style={{ fontSize: 13, color: th.textMuted, letterSpacing: 0.5 }}>上滑解锁 · 或说"灵犀，打开"</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SCREEN 2: HOME / TIMELINE ────────────────────────────────
+function HomeScreen() {
+  const th = useTheme() || T;
+  const [selectedTab, setSelectedTab] = useState('今天');
+  const tabs = ['昨天', '今天', '明天'];
+
+  const timelineItems = [
+    { time: '08:00', type: 'done', title: '晨间简报', sub: '灵犀已为你整理了今天的要点', icon: '☀️', color: th.accent3 },
+    { time: '09:30', type: 'done', title: '发送周报邮件', sub: '已自动生成并发送至 5 人', icon: null, color: th.success },
+    { time: '10:30', type: 'now', title: '产品周会', sub: '腾讯会议 · 主持人: 李总', icon: null, color: th.warning },
+    { time: '13:00', type: 'future', title: '午饭 · 与设计团队', sub: '外卖预计 12:45 到达', icon: null, color: th.accent },
+    { time: '15:00', type: 'future', title: '产品评审 PRD v2', sub: '你有 3 条待回复评论', icon: null, color: th.accent2 },
+    { time: '18:30', type: 'future', title: '健身', sub: '已预约私教 · 3.8公里 昨日步数', icon: null, color: th.accent3 },
+  ];
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden' }}>
+      <ScreenBg />
+      <div style={{ position: 'absolute', top: -80, right: -60, width: 240, height: 240, borderRadius: '50%', background: th.orb1, pointerEvents: 'none' }} />
+
+      <div style={{ position: 'relative', zIndex: 2, display: 'flex', flexDirection: 'column', height: '100%', paddingTop: 56 }}>
+        {/* Header */}
+        <div style={{ padding: '8px 20px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ fontSize: 22, fontWeight: 600, color: th.textPrimary, letterSpacing: -0.5 }}>你好，Alex</div>
+            <div style={{ fontSize: 13, color: th.textSecondary, marginTop: 2 }}>今天还有 <span style={{ color: th.accent }}>4 件事</span> 待完成</div>
+          </div>
+          <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'linear-gradient(135deg, oklch(60% 0.2 258), oklch(60% 0.2 300))', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>👤</div>
+        </div>
+
+        {/* Tab bar */}
+        <div style={{ display: 'flex', gap: 4, padding: '16px 20px 0' }}>
+          {tabs.map(t => (
+            <button key={t} onClick={() => setSelectedTab(t)} style={{
+              padding: '7px 18px', borderRadius: 20, border: 'none', cursor: 'pointer',
+              background: selectedTab === t ? th.accent : th.glass,
+              color: selectedTab === t ? '#fff' : th.textSecondary,
+              fontSize: 13, fontWeight: selectedTab === t ? 600 : 400,
+              fontFamily: 'inherit',
+              backdropFilter: 'blur(10px)',
+              transition: 'all 0.2s ease',
+              boxShadow: selectedTab === t ? `0 4px 16px ${th.accent}50` : 'none',
+            }}>{t}</button>
+          ))}
+        </div>
+
+        {/* Timeline */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px 100px', display: 'flex', flexDirection: 'column', gap: 0 }}>
+          {timelineItems.map((item, i) => (
+            <div key={i} style={{ display: 'flex', gap: 14, position: 'relative' }}>
+              {/* Line + dot */}
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 40, flexShrink: 0 }}>
+                <div style={{ fontSize: 11, color: item.type === 'now' ? th.warning : th.textMuted, fontWeight: 500, marginTop: 4, lineHeight: 1.2, textAlign: 'center', whiteSpace: 'nowrap' }}>{item.time}</div>
+                <div style={{ width: item.type === 'now' ? 10 : 7, height: item.type === 'now' ? 10 : 7, borderRadius: '50%', background: item.color, margin: '8px 0', flexShrink: 0, boxShadow: item.type === 'now' ? `0 0 12px ${item.color}` : 'none', animation: item.type === 'now' ? 'pulse-glow 2s ease-in-out infinite' : 'none' }} />
+                {i < timelineItems.length - 1 && (
+                  <div style={{ width: 1, flex: 1, minHeight: 20, background: `linear-gradient(to bottom, ${item.color}40, transparent)` }} />
+                )}
+              </div>
+              {/* Card */}
+              <GlassCard style={{
+                flex: 1, padding: '12px 14px', marginBottom: 10,
+                opacity: item.type === 'done' ? 0.55 : 1,
+                border: item.type === 'now' ? `0.5px solid ${th.warning}50` : `0.5px solid ${th.glassBorder}`,
+                boxShadow: item.type === 'now' ? `0 0 20px ${th.warning}20` : 'none',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 15, fontWeight: 500, color: th.textPrimary, flex: 1 }}>{item.title}</span>
+                  {item.type === 'done' && <span style={{ fontSize: 11, color: th.success }}>✓ 完成</span>}
+                  {item.type === 'now' && <span style={{ fontSize: 11, color: th.warning, fontWeight: 600, padding: '2px 8px', borderRadius: 10, background: `${th.warning}20` }}>进行中</span>}
+                </div>
+                <div style={{ fontSize: 12, color: th.textSecondary, marginTop: 4, fontWeight: 300 }}>{item.sub}</div>
+              </GlassCard>
+            </div>
+          ))}
+        </div>
+
+        {/* Bottom AI bar */}
+        <div style={{ position: 'absolute', bottom: 20, left: 16, right: 16 }}>
+          <GlassCard style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12, boxShadow: `0 8px 32px rgba(0,0,0,0.4), 0 0 0 0.5px ${th.accent}30` }}>
+            <div style={{ width: 32, height: 32, borderRadius: 10, background: `linear-gradient(135deg, ${th.accent}, ${th.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="3" fill="white"/><path d="M8 2v1M8 13v1M2 8h1M13 8h1M3.5 3.5l.7.7M11.8 11.8l.7.7M3.5 12.5l.7-.7M11.8 4.2l.7-.7" stroke="white" strokeWidth="1.2" strokeLinecap="round"/></svg>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: th.textMuted, fontWeight: 300 }}>问灵犀…</div>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <div style={{ width: 28, height: 28, borderRadius: 8, background: th.glass, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="5" r="2.5" stroke={th.textSecondary} strokeWidth="1.3"/><path d="M2 12c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5" stroke={th.textSecondary} strokeWidth="1.3" strokeLinecap="round"/></svg>
+              </div>
+              <div style={{ width: 28, height: 28, borderRadius: 8, background: th.glass, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="4.5" y="1" width="5" height="9" rx="2.5" stroke={th.textSecondary} strokeWidth="1.3"/><path d="M2 9c0 2.8 2 4 5 4s5-1.2 5-4M7 13v1" stroke={th.textSecondary} strokeWidth="1.3" strokeLinecap="round"/></svg>
+              </div>
+            </div>
+          </GlassCard>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SCREEN 3: AI CHAT ────────────────────────────────────────
+function ChatScreen() {
+  const th = useTheme() || T;
+  const [input, setInput] = useState('');
+  const [thinking, setThinking] = useState(false);
+  const messages = [
+    { role: 'ai', text: '你好 Alex，今天有什么我可以帮你的？', time: '09:41' },
+    { role: 'user', text: '帮我查一下明天上海的天气，顺便看看我有没有带伞', time: '09:42' },
+    { role: 'ai', text: '明天上海 🌧️ 小到中雨，气温 16–22°C。\n\n我扫描了你的行李清单备忘录，**没有看到折叠伞**。要我帮你在附近的便利店预订一把吗，或者提醒你出门前带伞？', time: '09:42', actions: ['预订折叠伞', '设置提醒', '查看路线'] },
+    { role: 'user', text: '设置提醒，明天早上7点', time: '09:43' },
+    { role: 'ai', text: '✅ 已设置：**明天早上 7:00** 提醒「带雨伞 ☂️」\n\n还有其他需要为这次出行准备的吗？', time: '09:43' },
+  ];
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden' }}>
+      <ScreenBg />
+      <div style={{ position: 'relative', zIndex: 2, display: 'flex', flexDirection: 'column', height: '100%', paddingTop: 56 }}>
+        {/* Header */}
+        <div style={{ padding: '8px 20px 12px', display: 'flex', alignItems: 'center', gap: 12, borderBottom: `0.5px solid ${th.glassBorder}` }}>
+          <div style={{ width: 36, height: 36, borderRadius: 12, background: 'linear-gradient(135deg, oklch(60% 0.2 258), oklch(60% 0.2 300))', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' }}>
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="4" fill="white"/><path d="M9 2v1.5M9 14.5V16M2 9h1.5M14.5 9H16" stroke="white" strokeWidth="1.5" strokeLinecap="round"/></svg>
+            <div style={{ position: 'absolute', bottom: -2, right: -2, width: 10, height: 10, borderRadius: '50%', background: th.success, border: '1.5px solid #08061a' }} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 16, fontWeight: 600, color: th.textPrimary }}>灵犀</div>
+            <div style={{ fontSize: 11, color: th.success }}>在线 · Qwen3-72B</div>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {['⊕', '⋯'].map((icon, i) => (
+              <div key={i} style={{ width: 30, height: 30, borderRadius: 9, background: th.glass, display: 'flex', alignItems: 'center', justifyContent: 'center', color: th.textSecondary, fontSize: 16 }}>{icon}</div>
+            ))}
+          </div>
+        </div>
+
+        {/* Messages */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {messages.map((msg, i) => (
+            <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start', gap: 4 }}>
+              <div style={{
+                maxWidth: '82%', padding: '10px 14px', borderRadius: msg.role === 'user' ? '18px 18px 4px 18px' : '18px 18px 18px 4px',
+                background: msg.role === 'user'
+                  ? `linear-gradient(135deg, ${th.accent}, ${th.accent2})`
+                  : th.glass,
+                border: msg.role === 'ai' ? `0.5px solid ${th.glassBorder}` : 'none',
+                fontSize: 14, color: th.textPrimary, lineHeight: 1.6, fontWeight: 300,
+                backdropFilter: msg.role === 'ai' ? 'blur(20px)' : 'none',
+              }}>
+                {msg.text.split('\n').map((line, li) => (
+                  <span key={li}>
+                    {line.split(/\*\*(.*?)\*\*/g).map((part, pi) =>
+                      pi % 2 === 1
+                        ? <strong key={pi} style={{ fontWeight: 600 }}>{part}</strong>
+                        : part
+                    )}
+                    {li < msg.text.split('\n').length - 1 && <br />}
+                  </span>
+                ))}
+              </div>
+              {msg.actions && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 2 }}>
+                  {msg.actions.map((a, ai) => (
+                    <button key={ai} style={{ padding: '5px 12px', borderRadius: 14, border: `0.5px solid ${th.accent}60`, background: th.accentSoft, color: th.accent, fontSize: 12, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', backdropFilter: 'blur(10px)' }}>{a}</button>
+                  ))}
+                </div>
+              )}
+              <span style={{ fontSize: 10, color: th.textMuted }}>{msg.time}</span>
+            </div>
+          ))}
+          {thinking && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px' }}>
+              {[0,1,2].map(i => (
+                <div key={i} style={{ width: 6, height: 6, borderRadius: '50%', background: th.accent, animation: `pulse-glow 1.2s ease-in-out ${i*0.2}s infinite` }} />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Input bar */}
+        <div style={{ padding: '8px 16px 28px', borderTop: `0.5px solid ${th.glassBorder}` }}>
+          <GlassCard style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 8px 8px 16px' }}>
+            <input
+              placeholder="输入指令或问题…"
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              style={{ flex: 1, background: 'none', border: 'none', outline: 'none', fontSize: 14, color: th.textPrimary, fontFamily: 'inherit', fontWeight: 300, '::placeholder': { color: th.textMuted } }}
+            />
+            <div style={{ display: 'flex', gap: 6 }}>
+              <div style={{ width: 32, height: 32, borderRadius: 10, background: th.glass, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="4.5" y="1" width="5" height="8.5" rx="2.5" stroke={th.textSecondary} strokeWidth="1.3"/><path d="M2 8c0 3 2 4.5 5 4.5s5-1.5 5-4.5M7 12.5v1" stroke={th.textSecondary} strokeWidth="1.3" strokeLinecap="round"/></svg>
+              </div>
+              <div style={{ width: 32, height: 32, borderRadius: 10, background: `linear-gradient(135deg, ${th.accent}, ${th.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: `0 4px 12px ${th.accent}50` }}>
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7h10M7 2l5 5-5 5" stroke="white" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              </div>
+            </div>
+          </GlassCard>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SCREEN 4: NOTIFICATIONS ──────────────────────────────────
+function NotificationScreen() {
+  const th = useTheme() || T;
+  const groups = [
+    {
+      label: '灵犀 AI 摘要', icon: '🧠', color: th.accent,
+      items: [
+        { title: '今日待办已整理', sub: '共 6 项，3 项需优先处理', time: '09:00', expanded: true, detail: '10:30 产品周会需要你准备 Q2 数据，建议现在开始整理。下午 15:00 评审记得提前阅读 PRD v2。' },
+      ]
+    },
+    {
+      label: '消息', icon: '💬', color: th.accent3,
+      items: [
+        { title: '微信 · 张总', sub: '明天的方案确认一下', time: '刚刚' },
+        { title: 'Slack · 产品组', sub: '李梅: @Alex 你看一下这个设计稿', time: '2分钟前' },
+        { title: '邮件', sub: '【重要】Q2 目标调整通知 — HR', time: '8分钟前' },
+      ]
+    },
+    {
+      label: '系统', icon: '⚙️', color: th.textMuted,
+      items: [
+        { title: '更新完成', sub: '灵犀 OS 2.1.3 已安装', time: '今天 08:00' },
+      ]
+    },
+  ];
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden' }}>
+      <ScreenBg />
+      <div style={{ position: 'relative', zIndex: 2, display: 'flex', flexDirection: 'column', height: '100%', paddingTop: 56 }}>
+        <div style={{ padding: '8px 20px 16px', display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+          <div style={{ fontSize: 22, fontWeight: 600, color: th.textPrimary }}>通知</div>
+          <button style={{ fontSize: 13, color: th.accent, background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit' }}>全部清除</button>
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 40px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {groups.map((group, gi) => (
+            <div key={gi}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, padding: '0 4px' }}>
+                <span style={{ fontSize: 13 }}>{group.icon}</span>
+                <span style={{ fontSize: 12, color: th.textMuted, fontWeight: 500, letterSpacing: 0.5, textTransform: 'uppercase' }}>{group.label}</span>
+                <div style={{ flex: 1, height: 0.5, background: th.glassBorder, marginLeft: 4 }} />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {group.items.map((item, ii) => (
+                  <GlassCard key={ii} style={{ padding: '14px 16px', border: item.expanded ? `0.5px solid ${group.color}40` : `0.5px solid ${th.glassBorder}` }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                      <GlowDot color={group.color} size={7} />
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <span style={{ fontSize: 14, fontWeight: 500, color: th.textPrimary }}>{item.title}</span>
+                          <span style={{ fontSize: 11, color: th.textMuted }}>{item.time}</span>
+                        </div>
+                        <div style={{ fontSize: 13, color: th.textSecondary, marginTop: 3, fontWeight: 300 }}>{item.sub}</div>
+                        {item.detail && (
+                          <div style={{ marginTop: 10, padding: '10px 12px', background: th.glass, borderRadius: 12, fontSize: 13, color: th.textSecondary, lineHeight: 1.6, fontWeight: 300 }}>{item.detail}</div>
+                        )}
+                      </div>
+                    </div>
+                  </GlassCard>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SCREEN 5: APP LAUNCH / TASK EXECUTION ────────────────────
+function AppLaunchScreen() {
+  const th = useTheme() || T;
+  const [phase, setPhase] = useState(0); // 0=search, 1=launching, 2=executing
+  const steps = [
+    { label: '理解指令', done: true },
+    { label: '打开高德地图', done: true },
+    { label: '搜索"星巴克"', done: true },
+    { label: '筛选距离最近', done: false, active: true },
+    { label: '展示结果', done: false },
+  ];
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden' }}>
+      <ScreenBg />
+      <div style={{ position: 'relative', zIndex: 2, display: 'flex', flexDirection: 'column', height: '100%', paddingTop: 56 }}>
+        {/* App search */}
+        <div style={{ padding: '8px 16px 16px' }}>
+          <GlassCard style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="6.5" cy="6.5" r="4.5" stroke={th.textSecondary} strokeWidth="1.4"/><path d="M10 10l4 4" stroke={th.textSecondary} strokeWidth="1.4" strokeLinecap="round"/></svg>
+            <span style={{ fontSize: 14, color: th.textPrimary, flex: 1 }}>帮我找最近的星巴克</span>
+            <div style={{ width: 6, height: 16, borderRadius: 3, background: th.accent, animation: 'blink-cursor 1s step-end infinite' }} />
+          </GlassCard>
+        </div>
+
+        {/* Executing card */}
+        <div style={{ padding: '0 16px 16px' }}>
+          <GlassCard style={{ padding: '16px', border: `0.5px solid ${th.accent}40`, boxShadow: `0 0 24px ${th.accent}15` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+              <div style={{ width: 32, height: 32, borderRadius: 10, background: 'linear-gradient(135deg, #00c458, #00a048)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>🗺️</div>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: th.textPrimary }}>高德地图</div>
+                <div style={{ fontSize: 11, color: th.accent }}>灵犀正在操作中…</div>
+              </div>
+              <div style={{ marginLeft: 'auto', width: 20, height: 20, borderRadius: '50%', border: `2px solid ${th.accent}`, borderTopColor: 'transparent', animation: 'spin-slow 0.8s linear infinite' }} />
+            </div>
+            {/* Steps */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {steps.map((s, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div style={{
+                    width: 18, height: 18, borderRadius: '50%', flexShrink: 0,
+                    background: s.done ? th.success : s.active ? th.accent : th.glass,
+                    border: s.active ? `1.5px solid ${th.accent}` : 'none',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    animation: s.active ? 'pulse-glow 1.5s ease-in-out infinite' : 'none',
+                  }}>
+                    {s.done && <svg width="10" height="8" viewBox="0 0 10 8" fill="none"><path d="M1 4l3 3 5-6" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                  </div>
+                  <span style={{ fontSize: 13, color: s.done ? th.textSecondary : s.active ? th.textPrimary : th.textMuted, fontWeight: s.active ? 500 : 300 }}>{s.label}</span>
+                </div>
+              ))}
+            </div>
+          </GlassCard>
+        </div>
+
+        {/* Recent apps as suggestions */}
+        <div style={{ padding: '0 16px' }}>
+          <div style={{ fontSize: 12, color: th.textMuted, marginBottom: 12, paddingLeft: 4, letterSpacing: 0.5 }}>也可以直接打开</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+            {[
+              { name: '微信', color: '#07c160', emoji: '💬' },
+              { name: '支付宝', color: '#1677ff', emoji: '💳' },
+              { name: '抖音', color: '#010101', emoji: '🎵' },
+              { name: '美团', color: '#ffcc00', emoji: '🛵' },
+              { name: '钉钉', color: '#1677ff', emoji: '📌' },
+              { name: '淘宝', color: '#ff6600', emoji: '🛍️' },
+              { name: '网易云', color: '#d43a3a', emoji: '🎵' },
+              { name: '更多', color: th.glass, emoji: '⋯' },
+            ].map((app, i) => (
+              <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+                <div style={{ width: 54, height: 54, borderRadius: 16, background: `${app.color}30`, border: `0.5px solid ${app.color}50`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, backdropFilter: 'blur(10px)' }}>{app.emoji}</div>
+                <span style={{ fontSize: 11, color: th.textSecondary }}>{app.name}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* AI hint */}
+        <div style={{ margin: '20px 16px 0' }}>
+          <GlassCard style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ width: 8, height: 8, borderRadius: '50%', background: th.accent, animation: 'pulse-glow 2s ease-in-out infinite' }} />
+            <span style={{ fontSize: 13, color: th.textSecondary, fontWeight: 300 }}>直接说出你想做的，灵犀会帮你完成</span>
+          </GlassCard>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SCREEN 6: SETTINGS ───────────────────────────────────────
+function SettingsScreen() {
+  const th = useTheme() || T;
+  const [darkMode, setDarkMode] = useState(true);
+  const [voiceFirst, setVoiceFirst] = useState(false);
+
+  const Toggle = ({ on, onToggle }) => (
+    <div onClick={onToggle} style={{ width: 44, height: 26, borderRadius: 13, background: on ? th.accent : th.glass, border: `0.5px solid ${th.glassBorder}`, position: 'relative', cursor: 'pointer', transition: 'background 0.25s ease', flexShrink: 0 }}>
+      <div style={{ position: 'absolute', top: 3, left: on ? 21 : 3, width: 20, height: 20, borderRadius: '50%', background: 'white', transition: 'left 0.25s ease', boxShadow: '0 1px 4px rgba(0,0,0,0.3)' }} />
+    </div>
+  );
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden' }}>
+      <ScreenBg />
+      <div style={{ position: 'relative', zIndex: 2, display: 'flex', flexDirection: 'column', height: '100%', paddingTop: 56 }}>
+        <div style={{ padding: '8px 20px 20px', fontSize: 22, fontWeight: 600, color: th.textPrimary }}>设置</div>
+
+        {/* Profile card */}
+        <div style={{ padding: '0 16px 20px' }}>
+          <GlassCard style={{ padding: '16px', display: 'flex', alignItems: 'center', gap: 14 }}>
+            <div style={{ width: 50, height: 50, borderRadius: 16, background: 'linear-gradient(135deg, oklch(60% 0.2 258), oklch(60% 0.2 300))', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, boxShadow: `0 0 20px ${th.accent}40` }}>👤</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 16, fontWeight: 600, color: th.textPrimary }}>Alex Zhang</div>
+              <div style={{ fontSize: 12, color: th.textSecondary, marginTop: 2 }}>alex@example.com</div>
+            </div>
+            <svg width="8" height="14" viewBox="0 0 8 14" fill="none"><path d="M1 1l6 6-6 6" stroke={th.textMuted} strokeWidth="2" fill="none" strokeLinecap="round"/></svg>
+          </GlassCard>
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 40px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {/* AI section */}
+          <div>
+            <div style={{ fontSize: 11, color: th.textMuted, marginBottom: 8, paddingLeft: 4, letterSpacing: 1, textTransform: 'uppercase' }}>灵犀 AI</div>
+            <GlassCard style={{ overflow: 'hidden' }}>
+              {[
+                { label: '主要模型', value: 'Qwen3-72B', type: 'nav' },
+                { label: '语音优先模式', value: '', type: 'toggle', on: voiceFirst, onToggle: () => setVoiceFirst(v => !v) },
+                { label: '记忆与上下文', value: '30天', type: 'nav' },
+                { label: '隐私模式', value: '关', type: 'nav', last: true },
+              ].map((row, i, arr) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', borderBottom: i < arr.length - 1 ? `0.5px solid ${th.glassBorder}` : 'none' }}>
+                  <span style={{ flex: 1, fontSize: 15, color: th.textPrimary, fontWeight: 300 }}>{row.label}</span>
+                  {row.type === 'nav' && <>
+                    <span style={{ fontSize: 13, color: th.textSecondary, marginRight: 6, whiteSpace: 'nowrap' }}>{row.value}</span>
+                    <svg width="8" height="14" viewBox="0 0 8 14" fill="none"><path d="M1 1l6 6-6 6" stroke={th.textMuted} strokeWidth="2" fill="none" strokeLinecap="round"/></svg>
+                  </>}
+                  {row.type === 'toggle' && <Toggle on={row.on} onToggle={row.onToggle} />}
+                </div>
+              ))}
+            </GlassCard>
+          </div>
+
+          {/* Appearance */}
+          <div>
+            <div style={{ fontSize: 11, color: th.textMuted, marginBottom: 8, paddingLeft: 4, letterSpacing: 1, textTransform: 'uppercase' }}>外观</div>
+            <GlassCard style={{ overflow: 'hidden' }}>
+              {[
+                { label: '深色模式', type: 'toggle', on: darkMode, onToggle: () => setDarkMode(v => !v) },
+                { label: '强调色', value: '灵犀蓝', type: 'nav' },
+                { label: '字体大小', value: '标准', type: 'nav', last: true },
+              ].map((row, i, arr) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', borderBottom: i < arr.length - 1 ? `0.5px solid ${th.glassBorder}` : 'none' }}>
+                  <span style={{ flex: 1, fontSize: 15, color: th.textPrimary, fontWeight: 300 }}>{row.label}</span>
+                  {row.type === 'nav' && <>
+                    <span style={{ fontSize: 13, color: th.textSecondary, marginRight: 6, whiteSpace: 'nowrap' }}>{row.value}</span>
+                    <svg width="8" height="14" viewBox="0 0 8 14" fill="none"><path d="M1 1l6 6-6 6" stroke={th.textMuted} strokeWidth="2" fill="none" strokeLinecap="round"/></svg>
+                  </>}
+                  {row.type === 'toggle' && <Toggle on={row.on} onToggle={row.onToggle} />}
+                </div>
+              ))}
+            </GlassCard>
+          </div>
+
+          {/* Privacy */}
+          <div>
+            <div style={{ fontSize: 11, color: th.textMuted, marginBottom: 8, paddingLeft: 4, letterSpacing: 1, textTransform: 'uppercase' }}>隐私与数据</div>
+            <GlassCard style={{ overflow: 'hidden' }}>
+              {['位置权限管理', '麦克风权限', '数据导出', '账户注销'].map((label, i, arr) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', borderBottom: i < arr.length - 1 ? `0.5px solid ${th.glassBorder}` : 'none' }}>
+                  <span style={{ flex: 1, fontSize: 15, color: i === 3 ? th.danger : th.textPrimary, fontWeight: 300 }}>{label}</span>
+                  <svg width="8" height="14" viewBox="0 0 8 14" fill="none"><path d="M1 1l6 6-6 6" stroke={th.textMuted} strokeWidth="2" fill="none" strokeLinecap="round"/></svg>
+                </div>
+              ))}
+            </GlassCard>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SCREEN 7: LLM CONFIG ─────────────────────────────────────
+function LLMConfigScreen() {
+  const th = useTheme() || T;
+  const [selected, setSelected] = useState('qwen3-72b');
+  const models = [
+    { id: 'qwen3-72b', name: 'Qwen3-72B', tag: '推荐', provider: '阿里云', ctx: '128K', speed: '快', quality: '极高', color: th.accent },
+    { id: 'deepseek-v3', name: 'DeepSeek-V3', tag: '高效', provider: 'DeepSeek', ctx: '64K', speed: '极快', quality: '高', color: th.accent3 },
+    { id: 'gpt4o', name: 'GPT-4o', tag: '国际版', provider: 'OpenAI', ctx: '128K', speed: '中', quality: '极高', color: th.accent2 },
+    { id: 'custom', name: '自定义模型', tag: '', provider: 'API Key', ctx: '—', speed: '—', quality: '—', color: th.textMuted },
+  ];
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%', overflow: 'hidden' }}>
+      <ScreenBg />
+      <div style={{ position: 'relative', zIndex: 2, display: 'flex', flexDirection: 'column', height: '100%', paddingTop: 56 }}>
+        <div style={{ padding: '8px 20px 4px' }}>
+          <div style={{ fontSize: 22, fontWeight: 600, color: th.textPrimary }}>AI 模型</div>
+          <div style={{ fontSize: 13, color: th.textSecondary, marginTop: 4, fontWeight: 300 }}>选择灵犀大脑</div>
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 16px 40px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {models.map((m) => (
+            <div key={m.id} onClick={() => setSelected(m.id)} style={{ cursor: 'pointer' }}>
+              <GlassCard style={{
+                padding: '12px 14px', position: 'relative', overflow: 'hidden',
+                border: selected === m.id ? `0.5px solid ${m.color}80` : `0.5px solid ${th.glassBorder}`,
+                boxShadow: selected === m.id ? `0 0 20px ${m.color}20` : 'none',
+                transition: 'all 0.2s ease',
+              }}>
+                {selected === m.id && <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg, transparent, ${m.color}, transparent)` }} />}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div style={{ width: 32, height: 32, borderRadius: 9, background: `${m.color}20`, border: `0.5px solid ${m.color}40`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <svg width="16" height="16" viewBox="0 0 20 20" fill="none">
+                      <circle cx="10" cy="10" r="3" fill={m.color} opacity="0.8"/>
+                      <path d="M10 3v1.5M10 15.5V17M3 10h1.5M15.5 10H17" stroke={m.color} strokeWidth="1.5" strokeLinecap="round" opacity="0.5"/>
+                      <circle cx="10" cy="10" r="7" stroke={m.color} strokeWidth="1" opacity="0.3"/>
+                    </svg>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 15, fontWeight: 600, color: th.textPrimary, whiteSpace: 'nowrap' }}>{m.name}</span>
+                      {m.tag && <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 6px', borderRadius: 5, background: `${m.color}25`, color: m.color, flexShrink: 0 }}>{m.tag}</span>}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                      <span style={{ fontSize: 12, color: th.textSecondary }}>{m.provider}</span>
+                      <span style={{ fontSize: 11, color: th.textMuted }}>·</span>
+                      <span style={{ fontSize: 11, color: th.textMuted }}>{m.ctx}</span>
+                      <span style={{ fontSize: 11, color: th.textMuted }}>·</span>
+                      <span style={{ fontSize: 11, color: th.textMuted }}>{m.speed}</span>
+                    </div>
+                  </div>
+                  {selected === m.id && (
+                    <div style={{ width: 18, height: 18, borderRadius: '50%', background: m.color, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      <svg width="9" height="7" viewBox="0 0 10 8" fill="none"><path d="M1 4l3 3 5-6" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                    </div>
+                  )}
+                </div>
+              </GlassCard>
+            </div>
+          ))}
+
+          {/* API Key input */}
+          <div style={{ marginTop: 4 }}>
+            <div style={{ fontSize: 11, color: th.textMuted, marginBottom: 8, paddingLeft: 4, letterSpacing: 1, textTransform: 'uppercase' }}>自定义接入</div>
+            <GlassCard style={{ padding: '14px 16px' }}>
+              <div style={{ fontSize: 13, color: th.textSecondary, marginBottom: 8, fontWeight: 300 }}>API 端点</div>
+              <div style={{ padding: '10px 14px', borderRadius: 12, background: th.glass, border: `0.5px solid ${th.glassBorder}`, fontSize: 13, color: th.textMuted, fontFamily: 'monospace' }}>
+                https://api.example.com/v1
+              </div>
+              <div style={{ fontSize: 13, color: th.textSecondary, margin: '12px 0 8px', fontWeight: 300 }}>API Key</div>
+              <div style={{ padding: '10px 14px', borderRadius: 12, background: th.glass, border: `0.5px solid ${th.glassBorder}`, fontSize: 13, color: th.textMuted, fontFamily: 'monospace' }}>
+                sk-••••••••••••••••
+              </div>
+            </GlassCard>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SCREEN SHELL WITH NAVIGATION ─────────────────────────────
+const SCREENS = [
+  { id: 'lock', label: '锁屏', Component: LockScreen },
+  { id: 'home', label: '主屏幕', Component: HomeScreen },
+  { id: 'chat', label: 'AI 对话', Component: ChatScreen },
+  { id: 'notif', label: '通知', Component: NotificationScreen },
+  { id: 'app', label: 'App 启动', Component: AppLaunchScreen },
+  { id: 'settings', label: '设置', Component: SettingsScreen },
+  { id: 'llm', label: 'LLM 配置', Component: LLMConfigScreen },
+];
+
+const PHONE_W = 390;
+const PHONE_H = 844;
+
+// Custom phone frame — bypasses IOSDevice flex layout issues
+function PhoneShell({ screenId }) {
+  const th = useTheme() || T;
+  const screen = SCREENS.find(s => s.id === screenId) || SCREENS[0];
+  const C = screen.Component;
+  return (
+    <div style={{
+      width: PHONE_W, height: PHONE_H,
+      borderRadius: 48, overflow: 'hidden',
+      position: 'relative',
+      background: th.phoneBg,
+      boxShadow: th.frameBoxShadow,
+      fontFamily: "'Noto Sans SC', -apple-system, system-ui, sans-serif",
+      WebkitFontSmoothing: 'antialiased',
+      transition: 'background 0.4s ease, box-shadow 0.4s ease',
+    }}>
+      {/* Dynamic island */}
+      <div style={{
+        position: 'absolute', top: 11, left: '50%', transform: 'translateX(-50%)',
+        width: 126, height: 37, borderRadius: 24, background: '#000', zIndex: 50,
+        boxShadow: '0 0 0 1px rgba(255,255,255,0.06)',
+      }} />
+      {/* Status bar */}
+      <div style={{
+        position: 'absolute', top: 0, left: 0, right: 0, zIndex: 40,
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '16px 24px 0', height: 54,
+      }}>
+        <span style={{ fontFamily: '-apple-system, system-ui', fontWeight: 600, fontSize: 16, color: th.statusBarColor, letterSpacing: -0.3 }}>
+          {new Date().getHours().toString().padStart(2,'0')}:{new Date().getMinutes().toString().padStart(2,'0')}
+        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <svg width="17" height="11" viewBox="0 0 17 11" fill={th.statusBarColor}>
+            <rect x="0" y="7" width="3" height="4" rx="0.6"/>
+            <rect x="4.5" y="4.5" width="3" height="6.5" rx="0.6"/>
+            <rect x="9" y="2" width="3" height="9" rx="0.6"/>
+            <rect x="13.5" y="0" width="3" height="11" rx="0.6"/>
+          </svg>
+          <svg width="16" height="11" viewBox="0 0 16 11" fill="none">
+            <path d="M8 3.2C10.2 3.2 12.2 4.1 13.6 5.5L14.7 4.4C13 2.7 10.6 1.6 8 1.6C5.4 1.6 3 2.7 1.3 4.4L2.4 5.5C3.8 4.1 5.8 3.2 8 3.2Z" fill={th.statusBarColor}/>
+            <path d="M8 6.6C9.4 6.6 10.6 7.2 11.4 8.1L12.5 7C11.4 5.9 9.8 5.2 8 5.2C6.2 5.2 4.6 5.9 3.5 7L4.6 8.1C5.4 7.2 6.6 6.6 8 6.6Z" fill={th.statusBarColor}/>
+            <circle cx="8" cy="10" r="1.4" fill={th.statusBarColor}/>
+          </svg>
+          <svg width="26" height="12" viewBox="0 0 26 12" fill="none">
+            <rect x="0.5" y="0.5" width="22" height="11" rx="3.5" stroke={th.statusBarColor} strokeOpacity="0.35"/>
+            <rect x="2" y="2" width="18" height="8" rx="2" fill={th.statusBarColor}/>
+            <path d="M24 4v4c.8-.3 1.5-1.1 1.5-2s-.7-1.7-1.5-2z" fill={th.statusBarColor} fillOpacity="0.4"/>
+          </svg>
+        </div>
+      </div>
+      {/* Screen content — absolutely fills the phone */}
+      <div style={{ position: 'absolute', inset: 0 }}>
+        <C />
+      </div>
+      {/* Home indicator */}
+      <div style={{
+        position: 'absolute', bottom: 8, left: 0, right: 0, zIndex: 60,
+        display: 'flex', justifyContent: 'center',
+        pointerEvents: 'none',
+      }}>
+        <div style={{ width: 134, height: 5, borderRadius: 100, background: 'rgba(255,255,255,0.5)' }} />
+      </div>
+    </div>
+  );
+}
+
+// ─── SCALED PHONE WRAPPER ─────────────────────────────────────
+function ScaledPhone({ screenId }) {
+  const containerRef = useRef(null);
+  const [scale, setScale] = useState(0.8);
+
+  useEffect(() => {
+    const compute = () => {
+      if (!containerRef.current) return;
+      const parent = containerRef.current.parentElement;
+      if (!parent) return;
+      const availW = parent.clientWidth - 160; // nav panel ~140px + gap
+      const availH = parent.clientHeight - 24; // padding
+      const scaleByH = availH / PHONE_H;
+      const scaleByW = availW / PHONE_W;
+      setScale(Math.min(scaleByH, scaleByW, 1));
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    if (containerRef.current?.parentElement) ro.observe(containerRef.current.parentElement);
+    return () => ro.disconnect();
+  }, []);
+
+  return (
+    <div ref={containerRef} style={{
+      position: 'relative', zIndex: 5, flexShrink: 0,
+      width: PHONE_W * scale,
+      height: PHONE_H * scale,
+    }}>
+      <div style={{
+        position: 'absolute', top: 0, left: 0,
+        width: PHONE_W, height: PHONE_H,
+        transformOrigin: 'top left',
+        transform: `scale(${scale})`,
+      }}>
+        <PhoneShell screenId={screenId} />
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────
+function App() {
+  const [activeScreen, setActiveScreen] = useState('lock');
+  const [tweaksVisible, setTweaksVisible] = useState(false);
+  const [isDark, setIsDark] = useState(true);
+  const theme = React.useMemo(() => makeTheme(isDark), [isDark]);
+  T = theme; // keep global T in sync for residual references
+
+  // Tweaks protocol
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.data?.type === '__activate_edit_mode') setTweaksVisible(true);
+      if (e.data?.type === '__deactivate_edit_mode') setTweaksVisible(false);
+    };
+    window.addEventListener('message', handler);
+    window.parent.postMessage({ type: '__edit_mode_available' }, '*');
+    return () => window.removeEventListener('message', handler);
+  }, []);
+
+  return (
+    <ThemeContext.Provider value={theme}>
+    <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column', background: theme.canvasBg, position: 'relative', overflow: 'hidden', transition: 'background 0.4s ease' }}
+      data-screen-label="Canvas">
+      {/* Background mesh */}
+      <div style={{ position: 'absolute', inset: 0, background: theme.canvasGrad, pointerEvents: 'none', transition: 'background 0.4s ease' }} />
+      <div style={{ position: 'absolute', inset: 0, backgroundImage: `radial-gradient(circle, ${isDark ? 'rgba(255,255,255,0.015)' : 'rgba(100,80,180,0.04)'} 1px, transparent 1px)`, backgroundSize: '32px 32px', pointerEvents: 'none' }} />
+
+      {/* Title bar — fixed height row */}
+      <div style={{ flexShrink: 0, height: 56, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10, position: 'relative', overflow: 'visible' }}>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '7px 16px', background: theme.titlePillBg, borderRadius: 16, border: `0.5px solid ${theme.titlePillBorder}`, backdropFilter: 'blur(10px)', whiteSpace: 'nowrap', transition: 'all 0.3s ease' }}>
+          <div style={{ width: 18, height: 18, borderRadius: 5, background: 'linear-gradient(135deg, oklch(60% 0.2 258), oklch(60% 0.2 300))', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <svg width="9" height="9" viewBox="0 0 10 10" fill="none"><circle cx="5" cy="5" r="2" fill="white"/><path d="M5 1v1M5 8v1M1 5h1M8 5h1" stroke="white" strokeWidth="1.2" strokeLinecap="round" opacity="0.6"/></svg>
+          </div>
+          <span style={{ fontSize: 13, fontWeight: 600, color: theme.textPrimary, letterSpacing: 0.3 }}>灵犀 OS</span>
+          <span style={{ fontSize: 11, color: theme.textMuted, borderLeft: `0.5px solid ${theme.glassBorder}`, paddingLeft: 8 }}>AI智能手机界面原型</span>
+          {/* Theme toggle */}
+          <button onClick={() => setIsDark(d => !d)} style={{
+            marginLeft: 4, padding: '3px 10px', borderRadius: 10,
+            border: `0.5px solid ${theme.glassBorder}`,
+            background: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(100,80,180,0.12)',
+            color: theme.textSecondary, fontSize: 11, cursor: 'pointer',
+            fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 5,
+            transition: 'all 0.2s ease',
+          }}>
+            {isDark ? '☀️ 浅色' : '🌙 深色'}
+          </button>
+        </div>
+      </div>
+
+      {/* Main area — nav + phone side by side */}
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 24, padding: '12px 24px 20px', position: 'relative', minHeight: 0 }}>
+        {/* Screen selector */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flexShrink: 0, alignSelf: 'center' }}>
+          {SCREENS.map(s => (
+            <button key={s.id} onClick={() => setActiveScreen(s.id)} style={{
+              padding: '8px 16px', borderRadius: 12, border: 'none', cursor: 'pointer',
+              background: activeScreen === s.id ? theme.navBtnActive : theme.navBtnInactive,
+              color: activeScreen === s.id ? theme.navBtnActiveText : theme.navBtnInactiveText,
+              fontSize: 12, fontWeight: activeScreen === s.id ? 600 : 400,
+              fontFamily: 'inherit', whiteSpace: 'nowrap',
+              boxShadow: activeScreen === s.id ? `0 4px 16px ${theme.accent}40` : 'none',
+              transition: 'all 0.2s ease',
+              backdropFilter: 'blur(10px)',
+              textAlign: 'left',
+            }}>{s.label}</button>
+          ))}
+        </div>
+
+        {/* Phone — auto-scale to fit remaining space */}
+        <ScaledPhone screenId={activeScreen} />
+      </div>
+
+      {/* Tweaks panel */}
+      {tweaksVisible && (
+        <div style={{
+          position: 'fixed', bottom: 32, right: 32, zIndex: 1000,
+          background: isDark ? 'rgba(16,14,36,0.96)' : 'rgba(240,238,252,0.96)',
+          backdropFilter: 'blur(20px)',
+          border: `0.5px solid ${theme.glassBorder}`, borderRadius: 20,
+          padding: '20px', width: 240,
+          boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+          transition: 'all 0.3s ease',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: theme.textPrimary }}>Tweaks</span>
+            <button onClick={() => { setTweaksVisible(false); window.parent.postMessage({ type: '__edit_mode_dismissed' }, '*'); }} style={{ background: 'none', border: 'none', color: theme.textMuted, fontSize: 18, cursor: 'pointer' }}>×</button>
+          </div>
+          {/* Theme toggle in tweaks */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 11, color: theme.textMuted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.8 }}>外观</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {[{label:'🌙 深色', val:true},{label:'☀️ 浅色', val:false}].map(opt => (
+                <button key={opt.label} onClick={() => setIsDark(opt.val)} style={{
+                  flex: 1, padding: '7px 0', borderRadius: 10, border: 'none', cursor: 'pointer',
+                  background: isDark === opt.val ? theme.accent : theme.glass,
+                  color: isDark === opt.val ? '#fff' : theme.textSecondary,
+                  fontSize: 12, fontFamily: 'inherit', fontWeight: isDark === opt.val ? 600 : 400,
+                  transition: 'all 0.2s ease',
+                }}>{opt.label}</button>
+              ))}
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: theme.textMuted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.8 }}>切换界面</div>
+          {SCREENS.map(s => (
+            <button key={s.id} onClick={() => setActiveScreen(s.id)} style={{
+              display: 'block', width: '100%', padding: '8px 12px', borderRadius: 10, border: 'none',
+              background: activeScreen === s.id ? `${theme.accent}25` : theme.glass,
+              color: activeScreen === s.id ? theme.accent : theme.textSecondary,
+              fontSize: 13, cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', marginBottom: 4,
+              fontWeight: activeScreen === s.id ? 600 : 400,
+            }}>{s.label}</button>
+          ))}
+        </div>
+      )}
+    </div>
+    </ThemeContext.Provider>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+<div id="root"></div>
+</body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "type": "slash_command_catalog",
+  "commands": [
+    {
+      "name": "model",
+      "description": "Switch the active model",
+      "source": "builtin"
+    }
+  ]
+}

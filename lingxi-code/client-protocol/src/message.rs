@@ -1,0 +1,92 @@
+//! `MessageDto` + `MessageBlockDto` — the shared block schema reproduced by
+//! both `MessageComplete` (F1-03) and a resumed scrollback.
+//!
+//! Carries the full block set the ~22 tool-card + diff + thinking renderers
+//! need so a completed message and a resumed scrollback are reproducible (plan
+//! F1-02). Tool payloads are JSON **Strings** (`input_json`/`result_json`) so
+//! `serde_json::Value` never enters the contract crate (governing decision
+//! §0.4); the diff fields (`old_string`/`new_string`/`file_path`) mirror the
+//! TUI `UserToolResult` at `tui/src/state.rs:73-89`.
+
+use serde::{Deserialize, Serialize};
+
+/// A complete conversation message — a role plus an ordered list of content
+/// blocks. Reproduces the assistant message a turn produced (or a resumed
+/// scrollback entry).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MessageDto {
+    /// The message role (e.g. `"assistant"`, `"user"`).
+    pub role: String,
+    /// The ordered content blocks comprising the message.
+    pub blocks: Vec<MessageBlockDto>,
+}
+
+/// One block within a [`MessageDto`].
+///
+/// The variant set is the structural parity anchor: it equals the block kinds
+/// the TUI scrollback renders (`Text | Thinking | RedactedThinking | ToolUse |
+/// ToolResult`). `#[non_exhaustive]` so a future block kind is additive (no
+/// major bump). Internally tagged on `type`, `snake_case` (the frozen serde
+/// convention, decision §0.1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MessageBlockDto {
+    /// Plain assistant text.
+    Text {
+        /// The text body.
+        text: String,
+    },
+    /// Extended-thinking reasoning trace (mirrors `protocol::ContentBlock::Thinking`).
+    Thinking {
+        /// The reasoning text.
+        thinking: String,
+        /// Optional cryptographic signature attesting to the trace.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// A redacted-thinking block — opaque encrypted reasoning the provider
+    /// returns when the trace is withheld.
+    RedactedThinking {
+        /// The opaque redacted payload.
+        data: String,
+    },
+    /// A tool invocation. `input_json` is the tool input lowered to a JSON
+    /// **String** (decision §0.4).
+    ToolUse {
+        /// Correlator echoed in the matching [`MessageBlockDto::ToolResult`].
+        id: String,
+        /// Tool name (e.g. `"Read"`, `"Edit"`).
+        tool: String,
+        /// Tool input as a JSON String.
+        input_json: String,
+    },
+    /// A tool result. `result_json` is the tool output lowered to a JSON
+    /// **String** (decision §0.4). The diff fields mirror the TUI
+    /// `UserToolResult` carried at `tui/src/state.rs:73-89` and are `None` for
+    /// non-diff tools.
+    ToolResult {
+        /// Correlator matching the paired [`MessageBlockDto::ToolUse`].
+        id: String,
+        /// Tool name that returned.
+        tool: String,
+        /// Tool result as a JSON String.
+        result_json: String,
+        /// Whether the tool reported failure.
+        is_error: bool,
+        /// Pre-edit text for diff tools (`old_string` for Edit). `None` for
+        /// non-diff tools.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_string: Option<String>,
+        /// Post-edit text for diff tools (`new_string` for Edit; `content` for
+        /// Write). `None` for non-diff tools.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_string: Option<String>,
+        /// Edited file path (drives diff syntax language). `None` for non-diff
+        /// tools.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_path: Option<String>,
+    },
+}

@@ -155,8 +155,17 @@ async fn tool_use_dispatched_before_message_stop() {
 
     // Output sequence: Text("calling tool"), ToolCall("AlwaysOk"),
     // ToolResult("AlwaysOk"), Text("done"), EndTurn.
+    //
+    // The §0.7 "light up thinking/usage" follow-up adds additive `Usage`
+    // emits (from `message_start` / `message_delta`) that interleave but
+    // are orthogonal to this text/tool ordering, so filter them (and
+    // `Thinking`) out before the strict-iterator walk.
     let events = output.snapshot().await;
-    let mut iter = events.iter();
+    let lifecycle: Vec<&OutputEvent> = events
+        .iter()
+        .filter(|e| !matches!(e, OutputEvent::Usage { .. } | OutputEvent::Thinking { .. }))
+        .collect();
+    let mut iter = lifecycle.into_iter();
     assert!(
         matches!(iter.next(), Some(OutputEvent::Text { text }) if text == "calling tool"),
         "events: {events:?}"

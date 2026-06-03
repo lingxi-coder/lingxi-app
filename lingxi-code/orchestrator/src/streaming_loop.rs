@@ -157,8 +157,9 @@ mod tests {
     use super::*;
     use crate::test_support::MockOutputStream;
     use crate::test_support_stream::{
-        content_block_start_text, content_block_start_tool_use, content_block_stop,
-        input_json_delta, message_delta_stop, message_start, message_stop, text_delta,
+        content_block_start_text, content_block_start_thinking, content_block_start_tool_use,
+        content_block_stop, input_json_delta, message_delta_stop, message_delta_stop_with_usage,
+        message_start, message_stop, text_delta, thinking_delta,
     };
     use futures::stream;
     use protocol::ToolUseId;
@@ -240,6 +241,93 @@ mod tests {
             }
             other => panic!("expected StreamingProtocol, got {other:?}"),
         }
+    }
+
+    /// §0.7 "light up thinking/usage": a stream carrying a `ThinkingDelta`
+    /// and a `MessageDelta` with a final `usage` snapshot must surface both
+    /// to the `OutputStream` via `emit_thinking` + `emit_usage`, while the
+    /// stop-reason / assembled-turn behavior stays exactly as before.
+    #[tokio::test]
+    async fn thinking_and_usage_deltas_emit_to_output() {
+        use crate::test_support::MockOutputStream;
+        use api_client::types::UsageApi;
+        use traits::OutputEvent;
+
+        let mock = Arc::new(MockOutputStream::new());
+        let out: Arc<dyn OutputStream> = mock.clone();
+        let evs = vec![
+            message_start("m1", "claude-opus-4-7"),
+            // a thinking block streamed as a delta
+            content_block_start_thinking(0),
+            thinking_delta(0, "let me reason"),
+            content_block_stop(0),
+            // a text block so the assembled turn is non-trivial
+            content_block_start_text(1),
+            text_delta(1, "answer"),
+            content_block_stop(1),
+            // final message_delta with stop_reason AND usage
+            message_delta_stop_with_usage(
+                "end_turn",
+                UsageApi {
+                    input_tokens: 120,
+                    output_tokens: 35,
+                    cache_creation_input_tokens: 10,
+                    cache_read_input_tokens: 5,
+                },
+            ),
+            message_stop(),
+        ];
+        let turn = pump_stream(boxed(evs), &out).await.expect("pump");
+
+        // Existing behavior is unchanged: stop reason + assembled blocks.
+        assert_eq!(turn.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(turn.assistant_blocks.len(), 2);
+        assert!(matches!(
+            &turn.assistant_blocks[0],
+            ContentBlock::Thinking { thinking, signature }
+                if thinking == "let me reason" && signature.is_none()
+        ));
+
+        let events = mock.snapshot().await;
+
+        // emit_thinking fired exactly once with the live delta + None sig.
+        let thinking: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                OutputEvent::Thinking {
+                    thinking,
+                    signature,
+                } => Some((thinking.clone(), signature.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking, vec![("let me reason".to_string(), None)]);
+
+        // emit_usage fired with the message_delta usage mapped field-for-field.
+        // (message_start carried a default all-zero usage, emitted first.)
+        let usages: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                OutputEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                } => Some((
+                    *input_tokens,
+                    *output_tokens,
+                    *cache_read_tokens,
+                    *cache_creation_tokens,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            usages.contains(&(120, 35, 5, 10)),
+            "expected final usage (120,35,5,10), got {usages:?}"
+        );
+        // message_start's default-zero usage was surfaced too.
+        assert_eq!(usages.first(), Some(&(0, 0, 0, 0)));
     }
 
     #[tokio::test]

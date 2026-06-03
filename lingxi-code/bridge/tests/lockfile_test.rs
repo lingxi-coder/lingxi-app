@@ -118,3 +118,84 @@ fn drop_guard_removes_lockfile_on_panic() {
     assert!(result.is_err(), "panic should propagate from closure");
     assert!(!path.exists(), "lockfile must be deleted even after panic");
 }
+
+// ── F2-04: dedicated bridge discovery lockfile ────────────────────────────
+//
+// The bridge writes its OWN `<port>.lock` under `~/.claude/bridge/` with a
+// distinct `ideName` so it does NOT collide with the real IDE peer that scans
+// `~/.claude/ide/` for the `IDE_NAME = "LingXi"` file.
+
+#[test]
+fn bridge_lockfile_writes_to_bridge_dir() {
+    use bridge::lockfile::BRIDGE_IDE_NAME;
+    let tmp = TempDir::new().unwrap();
+    // `~/.claude/bridge` is mirrored here by `<tmp>/.claude/bridge`.
+    let bridge_dir = tmp.path().join(".claude").join("bridge");
+    let lf = IdeLockfile::new_for_bridge_dir(
+        bridge_dir.clone(),
+        40740,
+        vec![PathBuf::from("/work/proj")],
+    );
+    // Filename is `<port>.lock` rooted at the bridge dir (NOT the ide dir).
+    let path = lf.path();
+    assert_eq!(path.parent().unwrap(), bridge_dir.as_path());
+    assert_eq!(path.file_name().unwrap().to_str().unwrap(), "40740.lock");
+
+    std::fs::create_dir_all(&bridge_dir).unwrap();
+    lf.write().expect("write bridge lockfile");
+    assert!(path.exists(), "bridge lockfile must be written to bridge dir");
+
+    // Round-trips with the distinct bridge ideName and a real auth token.
+    let (body, port) = IdeLockfile::read(&path).unwrap();
+    assert_eq!(port, 40740);
+    assert_eq!(body.transport, "ws");
+    assert_eq!(body.ide_name, BRIDGE_IDE_NAME);
+    assert_eq!(body.auth_token.len(), 32);
+}
+
+#[test]
+fn bridge_lockfile_uses_distinct_ide_name() {
+    use bridge::lockfile::{BRIDGE_IDE_NAME, IDE_NAME};
+    // The bridge ideName MUST differ from the IDE-peer ideName so the real
+    // IDE scanner does not pick up the bridge's lockfile (peer collision).
+    assert_ne!(
+        BRIDGE_IDE_NAME, IDE_NAME,
+        "bridge ideName must differ from the IDE-peer ideName"
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let bridge_dir = tmp.path().to_path_buf();
+    let lf = IdeLockfile::new_for_bridge_dir(
+        bridge_dir,
+        40741,
+        vec![PathBuf::from("/work/proj")],
+    );
+    assert_eq!(
+        lf.body().ide_name,
+        BRIDGE_IDE_NAME,
+        "bridge lockfile body must carry the distinct bridge ideName"
+    );
+}
+
+#[test]
+fn bridge_lockfile_drop_cleans_up() {
+    let tmp = TempDir::new().unwrap();
+    let bridge_dir = tmp.path().to_path_buf();
+    let path = {
+        let lf = IdeLockfile::new_for_bridge_dir(
+            bridge_dir,
+            40742,
+            vec![PathBuf::from("/work/proj")],
+        );
+        lf.write().expect("write bridge lockfile");
+        let path = lf.path();
+        let _guard = LockfileGuard::new(path.clone());
+        assert!(path.exists(), "bridge lockfile must exist while guard alive");
+        path
+        // _guard drops here.
+    };
+    assert!(
+        !path.exists(),
+        "bridge lockfile must be deleted when LockfileGuard drops"
+    );
+}

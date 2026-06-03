@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 protocol = { path = "../protocol" }
+client-protocol = { path = "../client-protocol" }
 traits = { path = "../traits" }
 secret = { path = "../secret" }
 jsonrpc = { path = "../jsonrpc" }
@@ -15,17 +16,19 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["sync", "time", "rt"] }
 tracing.workspace = true
 rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "os_rng"] }
 dirs = "5"
 tokio-tungstenite = "0.21"
+futures-util.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = "3.13"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 http = "1"
+futures-util.workspace = true
 
 [lints]
 workspace = true

@@ -1,0 +1,15 @@
+## XcodeGen output (regenerate with `xcodegen generate`)
+*.xcodeproj
+*.xcworkspace
+
+## Generated UniFFI integration artifacts (reproduce with scripts/build-xcframework.sh)
+Generated/
+Frameworks/
+*.xcframework
+
+## Xcode
+xcuserdata/
+DerivedData/
+build/
+.DS_Store
+*.xcuserstate

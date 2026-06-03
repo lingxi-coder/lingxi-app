@@ -136,7 +136,13 @@ fn fixture_names_match_constant_order() {
 }
 
 #[tokio::test]
-async fn every_fixture_command_dispatches_to_expected_literal() {
+async fn every_fixture_command_dispatches_to_handled() {
+    // Parity lock: every builtin command name is REGISTERED and dispatches to
+    // `Handled`. The original M5-era assertion that each returns the stub
+    // literal ("{name}: not implemented in v0.6.0 (M5)") is obsolete — later
+    // parity batches (merged from main) implemented many commands with real
+    // output (e.g. /commit), so this locks the full name surface dispatches,
+    // not the exact body.
     let f = fixture();
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
@@ -144,13 +150,9 @@ async fn every_fixture_command_dispatches_to_expected_literal() {
 
     for entry in &f.commands {
         let raw = format!("/{}", entry.name);
-        let outcome = d.dispatch(&raw).await;
-        match outcome {
-            SlashDispatchResult::Handled { display } => {
-                let expected = format!("{}: not implemented in v0.6.0 (M5)", entry.name);
-                assert_eq!(display, expected, "wrong output for /{}", entry.name);
-            }
-            other => panic!("/{}: expected Handled, got {other:?}", entry.name),
+        match d.dispatch(&raw).await {
+            SlashDispatchResult::Handled { .. } => {}
+            other => panic!("/{} must dispatch to Handled, got {other:?}", entry.name),
         }
     }
 }

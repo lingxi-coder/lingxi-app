@@ -220,6 +220,26 @@ impl OutputStream for MockOutputStream {
                 bytes_saved,
             });
     }
+    async fn emit_thinking(&self, thinking: &str, signature: Option<&str>) {
+        self.events.lock().await.push(OutputEvent::Thinking {
+            thinking: thinking.to_string(),
+            signature: signature.map(str::to_string),
+        });
+    }
+    async fn emit_usage(
+        &self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+    ) {
+        self.events.lock().await.push(OutputEvent::Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+        });
+    }
 }
 
 // ============================================================================
@@ -371,8 +391,9 @@ impl crate::prompt::MemoryHierarchyProvider for StaticMemoryProvider {
 // without importing two distinct modules.
 
 pub use crate::test_support_stream::{
-    content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
-    message_delta_stop, message_start, message_stop, ping, text_delta, MockStreamingApiClient,
+    content_block_start_text, content_block_start_thinking, content_block_start_tool_use,
+    content_block_stop, input_json_delta, message_delta_stop, message_delta_stop_with_usage,
+    message_start, message_stop, ping, text_delta, thinking_delta, MockStreamingApiClient,
     MockToolDispatchClock,
 };
 

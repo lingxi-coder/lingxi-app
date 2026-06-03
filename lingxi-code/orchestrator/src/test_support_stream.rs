@@ -213,6 +213,43 @@ pub fn message_delta_stop(stop_reason: &str) -> StreamEvent {
     }
 }
 
+/// `content_block_start` for a `thinking` block at `index`. (§0.7
+/// "light up thinking/usage" test vocabulary.)
+#[must_use]
+pub fn content_block_start_thinking(index: u32) -> StreamEvent {
+    StreamEvent::ContentBlockStart {
+        index,
+        content_block: ContentBlockApi::Thinking {
+            thinking: String::new(),
+            signature: None,
+        },
+    }
+}
+
+/// `content_block_delta { delta: ThinkingDelta { thinking } }`. (§0.7
+/// "light up thinking/usage" test vocabulary.)
+#[must_use]
+pub fn thinking_delta(index: u32, thinking: &str) -> StreamEvent {
+    StreamEvent::ContentBlockDelta {
+        index,
+        delta: ContentDelta::ThinkingDelta {
+            thinking: thinking.to_string(),
+        },
+    }
+}
+
+/// `message_delta` carrying a `stop_reason` AND a final `usage` snapshot.
+/// (§0.7 "light up thinking/usage" test vocabulary.)
+#[must_use]
+pub fn message_delta_stop_with_usage(stop_reason: &str, usage: UsageApi) -> StreamEvent {
+    StreamEvent::MessageDelta {
+        delta: MessageDeltaPayload {
+            stop_reason: Some(stop_reason.to_string()),
+        },
+        usage: Some(usage),
+    }
+}
+
 /// `message_stop`.
 #[must_use]
 pub fn message_stop() -> StreamEvent {

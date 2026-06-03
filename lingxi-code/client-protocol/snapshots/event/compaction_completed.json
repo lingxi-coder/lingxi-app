@@ -1,0 +1,6 @@
+{
+  "type": "compaction_completed",
+  "messages_before": 50,
+  "messages_after": 12,
+  "bytes_saved": 4096
+}

@@ -1,10 +1,13 @@
 //! `platform-android` (M8-P10) — the Android platform skeleton.
 //!
 //! [`AndroidPlatform`] implements the [`traits::Platform`] aggregate. The core
-//! OS handles (filesystem/clock/process/sandbox/worktree/http) are currently
-//! reused from `platform-posix-minimal` (portable Rust, valid on Android). The
-//! Android-specific device capabilities (camera, voice, share) are injected as
-//! `Arc<dyn …>` trait objects implemented natively in Kotlin via UniFFI (P12).
+//! OS handles (filesystem/clock/process/sandbox/worktree) are currently reused
+//! from `platform-posix-minimal` (portable Rust, valid on Android). The `http`
+//! handle is the shared real client ([`platform_common::http::ReqwestHttp`],
+//! `reqwest` + `rustls-tls`), so a keyed conversation streams against the real
+//! provider rather than the posix-minimal stub. The Android-specific device
+//! capabilities (camera, voice, share) are injected as `Arc<dyn …>` trait
+//! objects implemented natively in Kotlin via UniFFI (P12).
 //!
 //! M9 replaces the reused posix handles with scoped-storage-aware Android
 //! impls. The crate is intentionally **not** `#[cfg(target_os = "android")]`-
@@ -54,11 +57,11 @@ impl AndroidPlatform {
     #[must_use]
     pub fn new(inputs: AndroidPlatformInputs) -> Self {
         use platform_posix_minimal::{
-            PosixClock, PosixFileSystem, PosixHttp, PosixProcess, PosixSandbox, PosixWorktree,
+            PosixClock, PosixFileSystem, PosixProcess, PosixSandbox, PosixWorktree,
         };
         Self {
             fs: Arc::new(PosixFileSystem::new(inputs.app_files_root)),
-            http: Arc::new(PosixHttp::new()),
+            http: Arc::new(platform_common::http::ReqwestHttp::new()),
             clock: Arc::new(PosixClock::new()),
             process: Arc::new(PosixProcess::new()),
             sandbox: Arc::new(PosixSandbox::new()),

@@ -64,13 +64,21 @@ async fn streaming_text_only_three_deltas() {
     }
 
     let events = output.snapshot().await;
+    // The §0.7 "light up thinking/usage" follow-up adds additive `Usage`
+    // emits (from `message_start` / `message_delta`); filter them (and
+    // `Thinking`) out so this test keeps asserting the text/end-turn
+    // sequence it cares about.
+    let events: Vec<&OutputEvent> = events
+        .iter()
+        .filter(|e| !matches!(e, OutputEvent::Usage { .. } | OutputEvent::Thinking { .. }))
+        .collect();
     // Expect: Text("hel"), Text("lo wor"), Text("ld"), EndTurn { stop_reason: "end_turn" }
     assert_eq!(events.len(), 4, "got {events:?}");
-    assert!(matches!(&events[0], OutputEvent::Text { text } if text == "hel"));
-    assert!(matches!(&events[1], OutputEvent::Text { text } if text == "lo wor"));
-    assert!(matches!(&events[2], OutputEvent::Text { text } if text == "ld"));
+    assert!(matches!(events[0], OutputEvent::Text { text } if text == "hel"));
+    assert!(matches!(events[1], OutputEvent::Text { text } if text == "lo wor"));
+    assert!(matches!(events[2], OutputEvent::Text { text } if text == "ld"));
     assert!(
-        matches!(&events[3], OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "end_turn")
+        matches!(events[3], OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "end_turn")
     );
 
     // Mock observed exactly one streaming call.

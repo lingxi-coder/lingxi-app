@@ -1,0 +1,7 @@
+{
+  "type": "tool_use_result",
+  "id": "toolu_01",
+  "tool": "Read",
+  "result_json": "{\"content\":\"file body\"}",
+  "is_error": false
+}

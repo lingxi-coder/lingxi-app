@@ -236,6 +236,14 @@ pub struct StatusSnapshot {
     pub started_at: String,
     /// Working directory used to launch the session.
     pub cwd: PathBuf,
+    /// Active coordinator-team workers at snapshot time (T21).
+    ///
+    /// `0` for a non-coordinator session (the `Default`), so existing
+    /// constructors that use `..Default::default()` keep their behavior. A
+    /// coordinator session surfaces the live `TeamRegistry::active_worker_count`
+    /// here so `/status` can echo the same scalar the PUSH
+    /// `CoordinatorStatus` feed carries.
+    pub active_workers: u32,
 }
 
 /// Public handle to the orchestrator that slash commands operate against.
@@ -469,6 +477,31 @@ pub enum OutputEvent {
         /// UX estimate of bytes freed.
         bytes_saved: u64,
     },
+    /// A streaming reasoning ("thinking") delta as it arrives. (§0.7
+    /// "light up thinking/usage"). Recorded by `MockOutputStream` so the
+    /// orchestrator SSE-pump tests can assert `emit_thinking` fired. The
+    /// `signature` is `None` for live deltas (it only arrives on the
+    /// completed thinking block, not per-delta).
+    Thinking {
+        /// The reasoning fragment emitted.
+        thinking: String,
+        /// Cryptographic signature, `None` for live deltas.
+        signature: Option<String>,
+    },
+    /// An incremental token-usage update for the latest API call. (§0.7
+    /// "light up thinking/usage"). Recorded by `MockOutputStream` so the
+    /// orchestrator SSE-pump tests can assert `emit_usage` fired with the
+    /// right counts.
+    Usage {
+        /// Input tokens billed.
+        input_tokens: u64,
+        /// Output tokens billed.
+        output_tokens: u64,
+        /// Input tokens served from cache.
+        cache_read_tokens: u64,
+        /// Input tokens used to create a fresh cache entry.
+        cache_creation_tokens: u64,
+    },
 }
 
 /// Sink for orchestrator-emitted output events.
@@ -510,6 +543,53 @@ pub trait OutputStream: Send + Sync {
         _bytes_saved: u64,
     ) {
     }
+
+    /// Emit a streaming reasoning ("thinking") delta as it arrives.
+    ///
+    /// Added by the §0.7 "light up thinking/usage" follow-up. Called once
+    /// per `ThinkingDelta` SSE chunk from `event_router`. `signature` is
+    /// `None` for live deltas — the cryptographic signature only arrives on
+    /// the completed thinking block (`SignatureDelta`), not per-delta, so
+    /// the live-delta path always passes `None`.
+    ///
+    /// **Default no-op**: pre-existing sinks (TUI, CLI, `MockOutputStream`)
+    /// that don't render reasoning keep compiling unchanged. The
+    /// client-adapter overrides this to surface a `ClientEvent::ThinkingDelta`.
+    async fn emit_thinking(&self, _thinking: &str, _signature: Option<&str>) {}
+
+    /// Emit an incremental token-usage update for the latest API call.
+    ///
+    /// Added by the §0.7 "light up thinking/usage" follow-up. Called from
+    /// `event_router` when a `MessageDelta`/`MessageStart` SSE event carries
+    /// a `usage` payload. Counts are passed as bare `u64`s (rather than a
+    /// `cost::TokenUsage`) to keep `lingxi-traits` a leaf crate: `lingxi-cost`
+    /// already depends on `lingxi-traits`, so a `cost` dependency here would
+    /// form a cycle. The four arguments map field-for-field onto both
+    /// `cost::TokenUsage` (caller side, in the orchestrator) and
+    /// `ClientEvent::UsageUpdate` (adapter side).
+    ///
+    /// **Default no-op**: pre-existing sinks keep compiling unchanged. The
+    /// client-adapter overrides this to surface a `ClientEvent::UsageUpdate`.
+    async fn emit_usage(
+        &self,
+        _input_tokens: u64,
+        _output_tokens: u64,
+        _cache_read_tokens: u64,
+        _cache_creation_tokens: u64,
+    ) {
+    }
+
+    /// Emit a coordinator team-status update (active worker count + team name).
+    ///
+    /// Added by the coordinator-activation program. Called by the
+    /// `CoordinatorStatusSink` after each teammate status transition that
+    /// changes the active-worker tally, so a coordinator-mode session can
+    /// surface a live roster count.
+    ///
+    /// **Default no-op**: pre-existing sinks (TUI, CLI, `MockOutputStream`)
+    /// keep compiling unchanged. The client-adapter overrides this to surface
+    /// a `ClientEvent::CoordinatorStatus`.
+    async fn emit_coordinator_status(&self, _active_workers: u32, _team: Option<&str>) {}
 }
 
 #[cfg(test)]
@@ -534,6 +614,44 @@ mod tests {
         let s = serde_json::to_string(&ev).unwrap();
         let back: OutputEvent = serde_json::from_str(&s).unwrap();
         assert_eq!(ev, back);
+    }
+
+    /// Coordinator-activation T08: the additive `emit_coordinator_status`
+    /// PUSH hook ships as a default no-op so every pre-existing `OutputStream`
+    /// impl (TUI / CLI / `MockOutputStream`) keeps compiling without an
+    /// override. This bare unit struct implements ONLY the four required
+    /// methods and relies on the default for `emit_coordinator_status`;
+    /// driving it must neither fail to compile nor panic, for both a
+    /// `Some(team)` and a `None` team.
+    #[tokio::test]
+    async fn emit_coordinator_status_default_is_noop() {
+        struct BareSink;
+
+        #[async_trait]
+        impl OutputStream for BareSink {
+            async fn emit_text(&self, _text: &str) {}
+            async fn emit_tool_call(
+                &self,
+                _id: &protocol::ToolUseId,
+                _tool: &str,
+                _input: &serde_json::Value,
+            ) {
+            }
+            async fn emit_tool_result(
+                &self,
+                _id: &protocol::ToolUseId,
+                _tool: &str,
+                _result: &serde_json::Value,
+            ) {
+            }
+            async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
+        }
+
+        // Object-safe behind `dyn` (matches how engines hold it).
+        let sink: Box<dyn OutputStream> = Box::new(BareSink);
+        // The default no-op must simply return for both team shapes.
+        sink.emit_coordinator_status(3, Some("alpha")).await;
+        sink.emit_coordinator_status(0, None).await;
     }
 
     /// M6-04 Task 1: `OutputEvent::ToolCall` must carry a `ToolUseId` so the

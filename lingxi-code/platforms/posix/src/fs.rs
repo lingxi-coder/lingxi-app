@@ -74,7 +74,13 @@ impl FileSystem for PosixFileSystem {
             .map_err(|e| FsError::Io(e.to_string()))?;
         f.write_all(content.as_bytes())
             .await
-            .map_err(|e| FsError::Io(e.to_string()))
+            .map_err(|e| FsError::Io(e.to_string()))?;
+        // `tokio::fs::File` buffers through the blocking pool and does NOT
+        // flush on drop — without this an immediately-following read (e.g. a
+        // second append computing its offset, or the caller reading the file
+        // back) can race the not-yet-committed bytes. Flush makes append-then-
+        // read deterministic. Durability only; the written bytes are unchanged.
+        f.flush().await.map_err(|e| FsError::Io(e.to_string()))
     }
 
     async fn truncate(&self, path: &str, len: u64) -> Result<(), FsError> {

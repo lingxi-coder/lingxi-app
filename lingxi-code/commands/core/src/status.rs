@@ -112,6 +112,7 @@ mod tests {
             n_agents: 5,
             started_at: "2026-05-26T10:00:00Z".into(),
             cwd: std::path::PathBuf::from("/repo"),
+            active_workers: 0,
         };
         mock.set_status_snapshot(snap);
         let h = StatusHandler::new(mock);

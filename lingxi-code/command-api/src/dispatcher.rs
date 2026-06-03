@@ -28,6 +28,20 @@ impl RegistrySlashDispatcher {
         Self { registry }
     }
 
+    /// A second dispatcher pointing at the SAME shared registry.
+    ///
+    /// Dispatching is identical (both clone the same `Arc<RwLock<CommandRegistry>>`).
+    /// Used when a host keeps the original dispatcher (e.g. by value on a runtime
+    /// struct) but a second consumer — like the bridge-server's command router —
+    /// needs an owned `RegistrySlashDispatcher`/`Arc<dyn SlashCommandDispatcher>`
+    /// over the same command set.
+    #[must_use]
+    pub fn clone_shared(&self) -> Self {
+        Self {
+            registry: self.registry.clone(),
+        }
+    }
+
     /// Format the locked unknown-command literal.
     ///
     /// Public so callers can render the same string outside the dispatch loop

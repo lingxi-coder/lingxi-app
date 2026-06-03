@@ -1,0 +1,1687 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>灵犀 · iPhone</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+*::-webkit-scrollbar { display: none; }
+html, body, #root { height: 100%; }
+body {
+  font-family: 'Inter', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv11', 'ss01';
+  overflow: hidden;
+  background: #0a0a0c;
+}
+@keyframes fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes slide-right { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+@keyframes slide-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@keyframes shimmer { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.8; } }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo, createContext, useContext } = React;
+
+// ─── SHARED TOKENS (identical to macOS/iPad) ─────────────────
+const tokens = (dark) => dark ? {
+  appBg: '#0a0a0c',
+  windowBg: 'oklch(15% 0.012 270)',
+  sidebarBg: 'oklch(13% 0.012 270)',
+  surface: 'oklch(18% 0.015 270)',
+  surfaceHover: 'oklch(22% 0.020 270)',
+  surfaceActive: 'oklch(28% 0.030 270)',
+  border: 'oklch(28% 0.015 270 / 0.6)',
+  borderStrong: 'oklch(35% 0.020 270 / 0.8)',
+  text: 'oklch(96% 0.005 270)',
+  text2: 'oklch(72% 0.015 270)',
+  text3: 'oklch(52% 0.020 270)',
+  text4: 'oklch(38% 0.020 270)',
+  accent: 'oklch(70% 0.18 268)',
+  accentBg: 'oklch(70% 0.18 268 / 0.15)',
+  accentBorder: 'oklch(70% 0.18 268 / 0.35)',
+  accent2: 'oklch(70% 0.18 320)',
+  accent3: 'oklch(72% 0.16 195)',
+  ok: 'oklch(70% 0.15 155)',
+  composerBg: 'oklch(20% 0.015 270)',
+  ambient: 'radial-gradient(ellipse 80% 50% at 50% 0%, oklch(40% 0.15 268 / 0.20), transparent 70%)',
+} : {
+  appBg: '#cfc9d8',
+  windowBg: '#faf8f5',
+  sidebarBg: 'oklch(96% 0.005 270)',
+  surface: '#ffffff',
+  surfaceHover: 'oklch(96% 0.008 270)',
+  surfaceActive: 'oklch(92% 0.020 270)',
+  border: 'oklch(88% 0.008 270)',
+  borderStrong: 'oklch(82% 0.012 270)',
+  text: 'oklch(20% 0.018 270)',
+  text2: 'oklch(40% 0.020 270)',
+  text3: 'oklch(58% 0.020 270)',
+  text4: 'oklch(70% 0.015 270)',
+  accent: 'oklch(50% 0.22 268)',
+  accentBg: 'oklch(50% 0.22 268 / 0.10)',
+  accentBorder: 'oklch(50% 0.22 268 / 0.30)',
+  accent2: 'oklch(55% 0.22 320)',
+  accent3: 'oklch(52% 0.18 195)',
+  ok: 'oklch(55% 0.16 155)',
+  composerBg: '#ffffff',
+  ambient: 'radial-gradient(ellipse 80% 50% at 50% 0%, oklch(80% 0.10 268 / 0.45), transparent 70%)',
+};
+
+const Theme = createContext(null);
+const useT = () => useContext(Theme);
+
+const WORKSPACES = [
+  { id: 'personal', name: '个人', icon: '◐', color: 'oklch(70% 0.18 268)' },
+  { id: 'work', name: '工作', icon: '◑', color: 'oklch(70% 0.16 195)' },
+  { id: 'research', name: '研究', icon: '◒', color: 'oklch(72% 0.18 320)' },
+  { id: 'creative', name: '创作', icon: '◓', color: 'oklch(72% 0.16 75)' },
+];
+
+const CHATS = [
+  { id: 'c1', wsId: 'work', title: '重装 Claude Code', group: '今天', preview: 'nvm 残留清理完成', activity: '2 小时前' },
+  { id: 'c2', wsId: 'work', title: '客户邮件回复模板', group: '昨天', preview: '已生成 4 套话术', activity: '昨天' },
+  { id: 'c3', wsId: 'work', title: '上海差旅规划', group: '本周', preview: '机酒路线', activity: '周二' },
+];
+
+const PROJECTS = [
+  {
+    id: 'p1', wsId: 'work', name: '灵犀 OS 设计', icon: '◑', color: 'oklch(70% 0.18 268)',
+    desc: '多端 UI · 14 文件 · 8 记忆',
+    sessions: [
+      { id: 's1', title: '设计灵犀 iPhone 版', activity: '刚刚', preview: '类 Claude 移动端布局', pinned: true, msgs: 8 },
+      { id: 'p1s2', title: 'iPad 横屏推演', activity: '昨天', preview: 'Pencil 标注入口', msgs: 14 },
+      { id: 'p1s3', title: '深色色板校准', activity: '5月3日', preview: 'oklch 节点对齐', msgs: 22 },
+    ],
+  },
+  {
+    id: 'p2', wsId: 'work', name: 'Q2 OKR & 周报', icon: '◐', color: 'oklch(72% 0.16 195)',
+    desc: '目标对齐 · 6 文件 · 3 记忆',
+    sessions: [
+      { id: 'p2s1', title: '整理 Q2 OKR 草案', activity: '5 小时前', preview: '已对齐三方', msgs: 24 },
+      { id: 'p2s2', title: '周报自动化模板', activity: '昨天', preview: '从多源聚合', msgs: 6 },
+    ],
+  },
+  {
+    id: 'p3', wsId: 'work', name: 'Code & 工程', icon: '◇', color: 'oklch(72% 0.16 155)',
+    desc: 'Bug 排查 · 23 文件 · 12 记忆',
+    sessions: [
+      { id: 'p3s1', title: 'WebSocket 重连排查', activity: '昨天', preview: '指数退避方案', msgs: 31 },
+      { id: 'p3s2', title: 'PRD v2 评审反馈', activity: '周一', preview: '12 评论 4 待办', msgs: 18 },
+    ],
+  },
+];
+
+const CRONS = [
+  { id: 'cr1', wsId: 'work', title: '每日晨报', cron: '工作日 08:30', next: '明早 08:30', desc: '聚合 Linear/GitHub/邮件 → 早会摘要', enabled: true },
+  { id: 'cr2', wsId: 'work', title: '周报自动生成', cron: '每周五 17:00', next: '周五 17:00', desc: 'git 提交 + 日历 → 周报草稿', enabled: true },
+  { id: 'cr3', wsId: 'work', title: '客户反馈周聚合', cron: '每周一 09:00', next: '下周一 09:00', desc: '7 天工单聚类 + 情感分析', enabled: true },
+  { id: 'cr4', wsId: 'work', title: '凌晨日志巡检', cron: '每日 03:00', next: '— 已暂停', desc: '错误日志分类 + 告警', enabled: false },
+];
+
+const ALL_SESSIONS = [
+  ...CHATS,
+  ...PROJECTS.flatMap(p => p.sessions.map(s => ({ ...s, projectId: p.id, projectName: p.name, wsId: p.wsId }))),
+];
+
+const MESSAGES_DEFAULT = [
+  { role: 'user', text: '帮我做一版手机上的灵犀 AI 助手，参考 Claude iOS 应用的极简风格，但要保留多 workspace 和工作流的能力。' },
+  { role: 'ai', tag: '思考了 48 秒', text: '已完成。\n\n**iPhone 版本设计要点**：\n\n1. **主界面 = 对话**。打开即进入最近会话，没有冗余首页。\n2. **左滑/汉堡 → 抽屉**，包含 workspace pill、session 列表、知识库、设置。\n3. **顶部 chip 显示工作流进度**，一行可滑动，与 Mac/iPad 一致。\n4. **底部胶囊 composer**，按住录音、点附件出 sheet。\n\n点击左上角菜单试试抽屉。' },
+  { role: 'user', text: '能不能加个语音"心流"模式？随时按住屏幕说话，松开发送。' },
+  { role: 'ai', tag: '思考了 12 秒', text: '已加。**按住屏幕任意位置 0.6 秒**会进入沉浸录音态：背景虚化，中央波形脉动，松开立即发送给当前模型。键盘/composer 临时隐藏。\n\n再次按住录音时，AI 的上一条回复会变为半透明，提示"上下文已记入"。' },
+];
+
+const MODELS = [
+  { id: 'lx-72b', name: 'Lingxi-72B', desc: '主力', tag: '默认', color: 'oklch(70% 0.18 268)' },
+  { id: 'lx-72b-r', name: 'Lingxi-72B-R', desc: '推理', tag: '慢', color: 'oklch(72% 0.18 320)' },
+  { id: 'lx-32b', name: 'Lingxi-32B', desc: '高速', tag: '快', color: 'oklch(72% 0.16 195)' },
+  { id: 'lx-code', name: 'Lingxi-Code', desc: '代码', tag: '编程', color: 'oklch(72% 0.16 155)' },
+];
+
+const Icon = ({ name, size = 20, color = 'currentColor', stroke = 1.7 }) => {
+  const p = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: color, strokeWidth: stroke, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  switch (name) {
+    case 'menu': return <svg {...p}><path d="M3 6h18M3 12h18M3 18h18"/></svg>;
+    case 'edit': return <svg {...p}><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>;
+    case 'search': return <svg {...p}><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>;
+    case 'sparkle': return <svg {...p}><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/><circle cx="12" cy="12" r="2.5"/></svg>;
+    case 'book': return <svg {...p}><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>;
+    case 'workflow': return <svg {...p}><rect x="3" y="3" width="6" height="6" rx="1.5"/><rect x="15" y="3" width="6" height="6" rx="1.5"/><rect x="9" y="15" width="6" height="6" rx="1.5"/><path d="M6 9v2a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V9"/></svg>;
+    case 'cog': return <svg {...p}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>;
+    case 'plus': return <svg {...p}><path d="M12 5v14M5 12h14"/></svg>;
+    case 'mic': return <svg {...p}><rect x="9" y="2" width="6" height="11" rx="3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>;
+    case 'paperclip': return <svg {...p}><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.83l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>;
+    case 'chevron': return <svg {...p}><path d="m6 9 6 6 6-6"/></svg>;
+    case 'sun': return <svg {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>;
+    case 'moon': return <svg {...p}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
+    case 'check': return <svg {...p}><path d="M20 6 9 17l-5-5"/></svg>;
+    case 'pin': return <svg {...p}><path d="M12 17v5M9 10.76V3h6v7.76l3 1.94v3.3H6v-3.3l3-1.94z"/></svg>;
+    case 'brain': return <svg {...p}><path d="M9.5 2a2.5 2.5 0 0 1 2.5 2.5v15a2.5 2.5 0 0 1-4.96.44A2.5 2.5 0 0 1 4.5 17a2.5 2.5 0 0 1-2-3.65A2.5 2.5 0 0 1 4 8.5a2.5 2.5 0 0 1 2.5-2.5A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2a2.5 2.5 0 0 0-2.5 2.5v15a2.5 2.5 0 0 0 4.96.44A2.5 2.5 0 0 0 19.5 17a2.5 2.5 0 0 0 2-3.65A2.5 2.5 0 0 0 20 8.5a2.5 2.5 0 0 0-2.5-2.5A2.5 2.5 0 0 0 14.5 2z"/></svg>;
+    case 'arrowUp': return <svg {...p} fill={color} stroke="none"><path d="M12 4l-7 8h4v8h6v-8h4z"/></svg>;
+    case 'folder': return <svg {...p}><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>;
+    case 'clock': return <svg {...p}><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>;
+    case 'message': return <svg {...p}><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>;
+    case 'chevronR': return <svg {...p}><path d="m9 18 6-6-6-6"/></svg>;
+    case 'play': return <svg {...p} fill={color} stroke="none"><path d="M6 4l14 8-14 8z"/></svg>;
+    case 'pause': return <svg {...p}><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>;
+    case 'x': return <svg {...p}><path d="M18 6 6 18M6 6l18 12"/></svg>;
+    case 'skill': return <svg {...p}><circle cx="12" cy="8" r="3.5"/><path d="M5 21v-2a4 4 0 0 1 4-4h6a4 4 0 0 1 4 4v2"/><path d="M19 4l1 1-1 1M5 4l-1 1 1 1"/></svg>;
+    case 'plug': return <svg {...p}><path d="M9 2v6M15 2v6M6 8h12v3a6 6 0 0 1-12 0V8zM12 17v5"/></svg>;
+    case 'dream': return <svg {...p}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/><circle cx="8" cy="9" r="0.6" fill={color}/><circle cx="14" cy="14" r="0.6" fill={color}/><circle cx="17" cy="7" r="0.6" fill={color}/></svg>;
+    default: return null;
+  }
+};
+
+const Pill = ({ children, color, style = {} }) => {
+  const t = useT();
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4,
+      padding: '3px 9px', borderRadius: 6, fontSize: 11.5, fontWeight: 500,
+      background: color ? `color-mix(in oklab, ${color} 16%, transparent)` : t.surface,
+      color: color || t.text3,
+      border: `0.5px solid ${color ? `color-mix(in oklab, ${color} 30%, transparent)` : t.border}`,
+      ...style,
+    }}>{children}</span>
+  );
+};
+
+// ─── STATUS BAR ──────────────────────────────────────────────
+function StatusBar({ dark }) {
+  const c = dark ? '#fff' : '#000';
+  return (
+    <div style={{
+      height: 54, padding: '15px 32px 0', display: 'flex',
+      alignItems: 'flex-start', justifyContent: 'space-between',
+      flexShrink: 0, position: 'relative',
+    }}>
+      <span style={{ fontFamily: '-apple-system, "SF Pro"', fontWeight: 600, fontSize: 17, color: c, lineHeight: 1 }}>9:41</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <svg width="18" height="11" viewBox="0 0 18 11"><rect x="0" y="6" width="3" height="4" rx="0.6" fill={c}/><rect x="4.5" y="4" width="3" height="6" rx="0.6" fill={c}/><rect x="9" y="2" width="3" height="8" rx="0.6" fill={c}/><rect x="13.5" y="0" width="3" height="10" rx="0.6" fill={c}/></svg>
+        <svg width="16" height="11" viewBox="0 0 16 11"><path d="M8 2.5C10 2.5 11.9 3.3 13.2 4.7L14.3 3.6C12.7 2 10.5 1 8 1C5.5 1 3.3 2 1.7 3.6L2.8 4.7C4.1 3.3 6 2.5 8 2.5Z" fill={c}/><path d="M8 5.5C9.2 5.5 10.3 6 11.1 6.8L12.2 5.7C11 4.7 9.6 4 8 4C6.4 4 5 4.7 3.8 5.7L4.9 6.8C5.7 6 6.8 5.5 8 5.5Z" fill={c}/><circle cx="8" cy="9" r="1.3" fill={c}/></svg>
+        <svg width="26" height="12" viewBox="0 0 26 12"><rect x="0.5" y="0.5" width="22" height="11" rx="3" stroke={c} strokeOpacity="0.4" fill="none"/><rect x="2" y="2" width="19" height="8" rx="1.8" fill={c}/><path d="M24 4V8C24.7 7.7 25.3 7 25.3 6C25.3 5 24.7 4.3 24 4Z" fill={c} fillOpacity="0.45"/></svg>
+      </div>
+      {/* Dynamic Island */}
+      <div style={{
+        position: 'absolute', top: 11, left: '50%', transform: 'translateX(-50%)',
+        width: 124, height: 36, borderRadius: 22,
+        background: '#000',
+      }} />
+    </div>
+  );
+}
+
+// ─── HOME INDICATOR ──────────────────────────────────────────
+function HomeIndicator({ dark }) {
+  return (
+    <div style={{ height: 28, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 8, flexShrink: 0 }}>
+      <div style={{ width: 134, height: 5, borderRadius: 99, background: dark ? '#fff' : '#000' }} />
+    </div>
+  );
+}
+
+// ─── DRAWER (left side) ──────────────────────────────────────
+function Drawer({ open, onClose, activeWs, setActiveWs, activeSession, setActiveSession, openSettings }) {
+  const t = useT();
+  const ws = WORKSPACES.find(w => w.id === activeWs);
+  const [section, setSection] = useState('chats');
+  const [openProjects, setOpenProjects] = useState({ p1: true });
+  const chats = CHATS.filter(s => s.wsId === activeWs);
+  const groupedChats = chats.reduce((acc, s) => { (acc[s.group] = acc[s.group] || []).push(s); return acc; }, {});
+  const projects = PROJECTS.filter(p => p.wsId === activeWs);
+  const crons = CRONS.filter(c => c.wsId === activeWs);
+  const counts = { chats: chats.length, projects: projects.length, crons: crons.length };
+
+  if (!open) return null;
+
+  return (
+    <div style={{ position: 'absolute', inset: 0, zIndex: 50, display: 'flex' }}>
+      <div onClick={onClose} style={{
+        position: 'absolute', inset: 0,
+        background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(4px)',
+        animation: 'fade-in 0.2s ease',
+      }} />
+      <div style={{
+        width: 320, height: '100%', position: 'relative',
+        background: t.sidebarBg, borderRight: `0.5px solid ${t.border}`,
+        display: 'flex', flexDirection: 'column',
+        animation: 'slide-right 0.25s cubic-bezier(0.32, 0.72, 0, 1)',
+        boxShadow: '8px 0 30px rgba(0,0,0,0.3)',
+      }}>
+        {/* Status bar offset */}
+        <div style={{ height: 54 }} />
+
+        {/* Header */}
+        <div style={{ padding: '8px 18px 12px', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ fontSize: 17, fontWeight: 700, color: t.text, letterSpacing: -0.3 }}>灵犀</div>
+          <div style={{ flex: 1 }} />
+          <button onClick={onClose} style={{ width: 36, height: 36, borderRadius: 10, background: 'transparent', border: 'none', cursor: 'pointer', color: t.text3, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Icon name="x" size={20} stroke={1.8} />
+          </button>
+        </div>
+
+        {/* Workspace pills */}
+        <div style={{ padding: '0 18px 12px', display: 'flex', gap: 6, overflowX: 'auto' }}>
+          {WORKSPACES.map(w => (
+            <button key={w.id} onClick={() => setActiveWs(w.id)} style={{
+              padding: '7px 12px', borderRadius: 99, border: 'none', cursor: 'pointer',
+              background: w.id === activeWs ? `color-mix(in oklab, ${w.color} 20%, transparent)` : t.surface,
+              color: w.id === activeWs ? w.color : t.text3,
+              fontSize: 13, fontWeight: 500, fontFamily: 'inherit', whiteSpace: 'nowrap',
+              border: `0.5px solid ${w.id === activeWs ? `color-mix(in oklab, ${w.color} 35%, transparent)` : t.border}`,
+              display: 'flex', alignItems: 'center', gap: 5,
+            }}>
+              <span>{w.icon}</span> {w.name}
+            </button>
+          ))}
+        </div>
+
+        {/* Search */}
+        <div style={{ padding: '0 18px 14px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '11px 14px', borderRadius: 12, background: t.surface, border: `0.5px solid ${t.border}` }}>
+            <Icon name="search" size={16} color={t.text4} stroke={2} />
+            <span style={{ fontSize: 14, color: t.text4 }}>搜索会话</span>
+          </div>
+        </div>
+
+        {/* Section tabs */}
+        <div style={{ padding: '0 14px 8px', display: 'flex', gap: 4 }}>
+          {[
+            { id: 'chats', icon: 'message', label: '对话', count: counts.chats },
+            { id: 'projects', icon: 'folder', label: '项目', count: counts.projects },
+            { id: 'crons', icon: 'clock', label: '定时', count: counts.crons },
+          ].map(tab => {
+            const active = section === tab.id;
+            return (
+              <div key={tab.id} onClick={() => setSection(tab.id)} style={{
+                flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                padding: '9px 4px', borderRadius: 9, cursor: 'pointer',
+                background: active ? t.surfaceActive : 'transparent',
+                color: active ? t.text : t.text3,
+                fontSize: 13, fontWeight: active ? 600 : 500,
+                border: `0.5px solid ${active ? t.border : 'transparent'}`,
+              }}>
+                <Icon name={tab.icon} size={14} stroke={1.8} />
+                <span>{tab.label}</span>
+                <span style={{ fontSize: 10.5, color: active ? t.accent : t.text4, fontWeight: 600, minWidth: 12, textAlign: 'center' }}>{tab.count}</span>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Section body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '4px 12px 8px' }}>
+          {section === 'chats' && (
+            <>
+              {Object.entries(groupedChats).map(([group, items]) => (
+                <div key={group} style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, color: t.text4, fontWeight: 600, padding: '8px 14px 4px', letterSpacing: 0.6, textTransform: 'uppercase' }}>{group}</div>
+                  {items.map(s => (
+                    <div key={s.id} onClick={() => { setActiveSession(s.id); onClose(); }} style={{
+                      padding: '10px 14px', borderRadius: 10, cursor: 'pointer',
+                      background: s.id === activeSession ? t.surfaceActive : 'transparent',
+                      color: s.id === activeSession ? t.text : t.text2,
+                      position: 'relative', marginBottom: 2,
+                    }}>
+                      {s.id === activeSession && <div style={{ position: 'absolute', left: 0, top: 12, bottom: 12, width: 2.5, background: t.accent, borderRadius: 99 }} />}
+                      <div style={{ fontSize: 14, fontWeight: s.id === activeSession ? 600 : 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.title}</div>
+                      <div style={{ fontSize: 12, color: t.text4, marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.activity} · {s.preview}</div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+              <div style={{ fontSize: 11.5, color: t.text4, padding: '14px 14px 4px', lineHeight: 1.5 }}>临时对话 30 天后自动归档 · <span style={{ color: t.accent }}>转为项目</span></div>
+            </>
+          )}
+
+          {section === 'projects' && (
+            <div style={{ paddingTop: 4 }}>
+              {projects.map(p => {
+                const open = !!openProjects[p.id];
+                const hasActive = p.sessions.some(s => s.id === activeSession);
+                return (
+                  <div key={p.id} style={{ marginBottom: 6 }}>
+                    <div onClick={() => setOpenProjects(o => ({ ...o, [p.id]: !open }))} style={{
+                      display: 'flex', alignItems: 'center', gap: 10,
+                      padding: '10px 12px', borderRadius: 10, cursor: 'pointer',
+                      background: hasActive && !open ? t.surfaceActive : 'transparent',
+                    }}>
+                      <span style={{ color: t.text4, transform: open ? 'rotate(90deg)' : '', transition: 'transform 0.15s', display: 'inline-flex' }}>
+                        <Icon name="chevronR" size={12} stroke={2} />
+                      </span>
+                      <div style={{
+                        width: 28, height: 28, borderRadius: 7, flexShrink: 0,
+                        background: `color-mix(in oklab, ${p.color} 18%, ${t.surface})`,
+                        border: `0.5px solid color-mix(in oklab, ${p.color} 28%, transparent)`,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: 13, color: p.color, fontWeight: 700,
+                      }}>{p.icon}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: t.text, lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</div>
+                        <div style={{ fontSize: 11.5, color: t.text4, marginTop: 2, lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.desc}</div>
+                      </div>
+                      <span style={{ fontSize: 11, color: t.text4, fontWeight: 500, flexShrink: 0 }}>{p.sessions.length}</span>
+                    </div>
+                    {open && (
+                      <div style={{ paddingLeft: 22, marginTop: 2, position: 'relative' }}>
+                        <div style={{ position: 'absolute', left: 22, top: 4, bottom: 4, width: 1, background: t.border }} />
+                        {p.sessions.map(s => (
+                          <div key={s.id} onClick={() => { setActiveSession(s.id); onClose(); }} style={{
+                            padding: '8px 12px 8px 16px', marginLeft: 4, borderRadius: 8, cursor: 'pointer',
+                            background: s.id === activeSession ? t.surfaceActive : 'transparent',
+                            color: s.id === activeSession ? t.text : t.text2,
+                            position: 'relative',
+                          }}>
+                            {s.id === activeSession && <div style={{ position: 'absolute', left: -3, top: 8, bottom: 8, width: 2.5, background: p.color, borderRadius: 99 }} />}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                              {s.pinned && <Icon name="pin" size={11} color={p.color} stroke={2.2} />}
+                              <div style={{ fontSize: 13.5, fontWeight: s.id === activeSession ? 600 : 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.title}</div>
+                            </div>
+                            <div style={{ fontSize: 11.5, color: t.text4, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.activity} · {s.msgs} 条</div>
+                          </div>
+                        ))}
+                        <div style={{ padding: '7px 12px 7px 16px', marginLeft: 4, fontSize: 12.5, color: t.text4, display: 'flex', alignItems: 'center', gap: 5 }}>
+                          <Icon name="plus" size={11} stroke={2} /> 新会话
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                margin: '10px 4px 4px', padding: '11px', borderRadius: 10,
+                border: `1px dashed ${t.border}`, color: t.text3, fontSize: 13,
+              }}><Icon name="plus" size={13} stroke={2} /> 新建项目</div>
+            </div>
+          )}
+
+          {section === 'crons' && (
+            <div style={{ paddingTop: 4 }}>
+              {crons.map(c => (
+                <div key={c.id} style={{
+                  padding: '12px 14px', marginBottom: 6, borderRadius: 12,
+                  background: t.surface, border: `0.5px solid ${t.border}`,
+                  opacity: c.enabled ? 1 : 0.55,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
+                    <div style={{
+                      width: 8, height: 8, borderRadius: 99,
+                      background: c.enabled ? t.accent : t.text4,
+                      boxShadow: c.enabled ? `0 0 0 3px color-mix(in oklab, ${t.accent} 18%, transparent)` : 'none',
+                    }} />
+                    <div style={{ fontSize: 14, fontWeight: 600, color: t.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.title}</div>
+                    <Icon name={c.enabled ? 'pause' : 'play'} size={13} color={t.text4} stroke={1.8} />
+                  </div>
+                  <div style={{ fontSize: 12, color: t.text3, lineHeight: 1.4, marginBottom: 7 }}>{c.desc}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11, fontFamily: '-apple-system, ui-monospace, monospace' }}>
+                    <span style={{ padding: '3px 7px', borderRadius: 5, background: t.surfaceActive, color: t.text2, fontWeight: 500 }}>{c.cron}</span>
+                    <span style={{ color: t.text4 }}>→</span>
+                    <span style={{ color: c.enabled ? t.accent : t.text4, fontWeight: 500 }}>{c.next}</span>
+                  </div>
+                </div>
+              ))}
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                margin: '10px 4px 4px', padding: '11px', borderRadius: 10,
+                border: `1px dashed ${t.border}`, color: t.text3, fontSize: 13,
+              }}><Icon name="plus" size={13} stroke={2} /> 新建定时任务</div>
+            </div>
+          )}
+        </div>
+
+        {/* Knowledge + Memory shortcuts */}
+        <div style={{ padding: '4px 12px 0', display: 'flex', gap: 4, borderTop: `0.5px solid ${t.border}` }}>
+          {[
+            { icon: 'book', label: '知识库', count: 24 },
+            { icon: 'brain', label: '记忆', count: 42 },
+          ].map((item, i) => (
+            <div key={i} style={{
+              flex: 1, display: 'flex', alignItems: 'center', gap: 8,
+              padding: '11px 14px', borderRadius: 10, color: t.text3, fontSize: 13.5,
+            }}>
+              <Icon name={item.icon} size={15} stroke={1.7} />
+              <span style={{ flex: 1, fontWeight: 500 }}>{item.label}</span>
+              <span style={{ fontSize: 11.5, color: t.text4 }}>{item.count}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Bottom account */}
+        <div style={{ padding: '10px 12px', borderTop: `0.5px solid ${t.border}` }}>
+          <div onClick={openSettings} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', borderRadius: 10, cursor: 'pointer' }}>
+            <div style={{ width: 36, height: 36, borderRadius: '50%', background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 14, fontWeight: 600 }}>Y</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14, color: t.text, fontWeight: 500 }}>Yuxin Yang</div>
+              <div style={{ fontSize: 11.5, color: t.text4 }}>Pro · 5.5 / 8 段</div>
+            </div>
+            <Icon name="cog" size={18} color={t.text3} stroke={1.6} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── WORKFLOW BAR (compact mobile) ───────────────────────────
+function WorkflowBar() {
+  const t = useT();
+  const steps = [
+    { i: 1, l: '理解需求', s: 'done' },
+    { i: 2, l: '检索 Claude iOS', s: 'done' },
+    { i: 3, l: '抽屉/侧栏组件', s: 'done' },
+    { i: 4, l: '语音模式集成', s: 'running' },
+    { i: 5, l: '导出', s: 'todo' },
+  ];
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '8px 16px 10px', borderBottom: `0.5px solid ${t.border}`, overflowX: 'auto', background: t.windowBg }}>
+      {steps.map((s, i) => (
+        <React.Fragment key={s.i}>
+          <div style={{
+            display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 9px', borderRadius: 99,
+            background: s.s === 'done' ? `color-mix(in oklab, ${t.ok} 14%, transparent)` : s.s === 'running' ? t.accentBg : 'transparent',
+            color: s.s === 'done' ? t.ok : s.s === 'running' ? t.accent : t.text4,
+            border: `0.5px solid ${s.s === 'done' ? `color-mix(in oklab, ${t.ok} 28%, transparent)` : s.s === 'running' ? t.accentBorder : `color-mix(in oklab, ${t.text4} 30%, transparent)`}`,
+            borderStyle: s.s === 'todo' ? 'dashed' : 'solid',
+            fontSize: 11, fontWeight: 500, whiteSpace: 'nowrap', flexShrink: 0,
+          }}>
+            {s.s === 'done' && <Icon name="check" size={10} stroke={2.5} />}
+            {s.s === 'running' && <span style={{ width: 5, height: 5, borderRadius: 99, background: t.accent, animation: 'shimmer 1.4s infinite' }} />}
+            {s.s === 'todo' && <span style={{ width: 5, height: 5, borderRadius: 99, border: `1px solid ${t.text4}` }} />}
+            <span>{s.l}</span>
+          </div>
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+// ─── MESSAGE ─────────────────────────────────────────────────
+function Message({ m }) {
+  const t = useT();
+  if (m.role === 'user') {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 22, animation: 'fade-in 0.3s ease' }}>
+        <div style={{ maxWidth: '85%', padding: '12px 16px', borderRadius: 18, borderTopRightRadius: 6, background: t.surface, border: `0.5px solid ${t.border}`, fontSize: 15.5, lineHeight: 1.5, color: t.text, whiteSpace: 'pre-wrap' }}>{m.text}</div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: 'flex', gap: 11, marginBottom: 26, alignItems: 'flex-start', animation: 'fade-in 0.3s ease' }}>
+      <div style={{ width: 30, height: 30, borderRadius: 9, flexShrink: 0, background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: `0 4px 12px color-mix(in oklab, ${t.accent} 30%, transparent)` }}>
+        <Icon name="sparkle" size={15} color="#fff" stroke={2} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {m.tag && <div style={{ marginBottom: 8 }}><Pill color={t.accent}>{m.tag}</Pill></div>}
+        <div style={{ fontSize: 15.5, lineHeight: 1.6, color: t.text, whiteSpace: 'pre-wrap' }} dangerouslySetInnerHTML={{ __html: m.text.replace(/\*\*(.+?)\*\*/g, `<strong style="font-weight:600;color:${t.text}">$1</strong>`) }} />
+      </div>
+    </div>
+  );
+}
+
+// ─── COMPOSER ────────────────────────────────────────────────
+function Composer({ onSend, model, setModel }) {
+  const t = useT();
+  const [text, setText] = useState('');
+  const [modelOpen, setModelOpen] = useState(false);
+  const send = () => { if (text.trim()) { onSend(text); setText(''); } };
+  return (
+    <div style={{ padding: '8px 14px 4px', position: 'relative', flexShrink: 0 }}>
+      <div style={{
+        background: t.composerBg, border: `0.5px solid ${t.borderStrong}`,
+        borderRadius: 22, padding: '10px 12px 8px',
+        boxShadow: '0 4px 16px rgba(0,0,0,0.06)',
+      }}>
+        <textarea value={text} onChange={e => setText(e.target.value)}
+          placeholder="向灵犀提问…"
+          rows={1}
+          style={{
+            width: '100%', border: 'none', outline: 'none', resize: 'none',
+            background: 'transparent', color: t.text, fontSize: 15.5, lineHeight: 1.5,
+            fontFamily: 'inherit', minHeight: 22, maxHeight: 100, padding: '2px 4px',
+          }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 2, marginTop: 4, position: 'relative' }}>
+          <button style={{ width: 34, height: 34, borderRadius: 8, background: 'transparent', border: 'none', cursor: 'pointer', color: t.text3, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Icon name="plus" size={18} stroke={1.8} />
+          </button>
+          <button onClick={() => setModelOpen(!modelOpen)} style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            padding: '5px 9px', borderRadius: 8,
+            background: modelOpen ? t.surfaceHover : 'transparent',
+            border: 'none', cursor: 'pointer', color: t.text2, fontSize: 12, fontFamily: 'inherit',
+          }}>
+            <span style={{ width: 6, height: 6, borderRadius: 99, background: model.color }} />
+            <span style={{ fontWeight: 500 }}>{model.name.replace('Lingxi-', '')}</span>
+            <Icon name="chevron" size={11} stroke={2} color={t.text4} />
+          </button>
+          {modelOpen && (
+            <div style={{ position: 'absolute', bottom: '100%', left: 36, marginBottom: 6, zIndex: 50, background: t.surface, border: `0.5px solid ${t.borderStrong}`, borderRadius: 12, padding: 5, minWidth: 200, boxShadow: '0 16px 40px rgba(0,0,0,0.3)' }}>
+              {MODELS.map(m => (
+                <div key={m.id} onClick={() => { setModel(m); setModelOpen(false); }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 8, cursor: 'pointer', background: m.id === model.id ? t.accentBg : 'transparent' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 99, background: m.color }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, color: t.text, fontWeight: 500 }}>{m.name}</div>
+                    <div style={{ fontSize: 11, color: t.text3 }}>{m.desc}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ flex: 1 }} />
+          {!text.trim() ? (
+            <button style={{ width: 34, height: 34, borderRadius: 10, background: 'transparent', border: 'none', cursor: 'pointer', color: t.text2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Icon name="mic" size={18} stroke={1.8} />
+            </button>
+          ) : (
+            <button onClick={send} style={{
+              width: 34, height: 34, borderRadius: 10, border: 'none', cursor: 'pointer',
+              background: t.accent, color: '#fff',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: `0 4px 12px color-mix(in oklab, ${t.accent} 40%, transparent)`,
+            }}>
+              <Icon name="arrowUp" size={16} color="#fff" />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── CHAT VIEW ───────────────────────────────────────────────
+function ChatView({ session, theme, setTheme, openDrawer }) {
+  const t = useT();
+  const [messages, setMessages] = useState(MESSAGES_DEFAULT);
+  const [isNew, setIsNew] = useState(false);
+  const [model, setModel] = useState(MODELS[0]);
+  const [streaming, setStreaming] = useState(false);
+  const scrollRef = useRef(null);
+
+  // Switching sessions from the drawer restores that thread's content
+  useEffect(() => { setIsNew(false); setStreaming(false); setMessages(MESSAGES_DEFAULT); }, [session.id]);
+
+  // Tapping the top-right compose icon opens a fresh conversation
+  const newChat = () => { setMessages([]); setStreaming(false); setIsNew(true); };
+
+  const send = (txt) => {
+    setIsNew(false);
+    setMessages(ms => [...ms, { role: 'user', text: txt }]);
+    setStreaming(true);
+    setTimeout(() => {
+      setMessages(ms => [...ms, { role: 'ai', tag: '思考了 8 秒', text: '已记入。继续追问。' }]);
+      setStreaming(false);
+    }, 1100);
+  };
+
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [messages, streaming]);
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: t.windowBg, position: 'relative', minHeight: 0 }}>
+      <div style={{ position: 'absolute', inset: 0, background: t.ambient, pointerEvents: 'none' }} />
+
+      {/* Top bar */}
+      <div style={{ padding: '6px 12px 10px', display: 'flex', alignItems: 'center', gap: 4, position: 'relative', zIndex: 2 }}>
+        <button onClick={openDrawer} style={{ width: 38, height: 38, borderRadius: 10, background: 'transparent', border: 'none', cursor: 'pointer', color: t.text, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name="menu" size={20} stroke={1.8} />
+        </button>
+        <div style={{ flex: 1, textAlign: 'center', overflow: 'hidden' }}>
+          <div style={{ fontSize: 14.5, fontWeight: 600, color: t.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '0 8px' }}>{isNew ? '新对话' : session.title}</div>
+        </div>
+        <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} style={{ width: 38, height: 38, borderRadius: 10, background: 'transparent', border: 'none', cursor: 'pointer', color: t.text2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={18} stroke={1.7} />
+        </button>
+        <button onClick={newChat} style={{ width: 38, height: 38, borderRadius: 10, background: 'transparent', border: 'none', cursor: 'pointer', color: t.accent, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Icon name="edit" size={18} stroke={1.8} />
+        </button>
+      </div>
+
+      <WorkflowBar />
+
+      <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', position: 'relative', zIndex: 2 }}>
+        <div style={{ padding: '18px 16px 8px' }}>
+          {isNew && messages.length === 0 && !streaming && (
+            <div style={{ minHeight: 420, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '0 24px' }}>
+              <div style={{ width: 52, height: 52, borderRadius: 15, background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 18 }}>
+                <Icon name="sparkle" size={26} color="#fff" stroke={1.8} />
+              </div>
+              <div style={{ fontSize: 21, fontWeight: 600, color: t.text, marginBottom: 7 }}>开启新对话</div>
+              <div style={{ fontSize: 14, color: t.text4, lineHeight: 1.5, maxWidth: 260 }}>随便说点什么，或按住屏幕进入语音心流模式。</div>
+            </div>
+          )}
+          {messages.map((m, i) => <Message key={i} m={m} />)}
+          {streaming && (
+            <div style={{ display: 'flex', gap: 11, alignItems: 'center', marginBottom: 26 }}>
+              <div style={{ width: 30, height: 30, borderRadius: 9, background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Icon name="sparkle" size={15} color="#fff" stroke={2} />
+              </div>
+              <div style={{ display: 'flex', gap: 4 }}>
+                {[0, 1, 2].map(i => <span key={i} style={{ width: 5, height: 5, borderRadius: 99, background: t.accent, animation: `shimmer 1.2s infinite ${i * 0.15}s` }} />)}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <Composer onSend={send} model={model} setModel={setModel} />
+    </div>
+  );
+}
+
+// ─── SETTINGS DATA ──────────────────────────────────────────
+const PROVIDER_PRESETS = [
+  { id: 'anthropic',  name: 'Anthropic',   sub: 'Claude API',     color: 'oklch(72% 0.14 35)',  defaultUrl: 'https://api.anthropic.com',          keyPrefix: 'sk-ant-',  models: ['claude-sonnet-4-5', 'claude-opus-4', 'claude-haiku-4-5'] },
+  { id: 'openai',     name: 'OpenAI',      sub: 'ChatGPT API',    color: 'oklch(70% 0.14 165)', defaultUrl: 'https://api.openai.com/v1',          keyPrefix: 'sk-proj-', models: ['gpt-4o', 'gpt-4o-mini', 'o1-preview'] },
+  { id: 'google',     name: 'Google',      sub: 'Gemini API',     color: 'oklch(72% 0.14 250)', defaultUrl: 'https://generativelanguage.googleapis.com/v1', keyPrefix: 'AIza', models: ['gemini-2.5-pro', 'gemini-2.5-flash'] },
+  { id: 'deepseek',   name: 'DeepSeek',    sub: 'DeepSeek API',   color: 'oklch(72% 0.16 290)', defaultUrl: 'https://api.deepseek.com/v1',        keyPrefix: 'sk-',      models: ['deepseek-chat', 'deepseek-reasoner'] },
+  { id: 'qwen',       name: '通义千问',     sub: 'DashScope',      color: 'oklch(75% 0.14 75)',  defaultUrl: 'https://dashscope.aliyuncs.com/v1',  keyPrefix: 'sk-',      models: ['qwen-max', 'qwen-plus', 'qwen-turbo'] },
+  { id: 'openrouter', name: 'OpenRouter',  sub: '多模型聚合',     color: 'oklch(72% 0.14 200)', defaultUrl: 'https://openrouter.ai/api/v1',       keyPrefix: 'sk-or-',   models: ['anthropic/claude-sonnet-4.5', 'openai/gpt-4o', 'google/gemini-2.5-pro'] },
+  { id: 'custom',     name: '自定义',       sub: 'OpenAI 兼容端点', color: 'oklch(70% 0.05 270)', defaultUrl: 'https://',                          keyPrefix: '',         models: [] },
+];
+
+const SEARCH_PRESETS = [
+  { id: 'google',  name: 'Google',     sub: '官方 Custom Search', color: 'oklch(72% 0.14 250)', defaultUrl: 'https://www.googleapis.com/customsearch/v1', needsCx: true },
+  { id: 'brave',   name: 'Brave',      sub: '独立索引 · 隐私优先', color: 'oklch(60% 0.20 30)',  defaultUrl: 'https://api.search.brave.com/res/v1' },
+  { id: 'tavily',  name: 'Tavily',     sub: 'AI 优化搜索',        color: 'oklch(68% 0.18 200)', defaultUrl: 'https://api.tavily.com' },
+  { id: 'serper',  name: 'Serper',     sub: 'Google 代理',        color: 'oklch(70% 0.16 165)', defaultUrl: 'https://google.serper.dev' },
+  { id: 'bing',    name: 'Bing',       sub: 'Microsoft',          color: 'oklch(72% 0.14 220)', defaultUrl: 'https://api.bing.microsoft.com/v7.0' },
+];
+
+const FETCH_PRESETS = [
+  { id: 'jina',         name: 'Jina Reader',  sub: '免费 · 推荐',        color: 'oklch(72% 0.18 80)',  defaultUrl: 'https://r.jina.ai' },
+  { id: 'firecrawl',    name: 'Firecrawl',    sub: '渲染 JS · 结构化',   color: 'oklch(70% 0.20 40)',  defaultUrl: 'https://api.firecrawl.dev/v1' },
+  { id: 'browserless',  name: 'Browserless',  sub: 'Headless Chrome',    color: 'oklch(70% 0.15 290)', defaultUrl: 'https://chrome.browserless.io' },
+  { id: 'scrapingbee',  name: 'ScrapingBee',  sub: '反爬代理',           color: 'oklch(74% 0.16 75)',  defaultUrl: 'https://app.scrapingbee.com/api/v1' },
+];
+
+const VOICE_PRESETS = [
+  { id: 'elevenlabs',   name: 'ElevenLabs',   sub: '高质量 · 多语种',    color: 'oklch(68% 0.20 320)', defaultUrl: 'https://api.elevenlabs.io/v1' },
+  { id: 'openai-tts',   name: 'OpenAI TTS',   sub: '低延迟',             color: 'oklch(70% 0.14 165)', defaultUrl: 'https://api.openai.com/v1' },
+  { id: 'system',       name: '系统语音',      sub: '设备本地 · 免费',    color: 'oklch(70% 0.05 270)', defaultUrl: '' },
+];
+
+// ─── SETTINGS SHEET (multi-page navigation) ─────────────────
+function SettingsSheet({ open, onClose, theme, setTheme }) {
+  const t = useT();
+  const [stack, setStack] = useState([{ id: 'main' }]);
+  const top = stack[stack.length - 1];
+  const push = (page) => setStack(s => [...s, page]);
+  const pop = () => setStack(s => s.length > 1 ? s.slice(0, -1) : s);
+  const reset = () => setStack([{ id: 'main' }]);
+
+  // Provider stores
+  const [llmProviders, setLlmProviders] = useState([
+    { id: 'p_ant', preset: 'anthropic', name: 'Anthropic', url: 'https://api.anthropic.com', key: 'sk-ant-api03-••••••••7Hq2', model: 'claude-sonnet-4-5', status: 'connected', isDefault: true, enabled: true },
+    { id: 'p_oai', preset: 'openai',    name: 'OpenAI',    url: 'https://api.openai.com/v1', key: 'sk-proj-••••••••4nQ8',      model: 'gpt-4o',            status: 'idle',      enabled: true },
+    { id: 'p_dsk', preset: 'deepseek',  name: 'DeepSeek',  url: 'https://api.deepseek.com/v1', key: '',                        model: 'deepseek-chat',     status: 'idle',      enabled: false },
+  ]);
+  const [searchProviders, setSearchProviders] = useState([
+    { id: 's_brv', preset: 'brave',  name: 'Brave',  url: 'https://api.search.brave.com/res/v1', key: 'BSA••••••a9Z', status: 'connected', isDefault: true, enabled: true },
+    { id: 's_jin', preset: 'tavily', name: 'Tavily', url: 'https://api.tavily.com', key: '', status: 'idle', enabled: false },
+  ]);
+  const [fetchProviders, setFetchProviders] = useState([
+    { id: 'f_jin', preset: 'jina', name: 'Jina Reader', url: 'https://r.jina.ai', key: '', status: 'connected', isDefault: true, enabled: true },
+  ]);
+  const [voiceProvider, setVoiceProvider] = useState({ preset: 'system', voiceId: 'zh-CN-XiaoxiaoNeural', speed: 1.0, autoPlay: false });
+  const [skills, setSkills] = useState([
+    { id: 'sk1', name: '周报生成', author: '官方', desc: '聚合 Linear / GitHub / 日历自动出周报', triggers: ['每周五 17:00', '@周报'], enabled: true, builtin: true },
+    { id: 'sk2', name: '代码评审', author: '官方', desc: '对粘贴的 diff 给出严格 review', triggers: ['/review', '拖入 .diff'], enabled: true, builtin: true },
+    { id: 'sk3', name: '会议纪要', author: '官方', desc: '从语音/文本提取要点 + action item', triggers: ['会议结束后'], enabled: true, builtin: true },
+    { id: 'sk4', name: '论文精读', author: '社区 · @arxiv-fan', desc: 'arXiv 链接 → 结构化摘要 + 批注', triggers: ['粘贴 arxiv URL'], enabled: false },
+    { id: 'sk5', name: 'CSS Doctor', author: '社区 · @lin', desc: '诊断布局问题并给出修复', triggers: ['/css'], enabled: false },
+    { id: 'sk6', name: '英文润色', author: '我', desc: '中→英写作润色，保留原意', triggers: ['/polish'], enabled: true },
+  ]);
+  const [mcpServers, setMcpServers] = useState([
+    { id: 'mcp1', name: 'Filesystem', url: 'stdio://npx -y @modelcontextprotocol/server-filesystem', tools: 8, status: 'connected', enabled: true, transport: 'stdio' },
+    { id: 'mcp2', name: 'GitHub', url: 'https://mcp.github.com', tools: 14, status: 'connected', enabled: true, transport: 'sse', auth: 'oauth' },
+    { id: 'mcp3', name: 'Linear', url: 'https://mcp.linear.app', tools: 6, status: 'connected', enabled: true, transport: 'sse', auth: 'oauth' },
+    { id: 'mcp4', name: 'Notion', url: 'https://mcp.notion.com', tools: 12, status: 'idle', enabled: false, transport: 'sse', auth: 'oauth' },
+    { id: 'mcp5', name: 'Postgres (本地)', url: 'stdio://uvx mcp-server-postgres', tools: 4, status: 'error', enabled: true, transport: 'stdio' },
+  ]);
+  const [dreamConfig, setDreamConfig] = useState({
+    enabled: true,
+    window: 'night',       // night | always | custom
+    onCharging: true,
+    onWifi: true,
+    activities: { reorganize: true, plan: true, recap: true, prefetch: false, polish: false },
+    budget: 'medium',      // low | medium | high
+    lastRun: '今早 03:24 · 整理 7 条记忆 / 草拟今日计划',
+  });
+  const [language, setLanguage] = useState('zh-CN');
+  const [accent, setAccent] = useState('oklch(70% 0.18 268)');
+  const [density, setDensity] = useState('comfortable');
+  const [fontSize, setFontSize] = useState(15);
+  const [bioLock, setBioLock] = useState(true);
+  const [telemetry, setTelemetry] = useState(false);
+  const [autoUpdate, setAutoUpdate] = useState(true);
+  const [notifs, setNotifs] = useState({ workflows: true, mentions: true, crons: true, marketing: false });
+  const [smartRouting, setSmartRouting] = useState(true);
+  const [streamingDefault, setStreamingDefault] = useState(true);
+  const [showKey, setShowKey] = useState(false);
+
+  if (!open) return null;
+
+  const STATUS_META = {
+    connected: { dot: 'oklch(70% 0.15 155)', label: '已连接' },
+    idle:      { dot: t.text4,                label: '未验证' },
+    testing:   { dot: 'oklch(75% 0.15 75)',  label: '检测中…' },
+    error:     { dot: 'oklch(65% 0.20 25)',  label: '连接失败' },
+  };
+
+  // Helpers
+  const findStore = (kind) => kind === 'llm' ? [llmProviders, setLlmProviders, PROVIDER_PRESETS] : kind === 'search' ? [searchProviders, setSearchProviders, SEARCH_PRESETS] : [fetchProviders, setFetchProviders, FETCH_PRESETS];
+  const presetOf = (preset, presets) => presets.find(x => x.id === preset) || presets[presets.length - 1];
+
+  const inputBase = {
+    width: '100%', padding: '11px 12px', borderRadius: 10,
+    background: t.surface, border: `0.5px solid ${t.border}`,
+    color: t.text, fontSize: 13.5, fontFamily: '-apple-system, ui-monospace, monospace',
+    outline: 'none', boxSizing: 'border-box',
+  };
+
+  // ─── Reusable components ──
+  const Section = ({ label, footer, children }) => (
+    <div style={{ marginBottom: 22 }}>
+      {label && <div style={{ fontSize: 11, color: t.text4, fontWeight: 600, letterSpacing: 0.6, textTransform: 'uppercase', padding: '0 4px 8px' }}>{label}</div>}
+      <div style={{ background: t.surface, borderRadius: 12, border: `0.5px solid ${t.border}`, overflow: 'hidden' }}>{children}</div>
+      {footer && <div style={{ fontSize: 11, color: t.text4, lineHeight: 1.5, padding: '8px 4px 0' }}>{footer}</div>}
+    </div>
+  );
+
+  const Row = ({ icon, iconColor, label, value, valueColor, sub, chevron = true, onClick, danger, isLast, children }) => (
+    <div onClick={onClick} style={{
+      display: 'flex', alignItems: 'center', gap: 12,
+      padding: '12px 14px', cursor: onClick ? 'pointer' : 'default',
+      borderBottom: isLast ? 'none' : `0.5px solid ${t.border}`,
+    }}>
+      {icon && (
+        <div style={{
+          width: 28, height: 28, borderRadius: 7, flexShrink: 0,
+          background: `color-mix(in oklab, ${iconColor || t.accent} 16%, ${t.surface})`,
+          border: `0.5px solid color-mix(in oklab, ${iconColor || t.accent} 28%, transparent)`,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          color: iconColor || t.accent,
+        }}><Icon name={icon} size={14} stroke={1.8} /></div>
+      )}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14, color: danger ? 'oklch(65% 0.20 25)' : t.text, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
+        {sub && <div style={{ fontSize: 11.5, color: t.text4, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sub}</div>}
+      </div>
+      {value !== undefined && <div style={{ fontSize: 13, color: valueColor || t.text3, fontWeight: 400, whiteSpace: 'nowrap', textAlign: 'right', flexShrink: 0 }}>{value}</div>}
+      {children}
+      {chevron && onClick && <Icon name="chevronR" size={13} color={t.text4} />}
+    </div>
+  );
+
+  const Toggle = ({ on, onChange }) => (
+    <div onClick={(e) => { e.stopPropagation(); onChange(!on); }} style={{
+      width: 44, height: 26, borderRadius: 99, background: on ? t.accent : 'color-mix(in oklab, ' + t.text4 + ' 35%, transparent)',
+      position: 'relative', cursor: 'pointer', transition: 'background 0.2s', flexShrink: 0,
+    }}>
+      <div style={{ position: 'absolute', top: 2, left: on ? 20 : 2, width: 22, height: 22, borderRadius: '50%', background: '#fff', transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }} />
+    </div>
+  );
+
+  const RadioList = ({ options, value, onChange }) => (
+    <div style={{ background: t.surface, borderRadius: 12, border: `0.5px solid ${t.border}`, overflow: 'hidden' }}>
+      {options.map((o, i) => (
+        <div key={o.value} onClick={() => onChange(o.value)} style={{
+          display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', cursor: 'pointer',
+          borderBottom: i < options.length - 1 ? `0.5px solid ${t.border}` : 'none',
+        }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 14, color: t.text, fontWeight: 500 }}>{o.label}</div>
+            {o.sub && <div style={{ fontSize: 11.5, color: t.text4, marginTop: 2 }}>{o.sub}</div>}
+          </div>
+          {value === o.value && <Icon name="check" size={16} color={t.accent} stroke={2.5} />}
+        </div>
+      ))}
+    </div>
+  );
+
+  // ─── PAGES ──
+  const renderMain = () => {
+    const defaultLlm = llmProviders.find(p => p.isDefault) || llmProviders[0];
+    const defaultSearch = searchProviders.find(p => p.isDefault) || searchProviders[0];
+    const defaultFetch = fetchProviders.find(p => p.isDefault) || fetchProviders[0];
+    const LANG_MAP = { 'zh-CN': '简体中文', 'zh-TW': '繁體中文', 'en-US': 'English', 'ja-JP': '日本語' };
+    return (
+      <>
+        {/* Account card */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 14px', background: t.surface, border: `0.5px solid ${t.border}`, borderRadius: 14, marginBottom: 22 }}>
+          <div style={{ width: 46, height: 46, borderRadius: '50%', background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 17, fontWeight: 600 }}>Y</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 15.5, color: t.text, fontWeight: 600 }}>Yuxin Yang</div>
+            <div style={{ fontSize: 12, color: t.text4, marginTop: 2 }}>yuxin@axielix.com · Pro</div>
+          </div>
+          <button onClick={() => push({ id: 'account' })} style={{ padding: '6px 11px', borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.windowBg, color: t.text2, fontSize: 12, fontWeight: 500, fontFamily: 'inherit', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}>账户</button>
+        </div>
+
+        <Section label="智能">
+          <Row icon="sparkle" iconColor="oklch(70% 0.18 268)" label="LLM 提供商" sub={`默认: ${defaultLlm?.name || '未配置'}`} value={`${llmProviders.filter(p => p.enabled).length} 个启用`} onClick={() => push({ id: 'llm-list' })} />
+          <Row icon="search" iconColor="oklch(68% 0.18 200)" label="联网搜索" sub={defaultSearch ? `默认: ${defaultSearch.name}` : '未配置'} value={`${searchProviders.filter(p => p.enabled).length} 个启用`} onClick={() => push({ id: 'search-list' })} />
+          <Row icon="link" iconColor="oklch(72% 0.18 80)" label="网页抓取" sub={defaultFetch ? `默认: ${defaultFetch.name}` : '未配置'} value={`${fetchProviders.filter(p => p.enabled).length} 个启用`} onClick={() => push({ id: 'fetch-list' })} />
+          <Row icon="mic" iconColor="oklch(68% 0.20 320)" label="语音 TTS" sub={VOICE_PRESETS.find(v => v.id === voiceProvider.preset)?.name} value={voiceProvider.preset === 'system' ? '免费' : '已配置'} onClick={() => push({ id: 'voice' })} />
+        </Section>
+
+        <Section label="能力扩展" footer="Skills 是可复用的 AI 行为包；MCP 是接入外部工具的标准协议；Dream 让灵犀在你休息时主动整理与规划。">
+          <Row icon="skill" iconColor="oklch(72% 0.16 195)" label="Skills" sub="技能包 · 提示词 · 操作流" value={`${skills.filter(s => s.enabled).length} / ${skills.length} 启用`} onClick={() => push({ id: 'skills' })} />
+          <Row icon="plug" iconColor="oklch(70% 0.18 165)" label="MCP 服务器" sub="Model Context Protocol" value={`${mcpServers.filter(s => s.enabled).length} 连接`} onClick={() => push({ id: 'mcp-list' })} />
+          <Row icon="dream" iconColor="oklch(70% 0.18 320)" label="Dream 模式" sub="后台离线思考与整理" value={dreamConfig.enabled ? '开启' : '关闭'} onClick={() => push({ id: 'dream' })} isLast />
+        </Section>
+
+        <Section label="记忆与知识">
+          <Row icon="book" iconColor="oklch(72% 0.16 195)" label="知识库" value="24 项" onClick={() => push({ id: 'knowledge' })} />
+          <Row icon="brain" iconColor="oklch(72% 0.18 320)" label="记忆" sub="灵犀记住的关于你的事实" value="42 条" onClick={() => push({ id: 'memory' })} />
+          <Row icon="workflow" iconColor="oklch(70% 0.18 165)" label="工作流与自动化" value="3 启用" onClick={() => push({ id: 'workflows' })} isLast />
+        </Section>
+
+        <Section label="应用">
+          <Row icon="sun" iconColor="oklch(74% 0.16 75)" label="外观" value={theme === 'dark' ? '深色' : '浅色'} onClick={() => push({ id: 'appearance' })} />
+          <Row icon="message" iconColor="oklch(70% 0.14 250)" label="语言" value={LANG_MAP[language]} onClick={() => push({ id: 'language' })} />
+          <Row icon="cog" iconColor="oklch(70% 0.05 270)" label="通知" value={Object.values(notifs).filter(Boolean).length + ' 项开启'} onClick={() => push({ id: 'notifications' })} />
+          <Row icon="paperclip" iconColor="oklch(72% 0.14 35)" label="键盘与输入" sub="语音输入 · 候选词" onClick={() => push({ id: 'input' })} isLast />
+        </Section>
+
+        <Section label="隐私与安全">
+          <Row icon="pin" iconColor="oklch(70% 0.15 155)" label="生物识别锁" chevron={false}><Toggle on={bioLock} onChange={setBioLock} /></Row>
+          <Row icon="brain" iconColor="oklch(70% 0.05 270)" label="数据与隐私" sub="导出 · 删除 · 透明度报告" onClick={() => push({ id: 'privacy' })} />
+          <Row icon="sparkle" iconColor="oklch(70% 0.05 270)" label="使用诊断" chevron={false}><Toggle on={telemetry} onChange={setTelemetry} /></Row>
+          <Row icon="check" iconColor="oklch(70% 0.05 270)" label="自动更新" chevron={false} isLast><Toggle on={autoUpdate} onChange={setAutoUpdate} /></Row>
+        </Section>
+
+        <Section label="关于">
+          <Row icon="sparkle" label="灵犀" value="2.4.1 (build 8721)" chevron={false} />
+          <Row icon="book" label="帮助中心" onClick={() => {}} />
+          <Row icon="message" label="反馈与建议" onClick={() => {}} />
+          <Row icon="link" label="开源许可" onClick={() => {}} isLast />
+        </Section>
+
+        <div style={{ padding: '8px 4px 4px', textAlign: 'center', fontSize: 11, color: t.text4, lineHeight: 1.6 }}>
+          © 2026 灵犀 AI · 用户偏好仅在本地
+        </div>
+      </>
+    );
+  };
+
+  const renderProviderList = (kind) => {
+    const [arr, setArr, presets] = findStore(kind);
+    const titles = { llm: 'LLM 提供商', search: '联网搜索', fetch: '网页抓取' };
+    const blurbs = {
+      llm: '灵犀本身不调用云端 LLM — 由你添加的提供商完成推理。密钥仅本机加密。',
+      search: '让 AI 接入实时网页搜索 — 选择一个搜索提供商以启用"联网"模式。',
+      fetch: '抓取网页正文用于阅读、摘要、引用 — 推荐 Jina Reader（免费）。',
+    };
+    const setDefaultIn = (id) => setArr(a => a.map(p => ({ ...p, isDefault: p.id === id })));
+    return (
+      <>
+        <div style={{ fontSize: 11.5, color: t.text3, lineHeight: 1.5, marginBottom: 14 }}>{blurbs[kind]}</div>
+        <Section label={`已添加 · ${arr.length}`}>
+          {arr.length === 0 && <div style={{ padding: '24px 14px', textAlign: 'center', fontSize: 13, color: t.text4 }}>尚未添加任何提供商</div>}
+          {arr.map((p, i) => {
+            const preset = presetOf(p.preset, presets);
+            const sm = STATUS_META[p.status];
+            return (
+              <Row key={p.id}
+                icon={null}
+                label={(<div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span>{p.name}</span>
+                  {p.isDefault && <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: 10, fontWeight: 600, background: `color-mix(in oklab, ${t.accent} 18%, transparent)`, color: t.accent }}>默认</span>}
+                  {!p.enabled && <span style={{ padding: '1px 6px', borderRadius: 4, fontSize: 10, fontWeight: 500, background: `color-mix(in oklab, ${t.text4} 18%, transparent)`, color: t.text4 }}>停用</span>}
+                </div>)}
+                sub={(<span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: 'ui-monospace, monospace' }}>
+                  <span style={{ width: 6, height: 6, borderRadius: 99, background: sm.dot }} /> {sm.label} · {p.model || '—'}
+                </span>)}
+                onClick={() => push({ id: 'provider-edit', kind, providerId: p.id })}
+                isLast={i === arr.length - 1}
+              >
+                <div style={{
+                  width: 28, height: 28, borderRadius: 7, flexShrink: 0,
+                  background: `color-mix(in oklab, ${preset.color} 18%, ${t.surface})`,
+                  border: `0.5px solid color-mix(in oklab, ${preset.color} 28%, transparent)`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: preset.color, fontSize: 13, fontWeight: 700,
+                  position: 'absolute', left: 14,
+                }}>{p.name.slice(0, 1)}</div>
+              </Row>
+            );
+          })}
+        </Section>
+        <button onClick={() => push({ id: 'provider-picker', kind })} style={{
+          width: '100%', padding: '13px',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+          borderRadius: 12, border: `1px dashed ${t.border}`, background: 'transparent',
+          color: t.text2, fontSize: 13.5, fontWeight: 500, fontFamily: 'inherit', cursor: 'pointer',
+        }}><Icon name="plus" size={15} stroke={2} /> 添加{titles[kind]}</button>
+
+        {kind === 'llm' && (
+          <Section label="高级" footer="智能路由：根据任务类型自动选择最合适的模型（推理→Opus / 速度→Mini / 代码→Code）。流式响应：边生成边显示。">
+            <Row icon="sparkle" iconColor={t.accent} label="智能路由" sub="自动在已启用提供商间调度" chevron={false}><Toggle on={smartRouting} onChange={setSmartRouting} /></Row>
+            <Row icon="workflow" label="流式响应" chevron={false} isLast><Toggle on={streamingDefault} onChange={setStreamingDefault} /></Row>
+          </Section>
+        )}
+      </>
+    );
+  };
+
+  const renderProviderPicker = (kind) => {
+    const [, setArr, presets] = findStore(kind);
+    const add = (presetId) => {
+      const preset = presets.find(x => x.id === presetId);
+      const id = (kind[0]) + '_' + Math.random().toString(36).slice(2, 7);
+      const next = { id, preset: presetId, name: preset.name, url: preset.defaultUrl, key: '', model: preset.models?.[0] || '', status: 'idle', enabled: true };
+      setArr(arr => [...arr, next]);
+      // replace top two pages with edit
+      setStack(s => [...s.slice(0, -2), { id: 'provider-list', kind }, { id: 'provider-edit', kind, providerId: id }]);
+    };
+    return (
+      <>
+        <div style={{ fontSize: 11.5, color: t.text3, lineHeight: 1.5, marginBottom: 14 }}>选择一个预设 — 灵犀会自动预填 API 地址、Key 前缀和可用模型。</div>
+        <Section>
+          {presets.map((p, i) => (
+            <div key={p.id} onClick={() => add(p.id)} style={{
+              display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', cursor: 'pointer',
+              borderBottom: i < presets.length - 1 ? `0.5px solid ${t.border}` : 'none',
+            }}>
+              <div style={{
+                width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+                background: `color-mix(in oklab, ${p.color} 18%, ${t.surface})`,
+                border: `0.5px solid color-mix(in oklab, ${p.color} 28%, transparent)`,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: p.color, fontSize: 14, fontWeight: 700,
+              }}>{p.name.slice(0, 1)}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, color: t.text, fontWeight: 600 }}>{p.name}</div>
+                <div style={{ fontSize: 11.5, color: t.text4, marginTop: 2 }}>{p.sub}{p.models?.length ? ` · ${p.models.length} 模型` : ''}</div>
+              </div>
+              <Icon name="plus" size={15} color={t.text4} stroke={2} />
+            </div>
+          ))}
+        </Section>
+      </>
+    );
+  };
+
+  const renderProviderEdit = (kind, providerId) => {
+    const [arr, setArr, presets] = findStore(kind);
+    const editing = arr.find(p => p.id === providerId);
+    if (!editing) { pop(); return null; }
+    const preset = presetOf(editing.preset, presets);
+    const sm = STATUS_META[editing.status];
+    const update = (k, v) => setArr(a => a.map(p => p.id === providerId ? { ...p, [k]: v } : p));
+    const remove = () => { setArr(a => a.filter(p => p.id !== providerId)); pop(); };
+    const setDefaultHere = () => setArr(a => a.map(p => ({ ...p, isDefault: p.id === providerId })));
+    const test = () => { update('status', 'testing'); setTimeout(() => update('status', 'connected'), 1100); };
+    return (
+      <>
+        {/* Status banner */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', borderRadius: 10, background: `color-mix(in oklab, ${sm.dot} 8%, ${t.surface})`, border: `0.5px solid color-mix(in oklab, ${sm.dot} 24%, transparent)`, marginBottom: 18 }}>
+          <div style={{ width: 8, height: 8, borderRadius: 99, background: sm.dot, boxShadow: `0 0 0 3px color-mix(in oklab, ${sm.dot} 22%, transparent)` }} />
+          <div style={{ flex: 1, fontSize: 12.5, color: t.text2, fontWeight: 500 }}>{sm.label}</div>
+          <button onClick={test} style={{ padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`, background: t.windowBg, color: t.text2, fontSize: 12, fontWeight: 500, fontFamily: 'inherit', cursor: 'pointer' }}>测试连接</button>
+        </div>
+
+        <label style={{ display: 'block', fontSize: 12, color: t.text3, fontWeight: 500, marginBottom: 6 }}>显示名称</label>
+        <input value={editing.name} onChange={e => update('name', e.target.value)} style={{ ...inputBase, fontFamily: 'inherit', marginBottom: 14 }} />
+
+        <label style={{ display: 'block', fontSize: 12, color: t.text3, fontWeight: 500, marginBottom: 6 }}>API 地址</label>
+        <input value={editing.url} onChange={e => update('url', e.target.value)} placeholder={preset.defaultUrl} style={inputBase} />
+        <div style={{ fontSize: 10.5, color: t.text4, marginTop: 4, marginBottom: 14 }}>默认 <span style={{ fontFamily: 'ui-monospace, monospace' }}>{preset.defaultUrl || '—'}</span> · 可填代理 / 镜像</div>
+
+        <label style={{ display: 'block', fontSize: 12, color: t.text3, fontWeight: 500, marginBottom: 6 }}>API Key</label>
+        <div style={{ position: 'relative' }}>
+          <input type={showKey ? 'text' : 'password'} value={editing.key} onChange={e => update('key', e.target.value)} placeholder={(preset.keyPrefix || '') + '...'} style={{ ...inputBase, paddingRight: 76, letterSpacing: showKey ? 0 : 1 }} />
+          <div style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', display: 'flex', gap: 2 }}>
+            <button onClick={() => setShowKey(s => !s)} style={{ padding: '5px 7px', borderRadius: 6, border: 'none', background: 'transparent', color: t.text3, fontSize: 11, fontWeight: 500, fontFamily: 'inherit', cursor: 'pointer' }}>{showKey ? '隐藏' : '显示'}</button>
+            <button style={{ padding: '5px 7px', borderRadius: 6, border: 'none', background: 'transparent', color: t.text3, cursor: 'pointer', display: 'flex', alignItems: 'center' }}><Icon name="copy" size={13} stroke={1.8} /></button>
+          </div>
+        </div>
+        <div style={{ fontSize: 10.5, color: t.text4, marginTop: 4, marginBottom: 14 }}>密钥仅本地加密存储 · 从不上传到灵犀服务器</div>
+
+        {preset.needsCx && (<>
+          <label style={{ display: 'block', fontSize: 12, color: t.text3, fontWeight: 500, marginBottom: 6 }}>Custom Search Engine ID (cx)</label>
+          <input value={editing.cx || ''} onChange={e => update('cx', e.target.value)} placeholder="0123456789abcdef:ghi" style={inputBase} />
+          <div style={{ fontSize: 10.5, color: t.text4, marginTop: 4, marginBottom: 14 }}>在 Google Programmable Search 创建并粘贴搜索引擎 ID</div>
+        </>)}
+
+        {kind === 'llm' && preset.models?.length > 0 && (<>
+          <label style={{ display: 'block', fontSize: 12, color: t.text3, fontWeight: 500, marginBottom: 6 }}>默认模型</label>
+          <div style={{ background: t.surface, borderRadius: 10, border: `0.5px solid ${t.border}`, overflow: 'hidden', marginBottom: 14 }}>
+            {preset.models.map((m, i) => {
+              const sel = editing.model === m;
+              return (
+                <div key={m} onClick={() => update('model', m)} style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '11px 12px', cursor: 'pointer',
+                  borderBottom: i < preset.models.length - 1 ? `0.5px solid ${t.border}` : 'none',
+                }}>
+                  <div style={{ width: 16, height: 16, borderRadius: '50%', border: `1.5px solid ${sel ? preset.color : t.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    {sel && <div style={{ width: 8, height: 8, borderRadius: '50%', background: preset.color }} />}
+                  </div>
+                  <span style={{ flex: 1, fontSize: 13, color: t.text, fontFamily: 'ui-monospace, monospace' }}>{m}</span>
+                </div>
+              );
+            })}
+          </div>
+        </>)}
+
+        {kind === 'llm' && preset.models?.length === 0 && (<>
+          <label style={{ display: 'block', fontSize: 12, color: t.text3, fontWeight: 500, marginBottom: 6 }}>模型 ID</label>
+          <input value={editing.model} onChange={e => update('model', e.target.value)} placeholder="llama-3.3-70b" style={{ ...inputBase, fontFamily: 'ui-monospace, monospace', marginBottom: 14 }} />
+        </>)}
+
+        <Section>
+          <Row label="启用" chevron={false}><Toggle on={editing.enabled} onChange={(v) => update('enabled', v)} /></Row>
+          <Row label="设为默认" onClick={setDefaultHere} chevron={false} isLast>{editing.isDefault ? <Icon name="check" size={16} color={t.accent} stroke={2.2} /> : <span style={{ fontSize: 12, color: t.text4 }}>未启用</span>}</Row>
+        </Section>
+
+        <button onClick={remove} style={{
+          marginTop: 8, width: '100%', padding: '12px',
+          borderRadius: 11, border: `0.5px solid ${t.border}`, background: 'transparent',
+          color: 'oklch(65% 0.20 25)', fontSize: 13.5, fontWeight: 500, fontFamily: 'inherit', cursor: 'pointer',
+        }}>移除此提供商</button>
+      </>
+    );
+  };
+
+  const renderAppearance = () => {
+    const accents = [
+      { v: 'oklch(70% 0.18 268)', name: '靛紫' },
+      { v: 'oklch(70% 0.18 320)', name: '玫红' },
+      { v: 'oklch(72% 0.16 195)', name: '青蓝' },
+      { v: 'oklch(72% 0.16 155)', name: '青绿' },
+      { v: 'oklch(74% 0.16 75)',  name: '琥珀' },
+      { v: 'oklch(70% 0.20 30)',  name: '砖红' },
+    ];
+    return (
+      <>
+        <Section label="主题">
+          <RadioList value={theme} onChange={setTheme} options={[
+            { value: 'light', label: '浅色', sub: '暖白纸感 + 半透卡片' },
+            { value: 'dark',  label: '深色', sub: '午夜紫 + 低饱和' },
+          ]} />
+        </Section>
+
+        <Section label="强调色">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 10, padding: 14 }}>
+            {accents.map(a => (
+              <div key={a.v} onClick={() => setAccent(a.v)} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, cursor: 'pointer' }}>
+                <div style={{
+                  width: 34, height: 34, borderRadius: '50%', background: a.v,
+                  border: `2.5px solid ${accent === a.v ? t.windowBg : 'transparent'}`,
+                  boxShadow: accent === a.v ? `0 0 0 2px ${a.v}` : 'none',
+                }} />
+                <div style={{ fontSize: 11, color: t.text3, whiteSpace: 'nowrap' }}>{a.name}</div>
+              </div>
+            ))}
+          </div>
+        </Section>
+
+        <Section label="密度">
+          <RadioList value={density} onChange={setDensity} options={[
+            { value: 'compact',     label: '紧凑', sub: '一屏显示更多内容' },
+            { value: 'comfortable', label: '舒适', sub: '默认，平衡' },
+            { value: 'spacious',    label: '宽松', sub: '更大间距，更易读' },
+          ]} />
+        </Section>
+
+        <Section label="字号" footer={`当前 ${fontSize}pt · 影响对话与列表正文`}>
+          <div style={{ padding: '16px 18px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 11, color: t.text4 }}>A</span>
+              <input type="range" min={13} max={19} step={1} value={fontSize} onChange={e => setFontSize(+e.target.value)} style={{ flex: 1, accentColor: t.accent }} />
+              <span style={{ fontSize: 17, color: t.text4 }}>A</span>
+            </div>
+            <div style={{ padding: '10px 12px', borderRadius: 9, background: t.windowBg, fontSize: fontSize, color: t.text, lineHeight: 1.5 }}>
+              "灵犀，帮我整理今天的会议要点，重点标出有 action item 的部分。"
+            </div>
+          </div>
+        </Section>
+      </>
+    );
+  };
+
+  const renderLanguage = () => (
+    <>
+      <Section label="语言" footer="切换语言后将重新加载界面。AI 对话语言独立配置。">
+        <RadioList value={language} onChange={setLanguage} options={[
+          { value: 'zh-CN', label: '简体中文' },
+          { value: 'zh-TW', label: '繁體中文' },
+          { value: 'en-US', label: 'English (US)' },
+          { value: 'ja-JP', label: '日本語' },
+        ]} />
+      </Section>
+      <Section label="区域">
+        <Row label="日期格式" value="2026/5/14" chevron isLast onClick={() => {}} />
+      </Section>
+      <Section label="AI 回复语言">
+        <Row label="跟随界面" sub="灵犀根据你的输入语言自动判断" chevron={false} isLast><Toggle on={true} onChange={() => {}} /></Row>
+      </Section>
+    </>
+  );
+
+  const renderNotifications = () => {
+    const items = [
+      { k: 'workflows', label: '工作流完成', sub: 'AI 跑完多步任务时' },
+      { k: 'mentions',  label: '我被 @',       sub: '会话内有人提到你' },
+      { k: 'crons',     label: '定时任务报告', sub: 'cron 触发执行后' },
+      { k: 'marketing', label: '产品更新',     sub: '新功能与重要变更' },
+    ];
+    return (
+      <Section label="通知类型" footer="所有通知通过系统通知中心，灵犀不会单独打扰你。">
+        {items.map((it, i) => (
+          <Row key={it.k} label={it.label} sub={it.sub} chevron={false} isLast={i === items.length - 1}>
+            <Toggle on={notifs[it.k]} onChange={(v) => setNotifs(n => ({ ...n, [it.k]: v }))} />
+          </Row>
+        ))}
+      </Section>
+    );
+  };
+
+  const renderVoice = () => {
+    const preset = VOICE_PRESETS.find(v => v.id === voiceProvider.preset);
+    return (
+      <>
+        <Section label="语音合成 TTS">
+          <RadioList value={voiceProvider.preset} onChange={(v) => setVoiceProvider(s => ({ ...s, preset: v }))} options={VOICE_PRESETS.map(v => ({ value: v.id, label: v.name, sub: v.sub }))} />
+        </Section>
+        {preset && preset.id !== 'system' && (
+          <Section label="API 配置" footer="密钥仅本地存储。">
+            <div style={{ padding: '12px 14px' }}>
+              <input placeholder={'API Key (' + preset.name + ')'} style={inputBase} />
+            </div>
+          </Section>
+        )}
+        <Section label="选项" footer="自动播放：AI 回复完成后立即朗读。">
+          <Row label="语速" value={voiceProvider.speed.toFixed(1) + 'x'} chevron={false}>
+            <input type="range" min={0.5} max={2} step={0.1} value={voiceProvider.speed} onChange={e => setVoiceProvider(s => ({ ...s, speed: +e.target.value }))} style={{ width: 110, accentColor: t.accent }} />
+          </Row>
+          <Row label="自动播放回复" chevron={false} isLast><Toggle on={voiceProvider.autoPlay} onChange={(v) => setVoiceProvider(s => ({ ...s, autoPlay: v }))} /></Row>
+        </Section>
+      </>
+    );
+  };
+
+  const renderAccount = () => (
+    <>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '8px 0 18px' }}>
+        <div style={{ width: 76, height: 76, borderRadius: '50%', background: `linear-gradient(135deg, ${t.accent}, ${t.accent2})`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 30, fontWeight: 600, marginBottom: 12 }}>Y</div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: t.text }}>Yuxin Yang</div>
+        <div style={{ fontSize: 13, color: t.text4, marginTop: 4 }}>yuxin@axielix.com</div>
+        <span style={{ marginTop: 10, padding: '4px 12px', borderRadius: 99, background: `color-mix(in oklab, ${t.accent} 18%, transparent)`, color: t.accent, fontSize: 11.5, fontWeight: 600 }}>Pro · 续费日 2026-09-30</span>
+      </div>
+      <Section label="本月用量">
+        <Row label="对话次数" value="247 / 1000" chevron={false} />
+        <Row label="推理时长" value="5.5 / 8 小时" chevron={false} />
+        <Row label="存储" value="1.2 / 10 GB" chevron={false} isLast />
+      </Section>
+      <Section>
+        <Row icon="brain" label="管理订阅" onClick={() => {}} />
+        <Row icon="link" label="同步设备" sub="3 台设备已连接" onClick={() => {}} />
+        <Row icon="x" label="退出登录" danger onClick={() => {}} isLast />
+      </Section>
+    </>
+  );
+
+  const renderKnowledge = () => (
+    <>
+      <div style={{ fontSize: 11.5, color: t.text3, lineHeight: 1.5, marginBottom: 14 }}>知识库内容会被嵌入并附加到 AI 上下文。所有索引在本机完成。</div>
+      <Section label="存储">
+        <Row label="使用空间" value="142 MB" chevron={false} />
+        <Row label="文件数" value="24 个" chevron={false} />
+        <Row label="索引模型" value="bge-m3-local" onClick={() => {}} isLast />
+      </Section>
+      <Section label="行为">
+        <Row label="自动检索" sub="每次提问自动召回相关片段" chevron={false}><Toggle on={true} onChange={() => {}} /></Row>
+        <Row label="召回数量上限" value="8 段" onClick={() => {}} isLast />
+      </Section>
+    </>
+  );
+
+  const renderMemory = () => (
+    <>
+      <div style={{ fontSize: 11.5, color: t.text3, lineHeight: 1.5, marginBottom: 14 }}>灵犀根据对话自动提取关于你的偏好、习惯、关系。你可以随时编辑或删除。</div>
+      <Section label="近期记忆">
+        <Row label="偏好深色 + 中文" sub="2026-05-12 形成" onClick={() => {}} />
+        <Row label="工作日 8:30 倾向收到晨报" sub="2026-05-10 形成" onClick={() => {}} />
+        <Row label="正在做 AxieLix 灵犀项目" sub="2026-05-08 形成" onClick={() => {}} isLast />
+      </Section>
+      <Section>
+        <Row icon="x" label="清除全部记忆" danger onClick={() => {}} isLast chevron={false} />
+      </Section>
+    </>
+  );
+
+  const renderWorkflows = () => (
+    <Section label="自动化" footer="工作流由 cron 表达式或事件触发。在主界面侧栏 → 定时 可创建。">
+      <Row label="每日晨报" sub="工作日 08:30" chevron={false}><Toggle on={true} onChange={() => {}} /></Row>
+      <Row label="周报自动生成" sub="每周五 17:00" chevron={false}><Toggle on={true} onChange={() => {}} /></Row>
+      <Row label="客户反馈周聚合" sub="每周一 09:00" chevron={false}><Toggle on={true} onChange={() => {}} /></Row>
+      <Row label="凌晨日志巡检" sub="已暂停" chevron={false} isLast><Toggle on={false} onChange={() => {}} /></Row>
+    </Section>
+  );
+
+  const renderPrivacy = () => (
+    <>
+      <Section label="数据">
+        <Row icon="brain" label="导出我的所有数据" onClick={() => {}} />
+        <Row icon="x" label="删除账号与数据" danger onClick={() => {}} isLast />
+      </Section>
+      <Section label="可见性" footer="灵犀对你的承诺：密钥永远不离开本机；对话默认不被用于训练。">
+        <Row label="使用数据贡献训练" chevron={false}><Toggle on={false} onChange={() => {}} /></Row>
+        <Row label="崩溃报告" chevron={false} isLast><Toggle on={true} onChange={() => {}} /></Row>
+      </Section>
+    </>
+  );
+
+  const renderInput = () => (
+    <>
+      <Section label="语音输入">
+        <Row label="按住说话识别语言" value="自动" onClick={() => {}} />
+        <Row label="松开后自动发送" chevron={false} isLast><Toggle on={true} onChange={() => {}} /></Row>
+      </Section>
+      <Section label="候选词">
+        <Row label="启用智能候选" chevron={false}><Toggle on={true} onChange={() => {}} /></Row>
+        <Row label="基于历史会话" chevron={false} isLast><Toggle on={true} onChange={() => {}} /></Row>
+      </Section>
+    </>
+  );
+
+  const renderSkills = () => {
+    const grouped = { '官方': [], '我': [], '社区 · @arxiv-fan': [], '社区 · @lin': [] };
+    skills.forEach(s => { (grouped[s.author] = grouped[s.author] || []).push(s); });
+    const toggle = (id) => setSkills(arr => arr.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s));
+    return (
+      <>
+        <div style={{ fontSize: 11.5, color: t.text3, lineHeight: 1.5, marginBottom: 14 }}>Skills 是可复用的 AI 行为包，封装了系统提示词、工具调用与触发条件。启用后会出现在对应触发器或斜杠菜单。</div>
+        {Object.entries(grouped).filter(([_, arr]) => arr.length).map(([author, arr]) => (
+          <Section key={author} label={author}>
+            {arr.map((s, i) => (
+              <Row key={s.id}
+                icon="skill" iconColor={s.builtin ? 'oklch(72% 0.16 195)' : 'oklch(72% 0.16 75)'}
+                label={s.name}
+                sub={s.desc + ' · ' + s.triggers.join(' / ')}
+                chevron={false}
+                isLast={i === arr.length - 1}
+                onClick={() => push({ id: 'skill-detail', skillId: s.id })}
+              ><Toggle on={s.enabled} onChange={() => toggle(s.id)} /></Row>
+            ))}
+          </Section>
+        ))}
+        <button style={{
+          width: '100%', padding: '13px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+          borderRadius: 12, border: `1px dashed ${t.border}`, background: 'transparent',
+          color: t.text2, fontSize: 13.5, fontWeight: 500, fontFamily: 'inherit', cursor: 'pointer', marginBottom: 8,
+        }}><Icon name="plus" size={15} stroke={2} /> 浏览 Skills 商店</button>
+        <button style={{
+          width: '100%', padding: '13px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+          borderRadius: 12, border: `0.5px solid ${t.border}`, background: t.surface,
+          color: t.text2, fontSize: 13.5, fontWeight: 500, fontFamily: 'inherit', cursor: 'pointer',
+        }}><Icon name="edit" size={14} stroke={1.8} /> 创建自定义 Skill</button>
+      </>
+    );
+  };
+
+  const renderSkillDetail = (skillId) => {
+    const s = skills.find(x => x.id === skillId);
+    if (!s) { pop(); return null; }
+    const update = (k, v) => setSkills(arr => arr.map(x => x.id === skillId ? { ...x, [k]: v } : x));
+    return (
+      <>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '8px 0 18px' }}>
+          <div style={{ width: 64, height: 64, borderRadius: 16, background: `color-mix(in oklab, oklch(72% 0.16 195) 20%, ${t.surface})`, border: `0.5px solid color-mix(in oklab, oklch(72% 0.16 195) 35%, transparent)`, display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 12 }}>
+            <Icon name="skill" size={28} color="oklch(72% 0.16 195)" stroke={1.7} />
+          </div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: t.text }}>{s.name}</div>
+          <div style={{ fontSize: 12, color: t.text4, marginTop: 4 }}>{s.author} · v1.2.0</div>
+        </div>
+        <div style={{ padding: '14px 16px', background: t.surface, borderRadius: 12, border: `0.5px solid ${t.border}`, marginBottom: 14 }}>
+          <div style={{ fontSize: 13, color: t.text2, lineHeight: 1.6 }}>{s.desc}</div>
+        </div>
+        <Section label="触发">
+          {s.triggers.map((tr, i) => (
+            <Row key={i} label={tr} chevron={false} isLast={i === s.triggers.length - 1}>
+              <Icon name="check" size={15} color="oklch(70% 0.15 155)" stroke={2.4} />
+            </Row>
+          ))}
+        </Section>
+        <Section label="所需权限">
+          <Row label="读取知识库" chevron={false} />
+          <Row label="调用 LLM" chevron={false} />
+          <Row label="访问 MCP · GitHub" chevron={false} isLast />
+        </Section>
+        <Section>
+          <Row label="启用此 Skill" chevron={false}><Toggle on={s.enabled} onChange={(v) => update('enabled', v)} /></Row>
+          <Row label="自动建议" sub="检测到匹配场景时主动提示" chevron={false}><Toggle on={true} onChange={() => {}} /></Row>
+          <Row label="编辑提示词" onClick={() => {}} />
+          <Row icon="x" label={s.builtin ? '此 Skill 由官方维护' : '删除此 Skill'} danger={!s.builtin} chevron={false} isLast />
+        </Section>
+      </>
+    );
+  };
+
+  const renderMcpList = () => {
+    const toggle = (id) => setMcpServers(arr => arr.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s));
+    const totalTools = mcpServers.filter(s => s.enabled && s.status === 'connected').reduce((a, b) => a + b.tools, 0);
+    return (
+      <>
+        <div style={{ fontSize: 11.5, color: t.text3, lineHeight: 1.5, marginBottom: 14 }}>MCP (Model Context Protocol) 是连接外部工具的开放协议。已连接的服务器会向 AI 暴露工具调用能力。</div>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
+          <div style={{ flex: 1, padding: '10px 12px', background: t.surface, border: `0.5px solid ${t.border}`, borderRadius: 10 }}>
+            <div style={{ fontSize: 10.5, color: t.text4, letterSpacing: 0.5, textTransform: 'uppercase' }}>已连接</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: t.text, marginTop: 2 }}>{mcpServers.filter(s => s.status === 'connected').length}</div>
+          </div>
+          <div style={{ flex: 1, padding: '10px 12px', background: t.surface, border: `0.5px solid ${t.border}`, borderRadius: 10 }}>
+            <div style={{ fontSize: 10.5, color: t.text4, letterSpacing: 0.5, textTransform: 'uppercase' }}>可用工具</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: t.text, marginTop: 2 }}>{totalTools}</div>
+          </div>
+        </div>
+        <Section label={`服务器 · ${mcpServers.length}`}>
+          {mcpServers.map((s, i) => {
+            const sm = STATUS_META[s.status];
+            return (
+              <Row key={s.id}
+                icon="plug" iconColor={s.status === 'connected' ? 'oklch(70% 0.18 165)' : s.status === 'error' ? 'oklch(65% 0.20 25)' : t.text4}
+                label={s.name}
+                sub={(<span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: 'ui-monospace, monospace' }}>
+                  <span style={{ width: 6, height: 6, borderRadius: 99, background: sm.dot }} /> {sm.label} · {s.tools} 工具 · {s.transport}
+                </span>)}
+                chevron={false}
+                isLast={i === mcpServers.length - 1}
+                onClick={() => push({ id: 'mcp-edit', mcpId: s.id })}
+              ><Toggle on={s.enabled} onChange={() => toggle(s.id)} /></Row>
+            );
+          })}
+        </Section>
+        <button style={{
+          width: '100%', padding: '13px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+          borderRadius: 12, border: `1px dashed ${t.border}`, background: 'transparent',
+          color: t.text2, fontSize: 13.5, fontWeight: 500, fontFamily: 'inherit', cursor: 'pointer',
+        }}><Icon name="plus" size={15} stroke={2} /> 添加 MCP 服务器</button>
+        <div style={{ fontSize: 11, color: t.text4, lineHeight: 1.6, padding: '14px 4px 0' }}>
+          支持 stdio / SSE / Streamable HTTP 三种传输；OAuth、API Key、本地子进程多种鉴权。<br />
+          浏览公开服务器目录：<span style={{ color: t.accent }}>mcp.directory</span>
+        </div>
+      </>
+    );
+  };
+
+  const renderMcpEdit = (mcpId) => {
+    const s = mcpServers.find(x => x.id === mcpId);
+    if (!s) { pop(); return null; }
+    const sm = STATUS_META[s.status];
+    const update = (k, v) => setMcpServers(arr => arr.map(x => x.id === mcpId ? { ...x, [k]: v } : x));
+    return (
+      <>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', borderRadius: 10, background: `color-mix(in oklab, ${sm.dot} 8%, ${t.surface})`, border: `0.5px solid color-mix(in oklab, ${sm.dot} 24%, transparent)`, marginBottom: 18 }}>
+          <div style={{ width: 8, height: 8, borderRadius: 99, background: sm.dot, boxShadow: `0 0 0 3px color-mix(in oklab, ${sm.dot} 22%, transparent)` }} />
+          <div style={{ flex: 1, fontSize: 12.5, color: t.text2, fontWeight: 500 }}>{sm.label} · {s.tools} 工具可用</div>
+          <button onClick={() => { update('status', 'testing'); setTimeout(() => update('status', 'connected'), 1100); }} style={{ padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`, background: t.windowBg, color: t.text2, fontSize: 12, fontWeight: 500, fontFamily: 'inherit', cursor: 'pointer' }}>重新连接</button>
+        </div>
+        <label style={{ display: 'block', fontSize: 12, color: t.text3, fontWeight: 500, marginBottom: 6 }}>显示名称</label>
+        <input value={s.name} onChange={e => update('name', e.target.value)} style={{ ...inputBase, fontFamily: 'inherit', marginBottom: 14 }} />
+        <label style={{ display: 'block', fontSize: 12, color: t.text3, fontWeight: 500, marginBottom: 6 }}>端点</label>
+        <input value={s.url} onChange={e => update('url', e.target.value)} style={inputBase} />
+        <div style={{ fontSize: 10.5, color: t.text4, marginTop: 4, marginBottom: 14 }}>支持 <span style={{ fontFamily: 'ui-monospace, monospace' }}>stdio://</span>、<span style={{ fontFamily: 'ui-monospace, monospace' }}>https://</span>、<span style={{ fontFamily: 'ui-monospace, monospace' }}>sse://</span></div>
+        <Section label="传输与鉴权">
+          <Row label="传输方式" value={s.transport} onClick={() => {}} />
+          <Row label="鉴权" value={s.auth || '无'} onClick={() => {}} isLast />
+        </Section>
+        <Section label="工具权限" footer="灵犀只会调用你允许的工具。每次首次调用会请求确认。">
+          {['list_files', 'read_file', 'write_file', 'create_issue', 'list_issues', 'comment'].slice(0, Math.min(6, s.tools)).map((tn, i, a) => (
+            <Row key={tn} label={tn} sub={i % 2 === 0 ? '只读' : '可写'} chevron={false} isLast={i === a.length - 1}>
+              <Toggle on={i < 4} onChange={() => {}} />
+            </Row>
+          ))}
+        </Section>
+        <Section>
+          <Row label="启用服务器" chevron={false}><Toggle on={s.enabled} onChange={(v) => update('enabled', v)} /></Row>
+          <Row label="自动启动" chevron={false} isLast><Toggle on={true} onChange={() => {}} /></Row>
+        </Section>
+        <button onClick={() => { setMcpServers(arr => arr.filter(x => x.id !== mcpId)); pop(); }} style={{
+          marginTop: 8, width: '100%', padding: '12px',
+          borderRadius: 11, border: `0.5px solid ${t.border}`, background: 'transparent',
+          color: 'oklch(65% 0.20 25)', fontSize: 13.5, fontWeight: 500, fontFamily: 'inherit', cursor: 'pointer',
+        }}>移除此服务器</button>
+      </>
+    );
+  };
+
+  const renderDream = () => {
+    const acts = [
+      { k: 'reorganize', label: '整理记忆',   sub: '合并相似 / 去重 / 归档过期' },
+      { k: 'plan',       label: '草拟今日计划', sub: '基于昨日未完成 + 日历' },
+      { k: 'recap',      label: '总结过去一周', sub: '每周日凌晨生成回顾报告' },
+      { k: 'prefetch',   label: '预热常用上下文', sub: '预生成你最常问的回答' },
+      { k: 'polish',     label: '润色草稿',     sub: '为待发邮件/文档生成 2 套候选' },
+    ];
+    return (
+      <>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '12px 0 22px', position: 'relative' }}>
+          <div style={{ position: 'relative', width: 76, height: 76, marginBottom: 14 }}>
+            <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: `radial-gradient(circle at 30% 30%, oklch(70% 0.18 320), oklch(40% 0.18 268))`, animation: 'shimmer 3s ease-in-out infinite' }} />
+            <div style={{ position: 'absolute', inset: 6, borderRadius: '50%', background: t.windowBg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Icon name="dream" size={32} color="oklch(70% 0.18 320)" stroke={1.6} />
+            </div>
+          </div>
+          <div style={{ fontSize: 19, fontWeight: 700, color: t.text, letterSpacing: -0.3 }}>Dream 模式</div>
+          <div style={{ fontSize: 12.5, color: t.text3, marginTop: 6, textAlign: 'center', padding: '0 16px', lineHeight: 1.6 }}>当设备闲置时，灵犀在后台运行<br />整理、规划、润色 — 醒来即可看到结果</div>
+        </div>
+
+        <Section>
+          <Row label="开启 Dream 模式" sub={dreamConfig.lastRun} chevron={false} isLast>
+            <Toggle on={dreamConfig.enabled} onChange={(v) => setDreamConfig(c => ({ ...c, enabled: v }))} />
+          </Row>
+        </Section>
+
+        <Section label="时间窗">
+          <RadioList value={dreamConfig.window} onChange={(v) => setDreamConfig(c => ({ ...c, window: v }))} options={[
+            { value: 'night',  label: '夜间 (00:00–06:00)', sub: '默认，最不打扰' },
+            { value: 'always', label: '随时',                sub: '只要设备闲置' },
+            { value: 'custom', label: '自定义时段',          sub: '设置每日时间窗' },
+          ]} />
+        </Section>
+
+        <Section label="运行条件" footer="确保不会影响日常使用：仅在充电 + Wi-Fi 时跑昂贵任务。">
+          <Row label="仅在充电时" chevron={false}><Toggle on={dreamConfig.onCharging} onChange={(v) => setDreamConfig(c => ({ ...c, onCharging: v }))} /></Row>
+          <Row label="仅在 Wi-Fi 时" chevron={false} isLast><Toggle on={dreamConfig.onWifi} onChange={(v) => setDreamConfig(c => ({ ...c, onWifi: v }))} /></Row>
+        </Section>
+
+        <Section label="允许的活动" footer="可叠加，越多越费电与算力。">
+          {acts.map((a, i) => (
+            <Row key={a.k} label={a.label} sub={a.sub} chevron={false} isLast={i === acts.length - 1}>
+              <Toggle on={dreamConfig.activities[a.k]} onChange={(v) => setDreamConfig(c => ({ ...c, activities: { ...c.activities, [a.k]: v } }))} />
+            </Row>
+          ))}
+        </Section>
+
+        <Section label="算力预算" footer="高预算会优先调用更强模型（如 Claude Opus），并访问 MCP 工具。低预算只用本地 + 最便宜模型。">
+          <RadioList value={dreamConfig.budget} onChange={(v) => setDreamConfig(c => ({ ...c, budget: v }))} options={[
+            { value: 'low',    label: '低',   sub: '本地模型为主 · 几乎免费' },
+            { value: 'medium', label: '中',   sub: '中等模型 · 默认' },
+            { value: 'high',   label: '高',   sub: '推理模型 + 工具 · 最深入' },
+          ]} />
+        </Section>
+
+        <Section label="昨夜 Dream 回顾">
+          <Row label="03:24 - 03:41 · 整理记忆" sub="合并 12 条 → 7 条，归档 5 条过期" onClick={() => {}} />
+          <Row label="03:41 - 04:02 · 草拟今日计划" sub="基于 8 个未完成事项 + 3 场会议" onClick={() => {}} />
+          <Row label="04:02 - 04:08 · 润色邮件" sub="为 2 封草稿各生成 1 套候选" onClick={() => {}} isLast />
+        </Section>
+      </>
+    );
+  };
+
+  // ─── Title for page ──
+  const titleOf = (page) => {
+    switch (page.id) {
+      case 'main': return '设置';
+      case 'account': return '账户';
+      case 'llm-list': return 'LLM 提供商';
+      case 'search-list': return '联网搜索';
+      case 'fetch-list': return '网页抓取';
+      case 'provider-list': return ({ llm: 'LLM 提供商', search: '联网搜索', fetch: '网页抓取' })[page.kind];
+      case 'provider-picker': return '添加 ' + ({ llm: 'LLM', search: '搜索', fetch: '抓取' })[page.kind];
+      case 'provider-edit': {
+        const [arr] = findStore(page.kind);
+        return arr.find(p => p.id === page.providerId)?.name || '编辑';
+      }
+      case 'voice': return '语音 TTS';
+      case 'knowledge': return '知识库';
+      case 'memory': return '记忆';
+      case 'workflows': return '工作流';
+      case 'appearance': return '外观';
+      case 'language': return '语言';
+      case 'notifications': return '通知';
+      case 'input': return '键盘与输入';
+      case 'privacy': return '数据与隐私';
+      case 'skills': return 'Skills';
+      case 'skill-detail': {
+        return skills.find(s => s.id === page.skillId)?.name || 'Skill';
+      }
+      case 'mcp-list': return 'MCP 服务器';
+      case 'mcp-edit': {
+        return mcpServers.find(s => s.id === page.mcpId)?.name || 'MCP';
+      }
+      case 'dream': return 'Dream 模式';
+      default: return '设置';
+    }
+  };
+
+  // map list shortcuts
+  const renderPage = (page) => {
+    switch (page.id) {
+      case 'main': return renderMain();
+      case 'account': return renderAccount();
+      case 'llm-list': return renderProviderList('llm');
+      case 'search-list': return renderProviderList('search');
+      case 'fetch-list': return renderProviderList('fetch');
+      case 'provider-list': return renderProviderList(page.kind);
+      case 'provider-picker': return renderProviderPicker(page.kind);
+      case 'provider-edit': return renderProviderEdit(page.kind, page.providerId);
+      case 'voice': return renderVoice();
+      case 'knowledge': return renderKnowledge();
+      case 'memory': return renderMemory();
+      case 'workflows': return renderWorkflows();
+      case 'appearance': return renderAppearance();
+      case 'language': return renderLanguage();
+      case 'notifications': return renderNotifications();
+      case 'input': return renderInput();
+      case 'privacy': return renderPrivacy();
+      case 'skills': return renderSkills();
+      case 'skill-detail': return renderSkillDetail(page.skillId);
+      case 'mcp-list': return renderMcpList();
+      case 'mcp-edit': return renderMcpEdit(page.mcpId);
+      case 'dream': return renderDream();
+      default: return null;
+    }
+  };
+
+  return (
+    <div style={{ position: 'absolute', inset: 0, zIndex: 60, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
+      <div onClick={onClose} style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(6px)', animation: 'fade-in 0.2s ease' }} />
+      <div style={{
+        position: 'relative', background: t.windowBg, borderRadius: '20px 20px 0 0',
+        height: '94%', display: 'flex', flexDirection: 'column',
+        animation: 'slide-up 0.28s cubic-bezier(0.32, 0.72, 0, 1)',
+        boxShadow: '0 -8px 30px rgba(0,0,0,0.35)',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '8px 0 4px', flexShrink: 0 }}>
+          <div style={{ width: 38, height: 4.5, borderRadius: 99, background: t.text4, opacity: 0.45 }} />
+        </div>
+
+        {/* Nav bar */}
+        <div style={{ padding: '6px 8px 12px', display: 'flex', alignItems: 'center', gap: 4, borderBottom: `0.5px solid ${t.border}`, flexShrink: 0 }}>
+          <button onClick={stack.length > 1 ? pop : onClose} style={{ height: 34, padding: '0 8px', borderRadius: 8, background: 'transparent', border: 'none', cursor: 'pointer', color: t.text2, display: 'flex', alignItems: 'center', gap: 2, fontFamily: 'inherit', fontSize: 14, flexShrink: 0, whiteSpace: 'nowrap', maxWidth: 110, overflow: 'hidden' }}>
+            <span style={{ transform: 'rotate(180deg)', display: 'inline-flex', flexShrink: 0 }}><Icon name="chevronR" size={17} stroke={2.2} color={t.text2} /></span>
+            <span style={{ fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{stack.length > 1 ? titleOf(stack[stack.length - 2]) : '关闭'}</span>
+          </button>
+          <div style={{ flex: 1, textAlign: 'center', fontSize: 16, fontWeight: 700, color: t.text, letterSpacing: -0.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '0 8px' }}>{titleOf(top)}</div>
+          {stack.length > 1
+            ? <button onClick={() => { reset(); }} style={{ height: 34, padding: '0 12px', borderRadius: 8, background: 'transparent', border: 'none', cursor: 'pointer', color: t.accent, fontFamily: 'inherit', fontSize: 14, fontWeight: 600 }}>完成</button>
+            : <button onClick={onClose} style={{ height: 34, width: 34, borderRadius: 8, background: 'transparent', border: 'none', cursor: 'pointer', color: t.text3, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Icon name="x" size={18} stroke={1.8} /></button>}
+        </div>
+
+        {/* Page content */}
+        <div key={stack.length + '-' + top.id + '-' + (top.providerId || '')} style={{ flex: 1, overflowY: 'auto', padding: '16px 16px 28px', animation: 'fade-in 0.18s ease' }}>
+          {renderPage(top)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── APP ─────────────────────────────────────────────────────
+function App() {
+  const [theme, setTheme] = useState('dark');
+  const t = useMemo(() => tokens(theme === 'dark'), [theme]);
+  const [activeWs, setActiveWs] = useState('work');
+  const [activeSession, setActiveSession] = useState('s1');
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  const session = ALL_SESSIONS.find(s => s.id === activeSession) || ALL_SESSIONS[0];
+
+  // iPhone 15 Pro: 393 x 852
+  const W = 393, H = 852;
+  const [scale, setScale] = useState(1);
+  useEffect(() => {
+    const fit = () => {
+      const sw = window.innerWidth - 60, sh = window.innerHeight - 60;
+      setScale(Math.min(sw / W, sh / H, 1));
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, []);
+
+  return (
+    <Theme.Provider value={t}>
+      <div style={{
+        width: '100vw', height: '100vh',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        overflow: 'hidden',
+        background: 'radial-gradient(ellipse 80% 60% at 50% 30%, oklch(18% 0.05 268), #0a0a0c 70%)',
+      }} data-screen-label="灵犀 iPhone">
+        {/* iPhone bezel */}
+        <div style={{
+          width: W, height: H, transform: `scale(${scale})`, transformOrigin: 'center',
+          background: '#1a1a1d', borderRadius: 54, padding: 9,
+          boxShadow: '0 0 0 1.5px #2a2a2e, 0 50px 100px rgba(0,0,0,0.65)',
+          position: 'relative',
+        }}>
+          <div style={{
+            width: '100%', height: '100%',
+            borderRadius: 46, overflow: 'hidden',
+            background: t.windowBg,
+            display: 'flex', flexDirection: 'column',
+            position: 'relative',
+          }}>
+            <StatusBar dark={theme === 'dark'} />
+            <ChatView session={session} theme={theme} setTheme={setTheme} openDrawer={() => setDrawerOpen(true)} />
+            <HomeIndicator dark={theme === 'dark'} />
+            <Drawer
+              open={drawerOpen} onClose={() => setDrawerOpen(false)}
+              activeWs={activeWs} setActiveWs={setActiveWs}
+              activeSession={activeSession} setActiveSession={setActiveSession}
+              openSettings={() => { setDrawerOpen(false); setSettingsOpen(true); }}
+            />
+            <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} theme={theme} setTheme={setTheme} />
+          </div>
+        </div>
+      </div>
+    </Theme.Provider>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>

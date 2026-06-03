@@ -139,14 +139,19 @@ async fn two_streaming_turns_with_tool_in_between() {
     assert_eq!(api.captured_calls().await.len(), 2);
 
     let events = output.snapshot().await;
+    // The §0.7 "light up thinking/usage" follow-up adds additive `Usage`
+    // emits (from `message_start` / `message_delta`) that interleave but
+    // are orthogonal to the tool/text ordering this test asserts, so
+    // filter them (and `Thinking`) out before the sequence assertion.
     let kinds: Vec<&str> = events
         .iter()
-        .map(|e| match e {
-            OutputEvent::Text { .. } => "Text",
-            OutputEvent::ToolCall { .. } => "ToolCall",
-            OutputEvent::ToolResult { .. } => "ToolResult",
-            OutputEvent::EndTurn { .. } => "EndTurn",
-            _ => "Other",
+        .filter_map(|e| match e {
+            OutputEvent::Text { .. } => Some("Text"),
+            OutputEvent::ToolCall { .. } => Some("ToolCall"),
+            OutputEvent::ToolResult { .. } => Some("ToolResult"),
+            OutputEvent::EndTurn { .. } => Some("EndTurn"),
+            OutputEvent::Usage { .. } | OutputEvent::Thinking { .. } => None,
+            _ => Some("Other"),
         })
         .collect();
     assert_eq!(

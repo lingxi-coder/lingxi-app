@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "protocol",
+    "client-protocol",
+    "client-adapter",
     "tool-api",
     "tools/file",
     "tools/shell",
@@ -81,6 +83,8 @@ members = [
 # build only the real crates, not the integration-test fixtures.
 default-members = [
     "protocol",
+    "client-protocol",
+    "client-adapter",
     "tool-api",
     "tools/file",
     "tools/shell",
@@ -174,7 +178,21 @@ serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"
+# UniFFI (mobile in-process transport). Pinned to 0.28.3 — the version whose
+# dependency tree is vendored in the local registry cache, so
+# `cargo build --offline --features uniffi` resolves without network (M10 F3-00
+# GATE-ZERO). With `default-features = false` the resolved set is
+# uniffi/uniffi_core/uniffi_macros/uniffi_meta/uniffi_checksum_derive +
+# async-compat (the `tokio` feature) — `uniffi_build`/`uniffi_udl`/`cargo_metadata`
+# are NOT pulled (those only matter with the `bindgen`/`cargo-metadata` default
+# feature). MSRV: 0.28.x declares no explicit `rust-version` and compiles under
+# the workspace toolchain `rust-version = "1.82"` (no bump required — verified by
+# a clean offline build). `tokio` enables the async foreign-executor scaffolding
+# needed by F3-07. `client-protocol` adds this as an OPTIONAL dep gated behind
+# its `uniffi` feature, so the default (bridge-server) build never pulls it.
+uniffi = { version = "0.28.3", default-features = false, features = ["tokio"] }
 futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 
 # dev-only
 proptest = "1"

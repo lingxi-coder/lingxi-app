@@ -29,7 +29,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -79,9 +78,10 @@ fun ChatScreen(
     onMicClick: () -> Unit = {},
     onMicHoldStart: () -> Unit = {},
     onMicHoldRelease: () -> Unit = {},
+    draft: String = "",
+    onDraftChange: (String) -> Unit = {},
 ) {
     val t = LingXiTheme.palette
-    var draft by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
 
     // Auto-scroll to the latest turn / when streaming toggles (mirrors the iOS
@@ -121,12 +121,12 @@ fun ChatScreen(
             )
             Composer(
                 text = draft,
-                onTextChange = { draft = it },
+                onTextChange = onDraftChange,
                 model = state.model,
                 onModelChange = onSelectModel,
                 onSend = {
                     onSend(draft)
-                    draft = ""
+                    onDraftChange("")
                 },
                 onMicClick = onMicClick,
                 onMicHoldStart = onMicHoldStart,

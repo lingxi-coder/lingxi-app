@@ -29,6 +29,9 @@ import com.lingxi.code.drawer.rememberDrawerUiState
 import com.lingxi.code.model.MockData
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.VoiceFlowOverlay
+import com.lingxi.code.voice.buildVoiceEngine
+import com.lingxi.code.voice.rememberVoiceCapture
+import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
 
 /**
@@ -63,6 +66,25 @@ fun RootScreen(
     // releasing the held finger flips it off. The overlay renders above the
     // drawer + conversation.
     var voiceActive by remember { mutableStateOf(false) }
+
+    // The composer draft is hoisted here so a voice transcription (the
+    // hold-to-talk release) can route its recognized text straight into the
+    // input the user is about to send.
+    var draft by remember { mutableStateOf("") }
+
+    // T3.3: build the device-audio-backed engine once for this shell. Handing the
+    // STT/TTS adapters across the UniFFI seam lights up `tool-speech` on-device;
+    // the handle is null on a non-Android host / when the cdylib is absent.
+    val context = LocalContext.current
+    val engine = remember { buildVoiceEngine(context) }
+
+    // Hold-to-talk → live transcription, gated on RECORD_AUDIO. The recognized
+    // utterance is appended to the composer draft on release.
+    val (onVoiceHoldStart, onVoiceHoldRelease) = rememberVoiceCapture(
+        onTranscript = { transcript ->
+            draft = if (draft.isBlank()) transcript else "$draft $transcript"
+        },
+    )
 
     fun closeDrawer() = scope.launch { drawerState.close() }
 
@@ -102,8 +124,16 @@ fun RootScreen(
                     isDark = isDark,
                     onToggleTheme = onToggleTheme,
                     onOpenDrawer = { scope.launch { drawerState.open() } },
-                    onMicHoldStart = { voiceActive = true },
-                    onMicHoldRelease = { voiceActive = false },
+                    onMicHoldStart = {
+                        voiceActive = true
+                        onVoiceHoldStart()
+                    },
+                    onMicHoldRelease = {
+                        voiceActive = false
+                        onVoiceHoldRelease()
+                    },
+                    draft = draft,
+                    onDraftChange = { draft = it },
                 )
             }
         }

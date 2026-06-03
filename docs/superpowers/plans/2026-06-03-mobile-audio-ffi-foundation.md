@@ -32,20 +32,20 @@ Pattern to mirror for the tool: `tools/voice` (`VoiceTool` → `ctx.voice`).
       `platform` in `engine-mobile`. `cargo test -p traits -p tool-api -p tool-speech -p engine-mobile`.
 
 ## Layer 2 — FFI foundation (UniFFI export + Android bindings)
-- [ ] T2.1 `android-aar` + `ios-framework`: crate-local `#[uniffi::export(callback_interface)]`
+- [x] T2.1 `android-aar` + `ios-framework`: crate-local `#[uniffi::export(callback_interface)]`
       `Android/IosStt` + `…Tts` traits; bridges to `SpeechToText`/`TextToSpeech`.
-- [ ] T2.2 Extend the exported engine constructor to accept the foreign stt/tts
+- [x] T2.2 Extend the exported engine constructor to accept the foreign stt/tts
       (and carry through to a real mobile `Platform`). Add a genuinely
       `#[uniffi::export]` Android `build_android_engine` (today none is exported).
-- [ ] T2.3 `platform-android`/`platform-ios`: accept stt/tts inputs, expose via `Platform`.
-- [ ] T2.4 Android binding generation: cargo-ndk build `.so` per ABI + uniffi-bindgen
+- [x] T2.3 `platform-android`/`platform-ios`: accept stt/tts inputs, expose via `Platform`.
+- [x] T2.4 Android binding generation: cargo-ndk build `.so` per ABI + uniffi-bindgen
       Kotlin (mirror the iOS xcframework script). Verify generated Kotlin compiles.
 
 ## Layer 3 — Kotlin impl + Compose wiring
-- [ ] T3.1 `clients/android` consumes the `.so` + generated UniFFI Kotlin (gradle/NDK).
-- [ ] T3.2 Adapt the extracted `SystemSpeechRecognizerStt`/`SystemTextToSpeechTts`
+- [x] T3.1 `clients/android` consumes the `.so` + generated UniFFI Kotlin (gradle/NDK).
+- [x] T3.2 Adapt the extracted `SystemSpeechRecognizerStt`/`SystemTextToSpeechTts`
       to implement the generated `AndroidStt`/`AndroidTts` interfaces.
-- [ ] T3.3 Wire into `VoiceFlowOverlay` (hold-to-talk → engine `submit`/stt → transcript).
+- [x] T3.3 Wire into `VoiceFlowOverlay` (hold-to-talk → engine `submit`/stt → transcript).
 - [ ] T3.4 On-device or emulator smoke verification.
 
 ## Verification discipline

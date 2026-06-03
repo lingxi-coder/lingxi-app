@@ -1,5 +1,12 @@
+# Generated UniFFI integration artifacts (reproduce with scripts/build-jni.sh).
+# The Rust cdylib .so (per-ABI, ~20MB each) and the uniffi-bindgen Kotlin
+# bindings are build outputs, not source — mirrors clients/ios's Generated/.
+app/src/main/jniLibs/
+app/src/main/java/com/lingxi/code/bindings/
+
 .gradle/
 build/
+app/build/
 local.properties
 .idea/
 *.iml

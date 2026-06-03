@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use traits::{
     CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
-    SharingService, VoiceRecorder, WorktreeManager,
+    SharingService, SpeechToText, TextToSpeech, VoiceRecorder, WorktreeManager,
 };
 
 /// Construction inputs for [`IosPlatform`].
@@ -38,6 +38,11 @@ pub struct IosPlatformInputs {
     pub voice: Arc<dyn VoiceRecorder>,
     /// Native share sheet (Swift impl).
     pub share: Arc<dyn SharingService>,
+    /// Native speech-to-text (Swift impl), when wired. `None` keeps the
+    /// pre-speech behavior (the `speech` tool reports "unavailable").
+    pub stt: Option<Arc<dyn SpeechToText>>,
+    /// Native text-to-speech (Swift impl), when wired.
+    pub tts: Option<Arc<dyn TextToSpeech>>,
 }
 
 /// The iOS [`Platform`].
@@ -51,6 +56,8 @@ pub struct IosPlatform {
     camera: Arc<dyn CameraControl>,
     voice: Arc<dyn VoiceRecorder>,
     share: Arc<dyn SharingService>,
+    stt: Option<Arc<dyn SpeechToText>>,
+    tts: Option<Arc<dyn TextToSpeech>>,
 }
 
 impl IosPlatform {
@@ -70,6 +77,8 @@ impl IosPlatform {
             camera: inputs.camera,
             voice: inputs.voice,
             share: inputs.share,
+            stt: inputs.stt,
+            tts: inputs.tts,
         }
     }
 }
@@ -101,6 +110,12 @@ impl Platform for IosPlatform {
     }
     fn share(&self) -> Option<Arc<dyn SharingService>> {
         Some(self.share.clone())
+    }
+    fn stt(&self) -> Option<Arc<dyn SpeechToText>> {
+        self.stt.clone()
+    }
+    fn tts(&self) -> Option<Arc<dyn TextToSpeech>> {
+        self.tts.clone()
     }
     // computer_control() defaults to None — screen automation is not an iOS
     // capability in M8.

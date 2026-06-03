@@ -15,8 +15,11 @@ license.workspace = true
 # (default-on) lights up the real FFI surface — the re-exported handle is a
 # `uniffi::Object`, the listener a callback interface, the DTOs UniFFI types.
 
+# T2.4: `cdylib` added (additively) so cargo-ndk can cross-compile a loadable
+# `libandroid_aar.so` for the Android `jniLibs/<abi>/`; `lib` is kept so the
+# crate stays a normal Rust dependency (host tests, the F3-04 handle tests).
 [lib]
-crate-type = ["lib"]
+crate-type = ["lib", "cdylib"]
 
 [features]
 # F3-04: default-on so `cargo build -p android-aar` exercises the real FFI

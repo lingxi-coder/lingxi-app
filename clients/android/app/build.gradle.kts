@@ -68,8 +68,16 @@ dependencies {
     androidTestImplementation(composeBom)
 
     // Coroutines — required by the extracted device-audio layer
-    // (STT/TTS providers use suspendCancellableCoroutine + Flow).
+    // (STT/TTS providers use suspendCancellableCoroutine + Flow) and by the
+    // generated UniFFI bindings (async callback interfaces).
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+
+    // UniFFI Kotlin runtime — the generated bindings in
+    // com/lingxi/code/bindings/android_aar.kt (one merged file for all four
+    // crates) load the Rust cdylib (jniLibs/<abi>/libandroid_aar.so) through
+    // JNA. The @aar classifier pulls JNA's bundled native libs so Native.load
+    // resolves on-device.
+    implementation("net.java.dev.jna:jna:5.14.0@aar")
 
     // Core / lifecycle
     implementation("androidx.core:core-ktx:1.15.0")

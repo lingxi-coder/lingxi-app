@@ -19,9 +19,12 @@ use crate::definition::{
 use crate::display::{AgentColor, AgentDisplay};
 use crate::pool::StateMachinePool;
 use crate::runner::SubagentEvent;
+use crate::tool_resolver::AgentToolResolver;
 use async_trait::async_trait;
 use protocol::AgentId;
 use std::sync::Arc;
+use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
+use tool_api::ToolRegistry;
 use traits::subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
     SubagentUsage,
@@ -41,21 +44,29 @@ pub struct PoolSubagentSpawner {
     /// child's [`SubagentContext`]. `None` keeps the legacy stub behavior
     /// (the runner emits a synthetic completion without calling the model).
     api_client: Option<Arc<dyn SubagentApiClient>>,
-    /// Wire tool definitions (`{name, description, input_schema}`) stashed on
-    /// every child's [`SubagentContext::tool_schemas`] so the spawned subagent
-    /// advertises tools to the model. Unset (the default) = no tools.
+    /// The live tool registry, used to resolve each spawn's advertised tools +
+    /// allow-list PER-SPAWN: resolution reads whatever the registry holds at
+    /// spawn time (rather than a one-time serialized snapshot taken at boot),
+    /// so it auto-narrows once the spawn path loads real per-agent definitions.
+    /// Unset (the default) = no tools. NOTE: `ToolRegistry` mutators take
+    /// `&mut self`, so once shared as an immutable `Arc` here its contents are
+    /// fixed — re-resolving per spawn reflects boot-time registry state, not
+    /// live post-boot mutation (there is no `register_mcp_tools` caller on this
+    /// `Arc` today; MCP tools flow through the separate `McpRegistry`).
     ///
-    /// A SET-ONCE cell (not a plain `Vec`) so the boot path can break the
-    /// construction cycle: the spawner is consumed into the `BuiltinToolContext`
-    /// that builds the registry, so the registry does not exist when the spawner
-    /// is constructed. The host grabs a clone of this cell via
-    /// [`Self::tool_schemas_handle`] BEFORE boxing the spawner, then fills it
-    /// (with [`tool_api::wire::tools_to_wire`] over the live registry) AFTER the
-    /// registry is built. Reads at spawn time, so a fill that lands before the
-    /// first spawn is visible. NOTE: the advertised set is NOT per-agent
-    /// `AgentToolPolicy`-filtered — see the [`SubagentContext::tool_schemas`]
-    /// WARNING; the runner enforces `ctx.allowed_tools` at dispatch time.
-    tool_schemas: Arc<std::sync::OnceLock<Vec<serde_json::Value>>>,
+    /// A SET-ONCE cell so the boot path can break the construction cycle: the
+    /// spawner is consumed into the `BuiltinToolContext` that builds the registry,
+    /// so the registry does not exist when the spawner is constructed. The host
+    /// grabs a clone via [`Self::tool_registry_handle`] BEFORE boxing the spawner,
+    /// then fills it AFTER the registry is built. Each `spawn` runs
+    /// [`AgentToolResolver`] over the registry's `available_tools` per the child's
+    /// [`AgentToolPolicy`], serializing the result into
+    /// [`SubagentContext::tool_schemas`] (advertised) and recording the resolved
+    /// names into [`SubagentContext::allowed_tools`] (the runner's dispatch
+    /// allow-list). For today's hardcoded `AgentToolPolicy::All` default this is
+    /// the full set (no filtering); it auto-narrows once the spawn path loads
+    /// real per-agent definitions.
+    tool_registry: Arc<std::sync::OnceLock<Arc<ToolRegistry>>>,
 }
 
 impl PoolSubagentSpawner {
@@ -67,7 +78,7 @@ impl PoolSubagentSpawner {
         Self {
             pool,
             api_client: None,
-            tool_schemas: Arc::new(std::sync::OnceLock::new()),
+            tool_registry: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -79,31 +90,62 @@ impl PoolSubagentSpawner {
         self
     }
 
-    /// Builder: fill the wire tool definitions (`{name, description,
-    /// input_schema}`, e.g. from [`tool_api::wire::tools_to_wire`]) every
-    /// spawned child advertises to the model. Sets the cell immediately — use
-    /// this when the schemas are known at construction (tests). The boot path
-    /// instead uses [`Self::tool_schemas_handle`] to fill the cell later (the
-    /// registry does not exist yet at construction).
+    /// Builder: set the live tool registry every spawn resolves its advertised
+    /// tools + allow-list from. Sets the cell immediately — use this when the
+    /// registry is available at construction (tests). The boot path instead uses
+    /// [`Self::tool_registry_handle`] to fill the cell later (the registry does
+    /// not exist yet at construction — see the field doc).
     #[must_use]
-    pub fn with_tool_schemas(self, tool_schemas: Vec<serde_json::Value>) -> Self {
-        let _ = self.tool_schemas.set(tool_schemas);
+    pub fn with_tool_registry(self, registry: Arc<ToolRegistry>) -> Self {
+        let _ = self.tool_registry.set(registry);
         self
     }
 
-    /// Return a clone of the set-once tool-schema cell so the host can fill it
-    /// AFTER the registry is built (breaking the construction cycle). The cell
-    /// is shared with the boxed spawner, so a later `cell.set(...)` is seen by
-    /// every `spawn`. Filling more than once is a no-op (the first wins).
+    /// Return a clone of the set-once registry cell so the host can fill it AFTER
+    /// the registry is built (breaking the construction cycle). The cell is
+    /// shared with the boxed spawner, so a later `cell.set(...)` is seen by every
+    /// `spawn`. Filling more than once is a no-op (the first wins).
     #[must_use]
-    pub fn tool_schemas_handle(&self) -> Arc<std::sync::OnceLock<Vec<serde_json::Value>>> {
-        self.tool_schemas.clone()
+    pub fn tool_registry_handle(&self) -> Arc<std::sync::OnceLock<Arc<ToolRegistry>>> {
+        self.tool_registry.clone()
     }
 
-    /// Snapshot the (possibly boot-filled) tool schemas for a child context.
-    /// Unset cell → empty (no tools advertised).
-    fn resolve_tool_schemas(&self) -> Vec<serde_json::Value> {
-        self.tool_schemas.get().cloned().unwrap_or_default()
+    /// Resolve a spawn's advertised tool schemas + dispatch allow-list from the
+    /// live registry per `agent_def`'s [`AgentToolPolicy`]. Returns
+    /// `(tool_schemas, allowed_tool_names)`. Unset registry → `(empty, empty)`
+    /// (no tools advertised, allow-list guard skipped).
+    async fn resolve_tools(
+        &self,
+        agent_def: &AgentDefinition,
+    ) -> (Vec<serde_json::Value>, Vec<String>) {
+        let Some(registry) = self.tool_registry.get() else {
+            return (Vec::new(), Vec::new());
+        };
+        let parent_tools = registry.available_tools(&ToolStaticContext::default());
+        let resolved = AgentToolResolver::resolve(agent_def, &parent_tools, &[], false);
+        // The allow-list must cover the SAME surface the inherited
+        // `RegistryToolInvoker` accepts: `find_by_name` matches a tool by
+        // `name()` OR any `aliases()` entry (registry.rs). Building the list
+        // from canonical names alone would leave a legacy alias (e.g.
+        // `AgentTool`'s `"Task"`) advertised+dispatchable yet refused by the
+        // runner guard. Include each resolved tool's aliases so the guard's
+        // name set matches the invoker's. The advertised schemas stay
+        // canonical-name-only — claude-code advertises the canonical name.
+        let allowed: Vec<String> = resolved
+            .iter()
+            .flat_map(|t| {
+                std::iter::once(t.name().to_string())
+                    .chain(t.aliases().iter().map(|a| (*a).to_string()))
+            })
+            .collect();
+        let schemas = tool_api::wire::tools_to_wire(
+            &resolved,
+            &PromptOptions {
+                include_examples: true,
+            },
+        )
+        .await;
+        (schemas, allowed)
     }
 
     fn make_subagent_context(subagent_type: &str, prompt: &str) -> SubagentContext {
@@ -145,7 +187,9 @@ impl PoolSubagentSpawner {
                 icon: None,
             },
             // Set by `spawn` from `self.api_client` / `inherit.tool_invoker` /
-            // `inherit.budget` / `self.tool_schemas` just before pool allocation.
+            // `inherit.budget` just before pool allocation. `tool_schemas` +
+            // `allowed_tools` (above) are overwritten by `spawn` from
+            // `resolve_tools` over the live registry.
             api_client: None,
             tool_invoker: None,
             tool_schemas: vec![],
@@ -174,8 +218,18 @@ impl SubagentSpawner for PoolSubagentSpawner {
         ctx.tool_invoker = Some(inherit.tool_invoker);
         ctx.budget = Some(inherit.budget);
         ctx.api_client.clone_from(&self.api_client);
-        // Read the (possibly boot-filled) tool-schema cell; unset = no tools.
-        ctx.tool_schemas = self.resolve_tool_schemas();
+        // Resolve THIS spawn's advertised tools + dispatch allow-list from the
+        // live registry per the child's policy (unset registry → no tools).
+        // Populating `allowed_tools` here ACTIVATES the runner's dispatch guard
+        // (runner.rs: an empty list = guard skipped). Its safety rests on the
+        // allow-list covering every name the inherited `RegistryToolInvoker`
+        // could dispatch — true because both derive from the same registry
+        // snapshot (and `resolve_tools` now folds in aliases). A future change
+        // that let the spawner's registry and the invoker's registry diverge
+        // would have to re-establish that invariant.
+        let (tool_schemas, allowed_tools) = self.resolve_tools(&ctx.agent_definition).await;
+        ctx.tool_schemas = tool_schemas;
+        ctx.allowed_tools = allowed_tools;
         let agent_id = ctx.agent_id;
         let (_aid, mut rx) = self
             .pool
@@ -223,6 +277,7 @@ mod tests {
     use serde_json::Value;
     use std::sync::Arc;
     use test_harness::mocks::MockRuntimeSpawner;
+    use tool_api::Tool;
     use traits::budget::{BudgetEnforcerHandle, BudgetError};
     use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
@@ -267,40 +322,249 @@ mod tests {
         let _spawner = PoolSubagentSpawner::new(pool);
     }
 
+    /// Minimal stub tool with a configurable name + aliases (for the resolver
+    /// tests).
+    struct StubTool {
+        name: &'static str,
+        aliases: &'static [&'static str],
+    }
+
+    #[async_trait]
+    impl Tool for StubTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn aliases(&self) -> &[&str] {
+            self.aliases
+        }
+        fn input_schema(&self) -> &Value {
+            static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| serde_json::json!({"type": "object"}))
+        }
+        fn is_enabled(&self, _ctx: &tool_api::tool_trait::ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &Value) -> bool {
+            true
+        }
+        async fn check_permissions(
+            &self,
+            _input: &Value,
+            _ctx: &tool_api::context::ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &Value,
+            _opts: &tool_api::tool_trait::DescriptionOptions,
+        ) -> String {
+            self.name.into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            format!("{} tool prompt", self.name)
+        }
+        async fn call(
+            &self,
+            _input: Value,
+            _ctx: tool_api::context::ToolUseContext,
+            _tx: tool_api::progress::ToolProgressSender,
+        ) -> Result<tool_api::tool_trait::ToolCallResult, tool_api::tool_trait::ToolError> {
+            unreachable!("not invoked in this test")
+        }
+    }
+
+    /// Build an `AgentDefinition` with the given tool policy (other fields are
+    /// the spawn-path defaults).
+    fn agent_def(tools: AgentToolPolicy) -> AgentDefinition {
+        AgentDefinition {
+            agent_type: "test".into(),
+            when_to_use: String::new(),
+            tools,
+            max_turns: 1,
+            model: AgentModel::Inherit,
+            permission_mode: AgentPermissionMode::Bubble,
+            source: AgentSource::BuiltIn,
+            base_dir: "/tmp".into(),
+            system_prompt: None,
+            mcp_servers: vec![],
+            frontmatter_hooks: vec![],
+            icon: None,
+            allowed_tools: vec![],
+            worktree_requirement: None,
+        }
+    }
+
+    fn registry_with(names: &[&'static str]) -> Arc<ToolRegistry> {
+        let mut reg = ToolRegistry::new();
+        for name in names {
+            reg.register_builtin(Arc::new(StubTool {
+                name,
+                aliases: &[],
+            }));
+        }
+        Arc::new(reg)
+    }
+
+    /// Like `agent_def` but in Plan permission mode, which makes
+    /// [`AgentToolResolver`] retain only the read-only tool set.
+    fn agent_def_plan(tools: AgentToolPolicy) -> AgentDefinition {
+        AgentDefinition {
+            permission_mode: AgentPermissionMode::Plan,
+            ..agent_def(tools)
+        }
+    }
+
     #[test]
-    fn tool_schemas_cell_starts_empty_and_late_fill_is_visible() {
-        // The cycle-break primitive: the host grabs a handle, fills it AFTER
-        // the registry exists, and the spawner's spawn-time read sees it.
+    fn registry_cell_starts_empty_and_late_fill_is_visible() {
+        // The cycle-break primitive: the host grabs a handle, fills it AFTER the
+        // registry exists, and the spawner's spawn-time read sees it.
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let spawner = PoolSubagentSpawner::new(pool);
 
-        // Unset by default → child advertises no tools.
-        assert!(spawner.resolve_tool_schemas().is_empty());
-
-        // Host fills the shared cell late (post-registry-build).
-        let cell = spawner.tool_schemas_handle();
-        let schemas = vec![serde_json::json!({
-            "name": "Read",
-            "description": "Reads a file.",
-            "input_schema": {"type": "object"}
-        })];
-        cell.set(schemas.clone()).expect("first fill wins");
-
-        // The spawner's spawn-time read now returns the filled schemas.
-        assert_eq!(spawner.resolve_tool_schemas(), schemas);
-        // A second fill is a no-op (set-once).
-        assert!(cell.set(vec![]).is_err());
-        assert_eq!(spawner.resolve_tool_schemas(), schemas);
+        let cell = spawner.tool_registry_handle();
+        assert!(cell.get().is_none(), "unset by default");
+        let registry = registry_with(&["Read"]);
+        assert!(cell.set(registry).is_ok(), "first fill wins");
+        assert!(spawner.tool_registry_handle().get().is_some());
+        // Set-once: a second fill is rejected.
+        assert!(cell.set(registry_with(&[])).is_err());
     }
 
-    #[test]
-    fn with_tool_schemas_fills_the_cell_eagerly() {
+    #[tokio::test]
+    async fn resolve_tools_unset_registry_is_empty() {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
-        let schemas = vec![serde_json::json!({"name": "Bash"})];
-        let spawner = PoolSubagentSpawner::new(pool).with_tool_schemas(schemas.clone());
-        assert_eq!(spawner.resolve_tool_schemas(), schemas);
+        let spawner = PoolSubagentSpawner::new(pool);
+        let (schemas, allowed) = spawner
+            .resolve_tools(&agent_def(AgentToolPolicy::All {
+                use_exact_tools: true,
+            }))
+            .await;
+        assert!(schemas.is_empty());
+        assert!(allowed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_tools_all_policy_advertises_full_set_and_allow_list() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with(&["Read", "Bash"]));
+
+        let (schemas, allowed) = spawner
+            .resolve_tools(&agent_def(AgentToolPolicy::All {
+                use_exact_tools: true,
+            }))
+            .await;
+        // Full set (sorted by name), and allow-list = resolved names.
+        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["Bash", "Read"]);
+        assert_eq!(allowed, vec!["Read".to_string(), "Bash".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn resolve_tools_explicit_policy_filters_advertised_and_allow_list() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with(&["Read", "Bash", "Edit"]));
+
+        // Explicit allow-list: only "Read" survives — both the advertised set
+        // AND the dispatch allow-list narrow together.
+        let (schemas, allowed) = spawner
+            .resolve_tools(&agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()])))
+            .await;
+        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["Read"]);
+        assert_eq!(allowed, vec!["Read".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn resolve_tools_includes_aliases_in_allow_list() {
+        // The dispatch allow-list must accept every name the inherited invoker's
+        // `find_by_name` accepts — including aliases — or a `tool_use` for a
+        // legacy alias (e.g. AgentTool's "Task") would be wrongly refused by the
+        // runner guard. Advertised schemas stay canonical-name-only.
+        let mut reg = ToolRegistry::new();
+        reg.register_builtin(Arc::new(StubTool {
+            name: "Agent",
+            aliases: &["Task"],
+        }));
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool).with_tool_registry(Arc::new(reg));
+
+        let (schemas, allowed) = spawner
+            .resolve_tools(&agent_def(AgentToolPolicy::All {
+                use_exact_tools: true,
+            }))
+            .await;
+        // Advertised: canonical name only.
+        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["Agent"]);
+        // Allow-list: canonical name AND the legacy alias.
+        assert_eq!(allowed, vec!["Agent".to_string(), "Task".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn resolve_tools_plan_mode_keeps_only_readonly() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with(&["Read", "Bash", "Grep", "WebFetch"]));
+
+        // Plan permission mode retains only the read-only set
+        // (Read/Grep/Glob/WebSearch/WebFetch) at BOTH advertisement and the
+        // dispatch allow-list — `Bash` is dropped from both.
+        let (schemas, allowed) = spawner
+            .resolve_tools(&agent_def_plan(AgentToolPolicy::All {
+                use_exact_tools: true,
+            }))
+            .await;
+        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        // tools_to_wire sorts by name.
+        assert_eq!(names, vec!["Grep", "Read", "WebFetch"]);
+        assert!(!allowed.contains(&"Bash".to_string()));
+        assert_eq!(
+            allowed,
+            vec![
+                "Read".to_string(),
+                "Grep".to_string(),
+                "WebFetch".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_tools_except_policy() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with(&["Read", "Bash", "Edit"]));
+
+        // Except drops the named tools from BOTH the advertised set and the
+        // allow-list.
+        let (schemas, allowed) = spawner
+            .resolve_tools(&agent_def(AgentToolPolicy::Except(vec!["Bash".to_string()])))
+            .await;
+        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["Edit", "Read"]); // sorted by name
+        assert_eq!(allowed, vec!["Read".to_string(), "Edit".to_string()]); // resolved order
     }
 
     #[test]

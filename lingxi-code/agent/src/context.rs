@@ -42,7 +42,11 @@ pub struct SubagentContext {
     /// is skipped) — NOT "no tools allowed"; an empty resolver result therefore
     /// means unrestricted, so a caller wiring this from a real policy must
     /// produce the full resolved set, never an empty list, for a locked-down
-    /// agent. (The current spawn path leaves this empty + `AgentToolPolicy::All`.)
+    /// agent. The production spawner populates this from
+    /// [`crate::tool_resolver::AgentToolResolver`] (the same resolved set it
+    /// serializes into [`Self::tool_schemas`]), so the advertised set and the
+    /// allow-list stay in lock-step. For today's `AgentToolPolicy::All` default
+    /// that is every registered tool name (unrestricted in practice).
     pub allowed_tools: Vec<String>,
     /// Optional worktree the agent runs inside.
     pub worktree_handle: Option<WorktreeHandle>,
@@ -84,22 +88,25 @@ pub struct SubagentContext {
     /// [`tool_api::wire::tools_to_wire`]. Empty means the subagent calls the
     /// model with no tools (so it cannot emit `tool_use`).
     ///
-    /// LIVE in production (the CLI boot path fills the spawner's set-once cell
-    /// from the live registry after it is built — breaking the construction
-    /// cycle where the spawner sits inside the `BuiltinToolContext` that builds
-    /// the registry). The advertised set is the FULL registry, NOT the per-agent
-    /// [`crate::definition::AgentToolPolicy`]-filtered set, because the spawn path
-    /// loads no real [`crate::definition::AgentDefinition`] yet — it hardcodes
-    /// `AgentToolPolicy::All`. The production [`Self::tool_invoker`]
-    /// (`RegistryToolInvoker`) does NOT enforce policy either (`find_by_name` +
-    /// `tool.call`), so the dispatch-time guard is the runner's allow-list check
-    /// on [`Self::allowed_tools`] in [`crate::runner::run_subagent`] — IMPLEMENTED.
-    /// What remains DEFERRED is (a) filtering THIS advertised set through
-    /// [`crate::tool_resolver::AgentToolResolver`] AND populating `allowed_tools`
-    /// from the resolved policy, so a future policy-restricted agent is neither
-    /// told about nor able to call a tool outside its policy. Safe today only
-    /// because every spawnable agent is `AgentToolPolicy::All` with empty
-    /// `allowed_tools`.
+    /// LIVE in production, resolved PER-SPAWN: the spawner holds the live tool
+    /// registry (filled after it is built — breaking the construction cycle where
+    /// the spawner sits inside the `BuiltinToolContext` that builds the registry)
+    /// and, at each spawn, runs [`crate::tool_resolver::AgentToolResolver`] over
+    /// the registry's `available_tools` per the child's
+    /// [`crate::definition::AgentToolPolicy`], serializing the result here AND
+    /// recording the resolved names into [`Self::allowed_tools`]. So the
+    /// advertised set and the dispatch allow-list narrow TOGETHER, and
+    /// resolution reflects the registry's state at spawn time rather than a
+    /// one-time serialized snapshot taken at boot. (The shared `Arc<ToolRegistry>`
+    /// is immutable once handed to the spawner, so this picks up boot-time
+    /// registry state, not live post-boot mutation.) The production
+    /// [`Self::tool_invoker`] (`RegistryToolInvoker`) does not enforce policy
+    /// itself (`find_by_name` + `tool.call`), so the runner's allow-list check on
+    /// `allowed_tools` is the dispatch-time guard. The ONLY remaining DEFERRAL is
+    /// loading real [`crate::definition::AgentDefinition`]s in the spawn path: it
+    /// hardcodes `AgentToolPolicy::All` today, so resolution yields the full set
+    /// (no narrowing) — once real per-agent definitions load, both this set and
+    /// `allowed_tools` auto-narrow with zero further wiring.
     pub tool_schemas: Vec<serde_json::Value>,
     /// Inherited budget enforcer (from `SubagentInheritance::budget`). When
     /// `Some`, the multi-turn loop consults it once per turn and stops with a

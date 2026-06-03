@@ -15,16 +15,18 @@
 //!   ask-storm on every `Read`/`Glob`/etc. — or DELEGATE to `inner.check(...)`
 //!   so the prompt surfaces through whatever transport the host wired.
 //!
-//! ## Scope (phase 2 — enforcing gate)
-//! `authorize` currently matches TOOL-WIDE rules + mode only (no `rule_content`
-//! / per-tool content matching — that is phase 3, e.g. `Bash(npm run *)`). So a
-//! content-scoped rule is matched at the tool level until phase 3 lands. The
-//! subagent path ([`RegistryToolInvoker`]) still bypasses the gate (phase 3).
-//! `Plan` / `AcceptEdits` modes currently COLLAPSE to plain `Ask` (the mode
-//! fallback only special-cases `BypassPermissions` + `DontAsk`), so they do NOT
-//! yet impose `Plan`'s mutation block or `AcceptEdits`' edit auto-allow — also
-//! phase 3. This gate is built at boot only behind an OPT-IN toggle; the default
-//! remains the always-allow `NoOpPermissionGate`.
+//! ## Scope
+//! `authorize` matches TOOL-WIDE rules + mode for all tools, and per-tool FILE
+//! PATH content matching for file tools (phase 3a — `Edit(src/**)` /
+//! `Read(./secrets/**)`). `Bash`/`WebFetch` content matching (e.g.
+//! `Bash(npm run *)`) is still tool-wide (the 3a-bash deferral). The subagent
+//! path ([`RegistryToolInvoker`]) is now ALSO gated (phase 3b — closed the
+//! bypass; subagent + teammate tool calls consult this same gate). `Plan` /
+//! `AcceptEdits` modes still COLLAPSE to plain `Ask` (the mode fallback only
+//! special-cases `BypassPermissions` + `DontAsk`), so they do NOT yet impose
+//! `Plan`'s mutation block or `AcceptEdits`' edit auto-allow. This gate is built
+//! at boot only behind an OPT-IN toggle; the default remains the always-allow
+//! `NoOpPermissionGate`.
 
 use crate::defaults_per_tool::tool_default;
 use crate::gate::{PermissionDecision, PermissionGate, PromptDefault};

@@ -9,6 +9,7 @@
 
 use api_client::AnthropicProvider;
 use permission::PermissionMode;
+use traits::permission_gate::PermissionGate;
 use sandbox::decision::ProjectTrustLevel;
 use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use std::path::PathBuf;
@@ -91,6 +92,14 @@ pub struct BuiltinToolContext {
     /// Budget enforcer — `AgentTool` gates spawn calls through this seam.
     /// Production wires `cost::BudgetEnforcer`.
     pub budget_enforcer: Option<Arc<dyn BudgetEnforcerHandle>>,
+    /// Permission gate (enforcement 3b) — `AgentTool` threads this into the
+    /// `RegistryToolInvoker` it hands the spawner, so a spawned subagent's tool
+    /// calls are gated by the SAME policy as the main loop (closing the bypass
+    /// where the inherited invoker dispatched any tool unconditionally). `None`
+    /// = no enforcement wired (the default; legacy always-dispatch behavior).
+    /// Production wires the boot gate (`PolicyPermissionGate` when
+    /// `LINGXI_ENFORCE_PERMISSIONS` is set, else the no-op gate).
+    pub permission_gate: Option<Arc<dyn PermissionGate>>,
 
     // ===== M4-07 wiring (Phase 7) =====
     /// MCP registry — the 4 MCP builtin tools (`MCPTool`, `McpAuthTool`,

@@ -343,9 +343,15 @@ impl Tool for AgentTool {
         // into the bundle via `RegistryToolInvoker::new(parent_registry)`.
         // The budget Arc is cloned (no deep clone — `Arc::clone` only bumps
         // the refcount), so `Arc::ptr_eq` between parent + child holds.
-        let invoker: Arc<dyn traits::tool_invoker::ToolInvoker> = Arc::new(
-            tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry.clone()),
-        );
+        // (3b) Gate the subagent's tool dispatch with the same permission gate
+        // the main loop uses, when one is wired. `None` → unconditional dispatch
+        // (legacy). The gate rides into the spawner via the inheritance bundle.
+        let mut invoker_impl =
+            tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry.clone());
+        if let Some(gate) = self.ctx.permission_gate.clone() {
+            invoker_impl = invoker_impl.with_gate(gate);
+        }
+        let invoker: Arc<dyn traits::tool_invoker::ToolInvoker> = Arc::new(invoker_impl);
         let inherit = SubagentInheritance {
             tool_invoker: invoker,
             budget: budget.clone(),

@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+mod accumulator;
 pub mod api;
 pub mod catalog;
 pub mod color_manager;

@@ -8,14 +8,19 @@
 //! orchestrator's API client adapter and hands an `Arc<dyn SubagentApiClient>`
 //! to [`crate::handle::PoolSubagentSpawner`].
 //!
-//! The trait is kept deliberately minimal — a single non-streaming
-//! round-trip. SSE streaming, retry, and cost wiring all live behind the
-//! concrete impl, exactly as the orchestrator's `execute_one_turn` consumes
-//! them.
+//! The required method is a single non-streaming round-trip. A streaming
+//! variant ([`SubagentApiClient::messages_create_stream`]) layers on top with a
+//! default that wraps the non-streaming call, so retry/cost wiring lives behind
+//! the concrete impl exactly as the orchestrator's `execute_one_turn` consumes
+//! it. The production orchestrator adapter overrides the streaming method to
+//! delegate to its real SSE transport.
 
+use api_client::types::StreamEvent;
+use api_client::ApiError;
 use async_trait::async_trait;
+use futures::stream::{BoxStream, StreamExt};
 
-/// Non-streaming `messages.create` seam used by the subagent loop.
+/// `messages.create` seam used by the subagent loop.
 ///
 /// Object-safe: callers hold an `Arc<dyn SubagentApiClient>`. The concrete
 /// production impl lives in the orchestrator (the Wire step); test fixtures
@@ -31,5 +36,27 @@ pub trait SubagentApiClient: Send + Sync {
         model: &str,
         system: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
-    ) -> Result<api_client::MessageResponse, api_client::ApiError>;
+    ) -> Result<api_client::MessageResponse, ApiError>;
+
+    /// Issue one model round-trip over the streaming SSE transport, returning
+    /// the wire-decoded [`StreamEvent`] stream (yielding until `message_stop`).
+    /// The [`crate::runner::run_subagent`] loop drains this through
+    /// `crate::accumulator::accumulate_stream` into the same `MessageResponse`
+    /// the non-streaming path returns, so the turn loop is transport-agnostic.
+    ///
+    /// The default wraps [`SubagentApiClient::messages_create`] in a synthetic,
+    /// lossless event sequence — a client that only implements the
+    /// non-streaming round-trip still satisfies this seam (the round-trip
+    /// reproduces the response exactly). The production orchestrator adapter
+    /// overrides this to delegate to its real `StreamingApiClient::stream`.
+    async fn messages_create_stream(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
+        let resp = self.messages_create(model, system, messages).await?;
+        let events = crate::accumulator::response_to_stream_events(resp);
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+    }
 }

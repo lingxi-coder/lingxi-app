@@ -159,9 +159,11 @@ async fn emit_message(
 /// Imperative — mirrors `orchestrator::turn_loop::execute_one_turn`: call the
 /// model, append the assistant turn, dispatch `tool_use` blocks through the
 /// inherited [`traits::ToolInvoker`], feed results back as a user message,
-/// and repeat. Each model round-trip races a `UserExit` / `UserInterrupt`
-/// on `event_rx` via [`tokio::select!`]; a termination event aborts the loop
-/// and surfaces [`SubagentEvent::Killed`].
+/// and repeat. Each model round-trip goes over the streaming seam
+/// ([`crate::api::SubagentApiClient::messages_create_stream`] drained through
+/// `crate::accumulator::accumulate_stream`) and races a `UserExit` /
+/// `UserInterrupt` on `event_rx` via [`tokio::select!`]; a termination event
+/// aborts the loop and surfaces [`SubagentEvent::Killed`].
 #[allow(
     clippy::too_many_lines,
     reason = "imperative multi-turn agentic loop — splitting the turn body hurts readability"
@@ -254,8 +256,20 @@ async fn run_subagent_loop(
         // UserExit / UserInterrupt on event_rx aborts the loop -> Killed.
         // Any other inbound event is ignored (the loop is self-driving) and
         // we re-issue the round-trip on the next iteration.
+        //
+        // The round-trip goes over the STREAMING seam: open the SSE stream and
+        // drain it through `accumulate_stream` into the same `MessageResponse`
+        // the non-streaming path produced (the default `messages_create_stream`
+        // wraps `messages_create` losslessly, so a non-streaming client behaves
+        // identically). Dropping this future on the termination arm cancels the
+        // in-flight stream, exactly as dropping a non-streaming call would.
         let response = loop {
-            let api_call = api_client.messages_create(&model, system.as_deref(), history.clone());
+            let api_call = async {
+                let stream = api_client
+                    .messages_create_stream(&model, system.as_deref(), history.clone())
+                    .await?;
+                crate::accumulator::accumulate_stream(stream).await
+            };
             if !event_channel_open {
                 break api_call.await;
             }
@@ -623,6 +637,127 @@ mod tests {
                 Ok(text_response("(exhausted)", Some("end_turn")))
             })
         }
+    }
+
+    /// `SubagentApiClient` that OVERRIDES the streaming seam with scripted
+    /// `StreamEvent` sequences (one `Vec` per turn) and makes the non-streaming
+    /// `messages_create` unreachable — proving the runner drives the loop
+    /// through `messages_create_stream` + `accumulate_stream`, not the
+    /// non-streaming fallback.
+    struct StreamingMockApiClient {
+        turns: Mutex<VecDeque<Vec<api_client::types::StreamEvent>>>,
+        calls: AtomicUsize,
+    }
+
+    impl StreamingMockApiClient {
+        fn new(turns: Vec<Vec<api_client::types::StreamEvent>>) -> Arc<Self> {
+            Arc::new(Self {
+                turns: Mutex::new(turns.into_iter().collect()),
+                calls: AtomicUsize::new(0),
+            })
+        }
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl crate::api::SubagentApiClient for StreamingMockApiClient {
+        async fn messages_create(
+            &self,
+            _model: &str,
+            _system: Option<&str>,
+            _messages: Vec<ConversationMessage>,
+        ) -> Result<api_client::MessageResponse, api_client::ApiError> {
+            unreachable!("streaming mock must be driven through messages_create_stream")
+        }
+
+        async fn messages_create_stream(
+            &self,
+            _model: &str,
+            _system: Option<&str>,
+            _messages: Vec<ConversationMessage>,
+        ) -> Result<
+            futures::stream::BoxStream<
+                'static,
+                Result<api_client::types::StreamEvent, api_client::ApiError>,
+            >,
+            api_client::ApiError,
+        > {
+            use futures::StreamExt;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
+            Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
+        }
+    }
+
+    /// Build the `message_start` envelope shared by the streamed-turn builders.
+    fn ev_message_start() -> api_client::types::StreamEvent {
+        api_client::types::StreamEvent::MessageStart {
+            message: api_client::MessageResponse {
+                id: "mock".into(),
+                model: "mock".into(),
+                content: vec![],
+                stop_reason: None,
+                usage: api_client::types::UsageApi::default(),
+            },
+        }
+    }
+
+    /// One streamed turn carrying a single text block + `stop` reason.
+    fn streamed_text_turn(text: &str, stop: &str) -> Vec<api_client::types::StreamEvent> {
+        use api_client::types::{ContentBlockApi, ContentDelta, MessageDeltaPayload, StreamEvent};
+        vec![
+            ev_message_start(),
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlockApi::Text {
+                    text: String::new(),
+                },
+            },
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::TextDelta { text: text.into() },
+            },
+            StreamEvent::ContentBlockStop { index: 0 },
+            StreamEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some(stop.into()),
+                },
+                usage: None,
+            },
+            StreamEvent::MessageStop,
+        ]
+    }
+
+    /// One streamed turn carrying a single `tool_use` block + `stop` reason.
+    fn streamed_tool_use_turn(name: &str, stop: &str) -> Vec<api_client::types::StreamEvent> {
+        use api_client::types::{ContentBlockApi, ContentDelta, MessageDeltaPayload, StreamEvent};
+        vec![
+            ev_message_start(),
+            StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlockApi::ToolUse {
+                    id: ToolUseId::new(),
+                    name: name.into(),
+                    input: serde_json::Value::Null,
+                },
+            },
+            StreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: ContentDelta::InputJsonDelta {
+                    partial_json: "{}".into(),
+                },
+            },
+            StreamEvent::ContentBlockStop { index: 0 },
+            StreamEvent::MessageDelta {
+                delta: MessageDeltaPayload {
+                    stop_reason: Some(stop.into()),
+                },
+                usage: None,
+            },
+            StreamEvent::MessageStop,
+        ]
     }
 
     /// `ToolInvoker` that counts invocations and returns a canned value.
@@ -1033,6 +1168,63 @@ mod tests {
         let result = one_completed(&evs);
         assert_eq!(result["text"], "final answer");
         assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn loop_consumes_streaming_seam_end_to_end() {
+        // Proves the runner drives the loop through `messages_create_stream`:
+        // the mock's non-streaming `messages_create` is `unreachable!`. Turn 1
+        // streams a `tool_use` (dispatched via the invoker); turn 2 streams the
+        // final text. Asserts two streamed round-trips, one tool dispatch, and
+        // that the accumulated turn carries the streamed text + stop_reason.
+        let api = StreamingMockApiClient::new(vec![
+            streamed_tool_use_turn("Read", "tool_use"),
+            streamed_text_turn("streamed answer", "end_turn"),
+        ]);
+        let invoker = CountingInvoker::new();
+        let ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        assert_eq!(api.call_count(), 2, "two streamed round-trips");
+        assert_eq!(invoker.call_count(), 1, "streamed tool_use dispatched once");
+        let result = one_completed(&evs);
+        assert_eq!(result["text"], "streamed answer");
+        assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn loop_streaming_protocol_error_surfaces_failed() {
+        // A streamed turn that ends without `message_stop` accumulates to
+        // `ApiError::UnexpectedStreamEnd`, which the loop surfaces as Failed
+        // (same path as a non-streaming api error).
+        let truncated = vec![
+            ev_message_start(),
+            api_client::types::StreamEvent::ContentBlockStart {
+                index: 0,
+                content_block: api_client::types::ContentBlockApi::Text {
+                    text: String::new(),
+                },
+            },
+            // no content_block_stop, no message_stop
+        ];
+        let api = StreamingMockApiClient::new(vec![truncated]);
+        let ctx = loop_ctx(api.clone(), None, 4);
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        let failed = evs.iter().find_map(|e| match e {
+            SubagentEvent::Failed { error, .. } => Some(error.clone()),
+            _ => None,
+        });
+        let err = failed.expect("Failed on truncated stream");
+        assert!(err.starts_with("subagent api error:"), "got: {err}");
     }
 
     #[tokio::test]

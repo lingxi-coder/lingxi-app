@@ -86,10 +86,22 @@ It is designed to pass **KEYLESS**. With no `ANTHROPIC_API_KEY`:
   owned runtime; a turn failure is **not** thrown here, it streams to the
   listener.
 - the keyless turn then surfaces a **terminal `ClientEvent.error`** to the
-  listener (on the simulator's `posix-minimal` platform this is a
-  `.transport` error from the SSE stub). The test asserts that an `.error`
-  event arrived — proving the full SwiftUI→UniFFI→engine→listener path
-  in-process, without a secret.
+  listener. On the simulator `cfg(target_os = "ios")` is **true**, so the engine
+  builds the real `IosPlatform` whose `http` handle is the shared
+  `reqwest` + `rustls` client (`platform_common::http::ReqwestHttp`). The turn
+  therefore makes a **real HTTPS request** to the Anthropic-compatible endpoint,
+  and the terminal error is a real transport outcome — a `401`
+  (`non-success HTTP status 401: …`) when the request reaches the host, or a
+  `connection failed: …` when the simulator has no route to it. **Either is a
+  real-client result**; what it is *not* is the old `platform-posix-minimal` SSE
+  stub (`posix-minimal: … SSE stub …`).
+
+The test asserts both that an `.error` event arrived (proving the full
+SwiftUI→UniFFI→engine→listener path in-process) **and**, negatively, that the
+error message does not carry the posix-minimal stub markers (`posix-minimal` /
+`SSE stub` / `HTTP stub`) — proving a real `reqwest` call was made. This stays
+hermetic: it passes for a `401` *or* a connection error, without a secret and
+without requiring network success.
 
 Run it (no key in the environment):
 
@@ -107,10 +119,17 @@ xcodebuild -scheme LingxiCode -sdk iphonesimulator \
 ```
 
 Expected: `** TEST SUCCEEDED **`. The test log prints the real engine event
-stream it received over the UniFFI listener, e.g.:
+stream it received over the UniFFI listener — a **real** transport error from
+the `reqwest`+`rustls` client, e.g.:
 
 ```
-[P4] keyless ClientEvents received via UniFFI listener: turnStarted(turnId: nil) | error(kind: ...ErrorKindDto.transport, message: "streaming transport error: ... SSE stub ...")
+[P4] keyless ClientEvents received via UniFFI listener: turnStarted(turnId: nil) | error(kind: ...ErrorKindDto.transport, message: "streaming transport error: non-success HTTP status 401: ...")
+```
+
+or, when the simulator cannot reach the host:
+
+```
+[P4] keyless ClientEvents received via UniFFI listener: turnStarted(turnId: nil) | error(kind: ...ErrorKindDto.transport, message: "streaming transport error: connection failed: ...")
 ```
 
 ## 4. REAL run (with a key → live `textDelta`)
@@ -157,10 +176,12 @@ xcodebuild -scheme LingxiCode -sdk iphonesimulator \
 With a valid key reaching a real Anthropic-compatible endpoint, the same
 listener receives `turnStarted` → one or more `textDelta` → `turnEnded` (the
 `[P4] …` log line then shows `textDelta(...)` entries). The simulator's
-`posix-minimal` SSE transport is a stub, so a true streamed `textDelta` is best
-observed on a build that wires the real network client (Plan 17); the keyless
-terminal-error assertion is the portable, secret-free proof that the entire
-in-process transport is wired.
+`IosPlatform` now uses the real `reqwest`+`rustls` HTTP/SSE client
+(`platform_common::http::ReqwestHttp`, shared with desktop and Android), so the
+streamed `textDelta` is a genuine network response — no stub stands in the path.
+The keyless terminal-error assertion (a real `401` / connection error, never the
+`posix-minimal … SSE stub`) is the portable, secret-free proof that the entire
+in-process transport — including the real client — is wired.
 
 ## Files
 

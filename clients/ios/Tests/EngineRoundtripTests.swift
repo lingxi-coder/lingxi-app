@@ -15,15 +15,25 @@
 //   * `submit(.sendPrompt(...))` returns Ok — per the binding contract, a turn
 //     failure is NOT thrown from `submit`; the turn is spawned on the engine's
 //     runtime and `submit` returns once it is queued.
-//   * the keyless turn then fails at the model call (401 / missing key) and the
-//     adapter streams a TERMINAL `ClientEvent.error(kind:message:)` back to the
-//     listener.
+//   * the keyless turn then fails at the model call and the adapter streams a
+//     TERMINAL `ClientEvent.error(kind:message:)` back to the listener.
+//
+// On the simulator `cfg(target_os = "ios")` is TRUE, so `buildIosEngine` builds
+// the REAL `IosPlatform` whose `http` handle is the shared `reqwest` + `rustls`
+// client (`platform_common::http::ReqwestHttp`).  The keyless turn therefore
+// makes a REAL HTTPS request to the Anthropic-compatible endpoint and the
+// terminal error is a real transport outcome — a `401` (`non-success HTTP status
+// 401: …`) when the request reaches the host, or a `connection failed: …` when
+// the simulator has no route to it.  EITHER is proof the real client ran; what it
+// must NOT be is the old `platform-posix-minimal` stub, whose error carries the
+// literal `posix-minimal: … SSE stub (Plan 17 wires the real client)`.  This test
+// asserts exactly that distinction (see `assertRealHttpAttempt` below).
 //
 // So a keyless run is itself a complete proof: engine-build succeeded AND a real
-// engine-originated event arrived through the UniFFI callback on the listener.
-// (WITH a key, the same path streams `.textDelta` — see README-engine.md for the
-// real-run command; this test does not require or assert that, so it never needs
-// a secret in CI.)
+// engine-originated event arrived through the UniFFI callback on the listener AND
+// it came from a real `reqwest` call, not the stub.  (WITH a key, the same path
+// streams `.textDelta` — see README-engine.md for the real-run command; this test
+// does not require or assert that, so it never needs a secret in CI.)
 //
 // NO secrets: the test never sets or reads a hardcoded key.  It asserts the
 // keyless behavior; the engine reads `ANTHROPIC_API_KEY` from the environment.
@@ -163,6 +173,46 @@ import XCTest
             // any secret.
             if let (_, message) = errorEvents.first {
                 XCTAssertFalse(message.isEmpty, "the terminal error must carry a message")
+            }
+
+            // REAL-CLIENT PROOF.  The terminal error must come from the real
+            // `reqwest`+`rustls` transport (`platform_common::http::ReqwestHttp`)
+            // wired into `IosPlatform`, NOT the old `platform-posix-minimal` SSE
+            // stub.  We do this NEGATIVELY (hermetic-safe): assert the message is
+            // not the stub signature.  This passes whether the network returned a
+            // real `401` or a `connection failed: …` — both are the real client —
+            // and fails only if the engine is still wired to the stub.
+            for (_, message) in errorEvents {
+                assertRealHttpAttempt(message)
+            }
+        }
+
+        /// Assert a terminal-error `message` is a REAL transport outcome, not the
+        /// `platform-posix-minimal` stub.
+        ///
+        /// The stub's error is `connection failed: posix-minimal: SSE stub (Plan
+        /// 17 wires the real client)` (and `… HTTP stub …` for the request path).
+        /// The real client's error is either `non-success HTTP status 401: …`
+        /// (request reached the host) or `connection failed: …` from `reqwest`
+        /// (no route from the simulator).  We assert the stub's distinctive
+        /// substrings are ABSENT — true for every real-client outcome, false only
+        /// for the stub — so the test stays hermetic (no network success needed)
+        /// while still proving the real client ran.
+        private func assertRealHttpAttempt(
+            _ message: String,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) {
+            let stubMarkers = ["posix-minimal", "SSE stub", "HTTP stub"]
+            for marker in stubMarkers {
+                XCTAssertFalse(
+                    message.contains(marker),
+                    """
+                    terminal error still carries the posix-minimal stub marker \
+                    "\(marker)" — the engine is wired to the SSE/HTTP STUB, not the \
+                    real reqwest+rustls client. message: \(message)
+                    """,
+                    file: file, line: line)
             }
         }
     }

@@ -26,23 +26,29 @@ use crate::tool_team_delete::TeamDeleteTool;
 use std::sync::Arc;
 use tool_api::Tool;
 use traits::team_spawn::TeamSpawnSeam;
+use traits::OutputStream;
 
 /// Build the coordinator-only tools carrying net-new behavior.
 ///
 /// Returns EXACTLY `TeamCreate` + `TeamDelete` as `Arc<dyn Tool>` trait objects.
 /// Each constructor clones the shared [`TeamRegistry`], the [`CoordinatorMode`]
-/// gate, and the [`TeamSpawnSeam`] into its handler state.
+/// gate, and the [`TeamSpawnSeam`] into its handler state. `TeamCreate`
+/// additionally takes the orchestrator-facing [`OutputStream`] so it can PUSH
+/// the live active-worker count the moment a spawn is reconciled (deterministic
+/// activation, independent of the teammate's racy startup status emit).
 #[must_use]
 pub fn coordinator_internal_tools(
     team: Arc<TeamRegistry>,
     mode: Arc<CoordinatorMode>,
     spawn_seam: Arc<dyn TeamSpawnSeam>,
+    output: Arc<dyn OutputStream>,
 ) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(TeamCreateTool::new(
             team.clone(),
             mode.clone(),
             spawn_seam.clone(),
+            output,
         )) as Arc<dyn Tool>,
         Arc::new(TeamDeleteTool::new(team, mode, spawn_seam)) as Arc<dyn Tool>,
     ]
@@ -74,13 +80,38 @@ mod tests {
         }
     }
 
+    /// No-op output — the factory under test never emits; it only needs a
+    /// concrete `Arc<dyn OutputStream>` to construct `TeamCreate`.
+    struct NoopOutput;
+
+    #[async_trait]
+    impl OutputStream for NoopOutput {
+        async fn emit_text(&self, _text: &str) {}
+        async fn emit_tool_call(
+            &self,
+            _id: &protocol::ToolUseId,
+            _tool: &str,
+            _input: &serde_json::Value,
+        ) {
+        }
+        async fn emit_tool_result(
+            &self,
+            _id: &protocol::ToolUseId,
+            _tool: &str,
+            _result: &serde_json::Value,
+        ) {
+        }
+        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &traits::CostSnapshot) {}
+    }
+
     #[test]
     fn factory_returns_exactly_team_create_and_delete() {
         let team = Arc::new(TeamRegistry::new(AgentId::new()));
         let mode = Arc::new(CoordinatorMode::new());
         let seam: Arc<dyn TeamSpawnSeam> = Arc::new(NoopSeam);
+        let output: Arc<dyn OutputStream> = Arc::new(NoopOutput);
 
-        let tools = coordinator_internal_tools(team, mode, seam);
+        let tools = coordinator_internal_tools(team, mode, seam, output);
 
         // EXACTLY two tools — SendMessage / SyntheticOutput are dropped.
         assert_eq!(

@@ -261,6 +261,9 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::CoordinatorStatus.active_workers", "u32");
     put("ClientEvent::CoordinatorStatus.team", "Option<String>");
 
+    put("ClientEvent::CoordinatorWorker", "coordinator_worker");
+    put("ClientEvent::CoordinatorWorker.worker", "CoordinatorWorkerDto");
+
     put("ClientEvent::ThinkingDelta", "thinking_delta");
     put("ClientEvent::ThinkingDelta.thinking", "String");
     put("ClientEvent::ThinkingDelta.signature", "Option<String>");
@@ -377,6 +380,7 @@ fn current_contract_index() -> ContractIndex {
     put("ListingKindDto::Auth", "auth");
     put("ListingKindDto::Doctor", "doctor");
     put("ListingKindDto::Tasks", "tasks");
+    put("ListingKindDto::Coordinator", "coordinator");
 
     // ── MessageDto / MessageBlockDto (message.rs) ─────────────────────────
     put("MessageDto.role", "String");
@@ -497,6 +501,7 @@ fn current_contract_index() -> ContractIndex {
     put("StatusSnapshotDto.started_at", "String");
     put("StatusSnapshotDto.cwd", "String");
     put("StatusSnapshotDto.status_line", "Option<String>");
+    put("StatusSnapshotDto.active_workers", "Option<u32>");
 
     put("AuthStateDto::SignedOut", "signed_out");
     put("AuthStateDto::SignedIn", "signed_in");
@@ -528,6 +533,11 @@ fn current_contract_index() -> ContractIndex {
     put("TaskStatusDto::Completed", "completed");
     put("TaskStatusDto::Failed", "failed");
     put("TaskStatusDto::Cancelled", "cancelled");
+
+    put("CoordinatorWorkerDto.agent_id", "String");
+    put("CoordinatorWorkerDto.name", "String");
+    put("CoordinatorWorkerDto.agent_type", "String");
+    put("CoordinatorWorkerDto.status", "String");
 
     ix
 }
@@ -730,9 +740,9 @@ fn contract_index_covers_every_dto() {
     use client_protocol::error::ClientError;
     use client_protocol::events::{ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
     use client_protocol::listings::{
-        AgentDto, AuthStateDto, CheckStatusDto, DoctorCheckDto, DoctorReportDto, DoctorSummaryDto,
-        HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto, SessionRowDto,
-        SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+        AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto,
+        DoctorReportDto, DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto,
+        MemoryTierDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
     };
     use client_protocol::message::{MessageBlockDto, MessageDto};
     use client_protocol::permission::{
@@ -839,6 +849,7 @@ fn contract_index_covers_every_dto() {
             started_at: String::new(),
             cwd: String::new(),
             status_line: None,
+            active_workers: None,
         },
         AuthStateDto::SignedOut,
         DoctorReportDto {
@@ -858,6 +869,12 @@ fn contract_index_covers_every_dto() {
             task_type: String::new(),
             status: TaskStatusDto::Pending,
             description: String::new(),
+        },
+        CoordinatorWorkerDto {
+            agent_id: String::new(),
+            name: String::new(),
+            agent_type: String::new(),
+            status: String::new(),
         },
     );
 

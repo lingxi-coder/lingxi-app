@@ -13,6 +13,7 @@
     "n_agents": 1,
     "started_at": "2026-06-02T12:00:00Z",
     "cwd": "/home/dev/project",
-    "status_line": "opus | $0.0123"
+    "status_line": "opus | $0.0123",
+    "active_workers": 2
   }
 }

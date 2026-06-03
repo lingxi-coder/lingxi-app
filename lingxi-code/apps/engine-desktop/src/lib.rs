@@ -173,6 +173,13 @@ pub struct CoordinatorWiring {
     /// The spawn/kill seam the tools use to start / stop the real backing
     /// `InProcessTeammate` task.
     pub spawn_seam: Arc<dyn traits::team_spawn::TeamSpawnSeam>,
+    /// The orchestrator-facing output stream the `TeamCreate` tool pushes the
+    /// live active-worker count through immediately after a spawn is reconciled
+    /// — the same `Arc<dyn OutputStream>` `build()` gives the orchestrator and
+    /// the `CoordinatorStatusSink`. This makes `active_workers > 0` reach every
+    /// client deterministically, independent of the teammate's racy startup
+    /// status emit.
+    pub output: Arc<dyn traits::OutputStream>,
 }
 
 /// Assemble the desktop builtin **tool** registry from a freshly-built
@@ -234,9 +241,10 @@ pub fn register_desktop_tools(
             team,
             mode,
             spawn_seam,
+            output,
         }) => {
             for tool in coordinator::internal_tools::coordinator_internal_tools(
-                team, mode, spawn_seam,
+                team, mode, spawn_seam, output,
             ) {
                 reg.register_builtin(tool);
             }
@@ -897,6 +905,11 @@ pub async fn build(
             team: coordinator.clone(),
             mode: coordinator_mode.clone(),
             spawn_seam: spawn_seam.clone(),
+            // The SAME output stream the orchestrator + CoordinatorStatusSink use,
+            // so the TeamCreate activation PUSH and the sink's later transitions
+            // share one client feed. Cloned here because `output` is moved into
+            // the `ConversationOrchestrator` below.
+            output: output.clone(),
         })
     } else {
         // Drop the spawn-seam clone path; it is unused in a default session.
@@ -1198,6 +1211,7 @@ mod tests {
             team: Arc::new(coordinator::TeamRegistry::new(protocol::AgentId::new())),
             mode: Arc::new(coordinator::CoordinatorMode::new()),
             spawn_seam: Arc::new(NoopSeam),
+            output: Arc::new(orchestrator::test_support::MockOutputStream::new()),
         }
     }
 
@@ -1340,6 +1354,7 @@ mod tests {
             team: team.clone(),
             mode: Arc::new(coordinator::CoordinatorMode::new()),
             spawn_seam: Arc::new(NoopSeam),
+            output: Arc::new(orchestrator::test_support::MockOutputStream::new()),
         };
         let reg = desktop_tool_registry(ctx, Some(wiring));
 

@@ -16,8 +16,8 @@
 //! (decision §0.4).
 
 use crate::listings::{
-    AgentDto, AuthStateDto, DoctorReportDto, HookDto, McpServerDto, MemoryEntryDto, SessionRowDto,
-    SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    AgentDto, AuthStateDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
+    MemoryEntryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use crate::message::MessageDto;
 use serde::{Deserialize, Serialize};
@@ -286,6 +286,17 @@ pub enum ClientEvent {
         /// Optional team name. Skipped from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         team: Option<String>,
+    },
+
+    /// One per-worker roster row (T18). The PULL analog of
+    /// [`Self::CoordinatorStatus`]'s scalar: the bridge `spawn_coordinator_poll`
+    /// (T19) emits ONE of these per worker on a
+    /// [`ListingKindDto::Coordinator`](crate::commands::ListingKindDto::Coordinator)
+    /// refresh, exactly mirroring [`Self::TaskRow`] / [`TaskRowDto`]. Lowers 1:1
+    /// onto the TUI `WorkerRow`.
+    CoordinatorWorker {
+        /// The roster row payload.
+        worker: CoordinatorWorkerDto,
     },
 
     /// Streaming thinking delta. **LIVE-FED** (§0.7 follow-up): `event_router`

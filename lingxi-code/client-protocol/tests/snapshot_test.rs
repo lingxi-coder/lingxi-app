@@ -41,9 +41,9 @@ use client_protocol::commands::{ClientCommand, ImageRefDto, ListingKindDto, Prom
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
 use client_protocol::listings::{
-    AgentDto, AuthStateDto, CheckStatusDto, DoctorCheckDto, DoctorReportDto, DoctorSummaryDto,
-    HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto, SessionRowDto,
-    SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
+    DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
+    SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::{
@@ -353,6 +353,12 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/coordinator_worker.json",
+            ClientEvent::CoordinatorWorker {
+                worker: canonical_coordinator_worker(),
+            },
+        ),
+        (
             "event/thinking_delta.json",
             ClientEvent::ThinkingDelta {
                 thinking: "Let me reason about this.".to_string(),
@@ -619,6 +625,7 @@ fn canonical_status() -> StatusSnapshotDto {
         started_at: "2026-06-02T12:00:00Z".to_string(),
         cwd: "/home/dev/project".to_string(),
         status_line: Some("opus | $0.0123".to_string()),
+        active_workers: Some(2),
     }
 }
 
@@ -650,6 +657,15 @@ fn canonical_task_row() -> TaskRowDto {
         task_type: "bash".to_string(),
         status: TaskStatusDto::Running,
         description: "run the test suite".to_string(),
+    }
+}
+
+fn canonical_coordinator_worker() -> CoordinatorWorkerDto {
+    CoordinatorWorkerDto {
+        agent_id: "agent:00000000-0000-0000-0000-000000000001".to_string(),
+        name: "alpha".to_string(),
+        agent_type: "explorer".to_string(),
+        status: "working".to_string(),
     }
 }
 

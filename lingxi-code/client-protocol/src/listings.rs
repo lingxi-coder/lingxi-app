@@ -249,6 +249,14 @@ pub struct StatusSnapshotDto {
     /// (plan line 155). Skipped from the wire when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_line: Option<String>,
+    /// Active coordinator-team workers at snapshot time — an APPENDED OPTIONAL
+    /// field (T21). `None` (skipped from the wire) for a non-coordinator
+    /// session; `Some(n)` echoes the same scalar the PUSH
+    /// [`crate::events::ClientEvent::CoordinatorStatus`] feed carries. Adding an
+    /// optional field is a `Compatible` change (no `CLIENT_PROTOCOL_VERSION`
+    /// major bump — version-guard `adding_optional_field_is_compatible`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_workers: Option<u32>,
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
@@ -367,4 +375,33 @@ pub enum TaskStatusDto {
     Failed,
     /// Stopped by the user before completion.
     Cancelled,
+}
+
+// ── Coordinator (T18 — per-worker roster) ─────────────────────────────────────
+
+/// One coordinator-team worker row — the lowered `traits::team_registry::WorkerInfo`
+/// (itself the POD projection of the coordinator's `WorkerAgent`). Field-shaped
+/// to lower 1:1 onto the TUI `WorkerRow` (`tui/src/multiagent/state.rs:25`):
+/// `agent_id` / `name` / `agent_type` / `status`. Carried by
+/// [`crate::events::ClientEvent::CoordinatorWorker`] (one per worker, the same
+/// shape as [`TaskRowDto`] / [`crate::events::ClientEvent::TaskRow`]).
+///
+/// This is DISTINCT from `permission::WorkerInfoDto` (`{name, color, team}`,
+/// reserved for sub-agent permission requests) — that shape does not match the
+/// `WorkerRow` roster row.
+///
+/// `status` is a simplified label `String` (the same convention as
+/// [`TaskRowDto::status`]'s source `TaskRecord.status`) so this crate need not
+/// import the concrete `WorkerStatus` enum.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct CoordinatorWorkerDto {
+    /// Worker agent id, stringified (the `AgentId` display / wire form).
+    pub agent_id: String,
+    /// Display name (rendered in the roster).
+    pub name: String,
+    /// Agent-type string (e.g. `"explorer"`, `"writer"`).
+    pub agent_type: String,
+    /// Simplified status label (e.g. `"idle"`, `"working"`, `"failed"`).
+    pub status: String,
 }

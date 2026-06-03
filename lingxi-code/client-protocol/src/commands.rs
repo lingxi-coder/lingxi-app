@@ -297,4 +297,6 @@ pub enum ListingKindDto {
     Doctor,
     /// Task listing → `TaskRow` (one per task).
     Tasks,
+    /// Coordinator-team roster → `CoordinatorWorker` (one per worker) (T18).
+    Coordinator,
 }

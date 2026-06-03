@@ -36,8 +36,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use client_protocol::events::CostDto;
 use client_protocol::listings::{
-    AgentDto, CheckStatusDto, DoctorCheckDto, DoctorReportDto, DoctorSummaryDto, HookDto,
-    McpServerDto, McpStatusDto, SessionRowDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    AgentDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
+    DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, SessionRowDto, StatusSnapshotDto,
+    TaskRowDto, TaskStatusDto,
 };
 
 use permission::PromptDefault;
@@ -47,6 +48,7 @@ use traits::orchestrator::{
     McpServerInfo, McpStatus, StatusSnapshot,
 };
 use traits::task_registry::{TaskOutputChunk, TaskRecord};
+use traits::team_registry::WorkerInfo;
 
 // ── Primitive lowering rules ───────────────────────────────────────────────
 
@@ -219,6 +221,12 @@ pub fn lower_agent_info(info: &AgentInfo) -> AgentDto {
 /// The traits-shape fields map 1:1; the appended optional `status_line` is left
 /// `None` here (it is a status-line addition the engine struct does not carry —
 /// plan line 155 — so a caller with a pre-rendered line sets it after lowering).
+///
+/// The engine's `active_workers` (`u32`) is carried through as
+/// `Some(active_workers)` (T21) so `/status` echoes the live coordinator-team
+/// worker count. It is `0` (still emitted as `Some(0)`) for a non-coordinator
+/// session — the wire skip happens only when the optional is `None`, which this
+/// lowering never produces, matching the always-present engine field.
 #[must_use]
 pub fn lower_status_snapshot(s: &StatusSnapshot) -> StatusSnapshotDto {
     StatusSnapshotDto {
@@ -235,6 +243,7 @@ pub fn lower_status_snapshot(s: &StatusSnapshot) -> StatusSnapshotDto {
         started_at: s.started_at.clone(),
         cwd: s.cwd.to_string_lossy().into_owned(),
         status_line: None,
+        active_workers: Some(s.active_workers),
     }
 }
 
@@ -276,6 +285,24 @@ pub fn lower_task_record(rec: &TaskRecord) -> TaskRowDto {
         task_type: rec.task_type.clone(),
         status: lower_task_status(&rec.status),
         description: rec.description.clone(),
+    }
+}
+
+/// Lower a `traits::team_registry::WorkerInfo` (the POD projection of the
+/// coordinator's `WorkerAgent`) to a [`CoordinatorWorkerDto`] (T18).
+///
+/// The mapping is 1:1 — `WorkerInfo` is already the simplified roster shape that
+/// the DTO and the TUI `WorkerRow` share (`agent_id` / `name` / `agent_type` /
+/// `status`, with `status` a plain label `String`). No `WorkerStatus` enum is
+/// touched here; the simplification happens in the `coordinator`-side
+/// `TeamRegistryHandle` impl (T17).
+#[must_use]
+pub fn lower_worker_agent(info: &WorkerInfo) -> CoordinatorWorkerDto {
+    CoordinatorWorkerDto {
+        agent_id: info.agent_id.clone(),
+        name: info.name.clone(),
+        agent_type: info.agent_type.clone(),
+        status: info.status.clone(),
     }
 }
 
@@ -505,6 +532,7 @@ mod tests {
             n_agents: 1,
             started_at: "2026-06-02T00:00:00Z".to_string(),
             cwd: PathBuf::from("/work/proj"),
+            active_workers: 2,
         };
         let dto = lower_status_snapshot(&snap);
         assert_eq!(dto.session_id, "sess-1");
@@ -521,6 +549,8 @@ mod tests {
         assert_eq!(dto.cwd, "/work/proj");
         // The appended status-line field defaults to None on lowering (plan 155).
         assert_eq!(dto.status_line, None);
+        // The engine `active_workers` (u32) is carried through as Some(n) (T21).
+        assert_eq!(dto.active_workers, Some(2));
     }
 
     #[test]
@@ -576,6 +606,23 @@ mod tests {
         // "killed" wire status → Cancelled DTO variant.
         assert_eq!(dto.status, TaskStatusDto::Cancelled);
         assert_eq!(dto.description, "build");
+    }
+
+    #[test]
+    fn lower_worker_agent_matches_worker_row_fixture() {
+        // The `WorkerInfo` projection (T17) lowers 1:1 onto the roster DTO, which
+        // itself mirrors the TUI `WorkerRow {agent_id, name, agent_type, status}`.
+        let info = WorkerInfo {
+            agent_id: "agent:00000000-0000-0000-0000-000000000001".to_string(),
+            agent_type: "explorer".to_string(),
+            name: "alpha".to_string(),
+            status: "working".to_string(),
+        };
+        let dto = lower_worker_agent(&info);
+        assert_eq!(dto.agent_id, "agent:00000000-0000-0000-0000-000000000001");
+        assert_eq!(dto.name, "alpha");
+        assert_eq!(dto.agent_type, "explorer");
+        assert_eq!(dto.status, "working");
     }
 
     #[test]

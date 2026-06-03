@@ -16,9 +16,9 @@
 
 use client_protocol::events::ClientEvent;
 use client_protocol::listings::{
-    AgentDto, AuthStateDto, CheckStatusDto, DoctorCheckDto, DoctorReportDto, DoctorSummaryDto,
-    HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto, SessionRowDto,
-    SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
+    DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
+    SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 
 // ── Sessions ─────────────────────────────────────────────────────────────────
@@ -330,6 +330,7 @@ fn status_snapshot_round_trips() {
             started_at: "2026-06-02T15:00:00Z".to_string(),
             cwd: "/repo".to_string(),
             status_line: None,
+            active_workers: None,
         },
     };
     let json = serde_json::to_value(&ev).expect("serialize StatusSnapshot");
@@ -359,11 +360,16 @@ fn status_snapshot_optional_fields_skip_when_none() {
         started_at: "2026-06-02T15:00:00Z".to_string(),
         cwd: "/".to_string(),
         status_line: None,
+        active_workers: None,
     };
     let json = serde_json::to_value(&snap).expect("serialize StatusSnapshotDto none");
     assert!(
         json.get("status_line").is_none(),
         "None status_line must be skipped on the wire"
+    );
+    assert!(
+        json.get("active_workers").is_none(),
+        "None active_workers must be skipped on the wire"
     );
 
     snap.status_line = Some("main ✓ | 3 changes".to_string());
@@ -372,6 +378,45 @@ fn status_snapshot_optional_fields_skip_when_none() {
     let back: StatusSnapshotDto =
         serde_json::from_value(json).expect("deserialize StatusSnapshotDto some");
     assert_eq!(back, snap);
+}
+
+/// T21 — the appended optional `active_workers` scalar round-trips: skipped from
+/// the wire when `None`, present and equal when `Some(n)`. This is the field
+/// `/status` surfaces so it echoes the same count the PUSH `CoordinatorStatus`
+/// feed carries.
+#[test]
+fn status_snapshot_carries_active_workers_roundtrip() {
+    let mut snap = StatusSnapshotDto {
+        session_id: "s".to_string(),
+        model: "m".to_string(),
+        n_messages: 0,
+        total_cost_usd: 0.0,
+        input_tokens: 0,
+        output_tokens: 0,
+        n_mcp_connected: 0,
+        n_mcp_total: 0,
+        n_hooks: 0,
+        n_agents: 0,
+        started_at: "2026-06-02T15:00:00Z".to_string(),
+        cwd: "/".to_string(),
+        status_line: None,
+        active_workers: None,
+    };
+    // None → skipped from the wire (additive-optional convention).
+    let json = serde_json::to_value(&snap).expect("serialize none active_workers");
+    assert!(
+        json.get("active_workers").is_none(),
+        "None active_workers must be skipped on the wire"
+    );
+
+    // Some(n) → present, integer-typed, and round-trips byte-for-byte.
+    snap.active_workers = Some(3);
+    let json = serde_json::to_value(&snap).expect("serialize some active_workers");
+    assert_eq!(json["active_workers"], 3);
+    let back: StatusSnapshotDto =
+        serde_json::from_value(json).expect("deserialize some active_workers");
+    assert_eq!(back, snap);
+    assert_eq!(back.active_workers, Some(3));
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
@@ -580,5 +625,48 @@ fn coordinator_status_round_trips_reserved() {
     // None team is skipped on the wire.
     assert!(json.get("team").is_none(), "None team must be skipped");
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize CoordinatorStatus");
+    assert_eq!(back, ev);
+}
+
+/// `CoordinatorWorkerDto` — one per-worker roster row (T18). Field-shaped to
+/// lower 1:1 onto the TUI `WorkerRow` (`agent_id` / `name` / `agent_type` /
+/// `status`). The simplified `status` is a plain label string (the same
+/// convention as `TaskRecord.status`).
+#[test]
+fn coordinator_worker_dto_roundtrip() {
+    let dto = CoordinatorWorkerDto {
+        agent_id: "agent:00000000-0000-0000-0000-000000000001".to_string(),
+        name: "alpha".to_string(),
+        agent_type: "explorer".to_string(),
+        status: "working".to_string(),
+    };
+    let json = serde_json::to_value(&dto).expect("serialize CoordinatorWorkerDto");
+    assert_eq!(json["agent_id"], "agent:00000000-0000-0000-0000-000000000001");
+    assert_eq!(json["name"], "alpha");
+    assert_eq!(json["agent_type"], "explorer");
+    assert_eq!(json["status"], "working");
+    let back: CoordinatorWorkerDto =
+        serde_json::from_value(json).expect("deserialize CoordinatorWorkerDto");
+    assert_eq!(back, dto);
+}
+
+/// `CoordinatorWorker` — one roster row carried by an event (mirrors `TaskRow`).
+/// This is the wire carrier the bridge PULL path (T19) emits one-per-worker.
+#[test]
+fn coordinator_worker_event_round_trips() {
+    let ev = ClientEvent::CoordinatorWorker {
+        worker: CoordinatorWorkerDto {
+            agent_id: "agent:00000000-0000-0000-0000-000000000001".to_string(),
+            name: "alpha".to_string(),
+            agent_type: "explorer".to_string(),
+            status: "working".to_string(),
+        },
+    };
+    let json = serde_json::to_value(&ev).expect("serialize CoordinatorWorker");
+    assert_eq!(json["type"], "coordinator_worker");
+    assert_eq!(json["worker"]["agent_id"], "agent:00000000-0000-0000-0000-000000000001");
+    assert_eq!(json["worker"]["agent_type"], "explorer");
+    assert_eq!(json["worker"]["status"], "working");
+    let back: ClientEvent = serde_json::from_value(json).expect("deserialize CoordinatorWorker");
     assert_eq!(back, ev);
 }

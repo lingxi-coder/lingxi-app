@@ -25,9 +25,10 @@ use tool_api::tool_trait::{
     ToolStaticContext, ValidationError,
 };
 use traits::team_spawn::TeamSpawnSeam;
+use traits::OutputStream;
 
 use crate::mode::CoordinatorMode;
-use crate::team_registry::TeamRegistry;
+use crate::team_registry::{TeamRegistry, WorkerStatus};
 
 /// Canonical tool name — mirrors the TS `TEAM_CREATE_TOOL_NAME` constant
 /// (`src/tools/TeamCreateTool/constants.ts`).
@@ -76,25 +77,34 @@ fn team_create_schema() -> &'static Value {
 /// mode-gate behavior). Storing them now keeps the assembly seam stable.
 pub struct TeamCreateTool {
     team: Arc<TeamRegistry>,
-    #[allow(dead_code)] // Consumed by call()'s mode gate in T05.
     mode: Arc<CoordinatorMode>,
-    #[allow(dead_code)] // Consumed by call()'s real-spawn path in T05.
     spawn_seam: Arc<dyn TeamSpawnSeam>,
+    /// The orchestrator-facing PUSH sink. After a spawn is fully reconciled
+    /// (worker registered, teammate started, worker↔`task_id` link written),
+    /// `call()` emits the live active-worker count through this so every client
+    /// learns `active_workers > 0` deterministically — independent of the
+    /// teammate's own racy startup `Running` emit (which is dispatched on a
+    /// concurrent task and can fire before the link is written, leaving a
+    /// status sink keyed on the not-yet-written `task_id` unable to resolve it).
+    output: Arc<dyn OutputStream>,
 }
 
 impl TeamCreateTool {
     /// Construct a `TeamCreate` tool wired to the shared coordinator registry,
-    /// the mode gate, and the teammate spawn seam.
+    /// the mode gate, the teammate spawn seam, and the orchestrator-facing
+    /// output stream used to PUSH the live active-worker count after a spawn.
     #[must_use]
     pub fn new(
         team: Arc<TeamRegistry>,
         mode: Arc<CoordinatorMode>,
         spawn_seam: Arc<dyn TeamSpawnSeam>,
+        output: Arc<dyn OutputStream>,
     ) -> Self {
         Self {
             team,
             mode,
             spawn_seam,
+            output,
         }
     }
 }
@@ -264,6 +274,34 @@ impl Tool for TeamCreateTool {
         // 5. Record the team name (source of the CoordinatorStatus { team } DTO).
         self.team.set_team_name(Some(team_name.clone())).await;
 
+        // 5a. Mark the freshly-spawned, now-linked worker `Working` and PUSH the
+        //     live active-worker count to every client. This is the deterministic
+        //     activation point: by here the teammate task is confirmed started
+        //     (`spawn_teammate` returned) and the worker↔task_id link is written,
+        //     so the count is authoritative. We drive it from the tool rather
+        //     than relying on the teammate's own startup `Running` emit: that
+        //     emit runs on a CONCURRENT runtime task and can fire before this
+        //     `call()` writes the link (step 4), in which case the
+        //     `CoordinatorStatusSink` — keyed on the still-unwritten `task_id` —
+        //     silently drops it and no client ever learns `active_workers > 0`.
+        //     The sink remains authoritative for the later terminal transitions
+        //     (`Failed` / `Killed`) and their pushes; this initial push is
+        //     idempotent w.r.t. a sink `Running` that happens to land afterward
+        //     (same count).
+        self.team
+            .update_status(
+                &agent_id,
+                WorkerStatus::Working {
+                    activity: "running".to_string(),
+                },
+            )
+            .await;
+        let active = self.team.active_worker_count().await;
+        let pushed_team = self.team.team_name().await;
+        self.output
+            .emit_coordinator_status(active, pushed_team.as_deref())
+            .await;
+
         // 6. Return the worker agent id (model-facing lead id) and the REAL
         //    handler-generated task_id (replaces the old task_id == agent_id
         //    placeholder).
@@ -356,19 +394,78 @@ mod tests {
         }
     }
 
+    /// Spy [`OutputStream`] recording every `emit_coordinator_status` call as
+    /// `(active_workers, team)`; the four required callbacks are inert no-ops.
+    #[derive(Default)]
+    struct SpyOutput {
+        statuses: Mutex<Vec<(u32, Option<String>)>>,
+    }
+
+    impl SpyOutput {
+        fn last(&self) -> Option<(u32, Option<String>)> {
+            self.statuses.lock().unwrap().last().cloned()
+        }
+        fn calls(&self) -> usize {
+            self.statuses.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait]
+    impl OutputStream for SpyOutput {
+        async fn emit_text(&self, _text: &str) {}
+        async fn emit_tool_call(
+            &self,
+            _id: &protocol::ToolUseId,
+            _tool: &str,
+            _input: &serde_json::Value,
+        ) {
+        }
+        async fn emit_tool_result(
+            &self,
+            _id: &protocol::ToolUseId,
+            _tool: &str,
+            _result: &serde_json::Value,
+        ) {
+        }
+        async fn emit_end_turn(&self, _stop_reason: &str, _cost: &traits::CostSnapshot) {}
+        async fn emit_coordinator_status(&self, active_workers: u32, team: Option<&str>) {
+            self.statuses
+                .lock()
+                .unwrap()
+                .push((active_workers, team.map(str::to_string)));
+        }
+    }
+
+    /// Build a TeamCreate tool with coordinator mode ENABLED (the normal path),
+    /// a recording seam returning the given handler task_id, and a spy output
+    /// the test can inspect for the activation PUSH.
+    fn make_tool_with_seam_and_spy(
+        seam: Arc<RecordingSeam>,
+    ) -> (
+        TeamCreateTool,
+        Arc<TeamRegistry>,
+        Arc<CoordinatorMode>,
+        Arc<SpyOutput>,
+    ) {
+        let registry = Arc::new(TeamRegistry::new(AgentId::new()));
+        let mode = Arc::new(CoordinatorMode::new());
+        mode.enter();
+        let spy = Arc::new(SpyOutput::default());
+        let tool = TeamCreateTool::new(
+            registry.clone(),
+            mode.clone(),
+            seam as Arc<dyn TeamSpawnSeam>,
+            spy.clone() as Arc<dyn OutputStream>,
+        );
+        (tool, registry, mode, spy)
+    }
+
     /// Build a TeamCreate tool with coordinator mode ENABLED (the normal path)
     /// and a recording seam returning the given handler task_id.
     fn make_tool_with_seam(
         seam: Arc<RecordingSeam>,
     ) -> (TeamCreateTool, Arc<TeamRegistry>, Arc<CoordinatorMode>) {
-        let registry = Arc::new(TeamRegistry::new(AgentId::new()));
-        let mode = Arc::new(CoordinatorMode::new());
-        mode.enter();
-        let tool = TeamCreateTool::new(
-            registry.clone(),
-            mode.clone(),
-            seam as Arc<dyn TeamSpawnSeam>,
-        );
+        let (tool, registry, mode, _spy) = make_tool_with_seam_and_spy(seam);
         (tool, registry, mode)
     }
 
@@ -511,10 +608,12 @@ mod tests {
         let registry = Arc::new(TeamRegistry::new(AgentId::new()));
         let mode = Arc::new(CoordinatorMode::new()); // disabled by default
         let seam = Arc::new(RecordingSeam::new("task-handler-id"));
+        let spy = Arc::new(SpyOutput::default());
         let tool = TeamCreateTool::new(
             registry.clone(),
             mode,
             seam.clone() as Arc<dyn TeamSpawnSeam>,
+            spy.clone() as Arc<dyn OutputStream>,
         );
 
         let err = tool
@@ -531,10 +630,12 @@ mod tests {
             "invalid input: coordinator mode not active"
         );
 
-        // No worker spawned, seam never invoked, team name untouched.
+        // No worker spawned, seam never invoked, team name untouched, and the
+        // mode-gate early-return fired BEFORE any activation PUSH.
         assert!(registry.list().await.is_empty(), "no worker on disabled mode");
         assert_eq!(seam.spawns.load(Ordering::SeqCst), 0);
         assert_eq!(registry.team_name().await, None);
+        assert_eq!(spy.calls(), 0, "no CoordinatorStatus push when mode is off");
     }
 
     #[tokio::test]
@@ -596,6 +697,44 @@ mod tests {
             seam.spawns.load(Ordering::SeqCst),
             1,
             "spawn_teammate invoked exactly once"
+        );
+    }
+
+    /// T15 fix: after a successful spawn, `call()` deterministically transitions
+    /// the now-linked worker to `Working` and PUSHES the live active-worker
+    /// count to the orchestrator-facing output stream — independent of the
+    /// teammate's own racy startup status emit. This is the activation signal
+    /// every client observes.
+    #[tokio::test]
+    async fn call_transitions_worker_to_working_and_pushes_active_count() {
+        let seam = Arc::new(RecordingSeam::new("handler-task-7"));
+        let (tool, registry, _mode, spy) = make_tool_with_seam_and_spy(seam);
+
+        tool.call(
+            json!({ "team_name": "alpha", "agent_type": "researcher" }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("valid call");
+
+        // The worker is Working (deterministic Idle -> Working), not stranded Idle.
+        let workers = registry.list().await;
+        assert_eq!(workers.len(), 1);
+        assert_eq!(
+            workers[0].status,
+            WorkerStatus::Working {
+                activity: "running".to_string()
+            },
+            "the spawned worker is deterministically Working after call()"
+        );
+
+        // Exactly one activation PUSH carrying active_workers >= 1 + the team name.
+        assert_eq!(spy.calls(), 1, "exactly one CoordinatorStatus push on spawn");
+        assert_eq!(
+            spy.last(),
+            Some((1, Some("alpha".to_string()))),
+            "the push carries the live active-worker count and team name"
         );
     }
 }

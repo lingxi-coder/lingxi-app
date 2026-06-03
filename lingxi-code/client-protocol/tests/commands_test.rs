@@ -242,6 +242,7 @@ fn listing_kind_variants_round_trip() {
         (ListingKindDto::Auth, "auth"),
         (ListingKindDto::Doctor, "doctor"),
         (ListingKindDto::Tasks, "tasks"),
+        (ListingKindDto::Coordinator, "coordinator"),
     ];
     for (kind, tag) in cases {
         let json = serde_json::to_value(kind).expect("serialize ListingKindDto");
@@ -249,6 +250,18 @@ fn listing_kind_variants_round_trip() {
         let back: ListingKindDto = serde_json::from_value(json).expect("deserialize ListingKindDto");
         assert_eq!(back, kind);
     }
+}
+
+/// `ListingKindDto::Coordinator` — the per-worker roster pull kind (T18). A new
+/// variant on the `#[non_exhaustive]` enum is additive (no major bump).
+#[test]
+fn listing_kind_coordinator_roundtrip() {
+    let kind = ListingKindDto::Coordinator;
+    let json = serde_json::to_value(kind).expect("serialize ListingKindDto::Coordinator");
+    assert_eq!(json["type"], "coordinator");
+    let back: ListingKindDto =
+        serde_json::from_value(json).expect("deserialize ListingKindDto::Coordinator");
+    assert_eq!(back, kind);
 }
 
 /// `NewSession` — starts a fresh session. Carries optional `cwd`/`model`, but

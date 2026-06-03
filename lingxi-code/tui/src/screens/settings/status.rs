@@ -95,6 +95,7 @@ mod tests {
                 n_agents: 4,
                 started_at: "2026-05-29T10:00:00Z".into(),
                 cwd: PathBuf::from("/home/u/proj"),
+                active_workers: 0,
             },
             cost: CostSnapshot::default(),
         }

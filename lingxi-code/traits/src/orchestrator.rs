@@ -236,6 +236,14 @@ pub struct StatusSnapshot {
     pub started_at: String,
     /// Working directory used to launch the session.
     pub cwd: PathBuf,
+    /// Active coordinator-team workers at snapshot time (T21).
+    ///
+    /// `0` for a non-coordinator session (the `Default`), so existing
+    /// constructors that use `..Default::default()` keep their behavior. A
+    /// coordinator session surfaces the live `TeamRegistry::active_worker_count`
+    /// here so `/status` can echo the same scalar the PUSH
+    /// `CoordinatorStatus` feed carries.
+    pub active_workers: u32,
 }
 
 /// Public handle to the orchestrator that slash commands operate against.

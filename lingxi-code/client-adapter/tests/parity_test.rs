@@ -103,6 +103,7 @@ fn status_snapshot_parity() {
         n_agents: 4,
         started_at: "2026-05-29T10:00:00Z".to_string(),
         cwd: PathBuf::from("/home/u/proj"),
+        active_workers: 0,
     };
 
     let dto = lower_status_snapshot(&snap);

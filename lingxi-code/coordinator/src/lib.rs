@@ -21,6 +21,7 @@ pub mod tool_synthetic_output;
 pub mod tool_team_create;
 pub mod tool_team_delete;
 
+pub use handle::worker_status_label;
 pub use mailbox::{MailboxError, MailboxRouter, MessageSender, TeammateMailbox, TeammateMessage};
 pub use mode::CoordinatorMode;
 pub use status_sink::CoordinatorStatusSink;

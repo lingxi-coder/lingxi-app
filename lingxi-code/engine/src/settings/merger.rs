@@ -25,6 +25,14 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         additional_includes: concat_dedup(prev.additional_includes, next.additional_includes),
         sandbox: deep_merge_object(prev.sandbox, next.sandbox),
         hooks: deep_merge_object(prev.hooks, next.hooks),
+        // Deep-merge the opaque block. NOTE: claude-code concat-dedups the
+        // allow/deny/ask arrays across tiers; deep_merge_object takes `next`
+        // for a matching array key. This only affects a reader of the MERGED
+        // field — the permission loader reads each settings FILE per-source
+        // (`permission::permission_rules_from_settings_json`), so it is moot
+        // for rule loading. (Refine to per-array concat if the merged field is
+        // ever consumed directly.)
+        permissions: deep_merge_object(prev.permissions, next.permissions),
         output_style: deep_merge_object(prev.output_style, next.output_style),
         // Scalar fields — Override semantics: next wins when set, else prev.
         telemetry_enabled: next.telemetry_enabled.or(prev.telemetry_enabled),

@@ -9,7 +9,7 @@ use crate::mode::PermissionMode;
 use crate::result::{
     PermissionDecisionReason, PermissionMetadata, PermissionPrompt, PermissionResult,
 };
-use crate::rule::{PermissionRule, PermissionRuleSource};
+use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -45,6 +45,25 @@ impl PermissionPolicy {
             denial_tracking: Mutex::new(DenialTrackingState::default()),
             bypass_killswitch_active: false,
         }
+    }
+
+    /// Build a policy with `mode`, bucketing `rules` into the allow/deny/ask
+    /// maps keyed by source. The foundation for enforcement: the loaded rules
+    /// (e.g. from [`crate::loader::permission_rules_from_settings_json`]) land
+    /// in the same buckets [`Self::authorize`] already evaluates. Wiring a gate
+    /// over the resulting policy is a later phase.
+    #[must_use]
+    pub fn from_rules(mode: PermissionMode, rules: impl IntoIterator<Item = PermissionRule>) -> Self {
+        let mut policy = Self::new(mode);
+        for rule in rules {
+            let bucket = match rule.behavior {
+                PermissionBehavior::Allow => &mut policy.allow_rules,
+                PermissionBehavior::Deny => &mut policy.deny_rules,
+                PermissionBehavior::Ask => &mut policy.ask_rules,
+            };
+            bucket.entry(rule.source).or_default().push(rule);
+        }
+        policy
     }
 
     /// Resolve a tool call to a [`PermissionResult`].
@@ -199,6 +218,35 @@ mod tests {
         assert!(matches!(
             p.authorize("Bash", &serde_json::json!({})),
             PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn from_rules_buckets_by_behavior_and_authorizes() {
+        // The loader → policy → authorize foundation: a deny rule lands in the
+        // deny bucket and wins; an allow rule lands in the allow bucket.
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "allow": ["Read"], "deny": ["Bash"], "ask": ["WebFetch"] } }"#,
+            PermissionRuleSource::UserSettings,
+        )
+        .unwrap();
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        assert_eq!(p.allow_rules.values().flatten().count(), 1);
+        assert_eq!(p.deny_rules.values().flatten().count(), 1);
+        assert_eq!(p.ask_rules.values().flatten().count(), 1);
+        // Bash is denied by rule (tool-wide), Read allowed, WebFetch falls to
+        // its ask rule, an unmatched tool falls to the Default-mode ask.
+        assert!(matches!(
+            p.authorize("Bash", &serde_json::json!({})),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Read", &serde_json::json!({})),
+            PermissionResult::Allow { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Other", &serde_json::json!({})),
+            PermissionResult::Ask { .. }
         ));
     }
 }

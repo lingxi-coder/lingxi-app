@@ -28,6 +28,121 @@ pub struct PermissionRuleValue {
     pub rule_content: Option<String>,
 }
 
+impl PermissionRuleValue {
+    /// Parse a permission-rule string (`"Tool"` or `"Tool(content)"`) into a
+    /// [`PermissionRuleValue`]. 1:1 with claude-code
+    /// `permissionRuleValueFromString` (`utils/permissions/permissionRuleParser.ts`):
+    ///
+    /// - Splits on the FIRST unescaped `(` and requires the LAST unescaped `)`
+    ///   to be the final char; otherwise the whole string is a bare tool name.
+    /// - Empty (`"Tool()"`) or wildcard (`"Tool(*)"`) content collapses to a
+    ///   tool-wide rule (`rule_content: None`).
+    /// - Content is unescaped (`\(`→`(`, `\)`→`)`, `\\`→`\`).
+    /// - The tool name is run through [`normalize_legacy_tool_name`].
+    #[must_use]
+    pub fn from_rule_string(rule: &str) -> Self {
+        let chars: Vec<char> = rule.chars().collect();
+        let bare = || Self {
+            tool_name: normalize_legacy_tool_name(rule),
+            rule_content: None,
+        };
+        let Some(open) = find_first_unescaped(&chars, '(') else {
+            return bare();
+        };
+        let Some(close) = find_last_unescaped(&chars, ')') else {
+            return bare();
+        };
+        // Malformed / content-after-close → treat the whole string as a tool name.
+        if close <= open || close != chars.len() - 1 {
+            return bare();
+        }
+        let tool_name: String = chars[..open].iter().collect();
+        if tool_name.is_empty() {
+            return bare();
+        }
+        let raw_content: String = chars[open + 1..close].iter().collect();
+        // `Tool()` / `Tool(*)` are tool-wide.
+        if raw_content.is_empty() || raw_content == "*" {
+            return Self {
+                tool_name: normalize_legacy_tool_name(&tool_name),
+                rule_content: None,
+            };
+        }
+        Self {
+            tool_name: normalize_legacy_tool_name(&tool_name),
+            rule_content: Some(unescape_rule_content(&raw_content)),
+        }
+    }
+
+    /// Serialize back to the `"Tool"` / `"Tool(content)"` rule-string form
+    /// (1:1 with claude-code `permissionRuleValueToString`; content parens are
+    /// escaped). Round-trips with [`Self::from_rule_string`].
+    #[must_use]
+    pub fn to_rule_string(&self) -> String {
+        match self.rule_content.as_deref() {
+            None | Some("") => self.tool_name.clone(),
+            Some(content) => format!("{}({})", self.tool_name, escape_rule_content(content)),
+        }
+    }
+}
+
+/// Map a legacy tool name to its canonical name (claude-code
+/// `LEGACY_TOOL_NAME_ALIASES`, external/non-ant build — the KAIROS-gated
+/// `Brief` alias is omitted). Applied on parse so rules/hooks resolve to the
+/// current name.
+#[must_use]
+pub fn normalize_legacy_tool_name(name: &str) -> String {
+    match name {
+        "Task" => "Agent",
+        "KillShell" => "TaskStop",
+        "AgentOutputTool" | "BashOutputTool" => "TaskOutput",
+        other => other,
+    }
+    .to_string()
+}
+
+/// Escape rule content for `Tool(content)` storage (claude-code
+/// `escapeRuleContent`). Order matters: backslashes first, then parens.
+fn escape_rule_content(content: &str) -> String {
+    content
+        .replace('\\', "\\\\")
+        .replace('(', "\\(")
+        .replace(')', "\\)")
+}
+
+/// Reverse of [`escape_rule_content`] (claude-code `unescapeRuleContent`):
+/// parens first, then backslashes.
+fn unescape_rule_content(content: &str) -> String {
+    content
+        .replace("\\(", "(")
+        .replace("\\)", ")")
+        .replace("\\\\", "\\")
+}
+
+/// Index of the FIRST `target` char preceded by an EVEN number of backslashes
+/// (i.e. not escaped). claude-code `findFirstUnescapedChar`.
+fn find_first_unescaped(chars: &[char], target: char) -> Option<usize> {
+    (0..chars.len()).find(|&i| chars[i] == target && is_unescaped(chars, i))
+}
+
+/// Index of the LAST unescaped `target` char. claude-code `findLastUnescapedChar`.
+fn find_last_unescaped(chars: &[char], target: char) -> Option<usize> {
+    (0..chars.len())
+        .rev()
+        .find(|&i| chars[i] == target && is_unescaped(chars, i))
+}
+
+/// `true` if the char at `i` is preceded by an even number of `\`.
+fn is_unescaped(chars: &[char], i: usize) -> bool {
+    let mut backslashes = 0usize;
+    let mut j = i;
+    while j > 0 && chars[j - 1] == '\\' {
+        backslashes += 1;
+        j -= 1;
+    }
+    backslashes % 2 == 0
+}
+
 /// What a rule does on match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PermissionBehavior {
@@ -165,5 +280,84 @@ mod tests {
             source: PermissionRuleSource::Session,
         };
         assert!(!r.matches_tool("Bash"));
+    }
+
+    // ── rule-string parser (1:1 with claude-code permissionRuleParser.ts) ──
+
+    fn parse(s: &str) -> PermissionRuleValue {
+        PermissionRuleValue::from_rule_string(s)
+    }
+
+    #[test]
+    fn parse_bare_tool_name() {
+        let v = parse("Bash");
+        assert_eq!(v.tool_name, "Bash");
+        assert!(v.rule_content.is_none());
+    }
+
+    #[test]
+    fn parse_tool_with_content() {
+        let v = parse("Bash(npm install)");
+        assert_eq!(v.tool_name, "Bash");
+        assert_eq!(v.rule_content.as_deref(), Some("npm install"));
+    }
+
+    #[test]
+    fn parse_empty_and_wildcard_collapse_to_tool_wide() {
+        assert!(parse("Bash()").rule_content.is_none());
+        assert!(parse("Bash(*)").rule_content.is_none());
+        assert_eq!(parse("Bash(*)").tool_name, "Bash");
+    }
+
+    #[test]
+    fn parse_unescapes_escaped_parens() {
+        // claude-code doc example: Bash(python -c "print\(1\)")
+        let v = parse(r#"Bash(python -c "print\(1\)")"#);
+        assert_eq!(v.tool_name, "Bash");
+        assert_eq!(v.rule_content.as_deref(), Some(r#"python -c "print(1)""#));
+    }
+
+    #[test]
+    fn parse_malformed_treated_as_tool_name() {
+        // No close paren, content after close, or empty tool name → bare name.
+        assert_eq!(parse("Bash(npm").tool_name, "Bash(npm");
+        assert!(parse("Bash(npm").rule_content.is_none());
+        assert_eq!(parse("Bash(x)y").tool_name, "Bash(x)y");
+        assert_eq!(parse("(foo)").tool_name, "(foo)");
+    }
+
+    #[test]
+    fn parse_normalizes_legacy_tool_names() {
+        assert_eq!(parse("Task").tool_name, "Agent");
+        assert_eq!(parse("Task(general-purpose)").tool_name, "Agent");
+        assert_eq!(parse("KillShell").tool_name, "TaskStop");
+        assert_eq!(parse("AgentOutputTool").tool_name, "TaskOutput");
+        assert_eq!(parse("BashOutputTool").tool_name, "TaskOutput");
+    }
+
+    #[test]
+    fn to_rule_string_round_trips() {
+        for s in [
+            "Bash",
+            "Bash(npm install)",
+            "Edit(src/**)",
+            "WebFetch(domain:example.com)",
+        ] {
+            assert_eq!(parse(s).to_rule_string(), s, "round-trip {s}");
+        }
+        // Parens in content are escaped on the way out and survive a re-parse.
+        let v = parse(r#"Bash(echo "a\(b\)")"#);
+        let s = v.to_rule_string();
+        assert_eq!(s, r#"Bash(echo "a\(b\)")"#);
+        assert_eq!(parse(&s).rule_content, v.rule_content);
+        // None / empty content serialize to the bare tool name.
+        assert_eq!(
+            PermissionRuleValue {
+                tool_name: "Read".into(),
+                rule_content: None
+            }
+            .to_rule_string(),
+            "Read"
+        );
     }
 }

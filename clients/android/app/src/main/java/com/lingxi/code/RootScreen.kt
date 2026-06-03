@@ -24,13 +24,17 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lingxi.code.conversation.ChatScreen
 import com.lingxi.code.conversation.ChatViewModel
+import com.lingxi.code.conversation.ComposerAttachment
 import com.lingxi.code.drawer.DrawerContent
 import com.lingxi.code.drawer.rememberDrawerUiState
 import com.lingxi.code.model.MockData
 import com.lingxi.code.theme.LingXiTheme
+import com.lingxi.code.vision.rememberCameraCapture
 import com.lingxi.code.voice.VoiceFlowOverlay
 import com.lingxi.code.voice.buildVoiceEngine
 import com.lingxi.code.voice.rememberVoiceCapture
+import android.graphics.BitmapFactory
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
 
@@ -86,6 +90,26 @@ fun RootScreen(
         },
     )
 
+    // The captured-photo attachment is hoisted here exactly like the voice draft:
+    // tapping the composer's camera affordance drives an on-device capture through
+    // the same CameraController the engine bridges onto `traits::CameraControl`,
+    // and the resulting JPEG surfaces as a composer thumbnail (the device-vision
+    // analog of how onTranscript surfaces a recognized utterance).
+    var attachment by remember { mutableStateOf<ComposerAttachment?>(null) }
+
+    val onCameraClick = rememberCameraCapture(
+        onCaptured = { image ->
+            val bmp = BitmapFactory.decodeByteArray(image.jpegBytes, 0, image.jpegBytes.size)
+            if (bmp != null) {
+                attachment = ComposerAttachment(
+                    thumb = bmp.asImageBitmap(),
+                    width = image.width,
+                    height = image.height,
+                )
+            }
+        },
+    )
+
     fun closeDrawer() = scope.launch { drawerState.close() }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -134,6 +158,9 @@ fun RootScreen(
                     },
                     draft = draft,
                     onDraftChange = { draft = it },
+                    onCameraClick = onCameraClick,
+                    attachment = attachment,
+                    onRemoveAttachment = { attachment = null },
                 )
             }
         }

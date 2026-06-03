@@ -19,6 +19,7 @@ import com.lingxi.code.voice.audio.AndroidSttAdapter
 import com.lingxi.code.voice.audio.AndroidTtsAdapter
 import com.lingxi.code.voice.audio.SystemSpeechRecognizerStt
 import com.lingxi.code.voice.audio.SystemTextToSpeechTts
+import com.lingxi.code.vision.AndroidCameraAdapter
 import kotlinx.coroutines.launch
 
 private const val TAG = "VoiceController"
@@ -60,6 +61,10 @@ fun buildVoiceEngine(
     val appContext = context.applicationContext
     val stt = AndroidSttAdapter(SystemSpeechRecognizerStt(appContext))
     val tts = AndroidTtsAdapter(SystemTextToSpeechTts(appContext))
+    // Device-vision: the camera adapter drives the process-global CameraController,
+    // whose ActivityResult launchers are registered by MainActivity. The engine
+    // bridges this onto `traits::CameraControl`, lighting up `tool-camera` on-device.
+    val camera = AndroidCameraAdapter()
     val listener = object : AndroidEventListener {
         override suspend fun onEvent(event: ClientEvent) {
             // Minimal sink: the chat surface still streams through the mock
@@ -78,6 +83,7 @@ fun buildVoiceEngine(
             listener = listener,
             stt = stt,
             tts = tts,
+            camera = camera,
         )
     } catch (t: Throwable) {
         // PlatformUnavailable on a host build, or UnsatisfiedLinkError when the

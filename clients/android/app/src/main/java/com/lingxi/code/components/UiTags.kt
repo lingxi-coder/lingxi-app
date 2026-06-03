@@ -14,6 +14,9 @@ object UiTags {
     /** The conversation top-bar hamburger that opens the 对话/项目/定时 drawer. */
     const val OPEN_DRAWER = "tag.openDrawer"
 
+    /** The composer's camera affordance that triggers an on-device photo capture. */
+    const val COMPOSER_CAMERA = "tag.composerCamera"
+
     /** Prefix for the drawer section tabs; suffixed with the [DrawerSection] key. */
     const val DRAWER_TAB_PREFIX = "tag.drawerTab."
 

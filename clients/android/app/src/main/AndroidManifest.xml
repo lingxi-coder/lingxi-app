@@ -10,6 +10,20 @@
         android:name="android.permission.BLUETOOTH"
         android:maxSdkVersion="30" />
 
+    <!-- Device-vision layer: CAMERA for live capture; READ_MEDIA_IMAGES for the
+         photo-library pick on Android 13+ (the system photo picker itself needs
+         no permission, but the legacy gallery fallback does), with the pre-33
+         READ_EXTERNAL_STORAGE capped for older devices. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
     <application
         android:allowBackup="true"
         android:label="@string/app_name"

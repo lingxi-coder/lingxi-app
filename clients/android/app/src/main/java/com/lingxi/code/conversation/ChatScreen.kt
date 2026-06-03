@@ -80,6 +80,9 @@ fun ChatScreen(
     onMicHoldRelease: () -> Unit = {},
     draft: String = "",
     onDraftChange: (String) -> Unit = {},
+    onCameraClick: () -> Unit = {},
+    attachment: ComposerAttachment? = null,
+    onRemoveAttachment: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val listState = rememberLazyListState()
@@ -131,6 +134,9 @@ fun ChatScreen(
                 onMicClick = onMicClick,
                 onMicHoldStart = onMicHoldStart,
                 onMicHoldRelease = onMicHoldRelease,
+                onCameraClick = onCameraClick,
+                attachment = attachment,
+                onRemoveAttachment = onRemoveAttachment,
             )
         }
     }

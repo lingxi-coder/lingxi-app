@@ -30,12 +30,16 @@ pub trait SubagentApiClient: Send + Sync {
     /// Issue one non-streaming model round-trip.
     ///
     /// `system` is the assembled system prompt (stable across the run);
-    /// `messages` is the full conversation history, oldest first.
+    /// `messages` is the full conversation history, oldest first; `tools` is
+    /// the wire tool-definition array (`{name, description, input_schema}`)
+    /// advertised to the model, from [`crate::context::SubagentContext::tool_schemas`]
+    /// (empty = no tools).
     async fn messages_create(
         &self,
         model: &str,
         system: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
     ) -> Result<api_client::MessageResponse, ApiError>;
 
     /// Issue one model round-trip over the streaming SSE transport, returning
@@ -54,8 +58,9 @@ pub trait SubagentApiClient: Send + Sync {
         model: &str,
         system: Option<&str>,
         messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
-        let resp = self.messages_create(model, system, messages).await?;
+        let resp = self.messages_create(model, system, messages, tools).await?;
         let events = crate::accumulator::response_to_stream_events(resp);
         Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }

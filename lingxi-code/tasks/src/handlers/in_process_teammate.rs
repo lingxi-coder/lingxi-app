@@ -208,6 +208,13 @@ impl InProcessTeammateHandler {
             },
             api_client: Some(self.api_client.clone()),
             tool_invoker: self.tool_invoker.clone(),
+            // Teammates do not yet advertise tool schemas to the model (same
+            // boot-wiring gap as `PoolSubagentSpawner`). Empty = no tools
+            // advertised, so the teammate cannot emit `tool_use`. NOTE: the
+            // dispatch seam does NOT enforce per-agent policy today (see the
+            // `SubagentContext::tool_schemas` WARNING), so keeping this empty is
+            // also what prevents advertising tools the agent's policy forbids.
+            tool_schemas: vec![],
             // Teammates do not currently inherit a budget enforcer; `None`
             // preserves today's behavior (no per-turn budget gate) and is
             // purely additive.
@@ -569,6 +576,7 @@ mod tests {
             _model: &str,
             _system: Option<&str>,
             _messages: Vec<protocol::ConversationMessage>,
+            _tools: Vec<serde_json::Value>,
         ) -> Result<api_client::MessageResponse, api_client::ApiError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let next = self.responses.lock().unwrap().pop_front();

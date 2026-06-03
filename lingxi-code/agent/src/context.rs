@@ -70,6 +70,27 @@ pub struct SubagentContext {
     /// [`traits::subagent_spawn::SubagentInheritance`]. `None` means the agent
     /// cannot dispatch tools — a `tool_use` in that state surfaces a failure.
     pub tool_invoker: Option<Arc<dyn traits::ToolInvoker>>,
+    /// Wire tool definitions (`{name, description, input_schema}`) advertised to
+    /// the model on every round-trip of the multi-turn loop — the streaming
+    /// analog of the orchestrator's own `tools` array. Built by the spawner via
+    /// [`tool_api::wire::tools_to_wire`]. Empty means the subagent calls the
+    /// model with no tools (so it cannot emit `tool_use`).
+    ///
+    /// WARNING — per-agent policy is NOT enforced at the dispatch seam today:
+    /// the production [`Self::tool_invoker`] is `RegistryToolInvoker`, whose
+    /// `invoke` is `registry.find_by_name(name)` + `tool.call(...)` with NO
+    /// [`crate::definition::AgentToolPolicy`] / [`Self::allowed_tools`] check
+    /// (the runner's dispatch loop likewise never consults `allowed_tools`). So
+    /// whatever is advertised here is also dispatchable. The boot-wiring
+    /// follow-up that fills this from the live registry MUST therefore (a) filter
+    /// the advertised set through [`crate::tool_resolver::AgentToolResolver`] to
+    /// the agent's policy AND (b) add an allow-list guard before
+    /// `invoker.invoke` — otherwise a policy-restricted subagent could be told
+    /// about, and successfully call, a tool outside its policy. Today the leg
+    /// ships INERT (this stays empty in production), so nothing is over-advertised.
+    /// Boot-wiring is itself blocked by a construction cycle: the spawner sits
+    /// inside the `BuiltinToolContext` that builds the registry.
+    pub tool_schemas: Vec<serde_json::Value>,
     /// Inherited budget enforcer (from `SubagentInheritance::budget`). When
     /// `Some`, the multi-turn loop consults it once per turn and stops with a
     /// budget-exhausted terminal when the cumulative cost is over the limit.

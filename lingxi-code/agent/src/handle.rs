@@ -41,6 +41,14 @@ pub struct PoolSubagentSpawner {
     /// child's [`SubagentContext`]. `None` keeps the legacy stub behavior
     /// (the runner emits a synthetic completion without calling the model).
     api_client: Option<Arc<dyn SubagentApiClient>>,
+    /// Wire tool definitions (`{name, description, input_schema}`) stashed on
+    /// every child's [`SubagentContext::tool_schemas`] so the spawned subagent
+    /// advertises tools to the model. Empty (the default) = no tools. Wired via
+    /// [`Self::with_tool_schemas`]; boot-wiring from the live registry is a
+    /// follow-up (the spawner is built inside the `BuiltinToolContext` that in
+    /// turn builds the registry — a construction cycle that blocks handing the
+    /// registry in here today).
+    tool_schemas: Vec<serde_json::Value>,
 }
 
 impl PoolSubagentSpawner {
@@ -52,6 +60,7 @@ impl PoolSubagentSpawner {
         Self {
             pool,
             api_client: None,
+            tool_schemas: Vec::new(),
         }
     }
 
@@ -60,6 +69,16 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn with_api_client(mut self, api_client: Arc<dyn SubagentApiClient>) -> Self {
         self.api_client = Some(api_client);
+        self
+    }
+
+    /// Builder: attach the wire tool definitions (`{name, description,
+    /// input_schema}`, e.g. from [`tool_api::wire::tools_to_wire`]) every
+    /// spawned child advertises to the model. Without this, children call the
+    /// model with no tools.
+    #[must_use]
+    pub fn with_tool_schemas(mut self, tool_schemas: Vec<serde_json::Value>) -> Self {
+        self.tool_schemas = tool_schemas;
         self
     }
 
@@ -102,9 +121,10 @@ impl PoolSubagentSpawner {
                 icon: None,
             },
             // Set by `spawn` from `self.api_client` / `inherit.tool_invoker` /
-            // `inherit.budget` just before pool allocation.
+            // `inherit.budget` / `self.tool_schemas` just before pool allocation.
             api_client: None,
             tool_invoker: None,
+            tool_schemas: vec![],
             budget: None,
         }
     }
@@ -130,6 +150,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         ctx.tool_invoker = Some(inherit.tool_invoker);
         ctx.budget = Some(inherit.budget);
         ctx.api_client.clone_from(&self.api_client);
+        ctx.tool_schemas.clone_from(&self.tool_schemas);
         let agent_id = ctx.agent_id;
         let (_aid, mut rx) = self
             .pool

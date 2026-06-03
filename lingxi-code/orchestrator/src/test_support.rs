@@ -32,6 +32,7 @@ pub struct MockApiClient {
     queue: Arc<Mutex<VecDeque<MessageResponse>>>,
     captured_msgs: Arc<Mutex<Vec<Vec<ConversationMessage>>>>,
     captured_systems: Arc<Mutex<Vec<Option<String>>>>,
+    captured_tools: Arc<Mutex<Vec<Vec<serde_json::Value>>>>,
 }
 
 impl MockApiClient {
@@ -42,7 +43,15 @@ impl MockApiClient {
             queue: Arc::new(Mutex::new(VecDeque::from(responses))),
             captured_msgs: Arc::new(Mutex::new(Vec::new())),
             captured_systems: Arc::new(Mutex::new(Vec::new())),
+            captured_tools: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Snapshot the captured `tools` arguments (one entry per `messages_create`
+    /// call). Lets a test assert the orchestrator advertised the registry's
+    /// wire tool definitions on the batched path.
+    pub async fn captured_tools(&self) -> Vec<Vec<serde_json::Value>> {
+        self.captured_tools.lock().await.clone()
     }
 
     /// Snapshot the captured `msgs` arguments (one entry per `messages_create` call).
@@ -70,12 +79,14 @@ impl OrchestratorApiClient for MockApiClient {
         _model: &str,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
     ) -> Result<MessageResponse, ApiError> {
         self.captured_msgs.lock().await.push(msgs);
         self.captured_systems
             .lock()
             .await
             .push(system.map(str::to_string));
+        self.captured_tools.lock().await.push(tools);
         let mut q = self.queue.lock().await;
         q.pop_front().ok_or_else(|| ApiError::Server {
             status: 500,
@@ -723,11 +734,11 @@ mod tests {
         );
         let mock = MockApiClient::new(vec![r1, r2]);
         let resp1 = mock
-            .messages_create("m", None, vec![])
+            .messages_create("m", None, vec![], vec![])
             .await
             .expect("first");
         let resp2 = mock
-            .messages_create("m", None, vec![])
+            .messages_create("m", None, vec![], vec![])
             .await
             .expect("second");
         let ContentBlockApi::Text { text: first_text } = &resp1.content[0] else {
@@ -746,7 +757,7 @@ mod tests {
         let r = mock_message_response(vec![], Some("end_turn"));
         let mock = MockApiClient::new(vec![r]);
         let msgs = vec![];
-        mock.messages_create("m", None, msgs).await.expect("call");
+        mock.messages_create("m", None, msgs, vec![]).await.expect("call");
         assert_eq!(mock.captured_msgs().await.len(), 1);
     }
 
@@ -754,7 +765,7 @@ mod tests {
     async fn mock_exhaustion_returns_server_error() {
         let mock = MockApiClient::new(vec![]);
         let err = mock
-            .messages_create("m", None, vec![])
+            .messages_create("m", None, vec![], vec![])
             .await
             .expect_err("exhausted");
         assert!(format!("{err}").contains("mock script exhausted"));

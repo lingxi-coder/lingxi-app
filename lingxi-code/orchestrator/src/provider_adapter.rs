@@ -42,6 +42,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         model: &str,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
     ) -> Result<MessageResponse, ApiError> {
         let resolved = self.router.resolve(model)?;
         if messages_contain_image(&msgs) && !resolved.provider.capabilities().vision {
@@ -51,9 +52,17 @@ impl OrchestratorApiClient for ProviderApiAdapter {
                 resolved.provider.id()
             ))));
         }
+        if !tools.is_empty() && !resolved.provider.capabilities().native_tools {
+            return Err(ApiError::Http(traits::HttpError::InvalidRequest(format!(
+                "model {model:?} ({:?}) does not support tool use; \
+                 select a tool-capable model or run without tools",
+                resolved.provider.id()
+            ))));
+        }
         let mut req = CanonicalRequest::new(resolved.model);
         req.system = system.map(str::to_string);
         req.messages = msgs;
+        req.tools = tools;
         resolved.provider.complete(req).await
     }
 
@@ -88,9 +97,11 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         model: &str,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
     ) -> Result<MessageResponse, ApiError> {
-        // Delegate to the orchestrator impl so the two seams never diverge.
-        OrchestratorApiClient::messages_create(self, model, system, messages).await
+        // Delegate to the orchestrator impl so the two seams never diverge —
+        // tools included.
+        OrchestratorApiClient::messages_create(self, model, system, messages, tools).await
     }
 
     async fn messages_create_stream(
@@ -98,12 +109,13 @@ impl agent::SubagentApiClient for ProviderApiAdapter {
         model: &str,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
-        // Real SSE transport, shared with `StreamingApiClient::stream`. Subagent
-        // turns carry no tool schemas yet (the frozen `ToolInvoker` exposes
-        // none), so pass empty `tools`; the agent-crate accumulator reassembles
-        // the streamed blocks into the same `MessageResponse` shape.
-        StreamingApiClient::stream(self, model, system, messages, Vec::new()).await
+        // Real SSE transport, shared with `StreamingApiClient::stream`. The
+        // subagent's wire tool definitions (from `SubagentContext::tool_schemas`)
+        // ride through here; the agent-crate accumulator reassembles the
+        // streamed blocks into the same `MessageResponse` shape.
+        StreamingApiClient::stream(self, model, system, messages, tools).await
     }
 }
 
@@ -180,6 +192,7 @@ mod tests {
         async fn complete(&self, req: CanonicalRequest) -> Result<MessageResponse, ApiError> {
             *self.seen_model.lock().unwrap() = Some(req.model.clone());
             *self.seen_system.lock().unwrap() = req.system.clone();
+            *self.seen_tools_len.lock().unwrap() = Some(req.tools.len());
             Ok(MessageResponse {
                 id: "stub".to_string(),
                 model: req.model,
@@ -234,7 +247,7 @@ mod tests {
         });
         let adapter = ProviderApiAdapter::new(router.clone());
         let resp = adapter
-            .messages_create("openai/gpt-4o", Some("sys"), Vec::new())
+            .messages_create("openai/gpt-4o", Some("sys"), Vec::new(), Vec::new())
             .await
             .expect("ok");
         // Router saw the full string; provider saw the stripped local id.
@@ -330,6 +343,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bridge_forwards_batched_tools() {
+        // Batched twin of `bridge_forwards_stream_tools_and_flag`: the
+        // OrchestratorApiClient::messages_create path threads `tools` onto
+        // `CanonicalRequest::tools`, reaching the provider's `complete`.
+        let provider = Arc::new(StubProvider::new());
+        let router = Arc::new(StubRouter {
+            provider: provider.clone(),
+            seen_resolve: Mutex::new(None),
+        });
+        let adapter = ProviderApiAdapter::new(router);
+        let tools = vec![serde_json::json!({"name": "Read"})];
+        let _ = adapter
+            .messages_create("openai/gpt-4o", Some("sys"), Vec::new(), tools)
+            .await
+            .expect("ok");
+        assert_eq!(*provider.seen_tools_len.lock().unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn messages_create_with_tools_on_non_tool_model_fails_fast() {
+        // Batched twin of `stream_with_tools_on_non_tool_model_fails_fast`: the
+        // native_tools gate on the batched path rejects tools for a model that
+        // does not support them (unreachable in production — all real providers
+        // are tool-capable — but the gate must hold).
+        let router = std::sync::Arc::new(FixedRouter(std::sync::Arc::new(NoToolsProvider)));
+        let adapter = ProviderApiAdapter::new(router);
+        let tools = vec![serde_json::json!({"name": "Read"})];
+        let result = adapter
+            .messages_create("custom/no-tool-model", None, Vec::new(), tools)
+            .await;
+        assert!(
+            result.is_err(),
+            "batched path must reject tools on a non-tool-capable model"
+        );
+        let Err(err) = result else { panic!("expected Err") };
+        assert!(matches!(
+            err,
+            ApiError::Http(traits::HttpError::InvalidRequest(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn stream_with_tools_on_non_tool_model_fails_fast() {
         let router = std::sync::Arc::new(FixedRouter(std::sync::Arc::new(NoToolsProvider)));
         let adapter = ProviderApiAdapter::new(router);
@@ -372,7 +427,7 @@ mod tests {
                 },
             }],
         }];
-        let result = adapter.messages_create("custom/x", None, msgs).await;
+        let result = adapter.messages_create("custom/x", None, msgs, Vec::new()).await;
         assert!(result.is_err(), "image to a non-vision model must fail fast");
         assert!(matches!(
             result,
@@ -396,7 +451,7 @@ mod tests {
         let seam: Arc<dyn agent::SubagentApiClient> =
             Arc::new(ProviderApiAdapter::new(router.clone()));
         let resp = seam
-            .messages_create("openai/gpt-4o", Some("sys"), Vec::new())
+            .messages_create("openai/gpt-4o", Some("sys"), Vec::new(), Vec::new())
             .await
             .expect("seam ok");
         // Router saw the full string; provider saw the stripped local id —
@@ -424,7 +479,7 @@ mod tests {
         let seam: Arc<dyn agent::SubagentApiClient> =
             Arc::new(ProviderApiAdapter::new(router.clone()));
         let _s = seam
-            .messages_create_stream("openai/gpt-4o", Some("sys"), Vec::new())
+            .messages_create_stream("openai/gpt-4o", Some("sys"), Vec::new(), Vec::new())
             .await
             .expect("stream seam ok");
         assert_eq!(
@@ -452,6 +507,6 @@ mod tests {
                 source: ImageSource::Url { url: "https://x/y.png".to_string() },
             }],
         }];
-        adapter.messages_create("anthropic/claude", None, msgs).await.expect("vision model accepts image");
+        adapter.messages_create("anthropic/claude", None, msgs, Vec::new()).await.expect("vision model accepts image");
     }
 }

@@ -41,6 +41,7 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     // Object-merge fields (spec §7).
     ("sandbox", MergeStrategy::DeepMerge),
     ("hooks", MergeStrategy::DeepMerge),
+    ("permissions", MergeStrategy::DeepMerge),
     ("outputStyle", MergeStrategy::DeepMerge),
     // LingXi extension — deep-merge so multiple settings layers can each
     // declare a subset of provider profiles.
@@ -97,6 +98,17 @@ pub struct SettingsJson {
     /// Object-merge field (deep-merge).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<BTreeMap<String, Value>>,
+
+    /// Object-merge field (deep-merge). claude-code `permissions` block:
+    /// `{ "allow": [...], "deny": [...], "ask": [...], "defaultMode": "...",
+    ///    "additionalDirectories": [...] }` (rule strings like `"Bash(npm run *)"`).
+    /// Opaque here — projected into typed rules by
+    /// `permission::permission_rules_from_settings_json`. Without this field,
+    /// `deny_unknown_fields` would REJECT any settings.json carrying a
+    /// `permissions` block (breaking the whole load), so declaring it is
+    /// required even though enforcement is wired separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<BTreeMap<String, Value>>,
 
     /// Object-merge field (deep-merge).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,6 +196,20 @@ mod tests {
     }
 
     #[test]
+    fn accepts_permissions_block() {
+        // Regression: before the `permissions` field existed, `deny_unknown_fields`
+        // REJECTED any settings.json carrying a claude-code permissions block,
+        // breaking the entire load. It must now parse (the rules are projected
+        // out separately by `permission::permission_rules_from_settings_json`).
+        let json = r#"{
+            "permissions": { "allow": ["Bash(npm run *)"], "deny": ["Read(./secrets/**)"], "ask": [], "defaultMode": "default" }
+        }"#;
+        let parsed: SettingsJson = serde_json::from_str(json).expect("permissions block must parse");
+        assert!(parsed.permissions.is_some());
+        assert!(strategy_for("permissions").is_some(), "permissions has a merge strategy");
+    }
+
+    #[test]
     fn tolerates_dollar_schema_field_for_future_compat() {
         // claude-code @ 6a25909 does NOT emit "$schema". We tolerate it for forward-compat.
         let json = r#"{"$schema": "https://example.com/schema.json", "trustedDirectories": []}"#;
@@ -211,8 +237,9 @@ mod tests {
 
     #[test]
     fn merge_strategies_table_covers_object_fields() {
-        // The three spec §7 object-merge fields MUST be registered as DeepMerge.
-        for field in ["sandbox", "hooks", "outputStyle"] {
+        // The spec §7 object-merge fields MUST be registered as DeepMerge
+        // (plus the `permissions` block — claude-code parity).
+        for field in ["sandbox", "hooks", "permissions", "outputStyle"] {
             let strat =
                 strategy_for(field).unwrap_or_else(|| panic!("missing strategy for {field}"));
             assert!(

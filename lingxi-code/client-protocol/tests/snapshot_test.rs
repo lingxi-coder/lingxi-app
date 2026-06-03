@@ -756,8 +756,9 @@ fn feed_status_table_matches_golden() {
     check_golden("feed_status.json", &table, &mut failures);
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 
-    // Sanity: the LIVE-FED set is exactly the ~6 the adapter actually emits in
-    // the foundation; AssistantThinking is RESERVED (the §0.7 hook is NOT taken).
+    // Sanity: the LIVE-FED set is exactly the kinds the adapter actually emits.
+    // The §0.7 "light up thinking/usage" follow-up adds ThinkingDelta + UsageUpdate
+    // to the live set (event_router -> emit_thinking/emit_usage -> AdapterOutputStream).
     let live: Vec<&str> = table
         .iter()
         .filter(|e| e.status == FeedStatus::LiveFed)
@@ -771,10 +772,24 @@ fn feed_status_table_matches_golden() {
             "AssistantToolUse",
             "UserToolResult",
             "CompactBoundary",
+            "ThinkingDelta",
+            "UsageUpdate",
         ],
-        "the LIVE-FED set must be exactly the foundation's ~6 (AssistantThinking is RESERVED, §0.7)"
+        "the LIVE-FED set must include the §0.7 follow-up's ThinkingDelta + UsageUpdate"
     );
-    // AssistantThinking must be present AND marked RESERVED, not silently dropped.
+    // The §0.7 follow-up is taken: ThinkingDelta + UsageUpdate are now LIVE-FED.
+    let thinking_delta = table
+        .iter()
+        .find(|e| e.rendered_message == "ThinkingDelta")
+        .expect("ThinkingDelta present in the feed-status table");
+    assert_eq!(thinking_delta.status, FeedStatus::LiveFed);
+    let usage_update = table
+        .iter()
+        .find(|e| e.rendered_message == "UsageUpdate")
+        .expect("UsageUpdate present in the feed-status table");
+    assert_eq!(usage_update.status, FeedStatus::LiveFed);
+    // The whole-block AssistantThinking synthesized form stays RESERVED (the
+    // live reasoning stream flows through ThinkingDelta, not AssistantThinking).
     let thinking = table
         .iter()
         .find(|e| e.rendered_message == "AssistantThinking")
@@ -816,10 +831,10 @@ fn entry(rendered_message: &str, status: FeedStatus, note: &str) -> FeedStatusEn
     }
 }
 
-/// The full feed-status table. LIVE-FED first (~6, the adapter emits them in the
-/// foundation), then RESERVED / feed-deferred (the full deferred list incl.
-/// `ThinkingDelta`, `UsageUpdate`, `CoordinatorStatus`, `ExitPlanMode`,
-/// `BypassPermissionsMode`, the lossy session-replay events, …).
+/// The full feed-status table. LIVE-FED first (the adapter emits them, now incl.
+/// the §0.7 follow-up's `ThinkingDelta` + `UsageUpdate`), then RESERVED /
+/// feed-deferred (`AssistantThinking` whole-block form, `CoordinatorStatus`,
+/// `ExitPlanMode`, `BypassPermissionsMode`, the lossy session-replay events, …).
 fn feed_status_table() -> Vec<FeedStatusEntry> {
     use FeedStatus::*;
     vec![
@@ -849,21 +864,21 @@ fn feed_status_table() -> Vec<FeedStatusEntry> {
             LiveFed,
             "OutputStream::emit_compaction_completed -> ClientEvent::CompactionCompleted",
         ),
+        entry(
+            "ThinkingDelta",
+            LiveFed,
+            "OutputStream::emit_thinking -> ClientEvent::ThinkingDelta (§0.7 follow-up: event_router emits per ThinkingDelta SSE chunk)",
+        ),
+        entry(
+            "UsageUpdate",
+            LiveFed,
+            "OutputStream::emit_usage -> ClientEvent::UsageUpdate (§0.7 follow-up: event_router emits on MessageStart/MessageDelta usage)",
+        ),
         // ── RESERVED / feed-deferred ───────────────────────────────────────
         entry(
             "AssistantThinking",
             Reserved,
-            "no live source: needs the additive emit_thinking engine hook (decision §0.7)",
-        ),
-        entry(
-            "ThinkingDelta",
-            Reserved,
-            "no live source in the foundation (decision §0.7); round-trip only",
-        ),
-        entry(
-            "UsageUpdate",
-            Reserved,
-            "no live source in the foundation (decision §0.7); round-trip only",
+            "whole-block thinking synthesized form has no live source; the live stream uses ThinkingDelta (decision §0.7)",
         ),
         entry(
             "RedactedThinking",

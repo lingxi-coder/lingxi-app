@@ -165,14 +165,20 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
     );
 
     let events = output.snapshot().await;
+    // This test asserts the tool-lifecycle ORDERING. The §0.7
+    // "light up thinking/usage" follow-up adds additive `Usage` emits
+    // (from `message_start` / `message_delta`) that interleave but are
+    // orthogonal to that ordering, so filter them (and `Thinking`) out
+    // before the sequence assertion.
     let kinds: Vec<&str> = events
         .iter()
-        .map(|e| match e {
-            OutputEvent::Text { .. } => "Text",
-            OutputEvent::ToolCall { .. } => "ToolCall",
-            OutputEvent::ToolResult { .. } => "ToolResult",
-            OutputEvent::EndTurn { .. } => "EndTurn",
-            _ => "Other",
+        .filter_map(|e| match e {
+            OutputEvent::Text { .. } => Some("Text"),
+            OutputEvent::ToolCall { .. } => Some("ToolCall"),
+            OutputEvent::ToolResult { .. } => Some("ToolResult"),
+            OutputEvent::EndTurn { .. } => Some("EndTurn"),
+            OutputEvent::Usage { .. } | OutputEvent::Thinking { .. } => None,
+            _ => Some("Other"),
         })
         .collect();
     assert_eq!(

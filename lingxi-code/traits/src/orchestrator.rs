@@ -412,6 +412,31 @@ pub enum OutputEvent {
         /// UX estimate of bytes freed.
         bytes_saved: u64,
     },
+    /// A streaming reasoning ("thinking") delta as it arrives. (§0.7
+    /// "light up thinking/usage"). Recorded by `MockOutputStream` so the
+    /// orchestrator SSE-pump tests can assert `emit_thinking` fired. The
+    /// `signature` is `None` for live deltas (it only arrives on the
+    /// completed thinking block, not per-delta).
+    Thinking {
+        /// The reasoning fragment emitted.
+        thinking: String,
+        /// Cryptographic signature, `None` for live deltas.
+        signature: Option<String>,
+    },
+    /// An incremental token-usage update for the latest API call. (§0.7
+    /// "light up thinking/usage"). Recorded by `MockOutputStream` so the
+    /// orchestrator SSE-pump tests can assert `emit_usage` fired with the
+    /// right counts.
+    Usage {
+        /// Input tokens billed.
+        input_tokens: u64,
+        /// Output tokens billed.
+        output_tokens: u64,
+        /// Input tokens served from cache.
+        cache_read_tokens: u64,
+        /// Input tokens used to create a fresh cache entry.
+        cache_creation_tokens: u64,
+    },
 }
 
 /// Sink for orchestrator-emitted output events.
@@ -451,6 +476,41 @@ pub trait OutputStream: Send + Sync {
         _messages_before: u32,
         _messages_after: u32,
         _bytes_saved: u64,
+    ) {
+    }
+
+    /// Emit a streaming reasoning ("thinking") delta as it arrives.
+    ///
+    /// Added by the §0.7 "light up thinking/usage" follow-up. Called once
+    /// per `ThinkingDelta` SSE chunk from `event_router`. `signature` is
+    /// `None` for live deltas — the cryptographic signature only arrives on
+    /// the completed thinking block (`SignatureDelta`), not per-delta, so
+    /// the live-delta path always passes `None`.
+    ///
+    /// **Default no-op**: pre-existing sinks (TUI, CLI, `MockOutputStream`)
+    /// that don't render reasoning keep compiling unchanged. The
+    /// client-adapter overrides this to surface a `ClientEvent::ThinkingDelta`.
+    async fn emit_thinking(&self, _thinking: &str, _signature: Option<&str>) {}
+
+    /// Emit an incremental token-usage update for the latest API call.
+    ///
+    /// Added by the §0.7 "light up thinking/usage" follow-up. Called from
+    /// `event_router` when a `MessageDelta`/`MessageStart` SSE event carries
+    /// a `usage` payload. Counts are passed as bare `u64`s (rather than a
+    /// `cost::TokenUsage`) to keep `lingxi-traits` a leaf crate: `lingxi-cost`
+    /// already depends on `lingxi-traits`, so a `cost` dependency here would
+    /// form a cycle. The four arguments map field-for-field onto both
+    /// `cost::TokenUsage` (caller side, in the orchestrator) and
+    /// `ClientEvent::UsageUpdate` (adapter side).
+    ///
+    /// **Default no-op**: pre-existing sinks keep compiling unchanged. The
+    /// client-adapter overrides this to surface a `ClientEvent::UsageUpdate`.
+    async fn emit_usage(
+        &self,
+        _input_tokens: u64,
+        _output_tokens: u64,
+        _cache_read_tokens: u64,
+        _cache_creation_tokens: u64,
     ) {
     }
 }

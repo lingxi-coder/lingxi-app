@@ -25,19 +25,19 @@
     "note": "OutputStream::emit_compaction_completed -> ClientEvent::CompactionCompleted"
   },
   {
-    "rendered_message": "AssistantThinking",
-    "status": "reserved",
-    "note": "no live source: needs the additive emit_thinking engine hook (decision §0.7)"
-  },
-  {
     "rendered_message": "ThinkingDelta",
-    "status": "reserved",
-    "note": "no live source in the foundation (decision §0.7); round-trip only"
+    "status": "live_fed",
+    "note": "OutputStream::emit_thinking -> ClientEvent::ThinkingDelta (§0.7 follow-up: event_router emits per ThinkingDelta SSE chunk)"
   },
   {
     "rendered_message": "UsageUpdate",
+    "status": "live_fed",
+    "note": "OutputStream::emit_usage -> ClientEvent::UsageUpdate (§0.7 follow-up: event_router emits on MessageStart/MessageDelta usage)"
+  },
+  {
+    "rendered_message": "AssistantThinking",
     "status": "reserved",
-    "note": "no live source in the foundation (decision §0.7); round-trip only"
+    "note": "whole-block thinking synthesized form has no live source; the live stream uses ThinkingDelta (decision §0.7)"
   },
   {
     "rendered_message": "RedactedThinking",

@@ -7,8 +7,9 @@
 //! transport-agnostic [`ClientEventSink`]. The SAME stream therefore feeds both
 //! transports (bridge-server WS and mobile `UniFFI`) — governing decision §0.1.
 //!
-//! It implements the five [`traits::OutputStream`] callbacks
-//! (`traits/src/orchestrator.rs:423-456`):
+//! It implements the [`traits::OutputStream`] callbacks
+//! (`traits/src/orchestrator.rs:448-516`), including the two §0.7
+//! "light up thinking/usage" follow-up callbacks (`emit_thinking`/`emit_usage`):
 //!
 //! | callback                    | emitted `ClientEvent`(s)            |
 //! |-----------------------------|-------------------------------------|
@@ -17,6 +18,8 @@
 //! | `emit_tool_result`          | `ToolUseResult`                     |
 //! | `emit_end_turn`             | `CostUpdate` **then** `TurnEnded`   |
 //! | `emit_compaction_completed` | `CompactionCompleted`               |
+//! | `emit_thinking` (§0.7)      | `ThinkingDelta`                     |
+//! | `emit_usage` (§0.7)         | `UsageUpdate`                       |
 //!
 //! All `serde_json::Value` lowering goes through the pure F1-11 fns in
 //! [`crate::lowering`] so the wire form is identical to every other surface and
@@ -170,6 +173,40 @@ impl OutputStream for AdapterOutputStream {
                 messages_before,
                 messages_after,
                 bytes_saved,
+            })
+            .await;
+    }
+
+    /// §0.7 "light up thinking/usage": lower each live reasoning delta into a
+    /// [`ClientEvent::ThinkingDelta`]. `signature` is `None` for live deltas
+    /// (the cryptographic signature only arrives on the completed thinking
+    /// block, not per-delta) — see `traits::OutputStream::emit_thinking`.
+    async fn emit_thinking(&self, thinking: &str, signature: Option<&str>) {
+        self.sink
+            .emit(ClientEvent::ThinkingDelta {
+                thinking: thinking.to_string(),
+                signature: signature.map(str::to_string),
+            })
+            .await;
+    }
+
+    /// §0.7 "light up thinking/usage": lower each incremental token-usage
+    /// update into a [`ClientEvent::UsageUpdate`]. The four counters map
+    /// field-for-field from `traits::OutputStream::emit_usage` (which itself
+    /// mirrors `cost::TokenUsage` on the orchestrator side).
+    async fn emit_usage(
+        &self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+    ) {
+        self.sink
+            .emit(ClientEvent::UsageUpdate {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
             })
             .await;
     }
@@ -380,6 +417,73 @@ mod tests {
                 messages_before: 42,
                 messages_after: 8,
                 bytes_saved: 1_024,
+            }
+        );
+    }
+
+    /// §0.7: `emit_thinking` → exactly one `ThinkingDelta` carrying the reasoning
+    /// text verbatim. Live deltas carry `signature: None` (the trait passes `None`
+    /// per-delta — the signature only lands on the completed block).
+    #[tokio::test]
+    async fn emit_thinking_produces_thinking_delta() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        stream.emit_thinking("let me reason about this", None).await;
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            ClientEvent::ThinkingDelta {
+                thinking: "let me reason about this".to_string(),
+                signature: None,
+            }
+        );
+    }
+
+    /// §0.7: a `Some(signature)` is forwarded onto `ThinkingDelta.signature`
+    /// (proves the adapter does not hard-code `None` — it maps whatever the
+    /// engine passes, future-proofing the completed-block signature path).
+    #[tokio::test]
+    async fn emit_thinking_forwards_signature_when_present() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        stream.emit_thinking("done reasoning", Some("sig-abc")).await;
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ClientEvent::ThinkingDelta {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "done reasoning");
+                assert_eq!(signature.as_deref(), Some("sig-abc"));
+            }
+            other => panic!("expected ThinkingDelta, got {other:?}"),
+        }
+    }
+
+    /// §0.7: `emit_usage` → exactly one `UsageUpdate` with the four token
+    /// counters mapped field-for-field.
+    #[tokio::test]
+    async fn emit_usage_produces_usage_update() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+
+        stream.emit_usage(120, 48, 30, 90).await;
+
+        let events = sink.events().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            ClientEvent::UsageUpdate {
+                input_tokens: 120,
+                output_tokens: 48,
+                cache_read_tokens: 30,
+                cache_creation_tokens: 90,
             }
         );
     }

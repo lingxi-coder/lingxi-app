@@ -20,6 +20,8 @@ use crate::http::HttpTransport;
 use crate::process::ProcessRunner;
 use crate::sandbox::Sandbox;
 use crate::share::SharingService;
+use crate::stt::SpeechToText;
+use crate::tts::TextToSpeech;
 use crate::voice::VoiceRecorder;
 use crate::worktree::WorktreeManager;
 use std::sync::Arc;
@@ -47,6 +49,14 @@ pub trait Platform: Send + Sync {
     }
     /// Native microphone recorder, if the platform has one.
     fn voice(&self) -> Option<Arc<dyn VoiceRecorder>> {
+        None
+    }
+    /// Native speech-to-text (live mic → transcript), if available.
+    fn stt(&self) -> Option<Arc<dyn SpeechToText>> {
+        None
+    }
+    /// Native text-to-speech (text → PCM audio), if available.
+    fn tts(&self) -> Option<Arc<dyn TextToSpeech>> {
         None
     }
     /// Native share sheet, if the platform has one.

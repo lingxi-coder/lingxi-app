@@ -72,7 +72,7 @@ mod cli {
     use anyhow::{bail, Context, Result};
     use camino::{Utf8Path, Utf8PathBuf};
 
-    use uniffi_bindgen::bindings::SwiftBindingGenerator;
+    use uniffi_bindgen::bindings::{KotlinBindingGenerator, SwiftBindingGenerator};
     use uniffi_bindgen::interface::ComponentInterface;
     use uniffi_bindgen::macro_metadata;
     use uniffi_bindgen::{BindingGenerator, Component, GenerationSettings};
@@ -80,21 +80,37 @@ mod cli {
         create_metadata_groups, group_metadata, ExternalKind, Metadata, MetadataGroup, Type,
     };
 
-    /// Minimal arg model — we only support the one invocation the iOS build
-    /// script uses: `generate --library <path> --language swift --out-dir <dir>`
-    /// with optional `--no-format` / `--crate <name>`. (`--metadata-no-deps` is
-    /// accepted-and-ignored for backward compatibility with the prior script,
-    /// since we never run `cargo metadata` anymore.)
+    /// The binding backend this invocation targets. Swift is the original iOS
+    /// path; Kotlin (T2.4) reuses the SAME external-throws patch + `--library`
+    /// pipeline so the Android `.so`'s `MobileEngineHandle::submit` cross-crate
+    /// `ClientError` throw renders under the offline-pinned 0.28.3 bindgen too.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Language {
+        Swift,
+        Kotlin,
+    }
+
+    /// Minimal arg model. Original iOS invocation:
+    /// `generate --library <path> --language swift --out-dir <dir>`.
+    /// T2.4 adds `--language kotlin` (+ optional `--config <uniffi.toml>` so the
+    /// Kotlin backend honors `package_name`). `--no-format` / `--crate <name>`
+    /// are unchanged; `--metadata-no-deps` is accepted-and-ignored (we never run
+    /// `cargo metadata`).
     struct Args {
         library_path: Utf8PathBuf,
         out_dir: Utf8PathBuf,
         no_format: bool,
         crate_name: Option<String>,
+        language: Language,
+        config_path: Option<Utf8PathBuf>,
     }
 
     pub fn run() -> Result<()> {
         let args = parse_args()?;
-        generate_swift(&args)
+        match args.language {
+            Language::Swift => generate(&args, SwiftBindingGenerator),
+            Language::Kotlin => generate(&args, KotlinBindingGenerator),
+        }
     }
 
     fn parse_args() -> Result<Args> {
@@ -113,6 +129,7 @@ mod cli {
         let mut languages: Vec<String> = Vec::new();
         let mut no_format = false;
         let mut crate_name: Option<String> = None;
+        let mut config_path: Option<Utf8PathBuf> = None;
 
         while let Some(arg) = raw.next() {
             match arg.as_str() {
@@ -130,6 +147,10 @@ mod cli {
                 "--crate" => {
                     crate_name = Some(raw.next().context("--crate needs a value")?);
                 }
+                "--config" => {
+                    config_path =
+                        Some(Utf8PathBuf::from(raw.next().context("--config needs a value")?));
+                }
                 "--no-format" | "-n" => no_format = true,
                 // Accepted-and-ignored: we never invoke `cargo metadata`.
                 "--metadata-no-deps" => {}
@@ -137,32 +158,99 @@ mod cli {
             }
         }
 
-        // Swift is the only backend this packager emits.
-        for lang in &languages {
-            if !lang.eq_ignore_ascii_case("swift") {
-                bail!("only `--language swift` is supported here; got {lang:?}");
-            }
-        }
+        // Exactly one backend per invocation: swift (default) or kotlin (T2.4).
+        let language = match languages.as_slice() {
+            [] => Language::Swift,
+            [one] if one.eq_ignore_ascii_case("swift") => Language::Swift,
+            [one] if one.eq_ignore_ascii_case("kotlin") => Language::Kotlin,
+            [one] => bail!("only `--language swift|kotlin` is supported here; got {one:?}"),
+            _ => bail!("only a single `--language` is supported per invocation"),
+        };
 
         Ok(Args {
             library_path: library_path.context("--library <path> is required")?,
             out_dir: out_dir.context("--out-dir <dir> is required")?,
             no_format,
             crate_name,
+            language,
+            config_path,
         })
     }
 
-    fn generate_swift(args: &Args) -> Result<()> {
-        let components = find_components_patched(&args.library_path)?;
+    /// Generic over the binding backend (`SwiftBindingGenerator` /
+    /// `KotlinBindingGenerator`) — both share the SAME external-throws-patched
+    /// `--library` component discovery. Swift ships no `uniffi.toml` (empty
+    /// config), Kotlin loads `--config <uniffi.toml>` for `package_name`.
+    fn generate<G>(args: &Args, generator: G) -> Result<()>
+    where
+        G: BindingGenerator,
+    {
+        let groups = find_patched_groups(&args.library_path)?;
 
-        let mut components: Vec<Component<<SwiftBindingGenerator as BindingGenerator>::Config>> =
-            components
+        // T3.x fix — for Kotlin, MERGE the multi-crate metadata into ONE
+        // `ComponentInterface` so the backend emits ONE file with ONE runtime.
+        //
+        // In `--library` mode the merged `libandroid_aar.so` carries the UniFFI
+        // metadata of FOUR crates (client-protocol, client-adapter, engine-mobile,
+        // android-aar), so discovery yields four groups. The Kotlin backend emits
+        // ONE self-contained `.kt` file PER component, EACH re-declaring the
+        // shared runtime (`RustBuffer`, `UniffiLib`,
+        // `UniffiRustCallStatusErrorHandler`, every `FfiConverter*`, …). Four such
+        // files in one package collide (`Redeclaration`); four files in FOUR
+        // packages instead cannot share a runtime — e.g. `engine-mobile`'s
+        // `submit` throws `client-protocol::ClientError`, so its call hands
+        // `client_protocol.ClientException.ErrorHandler` (a
+        // `client_protocol.UniffiRustCallStatusErrorHandler`) to
+        // `engine_mobile.uniffiRustCallAsync` (which wants an
+        // `engine_mobile.UniffiRustCallStatusErrorHandler`), and the
+        // `RustBuffer`/`FfiConverter` types in that handler's signature are
+        // themselves package-private duplicates — the runtime can't be deduped
+        // type-by-type without cascading across the whole helper surface.
+        //
+        // The clean fix is the model that already works for Swift (one scope, one
+        // file, one runtime): merge the groups into a single `ComponentInterface`
+        // so all cross-crate references collapse to same-file references. The
+        // domain type names do NOT collide across the four crates (verified —
+        // only the runtime helpers do, and those fold to one copy), so the merge
+        // is sound. Swift keeps its per-group component flow UNCHANGED.
+        let components_ci: Vec<ComponentInterface> = match args.language {
+            Language::Kotlin => {
+                // Before merging four namespaces into one `TypeUniverse`, rewrite
+                // every cross-crate `Type::External` reference back to the LOCAL
+                // type the defining crate uses (`Enum`/`Record`/`Object`). Without
+                // this the universe sees the SAME type under two tags (e.g.
+                // `ClientEvent` as `Type::Enum` in its own group but `Type::External`
+                // where another crate references it) and the
+                // `TypeUniverse::add_known_type` consistency assertion fails. Once
+                // everything is one namespace, nothing is truly external.
+                let groups = de_externalize_groups(groups);
+                vec![merge_groups_into_ci(groups)?]
+            }
+            Language::Swift => groups
                 .into_iter()
-                .map(|Component { ci, config }| {
-                    let config = SwiftBindingGenerator.new_config(&config.into())?;
-                    Ok(Component { ci, config })
-                })
-                .collect::<Result<Vec<_>>>()?;
+                .map(ComponentInterface::from_metadata)
+                .collect::<Result<Vec<_>>>()?,
+        };
+
+        // Root TOML for `new_config`: the `--config` file if given (Kotlin's
+        // `[bindings.kotlin] package_name`), else an empty table (Swift's
+        // historical behavior — no per-crate `uniffi.toml`).
+        let root_toml: toml::Value = match &args.config_path {
+            Some(path) => {
+                let text = std::fs::read_to_string(path)
+                    .with_context(|| format!("reading config {path}"))?;
+                toml::from_str(&text).with_context(|| format!("parsing config {path}"))?
+            }
+            None => toml::Value::Table(toml::value::Table::default()),
+        };
+
+        let mut components: Vec<Component<G::Config>> = components_ci
+            .into_iter()
+            .map(|ci| {
+                let config = generator.new_config(&root_toml)?;
+                Ok(Component { ci, config })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         // Optionally narrow to one crate (mirrors stock `--crate`).
         if let Some(crate_name) = &args.crate_name {
@@ -183,20 +271,113 @@ mod cli {
                 .map(ToOwned::to_owned),
         };
 
-        SwiftBindingGenerator.update_component_configs(&settings, &mut components)?;
+        generator.update_component_configs(&settings, &mut components)?;
         std::fs::create_dir_all(&args.out_dir)?;
-        SwiftBindingGenerator.write_bindings(&settings, &components)?;
+        generator.write_bindings(&settings, &components)?;
+
+        // T3.x — fix the lone `message`-field error-variant codegen defect in the
+        // single merged Kotlin file (see [`fix_message_field_error_variants`]).
+        if args.language == Language::Kotlin {
+            for c in &components {
+                let file = kotlin_file_path(&args.out_dir, c.ci.namespace());
+                fix_message_field_error_variants(&file)?;
+            }
+        }
         Ok(())
     }
 
-    /// Faithful re-implementation of `uniffi_bindgen::library_mode::find_components`
-    /// (we ship NO UDL files, so the UDL branch is omitted), with ONE added pass:
-    /// [`patch_external_throws`] on each grouped namespace BEFORE building its
-    /// `ComponentInterface`. Returns components with the default (empty) TOML
-    /// config — we ship no `uniffi.toml`, so an empty config is exact.
-    fn find_components_patched(
-        library_path: &Utf8Path,
-    ) -> Result<Vec<Component<toml::value::Table>>> {
+    /// Merge every discovered metadata group into a SINGLE `ComponentInterface`
+    /// so the Kotlin backend emits ONE file with ONE shared runtime. Each group
+    /// is re-namespaced onto a common namespace first (the `add_metadata` merge
+    /// guard rejects a namespace mismatch), then folded in. The merged CI's
+    /// namespace name drives the output `.kt` filename and the `uniffi_<ns>`
+    /// cdylib fallback, so it is set to the real cdylib crate (`android_aar`); the
+    /// actual `cdylib` name is still taken from the library path by
+    /// `GenerationSettings`. The fold order is deterministic (groups sorted by
+    /// crate name) so the output is stable across runs.
+    fn merge_groups_into_ci(mut groups: Vec<MetadataGroup>) -> Result<ComponentInterface> {
+        use uniffi_meta::NamespaceMetadata;
+
+        let merged_ns = NamespaceMetadata {
+            crate_name: "android_aar".to_string(),
+            name: "android_aar".to_string(),
+        };
+
+        groups.sort_by(|a, b| a.namespace.crate_name.cmp(&b.namespace.crate_name));
+
+        let mut merged_ci: Option<ComponentInterface> = None;
+        for mut group in groups {
+            group.namespace = merged_ns.clone();
+            // Only the first group keeps a docstring slot; clear the rest so the
+            // merge guard's docstring handling stays a no-op.
+            group.namespace_docstring = None;
+            match &mut merged_ci {
+                None => merged_ci = Some(ComponentInterface::from_metadata(group)?),
+                Some(acc) => acc.add_metadata(group)?,
+            }
+        }
+
+        merged_ci.context("no UniFFI metadata groups found in the library")
+    }
+
+    /// Fix the 0.28.3 Kotlin codegen defect where an ERROR-enum struct variant
+    /// has a field literally named `message`. The non-flat `ErrorTemplate.kt`
+    /// emits BOTH a primary-constructor property `val \`message\`` AND an
+    /// `override val message get() = "message=…"`, which Kotlin rejects as an
+    /// overload-resolution ambiguity (two `message` properties on one class).
+    /// Our frozen `client_protocol::ClientError` (and the speech errors) carry a
+    /// `message: String` per variant by §0.4/F1-07 contract, so we cannot rename
+    /// the field in Rust without breaking the wire snapshots — we disambiguate in
+    /// the generated Kotlin instead.
+    ///
+    /// The fix collapses the two `message` properties into one: the constructor
+    /// property becomes `override val \`message\`` (so it legally overrides
+    /// `Throwable.message`, and the FFI converters' `value.message` reads the RAW
+    /// field — exactly what round-trips), and the redundant formatted getter is
+    /// dropped. Applied ONLY to the exact single-`message`-field shape the
+    /// template emits, so multi-field variants (whose getter formats other fields
+    /// too) and non-error records (`ClientEvent.Error`, which has no override)
+    /// are untouched. Swift never hits this (no `override`/`message` collision).
+    fn fix_message_field_error_variants(file: &Utf8Path) -> Result<()> {
+        let text = std::fs::read_to_string(file)
+            .with_context(|| format!("reading generated {file}"))?;
+
+        // The exact getter block the template emits for a lone `message` field.
+        const GETTER: &str =
+            "        override val message\n            get() = \"message=${ `message` }\"\n";
+        // The constructor property line + its closing `) : <Error>() {` form the
+        // anchor that distinguishes an ERROR variant (own-line `) :`) from the
+        // `ClientEvent.Error` record (`…kotlin.String) : ClientEvent()` inline).
+        const CTOR_PROP: &str = "        val `message`: kotlin.String\n        ) : ";
+        const CTOR_PROP_FIXED: &str =
+            "        override val `message`: kotlin.String\n        ) : ";
+
+        if !text.contains(GETTER) {
+            return Ok(()); // no colliding variant in this file
+        }
+        let patched = text
+            .replace(GETTER, "")
+            .replace(CTOR_PROP, CTOR_PROP_FIXED);
+        std::fs::write(file, patched).with_context(|| format!("writing patched {file}"))?;
+        Ok(())
+    }
+
+    /// The `<out_dir>/com/lingxi/code/bindings/<namespace>.kt` file the Kotlin
+    /// backend wrote for `namespace` (package = `com.lingxi.code.bindings` from
+    /// `apps/android-aar/uniffi.toml`, so the file sits directly under the package
+    /// path — NO per-crate sub-dir, since all crates merge into one component).
+    fn kotlin_file_path(out_dir: &Utf8Path, namespace: &str) -> Utf8PathBuf {
+        out_dir
+            .join("com/lingxi/code/bindings")
+            .join(format!("{namespace}.kt"))
+    }
+
+    /// Faithful re-implementation of the metadata-grouping half of
+    /// `uniffi_bindgen::library_mode::find_components` (we ship NO UDL files, so
+    /// the UDL branch is omitted), with ONE added pass: [`patch_external_throws`]
+    /// on each grouped namespace. Returns the PATCHED groups; the caller builds
+    /// `ComponentInterface`s (one per group for Swift, or one merged for Kotlin).
+    fn find_patched_groups(library_path: &Utf8Path) -> Result<Vec<MetadataGroup>> {
         let items = macro_metadata::extract_from_library(library_path)
             .context("extracting UniFFI metadata from the host library")?;
 
@@ -205,17 +386,13 @@ mod cli {
         // cross-crate `ClientError` throw type into `Type::External`.
         group_metadata(&mut metadata_groups, items)?;
 
-        metadata_groups
+        Ok(metadata_groups
             .into_values()
             .map(|mut group| {
                 patch_external_throws(&mut group);
-                let ci = ComponentInterface::from_metadata(group)?;
-                Ok(Component {
-                    ci,
-                    config: toml::value::Table::default(),
-                })
+                group
             })
-            .collect()
+            .collect())
     }
 
     /// The surgical fix. Walks a grouped namespace's items and rewrites the
@@ -268,6 +445,189 @@ mod cli {
                 kind: ExternalKind::DataClass,
                 ..
             } => Type::Enum { module_path, name },
+            other => other,
+        }
+    }
+
+    // ----- Kotlin merge: de-externalize cross-crate references -----------------
+
+    use std::collections::HashMap;
+    use uniffi_meta::{
+        EnumMetadata, FieldMetadata, FnParamMetadata, ObjectImpl, VariantMetadata,
+    };
+
+    /// What LOCAL `Type` a user-defined name resolves to once all four crates
+    /// share one namespace (so we can undo the `group_metadata` externalization).
+    #[derive(Clone, Copy)]
+    enum LocalKind {
+        Enum,
+        Record,
+        Object,
+    }
+
+    /// Rewrite every `Type::External` reference in every group back to the local
+    /// `Type` its DEFINING item uses, keyed by the type name (names are unique
+    /// across our four merged crates — verified; only runtime helpers overlap and
+    /// those aren't user types). Run BEFORE merging groups into one CI.
+    fn de_externalize_groups(groups: Vec<MetadataGroup>) -> Vec<MetadataGroup> {
+        // 1. Build name → local kind from the DEFINING items across all groups.
+        let mut kinds: HashMap<String, LocalKind> = HashMap::new();
+        for group in &groups {
+            for item in &group.items {
+                match item {
+                    Metadata::Enum(e) => {
+                        kinds.insert(e.name.clone(), LocalKind::Enum);
+                    }
+                    Metadata::Record(r) => {
+                        kinds.insert(r.name.clone(), LocalKind::Record);
+                    }
+                    Metadata::Object(o) => {
+                        kinds.insert(o.name.clone(), LocalKind::Object);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 2. Rewrite every type position in every item.
+        groups
+            .into_iter()
+            .map(|mut group| {
+                let items = std::mem::take(&mut group.items);
+                for item in items {
+                    group.items.insert(de_ext_item(item, &kinds));
+                }
+                group
+            })
+            .collect()
+    }
+
+    fn de_ext_item(item: Metadata, kinds: &HashMap<String, LocalKind>) -> Metadata {
+        match item {
+            Metadata::Func(mut m) => {
+                m.inputs = de_ext_params(m.inputs, kinds);
+                m.return_type = m.return_type.map(|t| de_ext_type(t, kinds));
+                m.throws = m.throws.map(|t| de_ext_type(t, kinds));
+                Metadata::Func(m)
+            }
+            Metadata::Method(mut m) => {
+                m.inputs = de_ext_params(m.inputs, kinds);
+                m.return_type = m.return_type.map(|t| de_ext_type(t, kinds));
+                m.throws = m.throws.map(|t| de_ext_type(t, kinds));
+                Metadata::Method(m)
+            }
+            Metadata::TraitMethod(mut m) => {
+                m.inputs = de_ext_params(m.inputs, kinds);
+                m.return_type = m.return_type.map(|t| de_ext_type(t, kinds));
+                m.throws = m.throws.map(|t| de_ext_type(t, kinds));
+                Metadata::TraitMethod(m)
+            }
+            Metadata::Constructor(mut m) => {
+                m.inputs = de_ext_params(m.inputs, kinds);
+                m.throws = m.throws.map(|t| de_ext_type(t, kinds));
+                Metadata::Constructor(m)
+            }
+            Metadata::Record(mut m) => {
+                m.fields = de_ext_fields(m.fields, kinds);
+                Metadata::Record(m)
+            }
+            Metadata::Enum(m) => Metadata::Enum(de_ext_enum(m, kinds)),
+            other => other,
+        }
+    }
+
+    fn de_ext_params(
+        params: Vec<FnParamMetadata>,
+        kinds: &HashMap<String, LocalKind>,
+    ) -> Vec<FnParamMetadata> {
+        params
+            .into_iter()
+            .map(|p| FnParamMetadata {
+                ty: de_ext_type(p.ty, kinds),
+                ..p
+            })
+            .collect()
+    }
+
+    fn de_ext_fields(
+        fields: Vec<FieldMetadata>,
+        kinds: &HashMap<String, LocalKind>,
+    ) -> Vec<FieldMetadata> {
+        fields
+            .into_iter()
+            .map(|f| FieldMetadata {
+                ty: de_ext_type(f.ty, kinds),
+                ..f
+            })
+            .collect()
+    }
+
+    fn de_ext_enum(e: EnumMetadata, kinds: &HashMap<String, LocalKind>) -> EnumMetadata {
+        EnumMetadata {
+            variants: e
+                .variants
+                .into_iter()
+                .map(|v| VariantMetadata {
+                    fields: de_ext_fields(v.fields, kinds),
+                    ..v
+                })
+                .collect(),
+            ..e
+        }
+    }
+
+    /// Mirror of `uniffi_meta`'s `convert_type`, but INVERSE: turn each
+    /// `Type::External` (and `Custom` builtins / container inners) back into the
+    /// LOCAL `Type` its defining item uses. `DataClass` → `Enum` or `Record` by
+    /// the name→kind map; `Interface`/`Trait` → `Object`. Recurses through the
+    /// structural containers exactly as the forward converter does.
+    fn de_ext_type(ty: Type, kinds: &HashMap<String, LocalKind>) -> Type {
+        match ty {
+            Type::External {
+                module_path,
+                name,
+                kind,
+                ..
+            } => match kind {
+                ExternalKind::Interface | ExternalKind::Trait => Type::Object {
+                    module_path,
+                    name,
+                    imp: ObjectImpl::Struct,
+                },
+                ExternalKind::DataClass => match kinds.get(&name) {
+                    Some(LocalKind::Record) => Type::Record { module_path, name },
+                    Some(LocalKind::Object) => Type::Object {
+                        module_path,
+                        name,
+                        imp: ObjectImpl::Struct,
+                    },
+                    // Default DataClass → Enum (covers enums + any unmapped name;
+                    // an enum tag is what `throws_name`/error rendering expects).
+                    _ => Type::Enum { module_path, name },
+                },
+            },
+            Type::Optional { inner_type } => Type::Optional {
+                inner_type: Box::new(de_ext_type(*inner_type, kinds)),
+            },
+            Type::Sequence { inner_type } => Type::Sequence {
+                inner_type: Box::new(de_ext_type(*inner_type, kinds)),
+            },
+            Type::Map {
+                key_type,
+                value_type,
+            } => Type::Map {
+                key_type: Box::new(de_ext_type(*key_type, kinds)),
+                value_type: Box::new(de_ext_type(*value_type, kinds)),
+            },
+            Type::Custom {
+                module_path,
+                name,
+                builtin,
+            } => Type::Custom {
+                module_path,
+                name,
+                builtin: Box::new(de_ext_type(*builtin, kinds)),
+            },
             other => other,
         }
     }

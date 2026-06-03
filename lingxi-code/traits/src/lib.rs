@@ -30,12 +30,14 @@ pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;
 pub mod share;
+pub mod stt;
 pub mod subagent_spawn;
 pub mod swarm;
 pub mod task_registry;
 pub mod team_registry;
 pub mod team_spawn;
 pub mod tool_invoker;
+pub mod tts;
 pub mod voice;
 pub mod worktree;
 
@@ -72,6 +74,8 @@ pub use sandbox::{
 };
 pub use secure_storage::{SecureStorage, SecureStorageBackend, SecureStorageError};
 pub use share::{ShareError, SharePayload, ShareResult, SharingService};
+pub use stt::{SpeechToText, SttError, SttOpts, SttTranscript};
+pub use tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
 pub use subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner,
     SubagentUsage,

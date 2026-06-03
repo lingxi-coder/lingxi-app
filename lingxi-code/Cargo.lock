@@ -1340,6 +1340,7 @@ dependencies = [
  "tool-plan",
  "tool-share",
  "tool-skill",
+ "tool-speech",
  "tool-task",
  "tool-ui",
  "tool-voice",
@@ -4629,6 +4630,20 @@ dependencies = [
  "telemetry",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tool-api",
+ "traits",
+]
+
+[[package]]
+name = "tool-speech"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "once_cell",
+ "permission",
+ "serde",
+ "serde_json",
  "tokio",
  "tool-api",
  "traits",

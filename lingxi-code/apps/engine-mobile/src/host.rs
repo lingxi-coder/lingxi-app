@@ -377,6 +377,8 @@ pub async fn build_mobile_inner(
         lsp_registry: None,
         camera: platform.camera(),
         voice: platform.voice(),
+        stt: platform.stt(),
+        tts: platform.tts(),
         share: platform.share(),
         computer_control: platform.computer_control(),
     };

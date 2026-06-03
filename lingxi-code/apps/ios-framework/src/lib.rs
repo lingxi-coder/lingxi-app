@@ -114,6 +114,8 @@ pub fn build_mobile_engine(
             camera: impls.camera,
             voice: impls.voice,
             share: impls.share,
+            stt: None,
+            tts: None,
         }));
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
@@ -314,6 +316,8 @@ pub fn build_ios_engine(
             camera: Arc::new(stub_capabilities::StubCamera),
             voice: Arc::new(stub_capabilities::StubVoice),
             share: Arc::new(stub_capabilities::StubShare),
+            stt: None,
+            tts: None,
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> = Arc::new(NoopPermissionSink);
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)

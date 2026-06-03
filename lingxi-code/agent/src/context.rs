@@ -45,8 +45,11 @@ pub struct SubagentContext {
     /// agent. The production spawner populates this from
     /// [`crate::tool_resolver::AgentToolResolver`] (the same resolved set it
     /// serializes into [`Self::tool_schemas`]), so the advertised set and the
-    /// allow-list stay in lock-step. For today's `AgentToolPolicy::All` default
-    /// that is every registered tool name (unrestricted in practice).
+    /// allow-list stay in lock-step. The policy comes from the spawn-resolved
+    /// [`crate::definition::AgentDefinition`] (built-in or user/project), so a
+    /// read-only agent (e.g. `Explore`/`Plan`, `AgentToolPolicy::Except` of the
+    /// write tools) genuinely narrows this list; a `general-purpose` agent
+    /// (`All`) keeps every registered tool name.
     pub allowed_tools: Vec<String>,
     /// Optional worktree the agent runs inside.
     pub worktree_handle: Option<WorktreeHandle>,
@@ -102,11 +105,11 @@ pub struct SubagentContext {
     /// registry state, not live post-boot mutation.) The production
     /// [`Self::tool_invoker`] (`RegistryToolInvoker`) does not enforce policy
     /// itself (`find_by_name` + `tool.call`), so the runner's allow-list check on
-    /// `allowed_tools` is the dispatch-time guard. The ONLY remaining DEFERRAL is
-    /// loading real [`crate::definition::AgentDefinition`]s in the spawn path: it
-    /// hardcodes `AgentToolPolicy::All` today, so resolution yields the full set
-    /// (no narrowing) — once real per-agent definitions load, both this set and
-    /// `allowed_tools` auto-narrow with zero further wiring.
+    /// `allowed_tools` is the dispatch-time guard. The spawn path now resolves a
+    /// REAL [`crate::definition::AgentDefinition`] per `subagent_type` (the 6
+    /// built-ins from [`crate::builtins`], overridden by the file catalog), so
+    /// the policy is per-agent: a read-only agent narrows this advertised set
+    /// AND `allowed_tools` together, while `general-purpose` keeps the full set.
     pub tool_schemas: Vec<serde_json::Value>,
     /// Inherited budget enforcer (from `SubagentInheritance::budget`). When
     /// `Some`, the multi-turn loop consults it once per turn and stops with a

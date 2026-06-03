@@ -12,6 +12,7 @@
 
 mod accumulator;
 pub mod api;
+pub mod builtins;
 pub mod catalog;
 pub mod color_manager;
 pub mod context;
@@ -28,6 +29,7 @@ pub mod transcript;
 pub mod worktree_policy;
 
 pub use api::SubagentApiClient;
+pub use builtins::builtin_agent_definitions;
 pub use catalog::{load_agents_from_dirs, parse_agent_markdown, AgentLoadError};
 pub use color_manager::AgentColorManager;
 pub use context::SubagentContext;

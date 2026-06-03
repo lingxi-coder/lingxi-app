@@ -84,6 +84,16 @@ pub async fn run_subagent(
 }
 
 /// Resolve the wire model string from the agent definition.
+///
+/// KNOWN GAP (pre-existing, see `crate::builtins` docs): this passes the
+/// definition's model string THROUGH verbatim. It does NOT resolve
+/// `AgentModel::Inherit` to the parent/main-loop model, nor a bare family alias
+/// (`"haiku"` / `"sonnet"`) to a concrete `claude-*` id — claude-code's
+/// `getAgentModel` does both. The downstream provider router only substitutes
+/// configured `routing.aliases`, so on a default install only
+/// `Explicit("claude-…")` ids resolve; `"inherit"` / `"haiku"` / `"sonnet"`
+/// reach the provider raw and error. Wiring real subagent model resolution is a
+/// dedicated follow-up.
 fn resolve_model(ctx: &SubagentContext) -> String {
     match &ctx.agent_definition.model {
         crate::definition::AgentModel::Inherit => "inherit".to_string(),

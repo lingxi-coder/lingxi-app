@@ -12,6 +12,7 @@
 //! `SubagentContext` so the child runner sees the same `Arc`s as the parent.
 
 use crate::api::SubagentApiClient;
+use crate::builtins::builtin_agent_definitions;
 use crate::context::SubagentContext;
 use crate::definition::{
     AgentDefinition, AgentModel, AgentPermissionMode, AgentSource, AgentToolPolicy,
@@ -21,8 +22,10 @@ use crate::pool::StateMachinePool;
 use crate::runner::SubagentEvent;
 use crate::tool_resolver::AgentToolResolver;
 use async_trait::async_trait;
-use protocol::AgentId;
+use protocol::{AgentId, ConversationMessage, MessageId};
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
 use tool_api::ToolRegistry;
 use traits::subagent_spawn::{
@@ -67,6 +70,18 @@ pub struct PoolSubagentSpawner {
     /// the full set (no filtering); it auto-narrows once the spawn path loads
     /// real per-agent definitions.
     tool_registry: Arc<std::sync::OnceLock<Arc<ToolRegistry>>>,
+    /// The 6 built-in subagent definitions, keyed by `agent_type`. Built once
+    /// in [`Self::new`] from [`builtin_agent_definitions`]. The spawn path
+    /// resolves `subagent_type -> AgentDefinition` against this (overridden by
+    /// the file catalog below) instead of fabricating a generic stub.
+    builtins: Arc<HashMap<String, AgentDefinition>>,
+    /// File-loaded user/project agent catalog (set-once, mirrors the registry
+    /// cycle-break). When set it takes PRECEDENCE over [`Self::builtins`] on an
+    /// `agent_type` collision — matching claude-code's later-wins ordering
+    /// (built-in < user < project). Shares the SAME `Arc<RwLock<…>>` the
+    /// orchestrator holds, so the spawner and `/agents` never drift. Unset (the
+    /// default / tests) = built-ins only.
+    agent_catalog: Arc<std::sync::OnceLock<Arc<RwLock<Vec<AgentDefinition>>>>>,
 }
 
 impl PoolSubagentSpawner {
@@ -75,10 +90,16 @@ impl PoolSubagentSpawner {
     /// loop.
     #[must_use]
     pub fn new(pool: Arc<StateMachinePool>) -> Self {
+        let builtins = builtin_agent_definitions()
+            .into_iter()
+            .map(|d| (d.agent_type.clone(), d))
+            .collect();
         Self {
             pool,
             api_client: None,
             tool_registry: Arc::new(std::sync::OnceLock::new()),
+            builtins: Arc::new(builtins),
+            agent_catalog: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -108,6 +129,85 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn tool_registry_handle(&self) -> Arc<std::sync::OnceLock<Arc<ToolRegistry>>> {
         self.tool_registry.clone()
+    }
+
+    /// Builder: set the file-loaded user/project agent catalog the spawn path
+    /// resolves against (it overrides built-ins on `agent_type` collision). Sets
+    /// the cell immediately — use when the catalog is available at construction
+    /// (tests). The boot path instead fills it later via
+    /// [`Self::agent_catalog_handle`] (the catalog does not exist when the
+    /// spawner is boxed — same cycle as the registry).
+    #[must_use]
+    pub fn with_agent_catalog(self, catalog: Arc<RwLock<Vec<AgentDefinition>>>) -> Self {
+        let _ = self.agent_catalog.set(catalog);
+        self
+    }
+
+    /// Return a clone of the set-once agent-catalog cell so the host can fill it
+    /// AFTER the catalog is built (breaking the construction cycle, exactly like
+    /// [`Self::tool_registry_handle`]). The cell is shared with the boxed
+    /// spawner; a later `cell.set(...)` is seen by every `spawn`. First fill wins.
+    #[must_use]
+    pub fn agent_catalog_handle(
+        &self,
+    ) -> Arc<std::sync::OnceLock<Arc<RwLock<Vec<AgentDefinition>>>>> {
+        self.agent_catalog.clone()
+    }
+
+    /// Resolve a spawn's [`AgentDefinition`] from `subagent_type`.
+    ///
+    /// Precedence (claude-code parity — later wins): file catalog
+    /// (user/project) overrides built-ins. An unknown type defaults to
+    /// `general-purpose` (claude-code's `effectiveType ?? GENERAL_PURPOSE`); a
+    /// last-resort all-tools stub covers the impossible empty-built-ins case.
+    async fn resolve_definition(&self, subagent_type: &str) -> AgentDefinition {
+        // 1. File catalog (user/project) wins on collision.
+        if let Some(catalog) = self.agent_catalog.get() {
+            if let Some(def) = catalog
+                .read()
+                .await
+                .iter()
+                .find(|d| d.agent_type == subagent_type)
+                .cloned()
+            {
+                return def;
+            }
+        }
+        // 2. Built-in by exact type.
+        if let Some(def) = self.builtins.get(subagent_type).cloned() {
+            return def;
+        }
+        // 3. Unknown type → general-purpose (matches claude-code's default).
+        if let Some(def) = self.builtins.get("general-purpose").cloned() {
+            return def;
+        }
+        // 4. Last resort (built-ins somehow empty): a permissive stub.
+        Self::fallback_definition(subagent_type)
+    }
+
+    /// Minimal all-tools definition used only when neither the catalog nor the
+    /// built-ins can supply one (built-ins always include `general-purpose`, so
+    /// this is defensive). Uses the high built-in turn cap, not the old
+    /// `max_turns: 1`, so a fallback agent can still run a tool-using loop.
+    fn fallback_definition(subagent_type: &str) -> AgentDefinition {
+        AgentDefinition {
+            agent_type: subagent_type.into(),
+            when_to_use: String::new(),
+            tools: AgentToolPolicy::All {
+                use_exact_tools: false,
+            },
+            max_turns: crate::builtins::BUILTIN_AGENT_MAX_TURNS,
+            model: AgentModel::Inherit,
+            permission_mode: AgentPermissionMode::Bubble,
+            source: AgentSource::BuiltIn,
+            base_dir: "built-in".into(),
+            system_prompt: None,
+            mcp_servers: vec![],
+            frontmatter_hooks: vec![],
+            icon: None,
+            allowed_tools: vec![],
+            worktree_requirement: None,
+        }
     }
 
     /// Resolve a spawn's advertised tool schemas + dispatch allow-list from the
@@ -148,29 +248,24 @@ impl PoolSubagentSpawner {
         (schemas, allowed)
     }
 
-    fn make_subagent_context(subagent_type: &str, prompt: &str) -> SubagentContext {
+    /// Build the child context from a RESOLVED [`AgentDefinition`] and the
+    /// caller's task prompt.
+    ///
+    /// Prompt channels follow claude-code (AgentTool.tsx / runAgent.ts): the
+    /// agent definition's body is the SYSTEM prompt
+    /// ([`SubagentContext::rendered_system_prompt`]), and the caller's task
+    /// `prompt` is the FIRST USER MESSAGE ([`SubagentContext::prompt_messages`])
+    /// — distinct channels. (Previously the task prompt was jammed into
+    /// `rendered_system_prompt` with no user message at all.) `None` system
+    /// prompt = the model gets no system prompt, the correct semantic for a
+    /// definition without a body.
+    fn make_subagent_context(def: AgentDefinition, prompt: &str) -> SubagentContext {
+        let rendered_system_prompt = def.system_prompt.as_deref().map(Arc::from);
         SubagentContext {
             agent_id: AgentId::new(),
             parent_agent_id: None,
-            agent_definition: AgentDefinition {
-                agent_type: subagent_type.into(),
-                when_to_use: String::new(),
-                tools: AgentToolPolicy::All {
-                    use_exact_tools: true,
-                },
-                max_turns: 1,
-                model: AgentModel::Inherit,
-                permission_mode: AgentPermissionMode::Bubble,
-                source: AgentSource::BuiltIn,
-                base_dir: "/tmp".into(),
-                system_prompt: None,
-                mcp_servers: vec![],
-                frontmatter_hooks: vec![],
-                icon: None,
-                allowed_tools: vec![],
-                worktree_requirement: None,
-            },
-            prompt_messages: vec![],
+            agent_definition: def,
+            prompt_messages: vec![ConversationMessage::user(MessageId::new(), prompt.to_string())],
             fork_context_messages: None,
             allowed_tools: vec![],
             worktree_handle: None,
@@ -179,7 +274,7 @@ impl PoolSubagentSpawner {
             can_show_permission_prompts: false,
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
-            rendered_system_prompt: Some(Arc::from(prompt)),
+            rendered_system_prompt,
             content_replacement_state: None,
             agent_memory: None,
             display: AgentDisplay {
@@ -188,8 +283,8 @@ impl PoolSubagentSpawner {
             },
             // Set by `spawn` from `self.api_client` / `inherit.tool_invoker` /
             // `inherit.budget` just before pool allocation. `tool_schemas` +
-            // `allowed_tools` (above) are overwritten by `spawn` from
-            // `resolve_tools` over the live registry.
+            // `allowed_tools` are overwritten by `spawn` from `resolve_tools`
+            // over the live registry per the resolved definition's policy.
             api_client: None,
             tool_invoker: None,
             tool_schemas: vec![],
@@ -211,7 +306,12 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // `Arc<dyn ToolInvoker>` the parent holds.
         inherit: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError> {
-        let mut ctx = Self::make_subagent_context(&request.subagent_type, &request.prompt);
+        // Resolve the REAL definition for this subagent_type (file catalog
+        // overrides built-ins; unknown → general-purpose). Its tools policy /
+        // model / max_turns / system prompt flow into the runner, and its
+        // policy drives the per-spawn tool resolution below.
+        let def = self.resolve_definition(&request.subagent_type).await;
+        let mut ctx = Self::make_subagent_context(def, &request.prompt);
         // Hand the child the parent's tool invoker, the parent's budget
         // enforcer, and our model API seam so the runner can drive the real
         // multi-turn loop and enforce the inherited budget per turn.
@@ -565,6 +665,108 @@ mod tests {
         let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, vec!["Edit", "Read"]); // sorted by name
         assert_eq!(allowed, vec!["Read".to_string(), "Edit".to_string()]); // resolved order
+    }
+
+    // ── batch 21: real AgentDefinition resolution + prompt placement ──
+
+    #[tokio::test]
+    async fn resolve_definition_returns_builtin_for_known_type() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+        // Explore is a read-only built-in: Except the write tools, model haiku,
+        // a real system prompt, and the high built-in turn cap (not the old 1).
+        let def = spawner.resolve_definition("Explore").await;
+        assert_eq!(def.agent_type, "Explore");
+        assert!(matches!(def.tools, AgentToolPolicy::Except(_)));
+        assert!(matches!(&def.model, AgentModel::Alias(m) if m == "haiku"));
+        assert!(def.system_prompt.is_some());
+        assert_eq!(def.max_turns, crate::builtins::BUILTIN_AGENT_MAX_TURNS);
+    }
+
+    #[tokio::test]
+    async fn resolve_definition_unknown_defaults_to_general_purpose() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+        let def = spawner.resolve_definition("no-such-agent").await;
+        assert_eq!(def.agent_type, "general-purpose");
+        assert!(matches!(def.tools, AgentToolPolicy::All { .. }));
+    }
+
+    #[tokio::test]
+    async fn resolve_definition_catalog_overrides_builtin() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        // A user/project agent named "Explore" must override the built-in.
+        let base = agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()]));
+        let custom = AgentDefinition {
+            agent_type: "Explore".to_string(),
+            system_prompt: Some("custom".to_string()),
+            ..base
+        };
+        let catalog = Arc::new(RwLock::new(vec![custom]));
+        let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
+        let def = spawner.resolve_definition("Explore").await;
+        assert_eq!(def.agent_type, "Explore");
+        // The catalog one (Explicit[Read]) wins over the built-in (Except[…]).
+        assert!(matches!(def.tools, AgentToolPolicy::Explicit(_)));
+        assert_eq!(def.system_prompt.as_deref(), Some("custom"));
+    }
+
+    #[test]
+    fn make_subagent_context_seeds_task_prompt_as_user_msg_and_def_body_as_system() {
+        let def = AgentDefinition {
+            system_prompt: Some("AGENT SYSTEM PROMPT".to_string()),
+            ..agent_def(AgentToolPolicy::All {
+                use_exact_tools: false,
+            })
+        };
+        let ctx = PoolSubagentSpawner::make_subagent_context(def, "do the task");
+        // Def body -> system prompt.
+        assert_eq!(
+            ctx.rendered_system_prompt.as_deref(),
+            Some("AGENT SYSTEM PROMPT")
+        );
+        // Task prompt -> first (and only) user message (NOT the system slot).
+        assert_eq!(ctx.prompt_messages.len(), 1);
+        assert!(matches!(
+            ctx.prompt_messages[0],
+            ConversationMessage::User { .. }
+        ));
+        assert_eq!(ctx.prompt_messages[0].text_content(), "do the task");
+    }
+
+    #[test]
+    fn make_subagent_context_none_system_prompt_yields_no_system() {
+        let def = AgentDefinition {
+            system_prompt: None,
+            ..agent_def(AgentToolPolicy::All {
+                use_exact_tools: false,
+            })
+        };
+        let ctx = PoolSubagentSpawner::make_subagent_context(def, "task");
+        assert!(ctx.rendered_system_prompt.is_none());
+        assert_eq!(ctx.prompt_messages[0].text_content(), "task");
+    }
+
+    #[tokio::test]
+    async fn explore_definition_narrows_resolved_tools_to_read_only() {
+        // End-to-end: resolve the Explore built-in, then resolve_tools over a
+        // registry with write tools -> Edit/Write dropped from BOTH the
+        // advertised schemas and the allow-list (the Except policy is now LIVE).
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with(&["Read", "Grep", "Edit", "Write"]));
+        let def = spawner.resolve_definition("Explore").await;
+        let (schemas, allowed) = spawner.resolve_tools(&def).await;
+        let names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["Grep", "Read"]); // sorted; Edit+Write dropped
+        assert!(allowed.contains(&"Read".to_string()));
+        assert!(allowed.contains(&"Grep".to_string()));
+        assert!(!allowed.contains(&"Edit".to_string()));
+        assert!(!allowed.contains(&"Write".to_string()));
     }
 
     #[test]

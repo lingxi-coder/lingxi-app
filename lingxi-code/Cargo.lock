@@ -2738,6 +2738,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 name = "platform-android"
 version = "0.12.0"
 dependencies = [
+ "platform-common",
  "platform-posix-minimal",
  "traits",
 ]
@@ -2746,14 +2747,17 @@ dependencies = [
 name = "platform-common"
 version = "0.12.0"
 dependencies = [
+ "api-client",
  "async-trait",
  "axum",
  "bytes",
  "eventsource-stream",
  "futures",
+ "futures-core",
  "futures-util",
  "http 1.4.0",
  "jsonrpc",
+ "protocol",
  "reqwest",
  "serde",
  "serde_json",
@@ -2770,6 +2774,7 @@ dependencies = [
 name = "platform-ios"
 version = "0.12.0"
 dependencies = [
+ "platform-common",
  "platform-posix-minimal",
  "traits",
 ]

@@ -6,15 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 
 # M8-P10: the Android platform skeleton. Portable Rust today — the filesystem /
-# clock / process / sandbox / worktree / http handles are reused from
-# platform-posix-minimal, and the Android-specific capabilities
-# (camera/voice/share) are injected as `Arc<dyn …>` trait objects implemented
-# natively in Kotlin via UniFFI (P12). M9 swaps the reused handles for
-# scoped-storage-aware impls. Not cfg-gated: portable, host-verified.
+# clock / process / sandbox / worktree handles are reused from
+# platform-posix-minimal. The http handle uses the shared real client
+# (platform_common::http::ReqwestHttp, reqwest + rustls-tls) so a keyed
+# conversation streams against the real provider. The Android-specific
+# capabilities (camera/voice/share) are injected as `Arc<dyn …>` trait objects
+# implemented natively in Kotlin via UniFFI (P12). M9 swaps the remaining reused
+# handles for scoped-storage-aware impls. Not cfg-gated: portable, host-verified.
 
 [dependencies]
 traits = { path = "../../traits" }
 platform-posix-minimal = { path = "../posix-minimal" }
+platform-common = { path = "../common" }
 
 [lints]
 workspace = true

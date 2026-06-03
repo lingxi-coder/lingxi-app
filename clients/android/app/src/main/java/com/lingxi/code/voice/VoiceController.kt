@@ -21,6 +21,7 @@ import com.lingxi.code.voice.audio.SystemSpeechRecognizerStt
 import com.lingxi.code.voice.audio.SystemTextToSpeechTts
 import com.lingxi.code.vision.AndroidCameraAdapter
 import com.lingxi.code.share.AndroidShareAdapter
+import com.lingxi.code.voice.recorder.AndroidVoiceAdapter
 import kotlinx.coroutines.launch
 
 private const val TAG = "VoiceController"
@@ -70,6 +71,11 @@ fun buildVoiceEngine(
     // whose Context is attached by MainActivity. The engine bridges this onto
     // `traits::SharingService`, lighting up `tool-share` on-device.
     val share = AndroidShareAdapter()
+    // Device-voice: the voice adapter drives the process-global RecorderController,
+    // whose Context is attached by MainActivity. The engine bridges this onto
+    // `traits::VoiceRecorder`, lighting up `tool-voice`'s raw mic recorder
+    // on-device (distinct from the STT hold-to-talk path above).
+    val voice = AndroidVoiceAdapter()
     val listener = object : AndroidEventListener {
         override suspend fun onEvent(event: ClientEvent) {
             // Minimal sink: the chat surface still streams through the mock
@@ -90,6 +96,7 @@ fun buildVoiceEngine(
             tts = tts,
             camera = camera,
             share = share,
+            voice = voice,
         )
     } catch (t: Throwable) {
         // PlatformUnavailable on a host build, or UnsatisfiedLinkError when the

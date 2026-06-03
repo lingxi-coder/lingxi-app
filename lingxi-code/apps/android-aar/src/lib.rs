@@ -434,6 +434,127 @@ fn camera_error_from_ffi(e: CameraFfiError) -> traits::CameraError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Voice — foreign (Kotlin) mic-recorder callback interface + its engine bridge.
+// ---------------------------------------------------------------------------
+//
+// Mirrors the AndroidShare/AndroidCamera pattern: the Kotlin layer implements a
+// crate-local async `AndroidVoice` callback interface (the system
+// `MediaRecorder` capturing the raw mic) and hands it across the FFI seam. The
+// engine consumes the SHARED `traits::VoiceRecorder` seam, so
+// `AndroidVoiceBridge` adapts the crate-local interface to its `traits`
+// counterpart. This is the RAW mic recorder driven by `tool-voice`
+// (start/stop/is_recording), distinct from the `AndroidStt` system recognizer.
+// `traits::VoiceRecordingOpts` is destructured into the flat `sample_rate_hz` /
+// `format` args to keep the FFI flat; the bridge maps the FFI result/error back
+// onto `traits::VoiceRecording` / `traits::VoiceError`.
+
+/// FFI error surface for the Android mic-recorder callback interface. A flat
+/// enum so UniFFI can render it for an async `callback_interface` method; the
+/// bridge fans it back out onto the richer [`traits::VoiceError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum VoiceFfiError {
+    /// The user denied microphone permission.
+    #[error("microphone permission denied")]
+    PermissionDenied,
+    /// `stop_recording` was called with no active session.
+    #[error("not currently recording")]
+    NotRecording,
+    /// Any other native failure.
+    #[error("voice error: {message}")]
+    Other {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// FFI carrier for a finished recording crossing the callback-interface seam:
+/// the encoded audio bytes + their MIME type. Mapped to [`traits::VoiceRecording`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct VoiceRecordingFfi {
+    /// Encoded audio bytes.
+    pub audio_bytes: Vec<u8>,
+    /// MIME type of `audio_bytes` (e.g. `"audio/m4a"`).
+    pub mime_type: String,
+}
+
+/// Crate-local foreign callback interface for native mic recording — the Kotlin
+/// app implements it over the system `MediaRecorder`. Bridged to
+/// [`traits::VoiceRecorder`] by [`AndroidVoiceBridge`]. Driven by the engine
+/// through `tool-voice` (start/stop/is_recording); the recording opts cross the
+/// seam as the flat `sample_rate_hz` / `format` args.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidVoice: Send + Sync {
+    /// Begin a mic recording session at the given sample rate / container format.
+    async fn start_recording(
+        &self,
+        sample_rate_hz: u32,
+        format: String,
+    ) -> Result<(), VoiceFfiError>;
+    /// Stop the active session and return the captured audio.
+    async fn stop_recording(&self) -> Result<VoiceRecordingFfi, VoiceFfiError>;
+    /// Whether a recording session is currently active.
+    async fn is_recording(&self) -> bool;
+}
+
+/// Adapts the crate-local [`AndroidVoice`] callback interface to the shared
+/// [`traits::VoiceRecorder`] seam the engine consumes. Destructures
+/// [`traits::VoiceRecordingOpts`] into the flat `sample_rate_hz` / `format`
+/// args, converts [`VoiceRecordingFfi`] back to [`traits::VoiceRecording`], and
+/// fans [`VoiceFfiError`] back out onto [`traits::VoiceError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct AndroidVoiceBridge {
+    inner: Box<dyn AndroidVoice>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::VoiceRecorder for AndroidVoiceBridge {
+    async fn start_recording(
+        &self,
+        opts: traits::VoiceRecordingOpts,
+    ) -> Result<(), traits::VoiceError> {
+        let traits::VoiceRecordingOpts {
+            sample_rate_hz,
+            format,
+        } = opts;
+        self.inner
+            .start_recording(sample_rate_hz, format)
+            .await
+            .map_err(voice_error_from_ffi)
+    }
+    async fn stop_recording(&self) -> Result<traits::VoiceRecording, traits::VoiceError> {
+        match self.inner.stop_recording().await {
+            Ok(rec) => Ok(traits::VoiceRecording {
+                audio_bytes: rec.audio_bytes,
+                mime_type: rec.mime_type,
+            }),
+            Err(e) => Err(voice_error_from_ffi(e)),
+        }
+    }
+    async fn is_recording(&self) -> bool {
+        self.inner.is_recording().await
+    }
+}
+
+/// Fan a flat [`VoiceFfiError`] back out onto the richer [`traits::VoiceError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn voice_error_from_ffi(e: VoiceFfiError) -> traits::VoiceError {
+    match e {
+        VoiceFfiError::PermissionDenied => traits::VoiceError::PermissionDenied,
+        VoiceFfiError::NotRecording => traits::VoiceError::NotRecording,
+        VoiceFfiError::Other { message } => traits::VoiceError::Other(message),
+    }
+}
+
 /// Adapts the crate-local [`AndroidStt`] callback interface to the shared
 /// [`traits::SpeechToText`] seam the engine consumes. One forwarding hop per
 /// call; maps [`SpeechFfiError`] onto [`traits::SttError`].
@@ -658,6 +779,7 @@ pub fn build_android_engine(
     tts: Box<dyn AndroidTts>,
     camera: Box<dyn AndroidCamera>,
     share: Box<dyn AndroidShare>,
+    voice: Box<dyn AndroidVoice>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -679,7 +801,7 @@ pub fn build_android_engine(
         let platform: Arc<dyn Platform> = Arc::new(AndroidPlatform::new(AndroidPlatformInputs {
             app_files_root: std::path::PathBuf::from(app_files_root),
             camera: Arc::new(AndroidCameraBridge { inner: camera }),
-            voice: Arc::new(stub_capabilities::StubVoice),
+            voice: Arc::new(AndroidVoiceBridge { inner: voice }),
             share: Arc::new(AndroidShareBridge { inner: share }),
             stt: Some(Arc::new(AndroidSttBridge { inner: stt })),
             tts: Some(Arc::new(AndroidTtsBridge { inner: tts })),
@@ -699,6 +821,7 @@ pub fn build_android_engine(
             tts,
             camera,
             share,
+            voice,
         );
         Err(MobileEngineError::PlatformUnavailable)
     }

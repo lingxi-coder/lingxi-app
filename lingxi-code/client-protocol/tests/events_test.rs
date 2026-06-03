@@ -196,11 +196,11 @@ fn compaction_completed_round_trips() {
     assert_eq!(back, ev);
 }
 
-/// `ThinkingDelta` — defined-but-RESERVED (feed-deferred, decision §0.7). It is
-/// part of the frozen enum NOW (so it round-trips) but has NO live engine
-/// source in the foundation.
+/// `ThinkingDelta` — now LIVE-FED (§0.7 follow-up): `event_router` emits it per
+/// `ContentDelta::ThinkingDelta` chunk. The wire shape is unchanged, so the
+/// frozen round-trip still holds (the live stream carries `signature: None`).
 #[test]
-fn thinking_delta_round_trips_reserved() {
+fn thinking_delta_round_trips() {
     let ev = ClientEvent::ThinkingDelta {
         thinking: "let me think".to_string(),
         signature: Some("sig".to_string()),
@@ -224,10 +224,11 @@ fn thinking_delta_round_trips_reserved() {
     assert_eq!(back_no_sig, ev_no_sig);
 }
 
-/// `UsageUpdate` — defined-but-RESERVED (feed-deferred, decision §0.7). Frozen
-/// now; no live engine source in the foundation.
+/// `UsageUpdate` — now LIVE-FED (§0.7 follow-up): `event_router` emits it from
+/// the `MessageStart` / `MessageDelta` usage fields. The wire shape is
+/// unchanged, so the frozen round-trip still holds.
 #[test]
-fn usage_update_round_trips_reserved() {
+fn usage_update_round_trips() {
     let ev = ClientEvent::UsageUpdate {
         input_tokens: 11,
         output_tokens: 22,

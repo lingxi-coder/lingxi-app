@@ -24,10 +24,13 @@ use serde::{Deserialize, Serialize};
 
 /// Outbound events the engine streams to a client.
 ///
-/// Each live-turn variant notes its engine source (from the area maps). The
-/// reserved variants (`ThinkingDelta`, `UsageUpdate`) are defined here so the
-/// contract freezes now, but have NO live engine source in the foundation —
-/// they are feed-deferred (decision §0.7) and round-trip only.
+/// Each live-turn variant notes its engine source (from the area maps).
+/// `ThinkingDelta` and `UsageUpdate` are now LIVE-FED by the §0.7 "light up
+/// thinking/usage" follow-up: `event_router` emits them via
+/// `OutputStream::emit_thinking` / `emit_usage`. The remaining reserved
+/// variants (e.g. `CoordinatorStatus`) are defined so the contract freezes now
+/// but still have no live engine source in the foundation (decisions §0.7 /
+/// §0.9) and round-trip only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -267,7 +270,7 @@ pub enum ClientEvent {
         status: TaskStatusDto,
     },
 
-    // ── Reserved / feed-deferred (decision §0.7, §0.9) ────────────────────
+    // ── Live thinking/usage (§0.7 follow-up) + reserved (§0.9) ────────────
 
     /// Coordinator/team status. **RESERVED / feed-deferred** (decision §0.9):
     /// coordinator/team is BLOCKED ON ENGINE WIRING (no `TeamRegistry` is
@@ -282,9 +285,11 @@ pub enum ClientEvent {
         team: Option<String>,
     },
 
-    /// Streaming thinking delta. **RESERVED / feed-deferred**: defined so the
-    /// contract freezes now, but has NO live engine source in the foundation
-    /// (decision §0.7). Round-trip only; MUST NOT be wired to a live source.
+    /// Streaming thinking delta. **LIVE-FED** (§0.7 follow-up): `event_router`
+    /// emits one per `ContentDelta::ThinkingDelta` SSE chunk via
+    /// `OutputStream::emit_thinking` → `AdapterOutputStream`. The `signature`
+    /// arrives on the completed block, not per-delta, so it is `None` on the
+    /// live stream.
     ThinkingDelta {
         /// The reasoning text delta.
         thinking: String,
@@ -293,9 +298,9 @@ pub enum ClientEvent {
         signature: Option<String>,
     },
 
-    /// Incremental token-usage update. **RESERVED / feed-deferred**: defined so
-    /// the contract freezes now, but has NO live engine source in the
-    /// foundation (decision §0.7). Round-trip only.
+    /// Incremental token-usage update. **LIVE-FED** (§0.7 follow-up):
+    /// `event_router` emits it from the `MessageStart` / `MessageDelta` usage
+    /// fields via `OutputStream::emit_usage` → `AdapterOutputStream`.
     UsageUpdate {
         /// Input tokens in the latest API call.
         input_tokens: u64,

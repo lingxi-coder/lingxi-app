@@ -32,10 +32,11 @@
 //! - **Nested spawns**: the parent model is always the main-loop model, not the
 //!   immediate parent subagent's (the frozen request carries no parent model).
 //! - **`in_process_teammate` path**: the persistent-teammate spawner
-//!   (`tasks::handlers::in_process_teammate`) builds its child context directly
-//!   and does NOT fold in [`resolve_agent_model`], so it still passes the
-//!   definition's model raw (`Inherit`→`"inherit"`). Wiring it is a separate
-//!   follow-up.
+//!   (`tasks::handlers::in_process_teammate`) now folds in [`resolve_agent_model`]
+//!   too — via `InProcessTeammateHandler::with_default_model` (wired from
+//!   `cfg.model` at boot) + its `build_context` — so a wired teammate resolves
+//!   its model the same way as a `PoolSubagentSpawner` spawn. Only the shared
+//!   boot-snapshot vs live-`/model` caveat (above) remains.
 
 use crate::definition::AgentModel;
 

@@ -49,6 +49,7 @@ use agent::definition::{
 };
 use agent::display::{AgentColor, AgentDisplay};
 use agent::pool::{PoolError, StateMachinePool};
+use agent::resolve_agent_model;
 use agent::runner::SubagentEvent;
 use agent::SubagentApiClient;
 
@@ -127,6 +128,12 @@ pub struct InProcessTeammateHandler {
     tool_invoker: Option<Arc<dyn traits::ToolInvoker>>,
     /// Resolves the [`AgentDefinition`] for a spawn.
     definitions: Arc<dyn TeammateDefinitionResolver>,
+    /// Parent / main-loop model used to resolve a teammate definition's
+    /// `AgentModel::Inherit` / family aliases to a concrete wire id (mirrors
+    /// `PoolSubagentSpawner::default_model`). Set at boot from `cfg.model` via
+    /// [`Self::with_default_model`]. `None` (the default / tests) leaves the
+    /// definition's model RAW (legacy: the runner emits `Inherit`→`"inherit"`).
+    default_model: Option<String>,
     /// Terminal-status sink (same seam as `LocalBashHandler`).
     status_sink: Arc<dyn TaskStatusSink>,
     /// `task_id` → control block, so `send_message` / `kill` can find the slot.
@@ -150,6 +157,7 @@ impl InProcessTeammateHandler {
             api_client,
             tool_invoker: None,
             definitions: Arc::new(DefaultTeammateDefinition),
+            default_model: None,
             status_sink: Arc::new(NoopStatusSink),
             entries: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -159,6 +167,16 @@ impl InProcessTeammateHandler {
     #[must_use]
     pub fn with_tool_invoker(mut self, invoker: Arc<dyn traits::ToolInvoker>) -> Self {
         self.tool_invoker = Some(invoker);
+        self
+    }
+
+    /// Set the parent / main-loop model used to resolve a teammate's
+    /// `AgentModel::Inherit` / bare family aliases to a concrete wire id (see
+    /// [`agent::resolve_agent_model`]). Wire this from `cfg.model` at boot;
+    /// without it, the definition's model is passed through raw (legacy).
+    #[must_use]
+    pub fn with_default_model(mut self, model: impl Into<String>) -> Self {
+        self.default_model = Some(model.into());
         self
     }
 
@@ -181,8 +199,16 @@ impl InProcessTeammateHandler {
     fn build_context(
         &self,
         agent_id: protocol::AgentId,
-        definition: AgentDefinition,
+        mut definition: AgentDefinition,
     ) -> SubagentContext {
+        // Resolve the model preference to a concrete wire id, mirroring the
+        // `PoolSubagentSpawner` seam (`Inherit`→parent model, family alias→
+        // concrete id), so a wired teammate runs against a live provider. Unset
+        // `default_model` (tests / no boot wiring) leaves it RAW (legacy).
+        if let Some(parent_model) = &self.default_model {
+            definition.model =
+                AgentModel::Explicit(resolve_agent_model(&definition.model, parent_model));
+        }
         let icon = definition.icon.clone();
         SubagentContext {
             agent_id,
@@ -711,6 +737,44 @@ mod tests {
     }
 
     // ---- Tests --------------------------------------------------------------
+
+    /// Minimal handler for the `build_context` model-resolution tests (no spawn).
+    fn model_test_handler(default_model: Option<&str>) -> InProcessTeammateHandler {
+        let dir = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let output = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs));
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime as Arc<dyn RuntimeSpawner>, 8));
+        let handler = InProcessTeammateHandler::new(pool, output, ScriptedApiClient::new(vec!["ok"]));
+        match default_model {
+            Some(m) => handler.with_default_model(m),
+            None => handler,
+        }
+    }
+
+    #[test]
+    fn build_context_resolves_inherit_to_default_model() {
+        // DefaultTeammateDefinition yields AgentModel::Inherit; with a default
+        // model wired the teammate ctx carries a concrete wire id (folded via
+        // the same `resolve_agent_model` seam as the spawner).
+        let handler = model_test_handler(Some("claude-opus-4-7"));
+        let def = DefaultTeammateDefinition
+            .resolve(&protocol::AgentId::new(), "lead")
+            .unwrap();
+        let ctx = handler.build_context(protocol::AgentId::new(), def);
+        assert!(matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-opus-4-7"));
+    }
+
+    #[test]
+    fn build_context_without_default_model_leaves_model_raw() {
+        // No default model wired → legacy behavior: Inherit is left untouched.
+        let handler = model_test_handler(None);
+        let def = DefaultTeammateDefinition
+            .resolve(&protocol::AgentId::new(), "lead")
+            .unwrap();
+        let ctx = handler.build_context(protocol::AgentId::new(), def);
+        assert!(matches!(&ctx.agent_definition.model, AgentModel::Inherit));
+    }
 
     #[tokio::test]
     async fn name_type_and_supports_messages() {

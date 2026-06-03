@@ -146,10 +146,12 @@ pub(crate) async fn execute_one_turn(
         (s.history.clone(), s.model.clone())
     };
 
-    // 1. Call the API.
+    // 1. Call the API. Advertise the registry's wire tool definitions
+    //    (same set + serialization as the streaming path).
+    let tools = orch.build_wire_tools().await;
     let response = orch
         .api
-        .messages_create(&model, system, history_snapshot)
+        .messages_create(&model, system, history_snapshot, tools)
         .await?;
 
     // 1.5 M6-06: record this response's usage into the wired CostTracker (if any).
@@ -495,10 +497,11 @@ pub(crate) async fn dispatch_tool_uses(
 
 #[cfg(test)]
 mod read_file_state_tests {
-    use super::{absolutize, dispatch_tool_uses};
+    use super::{absolutize, dispatch_tool_uses, execute_one_turn};
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+        mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
+        NoOpPermissionGate, StaticMemoryProvider,
     };
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
@@ -633,6 +636,87 @@ mod read_file_state_tests {
     async fn dispatch_one(orch: &ConversationOrchestrator, name: &str, input: serde_json::Value) {
         let uses = vec![(ToolUseId::new(), name.to_string(), input)];
         dispatch_tool_uses(orch, &uses).await.expect("dispatch");
+    }
+
+    // ----- build_wire_tools (registry -> wire `tools` array) -----
+
+    #[tokio::test]
+    async fn build_wire_tools_serializes_enabled_registry_tools() {
+        // The orchestrator's wire tool array carries each enabled registry tool
+        // as `{name, description, input_schema}`, sorted by name (the batched +
+        // streaming legs both source their `tools` arg from here).
+        let cwd = PathBuf::from("/tmp");
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(StubFileTool {
+                name: "Read",
+                cwd: cwd.clone(),
+            }),
+            Arc::new(StubFileTool {
+                name: "Bash",
+                cwd: cwd.clone(),
+            }),
+        ];
+        let orch = orch_with_tools(cwd, tools);
+        let wire = orch.build_wire_tools().await;
+
+        let names: Vec<&str> = wire.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["Bash", "Read"], "sorted by name");
+        for t in &wire {
+            // The base triple, nothing else.
+            assert_eq!(t.as_object().unwrap().len(), 3, "base triple only: {t}");
+            assert!(t.get("description").is_some());
+            assert_eq!(t["input_schema"]["type"], "object");
+        }
+    }
+
+    #[tokio::test]
+    async fn build_wire_tools_empty_registry_is_empty() {
+        let orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
+        assert!(orch.build_wire_tools().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn batched_turn_forwards_wire_tools_to_messages_create() {
+        // End-to-end (batched leg): `execute_one_turn` must build the registry's
+        // wire tools and pass them to `messages_create`. A no-tool `end_turn`
+        // response terminates the step after a single round-trip. (The streaming
+        // leg's twin is `streaming_concurrent_tools_test`.)
+        let cwd = PathBuf::from("/tmp");
+        let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+            vec![api_client::types::ContentBlockApi::Text {
+                text: "done".into(),
+            }],
+            Some("end_turn"),
+        )]));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(StubFileTool {
+            name: "Read",
+            cwd: cwd.clone(),
+        }));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            cwd,
+        );
+
+        let _ = execute_one_turn(&orch, None).await.expect("turn step");
+
+        let captured = api.captured_tools().await;
+        assert_eq!(captured.len(), 1, "exactly one messages_create round-trip");
+        let names: Vec<&str> = captured[0]
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Read"],
+            "batched turn must advertise the registry's wire tools to messages_create"
+        );
     }
 
     // ----- absolutize (pure, lexical — NOT realpath) -----

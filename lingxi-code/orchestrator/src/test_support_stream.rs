@@ -37,6 +37,8 @@ pub struct CapturedStreamCall {
     pub system: Option<String>,
     /// Conversation history snapshot at the time of the call.
     pub messages: Vec<ConversationMessage>,
+    /// Wire tool definitions advertised on this call (`build_wire_tools`).
+    pub tools: Vec<Value>,
 }
 
 /// Mock streaming client. Yields the next per-turn script of events each
@@ -91,12 +93,13 @@ impl StreamingApiClient for MockStreamingApiClient {
         model: &str,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        _tools: Vec<Value>,
+        tools: Vec<Value>,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
         self.captured.lock().await.push(CapturedStreamCall {
             model: model.to_string(),
             system: system.map(str::to_string),
             messages,
+            tools,
         });
         let mut queue = self.turns.lock().await;
         let next = queue.pop_front().ok_or_else(|| {

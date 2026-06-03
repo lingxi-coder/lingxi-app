@@ -186,6 +186,9 @@ async fn run_subagent_loop(
     let budget = ctx.budget.clone();
     let model = resolve_model(&ctx);
     let system: Option<String> = ctx.rendered_system_prompt.as_ref().map(std::string::ToString::to_string);
+    // Wire tool definitions advertised to the model on every round-trip (empty
+    // when the spawner wired none). Cloned per round-trip below.
+    let tool_schemas = ctx.tool_schemas.clone();
 
     // Seed history: fork-context prefix (if any) followed by the prompt.
     let mut history: Vec<ConversationMessage> = Vec::new();
@@ -266,7 +269,12 @@ async fn run_subagent_loop(
         let response = loop {
             let api_call = async {
                 let stream = api_client
-                    .messages_create_stream(&model, system.as_deref(), history.clone())
+                    .messages_create_stream(
+                        &model,
+                        system.as_deref(),
+                        history.clone(),
+                        tool_schemas.clone(),
+                    )
                     .await?;
                 crate::accumulator::accumulate_stream(stream).await
             };
@@ -629,6 +637,7 @@ mod tests {
             _model: &str,
             _system: Option<&str>,
             _messages: Vec<ConversationMessage>,
+            _tools: Vec<serde_json::Value>,
         ) -> Result<api_client::MessageResponse, api_client::ApiError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.responses.lock().unwrap().pop_front().unwrap_or_else(|| {
@@ -647,6 +656,9 @@ mod tests {
     struct StreamingMockApiClient {
         turns: Mutex<VecDeque<Vec<api_client::types::StreamEvent>>>,
         calls: AtomicUsize,
+        /// Tools seen on the most recent `messages_create_stream` call — lets a
+        /// test prove `ctx.tool_schemas` threads through the seam.
+        last_tools: Mutex<Vec<serde_json::Value>>,
     }
 
     impl StreamingMockApiClient {
@@ -654,10 +666,14 @@ mod tests {
             Arc::new(Self {
                 turns: Mutex::new(turns.into_iter().collect()),
                 calls: AtomicUsize::new(0),
+                last_tools: Mutex::new(Vec::new()),
             })
         }
         fn call_count(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+        fn last_tools(&self) -> Vec<serde_json::Value> {
+            self.last_tools.lock().unwrap().clone()
         }
     }
 
@@ -668,6 +684,7 @@ mod tests {
             _model: &str,
             _system: Option<&str>,
             _messages: Vec<ConversationMessage>,
+            _tools: Vec<serde_json::Value>,
         ) -> Result<api_client::MessageResponse, api_client::ApiError> {
             unreachable!("streaming mock must be driven through messages_create_stream")
         }
@@ -677,6 +694,7 @@ mod tests {
             _model: &str,
             _system: Option<&str>,
             _messages: Vec<ConversationMessage>,
+            tools: Vec<serde_json::Value>,
         ) -> Result<
             futures::stream::BoxStream<
                 'static,
@@ -686,6 +704,7 @@ mod tests {
         > {
             use futures::StreamExt;
             self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.last_tools.lock().unwrap() = tools;
             let events = self.turns.lock().unwrap().pop_front().unwrap_or_default();
             Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
         }
@@ -895,6 +914,7 @@ mod tests {
             },
             api_client: None,
             tool_invoker: None,
+            tool_schemas: vec![],
             budget: None,
         }
     }
@@ -1194,6 +1214,31 @@ mod tests {
         let result = one_completed(&evs);
         assert_eq!(result["text"], "streamed answer");
         assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn loop_advertises_context_tool_schemas_to_the_seam() {
+        // `ctx.tool_schemas` must reach `messages_create_stream`'s `tools` arg
+        // on every round-trip (this is what lets the model emit `tool_use`).
+        let api = StreamingMockApiClient::new(vec![streamed_text_turn("done", "end_turn")]);
+        let mut ctx = loop_ctx(api.clone(), None, 4);
+        let schemas = vec![serde_json::json!({
+            "name": "Read",
+            "description": "Reads a file.",
+            "input_schema": {"type": "object"}
+        })];
+        ctx.tool_schemas = schemas.clone();
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let _ = drain(out_rx).await;
+
+        assert_eq!(
+            api.last_tools(),
+            schemas,
+            "ctx.tool_schemas must be forwarded verbatim to the streaming seam"
+        );
     }
 
     #[tokio::test]

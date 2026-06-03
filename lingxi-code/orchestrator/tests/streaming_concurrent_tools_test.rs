@@ -144,7 +144,7 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
     let orch = ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
-        api,
+        api.clone(),
         registry_with_slow_and_fast(),
         orchestrator::test_support::noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
@@ -156,6 +156,21 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
     let start = std::time::Instant::now();
     let _ = orch.run_turn_streaming("call two tools").await.expect("ok");
     let elapsed = start.elapsed();
+
+    // Tool-schema wiring (batch 18): the streaming turn advertised the
+    // registry's wire tool definitions on its round-trips — serialized
+    // `{name, description, input_schema}`, sorted by name.
+    let calls = api.captured_calls().await;
+    let first_tools: Vec<&str> = calls[0]
+        .tools
+        .iter()
+        .map(|t| t["name"].as_str().expect("wire tool name"))
+        .collect();
+    assert_eq!(
+        first_tools,
+        vec!["Fast", "Slow"],
+        "run_turn_streaming must advertise the registry's wire tools (sorted by name)"
+    );
 
     // Concurrent execution: total wall time ~50ms (Slow's sleep), NOT
     // ~100ms (50ms × 2 sequential).

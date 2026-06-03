@@ -31,12 +31,16 @@ pub trait OrchestratorApiClient: Send + Sync {
     /// want the assembled LingXi prompt populate it via
     /// `ConversationOrchestrator::build_system_prompt` (private).
     /// Callers with an override populate it from
-    /// `OrchestratorConfig::system_prompt_override`.
+    /// `OrchestratorConfig::system_prompt_override`. `tools` is the wire
+    /// tool-definition array (`{name, description, input_schema}`) advertised
+    /// to the model, built via `ConversationOrchestrator::build_wire_tools`
+    /// (empty omits the `"tools"` key — same as the streaming `stream`).
     async fn messages_create(
         &self,
         model: &str,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
     ) -> Result<MessageResponse, ApiError>;
 
     /// Enumerate available `provider/model` ids + `@aliases` for `/model`'s
@@ -756,6 +760,10 @@ impl ConversationOrchestrator {
         }
         self.persist_message_to_jsonl(&user_msg).await;
 
+        // Build the wire tool definitions once for the conversation (stable
+        // across turns; see `build_wire_tools`). Cloned into each turn's stream.
+        let wire_tools = self.build_wire_tools().await;
+
         let mut turn_count: u32 = 0;
         let final_message_id;
         loop {
@@ -777,7 +785,7 @@ impl ConversationOrchestrator {
                     &model,
                     system_prompt.as_deref(),
                     snapshot,
-                    Vec::new(), // M5-09 wires the real tools schema.
+                    wire_tools.clone(),
                 )
                 .await
                 .map_err(OrchestratorError::Streaming)?;
@@ -1058,6 +1066,32 @@ impl ConversationOrchestrator {
         assemble_system_prompt(&ctx)
     }
 
+    /// Build the wire `tools` array for a turn from the registry's enabled tool
+    /// set, serialized via [`tool_api::wire::tools_to_wire`] to the
+    /// `{name, description, input_schema}` shape claude-code sends
+    /// (`utils/api.ts:169-178`). Used by both the batched ([`execute_one_turn`])
+    /// and streaming ([`Self::run_turn_streaming`]) paths.
+    ///
+    /// `ToolStaticContext::default()` (no feature flags) mirrors the system
+    /// prompt's enable-filter punt; `include_examples: true` requests the full
+    /// tool prompt as the `description`. Recomputed per turn (no session-level
+    /// `toolSchemaCache` analog yet) — `tools_to_wire` sorts by name so the
+    /// bytes stay deterministic across turns despite the registry's `HashMap`
+    /// MCP/plugin partitions. A session-level cache is a recommended follow-up.
+    ///
+    /// [`execute_one_turn`]: crate::turn_loop::execute_one_turn
+    pub(crate) async fn build_wire_tools(&self) -> Vec<serde_json::Value> {
+        use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
+        let tools = self.tools.available_tools(&ToolStaticContext::default());
+        tool_api::wire::tools_to_wire(
+            &tools,
+            &PromptOptions {
+                include_examples: true,
+            },
+        )
+        .await
+    }
+
     /// Borrow the in-memory session (read-write lock surrogate). Useful for tests.
     #[must_use]
     pub fn session(&self) -> Arc<Mutex<SessionState>> {
@@ -1095,9 +1129,20 @@ impl<T: HttpTransport + Send + Sync + 'static> OrchestratorApiClient
         model: &str,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
     ) -> Result<MessageResponse, ApiError> {
+        // Thread `tools` through `_with_opts`, keeping this legacy adapter's
+        // historical `max_tokens = 4096` / no-temperature defaults.
         self.provider
-            .messages_create_non_stream(model, system, msgs, self.transport.as_ref())
+            .messages_create_non_stream_with_opts(
+                model,
+                system,
+                msgs,
+                4096,
+                tools,
+                None,
+                self.transport.as_ref(),
+            )
             .await
     }
 }

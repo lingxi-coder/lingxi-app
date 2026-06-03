@@ -289,6 +289,15 @@ pub async fn build_runtime(
     //       the legacy stub completion.
     let subagent_pool =
         Arc::new(agent::StateMachinePool::new(Arc::new(PosixRuntime::new()), 4));
+    // NOTE: no `.with_tool_schemas(...)` here, so spawned subagents advertise
+    // ZERO tools to the model (the subagent leg ships INERT and cannot drive a
+    // real tool-using loop yet). Boot-wiring is blocked by a construction cycle:
+    // this spawner is consumed into the `BuiltinToolContext` below, which is what
+    // `desktop_tool_registry` then uses to build the registry — so the registry
+    // does not exist here to serialize. The follow-up should compute the schemas
+    // at spawn time from the orchestrator's own `Arc<ToolRegistry>` (filtered to
+    // the agent's policy — see the `SubagentContext::tool_schemas` WARNING) or
+    // push them in post-registry via a late setter, NOT bake them in here.
     let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> = Arc::new(
         agent::PoolSubagentSpawner::new(subagent_pool).with_api_client(subagent_api),
     );

@@ -65,6 +65,8 @@ fn active_screen_name(st: &AppState) -> Option<&'static str> {
         Some(Screen::Theme(_)) => Some("theme"),
         Some(Screen::BackgroundTasks(_)) => Some("background_tasks"),
         Some(Screen::Agents(_)) => Some("agents"),
+        Some(Screen::Skills(_)) => Some("skills"),
+        Some(Screen::Stats(_)) => Some("stats"),
         None => None,
     }
 }

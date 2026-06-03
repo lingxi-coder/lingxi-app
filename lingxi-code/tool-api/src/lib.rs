@@ -24,6 +24,7 @@ pub mod registry;
 pub mod tool_invoker_impl;
 pub mod tool_trait;
 pub mod util;
+pub mod wire;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

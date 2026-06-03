@@ -710,6 +710,18 @@ pub struct AppState {
     /// `.await` `OrchestratorHandle::list_hooks`, so it RAISES this flag and
     /// `root::pump_open_hooks` fetches + opens via [`Self::open_hooks`].
     pub pending_open_hooks: bool,
+    /// Set by the `/model` submit intercept: a request to open the model picker.
+    /// The SYNC submit path can't `.await` `list_available_models`, so it RAISES
+    /// this flag; `root::pump_open_model` fetches the models + reads the current
+    /// [`StatusSnapshot::model`] and opens via [`Self::open_model`]. Mirrors
+    /// `pending_open_mcp` (handle-backed).
+    pub pending_open_model: bool,
+    /// Set by the model picker's Enter (a committed selection): the model id to
+    /// switch to. The SYNC key path can't `.await` `OrchestratorHandle::switch_model`,
+    /// so the picker raises this and `root::pump_switch_model` performs the async
+    /// write OUTSIDE the lock, then updates [`StatusSnapshot::model`] (success) or
+    /// pushes an error `SystemText` (failure). `None` = no pending switch.
+    pub pending_switch_model: Option<String>,
     /// (`/color`) Session agent-color name set by the `/color <name>` command
     /// (claude-code `standaloneAgentContext.color`). `Some("cyan")` after
     /// `/color cyan`; `None` after `/color default` (reset). Maps to a render
@@ -785,6 +797,8 @@ impl AppState {
             pending_open_skills: false,
             pending_open_mcp: false,
             pending_open_hooks: false,
+            pending_open_model: false,
+            pending_switch_model: None,
             session_agent_color: None,
             pending_save_color: None,
         }
@@ -874,6 +888,16 @@ impl AppState {
             },
         ));
         crate::telemetry::screen_opened("hooks");
+    }
+
+    /// Open the `/model` picker with the given model ids + the active model
+    /// (pre-highlighted). Called by `root::pump_open_model` after the async
+    /// `list_available_models` fetch.
+    pub fn open_model(&mut self, models: Vec<String>, current: String) {
+        self.active_screen = Some(crate::screens::Screen::Model(
+            crate::screens::model::ModelScreenState::new(models, current),
+        ));
+        crate::telemetry::screen_opened("model");
     }
 
     /// (M9-09) Open the `/skills` registry viewer with the given grouped

@@ -246,6 +246,17 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.pending_open_hooks = true;
                 return false;
             }
+            // `/model` (no arg) opens the model picker. Like `/agents`, the open
+            // needs an async `OrchestratorHandle::list_available_models()` call,
+            // so we RAISE `pending_open_model`; `root::pump_open_model` fetches
+            // the models + current and opens the screen. (The `/model <arg>`
+            // form falls through to the `crates/commands` text handler.)
+            if st.prompt_text.trim() == "/model" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.pending_open_model = true;
+                return false;
+            }
             // (M9-09) `/skills` opens the read-only skill-registry viewer. Like
             // `/agents`/`/stats`, the open needs async work the sync `dispatch`
             // seam can't `.await`: an on-disk `.claude/skills/` dir walk (the
@@ -661,6 +672,22 @@ pub fn render_screen(
                 // line-by-line in a column View. Mirrors the Agents/Mcp arm.
                 use crate::screens::hooks::render_hooks_to_string;
                 let body = render_hooks_to_string(h);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().map(|line| element! {
+                            Text(content: line)
+                        }))
+                    }
+                }
+                .into_any()
+            }
+            Screen::Model(m) => {
+                // The model picker renders the pure `render_model_to_string` body
+                // (highlight-only single-select, snapshot-tested) line-by-line in
+                // a column View. Mirrors the Mcp/Hooks arm.
+                use crate::screens::model::render_model_to_string;
+                let body = render_model_to_string(m);
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {

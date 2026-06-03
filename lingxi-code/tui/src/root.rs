@@ -961,6 +961,59 @@ pub async fn pump_open_stats(state: &Arc<Mutex<AppState>>) -> bool {
     false
 }
 
+/// (M9-09 real data) Async `/skills` open pump.
+///
+/// Mirrors [`pump_open_stats`] (no `OrchestratorHandle` needed): the frozen
+/// `OrchestratorHandle` exposes no `list_skills`, so the data is an on-disk
+/// `.claude/skills/` dir walk (project ancestors up to the git root + the user
+/// home), read + parsed by the pure `skills::load_skill_sections`. The sync
+/// `/skills` submit path raises `AppState.pending_open_skills = true` (it can't
+/// `.await` the walk); this pump — driven by the same 100ms ticker `use_future`
+/// — observes the flag, walks OUTSIDE the lock, then opens the screen under the
+/// SAME priority guard (never over a permission dialog or another screen),
+/// re-checking after the walk. Returns `true` iff the screen was opened. Called
+/// unconditionally (not gated on a wired handle).
+///
+/// Single-phase (no loading screen): the walk is a handful of small `SKILL.md`
+/// reads — far lighter than the `/stats` history aggregation — so it opens in
+/// one tick. The reads still run on the blocking pool (`spawn_blocking`) so the
+/// fs I/O never touches the UI executor.
+pub async fn pump_open_skills(state: &Arc<Mutex<AppState>>) -> bool {
+    // 1) Observe the flag + capture `cwd` under the lock, then DROP the lock
+    //    before the fs walk (never held across `.await`/blocking I/O).
+    let cwd = {
+        let mut st = state.lock().await;
+        if !st.pending_open_skills {
+            return false;
+        }
+        if st.pending_permission.is_some() || st.active_screen.is_some() {
+            // Priority 1/2 own the surface: leave the flag, retry next tick.
+            return false;
+        }
+        st.pending_open_skills = false;
+        st.status.cwd.clone()
+    };
+
+    // 2) Walk + parse on the blocking pool (fs reads off the UI executor).
+    let claude_home = claude_home_dir();
+    let sections = tokio::task::spawn_blocking(move || {
+        crate::screens::skills::load_skill_sections(&cwd, &claude_home)
+    })
+    .await
+    .unwrap_or_default();
+
+    // 3) Re-acquire the lock and open — re-check the priority guard (a
+    //    permission dialog / screen may have arrived during the walk).
+    let mut st = state.lock().await;
+    if st.pending_permission.is_some() || st.active_screen.is_some() {
+        // Lost the race: re-raise so the next tick retries.
+        st.pending_open_skills = true;
+        return false;
+    }
+    st.open_skills(sections);
+    true
+}
+
 /// (M9-10) Resolve the claude config home — the same resolution the rest of the
 /// workspace uses (`$CLAUDE_CONFIG_DIR` → `~/.claude`). Mirrors
 /// `screens::doctor::claude_home_dir`. Falls back to `.` when the home dir is
@@ -991,19 +1044,36 @@ async fn aggregate_stats_from_disk() -> crate::screens::stats::StatsData {
         .unwrap_or_default()
 }
 
-/// Synchronous body of [`aggregate_stats_from_disk`], run via `spawn_blocking`.
-/// Uses blocking `std::fs` (it is already off the async executor). Returns the
-/// empty `StatsData::default()` on any I/O failure (the screen then shows the
-/// locked empty state).
-fn aggregate_stats_blocking() -> crate::screens::stats::StatsData {
-    use crate::screens::stats::{aggregate, parse_session, SessionContribution};
+/// (`/stats` result cache) The on-disk cache file path
+/// (`<claude_home>/stats-cache.json`). The filename intentionally matches
+/// claude-code's `STATS_CACHE_FILENAME` (`getStatsCachePath`).
+fn stats_cache_path() -> std::path::PathBuf {
+    claude_home_dir().join("stats-cache.json")
+}
+
+/// (`/stats` result cache) In-process result cache: the last computed
+/// `(fingerprint, data)` pair for THIS process. Checked before the disk read so
+/// a second `/stats` open within one session is instant (skips even the disk
+/// read); the disk cache (see [`stats_cache_path`]) covers the cross-process
+/// case. This is the optional/secondary layer — the disk-cache behaviour does
+/// not depend on it (claude-code's process-lifetime cache analogue).
+static STATS_MEM_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<(crate::screens::stats::HistoryFingerprint, crate::screens::stats::StatsData)>>,
+> = std::sync::OnceLock::new();
+
+/// Collect every `*.jsonl` transcript path under `projects_dir` as
+/// `(path, is_subagent)` pairs, mirroring claude-code `getAllSessionFiles`: main
+/// session files directly in each project dir, plus `subagents/agent-*.jsonl`.
+/// Pure readdir (no file reads) so it is cheap enough to run on every `/stats`
+/// open even when the cache HITS. Returns `[]` on any I/O failure (the caller
+/// then aggregates an empty set → the locked empty state).
+fn collect_jsonl_paths(projects_dir: &std::path::Path) -> Vec<(std::path::PathBuf, bool)> {
     use std::fs;
 
-    let projects_dir = claude_home_dir().join("projects");
-    let mut contribs: Vec<SessionContribution> = Vec::new();
+    let mut paths: Vec<(std::path::PathBuf, bool)> = Vec::new();
 
-    let Ok(project_entries) = fs::read_dir(&projects_dir) else {
-        return aggregate(&contribs);
+    let Ok(project_entries) = fs::read_dir(projects_dir) else {
+        return paths;
     };
     for project in project_entries.flatten() {
         let project_path = project.path();
@@ -1022,26 +1092,150 @@ fn aggregate_stats_blocking() -> crate::screens::stats::StatsData {
                     for s in sub.flatten() {
                         let sp = s.path();
                         let name = sp.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                        if name.starts_with("agent-")
-                            && sp.extension().is_some_and(|e| e == "jsonl")
+                        if name.starts_with("agent-") && sp.extension().is_some_and(|e| e == "jsonl")
                         {
-                            if let Ok(content) = fs::read_to_string(&sp) {
-                                contribs.push(parse_session(&content, true));
-                            }
+                            paths.push((sp, true));
                         }
                     }
                 }
                 continue;
             }
-            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    contribs.push(parse_session(&content, false));
-                }
+            if path.extension().is_some_and(|e| e == "jsonl") {
+                paths.push((path, false));
             }
         }
     }
 
-    aggregate(&contribs)
+    paths
+}
+
+/// Build the [`HistoryFingerprint`](crate::screens::stats::HistoryFingerprint)
+/// of the given transcript paths from each file's `(mtime, size)` metadata
+/// (claude-code's cheap mtime change signal). A file whose metadata cannot be
+/// read contributes a zeroed `(mtime_ns=0, size=0)` entry — still keyed by path,
+/// so its later appearance/disappearance still moves the fingerprint. The impure
+/// `fs::metadata` reads live here (not in the pure `stats` module).
+fn fingerprint_paths(paths: &[(std::path::PathBuf, bool)]) -> crate::screens::stats::HistoryFingerprint {
+    use crate::screens::stats::{FileFingerprint, HistoryFingerprint};
+    use std::time::UNIX_EPOCH;
+
+    let entries: Vec<FileFingerprint> = paths
+        .iter()
+        .map(|(path, _)| {
+            let meta = std::fs::metadata(path).ok();
+            let mtime_ns = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
+            FileFingerprint {
+                path: path.to_string_lossy().into_owned(),
+                mtime_ns,
+                size,
+            }
+        })
+        .collect();
+    HistoryFingerprint::from_entries(entries)
+}
+
+/// Synchronous body of [`aggregate_stats_from_disk`], run via `spawn_blocking`.
+/// Uses blocking `std::fs` (it is already off the async executor). Returns the
+/// empty `StatsData::default()` on any I/O failure (the screen then shows the
+/// locked empty state).
+///
+/// (`/stats` result cache, claude-code `aggregateClaudeCodeStats`) Resolves the
+/// `<claude_home>/projects/` walk root + the [`stats_cache_path`], checks the
+/// in-process [`STATS_MEM_CACHE`] first (a 2nd open within one process returns
+/// instantly), then delegates to the path-parameterized [`aggregate_stats_at`]
+/// for the disk-cache + walk, finally updating the mem cache on the way out.
+fn aggregate_stats_blocking() -> crate::screens::stats::StatsData {
+    let projects_dir = claude_home_dir().join("projects");
+    let cache_path = stats_cache_path();
+
+    // (i) Collect the transcript paths + (ii) fingerprint them. Both are cheap
+    // (readdir + metadata) relative to the read+parse the cache lets us skip.
+    let paths = collect_jsonl_paths(&projects_dir);
+    let current_fp = fingerprint_paths(&paths);
+
+    // In-process layer (optional/secondary): a 2nd `/stats` open within one
+    // process returns instantly when the fingerprint is unchanged — skipping
+    // even the disk read. Kept here (not in `aggregate_stats_at`) so the
+    // disk-cache tests don't depend on this process-global static.
+    let mem = STATS_MEM_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = mem.lock() {
+        if let Some((fp, data)) = guard.as_ref() {
+            if *fp == current_fp {
+                return data.clone();
+            }
+        }
+    }
+
+    let data = aggregate_stats_at(&paths, &current_fp, &cache_path);
+    update_stats_mem_cache(mem, &current_fp, &data);
+    data
+}
+
+/// The disk-cache + walk core of [`aggregate_stats_blocking`], parameterized on
+/// the already-collected `paths`, their `current_fp` fingerprint, and the
+/// `cache_path`. Does NOT touch the process-global [`STATS_MEM_CACHE`], so it is
+/// deterministically testable: a HIT (the on-disk cache decodes against
+/// `current_fp`) returns the cached [`StatsData`] verbatim with no read+parse; a
+/// MISS reads+parses every file, aggregates, and best-effort writes the cache.
+fn aggregate_stats_at(
+    paths: &[(std::path::PathBuf, bool)],
+    current_fp: &crate::screens::stats::HistoryFingerprint,
+    cache_path: &std::path::Path,
+) -> crate::screens::stats::StatsData {
+    use crate::screens::stats::{
+        aggregate, decode_stats_cache, encode_stats_cache, parse_session, SessionContribution,
+    };
+    use std::fs;
+
+    // Disk layer (cross-process): read the cache file (ignore errors) and decode
+    // it against the current fingerprint. A HIT returns without read+parse.
+    if let Ok(json) = fs::read_to_string(cache_path) {
+        if let Some(data) = decode_stats_cache(&json, current_fp) {
+            return data;
+        }
+    }
+
+    // MISS: parse every file and aggregate (behaviour identical to the
+    // un-cached walk).
+    let mut contribs: Vec<SessionContribution> = Vec::with_capacity(paths.len());
+    for (path, is_subagent) in paths {
+        if let Ok(content) = fs::read_to_string(path) {
+            contribs.push(parse_session(&content, *is_subagent));
+        }
+    }
+    let data = aggregate(&contribs);
+
+    // Persist the cache, best-effort: a read-only `CLAUDE_CONFIG_DIR` must never
+    // break `/stats`, so write failures are swallowed. The tmp-sibling + rename
+    // keeps a concurrent reader from seeing a half-written file (mirrors
+    // `memory::save_tier_body`). The tmp name carries the PID so two concurrent
+    // LingXi *processes* both writing `/stats` cannot rename each other's
+    // partially-written file (a corrupt result would only force a harmless
+    // re-walk, but the PID suffix avoids it entirely).
+    let tmp = cache_path.with_extension(format!("json.{}.lingxi-tmp", std::process::id()));
+    if fs::write(&tmp, encode_stats_cache(current_fp, &data)).is_ok() {
+        let _ = fs::rename(&tmp, cache_path);
+    }
+
+    data
+}
+
+/// Replace the in-process [`STATS_MEM_CACHE`] entry with `(fingerprint, data)`.
+/// A poisoned lock is silently ignored (the cache is a best-effort optimization,
+/// never a correctness dependency).
+fn update_stats_mem_cache(
+    mem: &std::sync::Mutex<Option<(crate::screens::stats::HistoryFingerprint, crate::screens::stats::StatsData)>>,
+    fingerprint: &crate::screens::stats::HistoryFingerprint,
+    data: &crate::screens::stats::StatsData,
+) {
+    if let Ok(mut guard) = mem.lock() {
+        *guard = Some((fingerprint.clone(), data.clone()));
+    }
 }
 
 /// (`/color`) Async agent-color persistence pump.
@@ -1277,6 +1471,13 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // multi-project `*.jsonl` fs walk that needs no handle. No-op
                 // (returns false) when no `/stats` request is pending.
                 if pump_open_stats(&state).await {
+                    needs_redraw = true;
+                }
+                // (M9-09 real data) `/skills` open pump. Runs UNCONDITIONALLY
+                // (not gated on a wired `OrchestratorHandle`): the skill data is
+                // an on-disk `.claude/skills/` dir walk that needs no handle.
+                // No-op (returns false) when no `/skills` request is pending.
+                if pump_open_skills(&state).await {
                     needs_redraw = true;
                 }
                 // (`/color`) Agent-color persistence pump. Runs UNCONDITIONALLY
@@ -1708,5 +1909,70 @@ mod tests {
         let mut other = KeyEvent::new(KeyEventKind::Press, KeyCode::Char('x'));
         other.modifiers = KeyModifiers::CONTROL | KeyModifiers::ALT;
         assert!(!is_toggle_vim_key(&other));
+    }
+
+    /// (`/stats` result cache) End-to-end disk-cache behaviour, driven through
+    /// the path-parameterized [`aggregate_stats_at`] (so it touches NO global
+    /// env var or process-static and is race-free under the default parallel
+    /// test runner): a 2nd aggregate HITS the cache (identical `StatsData` +
+    /// `stats-cache.json` exists), and mutating a transcript bumps the
+    /// fingerprint → the next aggregate re-walks and reflects the change.
+    #[test]
+    fn stats_disk_cache_hits_then_invalidates_on_file_change() {
+        use crate::screens::stats::StatsData;
+        use std::fs;
+        use tempfile::TempDir;
+
+        // Aggregate helper: re-collect paths + re-fingerprint each call (mirrors
+        // the real `aggregate_stats_blocking` minus the mem-cache).
+        let aggregate_once = |projects: &std::path::Path, cache: &std::path::Path| -> StatsData {
+            let paths = collect_jsonl_paths(projects);
+            let fp = fingerprint_paths(&paths);
+            aggregate_stats_at(&paths, &fp, cache)
+        };
+
+        let home = TempDir::new().expect("temp home");
+        let projects = home.path().join("projects");
+        let repo_a = projects.join("repo");
+        fs::create_dir_all(&repo_a).expect("mkdir project");
+        let cache = home.path().join("stats-cache.json");
+
+        let sess = repo_a.join("session-a.jsonl");
+        let line = |date: &str, input: u64, output: u64| -> String {
+            format!(
+                r#"{{"type":"assistant","isSidechain":false,"timestamp":"{date}T10:00:00.000Z","message":{{"model":"claude-opus","usage":{{"input_tokens":{input},"output_tokens":{output},"cache_read_input_tokens":0}}}}}}"#
+            )
+        };
+        fs::write(&sess, format!("{}\n", line("2026-05-01", 100, 50))).expect("write session a");
+        // A second project file so the walk crosses ≥2 files.
+        let repo_b = projects.join("repo2");
+        fs::create_dir_all(&repo_b).expect("mkdir project 2");
+        fs::write(repo_b.join("session-b.jsonl"), format!("{}\n", line("2026-05-02", 10, 5)))
+            .expect("write session b");
+
+        // First aggregate: MISS → full walk → writes the cache.
+        let first = aggregate_once(&projects, &cache);
+        assert_eq!(first.total_sessions, 2);
+        assert_eq!(first.total_tokens(), 165);
+        assert!(cache.exists(), "stats-cache.json must exist after the first aggregate");
+        // No leftover tmp sibling (atomic write completed). The tmp name is
+        // PID-suffixed so it cannot collide with a concurrent process's tmp.
+        assert!(!cache.with_extension(format!("json.{}.lingxi-tmp", std::process::id())).exists());
+
+        // Second aggregate with NO file change: HIT → identical data.
+        let second = aggregate_once(&projects, &cache);
+        assert_eq!(second, first, "unchanged history must return the cached StatsData");
+
+        // Mutate one transcript (append a line → size grows → fingerprint
+        // changes), then re-aggregate: the cache is invalidated and the new
+        // tokens are reflected.
+        fs::write(
+            &sess,
+            format!("{}\n{}\n", line("2026-05-01", 100, 50), line("2026-05-01", 7, 3)),
+        )
+        .expect("rewrite session a");
+        let third = aggregate_once(&projects, &cache);
+        assert_ne!(third, first, "a changed transcript must re-walk, not serve stale data");
+        assert_eq!(third.total_tokens(), 165 + 10, "new tokens reflected after invalidation");
     }
 }

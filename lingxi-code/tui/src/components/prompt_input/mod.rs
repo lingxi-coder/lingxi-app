@@ -20,6 +20,9 @@ use iocraft::prelude::*;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+pub mod banner;
+pub use banner::{render_session_color_banner, SessionColorBanner, SessionColorBannerProps};
+
 pub mod footer;
 pub use footer::{FooterMode, PromptInputFooter, PromptInputFooterProps};
 

@@ -132,6 +132,14 @@ pub fn register_core_batch_2(
 /// enumerates the on-disk session store. Each call overwrites the matching
 /// pass-1 unimplemented stub entry in-place.
 ///
+/// `/resume` additionally carries the `continue` alias (claude-code parity:
+/// `src/commands/resume/index.ts` declares `aliases: ['continue']`), registered
+/// here adjacent to the handler it targets. The alias is intentionally *not* a
+/// builtin name (it is absent from `BUILTIN_COMMAND_NAMES`), so `/continue`
+/// dispatches to the resume handler but does not appear as its own palette row —
+/// matching claude-code, where `continue` shares `resume`'s palette row (it
+/// carries no separate `Command` object, only an `aliases: ['continue']` entry).
+///
 /// The composition roots (`apps/engine-desktop`, `apps/engine-mobile`) call
 /// this immediately after `register_core_batch_2`, threading the live
 /// `Arc<dyn OrchestratorHandle>`.
@@ -145,6 +153,10 @@ pub fn register_core_batch_4(
     reg.register_builtin_handler(Arc::new(ExportHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(FilesHandler::new(handle.clone())));
     reg.register_builtin_handler(Arc::new(ResumeHandler::new(handle)));
+
+    // claude-code parity: `/resume` carries the `continue` alias
+    // (src/commands/resume/index.ts: aliases: ['continue']).
+    reg.register_alias("continue".to_string(), "resume".to_string());
 }
 
 /// Register the batch-3 (M-parity) handle-free slash commands.
@@ -585,6 +597,44 @@ mod batch_4_tests {
 
         let h = reg.get_handler("resume").expect("resume handler missing");
         match h.handle(&args("resume")).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_eq!(s, "No resumable sessions found.");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    /// claude-code parity: `/resume` carries the `continue` alias
+    /// (`src/commands/resume/index.ts`). After batch-4 wiring the alias must
+    /// resolve to the `resume` command entry.
+    #[test]
+    fn continue_alias_resolves_to_resume_command() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        register_core_batch_4(&mut reg, handle);
+
+        let cmd = reg
+            .resolve("continue")
+            .expect("continue alias should resolve");
+        assert_eq!(cmd.name, "resume");
+    }
+
+    /// The `continue` alias must also dispatch to the resume *handler* (proves
+    /// the alias-aware `CommandRegistry::get_handler`): looking it up under the
+    /// alias returns the resume handler, which renders the same "none found"
+    /// notice as `/resume` against the default mock.
+    #[tokio::test]
+    async fn continue_alias_dispatches_to_resume_handler() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        let handle = Arc::new(MockOrchestratorHandle::new());
+        register_core_batch_4(&mut reg, handle);
+
+        let h = reg
+            .get_handler("continue")
+            .expect("continue alias should map to the resume handler");
+        match h.handle(&args("continue")).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(s, "No resumable sessions found.");
             }

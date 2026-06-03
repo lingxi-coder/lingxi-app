@@ -161,6 +161,31 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn handle_renders_files_relative_to_cwd() {
+        use orchestrator::test_support::MockOrchestratorHandle;
+        use traits::StatusSnapshot;
+        // Pre-seed the read-file-state cache (absolute keys, insertion order)
+        // and a matching cwd, then drive the real handler: proves the
+        // `files_in_context` override + `render_files` compose 1:1 with the
+        // TS `Files in context:\n${relative(getCwd(), f)}` output.
+        let mock = MockOrchestratorHandle::new();
+        mock.set_files_in_context(vec![
+            PathBuf::from("/repo/src/a.rs"),
+            PathBuf::from("/repo/Cargo.toml"),
+        ]);
+        mock.set_status_snapshot(StatusSnapshot {
+            cwd: PathBuf::from("/repo"),
+            ..StatusSnapshot::default()
+        });
+        let h = FilesHandler::new(Arc::new(mock));
+        if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
+            assert_eq!(s, "Files in context:\nsrc/a.rs\nCargo.toml");
+        } else {
+            panic!();
+        }
+    }
+
     #[test]
     fn name_and_description() {
         use orchestrator::test_support::MockOrchestratorHandle;

@@ -14,7 +14,8 @@ use protocol::ToolUseId;
 use crate::components::prompt_input::completion::{CompletionOverlay, CompletionState};
 use crate::components::prompt_input::palette::{PaletteOverlay, PaletteState, OVERLAY_MAX_ITEMS};
 use crate::components::prompt_input::{
-    HistorySearchOverlay, HistorySearchState, PromptInput, PromptInputFooter, VimMode,
+    HistorySearchOverlay, HistorySearchState, PromptInput, PromptInputFooter, SessionColorBanner,
+    VimMode,
 };
 use crate::components::spinner::SpinnerWithVerb;
 use crate::components::status_line::StatusLine;
@@ -103,6 +104,13 @@ pub struct ReplScreenProps {
     /// in normal mode. When `Some`, the `TeammateViewHeader` renders above the
     /// transcript in `theme.claude`.
     pub viewing_teammate: Option<String>,
+    /// (`/color`) Session agent-color name (clone of `AppState.session_agent_color`,
+    /// claude-code `useSwarmBanner` standalone branch — `standaloneAgentContext.color`).
+    /// When `Some(name)`, a full-width colored rule line (`SessionColorBanner`)
+    /// renders directly ABOVE the prompt, tinted by the agent color. `None`
+    /// hides it (no row) — matching claude-code's `color: undefined` →
+    /// standalone branch falls through to `return null`.
+    pub session_agent_color: Option<String>,
 }
 
 impl Default for ReplScreenProps {
@@ -130,6 +138,7 @@ impl Default for ReplScreenProps {
             task_footer: None,
             team_footer: None,
             viewing_teammate: None,
+            session_agent_color: None,
         }
     }
 }
@@ -164,6 +173,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let task_footer = props.task_footer.clone();
     let team_footer = props.team_footer.clone();
     let viewing_teammate = props.viewing_teammate.clone();
+    let session_agent_color = props.session_agent_color.clone();
     let dim = theme.dim;
     element! {
         View(flex_direction: FlexDirection::Column, width: 100pct, height: 100pct) {
@@ -224,6 +234,16 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 let failed_match = !hs.query.is_empty() && hs.match_index.is_none();
                 element! {
                     HistorySearchOverlay(query: query, failed_match: failed_match)
+                }
+            }))
+            // (`/color`) Standalone-agent banner rule, drawn directly ABOVE the
+            // prompt when a session color is set (claude-code `useSwarmBanner`
+            // standalone branch + `PromptInput.tsx:2250-2267`). Hidden (no row)
+            // when `None`, matching `color: undefined` → `return null`.
+            #(session_agent_color.as_ref().map(|name| {
+                let name = name.clone();
+                element! {
+                    SessionColorBanner(color_name: name, width: prompt_width)
                 }
             }))
             PromptInput(

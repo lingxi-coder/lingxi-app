@@ -4612,6 +4612,7 @@ dependencies = [
  "serde_json",
  "session",
  "similar",
+ "skill-api",
  "syntect",
  "telemetry",
  "tempfile",

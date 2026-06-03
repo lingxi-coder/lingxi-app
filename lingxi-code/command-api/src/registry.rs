@@ -57,9 +57,16 @@ impl CommandRegistry {
     }
 
     /// Fetch a built-in handler by id.
+    ///
+    /// Canonicalizes through the aliases map exactly like [`Self::resolve`] does,
+    /// then looks up the built-in handler under the canonical name. For a
+    /// non-alias `handler_id`, `canon == handler_id`, so behavior is identical to
+    /// a plain `builtin_handlers` lookup; aliases (e.g. `continue` → `resume`)
+    /// route to the target's handler.
     #[must_use]
     pub fn get_handler(&self, handler_id: &str) -> Option<Arc<dyn BuiltinCommandHandler>> {
-        self.builtin_handlers.get(handler_id).cloned()
+        let canon = self.aliases.get(handler_id).map_or(handler_id, String::as_str);
+        self.builtin_handlers.get(canon).cloned()
     }
 
     /// Register a batch of commands owned by `plugin_id`.
@@ -84,5 +91,39 @@ impl CommandRegistry {
 impl Default for CommandRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builtin_support::unimplemented::UnimplementedCommandHandler;
+
+    /// `get_handler` canonicalizes through the aliases map (mirroring `resolve`),
+    /// so an alias (`continue` → `resume`) returns the target's handler while a
+    /// non-alias name remains a plain lookup and an unknown name yields `None`.
+    #[test]
+    fn get_handler_follows_alias() {
+        let mut reg = CommandRegistry::new();
+        reg.register_builtin_handler(Arc::new(UnimplementedCommandHandler::new(
+            "resume",
+            "Resume a previous conversation",
+        )));
+        reg.register_alias("continue".to_string(), "resume".to_string());
+
+        // The alias resolves to the resume handler.
+        let via_alias = reg
+            .get_handler("continue")
+            .expect("alias should map to the resume handler");
+        assert_eq!(via_alias.name(), "resume");
+
+        // The canonical name still resolves directly (non-alias no-op path).
+        let direct = reg
+            .get_handler("resume")
+            .expect("canonical name should resolve");
+        assert_eq!(direct.name(), "resume");
+
+        // Canonicalization is a no-op for an unknown, non-alias name.
+        assert!(reg.get_handler("nonexistent").is_none());
     }
 }

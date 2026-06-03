@@ -439,6 +439,8 @@ pub struct MockOrchestratorHandle {
     permissions_editor_error: StdMutex<Option<String>>,
     /// Pre-loaded available models list returned by `list_available_models`.
     available_models: StdMutex<Vec<String>>,
+    /// Pre-loaded read-file-state cache keys returned by `files_in_context`.
+    files_in_context: StdMutex<Vec<PathBuf>>,
 }
 
 impl MockOrchestratorHandle {
@@ -469,6 +471,7 @@ impl MockOrchestratorHandle {
             config_editor_error: StdMutex::new(None),
             permissions_editor_error: StdMutex::new(None),
             available_models: StdMutex::new(Vec::new()),
+            files_in_context: StdMutex::new(Vec::new()),
         }
     }
 
@@ -558,6 +561,10 @@ impl MockOrchestratorHandle {
     /// Pre-load the list returned by `list_available_models`.
     pub fn set_available_models(&self, m: Vec<String>) {
         *self.available_models.lock().unwrap() = m;
+    }
+    /// Pre-load the read-file-state cache keys returned by `files_in_context`.
+    pub fn set_files_in_context(&self, files: Vec<PathBuf>) {
+        *self.files_in_context.lock().unwrap() = files;
     }
 }
 
@@ -686,6 +693,10 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
     async fn list_available_models(&self) -> Vec<String> {
         self.available_models.lock().unwrap().clone()
+    }
+
+    async fn files_in_context(&self) -> Vec<PathBuf> {
+        self.files_in_context.lock().unwrap().clone()
     }
 }
 

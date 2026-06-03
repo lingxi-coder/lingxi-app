@@ -9,33 +9,37 @@
 //!   * a valid level → set it;
 //!   * anything else → an invalid-argument message.
 //!
-//! ## Frozen-batch deferrals (see the batch deferral note)
+//! ## Persistence + resolver
 //!
-//! Two pieces of the TS behaviour are NOT reachable frozen-safely and are
-//! deferred:
-//!   1. **Persistence.** The TS set/clear paths call
-//!      `updateSettingsForSource('userSettings', { effortLevel })`. The Rust
-//!      settings crate is a read-only loader (no save/write/persist fn) and
-//!      `SettingsJson` has no `effortLevel` field; `OrchestratorHandle` (frozen
-//!      `traits/`) exposes no settings-write nor effort accessor. So every set
-//!      here is **session-only** — which maps exactly onto the real TS
-//!      `persistable === undefined` branches (`" (this session only)"` /
-//!      `"Not applied … nothing saved"`), preserving 1:1 fidelity on those
-//!      strings.
-//!   2. **The `auto (currently {level})` computed level.** TS derives it via
-//!      `getDisplayedEffortLevel(model, …)` → `resolveAppliedEffort` →
-//!      `getDefaultEffortForModel` + `modelSupportsMaxEffort` (subscriber /
-//!      model-default / ultrathink logic) which has no Rust equivalent. The
-//!      handle supplies the model string (`get_status_snapshot().model`) but
-//!      not the default-effort resolver. For the pure-auto case we emit the
-//!      faithful subset `"Effort level: auto"`; the `{currently X}` suffix
-//!      needs the model-default resolver port.
+//! The TS set/clear paths call
+//! `updateSettingsForSource('userSettings', { effortLevel })`. The Rust
+//! settings crate is a read-only loader, but a write is not load-bearing on
+//! it: we persist with the same direct-fs seam `export.rs` uses, mirroring
+//! `updateSettingsForSource` byte-for-byte (merge into the existing
+//! `~/.claude/settings.json`, treat a missing value as a delete, never
+//! overwrite a JSON-syntax-broken file). [`persist_effort_level`] is the port.
+//!
+//! Per [`to_persistable`] (TS `toPersistableEffort`, `effort.ts` L95) only
+//! `low`/`medium`/`high` are persistable for non-ant users; `max` is
+//! session-scoped, so setting `max` keeps the `" (this session only)"` suffix
+//! and writes nothing — 1:1 with the TS `persistable === undefined` branch.
+//!
+//! The `auto (currently {level})` computed level is driven by the ported
+//! [`get_displayed_effort_level`] → [`resolve_applied_effort`] →
+//! [`get_default_effort_for_model`] + [`model_supports_max_effort`] chain.
+//! Three TS branches of `getDefaultEffortForModel` are seam-blocked and
+//! documented on that fn (Pro/Max/Team → medium needs subscriber-auth +
+//! `GrowthBook`; ultrathink → medium needs the ultrathink seam) — none is
+//! reachable in-tree, so every reachable model resolves to the API default
+//! `high`, computed rather than hard-coded.
 //!
 //! The env override (`CLAUDE_CODE_EFFORT_LEVEL`) is honoured in every branch.
 
 use async_trait::async_trait;
 use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
+use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::sync::Arc;
 use traits::OrchestratorHandle;
 
@@ -104,6 +108,151 @@ enum EnvOverride {
     Pinned { level: EffortLevel, raw: String },
 }
 
+/// `toPersistableEffort` (`effort.ts` L95) — the persistable subset of a
+/// level. `low`/`medium`/`high` persist; `max` is session-scoped for non-ant
+/// users (this port is non-ant), so it returns `None`. Numeric efforts are
+/// ANT-only and already absent from [`EffortLevel`].
+fn to_persistable(level: EffortLevel) -> Option<EffortLevel> {
+    match level {
+        EffortLevel::Low | EffortLevel::Medium | EffortLevel::High => Some(level),
+        EffortLevel::Max => None,
+    }
+}
+
+/// `~/.claude/settings.json` — byte-identical to the engine settings loader
+/// (`engine/src/settings/loader.rs` `home_dir` + `user_settings_path`) so the
+/// `HOME` redirect used by tests targets the same file. `None` if `HOME` is
+/// unset (TS `getSettingsFilePathForSource` → `null` → `{ error: null }`).
+fn user_settings_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude").join("settings.json"))
+}
+
+/// Persist `effortLevel` into the user `settings.json`, mirroring
+/// `updateSettingsForSource('userSettings', { effortLevel })`
+/// (`settings.ts` L416). `Some(level)` writes the key; `None` deletes it
+/// (TS `mergeWith` treats `undefined` as a delete, L483). All other keys are
+/// preserved.
+///
+/// Faithful to the TS error contract: a missing/empty file merges into an
+/// empty object, but a file whose JSON is syntactically broken is left
+/// untouched and surfaces `Invalid JSON syntax …` (L459) rather than being
+/// overwritten.
+fn persist_effort_level(level: Option<EffortLevel>) -> Result<(), String> {
+    // TS: filePath === null → { error: null }.
+    let Some(path) = user_settings_path() else {
+        return Ok(());
+    };
+
+    // TS: mkdirSync(dirname(filePath)).
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to read raw settings from {}: {e}", path.display()))?;
+    }
+
+    // Read existing settings. ENOENT / empty → empty map; broken JSON → bail
+    // without overwriting (TS L459).
+    let mut map: serde_json::Map<String, Value> = match std::fs::read_to_string(&path) {
+        Ok(content) if content.trim().is_empty() => serde_json::Map::new(),
+        Ok(content) => serde_json::from_str(&content).map_err(|_| {
+            format!("Invalid JSON syntax in settings file at {}", path.display())
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(e) => {
+            return Err(format!(
+                "Failed to read raw settings from {}: {e}",
+                path.display()
+            ))
+        }
+    };
+
+    // mergeWith: Some → set, None → delete.
+    match level {
+        Some(level) => {
+            map.insert("effortLevel".to_string(), json!(level.as_str()));
+        }
+        None => {
+            map.remove("effortLevel");
+        }
+    }
+
+    // jsonStringify(updatedSettings, null, 2) + '\n' — 2-space indent + newline.
+    let serialized = serde_json::to_string_pretty(&map)
+        .map_err(|e| format!("Failed to read raw settings from {}: {e}", path.display()))?;
+    std::fs::write(&path, serialized + "\n")
+        .map_err(|e| format!("Failed to read raw settings from {}: {e}", path.display()))?;
+    Ok(())
+}
+
+/// `modelSupportsMaxEffort` (`effort.ts` L53) — the non-ant reachable subset:
+/// `max` is Opus-4.6-only for public models. The 3P-override and ANT branches
+/// are seam-blocked (no `get3PModelCapabilityOverride` / `resolveAntModel` in
+/// this port).
+fn model_supports_max_effort(model: &str) -> bool {
+    model.to_lowercase().contains("opus-4-6")
+}
+
+/// `getDefaultEffortForModel` (`effort.ts` L279) — the non-ant reachable
+/// subset.
+///
+/// Every TS branch that can return a non-`undefined` default is seam-blocked
+/// in this port and so returns `None`:
+///   * ANT model overrides (`resolveAntModel` / `getAntModelOverrideConfig`);
+///   * Opus-4.6 → `medium` for Pro/Max/Team subscribers — needs the
+///     subscriber-auth (`isProSubscriber` …) and `GrowthBook`
+///     (`getOpusDefaultEffortConfig`) seams;
+///   * ultrathink → `medium` — needs the `isUltrathinkEnabled` seam.
+///
+/// With none of those reachable in-tree the TS fallback (`return undefined`,
+/// L328 — "resolve to high in the API") is the only live path, so this
+/// returns `None` for every model. The fn exists to wire the precedence
+/// chain; flipping any seam on later changes the answer without touching the
+/// call sites.
+fn get_default_effort_for_model(_model: &str) -> Option<EffortLevel> {
+    None
+}
+
+/// `convertEffortValueToLevel` (`effort.ts` L202) — for the string levels this
+/// port carries it is a passthrough (the numeric-coercion + `GrowthBook`
+/// `'high'` guard only apply to numeric/remote values, which are ANT-only and
+/// absent from [`EffortLevel`]).
+fn convert_effort_value_to_level(level: EffortLevel) -> EffortLevel {
+    level
+}
+
+/// `resolveAppliedEffort` (`effort.ts` L152) — the effort that would actually
+/// be sent for `model`, following `env → app-state → model default`. `None`
+/// means "send no effort param" (env cleared, or no default).
+///
+/// `app_state` mirrors the TS `appStateEffortValue` argument; this port has no
+/// app-state effort read seam, so call sites pass `None`.
+fn resolve_applied_effort(model: &str, app_state: Option<EffortLevel>) -> Option<EffortLevel> {
+    match effort_env_override() {
+        // envOverride === null → undefined.
+        EnvOverride::Cleared => None,
+        // envOverride ?? appState ?? getDefaultEffortForModel(model).
+        env => {
+            let resolved = match env {
+                EnvOverride::Pinned { level, .. } => Some(level),
+                _ => app_state.or_else(|| get_default_effort_for_model(model)),
+            };
+            // API rejects 'max' on non-Opus-4.6 — downgrade to 'high' (L163).
+            match resolved {
+                Some(EffortLevel::Max) if !model_supports_max_effort(model) => {
+                    Some(EffortLevel::High)
+                }
+                other => other,
+            }
+        }
+    }
+}
+
+/// `getDisplayedEffortLevel` (`effort.ts` L174) — [`resolve_applied_effort`]
+/// with the `?? 'high'` API-default fallback, then `convertEffortValueToLevel`.
+fn get_displayed_effort_level(model: &str, app_state: Option<EffortLevel>) -> EffortLevel {
+    let resolved = resolve_applied_effort(model, app_state).unwrap_or(EffortLevel::High);
+    convert_effort_value_to_level(resolved)
+}
+
 /// Read and classify `CLAUDE_CODE_EFFORT_LEVEL` (`getEffortEnvOverride`).
 fn effort_env_override() -> EnvOverride {
     let Ok(raw) = std::env::var(EFFORT_ENV_VAR) else {
@@ -151,23 +300,33 @@ impl EffortHandler {
             EnvOverride::Cleared | EnvOverride::Unset => {
                 // Effective value is undefined → TS renders
                 // `Effort level: auto (currently {level})` where `{level}` is
-                // `getDisplayedEffortLevel = resolveAppliedEffort(...) ?? 'high'`
-                // (effort.ts L178). With no env/app-state effort and no
-                // model-default resolver port, that resolves to the API default
-                // `'high'`, so the faithful default-case output is
-                // `auto (currently high)`. The model read is retained (and
-                // discarded) so the future `getDefaultEffortForModel` resolver —
-                // which can yield `(currently medium)` for opus-4-6/subscribers —
-                // has its seam wired.
-                let _ = self.handle.get_status_snapshot().await.model;
-                "Effort level: auto (currently high)".to_string()
+                // `getDisplayedEffortLevel(model, appStateEffort)` (effort.ts
+                // L178). This port has no app-state effort read seam (TS reads
+                // `appStateEffort`, not `settings.json`, so a persisted level
+                // does NOT surface here either), so app-state is `None`; with
+                // every reachable model default seam-blocked the resolver lands
+                // on the API default `high`. The level is now computed by the
+                // real `getDisplayedEffortLevel` port rather than hard-coded.
+                let model = self.handle.get_status_snapshot().await.model;
+                format!(
+                    "Effort level: auto (currently {})",
+                    get_displayed_effort_level(&model, None).as_str()
+                )
             }
         }
     }
 
     /// `unsetEffortLevel` (`effort.tsx` L76-106) — the `auto`/`unset` branch.
-    /// Nothing is persisted (no write seam); only the env-conflict note varies.
+    /// Deletes the persisted `effortLevel`; only the env-conflict note varies.
+    ///
+    /// Kept an associated fn (not `&self`): the body only touches the
+    /// process env + the user `settings.json` via free helpers, so a `&self`
+    /// receiver would trip `clippy::unused_self`.
     fn clear_effort() -> String {
+        // updateSettingsForSource('userSettings', { effortLevel: undefined }).
+        if let Err(msg) = persist_effort_level(None) {
+            return format!("Failed to set effort level: {msg}");
+        }
         match effort_env_override() {
             EnvOverride::Pinned { raw, .. } => format!(
                 "Cleared effort from settings, but {EFFORT_ENV_VAR}={raw} still controls this session"
@@ -176,30 +335,57 @@ impl EffortHandler {
         }
     }
 
-    /// `setEffortValue` (`effort.tsx` L16-61) — the valid-level branch. Because
-    /// there is no write seam, `persistable` is treated as `undefined` for the
-    /// suffix/conflict strings; the level itself is still session-applicable.
+    /// `setEffortValue` (`effort.tsx` L16-61) — the valid-level branch.
+    ///
+    /// Kept an associated fn (not `&self`) for the same reason as
+    /// [`Self::clear_effort`] — no receiver state is used, so `&self` would
+    /// trip `clippy::unused_self`.
     fn set_effort(level: EffortLevel) -> String {
+        // toPersistableEffort: low/medium/high persist, max is session-only.
+        let persistable = to_persistable(level);
+        if persistable.is_some() {
+            if let Err(msg) = persist_effort_level(Some(level)) {
+                return format!("Failed to set effort level: {msg}");
+            }
+        }
+
         // TS flags env conflict only when env pins a *different* level than the
-        // one the user asked for (`envOverride !== effortValue`). persistable
-        // === undefined for every set in this port → the session-only
-        // "Not applied … nothing saved" branch when the env conflicts.
+        // one the user asked for (`envOverride !== effortValue`). The note
+        // wording then branches on whether the level was persistable.
         match effort_env_override() {
             EnvOverride::Pinned {
                 level: env_level,
                 raw,
-            } if env_level != level => format!(
-                "Not applied: {EFFORT_ENV_VAR}={raw} overrides effort this session, and {} is session-only (nothing saved)",
-                level.as_str()
-            ),
-            // No conflict → `Set effort level to {x} (this session only): {desc}`.
-            // The `(this session only)` suffix fires because persistable is
-            // undefined in this port (no write seam).
-            _ => format!(
-                "Set effort level to {} (this session only): {}",
-                level.as_str(),
-                level.description()
-            ),
+            } if env_level != level => {
+                if persistable.is_none() {
+                    // Session-only level can't outlast the env (L38).
+                    format!(
+                        "Not applied: {EFFORT_ENV_VAR}={raw} overrides effort this session, and {} is session-only (nothing saved)",
+                        level.as_str()
+                    )
+                } else {
+                    // Persisted, but env wins until cleared (L47).
+                    format!(
+                        "{EFFORT_ENV_VAR}={raw} overrides this session — clear it and {} takes over",
+                        level.as_str()
+                    )
+                }
+            }
+            // No conflict → `Set effort level to {x}{suffix}: {desc}`. The
+            // `(this session only)` suffix fires only for non-persistable
+            // (`max`) levels (L54).
+            _ => {
+                let suffix = if persistable.is_some() {
+                    ""
+                } else {
+                    " (this session only)"
+                };
+                format!(
+                    "Set effort level to {}{suffix}: {}",
+                    level.as_str(),
+                    level.description()
+                )
+            }
         }
     }
 }
@@ -261,8 +447,78 @@ mod tests {
     use orchestrator::test_support::MockOrchestratorHandle;
 
     /// Env-mutating tests must run serialized: they share the one process-wide
-    /// `CLAUDE_CODE_EFFORT_LEVEL`. A module-level mutex serializes them.
+    /// `CLAUDE_CODE_EFFORT_LEVEL` *and* `HOME` (now that the set/clear paths
+    /// write `~/.claude/settings.json`). A module-level mutex serializes them.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII test fixture: holds [`ENV_LOCK`], redirects `HOME` to a fresh
+    /// per-test temp dir (so persistence never touches the real `~/.claude`),
+    /// and clears `CLAUDE_CODE_EFFORT_LEVEL`. On drop it restores the prior
+    /// `HOME` and removes the temp dir. Mirrors the `HOME_LOCK` pattern in
+    /// `engine/src/settings`; uses `std::env::temp_dir()` rather than the
+    /// `tempfile` crate, matching the `export.rs` test precedent (no new dep).
+    struct TestEnv {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        home: PathBuf,
+        prev_home: Option<std::ffi::OsString>,
+    }
+
+    impl TestEnv {
+        fn new() -> Self {
+            let guard = ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let prev_home = std::env::var_os("HOME");
+            // Unique per process + per nanosecond so parallel binaries / repeat
+            // runs never collide.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let home = std::env::temp_dir().join(format!(
+                "lingxi-effort-test-{}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&home).unwrap();
+            std::env::set_var("HOME", &home);
+            std::env::remove_var(EFFORT_ENV_VAR);
+            Self {
+                _guard: guard,
+                home,
+                prev_home,
+            }
+        }
+
+        /// The redirected `~/.claude/settings.json` path.
+        fn settings_path(&self) -> PathBuf {
+            self.home.join(".claude").join("settings.json")
+        }
+
+        /// Pre-seed `settings.json` with the given raw bytes (for the
+        /// merge / broken-JSON tests).
+        fn write_settings(&self, raw: &str) {
+            let path = self.settings_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, raw).unwrap();
+        }
+
+        /// Read `settings.json` back as a JSON object, or `None` if absent.
+        fn read_settings(&self) -> Option<serde_json::Map<String, Value>> {
+            std::fs::read_to_string(self.settings_path())
+                .ok()
+                .map(|c| serde_json::from_str(&c).unwrap())
+        }
+    }
+
+    impl Drop for TestEnv {
+        fn drop(&mut self) {
+            match &self.prev_home {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+            std::env::remove_var(EFFORT_ENV_VAR);
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
+    }
 
     fn args(raw: &str) -> ParsedSlashCommand {
         ParsedSlashCommand {
@@ -285,8 +541,7 @@ mod tests {
 
     #[tokio::test]
     async fn help_args_render_usage() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::remove_var(EFFORT_ENV_VAR);
+        let _env = TestEnv::new();
         for raw in ["help", "-h", "--help", "  help  "] {
             assert_eq!(run(raw).await, USAGE);
         }
@@ -294,8 +549,7 @@ mod tests {
 
     #[tokio::test]
     async fn current_with_no_env_renders_auto_subset() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::remove_var(EFFORT_ENV_VAR);
+        let _env = TestEnv::new();
         for raw in ["", "  ", "current", "status", "CURRENT"] {
             assert_eq!(run(raw).await, "Effort level: auto (currently high)");
         }
@@ -303,82 +557,84 @@ mod tests {
 
     #[tokio::test]
     async fn current_with_env_pinned_renders_effective_level() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = TestEnv::new();
         std::env::set_var(EFFORT_ENV_VAR, "high");
         assert_eq!(
             run("current").await,
             "Current effort level: high (Comprehensive implementation with extensive testing and documentation)"
         );
-        std::env::remove_var(EFFORT_ENV_VAR);
     }
 
     #[tokio::test]
     async fn current_with_env_cleared_renders_auto_subset() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = TestEnv::new();
         std::env::set_var(EFFORT_ENV_VAR, "unset");
         assert_eq!(run("").await, "Effort level: auto (currently high)");
-        std::env::remove_var(EFFORT_ENV_VAR);
     }
 
     #[tokio::test]
     async fn set_valid_level_no_env_is_session_only() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::remove_var(EFFORT_ENV_VAR);
+        let env = TestEnv::new();
+        // low/medium/high are now persistable → suffix dropped.
         assert_eq!(
             run("medium").await,
-            "Set effort level to medium (this session only): Balanced approach with standard implementation and testing"
+            "Set effort level to medium: Balanced approach with standard implementation and testing"
         );
+        // max stays session-only (toPersistableEffort(max) === undefined for
+        // non-ant) → suffix kept, nothing written.
         assert_eq!(
             run("MAX").await,
             "Set effort level to max (this session only): Maximum capability with deepest reasoning (Opus 4.6 only)"
+        );
+        // Persisted value is the last *persistable* set (medium); max didn't
+        // overwrite it.
+        assert_eq!(
+            env.read_settings().unwrap().get("effortLevel"),
+            Some(&json!("medium"))
         );
     }
 
     #[tokio::test]
     async fn set_level_conflicting_env_is_not_applied() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = TestEnv::new();
+        // env=low, ask max (non-persistable) → "Not applied … nothing saved".
         std::env::set_var(EFFORT_ENV_VAR, "low");
         assert_eq!(
-            run("high").await,
-            "Not applied: CLAUDE_CODE_EFFORT_LEVEL=low overrides effort this session, and high is session-only (nothing saved)"
+            run("max").await,
+            "Not applied: CLAUDE_CODE_EFFORT_LEVEL=low overrides effort this session, and max is session-only (nothing saved)"
         );
-        std::env::remove_var(EFFORT_ENV_VAR);
     }
 
     #[tokio::test]
     async fn set_level_matching_env_has_no_conflict_note() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = TestEnv::new();
         std::env::set_var(EFFORT_ENV_VAR, "high");
         assert_eq!(
             run("high").await,
-            "Set effort level to high (this session only): Comprehensive implementation with extensive testing and documentation"
+            "Set effort level to high: Comprehensive implementation with extensive testing and documentation"
         );
-        std::env::remove_var(EFFORT_ENV_VAR);
     }
 
     #[tokio::test]
     async fn clear_no_env_sets_auto() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::remove_var(EFFORT_ENV_VAR);
+        let _env = TestEnv::new();
         assert_eq!(run("auto").await, "Effort level set to auto");
         assert_eq!(run("unset").await, "Effort level set to auto");
     }
 
     #[tokio::test]
     async fn clear_with_env_pinned_warns() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = TestEnv::new();
         std::env::set_var(EFFORT_ENV_VAR, "high");
         assert_eq!(
             run("auto").await,
             "Cleared effort from settings, but CLAUDE_CODE_EFFORT_LEVEL=high still controls this session"
         );
-        std::env::remove_var(EFFORT_ENV_VAR);
     }
 
     #[tokio::test]
     async fn invalid_arg_message() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::remove_var(EFFORT_ENV_VAR);
+        let _env = TestEnv::new();
         assert_eq!(
             run("bogus").await,
             "Invalid argument: bogus. Valid options are: low, medium, high, max, auto"
@@ -387,8 +643,113 @@ mod tests {
 
     #[tokio::test]
     async fn name_and_description() {
+        let _env = TestEnv::new();
         let h = handler();
         assert_eq!(h.name(), "effort");
         assert_eq!(h.description(), "Set effort level for model usage");
+    }
+
+    // ---- persistence (updateSettingsForSource) parity ----
+
+    #[tokio::test]
+    async fn persist_creates_settings_and_writes_effort_level() {
+        let env = TestEnv::new();
+        assert_eq!(
+            run("high").await,
+            "Set effort level to high: Comprehensive implementation with extensive testing and documentation"
+        );
+        let map = env.read_settings().expect("settings.json written");
+        assert_eq!(map.get("effortLevel"), Some(&json!("high")));
+        assert_eq!(map.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn persist_merges_into_existing_settings() {
+        let env = TestEnv::new();
+        env.write_settings("{\"model\":\"opus\"}");
+        run("low").await;
+        let map = env.read_settings().unwrap();
+        assert_eq!(map.get("model"), Some(&json!("opus")));
+        assert_eq!(map.get("effortLevel"), Some(&json!("low")));
+    }
+
+    #[tokio::test]
+    async fn persist_max_is_session_only_not_written() {
+        let env = TestEnv::new();
+        env.write_settings("{}");
+        assert_eq!(
+            run("max").await,
+            "Set effort level to max (this session only): Maximum capability with deepest reasoning (Opus 4.6 only)"
+        );
+        assert!(env.read_settings().unwrap().get("effortLevel").is_none());
+    }
+
+    #[tokio::test]
+    async fn clear_removes_effort_level() {
+        let env = TestEnv::new();
+        env.write_settings("{\"effortLevel\":\"high\",\"model\":\"x\"}");
+        assert_eq!(run("auto").await, "Effort level set to auto");
+        let map = env.read_settings().unwrap();
+        assert!(map.get("effortLevel").is_none());
+        assert_eq!(map.get("model"), Some(&json!("x")));
+    }
+
+    #[tokio::test]
+    async fn broken_settings_json_not_overwritten() {
+        let env = TestEnv::new();
+        let raw = "{ bad json";
+        env.write_settings(raw);
+        let msg = run("high").await;
+        let path = env.settings_path();
+        assert_eq!(
+            msg,
+            format!(
+                "Failed to set effort level: Invalid JSON syntax in settings file at {}",
+                path.display()
+            )
+        );
+        // File bytes must be untouched (parity with TS L459).
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+    }
+
+    #[tokio::test]
+    async fn set_conflicting_env_with_persistable_uses_override_note() {
+        let env = TestEnv::new();
+        std::env::set_var(EFFORT_ENV_VAR, "low");
+        assert_eq!(
+            run("high").await,
+            "CLAUDE_CODE_EFFORT_LEVEL=low overrides this session — clear it and high takes over"
+        );
+        // Persistable set still wrote to disk (env only wins at resolve time).
+        assert_eq!(
+            env.read_settings().unwrap().get("effortLevel"),
+            Some(&json!("high"))
+        );
+    }
+
+    #[tokio::test]
+    async fn current_after_persist_still_renders_auto_high() {
+        let _env = TestEnv::new();
+        // Persist a level…
+        run("high").await;
+        // …then `current` still renders auto, because showCurrentEffort reads
+        // appStateEffort (None here), not settings.json.
+        assert_eq!(run("current").await, "Effort level: auto (currently high)");
+    }
+
+    // ---- resolver unit (effort.ts) ----
+
+    #[test]
+    fn resolver_unit() {
+        // `get_displayed_effort_level` reads `CLAUDE_CODE_EFFORT_LEVEL`, so
+        // serialize against the env-mutating tests (TestEnv clears it).
+        let _env = TestEnv::new();
+        assert_eq!(get_default_effort_for_model("claude-opus-4-6"), None);
+        assert_eq!(
+            get_displayed_effort_level("claude-opus-4-6", None),
+            EffortLevel::High
+        );
+        assert!(model_supports_max_effort("claude-opus-4-6"));
+        assert!(!model_supports_max_effort("claude-sonnet-4-6"));
     }
 }

@@ -121,6 +121,22 @@ mod tests {
         RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
     }
 
+    /// Like [`seeded_dispatcher`] but also wires the `continue` → `resume` alias
+    /// (registered by `register_core_batch_4` in `command-core`, which can't be
+    /// used here without a dependency cycle). Used to prove the alias survives
+    /// the real dispatch path end-to-end.
+    fn seeded_dispatcher_with_resume_alias() -> RegistrySlashDispatcher {
+        let mut reg = CommandRegistry::new();
+        for &name in BUILTIN_COMMAND_NAMES {
+            reg.register_builtin_handler(Arc::new(UnimplementedCommandHandler::new(
+                name,
+                core_description(name),
+            )));
+        }
+        reg.register_alias("continue".to_string(), "resume".to_string());
+        RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+    }
+
     #[tokio::test]
     async fn dispatches_known_command_to_locked_stub() {
         let d = seeded_dispatcher();
@@ -142,6 +158,24 @@ mod tests {
                 assert_eq!(display, "clear: not implemented in v0.6.0 (M5)");
             }
             other => panic!("expected Handled, got {other:?}"),
+        }
+    }
+
+    /// End-to-end guard: the `continue` alias survives the real dispatch path.
+    /// `/continue` must route through the alias-aware `get_handler` to the
+    /// `resume` handler — yielding `Handled`, not `Unknown`. (Mirrors
+    /// claude-code's `aliases: ['continue']` on `/resume`.)
+    #[tokio::test]
+    async fn dispatches_continue_alias_to_resume() {
+        let d = seeded_dispatcher_with_resume_alias();
+        let result = d.dispatch("/continue").await;
+        match result {
+            SlashDispatchResult::Handled { display } => {
+                // Seeded with the stub handler under "resume", so the alias
+                // routes there and we get the resume stub literal back.
+                assert_eq!(display, "resume: not implemented in v0.6.0 (M5)");
+            }
+            other => panic!("expected Handled for /continue, got {other:?}"),
         }
     }
 

@@ -226,17 +226,21 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 return false;
             }
             // (M9-09) `/skills` opens the read-only skill-registry viewer. Like
-            // `/theme`/`/memory` the open is fully SYNCHRONOUS: the skill
-            // catalog is in-tree but not reachable from the TUI (the frozen
-            // `OrchestratorHandle` has no `list_skills` and `AppState` holds no
-            // `SkillRegistry`), so the open passes an EMPTY section list — the
-            // locked `No skills found` empty state. No async pump needed; no
-            // echo, no turn. The `crates/commands` skills handler stays the
-            // `--no-tui` path.
+            // `/agents`/`/stats`, the open needs async work the sync `dispatch`
+            // seam can't `.await`: an on-disk `.claude/skills/` dir walk (the
+            // project ancestors up to the git root + the user home), reading +
+            // parsing each `SKILL.md`. The frozen `OrchestratorHandle` exposes
+            // no `list_skills`, so the TUI reads the dirs itself. We RAISE
+            // `pending_open_skills`; the async open pump in `root.rs`
+            // (`pump_open_skills`) walks the dirs OUTSIDE the `AppState` lock,
+            // builds the grouped sections, and opens the screen. When no skill
+            // exists on disk the sections are empty → the locked `No skills
+            // found` empty state. No echo, no turn. The `crates/commands` skills
+            // handler stays the `--no-tui` path.
             if st.prompt_text.trim() == "/skills" {
                 st.prompt_text.clear();
                 st.prompt_cursor = 0;
-                st.open_skills(Vec::new());
+                st.pending_open_skills = true;
                 return false;
             }
             // (M9-10) `/stats` opens the usage-stats screen. Like
@@ -747,6 +751,11 @@ pub fn render_screen(
             // (M9-06) Teammate-view mode: `Some(name)` renders the header
             // above the transcript; `None` leaves normal mode unchanged.
             viewing_teammate: state.viewing_teammate.clone(),
+            // (`/color`) Session agent-color: `Some(name)` tints a banner rule
+            // line above the prompt (claude-code `useSwarmBanner` standalone
+            // branch); `None` hides it. Reset (app.rs `/color default`) clears
+            // it back to `None`.
+            session_agent_color: state.session_agent_color.clone(),
         )
     }
     .into_any()

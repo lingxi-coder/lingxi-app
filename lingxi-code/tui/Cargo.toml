@@ -19,6 +19,12 @@ permission = { path = "../permission" }
 command-api = { path = "../command-api" }
 command-core = { path = "../commands/core" }
 session = { path = "../session" }
+# (M9-09 real data) Disk-skill loader for the `/skills` viewer: re-exports
+# `parse_skill_markdown`, `Skill`, `SkillSource`, `LoadedFrom`. The frozen
+# `OrchestratorHandle` exposes no `list_skills`, so the TUI walks the on-disk
+# `.claude/skills/` dirs itself (off the UI executor) via this in-workspace
+# abstraction. Depending on `skill-api` is not editing `traits/`.
+skill-api = { path = "../skill-api" }
 # (M7-14) CLAUDE.md hierarchy walker + loader — the M3 store the Memory editor
 # reads through and writes back to (§4 R7: no new persistence layer).
 memory = { path = "../memory" }

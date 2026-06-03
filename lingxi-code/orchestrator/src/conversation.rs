@@ -186,6 +186,23 @@ pub struct ConversationOrchestrator {
     /// no-op semantics. The CLI binary (M6-08 init.rs) always populates
     /// this. (M6-08)
     pub(crate) compaction: Option<Arc<compaction::CompactionOrchestrator>>,
+    /// Read-file-state cache backing `/files` (TS `context.readFileState`).
+    /// The dispatch loop (`turn_loop::dispatch_tool_uses`) inserts the
+    /// absolutized `file_path` of every successful
+    /// `Read`/`Edit`/`Write`/`MultiEdit`/`NotebookEdit`, and
+    /// [`Self::files_in_context`] returns the keys in insertion order. TS
+    /// uses an LRU `FileStateCache` keyed by `normalize(expandPath(file_path))`;
+    /// this port only needs the key set for `/files`, so it stores the
+    /// absolutized paths in a `Vec`, dedup keeping the FIRST insertion.
+    ///
+    /// FORCED divergences from the TS LRU (documented, not parity gaps):
+    /// - Ordering: TS `keys()` iterates MRU→LRU and a re-`set` promotes the
+    ///   key, so re-reading reorders the *middle* of the list (read a,b,c,a →
+    ///   TS `[a, c, b]`); this `Vec` keeps first-insertion order (`[a, b, c]`).
+    ///   The 2-file re-read case (`a,b,a`) coincides at `[a, b]`. Only the
+    ///   display order of re-read files differs — never the set itself.
+    /// - The 100-entry LRU eviction is intentionally not reproduced (MVP).
+    pub(crate) read_file_state: Arc<Mutex<Vec<std::path::PathBuf>>>,
 }
 
 impl ConversationOrchestrator {
@@ -232,6 +249,7 @@ impl ConversationOrchestrator {
             hook_registry: None,
             agent_catalog: None,
             compaction: None,
+            read_file_state: Arc::new(Mutex::new(Vec::new())),
         }
     }
 

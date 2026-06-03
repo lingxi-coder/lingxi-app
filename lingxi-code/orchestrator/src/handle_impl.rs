@@ -255,12 +255,15 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn files_in_context(&self) -> Vec<PathBuf> {
-        // The read-file-state cache (TS `context.readFileState`) is not yet
-        // wired into `ConversationOrchestrator`, so we surface no tracked
-        // files. `/files` then renders the locked "No files in context"
-        // branch — 1:1 with `files.ts`. Wiring the cache is a separate,
-        // non-additive change to the tool-execution path.
-        Vec::new()
+        // Read the orchestrator-owned read-file-state cache (TS
+        // `context.readFileState`), populated by the dispatch loop on each
+        // successful Read/Edit/Write/MultiEdit/NotebookEdit
+        // (`turn_loop::record_read_file_state`). Keys are absolutized,
+        // lexically-normalized paths in insertion order — 1:1 with TS
+        // `cacheKeys(context.readFileState)` (`Array.from(cache.keys())`),
+        // which `/files` renders via `relative(getCwd(), f)`. An empty cache
+        // still renders the locked "No files in context" branch.
+        self.read_file_state.lock().await.clone()
     }
 
     async fn context_window_usage(&self) -> (u64, u64) {

@@ -685,15 +685,29 @@ pub struct AppState {
     /// `pending_open_agents` — but the walk needs no `OrchestratorHandle`, so
     /// the pump runs unconditionally (not gated on a wired handle).
     pub pending_open_stats: bool,
+    /// (M9-09 real data) Set by the `/skills` submit intercept: a request to
+    /// open the read-only skill-registry viewer. The SYNC submit path can't
+    /// `.await` the on-disk `.claude/skills/` dir walk (project ancestors + user
+    /// home), so it only RAISES this flag; the async open pump in `root.rs`
+    /// (`pump_open_skills`, on the ticker `use_future`) walks the dirs OUTSIDE
+    /// the `AppState` lock, parses each `SKILL.md`, and calls
+    /// [`Self::open_skills`] with the grouped sections. Mirrors
+    /// `pending_open_stats` — the walk needs no `OrchestratorHandle`, so the
+    /// pump runs unconditionally (not gated on a wired handle). When no skills
+    /// exist on disk the sections vec is empty → the locked `No skills found`
+    /// empty state.
+    pub pending_open_skills: bool,
     /// (`/color`) Session agent-color name set by the `/color <name>` command
     /// (claude-code `standaloneAgentContext.color`). `Some("cyan")` after
     /// `/color cyan`; `None` after `/color default` (reset). Maps to a render
     /// color via [`crate::multiagent::style::agent_color_from_name`]. Not
     /// persisted here — the disk write is the separate `pending_save_color`
-    /// pump. NOTE: this field is set but NOT YET consumed by any render path —
-    /// the Rust TUI has no swarm-banner/prompt-bar color sink yet; it is exposed
-    /// (`pub`) for a future banner renderer. `/color` therefore persists + echoes
-    /// a confirmation this batch, but does not visibly recolor the session.
+    /// pump. RENDER SINK: when `Some(name)`, this drives a full-width colored
+    /// rule line (`SessionColorBanner`) directly ABOVE the prompt, tinted by the
+    /// agent color — the standalone-agent branch of claude-code `useSwarmBanner`
+    /// (`PromptInput.tsx:2250-2267`). `None` hides the banner (no row), matching
+    /// claude-code's `color: undefined` → `return null`. Fed into `ReplScreenProps`
+    /// alongside `viewing_teammate` (app.rs).
     pub session_agent_color: Option<String>,
     /// (`/color`) Set by the `/color` submit intercept: a request to PERSIST the
     /// chosen color to the session transcript (claude-code `saveAgentColor`).
@@ -755,6 +769,7 @@ impl AppState {
             viewing_teammate: None,
             pending_open_agents: false,
             pending_open_stats: false,
+            pending_open_skills: false,
             session_agent_color: None,
             pending_save_color: None,
         }
@@ -821,12 +836,12 @@ impl AppState {
     }
 
     /// (M9-09) Open the `/skills` registry viewer with the given grouped
-    /// sections. The open is fully synchronous (like `/theme`/`/memory`): the
-    /// frozen `OrchestratorHandle` exposes no `list_skills` and `AppState`
-    /// holds no `SkillRegistry`, so the live submit path passes an EMPTY
-    /// section list — the locked `No skills found` empty state. The state is
-    /// shaped to carry real sections, so when a `list_skills` handle method is
-    /// added (out of scope here — the trait is frozen) only this call changes.
+    /// sections. Called by `root::pump_open_skills` after the async on-disk
+    /// `.claude/skills/` walk (the frozen `OrchestratorHandle` exposes no
+    /// `list_skills`, so the TUI reads the dirs itself off the UI executor).
+    /// The sections are already in claude-code render order (project, user)
+    /// with empty sections omitted; when no skill exists on disk the vec is
+    /// empty → the locked `No skills found` empty state.
     pub fn open_skills(&mut self, sections: Vec<crate::screens::skills::SkillSection>) {
         self.active_screen = Some(crate::screens::Screen::Skills(
             crate::screens::skills::SkillsState::new(sections),

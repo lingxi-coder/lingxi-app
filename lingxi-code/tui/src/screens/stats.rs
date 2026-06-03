@@ -42,6 +42,7 @@
 use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use serde::{Deserialize, Serialize};
 
 use crate::screens::scroll::{scroll_indicator, visible_slice, ScrollState};
 
@@ -73,7 +74,7 @@ pub const FOOTER: &str = "Tab to switch · Esc to close";
 /// Per-model aggregated token usage (claude-code `ModelUsage`, the subset this
 /// screen reads). Counts are monotonic sums across every `assistant` row that
 /// named this model.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelUsage {
     /// Sum of `usage.input_tokens`.
     pub input_tokens: u64,
@@ -96,7 +97,7 @@ impl ModelUsage {
 /// The aggregated, terminal-free stats the screen renders. Built by
 /// [`aggregate`] from per-session [`SessionContribution`]s. Carries no `f64`
 /// (so `Screen`'s `PartialEq` is satisfiable and there is no Eq pitfall).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatsData {
     /// Distinct non-subagent sessions counted.
     pub total_sessions: usize,
@@ -361,6 +362,109 @@ fn track_date(stats: &mut StatsData, date: &str) {
         Some(l) if l.as_str() >= date => {}
         _ => stats.last_date = Some(date.to_string()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Result cache (claude-code `statsCache.ts` parity). The intent is the same as
+// claude-code's `PersistedStatsCache`: a second `/stats` open returns the
+// already-aggregated [`StatsData`] WITHOUT re-walking + re-parsing the whole
+// `<claude_home>/projects/` history, re-computing only when the history has
+// actually changed.
+//
+// FORCED DIVERGENCE from claude-code: claude-code keys validity on a
+// `lastComputedDate` day-watermark (it incrementally merges today's new rows
+// into a cache whose historical days never change). We instead key the whole
+// cache on a cheap path+mtime+size fingerprint of the transcript files
+// ([`HistoryFingerprint`]) and invalidate the WHOLE cache when ANY file
+// changes. This is coarser (a busy day forces a full re-walk) but matches the
+// candidate design and needs no per-day merge bookkeeping; the fingerprint walk
+// (readdir + metadata) is still cheap relative to read+parse, so even a miss is
+// no slower than the un-cached path. Accordingly our [`STATS_CACHE_VERSION`] is
+// its OWN counter (1), NOT claude-code's `3` — the on-disk schema differs.
+// ---------------------------------------------------------------------------
+
+/// One transcript file's identity for the history fingerprint: its path plus the
+/// `(mtime, size)` pair claude-code itself trusts as a cheap change signal (it
+/// skips re-reading files older than `fromDate`). An in-place edit that
+/// preserves BOTH mtime and size can theoretically be missed — an accepted
+/// limitation of this design.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FileFingerprint {
+    /// The file's path (lossy string form), the canonical-sort key.
+    pub path: String,
+    /// Last-modified time in nanoseconds since the Unix epoch (0 when unknown).
+    pub mtime_ns: u128,
+    /// File length in bytes.
+    pub size: u64,
+}
+
+/// A fingerprint of the entire transcript history: the [`FileFingerprint`]s of
+/// every walked `*.jsonl` file, kept SORTED by path so a reordered (e.g.
+/// parallel or differently-ordered) directory walk produces an identical,
+/// comparable fingerprint. Cache validity is `current == cached`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HistoryFingerprint {
+    /// The per-file fingerprints, canonically sorted by `path`.
+    pub files: Vec<FileFingerprint>,
+}
+
+impl HistoryFingerprint {
+    /// Build from pre-collected per-file entries, sorting them by path so the
+    /// fingerprint is canonical regardless of walk order. Pure: the caller does
+    /// the `fs::metadata` reads (the impure shell lives in `root.rs`).
+    #[must_use]
+    pub fn from_entries(mut v: Vec<FileFingerprint>) -> Self {
+        v.sort_by(|a, b| a.path.cmp(&b.path));
+        Self { files: v }
+    }
+}
+
+/// On-disk cache schema version (claude-code `STATS_CACHE_VERSION`). Bumped when
+/// the [`PersistedStatsCache`] / [`StatsData`] shape changes so a stale file is
+/// rejected by [`decode_stats_cache`] and falls back to a full walk. This is our
+/// OWN counter — see the module-section note above for why it is not `3`.
+pub const STATS_CACHE_VERSION: u32 = 1;
+
+/// The on-disk cache envelope (claude-code `PersistedStatsCache`): the schema
+/// version, the [`HistoryFingerprint`] the [`StatsData`] was computed from, and
+/// the aggregated data itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedStatsCache {
+    /// Schema version, checked against [`STATS_CACHE_VERSION`] on load.
+    pub version: u32,
+    /// The history fingerprint this `data` was aggregated from.
+    pub fingerprint: HistoryFingerprint,
+    /// The cached aggregation result.
+    pub data: StatsData,
+}
+
+/// Validate + decode a serialized [`PersistedStatsCache`] (claude-code
+/// `loadStatsCache`). Returns `Some(data)` only on a clean HIT: the JSON parses,
+/// the version matches [`STATS_CACHE_VERSION`], AND the embedded fingerprint
+/// equals `current`. A parse error, a version mismatch, OR a fingerprint
+/// mismatch (the invalidation) all yield `None`, mirroring claude-code's
+/// `getEmptyCache` fallback so a corrupt / old / foreign cache degrades
+/// gracefully to a full walk.
+#[must_use]
+pub fn decode_stats_cache(json: &str, current: &HistoryFingerprint) -> Option<StatsData> {
+    serde_json::from_str::<PersistedStatsCache>(json)
+        .ok()
+        .filter(|c| c.version == STATS_CACHE_VERSION && &c.fingerprint == current)
+        .map(|c| c.data)
+}
+
+/// Serialize a [`PersistedStatsCache`] for writing to disk (claude-code
+/// `saveStatsCache`). Stamps the current [`STATS_CACHE_VERSION`]. A serialization
+/// failure yields an empty string (the best-effort writer in `root.rs` swallows
+/// it; a subsequent load just misses and re-walks).
+#[must_use]
+pub fn encode_stats_cache(fingerprint: &HistoryFingerprint, data: &StatsData) -> String {
+    serde_json::to_string(&PersistedStatsCache {
+        version: STATS_CACHE_VERSION,
+        fingerprint: fingerprint.clone(),
+        data: data.clone(),
+    })
+    .unwrap_or_default()
 }
 
 /// Which tab the Stats screen shows.
@@ -1048,5 +1152,109 @@ mod tests {
         assert_eq!(format_peak_day("2026-12-25"), "Dec 25");
         // Malformed falls back to the raw string.
         assert_eq!(format_peak_day("not-a-date"), "not-a-date");
+    }
+
+    // ---- Result-cache primitives (claude-code `statsCache.ts` parity). ----
+
+    /// A non-empty `StatsData` built via the real `aggregate` path, to exercise
+    /// the serde round-trip over its `BTreeMap`s + `ModelUsage`.
+    fn sample_data() -> StatsData {
+        let s = parse_session(
+            &format!(
+                "{}\n{}\n",
+                user_line("2026-05-01"),
+                assistant_line("2026-05-01", "claude-opus", 100, 50)
+            ),
+            false,
+        );
+        aggregate(&[s])
+    }
+
+    fn fp_one() -> HistoryFingerprint {
+        HistoryFingerprint::from_entries(vec![FileFingerprint {
+            path: "a.jsonl".into(),
+            mtime_ns: 1,
+            size: 10,
+        }])
+    }
+
+    #[test]
+    fn cache_roundtrip_hit() {
+        let data = sample_data();
+        assert!(!data.is_empty());
+        let fp = fp_one();
+        let json = encode_stats_cache(&fp, &data);
+        // Same fingerprint + version → HIT, data recovered verbatim.
+        assert_eq!(decode_stats_cache(&json, &fp), Some(data));
+    }
+
+    #[test]
+    fn cache_miss_on_fingerprint_change() {
+        let data = sample_data();
+        let fp = fp_one();
+        let json = encode_stats_cache(&fp, &data);
+        // Bumped mtime → MISS (an edited file invalidates the cache).
+        let fp_mtime = HistoryFingerprint::from_entries(vec![FileFingerprint {
+            path: "a.jsonl".into(),
+            mtime_ns: 2,
+            size: 10,
+        }]);
+        assert_eq!(decode_stats_cache(&json, &fp_mtime), None);
+        // Bumped size → MISS.
+        let fp_size = HistoryFingerprint::from_entries(vec![FileFingerprint {
+            path: "a.jsonl".into(),
+            mtime_ns: 1,
+            size: 11,
+        }]);
+        assert_eq!(decode_stats_cache(&json, &fp_size), None);
+        // Extra file → MISS (a new transcript invalidates the cache).
+        let fp_extra = HistoryFingerprint::from_entries(vec![
+            FileFingerprint { path: "a.jsonl".into(), mtime_ns: 1, size: 10 },
+            FileFingerprint { path: "b.jsonl".into(), mtime_ns: 1, size: 10 },
+        ]);
+        assert_eq!(decode_stats_cache(&json, &fp_extra), None);
+    }
+
+    #[test]
+    fn cache_miss_on_version_mismatch() {
+        let data = sample_data();
+        let fp = fp_one();
+        // Serialize at the current version, then string-replace it with a future
+        // one the decoder must reject (claude-code version gate).
+        let json = encode_stats_cache(&fp, &data)
+            .replace(&format!("\"version\":{STATS_CACHE_VERSION}"), "\"version\":999");
+        assert!(json.contains("\"version\":999"), "version bump applied: {json}");
+        assert_eq!(decode_stats_cache(&json, &fp), None);
+    }
+
+    #[test]
+    fn cache_miss_on_garbage() {
+        let fp = fp_one();
+        // Non-JSON and empty input both decode to None (no panic).
+        assert_eq!(decode_stats_cache("not json", &fp), None);
+        assert_eq!(decode_stats_cache("", &fp), None);
+    }
+
+    #[test]
+    fn fingerprint_is_order_independent() {
+        // A reordered directory walk must produce an EQUAL fingerprint (→ HIT),
+        // so equality survives a parallel / differently-ordered readdir.
+        let a = FileFingerprint { path: "a.jsonl".into(), mtime_ns: 1, size: 10 };
+        let b = FileFingerprint { path: "b.jsonl".into(), mtime_ns: 2, size: 20 };
+        let from_ab = HistoryFingerprint::from_entries(vec![a.clone(), b.clone()]);
+        let from_ba = HistoryFingerprint::from_entries(vec![b, a]);
+        assert_eq!(from_ab, from_ba);
+        // And the canonical order is by path ascending.
+        assert_eq!(from_ab.files[0].path, "a.jsonl");
+    }
+
+    #[test]
+    fn statsdata_serde_roundtrip() {
+        // Covers the new `Serialize`/`Deserialize` derives over `StatsData`'s
+        // `BTreeMap`s (incl. the nested `daily_model_tokens`) and `ModelUsage`.
+        let data = sample_data();
+        let json = serde_json::to_string(&data).expect("serialize StatsData");
+        let back: StatsData = serde_json::from_str(&json).expect("deserialize StatsData");
+        assert_eq!(back, data);
     }
 }

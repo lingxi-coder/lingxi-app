@@ -33,7 +33,10 @@ syntect = { version = "=5.3.0", default-features = false, features = ["default-f
 # Line- + word-level diff for StructuredDiff. Reuses the version already in
 # the workspace lockfile (2.7.0); 3.x requires Rust 1.85 > our MSRV 1.82.
 similar = "=2.7.0"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+# `fs` + `io-util`: the `/stats` walk + `/color` transcript append in `root.rs`
+# read/append session JSONL via `tokio::fs` + `AsyncWriteExt`. (`fs` was already
+# pulled transitively by the stats walk; declared explicitly here.)
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs", "io-util"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tokio-stream = { workspace = true }
 futures = { workspace = true }

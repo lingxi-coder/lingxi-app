@@ -24,7 +24,9 @@ use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext, ValidationError,
 };
+use traits::team_spawn::TeamSpawnSeam;
 
+use crate::mode::CoordinatorMode;
 use crate::team_registry::TeamRegistry;
 
 /// Canonical tool name — mirrors the TS `TEAM_CREATE_TOOL_NAME` constant
@@ -65,17 +67,35 @@ fn team_create_schema() -> &'static Value {
     })
 }
 
-/// Coordinator-only `TeamCreate` tool. Holds a shared [`TeamRegistry`] handle
-/// and a cached input-schema `Value`.
+/// Coordinator-only `TeamCreate` tool. Holds a shared [`TeamRegistry`] handle,
+/// the coordinator [`CoordinatorMode`] gate, the [`TeamSpawnSeam`] used to start
+/// the real teammate task, and a cached input-schema `Value`.
+///
+/// `mode` and `spawn_seam` are threaded here in T03 so the factory can wire the
+/// full dependency set; they are consumed by `call()` in T05 (the real-spawn /
+/// mode-gate behavior). Storing them now keeps the assembly seam stable.
 pub struct TeamCreateTool {
     team: Arc<TeamRegistry>,
+    #[allow(dead_code)] // Consumed by call()'s mode gate in T05.
+    mode: Arc<CoordinatorMode>,
+    #[allow(dead_code)] // Consumed by call()'s real-spawn path in T05.
+    spawn_seam: Arc<dyn TeamSpawnSeam>,
 }
 
 impl TeamCreateTool {
-    /// Construct a `TeamCreate` tool wired to the shared coordinator registry.
+    /// Construct a `TeamCreate` tool wired to the shared coordinator registry,
+    /// the mode gate, and the teammate spawn seam.
     #[must_use]
-    pub fn new(team: Arc<TeamRegistry>) -> Self {
-        Self { team }
+    pub fn new(
+        team: Arc<TeamRegistry>,
+        mode: Arc<CoordinatorMode>,
+        spawn_seam: Arc<dyn TeamSpawnSeam>,
+    ) -> Self {
+        Self {
+            team,
+            mode,
+            spawn_seam,
+        }
     }
 }
 
@@ -184,6 +204,14 @@ impl Tool for TeamCreateTool {
         _ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
+        // 1. Mode early-return (defense-in-depth). Lets a future `/coordinator
+        //    exit()` neutralize the tool without a registry rebuild. This is
+        //    net-new in call() — distinct from `is_enabled`'s static feature
+        //    flag, which only gates whether the tool is advertised at all.
+        if !self.mode.is_enabled() {
+            return Err(ToolError::InvalidInput("coordinator mode not active".into()));
+        }
+
         // Parse defensively (do not rely on schema validation alone), matching
         // the builtin pattern. `team_name` is required; `agent_type` optional
         // (TS lead agent type defaults to TEAM_LEAD_NAME = "team-lead").
@@ -202,24 +230,49 @@ impl Tool for TeamCreateTool {
             .unwrap_or("team-lead")
             .to_string();
 
-        // Register/spawn the worker. The registry mints the AgentId, registers a
-        // mailbox, and inserts a WorkerAgent (status Idle). The worker's name is
-        // the team name; task_id starts empty (assigned later by the coordinator).
-        let task_id = String::new();
+        // Optional free-form team description/purpose; threaded into the
+        // teammate spawn so the handler can seed the worker's context.
+        let description = input
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        // 2. Register/spawn the worker metadata. The registry mints the AgentId,
+        //    registers a mailbox, and inserts a WorkerAgent (status Idle). The
+        //    worker's name is the team name; task_id starts empty and is written
+        //    back below from the handler-generated id.
         let agent_id = self
             .team
-            .spawn_worker(agent_type, team_name.clone(), task_id)
+            .spawn_worker(agent_type, team_name.clone(), String::new())
             .await
             .map_err(|e| ToolError::Internal(format!("TeamCreate: {e}")))?;
 
-        // Return the new agent id as both the model-facing `lead_agent_id` and
-        // the `task_id` the coordinator uses with SendMessage to continue it.
+        // 3. Start the REAL InProcessTeammate task via the spawn seam. Returns
+        //    the handler-generated task_id (distinct from the worker AgentId).
+        let task_id = self
+            .spawn_seam
+            .spawn_teammate(agent_id, team_name.clone(), description)
+            .await
+            .map_err(|e| ToolError::Internal(format!("TeamCreate: {e}")))?;
+
+        // 4. Reconcile the two id spaces: key the worker↔task link on the
+        //    handler-returned id so the status sink (find_by_task_id) and
+        //    TeamDelete (kill) can resolve back to this worker.
+        self.team.set_task_id(&agent_id, task_id.clone()).await;
+
+        // 5. Record the team name (source of the CoordinatorStatus { team } DTO).
+        self.team.set_team_name(Some(team_name.clone())).await;
+
+        // 6. Return the worker agent id (model-facing lead id) and the REAL
+        //    handler-generated task_id (replaces the old task_id == agent_id
+        //    placeholder).
         let agent_id_str = agent_id.as_uuid().to_string();
         Ok(ToolCallResult {
             data: json!({
                 "team_name": team_name,
                 "lead_agent_id": agent_id_str,
-                "task_id": agent_id_str,
+                "task_id": task_id,
                 "spawned": true,
             }),
             new_messages: Vec::new(),
@@ -264,9 +317,64 @@ mod tests {
         tx
     }
 
-    fn make_tool() -> (TeamCreateTool, Arc<TeamRegistry>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    /// Recording spawn seam: returns a fixed handler-generated `task_id`,
+    /// counts `spawn_teammate` invocations, and captures the args of the last
+    /// spawn so tests can assert what the tool threaded through.
+    struct RecordingSeam {
+        task_id: String,
+        spawns: AtomicUsize,
+        last_args: Mutex<Option<(AgentId, String, String)>>,
+    }
+
+    impl RecordingSeam {
+        fn new(task_id: impl Into<String>) -> Self {
+            Self {
+                task_id: task_id.into(),
+                spawns: AtomicUsize::new(0),
+                last_args: Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TeamSpawnSeam for RecordingSeam {
+        async fn spawn_teammate(
+            &self,
+            agent_id: AgentId,
+            name: String,
+            description: String,
+        ) -> Result<String, traits::team_spawn::TeamSpawnError> {
+            self.spawns.fetch_add(1, Ordering::SeqCst);
+            *self.last_args.lock().unwrap() = Some((agent_id, name, description));
+            Ok(self.task_id.clone())
+        }
+        async fn kill(&self, _task_id: &str) -> Result<(), traits::team_spawn::TeamSpawnError> {
+            Ok(())
+        }
+    }
+
+    /// Build a TeamCreate tool with coordinator mode ENABLED (the normal path)
+    /// and a recording seam returning the given handler task_id.
+    fn make_tool_with_seam(
+        seam: Arc<RecordingSeam>,
+    ) -> (TeamCreateTool, Arc<TeamRegistry>, Arc<CoordinatorMode>) {
         let registry = Arc::new(TeamRegistry::new(AgentId::new()));
-        let tool = TeamCreateTool::new(registry.clone());
+        let mode = Arc::new(CoordinatorMode::new());
+        mode.enter();
+        let tool = TeamCreateTool::new(
+            registry.clone(),
+            mode.clone(),
+            seam as Arc<dyn TeamSpawnSeam>,
+        );
+        (tool, registry, mode)
+    }
+
+    fn make_tool() -> (TeamCreateTool, Arc<TeamRegistry>) {
+        let seam = Arc::new(RecordingSeam::new("task-handler-id"));
+        let (tool, registry, _mode) = make_tool_with_seam(seam);
         (tool, registry)
     }
 
@@ -327,8 +435,9 @@ mod tests {
         let lead = res.data["lead_agent_id"]
             .as_str()
             .expect("lead_agent_id must be a string");
-        // task_id mirrors the agent id (the SendMessage continuation handle).
-        assert_eq!(res.data["task_id"], lead);
+        // task_id is now the handler-generated id (T05), NOT the agent id.
+        assert_eq!(res.data["task_id"], "task-handler-id");
+        assert_ne!(res.data["task_id"].as_str().unwrap(), lead);
 
         // Effect: the registry now lists exactly one worker matching the input.
         let workers = registry.list().await;
@@ -392,5 +501,101 @@ mod tests {
             .await
             .expect_err("blank must fail validation");
         assert_eq!(err.0, "team_name is required for TeamCreate");
+    }
+
+    // ---- T05: mode gate + real spawn + task_id write-back + team_name ----
+
+    #[tokio::test]
+    async fn call_when_mode_disabled_errors() {
+        // Mode OFF: the call() early-return fires before any spawn.
+        let registry = Arc::new(TeamRegistry::new(AgentId::new()));
+        let mode = Arc::new(CoordinatorMode::new()); // disabled by default
+        let seam = Arc::new(RecordingSeam::new("task-handler-id"));
+        let tool = TeamCreateTool::new(
+            registry.clone(),
+            mode,
+            seam.clone() as Arc<dyn TeamSpawnSeam>,
+        );
+
+        let err = tool
+            .call(
+                json!({ "team_name": "alpha-team", "agent_type": "researcher" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("call must fail when coordinator mode is disabled");
+        assert!(matches!(err, ToolError::InvalidInput(_)));
+        assert_eq!(
+            format!("{err}"),
+            "invalid input: coordinator mode not active"
+        );
+
+        // No worker spawned, seam never invoked, team name untouched.
+        assert!(registry.list().await.is_empty(), "no worker on disabled mode");
+        assert_eq!(seam.spawns.load(Ordering::SeqCst), 0);
+        assert_eq!(registry.team_name().await, None);
+    }
+
+    #[tokio::test]
+    async fn call_spawns_worker_and_writes_back_task_id() {
+        let seam = Arc::new(RecordingSeam::new("handler-task-42"));
+        let (tool, registry, _mode) = make_tool_with_seam(seam.clone());
+
+        let res = tool
+            .call(
+                json!({ "team_name": "alpha-team", "agent_type": "researcher", "description": "do work" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("TeamCreate must succeed when mode is enabled");
+
+        // Exactly one worker, its task_id reconciled to the seam-returned id.
+        let workers = registry.list().await;
+        assert_eq!(workers.len(), 1, "exactly one worker spawned");
+        let w = &workers[0];
+        assert_eq!(w.task_id, "handler-task-42", "task_id is the handler id");
+        assert_ne!(w.task_id, "", "task_id is NOT empty");
+        assert_ne!(
+            w.task_id,
+            w.agent_id.as_uuid().to_string(),
+            "task_id is NOT the agent_id"
+        );
+
+        // team_name set on the registry.
+        assert_eq!(registry.team_name().await, Some("alpha-team".to_string()));
+
+        // Result surfaces both the worker agent id and the real task id.
+        let lead = res.data["lead_agent_id"].as_str().unwrap();
+        assert_eq!(lead, w.agent_id.as_uuid().to_string());
+        assert_eq!(res.data["task_id"], "handler-task-42");
+
+        // The description was threaded through to the seam.
+        let (seam_agent_id, seam_name, seam_desc) =
+            seam.last_args.lock().unwrap().clone().expect("seam called");
+        assert_eq!(seam_agent_id, w.agent_id);
+        assert_eq!(seam_name, "alpha-team");
+        assert_eq!(seam_desc, "do work");
+    }
+
+    #[tokio::test]
+    async fn call_invokes_spawn_seam_once() {
+        let seam = Arc::new(RecordingSeam::new("handler-task-1"));
+        let (tool, _registry, _mode) = make_tool_with_seam(seam.clone());
+
+        tool.call(
+            json!({ "team_name": "beta" }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("valid call");
+
+        assert_eq!(
+            seam.spawns.load(Ordering::SeqCst),
+            1,
+            "spawn_teammate invoked exactly once"
+        );
     }
 }

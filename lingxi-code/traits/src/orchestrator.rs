@@ -570,6 +570,18 @@ pub trait OutputStream: Send + Sync {
         _cache_creation_tokens: u64,
     ) {
     }
+
+    /// Emit a coordinator team-status update (active worker count + team name).
+    ///
+    /// Added by the coordinator-activation program. Called by the
+    /// `CoordinatorStatusSink` after each teammate status transition that
+    /// changes the active-worker tally, so a coordinator-mode session can
+    /// surface a live roster count.
+    ///
+    /// **Default no-op**: pre-existing sinks (TUI, CLI, `MockOutputStream`)
+    /// keep compiling unchanged. The client-adapter overrides this to surface
+    /// a `ClientEvent::CoordinatorStatus`.
+    async fn emit_coordinator_status(&self, _active_workers: u32, _team: Option<&str>) {}
 }
 
 #[cfg(test)]

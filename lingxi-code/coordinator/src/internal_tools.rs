@@ -1,29 +1,105 @@
 //! Coordinator-only tool assembly.
 //!
-//! Builds the 4 coordinator-only tools (`TeamCreate` / `TeamDelete` /
-//! `SendMessage` / `StructuredOutput`), each wired to the shared
-//! [`TeamRegistry`]. In §15 (Plugin) and §22 (cli-demo) the host wires these
-//! into `ToolRegistry` only when [`crate::CoordinatorMode::is_enabled`] is true.
+//! Builds the coordinator-only tools that carry net-new behavior — `TeamCreate`
+//! and `TeamDelete` — each wired to the shared [`TeamRegistry`], the
+//! [`CoordinatorMode`] gate, and the [`TeamSpawnSeam`] used to start / stop the
+//! real backing teammate task.
+//!
+//! `SendMessage` / `StructuredOutput` are DELIBERATELY NOT assembled here. Their
+//! tool names collide byte-for-byte with already-registered builtins
+//! (`tool_ui`'s `SendMessage` / `StructuredOutput`), and the tool registry is
+//! push-no-dedup with first-match-wins — so registering coordinator copies would
+//! silently shadow nothing useful. Once the shared `MailboxRouter` is wired into
+//! `BuiltinToolContext` (engine-desktop `build()`), the in-tree builtins already
+//! satisfy those two roles. The source files
+//! ([`crate::tool_send_message`] / [`crate::tool_synthetic_output`]) are kept in
+//! place but no longer returned from this factory.
+//!
+//! In §15 (Plugin) and §22 (cli-demo) the host wires the returned tools into
+//! `ToolRegistry` IN PLACE OF `tool_team`'s `TeamCreate` / `TeamDelete`, decided
+//! at BUILD time, only when [`crate::CoordinatorMode`] is coordinator-capable.
 
+use crate::mode::CoordinatorMode;
 use crate::team_registry::TeamRegistry;
-use crate::tool_send_message::SendMessageTool;
-use crate::tool_synthetic_output::SyntheticOutputTool;
 use crate::tool_team_create::TeamCreateTool;
 use crate::tool_team_delete::TeamDeleteTool;
 use std::sync::Arc;
 use tool_api::Tool;
+use traits::team_spawn::TeamSpawnSeam;
 
-/// Build the list of coordinator-only tools, each sharing `team`.
+/// Build the coordinator-only tools carrying net-new behavior.
 ///
-/// Returns the four coordinator-mode tools as `Arc<dyn Tool>` trait objects so
-/// the host can register them directly. Each constructor clones the shared
-/// [`TeamRegistry`] `Arc` into its handler state.
+/// Returns EXACTLY `TeamCreate` + `TeamDelete` as `Arc<dyn Tool>` trait objects.
+/// Each constructor clones the shared [`TeamRegistry`], the [`CoordinatorMode`]
+/// gate, and the [`TeamSpawnSeam`] into its handler state.
 #[must_use]
-pub fn coordinator_internal_tools(team: Arc<TeamRegistry>) -> Vec<Arc<dyn Tool>> {
+pub fn coordinator_internal_tools(
+    team: Arc<TeamRegistry>,
+    mode: Arc<CoordinatorMode>,
+    spawn_seam: Arc<dyn TeamSpawnSeam>,
+) -> Vec<Arc<dyn Tool>> {
     vec![
-        Arc::new(TeamCreateTool::new(team.clone())) as Arc<dyn Tool>,
-        Arc::new(TeamDeleteTool::new(team.clone())) as Arc<dyn Tool>,
-        Arc::new(SendMessageTool::new(team.clone())) as Arc<dyn Tool>,
-        Arc::new(SyntheticOutputTool::new(team)) as Arc<dyn Tool>,
+        Arc::new(TeamCreateTool::new(
+            team.clone(),
+            mode.clone(),
+            spawn_seam.clone(),
+        )) as Arc<dyn Tool>,
+        Arc::new(TeamDeleteTool::new(team, mode, spawn_seam)) as Arc<dyn Tool>,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use protocol::AgentId;
+    use traits::team_spawn::TeamSpawnError;
+
+    /// No-op spawn seam — the factory under test never invokes it; it only needs
+    /// a concrete `Arc<dyn TeamSpawnSeam>` to construct the tools.
+    struct NoopSeam;
+
+    #[async_trait]
+    impl TeamSpawnSeam for NoopSeam {
+        async fn spawn_teammate(
+            &self,
+            _agent_id: AgentId,
+            _name: String,
+            _description: String,
+        ) -> Result<String, TeamSpawnError> {
+            Ok(String::new())
+        }
+        async fn kill(&self, _task_id: &str) -> Result<(), TeamSpawnError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn factory_returns_exactly_team_create_and_delete() {
+        let team = Arc::new(TeamRegistry::new(AgentId::new()));
+        let mode = Arc::new(CoordinatorMode::new());
+        let seam: Arc<dyn TeamSpawnSeam> = Arc::new(NoopSeam);
+
+        let tools = coordinator_internal_tools(team, mode, seam);
+
+        // EXACTLY two tools — SendMessage / SyntheticOutput are dropped.
+        assert_eq!(
+            tools.len(),
+            2,
+            "factory must return exactly TeamCreate + TeamDelete (not the 4-tool set)"
+        );
+
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert_eq!(names, vec!["TeamCreate", "TeamDelete"]);
+
+        // SendMessage / SyntheticOutput must NOT be present (builtins satisfy them).
+        assert!(
+            !names.contains(&"SendMessage"),
+            "SendMessage must be dropped from the coordinator factory"
+        );
+        assert!(
+            !names.contains(&"StructuredOutput"),
+            "StructuredOutput must be dropped from the coordinator factory"
+        );
+    }
 }

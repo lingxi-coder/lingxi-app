@@ -189,6 +189,11 @@ async fn run_subagent_loop(
     // Wire tool definitions advertised to the model on every round-trip (empty
     // when the spawner wired none). Cloned per round-trip below.
     let tool_schemas = ctx.tool_schemas.clone();
+    // Per-agent tool allow-list enforced at dispatch (see below). Empty = no
+    // restriction (the resolver has not filtered, e.g. `AgentToolPolicy::All`).
+    // This is the dispatch-time guard the advertised set relies on: the
+    // inherited `RegistryToolInvoker` itself does NOT check policy.
+    let allowed_tools = ctx.allowed_tools.clone();
 
     // Seed history: fork-context prefix (if any) followed by the prompt.
     let mut history: Vec<ConversationMessage> = Vec::new();
@@ -363,6 +368,22 @@ async fn run_subagent_loop(
 
             let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
             for (tool_use_id, name, input) in &tool_uses {
+                // Allow-list guard: when `allowed_tools` is non-empty, a model
+                // request for a tool outside it is refused WITHOUT dispatching
+                // (the inherited `RegistryToolInvoker` would otherwise run any
+                // registered tool by name). Surfaced as an `is_error` ToolResult
+                // so the model sees the refusal and can recover, mirroring how a
+                // tool error is fed back. Empty `allowed_tools` skips the guard.
+                if !allowed_tools.is_empty() && !allowed_tools.iter().any(|t| t == name) {
+                    tool_results.push(ContentBlock::ToolResult {
+                        tool_use_id: *tool_use_id,
+                        content: format!(
+                            "tool {name:?} is not in this agent's allowed tools"
+                        ),
+                        is_error: true,
+                    });
+                    continue;
+                }
                 let inv_ctx = traits::tool_invoker::SubagentInvocationContext {
                     parent_agent_id: ctx.parent_agent_id,
                 };
@@ -1270,6 +1291,77 @@ mod tests {
         });
         let err = failed.expect("Failed on truncated stream");
         assert!(err.starts_with("subagent api error:"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn loop_refuses_tool_outside_allowed_list_without_dispatching() {
+        // allowed_tools = ["Bash"]; the model asks for "Read" → refused WITHOUT
+        // dispatch (invoker never called), surfaced as an is_error ToolResult,
+        // and the loop continues to a clean end_turn.
+        let api = StreamingMockApiClient::new(vec![
+            streamed_tool_use_turn("Read", "tool_use"),
+            streamed_text_turn("done", "end_turn"),
+        ]);
+        let invoker = CountingInvoker::new();
+        let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
+        ctx.allowed_tools = vec!["Bash".to_string()];
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let evs = drain(out_rx).await;
+
+        assert_eq!(
+            invoker.call_count(),
+            0,
+            "a tool outside allowed_tools must NOT be dispatched"
+        );
+        // The refusal must be a structured is_error ToolResult carrying the
+        // reason (so the model sees it like any tool error and can recover) —
+        // deserialize the emitted Message rather than substring-matching.
+        let refused = evs.iter().any(|e| {
+            let SubagentEvent::Message { message, .. } = e else {
+                return false;
+            };
+            let Ok(ConversationMessage::User { content, .. }) =
+                serde_json::from_value::<ConversationMessage>(message.clone())
+            else {
+                return false;
+            };
+            content.iter().any(|b| {
+                matches!(b, ContentBlock::ToolResult { is_error: true, content, .. }
+                    if content.contains("not in this agent's allowed tools"))
+            })
+        });
+        assert!(
+            refused,
+            "refusal must be an is_error ToolResult carrying the reason; got {evs:?}"
+        );
+        let result = one_completed(&evs);
+        assert_eq!(result["stop_reason"], "end_turn");
+    }
+
+    #[tokio::test]
+    async fn loop_allows_tool_in_allowed_list() {
+        // allowed_tools = ["Read"]; "Read" is dispatched normally.
+        let api = StreamingMockApiClient::new(vec![
+            streamed_tool_use_turn("Read", "tool_use"),
+            streamed_text_turn("done", "end_turn"),
+        ]);
+        let invoker = CountingInvoker::new();
+        let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
+        ctx.allowed_tools = vec!["Read".to_string()];
+
+        let (_tx, event_rx) = mpsc::channel::<engine::Event>(8);
+        let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+        run_subagent(ctx, event_rx, out_tx).await;
+        let _ = drain(out_rx).await;
+
+        assert_eq!(
+            invoker.call_count(),
+            1,
+            "a tool inside allowed_tools is dispatched"
+        );
     }
 
     #[tokio::test]

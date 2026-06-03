@@ -22,6 +22,7 @@ import {
 type Narration = Extract<ConversationState['items'][number], { type: 'narration' }>;
 type Agent = Extract<ConversationState['items'][number], { type: 'agent' }>;
 type Meta = Extract<ConversationState['items'][number], { type: 'meta' }>;
+type Thinking = Extract<ConversationState['items'][number], { type: 'thinking' }>;
 
 const COST = {
   total_usd: 0.01,
@@ -149,4 +150,75 @@ test('reduceEvents folds a full turn end-to-end', () => {
   assert.equal(s.running, false);
   const kinds = s.items.map((i) => i.type);
   assert.deepEqual(kinds, ['narration', 'agent', 'narration', 'meta']);
+});
+
+test('thinking_delta accumulates into a single open, streaming thinking block', () => {
+  let s = emptyConversation();
+  s = reduceEvent(s, { type: 'turn_started' });
+  s = reduceEvent(s, { type: 'thinking_delta', thinking: 'Let me ' });
+  s = reduceEvent(s, { type: 'thinking_delta', thinking: 'consider ' });
+  s = reduceEvent(s, { type: 'thinking_delta', thinking: 'the options.' });
+  const blocks = s.items.filter((i) => i.type === 'thinking') as Thinking[];
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].text, 'Let me consider the options.');
+  // Still streaming — not yet sealed.
+  assert.notEqual(blocks[0].done, true);
+});
+
+test('thinking_delta is a distinct block from the assistant answer text', () => {
+  let s = emptyConversation();
+  s = reduceEvent(s, { type: 'thinking_delta', thinking: 'reasoning…' });
+  s = reduceEvent(s, { type: 'text_delta', text: 'the answer' });
+  const kinds = s.items.map((i) => i.type);
+  assert.deepEqual(kinds, ['thinking', 'narration']);
+  const block = s.items[0] as Thinking;
+  // The arrival of answer text seals the reasoning block.
+  assert.equal(block.done, true);
+  const line = s.items[1] as Narration;
+  assert.equal(line.text, 'the answer');
+});
+
+test('message_complete seals the open thinking block', () => {
+  let s = emptyConversation();
+  s = reduceEvent(s, { type: 'thinking_delta', thinking: 'pondering' });
+  s = reduceEvent(s, { type: 'message_complete' });
+  const block = s.items[0] as Thinking;
+  assert.equal(block.done, true);
+});
+
+test('turn_ended seals an open thinking block (no answer text streamed)', () => {
+  let s = emptyConversation();
+  s = reduceEvent(s, { type: 'turn_started' });
+  s = reduceEvent(s, { type: 'thinking_delta', thinking: 'quiet thought' });
+  s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'end_turn' }, cost: COST });
+  const block = s.items.find((i) => i.type === 'thinking') as Thinking;
+  assert.equal(block.done, true);
+});
+
+test('usage_update captures the live token snapshot without emitting a scrollback item', () => {
+  let s = emptyConversation();
+  assert.equal(s.usage, null);
+  s = reduceEvent(s, {
+    type: 'usage_update',
+    input_tokens: 1200,
+    output_tokens: 340,
+    cache_read_tokens: 800,
+    cache_creation_tokens: 64,
+  });
+  assert.equal(s.items.length, 0);
+  assert.deepEqual(s.usage, {
+    inputTokens: 1200,
+    outputTokens: 340,
+    cacheReadTokens: 800,
+    cacheCreationTokens: 64,
+  });
+  // A later update overwrites with the newest cumulative snapshot.
+  s = reduceEvent(s, {
+    type: 'usage_update',
+    input_tokens: 1500,
+    output_tokens: 900,
+    cache_read_tokens: 800,
+    cache_creation_tokens: 64,
+  });
+  assert.equal(s.usage?.outputTokens, 900);
 });

@@ -19,6 +19,7 @@ import {
   emptyConversation,
   reduceEvent,
   type ConversationState,
+  type UsageSnapshot,
 } from './conversation';
 
 /** What `useBridge` returns to the renderer. */
@@ -31,6 +32,8 @@ export interface UseBridge {
   readonly connected: boolean;
   /** The accumulated live conversation (drives the Stage when connected). */
   readonly conversation: ConversationState;
+  /** Latest live token-usage snapshot (`usage_update`), or `null`. */
+  readonly usage: UsageSnapshot | null;
   /** True while a turn is streaming (drives the composer's thinking affordance). */
   readonly running: boolean;
   /** Submit a prompt: echo it immediately, then drive a turn via the host. */
@@ -110,6 +113,7 @@ export function useBridge(): UseBridge {
     connection,
     connected,
     conversation,
+    usage: conversation.usage,
     running: conversation.running,
     sendPrompt,
     cancel,

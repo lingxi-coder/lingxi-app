@@ -123,6 +123,53 @@ function NarrationLine({ item }: { item: Extract<RunItem, { type: 'narration' }>
   );
 }
 
+// ─── THINKING BLOCK (collapsible, dim/italic reasoning stream) ──────
+function ThinkingBlock({ item }: { item: Extract<RunItem, { type: 'thinking' }> }) {
+  const t = useT();
+  // Auto-expanded while streaming so the reasoning is visible live; the user
+  // can collapse it once sealed. We default-collapse a completed block.
+  const [open, setOpen] = useState(!item.done);
+  const wasDone = useRef(item.done);
+  // Collapse automatically the moment the block seals (done flips true).
+  useEffect(() => {
+    if (item.done && !wasDone.current) setOpen(false);
+    wasDone.current = item.done;
+  }, [item.done]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: 880 }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6, alignSelf: 'flex-start',
+          padding: '2px 6px 2px 2px', borderRadius: 6, border: 'none', cursor: 'pointer',
+          background: 'transparent', color: t.text3, fontSize: 12.5, fontWeight: 500,
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.color = t.text2)}
+        onMouseLeave={(e) => (e.currentTarget.style.color = t.text3)}
+      >
+        <Icon name={open ? 'chevron' : 'chevronR'} size={13} stroke={2} />
+        <Icon name="spark" size={12} stroke={1.8} />
+        <span>{item.done ? 'Thought' : 'Thinking…'}</span>
+      </button>
+      {open && (
+        <div
+          style={{
+            borderLeft: `2px solid ${t.border}`, paddingLeft: 12, marginLeft: 6,
+            fontSize: 13.5, lineHeight: 1.65, color: t.text3, fontStyle: 'italic',
+            whiteSpace: 'pre-wrap',
+          }}
+        >
+          {item.text}
+          {!item.done && (
+            <span style={{ animation: 'cursor-blink 1.1s step-end infinite' }}>▍</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── AUDIO MESSAGE (user voice message bubble with static waveform) ─
 function AudioMessage({ bars, duration }: { bars: number[]; duration: number }) {
   const t = useT();
@@ -286,6 +333,16 @@ export function Stage({ extraMessages = [], live = false, liveItems = [], runnin
               <div key={i} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
                 <GutterRule />
                 <NarrationLine item={item} />
+              </div>
+            );
+          }
+          if (item.type === 'thinking') {
+            return (
+              <div key={i} style={{ display: 'flex', gap: 10, animation: 'fade-in 0.3s ease' }}>
+                <GutterRule />
+                <div style={{ flex: 1 }}>
+                  <ThinkingBlock item={item} />
+                </div>
               </div>
             );
           }

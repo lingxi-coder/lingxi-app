@@ -77,6 +77,7 @@ export function App() {
               theme={theme}
               setTheme={setTheme}
               sidebarCollapsed={sidebarCollapsed}
+              usage={live ? bridge.usage : null}
             />
             <Stage
               extraMessages={extraMessages}

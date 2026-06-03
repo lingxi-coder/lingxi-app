@@ -1,6 +1,7 @@
 import { useT } from '../theme/ThemeContext';
 import type { Project } from '../data';
 import type { ThemeMode } from '../theme/tokens';
+import type { UsageSnapshot } from '../bridge/conversation';
 import { Icon } from './Icon';
 import { iconBtn } from './primitives';
 
@@ -11,10 +12,24 @@ interface TopBarProps {
   theme: ThemeMode;
   setTheme: (m: ThemeMode) => void;
   sidebarCollapsed: boolean;
+  /** Live token-usage snapshot from the bridge (`usage_update`), or `null`. */
+  usage?: UsageSnapshot | null;
 }
 
-export function TopBar({ repo, onTogglePanel, panelOpen, theme, setTheme, sidebarCollapsed }: TopBarProps) {
+/** Compact token count (e.g. `1.2k`, `980`) for the usage chip. */
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return `${n}`;
+}
+
+export function TopBar({ repo, onTogglePanel, panelOpen, theme, setTheme, sidebarCollapsed, usage }: TopBarProps) {
   const t = useT();
+  const cached = usage ? usage.cacheReadTokens + usage.cacheCreationTokens : 0;
+  const usageTitle = usage
+    ? `tokens — in ${usage.inputTokens.toLocaleString()} · out ${usage.outputTokens.toLocaleString()}` +
+      ` · cache read ${usage.cacheReadTokens.toLocaleString()} · cache write ${usage.cacheCreationTokens.toLocaleString()}`
+    : undefined;
   return (
     <div
       style={{
@@ -45,6 +60,39 @@ export function TopBar({ repo, onTogglePanel, panelOpen, theme, setTheme, sideba
       </div>
 
       <div style={{ flex: 1 }} />
+
+      {/* Token counter — live `usage_update` snapshot from the engine. */}
+      {usage && (
+        <div
+          title={usageTitle}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 7,
+            padding: '4px 9px', borderRadius: 7,
+            background: t.surface, border: `0.5px solid ${t.border}`,
+          }}
+        >
+          <Icon name="spark" size={12} color={t.text3} stroke={1.8} />
+          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ fontSize: 10.5, color: t.text4, fontWeight: 600, letterSpacing: 0.3 }}>↑</span>
+            <span className="mono" style={{ fontSize: 11.5, color: t.text2, fontWeight: 500 }}>
+              {fmtTokens(usage.inputTokens)}
+            </span>
+            <span style={{ fontSize: 10.5, color: t.text4, fontWeight: 600, letterSpacing: 0.3, marginLeft: 2 }}>↓</span>
+            <span className="mono" style={{ fontSize: 11.5, color: t.text2, fontWeight: 500 }}>
+              {fmtTokens(usage.outputTokens)}
+            </span>
+          </span>
+          {cached > 0 && (
+            <span
+              className="mono"
+              style={{ fontSize: 10.5, color: t.accent, fontWeight: 500 }}
+              title={`cache read ${usage.cacheReadTokens.toLocaleString()} · cache write ${usage.cacheCreationTokens.toLocaleString()}`}
+            >
+              ⚡{fmtTokens(cached)}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Branch chip */}
       <div

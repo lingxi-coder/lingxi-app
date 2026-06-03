@@ -18,7 +18,11 @@
  *  - `turn_ended`         → `running = false` + a `meta` row carrying the cost
  *                           snapshot's formatted duration/token summary.
  *  - `error`              → a strong, danger-toned `narration` line.
- *  - `thinking_delta`     → a muted `narration` "thinking" line (streamed).
+ *  - `thinking_delta`     → a dim/italic collapsible `thinking` block, streamed
+ *                           (deltas accumulate like text); closed on
+ *                           `message_complete` / `turn_ended`.
+ *  - `usage_update`        → the live token counter snapshot (`usage`), surfaced
+ *                           by the chrome — does not emit a scrollback item.
  *
  * Other events (listings, sessions, cost_update, …) are intentionally ignored
  * here — they are out of scope for the one-conversation Stage view.
@@ -26,6 +30,18 @@
 
 import type { ClientEvent } from '@lingxi/bridge-client';
 import type { RunItem } from '../data';
+
+/**
+ * The latest live token-usage snapshot fed by `usage_update`. Mirrors the
+ * engine's `UsageUpdate` DTO (cumulative per turn). `null` until the first
+ * update arrives. Surfaced in the chrome's token counter, not the scrollback.
+ */
+export interface UsageSnapshot {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheCreationTokens: number;
+}
 
 /**
  * The accumulated live conversation. `items` is what the Stage renders;
@@ -45,10 +61,12 @@ export interface ConversationState {
   readonly lastError: string | null;
   /** Index of the open (still-streaming) assistant narration line, or -1. */
   readonly openAssistantIndex: number;
-  /** Index of the open (still-streaming) thinking narration line, or -1. */
+  /** Index of the open (still-streaming) thinking block, or -1. */
   readonly openThinkingIndex: number;
   /** tool-use `id` → index of its agent card in `items`. */
   readonly toolIndex: Readonly<Record<string, number>>;
+  /** Latest live token-usage snapshot (`usage_update`), or `null`. */
+  readonly usage: UsageSnapshot | null;
 }
 
 /** A fresh, empty conversation (no items, not running). */
@@ -60,7 +78,16 @@ export function emptyConversation(): ConversationState {
     openAssistantIndex: -1,
     openThinkingIndex: -1,
     toolIndex: {},
+    usage: null,
   };
+}
+
+/** Mark an open (still-streaming) thinking block as done, if one is open. */
+function closeThinking(items: RunItem[], idx: number): void {
+  if (idx >= 0 && items[idx]?.type === 'thinking') {
+    const prev = items[idx] as Extract<RunItem, { type: 'thinking' }>;
+    if (!prev.done) items[idx] = { ...prev, done: true };
+  }
 }
 
 /** A user message immediately echoed when the composer submits (optimistic). */
@@ -68,8 +95,9 @@ export function appendUserPrompt(state: ConversationState, text: string): Conver
   const trimmed = text.trim();
   if (!trimmed) return state;
   const items = state.items.slice();
-  items.push({ type: 'narration', text: trimmed, strong: true });
   // A new user turn closes any previously-open streaming lines.
+  closeThinking(items, state.openThinkingIndex);
+  items.push({ type: 'narration', text: trimmed, strong: true });
   return { ...state, items, openAssistantIndex: -1, openThinkingIndex: -1 };
 }
 
@@ -90,6 +118,8 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
 
     case 'turn_ended': {
       const items = state.items.slice();
+      // Seal any reasoning block still open when the turn closes.
+      closeThinking(items, state.openThinkingIndex);
       const fmt = event.cost?.formatted;
       if (fmt) {
         // `formatted` is the engine's pre-rendered "Nm Ns · N tokens · $N"
@@ -107,6 +137,8 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
 
     case 'text_delta': {
       const items = state.items.slice();
+      // The answer follows the reasoning — seal the open thinking block.
+      closeThinking(items, state.openThinkingIndex);
       let idx = state.openAssistantIndex;
       if (idx < 0 || items[idx]?.type !== 'narration') {
         idx = items.length;
@@ -115,17 +147,17 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
         const prev = items[idx] as Extract<RunItem, { type: 'narration' }>;
         items[idx] = { ...prev, text: prev.text + event.text };
       }
-      return { ...state, items, openAssistantIndex: idx };
+      return { ...state, items, openAssistantIndex: idx, openThinkingIndex: -1 };
     }
 
     case 'thinking_delta': {
       const items = state.items.slice();
       let idx = state.openThinkingIndex;
-      if (idx < 0 || items[idx]?.type !== 'narration') {
+      if (idx < 0 || items[idx]?.type !== 'thinking') {
         idx = items.length;
-        items.push({ type: 'narration', text: event.thinking, tone: 'muted' });
+        items.push({ type: 'thinking', text: event.thinking });
       } else {
-        const prev = items[idx] as Extract<RunItem, { type: 'narration' }>;
+        const prev = items[idx] as Extract<RunItem, { type: 'thinking' }>;
         items[idx] = { ...prev, text: prev.text + event.thinking };
       }
       return { ...state, items, openThinkingIndex: idx };
@@ -133,6 +165,8 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
 
     case 'tool_use_started': {
       const items = state.items.slice();
+      // A tool runs after the reasoning that led to it — seal the block.
+      closeThinking(items, state.openThinkingIndex);
       const idx = items.length;
       items.push({
         type: 'agent',
@@ -146,6 +180,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
         ...state,
         items,
         openAssistantIndex: -1,
+        openThinkingIndex: -1,
         toolIndex: { ...state.toolIndex, [event.id]: idx },
       };
     }
@@ -170,9 +205,25 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
       return next;
     }
 
-    case 'message_complete':
-      // The streamed assistant text is final; stop appending to it.
-      return { ...state, openAssistantIndex: -1, openThinkingIndex: -1 };
+    case 'message_complete': {
+      // The streamed assistant text is final; stop appending to it and seal
+      // any open reasoning block.
+      const items = state.items.slice();
+      closeThinking(items, state.openThinkingIndex);
+      return { ...state, items, openAssistantIndex: -1, openThinkingIndex: -1 };
+    }
+
+    case 'usage_update':
+      // Live token counter — captured for the chrome; emits no scrollback item.
+      return {
+        ...state,
+        usage: {
+          inputTokens: event.input_tokens,
+          outputTokens: event.output_tokens,
+          cacheReadTokens: event.cache_read_tokens,
+          cacheCreationTokens: event.cache_creation_tokens,
+        },
+      };
 
     case 'error':
       return { ...pushError(state, event.message), running: false };
@@ -197,6 +248,7 @@ function items_at(state: ConversationState, idx: number): RunItem | undefined {
 /** Append a strong, danger-toned error narration line. */
 function pushError(state: ConversationState, message: string): ConversationState {
   const items = state.items.slice();
+  closeThinking(items, state.openThinkingIndex);
   items.push({ type: 'narration', text: `✗ ${message}`, strong: true });
   return {
     ...state,

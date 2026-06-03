@@ -75,7 +75,11 @@ export type RunItem =
   | { type: 'narration'; text: string; tone?: 'muted'; strong?: boolean }
   | { type: 'agent'; state: 'done' | 'running'; title: string; sub?: string; expandable?: boolean; link?: boolean }
   | { type: 'meta'; dur: string; tokens: string }
-  | { type: 'audio'; bars: number[]; duration: number };
+  | { type: 'audio'; bars: number[]; duration: number }
+  // The assistant's streamed reasoning (`thinking_delta`), rendered as a dim,
+  // italic, collapsible block above the answer. `done` flips true once the
+  // reasoning stream closes (message_complete / turn_ended).
+  | { type: 'thinking'; text: string; done?: boolean };
 
 export const RUN: RunItem[] = [
   { type: 'narration', text: 'Dispatching Task 1: Bootstrap workspace', tone: 'muted' },

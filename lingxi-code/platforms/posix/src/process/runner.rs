@@ -73,7 +73,16 @@ impl ProcessRunner for PosixProcess {
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // On the timeout path below we `return Err(..)` and drop the
+            // `Child`. Tokio's default drop does NOT kill the OS process, so a
+            // timed-out `bash -c` would otherwise be orphaned and keep running
+            // (the handler reports `Killed` while the process is still alive).
+            // `kill_on_drop` makes the drop send SIGKILL, so the timeout
+            // actually terminates the child. (Descendants escaping the direct
+            // child are the `spawn_background` setsid path's concern, not the
+            // foreground capture path.)
+            .kill_on_drop(true);
 
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
         if let Some(stdin_text) = &inner.stdin {

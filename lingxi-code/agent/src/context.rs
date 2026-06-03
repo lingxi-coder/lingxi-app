@@ -40,6 +40,13 @@ pub struct SubagentContext {
     pub worktree_handle: Option<WorktreeHandle>,
     /// `true` when the agent runs asynchronously (e.g. background scan).
     pub is_async: bool,
+    /// `true` for a long-lived, message-driven teammate: after a turn-set ends
+    /// with a terminal stop the runner parks awaiting the next inbound
+    /// [`engine::Event::UserMessage`] instead of returning. Terminates only on
+    /// [`engine::Event::UserExit`] / [`engine::Event::UserInterrupt`] or when
+    /// the inbound event channel closes. Distinct from [`Self::is_async`],
+    /// which only governs background-vs-foreground scheduling.
+    pub persistent: bool,
     /// Whether the agent may surface permission prompts to the user.
     pub can_show_permission_prompts: bool,
     /// MCP connections the agent should attach to.
@@ -55,4 +62,17 @@ pub struct SubagentContext {
     pub agent_memory: Option<AgentMemorySnapshot>,
     /// UI display configuration (color, icon).
     pub display: AgentDisplay,
+    /// Model API seam used by the multi-turn [`crate::runner::run_subagent`]
+    /// loop. `None` keeps the legacy stub behavior (no real API calls) for
+    /// back-compat with callers that haven't wired an API client yet.
+    pub api_client: Option<Arc<dyn crate::api::SubagentApiClient>>,
+    /// Tool dispatch seam inherited from the parent via
+    /// [`traits::subagent_spawn::SubagentInheritance`]. `None` means the agent
+    /// cannot dispatch tools — a `tool_use` in that state surfaces a failure.
+    pub tool_invoker: Option<Arc<dyn traits::ToolInvoker>>,
+    /// Inherited budget enforcer (from `SubagentInheritance::budget`). When
+    /// `Some`, the multi-turn loop consults it once per turn and stops with a
+    /// budget-exhausted terminal when the cumulative cost is over the limit.
+    /// `None` disables budget enforcement (legacy/test contexts).
+    pub budget: Option<Arc<dyn traits::budget::BudgetEnforcerHandle>>,
 }

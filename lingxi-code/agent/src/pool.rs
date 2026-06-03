@@ -84,6 +84,29 @@ impl StateMachinePool {
         Ok((agent_id, out_rx))
     }
 
+    /// Deliver an inbound [`engine::Event`] into the slot owned by `agent_id`.
+    ///
+    /// Used by message-driven handlers (e.g. the in-process teammate) to push
+    /// a [`engine::Event::UserMessage`] to a parked subagent, and to deliver
+    /// [`engine::Event::UserExit`] / [`engine::Event::UserInterrupt`] for
+    /// cooperative termination.
+    ///
+    /// A `read()` lock suffices: we only read the `event_tx` sender, and the
+    /// mpsc channel is internally synchronized.
+    pub async fn send_event(
+        &self,
+        agent_id: &AgentId,
+        event: engine::Event,
+    ) -> Result<(), PoolError> {
+        let slots = self.slots.read().await;
+        let slot = slots.get(agent_id).ok_or(PoolError::NoSuchAgent)?;
+        slot.event_tx
+            .send(event)
+            .await
+            .map_err(|_| PoolError::AgentGone)?;
+        Ok(())
+    }
+
     /// Remove the slot owned by `agent_id` and cancel its background task.
     pub async fn deallocate(&self, agent_id: &AgentId) -> Result<(), PoolError> {
         let slot = self.slots.write().await.remove(agent_id);
@@ -112,6 +135,13 @@ pub enum PoolError {
     /// All `max_concurrent` slots are in use.
     #[error("too many agents — pool full")]
     TooManyAgents,
+    /// No slot is currently allocated for the requested `agent_id`.
+    #[error("no agent with the requested id")]
+    NoSuchAgent,
+    /// The slot exists but its inbound event channel is closed (the subagent
+    /// runner future has dropped its receiver — effectively terminated).
+    #[error("agent channel closed")]
+    AgentGone,
     /// The underlying [`RuntimeSpawner`] rejected the spawn / cancel call.
     #[error(transparent)]
     Runtime(#[from] RuntimeError),
@@ -128,12 +158,10 @@ mod tests {
     use std::sync::Arc;
     use test_harness::mocks::MockRuntimeSpawner;
 
-    #[tokio::test]
-    async fn allocate_and_deallocate() {
-        let runtime = Arc::new(MockRuntimeSpawner::default());
-        let pool = StateMachinePool::new(runtime, 5);
-
-        let ctx = SubagentContext {
+    /// Build a minimal [`SubagentContext`] with `api_client = None`, so the
+    /// allocated slot runs the legacy reducer-driven stub (no API calls).
+    fn make_ctx() -> SubagentContext {
+        SubagentContext {
             agent_id: AgentId::new(),
             parent_agent_id: None,
             agent_definition: AgentDefinition {
@@ -159,6 +187,7 @@ mod tests {
             allowed_tools: vec![],
             worktree_handle: None,
             is_async: false,
+            persistent: false,
             can_show_permission_prompts: true,
             mcp_clients: vec![],
             transcript_subdir: "/tmp".into(),
@@ -169,12 +198,116 @@ mod tests {
                 color: AgentColor::Cyan,
                 icon: None,
             },
-        };
+            api_client: None,
+            tool_invoker: None,
+            budget: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn allocate_and_deallocate() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = StateMachinePool::new(runtime, 5);
+
+        let ctx = make_ctx();
         let aid = ctx.agent_id;
         let (id, _rx) = pool.allocate(ctx).await.unwrap();
         assert_eq!(id, aid);
         assert_eq!(pool.slot_count().await, 1);
         pool.deallocate(&aid).await.unwrap();
         assert_eq!(pool.slot_count().await, 0);
+    }
+
+    /// `send_event` routes an inbound `engine::Event` into the slot's runner.
+    /// We drive the stub runner (api_client = None): a `UserExit` delivered via
+    /// `send_event` makes it emit `SubagentEvent::Killed`, proving the event
+    /// reached the slot's `event_tx`.
+    #[tokio::test]
+    async fn send_event_delivers_to_slot() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = StateMachinePool::new(runtime, 5);
+
+        let ctx = make_ctx();
+        let aid = ctx.agent_id;
+        let (_id, mut out_rx) = pool.allocate(ctx).await.unwrap();
+
+        pool.send_event(&aid, engine::Event::UserExit)
+            .await
+            .expect("send_event delivers to the live slot");
+
+        // The stub runner's fast-path turns UserExit into Killed.
+        let ev = out_rx.recv().await.expect("a SubagentEvent");
+        assert!(
+            matches!(ev, SubagentEvent::Killed { agent_id } if agent_id == aid),
+            "UserExit routed through send_event yields Killed; got {ev:?}"
+        );
+    }
+
+    /// `send_event` to an id with no slot is `NoSuchAgent`.
+    #[tokio::test]
+    async fn send_event_unknown_agent_errors() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = StateMachinePool::new(runtime, 5);
+        let err = pool
+            .send_event(&AgentId::new(), engine::Event::UserInterrupt)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PoolError::NoSuchAgent), "got {err:?}");
+    }
+
+    /// Allocating beyond `max_concurrent` is rejected with `TooManyAgents`. A
+    /// core invariant of the fixed-capacity slot table.
+    #[tokio::test]
+    async fn allocate_over_capacity_rejects() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = StateMachinePool::new(runtime, 1);
+
+        // First slot fits.
+        let (_id, _rx) = pool.allocate(make_ctx()).await.unwrap();
+        assert_eq!(pool.slot_count().await, 1);
+
+        // Second slot exceeds the cap.
+        let err = pool.allocate(make_ctx()).await.unwrap_err();
+        assert!(matches!(err, PoolError::TooManyAgents), "got {err:?}");
+        assert_eq!(pool.slot_count().await, 1, "rejected spawn left no slot");
+    }
+
+    /// `send_event` to a slot whose runner has dropped its inbound receiver
+    /// (the run future returned, e.g. after a terminal event) surfaces
+    /// `AgentGone` — distinct from `NoSuchAgent` (slot absent). The slot is
+    /// still in the map, so this exercises the closed-channel arm specifically.
+    #[tokio::test]
+    async fn send_event_to_dropped_runner_is_agent_gone() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = StateMachinePool::new(runtime, 5);
+
+        let aid = {
+            let ctx = make_ctx();
+            let id = ctx.agent_id;
+            let (_id, mut out_rx) = pool.allocate(ctx).await.unwrap();
+            // Drive the stub runner to termination: UserExit makes it emit
+            // Killed and return, dropping its `event_rx`. We never deallocate,
+            // so the slot stays in the map with a now-closed inbound channel.
+            pool.send_event(&id, engine::Event::UserExit).await.unwrap();
+            // Wait for the runner to actually surface Killed and return so its
+            // receiver is dropped before we probe the closed channel.
+            let ev = out_rx.recv().await.expect("Killed event");
+            assert!(matches!(ev, SubagentEvent::Killed { .. }), "got {ev:?}");
+            // The out channel closes once the runner returns.
+            while out_rx.recv().await.is_some() {}
+            id
+        };
+
+        // The slot is still present (not deallocated) but the runner's
+        // receiver is gone -> send fails with AgentGone.
+        let err = pool
+            .send_event(&aid, engine::Event::UserMessage {
+                message_id: protocol::MessageId::new(),
+                request_id: protocol::RequestId::new(),
+                content: "hello".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PoolError::AgentGone), "got {err:?}");
     }
 }

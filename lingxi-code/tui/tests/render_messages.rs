@@ -22,6 +22,53 @@ fn assistant_text_three_lines() {
     insta::assert_snapshot!("assistant_text_three_lines", element.to_string());
 }
 
+// (#211) The assistant body now routes through `render::markdown`. These
+// snapshots lock the markdown-rendered layout for the common element kinds
+// (the `● ` marker sits once to the left of a per-line body column). Styling
+// (bold/italic/underline/inline-code color) is applied per span; the textual
+// `.to_string()` captures the resulting LAYOUT.
+
+#[test]
+fn assistant_text_markdown_bold() {
+    let mut element = element! {
+        AssistantTextMessage(body: "normal **bold** word".to_string())
+    };
+    insta::assert_snapshot!("assistant_text_markdown_bold", element.to_string());
+}
+
+#[test]
+fn assistant_text_markdown_inline_code() {
+    // Inline code is colored with the `permission` palette (markdown.ts).
+    let mut element = element! {
+        AssistantTextMessage(body: "run `cargo test` now".to_string())
+    };
+    insta::assert_snapshot!("assistant_text_markdown_inline_code", element.to_string());
+}
+
+#[test]
+fn assistant_text_markdown_heading() {
+    let mut element = element! {
+        AssistantTextMessage(body: "# Title\n\nbody text".to_string())
+    };
+    insta::assert_snapshot!("assistant_text_markdown_heading", element.to_string());
+}
+
+#[test]
+fn assistant_text_markdown_list() {
+    let mut element = element! {
+        AssistantTextMessage(body: "- one\n- two\n- three".to_string())
+    };
+    insta::assert_snapshot!("assistant_text_markdown_list", element.to_string());
+}
+
+#[test]
+fn assistant_text_markdown_fenced_code() {
+    let mut element = element! {
+        AssistantTextMessage(body: "intro\n```rust\nfn main() {}\n```\noutro".to_string())
+    };
+    insta::assert_snapshot!("assistant_text_markdown_fenced_code", element.to_string());
+}
+
 #[test]
 fn task_assignment_no_description() {
     let mut element = element! {

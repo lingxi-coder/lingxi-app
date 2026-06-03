@@ -44,8 +44,11 @@ pub enum TaskSpawnInput {
     },
     /// Spawn an in-process agent.
     LocalAgent {
-        /// Agent target.
+        /// Agent target (per-instance identity UUID).
         agent_id: protocol::AgentId,
+        /// Resolved subagent-type name (TS `agentType`; the caller applies the
+        /// `'general-purpose'` fallback when the `AgentDefinition` has none).
+        subagent_type: String,
         /// Initial prompt.
         prompt: String,
         /// Whether to start backgrounded.

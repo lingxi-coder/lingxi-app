@@ -9,6 +9,7 @@ protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }
 tool-api = { path = "../tool-api" }
+permission = { path = "../permission" }
 agent = { path = "../agent" }
 tasks = { path = "../tasks" }
 memory = { path = "../memory" }

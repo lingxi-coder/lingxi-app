@@ -32,8 +32,11 @@ use anthropic_oauth::handle::OAuthHandle;
 use api_client::AnthropicProvider;
 use client_adapter::{AdapterPermissionGate, PermissionRequestSink};
 use command_api::{CommandRegistry, RegistrySlashDispatcher};
-use command_core::{register_all_builtin_commands, register_core_batch_1, register_core_batch_2};
-use orchestrator::test_support::{noop_hook_executor, NoOpPermissionGate, StaticMemoryProvider};
+use command_core::{
+    register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
+    register_core_batch_4, register_core_batch_5,
+};
+use orchestrator::test_support::{NoOpPermissionGate, StaticMemoryProvider};
 use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
 };
@@ -236,7 +239,9 @@ pub fn desktop_command_registry(
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
     register_core_batch_1(&mut reg, handle.clone());
-    register_core_batch_2(&mut reg, handle, auth);
+    register_core_batch_2(&mut reg, handle.clone(), auth);
+    register_core_batch_4(&mut reg, handle.clone());
+    register_core_batch_5(&mut reg, handle);
     // Desktop-only command handlers (no-op in M8 — the names remain
     // command-core unimplemented stubs until future milestones fill them).
     command_desktop::register(&mut reg);
@@ -347,8 +352,16 @@ pub async fn build(
         http.clone(),
         routing,
     ));
-    let api_client: Arc<dyn OrchestratorApiClient> =
-        Arc::new(ProviderApiAdapter::new(registry as Arc<dyn ModelRouter>));
+    // Build the CONCRETE adapter first so it can be coerced to BOTH the
+    // orchestrator seam (`OrchestratorApiClient`) and the agent seam
+    // (`agent::SubagentApiClient`). `ProviderApiAdapter` impls both (see
+    // orchestrator/src/provider_adapter.rs); type-erasing to one trait object
+    // up front would forfeit the other coercion.
+    let provider_adapter = Arc::new(ProviderApiAdapter::new(
+        Arc::clone(&registry) as Arc<dyn ModelRouter>,
+    ));
+    let api_client: Arc<dyn OrchestratorApiClient> = provider_adapter.clone();
+    let subagent_api: Arc<dyn agent::SubagentApiClient> = provider_adapter;
     // WebSearch builds Anthropic `POST /v1/messages` requests via its own
     // provider (server-side web search is Anthropic-only in v1).
     let tool_provider = Arc::new(AnthropicProvider::new(
@@ -359,8 +372,47 @@ pub async fn build(
     // (3) Credential manager + OAuth client (used by /login, /logout).
     let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
     let oauth_cfg = ClaudeAiOAuthConfig::default_with_port(0);
-    let oauth_client = Arc::new(ClaudeAiOAuthClient::new(oauth_cfg, http.clone(), credentials));
+    let oauth_client = Arc::new(ClaudeAiOAuthClient::new(
+        oauth_cfg.clone(),
+        http.clone(),
+        credentials.clone(),
+    ));
     let auth: Arc<dyn AuthHandle> = Arc::new(OAuthHandle::new(oauth_client));
+
+    // (3.1) M5-13: attach the OAuth refresh driver to the api-client when the
+    //        keychain already holds a logged-in OAuth token. `init_refresh_driver`
+    //        registers the process-global `OAuthRefreshHook` (so the api-client's
+    //        401-retry path calls `refresh` instead of `NoOpOAuthHook`) and spawns
+    //        the proactive-refresh task. It MUST be called at most once per
+    //        process; gating it on "tokens present" keeps the API-key path on the
+    //        correct `NoOpOAuthHook`. When no OAuth token is stored (the common
+    //        API-key case) we skip it entirely.
+    match credentials.get_oauth_tokens().await {
+        Ok(Some(tokens)) => {
+            if let Err(e) = anthropic_oauth::client::init_refresh_driver(
+                oauth_cfg,
+                tokens.access_token,
+                tokens.refresh_token,
+                tokens.expires_at,
+                http.clone(),
+                clock.clone(),
+                Some(Arc::new(telemetry::AnalyticsBus::new())),
+                Some(credentials.clone()),
+                Arc::new(PosixRuntime::new()),
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "failed to attach OAuth refresh driver; 401 auto-refresh disabled");
+            }
+        }
+        Ok(None) => {
+            // No stored OAuth session — API-key path. Leave `current_hook()` as
+            // the NoOpOAuthHook (correct: nothing to refresh).
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read OAuth tokens from keychain; skipping refresh-driver wiring");
+        }
+    }
 
     // (4) Orchestrator config from `cfg` (was `argv.model`).
     let mut orch_cfg = OrchestratorConfig::default();
@@ -379,11 +431,47 @@ pub async fn build(
         cost_persist_tx,
     ));
 
-    // (5) Hook / memory fillers + the permission gate. The gate is the F2-01
-    //     branch point: the CLI opts into the always-allow `NoOpPermissionGate`;
-    //     a transport binds the connection-scoped `AdapterPermissionGate` and
+    // (4.6) Subagent spawner pool + budget enforcer for the `AgentTool` seam.
+    //       `AgentTool::call` requires BOTH `subagent_spawner` and
+    //       `budget_enforcer` to be `Some` — wiring the spawner alone is inert.
+    //
+    //       The pool is the production `StateMachinePool` driven by the posix
+    //       `RuntimeSpawner`; `max_concurrent = 4` matches the agent-crate
+    //       fixtures. `with_api_client(subagent_api)` hands the child runner the
+    //       real model seam so spawned subagents drive the multi-turn
+    //       `run_subagent_loop` (gated on `ctx.api_client.is_some()`) instead of
+    //       the legacy stub completion.
+    let subagent_pool = Arc::new(agent::StateMachinePool::new(Arc::new(PosixRuntime::new()), 4));
+    let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> = Arc::new(
+        agent::PoolSubagentSpawner::new(subagent_pool).with_api_client(subagent_api),
+    );
+
+    //       The budget enforcer is an unlimited / non-blocking config (every
+    //       limit `None`, no warning thresholds, `WarnOnly` policy) so it never
+    //       halts a turn — `BudgetConfig` has no production `Default`, so all
+    //       five fields are spelled out. It shares the process `CostTracker`
+    //       (cloned because the tracker is also moved into `.with_cost_tracker`
+    //       below).
+    let budget_enforcer: Arc<dyn traits::budget::BudgetEnforcerHandle> =
+        Arc::new(cost::BudgetEnforcer::new(
+            cost::BudgetConfig {
+                max_session_nano_usd: None,
+                max_turn_nano_usd: None,
+                max_turn_tokens: None,
+                warning_thresholds: Vec::new(),
+                on_exceed: cost::BudgetExceedPolicy::WarnOnly,
+            },
+            cost_tracker.clone(),
+        ));
+
+    // (5) Memory filler + the permission gate. The gate is the F2-01 branch
+    //     point: the CLI opts into the always-allow `NoOpPermissionGate`; a
+    //     transport binds the connection-scoped `AdapterPermissionGate` and
     //     keeps its handle to `resolve()` inbound approvals (F2-06).
-    let hooks = noop_hook_executor();
+    //
+    //     M5-13: the hook executor is no longer the `noop_hook_executor()` stub
+    //     — it is constructed below (5.25) once `hook_registry` exists, so the
+    //     HTTP / Command hook arms run for real.
     let memory: Arc<dyn orchestrator::prompt::MemoryHierarchyProvider> =
         Arc::new(StaticMemoryProvider::empty());
 
@@ -396,9 +484,13 @@ pub async fn build(
         };
 
     // (5.1) Load `.mcp.json` (project preferred over user-global) and
-    //       pre-populate the McpRegistry with `Disconnected` entries so `/mcp`
-    //       can list them. The precedence-ordered paths arrive via `cfg`
-    //       (previously derived from `dirs::config_dir()` + cwd here).
+    //       auto-connect every enabled server (Plan 13). `connect_all` seeds
+    //       disabled servers as `Disconnected` so `/mcp` still lists them,
+    //       connects the rest, and records per-server failures as loop-eligible
+    //       `Disconnected { last_error }`. A background reconnect/backoff task
+    //       then retries dropped remote servers. The precedence-ordered paths
+    //       arrive via `cfg` (previously derived from `dirs::config_dir()` + cwd
+    //       in the CLI).
     let project_mcp_path = cfg
         .mcp_paths
         .first()
@@ -412,19 +504,8 @@ pub async fn build(
     let mcp_configs = mcp::load_mcp_json_with_precedence(&project_mcp_path, &global_mcp_path);
     let mcp_transport: Arc<dyn McpTransport> = Arc::new(PosixMcp::new());
     let mcp_registry = Arc::new(mcp::McpRegistry::new(mcp_transport));
-    {
-        let mut conns = mcp_registry.connections.write().await;
-        for cfg_entry in mcp_configs {
-            let name = cfg_entry.name.clone();
-            conns.insert(
-                name,
-                mcp::McpConnectionState::Disconnected {
-                    config: cfg_entry,
-                    last_error: None,
-                },
-            );
-        }
-    }
+    mcp_registry.connect_all(mcp_configs).await;
+    tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
 
     // (5.2) HookRegistry — read settings.json hooks from project
     //       (cwd/.claude/settings.json) then user (claude_home/settings.json),
@@ -457,6 +538,34 @@ pub async fn build(
     }
     let hook_registry = Arc::new(tokio::sync::RwLock::new(hook_registry));
 
+    // (5.25) M5-13: build the real hook executor now that `hook_registry`
+    //        exists. This replaces the `noop_hook_executor()` stub (which fed
+    //        `UnusedHttp` + `UnusedRuntime` and a `(None, None)` Command guard):
+    //        - `http.clone()` is the real `PosixHttp`, so the HTTP arm performs
+    //          real (SSRF-guarded) requests.
+    //        - `PosixRuntime` is the real `RuntimeSpawner`.
+    //        - `with_process_runner(PosixProcess, PosixSandbox)` makes the
+    //          Command arm spawn real child processes (the runner only accepts a
+    //          `SandboxedCommand`, which the sandbox mints).
+    //        The hooks Agent arm stays "not wired" (no `.with_agent_spawner(..)`
+    //        builder on `HookExecutorImpl` yet — M9+). NOTE: this is a *separate*
+    //        seam from the tool-context `subagent_spawner`, which IS now wired
+    //        below (4.6) — the hooks Agent arm and the `AgentTool` spawner are
+    //        distinct injection points. The orchestrator's `hooks` param is the
+    //        concrete `Arc<hooks::HookExecutorImpl>`, so no trait-object coercion
+    //        is needed.
+    let hooks = Arc::new(
+        hooks::HookExecutorImpl::new(
+            hook_registry.clone(),
+            http.clone(),
+            Arc::new(PosixRuntime::new()),
+        )
+        .with_process_runner(
+            Arc::new(PosixProcess::new()) as Arc<dyn traits::ProcessRunner>,
+            Arc::new(PosixSandbox::new()) as Arc<dyn traits::Sandbox>,
+        ),
+    );
+
     // (5.3) Agent catalog — load from project + user agents/. Project wins on
     //       collision (passed SECOND; later paths win). The user agents dir is
     //       `cfg.claude_home/agents` (was `dirs::home_dir()/.claude/agents`).
@@ -478,14 +587,25 @@ pub async fn build(
     //        spawner is the tokio-backed `PosixRuntime`. The same handle is
     //        returned for a transport/TUI poller to read live state.
     let task_output_dir = cwd.join(".claude").join("tasks-output");
-    let task_registry = Arc::new(tasks::registry::TaskRegistry::new(
+    let mut task_registry_inner = tasks::registry::TaskRegistry::new(
         Arc::new(PosixRuntime::new()),
         Arc::new(PosixFileSystem::new(cwd.clone())),
         Arc::new(tasks::output_manager::TaskOutputManager::new(
             task_output_dir,
             Arc::new(PosixFileSystem::new(cwd.clone())),
         )),
-    ));
+    );
+    // Register the M2 self-contained per-type handlers (LocalBash + MonitorMcp)
+    // before the registry is shared. Both depend only on platform traits we
+    // already build here; agent/teammate/workflow/remote/dream handlers register
+    // once their production pools are wired (M9+).
+    tasks::registry::register_self_contained_handlers(
+        &mut task_registry_inner,
+        Arc::new(PosixProcess::new()),
+        Arc::new(PosixSandbox::new()),
+        mcp_registry.clone(),
+    );
+    let task_registry = Arc::new(task_registry_inner);
 
     // (5.5) Assemble the desktop tool registry through the composition root.
     let tool_ctx = BuiltinToolContext {
@@ -509,12 +629,12 @@ pub async fn build(
         provider: tool_provider,
         default_model: orch_cfg.model.clone(),
         worktree: Arc::new(PosixWorktree::new()),
-        subagent_spawner: None,
+        subagent_spawner: Some(subagent_spawner),
         task_registry: Some(
             task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>
         ),
         mailbox_router: None,
-        budget_enforcer: None,
+        budget_enforcer: Some(budget_enforcer),
         mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: None,
         camera: None,

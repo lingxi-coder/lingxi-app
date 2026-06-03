@@ -1,10 +1,10 @@
 ---
-source: crates/tui/tests/render_virtual_window.rs
+source: tui/tests/render_virtual_window.rs
 expression: element.to_string()
 ---
 > short user line
 ● first
-second
-third
-fourth
+  second
+  third
+  fourth
 system note

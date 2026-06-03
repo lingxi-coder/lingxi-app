@@ -1,0 +1,7 @@
+---
+source: tui/tests/render_messages.rs
+expression: element.to_string()
+---
+● - one
+  - two
+  - three

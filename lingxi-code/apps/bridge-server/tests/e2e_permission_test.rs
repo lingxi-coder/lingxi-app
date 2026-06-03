@@ -242,6 +242,9 @@ async fn permission_request_event_then_approve_resolves_check() {
                 }
                 break req.request_id;
             }
+            // CostUpdate / UsageUpdate / ThinkingDelta may interleave with the
+            // stream (the §0.7 light-up now feeds usage live) — keep scanning.
+            Frame::Event(_) => {}
             other => panic!("unexpected frame before permission request: {other:?}"),
         }
     };

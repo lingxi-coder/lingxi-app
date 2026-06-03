@@ -42,7 +42,7 @@ pub use process::PosixProcess;
 pub use runtime::PosixRuntime;
 pub use sandbox::PosixSandbox;
 pub use secure_storage::{
-    secure_storage_for_platform, MacOsKeychainStorage, PlainTextSecureStorage,
+    secure_storage_for_platform, LinuxSecretStorage, MacOsKeychainStorage, PlainTextSecureStorage,
 };
 pub use swarm::TmuxSwarmBackend;
 pub use worktree::PosixWorktreeManager;

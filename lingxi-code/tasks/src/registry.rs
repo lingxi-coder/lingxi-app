@@ -3,15 +3,22 @@
 //! The registry owns the in-memory map of task IDs to [`TaskState`] and to
 //! the [`BackgroundTaskHandle`]s returned by the [`RuntimeSpawner`].
 
+use crate::handlers::{
+    DreamHandler, InProcessTeammateHandler, LocalAgentHandler, LocalBashHandler, MonitorMcpHandler,
+};
 use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
 use crate::state::{TaskState, TaskStateBase, TaskStatus};
 use crate::task_trait::{Task, TaskError, TaskSpawnInput};
+use agent::{StateMachinePool, SubagentApiClient};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
-use traits::{BackgroundTaskHandle, FileSystem, RuntimeSpawner};
+use traits::{
+    BackgroundTaskHandle, BudgetEnforcerHandle, FileSystem, ProcessRunner, RuntimeSpawner, Sandbox,
+    SubagentSpawner, ToolInvoker,
+};
 
 /// Tracks running tasks and dispatches lifecycle operations to handlers.
 pub struct TaskRegistry {
@@ -160,4 +167,127 @@ impl TaskRegistry {
         }
         Ok(())
     }
+}
+
+/// Register the M2 *self-contained* per-type handlers — the ones whose only
+/// dependencies are platform traits already available at boot (no agent /
+/// subagent pool, mailbox, or budget enforcer). Today that is
+/// [`TaskType::LocalBash`] and [`TaskType::MonitorMcp`].
+///
+/// `process` + `sandbox` are required because they are absent from
+/// [`crate::task_trait::TaskContext`] yet [`LocalBashHandler`] cannot run a
+/// command without them. The spool [`TaskOutputManager`] is shared with the
+/// registry's own (`reg.output_manager`) so handler-allocated spool paths land
+/// in the same sandboxed output dir the registry hands the TUI. `mcp` drives
+/// [`MonitorMcpHandler`]'s catalog polls.
+///
+/// Call this *before* the registry is wrapped in an [`Arc`] — registration
+/// takes `&mut self`. The remaining five task types (agent/teammate/workflow/
+/// remote/dream) register once their production pools are wired (M9+).
+pub fn register_self_contained_handlers(
+    reg: &mut TaskRegistry,
+    process: Arc<dyn ProcessRunner>,
+    sandbox: Arc<dyn Sandbox>,
+    mcp: Arc<mcp::McpRegistry>,
+) {
+    let output_manager = reg.output_manager.clone();
+    reg.register_handler(
+        TaskType::LocalBash,
+        Arc::new(LocalBashHandler::new(
+            process,
+            sandbox,
+            output_manager.clone(),
+        )),
+    );
+    reg.register_handler(
+        TaskType::MonitorMcp,
+        Arc::new(MonitorMcpHandler::with_default_interval(mcp, output_manager)),
+    );
+}
+
+/// Register the M2 *agent-backed* per-type handlers — the ones whose
+/// dependencies are NOT available at platform boot but require the production
+/// agent pipeline: [`TaskType::LocalAgent`] (a one-shot subagent driven through
+/// a [`SubagentSpawner`]) and [`TaskType::InProcessTeammate`] (a persistent,
+/// message-driven subagent driven through a [`StateMachinePool`]).
+///
+/// These are split out of [`register_self_contained_handlers`] because they need
+/// seams the task-registry construction site does not have at boot today — a
+/// concrete [`SubagentSpawner`] / [`StateMachinePool`], the parent's
+/// [`ToolInvoker`] + [`BudgetEnforcerHandle`], and a [`SubagentApiClient`]. The
+/// boot site (`apps/cli/src/init.rs`) constructs the task registry with
+/// `subagent_spawner: None` / `budget_enforcer: None` and no teammate pool, so
+/// wiring this helper there is a tracked follow-up (M9+). The helper exists now
+/// so the wire step can call it once those pools land, and so the handlers are
+/// reachable + tested in the interim.
+///
+/// `tool_invoker` + `budget` are passed through *unchanged* (cloning the `Arc`
+/// preserves pointer identity, which the recursion-lock + budget-aggregation
+/// invariants rely on). The spool [`TaskOutputManager`] is shared with the
+/// registry's own (`reg.output_manager`). Both handlers default their narrow
+/// status-sink seam; callers needing the registry-status adapter can build the
+/// handlers directly and `register_handler` them instead. The subagent type
+/// arrives already resolved on the [`crate::task_trait::TaskSpawnInput::LocalAgent`]
+/// variant, so no resolver injection is needed here.
+///
+/// Call this *before* the registry is wrapped in an [`Arc`] — registration
+/// takes `&mut self`.
+pub fn register_agent_handlers(
+    reg: &mut TaskRegistry,
+    spawner: Arc<dyn SubagentSpawner>,
+    pool: Arc<StateMachinePool>,
+    tool_invoker: Arc<dyn ToolInvoker>,
+    budget: Arc<dyn BudgetEnforcerHandle>,
+    api_client: Arc<dyn SubagentApiClient>,
+) {
+    let output_manager = reg.output_manager.clone();
+    reg.register_handler(
+        TaskType::LocalAgent,
+        Arc::new(LocalAgentHandler::new(
+            spawner,
+            tool_invoker.clone(),
+            budget,
+            output_manager.clone(),
+        )),
+    );
+    reg.register_handler(
+        TaskType::InProcessTeammate,
+        Arc::new(
+            InProcessTeammateHandler::new(pool, output_manager, api_client)
+                .with_tool_invoker(tool_invoker),
+        ),
+    );
+}
+
+/// Register the M2 *agent-backed* dream handler — [`TaskType::Dream`] — a
+/// one-shot forked subagent that runs the memory-consolidation prompt through a
+/// [`SubagentSpawner`].
+///
+/// Split out for the same reason as [`register_agent_handlers`]: the dream
+/// handler needs the production agent pipeline (a concrete [`SubagentSpawner`]
+/// plus the parent's [`ToolInvoker`] + [`BudgetEnforcerHandle`]) that the
+/// task-registry construction site does not have at boot today. The boot site
+/// (`apps/cli/src/init.rs`) wires this once the subagent pool lands (M9+) — the
+/// same deferred-wiring note the agent handlers carry. The helper exists now so
+/// the wire step can call it once those pools land, and so the handler is
+/// reachable + tested in the interim.
+///
+/// `tool_invoker` + `budget` are passed through *unchanged* (cloning the `Arc`
+/// preserves pointer identity, which the recursion-lock + budget-aggregation
+/// invariants rely on). The spool [`TaskOutputManager`] is shared with the
+/// registry's own (`reg.output_manager`).
+///
+/// Call this *before* the registry is wrapped in an [`Arc`] — registration
+/// takes `&mut self`.
+pub fn register_dream_handler(
+    reg: &mut TaskRegistry,
+    spawner: Arc<dyn SubagentSpawner>,
+    tool_invoker: Arc<dyn ToolInvoker>,
+    budget: Arc<dyn BudgetEnforcerHandle>,
+) {
+    let output_manager = reg.output_manager.clone();
+    reg.register_handler(
+        TaskType::Dream,
+        Arc::new(DreamHandler::new(spawner, tool_invoker, budget, output_manager)),
+    );
 }

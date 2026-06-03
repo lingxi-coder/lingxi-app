@@ -10,7 +10,10 @@ pub mod doctor;
 pub mod memory;
 pub mod repl;
 pub mod resume;
+pub mod scroll;
 pub mod settings;
+pub mod skills;
+pub mod stats;
 pub mod theme;
 
 /// Which full-page screen currently overlays the REPL. `None` ⇒ REPL is live.
@@ -81,4 +84,28 @@ pub enum Screen {
     /// returns to the list). Opened by `/agents`; rows come from
     /// `OrchestratorHandle::list_agents` (name/description/tools_allowed).
     Agents(agents::AgentsScreenState),
+    /// (M9-09) The `/skills` registry viewer — claude-code `SkillsMenu.tsx`. A
+    /// read-only, scrollable list of discovered skills grouped by source.
+    /// Carries its grouped sections + an embedded `ScrollState`. Interactive
+    /// like Agents (read-only): `root::handle_screen_key` runs the pure
+    /// `skills::handle_skills_key` (scroll keys via the embedded `ScrollState`;
+    /// Esc/`q` close). Opened synchronously by `/skills`. The skill catalog is
+    /// in-tree (`skill-api`) but not yet reachable from the TUI (the frozen
+    /// `OrchestratorHandle` exposes no `list_skills` and `AppState` holds no
+    /// `SkillRegistry`), so the open passes an EMPTY catalog — the locked
+    /// `No skills found` empty state — until a `list_skills` handle method
+    /// lands (out of this batch's scope).
+    Skills(skills::SkillsState),
+    /// (M9-10) The `/stats` usage-stats screen — claude-code `Stats.tsx`. A
+    /// two-tab (`Overview` / `Models`) overlay over the in-tree aggregation of
+    /// the `*.jsonl` session transcripts (sparkline tokens-per-day + activity
+    /// heatmap). Carries its aggregated `StatsData` + active `StatsTab` + an
+    /// embedded `ScrollState`. Interactive like Skills (read-only):
+    /// `root::handle_screen_key` runs the pure `stats::handle_stats_key`
+    /// (Tab/Shift-Tab switch tab, scroll keys via the embedded `ScrollState`,
+    /// Esc/`q` close). Opened by `/stats` via the async `pump_open_stats` (the
+    /// fs walk over `<claude_home>/projects/` runs OUTSIDE the `AppState` lock).
+    /// `StatsData` carries only integer/string fields (no `f64`), so the
+    /// `Screen: PartialEq` bound is satisfiable.
+    Stats(stats::StatsState),
 }

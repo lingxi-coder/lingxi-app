@@ -28,8 +28,11 @@ pub mod refresh;
 pub mod resolver;
 pub mod scope_upgrade;
 
+#[cfg(test)]
+mod testsupport;
+
 #[cfg(not(loom))]
-pub use callback::{await_callback, CallbackError, CallbackParams};
+pub use callback::{await_callback, CallbackError, CallbackListener, CallbackParams};
 pub use client::{ClaudeAiOAuthClient, OAuthError};
 pub use config::{ClaudeAiOAuthConfig, CLAUDE_CODE_OAUTH_SCOPES, REFRESH_GRANT_TYPE};
 pub use handle::OAuthHandle;

@@ -317,16 +317,17 @@ async fn command_arm_deferred_stub_returns_error() {
     let exec = HookExecutorImpl::new(reg, http, runtime);
 
     let agg = exec.execute(pre_tool_use_event(), dummy_ctx()).await;
-    // The Command arm is a documented stub — it returns an Error with a
-    // specific message (deferred gap from M5-06).
+    // The Command arm requires a process runner; this executor is built
+    // without one (no `.with_process_runner(..)`), so it returns the documented
+    // "not wired" Error. (Message reworded "not yet wired" → "not wired" on main.)
     let stderr: String = agg
         .all_results
         .iter()
         .map(|(_, r)| r.stderr.as_str())
         .collect();
     assert!(
-        stderr.contains("command executor not yet wired"),
-        "Command arm must return the documented deferred-stub error; got: {stderr:?}"
+        stderr.contains("command executor not wired"),
+        "Command arm must return the documented not-wired error; got: {stderr:?}"
     );
 }
 

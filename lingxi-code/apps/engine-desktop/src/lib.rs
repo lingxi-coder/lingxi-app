@@ -730,8 +730,9 @@ pub async fn build(
     //        tool to avoid an ask-storm). Unset (the DEFAULT) leaves the
     //        always-allow NoOp/Adapter gate untouched — NO behavior change.
     //        Reads the SAME two settings files as the hooks loader above
-    //        (project read last → its `defaultMode` wins). Content matching
-    //        (Bash/file globs) + subagent-path enforcement are phase 3.
+    //        (project read last → its `defaultMode` wins). File-glob content
+    //        matching (3a) + subagent/teammate-path enforcement (3b) now land
+    //        too; only Bash/WebFetch content matching (3a-bash) stays tool-wide.
     let perms: Arc<dyn PermissionGate> =
         if std::env::var_os("LINGXI_ENFORCE_PERMISSIONS").is_some_and(|v| !v.is_empty()) {
             let mut rules = Vec::new();
@@ -964,6 +965,9 @@ pub async fn build(
         ),
         mailbox_router: coordinator_mailbox,
         budget_enforcer: Some(budget_enforcer),
+        // (3b) AgentTool threads this into the subagent's RegistryToolInvoker so
+        // spawned subagents are gated by the same boot gate as the main loop.
+        permission_gate: Some(perms.clone()),
         mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: None,
         camera: None,
@@ -1004,7 +1008,11 @@ pub async fn build(
     //        invariant). No teammate can dispatch before `build()` returns, so
     //        the cell is always filled before first use.
     teammate_invoker.set(Arc::new(
-        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone()),
+        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
+            // (3b) Gate teammate tool dispatch with the same boot gate as the
+            // main loop + subagents. Default-off `perms` is the no-op gate, so
+            // this is behavior-neutral unless LINGXI_ENFORCE_PERMISSIONS is set.
+            .with_gate(perms.clone()),
     ));
 
     // Break the subagent construction cycle now that `tools` + `agent_catalog`

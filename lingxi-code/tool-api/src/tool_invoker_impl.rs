@@ -10,6 +10,7 @@ use crate::registry::ToolRegistry;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
+use traits::permission_gate::{PermissionDecision, PermissionGate};
 use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 
 /// Wraps an `Arc<ToolRegistry>` as a `dyn ToolInvoker`.
@@ -17,6 +18,12 @@ use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerEr
 /// Cheap to construct; clones share the same registry `Arc`.
 pub struct RegistryToolInvoker {
     registry: Arc<ToolRegistry>,
+    /// Permission gate consulted before every dispatch (enforcement 3b).
+    /// `None` (the default) preserves the legacy always-dispatch behavior for
+    /// tests / hosts without enforcement wired. When `Some`, this is the SAME
+    /// gate the main loop consults — so subagent and teammate tool calls are
+    /// now subject to the same allow/deny rules, closing the bypass.
+    gate: Option<Arc<dyn PermissionGate>>,
 }
 
 impl RegistryToolInvoker {
@@ -25,7 +32,18 @@ impl RegistryToolInvoker {
     /// parent's clone returns `true`.
     #[must_use]
     pub fn new(registry: Arc<ToolRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            gate: None,
+        }
+    }
+
+    /// Attach the permission gate consulted before each dispatch (3b). Without
+    /// it, dispatch is unconditional (legacy behavior).
+    #[must_use]
+    pub fn with_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     /// Borrow the underlying registry `Arc`.
@@ -47,6 +65,20 @@ impl ToolInvoker for RegistryToolInvoker {
             .registry
             .find_by_name(name)
             .ok_or_else(|| ToolInvokerError::NotFound(name.to_string()))?;
+
+        // Permission gate (enforcement 3b). The subagent/teammate dispatch
+        // surface now consults the same gate as the main loop — previously it
+        // dispatched any registered tool unconditionally (the bypass). A `Deny`
+        // is surfaced as `Internal` (the frozen `ToolInvokerError` carries no
+        // `Denied` variant; the subagent loop renders any `Err` as an
+        // `is_error` tool_result the model can recover from). Checked AFTER
+        // `find_by_name` so an unknown tool stays `NotFound`, and BEFORE the
+        // borrow of `input` is moved into `call`.
+        if let Some(gate) = &self.gate {
+            if let PermissionDecision::Deny { reason } = gate.check(name, &input).await {
+                return Err(ToolInvokerError::Internal(reason));
+            }
+        }
 
         // Synthesize a minimal ToolUseContext. The recursion-lock invariant
         // requires `subagent_registry` to carry the SAME Arc<ToolRegistry>
@@ -340,5 +372,89 @@ mod tests {
             Arc::ptr_eq(&parent_registry, registry_in_ctx),
             "RegistryToolInvoker must thread the parent Arc<ToolRegistry> into ToolUseContext.subagent_registry verbatim — this preserves the M4-05 recursion-lock contract across the dispatch boundary"
         );
+    }
+
+    // ──── enforcement 3b: permission gate before dispatch ──────────────
+    use traits::permission_gate::{PermissionDecision as GateDecision, PermissionGate as Gate};
+
+    /// Gate that returns a fixed decision and records each tool name it sees.
+    struct FixedGate {
+        decision: GateDecision,
+        seen: Arc<StdMutex<Vec<String>>>,
+    }
+    #[async_trait]
+    impl Gate for FixedGate {
+        async fn check(&self, name: &str, _input: &Value) -> GateDecision {
+            self.seen.lock().unwrap().push(name.to_string());
+            self.decision.clone()
+        }
+    }
+
+    fn no_ctx() -> SubagentInvocationContext {
+        SubagentInvocationContext {
+            parent_agent_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_deny_blocks_dispatch_and_surfaces_reason() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let gate = Arc::new(FixedGate {
+            decision: GateDecision::Deny {
+                reason: "denied by permission rule Bash".into(),
+            },
+            seen: seen.clone(),
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        match invoker.invoke("TestEcho", json!({ "a": 1 }), no_ctx()).await {
+            Err(ToolInvokerError::Internal(reason)) => {
+                assert!(reason.contains("denied by permission rule Bash"), "got {reason}");
+            }
+            other => panic!("expected Internal(deny), got {other:?}"),
+        }
+        // Gate was consulted; the tool was NOT run (echo would have returned data).
+        assert_eq!(seen.lock().unwrap().as_slice(), ["TestEcho"]);
+    }
+
+    #[tokio::test]
+    async fn gate_allow_dispatches_to_tool() {
+        let gate = Arc::new(FixedGate {
+            decision: GateDecision::Allow,
+            seen: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let out = invoker
+            .invoke("TestEcho", json!({ "k": "v" }), no_ctx())
+            .await
+            .expect("allow dispatches");
+        assert_eq!(out, json!({ "echo": { "k": "v" } }));
+    }
+
+    #[tokio::test]
+    async fn no_gate_dispatches_unconditionally_legacy() {
+        // Default `new` (no gate) preserves the pre-3b always-dispatch behavior.
+        let invoker = RegistryToolInvoker::new(registry_with_echo());
+        let out = invoker
+            .invoke("TestEcho", json!({}), no_ctx())
+            .await
+            .expect("legacy dispatch");
+        assert_eq!(out, json!({ "echo": {} }));
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_is_not_found_before_gate_runs() {
+        // `find_by_name` precedes the gate → an unknown tool is NotFound and
+        // the gate is never consulted (no spurious deny on a non-existent tool).
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let gate = Arc::new(FixedGate {
+            decision: GateDecision::Deny {
+                reason: "should not run".into(),
+            },
+            seen: seen.clone(),
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let result = invoker.invoke("NotARealTool", json!({}), no_ctx()).await;
+        assert!(matches!(result, Err(ToolInvokerError::NotFound(_))));
+        assert!(seen.lock().unwrap().is_empty(), "gate not consulted for unknown tool");
     }
 }

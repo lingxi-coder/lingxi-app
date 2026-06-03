@@ -43,12 +43,19 @@ pub struct PoolSubagentSpawner {
     api_client: Option<Arc<dyn SubagentApiClient>>,
     /// Wire tool definitions (`{name, description, input_schema}`) stashed on
     /// every child's [`SubagentContext::tool_schemas`] so the spawned subagent
-    /// advertises tools to the model. Empty (the default) = no tools. Wired via
-    /// [`Self::with_tool_schemas`]; boot-wiring from the live registry is a
-    /// follow-up (the spawner is built inside the `BuiltinToolContext` that in
-    /// turn builds the registry — a construction cycle that blocks handing the
-    /// registry in here today).
-    tool_schemas: Vec<serde_json::Value>,
+    /// advertises tools to the model. Unset (the default) = no tools.
+    ///
+    /// A SET-ONCE cell (not a plain `Vec`) so the boot path can break the
+    /// construction cycle: the spawner is consumed into the `BuiltinToolContext`
+    /// that builds the registry, so the registry does not exist when the spawner
+    /// is constructed. The host grabs a clone of this cell via
+    /// [`Self::tool_schemas_handle`] BEFORE boxing the spawner, then fills it
+    /// (with [`tool_api::wire::tools_to_wire`] over the live registry) AFTER the
+    /// registry is built. Reads at spawn time, so a fill that lands before the
+    /// first spawn is visible. NOTE: the advertised set is NOT per-agent
+    /// `AgentToolPolicy`-filtered — see the [`SubagentContext::tool_schemas`]
+    /// WARNING; the runner enforces `ctx.allowed_tools` at dispatch time.
+    tool_schemas: Arc<std::sync::OnceLock<Vec<serde_json::Value>>>,
 }
 
 impl PoolSubagentSpawner {
@@ -60,7 +67,7 @@ impl PoolSubagentSpawner {
         Self {
             pool,
             api_client: None,
-            tool_schemas: Vec::new(),
+            tool_schemas: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -72,14 +79,31 @@ impl PoolSubagentSpawner {
         self
     }
 
-    /// Builder: attach the wire tool definitions (`{name, description,
+    /// Builder: fill the wire tool definitions (`{name, description,
     /// input_schema}`, e.g. from [`tool_api::wire::tools_to_wire`]) every
-    /// spawned child advertises to the model. Without this, children call the
-    /// model with no tools.
+    /// spawned child advertises to the model. Sets the cell immediately — use
+    /// this when the schemas are known at construction (tests). The boot path
+    /// instead uses [`Self::tool_schemas_handle`] to fill the cell later (the
+    /// registry does not exist yet at construction).
     #[must_use]
-    pub fn with_tool_schemas(mut self, tool_schemas: Vec<serde_json::Value>) -> Self {
-        self.tool_schemas = tool_schemas;
+    pub fn with_tool_schemas(self, tool_schemas: Vec<serde_json::Value>) -> Self {
+        let _ = self.tool_schemas.set(tool_schemas);
         self
+    }
+
+    /// Return a clone of the set-once tool-schema cell so the host can fill it
+    /// AFTER the registry is built (breaking the construction cycle). The cell
+    /// is shared with the boxed spawner, so a later `cell.set(...)` is seen by
+    /// every `spawn`. Filling more than once is a no-op (the first wins).
+    #[must_use]
+    pub fn tool_schemas_handle(&self) -> Arc<std::sync::OnceLock<Vec<serde_json::Value>>> {
+        self.tool_schemas.clone()
+    }
+
+    /// Snapshot the (possibly boot-filled) tool schemas for a child context.
+    /// Unset cell → empty (no tools advertised).
+    fn resolve_tool_schemas(&self) -> Vec<serde_json::Value> {
+        self.tool_schemas.get().cloned().unwrap_or_default()
     }
 
     fn make_subagent_context(subagent_type: &str, prompt: &str) -> SubagentContext {
@@ -150,7 +174,8 @@ impl SubagentSpawner for PoolSubagentSpawner {
         ctx.tool_invoker = Some(inherit.tool_invoker);
         ctx.budget = Some(inherit.budget);
         ctx.api_client.clone_from(&self.api_client);
-        ctx.tool_schemas.clone_from(&self.tool_schemas);
+        // Read the (possibly boot-filled) tool-schema cell; unset = no tools.
+        ctx.tool_schemas = self.resolve_tool_schemas();
         let agent_id = ctx.agent_id;
         let (_aid, mut rx) = self
             .pool
@@ -240,6 +265,42 @@ mod tests {
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
         let _spawner = PoolSubagentSpawner::new(pool);
+    }
+
+    #[test]
+    fn tool_schemas_cell_starts_empty_and_late_fill_is_visible() {
+        // The cycle-break primitive: the host grabs a handle, fills it AFTER
+        // the registry exists, and the spawner's spawn-time read sees it.
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool);
+
+        // Unset by default → child advertises no tools.
+        assert!(spawner.resolve_tool_schemas().is_empty());
+
+        // Host fills the shared cell late (post-registry-build).
+        let cell = spawner.tool_schemas_handle();
+        let schemas = vec![serde_json::json!({
+            "name": "Read",
+            "description": "Reads a file.",
+            "input_schema": {"type": "object"}
+        })];
+        cell.set(schemas.clone()).expect("first fill wins");
+
+        // The spawner's spawn-time read now returns the filled schemas.
+        assert_eq!(spawner.resolve_tool_schemas(), schemas);
+        // A second fill is a no-op (set-once).
+        assert!(cell.set(vec![]).is_err());
+        assert_eq!(spawner.resolve_tool_schemas(), schemas);
+    }
+
+    #[test]
+    fn with_tool_schemas_fills_the_cell_eagerly() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let schemas = vec![serde_json::json!({"name": "Bash"})];
+        let spawner = PoolSubagentSpawner::new(pool).with_tool_schemas(schemas.clone());
+        assert_eq!(spawner.resolve_tool_schemas(), schemas);
     }
 
     #[test]

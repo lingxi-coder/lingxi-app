@@ -722,6 +722,56 @@ pub async fn build(
     }
     let hook_registry = Arc::new(tokio::sync::RwLock::new(hook_registry));
 
+    // (5.2b) Permission enforcement (OPT-IN, parity phase 2). When
+    //        LINGXI_ENFORCE_PERMISSIONS is set, load the settings permission
+    //        rules into a PermissionPolicy and WRAP the gate selected above with
+    //        PolicyPermissionGate: deny/allow rules are now enforced, an `Ask`
+    //        delegates to the inner gate's prompt (or auto-allows a read-only
+    //        tool to avoid an ask-storm). Unset (the DEFAULT) leaves the
+    //        always-allow NoOp/Adapter gate untouched — NO behavior change.
+    //        Reads the SAME two settings files as the hooks loader above
+    //        (project read last → its `defaultMode` wins). Content matching
+    //        (Bash/file globs) + subagent-path enforcement are phase 3.
+    let perms: Arc<dyn PermissionGate> =
+        if std::env::var_os("LINGXI_ENFORCE_PERMISSIONS").is_some_and(|v| !v.is_empty()) {
+            let mut rules = Vec::new();
+            let mut mode = permission::PermissionMode::Default;
+            for (path, source) in [
+                (
+                    cfg.claude_home.join("settings.json"),
+                    permission::PermissionRuleSource::UserSettings,
+                ),
+                (
+                    cwd.join(".claude").join("settings.json"),
+                    permission::PermissionRuleSource::ProjectSettings,
+                ),
+            ] {
+                if let Ok(raw) = tokio::fs::read_to_string(&path).await {
+                    match permission::permission_rules_from_settings_json(&raw, source) {
+                        Ok(mut r) => rules.append(&mut r),
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            path = %path.display(),
+                            "skipping malformed settings permissions"
+                        ),
+                    }
+                    if let Some(m) = permission::default_mode_from_settings_json(&raw) {
+                        mode = m; // project read last → wins
+                    }
+                }
+            }
+            let rule_count = rules.len();
+            let policy = Arc::new(permission::PermissionPolicy::from_rules(mode, rules));
+            tracing::info!(
+                rules = rule_count,
+                mode = ?mode,
+                "permission enforcement enabled (LINGXI_ENFORCE_PERMISSIONS)"
+            );
+            Arc::new(permission::PolicyPermissionGate::new(policy, perms))
+        } else {
+            perms
+        };
+
     // (5.25) M5-13: build the real hook executor now that `hook_registry`
     //        exists. This replaces the `noop_hook_executor()` stub (which fed
     //        `UnusedHttp` + `UnusedRuntime` and a `(None, None)` Command guard):

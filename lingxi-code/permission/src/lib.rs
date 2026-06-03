@@ -13,6 +13,7 @@ pub mod gate;
 pub mod loader;
 pub mod mode;
 pub mod policy;
+pub mod policy_gate;
 pub mod prompting_gate;
 pub mod result;
 pub mod rule;
@@ -24,9 +25,10 @@ pub use gate::{
     PermissionDecision, PermissionGate, PermissionRequest, PermissionResponse, PromptDecision,
     PromptDefault, PromptError, PromptingGate,
 };
-pub use loader::permission_rules_from_settings_json;
+pub use loader::{default_mode_from_settings_json, permission_rules_from_settings_json};
 pub use mode::PermissionMode;
 pub use policy::PermissionPolicy;
+pub use policy_gate::PolicyPermissionGate;
 pub use prompting_gate::InteractivePromptingGate;
 pub use result::{
     ClassifierKind, PermissionDecisionReason, PermissionResult, PermissionUpdateDestination,

@@ -21,6 +21,7 @@
 //! { "permissions": { "allow": ["Bash(npm run *)"], "deny": ["Read(./secrets/**)"], "ask": [] } }
 //! ```
 
+use crate::mode::PermissionMode;
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
 use serde::Deserialize;
 
@@ -33,7 +34,8 @@ struct SettingsTop {
     permissions: Option<PermissionsBlock>,
 }
 
-/// The `permissions` block. `allow`/`deny`/`ask` are arrays of rule strings.
+/// The `permissions` block. `allow`/`deny`/`ask` are arrays of rule strings;
+/// `defaultMode` selects the mode-fallback for unmatched calls.
 #[derive(Debug, Default, Deserialize)]
 struct PermissionsBlock {
     #[serde(default)]
@@ -42,6 +44,8 @@ struct PermissionsBlock {
     deny: Vec<String>,
     #[serde(default)]
     ask: Vec<String>,
+    #[serde(default, rename = "defaultMode")]
+    default_mode: Option<String>,
 }
 
 /// Parse one settings file's raw JSON into permission rules tagged with
@@ -76,6 +80,23 @@ pub fn permission_rules_from_settings_json(
         }
     }
     Ok(out)
+}
+
+/// Parse `permissions.defaultMode` into a [`PermissionMode`] (claude-code wire
+/// names: `default` / `plan` / `acceptEdits` / `bypassPermissions` / `dontAsk`).
+/// Returns `None` when the block, the field, or the value is absent/unrecognized
+/// (the caller falls back to [`PermissionMode::Default`]).
+#[must_use]
+pub fn default_mode_from_settings_json(raw: &str) -> Option<PermissionMode> {
+    let top: SettingsTop = serde_json::from_str(raw).ok()?;
+    match top.permissions?.default_mode?.as_str() {
+        "default" => Some(PermissionMode::Default),
+        "plan" => Some(PermissionMode::Plan),
+        "acceptEdits" => Some(PermissionMode::AcceptEdits),
+        "bypassPermissions" => Some(PermissionMode::BypassPermissions),
+        "dontAsk" => Some(PermissionMode::DontAsk),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -152,6 +173,27 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn default_mode_parses_wire_names() {
+        let m = |raw: &str| default_mode_from_settings_json(raw);
+        assert!(matches!(
+            m(r#"{ "permissions": { "defaultMode": "dontAsk" } }"#),
+            Some(PermissionMode::DontAsk)
+        ));
+        assert!(matches!(
+            m(r#"{ "permissions": { "defaultMode": "acceptEdits" } }"#),
+            Some(PermissionMode::AcceptEdits)
+        ));
+        assert!(matches!(
+            m(r#"{ "permissions": { "defaultMode": "bypassPermissions" } }"#),
+            Some(PermissionMode::BypassPermissions)
+        ));
+        // Absent / no block / unknown → None (caller defaults to Default).
+        assert!(m(r#"{ "permissions": {} }"#).is_none());
+        assert!(m("{}").is_none());
+        assert!(m(r#"{ "permissions": { "defaultMode": "bogus" } }"#).is_none());
     }
 
     #[test]

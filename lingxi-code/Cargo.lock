@@ -804,6 +804,7 @@ dependencies = [
  "session",
  "tokio",
  "tokio-util",
+ "tracing",
  "traits",
  "uniffi",
  "uuid",

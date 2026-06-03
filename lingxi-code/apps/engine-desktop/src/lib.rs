@@ -663,7 +663,13 @@ pub async fn build(
         if cfg.use_noop_permission_gate {
             (Arc::new(NoOpPermissionGate), None)
         } else {
-            let gate = Arc::new(AdapterPermissionGate::new(permission_sink));
+            // (3c) Persist an `AllowAlways` choice to `<cwd>/.claude/settings.local.json`.
+            let gate = Arc::new(AdapterPermissionGate::new(permission_sink).with_persist(
+                permission::PermissionPaths {
+                    claude_home: cfg.claude_home.clone(),
+                    cwd: cwd.clone(),
+                },
+            ));
             (gate.clone() as Arc<dyn PermissionGate>, Some(gate))
         };
 
@@ -737,6 +743,12 @@ pub async fn build(
         if std::env::var_os("LINGXI_ENFORCE_PERMISSIONS").is_some_and(|v| !v.is_empty()) {
             let mut rules = Vec::new();
             let mut mode = permission::PermissionMode::Default;
+            // Read the three persistable rule tiers in ASCENDING priority so
+            // the highest-priority `defaultMode` wins (last write). settings.local.json
+            // (3c) is read LAST so an `AllowAlways` persisted there is loaded back
+            // and honored on the next enforced boot (closing the persist↔enforce
+            // round-trip); rules from every tier accumulate (bucketed by source,
+            // `authorize` walks them by priority).
             for (path, source) in [
                 (
                     cfg.claude_home.join("settings.json"),
@@ -745,6 +757,10 @@ pub async fn build(
                 (
                     cwd.join(".claude").join("settings.json"),
                     permission::PermissionRuleSource::ProjectSettings,
+                ),
+                (
+                    cwd.join(".claude").join("settings.local.json"),
+                    permission::PermissionRuleSource::LocalSettings,
                 ),
             ] {
                 if let Ok(raw) = tokio::fs::read_to_string(&path).await {
@@ -757,7 +773,7 @@ pub async fn build(
                         ),
                     }
                     if let Some(m) = permission::default_mode_from_settings_json(&raw) {
-                        mode = m; // project read last → wins
+                        mode = m; // local settings read last → its defaultMode wins
                     }
                 }
             }

@@ -509,6 +509,8 @@ pub fn ctx_for_file_tools(
         lsp_registry: None,
         camera: None,
         voice: None,
+        stt: None,
+        tts: None,
         share: None,
         computer_control: None,
     }
@@ -553,6 +555,8 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         lsp_registry: None,
         camera: None,
         voice: None,
+        stt: None,
+        tts: None,
         share: None,
         computer_control: None,
     }

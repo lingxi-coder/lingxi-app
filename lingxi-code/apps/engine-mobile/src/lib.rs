@@ -111,6 +111,7 @@ pub fn register_mobile_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
     // ----- mobile-exclusive tools ------------------------------------------
     tool_camera::register_all(reg, ctx.clone());
     tool_voice::register_all(reg, ctx.clone());
+    tool_speech::register_all(reg, ctx.clone());
     tool_share::register_all(reg, ctx);
 }
 

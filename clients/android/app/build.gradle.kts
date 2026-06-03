@@ -67,6 +67,10 @@ dependencies {
     implementation(composeBom)
     androidTestImplementation(composeBom)
 
+    // Coroutines — required by the extracted device-audio layer
+    // (STT/TTS providers use suspendCancellableCoroutine + Flow).
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+
     // Core / lifecycle
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")

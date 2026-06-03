@@ -24,6 +24,8 @@ use traits::mailbox::MailboxRouterHandle;
 use traits::process::ProcessRunner;
 use traits::sandbox::Sandbox;
 use traits::share::SharingService;
+use traits::stt::SpeechToText;
+use traits::tts::TextToSpeech;
 use traits::subagent_spawn::SubagentSpawner;
 use traits::task_registry::TaskRegistryHandle;
 use traits::voice::VoiceRecorder;
@@ -110,6 +112,12 @@ pub struct BuiltinToolContext {
     /// Native microphone recorder — `tool-voice`'s `VoiceTool` routes here.
     /// `None` on desktop.
     pub voice: Option<Arc<dyn VoiceRecorder>>,
+    /// Native speech-to-text — `tool-speech`'s `SpeechTool` (`transcribe`)
+    /// routes here. `None` on desktop; mobile wires `platform.stt()`.
+    pub stt: Option<Arc<dyn SpeechToText>>,
+    /// Native text-to-speech — `tool-speech`'s `SpeechTool` (`speak`) routes
+    /// here. `None` on desktop; mobile wires `platform.tts()`.
+    pub tts: Option<Arc<dyn TextToSpeech>>,
     /// Native share sheet — `tool-share`'s `ShareTool` routes here. `None` on
     /// desktop.
     pub share: Option<Arc<dyn SharingService>>,

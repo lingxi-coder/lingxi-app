@@ -907,6 +907,8 @@ pub async fn build(
         lsp_registry: None,
         camera: None,
         voice: None,
+        stt: None,
+        tts: None,
         share: None,
         computer_control: None,
     };

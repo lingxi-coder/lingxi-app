@@ -299,6 +299,9 @@ pub async fn build_runtime(
     let subagent_spawner_concrete =
         agent::PoolSubagentSpawner::new(subagent_pool).with_api_client(subagent_api);
     let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
+    // Grab the catalog cell too (same cycle-break): the spawner is boxed here,
+    // but the agent catalog is not built until after `cwd` is resolved below.
+    let subagent_agent_catalog_cell = subagent_spawner_concrete.agent_catalog_handle();
     let subagent_spawner: Arc<dyn traits::subagent_spawn::SubagentSpawner> =
         Arc::new(subagent_spawner_concrete);
 
@@ -530,6 +533,14 @@ pub async fn build_runtime(
     // auto-activates once the spawn path loads real `AgentDefinition`s (see the
     // `SubagentContext::tool_schemas` doc).
     let _ = subagent_tool_registry_cell.set(tools.clone());
+    // Fill the spawner's agent-catalog cell with the SAME `Arc<RwLock<…>>` the
+    // orchestrator holds (`.with_agent_catalog` below moves the original — the
+    // clone shares the lock). Spawned subagents now resolve real user/project
+    // `AgentDefinition`s (overriding built-ins). Sharing the one `Arc` keeps the
+    // spawner ready to stay in lock-step with `/agents` once a runtime
+    // catalog-mutation path is wired (the catalog is read-only today). Unset
+    // until now → built-ins only; from here → catalog-aware.
+    let _ = subagent_agent_catalog_cell.set(agent_catalog.clone());
 
     let orch = Arc::new(
         ConversationOrchestrator::new(cfg, api_client, tools, hooks, perms, output, memory, cwd)

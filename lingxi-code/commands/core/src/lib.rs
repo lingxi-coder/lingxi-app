@@ -27,6 +27,7 @@ pub mod hooks;
 pub mod init;
 pub mod init_verifiers;
 pub mod insights;
+pub mod keybindings;
 pub mod login;
 pub mod logout;
 pub mod mcp;
@@ -66,6 +67,7 @@ pub use hooks::HooksHandler;
 pub use init::InitHandler;
 pub use init_verifiers::InitVerifiersHandler;
 pub use insights::InsightsHandler;
+pub use keybindings::KeybindingsHandler;
 pub use login::LoginHandler;
 pub use logout::LogoutHandler;
 pub use mcp::McpHandler;
@@ -86,5 +88,5 @@ pub use version::VersionHandler;
 
 pub use register::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
-    register_core_batch_3, register_core_batch_4, register_core_batch_5,
+    register_core_batch_3, register_core_batch_4, register_core_batch_5, register_core_batch_6,
 };

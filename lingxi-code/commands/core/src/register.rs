@@ -48,6 +48,14 @@ pub fn register_all_builtin_commands(reg: &mut CommandRegistry) {
     // batch-1/batch-2). Each call overwrites the matching pass-1 unimplemented
     // stub entry in-place.
     register_core_batch_3(reg);
+
+    // Pass 4: overwrite the batch-6 handle-free `/keybindings` handler. Like
+    // batch-3 it carries no orchestrator/auth handle, so it is wired here
+    // unconditionally with the external-user default gate (disabled → preview
+    // branch). Composition roots that resolve the customization flag at boot may
+    // re-call `register_core_batch_6` with `enabled = true` to overwrite this
+    // entry in-place.
+    register_core_batch_6(reg, false);
 }
 
 /// Overwrite the 6 batch-1 entries (`clear`, `compact`, `exit`, `help`,
@@ -216,6 +224,28 @@ pub fn register_core_batch_5(
     use crate::EffortHandler;
 
     reg.register_builtin_handler(Arc::new(EffortHandler::new(handle)));
+}
+
+/// Overwrite the batch-6 entry (`keybindings`) with its handle-free real
+/// handler.
+///
+/// `/keybindings` is a `type: 'local'` claude-code command that writes the
+/// keybindings template (exclusive-create) and opens it in `$EDITOR`. It needs
+/// no orchestrator or auth handle — it does the filesystem work and editor
+/// spawn directly — so it is wired unconditionally at the end of
+/// [`register_all_builtin_commands`] (mirroring the batch-3 pattern), with the
+/// external-user default gate (`enabled = false` → the "currently in preview"
+/// branch).
+///
+/// `enabled` mirrors the TS `isKeybindingCustomizationEnabled()` `GrowthBook`
+/// gate: composition roots that resolve that flag at boot may re-call this with
+/// `enabled = true` to overwrite the entry in-place and unlock the
+/// create/open branches. The function is idempotent — calling it twice with the
+/// same `enabled` produces the same final state.
+pub fn register_core_batch_6(reg: &mut CommandRegistry, enabled: bool) {
+    use crate::KeybindingsHandler;
+
+    reg.register_builtin_handler(Arc::new(KeybindingsHandler::with_enabled(enabled)));
 }
 
 #[cfg(test)]
@@ -527,6 +557,69 @@ mod batch_5_tests {
             }
             other => panic!("/effort expected Done with display, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod batch_6_tests {
+    use super::*;
+    use command_api::model::CommandResult;
+    use command_api::parser::ParsedSlashCommand;
+
+    fn args(name: &str) -> ParsedSlashCommand {
+        ParsedSlashCommand {
+            name: name.to_string(),
+            raw_args: String::new(),
+            positional_args: vec![],
+        }
+    }
+
+    #[test]
+    fn keybindings_resolves_with_handler_after_register_all() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        assert!(reg.resolve("keybindings").is_some(), "/keybindings missing");
+        assert!(
+            reg.get_handler("keybindings").is_some(),
+            "/keybindings handler missing"
+        );
+    }
+
+    /// After `register_all_builtin_commands` (default gate = disabled),
+    /// `/keybindings` must NOT return the locked M5 stub literal — it returns
+    /// the real "currently in preview" display.
+    #[tokio::test]
+    async fn keybindings_returns_preview_not_stub() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+
+        let h = reg
+            .get_handler("keybindings")
+            .expect("keybindings handler missing");
+        match h.handle(&args("keybindings")).await {
+            CommandResult::Done { display: Some(s) } => {
+                assert_ne!(
+                    s, "keybindings: not implemented in v0.6.0 (M5)",
+                    "/keybindings still returns the locked stub literal"
+                );
+                assert_eq!(s, crate::keybindings::KEYBINDINGS_PREVIEW_DISABLED);
+            }
+            other => panic!("/keybindings expected Done with display, got {other:?}"),
+        }
+    }
+
+    /// Re-calling batch-6 with `enabled = true` overwrites the entry in-place;
+    /// dispatch then leaves the preview branch (the create/open path requires
+    /// the real editor, so we only assert it is no longer the preview string is
+    /// covered by the handler's own unit tests — here we just confirm the
+    /// in-place overwrite resolves a handler).
+    #[test]
+    fn batch_6_overwrite_is_idempotent_and_resolves() {
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        register_core_batch_6(&mut reg, true);
+        register_core_batch_6(&mut reg, true); // twice
+        assert!(reg.get_handler("keybindings").is_some());
     }
 }
 

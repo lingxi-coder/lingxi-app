@@ -93,6 +93,7 @@ mod jittered_delay {
 }
 
 use crate::error::ApiError;
+use crate::overflow::{parse_max_tokens_overflow, Overflow};
 use protocol::HttpResponse;
 use traits::HttpError;
 
@@ -126,8 +127,15 @@ pub fn is_529(status: u16, body: &str) -> bool {
 ///   (`anthropic.rs::drive_retry_loop_with_429`) intercepts and handles 429
 ///   before it reaches here, so in the loop this surfaces as a terminal
 ///   `Server` like any other unhandled status (see `with_retry`).
+/// * [`RetryClass::AdjustAndRetry`] — the 400 `max_tokens` context-overflow
+///   error (claude-code `withRetry.ts:727`). The generic loop cannot re-shrink
+///   the request body, so the caller
+///   (`anthropic.rs::drive_retry_loop_with_429`) intercepts this 400 before it
+///   reaches the generic loop, recomputes `max_tokens`, mutates the body, and
+///   re-attempts. This variant exists so the classifier *routes* the overflow
+///   400 to a retry path rather than `Terminal` (Batch 1 dependency).
 /// * [`RetryClass::Terminal`] — every other status (2xx is handled before
-///   classification; 3xx, 400/401/403, etc. are non-retryable here).
+///   classification; 3xx, other 400/401/403, etc. are non-retryable here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryClass {
     /// Retry (subject to the attempt budget). `overloaded` is `true` for the
@@ -139,6 +147,10 @@ pub enum RetryClass {
     },
     /// 429 — owned by the caller's rate-limit path, not this loop.
     Fallthrough,
+    /// 400 `max_tokens` context overflow — owned by the caller's body-reshrink
+    /// path (`drive_retry_loop_with_429`), not the generic loop. Carries the
+    /// parsed [`Overflow`] numbers so the caller can recompute `max_tokens`.
+    AdjustAndRetry(Overflow),
     /// Non-retryable; return the response as an error immediately.
     Terminal,
 }
@@ -156,6 +168,13 @@ pub fn classify_retryable(resp: &HttpResponse) -> RetryClass {
     // before the status-code ladder, withRetry.ts:719-724).
     if is_529(resp.status, &resp.body) {
         return RetryClass::Retry { overloaded: true };
+    }
+    // 400 `max_tokens` context overflow — re-shrinkable (claude-code
+    // withRetry.ts:727). Checked before the status ladder so the overflow 400
+    // is routed to AdjustAndRetry instead of the trailing Terminal arm. Owned
+    // by the caller (body reshrink), like the 429 Fallthrough.
+    if let Some(overflow) = parse_max_tokens_overflow(resp.status, &resp.body) {
+        return RetryClass::AdjustAndRetry(overflow);
     }
     match resp.status {
         // Rate limit — owned by the caller (subscriber gates, reset delays).
@@ -228,11 +247,18 @@ where
                     );
                     continue;
                 }
-                // 429 (Fallthrough) and every Terminal status surface as
-                // ApiError::Server for the caller to inspect. In production the
-                // 429 is intercepted in the caller's closure before reaching
-                // here (drive_retry_loop_with_429); this arm is the fallback.
-                RetryClass::Fallthrough | RetryClass::Terminal => {
+                // 429 (Fallthrough), the 400 overflow (AdjustAndRetry), and
+                // every Terminal status surface as ApiError::Server for the
+                // caller to inspect. In production both the 429 and the
+                // overflow 400 are intercepted in the caller's closure before
+                // reaching here (drive_retry_loop_with_429) — the 429 sleeps
+                // and re-loops, the overflow 400 reshrinks `max_tokens` and
+                // re-loops; this generic arm is the fallback for callers that
+                // do not intercept (the body-mutation reshrink is not possible
+                // from inside the generic, body-agnostic loop).
+                RetryClass::Fallthrough
+                | RetryClass::AdjustAndRetry(_)
+                | RetryClass::Terminal => {
                     return Err(ApiError::Server {
                         status: resp.status,
                         body: resp.body,
@@ -633,5 +659,40 @@ mod classify {
                 "status {status} should be Terminal",
             );
         }
+    }
+
+    #[test]
+    fn classify_400_overflow_is_adjust_and_retry() {
+        let body =
+            "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000";
+        assert_eq!(
+            classify_retryable(&resp(400, body)),
+            RetryClass::AdjustAndRetry(Overflow {
+                input_tokens: 188_059,
+                max_tokens: 20_000,
+                context_limit: 200_000,
+            }),
+        );
+    }
+
+    #[test]
+    fn classify_400_without_overflow_marker_stays_terminal() {
+        // A plain 400 (no overflow message) is NOT re-shrinkable → Terminal.
+        assert_eq!(
+            classify_retryable(&resp(400, "some other invalid_request_error")),
+            RetryClass::Terminal,
+        );
+    }
+
+    #[test]
+    fn classify_overflow_message_on_non_400_status_is_not_adjust() {
+        // The overflow message only routes to AdjustAndRetry on a real 400;
+        // the same text on a 500 follows the normal 5xx retry path.
+        let body =
+            "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000";
+        assert_eq!(
+            classify_retryable(&resp(500, body)),
+            RetryClass::Retry { overloaded: false },
+        );
     }
 }

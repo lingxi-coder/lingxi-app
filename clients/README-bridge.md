@@ -1,5 +1,11 @@
 # Running a real conversation through the bridge-server
 
+> **Fresh clone?** Run the one-command bootstrap first: [`./clients/setup.sh`](README.md)
+> (builds the `bridge-server` binary, then `npm install`s + **builds** the shared
+> SDK — required before electron — then installs electron, and builds the mobile
+> bindings when those toolchains are present). The manual per-step commands below
+> are the fallback. See [`README.md`](README.md) for the full client overview.
+
 This is the end-to-end path the native shells use:
 
 ```

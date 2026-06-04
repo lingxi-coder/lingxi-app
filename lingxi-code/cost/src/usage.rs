@@ -63,6 +63,24 @@ impl Usage {
         }
     }
 
+    /// Total context-window tokens at the time of an API call.
+    ///
+    /// Mirrors `getTokenCountFromUsage` (`utils/tokens.ts:46-66`):
+    /// `input + cache_creation + cache_read + output`. This is the full context
+    /// size reported by the last API response and is the input the compaction
+    /// threshold math reads. `reasoning_output` is excluded to match TS, which
+    /// sums only `input_tokens + cache_creation_input_tokens +
+    /// cache_read_input_tokens + output_tokens` (reasoning is already folded
+    /// into `output_tokens` on the wire).
+    #[must_use]
+    pub fn total_context_tokens(&self) -> u64 {
+        self.tokens
+            .input
+            .saturating_add(self.tokens.cache_write)
+            .saturating_add(self.tokens.cache_read)
+            .saturating_add(self.tokens.output)
+    }
+
     /// Sum of all token classes.
     #[must_use]
     pub fn total_tokens(&self) -> u64 {
@@ -99,5 +117,35 @@ impl Usage {
                 .web_search_requests
                 .saturating_add(s.web_search_requests);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn total_context_tokens_sums_input_cache_and_output() {
+        let usage = Usage {
+            tokens: TokenUsage {
+                input: 100,
+                output: 40,
+                cache_write: 10,
+                cache_read: 25,
+                // reasoning_output is excluded from total_context_tokens (it is
+                // folded into output_tokens on the wire — mirrors TS).
+                reasoning_output: 7,
+            },
+            ..Usage::default()
+        };
+        // input + cache_write + cache_read + output = 100 + 10 + 25 + 40 = 175.
+        assert_eq!(usage.total_context_tokens(), 175);
+        // total_tokens still includes reasoning_output.
+        assert_eq!(usage.total_tokens(), 182);
+    }
+
+    #[test]
+    fn total_context_tokens_zero_for_default() {
+        assert_eq!(Usage::default().total_context_tokens(), 0);
     }
 }

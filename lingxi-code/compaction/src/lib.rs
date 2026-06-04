@@ -8,6 +8,7 @@ pub mod autocompact;
 pub mod boundary;
 pub mod cached_microcompact;
 pub mod context_collapse;
+pub mod context_window;
 pub mod grouping;
 pub mod microcompact;
 pub mod orchestrator;
@@ -21,6 +22,10 @@ pub mod thresholds;
 pub mod warning_state;
 
 pub use autocompact::{Autocompactor, CompactionError, CompactionResult};
+pub use context_window::{
+    context_window_for_model, max_output_tokens_for_model, CONTEXT_1M_BETA_HEADER,
+    MODEL_CONTEXT_WINDOW_DEFAULT,
+};
 pub use boundary::{
     create_compact_boundary, find_last_compact_boundary_index, get_messages_after_compact_boundary,
     is_compact_boundary, CompactBoundaryMetadata, CompactTrigger, PreservedSegment,

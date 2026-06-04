@@ -22,6 +22,7 @@
 )]
 
 pub mod edit;
+pub mod file_meta;
 pub mod glob;
 pub mod grep;
 pub mod notebook_edit;

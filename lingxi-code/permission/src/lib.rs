@@ -14,6 +14,7 @@ pub mod filesystem;
 pub mod gate;
 pub mod loader;
 pub mod mode;
+pub mod mode_policy;
 pub mod persist;
 pub mod policy;
 pub mod policy_gate;
@@ -42,6 +43,7 @@ pub use loader::{
     permission_rules_from_settings_json,
 };
 pub use mode::{next_permission_mode, PermissionMode};
+pub use mode_policy::is_plan_safe_tool;
 pub use persist::{persist_permission_update, PermissionPaths, PersistError};
 pub use policy::PermissionPolicy;
 pub use policy_gate::PolicyPermissionGate;

@@ -268,20 +268,28 @@ impl Tool for FileEditTool {
         // Distinguish "does not exist" from a real read error so an empty
         // `old_string` can mean new-file creation (claude-code FileEditTool).
         //
-        // DEFERRED (own batch): claude-code normalizes CRLF→LF on read for
-        // matching and re-applies the file's original line endings on write
-        // (utils.ts writeTextContent). We read/write raw, so an `old_string`
-        // spanning a line break won't match a CRLF file. A correct fix needs
-        // line-ending detection + preservation (the audit's "Edit/Write drop
-        // CRLF/utf16" item), not a one-sided normalize that would convert
-        // endings — so it is intentionally NOT done here.
-        let existing = match tokio::fs::read_to_string(&canon).await {
-            Ok(s) => Some(s),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
-                self.emit_failed(&invocation_id, "io_read").await;
-                return Err(ToolError::Io(e.to_string()));
-            }
+        // Read the raw bytes and detect encoding (UTF-16LE via BOM, else UTF-8)
+        // and line endings, then present an LF-normalized in-memory `content`
+        // for matching — byte-faithful to claude-code `readFileForEdit` →
+        // `readFileSyncWithMetadata` (FileEditTool.ts:202-221, 444-449). The
+        // detected encoding/line-ending are fed back into `write_with_metadata`
+        // so a CRLF or UTF-16LE file round-trips without corruption and an
+        // `old_string` spanning a line break matches against the LF view.
+        let existing: Option<(String, crate::file_meta::Encoding, crate::file_meta::LineEnding)> =
+            match tokio::fs::read(&canon).await {
+                Ok(bytes) => Some(crate::file_meta::read_with_metadata(&bytes)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    self.emit_failed(&invocation_id, "io_read").await;
+                    return Err(ToolError::Io(e.to_string()));
+                }
+            };
+
+        // New files are created as UTF-8/LF (TS `readFileForEdit` ENOENT
+        // branch returns encoding `utf8`, lineEndings `LF`).
+        let (existing, enc, ending) = match existing {
+            None => (None, crate::file_meta::Encoding::Utf8, crate::file_meta::LineEnding::Lf),
+            Some((content, enc, ending)) => (Some(content), enc, ending),
         };
 
         let (before, after, replacements): (String, String, u32) = match existing {
@@ -346,7 +354,11 @@ impl Tool for FileEditTool {
             }
         };
 
-        if let Err(e) = tokio::fs::write(&canon, after.as_bytes()).await {
+        // Re-apply the original encoding + line endings on write so a CRLF or
+        // UTF-16LE file round-trips byte-for-byte (claude-code
+        // `writeTextContent`, file.ts:84-98). `after` is LF-normalized.
+        let bytes = crate::file_meta::encode_with_metadata(&after, enc, ending);
+        if let Err(e) = tokio::fs::write(&canon, bytes).await {
             self.emit_failed(&invocation_id, "io_write").await;
             return Err(ToolError::Io(e.to_string()));
         }
@@ -722,4 +734,108 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn edits_crlf_file_preserving_endings() {
+        // old_string spans a line break — only matchable against the
+        // LF-normalized in-memory view; the rewrite must re-apply CRLF.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("crlf.txt");
+        std::fs::write(&target, b"line one\r\nline two\r\nline three\r\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                // Matches across the CRLF that was normalized to LF.
+                "old_string": "line one\nline two",
+                "new_string": "first\nsecond"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        // ASSERT BYTES: CRLF preserved on disk, including the rewritten region.
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"first\r\nsecond\r\nline three\r\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn edits_utf16le_file_preserving_bom_and_encoding() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("u16.txt");
+        // "hello world" in UTF-16LE with BOM.
+        let mut bytes = vec![0xFF, 0xFE];
+        for u in "hello world".encode_utf16() {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        std::fs::write(&target, &bytes).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "world",
+                "new_string": "Rust"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        // ASSERT BYTES: BOM preserved, re-encoded as UTF-16LE.
+        let mut expected = vec![0xFF, 0xFE];
+        for u in "hello Rust".encode_utf16() {
+            expected.extend_from_slice(&u.to_le_bytes());
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn mixed_endings_pick_dominant_crlf() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("mixed.txt");
+        // 3 CRLF vs 1 bare LF ⇒ CRLF dominates (TS crlf > lf).
+        std::fs::write(&target, b"a\r\nb\r\nc\r\nd\nEDITME").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "EDITME",
+                "new_string": "done"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        // ASSERT BYTES: the lone LF after `c\r\n` is rewritten to the dominant
+        // CRLF (matches TS writeTextContent collapsing then re-applying CRLF).
+        assert_eq!(std::fs::read(&target).unwrap(), b"a\r\nb\r\nc\r\nd\r\ndone");
+    }
+
+    #[tokio::test]
+    async fn lf_file_round_trips_as_lf() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("lf.txt");
+        std::fs::write(&target, b"alpha\nbeta\ngamma\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "beta",
+                "new_string": "BETA"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        // ASSERT BYTES: still pure LF (no CR introduced).
+        assert_eq!(std::fs::read(&target).unwrap(), b"alpha\nBETA\ngamma\n");
+    }
 }

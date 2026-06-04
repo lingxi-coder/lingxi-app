@@ -1493,6 +1493,89 @@ pub async fn pump_save_color(
     file.write_all(payload.as_bytes()).await.is_ok()
 }
 
+/// (`/copy`) Write a pending `/copy` selection to the system clipboard.
+///
+/// Mirrors [`pump_save_color`] (no `OrchestratorHandle`, no priority guard): the
+/// sync `/copy` submit intercept raises `AppState.pending_copy_clipboard =
+/// Some(text)` (it can't `.await`, and the iocraft reconciler owns stdout, so a
+/// native clipboard shell-out must run OUTSIDE the render frame). This pump —
+/// driven by the same 100 ms ticker `use_future` — takes the text and shells
+/// out to the platform clipboard utility OUTSIDE the `AppState` lock.
+///
+/// claude-code's `setClipboard` fires its native safety net FIRST on darwin
+/// (`copyNative` → `pbcopy`) and writes OSC-52 to stdout as a portable fallback.
+/// Because this TUI's stdout is owned by iocraft's fullscreen reconciler (a raw
+/// OSC-52 write mid-frame would corrupt the rendered output), we use ONLY the
+/// native utility path here: `pbcopy` (macOS), `wl-copy`/`xclip`/`xsel` (Linux),
+/// `clip` (Windows) — the same utilities claude-code's `copyNative` probes. The
+/// spawn is best-effort (fire-and-forget): a missing utility is silently
+/// ignored, matching claude-code's `execFileNoThrow`. Returns `true` iff a
+/// clipboard write was attempted (a `/copy` was pending).
+pub async fn pump_copy_clipboard(state: &Arc<Mutex<AppState>>) -> bool {
+    // 1) Take the pending text under the lock.
+    let text = {
+        let mut st = state.lock().await;
+        let Some(text) = st.pending_copy_clipboard.take() else {
+            return false;
+        };
+        text
+    };
+
+    // 2) Shell out OUTSIDE the lock on a blocking thread (the clipboard utility
+    //    is a subprocess that reads stdin; `spawn_blocking` keeps the async
+    //    ticker responsive). Fire-and-forget — failures are silent, exactly as
+    //    claude-code's `execFileNoThrow` swallows them.
+    tokio::task::spawn_blocking(move || {
+        copy_to_clipboard_native(&text);
+    });
+    true
+}
+
+/// Shell out to a native clipboard utility, writing `text` to its stdin. Best
+/// effort: a missing binary or non-zero exit is ignored (claude-code
+/// `copyNative` / `execFileNoThrow`). Probes the same per-platform utilities
+/// claude-code uses; on Linux it tries the Wayland tool first, then X11.
+fn copy_to_clipboard_native(text: &str) {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    // (cmd, args) candidates in probe order for the current platform.
+    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbcopy", &[])]
+    } else if cfg!(target_os = "windows") {
+        &[("clip", &[])]
+    } else {
+        // Linux/other: Wayland (wl-copy) → X11 (xclip → xsel).
+        &[
+            ("wl-copy", &[]),
+            ("xclip", &["-selection", "clipboard"]),
+            ("xsel", &["--clipboard", "--input"]),
+        ]
+    };
+
+    for (cmd, args) in candidates {
+        let spawned = Command::new(cmd)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let Ok(mut child) = spawned else {
+            // Binary not found — try the next candidate.
+            continue;
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+            // Drop stdin to signal EOF before waiting.
+        }
+        // Wait so the pipe is fully consumed; ignore the exit status. Stop after
+        // the first utility that successfully spawned (matches claude-code's
+        // cached-winner behavior — we don't fan out to every tool).
+        let _ = child.wait();
+        return;
+    }
+}
+
 /// (M7-13 review) Load the 4-layer effective settings the Settings screen
 /// displays, mirroring the M3 `Settings::load` read API (the ONLY settings read
 /// path; §4 R7). A load error degrades gracefully to defaults so the screen can
@@ -1697,6 +1780,15 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // were already applied synchronously by the submit intercept;
                 // only the disk write is deferred here.
                 let _wrote_color = pump_save_color(&state, ticker_session_id).await;
+                // (`/copy`) Clipboard write pump. Runs UNCONDITIONALLY (no
+                // handle, no priority guard): a pending `/copy` selection is
+                // written to the system clipboard via the platform utility
+                // (`pbcopy` on macOS — claude-code's `copyNative` darwin path).
+                // No-op when nothing is pending. We do NOT bump the redraw tick
+                // — the confirmation `system` display was already pushed
+                // synchronously by the submit intercept; only the clipboard
+                // write is deferred here (best-effort, fire-and-forget).
+                let _copied = pump_copy_clipboard(&state).await;
                 // (M9-05) Poll the live multi-agent feed once on the SAME
                 // cadence and forward its events into the channel. We do NOT bump
                 // `tick` here — the MultiAgent pump (which drains the channel)

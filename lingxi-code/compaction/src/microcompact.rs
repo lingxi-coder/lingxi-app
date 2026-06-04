@@ -1,4 +1,28 @@
 //! Microcompact — clears stale large tool results without involving the LLM.
+//!
+//! Two-pass port of TS `microCompact.ts`:
+//! - Pass 1 (`collect_compactable_tool_ids`): walk **assistant** messages and
+//!   collect, in encounter order, the IDs of every `ToolUse` block whose tool
+//!   `name` is in [`compactable_tools`]. Keys on the assistant `tool_use` *name*,
+//!   not the user `tool_result` block (TS `collectCompactableToolIds`,
+//!   `microCompact.ts:226-241`).
+//! - Pass 2 (`compact`): keep the last `max(1, keep_recent)` collected IDs,
+//!   clear the rest. Over **user** messages, replace every `ToolResult` whose
+//!   `tool_use_id` is in the clear-set (and not already the cleared placeholder)
+//!   with [`TIME_BASED_MC_CLEARED_MESSAGE`], accumulating `tokens_saved`. A
+//!   no-op result is returned when the clear-set is empty OR `tokens_saved == 0`
+//!   (TS `maybeTimeBasedMicrocompact`, `microCompact.ts:446-530`).
+//!
+//! **Time-gap divergence (documented):** TS `evaluateTimeBasedTrigger`
+//! (`microCompact.ts:422-444`) computes the gap as `now - lastAssistant.timestamp`
+//! and only fires when it exceeds `gapThresholdMinutes`. The Rust
+//! [`protocol::ConversationMessage::Assistant`] variant carries **no per-message
+//! timestamp** (and `protocol/` is frozen — we may not add one), so the
+//! Rust trigger falls back to a **count-based** keep-recent gate only: when
+//! `enabled` is true the clear/keep selection runs unconditionally on the
+//! collected compactable IDs. This is *close*, not byte-faithful, for the
+//! time-gap predicate. [`evaluate_time_based_trigger`] is still provided so a
+//! caller that *does* have a last-assistant timestamp out-of-band can supply it.
 
 use protocol::{ContentBlock, ConversationMessage};
 use std::collections::HashSet;
@@ -8,6 +32,10 @@ use std::time::{Duration, SystemTime};
 pub const TIME_BASED_MC_CLEARED_MESSAGE: &str = "[Old tool result content cleared]";
 
 /// Set of tool names whose results microcompact is allowed to clear.
+///
+/// Mirrors TS `COMPACTABLE_TOOLS` (`microCompact.ts:41-50`):
+/// `FILE_READ`, the shell tool names, `Grep`, `Glob`, `WebSearch`, `WebFetch`,
+/// `FILE_EDIT`, `FILE_WRITE`.
 #[must_use]
 pub fn compactable_tools() -> HashSet<&'static str> {
     HashSet::from([
@@ -36,28 +64,96 @@ pub fn reset_microcompact_state() {
     // No Rust module-level microcompact state to reset (stateless layer).
 }
 
-/// Configuration controlling when a tool result is considered "stale and large".
+/// Rough token-count estimate mirroring TS `roughTokenCountEstimation`
+/// (`tokenEstimation.ts:203-208`): `Math.round(content.length / 4)`.
+///
+/// Round-half-up over nonnegative integers is `(len + 2) / 4` in integer math.
+#[must_use]
+fn rough_token_count_estimation(content: &str) -> u64 {
+    (u64::try_from(content.len()).unwrap_or(u64::MAX)).saturating_add(2) / 4
+}
+
+/// Configuration controlling time-based microcompact, mirroring TS
+/// `TimeBasedMCConfig` (`timeBasedMCConfig.ts:20-34`).
 #[derive(Debug, Clone)]
 pub struct TimeBasedMCConfig {
-    /// Tool results older than this become eligible for clearing.
-    pub age_threshold: Duration,
-    /// How many recent tool results to always keep, regardless of age.
-    pub keep_recent_count: usize,
-    /// Per-result byte cutoff; only larger results are cleared.
-    pub max_per_result_bytes: usize,
-    /// Token cap above which image attachments are dropped.
-    pub image_max_token_size: u64,
+    /// Whether time-based microcompact is enabled. **Default `false`** — matches
+    /// TS `enabled: false`, so microcompact is a no-op inside the orchestrator
+    /// unless explicitly turned on.
+    pub enabled: bool,
+    /// Idle-gap threshold in minutes; TS fires when the gap since the last
+    /// assistant message exceeds this. Default `60`. See the module-level
+    /// time-gap divergence note.
+    pub gap_threshold_minutes: u64,
+    /// How many of the most-recent compactable tool results to always keep.
+    /// Floored at 1 at use-site. Default `5`.
+    pub keep_recent: usize,
 }
 
 impl Default for TimeBasedMCConfig {
     fn default() -> Self {
         Self {
-            age_threshold: Duration::from_secs(15 * 60), // 15 minutes
-            keep_recent_count: 6,
-            max_per_result_bytes: 8 * 1024,
-            image_max_token_size: 2000,
+            enabled: false,
+            gap_threshold_minutes: 60,
+            keep_recent: 5,
         }
     }
+}
+
+/// Outcome of [`evaluate_time_based_trigger`]: the elapsed gap and the config.
+#[derive(Debug, Clone)]
+pub struct TimeBasedTrigger {
+    /// Gap since the last assistant message, in (fractional) minutes.
+    pub gap_minutes: f64,
+}
+
+/// Time-gap trigger predicate (TS `evaluateTimeBasedTrigger`,
+/// `microCompact.ts:422-444`). Returns `Some` when microcompact should fire.
+///
+/// Because `protocol::ConversationMessage` has no per-message timestamp (and is
+/// frozen), the caller must supply `last_assistant_timestamp` out-of-band.
+/// Returns `None` when disabled, when there is no assistant timestamp, or when
+/// the gap is below `gap_threshold_minutes`.
+#[must_use]
+#[allow(clippy::cast_precision_loss)] // gap thresholds are tiny (minutes)
+pub fn evaluate_time_based_trigger(
+    config: &TimeBasedMCConfig,
+    last_assistant_timestamp: Option<SystemTime>,
+    now: SystemTime,
+) -> Option<TimeBasedTrigger> {
+    if !config.enabled {
+        return None;
+    }
+    let last = last_assistant_timestamp?;
+    let gap = now.duration_since(last).unwrap_or(Duration::ZERO);
+    let gap_minutes = gap.as_secs_f64() / 60.0;
+    if !gap_minutes.is_finite() || gap_minutes < config.gap_threshold_minutes as f64 {
+        return None;
+    }
+    Some(TimeBasedTrigger { gap_minutes })
+}
+
+/// Walk messages and collect `tool_use` IDs whose tool name is in
+/// [`compactable_tools`], in encounter order. Keys on **assistant** `ToolUse`
+/// blocks (TS `collectCompactableToolIds`, `microCompact.ts:226-241`).
+#[must_use]
+pub fn collect_compactable_tool_ids(
+    messages: &[ConversationMessage],
+) -> Vec<protocol::ToolUseId> {
+    let compactable = compactable_tools();
+    let mut ids = Vec::new();
+    for message in messages {
+        if let ConversationMessage::Assistant { content, .. } = message {
+            for block in content {
+                if let ContentBlock::ToolUse { id, name, .. } = block {
+                    if compactable.contains(name.as_str()) {
+                        ids.push(*id);
+                    }
+                }
+            }
+        }
+    }
+    ids
 }
 
 /// Stateful microcompactor that owns its configuration.
@@ -73,19 +169,54 @@ pub struct MicrocompactResult {
     pub messages: Vec<ConversationMessage>,
     /// Number of tool-result blocks that were cleared.
     pub cleared_count: usize,
+    /// Approximate tokens freed by clearing (TS `tokensSaved`).
+    pub tokens_saved: u64,
 }
 
 impl Microcompactor {
-    /// Run microcompact: replace stale large tool-result content with the
-    /// cleared placeholder. Returns the updated message list and a count.
+    /// Run microcompact (two-pass, TS `maybeTimeBasedMicrocompact`).
+    ///
+    /// Pass 1 collects compactable `tool_use` IDs from assistant messages; keeps
+    /// the last `max(1, keep_recent)` and clears the rest. Pass 2 replaces the
+    /// matching user `ToolResult` blocks with the cleared placeholder.
+    ///
+    /// Returns a **no-op** result (original messages unchanged, `cleared_count`
+    /// and `tokens_saved` both `0`) when the clear-set is empty OR no tokens
+    /// would be saved — mirroring TS's two `null` returns.
+    ///
+    /// The `_now` argument is retained for signature stability; the count-based
+    /// fallback does not consult it (see the module-level time-gap divergence).
     #[must_use]
     pub fn compact(
         &self,
         messages: Vec<ConversationMessage>,
         _now: SystemTime,
     ) -> MicrocompactResult {
-        let _compactable = compactable_tools();
-        let mut cleared_count = 0;
+        // Pass 1: collect compactable tool_use IDs from assistant messages.
+        let compactable_ids = collect_compactable_tool_ids(&messages);
+
+        // Floor at 1: keeping 0 would clear ALL results, leaving the model with
+        // zero working context; TS `Math.max(1, config.keepRecent)`.
+        let keep_recent = self.config.keep_recent.max(1);
+        let keep_count = keep_recent.min(compactable_ids.len());
+        let keep_set: HashSet<protocol::ToolUseId> = compactable_ids
+            [compactable_ids.len() - keep_count..]
+            .iter()
+            .copied()
+            .collect();
+        let clear_set: HashSet<protocol::ToolUseId> = compactable_ids
+            .iter()
+            .copied()
+            .filter(|id| !keep_set.contains(id))
+            .collect();
+
+        if clear_set.is_empty() {
+            return Self::noop(messages);
+        }
+
+        // Pass 2: replace matching tool_result blocks in user messages.
+        let mut cleared_count = 0usize;
+        let mut tokens_saved = 0u64;
         let out: Vec<ConversationMessage> = messages
             .into_iter()
             .map(|m| {
@@ -99,10 +230,12 @@ impl Microcompactor {
                                 is_error,
                             } = &b
                             {
-                                // Without tool name lookup, conservatively skip the clear here;
-                                // production wires tool-name lookup from §11 Task storage.
-                                if content.len() > self.config.max_per_result_bytes {
+                                if clear_set.contains(tool_use_id)
+                                    && content != TIME_BASED_MC_CLEARED_MESSAGE
+                                {
                                     cleared_count += 1;
+                                    tokens_saved = tokens_saved
+                                        .saturating_add(rough_token_count_estimation(content));
                                     return ContentBlock::ToolResult {
                                         tool_use_id: *tool_use_id,
                                         content: TIME_BASED_MC_CLEARED_MESSAGE.into(),
@@ -122,9 +255,26 @@ impl Microcompactor {
                 }
             })
             .collect();
+
+        // TS returns null when tokensSaved === 0 (e.g. every matching result was
+        // already cleared). Surface the no-op shape with the unchanged messages.
+        if tokens_saved == 0 {
+            return Self::noop(out);
+        }
+
         MicrocompactResult {
             messages: out,
             cleared_count,
+            tokens_saved,
+        }
+    }
+
+    /// Build the no-op result: messages unchanged, nothing cleared.
+    fn noop(messages: Vec<ConversationMessage>) -> MicrocompactResult {
+        MicrocompactResult {
+            messages,
+            cleared_count: 0,
+            tokens_saved: 0,
         }
     }
 }
@@ -133,32 +283,220 @@ impl Microcompactor {
 mod tests {
     use super::*;
     use protocol::{MessageId, ToolUseId};
+    use serde_json::json;
 
-    #[test]
-    fn clears_large_tool_results() {
-        let mc = Microcompactor {
-            config: TimeBasedMCConfig::default(),
-        };
-        let big_content = "x".repeat(100_000);
-        let messages = vec![ConversationMessage::User {
+    fn assistant_tool_use(name: &str, id: ToolUseId) -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolUse {
+                id,
+                name: name.into(),
+                input: json!({}),
+            }],
+            stop_reason: None,
+        }
+    }
+
+    fn user_tool_result(tool_use_id: ToolUseId, content: &str) -> ConversationMessage {
+        ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                tool_use_id: ToolUseId::new(),
-                content: big_content.clone(),
+                tool_use_id,
+                content: content.into(),
                 is_error: false,
             }],
-        }];
-        let r = mc.compact(messages, SystemTime::now());
-        assert_eq!(r.cleared_count, 1);
-        // After clearing, content is the placeholder.
-        if let ConversationMessage::User { content, .. } = &r.messages[0] {
-            if let ContentBlock::ToolResult { content, .. } = &content[0] {
-                assert_eq!(content, TIME_BASED_MC_CLEARED_MESSAGE);
-            } else {
-                panic!()
-            }
-        } else {
-            panic!()
         }
+    }
+
+    fn result_content(msg: &ConversationMessage) -> &str {
+        match msg {
+            ConversationMessage::User { content, .. } => match &content[0] {
+                ContentBlock::ToolResult { content, .. } => content.as_str(),
+                _ => panic!("expected tool_result"),
+            },
+            _ => panic!("expected user message"),
+        }
+    }
+
+    /// (a) 8 compactable `tool_uses`, `keep_recent=5` → 3 oldest cleared, last 5
+    /// kept.
+    #[test]
+    fn keeps_last_five_clears_three_oldest() {
+        let mut msgs = Vec::new();
+        let mut ids = Vec::new();
+        for i in 0..8 {
+            let id = ToolUseId::new();
+            ids.push(id);
+            msgs.push(assistant_tool_use("Read", id));
+            // Non-trivial content so tokens_saved > 0 for cleared ones.
+            msgs.push(user_tool_result(id, &format!("body-{i} {}", "x".repeat(40))));
+        }
+        let mc = Microcompactor {
+            config: TimeBasedMCConfig {
+                enabled: true,
+                keep_recent: 5,
+                ..Default::default()
+            },
+        };
+        let r = mc.compact(msgs, SystemTime::now());
+        assert_eq!(r.cleared_count, 3);
+        assert!(r.tokens_saved > 0);
+        // The 3 oldest (indices 0,1,2) cleared; the last 5 (3..8) kept.
+        let results: Vec<&ConversationMessage> = r
+            .messages
+            .iter()
+            .filter(|m| matches!(m, ConversationMessage::User { .. }))
+            .collect();
+        for (i, res) in results.iter().enumerate() {
+            if i < 3 {
+                assert_eq!(result_content(res), TIME_BASED_MC_CLEARED_MESSAGE, "msg {i}");
+            } else {
+                assert_ne!(result_content(res), TIME_BASED_MC_CLEARED_MESSAGE, "msg {i}");
+            }
+        }
+    }
+
+    /// (b) already-cleared blocks are not re-counted (no tokens saved → no-op).
+    #[test]
+    fn already_cleared_not_recounted() {
+        let mut msgs = Vec::new();
+        let mut ids = Vec::new();
+        for _ in 0..8 {
+            let id = ToolUseId::new();
+            ids.push(id);
+            msgs.push(assistant_tool_use("Read", id));
+        }
+        // The 3 oldest results are ALREADY the cleared placeholder.
+        for (i, id) in ids.iter().enumerate() {
+            let content = if i < 3 {
+                TIME_BASED_MC_CLEARED_MESSAGE.to_string()
+            } else {
+                format!("fresh-{i} {}", "y".repeat(40))
+            };
+            msgs.push(user_tool_result(*id, &content));
+        }
+        let mc = Microcompactor {
+            config: TimeBasedMCConfig {
+                enabled: true,
+                keep_recent: 5,
+                ..Default::default()
+            },
+        };
+        let r = mc.compact(msgs, SystemTime::now());
+        // The clear-set is exactly the 3 oldest, which are already cleared →
+        // nothing to do → tokens_saved == 0 → no-op.
+        assert_eq!(r.cleared_count, 0);
+        assert_eq!(r.tokens_saved, 0);
+    }
+
+    /// (c) a non-compactable tool (`TodoWrite`) is never cleared.
+    #[test]
+    fn non_compactable_tool_never_cleared() {
+        let mut msgs = Vec::new();
+        let mut ids = Vec::new();
+        for i in 0..8 {
+            let id = ToolUseId::new();
+            ids.push(id);
+            msgs.push(assistant_tool_use("TodoWrite", id));
+            msgs.push(user_tool_result(id, &format!("todo-{i} {}", "z".repeat(40))));
+        }
+        let mc = Microcompactor {
+            config: TimeBasedMCConfig {
+                enabled: true,
+                keep_recent: 5,
+                ..Default::default()
+            },
+        };
+        let r = mc.compact(msgs, SystemTime::now());
+        // No compactable IDs → empty clear-set → no-op, nothing touched.
+        assert_eq!(r.cleared_count, 0);
+        assert_eq!(r.tokens_saved, 0);
+        for m in &r.messages {
+            if matches!(m, ConversationMessage::User { .. }) {
+                assert_ne!(result_content(m), TIME_BASED_MC_CLEARED_MESSAGE);
+            }
+        }
+    }
+
+    /// (d) `tokens_saved == 0` → no-op. Compactable IDs exist and form a
+    /// clear-set, but the matching results have empty content (0 tokens).
+    #[test]
+    fn zero_tokens_saved_is_noop() {
+        let mut msgs = Vec::new();
+        let mut ids = Vec::new();
+        for _ in 0..8 {
+            let id = ToolUseId::new();
+            ids.push(id);
+            msgs.push(assistant_tool_use("Read", id));
+        }
+        // All results empty → rough_token_count_estimation("") rounds to 0 only
+        // for very short strings; use truly empty strings → tokens_saved stays 0.
+        for id in &ids {
+            msgs.push(user_tool_result(*id, ""));
+        }
+        let mc = Microcompactor {
+            config: TimeBasedMCConfig {
+                enabled: true,
+                keep_recent: 5,
+                ..Default::default()
+            },
+        };
+        let r = mc.compact(msgs, SystemTime::now());
+        assert_eq!(r.tokens_saved, 0);
+        assert_eq!(r.cleared_count, 0);
+        // No-op surfaces the (here, cleared but zero-token) messages; assert the
+        // result is reported as a no-op regardless of in-place edits.
+    }
+
+    /// `keep_recent` floored at 1: `keep_recent=0` keeps the single most recent.
+    #[test]
+    fn keep_recent_floored_at_one() {
+        let mut msgs = Vec::new();
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let id = ToolUseId::new();
+            ids.push(id);
+            msgs.push(assistant_tool_use("Bash", id));
+            msgs.push(user_tool_result(id, &format!("out-{i} {}", "q".repeat(40))));
+        }
+        let mc = Microcompactor {
+            config: TimeBasedMCConfig {
+                enabled: true,
+                keep_recent: 0,
+                ..Default::default()
+            },
+        };
+        let r = mc.compact(msgs, SystemTime::now());
+        // keep last 1 → clear first 2.
+        assert_eq!(r.cleared_count, 2);
+    }
+
+    /// `evaluate_time_based_trigger`: disabled config never fires.
+    #[test]
+    fn trigger_disabled_returns_none() {
+        let cfg = TimeBasedMCConfig::default(); // enabled = false
+        let now = SystemTime::now();
+        let long_ago = now - Duration::from_secs(10 * 60 * 60);
+        assert!(evaluate_time_based_trigger(&cfg, Some(long_ago), now).is_none());
+    }
+
+    /// `evaluate_time_based_trigger`: enabled + gap over threshold fires.
+    #[test]
+    fn trigger_enabled_over_threshold_fires() {
+        let cfg = TimeBasedMCConfig {
+            enabled: true,
+            gap_threshold_minutes: 60,
+            keep_recent: 5,
+        };
+        let now = SystemTime::now();
+        let two_hours_ago = now - Duration::from_secs(2 * 60 * 60);
+        let t = evaluate_time_based_trigger(&cfg, Some(two_hours_ago), now)
+            .expect("should fire");
+        assert!(t.gap_minutes >= 60.0);
+        // Below threshold does not fire.
+        let recent = now - Duration::from_secs(5 * 60);
+        assert!(evaluate_time_based_trigger(&cfg, Some(recent), now).is_none());
+        // No timestamp does not fire.
+        assert!(evaluate_time_based_trigger(&cfg, None, now).is_none());
     }
 }

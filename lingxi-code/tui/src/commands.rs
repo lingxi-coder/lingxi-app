@@ -5,3 +5,4 @@
 //! mounting a screen. Each is a PURE arg-parser the dispatch intercept drives.
 
 pub mod color;
+pub mod copy;

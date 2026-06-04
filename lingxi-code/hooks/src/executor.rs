@@ -361,6 +361,33 @@ impl Dispatcher {
                     Some(t) if !t.is_zero() => t,
                     _ => Duration::from_millis(HOOK_COMMAND_TIMEOUT_MS),
                 };
+                // B2: inject `CLAUDE_PROJECT_DIR` into the child env so hook
+                // scripts referencing `$CLAUDE_PROJECT_DIR` resolve to the
+                // stable project root. claude-code builds the env as
+                // `{ ...subprocessEnv(), CLAUDE_PROJECT_DIR: toHookPath(projectDir) }`
+                // (`utils/hooks.ts:882-885`): the engine value is spread AFTER
+                // the base env, so it wins over any pre-existing entry. We
+                // mirror that precedence — start from the hook's declared `env`
+                // (our analog of the base/subprocess env), then `insert` the
+                // engine value last so it overwrites a user-supplied
+                // `CLAUDE_PROJECT_DIR`. The value is the stable project root,
+                // falling back to `ctx.cwd` when no root is wired yet
+                // (`HookContext.project_dir == None`).
+                //
+                // Divergence (documented, not a gap): Windows `toHookPath`
+                // POSIX-path conversion is skipped — macOS/Linux parity target,
+                // consistent with `turn_loop.rs::absolutize`. Full
+                // `subprocessEnv()` base-env replication and `CLAUDE_ENV_FILE`
+                // are out of B2 scope.
+                let mut child_env = env.clone();
+                let project_dir = ctx
+                    .project_dir
+                    .clone()
+                    .unwrap_or_else(|| ctx.cwd.clone());
+                child_env.insert(
+                    "CLAUDE_PROJECT_DIR".to_string(),
+                    project_dir.to_string_lossy().into_owned(),
+                );
                 // claude-code writes `jsonStringify(hookInput) + '\n'` to the
                 // child's stdin then closes it (`hooks.ts:1006`/`1210`). The
                 // trailing newline is load-bearing: a bash `read -r line`
@@ -369,7 +396,7 @@ impl Dispatcher {
                     command: command.clone(),
                     args: args.clone(),
                     cwd: cwd.clone().or_else(|| Some(ctx.cwd.clone())),
-                    env: env.clone(),
+                    env: child_env,
                     timeout: Some(effective_timeout),
                     stdin: Some(format!("{body}\n")),
                 };
@@ -838,6 +865,7 @@ mod command_arm_tests {
     use crate::response::HookDecision;
     use protocol::{HookId, ToolUseId};
     use serde_json::json;
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use traits::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
     use traits::{
@@ -850,6 +878,9 @@ mod command_arm_tests {
     struct MockRunner {
         result: Mutex<Option<Result<ProcessOutput, ProcessError>>>,
         recorded_stdin: Mutex<Option<String>>,
+        /// B2: the child env the arm handed to the sandbox, captured so tests
+        /// can assert `CLAUDE_PROJECT_DIR` injection + precedence.
+        recorded_env: Mutex<Option<HashMap<String, String>>>,
     }
 
     impl MockRunner {
@@ -857,12 +888,14 @@ mod command_arm_tests {
             Arc::new(Self {
                 result: Mutex::new(Some(Ok(output))),
                 recorded_stdin: Mutex::new(None),
+                recorded_env: Mutex::new(None),
             })
         }
         fn err(e: ProcessError) -> Arc<Self> {
             Arc::new(Self {
                 result: Mutex::new(Some(Err(e))),
                 recorded_stdin: Mutex::new(None),
+                recorded_env: Mutex::new(None),
             })
         }
     }
@@ -871,6 +904,7 @@ mod command_arm_tests {
     impl ProcessRunner for MockRunner {
         async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
             *self.recorded_stdin.lock().unwrap() = cmd.inner().stdin.clone();
+            *self.recorded_env.lock().unwrap() = Some(cmd.inner().env.clone());
             self.result
                 .lock()
                 .unwrap()
@@ -1153,6 +1187,101 @@ mod command_arm_tests {
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Error));
         assert!(r.stderr.contains("command executor not wired"));
+    }
+
+    // ---- B2: CLAUDE_PROJECT_DIR injection into the Command child env -----
+
+    /// A Command hook whose declared `env` is seeded with `entries`.
+    fn command_hook_with_env(entries: &[(&str, &str)]) -> HookDefinition {
+        let mut h = command_hook();
+        if let DefHookExecutor::Command { env, .. } = &mut h.executor {
+            for (k, v) in entries {
+                env.insert((*k).to_string(), (*v).to_string());
+            }
+        }
+        h
+    }
+
+    /// Executor wired with a single Command hook (custom `env`) + the recording
+    /// runner, so the test can assert the child env the sandbox received.
+    fn executor_with_hook(hook: HookDefinition, process: Arc<dyn ProcessRunner>) -> HookExecutorImpl {
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let reg = Arc::new(RwLock::new(registry));
+        HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime))
+            .with_process_runner(process, Arc::new(StubSandbox))
+    }
+
+    #[tokio::test]
+    async fn command_env_contains_project_dir_from_ctx() {
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_with(runner.clone());
+        let ctx = HookContext {
+            project_dir: Some(PathBuf::from("/repo/root")),
+            cwd: PathBuf::from("/repo/root/worktree"),
+            ..Default::default()
+        };
+
+        let _ = exec.execute(pre_event(), ctx).await;
+
+        let env = runner.recorded_env.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            env.get("CLAUDE_PROJECT_DIR").map(String::as_str),
+            Some("/repo/root"),
+            "engine project_dir is injected verbatim",
+        );
+    }
+
+    #[tokio::test]
+    async fn command_env_engine_project_dir_wins_over_user_env() {
+        // The hook declares its own CLAUDE_PROJECT_DIR; the engine value is set
+        // AFTER the base spread in claude-code (`utils/hooks.ts:882-885`), so
+        // the engine value wins. Match that precedence.
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_with_hook(
+            command_hook_with_env(&[
+                ("CLAUDE_PROJECT_DIR", "/user/override"),
+                ("MY_VAR", "keep-me"),
+            ]),
+            runner.clone(),
+        );
+        let ctx = HookContext {
+            project_dir: Some(PathBuf::from("/engine/root")),
+            ..Default::default()
+        };
+
+        let _ = exec.execute(pre_event(), ctx).await;
+
+        let env = runner.recorded_env.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            env.get("CLAUDE_PROJECT_DIR").map(String::as_str),
+            Some("/engine/root"),
+            "engine value overrides the user-supplied hook.env entry",
+        );
+        // Unrelated user env entries are preserved.
+        assert_eq!(env.get("MY_VAR").map(String::as_str), Some("keep-me"));
+    }
+
+    #[tokio::test]
+    async fn command_env_project_dir_falls_back_to_cwd() {
+        // No project_dir wired → CLAUDE_PROJECT_DIR falls back to ctx.cwd, the
+        // faithful approximation until the orchestrator populates a project root.
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_with(runner.clone());
+        let ctx = HookContext {
+            project_dir: None,
+            cwd: PathBuf::from("/some/cwd"),
+            ..Default::default()
+        };
+
+        let _ = exec.execute(pre_event(), ctx).await;
+
+        let env = runner.recorded_env.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            env.get("CLAUDE_PROJECT_DIR").map(String::as_str),
+            Some("/some/cwd"),
+            "absent project_dir falls back to ctx.cwd",
+        );
     }
 
     // ---- B1: lifecycle events now serialize through the Command arm -----

@@ -56,6 +56,16 @@ pub const OVERSCAN_LINES: usize = 3;
 /// rendering; until then this proxy + its lock tests are the guardrail.
 #[must_use]
 pub fn measured_height(msg: &RenderedMessage, width: usize) -> usize {
+    // §A4 empty-message guard: a user-text body that is only stripped
+    // prompt-XML tags (or `(no content)`) renders as an EMPTY View (zero rows)
+    // in `UserTextMessage` — so it must measure as 0, not the 1 the
+    // empty-string branch below would otherwise return. Mirrors claude-code's
+    // `return null` for these bodies.
+    if let RenderedMessage::UserText { body, .. } = msg {
+        if crate::components::messages::text_guard::is_empty_message_text(body) {
+            return 0;
+        }
+    }
     let text = render_text_for_measure(msg);
     if text.is_empty() {
         return 1;
@@ -1317,8 +1327,24 @@ mod tests {
     }
 
     #[test]
-    fn empty_body_measures_one() {
-        assert_eq!(measured_height(&user(""), 80), 1);
+    fn empty_user_body_measures_zero() {
+        // §A4: an empty (or `(no content)`, or only-stripped-tags) user body is
+        // suppressed → empty View → 0 rows. (Was 1 before the guard.)
+        assert_eq!(measured_height(&user(""), 80), 0);
+        assert_eq!(measured_height(&user("(no content)"), 80), 0);
+        assert_eq!(measured_height(&user("<context>x</context>"), 80), 0);
+    }
+
+    #[test]
+    fn empty_text_branch_measures_one() {
+        // A genuinely empty *measured text* for a non-suppressed variant still
+        // occupies one row (the `text.is_empty()` branch of `measured_height`).
+        let empty_system = RenderedMessage::SystemText {
+            body: String::new(),
+            timestamp: 0,
+            is_error: false,
+        };
+        assert_eq!(measured_height(&empty_system, 80), 1);
     }
 
     #[test]

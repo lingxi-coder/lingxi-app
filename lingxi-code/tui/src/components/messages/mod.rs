@@ -30,6 +30,7 @@ pub mod system_api_error;
 pub mod system_text;
 pub mod task_assignment;
 pub mod team_mem_saved;
+pub mod text_guard;
 pub mod thinking;
 pub mod user_agent_notification;
 pub mod user_channel;
@@ -52,6 +53,13 @@ use user_tool_result::{render_user_tool_result_to_string, UserToolResultProps};
 #[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (28 variants)
 pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: bool) -> String {
     match entry {
+        // §A4 empty-message guard: a body that is only stripped prompt-XML
+        // tags (or `(no content)`) is suppressed entirely — the component
+        // returns an empty View, so the string oracle returns "" (no `"> "`
+        // prefix row), matching claude-code's `return null`.
+        RenderedMessage::UserText { body, .. } if text_guard::is_empty_message_text(body) => {
+            String::new()
+        }
         RenderedMessage::UserText { body, .. } => format!("> {body}"),
         // Markdown-rendered body, marker-prefixed (oracle == the component's
         // markdown-flattened layout).

@@ -23,6 +23,7 @@
 )]
 
 pub mod bash;
+pub mod command_semantics;
 pub mod powershell;
 pub mod repl;
 pub mod shared;

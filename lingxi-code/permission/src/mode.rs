@@ -44,6 +44,27 @@ impl PermissionMode {
     }
 }
 
+/// The next mode in the Shift+Tab UI cycle (claude-code `getNextPermissionMode`,
+/// EXTERNAL / non-`ant` path): `Default→AcceptEdits→Plan→…`, where `Plan`
+/// advances to `BypassPermissions` only when `bypass_available`, else back to
+/// `Default`; `BypassPermissions`/`DontAsk`/internal modes return `Default`.
+///
+/// The `ant`-only `auto`/`bubble` cycle targets (and the `canCycleToAuto`
+/// gate) are intentionally omitted — external builds never cycle to `auto`
+/// (TS guards them behind `USER_TYPE==='ant'` + the `TRANSCRIPT_CLASSIFIER`
+/// feature), so the non-`ant` cycle is byte-faithful.
+#[must_use]
+pub fn next_permission_mode(current: PermissionMode, bypass_available: bool) -> PermissionMode {
+    use PermissionMode::{AcceptEdits, BypassPermissions, Default, Plan};
+    match current {
+        Default => AcceptEdits,
+        AcceptEdits => Plan,
+        Plan if bypass_available => BypassPermissions,
+        // Plan (no bypass), BypassPermissions, DontAsk, Bubble, Auto → Default.
+        _ => Default,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,5 +77,23 @@ mod tests {
     #[test]
     fn default_is_external() {
         assert!(PermissionMode::Default.is_external());
+    }
+
+    #[test]
+    fn cycle_external_path_matches_ts() {
+        use PermissionMode::{AcceptEdits, BypassPermissions, Default, DontAsk, Plan};
+        // bypass NOT available
+        assert_eq!(next_permission_mode(Default, false), AcceptEdits);
+        assert_eq!(next_permission_mode(AcceptEdits, false), Plan);
+        assert_eq!(next_permission_mode(Plan, false), Default);
+        assert_eq!(next_permission_mode(BypassPermissions, false), Default);
+        assert_eq!(next_permission_mode(DontAsk, false), Default);
+        // bypass available → Plan advances to BypassPermissions
+        assert_eq!(next_permission_mode(Plan, true), BypassPermissions);
+        assert_eq!(next_permission_mode(Default, true), AcceptEdits); // unchanged
+        assert_eq!(next_permission_mode(BypassPermissions, true), Default);
+        // internal modes fall back to Default
+        assert_eq!(next_permission_mode(PermissionMode::Bubble, true), Default);
+        assert_eq!(next_permission_mode(PermissionMode::Auto, true), Default);
     }
 }

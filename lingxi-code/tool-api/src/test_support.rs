@@ -75,6 +75,7 @@ impl traits::filesystem::FileSystem for PanickingFs {
 }
 
 /// Convenience: return a `PanickingFs` wrapped as `Arc<dyn FileSystem>`.
+#[must_use]
 pub fn make_dummy_fs() -> Arc<dyn traits::filesystem::FileSystem> {
     Arc::new(PanickingFs) as _
 }
@@ -91,6 +92,7 @@ pub fn make_dummy_fs() -> Arc<dyn traits::filesystem::FileSystem> {
 pub static HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Build a fresh, minimal [`ToolUseContext`] for unit tests.
+#[must_use]
 pub fn fresh_ctx() -> ToolUseContext {
     ToolUseContext {
         options: ToolUseOptions {
@@ -113,6 +115,7 @@ pub fn fresh_ctx() -> ToolUseContext {
 }
 
 /// Build a fresh progress sender wired to a dropped receiver.
+#[must_use]
 pub fn fresh_tx() -> ToolProgressSender {
     let (tx, _rx) = progress_channel();
     tx
@@ -516,6 +519,7 @@ pub fn ctx_for_file_tools(
         notifications: None,
         clipboard: None,
         computer_control: None,
+        read_file_state: crate::read_file_state::new_read_file_state_map(),
     }
 }
 
@@ -565,5 +569,6 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         notifications: None,
         clipboard: None,
         computer_control: None,
+        read_file_state: crate::read_file_state::new_read_file_state_map(),
     }
 }

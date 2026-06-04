@@ -352,6 +352,8 @@ pub async fn build_mobile_inner(
     //     desktop-only seams (subagent / mcp / lsp / team / worktree-tool) are
     //     absent because `engine-mobile` does not link those tool crates.
     let tool_ctx = BuiltinToolContext {
+        // FILE.B: file tools share one read-state map (see engine-desktop note).
+        read_file_state: tool_api::read_file_state::new_read_file_state_map(),
         fs,
         bus: Arc::new(telemetry::AnalyticsBus::new()),
         trusted_dirs: vec![cwd.clone()],

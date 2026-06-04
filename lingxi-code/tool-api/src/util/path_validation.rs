@@ -141,10 +141,10 @@ mod tests {
         let trusted = vec![tmp.path().to_path_buf()];
         let target = PathBuf::from("/etc/hosts");
         let err = canonicalize_and_validate(&target, &trusted).unwrap_err();
-        match err {
-            PathValidationError::Outside { .. } => {}
-            other => panic!("expected Outside, got {other:?}"),
-        }
+        assert!(
+            matches!(err, PathValidationError::Outside { .. }),
+            "expected Outside, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -165,10 +165,10 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink("/etc/hosts", &link).unwrap();
         let err = canonicalize_and_validate(&link, &trusted).unwrap_err();
-        match err {
-            PathValidationError::Outside { .. } => {}
-            other => panic!("expected Outside, got {other:?}"),
-        }
+        assert!(
+            matches!(err, PathValidationError::Outside { .. }),
+            "expected Outside, got {err:?}"
+        );
     }
 
     #[tokio::test]

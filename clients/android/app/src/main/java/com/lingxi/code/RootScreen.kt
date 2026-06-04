@@ -22,9 +22,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lingxi.code.conversation.ChatScreen
 import com.lingxi.code.conversation.ChatViewModel
 import com.lingxi.code.conversation.ComposerAttachment
+import com.lingxi.code.conversation.ConversationSource
+import com.lingxi.code.conversation.EngineConversationSource
+import com.lingxi.code.conversation.MockConversationSource
 import com.lingxi.code.drawer.DrawerContent
 import com.lingxi.code.drawer.rememberDrawerUiState
 import com.lingxi.code.model.MockData
@@ -32,7 +37,6 @@ import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.share.rememberShare
 import com.lingxi.code.vision.rememberCameraCapture
 import com.lingxi.code.voice.VoiceFlowOverlay
-import com.lingxi.code.voice.buildVoiceEngine
 import com.lingxi.code.voice.rememberVoiceCapture
 import android.graphics.BitmapFactory
 import androidx.compose.ui.graphics.asImageBitmap
@@ -59,9 +63,24 @@ fun RootScreen(
     onToggleTheme: () -> Unit,
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit = {},
-    viewModel: ChatViewModel = viewModel(),
+    viewModel: ChatViewModel? = null,
 ) {
-    val state by viewModel.state.collectAsState()
+    val context = LocalContext.current
+
+    // Wire the chat to the REAL engine: build an EngineConversationSource (which
+    // owns the MobileEngineHandle + its single event listener) once for this
+    // shell, falling back to the canned MockConversationSource when the engine is
+    // unavailable (JVM host / missing cdylib / PlatformUnavailable). This mirrors
+    // the iOS ConversationSourceFactory.make() guard. The previous build-then-drop
+    // `buildVoiceEngine` val is gone — the source is now the sole handle owner.
+    val source: ConversationSource = remember(context) {
+        EngineConversationSource.create(context) ?: MockConversationSource()
+    }
+    val chatViewModel: ChatViewModel = viewModel ?: viewModel(
+        factory = viewModelFactory { initializer { ChatViewModel(source) } },
+    )
+
+    val state by chatViewModel.state.collectAsState()
     val drawerUi = rememberDrawerUiState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -76,12 +95,6 @@ fun RootScreen(
     // hold-to-talk release) can route its recognized text straight into the
     // input the user is about to send.
     var draft by remember { mutableStateOf("") }
-
-    // T3.3: build the device-audio-backed engine once for this shell. Handing the
-    // STT/TTS adapters across the UniFFI seam lights up `tool-speech` on-device;
-    // the handle is null on a non-Android host / when the cdylib is absent.
-    val context = LocalContext.current
-    val engine = remember { buildVoiceEngine(context) }
 
     // Hold-to-talk → live transcription, gated on RECORD_AUDIO. The recognized
     // utterance is appended to the composer draft on release.
@@ -134,7 +147,7 @@ fun RootScreen(
                         ui = drawerUi,
                         onSelectSession = { id ->
                             drawerUi.selectSession(id)
-                            viewModel.openSession(MockData.session(id))
+                            chatViewModel.openSession(MockData.session(id))
                             closeDrawer()
                         },
                         onOpenSettings = {
@@ -149,9 +162,9 @@ fun RootScreen(
             Box(modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
                 ChatScreen(
                     state = state,
-                    onSend = viewModel::send,
-                    onNewChat = viewModel::newChat,
-                    onSelectModel = viewModel::selectModel,
+                    onSend = chatViewModel::send,
+                    onNewChat = chatViewModel::newChat,
+                    onSelectModel = chatViewModel::selectModel,
                     isDark = isDark,
                     onToggleTheme = onToggleTheme,
                     onOpenDrawer = { scope.launch { drawerState.open() } },

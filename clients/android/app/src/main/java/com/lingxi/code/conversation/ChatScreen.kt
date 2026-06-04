@@ -124,6 +124,7 @@ fun ChatScreen(
                 onShare = onShare,
                 modifier = Modifier.weight(1f),
             )
+            state.statusLine?.let { StatusRow(text = it) }
             Composer(
                 text = draft,
                 onTextChange = onDraftChange,
@@ -264,6 +265,28 @@ private fun EmptyState() {
             modifier = Modifier.widthIn(max = 260.dp),
         )
     }
+}
+
+/**
+ * A dim, single-line status row above the composer — surfaces engine tool
+ * activity ("调用工具 …") and errors ("错误：…"). The Android analog of the iOS
+ * `ConversationModel.statusLine`. Hidden when [ChatState.statusLine] is `null`.
+ */
+@Composable
+private fun StatusRow(text: String) {
+    val t = LingXiTheme.palette
+    Text(
+        text = text,
+        color = t.text4,
+        fontSize = 12.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .testTag(UiTags.CHAT_STATUS)
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 4.dp),
+    )
 }
 
 /** The pulsing three-dot row shown while the assistant reply streams. */

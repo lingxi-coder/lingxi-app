@@ -52,6 +52,12 @@ private const val TAG = "VoiceController"
  * are the exact objects the engine bridges onto `traits::SpeechToText` /
  * `traits::TextToSpeech`, so the speech tool runs on-device.
  *
+ * [onEvent] is the single sink for every inbound engine [ClientEvent]: the
+ * caller (the conversation source) owns the registered listener so the chat
+ * surface streams the REAL turn loop. It defaults to a `Log.d` trace so callers
+ * that only need the device-capability wiring (e.g. the voice path) still build
+ * a working handle without re-implementing a listener.
+ *
  * Returns `null` when the engine cannot be built — on a JVM/unit host the
  * `buildAndroidEngine` export returns `PlatformUnavailable`, and a missing
  * cdylib throws on class init; either way the chat shell stays usable.
@@ -61,6 +67,9 @@ fun buildVoiceEngine(
     apiBase: String = "",
     apiKey: String = "",
     model: String = "",
+    onEvent: suspend (ClientEvent) -> Unit = { event ->
+        Log.d(TAG, "engine event: ${event::class.simpleName}")
+    },
 ): MobileEngineHandle? {
     val appContext = context.applicationContext
     val stt = AndroidSttAdapter(SystemSpeechRecognizerStt(appContext))
@@ -90,11 +99,10 @@ fun buildVoiceEngine(
     val clipboard = AndroidClipboardAdapter()
     val listener = object : AndroidEventListener {
         override suspend fun onEvent(event: ClientEvent) {
-            // Minimal sink: the chat surface still streams through the mock
-            // ConversationSource for now (T3.3 wires the audio path, not the full
-            // event loop). Logging proves the listener bridge is live without
-            // blocking the engine turn loop.
-            Log.d(TAG, "engine event: ${event::class.simpleName}")
+            // Single sink: forward every inbound engine event to the caller's
+            // [onEvent]. EngineConversationSource passes a sink that pushes into
+            // its SharedFlow, so the chat surface streams the REAL turn loop.
+            onEvent(event)
         }
     }
     return try {

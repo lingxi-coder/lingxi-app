@@ -26,6 +26,11 @@ data class ChatState(
     val streaming: Boolean = false,
     /** The model selected in the composer chip. */
     val model: ModelOption,
+    /**
+     * A transient, user-visible status line (tool activity, engine errors).
+     * `null` hides the row. Mirrors the iOS `ConversationModel.statusLine`.
+     */
+    val statusLine: String? = null,
 )
 
 /**
@@ -48,26 +53,37 @@ class ChatViewModel(
     )
     val state: StateFlow<ChatState> = _state.asStateFlow()
 
+    /**
+     * Index into [ChatState.messages] of the assistant message currently being
+     * streamed (deltas append into it). `null` between turns / before the first
+     * delta of a turn. Mirrors the iOS `EngineConversationSource.streamingIndex`.
+     */
+    private var streamingIndex: Int? = null
+
     /** Switch to another session: reset to the default mock conversation. */
     fun openSession(ref: SessionRef) {
+        streamingIndex = null
         _state.update {
             it.copy(
                 session = ref,
                 messages = source.initialMessages(),
                 isNew = false,
                 streaming = false,
+                statusLine = null,
             )
         }
     }
 
     /** Start a fresh, empty chat (top-bar "edit" / new-chat button). */
     fun newChat() {
+        streamingIndex = null
         _state.update {
             it.copy(
                 session = SessionRef(id = "new", title = "新对话"),
                 messages = emptyList(),
                 isNew = true,
                 streaming = false,
+                statusLine = null,
             )
         }
     }
@@ -86,22 +102,62 @@ class ChatViewModel(
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
 
+        streamingIndex = null
         _state.update {
             it.copy(
                 isNew = false,
+                statusLine = null,
                 messages = it.messages + Message(role = Role.User, text = trimmed),
             )
         }
 
         viewModelScope.launch {
-            source.submit(trimmed).collect { event ->
-                when (event) {
-                    is ReplyEvent.Thinking -> _state.update { it.copy(streaming = true) }
-                    is ReplyEvent.Delta -> Unit // reserved for the real engine stream
-                    is ReplyEvent.Completed -> _state.update {
-                        it.copy(streaming = false, messages = it.messages + event.message)
-                    }
+            source.submit(trimmed).collect { event -> reduce(event) }
+        }
+    }
+
+    /**
+     * Reduce one [ReplyEvent] into [ChatState]. Extracted from [send] so it is
+     * unit-testable with a fake source (no engine). Mirrors the iOS
+     * `EngineConversationSource.apply(_:)` switch.
+     */
+    internal fun reduce(event: ReplyEvent) {
+        when (event) {
+            is ReplyEvent.Thinking -> _state.update { it.copy(streaming = true) }
+
+            is ReplyEvent.Delta -> _state.update { s ->
+                val i = streamingIndex
+                if (i != null && s.messages.indices.contains(i)) {
+                    // Append into the in-flight assistant message.
+                    val updated = s.messages.toMutableList()
+                    val prev = updated[i]
+                    updated[i] = prev.copy(text = prev.text + event.text)
+                    s.copy(streaming = true, messages = updated)
+                } else {
+                    // First delta of the turn: open a new assistant message.
+                    val opened = s.messages + Message(role = Role.Ai, text = event.text)
+                    streamingIndex = opened.size - 1
+                    s.copy(streaming = true, messages = opened)
                 }
+            }
+
+            is ReplyEvent.ToolActivity -> _state.update { it.copy(statusLine = event.label) }
+
+            is ReplyEvent.Error -> {
+                streamingIndex = null
+                _state.update { it.copy(streaming = false, statusLine = "错误：${event.message}") }
+            }
+
+            is ReplyEvent.Completed -> {
+                streamingIndex = null
+                _state.update {
+                    it.copy(streaming = false, messages = it.messages + event.message)
+                }
+            }
+
+            is ReplyEvent.End -> {
+                streamingIndex = null
+                _state.update { it.copy(streaming = false) }
             }
         }
     }

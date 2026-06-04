@@ -20,6 +20,9 @@ object UiTags {
     /** A message bubble's share affordance that surfaces the native share chooser. */
     const val MESSAGE_SHARE = "tag.messageShare"
 
+    /** The conversation's transient status row (engine tool activity / errors). */
+    const val CHAT_STATUS = "tag.chatStatus"
+
     /** Prefix for the drawer section tabs; suffixed with the [DrawerSection] key. */
     const val DRAWER_TAB_PREFIX = "tag.drawerTab."
 

@@ -8,8 +8,10 @@ import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.model.EngineModelState
+import com.lingxi.code.model.EngineSessionState
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.MockData
+import com.lingxi.code.model.SessionCatalog
 import com.lingxi.code.secure.SecureKeyStore
 import com.lingxi.code.secure.resolveEngineCredentials
 import com.lingxi.code.voice.buildVoiceEngine
@@ -107,6 +109,42 @@ interface ConversationSource {
      * mock keeps its local selection).
      */
     suspend fun setModel(id: String) {}
+
+    /**
+     * The engine's REAL resumable-session catalog — the SEPARATE, out-of-band
+     * session-state path, the exact sibling of [modelState]. `SessionList` (the
+     * reply to `ListSessions`) is NOT part of a text turn, so it flows here (a
+     * [StateFlow]) instead of through [submit]'s per-turn [ReplyEvent] stream.
+     * Empty for the mock (the drawer then keeps showing its [MockData] session
+     * list); the engine populates it after the `ListSessions` submitted at build
+     * time replies. The UI observes this to render real history; an empty state
+     * means "mock mode / no catalog yet".
+     */
+    val sessionState: StateFlow<EngineSessionState>
+        get() = MutableStateFlow(EngineSessionState()).asStateFlow()
+
+    /**
+     * Ask the engine to (re)report its resumable-session catalog, submitting
+     * `ClientCommand.ListSessions`. The reply (`SessionList`) updates
+     * [sessionState] out-of-band. Called when the drawer opens so the list is
+     * fresh. A no-op for sources with no engine (the mock keeps [MockData]).
+     */
+    suspend fun refreshSessions() {}
+
+    /**
+     * Resume the engine session named by the REAL wire [uuid], submitting
+     * `ClientCommand.ResumeSession`. The engine confirms with `SessionResumed`;
+     * the transcript then streams from the resumed session. A no-op for sources
+     * with no engine (the mock keeps its local selection).
+     */
+    suspend fun resumeSession(uuid: String) {}
+
+    /**
+     * Start a fresh engine session, submitting `ClientCommand.NewSession`. The
+     * engine confirms with `SessionStarted`; the UI resets its transcript on
+     * that event. A no-op for sources with no engine (the mock).
+     */
+    suspend fun newSession() {}
 }
 
 /**
@@ -126,6 +164,43 @@ fun reduceModelEvent(prev: EngineModelState, event: ClientEvent): EngineModelSta
     when (event) {
         is ClientEvent.ModelList -> EngineModelState(available = event.models, active = event.current)
         is ClientEvent.ModelChanged -> prev.copy(active = event.model)
+        else -> prev
+    }
+
+/**
+ * PURE reducer for the out-of-band SESSION events — the exact sibling of
+ * [reduceModelEvent]. Folds one inbound engine [ClientEvent] into the prior
+ * [EngineSessionState], or returns `prev` unchanged for every event that isn't a
+ * session-catalog event.
+ *
+ *  - `SessionList` → replace the catalog with the engine's real rows, mapping
+ *                    each wire `SessionRowDto` to a UI [SessionRow] (title +
+ *                    message count + humanized relative time) via
+ *                    [SessionCatalog.rowFrom].
+ *  - anything else → unchanged (`#[non_exhaustive]`, so an `else` is required).
+ *
+ * `SessionStarted` / `SessionResumed` / `SessionEnded` are lifecycle events the
+ * ViewModel acts on (transcript reset / title swap), NOT catalog mutations, so
+ * they are intentionally ignored here. [nowEpochSeconds] is injected so the
+ * relative-time bucketing is deterministic in unit tests.
+ */
+fun reduceSessionEvent(
+    prev: EngineSessionState,
+    event: ClientEvent,
+    nowEpochSeconds: Long = System.currentTimeMillis() / 1000L,
+): EngineSessionState =
+    when (event) {
+        is ClientEvent.SessionList -> EngineSessionState(
+            rows = event.sessions.map { dto ->
+                SessionCatalog.rowFrom(
+                    uuid = dto.uuid,
+                    title = dto.title,
+                    messageCount = dto.messageCount.toInt(),
+                    modifiedRfc3339 = dto.modifiedRfc3339,
+                    nowEpochSeconds = nowEpochSeconds,
+                )
+            },
+        )
         else -> prev
     }
 
@@ -252,6 +327,7 @@ class EngineConversationSource private constructor(
     private val events: MutableSharedFlow<ClientEvent>,
     private val permissions: MutableStateFlow<PermissionPromptState?>,
     private val models: MutableStateFlow<EngineModelState>,
+    private val sessions: MutableStateFlow<EngineSessionState>,
 ) : ConversationSource {
 
     /** A fresh engine session starts empty (the engine streams the transcript). */
@@ -263,6 +339,44 @@ class EngineConversationSource private constructor(
      * (see [create]). The picker observes this; [setModel] confirms a pick.
      */
     override val modelState: StateFlow<EngineModelState> = models.asStateFlow()
+
+    /**
+     * The engine's REAL resumable-session catalog, driven OUT-OF-BAND by the
+     * listener folding `SessionList` through [reduceSessionEvent] (see [create]).
+     * The drawer observes this to render real history; [resumeSession] /
+     * [newSession] act on a pick.
+     */
+    override val sessionState: StateFlow<EngineSessionState> = sessions.asStateFlow()
+
+    override suspend fun refreshSessions() {
+        try {
+            handle.submit(ClientCommand.ListSessions(limit = null))
+        } catch (_: Throwable) {
+            // A ListSessions that can't be delivered leaves the catalog as-is;
+            // the drawer keeps whatever it last rendered (mock list if empty).
+        }
+    }
+
+    override suspend fun resumeSession(uuid: String) {
+        if (uuid.isBlank()) return
+        try {
+            handle.submit(ClientCommand.ResumeSession(sessionId = uuid, cwd = null))
+        } catch (_: Throwable) {
+            // A ResumeSession that can't be delivered leaves the active session
+            // unchanged; the engine never emits SessionResumed, so the UI keeps
+            // whatever it locally selected (no optimistic transcript swap).
+        }
+    }
+
+    override suspend fun newSession() {
+        try {
+            handle.submit(ClientCommand.NewSession(cwd = null, model = null))
+        } catch (_: Throwable) {
+            // A NewSession that can't be delivered leaves the current session in
+            // place; the engine never emits SessionStarted, so the UI keeps its
+            // transcript (the local reset still ran for snappiness — see ViewModel).
+        }
+    }
 
     override suspend fun setModel(id: String) {
         if (id.isBlank()) return
@@ -390,6 +504,13 @@ class EngineConversationSource private constructor(
             // Starts empty → the UI shows MockData.models until the `ListModels`
             // submitted after build replies with the real catalog.
             val models = MutableStateFlow(EngineModelState())
+            // The engine's REAL resumable-session catalog (sibling of `models`).
+            // The listener below folds every inbound `SessionList` into this
+            // StateFlow via the pure `reduceSessionEvent`, so the drawer is driven
+            // by real history out-of-band from the per-turn stream. Starts empty →
+            // the drawer shows the MockData session list until the `ListSessions`
+            // submitted after build replies with the real catalog.
+            val sessions = MutableStateFlow(EngineSessionState())
             // Credentials: the encrypted-at-rest SecureKeyStore FIRST (the shipped
             // app's source of truth — SHIP-BLOCKER #1), falling back to the process
             // environment as a dev override. A shipped mobile app has no process
@@ -415,11 +536,14 @@ class EngineConversationSource private constructor(
                 // persist a model, so a fresh install always uses the real default.
                 model = creds.model,
                 onEvent = { event ->
-                    // The OUT-OF-BAND model-state path: fold model events into the
-                    // StateFlow the picker observes, BEFORE forwarding to the
-                    // per-turn stream. `reduceModelEvent` is a no-op for non-model
-                    // events, so every event still reaches `events` unchanged.
+                    // The OUT-OF-BAND state paths: fold model + session catalog
+                    // events into the StateFlows the picker / drawer observe,
+                    // BEFORE forwarding to the per-turn stream. Both reducers are
+                    // no-ops for unrelated events, so every event still reaches
+                    // `events` unchanged (lifecycle events like SessionStarted ride
+                    // the per-turn stream; the ViewModel acts on them there).
                     models.value = reduceModelEvent(models.value, event)
+                    sessions.value = reduceSessionEvent(sessions.value, event)
                     events.emit(event)
                 },
                 onPermission = { request -> permissions.value = permissionRequestToPrompt(request) },
@@ -436,8 +560,17 @@ class EngineConversationSource private constructor(
                 } catch (_: Throwable) {
                     // benign: no catalog → picker keeps MockData.models
                 }
+                // Same out-of-band priming for the session catalog: the reply
+                // (`SessionList`) flows back through the listener into `sessions`,
+                // populating the drawer with real history. A failed ListSessions
+                // just leaves the catalog empty (drawer shows MockData).
+                try {
+                    handle.submit(ClientCommand.ListSessions(limit = null))
+                } catch (_: Throwable) {
+                    // benign: no catalog → drawer keeps MockData session list
+                }
             }
-            return EngineConversationSource(handle, events, permissions, models)
+            return EngineConversationSource(handle, events, permissions, models, sessions)
         }
     }
 }

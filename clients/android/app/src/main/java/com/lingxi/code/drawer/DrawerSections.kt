@@ -49,6 +49,7 @@ import com.lingxi.code.model.Chat
 import com.lingxi.code.model.Cron
 import com.lingxi.code.model.Project
 import com.lingxi.code.model.ProjectSession
+import com.lingxi.code.model.SessionRow
 import com.lingxi.code.theme.LingXiTheme
 
 /**
@@ -121,6 +122,77 @@ private fun ChatRow(chat: Chat, active: Boolean, onClick: () -> Unit) {
             )
             Text(
                 text = "${chat.activity} · ${chat.preview}",
+                color = t.text4,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+// MARK: - 对话 (engine sessions) ---------------------------------------------
+
+/**
+ * The 对话 tab rendered from the engine's REAL resumable-session catalog
+ * ([SessionRow]s), replacing [ChatsSection] when the engine has reported a
+ * `SessionList`. One flat, newest-first list (the engine already sorts by mtime
+ * desc) — no MockData grouping headers, since the wire rows carry no group.
+ * Tapping a row resumes that session by its wire uuid.
+ */
+@Composable
+internal fun EngineSessionsSection(
+    sessions: List<SessionRow>,
+    activeSession: String,
+    onSelectSession: (String) -> Unit,
+) {
+    val t = LingXiTheme.palette
+    Column(Modifier.fillMaxWidth()) {
+        sessions.forEach { row ->
+            EngineSessionRow(
+                row = row,
+                active = row.uuid == activeSession,
+                onClick = { onSelectSession(row.uuid) },
+            )
+        }
+        if (sessions.isEmpty()) {
+            // The catalog was reported but the search filtered everything out.
+            Text(
+                text = "无匹配会话",
+                color = t.text4,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .padding(horizontal = 14.dp)
+                    .padding(top = 8.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun EngineSessionRow(row: SessionRow, active: Boolean, onClick: () -> Unit) {
+    val t = LingXiTheme.palette
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 2.dp)
+            .height(IntrinsicSize.Min)
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (active) t.surfaceActive else Color.Transparent)
+            .clickable(onClick = onClick),
+    ) {
+        AccentBar(visible = active, color = t.accent, inset = 12.dp)
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Text(
+                text = row.title,
+                color = if (active) t.text else t.text2,
+                fontSize = 14.sp,
+                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = "${row.relativeTime} · ${row.messageCount} 条",
                 color = t.text4,
                 fontSize = 12.sp,
                 maxLines = 1,

@@ -113,6 +113,67 @@ struct SessionRef: Identifiable, Equatable {
     let title: String
 }
 
+/// One REAL resumable session from the engine — the UI projection of the
+/// protocol `SessionRowDto` (`client-protocol/src/listings.rs`). The engine
+/// enumerates `~/.claude` JSONL sessions and lowers each to a row; the
+/// conversation source maps `SessionRowDto` → this model on the out-of-band
+/// `SessionList` event path (the analog of how `ModelList` rides a separate
+/// state path, NOT a per-turn delta).
+///
+/// `id` is the session UUID (also the `ResumeSession` target). `relativeTime`
+/// is derived from the row's RFC 3339 `modified` so the drawer shows "2 小时前"
+/// rather than a raw timestamp.
+struct EngineSession: Identifiable, Equatable {
+    /// The session UUID — `SessionRowDto.uuid`; the `ResumeSession` target id.
+    let id: String
+    /// The session title (≤ 50 chars), already truncated by the engine.
+    let title: String
+    /// Number of JSONL lines in the session file (`SessionRowDto.message_count`).
+    let messageCount: Int
+    /// A short, relative "time ago" string derived from `modified_rfc3339`.
+    let relativeTime: String
+
+    /// A `SessionRef` for ChatView's title bar (so a resumed session shows its
+    /// real title even though the transcript itself is an engine follow-up).
+    var ref: SessionRef { SessionRef(id: id, title: title) }
+}
+
+/// Formats an RFC 3339 timestamp into a short, relative Chinese "time ago"
+/// string (e.g. "刚刚", "2 小时前", "昨天") for the drawer's session rows. A
+/// parse failure falls back to the raw string so a row is never blank.
+enum RelativeTime {
+    private static let parser: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let parserNoFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    /// `rfc3339` → a short relative label. Unparseable input returns the raw
+    /// string (trimmed) so the row degrades gracefully rather than going blank.
+    static func format(_ rfc3339: String, now: Date = Date()) -> String {
+        let date = parser.date(from: rfc3339) ?? parserNoFraction.date(from: rfc3339)
+        guard let date else {
+            return rfc3339.isEmpty ? "—" : rfc3339
+        }
+        let secs = now.timeIntervalSince(date)
+        if secs < 60 { return "刚刚" }
+        if secs < 3600 { return "\(Int(secs / 60)) 分钟前" }
+        if secs < 86_400 { return "\(Int(secs / 3600)) 小时前" }
+        let days = Int(secs / 86_400)
+        if days == 1 { return "昨天" }
+        if days < 7 { return "\(days) 天前" }
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "zh_CN")
+        fmt.dateFormat = "M月d日"
+        return fmt.string(from: date)
+    }
+}
+
 // MARK: - Mock data ---------------------------------------------------------
 
 enum MockData {

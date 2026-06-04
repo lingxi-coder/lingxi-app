@@ -1329,6 +1329,7 @@ dependencies = [
  "sandbox",
  "secret",
  "serde_json",
+ "session",
  "skill-api",
  "skill-builtin",
  "telemetry",

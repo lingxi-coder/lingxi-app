@@ -26,6 +26,11 @@
          and returns PermissionDenied when not granted. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Connectivity layer: ACCESS_NETWORK_STATE backs the dismissible offline
+         banner driven by ConnectivityManager.NetworkCallback. Read-only — it only
+         observes whether a validated network is available; it never hard-blocks. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />

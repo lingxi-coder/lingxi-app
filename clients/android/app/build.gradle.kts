@@ -83,6 +83,9 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.0")
+    // SavedStateHandle + createSavedStateHandle() — the transcript / draft /
+    // active session survive process death (low-memory kill while backgrounded).
+    implementation("androidx.lifecycle:lifecycle-viewmodel-savedstate:2.9.0")
 
     // Activity + Compose
     implementation("androidx.activity:activity-compose:1.10.1")

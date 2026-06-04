@@ -1,5 +1,6 @@
 package com.lingxi.code.conversation
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lingxi.code.model.EngineModelCatalog
@@ -94,24 +95,103 @@ internal fun classifyError(message: String): ChatErrorKind {
 }
 
 /**
- * Conversation ViewModel. Holds the mock conversation as a [StateFlow] and
- * exposes intent functions ([send], [newChat], [openSession], [selectModel])
- * the composables call. All engine/network concerns sit behind the injected
+ * Minimal, Bundle-safe (string) serialization for the transcript persisted into
+ * [SavedStateHandle], so the conversation survives process death without pulling
+ * in a serialization library or making [Message] `Parcelable`.
+ *
+ * Each [Message] becomes ONE line of `roletagidtext`
+ * (`` is a control char that never appears in user text); a blank `tag`
+ * round-trips back to `null`. The [text] is placed LAST and is the only field
+ * allowed to contain newlines, so the list is stored as an `ArrayList<String>`
+ * (one entry per message) — a primitive the saved-state `Bundle` persists
+ * verbatim across process death. PURE (no Android types) so it is unit-testable
+ * on the plain JVM.
+ */
+internal object TranscriptCodec {
+    private const val FS = '' // field separator (never in user text)
+
+    fun encode(messages: List<Message>): ArrayList<String> =
+        ArrayList(
+            messages.map { m ->
+                // role, tag, id, text — text last (the only newline-bearing field).
+                "${m.role.name}$FS${m.tag.orEmpty()}$FS${m.id}$FS${m.text}"
+            },
+        )
+
+    fun decode(lines: List<String>?): List<Message> {
+        if (lines.isNullOrEmpty()) return emptyList()
+        return lines.mapNotNull { line ->
+            // limit=4 so a text field containing the (improbable) separator or any
+            // newline is preserved intact as the final segment.
+            val parts = line.split(FS, limit = 4)
+            if (parts.size < 4) return@mapNotNull null
+            val role = when (parts[0]) {
+                Role.Ai.name -> Role.Ai
+                Role.User.name -> Role.User
+                else -> return@mapNotNull null
+            }
+            val tag = parts[1].ifEmpty { null }
+            Message(role = role, text = parts[3], tag = tag, id = parts[2])
+        }
+    }
+}
+
+/**
+ * Conversation ViewModel. Holds the conversation as a [StateFlow] and exposes
+ * intent functions ([send], [newChat], [openSession], [selectModel]) the
+ * composables call. All engine/network concerns sit behind the injected
  * [ConversationSource], so swapping in the real UniFFI source later requires no
  * changes here beyond the constructor argument.
+ *
+ * The optional [savedState] persists the live transcript, the composer draft and
+ * the active session id so they survive process death (low-memory kill while the
+ * app is backgrounded). It is keyed by primitive/`ArrayList<String>` values only,
+ * so the saved-state `Bundle` round-trips them without a serialization library.
+ * `null` (the default, and what the reducer unit tests pass) disables persistence
+ * — the ViewModel then behaves exactly as before.
  */
 class ChatViewModel(
     private val source: ConversationSource = MockConversationSource(),
+    private val savedState: SavedStateHandle? = null,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(
-        ChatState(
-            session = MockData.allSessions.first(),
-            messages = source.initialMessages(),
-            model = MockData.models.first(),
-        ),
+        run {
+            // Restore the persisted transcript + session if process death dropped
+            // us; otherwise start from the source's initial transcript. A restored
+            // (possibly empty) transcript wins over `initialMessages()` so a user
+            // who had cleared to a fresh chat doesn't get the mock seed back.
+            val restored: List<Message>? =
+                savedState?.takeIf { it.contains(KEY_TRANSCRIPT) }
+                    ?.let { TranscriptCodec.decode(it.get<ArrayList<String>>(KEY_TRANSCRIPT)) }
+            val sessionId = savedState?.get<String>(KEY_SESSION_ID)
+            val sessionTitle = savedState?.get<String>(KEY_SESSION_TITLE)
+            val session =
+                if (sessionId != null && sessionTitle != null) SessionRef(sessionId, sessionTitle)
+                else MockData.allSessions.first()
+            val isNew = savedState?.get<Boolean>(KEY_IS_NEW) ?: false
+            ChatState(
+                session = session,
+                messages = restored ?: source.initialMessages(),
+                isNew = isNew,
+                model = MockData.models.first(),
+            )
+        },
     )
     val state: StateFlow<ChatState> = _state.asStateFlow()
+
+    /**
+     * The composer draft, persisted into [savedState] so an in-progress (unsent)
+     * message survives process death. Hoisted UI owns the editable draft (see
+     * `RootScreen`); this exposes the restored value + a setter the draft mirrors
+     * into so the saved-state copy stays current.
+     */
+    val restoredDraft: String get() = savedState?.get<String>(KEY_DRAFT) ?: ""
+
+    /** Mirror the live composer draft into saved state (called as the user types). */
+    fun onDraftChanged(draft: String) {
+        savedState?.set(KEY_DRAFT, draft)
+    }
 
     init {
         // Observe the engine's OUT-OF-BAND model state (SHIP-BLOCKER #2): a real
@@ -121,6 +201,22 @@ class ChatViewModel(
         viewModelScope.launch {
             source.modelState.collect { engine -> applyModelState(engine) }
         }
+        // Keep the persisted transcript + session id in lock-step with state, so a
+        // process-death kill at any moment restores the latest committed transcript.
+        if (savedState != null) {
+            viewModelScope.launch {
+                _state.collect { s -> persist(s) }
+            }
+        }
+    }
+
+    /** Write the durable slice of [ChatState] into [savedState] (Bundle-safe values). */
+    private fun persist(s: ChatState) {
+        val sv = savedState ?: return
+        sv[KEY_TRANSCRIPT] = TranscriptCodec.encode(s.messages)
+        sv[KEY_SESSION_ID] = s.session.id
+        sv[KEY_SESSION_TITLE] = s.session.title
+        sv[KEY_IS_NEW] = s.isNew
     }
 
     /**
@@ -150,11 +246,23 @@ class ChatViewModel(
      */
     private var turnJob: Job? = null
 
+    /**
+     * Monotonic turn generation, bumped by EVERY action that abandons the
+     * in-flight turn ([openSession], [newChat], [send], [cancel]). Each collecting
+     * coroutine captures the token live at its launch and stamps it onto every
+     * [reduce] call; [reduce] DROPS any event whose token is stale.
+     *
+     * ORPHANED-TURN FIX: `Job.cancel()` is cooperative — it can't stop a `reduce`
+     * that is already executing on the collector thread when the session switches,
+     * so a late `Delta`/`End` from the old turn could otherwise mutate the NEW
+     * session's transcript. The token closes that race deterministically: a stale
+     * turn's events are ignored even if its coroutine briefly outlives the switch.
+     */
+    private var turnToken: Long = 0L
+
     /** Switch to another session: cancel any in-flight turn and reset state. */
     fun openSession(ref: SessionRef) {
-        turnJob?.cancel()
-        turnJob = null
-        streamingIndex = null
+        abandonInFlightTurn()
         _state.update {
             it.copy(
                 session = ref,
@@ -169,9 +277,7 @@ class ChatViewModel(
 
     /** Start a fresh, empty chat (top-bar "edit" / new-chat button). */
     fun newChat() {
-        turnJob?.cancel()
-        turnJob = null
-        streamingIndex = null
+        abandonInFlightTurn()
         _state.update {
             it.copy(
                 session = SessionRef(id = "new", title = "新对话"),
@@ -182,6 +288,21 @@ class ChatViewModel(
                 error = null,
             )
         }
+    }
+
+    /**
+     * Cancel the in-flight collecting coroutine and reset the per-turn cursors so
+     * NO stale event can mutate the next session's transcript. Bumping [turnToken]
+     * is the deterministic half (events from the old turn are dropped by [reduce]
+     * even if its coroutine hasn't observed cancellation yet); cancelling
+     * [turnJob] is the eager half (stop collecting promptly). Shared by
+     * [openSession] / [newChat].
+     */
+    private fun abandonInFlightTurn() {
+        turnToken++
+        turnJob?.cancel()
+        turnJob = null
+        streamingIndex = null
     }
 
     /**
@@ -212,7 +333,13 @@ class ChatViewModel(
         if (trimmed.isEmpty()) return
         if (_state.value.streaming) return // ignore overlapping submit while streaming
 
+        // A new turn supersedes any prior (e.g. just-cancelled) one — bump the
+        // token so a lingering old coroutine's events are dropped by `reduce`, and
+        // capture this turn's token so its own events are accepted.
+        turnToken++
+        val token = turnToken
         streamingIndex = null
+        savedState?.set(KEY_DRAFT, "") // the draft was just sent — clear the persisted copy
         _state.update {
             it.copy(
                 isNew = false,
@@ -224,7 +351,7 @@ class ChatViewModel(
         }
 
         turnJob = viewModelScope.launch {
-            source.submit(trimmed).collect { event -> reduce(event) }
+            source.submit(trimmed).collect { event -> reduce(event, token) }
         }
     }
 
@@ -237,6 +364,9 @@ class ChatViewModel(
      */
     fun cancel() {
         if (!_state.value.streaming) return
+        // Supersede the turn: a late event arriving after the engine's Cancel
+        // round-trip must not re-open streaming on the now-idle transcript.
+        turnToken++
         val job = turnJob
         turnJob = null
         viewModelScope.launch {
@@ -254,11 +384,33 @@ class ChatViewModel(
     }
 
     /**
+     * Re-send the last user turn (the offline banner's "重试" affordance). Finds
+     * the most recent user message and routes it back through [send] — which
+     * appends a fresh turn rather than mutating history, and is itself guarded
+     * against overlapping submits while streaming. A no-op when there is no prior
+     * user turn or a turn is already in flight.
+     */
+    fun resendLast() {
+        if (_state.value.streaming) return
+        val lastUser = _state.value.messages.lastOrNull { it.role == Role.User } ?: return
+        send(lastUser.text)
+    }
+
+    /**
      * Reduce one [ReplyEvent] into [ChatState]. Extracted from [send] so it is
      * unit-testable with a fake source (no engine). Mirrors the iOS
      * `EngineConversationSource.apply(_:)` switch.
+     *
+     * [token] is the generation of the turn that produced [event] (captured when
+     * its collecting coroutine launched). An event whose token no longer matches
+     * the live [turnToken] is from an ABANDONED turn (session switched / new chat
+     * / cancelled mid-stream) and is DROPPED — this is the orphaned-turn guard
+     * that keeps a stale `Delta`/`End` from mutating the new session's transcript.
+     * Defaults to the live token so direct reducer unit tests (and any in-turn
+     * call) are always treated as current.
      */
-    internal fun reduce(event: ReplyEvent) {
+    internal fun reduce(event: ReplyEvent, token: Long = turnToken) {
+        if (token != turnToken) return // stale turn — its session was abandoned
         when (event) {
             is ReplyEvent.Thinking -> _state.update { it.copy(streaming = true) }
 
@@ -309,5 +461,14 @@ class ChatViewModel(
                 _state.update { it.copy(streaming = false) }
             }
         }
+    }
+
+    private companion object {
+        // SavedStateHandle keys for the durable conversation slice (process death).
+        const val KEY_TRANSCRIPT = "chat.transcript" // ArrayList<String>, see TranscriptCodec
+        const val KEY_DRAFT = "chat.draft" // String — unsent composer text
+        const val KEY_SESSION_ID = "chat.session.id" // String
+        const val KEY_SESSION_TITLE = "chat.session.title" // String
+        const val KEY_IS_NEW = "chat.isNew" // Boolean — empty-state hero vs list
     }
 }

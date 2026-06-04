@@ -128,8 +128,10 @@ fun SettingsHost(
                 // 隐私与安全 (A6)
                 page(SettingsRoutes.PRIVACY) { PrivacyPage() }
 
-                // 智能 — providers (A7) + voice seam
-                page(SettingsRoutes.VOICE) { PlaceholderPage(SettingsTitles.VOICE, "语音 TTS 配置在下一阶段 (A7) 接入。") }
+                // 智能 — providers (A7) + voice TTS editor
+                page(SettingsRoutes.VOICE) {
+                    VoicePage(voice = state.voice, onChange = store::setVoice)
+                }
                 page(SettingsRoutes.PROVIDER_LIST) {
                     val kind = providerKindArg(it)
                     ProviderListPage(
@@ -304,6 +306,7 @@ private fun SettingsTopBar(
                 color = t.text2,
                 stroke = 2.2f,
                 modifier = Modifier.rotate(180f),
+                contentDescription = if (atRoot) "关闭设置" else "返回",
             )
             if (atRoot) {
                 Text("关闭", color = t.text2, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
@@ -340,7 +343,7 @@ private fun SettingsTopBar(
                     .clip(RoundedCornerShape(8.dp))
                     .clickable(onClick = onClose),
             ) {
-                LXIcon(name = LXIconName.X, size = 18.dp, color = t.text3, stroke = 1.8f)
+                LXIcon(name = LXIconName.X, size = 18.dp, color = t.text3, stroke = 1.8f, contentDescription = "关闭设置")
             }
         }
     }

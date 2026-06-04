@@ -11,6 +11,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -21,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -31,6 +33,8 @@ import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.conversation.EngineConversationSource
 import com.lingxi.code.conversation.MockConversationSource
 import com.lingxi.code.conversation.PermissionPromptDialog
+import com.lingxi.code.connectivity.rememberOnlineState
+import com.lingxi.code.connectivity.shouldShowOfflineBanner
 import com.lingxi.code.drawer.DrawerContent
 import com.lingxi.code.drawer.rememberDrawerUiState
 import com.lingxi.code.model.MockData
@@ -78,7 +82,13 @@ fun RootScreen(
         EngineConversationSource.create(context) ?: MockConversationSource()
     }
     val chatViewModel: ChatViewModel = viewModel ?: viewModel(
-        factory = viewModelFactory { initializer { ChatViewModel(source) } },
+        // Pass a SavedStateHandle so the transcript / draft / active session
+        // survive process death (low-memory kill while backgrounded). The handle
+        // is created from the CreationExtras the factory receives, scoped to this
+        // ViewModel — the durable conversation slice round-trips through it.
+        factory = viewModelFactory {
+            initializer { ChatViewModel(source, createSavedStateHandle()) }
+        },
     )
 
     val state by chatViewModel.state.collectAsState()
@@ -98,8 +108,10 @@ fun RootScreen(
 
     // The composer draft is hoisted here so a voice transcription (the
     // hold-to-talk release) can route its recognized text straight into the
-    // input the user is about to send.
-    var draft by remember { mutableStateOf("") }
+    // input the user is about to send. Seeded from the ViewModel's SavedStateHandle
+    // so an unsent draft survives process death; every edit mirrors back into the
+    // handle (see onDraftChange below) and `send` clears it.
+    var draft by remember { mutableStateOf(chatViewModel.restoredDraft) }
 
     // Hold-to-talk → live transcription, gated on RECORD_AUDIO. The recognized
     // utterance is appended to the composer draft on release.
@@ -134,6 +146,17 @@ fun RootScreen(
     // `traits::SharingService` (the device-share analog of how onCameraClick
     // reuses CameraController for both the UI affordance and `tool-camera`).
     val onShare = rememberShare()
+
+    // Connectivity: a dismissible offline banner driven by ConnectivityManager's
+    // NetworkCallback (rememberOnlineState). It only INFORMS — the conversation
+    // is never hard-blocked. `dismissedWhileOffline` hides the banner after the
+    // user dismisses the current offline episode; coming back online resets it
+    // so the next disconnect re-shows it.
+    val isOnline by rememberOnlineState()
+    var dismissedWhileOffline by remember { mutableStateOf(false) }
+    LaunchedEffect(isOnline) {
+        if (isOnline) dismissedWhileOffline = false
+    }
 
     fun closeDrawer() = scope.launch { drawerState.close() }
 
@@ -182,13 +205,23 @@ fun RootScreen(
                         onVoiceHoldRelease()
                     },
                     draft = draft,
-                    onDraftChange = { draft = it },
+                    onDraftChange = {
+                        draft = it
+                        chatViewModel.onDraftChanged(it) // mirror into SavedStateHandle
+                    },
                     onCameraClick = onCameraClick,
                     attachment = attachment,
                     onRemoveAttachment = { attachment = null },
                     onShare = onShare,
                     onStop = chatViewModel::cancel,
                     onDismissError = chatViewModel::dismissError,
+                    showOfflineBanner = shouldShowOfflineBanner(isOnline, dismissedWhileOffline),
+                    onDismissOffline = { dismissedWhileOffline = true },
+                    // "重试" re-sends the last user turn through the same path the
+                    // composer uses; the ConnectivityManager callback keeps the
+                    // banner's visibility honest (it auto-clears once a validated
+                    // network returns, regardless of this tap).
+                    onRetryOffline = { chatViewModel.resendLast() },
                 )
             }
         }

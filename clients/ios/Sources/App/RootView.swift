@@ -4,10 +4,22 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var app: AppState
     @Environment(\.theme) private var t
+    // Observe the app lifecycle so a turn left mid-stream when the user
+    // backgrounds the app isn't stranded "streaming" forever, and so the active
+    // session / draft are restored on return.
+    @Environment(\.scenePhase) private var scenePhase
 
     @StateObject private var settingsStore = SettingsStore()
     @State private var activeWs = "work"
-    @State private var activeSession = "s1"
+    // The active session id, DERIVED from real data (the first available
+    // session) rather than the literal "s1", and PERSISTED via @AppStorage so a
+    // relaunch / restore lands on the session the user last had open. @AppStorage
+    // writes through immediately, so backgrounding inherently persists it.
+    @AppStorage("activeSession") private var activeSession = MockData.defaultSessionId
+    // The composer draft, hoisted to the root (the iOS analog of Android
+    // RootScreen's `draft`) and PERSISTED so an in-progress, unsent message
+    // survives the app being backgrounded and is restored on return.
+    @AppStorage("composerDraft") private var draft = ""
     @State private var drawerOpen = false
     @State private var settingsOpen = false
     @State private var voiceActive = false
@@ -25,6 +37,7 @@ struct RootView: View {
             ChatView(session: session,
                      openDrawer: { withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { drawerOpen = true } },
                      voiceActive: $voiceActive,
+                     draft: $draft,
                      source: source)
 
             // Drawer overlay
@@ -51,6 +64,29 @@ struct RootView: View {
                 VoiceFlowView(onRelease: { withAnimation(.easeOut(duration: 0.25)) { voiceActive = false } })
                     .zIndex(70)
                     .allowsHitTesting(false)
+            }
+        }
+        // Mid-stream session switch (iOS analog of the Android `openSession` fix):
+        // the Drawer writes `activeSession`; when it actually changes, tell the
+        // source to switch sessions, which cancels any in-flight turn FIRST so a
+        // turn completing after the switch can't land its deltas/notice in the
+        // session we just opened. The new session's title also drives ChatView's
+        // top bar via the recomputed `session`.
+        .onChange(of: activeSession) { _, newId in
+            source.openSession(MockData.session(newId))
+        }
+        // Lifecycle: clear a stuck streaming flag on background (so a turn parked
+        // mid-stream isn't left "streaming" forever) and restore on foreground.
+        // The active session + draft are persisted via @AppStorage, so they are
+        // already durable across the transition; this only manages turn state.
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background:
+                source.handleBackground()
+            case .active:
+                source.handleForeground()
+            default:
+                break
             }
         }
     }

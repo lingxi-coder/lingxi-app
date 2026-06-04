@@ -4,6 +4,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
@@ -41,8 +43,20 @@ fun LXIcon(
     size: Dp = 20.dp,
     color: Color = Color.White,
     stroke: Float = 1.7f,
+    /**
+     * Accessibility label. When non-null the glyph becomes a labeled
+     * a11y node (TalkBack reads it); when null the glyph stays decorative
+     * (the default for icons that sit inside an already-labeled control or
+     * accompany a visible text label). Icon-only buttons pass a label here.
+     */
+    contentDescription: String? = null,
 ) {
-    Canvas(modifier = modifier.size(size)) {
+    val a11y = if (contentDescription != null) {
+        Modifier.clearAndSetSemantics { this.contentDescription = contentDescription }
+    } else {
+        Modifier
+    }
+    Canvas(modifier = modifier.then(a11y).size(size)) {
         val s = this.size.width / 24f // scale from the 24-unit viewBox
         val strokeStyle = Stroke(
             width = stroke * s,

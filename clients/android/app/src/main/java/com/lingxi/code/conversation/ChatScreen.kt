@@ -48,6 +48,7 @@ import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
+import com.lingxi.code.connectivity.OfflineBanner
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.theme.LingXiTheme
 
@@ -88,6 +89,10 @@ fun ChatScreen(
     onShare: (String) -> Unit = {},
     onStop: () -> Unit = {},
     onDismissError: () -> Unit = {},
+    /** True to surface the dismissible offline banner above the composer. */
+    showOfflineBanner: Boolean = false,
+    onDismissOffline: () -> Unit = {},
+    onRetryOffline: (() -> Unit)? = null,
 ) {
     val t = LingXiTheme.palette
     val listState = rememberLazyListState()
@@ -127,6 +132,11 @@ fun ChatScreen(
                 listState = listState,
                 onShare = onShare,
                 modifier = Modifier.weight(1f),
+            )
+            OfflineBanner(
+                visible = showOfflineBanner,
+                onDismiss = onDismissOffline,
+                onRetry = onRetryOffline,
             )
             state.error?.let { ErrorBanner(error = it, onDismiss = onDismissError) }
             state.statusLine?.let { StatusRow(text = it) }
@@ -174,6 +184,7 @@ private fun TopBar(
             color = t.text,
             size = 20.dp,
             onClick = onOpenDrawer,
+            contentDescription = "打开侧栏",
             modifier = Modifier.testTag(UiTags.OPEN_DRAWER),
         )
         Spacer(Modifier.weight(1f))
@@ -191,8 +202,15 @@ private fun TopBar(
             color = t.text2,
             size = 18.dp,
             onClick = onToggleTheme,
+            contentDescription = if (isDark) "切换浅色主题" else "切换深色主题",
         )
-        IconButton(name = LXIconName.Edit, color = t.accent, size = 18.dp, onClick = onNewChat)
+        IconButton(
+            name = LXIconName.Edit,
+            color = t.accent,
+            size = 18.dp,
+            onClick = onNewChat,
+            contentDescription = "新建对话",
+        )
     }
 }
 
@@ -203,13 +221,14 @@ private fun IconButton(
     color: Color,
     size: Dp,
     onClick: () -> Unit,
+    contentDescription: String? = null,
     modifier: Modifier = Modifier,
 ) {
     Box(
         modifier = modifier.size(38.dp).clip(CircleShape).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        LXIcon(name = name, size = size, color = color, stroke = 1.8f)
+        LXIcon(name = name, size = size, color = color, stroke = 1.8f, contentDescription = contentDescription)
     }
 }
 
@@ -359,7 +378,7 @@ private fun ErrorBanner(error: ChatError, onDismiss: () -> Unit) {
                 .testTag(UiTags.CHAT_ERROR_DISMISS),
             contentAlignment = Alignment.Center,
         ) {
-            LXIcon(name = LXIconName.X, size = 14.dp, color = t.text3, stroke = 2f)
+            LXIcon(name = LXIconName.X, size = 14.dp, color = t.text3, stroke = 2f, contentDescription = "关闭错误提示")
         }
     }
 }

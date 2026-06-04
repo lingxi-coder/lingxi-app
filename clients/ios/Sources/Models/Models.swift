@@ -187,4 +187,9 @@ enum MockData {
     static func session(_ id: String) -> SessionRef {
         allSessions.first(where: { $0.id == id }) ?? allSessions[0]
     }
+
+    /// The default active session id — the FIRST available session, derived from
+    /// real data rather than a hardcoded literal. RootView seeds `activeSession`
+    /// with this (and falls back to it via `session(_:)` for any unknown id).
+    static var defaultSessionId: String { allSessions.first?.id ?? "" }
 }

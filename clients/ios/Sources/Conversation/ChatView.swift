@@ -19,10 +19,11 @@ struct ChatView: View {
 
     @State private var dotPulse = false
 
-    // Composer draft, HOISTED here (the iOS analog of Android RootScreen's
-    // `draft`) so a hold-to-talk transcription can route its recognized text
-    // straight into the input the user is about to send.
-    @State private var draft = ""
+    // Composer draft, HOISTED up to RootView (the iOS analog of Android
+    // RootScreen's `draft`) so a hold-to-talk transcription can route its
+    // recognized text into the input AND so the root can persist it across the
+    // app being backgrounded. ChatView binds to it; it no longer owns it.
+    @Binding var draft: String
     // The captured-photo attachment, hoisted like the draft: the composer's
     // camera affordance drives an on-device capture and surfaces the JPEG here.
     @State private var attachment: ComposerAttachment? = nil
@@ -32,13 +33,21 @@ struct ChatView: View {
     private let voiceCapture = VoiceCapture()
     private let cameraCapture = CameraCapture()
 
+    // Connectivity: an offline banner (driven by NWPathMonitor) surfaced in the
+    // chat view so the user is told up front when the network is unavailable —
+    // a send still needs the network to reach the LLM API even though the engine
+    // runs on-device. Purely informational + a retry; it never gates sending.
+    @StateObject private var connectivity = ConnectivityMonitor()
+
     init(session: SessionRef,
          openDrawer: @escaping () -> Void,
          voiceActive: Binding<Bool>,
+         draft: Binding<String>,
          source: any ConversationSource) {
         self.session = session
         self.openDrawer = openDrawer
         self._voiceActive = voiceActive
+        self._draft = draft
         self.source = source
         self.convo = source.model
     }
@@ -55,6 +64,15 @@ struct ChatView: View {
             VStack(spacing: 0) {
                 topBar
                 WorkflowBar()
+                // Offline banner: shown only while the device is offline. Sits
+                // between the workflow bar and the transcript so it's visible
+                // without obscuring the conversation; the retry re-warms the
+                // engine source (rebuilds the handle / re-lists models).
+                if connectivity.isOffline {
+                    OfflineBanner(onRetry: retryConnection)
+                        .padding(.horizontal, 14).padding(.bottom, 8)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
                 messageList
                 Composer(model: $convo.model,
                          // SHIP-BLOCKER #2: drive the picker off the engine's real
@@ -103,6 +121,7 @@ struct ChatView: View {
                     if voiceActive { withAnimation(.easeOut(duration: 0.25)) { voiceActive = false } }
                 }
         )
+        .animation(.easeOut(duration: 0.25), value: connectivity.isOffline)
         .onAppear {
             withAnimation(.easeInOut(duration: 1.2).repeatForever()) { dotPulse = true }
             // SHIP-BLOCKER #2: build the engine eagerly so its real model catalog
@@ -114,24 +133,27 @@ struct ChatView: View {
     // MARK: top bar
     private var topBar: some View {
         HStack(spacing: 4) {
-            iconButton(.menu, color: t.text, action: openDrawer)
+            iconButton(.menu, color: t.text, label: "打开抽屉", action: openDrawer)
             Spacer()
             Text(convo.isNew ? "新对话" : session.title)
-                .font(.system(size: 14.5, weight: .semibold))
+                .font(.scaledSystem(14.5, weight: .semibold, relativeTo: .subheadline))
                 .foregroundColor(t.text)
                 .lineLimit(1)
             Spacer()
-            iconButton(app.isDark ? .sun : .moon, size: 18, color: t.text2) { app.toggleTheme() }
-            iconButton(.edit, size: 18, color: t.accent) { newChat() }
+            iconButton(app.isDark ? .sun : .moon, size: 18, color: t.text2,
+                       label: app.isDark ? "切换到浅色主题" : "切换到深色主题") { app.toggleTheme() }
+            iconButton(.edit, size: 18, color: t.accent, label: "新建对话") { newChat() }
         }
         .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 10)
     }
 
-    private func iconButton(_ name: LXIconName, size: CGFloat = 20, color: Color, action: @escaping () -> Void) -> some View {
+    private func iconButton(_ name: LXIconName, size: CGFloat = 20, color: Color,
+                            label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             LXIcon(name: name, size: size, color: color, stroke: 1.8)
                 .frame(width: 38, height: 38)
         }
+        .accessibilityLabel(label)
     }
 
     // MARK: message list
@@ -170,10 +192,12 @@ struct ChatView: View {
                 .frame(width: 52, height: 52)
                 .overlay(LXIcon(name: .sparkle, size: 26, color: .white, stroke: 1.8))
                 .padding(.bottom, 18)
-            Text("开启新对话").font(.system(size: 21, weight: .semibold)).foregroundColor(t.text)
+            Text("开启新对话")
+                .font(.scaledSystem(21, weight: .semibold, relativeTo: .title2))
+                .foregroundColor(t.text)
                 .padding(.bottom, 7)
             Text("随便说点什么，或按住屏幕进入语音心流模式。")
-                .font(.system(size: 14)).foregroundColor(t.text4)
+                .font(.scaledSystem(14, relativeTo: .subheadline)).foregroundColor(t.text4)
                 .multilineTextAlignment(.center).lineSpacing(14 * 0.5)
                 .frame(maxWidth: 260)
         }
@@ -290,6 +314,12 @@ struct ChatView: View {
 
     /// Share an assistant reply's text via the native share sheet.
     private func shareMessage(_ text: String) { ShareCapture.share(text: text) }
+
+    /// Retry from the offline banner: re-warm the engine source so a recovered
+    /// connection rebuilds the handle / re-lists models. `NWPathMonitor` clears
+    /// the banner on its own once the path is satisfied again; this gives the
+    /// user an explicit nudge instead of waiting for the next send to fail.
+    private func retryConnection() { source.warmUp() }
 }
 
 // MARK: - Error banner (PR-4 item 4)
@@ -323,6 +353,7 @@ private struct ErrorBanner: View {
                     .contentShape(RoundedRectangle(cornerRadius: 8))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("关闭错误提示")
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
         .background(t.danger.opacity(0.10))

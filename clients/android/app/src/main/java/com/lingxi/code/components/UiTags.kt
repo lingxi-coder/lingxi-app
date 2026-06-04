@@ -47,6 +47,18 @@ object UiTags {
     /** The permission prompt's Deny action. */
     const val PERMISSION_DENY = "tag.permissionDeny"
 
+    /** The drawer's editable search field that filters the section lists. */
+    const val DRAWER_SEARCH = "tag.drawerSearch"
+
+    /** The dismissible offline banner shown in the chat scaffold when offline. */
+    const val OFFLINE_BANNER = "tag.offlineBanner"
+
+    /** The offline banner's retry affordance. */
+    const val OFFLINE_RETRY = "tag.offlineRetry"
+
+    /** The offline banner's dismiss (×) affordance. */
+    const val OFFLINE_DISMISS = "tag.offlineDismiss"
+
     /** Prefix for the drawer section tabs; suffixed with the [DrawerSection] key. */
     const val DRAWER_TAB_PREFIX = "tag.drawerTab."
 

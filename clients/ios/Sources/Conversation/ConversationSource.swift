@@ -127,6 +127,17 @@ final class ConversationModel: ObservableObject {
     @Published var isNew: Bool = false
     /// The currently selected model chip.
     @Published var model: ModelOption
+    // ── Out-of-band model state (SHIP-BLOCKER #2) ──────────────────────────────
+    // `ListModels` / `ModelChanged` are NOT part of a text turn, so they ride a
+    // SEPARATE model-state path here (the @Published analog of Android's model
+    // StateFlow) updated by the listener — never the per-turn delta flow. The
+    // picker is driven by `availableModels` (real engine ids); `activeModelId` is
+    // whatever the engine reports. Empty until the first `ModelList` lands, in
+    // which case the UI falls back to the mock catalog (engine unavailable).
+    /// The real model ids the engine accepts (`ModelList.models`). Empty ⇒ mock.
+    @Published var availableModels: [String] = []
+    /// The active model id the engine reports (`ModelList.current` / `ModelChanged.model`).
+    @Published var activeModelId: String = ""
     /// A transient, dim status line (tool activity / connection state). NOT used
     /// for errors anymore — those go to `error` (the persistent banner).
     @Published var statusLine: String? = nil
@@ -170,6 +181,15 @@ protocol ConversationSource: AnyObject {
     func cancel()
     /// Dismiss the persistent error banner (PR-4 item 4).
     func dismissError()
+    /// Switch the active model (SHIP-BLOCKER #2). The engine source submits
+    /// `ClientCommand.setModel(id)` with a REAL model id and reflects the
+    /// confirming `ModelChanged`; the mock just swaps the chip. `id` is a real
+    /// engine model id when `model.availableModels` is populated.
+    func setModel(_ id: String)
+    /// Optionally build the engine eagerly so the real model catalog
+    /// (`ModelList`) populates before the first send (SHIP-BLOCKER #2). A no-op on
+    /// the mock; idempotent on the engine.
+    func warmUp()
     #if canImport(engine_mobileFFI)
         /// Resolve a parked permission request (SHIP-BLOCKER #3): submit
         /// `ApprovePermission{requestId, response}` and pop the head of the queue.
@@ -178,6 +198,12 @@ protocol ConversationSource: AnyObject {
         /// `DenyPermission{requestId}` and pop the head of the queue.
         func denyPermission(_ requestId: UInt64)
     #endif
+}
+
+/// Default `warmUp` for sources with nothing to pre-build (the mock). The engine
+/// source overrides it to eagerly build the handle + list models.
+extension ConversationSource {
+    func warmUp() {}
 }
 
 #if canImport(engine_mobileFFI)
@@ -212,8 +238,14 @@ enum ConversationSourceFactory {
                 || !(env["ANTHROPIC_API_KEY"] ?? "").isEmpty
             if optedIn {
                 let root = appSandboxRoot()
+                // SHIP-BLOCKER #2: NEVER seed the engine with a branded mock id
+                // ("lx-72b" → Anthropic 400). Use the user's last-picked real model
+                // from the Keychain when set; otherwise pass "" so `buildIosEngine`
+                // falls back to `MobileConfig.default_model` (a real Anthropic wire
+                // id). `fromEnvironment` still lets `LINGXI_MODEL` override for dev.
+                let storedModel = Keychain.get(.model) ?? ""
                 let config = EngineConfig.fromEnvironment(
-                    appSandboxRoot: root, model: MockData.models[0].id)
+                    appSandboxRoot: root, model: storedModel)
                 return EngineConversationSource(config: config)
             }
         #endif
@@ -282,6 +314,15 @@ final class MockConversationSource: ConversationSource {
     }
 
     func dismissError() { model.error = nil }
+
+    /// Mock model switch: no engine, so just swap the chip from the mock catalog.
+    /// The mock never populates `availableModels`, so the picker stays on
+    /// `MockData.models` and this id is a mock id.
+    func setModel(_ id: String) {
+        if let opt = MockData.models.first(where: { $0.id == id }) {
+            model.model = opt
+        }
+    }
 }
 
 // MARK: - Engine source (real, over UniFFI)
@@ -313,10 +354,14 @@ final class MockConversationSource: ConversationSource {
             let base = nonEmpty(env["ANTHROPIC_BASE_URL"])
                 ?? Keychain.get(.apiBase)
                 ?? "https://api.anthropic.com"
+            // Model: env override (dev) > caller-supplied (Keychain) > "" (engine
+            // default). SHIP-BLOCKER #2: an EMPTY result is the intended "let the
+            // engine pick `MobileConfig.default_model`" signal — `build_ios_engine`
+            // only overrides `default_model` when the passed id is non-empty.
             return EngineConfig(
                 apiBase: base,
                 apiKey: key,
-                model: env["LINGXI_MODEL"] ?? model,
+                model: nonEmpty(env["LINGXI_MODEL"]) ?? model,
                 appSandboxRoot: appSandboxRoot
             )
         }
@@ -357,8 +402,15 @@ final class MockConversationSource: ConversationSource {
 
         init(config: EngineConfig) {
             self.config = config
+            // Seed the chip from the mock catalog only as a placeholder until the
+            // engine's `ModelList` lands (SHIP-BLOCKER #2). The REAL active model is
+            // `activeModelId`, set below from the (possibly empty) configured id and
+            // then authoritatively replaced by `ModelList.current` / `ModelChanged`.
             self.model = ConversationModel(model: MockData.models.first(where: { $0.id == config.model })
                 ?? MockData.models[0])
+            // Out-of-band model state: the configured id (empty ⇒ engine default,
+            // filled by the first `ModelList`). Never a branded mock id here.
+            self.model.activeModelId = config.model
         }
 
         // MARK: ConversationSource
@@ -453,7 +505,27 @@ final class MockConversationSource: ConversationSource {
                 clipboard: ClipboardImpl(),
                 permissions: permissionSink)
             self.handle = handle
+            // SHIP-BLOCKER #2: ask the engine for its real model catalog the moment
+            // the handle exists. The reply (`ModelList`) arrives out-of-band on the
+            // listener and populates `availableModels` / `activeModelId` — driving
+            // the picker off real ids, not the branded mock catalog. This is
+            // out-of-band model state, NOT part of any text turn.
+            try await handle.submit(command: .listModels)
             return handle
+        }
+
+        /// Build the handle eagerly (independent of the first turn) so the model
+        /// catalog populates as soon as the source is shown — the picker shouldn't
+        /// have to wait for a sent message to learn the real ids. A build failure is
+        /// surfaced as a host error banner; a later `send` will retry via the same
+        /// `ensureHandle`.
+        func warmUp() {
+            guard handle == nil else { return }
+            Task { [weak self] in
+                guard let self else { return }
+                do { _ = try await self.ensureHandle() }
+                catch { await self.fail(.host, "\(error)") }
+            }
         }
 
         // MARK: inbound-event application (called on the main actor)
@@ -502,10 +574,16 @@ final class MockConversationSource: ConversationSource {
                 // PR-4 item 4: a terminal error is a persistent, kind-aware banner.
                 fail(Self.kind(from: kind), message)
 
+            case let .modelList(models, current):
+                // Out-of-band model catalog (SHIP-BLOCKER #2). Drive the picker off
+                // these REAL engine ids and adopt the engine's reported active model
+                // — not a branded mock default.
+                model.availableModels = models
+                applyActiveModel(current)
+
             case let .modelChanged(model: newModel):
-                if let opt = MockData.models.first(where: { $0.id == newModel || $0.name == newModel }) {
-                    model.model = opt
-                }
+                // The engine confirmed a switch (1:1 with a successful `SetModel`).
+                applyActiveModel(newModel)
 
             default:
                 // Cost / message-boundary / listing events are not rendered in the
@@ -554,6 +632,43 @@ final class MockConversationSource: ConversationSource {
             // can never be answered now, so drop the prompt rather than leave it
             // stranded.
             model.pendingPermissions = []
+        }
+
+        // MARK: model selection (SHIP-BLOCKER #2)
+
+        /// Adopt the engine's reported active model id. Updates the out-of-band
+        /// `activeModelId`, persists it to the Keychain (so a relaunch resumes this
+        /// real model instead of falling back to the engine default), and keeps the
+        /// friendly chip in sync when the id maps to a known mock entry (a friendly
+        /// label is optional — the picker itself is driven by `availableModels`).
+        private func applyActiveModel(_ id: String) {
+            guard !id.isEmpty else { return }
+            model.activeModelId = id
+            Keychain.set(.model, id)
+            if let opt = MockData.models.first(where: { $0.id == id || $0.name == id }) {
+                model.model = opt
+            }
+        }
+
+        /// Switch the active model (SHIP-BLOCKER #2): submit `SetModel` with a REAL
+        /// engine id. The engine confirms with `ModelChanged`, which `applyActiveModel`
+        /// adopts + persists. Optimistically reflect the id so the chip updates even
+        /// before the round-trip completes. No-op when the id is already active.
+        func setModel(_ id: String) {
+            guard !id.isEmpty, id != model.activeModelId else { return }
+            model.activeModelId = id
+            if let opt = MockData.models.first(where: { $0.id == id || $0.name == id }) {
+                model.model = opt
+            }
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let handle = try await self.ensureHandle()
+                    try await handle.submit(command: .setModel(model: id))
+                } catch {
+                    await self.fail(.host, "切换模型失败：\(error)")
+                }
+            }
         }
 
         // MARK: permission gating (SHIP-BLOCKER #3)

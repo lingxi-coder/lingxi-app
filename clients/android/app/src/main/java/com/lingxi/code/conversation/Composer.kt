@@ -69,6 +69,8 @@ fun Composer(
     onModelChange: (ModelOption) -> Unit,
     onSend: () -> Unit,
     modifier: Modifier = Modifier,
+    /** The catalog the model chip's dropdown shows — engine ids, or the mock list. */
+    availableModels: List<ModelOption> = MockData.models,
     onMicClick: () -> Unit = {},
     onMicHoldStart: () -> Unit = {},
     onMicHoldRelease: () -> Unit = {},
@@ -150,7 +152,7 @@ fun Composer(
                 ) {
                     LXIcon(name = LXIconName.Paperclip, size = 18.dp, color = t.text3, stroke = 1.8f)
                 }
-                ModelChip(model = model, onModelChange = onModelChange)
+                ModelChip(model = model, models = availableModels, onModelChange = onModelChange)
                 Spacer(Modifier.weight(1f))
                 when {
                     // Streaming: the send action becomes a Stop button that
@@ -267,7 +269,11 @@ private fun IconHit(
  * the active row tinted.
  */
 @Composable
-private fun ModelChip(model: ModelOption, onModelChange: (ModelOption) -> Unit) {
+private fun ModelChip(
+    model: ModelOption,
+    models: List<ModelOption>,
+    onModelChange: (ModelOption) -> Unit,
+) {
     val t = LingXiTheme.palette
     var open by remember { mutableStateOf(false) }
     val chipShape = RoundedCornerShape(8.dp)
@@ -298,7 +304,7 @@ private fun ModelChip(model: ModelOption, onModelChange: (ModelOption) -> Unit) 
             containerColor = t.surface,
             modifier = Modifier.width(220.dp),
         ) {
-            MockData.models.forEach { m ->
+            models.forEach { m ->
                 val active = m.id == model.id
                 Row(
                     verticalAlignment = Alignment.CenterVertically,

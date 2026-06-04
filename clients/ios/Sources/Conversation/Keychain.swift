@@ -23,18 +23,22 @@ import Security
 
 /// App-scoped secure storage for the engine's LLM credentials.
 ///
-/// Two slots, each a separate Keychain item under the same service:
+/// Three slots, each a separate Keychain item under the same service:
 ///   - `apiKey`  — the Anthropic (or compatible) API key.
 ///   - `apiBase` — an optional base URL override (proxy / mirror); blank ⇒ default.
+///   - `model`   — the user's last-picked real model id (SHIP-BLOCKER #2). Blank /
+///                 unset ⇒ the engine starts on `MobileConfig.default_model`; never
+///                 a branded mock id. Persisted so a relaunch resumes that model.
 ///
 /// All accessors are static + synchronous: Keychain calls are fast and the call
 /// sites (settings writes, engine config build) are already off the render path.
 enum Keychain {
-    /// The two stored credentials. The account string is the Keychain item's
+    /// The stored slots. The account string is the Keychain item's
     /// `kSecAttrAccount`, stable across versions.
     enum Item: String {
         case apiKey = "anthropic.apiKey"
         case apiBase = "anthropic.apiBase"
+        case model = "anthropic.model"
     }
 
     /// App-scoped service id. Prefer the running bundle identifier so the secret

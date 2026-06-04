@@ -7,12 +7,16 @@ import com.lingxi.code.bindings.ErrorKindDto
 import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.PermissionResponseDto
+import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.MockData
 import com.lingxi.code.secure.SecureKeyStore
 import com.lingxi.code.secure.resolveEngineCredentials
 import com.lingxi.code.voice.buildVoiceEngine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -84,7 +88,46 @@ interface ConversationSource {
      * for sources with no engine (the mock).
      */
     suspend fun denyPermission(requestId: ULong) {}
+
+    /**
+     * The engine's REAL model catalog + active id — the SEPARATE, out-of-band
+     * model-state path (SHIP-BLOCKER #2). `ModelList` / `ModelChanged` are NOT
+     * part of a text turn, so they flow here (a [StateFlow]) instead of through
+     * [submit]'s per-turn [ReplyEvent] stream. Empty for the mock (the UI then
+     * keeps showing [MockData.models]); the engine populates it after the
+     * `ListModels` submitted at build time replies.
+     */
+    val modelState: StateFlow<EngineModelState>
+        get() = MutableStateFlow(EngineModelState()).asStateFlow()
+
+    /**
+     * Switch the engine's active model to the REAL wire `id`, submitting
+     * `ClientCommand.SetModel`. The engine confirms with `ModelChanged`, which
+     * updates [modelState]'s active id. A no-op for sources with no engine (the
+     * mock keeps its local selection).
+     */
+    suspend fun setModel(id: String) {}
 }
+
+/**
+ * PURE reducer for the out-of-band model events. Folds one inbound engine
+ * [ClientEvent] into the prior [EngineModelState], or returns `prev` unchanged
+ * for every event that isn't a model event. Mirrors [clientEventToReply] in
+ * being a free function with NO engine / Android dependency so the
+ * `ModelList` / `ModelChanged` handling is exhaustively unit-testable on the JVM
+ * (no `buildAndroidEngine`).
+ *
+ *  - `ModelList`    → replace the catalog with the engine's real ids; adopt
+ *                     `current` as the active id.
+ *  - `ModelChanged` → keep the catalog, swap the active id to the new model.
+ *  - anything else  → unchanged (`#[non_exhaustive]`, so an `else` is required).
+ */
+fun reduceModelEvent(prev: EngineModelState, event: ClientEvent): EngineModelState =
+    when (event) {
+        is ClientEvent.ModelList -> EngineModelState(available = event.models, active = event.current)
+        is ClientEvent.ModelChanged -> prev.copy(active = event.model)
+        else -> prev
+    }
 
 /**
  * Streamed assistant-reply events — the UI-facing analog of engine
@@ -208,10 +251,29 @@ class EngineConversationSource private constructor(
     private val handle: MobileEngineHandle,
     private val events: MutableSharedFlow<ClientEvent>,
     private val permissions: MutableStateFlow<PermissionPromptState?>,
+    private val models: MutableStateFlow<EngineModelState>,
 ) : ConversationSource {
 
     /** A fresh engine session starts empty (the engine streams the transcript). */
     override fun initialMessages(): List<Message> = emptyList()
+
+    /**
+     * The engine's REAL model catalog + active id, driven OUT-OF-BAND by the
+     * listener folding `ModelList` / `ModelChanged` through [reduceModelEvent]
+     * (see [create]). The picker observes this; [setModel] confirms a pick.
+     */
+    override val modelState: StateFlow<EngineModelState> = models.asStateFlow()
+
+    override suspend fun setModel(id: String) {
+        if (id.isBlank()) return
+        try {
+            handle.submit(ClientCommand.SetModel(model = id))
+        } catch (_: Throwable) {
+            // A SetModel that can't be delivered leaves the active id as-is; the
+            // engine never emits ModelChanged, so the picker reverts to whatever
+            // the engine last reported (no optimistic local mutation).
+        }
+    }
 
     /**
      * The head parked permission request, driven by the engine's outbound
@@ -321,6 +383,13 @@ class EngineConversationSource private constructor(
             // StateFlow (latest wins) is fine: only one request is parked per gate
             // at a time in the foundation (no concurrent worker permissions yet).
             val permissions = MutableStateFlow<PermissionPromptState?>(null)
+            // The engine's REAL model catalog + active id (SHIP-BLOCKER #2). The
+            // listener below folds every inbound `ModelList` / `ModelChanged`
+            // into this StateFlow via the pure `reduceModelEvent`, so the picker
+            // is driven by real wire ids out-of-band from the per-turn stream.
+            // Starts empty → the UI shows MockData.models until the `ListModels`
+            // submitted after build replies with the real catalog.
+            val models = MutableStateFlow(EngineModelState())
             // Credentials: the encrypted-at-rest SecureKeyStore FIRST (the shipped
             // app's source of truth — SHIP-BLOCKER #1), falling back to the process
             // environment as a dev override. A shipped mobile app has no process
@@ -340,11 +409,35 @@ class EngineConversationSource private constructor(
                 context = context,
                 apiBase = creds.apiBase,
                 apiKey = creds.apiKey,
+                // Empty `creds.model` → the engine starts on MobileConfig.default_model
+                // (a real Anthropic wire id), never a branded `lx-*` mock id. A
+                // dev-set LINGXI_MODEL still overrides; the secure store doesn't
+                // persist a model, so a fresh install always uses the real default.
                 model = creds.model,
-                onEvent = { event -> events.emit(event) },
+                onEvent = { event ->
+                    // The OUT-OF-BAND model-state path: fold model events into the
+                    // StateFlow the picker observes, BEFORE forwarding to the
+                    // per-turn stream. `reduceModelEvent` is a no-op for non-model
+                    // events, so every event still reaches `events` unchanged.
+                    models.value = reduceModelEvent(models.value, event)
+                    events.emit(event)
+                },
                 onPermission = { request -> permissions.value = permissionRequestToPrompt(request) },
             ) ?: return null
-            return EngineConversationSource(handle, events, permissions)
+            // Ask the engine for its REAL catalog now that the handle exists; the
+            // reply (`ModelList`) flows back through the listener above into the
+            // `models` StateFlow, populating the picker with real wire ids.
+            // `handle.submit` is suspend, so fire it off the calling thread — a
+            // failed ListModels just leaves the catalog empty (UI shows the mock
+            // list); it never blocks building the source.
+            CoroutineScope(Dispatchers.Default).launch {
+                try {
+                    handle.submit(ClientCommand.ListModels)
+                } catch (_: Throwable) {
+                    // benign: no catalog → picker keeps MockData.models
+                }
+            }
+            return EngineConversationSource(handle, events, permissions, models)
         }
     }
 }

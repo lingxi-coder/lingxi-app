@@ -57,6 +57,12 @@ struct ChatView: View {
                 WorkflowBar()
                 messageList
                 Composer(model: $convo.model,
+                         // SHIP-BLOCKER #2: drive the picker off the engine's real
+                         // model catalog + active id (out-of-band model state). On
+                         // pick, the source submits `SetModel(id)` with a real id.
+                         availableModels: convo.availableModels,
+                         activeModelId: convo.activeModelId,
+                         onSelectModel: { source.setModel($0) },
                          draft: $draft,
                          onSend: send,
                          streaming: convo.streaming,
@@ -97,7 +103,12 @@ struct ChatView: View {
                     if voiceActive { withAnimation(.easeOut(duration: 0.25)) { voiceActive = false } }
                 }
         )
-        .onAppear { withAnimation(.easeInOut(duration: 1.2).repeatForever()) { dotPulse = true } }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.2).repeatForever()) { dotPulse = true }
+            // SHIP-BLOCKER #2: build the engine eagerly so its real model catalog
+            // (`ModelList`) populates the picker before the first send. No-op on the mock.
+            source.warmUp()
+        }
     }
 
     // MARK: top bar

@@ -99,6 +99,38 @@ import XCTest
         func onRequest(request: PermissionRequest) async {}
     }
 
+    /// A test listener that fulfils a distinct expectation for each model event
+    /// kind (SHIP-BLOCKER #2). Used to prove the OUT-OF-BAND model-state path:
+    /// `ListModels`→`ModelList` and `SetModel`→`ModelChanged` flow over the same
+    /// UniFFI listener WITHOUT a text turn. Thread-safe (Rust delivers off-runtime).
+    final class ModelListener: IosEventListener, @unchecked Sendable {
+        private let lock = NSLock()
+        private(set) var modelList: (models: [String], current: String)?
+        private(set) var changedModel: String?
+        let gotList: XCTestExpectation
+        let gotChanged: XCTestExpectation
+
+        init(gotList: XCTestExpectation, gotChanged: XCTestExpectation) {
+            self.gotList = gotList
+            self.gotChanged = gotChanged
+            gotList.assertForOverFulfill = false
+            gotChanged.assertForOverFulfill = false
+        }
+
+        func onEvent(event: ClientEvent) async {
+            switch event {
+            case let .modelList(models, current):
+                lock.lock(); modelList = (models, current); lock.unlock()
+                gotList.fulfill()
+            case let .modelChanged(model):
+                lock.lock(); changedModel = model; lock.unlock()
+                gotChanged.fulfill()
+            default:
+                break
+            }
+        }
+    }
+
     final class EngineRoundtripTests: XCTestCase {
 
         /// End-to-end, KEYLESS:  build the engine, submit a prompt, and assert a
@@ -200,6 +232,75 @@ import XCTest
             for (_, message) in errorEvents {
                 assertRealHttpAttempt(message)
             }
+        }
+
+        /// SHIP-BLOCKER #2, KEYLESS: prove the out-of-band model-state path end to
+        /// end — `ListModels`→`ModelList` (real ids, NOT branded mock ids) and
+        /// `SetModel`→`ModelChanged` — over the same UniFFI listener, with NO text
+        /// turn and NO key. The engine's `list_available_models` returns a real
+        /// fallback catalog keyless, so this is hermetic.
+        func testModelCatalogAndSwitchRoundTripKeyless() async throws {
+            let gotList = expectation(description: "engine delivers a ModelList over the listener")
+            let gotChanged = expectation(description: "engine delivers a ModelChanged over the listener")
+            let listener = ModelListener(gotList: gotList, gotChanged: gotChanged)
+
+            let sandbox = FileManager.default.temporaryDirectory
+                .appendingPathComponent("LingxiCodeTest-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: sandbox) }
+
+            // SHIP-BLOCKER #2: build with an EMPTY model id — the engine must start
+            // on `MobileConfig.default_model` (a real Anthropic wire id), never a
+            // branded mock id. `build_ios_engine` only overrides default_model when
+            // the passed id is non-empty, so "" exercises exactly that path.
+            let handle: MobileEngineHandle
+            do {
+                handle = try buildIosEngine(
+                    apiBase: ProcessInfo.processInfo.environment["ANTHROPIC_BASE_URL"]
+                        ?? "https://api.anthropic.com",
+                    apiKey: ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] ?? "",
+                    model: "",
+                    appSandboxRoot: sandbox.path,
+                    listener: listener,
+                    stt: SttImpl(),
+                    tts: TtsImpl(),
+                    camera: CameraImpl(),
+                    share: ShareImpl(),
+                    voice: VoiceImpl(),
+                    notifications: NotificationImpl(),
+                    clipboard: ClipboardImpl(),
+                    permissions: NoopPermissionSink())
+            } catch {
+                XCTFail("buildIosEngine must succeed keyless with empty model, got: \(error)")
+                return
+            }
+
+            // OUT-OF-BAND: ask for the catalog (not a text turn).
+            try await handle.submit(command: .listModels)
+            await fulfillment(of: [gotList], timeout: 30)
+
+            guard let list = listener.modelList else {
+                XCTFail("no ModelList received"); return
+            }
+            XCTAssertFalse(list.models.isEmpty, "ModelList must carry real model ids")
+            // The reported active model (engine default) and the catalog must NOT be
+            // the branded mock ids the apps used to hardcode (lx-72b, …). Sending a
+            // branded id is precisely the SHIP-BLOCKER #2 bug.
+            let mockIds: Set<String> = ["lx-72b", "lx-72b-r", "lx-32b", "lx-code"]
+            XCTAssertFalse(mockIds.contains(list.current),
+                           "active model must be a REAL engine id, not a branded mock id: \(list.current)")
+            for id in list.models {
+                XCTAssertFalse(mockIds.contains(id),
+                               "catalog must contain only REAL engine ids, found mock id: \(id)")
+            }
+
+            // SetModel→ModelChanged: pick a different real id from the catalog and
+            // confirm the engine echoes it back (a turn would then send THIS id).
+            let target = list.models.first(where: { $0 != list.current }) ?? list.models[0]
+            try await handle.submit(command: .setModel(model: target))
+            await fulfillment(of: [gotChanged], timeout: 30)
+            XCTAssertEqual(listener.changedModel, target,
+                           "ModelChanged must echo the SetModel id (the real id a turn will send)")
         }
 
         /// Assert a terminal-error `message` is a REAL transport outcome, not the

@@ -4,6 +4,14 @@ import SwiftUI
 struct Composer: View {
     @Environment(\.theme) private var t
     @Binding var model: ModelOption
+    // SHIP-BLOCKER #2: the picker is driven by the ENGINE's real model catalog when
+    // available. `availableModels` are real engine ids (empty ⇒ engine unavailable,
+    // fall back to the mock catalog); `activeModelId` is whatever the engine reports;
+    // `onSelectModel` submits `SetModel(id)` with a real id. The `model` binding is
+    // kept only as the friendly chip label (and the mock-fallback selection).
+    var availableModels: [String] = []
+    var activeModelId: String = ""
+    var onSelectModel: (String) -> Void = { _ in }
     /// Draft text, HOISTED so the device capabilities can inject into it:
     /// hold-to-talk STT fills it with the recognized utterance (mirrors Android
     /// `onTranscript` → draft). The caller owns it (see ChatView).
@@ -118,11 +126,54 @@ struct Composer: View {
             }
     }
 
+    /// One picker row, abstracting over a real engine id and a mock catalog entry
+    /// so the menu renders identically in both modes (SHIP-BLOCKER #2).
+    private struct ModelRow: Identifiable {
+        let id: String        // the real engine id (or mock id) submitted on pick
+        let name: String      // display label (friendly when known, else the id)
+        let desc: String?     // optional subtitle (mock only)
+        let color: Color      // dot color
+    }
+
+    /// The rows to render: the engine's real catalog when present, else the mock
+    /// catalog (engine unavailable / not yet listed). `ModelDisplay` maps a raw
+    /// engine id to a friendly label + a stable color (friendly display optional).
+    private var modelRows: [ModelRow] {
+        if !availableModels.isEmpty {
+            return availableModels.map { id in
+                ModelRow(id: id,
+                         name: ModelDisplay.name(for: id),
+                         desc: nil,
+                         color: ModelDisplay.color(for: id))
+            }
+        }
+        return MockData.models.map {
+            ModelRow(id: $0.id, name: $0.name, desc: $0.desc, color: $0.color)
+        }
+    }
+
+    /// The id considered "active" for the chip + highlight: the engine's reported
+    /// id when driving, else the mock chip's id.
+    private var selectedModelId: String {
+        availableModels.isEmpty ? model.id : activeModelId
+    }
+
+    /// The chip's short label: the friendly name of the active engine id when
+    /// driving, else the mock chip's short name.
+    private var chipLabel: String {
+        availableModels.isEmpty ? model.shortName : ModelDisplay.shortName(for: activeModelId)
+    }
+
+    /// The chip's dot color: derived from the active engine id when driving.
+    private var chipColor: Color {
+        availableModels.isEmpty ? model.color : ModelDisplay.color(for: activeModelId)
+    }
+
     private var modelChip: some View {
         Button { withAnimation(.easeOut(duration: 0.15)) { modelOpen.toggle() } } label: {
             HStack(spacing: 5) {
-                Circle().fill(model.color).frame(width: 6, height: 6)
-                Text(model.shortName).font(.system(size: 12, weight: .medium))
+                Circle().fill(chipColor).frame(width: 6, height: 6)
+                Text(chipLabel).font(.system(size: 12, weight: .medium))
                 LXIcon(name: .chevron, size: 11, color: t.text4, stroke: 2)
             }
             .foregroundColor(t.text2)
@@ -134,20 +185,23 @@ struct Composer: View {
 
     private var modelMenu: some View {
         VStack(spacing: 0) {
-            ForEach(MockData.models) { m in
+            ForEach(modelRows) { m in
                 Button {
-                    model = m; withAnimation(.easeOut(duration: 0.15)) { modelOpen = false }
+                    onSelectModel(m.id)
+                    withAnimation(.easeOut(duration: 0.15)) { modelOpen = false }
                 } label: {
                     HStack(spacing: 10) {
                         Circle().fill(m.color).frame(width: 8, height: 8)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(m.name).font(.system(size: 13, weight: .medium)).foregroundColor(t.text)
-                            Text(m.desc).font(.system(size: 11)).foregroundColor(t.text3)
+                            if let desc = m.desc {
+                                Text(desc).font(.system(size: 11)).foregroundColor(t.text3)
+                            }
                         }
                         Spacer()
                     }
                     .padding(.horizontal, 10).padding(.vertical, 8)
-                    .background(m.id == model.id ? t.accent.tint(0.15) : .clear)
+                    .background(m.id == selectedModelId ? t.accent.tint(0.15) : .clear)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
             }

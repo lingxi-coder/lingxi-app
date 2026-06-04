@@ -1,0 +1,243 @@
+# Client apps CI — gates the LingXi-Next CLIENT applications on every PR and on
+# push to `main`. This is the app-layer counterpart to ci.yml (which already
+# covers the pure-Rust engine, including the `cross-compile-mobile` Rust check):
+# nothing here re-runs cargo checks — these jobs build/test the gradle, xcode,
+# and node client surfaces and run the instrumented / simulator engine
+# round-trip tests against a freshly built on-device engine.
+#
+# CAVEAT (no remote yet): at authoring time this repo has NO git remote, so
+# GitHub Actions cannot actually RUN this workflow. It is a validated workflow
+# DEFINITION (actionlint-clean + YAML-parseable); it begins executing only once
+# the repo is pushed to GitHub. The triggers below mirror ci.yml so that, once
+# pushed, these client gates fire on every pull_request and on push to main.
+#
+# All engine round-trip tests are KEYLESS: with no ANTHROPIC_API_KEY the engine
+# is expected to terminate in an Error / TurnEnded event, which is exactly what
+# the round-trip tests assert. No secret is required by any job here.
+
+name: clients
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# One in-flight run per ref; a new push to the same PR/branch cancels the old
+# one (matches the cancel-in-progress convention requested for this file).
+concurrency:
+  group: clients-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. node-clients — shared TS SDK + Electron typecheck (ubuntu).
+  #    The Electron app depends on the shared SDK via `file:../shared`, so the
+  #    shared package MUST be built (tsc emit) before electron's typecheck can
+  #    resolve `@lingxi/bridge-client`. Both steps therefore live in one job and
+  #    run sequentially: shared first, electron second.
+  # ---------------------------------------------------------------------------
+  node-clients:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          # Both client packages keep their own lockfile; cache keys off both so
+          # a change in either invalidates only the relevant restore.
+          cache-dependency-path: |
+            clients/shared/package-lock.json
+            clients/electron/package-lock.json
+
+      # shared SDK: install, build (tsc emit — produces the dist/ that electron
+      # links against), then run its node:test suite.
+      - name: shared — install, build, test
+        working-directory: clients/shared
+        run: |
+          npm ci
+          npm run build
+          npm test
+
+      # electron: install, then typecheck. REQUIRES the shared build above
+      # (file:../shared dependency); npm ci re-links the local file: dep.
+      - name: electron — install, typecheck
+        working-directory: clients/electron
+        run: |
+          npm ci
+          npm run typecheck
+
+  # ---------------------------------------------------------------------------
+  # 2. android — JNI cross-compile + Gradle unit tests + APK/test-APK assembly.
+  #    Builds the gitignored jniLibs + UniFFI Kotlin bindings via build-jni.sh
+  #    (cargo-ndk against an installed NDK), then runs the Gradle build/test
+  #    targets. compileSdk 35 / minSdk 26 / JDK 17 per the app module.
+  # ---------------------------------------------------------------------------
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Rust toolchain pinned to the workspace MSRV, with the two Android ABIs
+      # the AAR cdylib is cross-compiled for (arm64-v8a + x86_64).
+      - uses: dtolnay/rust-toolchain@1.82.0
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      # cargo-ndk drives the per-ABI cross-compile inside build-jni.sh.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Installs the Android SDK + command-line tools and exports
+      # ANDROID_HOME / ANDROID_SDK_ROOT for later steps.
+      - uses: android-actions/setup-android@v3
+
+      # Install a concrete NDK (>= the one the project expects) and export
+      # ANDROID_NDK_HOME so build-jni.sh uses it directly instead of guessing
+      # the newest installed NDK.
+      - name: Install Android NDK
+        run: |
+          sdkmanager --install "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      # Gradle build cache + dependency cache (also provisions Gradle itself).
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Build the gitignored integration artifacts (libandroid_aar.so per ABI +
+      # Kotlin UniFFI bindings) that the Gradle project links against.
+      - name: Build JNI libs + UniFFI bindings
+        run: bash clients/android/scripts/build-jni.sh
+
+      # Unit tests + debug APK + androidTest APK. The androidTest APK is what
+      # the emulator job (job 3) installs and runs.
+      - name: Gradle — unit tests + assemble debug + assemble test APK
+        working-directory: clients/android
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+
+  # ---------------------------------------------------------------------------
+  # 3. android-emulator — the instrumented engine round-trip on an emulator.
+  #    Runs EngineRoundtripTest.kt on a booted AVD via the emulator-runner
+  #    action. emulator-runner jobs are FRESH (no artifacts from job 2), so this
+  #    job repeats the full rust + cargo-ndk + java + ndk setup AND re-runs
+  #    build-jni.sh so jniLibs exist before connectedDebugAndroidTest builds the
+  #    real on-device engine. KEYLESS: the round-trip asserts a terminal
+  #    Error/TurnEnded, the expected no-API-key outcome.
+  # ---------------------------------------------------------------------------
+  android-emulator:
+    runs-on: ubuntu-latest
+    needs: android
+    steps:
+      - uses: actions/checkout@v4
+
+      # KVM hardware acceleration for the x86_64 emulator — the standard
+      # ubuntu-runner permissions step (the runner user is not in `kvm`).
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Same engine-build prerequisites as job 2 (fresh job → set up again).
+      - uses: dtolnay/rust-toolchain@1.82.0
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager --install "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Rebuild jniLibs in THIS job — emulator-runner runs in the same job, but
+      # this job never ran job 2's build steps, so the artifacts must be made
+      # here too before the on-device test compiles the engine.
+      - name: Build JNI libs + UniFFI bindings
+        run: bash clients/android/scripts/build-jni.sh
+
+      # api-level 30 (>= minSdk 26), x86_64 + google_apis for KVM-accelerated
+      # boot. force-avd-creation + the headless/no-window emulator options are
+      # the recommended CI flags for a deterministic cold boot.
+      - name: Instrumented round-trip on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          force-avd-creation: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          working-directory: clients/android
+          script: ./gradlew :app:connectedDebugAndroidTest
+
+  # ---------------------------------------------------------------------------
+  # 4. ios — XCFramework build + Xcode simulator engine round-trip (macOS).
+  #    build-xcframework.sh cross-compiles the 3 iOS rust slices + UniFFI Swift
+  #    bindings; xcodegen materializes the .xcodeproj; xcodebuild runs the
+  #    EngineRoundtripTests on a simulator. KEYLESS, same terminal-error
+  #    assertion as the Android round-trip. Needs a macOS runner (Xcode + iOS
+  #    simulators only exist there).
+  # ---------------------------------------------------------------------------
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The three iOS rust targets the XCFramework is assembled from: device,
+      # Apple-silicon simulator, and Intel simulator.
+      - uses: dtolnay/rust-toolchain@1.82.0
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      # xcodegen materializes clients/ios/project.yml into an .xcodeproj.
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      # Build the gitignored Generated/ Swift bindings + the
+      # LingxiCodeFFI.xcframework that the Xcode project links against.
+      - name: Build XCFramework + Swift bindings
+        run: bash clients/ios/scripts/build-xcframework.sh
+
+      - name: Generate Xcode project
+        working-directory: clients/ios
+        run: xcodegen generate
+
+      # Pick a concrete, currently-available iPhone simulator by name rather
+      # than hardcoding one Xcode-version-specific device — `simctl list` on the
+      # runner is the source of truth, so this survives runner image bumps.
+      # `jq` is preinstalled on GitHub macOS runners.
+      - name: Resolve a booted-capable simulator
+        id: sim
+        run: |
+          # First available iPhone simulator name across all runtimes.
+          name="$(xcrun simctl list devices available --json \
+            | jq -r '[.devices[][] | select(.isAvailable and (.name | startswith("iPhone"))) | .name] | first')"
+          echo "Using simulator: ${name}"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      # Run EngineRoundtripTests on the simulator under the LingxiCode scheme.
+      - name: xcodebuild test (simulator round-trip)
+        working-directory: clients/ios
+        run: |
+          xcodebuild test \
+            -scheme LingxiCode \
+            -destination "platform=iOS Simulator,name=${{ steps.sim.outputs.name }},OS=latest"

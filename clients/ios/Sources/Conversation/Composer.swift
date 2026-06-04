@@ -10,6 +10,11 @@ struct Composer: View {
     @Binding var draft: String
     let onSend: (String) -> Void
 
+    // PR-4 items 1 & 2: while a turn is in flight the send affordance becomes a
+    // Stop button (interrupt the turn), and we never start an overlapping turn.
+    var streaming: Bool = false
+    var onStop: () -> Void = {}
+
     // Camera affordance (the + / attach button) — mirrors Android `onCameraClick`
     // + the captured-photo `attachment` chip surfaced for review before sending.
     var onCameraClick: () -> Void = {}
@@ -51,7 +56,18 @@ struct Composer: View {
                     }
                     modelChip
                     Spacer()
-                    if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    if streaming {
+                        // PR-4 item 2: the Stop button replaces Send while a turn
+                        // is in flight — tapping it cancels the in-flight turn.
+                        Button(action: onStop) {
+                            LXIcon(name: .stop, size: 14, color: .white)
+                                .frame(width: 34, height: 34)
+                                .background(t.danger)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                                .shadow(color: t.danger.tint(0.40), radius: 6, y: 4)
+                        }
+                        .accessibilityLabel("停止")
+                    } else if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         // Mic: press-and-hold to enter voice flow; release runs STT.
                         Button(action: {}) {
                             LXIcon(name: .mic, size: 18, color: holding ? t.accent : t.text2, stroke: 1.8)

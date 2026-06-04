@@ -59,6 +59,8 @@ struct ChatView: View {
                 Composer(model: $convo.model,
                          draft: $draft,
                          onSend: send,
+                         streaming: convo.streaming,
+                         onStop: stop,
                          onCameraClick: captureFromCamera,
                          attachment: attachment,
                          onRemoveAttachment: { attachment = nil },
@@ -118,14 +120,22 @@ struct ChatView: View {
                         MessageBubble(message: m, onShare: shareMessage)
                     }
                     if convo.streaming { streamingRow }
+                    // PR-4 item 3: a non-clean turn outcome (MaxTurns / Cancelled),
+                    // surfaced distinctly from a normal end.
+                    if let notice = convo.notice { noticeRow(notice) }
                     if let status = convo.statusLine { statusRow(status) }
                     if let cap = captureStatus { statusRow(cap) }
+                    // PR-4 item 4: a persistent, dismissible, kind-aware error
+                    // banner (not the old transient dim line).
+                    if let err = convo.error { ErrorBanner(error: err, onDismiss: dismissError) }
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
             }
             .onChange(of: convo.messages.count) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             .onChange(of: convo.streaming) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
+            .onChange(of: convo.error) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
+            .onChange(of: convo.notice) { _, _ in withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
         }
     }
 
@@ -162,7 +172,7 @@ struct ChatView: View {
         .padding(.bottom, 26)
     }
 
-    // A dim, single-line status row (engine errors / tool activity).
+    // A dim, single-line status row (tool activity / capture affordances).
     private func statusRow(_ status: String) -> some View {
         HStack {
             Text(status)
@@ -173,10 +183,33 @@ struct ChatView: View {
         .padding(.bottom, 18)
     }
 
+    // A turn-outcome notice (MaxTurns / Cancelled) — a centered, dim chip that
+    // distinguishes a non-clean end from a normal one (PR-4 item 3).
+    private func noticeRow(_ notice: TurnNotice) -> some View {
+        HStack {
+            Spacer()
+            Text(notice.text)
+                .font(.system(size: 12))
+                .foregroundColor(t.text3)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(t.surface)
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(t.border, lineWidth: 0.5))
+            Spacer()
+        }
+        .padding(.bottom, 18)
+    }
+
     // MARK: actions
     private func newChat() { source.startNewConversation() }
 
     private func send(_ txt: String) { source.send(txt) }
+
+    // PR-4 item 2: interrupt the in-flight turn.
+    private func stop() { source.cancel() }
+
+    // PR-4 item 4: dismiss the persistent error banner.
+    private func dismissError() { source.dismissError() }
 
     // MARK: capability affordances (mirror Android RootScreen)
 
@@ -233,4 +266,44 @@ struct ChatView: View {
 
     /// Share an assistant reply's text via the native share sheet.
     private func shareMessage(_ text: String) { ShareCapture.share(text: text) }
+}
+
+// MARK: - Error banner (PR-4 item 4)
+
+/// A persistent, dismissible, kind-aware error surface. Unlike the dim
+/// `statusLine`, it stays until the user taps × — and its label/tint are driven
+/// by the error `kind` (transport vs. server vs. internal …) so the user can
+/// tell a network hiccup from a protocol fault.
+private struct ErrorBanner: View {
+    @Environment(\.theme) private var t
+    let error: ConversationError
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            LXIcon(name: .warning, size: 16, color: t.danger, stroke: 1.8)
+                .frame(width: 20, height: 20)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(error.kind.label)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(t.text)
+                Text(error.message)
+                    .font(.system(size: 12.5))
+                    .foregroundColor(t.text2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button(action: onDismiss) {
+                LXIcon(name: .x, size: 14, color: t.text3, stroke: 2)
+                    .frame(width: 28, height: 28)
+                    .contentShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(t.danger.opacity(0.10))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.danger.opacity(0.40), lineWidth: 0.5))
+        .padding(.bottom, 18)
+    }
 }

@@ -3,6 +3,7 @@ package com.lingxi.code.conversation
 import android.content.Context
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
+import com.lingxi.code.bindings.ErrorKindDto
 import com.lingxi.code.bindings.MobileEngineHandle
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.MockData
@@ -12,6 +13,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.transformWhile
 
 /**
@@ -43,6 +45,14 @@ interface ConversationSource {
      * [ReplyEvent.End] or [ReplyEvent.Error].
      */
     fun submit(text: String): Flow<ReplyEvent>
+
+    /**
+     * Cancel the in-flight turn (the composer's Stop affordance). Fires the
+     * engine's `Cancel` command so the streaming turn terminates promptly; the
+     * resulting `TurnEnded` flows back through [submit]'s stream as a normal
+     * [ReplyEvent.End]. A no-op for sources with no cancellable turn (the mock).
+     */
+    suspend fun cancel() {}
 }
 
 /**
@@ -96,6 +106,34 @@ fun clientEventToReply(event: ClientEvent): ReplyEvent? = when (event) {
 }
 
 /**
+ * PURE flow transform: turn an inbound [ClientEvent] stream into the UI-facing
+ * [ReplyEvent] stream the [ChatViewModel] reduces. Prepends a leading
+ * [ReplyEvent.Thinking] (so the dots row shows the instant a turn is armed,
+ * before the first engine event), maps each event through [clientEventToReply]
+ * (dropping ignored ones), and COMPLETES after the first terminal reply
+ * ([ReplyEvent.End] / [ReplyEvent.Error]) — emitting a trailing
+ * [ReplyEvent.End] after an `Error` so the ViewModel always sees a clean turn
+ * boundary.
+ *
+ * Extracted from [EngineConversationSource.submit] as a free function with NO
+ * engine / Android dependency so the streaming/ordering contract is exercised on
+ * the plain JVM (see `EngineReplyStreamTest`) — including the subscribe-before-
+ * submit guarantee, which a flow-level test can prove without a native engine.
+ */
+fun mapReplyStream(events: Flow<ClientEvent>): Flow<ReplyEvent> = flow {
+    emit(ReplyEvent.Thinking)
+    emitAll(
+        events.transformWhile { event ->
+            val reply = clientEventToReply(event) ?: return@transformWhile true
+            emit(reply)
+            val terminal = reply is ReplyEvent.End || reply is ReplyEvent.Error
+            if (reply is ReplyEvent.Error) emit(ReplyEvent.End)
+            !terminal // keep collecting until a terminal reply
+        },
+    )
+}
+
+/**
  * The shell's mock source: starts from [MockData.messagesDefault] and answers
  * every turn with the same canned reply after a 1.1s "thinking" beat — matching
  * the iOS `MockConversationSource.send` simulation exactly.
@@ -143,27 +181,45 @@ class EngineConversationSource private constructor(
     /** A fresh engine session starts empty (the engine streams the transcript). */
     override fun initialMessages(): List<Message> = emptyList()
 
-    override fun submit(text: String): Flow<ReplyEvent> = flow {
-        emit(ReplyEvent.Thinking)
-        try {
-            handle.submit(ClientCommand.SendPrompt(text = text, promptMode = null, images = emptyList(), turnId = null))
-        } catch (t: Throwable) {
-            emit(ReplyEvent.Error("引擎错误：${t.message ?: t::class.simpleName}"))
-            emit(ReplyEvent.End)
-            return@flow
-        }
-        // Map the shared engine stream until a terminal reply, then complete.
-        // `transformWhile` emits each mapped reply and stops collecting upstream
-        // once a terminal (End / Error) reply has been forwarded.
-        emitAll(
-            events.transformWhile { event ->
-                val reply = clientEventToReply(event) ?: return@transformWhile true
-                emit(reply)
-                val terminal = reply is ReplyEvent.End || reply is ReplyEvent.Error
-                if (reply is ReplyEvent.Error) emit(ReplyEvent.End)
-                !terminal // keep collecting until a terminal reply
+    override fun submit(text: String): Flow<ReplyEvent> =
+        // Subscribe-before-submit: the returned reply stream maps the shared
+        // engine flow through `mapReplyStream`, but the `SendPrompt` is fired
+        // from `events.onSubscription { … }` — which runs ONLY AFTER this
+        // collector is registered as a subscriber of the SharedFlow. That ordering
+        // closes the race the prior `flow { submit(); emitAll(events…) }` had: a
+        // `TextDelta` emitted by the engine's listener thread in the window between
+        // `submit` returning and the collector subscribing is no longer dropped,
+        // because the collector is already subscribed before the turn is spawned.
+        mapReplyStream(
+            events.onSubscription {
+                try {
+                    handle.submit(
+                        ClientCommand.SendPrompt(
+                            text = text, promptMode = null, images = emptyList(), turnId = null,
+                        ),
+                    )
+                } catch (t: Throwable) {
+                    // Inject the build/submit failure into the same stream the
+                    // collector is already reading, so the mapper terminates it.
+                    emit(
+                        ClientEvent.Error(
+                            kind = ErrorKindDto.TRANSPORT,
+                            message = "引擎错误：${t.message ?: t::class.simpleName}",
+                        ),
+                    )
+                }
             },
         )
+
+    override suspend fun cancel() {
+        // Narrow `Cancel(turnId = null)` cancels the current turn (bindings doc:
+        // "None cancels the current one"). The engine emits `TurnEnded`, which
+        // flows back through the active `submit` stream as `ReplyEvent.End`.
+        try {
+            handle.submit(ClientCommand.Cancel(turnId = null))
+        } catch (_: Throwable) {
+            // A cancel that can't be delivered (no in-flight turn) is benign.
+        }
     }
 
     companion object {

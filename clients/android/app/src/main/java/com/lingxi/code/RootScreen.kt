@@ -182,6 +182,8 @@ fun RootScreen(
                     attachment = attachment,
                     onRemoveAttachment = { attachment = null },
                     onShare = onShare,
+                    onStop = chatViewModel::cancel,
+                    onDismissError = chatViewModel::dismissError,
                 )
             }
         }

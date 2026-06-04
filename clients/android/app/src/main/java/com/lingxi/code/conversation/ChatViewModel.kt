@@ -7,6 +7,7 @@ import com.lingxi.code.model.MockData
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionRef
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -27,11 +28,61 @@ data class ChatState(
     /** The model selected in the composer chip. */
     val model: ModelOption,
     /**
-     * A transient, user-visible status line (tool activity, engine errors).
-     * `null` hides the row. Mirrors the iOS `ConversationModel.statusLine`.
+     * A transient, user-visible status line (tool activity). `null` hides the
+     * row. Mirrors the iOS `ConversationModel.statusLine`. Errors no longer ride
+     * this dim line — they surface in [error] as a persistent banner.
      */
     val statusLine: String? = null,
+    /**
+     * A persistent, dismissible turn error. Unlike [statusLine] (which the next
+     * tool-activity event overwrites and a turn clears), this survives until the
+     * user dismisses it ([ChatViewModel.dismissError]) or starts a new turn —
+     * so a failed reply is never lost to a transient flash. `null` hides the
+     * banner.
+     */
+    val error: ChatError? = null,
+) {
+    /** True while a turn is in flight — gates the composer (Stop vs Send). */
+    val isStreaming: Boolean get() = streaming
+}
+
+/**
+ * A user-facing turn error rendered as the dismissible banner. [message] is the
+ * engine's failure reason; [kind] selects the banner's label/glyph so an auth
+ * failure reads differently from a transport blip (kind-aware, per spec item 4).
+ */
+data class ChatError(
+    val message: String,
+    val kind: ChatErrorKind = ChatErrorKind.GENERIC,
 )
+
+/**
+ * Coarse error classification for the banner. Derived from the engine error
+ * MESSAGE (the reply stream carries a flat string, not the wire `ErrorKindDto`),
+ * so the UI can lead with a kind-appropriate headline.
+ */
+enum class ChatErrorKind {
+    /** Missing / rejected credentials (401 / "api key" / "unauthorized"). */
+    AUTH,
+
+    /** Network / transport blip (timeout, connection reset). */
+    NETWORK,
+
+    /** Anything else. */
+    GENERIC,
+}
+
+/** Classify a raw engine error message into a [ChatErrorKind] for the banner. */
+internal fun classifyError(message: String): ChatErrorKind {
+    val m = message.lowercase()
+    return when {
+        "401" in m || "api key" in m || "apikey" in m || "unauthorized" in m ||
+            "authentication" in m || "未授权" in m || "密钥" in m -> ChatErrorKind.AUTH
+        "timeout" in m || "timed out" in m || "connection" in m || "network" in m ||
+            "transport" in m || "超时" in m || "网络" in m || "连接" in m -> ChatErrorKind.NETWORK
+        else -> ChatErrorKind.GENERIC
+    }
+}
 
 /**
  * Conversation ViewModel. Holds the mock conversation as a [StateFlow] and
@@ -60,8 +111,17 @@ class ChatViewModel(
      */
     private var streamingIndex: Int? = null
 
-    /** Switch to another session: reset to the default mock conversation. */
+    /**
+     * The coroutine collecting the active turn's reply stream. Held so [cancel]
+     * (and a session switch) can stop local collection, and so [send] can detect
+     * an in-flight turn to ignore an overlapping submit. `null` between turns.
+     */
+    private var turnJob: Job? = null
+
+    /** Switch to another session: cancel any in-flight turn and reset state. */
     fun openSession(ref: SessionRef) {
+        turnJob?.cancel()
+        turnJob = null
         streamingIndex = null
         _state.update {
             it.copy(
@@ -70,12 +130,15 @@ class ChatViewModel(
                 isNew = false,
                 streaming = false,
                 statusLine = null,
+                error = null,
             )
         }
     }
 
     /** Start a fresh, empty chat (top-bar "edit" / new-chat button). */
     fun newChat() {
+        turnJob?.cancel()
+        turnJob = null
         streamingIndex = null
         _state.update {
             it.copy(
@@ -84,6 +147,7 @@ class ChatViewModel(
                 isNew = true,
                 streaming = false,
                 statusLine = null,
+                error = null,
             )
         }
     }
@@ -97,23 +161,57 @@ class ChatViewModel(
      * Submit a user turn. Appends the user message, flips [ChatState.streaming]
      * on, and collects the [ConversationSource] reply stream — appending the
      * completed assistant message and clearing the streaming flag.
+     *
+     * OVERLAPPING-SUBMIT GUARD: a submit while a turn is already streaming is
+     * IGNORED (the composer shows Stop, not Send, then — but a stale tap / IME
+     * Send / programmatic call must not start a second concurrent turn). The
+     * guard is here (not only in the UI) so the contract holds regardless of who
+     * calls `send`.
      */
     fun send(text: String) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
+        if (_state.value.streaming) return // ignore overlapping submit while streaming
 
         streamingIndex = null
         _state.update {
             it.copy(
                 isNew = false,
                 statusLine = null,
+                error = null, // a fresh turn clears the prior turn's error banner
+                streaming = true, // gate the composer immediately, before the first event
                 messages = it.messages + Message(role = Role.User, text = trimmed),
             )
         }
 
-        viewModelScope.launch {
+        turnJob = viewModelScope.launch {
             source.submit(trimmed).collect { event -> reduce(event) }
         }
+    }
+
+    /**
+     * Cancel the in-flight turn (the composer's Stop affordance). Fires the
+     * engine's `Cancel` command, stops collecting the local reply stream, and
+     * resets streaming state immediately so the composer flips back to Send
+     * without waiting for the engine's `TurnEnded` to round-trip. A no-op when no
+     * turn is in flight.
+     */
+    fun cancel() {
+        if (!_state.value.streaming) return
+        val job = turnJob
+        turnJob = null
+        viewModelScope.launch {
+            // Tell the engine first (best-effort), then drop local collection.
+            source.cancel()
+            job?.cancel()
+        }
+        streamingIndex = null
+        _state.update { it.copy(streaming = false, statusLine = null) }
+    }
+
+    /** Dismiss the persistent error banner (its × affordance). */
+    fun dismissError() {
+        _state.update { it.copy(error = null) }
     }
 
     /**
@@ -145,11 +243,22 @@ class ChatViewModel(
 
             is ReplyEvent.Error -> {
                 streamingIndex = null
-                _state.update { it.copy(streaming = false, statusLine = "错误：${event.message}") }
+                turnJob = null
+                // Surface as the PERSISTENT, kind-aware banner — not the dim,
+                // overwritable statusLine. Clear the status line so a stale tool
+                // label doesn't linger beneath the error.
+                _state.update {
+                    it.copy(
+                        streaming = false,
+                        statusLine = null,
+                        error = ChatError(event.message, classifyError(event.message)),
+                    )
+                }
             }
 
             is ReplyEvent.Completed -> {
                 streamingIndex = null
+                turnJob = null
                 _state.update {
                     it.copy(streaming = false, messages = it.messages + event.message)
                 }
@@ -157,6 +266,7 @@ class ChatViewModel(
 
             is ReplyEvent.End -> {
                 streamingIndex = null
+                turnJob = null
                 _state.update { it.copy(streaming = false) }
             }
         }

@@ -10,6 +10,7 @@ enum LXIconName: String {
     case menu, edit, search, sparkle, book, workflow, cog, plus, mic, paperclip
     case chevron, sun, moon, check, pin, brain, arrowUp, folder, clock, message
     case chevronR, play, pause, x, skill, plug, dream, link, copy, share
+    case warning, stop
 }
 
 struct LXIcon: View {
@@ -138,7 +139,12 @@ extension LXIcon {
                     PathSpec { circle(18, 19, 3) },
                     PathSpec { line([(8.59, 13.51), (15.42, 17.49)]) },
                     PathSpec { line([(15.41, 6.51), (8.59, 10.49)]) }]
-        case .arrowUp, .play, .pause:
+        case .warning:
+            // Triangle-exclamation: a rounded warning triangle + the bang stem;
+            // the bang dot is drawn as a fill (see fillPaths).
+            return [PathSpec { var p = Path(); p.move(to: .init(x:10.29,y:3.86)); p.addLine(to: .init(x:1.82,y:18)); p.addCurve(to: .init(x:3.53,y:21), control1: .init(x:1.45,y:18.64), control2: .init(x:2.78,y:21)); p.addLine(to: .init(x:20.47,y:21)); p.addCurve(to: .init(x:22.18,y:18), control1: .init(x:21.22,y:21), control2: .init(x:22.55,y:18.64)); p.addLine(to: .init(x:13.71,y:3.86)); p.addCurve(to: .init(x:10.29,y:3.86), control1: .init(x:12.93,y:2.6), control2: .init(x:11.07,y:2.6)); p.closeSubpath(); return p },
+                    PathSpec { line([(12,9),(12,13)]) }]
+        case .arrowUp, .play, .pause, .stop:
             return [] // filled icons
         }
     }
@@ -151,6 +157,12 @@ extension LXIcon {
             return [PathSpec { line([(6,4),(20,12),(6,20)]) }]
         case .pause:
             return [PathSpec { roundedRect(6,5,4,14,1) }, PathSpec { roundedRect(14,5,4,14,1) }]
+        case .stop:
+            // A filled rounded square — the universal "stop the stream" glyph.
+            return [PathSpec { roundedRect(6,6,12,12,2.5) }]
+        case .warning:
+            // The exclamation dot at the base of the bang.
+            return [PathSpec { circle(12,17,1.05) }]
         default:
             return []
         }

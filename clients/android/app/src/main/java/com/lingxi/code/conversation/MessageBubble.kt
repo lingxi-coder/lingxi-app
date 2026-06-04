@@ -8,12 +8,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -23,6 +25,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
@@ -148,44 +151,128 @@ fun AssistantAvatar(
 }
 
 /**
- * Renders the assistant text with `**bold**` spans — the only markdown the
- * prototype uses — preserving paragraph breaks. Mirrors the iOS `AIText`
- * `AttributedString` parser.
+ * Renders an assistant reply as Markdown. Beyond the prototype's `**bold**`, this
+ * now renders fenced code blocks, inline code, and bullet / numbered lists — so
+ * real coding replies are readable. The PURE parsing lives in `Markdown.kt`
+ * ([parseMarkdownBlocks]); this composable only LAYS OUT the resulting blocks.
  */
 @Composable
 fun AIText(
     markdown: String,
     modifier: Modifier = Modifier,
 ) {
-    val t = LingXiTheme.palette
-    Text(
-        text = parseBoldMarkdown(markdown),
-        color = t.text,
-        fontSize = 15.5f.sp,
-        lineHeight = (15.5f * 1.6f).sp,
+    val blocks = remember(markdown) { parseMarkdownBlocks(markdown) }
+    Column(
         modifier = modifier,
-    )
-}
-
-/** Parse `**bold**` inline spans into an [androidx.compose.ui.text.AnnotatedString]. */
-private fun parseBoldMarkdown(s: String) = buildAnnotatedString {
-    var i = 0
-    while (i < s.length) {
-        val open = s.indexOf("**", i)
-        if (open < 0) {
-            append(s.substring(i))
-            break
-        }
-        append(s.substring(i, open))
-        val close = s.indexOf("**", open + 2)
-        if (close < 0) {
-            // Unterminated — emit the rest literally.
-            append(s.substring(open))
-            break
-        }
-        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) {
-            append(s.substring(open + 2, close))
-        }
-        i = close + 2
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        blocks.forEach { block -> MdBlockView(block) }
     }
 }
+
+/** Render one [MdBlock]. */
+@Composable
+private fun MdBlockView(block: MdBlock) {
+    val t = LingXiTheme.palette
+    when (block) {
+        is MdBlock.Paragraph -> Text(
+            text = inlineSpans(block.spans, t.surfaceHover, t.text2),
+            color = t.text,
+            fontSize = 15.5f.sp,
+            lineHeight = (15.5f * 1.6f).sp,
+        )
+
+        is MdBlock.CodeBlock -> CodeBlockView(block)
+
+        is MdBlock.BulletList -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            block.items.forEach { item ->
+                ListRow(marker = "•", spans = item)
+            }
+        }
+
+        is MdBlock.NumberedList -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            block.items.forEach { item ->
+                ListRow(marker = item.marker, spans = item.spans)
+            }
+        }
+    }
+}
+
+/** A single list row: a fixed-width marker gutter + the item's inline content. */
+@Composable
+private fun ListRow(marker: String, spans: List<MdInline>) {
+    val t = LingXiTheme.palette
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+        Text(
+            text = marker,
+            color = t.text3,
+            fontSize = 15.5f.sp,
+            lineHeight = (15.5f * 1.6f).sp,
+            modifier = Modifier.widthIn(min = 18.dp),
+        )
+        Text(
+            text = inlineSpans(spans, t.surfaceHover, t.text2),
+            color = t.text,
+            fontSize = 15.5f.sp,
+            lineHeight = (15.5f * 1.6f).sp,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/** A fenced code block: a monospace surface with a subtle border + optional language label. */
+@Composable
+private fun CodeBlockView(block: MdBlock.CodeBlock) {
+    val t = LingXiTheme.palette
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(t.surfaceHover)
+            .border(0.5.dp, t.border, RoundedCornerShape(10.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        if (block.language.isNotEmpty()) {
+            Text(
+                text = block.language,
+                color = t.text4,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        Text(
+            text = block.code,
+            color = t.text2,
+            fontSize = 13.5f.sp,
+            lineHeight = (13.5f * 1.5f).sp,
+            fontFamily = FontFamily.Monospace,
+        )
+    }
+}
+
+/**
+ * Build an [androidx.compose.ui.text.AnnotatedString] from [MdInline] spans:
+ * `**bold**` → semibold, `` `code` `` → monospace on a tinted background.
+ */
+private fun inlineSpans(spans: List<MdInline>, codeBg: Color, codeColor: Color) =
+    buildAnnotatedString {
+        spans.forEach { span ->
+            when (span) {
+                is MdInline.Text -> append(span.text)
+                is MdInline.Bold -> withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) {
+                    append(span.text)
+                }
+                is MdInline.Code -> withStyle(
+                    SpanStyle(
+                        fontFamily = FontFamily.Monospace,
+                        background = codeBg,
+                        color = codeColor,
+                        fontSize = 14.sp,
+                    ),
+                ) {
+                    append(span.text)
+                }
+            }
+        }
+    }

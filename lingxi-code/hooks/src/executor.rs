@@ -13,7 +13,11 @@ use crate::agent_executor::{AgentExecutionSignal, AgentExecutor};
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
 use crate::hook_payload::{
-    parse_response, HookEventNamePost, HookEventNamePre, PostToolUsePayload, PreToolUsePayload,
+    parse_response, HookEventNamePost, HookEventNamePre, HookEventNameSessionStart,
+    HookEventNameStop, HookEventNameStopFailure, HookEventNameSubagentStop,
+    HookEventNameTaskCompleted, HookEventNameUserPromptSubmit, PostToolUsePayload,
+    PreToolUsePayload, SessionStartPayload, StopFailurePayload, StopPayload, SubagentStopPayload,
+    TaskCompletedPayload, UserPromptSubmitPayload,
 };
 use crate::http_executor::{HttpExecutionSignal, HttpExecutor};
 use crate::registry::{HookContext, HookRegistry};
@@ -339,8 +343,18 @@ impl HookExecutorImpl {
 
 /// Build the serialized envelope body + `expected_event` marker for an event.
 ///
-/// Returns `None` for event variants the HTTP / Agent arms don't yet
-/// support (everything except `PreToolUse` / `PostToolUse` in M5-06).
+/// Returns `None` for event variants the HTTP / Agent arms don't yet support.
+/// Tool events (`PreToolUse` / `PostToolUse`, M5-06) plus the lifecycle events
+/// `Stop` / `SubagentStop` / `TaskCompleted` / `UserPromptSubmit` /
+/// `SessionStart` / `StopFailure` (B1) are serialized here; every other variant
+/// still falls through to `None` until its wire schema is ported.
+///
+/// Where a [`HookEvent`] variant carries fewer fields than the claude-code wire
+/// schema (e.g. `Stop` has no `stop_hook_active` / `last_assistant_message`
+/// yet, `TaskCompleted` only carries `task_id`), the available fields are
+/// populated and the rest defaulted (`false` / `None` / empty string). The
+/// missing fields are filled by later B-cluster batches that thread richer
+/// context through `HookEvent` / `HookContext`.
 fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static str, String)> {
     match event {
         HookEvent::PreToolUse {
@@ -382,6 +396,137 @@ fn build_envelope_body(event: &HookEvent, ctx: &HookContext) -> Option<(&'static
                 tool_use_id: tool_use_id.to_string(),
             };
             Some(("PostToolUse", serde_json::to_string(&payload).ok()?))
+        }
+        // Lifecycle events (B1) share the `createBaseHookInput` base shape; they
+        // are split into a helper to keep this dispatch readable.
+        _ => build_lifecycle_envelope_body(event, ctx),
+    }
+}
+
+/// The `createBaseHookInput` base shape (`utils/hooks.ts:301-328`) extracted
+/// from a [`HookContext`], reused by every lifecycle payload.
+struct BaseHookFields {
+    session_id: String,
+    transcript_path: String,
+    cwd: String,
+    permission_mode: Option<String>,
+    agent_id: Option<String>,
+    agent_type: Option<String>,
+}
+
+impl BaseHookFields {
+    fn from_ctx(ctx: &HookContext) -> Self {
+        Self {
+            session_id: ctx.session_id.to_string(),
+            transcript_path: ctx.transcript_path.to_string_lossy().into_owned(),
+            cwd: ctx.cwd.to_string_lossy().into_owned(),
+            permission_mode: ctx.permission_mode.clone(),
+            agent_id: ctx.agent_id.as_ref().map(ToString::to_string),
+            agent_type: ctx.agent_type.clone(),
+        }
+    }
+}
+
+/// Serialize the B1 lifecycle events (`Stop` / `SubagentStop` /
+/// `TaskCompleted` / `UserPromptSubmit` / `SessionStart` / `StopFailure`).
+///
+/// Where a [`HookEvent`] variant carries fewer fields than the claude-code wire
+/// schema, the available fields are populated and the rest defaulted
+/// (`false` / `None` / empty string) — filled by later B-cluster batches.
+/// Every other (not-yet-ported) variant returns `None`.
+fn build_lifecycle_envelope_body(
+    event: &HookEvent,
+    ctx: &HookContext,
+) -> Option<(&'static str, String)> {
+    let b = BaseHookFields::from_ctx(ctx);
+    match event {
+        HookEvent::Stop { .. } => {
+            let payload = StopPayload {
+                hook_event_name: HookEventNameStop,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                stop_hook_active: false,
+                last_assistant_message: None,
+            };
+            Some(("Stop", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::SubagentStop { agent_id, .. } => {
+            let payload = SubagentStopPayload {
+                hook_event_name: HookEventNameSubagentStop,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                stop_hook_active: false,
+                agent_id: agent_id.to_string(),
+                agent_transcript_path: String::new(),
+                agent_type: b.agent_type.unwrap_or_default(),
+                last_assistant_message: None,
+            };
+            Some(("SubagentStop", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::TaskCompleted { task_id, .. } => {
+            let payload = TaskCompletedPayload {
+                hook_event_name: HookEventNameTaskCompleted,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                task_id: task_id.clone(),
+                task_subject: String::new(),
+                task_description: None,
+                teammate_name: None,
+                team_name: None,
+            };
+            Some(("TaskCompleted", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::UserPromptSubmit { prompt } => {
+            let payload = UserPromptSubmitPayload {
+                hook_event_name: HookEventNameUserPromptSubmit,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                prompt: prompt.clone(),
+            };
+            Some(("UserPromptSubmit", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::SessionStart { source, .. } => {
+            let payload = SessionStartPayload {
+                hook_event_name: HookEventNameSessionStart,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                source: source.clone(),
+                agent_type: b.agent_type,
+                model: None,
+            };
+            Some(("SessionStart", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::StopFailure { error } => {
+            let payload = StopFailurePayload {
+                hook_event_name: HookEventNameStopFailure,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                error: error.clone(),
+                error_details: None,
+                last_assistant_message: None,
+            };
+            Some(("StopFailure", serde_json::to_string(&payload).ok()?))
         }
         _ => None,
     }
@@ -907,5 +1052,174 @@ mod command_arm_tests {
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Error));
         assert!(r.stderr.contains("command executor not wired"));
+    }
+
+    // ---- B1: lifecycle events now serialize through the Command arm -----
+
+    /// A Command hook subscribed to a single lifecycle `event` type.
+    fn command_hook_for(event: HookEventType) -> HookDefinition {
+        let mut h = command_hook();
+        h.events = vec![event];
+        h
+    }
+
+    /// Executor wired with a Command hook subscribed to `event`.
+    fn executor_for(event: HookEventType, process: Arc<dyn ProcessRunner>) -> HookExecutorImpl {
+        let mut registry = HookRegistry::new();
+        registry.register(command_hook_for(event));
+        let reg = Arc::new(RwLock::new(registry));
+        HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime))
+            .with_process_runner(process, Arc::new(StubSandbox))
+    }
+
+    /// Dispatch `event` through a Command hook and return the stdin the child
+    /// would have received (the serialized envelope). Empty if no hook fired.
+    async fn dispatch_and_capture(event_type: HookEventType, event: HookEvent) -> String {
+        let runner = MockRunner::ok(output("", "", 0));
+        let exec = executor_for(event_type, runner.clone());
+        let agg = exec.execute(event, HookContext::default()).await;
+        assert_eq!(agg.all_results.len(), 1, "exactly one hook must fire");
+        let captured = runner.recorded_stdin.lock().unwrap().clone().unwrap();
+        captured
+    }
+
+    #[tokio::test]
+    async fn stop_event_serializes_through_command_arm() {
+        let stdin = dispatch_and_capture(
+            HookEventType::Stop,
+            HookEvent::Stop {
+                reason: "done".into(),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"Stop""#));
+        assert!(stdin.contains(r#""stop_hook_active":false"#));
+        assert!(stdin.ends_with('\n'), "trailing newline is load-bearing");
+    }
+
+    #[tokio::test]
+    async fn subagent_stop_event_serializes_agent_id() {
+        let agent_id = protocol::AgentId::new();
+        let stdin = dispatch_and_capture(
+            HookEventType::SubagentStop,
+            HookEvent::SubagentStop {
+                agent_id,
+                status: "completed".into(),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"SubagentStop""#));
+        assert!(stdin.contains(&format!(r#""agent_id":"{agent_id}""#)));
+        assert!(stdin.contains(r#""stop_hook_active":false"#));
+    }
+
+    #[tokio::test]
+    async fn task_completed_event_serializes_task_id() {
+        let stdin = dispatch_and_capture(
+            HookEventType::TaskCompleted,
+            HookEvent::TaskCompleted {
+                task_id: "task-99".into(),
+                status: "success".into(),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"TaskCompleted""#));
+        assert!(stdin.contains(r#""task_id":"task-99""#));
+    }
+
+    #[tokio::test]
+    async fn user_prompt_submit_event_serializes_prompt() {
+        let stdin = dispatch_and_capture(
+            HookEventType::UserPromptSubmit,
+            HookEvent::UserPromptSubmit {
+                prompt: "do the thing".into(),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"UserPromptSubmit""#));
+        assert!(stdin.contains(r#""prompt":"do the thing""#));
+    }
+
+    #[tokio::test]
+    async fn session_start_event_serializes_source() {
+        let stdin = dispatch_and_capture(
+            HookEventType::SessionStart,
+            HookEvent::SessionStart {
+                session_id: protocol::SessionId::nil(),
+                source: "startup".into(),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"SessionStart""#));
+        assert!(stdin.contains(r#""source":"startup""#));
+    }
+
+    #[tokio::test]
+    async fn stop_failure_event_serializes_error() {
+        let stdin = dispatch_and_capture(
+            HookEventType::StopFailure,
+            HookEvent::StopFailure {
+                error: "rate_limit".into(),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"StopFailure""#));
+        assert!(stdin.contains(r#""error":"rate_limit""#));
+    }
+
+    #[test]
+    fn unsupported_event_still_returns_none() {
+        // `SessionEnd` has no ported wire schema yet — must fall through.
+        let ev = HookEvent::SessionEnd {
+            session_id: protocol::SessionId::nil(),
+            reason: "user_exit".into(),
+        };
+        assert!(build_envelope_body(&ev, &HookContext::default()).is_none());
+    }
+
+    #[test]
+    fn build_envelope_body_returns_expected_event_markers() {
+        let ctx = HookContext::default();
+        let cases: Vec<(HookEvent, &'static str)> = vec![
+            (HookEvent::Stop { reason: "r".into() }, "Stop"),
+            (
+                HookEvent::SubagentStop {
+                    agent_id: protocol::AgentId::new(),
+                    status: "completed".into(),
+                },
+                "SubagentStop",
+            ),
+            (
+                HookEvent::TaskCompleted {
+                    task_id: "t".into(),
+                    status: "success".into(),
+                },
+                "TaskCompleted",
+            ),
+            (
+                HookEvent::UserPromptSubmit { prompt: "p".into() },
+                "UserPromptSubmit",
+            ),
+            (
+                HookEvent::SessionStart {
+                    session_id: protocol::SessionId::nil(),
+                    source: "startup".into(),
+                },
+                "SessionStart",
+            ),
+            (
+                HookEvent::StopFailure {
+                    error: "unknown".into(),
+                },
+                "StopFailure",
+            ),
+        ];
+        for (ev, expected) in cases {
+            let (marker, body) = build_envelope_body(&ev, &ctx).expect("must serialize");
+            assert_eq!(marker, expected);
+            // The serialized body's hook_event_name must equal the marker, and
+            // round-trips through parse_response without a mismatch error.
+            assert!(body.contains(&format!(r#""hook_event_name":"{expected}""#)));
+        }
     }
 }

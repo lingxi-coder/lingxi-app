@@ -355,7 +355,11 @@ impl Tool for BashTool {
                 let (stdout_clean, ansi_dropped_out) = strip_ansi_count(&out.stdout);
                 let (stderr_clean, ansi_dropped_err) = strip_ansi_count(&out.stderr);
                 let (stdout_final, truncated_out) = truncate_default(stdout_clean);
-                let is_error = out.exit_code != 0;
+                // Exit-code reinterpretation (claude-code interpretCommandResult):
+                // e.g. `grep` no-match (exit 1) is NOT an error.
+                let interp =
+                    crate::command_semantics::interpret_command_result(&cmd_str, out.exit_code);
+                let is_error = interp.is_error;
 
                 let elapsed_ms = SystemTime::now()
                     .duration_since(started_at)
@@ -385,6 +389,7 @@ impl Tool for BashTool {
                         "stdout":    stdout_final,
                         "stderr":    stderr_clean,
                         "is_error":  is_error,
+                        "return_code_interpretation": interp.message,
                         "timed_out": false,
                         "truncated": truncated_out,
                     }),

@@ -39,6 +39,35 @@ pub struct HookDefinition {
     pub priority: i32,
 }
 
+impl HookDefinition {
+    /// The hook's tool-name matcher pattern, if any (B3).
+    ///
+    /// In claude-code a `Pre/PostToolUse` hook declares a `matcher` string
+    /// (e.g. `"Write|Edit"`, `"^Bash$"`, `"*"`) that gates whether the hook
+    /// fires for a given tool. Here that pattern is canonically carried on
+    /// [`Self::if_condition`] as the [`HookCondition::pattern`] of a condition
+    /// whose [`HookCondition::match_tool_name`] is `true` — that is how the
+    /// settings loader (`loader.rs`) and the orchestrator's `list_hooks`
+    /// (`handle_impl.rs`) already model it. This accessor surfaces that pattern
+    /// as the `Option<String>`-shaped "matcher" the B3 spec calls for, WITHOUT
+    /// adding a new struct field (which would break the explicit
+    /// `HookDefinition { … }` literals constructed in the locked test-harness
+    /// and orchestrator integration tests).
+    ///
+    /// Returns `None` when the hook has no condition, or has an
+    /// `if`-condition that is NOT a tool-name matcher (`match_tool_name ==
+    /// false`) — such a condition is a permission-rule / input matcher, which
+    /// is the `if`-condition half of B3 and is deferred (see
+    /// [`crate::matcher`] and `match_event`).
+    #[must_use]
+    pub fn matcher(&self) -> Option<&str> {
+        self.if_condition
+            .as_ref()
+            .filter(|c| c.match_tool_name)
+            .map(|c| c.pattern.as_str())
+    }
+}
+
 /// How the engine actually invokes a hook body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HookExecutor {
@@ -84,15 +113,29 @@ pub enum HookExecutor {
 
 /// Optional matcher applied before executing a hook.
 ///
-/// Currently a single pattern flagged for either tool-name or input matching.
-/// The full regex / glob engine lands with the Plan 09 hook plumbing.
+/// A single pattern flagged for either tool-name or input matching.
+///
+/// When `match_tool_name` is `true`, [`Self::pattern`] is the B3 tool-name
+/// matcher (`"Write|Edit"`, `"^Bash$"`, `"*"`, …) and is evaluated by
+/// [`crate::matcher::matches_pattern`] against the event's tool name in
+/// [`crate::registry::HookRegistry::match_event`]. This is the MATCHER half of
+/// B3 and is fully ported.
+///
+/// When `match_input` is `true`, the pattern is intended to be a permission-rule
+/// string (e.g. `"Bash(rm:*)"`) matched against the serialized tool input —
+/// the `if`-condition half of B3. That rule-content matching is BLOCKED on the
+/// ported permission-rule parser and is NOT yet evaluated (such conditions are
+/// currently treated as non-tool-name matchers, i.e. they do not gate firing).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookCondition {
-    /// Pattern text (regex or glob — interpretation TBD in Plan 09).
+    /// Pattern text. A tool-name matcher when `match_tool_name` is `true`
+    /// (B3, ported); a permission-rule string when `match_input` is `true`
+    /// (`if`-condition, deferred).
     pub pattern: String,
-    /// If `true` the pattern is matched against `tool_name`.
+    /// If `true` the pattern is the B3 tool-name matcher (evaluated).
     pub match_tool_name: bool,
-    /// If `true` the pattern is matched against `tool_input` serialized JSON.
+    /// If `true` the pattern is matched against `tool_input` serialized JSON
+    /// (the `if`-condition half of B3 — deferred, not yet evaluated).
     pub match_input: bool,
 }
 

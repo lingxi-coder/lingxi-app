@@ -100,6 +100,12 @@ dependencies {
     // DataStore (preferences) for persisted theme / accent
     implementation("androidx.datastore:datastore-preferences:1.1.7")
 
+    // Secure key store — the Anthropic API key + base URL are encrypted at rest
+    // via EncryptedSharedPreferences (AES-256 GCM, key wrapped by the Android
+    // Keystore). SHIP-BLOCKER #1: a shipped app has no process env, so the key
+    // must live in an encrypted on-device store, never plain DataStore/prefs.
+    implementation("androidx.security:security-crypto:1.1.0-alpha03")
+
     // Unit tests
     testImplementation("junit:junit:4.13.2")
     // Coroutine/Flow test harness — runTest + UnconfinedTestDispatcher drive the

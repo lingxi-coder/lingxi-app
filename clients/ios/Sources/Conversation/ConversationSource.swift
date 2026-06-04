@@ -14,9 +14,10 @@
 // one protocol (`client-protocol`), one transport (UniFFI), one renderer
 // (SwiftUI). The engine runs ON the device; no network bridge.
 //
-// SECRETS: the LLM API key is read from the runtime environment
-// (`ANTHROPIC_API_KEY`) / an app setting — see `EngineConfig.fromEnvironment`.
-// It is NEVER hardcoded, logged, or persisted here.
+// SECRETS: the LLM API key is resolved from the iOS Keychain (`Keychain`) with a
+// runtime `ANTHROPIC_API_KEY` env override for dev — see
+// `EngineConfig.fromEnvironment`. It is NEVER hardcoded, logged, or persisted in
+// plaintext here.
 
 import Foundation
 import SwiftUI
@@ -191,16 +192,24 @@ protocol ConversationSource: AnyObject {
 // MARK: - Source selection
 
 /// Chooses the conversation source at app start. Prefers the real in-process
-/// engine (over UniFFI) when the bindings are linked AND the engine is opted in
-/// (`LINGXI_USE_ENGINE=1`, or an `ANTHROPIC_API_KEY` present in the environment);
+/// engine (over UniFFI) when the bindings are linked AND the engine is opted in;
 /// otherwise the canned mock. Falling back to the mock keeps the app usable in
 /// preview / no-key environments.
+///
+/// Opt-in (any one suffices), in priority order:
+///   1. A key stored in the Keychain (SHIP-BLOCKER #1) — the shipped-app path: a
+///      user pasting their key in Settings is enough, no env needed.
+///   2. `LINGXI_USE_ENGINE=1` in the environment (dev/CI explicit opt-in).
+///   3. `ANTHROPIC_API_KEY` present in the environment (dev convenience).
 @MainActor
 enum ConversationSourceFactory {
     static func make() -> any ConversationSource {
         #if canImport(engine_mobileFFI)
             let env = ProcessInfo.processInfo.environment
-            let optedIn = env["LINGXI_USE_ENGINE"] == "1" || !(env["ANTHROPIC_API_KEY"] ?? "").isEmpty
+            let hasKeychainKey = !(Keychain.get(.apiKey) ?? "").isEmpty
+            let optedIn = hasKeychainKey
+                || env["LINGXI_USE_ENGINE"] == "1"
+                || !(env["ANTHROPIC_API_KEY"] ?? "").isEmpty
             if optedIn {
                 let root = appSandboxRoot()
                 let config = EngineConfig.fromEnvironment(
@@ -287,18 +296,36 @@ final class MockConversationSource: ConversationSource {
         var model: String
         var appSandboxRoot: String
 
-        /// Build from the process environment + the app sandbox. `ANTHROPIC_API_KEY`
-        /// (optionally `ANTHROPIC_BASE_URL` / `LINGXI_MODEL`) drives the engine; an
-        /// empty key is valid (turns 401 at run time, slash commands still work).
+        /// Resolve the engine credentials. The API key (and optional base URL)
+        /// come from the iOS Keychain FIRST (SHIP-BLOCKER #1 — a shipped app has no
+        /// process env), with an environment override for development/CI so a
+        /// `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` in the env still wins for a
+        /// dev run. An empty key is valid (turns 401 at run time, slash commands
+        /// still work) and keeps the mock fallback in `make()`.
         static func fromEnvironment(appSandboxRoot: String,
                                     model: String) -> EngineConfig {
             let env = ProcessInfo.processInfo.environment
+            // Key: env override (dev) > Keychain (shipped) > empty.
+            let key = nonEmpty(env["ANTHROPIC_API_KEY"])
+                ?? Keychain.get(.apiKey)
+                ?? ""
+            // Base URL: env override (dev) > Keychain (shipped) > Anthropic default.
+            let base = nonEmpty(env["ANTHROPIC_BASE_URL"])
+                ?? Keychain.get(.apiBase)
+                ?? "https://api.anthropic.com"
             return EngineConfig(
-                apiBase: env["ANTHROPIC_BASE_URL"] ?? "https://api.anthropic.com",
-                apiKey: env["ANTHROPIC_API_KEY"] ?? "",
+                apiBase: base,
+                apiKey: key,
                 model: env["LINGXI_MODEL"] ?? model,
                 appSandboxRoot: appSandboxRoot
             )
+        }
+
+        /// `s` when it is non-nil and non-empty, else `nil` — so an unset OR blank
+        /// env var falls through to the Keychain instead of masking it with "".
+        private static func nonEmpty(_ s: String?) -> String? {
+            guard let s, !s.isEmpty else { return nil }
+            return s
         }
     }
 

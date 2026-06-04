@@ -27,6 +27,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
@@ -47,6 +48,7 @@ import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.GenericProvider
 import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.model.ProviderPreset
+import com.lingxi.code.secure.SecureKeyStore
 import com.lingxi.code.theme.LXFont
 import com.lingxi.code.theme.LingXiTheme
 
@@ -92,6 +94,14 @@ fun ProviderListPage(
 
     Column(Modifier.fillMaxWidth()) {
         Blurb(kind.blurb())
+
+        // SHIP-BLOCKER #1: the engine's own Anthropic key, configured + stored
+        // encrypted-at-rest (SecureKeyStore). Only on the LLM page — this is the
+        // key the in-process engine authenticates with, distinct from the mock
+        // per-provider rows below.
+        if (kind == ProviderKind.Llm) {
+            EngineKeySection()
+        }
 
         SettingsSection(label = "已添加 · ${arr.size}") {
             if (arr.isEmpty()) {
@@ -368,6 +378,57 @@ fun ProviderEditPage(
         ) {
             Text("移除此提供商", color = t.danger, fontSize = 13.5f.sp, fontWeight = FontWeight.Medium)
         }
+    }
+}
+
+// MARK: - Engine key (SHIP-BLOCKER #1) ---------------------------------------
+
+/**
+ * The in-process engine's Anthropic credentials, configured here and persisted
+ * encrypted-at-rest via [SecureKeyStore]. A shipped mobile app has no process
+ * environment, so this is the source of truth `EngineConversationSource.create`
+ * reads first (env is only a dev override). The key is masked (show/hide), and
+ * a blank value clears the stored entry.
+ *
+ * State is local-to-this-composable and seeded from the store on first
+ * composition; each edit writes straight through to the encrypted store. If the
+ * Keystore can't be provisioned ([SecureKeyStore.create] returns `null`) the
+ * field still renders but edits are no-ops — the engine then degrades to the
+ * env / mock path.
+ */
+@Composable
+fun EngineKeySection() {
+    val context = LocalContext.current
+    val store = remember(context) { SecureKeyStore.create(context) }
+
+    var key by remember { mutableStateOf(store?.apiKey().orEmpty()) }
+    var base by remember { mutableStateOf(store?.apiBase().orEmpty()) }
+    var showKey by remember { mutableStateOf(false) }
+
+    Column(Modifier.fillMaxWidth().padding(bottom = 22.dp)) {
+        FieldLabel("引擎 API Key")
+        KeyField(
+            value = key,
+            placeholder = "sk-ant-...",
+            show = showKey,
+            onToggleShow = { showKey = !showKey },
+            onValueChange = { v ->
+                key = v
+                store?.setApiKey(v)
+            },
+        )
+        FieldHint("灵犀引擎用此密钥直连 Anthropic · 加密存储于本机安全区 · 从不上传")
+
+        FieldLabel("API 地址（可选）")
+        SettingsField(
+            value = base,
+            onValueChange = { v ->
+                base = v
+                store?.setApiBase(v)
+            },
+            placeholder = "https://api.anthropic.com",
+        )
+        FieldHint("留空使用官方地址 · 可填代理 / 镜像 / 兼容网关")
     }
 }
 

@@ -92,6 +92,13 @@ import XCTest
         }
     }
 
+    /// A no-op `IosPermissionSink` for the keyless round-trip: the keyless turn
+    /// 401s before any tool runs, so no permission is ever requested. Required
+    /// only to satisfy `buildIosEngine`'s `permissions:` parameter.
+    final class NoopPermissionSink: IosPermissionSink, @unchecked Sendable {
+        func onRequest(request: PermissionRequest) async {}
+    }
+
     final class EngineRoundtripTests: XCTestCase {
 
         /// End-to-end, KEYLESS:  build the engine, submit a prompt, and assert a
@@ -132,7 +139,8 @@ import XCTest
                     share: ShareImpl(),
                     voice: VoiceImpl(),
                     notifications: NotificationImpl(),
-                    clipboard: ClipboardImpl())
+                    clipboard: ClipboardImpl(),
+                    permissions: NoopPermissionSink())
             } catch {
                 XCTFail("buildIosEngine must succeed keyless (handshake), got error: \(error)")
                 return

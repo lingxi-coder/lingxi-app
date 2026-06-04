@@ -9,6 +9,8 @@ import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.MockData
+import com.lingxi.code.secure.SecureKeyStore
+import com.lingxi.code.secure.resolveEngineCredentials
 import com.lingxi.code.voice.buildVoiceEngine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -319,15 +321,26 @@ class EngineConversationSource private constructor(
             // StateFlow (latest wins) is fine: only one request is parked per gate
             // at a time in the foundation (no concurrent worker permissions yet).
             val permissions = MutableStateFlow<PermissionPromptState?>(null)
-            // API key/base/model from the environment, mirroring the iOS
-            // EngineConfig.fromEnvironment. An empty key is valid — slash commands
-            // still work and a turn 401s at run time (iOS §). Never hardcoded.
-            val env = System.getenv()
+            // Credentials: the encrypted-at-rest SecureKeyStore FIRST (the shipped
+            // app's source of truth — SHIP-BLOCKER #1), falling back to the process
+            // environment as a dev override. A shipped mobile app has no process
+            // env, so the key normally comes from the secure store the Settings
+            // screen writes; ANTHROPIC_API_KEY only ever overrides on a dev host.
+            val store = SecureKeyStore.create(context)
+            val creds = resolveEngineCredentials(
+                storedKey = store?.apiKey() ?: "",
+                storedBase = store?.apiBase() ?: "",
+                env = System.getenv(),
+            )
+            // No key anywhere → fall back to the mock (the caller swaps in
+            // MockConversationSource). Keeps the chat usable on a fresh install
+            // before the user sets a key, instead of an engine that only 401s.
+            if (creds.apiKey.isBlank()) return null
             val handle = buildVoiceEngine(
                 context = context,
-                apiBase = env["ANTHROPIC_BASE_URL"] ?: "",
-                apiKey = env["ANTHROPIC_API_KEY"] ?: "",
-                model = env["LINGXI_MODEL"] ?: "",
+                apiBase = creds.apiBase,
+                apiKey = creds.apiKey,
+                model = creds.model,
                 onEvent = { event -> events.emit(event) },
                 onPermission = { request -> permissions.value = permissionRequestToPrompt(request) },
             ) ?: return null

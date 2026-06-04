@@ -1,16 +1,31 @@
-//! `ToolSearchTool` — token-overlap search over the registry.
+//! `ToolSearchTool` — deferred-tool search over the registry.
 //!
-//! Wire identifiers locked in spec §7:
-//! - Top-20 results.
-//! - Token normalization: lowercase, split on `[^a-z0-9]+`.
-//! - Score = `|query_tokens ∩ tool_tokens|`.
-//! - Ties broken by tool name lexicographic order.
+//! 1:1 with `claude-code/src/tools/ToolSearchTool/ToolSearchTool.ts`:
+//! - `select:A,B,C` — direct comma-separated multi-select by exact name
+//!   (case-insensitive `select:` prefix; dedup; whole-view candidate set).
+//! - `mcp__server` prefix match — return deferred tools whose name starts
+//!   with the lowercased query.
+//! - Exact-name fast path — a bare tool name returns just that tool.
+//! - Weighted keyword scoring with `+required` term partition:
+//!   per-term name-part match (+10, +12 for MCP), partial-part match
+//!   (+5, +6 for MCP), full-name fallback (+3 when score still 0),
+//!   `searchHint` word-boundary match (+4), description word-boundary
+//!   match (+2). Candidates are pre-filtered to those matching ALL
+//!   required terms.
+//! - `max_results` is a runtime parameter (default 5), bounded by a hard
+//!   ceiling guard.
+//!
+//! Rust divergences from TS (no substrate): there is no deferred-vs-loaded
+//! tool distinction (the whole `ToolRegistryView` is the candidate set), no
+//! `tool_reference` result blocks (we return a plain `matches` name list),
+//! and `getToolDescriptionMemoized` (`tool.prompt(...)`) is replaced by the
+//! stored `description`/`search_hint` carried on each entry.
 //!
 //! Avoids holding `Arc<ToolRegistry>` directly (which would cycle) by
 //! accepting a `ToolRegistryView` snapshot at construction time. The
 //! dispatcher passes a freshly-snapshotted vec when registering this tool.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -33,23 +48,31 @@ use tool_api::tool_trait::{
 
 /// Tool name byte-lock.
 pub const TOOL_SEARCH_TOOL_NAME: &str = "ToolSearch";
-/// Top-N cap (spec §7).
+/// Default `max_results` when the caller omits it (TS schema default 5).
+pub const TOOL_SEARCH_DEFAULT_MAX_RESULTS: usize = 5;
+/// Hard ceiling guard on `max_results`. TS has no hard cap (only a runtime
+/// default of 5); this guard prevents a pathological request from returning
+/// an unbounded list. Kept at 20 to preserve the parity wire-identifier lock.
 pub const TOOL_SEARCH_MAX_RESULTS: usize = 20;
 
 /// One row in the searchable registry view.
 #[derive(Debug, Clone)]
 pub struct ToolSearchEntry {
-    /// Tool name (used for ranking display + tie-breaks).
+    /// Tool name (used for ranking + select/exact/prefix matching).
     pub name: String,
-    /// Tool description (token source).
+    /// Tool description (lower-signal token source, scored at +2).
     pub description: String,
+    /// Curated capability phrase (`tool.searchHint`), scored at +4. TS scores
+    /// `searchHint` separately from (and higher than) the prompt-derived
+    /// description.
+    pub search_hint: Option<String>,
 }
 
 /// Read-only snapshot of registered tools fed to `ToolSearchTool` at
 /// construction. Avoids the `Arc<ToolRegistry>` cycle that would arise from
 /// `lingxi-tools::ToolSearchTool` holding a strong ref to its owner.
 pub trait ToolRegistryView: Send + Sync {
-    /// All registered tool entries (name + description).
+    /// All registered tool entries (name + description + search hint).
     fn entries(&self) -> Vec<ToolSearchEntry>;
 }
 
@@ -73,7 +96,7 @@ impl ToolRegistryView for StaticRegistryView {
     }
 }
 
-/// `ToolSearchTool` — token-overlap search over the registry. Top-20 results.
+/// `ToolSearchTool` — deferred-tool search over the registry.
 pub struct ToolSearchTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
     pub(crate) view: Arc<dyn ToolRegistryView>,
@@ -101,53 +124,324 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
         "properties": {
-            "query": { "type": "string", "minLength": 1 }
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Query to find deferred tools. Use \"select:<tool_name>\" for direct selection, or keywords to search."
+            },
+            "max_results": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 5,
+                "description": "Maximum number of results to return (default: 5)"
+            }
         },
         "required": ["query"]
     })
 });
 
-/// Normalize a text blob into token set: lowercase + split on `[^a-z0-9]+`.
+/// Parsed tool name, mirroring TS `parseToolName`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedName {
+    /// Lowercased name fragments (MCP `__`/`_` segments, or CamelCase words).
+    pub parts: Vec<String>,
+    /// The fragments joined by single spaces (full searchable form).
+    pub full: String,
+    /// Whether the name is an `mcp__…` tool (raises part-match weights).
+    pub is_mcp: bool,
+}
+
+/// Parse a tool name into searchable parts. Handles MCP tools
+/// (`mcp__server__action`) and regular CamelCase / snake_case tools.
+///
+/// Mirrors `parseToolName` in `ToolSearchTool.ts:132-161`.
 #[must_use]
-pub(crate) fn tokenize(text: &str) -> HashSet<String> {
-    let mut out = HashSet::new();
-    let mut buf = String::new();
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() {
-            buf.push(ch.to_ascii_lowercase());
-        } else if !buf.is_empty() {
-            out.insert(std::mem::take(&mut buf));
-        }
+pub(crate) fn parse_tool_name(name: &str) -> ParsedName {
+    if let Some(without_prefix) = name.strip_prefix("mcp__") {
+        let without_prefix = without_prefix.to_lowercase();
+        // split('__').flatMap(p => p.split('_')) then filter(Boolean)
+        let parts: Vec<String> = without_prefix
+            .split("__")
+            .flat_map(|p| p.split('_'))
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        // full = withoutPrefix.replace(/__/g, ' ').replace(/_/g, ' ')
+        let full = without_prefix.replace("__", " ").replace('_', " ");
+        return ParsedName {
+            parts,
+            full,
+            is_mcp: true,
+        };
     }
-    if !buf.is_empty() {
-        out.insert(buf);
+
+    // Regular tool: CamelCase -> spaces, '_' -> spaces, lowercase, split on
+    // whitespace, drop empties.
+    let spaced = insert_camel_spaces(name).replace('_', " ").to_lowercase();
+    let parts: Vec<String> = spaced.split_whitespace().map(str::to_string).collect();
+    let full = parts.join(" ");
+    ParsedName {
+        parts,
+        full,
+        is_mcp: false,
+    }
+}
+
+/// Insert a space between a lowercase char immediately followed by an
+/// uppercase char, replicating the JS regex `([a-z])([A-Z]) -> $1 $2`.
+/// `[a-z]`/`[A-Z]` are ASCII-only, matching the JS character classes.
+fn insert_camel_spaces(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, ch) in name.char_indices() {
+        if i > 0 && ch.is_ascii_uppercase() {
+            // Previous byte is the prior char; since the prior char that we
+            // care about is ASCII lowercase, a single-byte lookback is exact.
+            let prev = bytes[i - 1];
+            if prev.is_ascii_lowercase() {
+                out.push(' ');
+            }
+        }
+        out.push(ch);
     }
     out
 }
 
-/// Compute `(score, name, description)` for every entry, then return top
-/// [`TOOL_SEARCH_MAX_RESULTS`] sorted by `(-score, name)`.
+/// Whether `c` is a JS `\w` char: `[A-Za-z0-9_]`.
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Faithful port of `new RegExp('\\b' + escapeRegExp(needle) + '\\b').test(hay)`.
+///
+/// `escapeRegExp` makes the needle a literal, so this is a literal substring
+/// search additionally requiring a word boundary (`\b`) immediately before the
+/// first char and immediately after the last char of each candidate match.
+/// A `\b` exists at an index iff the char before and the char after differ in
+/// word-ness (string ends count as non-word).
 #[must_use]
-pub(crate) fn rank(query: &str, entries: &[ToolSearchEntry]) -> Vec<ToolSearchEntry> {
-    let q_tokens = tokenize(query);
-    let mut scored: Vec<(usize, &ToolSearchEntry)> = entries
+pub(crate) fn word_boundary_contains(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        // `\b\b` matches at any boundary — JS would find one in any non-empty
+        // string. Search terms are non-empty by construction, but stay safe.
+        return haystack.chars().any(is_word_char);
+    }
+    let hay: Vec<char> = haystack.chars().collect();
+    let pat: Vec<char> = needle.chars().collect();
+    let n = hay.len();
+    let m = pat.len();
+    if m > n {
+        return false;
+    }
+    let leading_word = is_word_char(pat[0]);
+    let trailing_word = is_word_char(pat[m - 1]);
+    'outer: for start in 0..=(n - m) {
+        // Literal match at `start`.
+        for k in 0..m {
+            if hay[start + k] != pat[k] {
+                continue 'outer;
+            }
+        }
+        // `\b` before `start`: boundary between hay[start-1] and pat[0].
+        let before_word = start > 0 && is_word_char(hay[start - 1]);
+        if before_word == leading_word {
+            // No boundary transition -> `\b` does not match here.
+            continue;
+        }
+        // `\b` after the match: boundary between pat[m-1] and hay[start+m].
+        let end = start + m;
+        let after_word = end < n && is_word_char(hay[end]);
+        if after_word == trailing_word {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Outcome of a search: a list of matched tool names plus the query kind for
+/// telemetry.
+struct SearchResult {
+    matches: Vec<String>,
+    query_type: &'static str,
+}
+
+/// Parse and resolve a `select:` query. Returns `Some(found_names)` (possibly
+/// empty) when the query has the `select:` prefix (case-insensitive); `None`
+/// when it is not a select query.
+///
+/// Mirrors the `select:` branch in `ToolSearchTool.ts:363-406`: comma-split,
+/// trim, drop empties, dedup, and look up each requested name by
+/// case-insensitive exact match in the view (the whole view is the candidate
+/// set — there is no deferred/loaded split in Rust).
+#[must_use]
+pub(crate) fn handle_select(query: &str, entries: &[ToolSearchEntry]) -> Option<Vec<String>> {
+    // /^select:(.+)$/i — case-insensitive prefix; `(.+)` requires at least one
+    // char after the colon, and `.` does not match a newline, so a bare
+    // `select:` (or a `select:\n…` whose remainder begins at a newline) is not
+    // a select query.
+    let lower = query.to_lowercase();
+    let rest = lower.strip_prefix("select:")?;
+    let first = rest.chars().next()?;
+    if first == '\n' || first == '\r' {
+        return None;
+    }
+    // Slice the original (case-preserving) query at the same byte offset so we
+    // resolve names against their real casing-insensitive view lookup.
+    let original_rest = &query["select:".len()..];
+
+    let mut found: Vec<String> = Vec::new();
+    for raw in original_rest.split(',') {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        if let Some(entry) = entries
+            .iter()
+            .find(|e| e.name.eq_ignore_ascii_case(name))
+        {
+            if !found.contains(&entry.name) {
+                found.push(entry.name.clone());
+            }
+        }
+    }
+    Some(found)
+}
+
+/// Weighted keyword scorer, mirroring `searchToolsWithKeywords`
+/// (`ToolSearchTool.ts:186-302`). `entries` is the candidate set (no
+/// deferred/loaded split in Rust).
+#[must_use]
+pub(crate) fn search_tools_with_keywords(
+    query: &str,
+    entries: &[ToolSearchEntry],
+    max_results: usize,
+) -> Vec<String> {
+    let query_lower = query.to_lowercase();
+    let query_lower = query_lower.trim();
+
+    // Fast path: exact tool-name match (case-insensitive).
+    if let Some(entry) = entries
         .iter()
-        .map(|e| {
-            let mut text = String::with_capacity(e.name.len() + e.description.len() + 1);
-            text.push_str(&e.name);
-            text.push(' ');
-            text.push_str(&e.description);
-            let toks = tokenize(&text);
-            let score = q_tokens.intersection(&toks).count();
-            (score, e)
+        .find(|e| e.name.to_lowercase() == query_lower)
+    {
+        return vec![entry.name.clone()];
+    }
+
+    // mcp__server prefix match.
+    if query_lower.starts_with("mcp__") && query_lower.len() > 5 {
+        let prefix_matches: Vec<String> = entries
+            .iter()
+            .filter(|e| e.name.to_lowercase().starts_with(query_lower))
+            .take(max_results)
+            .map(|e| e.name.clone())
+            .collect();
+        if !prefix_matches.is_empty() {
+            return prefix_matches;
+        }
+    }
+
+    // Tokenize the query on whitespace, drop empties.
+    let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
+
+    // Partition into required (+prefixed) and optional terms.
+    let mut required_terms: Vec<String> = Vec::new();
+    let mut optional_terms: Vec<String> = Vec::new();
+    for term in &query_terms {
+        if let Some(stripped) = term.strip_prefix('+') {
+            if !stripped.is_empty() {
+                required_terms.push(stripped.to_string());
+                continue;
+            }
+        }
+        optional_terms.push((*term).to_string());
+    }
+
+    // allScoringTerms = required.length > 0 ? [...required, ...optional] : queryTerms
+    let all_scoring_terms: Vec<String> = if required_terms.is_empty() {
+        query_terms.iter().map(|t| (*t).to_string()).collect()
+    } else {
+        required_terms
+            .iter()
+            .cloned()
+            .chain(optional_terms.iter().cloned())
+            .collect()
+    };
+
+    // Pre-filter to entries matching ALL required terms in name/desc/hint.
+    let candidates: Vec<&ToolSearchEntry> = if required_terms.is_empty() {
+        entries.iter().collect()
+    } else {
+        entries
+            .iter()
+            .filter(|entry| {
+                let parsed = parse_tool_name(&entry.name);
+                let desc = entry.description.to_lowercase();
+                let hint = entry
+                    .search_hint
+                    .as_deref()
+                    .map(str::to_lowercase)
+                    .unwrap_or_default();
+                required_terms.iter().all(|term| {
+                    parsed.parts.iter().any(|p| p == term)
+                        || parsed.parts.iter().any(|p| p.contains(term))
+                        || word_boundary_contains(&desc, term)
+                        || (!hint.is_empty() && word_boundary_contains(&hint, term))
+                })
+            })
+            .collect()
+    };
+
+    // Score each candidate.
+    let mut scored: Vec<(String, i64)> = candidates
+        .iter()
+        .map(|entry| {
+            let parsed = parse_tool_name(&entry.name);
+            let desc = entry.description.to_lowercase();
+            let hint = entry
+                .search_hint
+                .as_deref()
+                .map(str::to_lowercase)
+                .unwrap_or_default();
+
+            let mut score: i64 = 0;
+            for term in &all_scoring_terms {
+                // Exact part match (high weight for MCP/tool-name parts).
+                if parsed.parts.iter().any(|p| p == term) {
+                    score += if parsed.is_mcp { 12 } else { 10 };
+                } else if parsed.parts.iter().any(|p| p.contains(term)) {
+                    score += if parsed.is_mcp { 6 } else { 5 };
+                }
+
+                // Full-name fallback (only while still scoreless).
+                if score == 0 && parsed.full.contains(term) {
+                    score += 3;
+                }
+
+                // searchHint match — curated phrase, higher signal.
+                if !hint.is_empty() && word_boundary_contains(&hint, term) {
+                    score += 4;
+                }
+
+                // Description match (word boundary to avoid false positives).
+                if word_boundary_contains(&desc, term) {
+                    score += 2;
+                }
+            }
+
+            (entry.name.clone(), score)
         })
-        .filter(|(s, _)| *s > 0)
+        .filter(|(_, s)| *s > 0)
         .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name.cmp(&b.1.name)));
+
+    // sort((a, b) => b.score - a.score) — JS sort is stable, so candidates of
+    // equal score keep their original (registry) order. Rust's sort_by is also
+    // stable, so a key on `-score` reproduces that ordering exactly.
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
     scored
         .into_iter()
-        .take(TOOL_SEARCH_MAX_RESULTS)
-        .map(|(_, e)| e.clone())
+        .take(max_results)
+        .map(|(name, _)| name)
         .collect()
 }
 
@@ -167,6 +461,18 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
         AnalyticsValue::Int(duration_ms as i64),
     );
     bus.log_event(TOOL_SEARCH_FAILED, md).await;
+}
+
+/// Resolve the effective `max_results` from input: TS default 5, bounded by
+/// the hard ceiling guard. Non-integer / out-of-range values fall back to the
+/// default (the schema would reject them, but stay defensive).
+fn resolve_max_results(input: &Value) -> usize {
+    let raw = input
+        .get("max_results")
+        .and_then(Value::as_u64)
+        .map_or(TOOL_SEARCH_DEFAULT_MAX_RESULTS, |n| n as usize);
+    let raw = raw.max(1);
+    raw.min(TOOL_SEARCH_MAX_RESULTS)
 }
 
 #[async_trait]
@@ -211,11 +517,11 @@ impl Tool for ToolSearchTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "Token-overlap search over the registered tool list (top-20 results).".into()
+        "Fetches full schema definitions for deferred tools so they can be called.".into()
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "ToolSearch: rank registered tools by token overlap with the query.".into()
+        "Fetches full schema definitions for deferred tools so they can be called.".into()
     }
 
     async fn validate_input(
@@ -254,42 +560,50 @@ impl Tool for ToolSearchTool {
             emit_failed(&bus, "empty_query", started.elapsed().as_millis() as u64).await;
             return Err(ToolError::InvalidInput("ToolSearch: query is empty".into()));
         }
+        let max_results = resolve_max_results(&input);
 
         let mut md: LogEventMetadata = HashMap::new();
         md.insert("_PROTO_query".into(), pii_str(&query));
         bus.log_event(TOOL_SEARCH_STARTED, md).await;
 
         let entries = self.view.entries();
-        let top = rank(&query, &entries);
 
-        let results: Vec<Value> = top
-            .iter()
-            .map(|e| {
-                json!({
-                    "name": e.name,
-                    "description": e.description,
-                })
-            })
-            .collect();
+        let SearchResult {
+            matches,
+            query_type,
+        } = match handle_select(&query, &entries) {
+            Some(found) => SearchResult {
+                matches: found,
+                query_type: "select",
+            },
+            None => SearchResult {
+                matches: search_tools_with_keywords(&query, &entries, max_results),
+                query_type: "keyword",
+            },
+        };
 
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "duration_ms".into(),
             AnalyticsValue::Int(started.elapsed().as_millis() as i64),
         );
-        md.insert("result_count".into(), AnalyticsValue::Int(top.len() as i64));
         md.insert(
-            "registry_size".into(),
+            "match_count".into(),
+            AnalyticsValue::Int(matches.len() as i64),
+        );
+        md.insert(
+            "total_deferred_tools".into(),
             AnalyticsValue::Int(entries.len() as i64),
         );
+        md.insert("query_type".into(), verified_str(query_type));
         bus.log_event(TOOL_SEARCH_COMPLETED, md).await;
 
         Ok(ToolCallResult {
             data: json!({
+                "matches": matches,
                 "query": query,
-                "results": results,
-                "result_count": top.len(),
-                "max_results": TOOL_SEARCH_MAX_RESULTS,
+                "total_deferred_tools": entries.len(),
+                "max_results": max_results,
             }),
             new_messages: vec![],
             context_modifier: None,
@@ -313,91 +627,328 @@ mod tests {
         }
     }
 
-    fn mk_view(entries: Vec<(&str, &str)>) -> Arc<dyn ToolRegistryView> {
-        Arc::new(StaticRegistryView::new(
-            entries
-                .into_iter()
-                .map(|(n, d)| ToolSearchEntry {
-                    name: n.into(),
-                    description: d.into(),
-                })
-                .collect(),
-        ))
+    fn entry(name: &str, desc: &str) -> ToolSearchEntry {
+        ToolSearchEntry {
+            name: name.into(),
+            description: desc.into(),
+            search_hint: None,
+        }
+    }
+
+    fn entry_hint(name: &str, desc: &str, hint: &str) -> ToolSearchEntry {
+        ToolSearchEntry {
+            name: name.into(),
+            description: desc.into(),
+            search_hint: Some(hint.into()),
+        }
+    }
+
+    fn mk_view(entries: Vec<ToolSearchEntry>) -> Arc<dyn ToolRegistryView> {
+        Arc::new(StaticRegistryView::new(entries))
     }
 
     #[test]
     fn constants_locked() {
         assert_eq!(TOOL_SEARCH_TOOL_NAME, "ToolSearch");
+        assert_eq!(TOOL_SEARCH_DEFAULT_MAX_RESULTS, 5);
         assert_eq!(TOOL_SEARCH_MAX_RESULTS, 20);
     }
 
+    // ---- parse_tool_name ----
+
     #[test]
-    fn tokenize_lowercases_and_splits_on_non_alnum() {
-        let toks = tokenize("Read-File! ABC123");
-        assert!(toks.contains("read"));
-        assert!(toks.contains("file"));
-        assert!(toks.contains("abc123"));
-        assert_eq!(toks.len(), 3);
+    fn parse_mcp_tool_name() {
+        let p = parse_tool_name("mcp__github__create_issue");
+        assert!(p.is_mcp);
+        assert_eq!(p.parts, vec!["github", "create", "issue"]);
+        assert_eq!(p.full, "github create issue");
     }
 
     #[test]
-    fn rank_orders_by_overlap_score_then_name() {
-        let entries = vec![
-            ToolSearchEntry {
-                name: "B".into(),
-                description: "read file write".into(),
-            },
-            ToolSearchEntry {
-                name: "A".into(),
-                description: "read file write".into(),
-            },
-            ToolSearchEntry {
-                name: "C".into(),
-                description: "read".into(),
-            },
+    fn parse_camelcase_tool_name() {
+        let p = parse_tool_name("ReadFile");
+        assert!(!p.is_mcp);
+        assert_eq!(p.parts, vec!["read", "file"]);
+        assert_eq!(p.full, "read file");
+    }
+
+    #[test]
+    fn parse_snakecase_tool_name() {
+        let p = parse_tool_name("go_to_definition");
+        assert!(!p.is_mcp);
+        assert_eq!(p.parts, vec!["go", "to", "definition"]);
+        assert_eq!(p.full, "go to definition");
+    }
+
+    #[test]
+    fn parse_single_word_name() {
+        let p = parse_tool_name("Read");
+        assert_eq!(p.parts, vec!["read"]);
+        assert_eq!(p.full, "read");
+        assert!(!p.is_mcp);
+    }
+
+    // ---- word_boundary_contains ----
+
+    #[test]
+    fn word_boundary_matches_whole_word() {
+        assert!(word_boundary_contains("read a file", "read"));
+        assert!(word_boundary_contains("read a file", "file"));
+    }
+
+    #[test]
+    fn word_boundary_rejects_substring_inside_word() {
+        // "read" is NOT a whole word inside "already" / "thread".
+        assert!(!word_boundary_contains("already done", "read"));
+        assert!(!word_boundary_contains("kill a thread", "read"));
+    }
+
+    #[test]
+    fn word_boundary_matches_at_string_edges() {
+        assert!(word_boundary_contains("read", "read"));
+        assert!(word_boundary_contains("file-read", "read"));
+        assert!(word_boundary_contains("read.", "read"));
+    }
+
+    // ---- handle_select ----
+
+    #[test]
+    fn select_returns_both_names() {
+        let v = vec![entry("Read", ""), entry("Write", ""), entry("Edit", "")];
+        let got = handle_select("select:Read,Write", &v).unwrap();
+        assert_eq!(got, vec!["Read".to_string(), "Write".to_string()]);
+    }
+
+    #[test]
+    fn select_unknown_returns_empty() {
+        let v = vec![entry("Read", "")];
+        let got = handle_select("select:Nope", &v).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn select_is_case_insensitive_prefix() {
+        let v = vec![entry("Read", "")];
+        let got = handle_select("SELECT:Read", &v).unwrap();
+        assert_eq!(got, vec!["Read".to_string()]);
+    }
+
+    #[test]
+    fn select_resolves_names_case_insensitively() {
+        let v = vec![entry("Read", "")];
+        let got = handle_select("select:read", &v).unwrap();
+        assert_eq!(got, vec!["Read".to_string()]);
+    }
+
+    #[test]
+    fn select_trims_and_dedups() {
+        let v = vec![entry("Read", ""), entry("Write", "")];
+        let got = handle_select("select: Read , Write , Read ", &v).unwrap();
+        assert_eq!(got, vec!["Read".to_string(), "Write".to_string()]);
+    }
+
+    #[test]
+    fn non_select_returns_none() {
+        let v = vec![entry("Read", "")];
+        assert!(handle_select("read files", &v).is_none());
+    }
+
+    // ---- search_tools_with_keywords ----
+
+    #[test]
+    fn exact_name_fast_path() {
+        let v = vec![entry("Read", "read a file"), entry("Write", "write a file")];
+        let got = search_tools_with_keywords("read", &v, 5);
+        assert_eq!(got, vec!["Read".to_string()]);
+    }
+
+    #[test]
+    fn mcp_prefix_match() {
+        let v = vec![
+            entry("mcp__github__create_issue", "create a github issue"),
+            entry("mcp__github__list_issues", "list github issues"),
+            entry("mcp__slack__send", "send a slack message"),
         ];
-        let r = rank("read file", &entries);
-        // A and B both match {read, file} (score 2); A < B by name.
-        // C only matches {read} (score 1).
-        assert_eq!(r.len(), 3);
-        assert_eq!(r[0].name, "A");
-        assert_eq!(r[1].name, "B");
-        assert_eq!(r[2].name, "C");
+        let got = search_tools_with_keywords("mcp__github", &v, 5);
+        assert_eq!(
+            got,
+            vec![
+                "mcp__github__create_issue".to_string(),
+                "mcp__github__list_issues".to_string(),
+            ]
+        );
     }
 
     #[test]
-    fn rank_caps_at_20() {
-        let entries: Vec<ToolSearchEntry> = (0..50)
-            .map(|i| ToolSearchEntry {
-                name: format!("t{i:02}"),
-                description: "match me please".into(),
-            })
+    fn mcp_prefix_too_short_falls_through() {
+        // "mcp__" alone (len == 5) is not a prefix query; falls into scoring.
+        let v = vec![entry("mcp__github__create_issue", "create a github issue")];
+        let got = search_tools_with_keywords("mcp__", &v, 5);
+        // No scoring term overlap, no exact match -> empty.
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn name_part_beats_description_only() {
+        // "Notebook" name-part match (+10) outranks a description-only hit (+2).
+        let v = vec![
+            entry("NotebookEdit", "edit a cell"),
+            entry("Write", "write to a notebook somewhere"),
+        ];
+        let got = search_tools_with_keywords("notebook", &v, 5);
+        assert_eq!(
+            got,
+            vec!["NotebookEdit".to_string(), "Write".to_string()]
+        );
+    }
+
+    #[test]
+    fn required_term_filters_candidates() {
+        // "+slack send": require "slack", rank by "send" too.
+        let v = vec![
+            entry("mcp__slack__send_message", "send a message to slack"),
+            entry("mcp__github__send_dispatch", "send a github dispatch"),
+            entry("Read", "read a file"),
+        ];
+        let got = search_tools_with_keywords("+slack send", &v, 5);
+        // Only the slack tool survives the required-term pre-filter.
+        assert_eq!(got, vec!["mcp__slack__send_message".to_string()]);
+    }
+
+    #[test]
+    fn required_term_unmatched_yields_empty() {
+        let v = vec![entry("Read", "read a file")];
+        let got = search_tools_with_keywords("+nonexistent read", &v, 5);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn search_hint_scores_higher_than_description() {
+        // entry A: hint match (+4) + desc match (+2) = 6
+        // entry B: desc match only (+2)
+        let v = vec![
+            entry_hint("ToolA", "shell command runner", "shell"),
+            entry("ToolB", "run a shell command"),
+        ];
+        let got = search_tools_with_keywords("shell", &v, 5);
+        assert_eq!(got, vec!["ToolA".to_string(), "ToolB".to_string()]);
+    }
+
+    #[test]
+    fn max_results_caps_keyword() {
+        let v: Vec<ToolSearchEntry> = (0..10)
+            .map(|i| entry(&format!("Tool{i:02}"), "match me please"))
             .collect();
-        let r = rank("match", &entries);
-        assert_eq!(r.len(), TOOL_SEARCH_MAX_RESULTS);
+        let got = search_tools_with_keywords("match", &v, 2);
+        assert_eq!(got.len(), 2);
     }
 
     #[test]
-    fn rank_excludes_zero_score() {
-        let entries = vec![ToolSearchEntry {
-            name: "x".into(),
-            description: "nothing matches here".into(),
-        }];
-        assert!(rank("foo", &entries).is_empty());
+    fn zero_score_excluded() {
+        let v = vec![entry("Read", "read a file")];
+        let got = search_tools_with_keywords("xyzzy", &v, 5);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn mcp_part_match_outweighs_regular() {
+        // MCP exact part match is +12 vs +10 for a regular tool.
+        let v = vec![
+            entry("DeployTool", "deploy something"),
+            entry("mcp__vercel__deploy", "deploy to vercel"),
+        ];
+        let got = search_tools_with_keywords("deploy", &v, 5);
+        assert_eq!(
+            got,
+            vec!["mcp__vercel__deploy".to_string(), "DeployTool".to_string()]
+        );
+    }
+
+    // ---- resolve_max_results ----
+
+    #[test]
+    fn max_results_defaults_to_five() {
+        assert_eq!(resolve_max_results(&json!({"query": "x"})), 5);
+    }
+
+    #[test]
+    fn max_results_honors_input() {
+        assert_eq!(resolve_max_results(&json!({"query": "x", "max_results": 3})), 3);
+    }
+
+    #[test]
+    fn max_results_clamped_to_ceiling() {
+        assert_eq!(
+            resolve_max_results(&json!({"query": "x", "max_results": 9999})),
+            TOOL_SEARCH_MAX_RESULTS
+        );
+    }
+
+    #[test]
+    fn max_results_floor_one() {
+        assert_eq!(resolve_max_results(&json!({"query": "x", "max_results": 0})), 1);
+    }
+
+    // ---- call() ----
+
+    #[tokio::test]
+    async fn call_select_returns_matches() {
+        let tool = ToolSearchTool::with_view(
+            shell_test_ctx(dummy_out()),
+            mk_view(vec![entry("Read", "read a file"), entry("Write", "write a file")]),
+        );
+        let out = tool
+            .call(json!({"query": "select:Read,Write"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(out.data["matches"], json!(["Read", "Write"]));
+        assert_eq!(out.data["query"], json!("select:Read,Write"));
+        assert_eq!(out.data["total_deferred_tools"], json!(2));
+        assert_eq!(out.data["max_results"], json!(5));
     }
 
     #[tokio::test]
-    async fn returns_ranked_results() {
+    async fn call_select_unknown_empty_matches() {
         let tool = ToolSearchTool::with_view(
             shell_test_ctx(dummy_out()),
-            mk_view(vec![("Read", "read a file"), ("Write", "write a file")]),
+            mk_view(vec![entry("Read", "read a file")]),
         );
         let out = tool
-            .call(json!({"query": "read"}), fresh_ctx(), fresh_tx())
+            .call(json!({"query": "select:Nope"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(out.data["result_count"], json!(1));
-        assert_eq!(out.data["results"][0]["name"], json!("Read"));
+        assert_eq!(out.data["matches"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn call_keyword_returns_ranked() {
+        let tool = ToolSearchTool::with_view(
+            shell_test_ctx(dummy_out()),
+            mk_view(vec![
+                entry("NotebookEdit", "edit a cell"),
+                entry("Read", "read a file"),
+            ]),
+        );
+        let out = tool
+            .call(json!({"query": "notebook"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(out.data["matches"], json!(["NotebookEdit"]));
+    }
+
+    #[tokio::test]
+    async fn call_max_results_caps() {
+        let entries: Vec<ToolSearchEntry> = (0..10)
+            .map(|i| entry(&format!("Tool{i:02}"), "match me please"))
+            .collect();
+        let tool =
+            ToolSearchTool::with_view(shell_test_ctx(dummy_out()), mk_view(entries));
+        let out = tool
+            .call(json!({"query": "match", "max_results": 2}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(out.data["matches"].as_array().unwrap().len(), 2);
+        assert_eq!(out.data["max_results"], json!(2));
     }
 
     #[tokio::test]
@@ -408,5 +959,22 @@ mod tests {
             .await
             .expect_err("empty");
         assert!(format!("{err}").contains("query is empty"));
+    }
+
+    #[test]
+    fn schema_has_max_results_default() {
+        let schema = &*SCHEMA;
+        assert_eq!(
+            schema["properties"]["max_results"]["default"],
+            json!(5)
+        );
+        assert_eq!(
+            schema["properties"]["max_results"]["type"],
+            json!("integer")
+        );
+        assert_eq!(
+            schema["properties"]["max_results"]["minimum"],
+            json!(1)
+        );
     }
 }

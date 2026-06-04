@@ -6,6 +6,7 @@
 //! (wired in Tasks 16–18).
 
 use crate::oauth_hook::{current_hook, OAuthRefreshHook, TokenHash};
+use crate::overflow::{adjusted_max_tokens, parse_max_tokens_overflow, Overflow};
 use crate::rate_limit::{parse_anthropic_ratelimit_reset, parse_retry_after, parse_unified_reset};
 use crate::retry::{with_retry, DEFAULT_BASE_DELAYS_MS, DEFAULT_RETRY_BUDGET};
 use crate::types::{MessageResponse, StreamEvent};
@@ -378,11 +379,23 @@ impl AnthropicProvider {
     /// Run the retry loop. A 429 is handled in-closure (parse
     /// `Retry-After` / `anthropic-ratelimit-requests-reset`, sleep, then return
     /// a synthesised retryable so `with_retry` re-attempts — the rate-limit
-    /// handshake; see Batch 4 for the subscriber gate). **Every other status,
-    /// including a real 529 or a streamed `overloaded_error` body, is passed
-    /// through verbatim** so [`crate::retry::classify_retryable`] sees the real
-    /// status/body and can tag it `Overloaded`. Returns the underlying
-    /// `with_retry` outcome.
+    /// handshake; see Batch 4 for the subscriber gate).
+    ///
+    /// A **400** `max_tokens` context-overflow error
+    /// is also handled in-closure (Batch 5): the three numbers are parsed
+    /// ([`crate::overflow::parse_max_tokens_overflow`]), a safe `max_tokens` is
+    /// recomputed ([`crate::overflow::adjusted_max_tokens`], floor 3000 with a
+    /// 1000 safety buffer, accounting for the thinking budget), the shared
+    /// request body's `max_tokens` field is mutated in place, and the request is
+    /// re-issued **within the same attempt** — mirroring the TS `continue`
+    /// (`withRetry.ts:425`), which re-loops WITHOUT consuming a normal retry
+    /// slot. If the reshrink is impossible (`available < 3000`) the original 400
+    /// is surfaced unchanged (TS `throw error`, `:404`).
+    ///
+    /// **Every other status, including a real 529 or a streamed
+    /// `overloaded_error` body, is passed through verbatim** so
+    /// [`crate::retry::classify_retryable`] sees the real status/body and can
+    /// tag it `Overloaded`. Returns the underlying `with_retry` outcome.
     async fn drive_retry_loop_with_429<T: HttpTransport>(
         &self,
         body: &Value,
@@ -394,12 +407,33 @@ impl AnthropicProvider {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        with_retry(DEFAULT_RETRY_BUDGET, DEFAULT_BASE_DELAYS_MS, |_attempt| {
-            let body = body.clone();
+        // Extended-thinking budget threaded into the overflow reshrink (0 when
+        // thinking is disabled / absent), read from `thinking.budget_tokens` —
+        // the wire field the Messages API uses. Mirrors TS `retryContext`
+        // thinking config (`withRetry.ts:408-410`).
+        let thinking_budget = body
+            .get("thinking")
+            .and_then(|t| {
+                if t.get("type").and_then(Value::as_str) == Some("enabled") {
+                    t.get("budget_tokens").and_then(Value::as_u64)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        // Shared, mutable body so an overflow reshrink performed during one
+        // attempt persists into subsequent attempts (the 2nd attempt sees the
+        // reduced `max_tokens`). `tokio::sync::Mutex` because the closure is
+        // async and the lock is held across an `.await`.
+        let shared_body = Arc::new(tokio::sync::Mutex::new(body.clone()));
+        with_retry(DEFAULT_RETRY_BUDGET, DEFAULT_BASE_DELAYS_MS, |attempt| {
             let bus = bus_for_loop.clone();
             let model_s = model_for_loop.clone();
+            let shared_body = Arc::clone(&shared_body);
             async move {
-                let req = self.build_request_with_betas(&body, None);
+                // Snapshot the (possibly already-reshrunk) body for this attempt.
+                let mut current = shared_body.lock().await.clone();
+                let req = self.build_request_with_betas(&current, None);
                 let resp = transport.request(req).await?;
                 // Only 429 is intercepted: sleep on the rate-limit window, then
                 // return a synthesised retryable (a 503) to trigger one more
@@ -414,6 +448,46 @@ impl AnthropicProvider {
                         headers: Vec::new(),
                         body: String::new(),
                     });
+                }
+                // 400 `max_tokens` context overflow: reshrink `max_tokens` and
+                // re-issue WITHIN this attempt (TS `continue`, withRetry.ts:425).
+                // The API will not overflow again after a correct reshrink, so a
+                // single in-attempt re-issue is bounded; if the re-issued
+                // request somehow returns the same overflow, the generic loop
+                // re-classifies it and the original 400 surfaces.
+                if let Some(overflow) = parse_max_tokens_overflow(resp.status, &resp.body) {
+                    if let Some(adjusted) = adjusted_max_tokens(overflow, thinking_budget) {
+                        // Mutate the shared body so later attempts also see the
+                        // reduced cap, then re-issue immediately.
+                        {
+                            let mut guard = shared_body.lock().await;
+                            guard["max_tokens"] = Value::from(adjusted);
+                            current = guard.clone();
+                        }
+                        tracing::warn!(
+                            target: "lingxi::api_client::overflow",
+                            input_tokens = overflow.input_tokens,
+                            context_limit = overflow.context_limit,
+                            adjusted_max_tokens = adjusted,
+                            "max_tokens context overflow; reshrinking and retrying"
+                        );
+                        // Telemetry parity: `tengu_max_tokens_context_overflow_adjustment`
+                        // (withRetry.ts:418) is emitted via the bus, not byte-compared.
+                        emit_max_tokens_overflow_adjustment(
+                            &bus,
+                            &model_s,
+                            overflow,
+                            adjusted,
+                            attempt,
+                        )
+                        .await;
+                        let req = self.build_request_with_betas(&current, None);
+                        return transport.request(req).await.map_err(Into::into);
+                    }
+                    // available < 3000 → cannot reshrink; surface the original
+                    // 400 unchanged (TS `throw error`, withRetry.ts:404). The
+                    // generic loop classifies this 400 as Terminal (its body no
+                    // longer reshrinkable here) → ApiError::Server { 400, .. }.
                 }
                 Ok(resp)
             }
@@ -749,6 +823,27 @@ async fn handle_429(
     tokio::time::sleep(sleep).await;
 }
 
+/// Emit the `tengu_max_tokens_context_overflow_adjustment` telemetry event for
+/// a parsed overflow + its recomputed cap. Thin wrapper over the `telemetry`
+/// module helper so the closure in `drive_retry_loop_with_429` stays terse.
+async fn emit_max_tokens_overflow_adjustment(
+    bus: &Option<Arc<::telemetry::AnalyticsBus>>,
+    model: &str,
+    overflow: Overflow,
+    adjusted: u32,
+    attempt: u8,
+) {
+    telemetry::emit_max_tokens_overflow_adjustment(
+        bus,
+        model,
+        overflow.input_tokens,
+        overflow.context_limit,
+        adjusted,
+        attempt,
+    )
+    .await;
+}
+
 /// Convert a `Duration` to a `u64` millisecond count, saturating at `u64::MAX`.
 /// Used for telemetry payloads where ms-resolution `i64` is the wire shape.
 fn duration_ms_clamped(d: std::time::Duration) -> u64 {
@@ -930,6 +1025,49 @@ mod telemetry {
             AnalyticsValue::Int(retry_after_ms as i64),
         );
         bus.log_event("tengu_api_rate_limited", m).await;
+    }
+
+    /// Emit `tengu_max_tokens_context_overflow_adjustment` (claude-code
+    /// `withRetry.ts:418`) with the parsed input/limit and the recomputed cap.
+    /// The bus payload is not byte-compared (Batch 5 fidelity note), but the
+    /// event name and field keys mirror the TS `logEvent` call.
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "token counts and attempt index fit in i64 for all realistic deployments"
+    )]
+    pub async fn emit_max_tokens_overflow_adjustment(
+        bus: &Option<Arc<AnalyticsBus>>,
+        model: &str,
+        input_tokens: u64,
+        context_limit: u64,
+        adjusted_max_tokens: u32,
+        attempt: u8,
+    ) {
+        let Some(bus) = bus else { return };
+        let mut m = LogEventMetadata::new();
+        m.insert(
+            "model".into(),
+            AnalyticsValue::String(
+                Verified::assert_safe(model.to_string())
+                    .as_str()
+                    .to_string(),
+            ),
+        );
+        m.insert(
+            "inputTokens".into(),
+            AnalyticsValue::Int(input_tokens as i64),
+        );
+        m.insert(
+            "contextLimit".into(),
+            AnalyticsValue::Int(context_limit as i64),
+        );
+        m.insert(
+            "adjustedMaxTokens".into(),
+            AnalyticsValue::Int(i64::from(adjusted_max_tokens)),
+        );
+        m.insert("attempt".into(), AnalyticsValue::Int(i64::from(attempt)));
+        bus.log_event("tengu_max_tokens_context_overflow_adjustment", m)
+            .await;
     }
 }
 

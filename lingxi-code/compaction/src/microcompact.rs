@@ -23,6 +23,19 @@ pub fn compactable_tools() -> HashSet<&'static str> {
     ])
 }
 
+/// Reset microcompact module state after a compaction.
+///
+/// TS `resetMicrocompactState` (`microCompact.ts:130`) resets the
+/// cached-microcompact module state (`cachedMCState`) and clears
+/// `pendingCacheEdits`. The Rust microcompact / cached-microcompact layers are
+/// stateless (pure functions over passed-in history; see
+/// [`crate::cached_microcompact::CachedMicrocompact`], a unit struct), so there
+/// is no module-level mutable state to clear — this is a documented no-op kept
+/// for call-site symmetry with the TS post-compact cleanup.
+pub fn reset_microcompact_state() {
+    // No Rust module-level microcompact state to reset (stateless layer).
+}
+
 /// Configuration controlling when a tool result is considered "stale and large".
 #[derive(Debug, Clone)]
 pub struct TimeBasedMCConfig {

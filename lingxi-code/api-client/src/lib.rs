@@ -13,6 +13,7 @@ pub mod anthropic;
 pub mod betas;
 pub mod error;
 pub mod oauth_hook;
+pub mod overflow;
 pub mod rate_limit;
 pub mod retry;
 pub mod sse;

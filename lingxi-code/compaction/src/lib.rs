@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod autocompact;
+pub mod boundary;
 pub mod cached_microcompact;
 pub mod context_collapse;
 pub mod grouping;
@@ -17,12 +18,24 @@ pub mod reactive;
 pub mod session_memory;
 pub mod snip;
 pub mod thresholds;
+pub mod warning_state;
 
 pub use autocompact::{Autocompactor, CompactionError, CompactionResult};
+pub use boundary::{
+    create_compact_boundary, find_last_compact_boundary_index, get_messages_after_compact_boundary,
+    is_compact_boundary, CompactBoundaryMetadata, CompactTrigger, PreservedSegment,
+    BOUNDARY_CONTENT,
+};
 pub use microcompact::{
-    compactable_tools, MicrocompactResult, Microcompactor, TIME_BASED_MC_CLEARED_MESSAGE,
+    compactable_tools, reset_microcompact_state, MicrocompactResult, Microcompactor,
+    TIME_BASED_MC_CLEARED_MESSAGE,
 };
 pub use orchestrator::{CompactionOrchestrator, IterationCompactionResult};
+pub use post_compact::{is_main_thread_compact, run_post_compact_cleanup};
+pub use warning_state::{
+    clear_compact_warning_suppression, is_compact_warning_suppressed, suppress_compact_warning,
+    CompactWarningState,
+};
 pub use prompt::{
     format_compact_summary, get_compact_prompt, get_compact_user_summary_message,
     BASE_COMPACT_PROMPT, NO_TOOLS_PREAMBLE, NO_TOOLS_TRAILER,

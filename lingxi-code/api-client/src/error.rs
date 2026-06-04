@@ -30,6 +30,21 @@ pub enum ApiError {
         retry_after_secs: u64,
     },
 
+    /// HTTP 529 (or a streamed body carrying `"type":"overloaded_error"`): the
+    /// provider is at transient capacity. `repeated` is set once the retry
+    /// budget is exhausted on consecutive overloads, switching the display
+    /// string to the byte-locked claude-code message.
+    ///
+    /// Display string is **byte-locked** to claude-code `errors.ts:166`
+    /// (`REPEATED_529_ERROR_MESSAGE = 'Repeated 529 Overloaded errors'`) when
+    /// `repeated`, else the lowercase `"overloaded"` token used by `is529Error`
+    /// classification.
+    #[error("{}", if *repeated { "Repeated 529 Overloaded errors" } else { "overloaded" })]
+    Overloaded {
+        /// `true` once the overload persists across the whole retry budget.
+        repeated: bool,
+    },
+
     /// Authentication failed (HTTP 401 / 403 / invalid API key).
     #[error("authentication failed: {0}")]
     Unauthorized(String),
@@ -95,5 +110,18 @@ mod tests {
             retry_after_secs: 7,
         };
         assert_eq!(format!("{e}"), "Rate limited; retrying in 7s");
+    }
+
+    #[test]
+    fn overloaded_repeated_display_string_is_byte_locked() {
+        // Byte-locked against claude-code errors.ts:166 REPEATED_529_ERROR_MESSAGE.
+        let e = ApiError::Overloaded { repeated: true };
+        assert_eq!(format!("{e}"), "Repeated 529 Overloaded errors");
+    }
+
+    #[test]
+    fn overloaded_single_display_string() {
+        let e = ApiError::Overloaded { repeated: false };
+        assert_eq!(format!("{e}"), "overloaded");
     }
 }

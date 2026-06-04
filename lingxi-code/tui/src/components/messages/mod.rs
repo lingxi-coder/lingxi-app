@@ -64,7 +64,9 @@ pub fn render_entry_to_string(entry: &RenderedMessage, focused: bool, expanded: 
         // Markdown-rendered body, marker-prefixed (oracle == the component's
         // markdown-flattened layout).
         RenderedMessage::AssistantText { body, .. } => {
-            assistant_text::render_assistant_text_to_string(body)
+            // (A2) Default markdown width (0 → 80); this string dispatcher has
+            // no terminal width, matching the prior behavior.
+            assistant_text::render_assistant_text_to_string(body, 0)
         }
         RenderedMessage::SystemText { body, .. } => body.clone(),
         RenderedMessage::AssistantToolUse { id, tool, input } => {

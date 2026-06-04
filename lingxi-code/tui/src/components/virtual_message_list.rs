@@ -66,7 +66,7 @@ pub fn measured_height(msg: &RenderedMessage, width: usize) -> usize {
             return 0;
         }
     }
-    let text = render_text_for_measure(msg);
+    let text = render_text_for_measure(msg, width);
     if text.is_empty() {
         return 1;
     }
@@ -95,7 +95,7 @@ pub fn measured_height(msg: &RenderedMessage, width: usize) -> usize {
 /// `measured_height_pins_*` lock tests below. Drift here corrupts the
 /// line-based scroll math.
 #[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (28 variants)
-fn render_text_for_measure(msg: &RenderedMessage) -> String {
+fn render_text_for_measure(msg: &RenderedMessage, width: usize) -> String {
     match msg {
         RenderedMessage::UserText { body, .. } | RenderedMessage::SystemText { body, .. } => {
             body.clone()
@@ -104,8 +104,10 @@ fn render_text_for_measure(msg: &RenderedMessage) -> String {
         // (marker + 2-col continuation indent) so the height cache counts the
         // SAME rows the component draws. A raw `body.clone()` over-counts
         // dropped ``` fence rows / trailing blanks once markdown is applied.
+        // (A2) Pass the SAME width the component renders at so a markdown table
+        // flattens to the identical row count.
         RenderedMessage::AssistantText { body, .. } => {
-            crate::components::messages::assistant_text::render_assistant_text_to_string(body)
+            crate::components::messages::assistant_text::render_assistant_text_to_string(body, width)
         }
         RenderedMessage::AssistantToolUse { tool, .. } => format!("● {tool}(…)"),
         RenderedMessage::UserToolResult { result, .. } => result
@@ -710,12 +712,16 @@ pub fn VirtualMessageList(props: &VirtualMessageListProps) -> impl Into<AnyEleme
     let focused_tool_id = props.focused_tool_id;
     let theme = props.theme;
     let theme_name = props.theme_name;
+    // (A2) Thread the cache's render width into each message so markdown TABLES
+    // in assistant bodies lay out to the live viewport width. The cache was
+    // built at this same width, so measurement and render agree.
+    let width = props.cache.width();
     let rendered: Vec<AnyElement<'static>> = if win.is_empty() {
         Vec::new()
     } else {
         win.indices()
             .filter_map(|i| props.messages.get(i).cloned())
-            .map(|m| render_message(m, &expanded, focused_tool_id, theme, theme_name))
+            .map(|m| render_message(m, &expanded, focused_tool_id, theme, theme_name, width))
             .collect()
     };
     element! {
@@ -778,10 +784,11 @@ mod tests {
             timestamp: 0,
         };
         assert_eq!(measured_height(&m, 80), 2);
-        // measurement == render: pin against the renderer's own oracle.
+        // measurement == render: pin against the renderer's own oracle at the
+        // same width `measured_height` uses (A2).
         assert_eq!(
             measured_height(&m, 80),
-            render_assistant_text_to_string(body).lines().count()
+            render_assistant_text_to_string(body, 80).lines().count()
         );
     }
 
@@ -797,7 +804,7 @@ mod tests {
             body: body.into(),
             timestamp: 0,
         };
-        let rendered = render_assistant_text_to_string(body);
+        let rendered = render_assistant_text_to_string(body, 80);
         assert_eq!(
             measured_height(&m, 80),
             rendered.lines().count(),

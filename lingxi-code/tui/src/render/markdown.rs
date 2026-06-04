@@ -18,12 +18,30 @@
 // the module prose; suppress the doc-markdown nudge crate-wide for this file.
 #![allow(clippy::doc_markdown)]
 
+use crate::render::markdown_table::{self, ColumnAlign};
 use crate::render::{SpanStyle, StyleColor, StyledLine, StyledSpan};
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
+/// Default render width (display columns) used by [`render`] when the caller
+/// has no terminal width to thread in. Tables are the only block whose layout
+/// depends on width; everything else is width-independent, so existing
+/// non-table callers/tests are unaffected by this default.
+const DEFAULT_RENDER_WIDTH: usize = 80;
 
 /// Dim vertical bar prefixing blockquote lines. Matches claude-code's
 /// `BLOCKQUOTE_BAR` (`src/constants/figures.ts`).
 const BLOCKQUOTE_BAR: &str = "│";
+
+/// Map a `pulldown-cmark` column [`Alignment`] to the table renderer's
+/// [`ColumnAlign`]. `None` (no explicit alignment) is markdown's left default,
+/// matching claude-code (`token.align?.[col] ?? 'left'`).
+fn map_alignment(a: Alignment) -> ColumnAlign {
+    match a {
+        Alignment::Center => ColumnAlign::Center,
+        Alignment::Right => ColumnAlign::Right,
+        Alignment::None | Alignment::Left => ColumnAlign::Left,
+    }
+}
 
 /// Theme colors the markdown renderer needs. Kept minimal and decoupled
 /// from iocraft so the renderer is a pure value function.
@@ -71,16 +89,29 @@ struct CodeBlockState {
     text: String,
 }
 
-/// Render CommonMark `text` to styled lines using `theme`. Strikethrough is
-/// disabled to match claude-code; tables and footnotes are enabled by
-/// `pulldown-cmark` defaults but only paragraph/heading/list/quote/code are
-/// styled here (others fall through as their inline text).
+/// Render CommonMark `text` to styled lines using `theme`, at the
+/// [`DEFAULT_RENDER_WIDTH`]. Strikethrough is disabled to match claude-code;
+/// tables are enabled and now rendered as a bordered grid (see
+/// [`render_with_width`]); footnotes are enabled by `pulldown-cmark` defaults
+/// but only paragraph/heading/list/quote/code/table are styled here (others
+/// fall through as their inline text).
+///
+/// Width only affects table layout; delegating to [`render_with_width`] with
+/// the default keeps every non-table caller (and their pinned tests) unchanged.
 #[must_use]
 pub fn render(text: &str, theme: &MarkdownTheme) -> Vec<StyledLine> {
+    render_with_width(text, theme, DEFAULT_RENDER_WIDTH)
+}
+
+/// Render CommonMark `text` to styled lines using `theme`, laying out markdown
+/// tables to fit `width` display columns (the bordered-grid / vertical-fallback
+/// algorithm in [`markdown_table`]). Non-table blocks are width-independent.
+#[must_use]
+pub fn render_with_width(text: &str, theme: &MarkdownTheme, width: usize) -> Vec<StyledLine> {
     let options = Options::ENABLE_TABLES;
     let parser = Parser::new_ext(text, options);
 
-    let mut builder = Builder::new(theme);
+    let mut builder = Builder::new(theme, width);
     for event in parser {
         builder.handle(event);
     }
@@ -110,10 +141,30 @@ struct Builder<'a> {
     /// When inside a fenced/indented code block: accumulates raw text and
     /// the language hint. `Some` between `Start(CodeBlock)`/`End(CodeBlock)`.
     code_block: Option<CodeBlockState>,
+    /// Table render width (display columns) threaded from
+    /// [`render_with_width`].
+    table_width: usize,
+    /// Per-column alignment from the table's `Start(Table(alignments))`.
+    table_aligns: Vec<ColumnAlign>,
+    /// Header cells (one styled span list per column), captured from the
+    /// `TableHead` row.
+    table_header: Vec<Vec<StyledSpan>>,
+    /// Data rows: one row per `TableRow`, each a list of styled cells.
+    table_rows: Vec<Vec<Vec<StyledSpan>>>,
+    /// The cell currently being built (flushed from `pending` on
+    /// `End(TableCell)`).
+    table_cell: Vec<StyledSpan>,
+    /// The row currently being built (one styled-cell list per `TableCell`).
+    table_row: Vec<Vec<StyledSpan>>,
+    /// Whether the active row is the header row (`TableHead`) vs a data row.
+    in_table_head: bool,
+    /// Whether we are inside a `Start(Table)`/`End(Table)` span at all (so the
+    /// cell-content path knows to buffer into `table_cell` not `lines`).
+    in_table: bool,
 }
 
 impl<'a> Builder<'a> {
-    fn new(theme: &'a MarkdownTheme) -> Self {
+    fn new(theme: &'a MarkdownTheme, table_width: usize) -> Self {
         Builder {
             theme,
             lines: Vec::new(),
@@ -124,6 +175,14 @@ impl<'a> Builder<'a> {
             emphasis_depth: 0,
             blockquote_depth: 0,
             code_block: None,
+            table_width,
+            table_aligns: Vec::new(),
+            table_header: Vec::new(),
+            table_rows: Vec::new(),
+            table_cell: Vec::new(),
+            table_row: Vec::new(),
+            in_table_head: false,
+            in_table: false,
         }
     }
 
@@ -195,7 +254,13 @@ impl<'a> Builder<'a> {
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
-                self.flush();
+                if self.in_table {
+                    // Inside a table cell a line break is whitespace; the cell
+                    // wrap collapses it. (claude-code wraps the joined content.)
+                    self.push_text(" ");
+                } else {
+                    self.flush();
+                }
             }
             Event::End(TagEnd::Paragraph) => {
                 self.flush();
@@ -268,6 +333,63 @@ impl<'a> Builder<'a> {
                 if let Some(cb) = self.code_block.take() {
                     self.emit_code_block(&cb);
                 }
+            }
+            // ---- tables (claude-code `MarkdownTable`) ----------------------
+            Event::Start(Tag::Table(alignments)) => {
+                self.flush();
+                self.in_table = true;
+                self.table_aligns = alignments.iter().copied().map(map_alignment).collect();
+                self.table_header.clear();
+                self.table_rows.clear();
+                self.table_row.clear();
+                self.table_cell.clear();
+                self.in_table_head = false;
+                // A cell's content must not inherit list/quote context; the
+                // builder is always entered at block level for a table.
+                self.pending.clear();
+            }
+            Event::Start(Tag::TableHead) => {
+                self.in_table_head = true;
+                self.table_row.clear();
+            }
+            Event::End(TagEnd::TableHead) => {
+                self.table_header = std::mem::take(&mut self.table_row);
+                self.in_table_head = false;
+            }
+            Event::Start(Tag::TableRow) => {
+                self.table_row.clear();
+            }
+            Event::End(TagEnd::TableRow) => {
+                if !self.in_table_head {
+                    self.table_rows.push(std::mem::take(&mut self.table_row));
+                }
+            }
+            Event::Start(Tag::TableCell) => {
+                // Cell inline content accumulates in `pending`; ensure it is
+                // empty at cell start.
+                self.pending.clear();
+                self.table_cell.clear();
+            }
+            Event::End(TagEnd::TableCell) => {
+                // Flush the buffered inline spans into the current cell.
+                let mut cell = std::mem::take(&mut self.pending);
+                self.table_cell.append(&mut cell);
+                self.table_row.push(std::mem::take(&mut self.table_cell));
+            }
+            Event::End(TagEnd::Table) => {
+                self.in_table = false;
+                let lines = markdown_table::render_table(
+                    &self.table_header,
+                    &self.table_rows,
+                    &self.table_aligns,
+                    self.table_width,
+                    self.theme,
+                );
+                self.lines.extend(lines);
+                self.lines.push(StyledLine::empty());
+                self.table_aligns.clear();
+                self.table_header.clear();
+                self.table_rows.clear();
             }
             _ => {}
         }
@@ -624,5 +746,76 @@ mod tests {
             "text\n```python\nprint(1)",
             &theme()
         )));
+    }
+
+    // ---- A2: markdown TABLE grid layout --------------------------------
+
+    const TABLE_MD: &str = "\
+| Name | Role |
+|:-----|-----:|
+| Ada  | Eng  |
+| Bob  | PM   |";
+
+    #[test]
+    fn table_renders_grid_not_inline() {
+        let lines = render(TABLE_MD, &theme());
+        let joined: String = lines
+            .iter()
+            .map(StyledLine::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Bordered grid glyphs present (not a flattened inline string).
+        assert!(joined.contains('│'), "vertical border present: {joined:?}");
+        assert!(joined.contains('┌'), "top-left corner present");
+        assert!(joined.contains('┼'), "interior cross present");
+        // Header text rendered.
+        assert!(joined.contains("Name") && joined.contains("Role"));
+        // Data rows rendered.
+        assert!(joined.contains("Ada") && joined.contains("Bob"));
+    }
+
+    #[test]
+    fn table_maps_column_alignment() {
+        // Left + right aligned columns from `:---` / `---:`.
+        let lines = render(TABLE_MD, &theme());
+        // The header row is centered regardless; the data rows honor the
+        // per-column alignment. Find a data line containing "Ada".
+        let ada_line = lines
+            .iter()
+            .map(StyledLine::plain_text)
+            .find(|l| l.contains("Ada"))
+            .expect("data row with Ada");
+        // Left-aligned col 1: content hugs the left after "│ ".
+        assert!(ada_line.starts_with("│ Ada"), "left col: {ada_line:?}");
+        // Right-aligned col 2: "Eng" hugs the right before " │".
+        assert!(ada_line.ends_with("Eng │"), "right col: {ada_line:?}");
+    }
+
+    #[test]
+    fn table_inline_code_cell_keeps_style() {
+        // A cell containing inline code keeps the inline-code color span.
+        let md = "| A |\n|---|\n| `x` |";
+        let lines = render(md, &theme());
+        let code = lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .find(|s| s.text == "x")
+            .expect("inline-code cell span present");
+        assert_eq!(
+            code.style.fg,
+            StyleColor::Named(crate::render::NamedColor::Magenta)
+        );
+    }
+
+    #[test]
+    fn snapshot_markdown_table() {
+        // Default width (80) → bordered grid.
+        insta::assert_yaml_snapshot!(render(TABLE_MD, &theme()));
+    }
+
+    #[test]
+    fn snapshot_markdown_table_narrow() {
+        // Narrow width (24) → exercises the shrink / vertical-fallback paths.
+        insta::assert_yaml_snapshot!(render_with_width(TABLE_MD, &theme(), 24));
     }
 }

@@ -75,6 +75,10 @@ fun Composer(
     onCameraClick: () -> Unit = {},
     attachment: ComposerAttachment? = null,
     onRemoveAttachment: () -> Unit = {},
+    /** True while a turn streams — the trailing action becomes a Stop button. */
+    isStreaming: Boolean = false,
+    /** Fired by the Stop button to cancel the in-flight turn. */
+    onStop: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val hasText = text.trim().isNotEmpty()
@@ -120,7 +124,9 @@ fun Composer(
                     cursorBrush = SolidColor(t.accent),
                     maxLines = 5,
                     keyboardActions = androidx.compose.foundation.text.KeyboardActions(
-                        onSend = { onSend() },
+                        // Don't start a second turn from the IME Send key while one
+                        // is already streaming (the VM also guards this).
+                        onSend = { if (!isStreaming) onSend() },
                     ),
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                         imeAction = ImeAction.Send,
@@ -146,19 +152,40 @@ fun Composer(
                 }
                 ModelChip(model = model, onModelChange = onModelChange)
                 Spacer(Modifier.weight(1f))
-                if (hasText) {
-                    Box(
+                when {
+                    // Streaming: the send action becomes a Stop button that
+                    // cancels the in-flight turn (a filled square — the universal
+                    // stop glyph — inside the accent slot).
+                    isStreaming -> Box(
                         modifier = Modifier
                             .size(34.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .background(t.accent)
-                            .clickable(onClick = onSend),
+                            .clickable(onClick = onStop)
+                            .testTag(UiTags.COMPOSER_STOP),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(12.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(Color.White),
+                        )
+                    }
+                    // Idle with text: the accent Send button.
+                    hasText -> Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(t.accent)
+                            .clickable(onClick = onSend)
+                            .testTag(UiTags.COMPOSER_SEND),
                         contentAlignment = Alignment.Center,
                     ) {
                         LXIcon(name = LXIconName.ArrowUp, size = 16.dp, color = Color.White)
                     }
-                } else {
-                    IconHit(
+                    // Idle, empty: the mic (voice-hold) affordance.
+                    else -> IconHit(
                         onClick = onMicClick,
                         modifier = Modifier.voiceHold(
                             onStart = onMicHoldStart,

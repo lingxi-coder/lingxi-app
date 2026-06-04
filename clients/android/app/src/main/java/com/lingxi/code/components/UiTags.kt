@@ -17,8 +17,23 @@ object UiTags {
     /** The composer's camera affordance that triggers an on-device photo capture. */
     const val COMPOSER_CAMERA = "tag.composerCamera"
 
+    /** The composer's accent Send button (shown idle, with text). */
+    const val COMPOSER_SEND = "tag.composerSend"
+
+    /** The composer's Stop button (replaces Send while a turn streams). */
+    const val COMPOSER_STOP = "tag.composerStop"
+
+    /** The persistent, dismissible turn-error banner above the composer. */
+    const val CHAT_ERROR = "tag.chatError"
+
+    /** The error banner's dismiss (×) affordance. */
+    const val CHAT_ERROR_DISMISS = "tag.chatErrorDismiss"
+
     /** A message bubble's share affordance that surfaces the native share chooser. */
     const val MESSAGE_SHARE = "tag.messageShare"
+
+    /** The conversation's transient status row (engine tool activity / errors). */
+    const val CHAT_STATUS = "tag.chatStatus"
 
     /** Prefix for the drawer section tabs; suffixed with the [DrawerSection] key. */
     const val DRAWER_TAB_PREFIX = "tag.drawerTab."

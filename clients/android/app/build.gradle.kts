@@ -102,6 +102,10 @@ dependencies {
 
     // Unit tests
     testImplementation("junit:junit:4.13.2")
+    // Coroutine/Flow test harness — runTest + UnconfinedTestDispatcher drive the
+    // engine reply-stream ordering tests (subscribe-before-submit, terminal
+    // completion) on the plain JVM with virtual time.
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
 
     // Instrumented + Compose UI tests
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

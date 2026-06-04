@@ -413,6 +413,16 @@ function validateEvent(name: string, v: unknown): void {
       assert.ok(isNumber(o['active_workers']));
       if ('team' in o) assert.ok(isString(o['team']));
       break;
+    case 'coordinator_worker': {
+      const w = rec(o['worker']);
+      assert.ok(
+        isString(w['agent_id']) &&
+          isString(w['name']) &&
+          isString(w['agent_type']) &&
+          isString(w['status']),
+      );
+      break;
+    }
     case 'thinking_delta':
       assert.ok(isString(o['thinking']));
       if ('signature' in o) assert.ok(isString(o['signature']));
@@ -490,7 +500,7 @@ test('every command snapshot parses as ClientCommand', () => {
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 30, `expected 30 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 31, `expected 31 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

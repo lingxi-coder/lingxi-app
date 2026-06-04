@@ -5,7 +5,10 @@
  * Rust `bridge-server`:
  *
  *   1. Spawn the built `bridge-server` binary as a child process. Its path is
- *      resolved from `LINGXI_BRIDGE_SERVER_BIN`, else the workspace debug build.
+ *      resolved from `opts.serverBin` → `LINGXI_BRIDGE_SERVER_BIN` → a path
+ *      derived RELATIVE to the repo (`<repoRoot>/lingxi-code/target/{debug,
+ *      release}/bridge-server`, first existing); a clear, actionable error is
+ *      thrown if none resolve.
  *      `ANTHROPIC_API_KEY` / `LINGXI_API_BASE_URL` pass through from the
  *      environment; `--cwd` / `--model` come from env overrides (the key is
  *      NEVER read into a string we log — it rides inherited `env` untouched).
@@ -26,8 +29,9 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { ipcMain, type WebContents } from 'electron';
 import {
@@ -80,13 +84,69 @@ export interface BridgeManagerOptions {
   lockfileTimeoutMs?: number;
 }
 
-/** The workspace debug build path used when no override is supplied. */
-const DEFAULT_SERVER_BIN =
-  '/Users/luolingfeng/Projects/LingXi-Next/.claude/worktrees/m10-native-apps/lingxi-code/target/debug/bridge-server';
+/** Binary name we look for under the workspace `lingxi-code/target/{profile}`. */
+const SERVER_BIN_NAME = 'bridge-server';
 
-/** Resolve the bridge-server binary path from options → env → workspace default. */
+/**
+ * Walk upward from `start` looking for a built `bridge-server` under
+ * `<dir>/lingxi-code/target/{debug,release}/bridge-server`, returning the first
+ * existing path. This anchors the binary RELATIVE to the repo (no absolute
+ * author path) and works from both the bundled `out/main` and the `src/main`
+ * source tree, since both live under the repo root.
+ */
+function findWorkspaceServerBin(start: string): string | undefined {
+  let dir = start;
+  // Bound the walk at the filesystem root (dirname is idempotent there).
+  for (;;) {
+    for (const profile of ['debug', 'release']) {
+      const candidate = join(dir, 'lingxi-code', 'target', profile, SERVER_BIN_NAME);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) {
+      return undefined;
+    }
+    dir = parent;
+  }
+}
+
+/** Absolute path of this module's directory (works for both ESM bundle + source). */
+function moduleDir(): string {
+  try {
+    return dirname(fileURLToPath(import.meta.url));
+  } catch {
+    // Extremely defensive: if `import.meta.url` is unavailable, fall back to cwd.
+    return process.cwd();
+  }
+}
+
+/**
+ * Resolve the bridge-server binary path:
+ *   1. an explicit `opts.serverBin` override, else
+ *   2. the `LINGXI_BRIDGE_SERVER_BIN` environment variable, else
+ *   3. a path derived RELATIVE to the repo by walking up from this module to a
+ *      built `lingxi-code/target/{debug,release}/bridge-server`.
+ *
+ * Throws an actionable error when none resolve, telling the user to build the
+ * binary or set the env var — no absolute author paths are ever baked in.
+ */
 export function resolveServerBin(opts: BridgeManagerOptions = {}): string {
-  return opts.serverBin ?? process.env['LINGXI_BRIDGE_SERVER_BIN'] ?? DEFAULT_SERVER_BIN;
+  const explicit = opts.serverBin ?? process.env['LINGXI_BRIDGE_SERVER_BIN'];
+  if (explicit) {
+    return explicit;
+  }
+  const found = findWorkspaceServerBin(moduleDir());
+  if (found) {
+    return found;
+  }
+  throw new Error(
+    `bridge-server binary not found. Build it from the cargo workspace ` +
+      `("cd lingxi-code && cargo build -p bridge-server --bin bridge-server", ` +
+      `which emits lingxi-code/target/debug/bridge-server), or point ` +
+      `LINGXI_BRIDGE_SERVER_BIN at a prebuilt binary.`,
+  );
 }
 
 /** Lockfile filenames currently in `dir` (so we can tell which one the child adds). */
@@ -147,7 +207,16 @@ export class BridgeManager {
     const preexisting = snapshotLockfiles(bridgeDir);
 
     this.setState({ status: 'spawning' });
-    const child = this.spawnServer();
+    let child: ChildProcess;
+    try {
+      // Resolving the binary path can throw (e.g. it isn't built / no env var);
+      // surface that as a clean `error` state rather than a stuck `spawning`.
+      child = this.spawnServer();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.setState({ status: 'error', message });
+      throw err;
+    }
     this.child = child;
 
     child.once('exit', (code, signal) => {

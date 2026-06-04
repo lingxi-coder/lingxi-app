@@ -6,6 +6,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
+import com.lingxi.code.components.tint
 import com.lingxi.code.model.ModelOption
 import com.lingxi.code.theme.LingXiTheme
 
@@ -84,6 +86,8 @@ fun ChatScreen(
     attachment: ComposerAttachment? = null,
     onRemoveAttachment: () -> Unit = {},
     onShare: (String) -> Unit = {},
+    onStop: () -> Unit = {},
+    onDismissError: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val listState = rememberLazyListState()
@@ -124,6 +128,8 @@ fun ChatScreen(
                 onShare = onShare,
                 modifier = Modifier.weight(1f),
             )
+            state.error?.let { ErrorBanner(error = it, onDismiss = onDismissError) }
+            state.statusLine?.let { StatusRow(text = it) }
             Composer(
                 text = draft,
                 onTextChange = onDraftChange,
@@ -139,6 +145,8 @@ fun ChatScreen(
                 onCameraClick = onCameraClick,
                 attachment = attachment,
                 onRemoveAttachment = onRemoveAttachment,
+                isStreaming = state.isStreaming,
+                onStop = onStop,
             )
         }
     }
@@ -263,6 +271,95 @@ private fun EmptyState() {
             textAlign = TextAlign.Center,
             modifier = Modifier.widthIn(max = 260.dp),
         )
+    }
+}
+
+/**
+ * A dim, single-line status row above the composer — surfaces engine tool
+ * activity ("调用工具 …") and errors ("错误：…"). The Android analog of the iOS
+ * `ConversationModel.statusLine`. Hidden when [ChatState.statusLine] is `null`.
+ */
+@Composable
+private fun StatusRow(text: String) {
+    val t = LingXiTheme.palette
+    Text(
+        text = text,
+        color = t.text4,
+        fontSize = 12.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .testTag(UiTags.CHAT_STATUS)
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 4.dp),
+    )
+}
+
+/**
+ * A persistent, dismissible, kind-aware error banner above the composer.
+ *
+ * Unlike [StatusRow] (a dim, single-line, auto-overwritten status), this is a
+ * filled danger-tinted row with a kind-specific headline and a × dismiss button,
+ * driven by [ChatState.error]. It survives until the user dismisses it or starts
+ * a new turn — so a failed reply is never lost to a transient flash (spec item 4).
+ */
+@Composable
+private fun ErrorBanner(error: ChatError, onDismiss: () -> Unit) {
+    val t = LingXiTheme.palette
+    val headline = when (error.kind) {
+        ChatErrorKind.AUTH -> "鉴权失败"
+        ChatErrorKind.NETWORK -> "网络错误"
+        ChatErrorKind.GENERIC -> "出错了"
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier
+            .testTag(UiTags.CHAT_ERROR)
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp)
+            .padding(top = 4.dp, bottom = 4.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(t.danger.tint(0.12f))
+            .border(0.5.dp, t.danger.tint(0.4f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(18.dp)
+                .clip(CircleShape)
+                .background(t.danger),
+            contentAlignment = Alignment.Center,
+        ) {
+            LXIcon(name = LXIconName.X, size = 11.dp, color = Color.White, stroke = 2.4f)
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = headline,
+                color = t.danger,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = error.message,
+                color = t.text2,
+                fontSize = 12.5f.sp,
+                lineHeight = (12.5f * 1.4f).sp,
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(onClick = onDismiss)
+                .testTag(UiTags.CHAT_ERROR_DISMISS),
+            contentAlignment = Alignment.Center,
+        ) {
+            LXIcon(name = LXIconName.X, size = 14.dp, color = t.text3, stroke = 2f)
+        }
     }
 }
 

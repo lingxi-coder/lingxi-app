@@ -105,8 +105,10 @@ model), `-h/--help`.
 
 ## 6. The Electron GUI
 
-The desktop shell connects through the same lockfile. With a key in the
-environment and the SDK built (step 2):
+The desktop shell spawns its OWN `bridge-server` child and connects through the
+lockfile that child publishes — you do NOT need to launch a server separately.
+With a key in the environment, the binary built (step 1), and the SDK built
+(step 2):
 
 ```sh
 cd clients/electron
@@ -114,6 +116,13 @@ npm install        # first time only
 npm run dev        # electron-vite dev
 ```
 
-The app discovers the newest `~/.claude/bridge/<port>.lock`, connects, and drives
-a live conversation. If you are not running the server separately, launch one
-first (step 5) so a lockfile is present for the app to discover.
+The main process resolves the `bridge-server` binary in this order:
+
+1. `BridgeManagerOptions.serverBin` (programmatic override), else
+2. the `LINGXI_BRIDGE_SERVER_BIN` environment variable, else
+3. a path derived **relative to the repo**, walking up to the first existing
+   `lingxi-code/target/{debug,release}/bridge-server`.
+
+If none resolve, the app surfaces an `error` connection state telling you to
+build the binary (step 1) or set `LINGXI_BRIDGE_SERVER_BIN`. No absolute paths
+are hardcoded, so a fresh clone works once the binary is built.

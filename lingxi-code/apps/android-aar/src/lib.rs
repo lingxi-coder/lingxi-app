@@ -115,6 +115,7 @@ pub fn build_mobile_engine(
             stt: None,
             tts: None,
             notifications: None,
+            clipboard: None,
         }));
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
@@ -389,6 +390,91 @@ impl traits::NotificationService for AndroidNotificationBridge {
                 Err(traits::NotificationError::Other(message))
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard — foreign (Kotlin) callback interface + its engine bridge.
+// ---------------------------------------------------------------------------
+//
+// Mirrors the AndroidNotification pattern: the Kotlin layer implements a
+// crate-local async `AndroidClipboard` callback interface (the system
+// `ClipboardManager`) and hands it across the FFI seam. The engine consumes
+// the SHARED `traits::Clipboard` seam, so `AndroidClipboardBridge` adapts the
+// crate-local interface to its `traits` counterpart; the bridge maps the FFI
+// error back onto `traits::ClipboardError`. This is ENGINE-DRIVEN by
+// `tool-clipboard` (the model reads/writes the pasteboard) — no user-facing UI
+// affordance. NOTE Android 10+ restricts clipboard READS to the focused app /
+// default IME — when a read is not permitted the Kotlin side returns `None`
+// gracefully rather than crashing.
+
+/// FFI error surface for the Android clipboard callback interface. A flat enum
+/// so UniFFI can render it for an async `callback_interface` method; the bridge
+/// fans it back out onto the richer [`traits::ClipboardError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum ClipboardFfiError {
+    /// The platform does not support this clipboard operation (e.g. Android
+    /// 10+ restricts clipboard reads to the focused app / default IME).
+    #[error("clipboard operation unsupported")]
+    Unsupported,
+    /// Any other native failure.
+    #[error("clipboard error: {message}")]
+    Other {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// Crate-local foreign callback interface for native clipboard access — the
+/// Kotlin app implements it over the system `ClipboardManager` (set via
+/// `ClipData.newPlainText` + `setPrimaryClip`; get via
+/// `primaryClip.getItemAt(0).coerceToText`). Bridged to [`traits::Clipboard`]
+/// by [`AndroidClipboardBridge`]. `get_text` returns `None` when the clipboard
+/// is empty or a read is not permitted by the platform.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidClipboard: Send + Sync {
+    /// Write plain `text` to the system clipboard.
+    async fn set_text(&self, text: String) -> Result<(), ClipboardFfiError>;
+    /// Read plain text from the system clipboard. Returns `None` when empty or
+    /// when a background read is not permitted (Android 10+ restriction).
+    async fn get_text(&self) -> Result<Option<String>, ClipboardFfiError>;
+}
+
+/// Adapts the crate-local [`AndroidClipboard`] callback interface to the shared
+/// [`traits::Clipboard`] seam the engine consumes. One forwarding hop per call;
+/// maps [`ClipboardFfiError`] back out onto [`traits::ClipboardError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct AndroidClipboardBridge {
+    inner: Box<dyn AndroidClipboard>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::Clipboard for AndroidClipboardBridge {
+    async fn set_text(&self, text: String) -> Result<(), traits::ClipboardError> {
+        self.inner
+            .set_text(text)
+            .await
+            .map_err(clipboard_error_from_ffi)
+    }
+    async fn get_text(&self) -> Result<Option<String>, traits::ClipboardError> {
+        self.inner.get_text().await.map_err(clipboard_error_from_ffi)
+    }
+}
+
+/// Fan a flat [`ClipboardFfiError`] back out onto the richer
+/// [`traits::ClipboardError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn clipboard_error_from_ffi(e: ClipboardFfiError) -> traits::ClipboardError {
+    match e {
+        ClipboardFfiError::Unsupported => traits::ClipboardError::Unsupported,
+        ClipboardFfiError::Other { message } => traits::ClipboardError::Other(message),
     }
 }
 
@@ -863,6 +949,7 @@ pub fn build_android_engine(
     share: Box<dyn AndroidShare>,
     voice: Box<dyn AndroidVoice>,
     notifications: Box<dyn AndroidNotification>,
+    clipboard: Box<dyn AndroidClipboard>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -891,6 +978,7 @@ pub fn build_android_engine(
             notifications: Some(Arc::new(AndroidNotificationBridge {
                 inner: notifications,
             })),
+            clipboard: Some(Arc::new(AndroidClipboardBridge { inner: clipboard })),
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> = Arc::new(NoopPermissionSink);
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
@@ -909,6 +997,7 @@ pub fn build_android_engine(
             share,
             voice,
             notifications,
+            clipboard,
         );
         Err(MobileEngineError::PlatformUnavailable)
     }

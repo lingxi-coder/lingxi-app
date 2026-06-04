@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import com.lingxi.code.vision.CameraController
 import com.lingxi.code.share.ShareController
 import com.lingxi.code.notify.NotificationController
+import com.lingxi.code.clipboard.ClipboardController
 import com.lingxi.code.voice.recorder.RecorderController
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
@@ -77,6 +78,12 @@ class MainActivity : ComponentActivity() {
         // drives across the FFI seam to post to the system NotificationManager
         // (engine-driven through tool-notification; no UI affordance).
         NotificationController.attach(applicationContext)
+        // Device-clipboard: hand the application Context to the process-global
+        // ClipboardController, which the UniFFI AndroidClipboard adapter drives
+        // across the FFI seam to read/write the system ClipboardManager
+        // (engine-driven through tool-clipboard; no UI affordance). No manifest
+        // permission is required for clipboard access.
+        ClipboardController.attach(applicationContext)
 
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -129,6 +136,7 @@ class MainActivity : ComponentActivity() {
         ShareController.detach()
         RecorderController.detach()
         NotificationController.detach()
+        ClipboardController.detach()
         super.onDestroy()
     }
 }

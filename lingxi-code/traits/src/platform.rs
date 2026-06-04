@@ -13,6 +13,7 @@
 //! concrete handles; library crates stay `#[cfg]`-free.
 
 use crate::camera::CameraControl;
+use crate::clipboard::Clipboard;
 use crate::clock::Clock;
 use crate::computer_control::ComputerControl;
 use crate::filesystem::FileSystem;
@@ -66,6 +67,10 @@ pub trait Platform: Send + Sync {
     }
     /// Native system notifications (engine-driven post), if available.
     fn notifications(&self) -> Option<Arc<dyn NotificationService>> {
+        None
+    }
+    /// Native system clipboard (engine-driven read/write), if available.
+    fn clipboard(&self) -> Option<Arc<dyn Clipboard>> {
         None
     }
     /// Screen-capture + input automation backend, if available.

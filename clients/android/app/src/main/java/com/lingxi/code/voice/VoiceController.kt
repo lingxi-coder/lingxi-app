@@ -22,6 +22,7 @@ import com.lingxi.code.voice.audio.SystemTextToSpeechTts
 import com.lingxi.code.vision.AndroidCameraAdapter
 import com.lingxi.code.share.AndroidShareAdapter
 import com.lingxi.code.notify.AndroidNotificationAdapter
+import com.lingxi.code.clipboard.AndroidClipboardAdapter
 import com.lingxi.code.voice.recorder.AndroidVoiceAdapter
 import kotlinx.coroutines.launch
 
@@ -82,6 +83,11 @@ fun buildVoiceEngine(
     // engine bridges this onto `traits::NotificationService`, lighting up
     // `tool-notification` on-device (engine-driven; no UI affordance).
     val notifications = AndroidNotificationAdapter()
+    // Device-clipboard: the clipboard adapter drives the process-global
+    // ClipboardController, whose Context is attached by MainActivity. The engine
+    // bridges this onto `traits::Clipboard`, lighting up `tool-clipboard`
+    // on-device (engine-driven; no UI affordance).
+    val clipboard = AndroidClipboardAdapter()
     val listener = object : AndroidEventListener {
         override suspend fun onEvent(event: ClientEvent) {
             // Minimal sink: the chat surface still streams through the mock
@@ -104,6 +110,7 @@ fun buildVoiceEngine(
             share = share,
             voice = voice,
             notifications = notifications,
+            clipboard = clipboard,
         )
     } catch (t: Throwable) {
         // PlatformUnavailable on a host build, or UnsatisfiedLinkError when the

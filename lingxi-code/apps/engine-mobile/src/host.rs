@@ -385,6 +385,7 @@ pub async fn build_mobile_inner(
         tts: platform.tts(),
         share: platform.share(),
         notifications: platform.notifications(),
+        clipboard: platform.clipboard(),
         computer_control: platform.computer_control(),
     };
     let tools = Arc::new(mobile_tool_registry(tool_ctx));

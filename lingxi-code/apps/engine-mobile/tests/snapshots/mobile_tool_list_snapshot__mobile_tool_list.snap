@@ -30,6 +30,7 @@ expression: names
 - WebSearch
 - Write
 - camera
+- clipboard
 - notification
 - share
 - speech

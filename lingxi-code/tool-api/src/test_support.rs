@@ -514,6 +514,7 @@ pub fn ctx_for_file_tools(
         tts: None,
         share: None,
         notifications: None,
+        clipboard: None,
         computer_control: None,
     }
 }
@@ -562,6 +563,7 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         tts: None,
         share: None,
         notifications: None,
+        clipboard: None,
         computer_control: None,
     }
 }

@@ -113,6 +113,7 @@ pub fn register_mobile_tools(reg: &mut ToolRegistry, ctx: BuiltinToolContext) {
     tool_voice::register_all(reg, ctx.clone());
     tool_speech::register_all(reg, ctx.clone());
     tool_notification::register_all(reg, ctx.clone());
+    tool_clipboard::register_all(reg, ctx.clone());
     tool_share::register_all(reg, ctx);
 }
 

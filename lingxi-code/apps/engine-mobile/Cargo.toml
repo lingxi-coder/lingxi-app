@@ -113,6 +113,7 @@ tool-voice = { path = "../../tools/voice" }
 tool-speech = { path = "../../tools/speech" }
 tool-share = { path = "../../tools/share" }
 tool-notification = { path = "../../tools/notification" }
+tool-clipboard = { path = "../../tools/clipboard" }
 # Skill + command sets.
 skill-builtin = { path = "../../skills/builtin" }
 command-core = { path = "../../commands/core" }

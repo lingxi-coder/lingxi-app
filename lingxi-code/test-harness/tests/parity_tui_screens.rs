@@ -70,6 +70,7 @@ fn active_screen_name(st: &AppState) -> Option<&'static str> {
         Some(Screen::Mcp(_)) => Some("mcp"),
         Some(Screen::Hooks(_)) => Some("hooks"),
         Some(Screen::Model(_)) => Some("model"),
+        Some(Screen::Permissions(_)) => Some("permissions"),
         None => None,
     }
 }

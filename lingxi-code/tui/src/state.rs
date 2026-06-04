@@ -710,6 +710,11 @@ pub struct AppState {
     /// `.await` `OrchestratorHandle::list_hooks`, so it RAISES this flag and
     /// `root::pump_open_hooks` fetches + opens via [`Self::open_hooks`].
     pub pending_open_hooks: bool,
+    /// Set by the `/permissions` submit intercept: a request to open the
+    /// read-only permissions viewer. Off-disk like `pending_open_skills` (no
+    /// handle); `root::pump_open_permissions` reads the settings tiers on the
+    /// blocking pool and opens via [`Self::open_permissions`].
+    pub pending_open_permissions: bool,
     /// Set by the `/model` submit intercept: a request to open the model picker.
     /// The SYNC submit path can't `.await` `list_available_models`, so it RAISES
     /// this flag; `root::pump_open_model` fetches the models + reads the current
@@ -797,6 +802,7 @@ impl AppState {
             pending_open_skills: false,
             pending_open_mcp: false,
             pending_open_hooks: false,
+            pending_open_permissions: false,
             pending_open_model: false,
             pending_switch_model: None,
             session_agent_color: None,
@@ -888,6 +894,16 @@ impl AppState {
             },
         ));
         crate::telemetry::screen_opened("hooks");
+    }
+
+    /// Open the `/permissions` viewer with the loaded state. Called by
+    /// `root::pump_open_permissions` after the off-disk settings read.
+    pub fn open_permissions(
+        &mut self,
+        state: crate::screens::permissions::PermissionsScreenState,
+    ) {
+        self.active_screen = Some(crate::screens::Screen::Permissions(state));
+        crate::telemetry::screen_opened("permissions");
     }
 
     /// Open the `/model` picker with the given model ids + the active model

@@ -246,6 +246,15 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.pending_open_hooks = true;
                 return false;
             }
+            // `/permissions` opens the read-only permissions viewer. OFF-DISK
+            // like `/skills` (no handle): `root::pump_open_permissions` reads the
+            // settings tiers on the blocking pool and opens the screen.
+            if st.prompt_text.trim() == "/permissions" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.pending_open_permissions = true;
+                return false;
+            }
             // `/model` (no arg) opens the model picker. Like `/agents`, the open
             // needs an async `OrchestratorHandle::list_available_models()` call,
             // so we RAISE `pending_open_model`; `root::pump_open_model` fetches
@@ -714,6 +723,22 @@ pub fn render_screen(
                 // a column View. Mirrors the Mcp/Hooks arm.
                 use crate::screens::model::render_model_to_string;
                 let body = render_model_to_string(m);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().map(|line| element! {
+                            Text(content: line)
+                        }))
+                    }
+                }
+                .into_any()
+            }
+            Screen::Permissions(p) => {
+                // The read-only permissions viewer renders the pure
+                // `render_permissions_to_string` body (list↔detail, snapshot-
+                // tested) line-by-line in a column View. Mirrors the Hooks/Mcp arm.
+                use crate::screens::permissions::render_permissions_to_string;
+                let body = render_permissions_to_string(p);
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {

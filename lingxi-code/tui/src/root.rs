@@ -452,6 +452,16 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 HooksOutcome::Stay => {}
             }
         }
+        Some(Screen::Permissions(state)) => {
+            // Read-only permissions viewer. Pure list↔detail reducer; mirrors
+            // the Hooks/Mcp arm.
+            use crate::screens::permissions::{handle_permissions_key, PermissionsOutcome};
+            let ct_key = iocraft_to_crossterm028_key(k);
+            match handle_permissions_key(state, ct_key.code) {
+                PermissionsOutcome::Close => st.close_screen(),
+                PermissionsOutcome::Stay => {}
+            }
+        }
         Some(Screen::Model(state)) => {
             // Model picker. The SYNC key path can't `.await switch_model`, so on
             // Commit it raises `pending_switch_model` (the async
@@ -1207,6 +1217,46 @@ pub async fn pump_open_skills(state: &Arc<Mutex<AppState>>) -> bool {
     true
 }
 
+/// Async `/permissions` viewer open pump. Mirrors [`pump_open_skills`] (no
+/// `OrchestratorHandle` needed): reads the three persistable settings tiers OFF
+/// the UI executor on the blocking pool and opens the read-only viewer. The
+/// frozen `PermissionGate` exposes no live-policy accessor, so this reads the
+/// PERSISTED rules from disk (the same files the enforcement loader + 3c use).
+pub async fn pump_open_permissions(state: &Arc<Mutex<AppState>>) -> bool {
+    // 1) Observe the flag + capture `cwd` under the lock, then DROP the lock
+    //    before the fs reads (never held across blocking I/O).
+    let cwd = {
+        let mut st = state.lock().await;
+        if !st.pending_open_permissions {
+            return false;
+        }
+        if st.pending_permission.is_some() || st.active_screen.is_some() {
+            // Priority 1/2 own the surface: leave the flag, retry next tick.
+            return false;
+        }
+        st.pending_open_permissions = false;
+        st.status.cwd.clone()
+    };
+
+    // 2) Read + parse the settings tiers on the blocking pool.
+    let claude_home = claude_home_dir();
+    let screen_state = tokio::task::spawn_blocking(move || {
+        crate::screens::permissions::load_permission_sections(&cwd, &claude_home)
+    })
+    .await
+    .unwrap_or_default();
+
+    // 3) Re-acquire the lock and open — re-check the priority guard (a
+    //    permission dialog / screen may have arrived during the read).
+    let mut st = state.lock().await;
+    if st.pending_permission.is_some() || st.active_screen.is_some() {
+        st.pending_open_permissions = true;
+        return false;
+    }
+    st.open_permissions(screen_state);
+    true
+}
+
 /// (M9-10) Resolve the claude config home — the same resolution the rest of the
 /// workspace uses (`$CLAUDE_CONFIG_DIR` → `~/.claude`). Mirrors
 /// `screens::doctor::claude_home_dir`. Falls back to `.` when the home dir is
@@ -1687,6 +1737,11 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                 // an on-disk `.claude/skills/` dir walk that needs no handle.
                 // No-op (returns false) when no `/skills` request is pending.
                 if pump_open_skills(&state).await {
+                    needs_redraw = true;
+                }
+                // `/permissions` read-only viewer pump — off-disk like `/skills`
+                // (reads the settings tiers; no handle needed).
+                if pump_open_permissions(&state).await {
                     needs_redraw = true;
                 }
                 // (`/color`) Agent-color persistence pump. Runs UNCONDITIONALLY

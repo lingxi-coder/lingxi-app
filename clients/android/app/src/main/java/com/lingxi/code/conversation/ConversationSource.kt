@@ -5,12 +5,17 @@ import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.ErrorKindDto
 import com.lingxi.code.bindings.MobileEngineHandle
+import com.lingxi.code.bindings.PermissionRequest
+import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.MockData
 import com.lingxi.code.voice.buildVoiceEngine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onSubscription
@@ -53,6 +58,30 @@ interface ConversationSource {
      * [ReplyEvent.End]. A no-op for sources with no cancellable turn (the mock).
      */
     suspend fun cancel() {}
+
+    /**
+     * The head parked permission request awaiting the user's allow/deny, or
+     * `null` when none is pending. The engine emits a [PermissionRequest]
+     * OUTBOUND whenever a tool needs approval; the UI renders this and resolves
+     * it via [approvePermission] / [denyPermission]. Sources with no engine (the
+     * mock) never emit one, so this stays `null`.
+     */
+    val pendingPermission: StateFlow<PermissionPromptState?>
+        get() = MutableStateFlow<PermissionPromptState?>(null).asStateFlow()
+
+    /**
+     * Approve the parked request `requestId` with `response` (once / always),
+     * submitting `ClientCommand.ApprovePermission` so the engine's parked turn
+     * resumes. A no-op for sources with no engine (the mock).
+     */
+    suspend fun approvePermission(requestId: ULong, response: PermissionResponseDto) {}
+
+    /**
+     * Deny the parked request `requestId`, submitting
+     * `ClientCommand.DenyPermission` so the engine's parked turn unwinds. A no-op
+     * for sources with no engine (the mock).
+     */
+    suspend fun denyPermission(requestId: ULong) {}
 }
 
 /**
@@ -176,10 +205,56 @@ class MockConversationSource : ConversationSource {
 class EngineConversationSource private constructor(
     private val handle: MobileEngineHandle,
     private val events: MutableSharedFlow<ClientEvent>,
+    private val permissions: MutableStateFlow<PermissionPromptState?>,
 ) : ConversationSource {
 
     /** A fresh engine session starts empty (the engine streams the transcript). */
     override fun initialMessages(): List<Message> = emptyList()
+
+    /**
+     * The head parked permission request, driven by the engine's outbound
+     * `AndroidPermissionSink.onRequest` (registered in [create]). The UI observes
+     * this and resolves it via [approvePermission] / [denyPermission].
+     */
+    override val pendingPermission: StateFlow<PermissionPromptState?> =
+        permissions.asStateFlow()
+
+    override suspend fun approvePermission(
+        requestId: ULong,
+        response: PermissionResponseDto,
+    ) {
+        resolvePermission(requestId) {
+            handle.submit(ClientCommand.ApprovePermission(requestId = requestId, response = response))
+        }
+    }
+
+    override suspend fun denyPermission(requestId: ULong) {
+        resolvePermission(requestId) {
+            handle.submit(ClientCommand.DenyPermission(requestId = requestId))
+        }
+    }
+
+    /**
+     * Run [submit] to resolve the parked request `requestId`, then clear the
+     * pending prompt (only when it is still the request we resolved — a CAS-style
+     * guard so a fast follow-up request isn't dismissed). A submit failure (no
+     * such parked request) still clears the prompt so the UI never wedges.
+     */
+    private suspend inline fun resolvePermission(
+        requestId: ULong,
+        submit: () -> Unit,
+    ) {
+        try {
+            submit()
+        } catch (_: Throwable) {
+            // The gate may have already unwound (cancel / timeout); dropping the
+            // prompt below keeps the UI consistent regardless.
+        }
+        permissions.compareAndSet(
+            expect = permissions.value?.takeIf { it.requestId == requestId },
+            update = null,
+        )
+    }
 
     override fun submit(text: String): Flow<ReplyEvent> =
         // Subscribe-before-submit: the returned reply stream maps the shared
@@ -238,6 +313,12 @@ class EngineConversationSource private constructor(
                 extraBufferCapacity = 256,
                 onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
             )
+            // The head parked permission request. The engine's outbound
+            // `AndroidPermissionSink.onRequest` pushes each request here (mapped
+            // to the UI render model); the prompt clears it on resolve. A plain
+            // StateFlow (latest wins) is fine: only one request is parked per gate
+            // at a time in the foundation (no concurrent worker permissions yet).
+            val permissions = MutableStateFlow<PermissionPromptState?>(null)
             // API key/base/model from the environment, mirroring the iOS
             // EngineConfig.fromEnvironment. An empty key is valid — slash commands
             // still work and a turn 401s at run time (iOS §). Never hardcoded.
@@ -248,8 +329,9 @@ class EngineConversationSource private constructor(
                 apiKey = env["ANTHROPIC_API_KEY"] ?: "",
                 model = env["LINGXI_MODEL"] ?: "",
                 onEvent = { event -> events.emit(event) },
+                onPermission = { request -> permissions.value = permissionRequestToPrompt(request) },
             ) ?: return null
-            return EngineConversationSource(handle, events)
+            return EngineConversationSource(handle, events, permissions)
         }
     }
 }

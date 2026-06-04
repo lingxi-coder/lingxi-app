@@ -76,6 +76,43 @@ enum TurnNotice: Equatable {
     }
 }
 
+#if canImport(engine_mobileFFI)
+
+    /// One engine-parked permission request the UI must answer (SHIP-BLOCKER #3).
+    ///
+    /// The engine's adapter gate emits a `PermissionRequest` whenever a tool needs
+    /// approval (e.g. a Write/Bash invocation) and parks the turn on a oneshot until
+    /// the user answers. On mobile that request used to vanish into a no-op sink, so
+    /// the turn hung forever; now the sink forwards it here and the chat view renders
+    /// a prompt. The user's choice resolves the park by submitting
+    /// `ClientCommand.approvePermission` / `denyPermission` (correlated by
+    /// `requestId`) back through the `MobileEngineHandle`.
+    ///
+    /// `Identifiable` on `requestId` so SwiftUI can key the modal; the head of the
+    /// queue is the one rendered.
+    struct PendingPermission: Identifiable, Equatable {
+        /// Engine correlator echoed back in the resolving command.
+        let requestId: UInt64
+        /// What the user is approving (drives the prompt's title + detail).
+        let kind: PermissionKindDto
+        /// Sub-agent identity, when present (always `None` in the foundation).
+        let worker: WorkerInfoDto?
+
+        var id: UInt64 { requestId }
+
+        init(request: PermissionRequest) {
+            self.requestId = request.requestId
+            self.kind = request.kind
+            self.worker = request.worker
+        }
+
+        static func == (lhs: PendingPermission, rhs: PendingPermission) -> Bool {
+            lhs.requestId == rhs.requestId
+        }
+    }
+
+#endif
+
 /// The observable conversation state ChatView renders. Both sources mutate it on
 /// the main actor: the mock with canned timers, the engine from listener events.
 @MainActor
@@ -97,6 +134,13 @@ final class ConversationModel: ObservableObject {
     /// A non-clean turn outcome (MaxTurns / Cancelled) surfaced distinctly from a
     /// normal end (PR-4 item 3). Cleared when a new turn starts.
     @Published var notice: TurnNotice? = nil
+    #if canImport(engine_mobileFFI)
+        /// FIFO queue of engine-parked permission requests (SHIP-BLOCKER #3). The
+        /// chat view renders the head (`first`) as a modal prompt; answering it pops
+        /// the head and reveals the next. Empty between requests / on the mock
+        /// (which never asks for permission).
+        @Published var pendingPermissions: [PendingPermission] = []
+    #endif
 
     init(messages: [Message] = MockData.messagesDefault,
          model: ModelOption = MockData.models[0]) {
@@ -125,7 +169,24 @@ protocol ConversationSource: AnyObject {
     func cancel()
     /// Dismiss the persistent error banner (PR-4 item 4).
     func dismissError()
+    #if canImport(engine_mobileFFI)
+        /// Resolve a parked permission request (SHIP-BLOCKER #3): submit
+        /// `ApprovePermission{requestId, response}` and pop the head of the queue.
+        func approvePermission(_ requestId: UInt64, _ response: PermissionResponseDto)
+        /// Resolve a parked permission request by denying it: submit
+        /// `DenyPermission{requestId}` and pop the head of the queue.
+        func denyPermission(_ requestId: UInt64)
+    #endif
 }
+
+#if canImport(engine_mobileFFI)
+    /// Default permission handling for sources that never park a turn on a
+    /// permission gate (the mock). The engine source overrides both.
+    extension ConversationSource {
+        func approvePermission(_ requestId: UInt64, _ response: PermissionResponseDto) {}
+        func denyPermission(_ requestId: UInt64) {}
+    }
+#endif
 
 // MARK: - Source selection
 
@@ -255,6 +316,10 @@ final class MockConversationSource: ConversationSource {
         private let config: EngineConfig
         private var handle: MobileEngineHandle?
         private var listener: EngineListener?
+        /// The permission sink registered with the engine (SHIP-BLOCKER #3). Held so
+        /// it outlives `ensureHandle`; Rust calls `onRequest` on it when a tool needs
+        /// approval.
+        private var permissionSink: EnginePermissionSink?
         /// Index into `model.messages` of the assistant message currently being
         /// streamed (deltas append into it). `nil` between turns.
         private var streamingIndex: Int?
@@ -280,6 +345,10 @@ final class MockConversationSource: ConversationSource {
             model.notice = nil
             streamingIndex = nil
             currentTurnId = nil
+            // A pending permission belongs to the turn we're abandoning — drop it so
+            // a stale prompt can't leak into the fresh conversation. The engine's
+            // parked turn ends with the connection / next turn; we never answer it.
+            model.pendingPermissions = []
         }
 
         func send(_ text: String) {
@@ -338,6 +407,10 @@ final class MockConversationSource: ConversationSource {
             if let handle { return handle }
             let listener = EngineListener(source: self)
             self.listener = listener
+            // SHIP-BLOCKER #3: register a real permission sink so a tool that needs
+            // approval surfaces a prompt instead of hanging the turn forever.
+            let permissionSink = EnginePermissionSink(source: self)
+            self.permissionSink = permissionSink
             let handle = try buildIosEngine(
                 apiBase: config.apiBase,
                 apiKey: config.apiKey,
@@ -350,7 +423,8 @@ final class MockConversationSource: ConversationSource {
                 share: ShareImpl(),
                 voice: VoiceImpl(),
                 notifications: NotificationImpl(),
-                clipboard: ClipboardImpl())
+                clipboard: ClipboardImpl(),
+                permissions: permissionSink)
             self.handle = handle
             return handle
         }
@@ -449,6 +523,67 @@ final class MockConversationSource: ConversationSource {
             streamingIndex = nil
             currentTurnId = nil
             model.statusLine = nil
+            // A terminal error tears down the turn — its parked permission (if any)
+            // can never be answered now, so drop the prompt rather than leave it
+            // stranded.
+            model.pendingPermissions = []
+        }
+
+        // MARK: permission gating (SHIP-BLOCKER #3)
+
+        /// Enqueue one outbound permission request (called on the main actor by the
+        /// sink). De-dupes by `requestId` so a re-delivered request can't stack two
+        /// prompts. The chat view renders the head of the queue.
+        fileprivate func enqueuePermission(_ request: PermissionRequest) {
+            guard !model.pendingPermissions.contains(where: { $0.requestId == request.requestId })
+            else { return }
+            model.pendingPermissions.append(PendingPermission(request: request))
+        }
+
+        /// Resolve the head request by approving it (allow-once / allow-always):
+        /// submit `ApprovePermission` and pop it so the next request surfaces.
+        func approvePermission(_ requestId: UInt64, _ response: PermissionResponseDto) {
+            resolve(requestId, command: .approvePermission(requestId: requestId, response: response))
+        }
+
+        /// Resolve the head request by denying it: submit `DenyPermission` and pop it.
+        func denyPermission(_ requestId: UInt64) {
+            resolve(requestId, command: .denyPermission(requestId: requestId))
+        }
+
+        /// Shared resolution path: optimistically pop the prompt (the gate's oneshot
+        /// fires from the submitted command) and submit the resolving command on the
+        /// engine runtime. A submit failure surfaces as a host error banner.
+        private func resolve(_ requestId: UInt64, command: ClientCommand) {
+            model.pendingPermissions.removeAll { $0.requestId == requestId }
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let handle = try await self.ensureHandle()
+                    try await handle.submit(command: command)
+                } catch {
+                    await self.fail(.host, "权限响应失败：\(error)")
+                }
+            }
+        }
+    }
+
+    /// Swift implementation of the `IosPermissionSink` UniFFI callback interface
+    /// (SHIP-BLOCKER #3). Rust calls `onRequest(_:)` on the engine's runtime when a
+    /// tool needs approval; we hop to the main actor and enqueue the request so the
+    /// chat view can prompt. Returns promptly — the engine's turn parks on its own
+    /// oneshot and is resolved later by `ApprovePermission` / `DenyPermission`.
+    final class EnginePermissionSink: IosPermissionSink {
+        private weak var source: EngineConversationSource?
+
+        init(source: EngineConversationSource) {
+            self.source = source
+        }
+
+        func onRequest(request: PermissionRequest) async {
+            await MainActor.run { [weak source] in
+                source?.enqueuePermission(request)
+            }
         }
     }
 

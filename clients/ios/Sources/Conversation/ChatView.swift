@@ -67,6 +67,19 @@ struct ChatView: View {
                          onMicHoldStart: startVoiceHold,
                          onMicHoldRelease: endVoiceHold)
             }
+
+            // SHIP-BLOCKER #3: the engine-parked permission prompt. Sits above the
+            // conversation so a tool that needs approval is answered (allow / deny)
+            // instead of hanging the turn forever. No-op surface on the mock source
+            // (which never parks a turn on a permission gate).
+            #if canImport(engine_mobileFFI)
+                PermissionPrompt(
+                    pending: convo.pendingPermissions.first,
+                    onApprove: { source.approvePermission($0, $1) },
+                    onDeny: { source.denyPermission($0) }
+                )
+                .animation(.easeOut(duration: 0.2), value: convo.pendingPermissions.first)
+            #endif
         }
         // Voice flow: hold anywhere 0.6s to enter immersive recording; release sends.
         // A LongPress sequenced into a Drag keeps the same touch, so the

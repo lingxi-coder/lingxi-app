@@ -18,6 +18,7 @@ pub mod ptl_retry;
 pub mod reactive;
 pub mod session_memory;
 pub mod snip;
+pub mod threshold_calc;
 pub mod thresholds;
 pub mod warning_state;
 
@@ -48,3 +49,8 @@ pub use prompt::{
 };
 pub use snip::{SnipCompactor, SnipResult};
 pub use thresholds::*;
+// Pure threshold kernels (Batch 3). `threshold_calc::auto_compact_threshold`
+// takes a precomputed effective window and is reachable via the module path; it
+// is intentionally NOT glob-re-exported to avoid shadowing the model-aware
+// `thresholds::auto_compact_threshold`.
+pub use threshold_calc::{effective_context_window, should_auto_compact};

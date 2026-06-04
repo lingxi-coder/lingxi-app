@@ -254,8 +254,74 @@ pub fn apply_move_vertical(text: &str, cursor: usize, delta: i32) -> usize {
     byte
 }
 
+/// Split one logical line into `(segment, is_cursor)` chunks for the cursor
+/// glyph render, mirroring claude-code's `Cursor.render` before/at/after split
+/// (`utils/Cursor.ts:244-296`).
+///
+/// `cursor_col_in_line` is the DISPLAY column (see the column contract on
+/// [`cursor_line_col`]) where the caret sits on this line, or `None` if the
+/// caret is not on this line (then the whole line is one non-cursor chunk).
+///
+/// The single grapheme whose cumulative display width first *exceeds* the
+/// cursor column is the "at-cursor" chunk (`is_cursor = true`) — this matches
+/// the TS `nextWidth > column` test, so a caret on a wide (2-cell) cluster
+/// marks the WHOLE cluster. When the caret is at end-of-line (no grapheme
+/// crosses the column) a synthetic `" "` cursor chunk is appended, faithful to
+/// claude-code's `atCursor = cursorChar` default (`cursorChar` is `" "` when
+/// the input shows its cursor — `TextInput.tsx:105`). An empty line therefore
+/// yields a single highlighted space.
+///
+/// Returned chunks concatenate back to the original line (plus the trailing
+/// synthetic space at EOL); adjacent chunks of the same flag are NOT merged
+/// (callers style per-chunk), but the cursor chunk is always exactly one
+/// grapheme (or the synthetic space).
+#[must_use]
+pub fn render_line_with_cursor(line: &str, cursor_col_in_line: Option<usize>) -> Vec<(String, bool)> {
+    let Some(column) = cursor_col_in_line else {
+        // Caret is not on this line: one plain chunk (skip empty so the line
+        // contributes nothing rather than an empty Text).
+        if line.is_empty() {
+            return Vec::new();
+        }
+        return vec![(line.to_string(), false)];
+    };
+
+    let mut before = String::new();
+    let mut at_cursor: Option<String> = None;
+    let mut after = String::new();
+    let mut current_width = 0usize;
+
+    for g in line.graphemes(true) {
+        if at_cursor.is_some() {
+            after.push_str(g);
+            continue;
+        }
+        let next_width = current_width + UnicodeWidthStr::width(g);
+        if next_width > column {
+            at_cursor = Some(g.to_string());
+        } else {
+            current_width = next_width;
+            before.push_str(g);
+        }
+    }
+
+    // EOL: no grapheme crossed the column → synthetic single-space cursor,
+    // faithful to claude-code's `atCursor = cursorChar` (" ") default.
+    let cursor_chunk = at_cursor.unwrap_or_else(|| " ".to_string());
+
+    let mut chunks = Vec::with_capacity(3);
+    if !before.is_empty() {
+        chunks.push((before, false));
+    }
+    chunks.push((cursor_chunk, true));
+    if !after.is_empty() {
+        chunks.push((after, false));
+    }
+    chunks
+}
+
 /// Props for `PromptInput`.
-#[derive(Default, Props)]
+#[derive(Props)]
 pub struct PromptInputProps {
     /// Current text in the prompt buffer (may contain `\n`).
     pub text: String,
@@ -263,6 +329,22 @@ pub struct PromptInputProps {
     pub cursor: usize,
     /// Total terminal column width (drives wrap + height). 0 → treat as 80.
     pub width: usize,
+    /// Draw the inverse-video cursor block. Defaults to `true` (cursor shown);
+    /// tests force `false`. Mirrors claude-code gating the cursor on
+    /// `focus && showCursor && terminalFocus` (`BaseTextInput.tsx:63`) — when
+    /// the prompt isn't the active/focused input, no caret is drawn.
+    pub show_cursor: bool,
+}
+
+impl Default for PromptInputProps {
+    fn default() -> Self {
+        PromptInputProps {
+            text: String::new(),
+            cursor: 0,
+            width: 0,
+            show_cursor: true,
+        }
+    }
 }
 
 /// Render the prompt zone. M7-06 emits one `Text` row per logical line: the
@@ -281,10 +363,19 @@ pub struct PromptInputProps {
 #[component]
 #[allow(clippy::cast_possible_truncation)]
 pub fn PromptInput(props: &PromptInputProps) -> impl Into<AnyElement<'static>> {
-    let _ = props.cursor; // cursor glyph rendering remains an M7-08 (vim) enhancement
     let width = if props.width == 0 { 80 } else { props.width };
     let starts = line_starts(&props.text);
     let height = visual_row_count(&props.text, width);
+    // Map the byte cursor → (line_index, display_col) once, so only the line
+    // containing the caret gets a highlighted chunk. Gated on `show_cursor`
+    // (claude-code's `focus && showCursor && terminalFocus`): when off, no line
+    // is the cursor line.
+    let (cursor_line, cursor_col) = if props.show_cursor {
+        let (l, c) = cursor_line_col(&props.text, props.cursor);
+        (Some(l), c)
+    } else {
+        (None, 0)
+    };
     // One Text per logical line; first line carries the "❯ " marker, the rest
     // are indented by 2 columns to align under it. "❯ " is display-width 2, the
     // same as the indent, so the `usable = width - 2` budget is unchanged.
@@ -299,14 +390,27 @@ pub fn PromptInput(props: &PromptInputProps) -> impl Into<AnyElement<'static>> {
     element! {
         View(flex_direction: FlexDirection::Column, height: height as u16) {
             #(lines.into_iter().map(|(i, content)| {
-                let display = if i == 0 {
-                    format!("❯ {content}")
-                } else {
-                    format!("  {content}")
-                };
+                let prefix = if i == 0 { "❯ " } else { "  " };
+                let col_in_line = if cursor_line == Some(i) { Some(cursor_col) } else { None };
+                let chunks = render_line_with_cursor(&content, col_in_line);
+                // iocraft has no "reverse video" attribute; emulate by swapping
+                // fg/bg on the cursor chunk (View(background_color) + Text(color)),
+                // the same swap the theme preview uses. We have no theme handle
+                // here, so fall back to the spec's Color::Black-on-White inverse.
                 element! {
                     View(flex_direction: FlexDirection::Row) {
-                        Text(content: display)
+                        Text(content: prefix.to_string())
+                        #(chunks.into_iter().map(|(seg, is_cursor)| {
+                            if is_cursor {
+                                element! {
+                                    View(background_color: Color::White) {
+                                        Text(content: seg, color: Color::Black)
+                                    }
+                                }.into_any()
+                            } else {
+                                element! { Text(content: seg) }.into_any()
+                            }
+                        }))
                     }
                 }
             }))
@@ -518,9 +622,139 @@ mod tests {
     }
 
     #[test]
+    fn cursor_none_when_not_on_line() {
+        // No caret on this line → one plain chunk, no highlight.
+        assert_eq!(
+            render_line_with_cursor("hello", None),
+            vec![("hello".to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn cursor_none_empty_line_yields_nothing() {
+        // A non-cursor empty line contributes no chunk (no empty Text).
+        assert_eq!(render_line_with_cursor("", None), Vec::<(String, bool)>::new());
+    }
+
+    #[test]
+    fn cursor_mid_line_marks_exactly_one_char() {
+        // "hello", caret at display col 2 → before "he", at "l", after "lo".
+        assert_eq!(
+            render_line_with_cursor("hello", Some(2)),
+            vec![
+                ("he".to_string(), false),
+                ("l".to_string(), true),
+                ("lo".to_string(), false),
+            ]
+        );
+        // Exactly one chunk is the cursor, and it is exactly one grapheme.
+        let chunks = render_line_with_cursor("hello", Some(2));
+        let cursor_chunks: Vec<_> = chunks.iter().filter(|(_, c)| *c).collect();
+        assert_eq!(cursor_chunks.len(), 1);
+        assert_eq!(cursor_chunks[0].0.chars().count(), 1);
+    }
+
+    #[test]
+    fn cursor_at_line_start_marks_first_char() {
+        // col 0 → no "before" chunk, first char is the cursor.
+        assert_eq!(
+            render_line_with_cursor("hello", Some(0)),
+            vec![("h".to_string(), true), ("ello".to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn cursor_at_eol_appends_synthetic_space() {
+        // caret past the last grapheme (col == line width) → before "hi",
+        // synthetic highlighted " ", no after. Mirrors atCursor = cursorChar.
+        assert_eq!(
+            render_line_with_cursor("hi", Some(2)),
+            vec![("hi".to_string(), false), (" ".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn cursor_empty_line_single_highlighted_space() {
+        // Empty cursor line → a single highlighted space (the caret block).
+        assert_eq!(
+            render_line_with_cursor("", Some(0)),
+            vec![(" ".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn cursor_on_wide_char_marks_whole_cluster() {
+        // "中b": "中" is display-width 2. Caret at display col 0 lands on the
+        // wide cluster — the WHOLE "中" is the cursor chunk (nextWidth 2 > 0).
+        assert_eq!(
+            render_line_with_cursor("中b", Some(0)),
+            vec![("中".to_string(), true), ("b".to_string(), false)]
+        );
+        // Caret at display col 1 (mid the 2-cell char) still resolves to the
+        // whole "中" cluster, never splitting the codepoint.
+        assert_eq!(
+            render_line_with_cursor("中b", Some(1)),
+            vec![("中".to_string(), true), ("b".to_string(), false)]
+        );
+        // Caret at display col 2 (just past "中") lands on "b".
+        assert_eq!(
+            render_line_with_cursor("中b", Some(2)),
+            vec![("中".to_string(), false), ("b".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn cursor_on_combining_grapheme_marks_whole_cluster() {
+        // "é" written as e + combining acute (U+0301) is one grapheme, width 1.
+        // Caret at col 0 marks the whole cluster (both codepoints) as cursor.
+        let line = "e\u{0301}x";
+        assert_eq!(
+            render_line_with_cursor(line, Some(0)),
+            vec![("e\u{0301}".to_string(), true), ("x".to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn prompt_input_cursor_line_preserves_text() {
+        // Render with show_cursor: the cursor block (color-swapped View/Text) is
+        // emitted as a separate span, but iocraft's plain `to_string()` strips
+        // styling, so all the visible characters still appear in order. The
+        // per-chunk color swap itself is pinned by `render_line_with_cursor`
+        // unit tests; here we assert the component splits without dropping text.
+        let mut el = element! {
+            PromptInput(text: "hi".to_string(), cursor: 0usize, width: 80usize, show_cursor: true)
+        };
+        let out = el.to_string();
+        assert!(out.contains("❯ hi"), "got: {out}");
+    }
+
+    #[test]
+    fn prompt_input_cursor_at_eol_renders_marker() {
+        // Empty buffer, caret at EOL (byte 0) with the cursor shown → the "❯ "
+        // marker row is emitted with a synthetic-space cursor block, so the
+        // marker is still present and nothing panics on an empty line.
+        let mut el = element! {
+            PromptInput(text: String::new(), cursor: 0usize, width: 80usize, show_cursor: true)
+        };
+        let out = el.to_string();
+        assert!(out.contains('❯'), "got: {out:?}");
+    }
+
+    #[test]
+    fn prompt_input_hidden_cursor_plain_text() {
+        // show_cursor: false → no cursor line, plain text only.
+        let mut el = element! {
+            PromptInput(text: "hi".to_string(), cursor: 0usize, width: 80usize, show_cursor: false)
+        };
+        let out = el.to_string();
+        assert!(out.contains("❯ hi"), "got: {out}");
+    }
+
+    #[test]
     fn prompt_input_renders_three_lines() {
-        let mut el =
-            element! { PromptInput(text: "a\nb\nc".to_string(), cursor: 0usize, width: 80usize) };
+        let mut el = element! {
+            PromptInput(text: "a\nb\nc".to_string(), cursor: 0usize, width: 80usize, show_cursor: false)
+        };
         let out = el.to_string();
         assert!(out.contains("❯ a"), "got: {out}");
         assert!(out.contains("  b"), "got: {out}");
@@ -537,7 +771,9 @@ mod tests {
         let text = "line one\nline two\nline three";
         let width = 80usize;
         let budget = visual_row_count(text, width);
-        let mut el = element! { PromptInput(text: text.to_string(), cursor: 0usize, width: width) };
+        let mut el = element! {
+            PromptInput(text: text.to_string(), cursor: 0usize, width: width, show_cursor: false)
+        };
         let out = el.to_string();
         let rendered_rows = out.lines().filter(|l| !l.trim().is_empty()).count();
         assert_eq!(
@@ -549,8 +785,9 @@ mod tests {
 
     #[test]
     fn prompt_input_single_line_unchanged() {
-        let mut el =
-            element! { PromptInput(text: "hi".to_string(), cursor: 0usize, width: 80usize) };
+        let mut el = element! {
+            PromptInput(text: "hi".to_string(), cursor: 0usize, width: 80usize, show_cursor: false)
+        };
         let out = el.to_string();
         assert!(out.contains("❯ hi"), "got: {out}");
     }

@@ -250,6 +250,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 text: prompt_text,
                 cursor: prompt_cursor,
                 width: prompt_width,
+                show_cursor: true,
             )
             PromptInputFooter(
                 mode: crate::components::prompt_input::FooterMode::Prompt,

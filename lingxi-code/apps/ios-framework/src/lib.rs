@@ -116,6 +116,8 @@ pub fn build_mobile_engine(
             share: impls.share,
             stt: None,
             tts: None,
+            notifications: None,
+            clipboard: None,
         }));
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
@@ -318,6 +320,8 @@ pub fn build_ios_engine(
             share: Arc::new(stub_capabilities::StubShare),
             stt: None,
             tts: None,
+            notifications: None,
+            clipboard: None,
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> = Arc::new(NoopPermissionSink);
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)

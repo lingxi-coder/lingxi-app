@@ -12,6 +12,7 @@ pub mod auth;
 pub mod bridge;
 pub mod budget;
 pub mod camera;
+pub mod clipboard;
 pub mod clock;
 pub mod commands;
 pub mod computer_control;
@@ -21,6 +22,7 @@ pub mod http;
 pub mod lsp;
 pub mod mailbox;
 pub mod mcp;
+pub mod notification;
 pub mod orchestrator;
 pub mod permission_gate;
 pub mod platform;
@@ -45,6 +47,7 @@ pub use auth::{AuthError, AuthHandle, LoginInfo};
 pub use bridge::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
 pub use budget::{BudgetEnforcerHandle, BudgetError};
 pub use camera::{CameraControl, CameraError, CameraPosition, CapturePhotoOpts, CapturedImage};
+pub use clipboard::{Clipboard, ClipboardError};
 pub use clock::Clock;
 pub use commands::{SlashCommandDispatcher, SlashDispatchResult};
 pub use computer_control::{ComputerControl, ComputerError, Screenshot};
@@ -56,6 +59,7 @@ pub use mailbox::{
     MailboxError as RouterMailboxError, MailboxMessage, MailboxRouterHandle, RouteAck,
 };
 pub use mcp::*;
+pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{
     AgentInfo, CheckStatus, CompactionSummary, CostSnapshot, DoctorCheck, DoctorReport,
     DoctorSummary, HandleError, HookInfo, McpServerInfo, McpStatus, MemoryEditorOutcome,

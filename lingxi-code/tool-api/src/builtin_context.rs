@@ -17,11 +17,13 @@ use std::sync::Arc;
 use telemetry::AnalyticsBus;
 use traits::budget::BudgetEnforcerHandle;
 use traits::camera::CameraControl;
+use traits::clipboard::Clipboard;
 use traits::clock::Clock;
 use traits::computer_control::ComputerControl;
 use traits::filesystem::FileSystem;
 use traits::http::HttpTransport;
 use traits::mailbox::MailboxRouterHandle;
+use traits::notification::NotificationService;
 use traits::process::ProcessRunner;
 use traits::sandbox::Sandbox;
 use traits::share::SharingService;
@@ -130,6 +132,12 @@ pub struct BuiltinToolContext {
     /// Native share sheet — `tool-share`'s `ShareTool` routes here. `None` on
     /// desktop.
     pub share: Option<Arc<dyn SharingService>>,
+    /// Native system notifications — `tool-notification`'s `NotificationTool`
+    /// routes here. `None` on desktop; mobile wires `platform.notifications()`.
+    pub notifications: Option<Arc<dyn NotificationService>>,
+    /// Native system clipboard — `tool-clipboard`'s `ClipboardTool` routes
+    /// here. `None` on desktop; mobile wires `platform.clipboard()`.
+    pub clipboard: Option<Arc<dyn Clipboard>>,
     /// Screen-capture + input automation — the device-control tools
     /// (`computer`/`android_use`/`ios_use`) route here. `None` unless a
     /// desktop automation backend or a mobile UniFFI impl is wired.

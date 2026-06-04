@@ -19,8 +19,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use traits::{
-    CameraControl, Clock, FileSystem, HttpTransport, Platform, ProcessRunner, Sandbox,
-    SharingService, SpeechToText, TextToSpeech, VoiceRecorder, WorktreeManager,
+    CameraControl, Clipboard, Clock, FileSystem, HttpTransport, NotificationService, Platform,
+    ProcessRunner, Sandbox, SharingService, SpeechToText, TextToSpeech, VoiceRecorder,
+    WorktreeManager,
 };
 
 /// Construction inputs for [`AndroidPlatform`].
@@ -42,6 +43,12 @@ pub struct AndroidPlatformInputs {
     pub stt: Option<Arc<dyn SpeechToText>>,
     /// Native text-to-speech (Kotlin impl), when wired.
     pub tts: Option<Arc<dyn TextToSpeech>>,
+    /// Native system notifications (Kotlin impl), when wired. `None` keeps the
+    /// `notification` tool reporting "unavailable".
+    pub notifications: Option<Arc<dyn NotificationService>>,
+    /// Native system clipboard (Kotlin impl), when wired. `None` keeps the
+    /// `clipboard` tool reporting "unavailable".
+    pub clipboard: Option<Arc<dyn Clipboard>>,
 }
 
 /// The Android [`Platform`].
@@ -57,6 +64,8 @@ pub struct AndroidPlatform {
     share: Arc<dyn SharingService>,
     stt: Option<Arc<dyn SpeechToText>>,
     tts: Option<Arc<dyn TextToSpeech>>,
+    notifications: Option<Arc<dyn NotificationService>>,
+    clipboard: Option<Arc<dyn Clipboard>>,
 }
 
 impl AndroidPlatform {
@@ -78,6 +87,8 @@ impl AndroidPlatform {
             share: inputs.share,
             stt: inputs.stt,
             tts: inputs.tts,
+            notifications: inputs.notifications,
+            clipboard: inputs.clipboard,
         }
     }
 }
@@ -115,6 +126,12 @@ impl Platform for AndroidPlatform {
     }
     fn tts(&self) -> Option<Arc<dyn TextToSpeech>> {
         self.tts.clone()
+    }
+    fn notifications(&self) -> Option<Arc<dyn NotificationService>> {
+        self.notifications.clone()
+    }
+    fn clipboard(&self) -> Option<Arc<dyn Clipboard>> {
+        self.clipboard.clone()
     }
     // computer_control() defaults to None.
 }

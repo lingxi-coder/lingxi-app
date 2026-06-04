@@ -20,6 +20,12 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <!-- Device-notifications layer: POST_NOTIFICATIONS for engine-driven local
+         notifications (tool-notification posts via NotificationManager). Runtime
+         permission required on Android 13+ (TIRAMISU); the controller gates on it
+         and returns PermissionDenied when not granted. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />

@@ -1336,9 +1336,11 @@ dependencies = [
  "tokio-util",
  "tool-api",
  "tool-camera",
+ "tool-clipboard",
  "tool-cron",
  "tool-file",
  "tool-meta",
+ "tool-notification",
  "tool-plan",
  "tool-share",
  "tool-skill",
@@ -4437,6 +4439,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tool-clipboard"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "once_cell",
+ "permission",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tool-api",
+ "traits",
+]
+
+[[package]]
 name = "tool-computer-use"
 version = "0.12.0"
 dependencies = [
@@ -4563,6 +4579,20 @@ dependencies = [
  "telemetry",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tool-api",
+ "traits",
+]
+
+[[package]]
+name = "tool-notification"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "once_cell",
+ "permission",
+ "serde",
+ "serde_json",
  "tokio",
  "tool-api",
  "traits",

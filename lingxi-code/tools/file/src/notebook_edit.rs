@@ -203,6 +203,40 @@ impl Tool for NotebookEditTool {
             }
         };
 
+        // Read-before-write staleness guard (Batch F). The notebook always
+        // exists here (the `read_to_string` above errors otherwise), so a prior
+        // full read + unchanged-mtime is required (TS
+        // `NotebookEditTool.ts:221-237`). We reuse the shared
+        // `check_read_before_write` helper for uniformity with Edit/Write,
+        // which also applies the isPartialView + content-equality fallback —
+        // TS's NotebookEdit guard is the simpler `!lastRead` / `mtime >
+        // timestamp` form without those, but the extra checks only ever relax
+        // (content-equality) or tighten (partial-view) in cases a notebook does
+        // not reach in practice.
+        //
+        // KNOWN PARTIAL COVERAGE (flagged per spec): the Rust `Read` tool does
+        // NOT support `.ipynb` (no notebook media), so it never populates
+        // `read_file_state` for a notebook. The guard can therefore only trip
+        // on a prior NotebookEdit's OWN post-write `set` below — a plain
+        // Read→NotebookEdit cannot satisfy the guard. This gap closes only when
+        // Read gains notebook support, which is out of faithful reach (no Rust
+        // crate equivalent for the TS notebook media pipeline). `raw` is the
+        // current on-disk content for the (rarely-reached) content fallback.
+        let current_mtime_ms = tokio::fs::metadata(&canon)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+        if let Err(e) = crate::check_read_before_write(
+            &self.ctx.read_file_state,
+            &canon,
+            current_mtime_ms,
+            &raw,
+        ) {
+            self.emit_failed(&invocation_id, "stale_read").await;
+            return Err(e);
+        }
+
         let mut nb: Value = match serde_json::from_str(&raw) {
             Ok(v) => v,
             Err(e) => {
@@ -273,6 +307,28 @@ impl Tool for NotebookEditTool {
             return Err(ToolError::Io(e.to_string()));
         }
 
+        // Post-write: update the read-state registry so an immediate second
+        // NotebookEdit succeeds and the staleness guard sees the new mtime (TS
+        // `NotebookEditTool.ts:437-442` `readFileState.set({content:
+        // updatedContent, timestamp: <new mtime>, offset: undefined, limit:
+        // undefined})`). `serialized` is the just-written notebook JSON;
+        // offset/limit cleared so it counts as a full read.
+        let new_mtime_ms = tokio::fs::metadata(&canon)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+        tool_api::read_file_state::set(
+            &self.ctx.read_file_state,
+            canon.clone(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: serialized.clone(),
+                mtime_ms: new_mtime_ms,
+                offset: None,
+                limit: None,
+            },
+        );
+
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, 1, duration_ms).await;
 
@@ -306,6 +362,34 @@ mod tests {
         )
     }
 
+    /// Simulate a prior full read of `target` (a notebook) so the
+    /// read-before-write staleness guard (Batch F) is satisfied. Records the
+    /// file's current content + floored mtime under the canonicalized key with
+    /// `offset`/`limit` = `None`. Call AFTER writing the file's bytes.
+    ///
+    /// NB: the Rust `Read` tool cannot populate this for `.ipynb` (no notebook
+    /// media support), so in production only a prior NotebookEdit's own
+    /// post-write `set` satisfies the guard — these tests seed it directly to
+    /// exercise the post-guard logic. (Documented partial-coverage gap.)
+    fn seed_full_read(ctx: &BuiltinToolContext, target: &std::path::Path) {
+        let canon = std::fs::canonicalize(target).unwrap();
+        let content = std::fs::read_to_string(&canon).unwrap();
+        let mtime_ms = std::fs::metadata(&canon)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+        tool_api::read_file_state::set(
+            &ctx.read_file_state,
+            canon,
+            tool_api::read_file_state::ReadFileEntry {
+                content,
+                mtime_ms,
+                offset: None,
+                limit: None,
+            },
+        );
+    }
+
     pub(crate) fn sample_notebook() -> String {
         serde_json::to_string_pretty(&json!({
             "cells": [
@@ -329,6 +413,7 @@ mod tests {
         let target = tmp.path().join("nb.ipynb");
         std::fs::write(&target, sample_notebook()).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
         let _ = tool
             .call(
@@ -354,6 +439,7 @@ mod tests {
         let target = tmp.path().join("nb.ipynb");
         std::fs::write(&target, sample_notebook()).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
         let _ = tool
             .call(
@@ -380,6 +466,7 @@ mod tests {
         let target = tmp.path().join("nb.ipynb");
         std::fs::write(&target, sample_notebook()).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
         let _ = tool
             .call(
@@ -408,6 +495,7 @@ mod tests {
         let target = outside.path().join("nb.ipynb");
         std::fs::write(&target, sample_notebook()).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
         let err = tool
             .call(
@@ -433,6 +521,7 @@ mod tests {
         let target = tmp.path().join("bad.ipynb");
         std::fs::write(&target, "this is not json").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
         let err = tool
             .call(
@@ -449,12 +538,88 @@ mod tests {
         assert!(err.to_string().contains("notebook JSON parse"));
     }
 
+    // ───────────────────────── Batch F: staleness guard ─────────────────────
+
+    #[tokio::test]
+    async fn notebook_edit_without_prior_read_errors_not_read() {
+        // No recorded read of the notebook → FILE_NOT_READ_ERROR. This is the
+        // common production path: Rust `Read` cannot populate the registry for
+        // `.ipynb` (no notebook media), so a plain edit-without-edit is refused.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        // Deliberately do NOT seed a prior read.
+        let tool = NotebookEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "notebook_path": target.to_str().unwrap(),
+                    "cell_id": "c1",
+                    "edit_mode": "replace",
+                    "new_source": "print('blocked')"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_NOT_READ_ERROR),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_write_set_lets_immediate_second_notebook_edit_succeed() {
+        // First NotebookEdit succeeds with a seeded read; its post-write `set`
+        // updates the registry so a SECOND immediate NotebookEdit (no re-seed)
+        // also succeeds — the only way the guard is satisfied in production
+        // (Read does not populate the registry for notebooks).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = NotebookEditTool::new(ctx);
+        tool.call(
+            json!({
+                "notebook_path": target.to_str().unwrap(),
+                "cell_id": "c1",
+                "edit_mode": "replace",
+                "new_source": "print('first')"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        // No re-seed: the post-write set from the first edit satisfies the guard.
+        tool.call(
+            json!({
+                "notebook_path": target.to_str().unwrap(),
+                "cell_id": "c2",
+                "edit_mode": "replace",
+                "new_source": "## Updated"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let modified: Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(modified["cells"][0]["source"], "print('first')");
+        assert_eq!(modified["cells"][1]["source"], "## Updated");
+    }
+
     #[tokio::test]
     async fn rejects_missing_cell_for_replace() {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("nb.ipynb");
         std::fs::write(&target, sample_notebook()).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
         let err = tool
             .call(

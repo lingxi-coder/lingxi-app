@@ -743,6 +743,22 @@ pub struct AppState {
     /// resolves the transcript path and appends OUTSIDE the `AppState` lock,
     /// then clears the flag. Mirrors `pending_open_stats` (no handle needed).
     pub pending_save_color: Option<String>,
+    /// (A6) Resolved custom status-line text — `Some(text)` when the user
+    /// configured `statusLine: {type:'command'}` in settings AND the command
+    /// ran successfully (already passed through
+    /// [`crate::components::status_line::format_custom_status_line`]). `None`
+    /// (the default) leaves the built-in `model cwd cost ctx% mode` row in
+    /// place, byte-identical to the historical behavior. Populated by the async
+    /// status-line pump (re-run when the cost/context/model snapshot changes,
+    /// debounced like claude-code's status effect); rendered via the `custom`
+    /// prop on [`crate::components::status_line::StatusLine`].
+    pub status_line_text: Option<String>,
+    /// (A6) Parsed `statusLine` setting (`{type, command, padding}`), or `None`
+    /// when unset / not a `command` config. The async pump reads `command` +
+    /// `padding` from here; the `padding` also feeds the `StatusLine` render
+    /// prop so the custom row pads identically to claude-code's
+    /// `<Box paddingX={paddingX}>`. Read once at startup from the settings JSON.
+    pub status_line_config: Option<crate::components::status_line_command::StatusLineConfig>,
 }
 
 impl AppState {
@@ -801,7 +817,20 @@ impl AppState {
             pending_switch_model: None,
             session_agent_color: None,
             pending_save_color: None,
+            status_line_text: None,
+            status_line_config: None,
         }
+    }
+
+    /// (A6) Read the `statusLine` setting out of a loaded settings JSON value
+    /// and stash the parsed [`StatusLineConfig`] on the state. A `command`-typed
+    /// config arms the async status-line pump; any other shape (absent, or
+    /// `type != "command"`) leaves `status_line_config == None` so the built-in
+    /// status row renders. Idempotent — safe to call on each settings reload.
+    pub fn load_status_line_setting(&mut self, settings: &serde_json::Value) {
+        self.status_line_config = settings
+            .get("statusLine")
+            .and_then(crate::components::status_line_command::StatusLineConfig::from_settings_value);
     }
 
     /// (M7-11) Open the Doctor screen, carrying the captured diagnostics

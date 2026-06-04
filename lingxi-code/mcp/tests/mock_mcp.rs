@@ -287,6 +287,56 @@ async fn list_tools_prefixes_full_name_with_double_underscores() {
 }
 
 #[tokio::test]
+async fn full_name_normalizes_invalid_server_name_and_round_trips() {
+    // A server whose name has an API-invalid char (`.`) is normalized in the
+    // FQN `<server>` token (`my.server` → `my_server`) so the advertised tool
+    // name matches `^[a-zA-Z0-9_-]{1,64}$`. The DTO `server_name` stays RAW for
+    // display (claude-code keeps client.name raw, normalizing only the FQN).
+    let captured = Arc::new(Mutex::new(None::<String>));
+    let captured_clone = captured.clone();
+    let (client, _cap, _h) =
+        make_client_against_mock("my.server", std::path::PathBuf::from("/tmp/work"), move |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            if method == "tools/call" {
+                let name = req["params"]["name"].as_str().unwrap_or("").to_string();
+                let c = captured_clone.clone();
+                tokio::spawn(async move { *c.lock().await = Some(name) });
+            }
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "tools/list" => json!({
+                    "tools": [ { "name": "read_file", "description": "Read", "inputSchema": {} } ]
+                }),
+                "tools/call" => json!({ "content": [{ "type": "text", "text": "ok" }], "isError": false }),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        })
+        .await;
+
+    client.initialize().await.expect("init");
+    let tools = client.list_tools().await.expect("list");
+    // FQN server token normalized; DTO server_name stays raw.
+    assert_eq!(tools[0].full_name, "mcp__my_server__read_file");
+    assert_eq!(tools[0].server_name, "my.server");
+
+    // The normalized FQN strips back correctly: the wire `name` is the bare
+    // tool name, proving the build/strip round-trip is self-consistent.
+    client
+        .call_tool("mcp__my_server__read_file", json!({}))
+        .await
+        .expect("normalized FQN should strip + call");
+    // give the spawned capture task a tick
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(captured.lock().await.as_deref(), Some("read_file"));
+}
+
+#[tokio::test]
 async fn call_tool_times_out_with_locked_error_string() {
     // Mock responds to `initialize` but NEVER responds to `tools/call`,
     // forcing the client to hit the timeout branch.

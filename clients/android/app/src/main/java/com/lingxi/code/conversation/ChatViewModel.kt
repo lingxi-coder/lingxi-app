@@ -2,6 +2,8 @@ package com.lingxi.code.conversation
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lingxi.code.model.EngineModelCatalog
+import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.MockData
 import com.lingxi.code.model.ModelOption
@@ -25,8 +27,15 @@ data class ChatState(
     val isNew: Boolean = false,
     /** True while the assistant reply streams — renders the pulsing dots row. */
     val streaming: Boolean = false,
-    /** The model selected in the composer chip. */
+    /** The model selected in the composer chip (the active engine id, or a mock row). */
     val model: ModelOption,
+    /**
+     * The catalog the picker shows. Driven by the engine's REAL `ModelList`
+     * (out-of-band, via [ConversationSource.modelState]); falls back to the
+     * branded [MockData.models] when the engine hasn't reported a catalog yet
+     * (mock mode / before the first `ModelList`). The active row is [model].
+     */
+    val availableModels: List<ModelOption> = MockData.models,
     /**
      * A transient, user-visible status line (tool activity). `null` hides the
      * row. Mirrors the iOS `ConversationModel.statusLine`. Errors no longer ride
@@ -104,6 +113,29 @@ class ChatViewModel(
     )
     val state: StateFlow<ChatState> = _state.asStateFlow()
 
+    init {
+        // Observe the engine's OUT-OF-BAND model state (SHIP-BLOCKER #2): a real
+        // `ModelList` populates the picker with wire ids; `ModelChanged` (or the
+        // `ListModels` reply's `current`) selects the active row. Mock sources
+        // keep an empty state forever, so this never disturbs MockData.models.
+        viewModelScope.launch {
+            source.modelState.collect { engine -> applyModelState(engine) }
+        }
+    }
+
+    /**
+     * Fold the engine's [EngineModelState] into [ChatState]: build the picker
+     * rows from the REAL wire ids and select the active one. Empty catalog →
+     * leave the mock list + selection untouched (mock mode). Extracted so the
+     * mapping is exercised directly in unit tests with a fake source.
+     */
+    internal fun applyModelState(engine: EngineModelState) {
+        if (!engine.hasCatalog) return // mock mode: keep MockData.models + its selection
+        val options = EngineModelCatalog.options(engine.available)
+        val active = options.firstOrNull { it.id == engine.active } ?: options.first()
+        _state.update { it.copy(availableModels = options, model = active) }
+    }
+
     /**
      * Index into [ChatState.messages] of the assistant message currently being
      * streamed (deltas append into it). `null` between turns / before the first
@@ -152,9 +184,16 @@ class ChatViewModel(
         }
     }
 
-    /** Change the composer's selected model. */
+    /**
+     * Change the active model. Reflects the pick locally immediately (snappy
+     * chip), then submits `SetModel(id)` to the engine with the REAL wire id —
+     * the engine confirms with `ModelChanged`, which re-selects the row via
+     * [applyModelState]. For the mock source `setModel` is a no-op, so the local
+     * selection stands.
+     */
     fun selectModel(model: ModelOption) {
         _state.update { it.copy(model = model) }
+        viewModelScope.launch { source.setModel(model.id) }
     }
 
     /**

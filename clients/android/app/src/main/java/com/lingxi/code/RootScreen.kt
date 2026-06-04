@@ -30,6 +30,7 @@ import com.lingxi.code.conversation.ComposerAttachment
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.conversation.EngineConversationSource
 import com.lingxi.code.conversation.MockConversationSource
+import com.lingxi.code.conversation.PermissionPromptDialog
 import com.lingxi.code.drawer.DrawerContent
 import com.lingxi.code.drawer.rememberDrawerUiState
 import com.lingxi.code.model.MockData
@@ -81,6 +82,10 @@ fun RootScreen(
     )
 
     val state by chatViewModel.state.collectAsState()
+    // The head parked permission request, driven by the engine's outbound
+    // AndroidPermissionSink (SHIP-BLOCKER #3). The mock source never emits one,
+    // so this stays null and the prompt is never shown there.
+    val pendingPermission by source.pendingPermission.collectAsState()
     val drawerUi = rememberDrawerUiState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -190,6 +195,20 @@ fun RootScreen(
 
         // Immersive voice overlay (full-screen, above everything else).
         VoiceFlowOverlay(visible = voiceActive)
+
+        // Permission prompt (above everything): renders the head parked request
+        // and resolves it by submitting Approve/DenyPermission through the source,
+        // which forwards to MobileEngineHandle.submit. SHIP-BLOCKER #3: this is
+        // the round-trip that unparks a write/Bash turn the engine is waiting on.
+        PermissionPromptDialog(
+            state = pendingPermission,
+            onApprove = { requestId, response ->
+                scope.launch { source.approvePermission(requestId, response) }
+            },
+            onDeny = { requestId ->
+                scope.launch { source.denyPermission(requestId) }
+            },
+        )
     }
 }
 

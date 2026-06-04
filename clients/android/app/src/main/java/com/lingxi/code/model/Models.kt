@@ -187,3 +187,83 @@ object MockData {
     fun session(id: String): SessionRef =
         allSessions.firstOrNull { it.id == id } ?: allSessions[0]
 }
+
+// MARK: - Engine model catalog ----------------------------------------------
+
+/**
+ * The single source of truth for what the model picker shows + which row is
+ * active. SHIP-BLOCKER #2: the [available] ids and [active] id are REAL Anthropic
+ * wire ids reported by the engine (`ModelList` / `ModelChanged`) — never the
+ * branded `lx-*` mock ids. [EngineModelCatalog.from] turns this into the
+ * picker's [ModelOption] rows, attaching a friendly display name without ever
+ * losing the wire id (the id is what `SetModel` sends).
+ *
+ * The empty state ([available] empty) means "the engine hasn't reported its
+ * catalog yet (or we're in mock mode)" — the UI keeps showing [MockData.models]
+ * until a real `ModelList` arrives.
+ */
+data class EngineModelState(
+    val available: List<String> = emptyList(),
+    val active: String = "",
+) {
+    val hasCatalog: Boolean get() = available.isNotEmpty()
+}
+
+/**
+ * Friendly-name + accent derivation for a REAL Anthropic wire id, so the picker
+ * reads "Claude Opus 4" instead of `claude-opus-4-20250514` while still carrying
+ * the wire id through [ModelOption.id]. PURE — no engine / Android dependency —
+ * so it is unit-testable on the plain JVM.
+ */
+object EngineModelCatalog {
+
+    // A small, deterministic accent palette (reusing the brand colors the mock
+    // catalog already uses) so each picker row gets a stable dot color keyed by
+    // its position — purely cosmetic, never affects the wire id.
+    private val accents: List<Color> = listOf(
+        Color(red = 0.4340f, green = 0.5865f, blue = 1.0000f), // indigo
+        Color(red = 0.8090f, green = 0.4552f, blue = 0.8891f), // violet
+        Color(red = 0.0000f, green = 0.7601f, blue = 0.7664f), // teal
+        Color(red = 0.2085f, green = 0.7571f, blue = 0.4656f), // green
+        Color(red = 0.8696f, green = 0.5765f, blue = 0.0000f), // amber
+    )
+
+    /**
+     * Turn a wire id into a human label. Handles the Anthropic id shape
+     * (`claude-<family>-<ver>-<date>`): drops a trailing 8-digit date stamp,
+     * title-cases the remaining segments, and capitalizes `claude`. Unknown
+     * shapes fall back to the raw id (never blank), so a model the engine adds
+     * tomorrow still renders sanely without a code change.
+     */
+    fun displayName(id: String): String {
+        if (id.isBlank()) return id
+        val parts = id.split('-').filter { it.isNotEmpty() }
+        // Drop a trailing all-digit date/version stamp (e.g. "20250514").
+        val trimmed = parts.dropLastWhile { it.length >= 6 && it.all(Char::isDigit) }
+        val segments = trimmed.ifEmpty { parts }
+        return segments.joinToString(" ") { seg ->
+            when {
+                seg.equals("claude", ignoreCase = true) -> "Claude"
+                seg.all { it.isDigit() || it == '.' } -> seg // keep version numbers as-is
+                else -> seg.replaceFirstChar { c -> c.uppercaseChar() }
+            }
+        }
+    }
+
+    /**
+     * Build the picker rows from the engine's REAL [ids]. Each [ModelOption.id]
+     * is the verbatim wire id (what `SetModel` sends); the name is a friendly
+     * label and the dot color is keyed by position. Returns an empty list for an
+     * empty catalog (the caller falls back to [MockData.models]).
+     */
+    fun options(ids: List<String>): List<ModelOption> =
+        ids.mapIndexed { i, id ->
+            ModelOption(
+                id = id,
+                name = displayName(id),
+                desc = id, // the wire id, surfaced as the secondary line for transparency
+                tag = "",
+                color = accents[i % accents.size],
+            )
+        }
+}

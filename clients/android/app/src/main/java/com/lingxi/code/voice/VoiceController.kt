@@ -11,8 +11,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.core.content.ContextCompat
 import com.lingxi.code.bindings.AndroidEventListener
+import com.lingxi.code.bindings.AndroidPermissionSink
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.MobileEngineHandle
+import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.SpeechFfiException
 import com.lingxi.code.bindings.buildAndroidEngine
 import com.lingxi.code.voice.audio.AndroidSttAdapter
@@ -58,6 +60,14 @@ private const val TAG = "VoiceController"
  * that only need the device-capability wiring (e.g. the voice path) still build
  * a working handle without re-implementing a listener.
  *
+ * [onPermission] is the single sink for every OUTBOUND [PermissionRequest]: when
+ * a tool needs approval the engine parks the turn and emits the request through
+ * the `AndroidPermissionSink` registered here. The caller (the conversation
+ * source) enqueues a prompt and resolves it via
+ * `handle.submit(ClientCommand.Approve/DenyPermission)`. SHIP-BLOCKER #3: without
+ * this sink the prior `NoopPermissionSink` DROPPED the request and the turn hung
+ * forever. It defaults to a `Log.w` trace so the voice-only path still builds.
+ *
  * Returns `null` when the engine cannot be built — on a JVM/unit host the
  * `buildAndroidEngine` export returns `PlatformUnavailable`, and a missing
  * cdylib throws on class init; either way the chat shell stays usable.
@@ -69,6 +79,9 @@ fun buildVoiceEngine(
     model: String = "",
     onEvent: suspend (ClientEvent) -> Unit = { event ->
         Log.d(TAG, "engine event: ${event::class.simpleName}")
+    },
+    onPermission: suspend (PermissionRequest) -> Unit = { request ->
+        Log.w(TAG, "permission request dropped (no prompt UI wired): ${request.requestId}")
     },
 ): MobileEngineHandle? {
     val appContext = context.applicationContext
@@ -105,6 +118,17 @@ fun buildVoiceEngine(
             onEvent(event)
         }
     }
+    // Device-permissions: the engine's adapter gate emits an OUTBOUND
+    // PermissionRequest through this sink whenever a tool needs approval. The
+    // adapter forwards it to the caller's [onPermission] (EngineConversationSource
+    // pushes it into its pending-permission StateFlow, which the Compose prompt
+    // renders). This MUST return promptly — the user's answer comes back
+    // asynchronously via `handle.submit(Approve/DenyPermission)`.
+    val permissions = object : AndroidPermissionSink {
+        override suspend fun onRequest(request: PermissionRequest) {
+            onPermission(request)
+        }
+    }
     return try {
         buildAndroidEngine(
             apiBase = apiBase,
@@ -119,6 +143,7 @@ fun buildVoiceEngine(
             voice = voice,
             notifications = notifications,
             clipboard = clipboard,
+            permissions = permissions,
         )
     } catch (t: Throwable) {
         // PlatformUnavailable on a host build, or UnsatisfiedLinkError when the

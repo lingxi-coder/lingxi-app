@@ -35,6 +35,18 @@ object UiTags {
     /** The conversation's transient status row (engine tool activity / errors). */
     const val CHAT_STATUS = "tag.chatStatus"
 
+    /** The permission-prompt modal (allow/deny for an engine-parked tool). */
+    const val PERMISSION_PROMPT = "tag.permissionPrompt"
+
+    /** The permission prompt's Allow-once action. */
+    const val PERMISSION_ALLOW_ONCE = "tag.permissionAllowOnce"
+
+    /** The permission prompt's Allow-always action. */
+    const val PERMISSION_ALLOW_ALWAYS = "tag.permissionAllowAlways"
+
+    /** The permission prompt's Deny action. */
+    const val PERMISSION_DENY = "tag.permissionDeny"
+
     /** Prefix for the drawer section tabs; suffixed with the [DrawerSection] key. */
     const val DRAWER_TAB_PREFIX = "tag.drawerTab."
 

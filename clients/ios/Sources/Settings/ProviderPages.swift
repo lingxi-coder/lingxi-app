@@ -56,6 +56,8 @@ struct ProviderListPage: View {
                 .padding(.bottom, 22)
 
             if kind == .llm {
+                EngineCredentialsSection()
+
                 SettingsSection(label: "高级",
                                 footer: "智能路由：根据任务类型自动选择最合适的模型（推理→Opus / 速度→Mini / 代码→Code）。流式响应：边生成边显示。") {
                     SettingsRow(icon: .sparkle, iconColor: t.accent, label: "智能路由",
@@ -259,4 +261,73 @@ struct ProviderEditPage: View {
             .padding(.bottom, 14)
         }
     }
+}
+
+// MARK: - Engine credentials (SHIP-BLOCKER #1)
+
+/// The in-process engine's actual API credentials, persisted in the iOS Keychain
+/// (see `Keychain`). This is distinct from the visual "provider" cards above
+/// (which are prototype/display state): THIS is the key the engine reads at
+/// `EngineConfig.fromEnvironment` time to opt in and authenticate turns.
+///
+/// A non-empty key here is what flips the app from the mock conversation source
+/// to the real engine on next launch. A blank key clears the Keychain item and
+/// falls back to the mock. The base URL is optional (proxy / mirror); blank ⇒
+/// the Anthropic default. Both load from / save to the Keychain — never to the
+/// settings store, UserDefaults, or any log.
+struct EngineCredentialsSection: View {
+    @Environment(\.theme) private var t
+
+    /// Local editing buffers, seeded from the Keychain on appear and flushed back
+    /// on commit / disappear so a backgrounding mid-edit still persists.
+    @State private var apiKey: String = ""
+    @State private var apiBase: String = ""
+    @State private var showKey = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            FieldLabel(text: "引擎 API Key")
+            keyField()
+            FieldHint("驱动设备端引擎的真实密钥 · 仅存于本机钥匙串(Keychain)，从不上传 · 填入后下次启动即启用真实引擎，留空则回退到演示模式")
+
+            FieldLabel(text: "API 地址（可选）")
+            SettingsField(text: $apiBase, placeholder: "https://api.anthropic.com")
+                .onSubmit(persistBase)
+            FieldHint("默认 `https://api.anthropic.com` · 可填代理 / 镜像端点")
+        }
+        .padding(.bottom, 22)
+        .onAppear {
+            apiKey = Keychain.get(.apiKey) ?? ""
+            apiBase = Keychain.get(.apiBase) ?? ""
+        }
+        .onDisappear {
+            persistKey()
+            persistBase()
+        }
+    }
+
+    private func keyField() -> some View {
+        ZStack(alignment: .trailing) {
+            SettingsField(text: $apiKey, placeholder: "sk-ant-...",
+                          secure: !showKey, trailingPadding: 76)
+                .onSubmit(persistKey)
+            HStack(spacing: 2) {
+                Button { showKey.toggle() } label: {
+                    Text(showKey ? "隐藏" : "显示")
+                        .font(.system(size: 11, weight: .medium)).foregroundColor(t.text3)
+                        .padding(.horizontal, 7).padding(.vertical, 5)
+                }
+                Button { persistKey(); apiKey = ""; Keychain.clear(.apiKey) } label: {
+                    Text("清除").font(.system(size: 11, weight: .medium)).foregroundColor(t.danger)
+                        .padding(.horizontal, 7).padding(.vertical, 5)
+                }
+            }
+            .padding(.trailing, 6)
+        }
+    }
+
+    /// Persist the key buffer to the Keychain. A blank value clears the item.
+    private func persistKey() { Keychain.set(.apiKey, apiKey) }
+    /// Persist the base-URL buffer. A blank value clears the override.
+    private func persistBase() { Keychain.set(.apiBase, apiBase) }
 }

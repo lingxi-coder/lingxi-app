@@ -57,6 +57,47 @@ struct ModelOption: Identifiable, Equatable {
     var shortName: String { name.replacingOccurrences(of: "Lingxi-", with: "") }
 }
 
+/// Friendly display for a REAL engine model id (SHIP-BLOCKER #2). The picker is
+/// driven by the engine's raw ids (e.g. `claude-sonnet-4-20250514`); these helpers
+/// derive an optional human label + a stable dot color so the UI looks the same as
+/// the mock catalog without inventing branded names. Unknown ids fall back to the
+/// raw id (never hidden) so a turn always shows the real model it will send.
+enum ModelDisplay {
+    /// A human-friendly full name for a raw id, best-effort. Known Anthropic
+    /// families get a tidy label; anything else shows the raw id verbatim.
+    static func name(for id: String) -> String {
+        let l = id.lowercased()
+        if l.contains("opus") { return "Claude Opus" }
+        if l.contains("sonnet") { return "Claude Sonnet" }
+        if l.contains("haiku") { return "Claude Haiku" }
+        return id
+    }
+
+    /// A compact label for the composer chip — the family word when known, else
+    /// the raw id (so the active real model is always visible).
+    static func shortName(for id: String) -> String {
+        let l = id.lowercased()
+        if l.contains("opus") { return "Opus" }
+        if l.contains("sonnet") { return "Sonnet" }
+        if l.contains("haiku") { return "Haiku" }
+        return id.isEmpty ? "默认" : id
+    }
+
+    /// A stable dot color for a raw id (hash-derived so the same id always gets the
+    /// same hue), reusing the mock palette's accent family.
+    static func color(for id: String) -> Color {
+        let palette: [Color] = [
+            Color(srgb: 0.4340, 0.5865, 1.0000), // blue
+            Color(srgb: 0.8090, 0.4552, 0.8891), // purple
+            Color(srgb: 0.0000, 0.7601, 0.7664), // teal
+            Color(srgb: 0.2085, 0.7571, 0.4656), // green
+        ]
+        guard !id.isEmpty else { return palette[0] }
+        let h = abs(id.hashValue)
+        return palette[h % palette.count]
+    }
+}
+
 enum Role { case user, ai }
 
 struct Message: Identifiable, Equatable {

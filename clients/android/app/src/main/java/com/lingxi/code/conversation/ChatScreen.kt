@@ -134,6 +134,7 @@ fun ChatScreen(
                 text = draft,
                 onTextChange = onDraftChange,
                 model = state.model,
+                availableModels = state.availableModels,
                 onModelChange = onSelectModel,
                 onSend = {
                     onSend(draft)

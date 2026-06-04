@@ -875,6 +875,46 @@ impl engine_mobile::PermissionRequestSink for NoopPermissionSink {
     async fn emit_request(&self, _request: client_protocol::permission::PermissionRequest) {}
 }
 
+/// The Kotlin-implemented permission sink the Android app registers when it builds
+/// the engine. Defined in THIS crate (not re-used from `engine-mobile`) so its
+/// UniFFI converter registers under `android_aar`'s tag — a prerequisite for
+/// naming it as a parameter type in [`build_android_engine`]. Mirrors
+/// `AndroidEventListener`: where the listener carries OUTBOUND events, this carries
+/// the engine's OUTBOUND permission requests to the Kotlin host's prompt UI; the
+/// inbound resolution flows back through
+/// `MobileEngineHandle::submit(ClientCommand::Approve/DenyPermission)`.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait AndroidPermissionSink: Send + Sync {
+    /// Deliver one outbound [`client_protocol::permission::PermissionRequest`] to
+    /// the Kotlin host. Implementations enqueue a prompt and return promptly —
+    /// they must not block the engine turn loop; the user's answer comes back via
+    /// `MobileEngineHandle::submit`.
+    async fn on_request(&self, request: client_protocol::permission::PermissionRequest);
+}
+
+/// Adapts the crate-local [`AndroidPermissionSink`] callback interface to the
+/// shared [`PermissionRequestSink`] the engine's adapter gate emits onto. One
+/// forwarding hop per request; no transformation. Mirrors [`AndroidListenerBridge`].
+///
+/// Constructed only on the `target_os = "android"` path of
+/// [`build_android_engine`]; `allow(dead_code)` on the host bindgen build (where
+/// that path is `cfg`'d out).
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct AndroidPermissionSinkBridge {
+    inner: Box<dyn AndroidPermissionSink>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl engine_mobile::PermissionRequestSink for AndroidPermissionSinkBridge {
+    async fn emit_request(&self, request: client_protocol::permission::PermissionRequest) {
+        self.inner.on_request(request).await;
+    }
+}
+
 /// The Kotlin-implemented event listener the Android app registers when it builds
 /// the engine. Defined in THIS crate (not re-used from `client-adapter`) so its
 /// UniFFI converter registers under `android_aar`'s tag — a prerequisite for
@@ -950,6 +990,7 @@ pub fn build_android_engine(
     voice: Box<dyn AndroidVoice>,
     notifications: Box<dyn AndroidNotification>,
     clipboard: Box<dyn AndroidClipboard>,
+    permissions: Box<dyn AndroidPermissionSink>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> =
         Arc::new(AndroidListenerBridge { inner: listener });
@@ -980,7 +1021,8 @@ pub fn build_android_engine(
             })),
             clipboard: Some(Arc::new(AndroidClipboardBridge { inner: clipboard })),
         }));
-        let permission_sink: Arc<dyn PermissionRequestSink> = Arc::new(NoopPermissionSink);
+        let permission_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(AndroidPermissionSinkBridge { inner: permissions });
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
     #[cfg(not(target_os = "android"))]
@@ -998,6 +1040,7 @@ pub fn build_android_engine(
             voice,
             notifications,
             clipboard,
+            permissions,
         );
         Err(MobileEngineError::PlatformUnavailable)
     }

@@ -232,6 +232,51 @@ impl engine_mobile::PermissionRequestSink for NoopPermissionSink {
     async fn emit_request(&self, _request: client_protocol::permission::PermissionRequest) {}
 }
 
+// The foreign permission sink (`IosPermissionSink`) is a callback interface
+// DEFINED IN THIS CRATE — mirroring `IosEventListener` — so its UniFFI
+// `FfiConverter` lands under `ios_framework`'s tag, a prerequisite for naming it
+// as a parameter type in `build_ios_engine`. Where the listener carries OUTBOUND
+// events, this carries the engine's OUTBOUND permission requests to the Swift
+// host's prompt UI; the inbound resolution flows back through
+// `MobileEngineHandle::submit(ClientCommand::Approve/DenyPermission)`.
+// `IosPermissionSinkBridge` adapts this crate-local interface to the shared
+// `engine_mobile::PermissionRequestSink` the engine's adapter gate emits onto.
+/// The Swift-implemented permission sink the iOS app registers when it builds the
+/// engine. Defined in this crate (not re-used from `engine-mobile`) so its UniFFI
+/// converter registers under `ios_framework`'s tag — see [`build_ios_engine`].
+/// The host presents a prompt for each request and resolves it by submitting
+/// `ClientCommand::ApprovePermission` / `DenyPermission` back through the handle.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosPermissionSink: Send + Sync {
+    /// Deliver one outbound [`client_protocol::permission::PermissionRequest`] to
+    /// the Swift host. Implementations enqueue a prompt and return promptly —
+    /// they must not block the engine turn loop; the user's answer comes back via
+    /// `MobileEngineHandle::submit`.
+    async fn on_request(&self, request: client_protocol::permission::PermissionRequest);
+}
+
+/// Adapts the crate-local [`IosPermissionSink`] callback interface to the shared
+/// [`PermissionRequestSink`] the engine's adapter gate emits onto. One forwarding
+/// hop per request; no transformation. Mirrors [`IosListenerBridge`].
+///
+/// Constructed only on the `target_os = "ios"` path of [`build_ios_engine`];
+/// `allow(dead_code)` on the host bindgen build (where that path is `cfg`'d out).
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+struct IosPermissionSinkBridge {
+    inner: Box<dyn IosPermissionSink>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl engine_mobile::PermissionRequestSink for IosPermissionSinkBridge {
+    async fn emit_request(&self, request: client_protocol::permission::PermissionRequest) {
+        self.inner.on_request(request).await;
+    }
+}
+
 // The foreign event listener (`IosEventListener`) is a callback interface
 // DEFINED IN THIS CRATE so its UniFFI `FfiConverterArc` lands under
 // `ios_framework`'s tag — a prerequisite for naming it in a `#[uniffi::export]`
@@ -890,6 +935,7 @@ pub fn build_ios_engine(
     voice: Box<dyn IosVoice>,
     notifications: Box<dyn IosNotification>,
     clipboard: Box<dyn IosClipboard>,
+    permissions: Box<dyn IosPermissionSink>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> = Arc::new(IosListenerBridge { inner: listener });
     #[cfg(target_os = "ios")]
@@ -919,7 +965,8 @@ pub fn build_ios_engine(
             })),
             clipboard: Some(Arc::new(IosClipboardBridge { inner: clipboard })),
         }));
-        let permission_sink: Arc<dyn PermissionRequestSink> = Arc::new(NoopPermissionSink);
+        let permission_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(IosPermissionSinkBridge { inner: permissions });
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
     #[cfg(not(target_os = "ios"))]
@@ -937,6 +984,7 @@ pub fn build_ios_engine(
             voice,
             notifications,
             clipboard,
+            permissions,
         );
         Err(MobileEngineError::PlatformUnavailable)
     }

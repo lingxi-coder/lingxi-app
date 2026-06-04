@@ -375,9 +375,14 @@ impl AnthropicProvider {
             .await;
     }
 
-    /// Run the retry loop, treating 429 as a synthesised 503 after sleeping
-    /// for the parsed `Retry-After` / `anthropic-ratelimit-requests-reset`
-    /// delay. Returns the underlying `with_retry` outcome.
+    /// Run the retry loop. A 429 is handled in-closure (parse
+    /// `Retry-After` / `anthropic-ratelimit-requests-reset`, sleep, then return
+    /// a synthesised retryable so `with_retry` re-attempts — the rate-limit
+    /// handshake; see Batch 4 for the subscriber gate). **Every other status,
+    /// including a real 529 or a streamed `overloaded_error` body, is passed
+    /// through verbatim** so [`crate::retry::classify_retryable`] sees the real
+    /// status/body and can tag it `Overloaded`. Returns the underlying
+    /// `with_retry` outcome.
     async fn drive_retry_loop_with_429<T: HttpTransport>(
         &self,
         body: &Value,
@@ -396,6 +401,12 @@ impl AnthropicProvider {
             async move {
                 let req = self.build_request_with_betas(&body, None);
                 let resp = transport.request(req).await?;
+                // Only 429 is intercepted: sleep on the rate-limit window, then
+                // return a synthesised retryable (a 503) to trigger one more
+                // attempt. We deliberately do NOT touch 529 / overloaded-body
+                // responses here — passing the real status through lets the
+                // classifier recognise the transient-capacity (overloaded)
+                // error instead of mis-bucketing it.
                 if resp.status == 429 {
                     handle_429(&resp.headers, &bus, &model_s).await;
                     return Ok(protocol::HttpResponse {
@@ -752,6 +763,7 @@ fn error_kind(e: &ApiError) -> &'static str {
         ApiError::Http(_) => "http",
         ApiError::PromptTooLong { .. } => "prompt_too_long",
         ApiError::RateLimited { .. } => "rate_limited",
+        ApiError::Overloaded { .. } => "overloaded",
         ApiError::Unauthorized(_) => "unauthorized",
         ApiError::MalformedStream(_) => "malformed_stream",
         ApiError::UnexpectedStreamEnd => "stream_end",

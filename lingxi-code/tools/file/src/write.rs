@@ -29,6 +29,22 @@ use tool_api::BuiltinToolContext;
 /// Tool name byte-lock — matches claude-code tool registry.
 pub const TOOL_NAME: &str = "Write";
 
+/// Build the model-facing `tool_result` message for a Write, byte-faithful to
+/// claude-code `FileWriteTool.mapToolResultToToolResultBlockParam`
+/// (`FileWriteTool.ts:418-433`): `create` → `"File created successfully at:
+/// {path}"`, `update` → `"The file {path} has been updated successfully."`.
+///
+/// `path` is the ORIGINAL `file_path` input string (claude-code echoes the
+/// caller's path verbatim, not a canonicalized form).
+#[must_use]
+pub fn write_result_message(path: &str, is_create: bool) -> String {
+    if is_create {
+        format!("File created successfully at: {path}")
+    } else {
+        format!("The file {path} has been updated successfully.")
+    }
+}
+
 /// `FileWriteTool` — writes a UTF-8 file inside the trusted-dirs whitelist.
 pub struct FileWriteTool {
     ctx: BuiltinToolContext,
@@ -213,6 +229,18 @@ impl Tool for FileWriteTool {
             }
         };
 
+        // Determine create-vs-update BEFORE the write. claude-code keys the
+        // result `type` on `if (oldContent)` (`FileWriteTool.ts:359`), a JS
+        // truthiness check on the pre-write file contents: a missing file OR an
+        // existing-but-empty file is `create`; only a pre-existing file with
+        // non-empty content is `update`. We mirror that: read the prior bytes
+        // non-fatally (a read error is treated as "no prior content" so it
+        // falls through to `create`, matching the ENOENT→null path).
+        let is_create = match tokio::fs::read(&canon).await {
+            Ok(prior) => prior.is_empty(),
+            Err(_) => true,
+        };
+
         if let Err(e) = tokio::fs::write(&canon, content.as_bytes()).await {
             self.emit_failed(&invocation_id, "io_write").await;
             return Err(ToolError::Io(e.to_string()));
@@ -223,8 +251,20 @@ impl Tool for FileWriteTool {
         self.emit_completed(&invocation_id, bytes_written, duration_ms)
             .await;
 
+        // Model-facing result string is byte-faithful to claude-code
+        // (`FileWriteTool.ts:418-433`); it echoes the ORIGINAL `file_path` arg,
+        // not the canonicalized path. Batch A's serialization rule emits
+        // `data["content"]` verbatim to the model; `bytes_written` / `type`
+        // remain for the TUI.
+        let content_message = write_result_message(file_path, is_create);
+        let type_str = if is_create { "create" } else { "update" };
+
         Ok(ToolCallResult {
-            data: json!({ "bytes_written": bytes_written }),
+            data: json!({
+                "content": content_message,
+                "bytes_written": bytes_written,
+                "type": type_str,
+            }),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -258,6 +298,32 @@ mod tests {
         assert_eq!(TOOL_NAME, "Write");
     }
 
+    #[test]
+    fn write_result_message_create_is_byte_locked() {
+        // FileWriteTool.ts:420-425.
+        assert_eq!(
+            write_result_message("/tmp/new.txt", true),
+            "File created successfully at: /tmp/new.txt"
+        );
+    }
+
+    #[test]
+    fn write_result_message_update_is_byte_locked() {
+        // FileWriteTool.ts:426-431.
+        assert_eq!(
+            write_result_message("/tmp/old.txt", false),
+            "The file /tmp/old.txt has been updated successfully."
+        );
+    }
+
+    #[test]
+    fn write_result_message_echoes_original_path_verbatim() {
+        assert_eq!(
+            write_result_message("./a/../b.txt", true),
+            "File created successfully at: ./a/../b.txt"
+        );
+    }
+
     #[tokio::test]
     async fn happy_path_writes_file() {
         let tmp = TempDir::new().unwrap();
@@ -274,6 +340,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["bytes_written"], 5);
+        // New file → `create`: model-facing `content` is byte-faithful and
+        // echoes the ORIGINAL input path verbatim.
+        let input_path = target.to_str().unwrap();
+        assert_eq!(result.data["type"], "create");
+        assert_eq!(
+            result.data["content"].as_str().unwrap(),
+            format!("File created successfully at: {input_path}")
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&"tengu_tool_write_started".to_string()));
@@ -331,7 +405,7 @@ mod tests {
         std::fs::write(&target, "old").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileWriteTool::new(ctx);
-        let _ = tool
+        let result = tool
             .call(
                 json!({ "file_path": target.to_str().unwrap(), "content": "new" }),
                 fresh_ctx(),
@@ -339,7 +413,66 @@ mod tests {
             )
             .await
             .unwrap();
+        // Pre-existing non-empty file → `update`: byte-faithful message.
+        let input_path = target.to_str().unwrap();
+        assert_eq!(result.data["type"], "update");
+        assert_eq!(
+            result.data["content"].as_str().unwrap(),
+            format!("The file {input_path} has been updated successfully.")
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+    }
+
+    #[tokio::test]
+    async fn overwriting_empty_file_is_treated_as_create() {
+        // claude-code keys `type` on `if (oldContent)` truthiness: an existing
+        // but EMPTY file is falsy and yields `create` (FileWriteTool.ts:359).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("empty.txt");
+        std::fs::write(&target, "").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileWriteTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "content": "filled" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let input_path = target.to_str().unwrap();
+        assert_eq!(result.data["type"], "create");
+        assert_eq!(
+            result.data["content"].as_str().unwrap(),
+            format!("File created successfully at: {input_path}")
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "filled");
+    }
+
+    #[tokio::test]
+    async fn mkdir_new_file_is_create() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("sub").join("deep").join("out.txt");
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileWriteTool::new(ctx);
+        let result = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "content": "deep content",
+                    "mkdir": true
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let input_path = target.to_str().unwrap();
+        assert_eq!(result.data["type"], "create");
+        assert_eq!(
+            result.data["content"].as_str().unwrap(),
+            format!("File created successfully at: {input_path}")
+        );
     }
 
     #[tokio::test]

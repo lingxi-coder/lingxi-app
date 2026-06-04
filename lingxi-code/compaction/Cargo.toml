@@ -20,5 +20,10 @@ async-trait.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
 
+[dev-dependencies]
+# Only used by the autocompact unit test to construct a `CacheSafeParams`
+# (which carries a `tool_api::ToolUseOptions`).
+tool-api = { path = "../tool-api" }
+
 [lints]
 workspace = true

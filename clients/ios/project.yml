@@ -40,6 +40,9 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: 灵犀
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait"
         INFOPLIST_KEY_NSMicrophoneUsageDescription: "灵犀使用麦克风进行语音心流输入。"
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "灵犀使用语音识别将你的语音转写为文本。"
+        INFOPLIST_KEY_NSCameraUsageDescription: "灵犀使用相机拍摄照片供模型分析。"
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "灵犀访问相册以选择图片供模型分析。"
         ENABLE_PREVIEWS: true
         GENERATE_INFOPLIST_FILE: true
         MARKETING_VERSION: "2.4.1"

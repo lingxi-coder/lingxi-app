@@ -355,6 +355,32 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                     return false;
                 }
             }
+            // (`/copy [N]`) Copy the most recent assistant text (or the Nth) to
+            // the system clipboard (claude-code `commands/copy/copy.tsx`). A
+            // `local-jsx` command — NOT a screen for the no-arg/`N` fast path
+            // (the marked-based code-block selector dialog is deferred, bucket
+            // (b)). Parse the trailing integer, run the byte-locked
+            // `collect_recent_assistant_texts` selection over the live
+            // transcript, push the confirmation/error `SystemText`
+            // SYNCHRONOUSLY, and on success RAISE `pending_copy_clipboard` so
+            // the async pump in `root.rs` (`pump_copy_clipboard`) writes to the
+            // clipboard OUTSIDE the lock + the render frame (the iocraft
+            // reconciler owns stdout). No echo, no turn. The `crates/commands`
+            // copy name stays the `--no-tui` text path, untouched.
+            {
+                let trimmed = st.prompt_text.trim();
+                let is_copy =
+                    trimmed == "/copy" || trimmed.split_whitespace().next() == Some("/copy");
+                if is_copy {
+                    // Own the args before the `&mut st` borrow in
+                    // `apply_copy_command` (which clears `prompt_text`).
+                    let args = trimmed.strip_prefix("/copy").unwrap_or("").to_string();
+                    apply_copy_command(st, &args);
+                    st.prompt_text.clear();
+                    st.prompt_cursor = 0;
+                    return false;
+                }
+            }
             let line = std::mem::take(&mut st.prompt_text);
             st.prompt_cursor = 0;
             st.history.push(line.clone());
@@ -489,6 +515,39 @@ fn apply_color_command(st: &mut AppState, args: &str) {
         timestamp: chrono::Utc::now().timestamp(),
         is_error,
     });
+}
+
+/// Apply a parsed `/copy [N]` command to `AppState`: select the assistant text
+/// over the live transcript, push the confirmation/error `SystemText`, and on
+/// success raise `pending_copy_clipboard` so the async pump in `root.rs`
+/// (`pump_copy_clipboard`) writes it to the system clipboard OUTSIDE the lock
+/// (the iocraft reconciler owns stdout). PURE w.r.t. I/O — no clipboard write
+/// happens here. 1:1 with the no-arg/`N` fast path of claude-code
+/// `commands/copy/copy.tsx`'s `call` (`onDone` + `setClipboard`).
+///
+/// `args` is the text AFTER the `/copy` command word (may be empty).
+fn apply_copy_command(st: &mut AppState, args: &str) {
+    use crate::commands::copy::{parse_copy_command, CopyCommand};
+    match parse_copy_command(&st.messages, args) {
+        CopyCommand::Copy { text, display } => {
+            // Raise the clipboard write for the async pump; show the
+            // confirmation immediately (clipboard writes are best-effort,
+            // exactly as claude-code's OSC-52 path is fire-and-forget).
+            st.pending_copy_clipboard = Some(text);
+            st.push_message(RenderedMessage::SystemText {
+                body: display,
+                timestamp: chrono::Utc::now().timestamp(),
+                is_error: false,
+            });
+        }
+        CopyCommand::Error { display } => {
+            st.push_message(RenderedMessage::SystemText {
+                body: display,
+                timestamp: chrono::Utc::now().timestamp(),
+                is_error: true,
+            });
+        }
+    }
 }
 
 /// Process a submitted line. If `/`-prefixed → slash dispatch (with TUI
@@ -1235,6 +1294,97 @@ mod dispatch_tests {
                 "Editor mode set to normal. Using standard (readline) keyboard bindings."
             ),
             other => panic!("expected vim-off SystemText, got {other:?}"),
+        }
+    }
+
+    /// `/copy` with an empty transcript pushes the "nothing to copy" error
+    /// `SystemText`, clears the prompt, does NOT raise a clipboard write, and
+    /// does NOT run a turn (Submit returns false).
+    #[test]
+    fn copy_command_empty_transcript_graceful() {
+        let mut st = s();
+        st.prompt_text = "/copy".to_string();
+        let runs_turn = dispatch(KeyAction::Submit, &mut st);
+        assert!(!runs_turn, "/copy must not run a turn");
+        assert_eq!(st.prompt_text, "");
+        assert!(st.pending_copy_clipboard.is_none());
+        match st.messages.last() {
+            Some(RenderedMessage::SystemText {
+                body,
+                is_error: true,
+                ..
+            }) => assert_eq!(body, "No assistant message to copy"),
+            other => panic!("expected nothing-to-copy error, got {other:?}"),
+        }
+    }
+
+    /// `/copy` (no arg) copies the LATEST assistant text: raises
+    /// `pending_copy_clipboard` with that body + pushes the confirmation.
+    #[test]
+    fn copy_command_copies_latest_assistant_message() {
+        let mut st = s();
+        st.push_message(RenderedMessage::AssistantText {
+            body: "older".into(),
+            timestamp: 0,
+        });
+        st.push_message(RenderedMessage::AssistantText {
+            body: "newest".into(),
+            timestamp: 0,
+        });
+        st.prompt_text = "/copy".to_string();
+        let runs_turn = dispatch(KeyAction::Submit, &mut st);
+        assert!(!runs_turn, "/copy must not run a turn");
+        assert_eq!(st.prompt_text, "");
+        assert_eq!(st.pending_copy_clipboard.as_deref(), Some("newest"));
+        match st.messages.last() {
+            Some(RenderedMessage::SystemText {
+                body,
+                is_error: false,
+                ..
+            }) => assert_eq!(body, "Copied to clipboard (6 characters, 1 lines)"),
+            other => panic!("expected copy confirmation, got {other:?}"),
+        }
+    }
+
+    /// `/copy N` selects the Nth-latest (2 = second-to-latest).
+    #[test]
+    fn copy_command_n_selects_nth_latest() {
+        let mut st = s();
+        for body in ["third", "second", "first"] {
+            st.push_message(RenderedMessage::AssistantText {
+                body: body.into(),
+                timestamp: 0,
+            });
+        }
+        st.prompt_text = "/copy 2".to_string();
+        let runs_turn = dispatch(KeyAction::Submit, &mut st);
+        assert!(!runs_turn, "/copy N must not run a turn");
+        // /copy 2 → second-to-latest = "second".
+        assert_eq!(st.pending_copy_clipboard.as_deref(), Some("second"));
+    }
+
+    /// A bad `/copy` arg pushes the usage error and raises no clipboard write.
+    #[test]
+    fn copy_command_bad_arg_returns_usage_error() {
+        let mut st = s();
+        st.push_message(RenderedMessage::AssistantText {
+            body: "x".into(),
+            timestamp: 0,
+        });
+        st.prompt_text = "/copy abc".to_string();
+        let runs_turn = dispatch(KeyAction::Submit, &mut st);
+        assert!(!runs_turn);
+        assert!(st.pending_copy_clipboard.is_none());
+        match st.messages.last() {
+            Some(RenderedMessage::SystemText {
+                body,
+                is_error: true,
+                ..
+            }) => assert_eq!(
+                body,
+                "Usage: /copy [N] where N is 1 (latest), 2, 3, \u{2026} Got: abc"
+            ),
+            other => panic!("expected usage error, got {other:?}"),
         }
     }
 

@@ -743,6 +743,19 @@ pub struct AppState {
     /// resolves the transcript path and appends OUTSIDE the `AppState` lock,
     /// then clears the flag. Mirrors `pending_open_stats` (no handle needed).
     pub pending_save_color: Option<String>,
+    /// (`/copy`) Set by the `/copy [N]` submit intercept: a request to write
+    /// the selected assistant text to the system clipboard (claude-code
+    /// `commands/copy/copy.tsx` → `setClipboard`). The SYNC submit path can't
+    /// `.await` (the iocraft reconciler owns stdout, so a native clipboard
+    /// shell-out must run OUTSIDE the render frame), so it only RAISES the text
+    /// to copy. The async pump in `root.rs` (`pump_copy_clipboard`, on the
+    /// ticker `use_future`) writes it via the platform clipboard utility
+    /// (`pbcopy` on macOS — claude-code's `copyNative` darwin path) OUTSIDE the
+    /// `AppState` lock, then clears the flag. The user-facing confirmation
+    /// `SystemText` is pushed SYNCHRONOUSLY by the intercept (clipboard writes
+    /// are best-effort, exactly as claude-code's OSC-52 path is). Mirrors
+    /// `pending_save_color` (no handle needed).
+    pub pending_copy_clipboard: Option<String>,
     /// (A6) Resolved custom status-line text — `Some(text)` when the user
     /// configured `statusLine: {type:'command'}` in settings AND the command
     /// ran successfully (already passed through
@@ -817,6 +830,7 @@ impl AppState {
             pending_switch_model: None,
             session_agent_color: None,
             pending_save_color: None,
+            pending_copy_clipboard: None,
             status_line_text: None,
             status_line_config: None,
         }

@@ -19,6 +19,19 @@ struct ChatView: View {
 
     @State private var dotPulse = false
 
+    // Composer draft, HOISTED here (the iOS analog of Android RootScreen's
+    // `draft`) so a hold-to-talk transcription can route its recognized text
+    // straight into the input the user is about to send.
+    @State private var draft = ""
+    // The captured-photo attachment, hoisted like the draft: the composer's
+    // camera affordance drives an on-device capture and surfaces the JPEG here.
+    @State private var attachment: ComposerAttachment? = nil
+    // A transient affordance status line (permission denied / capture failed).
+    @State private var captureStatus: String? = nil
+
+    private let voiceCapture = VoiceCapture()
+    private let cameraCapture = CameraCapture()
+
     init(session: SessionRef,
          openDrawer: @escaping () -> Void,
          voiceActive: Binding<Bool>,
@@ -43,7 +56,14 @@ struct ChatView: View {
                 topBar
                 WorkflowBar()
                 messageList
-                Composer(model: $convo.model, onSend: send)
+                Composer(model: $convo.model,
+                         draft: $draft,
+                         onSend: send,
+                         onCameraClick: captureFromCamera,
+                         attachment: attachment,
+                         onRemoveAttachment: { attachment = nil },
+                         onMicHoldStart: startVoiceHold,
+                         onMicHoldRelease: endVoiceHold)
             }
         }
         // Voice flow: hold anywhere 0.6s to enter immersive recording; release sends.
@@ -95,10 +115,11 @@ struct ChatView: View {
                 VStack(spacing: 0) {
                     if convo.isNew && convo.messages.isEmpty && !convo.streaming { emptyState }
                     ForEach(Array(convo.messages.enumerated()), id: \.element.id) { _, m in
-                        MessageBubble(message: m)
+                        MessageBubble(message: m, onShare: shareMessage)
                     }
                     if convo.streaming { streamingRow }
                     if let status = convo.statusLine { statusRow(status) }
+                    if let cap = captureStatus { statusRow(cap) }
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 8)
@@ -156,4 +177,60 @@ struct ChatView: View {
     private func newChat() { source.startNewConversation() }
 
     private func send(_ txt: String) { source.send(txt) }
+
+    // MARK: capability affordances (mirror Android RootScreen)
+
+    /// Mic press past the 0.6s threshold: enter the immersive voice flow (the
+    /// same overlay the hold-anywhere gesture shows).
+    private func startVoiceHold() {
+        captureStatus = nil
+        withAnimation(.easeOut(duration: 0.25)) { voiceActive = true }
+    }
+
+    /// Finger lift after a successful mic hold: dismiss the overlay and run a
+    /// one-shot STT capture, filling the composer draft with the transcript
+    /// (mirrors Android `onTranscript` → draft; gated on speech/mic auth inside
+    /// `SttImpl`).
+    private func endVoiceHold() {
+        withAnimation(.easeOut(duration: 0.25)) { voiceActive = false }
+        Task {
+            switch await voiceCapture.transcribe() {
+            case let .transcript(text):
+                draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? text : "\(draft) \(text)"
+            case .permissionDenied:
+                captureStatus = "需要麦克风与语音识别权限"
+            case .empty:
+                break
+            case let .failed(message):
+                captureStatus = "语音识别失败：\(message)"
+            }
+        }
+    }
+
+    /// Attach button: drive an on-device camera capture (falling back to the
+    /// photo library when the camera is unavailable, e.g. the simulator) and
+    /// surface the photo as a composer attachment chip.
+    private func captureFromCamera() {
+        captureStatus = nil
+        Task {
+            var result = await cameraCapture.capture(fromLibrary: false)
+            // Simulators have no camera — fall back to the library so the
+            // affordance is still exercisable.
+            if case .failed = result { result = await cameraCapture.capture(fromLibrary: true) }
+            switch result {
+            case let .captured(att):
+                attachment = att
+            case .cancelled:
+                break
+            case .permissionDenied:
+                captureStatus = "需要相机或相册权限"
+            case let .failed(message):
+                captureStatus = "拍照失败：\(message)"
+            }
+        }
+    }
+
+    /// Share an assistant reply's text via the native share sheet.
+    private func shareMessage(_ text: String) { ShareCapture.share(text: text) }
 }

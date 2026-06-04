@@ -4,32 +4,60 @@ import SwiftUI
 struct Composer: View {
     @Environment(\.theme) private var t
     @Binding var model: ModelOption
+    /// Draft text, HOISTED so the device capabilities can inject into it:
+    /// hold-to-talk STT fills it with the recognized utterance (mirrors Android
+    /// `onTranscript` → draft). The caller owns it (see ChatView).
+    @Binding var draft: String
     let onSend: (String) -> Void
 
-    @State private var text = ""
+    // Camera affordance (the + / attach button) — mirrors Android `onCameraClick`
+    // + the captured-photo `attachment` chip surfaced for review before sending.
+    var onCameraClick: () -> Void = {}
+    var attachment: ComposerAttachment? = nil
+    var onRemoveAttachment: () -> Void = {}
+
+    // Hold-to-talk on the mic affordance — mirrors Android `onMicHoldStart` /
+    // `onMicHoldRelease`. A press past the threshold enters the immersive voice
+    // flow; the finger lift drives the STT transcription that fills the draft.
+    var onMicHoldStart: () -> Void = {}
+    var onMicHoldRelease: () -> Void = {}
+
     @State private var modelOpen = false
+    @State private var holding = false
 
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
-                TextField("", text: $text, prompt: Text("向灵犀提问…").foregroundColor(t.text4), axis: .vertical)
+                // Captured-photo attachment chip (the device-vision analog of how
+                // a transcript lands in the draft): a thumbnail + a remove button,
+                // shown only once a camera capture has surfaced an image.
+                if let attachment {
+                    AttachmentThumb(attachment: attachment, onRemove: onRemoveAttachment)
+                }
+
+                TextField("", text: $draft, prompt: Text("向灵犀提问…").foregroundColor(t.text4), axis: .vertical)
                     .font(.system(size: 15.5))
                     .foregroundColor(t.text)
                     .lineLimit(1...5)
                     .padding(.horizontal, 4).padding(.vertical, 2)
 
                 HStack(spacing: 2) {
-                    Button(action: {}) {
+                    // Attach / camera: drives a real on-device capture through the
+                    // same CameraImpl the engine bridges onto `traits::CameraControl`;
+                    // the result surfaces as the attachment chip above.
+                    Button(action: onCameraClick) {
                         LXIcon(name: .plus, size: 18, color: t.text3, stroke: 1.8)
                             .frame(width: 34, height: 34)
                     }
                     modelChip
                     Spacer()
-                    if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        // Mic: press-and-hold to enter voice flow; release runs STT.
                         Button(action: {}) {
-                            LXIcon(name: .mic, size: 18, color: t.text2, stroke: 1.8)
+                            LXIcon(name: .mic, size: 18, color: holding ? t.accent : t.text2, stroke: 1.8)
                                 .frame(width: 34, height: 34)
                         }
+                        .simultaneousGesture(micHoldGesture)
                     } else {
                         Button(action: send) {
                             LXIcon(name: .arrowUp, size: 16, color: .white)
@@ -51,6 +79,27 @@ struct Composer: View {
         .overlay(alignment: .bottomLeading) {
             if modelOpen { modelMenu.padding(.leading, 50).padding(.bottom, 50) }
         }
+    }
+
+    // Press-and-hold → release, mirroring Android `voiceHold` (and the iOS
+    // hold-anywhere idiom): a 0.6s LongPress sequenced into a Drag so the same
+    // touch that crosses the threshold (onMicHoldStart) is the one whose lift we
+    // detect (onMicHoldRelease → STT).
+    private var micHoldGesture: some Gesture {
+        LongPressGesture(minimumDuration: 0.6)
+            .sequenced(before: DragGesture(minimumDistance: 0))
+            .onChanged { value in
+                if case .second(true, _) = value, !holding {
+                    holding = true
+                    onMicHoldStart()
+                }
+            }
+            .onEnded { _ in
+                if holding {
+                    holding = false
+                    onMicHoldRelease()
+                }
+            }
     }
 
     private var modelChip: some View {
@@ -97,8 +146,39 @@ struct Composer: View {
     }
 
     private func send() {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        onSend(text); text = ""
+        onSend(draft); draft = ""
+    }
+}
+
+// MARK: - Attachment thumbnail chip
+
+/// A captured-photo thumbnail chip with a remove (×) affordance — mirrors
+/// Android `AttachmentThumb`.
+private struct AttachmentThumb: View {
+    @Environment(\.theme) private var t
+    let attachment: ComposerAttachment
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            #if canImport(UIKit)
+                Image(uiImage: attachment.image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 48, height: 48)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            #endif
+            Text("\(attachment.width)×\(attachment.height)")
+                .font(.system(size: 12))
+                .foregroundColor(t.text3)
+            Spacer()
+            Button(action: onRemove) {
+                LXIcon(name: .x, size: 14, color: t.text3, stroke: 2)
+                    .frame(width: 28, height: 28)
+            }
+        }
+        .padding(.horizontal, 4).padding(.vertical, 2)
     }
 }

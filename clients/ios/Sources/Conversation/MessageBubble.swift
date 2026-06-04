@@ -6,6 +6,9 @@ struct MessageBubble: View {
     let message: Message
     /// When the most-recent AI reply is dimmed during voice flow ("上下文已记入").
     var dimmed: Bool = false
+    /// Tapping the assistant bubble's share affordance surfaces the native share
+    /// sheet for this reply's text (mirrors Android `MessageBubble onShare`).
+    var onShare: (String) -> Void = { _ in }
 
     var body: some View {
         if message.role == .user {
@@ -28,6 +31,16 @@ struct MessageBubble: View {
                 VStack(alignment: .leading, spacing: 8) {
                     if let tag = message.tag { Pill(text: tag, color: t.accent) }
                     AIText(markdown: message.text)
+                    // Share affordance: surfaces the native chooser for this
+                    // reply's text through the same ShareImpl the engine bridges
+                    // onto `traits::SharingService` — so a bubble share and a
+                    // `tool-share` invocation are the identical launch path.
+                    Button(action: { onShare(message.text) }) {
+                        LXIcon(name: .share, size: 15, color: t.text3, stroke: 1.8)
+                            .frame(width: 28, height: 28)
+                            .contentShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
                 }
                 Spacer(minLength: 0)
             }

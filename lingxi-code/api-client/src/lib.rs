@@ -13,6 +13,7 @@ pub mod anthropic;
 pub mod betas;
 pub mod error;
 pub mod oauth_hook;
+pub mod opus;
 pub mod overflow;
 pub mod rate_limit;
 pub mod retry;
@@ -21,6 +22,8 @@ pub mod types;
 
 pub use anthropic::AnthropicProvider;
 pub use error::ApiError;
+pub use opus::is_non_custom_opus;
+pub use retry::{with_retry_ctl, RetryControl, MAX_529_RETRIES};
 pub use oauth_hook::{
     register_oauth_hook, BearerToken, MiddlewareError, NoOpOAuthHook, OAuthHookError,
     OAuthRefreshHook, TokenHash,

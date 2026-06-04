@@ -45,6 +45,22 @@ pub enum ApiError {
         repeated: bool,
     },
 
+    /// The consecutive-529 counter reached `MAX_529_RETRIES` (3) on a
+    /// non-custom Opus primary model and a fallback model is configured: the
+    /// retry loop stops and signals the caller (the orchestrator turn loop) to
+    /// re-issue the request against `fallback_model` instead of retrying.
+    ///
+    /// 1:1 with claude-code `FallbackTriggeredError` (`withRetry.ts:160-168`,
+    /// thrown at `:347`). The display string is **byte-locked** to TS
+    /// `withRetry.ts:165` (`Model fallback triggered: ${originalModel} -> ${fallbackModel}`).
+    #[error("Model fallback triggered: {original_model} -> {fallback_model}")]
+    FallbackTriggered {
+        /// The primary model that hit the consecutive-529 threshold.
+        original_model: String,
+        /// The configured fallback model the caller should re-issue against.
+        fallback_model: String,
+    },
+
     /// Authentication failed (HTTP 401 / 403 / invalid API key).
     #[error("authentication failed: {0}")]
     Unauthorized(String),
@@ -123,5 +139,19 @@ mod tests {
     fn overloaded_single_display_string() {
         let e = ApiError::Overloaded { repeated: false };
         assert_eq!(format!("{e}"), "overloaded");
+    }
+
+    #[test]
+    fn fallback_triggered_display_string_is_byte_locked() {
+        // Byte-locked against claude-code withRetry.ts:165
+        // (`Model fallback triggered: ${originalModel} -> ${fallbackModel}`).
+        let e = ApiError::FallbackTriggered {
+            original_model: "claude-opus-4-6".into(),
+            fallback_model: "claude-sonnet-4-6".into(),
+        };
+        assert_eq!(
+            format!("{e}"),
+            "Model fallback triggered: claude-opus-4-6 -> claude-sonnet-4-6"
+        );
     }
 }

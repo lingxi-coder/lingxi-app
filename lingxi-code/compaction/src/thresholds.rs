@@ -138,6 +138,11 @@ pub fn auto_compact_threshold(model: &str, betas: &[String]) -> u64 {
 ///
 /// Mirrors the object returned by `calculateTokenWarningState`
 /// (`autoCompact.ts:93-145`).
+// Mirrors the flat object returned by TS `calculateTokenWarningState`: four
+// independent threshold-crossing flags. Collapsing them into enums would diverge
+// from the byte-faithful field set and the serde wire shape, so the bool flags
+// are intentional here.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TokenWarningState {
     /// Percentage of the threshold still available, clamped to `>= 0`
@@ -239,7 +244,9 @@ fn percent_left_of(threshold: u64, usage: u64) -> u8 {
     // JS Math.round: round half away from zero for positive values → (x + 0.5).floor().
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let rounded = (ratio * 100.0 + 0.5).floor() as i64;
-    rounded.clamp(0, 100) as u8
+    // `clamp(0, 100)` guarantees the value fits in `u8`, so `try_from` never
+    // fails; this avoids the (false-positive) sign-loss cast.
+    u8::try_from(rounded.clamp(0, 100)).unwrap_or(0)
 }
 
 /// Read an env var and apply [`isEnvTruthy`](crate::context_window) semantics

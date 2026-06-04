@@ -79,6 +79,11 @@ pub fn validate_url(url_str: &str) -> Result<url::Url, String> {
             "URL scheme '{scheme}' not allowed; only https/http"
         ));
     }
+    // claude-code `validateURL` SSRF/abuse gate: overlong URL, embedded
+    // credentials, single-label/internal hostname. (The scheme allow-list above
+    // is a Rust-side addition kept for defence-in-depth — claude-code upgrades
+    // http→https instead of rejecting non-https here.)
+    crate::url_safety::validate_url_safety(url_str, &parsed)?;
     Ok(parsed)
 }
 

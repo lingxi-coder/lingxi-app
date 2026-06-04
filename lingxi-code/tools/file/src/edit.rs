@@ -275,21 +275,58 @@ impl Tool for FileEditTool {
         // detected encoding/line-ending are fed back into `write_with_metadata`
         // so a CRLF or UTF-16LE file round-trips without corruption and an
         // `old_string` spanning a line break matches against the LF view.
-        let existing: Option<(String, crate::file_meta::Encoding, crate::file_meta::LineEnding)> =
-            match tokio::fs::read(&canon).await {
-                Ok(bytes) => Some(crate::file_meta::read_with_metadata(&bytes)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => {
-                    self.emit_failed(&invocation_id, "io_read").await;
-                    return Err(ToolError::Io(e.to_string()));
-                }
-            };
+        // Read the raw bytes once; also capture the *current* mtime (floored to
+        // ms) and a raw-UTF-8 decode that matches how the `Read` tool stores
+        // its content, so the read-before-write staleness guard (Batch F) can
+        // compare like with like.
+        #[allow(clippy::type_complexity)]
+        let existing: Option<(
+            String,
+            crate::file_meta::Encoding,
+            crate::file_meta::LineEnding,
+            i64,
+            String,
+        )> = match tokio::fs::read(&canon).await {
+            Ok(bytes) => {
+                // Current mtime (floored ms) — `None`/error falls back to epoch
+                // `0`, matching `read.rs`'s handling.
+                let mtime_ms = tokio::fs::metadata(&canon)
+                    .await
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+                // Raw (non-LF-normalized) UTF-8 decode — the exact form the
+                // `Read` tool records into `read_file_state`. Used only for the
+                // content-equality fallback; falls back to the LF view if the
+                // file is not strict UTF-8 (e.g. UTF-16LE), in which case the
+                // mtime check alone governs.
+                let raw_decoded = crate::shared::decode_utf8_strict(&bytes).ok();
+                let (content, enc, ending) = crate::file_meta::read_with_metadata(&bytes);
+                let raw_for_cmp = raw_decoded.unwrap_or_else(|| content.clone());
+                Some((content, enc, ending, mtime_ms, raw_for_cmp))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                self.emit_failed(&invocation_id, "io_read").await;
+                return Err(ToolError::Io(e.to_string()));
+            }
+        };
 
         // New files are created as UTF-8/LF (TS `readFileForEdit` ENOENT
-        // branch returns encoding `utf8`, lineEndings `LF`).
-        let (existing, enc, ending) = match existing {
-            None => (None, crate::file_meta::Encoding::Utf8, crate::file_meta::LineEnding::Lf),
-            Some((content, enc, ending)) => (Some(content), enc, ending),
+        // branch returns encoding `utf8`, lineEndings `LF`). `existing` carries
+        // the LF-normalized content plus the staleness-guard inputs (mtime +
+        // raw-decoded current content) when the file already exists.
+        let (existing, enc, ending, guard_mtime_ms, guard_raw_content) = match existing {
+            None => (
+                None,
+                crate::file_meta::Encoding::Utf8,
+                crate::file_meta::LineEnding::Lf,
+                0i64,
+                String::new(),
+            ),
+            Some((content, enc, ending, mtime_ms, raw_for_cmp)) => {
+                (Some(content), enc, ending, mtime_ms, raw_for_cmp)
+            }
         };
 
         let (before, after, replacements): (String, String, u32) = match existing {
@@ -307,6 +344,24 @@ impl Tool for FileEditTool {
             }
             // File exists.
             Some(before) => {
+                // Read-before-write staleness guard (Batch F). The file exists,
+                // so a prior full `Read` is required and the file must not have
+                // changed on disk since (TS `FileEditTool.ts:275-311` validate +
+                // `:451-468` call-time re-check). New-file creation hits the
+                // `None` arm above and skips this entirely (TS ENOENT →
+                // `result:true`). `guard_raw_content` is the current on-disk
+                // content decoded the same way `Read` records it, for the
+                // full-read content-equality fallback.
+                if let Err(e) = crate::check_read_before_write(
+                    &self.ctx.read_file_state,
+                    &canon,
+                    guard_mtime_ms,
+                    &guard_raw_content,
+                ) {
+                    self.emit_failed(&invocation_id, "stale_read").await;
+                    return Err(e);
+                }
+
                 if old_string.is_empty() {
                     // Empty `old_string` is only valid for an (effectively) empty
                     // file — otherwise it's a creation attempt on existing content.
@@ -376,6 +431,29 @@ impl Tool for FileEditTool {
             return Err(ToolError::Io(e.to_string()));
         }
 
+        // Post-write: update the read-state registry so an immediate second
+        // Edit/Write succeeds and Read-dedup sees the new mtime (TS
+        // `FileEditTool.ts:519-525` `readFileState.set({content: updatedFile,
+        // timestamp: <new mtime>, offset: undefined, limit: undefined})`).
+        // `after` is the LF-normalized written content (TS stores the same
+        // LF-normalized `updatedFile`); offset/limit cleared so the next read
+        // counts as a full read.
+        let new_mtime_ms = tokio::fs::metadata(&canon)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+        tool_api::read_file_state::set(
+            &self.ctx.read_file_state,
+            canon.clone(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: after.clone(),
+                mtime_ms: new_mtime_ms,
+                offset: None,
+                limit: None,
+            },
+        );
+
         let patch_preview = Self::build_patch_preview(&before, &after);
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, replacements, duration_ms)
@@ -420,6 +498,37 @@ mod tests {
             ),
             sink,
         )
+    }
+
+    /// Simulate a prior full `Read` of `target` so the read-before-write
+    /// staleness guard (Batch F) is satisfied: records the file's current
+    /// raw-UTF-8 content (the same form `Read` stores) and its current floored
+    /// mtime under the canonicalized key, with `offset`/`limit` = `None` (a
+    /// full read). Call AFTER writing the file's bytes so the seeded mtime
+    /// matches the on-disk mtime (guard fires only when current mtime is
+    /// strictly greater).
+    fn seed_full_read(ctx: &BuiltinToolContext, target: &std::path::Path) {
+        let canon = std::fs::canonicalize(target).unwrap();
+        let bytes = std::fs::read(&canon).unwrap();
+        // Decode the SAME way the guard compares (raw UTF-8, BOM-stripped),
+        // falling back to lossy for non-UTF-8 fixtures (e.g. UTF-16LE), where
+        // the mtime check alone governs.
+        let content = crate::shared::decode_utf8_strict(&bytes)
+            .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned());
+        let mtime_ms = std::fs::metadata(&canon)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+        tool_api::read_file_state::set(
+            &ctx.read_file_state,
+            canon,
+            tool_api::read_file_state::ReadFileEntry {
+                content,
+                mtime_ms,
+                offset: None,
+                limit: None,
+            },
+        );
     }
 
     #[test]
@@ -477,6 +586,8 @@ mod tests {
         std::fs::write(&target, "hello world").unwrap();
         let (ctx, sink) = make_ctx(&tmp);
         ctx.bus.attach_sink(sink.clone()).await;
+        // Simulate the prior full Read that the staleness guard now requires.
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         let result = tool
             .call(
@@ -532,6 +643,7 @@ mod tests {
         let target = tmp.path().join("exists.txt");
         std::fs::write(&target, "already here").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
@@ -556,6 +668,7 @@ mod tests {
         let target = tmp.path().join("blank.txt");
         std::fs::write(&target, "   \n").unwrap(); // whitespace-only ⇒ effectively empty
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
             json!({
@@ -577,6 +690,7 @@ mod tests {
         let target = tmp.path().join("nb.ipynb");
         std::fs::write(&target, "{\"cells\": []}").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
@@ -600,6 +714,7 @@ mod tests {
         let target = tmp.path().join("a.txt");
         std::fs::write(&target, "hello").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
@@ -643,6 +758,7 @@ mod tests {
         let target = tmp.path().join("a.txt");
         std::fs::write(&target, "foo foo foo").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
@@ -666,6 +782,7 @@ mod tests {
         let target = tmp.path().join("a.txt");
         std::fs::write(&target, "foo foo foo").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         let result = tool
             .call(
@@ -699,6 +816,7 @@ mod tests {
         let target = tmp.path().join("a.txt");
         std::fs::write(&target, "hello").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         let err = tool
             .call(
@@ -722,6 +840,7 @@ mod tests {
         let big: String = (0..100).map(|i| format!("L{i}\n")).collect();
         std::fs::write(&target, &big).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         let result = tool
             .call(
@@ -755,6 +874,7 @@ mod tests {
         let target = tmp.path().join("crlf.txt");
         std::fs::write(&target, b"line one\r\nline two\r\nline three\r\n").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
             json!({
@@ -786,6 +906,7 @@ mod tests {
         }
         std::fs::write(&target, &bytes).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
             json!({
@@ -813,6 +934,7 @@ mod tests {
         // 3 CRLF vs 1 bare LF ⇒ CRLF dominates (TS crlf > lf).
         std::fs::write(&target, b"a\r\nb\r\nc\r\nd\nEDITME").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
             json!({
@@ -838,6 +960,7 @@ mod tests {
         let target = tmp.path().join("curly.txt");
         std::fs::write(&target, "say \u{201C}hello\u{201D} now").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
             json!({
@@ -866,6 +989,7 @@ mod tests {
         let target = tmp.path().join("contraction.txt");
         std::fs::write(&target, "a \u{2018}b\u{2019} c").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
             json!({
@@ -892,6 +1016,7 @@ mod tests {
         let target = tmp.path().join("quotes.txt");
         std::fs::write(&target, "x \u{2018}q\u{2019} y").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
             json!({
@@ -918,6 +1043,7 @@ mod tests {
         let target = tmp.path().join("plain.txt");
         std::fs::write(&target, "say \"hello\" now").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
             json!({
@@ -937,12 +1063,199 @@ mod tests {
         );
     }
 
+    // ───────────────────────── Batch F: staleness guard ─────────────────────
+
+    #[tokio::test]
+    async fn edit_without_prior_read_errors_not_read() {
+        // Editing an existing file with NO recorded Read → FILE_NOT_READ_ERROR.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("unread.txt");
+        std::fs::write(&target, "hello world").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        // Deliberately do NOT seed a prior read.
+        let tool = FileEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "world",
+                    "new_string": "Rust"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        // ToolError::Display prefixes "invalid input: "; assert the exact
+        // byte-locked message on the InvalidInput payload.
+        match err {
+            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_NOT_READ_ERROR),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        // File untouched.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn partial_read_then_edit_errors_not_read() {
+        // A partial (offset/limit) read does not count as having read the file:
+        // Edit → FILE_NOT_READ_ERROR (isPartialView approximation).
+        use filetime::{set_file_mtime, FileTime};
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("partial.txt");
+        std::fs::write(&target, "a\nb\nc\n").unwrap();
+        set_file_mtime(&target, FileTime::from_unix_time(1_000_000_000, 0)).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let canon = std::fs::canonicalize(&target).unwrap();
+        let mtime_ms = std::fs::metadata(&canon)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+        // Seed a PARTIAL read (offset set) — not a full view.
+        tool_api::read_file_state::set(
+            &ctx.read_file_state,
+            canon,
+            tool_api::read_file_state::ReadFileEntry {
+                content: "a\nb\nc\n".into(),
+                mtime_ms,
+                offset: Some(1),
+                limit: Some(2),
+            },
+        );
+        let tool = FileEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "b",
+                    "new_string": "B"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        // ToolError::Display prefixes "invalid input: "; assert the exact
+        // byte-locked message on the InvalidInput payload.
+        match err {
+            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_NOT_READ_ERROR),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "a\nb\nc\n");
+    }
+
+    #[tokio::test]
+    async fn external_modify_then_edit_errors_modified() {
+        // Read → external modify (mtime bumps AND content changes) → Edit must
+        // refuse with FILE_UNEXPECTEDLY_MODIFIED_ERROR.
+        use filetime::{set_file_mtime, FileTime};
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("ext.txt");
+        std::fs::write(&target, "original\n").unwrap();
+        set_file_mtime(&target, FileTime::from_unix_time(1_000_000_000, 0)).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        // Seed the full read as of the OLD mtime/content.
+        seed_full_read(&ctx, &target);
+        // Now an external actor rewrites the file AND bumps the mtime forward.
+        std::fs::write(&target, "tampered\n").unwrap();
+        set_file_mtime(&target, FileTime::from_unix_time(2_000_000_000, 0)).unwrap();
+        let tool = FileEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "tampered",
+                    "new_string": "x"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        // Edit refused → file left as the external content.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "tampered\n");
+    }
+
+    #[tokio::test]
+    async fn same_content_touch_then_edit_proceeds_via_fallback() {
+        // Read(full) → mtime bumped but bytes UNCHANGED (cloud-sync/antivirus
+        // touch) → Edit proceeds via the content-equality fallback.
+        use filetime::{set_file_mtime, FileTime};
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("touched.txt");
+        std::fs::write(&target, "keep me\n").unwrap();
+        set_file_mtime(&target, FileTime::from_unix_time(1_000_000_000, 0)).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        // Touch: bump mtime forward WITHOUT changing content.
+        set_file_mtime(&target, FileTime::from_unix_time(2_000_000_000, 0)).unwrap();
+        let tool = FileEditTool::new(ctx);
+        let result = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "keep me",
+                    "new_string": "edited"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["replacements"], 1);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "edited\n");
+    }
+
+    #[tokio::test]
+    async fn post_write_set_lets_immediate_second_edit_succeed() {
+        // First Edit succeeds with a seeded read; its post-write `set` updates
+        // the registry so a SECOND immediate Edit (no re-seed) also succeeds.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("twice.txt");
+        std::fs::write(&target, "alpha beta\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "alpha",
+                "new_string": "ALPHA"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        // No re-seed: the post-write map.set from the first edit must satisfy
+        // the guard for the second edit.
+        let result = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "beta",
+                    "new_string": "BETA"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["replacements"], 1);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "ALPHA BETA\n");
+    }
+
     #[tokio::test]
     async fn lf_file_round_trips_as_lf() {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("lf.txt");
         std::fs::write(&target, b"alpha\nbeta\ngamma\n").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
         let tool = FileEditTool::new(ctx);
         tool.call(
             json!({

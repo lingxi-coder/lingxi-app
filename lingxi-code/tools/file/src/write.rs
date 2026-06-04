@@ -236,10 +236,49 @@ impl Tool for FileWriteTool {
         // non-empty content is `update`. We mirror that: read the prior bytes
         // non-fatally (a read error is treated as "no prior content" so it
         // falls through to `create`, matching the ENOENT→null path).
-        let is_create = match tokio::fs::read(&canon).await {
-            Ok(prior) => prior.is_empty(),
-            Err(_) => true,
+        //
+        // `file_exists` separately tracks whether the file is physically
+        // present on disk: the read-before-write staleness guard (Batch F) keys
+        // on physical existence (TS `meta !== null`, `FileWriteTool.ts:279`),
+        // NOT on the create-vs-update truthiness — an existing-but-empty file
+        // still requires a prior Read.
+        let (is_create, file_exists, prior_decoded) = match tokio::fs::read(&canon).await {
+            Ok(prior) => {
+                // Raw UTF-8 decode matching how `Read` records content (used by
+                // the content-equality fallback); a non-UTF-8 prior file leaves
+                // it `None` and the mtime check alone governs.
+                let decoded = crate::shared::decode_utf8_strict(&prior).ok();
+                (prior.is_empty(), true, decoded)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (true, false, None),
+            // A non-ENOENT read error means the path exists but is unreadable;
+            // treat as "no prior content" (create) and skip the guard rather
+            // than block the write (TS reaches its guard only via a successful
+            // stat, and a stat failure short-circuits earlier).
+            Err(_) => (true, false, None),
         };
+
+        // Read-before-write staleness guard (Batch F): only for an EXISTING
+        // file. New-file creation skips it (TS `meta === null` skips the
+        // guard; `FileWriteTool.ts:198-219` & `:279-295`).
+        if file_exists {
+            // Current mtime (floored ms); `None`/error falls back to epoch `0`.
+            let current_mtime_ms = tokio::fs::metadata(&canon)
+                .await
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+            let cmp_content = prior_decoded.as_deref().unwrap_or("");
+            if let Err(e) = crate::check_read_before_write(
+                &self.ctx.read_file_state,
+                &canon,
+                current_mtime_ms,
+                cmp_content,
+            ) {
+                self.emit_failed(&invocation_id, "stale_read").await;
+                return Err(e);
+            }
+        }
 
         if let Err(e) = tokio::fs::write(&canon, content.as_bytes()).await {
             self.emit_failed(&invocation_id, "io_write").await;
@@ -250,6 +289,28 @@ impl Tool for FileWriteTool {
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, bytes_written, duration_ms)
             .await;
+
+        // Post-write: update the read-state registry so an immediate second
+        // Write/Edit succeeds and Read-dedup sees the new mtime (TS
+        // `FileWriteTool.ts:332-337` `readFileState.set({content, timestamp:
+        // <new mtime>, offset: undefined, limit: undefined})`). Write stores
+        // the model-sent `content` verbatim (it is written as UTF-8/LF), with
+        // offset/limit cleared so the next read counts as a full read.
+        let new_mtime_ms = tokio::fs::metadata(&canon)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+        tool_api::read_file_state::set(
+            &self.ctx.read_file_state,
+            canon.clone(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: content.to_string(),
+                mtime_ms: new_mtime_ms,
+                offset: None,
+                limit: None,
+            },
+        );
 
         // Model-facing result string is byte-faithful to claude-code
         // (`FileWriteTool.ts:418-433`); it echoes the ORIGINAL `file_path` arg,
@@ -291,6 +352,32 @@ mod tests {
             ),
             sink,
         )
+    }
+
+    /// Simulate a prior full `Read` of `target` so the read-before-write
+    /// staleness guard (Batch F) is satisfied when overwriting an EXISTING
+    /// file: records the file's current raw-UTF-8 content + floored mtime under
+    /// the canonicalized key with `offset`/`limit` = `None`. Call AFTER writing
+    /// the file so the seeded mtime matches the on-disk mtime.
+    fn seed_full_read(ctx: &BuiltinToolContext, target: &std::path::Path) {
+        let canon = std::fs::canonicalize(target).unwrap();
+        let bytes = std::fs::read(&canon).unwrap();
+        let content = crate::shared::decode_utf8_strict(&bytes)
+            .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned());
+        let mtime_ms = std::fs::metadata(&canon)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+        tool_api::read_file_state::set(
+            &ctx.read_file_state,
+            canon,
+            tool_api::read_file_state::ReadFileEntry {
+                content,
+                mtime_ms,
+                offset: None,
+                limit: None,
+            },
+        );
     }
 
     #[test]
@@ -404,6 +491,8 @@ mod tests {
         let target = tmp.path().join("over.txt");
         std::fs::write(&target, "old").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        // Overwriting an existing file requires a prior full Read (Batch F).
+        seed_full_read(&ctx, &target);
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
@@ -431,6 +520,9 @@ mod tests {
         let target = tmp.path().join("empty.txt");
         std::fs::write(&target, "").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        // An existing-but-empty file still physically exists, so the guard
+        // applies even though create-vs-update treats it as `create`.
+        seed_full_read(&ctx, &target);
         let tool = FileWriteTool::new(ctx);
         let result = tool
             .call(
@@ -473,6 +565,145 @@ mod tests {
             result.data["content"].as_str().unwrap(),
             format!("File created successfully at: {input_path}")
         );
+    }
+
+    // ───────────────────────── Batch F: staleness guard ─────────────────────
+
+    #[tokio::test]
+    async fn write_without_prior_read_errors_not_read() {
+        // Overwriting an existing file with NO recorded Read → FILE_NOT_READ_ERROR.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("guarded.txt");
+        std::fs::write(&target, "existing content").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        // Deliberately do NOT seed a prior read.
+        let tool = FileWriteTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "content": "new" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_NOT_READ_ERROR),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        // File untouched.
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "existing content"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_file_write_skips_guard() {
+        // Writing a NONEXISTENT path is creation → the guard is skipped even
+        // without a prior Read (TS `meta === null`).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("fresh.txt");
+        assert!(!target.exists());
+        let (ctx, _sink) = make_ctx(&tmp);
+        // No seed; the file does not exist, so the guard must not apply.
+        let tool = FileWriteTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "content": "brand new" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["type"], "create");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "brand new");
+    }
+
+    #[tokio::test]
+    async fn external_modify_then_write_errors_modified() {
+        // Read → external modify (mtime bumps AND content changes) → Write must
+        // refuse with FILE_UNEXPECTEDLY_MODIFIED_ERROR.
+        use filetime::{set_file_mtime, FileTime};
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("ext.txt");
+        std::fs::write(&target, "original").unwrap();
+        set_file_mtime(&target, FileTime::from_unix_time(1_000_000_000, 0)).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        // External actor rewrites the file AND bumps mtime forward.
+        std::fs::write(&target, "tampered").unwrap();
+        set_file_mtime(&target, FileTime::from_unix_time(2_000_000_000, 0)).unwrap();
+        let tool = FileWriteTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "content": "model wrote this" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(m) => assert_eq!(m, crate::FILE_UNEXPECTEDLY_MODIFIED_ERROR),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+        // Write refused → file left as the external content.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "tampered");
+    }
+
+    #[tokio::test]
+    async fn same_content_touch_then_write_proceeds_via_fallback() {
+        // Read(full) → mtime bumped but bytes UNCHANGED → Write proceeds via the
+        // content-equality fallback.
+        use filetime::{set_file_mtime, FileTime};
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("touched.txt");
+        std::fs::write(&target, "keep").unwrap();
+        set_file_mtime(&target, FileTime::from_unix_time(1_000_000_000, 0)).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        // Touch: bump mtime forward WITHOUT changing content.
+        set_file_mtime(&target, FileTime::from_unix_time(2_000_000_000, 0)).unwrap();
+        let tool = FileWriteTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "content": "overwritten" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        // Pre-existing non-empty file → update.
+        assert_eq!(result.data["type"], "update");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "overwritten");
+    }
+
+    #[tokio::test]
+    async fn post_write_set_lets_immediate_second_write_succeed() {
+        // First Write succeeds with a seeded read; its post-write `set` updates
+        // the registry so a SECOND immediate Write (no re-seed) also succeeds.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("twice.txt");
+        std::fs::write(&target, "v0").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = FileWriteTool::new(ctx);
+        tool.call(
+            json!({ "file_path": target.to_str().unwrap(), "content": "v1" }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        // No re-seed: the post-write `set` from the first write must satisfy
+        // the guard for the second write.
+        tool.call(
+            json!({ "file_path": target.to_str().unwrap(), "content": "v2" }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "v2");
     }
 
     #[tokio::test]

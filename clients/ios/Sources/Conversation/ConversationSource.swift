@@ -220,7 +220,14 @@ final class MockConversationSource: ConversationSource {
                 apiKey: config.apiKey,
                 model: config.model,
                 appSandboxRoot: config.appSandboxRoot,
-                listener: listener)
+                listener: listener,
+                stt: SttImpl(),
+                tts: TtsImpl(),
+                camera: CameraImpl(),
+                share: ShareImpl(),
+                voice: VoiceImpl(),
+                notifications: NotificationImpl(),
+                clipboard: ClipboardImpl())
             self.handle = handle
             return handle
         }

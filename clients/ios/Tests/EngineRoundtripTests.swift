@@ -125,7 +125,14 @@ import XCTest
                     apiKey: apiKey,
                     model: "claude-sonnet-4-20250514",
                     appSandboxRoot: sandbox.path,
-                    listener: listener)
+                    listener: listener,
+                    stt: SttImpl(),
+                    tts: TtsImpl(),
+                    camera: CameraImpl(),
+                    share: ShareImpl(),
+                    voice: VoiceImpl(),
+                    notifications: NotificationImpl(),
+                    clipboard: ClipboardImpl())
             } catch {
                 XCTFail("buildIosEngine must succeed keyless (handshake), got error: \(error)")
                 return

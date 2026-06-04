@@ -269,6 +269,593 @@ impl ClientEventListener for IosListenerBridge {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Device-capability FFI block (iOS parity with android-aar).
+// ---------------------------------------------------------------------------
+//
+// Mirrors `android-aar`'s AndroidStt/AndroidTts/AndroidCamera/AndroidShare/
+// AndroidVoice/AndroidNotification/AndroidClipboard callback interfaces + their
+// FFI types + engine bridges, s/Android/Ios/ for the interface/bridge names.
+// These interfaces are DEFINED IN THIS CRATE (mirroring `IosEventListener`) so
+// their UniFFI `FfiConverter`s register under `ios_framework`'s tag — a
+// prerequisite for naming them as parameter types in `build_ios_engine`. The
+// engine consumes the SHARED `traits::*` seams, so each crate-local interface is
+// adapted by a thin bridge struct to its `traits` counterpart.
+//
+// RETURN SHAPE (UniFFI 0.28.3): async callback-interface methods return
+// `Result<T, E>` where `E` is a `#[derive(uniffi::Error)]` enum.
+
+/// FFI error surface for the iOS speech callback interfaces. A flat enum so
+/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// fans it back out onto the richer `traits::SttError` / `traits::TtsError`.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum SpeechFfiError {
+    /// The user denied microphone permission (STT only).
+    #[error("microphone permission denied")]
+    PermissionDenied,
+    /// No speech detected before the listen timeout (STT only).
+    #[error("no speech detected")]
+    NoSpeech,
+    /// No usable recognizer / synthesizer on the device.
+    #[error("speech service unavailable")]
+    Unavailable,
+    /// A transient failure — safe to retry.
+    #[error("transient speech error: {message}")]
+    Retriable {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+    /// Any other native failure.
+    #[error("speech error: {message}")]
+    Other {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// Crate-local foreign callback interface for native speech-to-text — the Swift
+/// app implements it over `SFSpeechRecognizer` (opens the live mic, listens for
+/// one utterance, returns the final transcript). Bridged to
+/// [`traits::SpeechToText`] by [`IosSttBridge`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosStt: Send + Sync {
+    /// Open the mic, listen for a single utterance, and return the recognized
+    /// text. `language` is a BCP-47 hint (`None` = device default).
+    async fn transcribe(&self, language: Option<String>) -> Result<String, SpeechFfiError>;
+}
+
+/// Crate-local foreign callback interface for native text-to-speech — the Swift
+/// app implements it over `AVSpeechSynthesizer`, returning 16-bit signed
+/// little-endian mono PCM. Bridged to [`traits::TextToSpeech`] by [`IosTtsBridge`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosTts: Send + Sync {
+    /// Synthesize `text` to PCM16 audio at [`TtsAudioFfi::sample_rate_hz`].
+    /// `voice` is a provider-specific id (`None` = system default voice).
+    async fn synthesize(
+        &self,
+        text: String,
+        voice: Option<String>,
+    ) -> Result<TtsAudioFfi, SpeechFfiError>;
+}
+
+/// FFI carrier for synthesized audio crossing the callback-interface seam:
+/// PCM16 frames + the sample rate the Swift engine produced them at.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct TtsAudioFfi {
+    /// Raw PCM16 frames (16-bit signed little-endian, mono).
+    pub pcm: Vec<u8>,
+    /// Sample rate of `pcm` in Hz.
+    pub sample_rate_hz: u32,
+}
+
+/// FFI error surface for the iOS share callback interface. A flat enum so UniFFI
+/// can render it for an async `callback_interface` method; the bridge fans it
+/// back out onto the richer [`traits::ShareError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum ShareFfiError {
+    /// Sharing is unsupported on this device / for this payload.
+    #[error("sharing unsupported")]
+    Unsupported,
+    /// Any other native failure.
+    #[error("share error: {message}")]
+    Other {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// FFI carrier for the outcome of a native share — whether the user completed
+/// or dismissed the system share sheet. Mapped to [`traits::ShareResult`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Debug, Clone)]
+pub enum ShareResultFfi {
+    /// The user completed the share (chose a target app).
+    Success,
+    /// The user dismissed the share sheet without sharing.
+    Cancelled,
+}
+
+/// Crate-local foreign callback interface for native sharing — the Swift app
+/// implements it over `UIActivityViewController`. Bridged to
+/// [`traits::SharingService`] by [`IosShareBridge`]. The payload crosses the
+/// seam as three flat optionals (`text` / `url` / `image_bytes`).
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosShare: Send + Sync {
+    /// Present the native share sheet for the given payload and report whether
+    /// the user completed or cancelled it.
+    async fn share(
+        &self,
+        text: Option<String>,
+        url: Option<String>,
+        image_bytes: Option<Vec<u8>>,
+    ) -> Result<ShareResultFfi, ShareFfiError>;
+}
+
+/// Adapts the crate-local [`IosShare`] callback interface to the shared
+/// [`traits::SharingService`] seam the engine consumes. Destructures
+/// [`traits::SharePayload`] into the flat `text` / `url` / `image_bytes` args
+/// and fans [`ShareResultFfi`] / [`ShareFfiError`] back out onto
+/// [`traits::ShareResult`] / [`traits::ShareError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+struct IosShareBridge {
+    inner: Box<dyn IosShare>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::SharingService for IosShareBridge {
+    async fn share(
+        &self,
+        payload: traits::SharePayload,
+    ) -> Result<traits::ShareResult, traits::ShareError> {
+        let traits::SharePayload {
+            text,
+            url,
+            image_bytes,
+        } = payload;
+        match self.inner.share(text, url, image_bytes).await {
+            Ok(ShareResultFfi::Success) => Ok(traits::ShareResult::Success),
+            Ok(ShareResultFfi::Cancelled) => Ok(traits::ShareResult::Cancelled),
+            Err(ShareFfiError::Unsupported) => Err(traits::ShareError::Unsupported),
+            Err(ShareFfiError::Other { message }) => Err(traits::ShareError::Other(message)),
+        }
+    }
+}
+
+/// FFI error surface for the iOS notification callback interface. A flat enum so
+/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// fans it back out onto the richer [`traits::NotificationError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum NotificationFfiError {
+    /// The user denied notification permission.
+    #[error("notification permission denied")]
+    PermissionDenied,
+    /// Any other native failure.
+    #[error("notification error: {message}")]
+    Other {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// Crate-local foreign callback interface for native notifications — the Swift
+/// app implements it over `UNUserNotificationCenter`. Bridged to
+/// [`traits::NotificationService`] by [`IosNotificationBridge`]. The request
+/// crosses the seam as the flat `title` / `body` / `tag` args.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosNotification: Send + Sync {
+    /// Post a single local notification. `tag` (when present) lets a later post
+    /// replace an earlier one (the notification request identifier).
+    async fn notify(
+        &self,
+        title: String,
+        body: String,
+        tag: Option<String>,
+    ) -> Result<(), NotificationFfiError>;
+}
+
+/// Adapts the crate-local [`IosNotification`] callback interface to the shared
+/// [`traits::NotificationService`] seam the engine consumes. Destructures
+/// [`traits::NotificationRequest`] into the flat `title` / `body` / `tag` args
+/// and fans [`NotificationFfiError`] back out onto [`traits::NotificationError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+struct IosNotificationBridge {
+    inner: Box<dyn IosNotification>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::NotificationService for IosNotificationBridge {
+    async fn notify(
+        &self,
+        req: traits::NotificationRequest,
+    ) -> Result<(), traits::NotificationError> {
+        let traits::NotificationRequest { title, body, tag } = req;
+        match self.inner.notify(title, body, tag).await {
+            Ok(()) => Ok(()),
+            Err(NotificationFfiError::PermissionDenied) => {
+                Err(traits::NotificationError::PermissionDenied)
+            }
+            Err(NotificationFfiError::Other { message }) => {
+                Err(traits::NotificationError::Other(message))
+            }
+        }
+    }
+}
+
+/// FFI error surface for the iOS clipboard callback interface. A flat enum so
+/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// fans it back out onto the richer [`traits::ClipboardError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum ClipboardFfiError {
+    /// The platform does not support this clipboard operation.
+    #[error("clipboard operation unsupported")]
+    Unsupported,
+    /// Any other native failure.
+    #[error("clipboard error: {message}")]
+    Other {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// Crate-local foreign callback interface for native clipboard access — the
+/// Swift app implements it over `UIPasteboard` (set via `string =`; get via
+/// `string`). Bridged to [`traits::Clipboard`] by [`IosClipboardBridge`].
+/// `get_text` returns `None` when the clipboard is empty or holds no text.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosClipboard: Send + Sync {
+    /// Write plain `text` to the system clipboard.
+    async fn set_text(&self, text: String) -> Result<(), ClipboardFfiError>;
+    /// Read plain text from the system clipboard. Returns `None` when empty.
+    async fn get_text(&self) -> Result<Option<String>, ClipboardFfiError>;
+}
+
+/// Adapts the crate-local [`IosClipboard`] callback interface to the shared
+/// [`traits::Clipboard`] seam the engine consumes. One forwarding hop per call;
+/// maps [`ClipboardFfiError`] back out onto [`traits::ClipboardError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+struct IosClipboardBridge {
+    inner: Box<dyn IosClipboard>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::Clipboard for IosClipboardBridge {
+    async fn set_text(&self, text: String) -> Result<(), traits::ClipboardError> {
+        self.inner
+            .set_text(text)
+            .await
+            .map_err(clipboard_error_from_ffi)
+    }
+    async fn get_text(&self) -> Result<Option<String>, traits::ClipboardError> {
+        self.inner.get_text().await.map_err(clipboard_error_from_ffi)
+    }
+}
+
+/// Fan a flat [`ClipboardFfiError`] back out onto the richer
+/// [`traits::ClipboardError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+fn clipboard_error_from_ffi(e: ClipboardFfiError) -> traits::ClipboardError {
+    match e {
+        ClipboardFfiError::Unsupported => traits::ClipboardError::Unsupported,
+        ClipboardFfiError::Other { message } => traits::ClipboardError::Other(message),
+    }
+}
+
+/// FFI error surface for the iOS camera callback interface. A flat enum so
+/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// fans it back out onto the richer [`traits::CameraError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum CameraFfiError {
+    /// The user denied camera / photo-library permission.
+    #[error("camera permission denied")]
+    PermissionDenied,
+    /// The user cancelled the capture / picker.
+    #[error("camera capture cancelled")]
+    Cancelled,
+    /// No camera hardware is available.
+    #[error("camera device unavailable")]
+    DeviceUnavailable,
+    /// Any other native failure.
+    #[error("camera error: {message}")]
+    Other {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// FFI carrier for a captured (or picked) image crossing the callback-interface
+/// seam: JPEG-encoded bytes + the decoded pixel dimensions.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct CapturedImageFfi {
+    /// JPEG-encoded image bytes.
+    pub jpeg_bytes: Vec<u8>,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+}
+
+/// Crate-local foreign callback interface for native camera access — the Swift
+/// app implements it over `UIImagePickerController` / `PHPickerViewController`.
+/// Bridged to [`traits::CameraControl`] by [`IosCameraBridge`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosCamera: Send + Sync {
+    /// Capture a photo with the native camera UI. `front` selects the
+    /// front/selfie camera when true (rear when false); `allow_editing`
+    /// presents the native edit/crop UI after capture.
+    async fn capture_photo(
+        &self,
+        front: bool,
+        allow_editing: bool,
+    ) -> Result<CapturedImageFfi, CameraFfiError>;
+    /// Pick an existing image from the system photo library.
+    async fn pick_from_library(&self) -> Result<CapturedImageFfi, CameraFfiError>;
+}
+
+/// Adapts the crate-local [`IosCamera`] callback interface to the shared
+/// [`traits::CameraControl`] seam the engine consumes. Maps
+/// [`traits::CameraPosition`] onto the flat `front` bool, threads
+/// `allow_editing`, and fans [`CameraFfiError`] back out onto
+/// [`traits::CameraError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+struct IosCameraBridge {
+    inner: Box<dyn IosCamera>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::CameraControl for IosCameraBridge {
+    async fn capture_photo(
+        &self,
+        opts: traits::CapturePhotoOpts,
+    ) -> Result<traits::CapturedImage, traits::CameraError> {
+        let front = matches!(opts.position, traits::CameraPosition::Front);
+        match self.inner.capture_photo(front, opts.allow_editing).await {
+            Ok(img) => Ok(captured_image_from_ffi(img)),
+            Err(e) => Err(camera_error_from_ffi(e)),
+        }
+    }
+    async fn pick_from_library(&self) -> Result<traits::CapturedImage, traits::CameraError> {
+        match self.inner.pick_from_library().await {
+            Ok(img) => Ok(captured_image_from_ffi(img)),
+            Err(e) => Err(camera_error_from_ffi(e)),
+        }
+    }
+}
+
+/// Convert an FFI [`CapturedImageFfi`] into the shared [`traits::CapturedImage`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+fn captured_image_from_ffi(img: CapturedImageFfi) -> traits::CapturedImage {
+    traits::CapturedImage {
+        jpeg_bytes: img.jpeg_bytes,
+        width: img.width,
+        height: img.height,
+    }
+}
+
+/// Fan a flat [`CameraFfiError`] back out onto the richer [`traits::CameraError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+fn camera_error_from_ffi(e: CameraFfiError) -> traits::CameraError {
+    match e {
+        CameraFfiError::PermissionDenied => traits::CameraError::PermissionDenied,
+        CameraFfiError::Cancelled => traits::CameraError::Cancelled,
+        CameraFfiError::DeviceUnavailable => traits::CameraError::DeviceUnavailable,
+        CameraFfiError::Other { message } => traits::CameraError::Other(message),
+    }
+}
+
+/// FFI error surface for the iOS mic-recorder callback interface. A flat enum so
+/// UniFFI can render it for an async `callback_interface` method; the bridge
+/// fans it back out onto the richer [`traits::VoiceError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
+#[derive(Debug, thiserror::Error)]
+pub enum VoiceFfiError {
+    /// The user denied microphone permission.
+    #[error("microphone permission denied")]
+    PermissionDenied,
+    /// `stop_recording` was called with no active session.
+    #[error("not currently recording")]
+    NotRecording,
+    /// Any other native failure.
+    #[error("voice error: {message}")]
+    Other {
+        /// Human-readable detail from the native side.
+        message: String,
+    },
+}
+
+/// FFI carrier for a finished recording crossing the callback-interface seam:
+/// the encoded audio bytes + their MIME type. Mapped to [`traits::VoiceRecording`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Debug, Clone)]
+pub struct VoiceRecordingFfi {
+    /// Encoded audio bytes.
+    pub audio_bytes: Vec<u8>,
+    /// MIME type of `audio_bytes` (e.g. `"audio/m4a"`).
+    pub mime_type: String,
+}
+
+/// Crate-local foreign callback interface for native mic recording — the Swift
+/// app implements it over `AVAudioRecorder`. Bridged to [`traits::VoiceRecorder`]
+/// by [`IosVoiceBridge`]. Driven by the engine through `tool-voice`
+/// (start/stop/is_recording); the recording opts cross the seam as the flat
+/// `sample_rate_hz` / `format` args.
+#[cfg(feature = "uniffi")]
+#[cfg_attr(feature = "uniffi", uniffi::export(callback_interface))]
+#[async_trait::async_trait]
+pub trait IosVoice: Send + Sync {
+    /// Begin a mic recording session at the given sample rate / container format.
+    async fn start_recording(
+        &self,
+        sample_rate_hz: u32,
+        format: String,
+    ) -> Result<(), VoiceFfiError>;
+    /// Stop the active session and return the captured audio.
+    async fn stop_recording(&self) -> Result<VoiceRecordingFfi, VoiceFfiError>;
+    /// Whether a recording session is currently active.
+    async fn is_recording(&self) -> bool;
+}
+
+/// Adapts the crate-local [`IosVoice`] callback interface to the shared
+/// [`traits::VoiceRecorder`] seam the engine consumes. Destructures
+/// [`traits::VoiceRecordingOpts`] into the flat `sample_rate_hz` / `format`
+/// args, converts [`VoiceRecordingFfi`] back to [`traits::VoiceRecording`], and
+/// fans [`VoiceFfiError`] back out onto [`traits::VoiceError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+struct IosVoiceBridge {
+    inner: Box<dyn IosVoice>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::VoiceRecorder for IosVoiceBridge {
+    async fn start_recording(
+        &self,
+        opts: traits::VoiceRecordingOpts,
+    ) -> Result<(), traits::VoiceError> {
+        let traits::VoiceRecordingOpts {
+            sample_rate_hz,
+            format,
+        } = opts;
+        self.inner
+            .start_recording(sample_rate_hz, format)
+            .await
+            .map_err(voice_error_from_ffi)
+    }
+    async fn stop_recording(&self) -> Result<traits::VoiceRecording, traits::VoiceError> {
+        match self.inner.stop_recording().await {
+            Ok(rec) => Ok(traits::VoiceRecording {
+                audio_bytes: rec.audio_bytes,
+                mime_type: rec.mime_type,
+            }),
+            Err(e) => Err(voice_error_from_ffi(e)),
+        }
+    }
+    async fn is_recording(&self) -> bool {
+        self.inner.is_recording().await
+    }
+}
+
+/// Fan a flat [`VoiceFfiError`] back out onto the richer [`traits::VoiceError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+fn voice_error_from_ffi(e: VoiceFfiError) -> traits::VoiceError {
+    match e {
+        VoiceFfiError::PermissionDenied => traits::VoiceError::PermissionDenied,
+        VoiceFfiError::NotRecording => traits::VoiceError::NotRecording,
+        VoiceFfiError::Other { message } => traits::VoiceError::Other(message),
+    }
+}
+
+/// Adapts the crate-local [`IosStt`] callback interface to the shared
+/// [`traits::SpeechToText`] seam the engine consumes. One forwarding hop per
+/// call; maps [`SpeechFfiError`] onto [`traits::SttError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+struct IosSttBridge {
+    inner: Box<dyn IosStt>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::SpeechToText for IosSttBridge {
+    async fn transcribe(
+        &self,
+        opts: traits::SttOpts,
+    ) -> Result<traits::SttTranscript, traits::SttError> {
+        match self.inner.transcribe(opts.language.clone()).await {
+            Ok(text) => Ok(traits::SttTranscript {
+                text,
+                language: opts.language,
+                confidence: None,
+            }),
+            Err(e) => Err(match e {
+                SpeechFfiError::PermissionDenied => traits::SttError::PermissionDenied,
+                SpeechFfiError::NoSpeech => traits::SttError::NoSpeech,
+                SpeechFfiError::Unavailable => traits::SttError::Unavailable,
+                SpeechFfiError::Retriable { message } => traits::SttError::Retriable(message),
+                SpeechFfiError::Other { message } => traits::SttError::Other(message),
+            }),
+        }
+    }
+}
+
+/// Adapts the crate-local [`IosTts`] callback interface to the shared
+/// [`traits::TextToSpeech`] seam the engine consumes. Maps [`SpeechFfiError`]
+/// onto [`traits::TtsError`].
+#[cfg(feature = "uniffi")]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+struct IosTtsBridge {
+    inner: Box<dyn IosTts>,
+}
+
+#[cfg(feature = "uniffi")]
+#[async_trait::async_trait]
+impl traits::TextToSpeech for IosTtsBridge {
+    async fn synthesize(
+        &self,
+        opts: traits::TtsOpts,
+    ) -> Result<traits::TtsAudio, traits::TtsError> {
+        match self.inner.synthesize(opts.text, opts.voice).await {
+            Ok(audio) => Ok(traits::TtsAudio {
+                pcm: audio.pcm,
+                sample_rate_hz: audio.sample_rate_hz,
+            }),
+            Err(e) => Err(match e {
+                SpeechFfiError::Unavailable => traits::TtsError::Unavailable,
+                SpeechFfiError::Retriable { message } | SpeechFfiError::Other { message } => {
+                    traits::TtsError::SynthesisFailed(message)
+                }
+                // STT-only variants are not produced by a TTS impl; fold them
+                // into a generic TTS error rather than panic.
+                SpeechFfiError::PermissionDenied => {
+                    traits::TtsError::Other("permission denied".to_string())
+                }
+                SpeechFfiError::NoSpeech => traits::TtsError::Other("no speech".to_string()),
+            }),
+        }
+    }
+}
+
 /// Foreign-callable constructor for the iOS app (plan M10-P3a).
 ///
 /// Builds a fully-wired [`MobileEngineHandle`] from the Swift-supplied event
@@ -296,6 +883,13 @@ pub fn build_ios_engine(
     model: String,
     app_sandbox_root: String,
     listener: Box<dyn IosEventListener>,
+    stt: Box<dyn IosStt>,
+    tts: Box<dyn IosTts>,
+    camera: Box<dyn IosCamera>,
+    share: Box<dyn IosShare>,
+    voice: Box<dyn IosVoice>,
+    notifications: Box<dyn IosNotification>,
+    clipboard: Box<dyn IosClipboard>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let listener: Arc<dyn ClientEventListener> = Arc::new(IosListenerBridge { inner: listener });
     #[cfg(target_os = "ios")]
@@ -315,20 +909,35 @@ pub fn build_ios_engine(
         }
         let platform: Arc<dyn Platform> = Arc::new(IosPlatform::new(IosPlatformInputs {
             app_sandbox_root: std::path::PathBuf::from(app_sandbox_root),
-            camera: Arc::new(stub_capabilities::StubCamera),
-            voice: Arc::new(stub_capabilities::StubVoice),
-            share: Arc::new(stub_capabilities::StubShare),
-            stt: None,
-            tts: None,
-            notifications: None,
-            clipboard: None,
+            camera: Arc::new(IosCameraBridge { inner: camera }),
+            voice: Arc::new(IosVoiceBridge { inner: voice }),
+            share: Arc::new(IosShareBridge { inner: share }),
+            stt: Some(Arc::new(IosSttBridge { inner: stt })),
+            tts: Some(Arc::new(IosTtsBridge { inner: tts })),
+            notifications: Some(Arc::new(IosNotificationBridge {
+                inner: notifications,
+            })),
+            clipboard: Some(Arc::new(IosClipboardBridge { inner: clipboard })),
         }));
         let permission_sink: Arc<dyn PermissionRequestSink> = Arc::new(NoopPermissionSink);
         engine_mobile::build_mobile_engine(cfg, platform, listener, permission_sink)
     }
     #[cfg(not(target_os = "ios"))]
     {
-        let _ = (api_base, api_key, model, app_sandbox_root, listener);
+        let _ = (
+            api_base,
+            api_key,
+            model,
+            app_sandbox_root,
+            listener,
+            stt,
+            tts,
+            camera,
+            share,
+            voice,
+            notifications,
+            clipboard,
+        );
         Err(MobileEngineError::PlatformUnavailable)
     }
 }

@@ -3,6 +3,7 @@
 
 use crate::definition::{HookDefinition, HookSource};
 use crate::events::HookEvent;
+use crate::matcher::matches_pattern;
 use protocol::{AgentId, PluginId, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -81,22 +82,77 @@ impl HookRegistry {
         self.plugin.remove(plugin_id);
     }
 
-    /// Return every hook subscribed to `event`'s type, sorted in execution
-    /// order (highest priority first).
+    /// Return every hook subscribed to `event`'s type that ALSO satisfies its
+    /// declared matcher, sorted in execution order (highest priority first).
+    ///
+    /// Mirrors claude-code `getMatchingHooks` (`utils/hooks.ts:1603-1703`):
+    /// first the event-type subscription filter, then the per-hook matcher
+    /// filter (`hooks.ts:1681-1685`):
+    ///
+    /// ```ts
+    /// const filteredMatchers = matchQuery
+    ///   ? hookMatchers.filter(m => !m.matcher || matchesPattern(matchQuery, m.matcher))
+    ///   : hookMatchers
+    /// ```
+    ///
+    /// So when this event has a `match_query` (B3, tool-name events), a hook is
+    /// dropped only if it DECLARES a matcher that does not match. A hook with
+    /// no matcher (`matcher() == None`) — or an empty / `"*"` matcher — always
+    /// fires, exactly as before this change. Events with no `match_query`
+    /// (e.g. `TaskCompleted`) skip the matcher filter entirely.
+    ///
+    /// NOTE (B3 `if`-condition gap): the `if`-condition rule-content matcher
+    /// (`match_input`-style permission rules like `"Bash(rm:*)"`) is NOT
+    /// evaluated here — that half of B3 is blocked on the ported permission-rule
+    /// parser. Only the tool-name `matcher` is enforced. Such conditions do not
+    /// (yet) gate firing.
     #[must_use]
     pub fn match_event(&self, event: &HookEvent, _ctx: &HookContext) -> Vec<&HookDefinition> {
         let et = event.event_type();
-        let mut matched: Vec<&HookDefinition> = self
-            .sources
-            .values()
-            .flatten()
-            .filter(|h| h.events.contains(&et))
-            .collect();
+        let match_query = Self::match_query_for(event);
+        let keep = |h: &&HookDefinition| -> bool {
+            if !h.events.contains(&et) {
+                return false;
+            }
+            // TS `getMatchingHooks`: only apply the matcher filter when the
+            // event yields a `matchQuery`; otherwise every subscribed hook
+            // passes. A hook with no matcher always passes.
+            match (&match_query, h.matcher()) {
+                (Some(query), Some(matcher)) => matches_pattern(query, matcher),
+                _ => true,
+            }
+        };
+        let mut matched: Vec<&HookDefinition> =
+            self.sources.values().flatten().filter(keep).collect();
         for hooks in self.plugin.values() {
-            matched.extend(hooks.iter().filter(|h| h.events.contains(&et)));
+            matched.extend(hooks.iter().filter(keep));
         }
         matched.sort_by(|a, b| b.priority.cmp(&a.priority));
         matched
+    }
+
+    /// Compute the `matchQuery` string for `event`, mirroring the tool-name
+    /// arms of the switch in claude-code `getMatchingHooks`
+    /// (`utils/hooks.ts:1616-1623`).
+    ///
+    /// This is the B3 MATCHER half: the query is the tool name for tool-name
+    /// events (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`,
+    /// `PermissionRequest`, `PermissionDenied`). For every other event TS
+    /// derives the query from event-specific fields, but those non-tool match
+    /// queries (and the events' payload shapes) are scoped to later batches —
+    /// here they return `None`, so the matcher filter is skipped (TS:
+    /// `matchQuery ? filter : hookMatchers`) and the subscribed hooks fire
+    /// exactly as before. This keeps the change purely additive for non-tool
+    /// events while enforcing tool-name matchers faithfully.
+    fn match_query_for(event: &HookEvent) -> Option<String> {
+        match event {
+            HookEvent::PreToolUse { tool_name, .. }
+            | HookEvent::PostToolUse { tool_name, .. }
+            | HookEvent::PostToolUseFailure { tool_name, .. }
+            | HookEvent::PermissionRequest { tool_name, .. }
+            | HookEvent::PermissionDenied { tool_name, .. } => Some(tool_name.clone()),
+            _ => None,
+        }
     }
 
     /// Snapshot every registered hook across all sources (user / project /
@@ -169,5 +225,146 @@ mod all_hooks_tests {
         assert!(names.contains(&"project-lint"));
         assert!(names.contains(&"plugin-x"));
         assert_eq!(names.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod match_event_matcher_tests {
+    //! B3 matcher integration: `match_event` drops hooks whose declared
+    //! tool-name matcher does not match the event's tool, while no-matcher
+    //! hooks keep firing for any subscribed event.
+    use super::*;
+    use crate::definition::{HookCondition, HookExecutor, HookSource};
+    use crate::events::HookEventType;
+    use protocol::{HookId, ToolUseId};
+
+    fn hook_with(name: &str, event: HookEventType, matcher: Option<&str>) -> HookDefinition {
+        HookDefinition {
+            id: HookId::new(),
+            name: name.into(),
+            events: vec![event],
+            if_condition: matcher.map(|m| HookCondition {
+                pattern: m.into(),
+                match_tool_name: true,
+                match_input: false,
+            }),
+            executor: HookExecutor::Builtin {
+                handler_id: "noop".into(),
+            },
+            source: HookSource::User,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+        }
+    }
+
+    fn pre_tool_use(tool: &str) -> HookEvent {
+        HookEvent::PreToolUse {
+            tool_name: tool.into(),
+            tool_input: serde_json::json!({}),
+            tool_use_id: ToolUseId::new(),
+        }
+    }
+
+    fn matched_names(reg: &HookRegistry, event: &HookEvent) -> Vec<String> {
+        reg.match_event(event, &HookContext::default())
+            .iter()
+            .map(|h| h.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn write_matcher_hook_does_not_fire_on_bash_event() {
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with(
+            "write-only",
+            HookEventType::PreToolUse,
+            Some("Write"),
+        ));
+        // Fires on a Write tool event.
+        assert_eq!(
+            matched_names(&reg, &pre_tool_use("Write")),
+            vec!["write-only"]
+        );
+        // Dropped on a Bash tool event — the declared matcher does not match.
+        assert!(matched_names(&reg, &pre_tool_use("Bash")).is_empty());
+    }
+
+    #[test]
+    fn no_matcher_hook_fires_on_any_tool_event() {
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with("always", HookEventType::PreToolUse, None));
+        // A hook with no matcher fires regardless of the tool name.
+        assert_eq!(matched_names(&reg, &pre_tool_use("Bash")), vec!["always"]);
+        assert_eq!(matched_names(&reg, &pre_tool_use("Write")), vec!["always"]);
+        assert_eq!(matched_names(&reg, &pre_tool_use("Read")), vec!["always"]);
+    }
+
+    #[test]
+    fn pipe_matcher_fires_on_any_segment() {
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with(
+            "fmt",
+            HookEventType::PreToolUse,
+            Some("Write|Edit"),
+        ));
+        assert_eq!(matched_names(&reg, &pre_tool_use("Write")), vec!["fmt"]);
+        assert_eq!(matched_names(&reg, &pre_tool_use("Edit")), vec!["fmt"]);
+        assert!(matched_names(&reg, &pre_tool_use("Bash")).is_empty());
+    }
+
+    #[test]
+    fn star_matcher_fires_on_any_tool() {
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with("star", HookEventType::PreToolUse, Some("*")));
+        assert_eq!(matched_names(&reg, &pre_tool_use("Bash")), vec!["star"]);
+        assert_eq!(matched_names(&reg, &pre_tool_use("Write")), vec!["star"]);
+    }
+
+    #[test]
+    fn regex_matcher_filters_tool_name() {
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with(
+            "bashish",
+            HookEventType::PreToolUse,
+            Some("^Bash.*"),
+        ));
+        assert_eq!(matched_names(&reg, &pre_tool_use("Bash")), vec!["bashish"]);
+        assert_eq!(
+            matched_names(&reg, &pre_tool_use("BashOutput")),
+            vec!["bashish"]
+        );
+        assert!(matched_names(&reg, &pre_tool_use("Write")).is_empty());
+    }
+
+    #[test]
+    fn matcher_filter_skipped_for_non_tool_event_with_query() {
+        // A Stop hook with a (tool-name) matcher still fires on a Stop event,
+        // because Stop has no tool match-query (TS leaves matchQuery undefined),
+        // so the matcher filter is skipped. This guards the no-regression rule.
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with("stopper", HookEventType::Stop, Some("Write")));
+        let event = HookEvent::Stop {
+            reason: "done".into(),
+        };
+        assert_eq!(matched_names(&reg, &event), vec!["stopper"]);
+    }
+
+    #[test]
+    fn matcher_filter_applies_to_plugin_hooks_too() {
+        let mut reg = HookRegistry::new();
+        reg.register_plugin_hooks(
+            protocol::PluginId::new(),
+            vec![hook_with(
+                "plugin-write",
+                HookEventType::PreToolUse,
+                Some("Write"),
+            )],
+        );
+        assert_eq!(
+            matched_names(&reg, &pre_tool_use("Write")),
+            vec!["plugin-write"]
+        );
+        assert!(matched_names(&reg, &pre_tool_use("Bash")).is_empty());
     }
 }

@@ -25,6 +25,7 @@ pub mod provider_adapter;
 pub mod resume;
 pub mod sse;
 pub mod streaming_loop;
+pub mod token_budget;
 pub mod turn_loop;
 
 // test_support carries the HookExecutor / PermissionGate trait definitions

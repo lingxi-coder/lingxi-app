@@ -39,7 +39,20 @@ pub enum RouterAction {
     AppendAssistantBlock(ContentBlock),
     /// `message_delta` arrived with a `stop_reason`. Streaming loop
     /// records this and continues until `message_stop` arrives.
-    RecordStopReason(String),
+    /// `output_tokens` carries the delta's usage snapshot (A3 budget
+    /// accounting); `0` when the delta had no usage.
+    RecordStopReason {
+        /// The final `stop_reason`.
+        stop_reason: String,
+        /// Cumulative output tokens from this delta's usage (`0` if absent).
+        output_tokens: u64,
+    },
+    /// `message_delta` arrived with usage but NO `stop_reason` (A3). The
+    /// streaming loop records `output_tokens` and continues.
+    RecordUsage {
+        /// Cumulative output tokens from this delta's usage.
+        output_tokens: u64,
+    },
     /// `message_stop` arrived — terminate the per-turn loop.
     EndOfStream,
     /// A server-emitted `Error` event — surface as a streaming error.
@@ -144,11 +157,19 @@ pub async fn dispatch_event(
             // final usage snapshot. Surface it to the output sink BEFORE
             // computing the router action — the stop-reason behavior below
             // is unchanged.
+            // A3: capture the output-token count before `usage` is consumed
+            // by the emit helper, so the budget loop can accumulate it.
+            let output_tokens = usage.as_ref().map_or(0, |u| u.output_tokens);
             if let Some(usage) = usage {
                 emit_usage_if_present(output, &usage).await;
             }
             if let Some(sr) = delta.stop_reason {
-                Ok(RouterAction::RecordStopReason(sr))
+                Ok(RouterAction::RecordStopReason {
+                    stop_reason: sr,
+                    output_tokens,
+                })
+            } else if output_tokens > 0 {
+                Ok(RouterAction::RecordUsage { output_tokens })
             } else {
                 Ok(RouterAction::Continue)
             }
@@ -251,7 +272,9 @@ mod tests {
         .await
         .expect("ok");
         match action {
-            RouterAction::RecordStopReason(sr) => assert_eq!(sr, "end_turn"),
+            RouterAction::RecordStopReason { stop_reason, .. } => {
+                assert_eq!(stop_reason, "end_turn");
+            }
             other => panic!("expected RecordStopReason, got {other:?}"),
         }
     }

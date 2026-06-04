@@ -18,6 +18,8 @@
 pub mod argument_substitution;
 pub mod builtin_support;
 pub mod dispatcher;
+pub mod expand;
+pub mod markdown_loader;
 pub mod model;
 pub mod parser;
 pub mod registry;
@@ -28,6 +30,11 @@ pub use argument_substitution::{
     FrontmatterArgs,
 };
 pub use dispatcher::RegistrySlashDispatcher;
+pub use expand::{expand_markdown_command, ExpandCtx, ExpandError};
+pub use markdown_loader::{
+    build_markdown_command, command_name_from_path, extract_description_from_markdown,
+    load_command_markdown_files, project_dirs_up_to_home, MarkdownCommandFile,
+};
 pub use model::*;
 pub use parser::{parse_slash_command, ParsedSlashCommand};
 pub use registry::CommandRegistry;

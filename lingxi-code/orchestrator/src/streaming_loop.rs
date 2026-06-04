@@ -48,6 +48,11 @@ pub struct PumpedTurn {
     /// Final `stop_reason` (from `message_delta`). `None` if the stream
     /// ended without a `message_delta` carrying one.
     pub stop_reason: Option<String>,
+    /// A3: this turn's output-token count, taken from the final
+    /// `message_delta` usage snapshot (the cumulative output tokens of the
+    /// streamed message). `0` if the stream carried no usage. The token-budget
+    /// continuation loop accumulates this into `global_turn_tokens`.
+    pub output_tokens: u64,
 }
 
 /// Consume the given stream to completion, routing events through the
@@ -83,8 +88,19 @@ pub async fn pump_stream(
             RouterAction::DispatchToolUse { id, name, input } => {
                 turn.tool_uses.push(ObservedToolUse { id, name, input });
             }
-            RouterAction::RecordStopReason(sr) => {
-                turn.stop_reason = Some(sr);
+            RouterAction::RecordStopReason {
+                stop_reason,
+                output_tokens,
+            } => {
+                turn.stop_reason = Some(stop_reason);
+                // The final delta's usage supersedes any earlier snapshot.
+                if output_tokens > 0 {
+                    turn.output_tokens = output_tokens;
+                }
+            }
+            RouterAction::RecordUsage { output_tokens } => {
+                // Usage-only delta (no stop_reason yet): keep the latest count.
+                turn.output_tokens = output_tokens;
             }
             RouterAction::EndOfStream => {
                 return Ok(turn);

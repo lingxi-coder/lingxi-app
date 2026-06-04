@@ -1,7 +1,10 @@
 package com.lingxi.code.conversation
 
+import androidx.lifecycle.SavedStateHandle
 import com.lingxi.code.model.Message
+import com.lingxi.code.model.MockData
 import com.lingxi.code.model.Role
+import com.lingxi.code.model.SessionRef
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -57,6 +60,21 @@ class ChatViewModelReducerTest {
             submitted += text
             return never.asSharedFlow() // a turn that streams forever until cancelled
         }
+        override suspend fun cancel() { cancelCount++ }
+    }
+
+    /**
+     * A source whose reply stream is a hot [MutableSharedFlow] the test drives by
+     * hand — so a turn can be left mid-stream, the session switched, and a STALE
+     * event then pushed to prove the orphaned-turn guard drops it.
+     */
+    private class EmittingSource(
+        private val initial: List<Message> = emptyList(),
+    ) : ConversationSource {
+        val stream = MutableSharedFlow<ReplyEvent>(extraBufferCapacity = 16)
+        var cancelCount = 0
+        override fun initialMessages(): List<Message> = initial
+        override fun submit(text: String): Flow<ReplyEvent> = stream.asSharedFlow()
         override suspend fun cancel() { cancelCount++ }
     }
 
@@ -262,5 +280,143 @@ class ChatViewModelReducerTest {
         // Once cancelled, a new turn must be accepted.
         vm.send("second")
         assertEquals(listOf("first", "second"), src.submitted)
+    }
+
+    // --- orphaned-turn guard (session switch mid-stream) ------------------
+
+    @Test
+    fun openSession_midStream_dropsStaleDelta_doesNotMutateNewSession() = runTest(dispatcher) {
+        val src = EmittingSource()
+        val vm = ChatViewModel(src)
+
+        // Turn 1 begins streaming into session A.
+        vm.send("hi from A")
+        src.stream.emit(ReplyEvent.Delta("partial A"))
+        assertTrue(vm.state.value.streaming)
+        assertEquals("partial A", vm.state.value.messages.last { it.role == Role.Ai }.text)
+
+        // Switch to a DIFFERENT session mid-stream (the orphaned-turn scenario).
+        val sessB = SessionRef(id = "B", title = "会话 B")
+        vm.openSession(sessB)
+        assertEquals(sessB, vm.state.value.session)
+        assertFalse("switching sessions clears streaming", vm.state.value.streaming)
+        val transcriptAfterSwitch = vm.state.value.messages
+
+        // The OLD turn's coroutine is still alive for one more emission: a late
+        // Delta + End from turn 1 must NOT land in session B's transcript.
+        src.stream.emit(ReplyEvent.Delta(" LATE-LEAK"))
+        src.stream.emit(ReplyEvent.End)
+
+        assertEquals(
+            "stale turn must not append to the new session",
+            transcriptAfterSwitch,
+            vm.state.value.messages,
+        )
+        assertFalse("stale End must not flip streaming back", vm.state.value.streaming)
+    }
+
+    @Test
+    fun newChat_midStream_dropsStaleEnd_keepsFreshChatEmpty() = runTest(dispatcher) {
+        val src = EmittingSource()
+        val vm = ChatViewModel(src)
+
+        vm.send("hi")
+        src.stream.emit(ReplyEvent.Delta("streaming…"))
+        vm.newChat()
+        assertTrue(vm.state.value.isNew)
+        assertTrue("a fresh chat starts empty", vm.state.value.messages.isEmpty())
+
+        // Stale events from the abandoned turn arrive after the reset.
+        src.stream.emit(ReplyEvent.Delta("ghost"))
+        src.stream.emit(ReplyEvent.End)
+
+        assertTrue("stale delta must not populate the new chat", vm.state.value.messages.isEmpty())
+        assertFalse(vm.state.value.streaming)
+    }
+
+    @Test
+    fun newTurnAfterSwitch_streamsNormally_intoNewSession() = runTest(dispatcher) {
+        val src = EmittingSource()
+        val vm = ChatViewModel(src)
+
+        vm.send("A")
+        src.stream.emit(ReplyEvent.Delta("a-reply"))
+        vm.openSession(SessionRef(id = "B", title = "B"))
+
+        // A genuinely new turn in session B must stream normally (the guard only
+        // drops the SUPERSEDED turn, never the current one).
+        vm.send("B")
+        src.stream.emit(ReplyEvent.Delta("b-reply"))
+        src.stream.emit(ReplyEvent.End)
+
+        val ai = vm.state.value.messages.filter { it.role == Role.Ai }
+        assertEquals(1, ai.size)
+        assertEquals("b-reply", ai.single().text)
+        assertFalse(vm.state.value.streaming)
+    }
+
+    // --- TranscriptCodec round-trip --------------------------------------
+
+    @Test
+    fun transcriptCodec_roundTripsMessages_preservingRoleTagIdText() {
+        val original = listOf(
+            Message(role = Role.User, text = "hello", id = "u1"),
+            Message(role = Role.Ai, text = "multi\nline\nreply", tag = "思考了 8 秒", id = "a1"),
+            Message(role = Role.User, text = "", id = "u2"), // empty text edge case
+        )
+        val decoded = TranscriptCodec.decode(TranscriptCodec.encode(original))
+        assertEquals(original, decoded)
+    }
+
+    @Test
+    fun transcriptCodec_decodesNullAndEmptyToEmptyList() {
+        assertTrue(TranscriptCodec.decode(null).isEmpty())
+        assertTrue(TranscriptCodec.decode(emptyList()).isEmpty())
+    }
+
+    // --- SavedStateHandle persistence / restore --------------------------
+
+    @Test
+    fun savedState_restoresTranscriptDraftAndSession() = runTest(dispatcher) {
+        val handle = SavedStateHandle()
+        val src = EmittingSource(initial = emptyList())
+
+        // First lifetime: stream a turn into a chosen session + type a draft.
+        val vm1 = ChatViewModel(src, handle)
+        vm1.openSession(SessionRef(id = "s-keep", title = "保留会话"))
+        vm1.send("question")
+        src.stream.emit(ReplyEvent.Delta("answer"))
+        src.stream.emit(ReplyEvent.End)
+        vm1.onDraftChanged("half-typed")
+
+        // Second lifetime (process death): a new ViewModel restores from the same
+        // handle the OS would have persisted.
+        val src2 = EmittingSource(initial = listOf(Message(role = Role.User, text = "SEED")))
+        val vm2 = ChatViewModel(src2, handle)
+        val s = vm2.state.value
+        assertEquals("s-keep", s.session.id)
+        assertEquals("保留会话", s.session.title)
+        // Restored transcript wins over the new source's initialMessages() seed.
+        assertEquals(listOf("question", "answer"), s.messages.map { it.text })
+        assertEquals("half-typed", vm2.restoredDraft)
+    }
+
+    @Test
+    fun savedState_clearsDraftOnSend() = runTest(dispatcher) {
+        val handle = SavedStateHandle()
+        val vm = ChatViewModel(RecordingSource(), handle)
+        vm.onDraftChanged("about to send")
+        assertEquals("about to send", vm.restoredDraft)
+        vm.send("about to send")
+        assertEquals("a sent draft is cleared from saved state", "", vm.restoredDraft)
+    }
+
+    @Test
+    fun noSavedState_behavesAsBefore_restoredDraftEmpty() {
+        // The reducer-test default (null handle) must keep the prior behavior:
+        // initialMessages seed the transcript, restoredDraft is blank.
+        val vm = ChatViewModel(StubSource())
+        assertEquals("", vm.restoredDraft)
+        assertEquals(MockData.allSessions.first(), vm.state.value.session)
     }
 }

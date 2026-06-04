@@ -1,5 +1,55 @@
 import SwiftUI
 
+// MARK: - Dynamic Type helper
+//
+// The prototype's layout is pixel-matched with fixed point sizes
+// (`.font(.system(size:))`), which do NOT scale with the user's text-size
+// setting. For the primary readable content we want the design's baseline size
+// AND Dynamic Type scaling. `Font.system(size:weight:)` has no `relativeTo:`
+// overload, and the empty-named `Font.custom("", size:relativeTo:)` idiom logs
+// a runtime "Unable to update Font Descriptor's weight" warning the moment a
+// weight is applied. So instead we scale the baseline point size through
+// `UIFontMetrics(forTextStyle:)` — which honors the current Dynamic Type
+// content-size category — and build a proper SYSTEM font of that scaled size +
+// weight (no malformed descriptor, no warning).
+extension Font {
+    /// A system font at `size`, scaling with Dynamic Type relative to `style`.
+    /// The baseline point size is run through `UIFontMetrics(forTextStyle:)` so
+    /// it tracks the user's text-size setting while preserving the design size.
+    static func scaledSystem(_ size: CGFloat,
+                             weight: Font.Weight = .regular,
+                             relativeTo style: Font.TextStyle = .body) -> Font {
+        #if canImport(UIKit)
+            let scaled = UIFontMetrics(forTextStyle: style.uiTextStyle).scaledValue(for: size)
+            return .system(size: scaled, weight: weight)
+        #else
+            return .system(size: size, weight: weight)
+        #endif
+    }
+}
+
+#if canImport(UIKit)
+    private extension Font.TextStyle {
+        /// Map the SwiftUI text style to its UIKit counterpart for `UIFontMetrics`.
+        var uiTextStyle: UIFont.TextStyle {
+            switch self {
+            case .largeTitle:  return .largeTitle
+            case .title:       return .title1
+            case .title2:      return .title2
+            case .title3:      return .title3
+            case .headline:    return .headline
+            case .subheadline: return .subheadline
+            case .body:        return .body
+            case .callout:     return .callout
+            case .footnote:    return .footnote
+            case .caption:     return .caption1
+            case .caption2:    return .caption2
+            @unknown default:  return .body
+            }
+        }
+    }
+#endif
+
 // MARK: - color-mix helper
 //
 // The prototype leans on CSS `color-mix(in oklab, A p%, B)`. We approximate it

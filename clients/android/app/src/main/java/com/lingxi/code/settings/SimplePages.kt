@@ -8,8 +8,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -28,6 +31,8 @@ import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.LXToggle
 import com.lingxi.code.components.tint
 import com.lingxi.code.model.NotifConfig
+import com.lingxi.code.model.Presets
+import com.lingxi.code.model.VoiceConfig
 import com.lingxi.code.theme.LingXiTheme
 
 /**
@@ -229,6 +234,87 @@ fun LanguagePage(language: String, onSelect: (String) -> Unit) {
         }
     }
 }
+
+// MARK: - Voice TTS ---------------------------------------------------------
+/**
+ * Voice / TTS settings — the Android analog of the iOS `VoicePage`. Picks the
+ * synthesis provider preset, exposes an API-key field for the non-system
+ * presets, and edits the speech rate + auto-play toggle. Backed by the hoisted
+ * [SettingsStore]'s [com.lingxi.code.model.VoiceConfig] via [SettingsStore.setVoice]
+ * so changes persist for the session (consistent with the other settings pages).
+ *
+ * @param voice the live voice config (preset / speed / auto-play).
+ * @param onChange writes a mutated config back into the store.
+ */
+@Composable
+fun VoicePage(voice: VoiceConfig, onChange: (VoiceConfig) -> Unit) {
+    val t = LingXiTheme.palette
+    val preset = Presets.voice.firstOrNull { it.id == voice.preset }
+    // API key is a local, non-persisted field (keys never live in the mock
+    // settings state — they belong in the SecureKeyStore), matching the iOS
+    // page's @State apiKey. Reset per preset so switching providers clears it.
+    var apiKey by remember(voice.preset) { mutableStateOf("") }
+
+    Column(Modifier.fillMaxWidth()) {
+        SettingsSection(label = "语音合成 TTS") {
+            RadioList(
+                options = Presets.voice.map { RadioOption(it.id, it.name, it.sub) },
+                selected = voice.preset,
+                onSelect = { onChange(voice.copy(preset = it)) },
+            )
+        }
+
+        if (preset != null && preset.id != "system") {
+            SettingsSection(label = "API 配置", footer = "密钥仅本地存储。") {
+                Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)) {
+                    SettingsField(
+                        value = apiKey,
+                        onValueChange = { apiKey = it },
+                        placeholder = "API Key (${preset.name})",
+                    )
+                }
+            }
+        }
+
+        SettingsSection(label = "选项", footer = "自动播放：AI 回复完成后立即朗读。") {
+            SettingsRow(
+                label = "语速",
+                value = String.format("%.1fx", voice.speed),
+                chevron = false,
+            ) {
+                Slider(
+                    value = voice.speed,
+                    onValueChange = { v ->
+                        // Snap to 0.1 steps in 0.5..2.0 (matches the iOS Slider step).
+                        onChange(voice.copy(speed = snapVoiceSpeed(v)))
+                    },
+                    valueRange = 0.5f..2.0f,
+                    steps = 14, // 0.5..2.0 by 0.1 → 16 stops → 14 interior steps
+                    colors = SliderDefaults.colors(
+                        thumbColor = t.accent,
+                        activeTrackColor = t.accent,
+                        inactiveTrackColor = t.surfaceActive,
+                    ),
+                    modifier = Modifier.width(120.dp),
+                )
+            }
+            SettingsRow(label = "自动播放回复", chevron = false, isLast = true) {
+                LXToggle(
+                    checked = voice.autoPlay,
+                    onCheckedChange = { onChange(voice.copy(autoPlay = it)) },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Snap a raw slider value to the voice-rate grid: 0.1 increments clamped to the
+ * 0.5x..2.0x range (the iOS `Slider(in: 0.5...2, step: 0.1)`). PURE so the
+ * snapping is unit-testable on the plain JVM.
+ */
+fun snapVoiceSpeed(raw: Float): Float =
+    (Math.round(raw * 10f) / 10f).coerceIn(0.5f, 2.0f)
 
 // MARK: - Placeholder (A7/A8 seam) ------------------------------------------
 /**

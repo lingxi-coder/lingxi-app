@@ -19,10 +19,14 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -30,7 +34,9 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -38,7 +44,10 @@ import com.lingxi.code.components.LXIcon
 import com.lingxi.code.components.LXIconName
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.components.tint
+import com.lingxi.code.model.Chat
+import com.lingxi.code.model.Cron
 import com.lingxi.code.model.MockData
+import com.lingxi.code.model.Project
 import com.lingxi.code.model.Workspace
 import com.lingxi.code.theme.LingXiTheme
 
@@ -66,9 +75,19 @@ fun DrawerContent(
 ) {
     val t = LingXiTheme.palette
 
-    val chats = remember(ui.activeWs) { MockData.chats.filter { it.wsId == ui.activeWs } }
-    val projects = remember(ui.activeWs) { MockData.projects.filter { it.wsId == ui.activeWs } }
-    val crons = remember(ui.activeWs) { MockData.crons.filter { it.wsId == ui.activeWs } }
+    // Live search query — filters the active workspace's chats / projects / crons
+    // (the real editable analog of the prototype's static search pill). Kept as a
+    // plain `remember` (transient, like a search box that resets when the drawer
+    // closes); the workspace-scoped lists below recompute on every keystroke.
+    var query by remember { mutableStateOf("") }
+
+    val wsChats = remember(ui.activeWs) { MockData.chats.filter { it.wsId == ui.activeWs } }
+    val wsProjects = remember(ui.activeWs) { MockData.projects.filter { it.wsId == ui.activeWs } }
+    val wsCrons = remember(ui.activeWs) { MockData.crons.filter { it.wsId == ui.activeWs } }
+
+    val chats = remember(wsChats, query) { filterChats(wsChats, query) }
+    val projects = remember(wsProjects, query) { filterProjects(wsProjects, query) }
+    val crons = remember(wsCrons, query) { filterCrons(wsCrons, query) }
 
     Column(
         modifier = modifier
@@ -78,7 +97,7 @@ fun DrawerContent(
     ) {
         DrawerHeader(onClose = onClose)
         WorkspacePills(activeWs = ui.activeWs, onSelect = ui::selectWorkspace)
-        SearchBar()
+        SearchBar(query = query, onQueryChange = { query = it })
         SectionTabs(
             section = ui.section,
             chats = chats.size,
@@ -141,7 +160,7 @@ private fun DrawerHeader(onClose: () -> Unit) {
                 .clickable(onClick = onClose),
             contentAlignment = Alignment.Center,
         ) {
-            LXIcon(name = LXIconName.X, size = 20.dp, color = t.text3, stroke = 1.8f)
+            LXIcon(name = LXIconName.X, size = 20.dp, color = t.text3, stroke = 1.8f, contentDescription = "关闭侧栏")
         }
     }
 }
@@ -185,8 +204,14 @@ private fun WorkspacePill(ws: Workspace, active: Boolean, onClick: () -> Unit) {
 
 // MARK: - search ------------------------------------------------------------
 
+/**
+ * The drawer's real search field — an editable [BasicTextField] whose [query]
+ * filters the section lists (chats / projects / crons) live as the user types.
+ * Hoisted so the filtering logic lives in [DrawerContent]; a trailing × clears
+ * the query when non-empty.
+ */
 @Composable
-private fun SearchBar() {
+private fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
     val t = LingXiTheme.palette
     val shape = RoundedCornerShape(12.dp)
     Row(
@@ -199,11 +224,35 @@ private fun SearchBar() {
             .clip(shape)
             .background(t.surface)
             .border(0.5.dp, t.border, shape)
-            .clickable {}
             .padding(horizontal = 14.dp, vertical = 11.dp),
     ) {
         LXIcon(name = LXIconName.Search, size = 16.dp, color = t.text4, stroke = 2f)
-        Text("搜索会话", color = t.text4, fontSize = 14.sp)
+        Box(modifier = Modifier.weight(1f)) {
+            if (query.isEmpty()) {
+                Text("搜索会话", color = t.text4, fontSize = 14.sp)
+            }
+            BasicTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                singleLine = true,
+                textStyle = TextStyle(color = t.text, fontSize = 14.sp),
+                cursorBrush = SolidColor(t.accent),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(UiTags.DRAWER_SEARCH),
+            )
+        }
+        if (query.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .clickable { onQueryChange("") },
+                contentAlignment = Alignment.Center,
+            ) {
+                LXIcon(name = LXIconName.X, size = 13.dp, color = t.text4, stroke = 2f, contentDescription = "清除搜索")
+            }
+        }
     }
 }
 
@@ -337,7 +386,61 @@ private fun AccountRow(onClick: () -> Unit) {
                 Text("Yuxin Yang", color = t.text, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Text("Pro · 5.5 / 8 段", color = t.text4, fontSize = 11.5f.sp)
             }
-            LXIcon(name = LXIconName.Cog, size = 18.dp, color = t.text3, stroke = 1.6f)
+            LXIcon(name = LXIconName.Cog, size = 18.dp, color = t.text3, stroke = 1.6f, contentDescription = "设置")
+        }
+    }
+}
+
+// MARK: - search filtering (pure) -------------------------------------------
+
+/**
+ * Case-insensitive, whitespace-trimmed drawer search filters — PURE so they are
+ * unit-testable on the plain JVM (see `DrawerSearchTest`). An empty/blank query
+ * returns the list unchanged; otherwise a row matches if the query is a
+ * substring of any of its user-visible text fields.
+ *
+ * Projects match on their own name/desc OR any contained session's title — a
+ * matching project keeps only the sessions that also match (or all sessions when
+ * the project name itself matched), so a query never surfaces a project with an
+ * empty body.
+ */
+internal fun filterChats(chats: List<Chat>, query: String): List<Chat> {
+    val q = query.trim().lowercase()
+    if (q.isEmpty()) return chats
+    return chats.filter {
+        it.title.lowercase().contains(q) ||
+            it.preview.lowercase().contains(q) ||
+            it.group.lowercase().contains(q)
+    }
+}
+
+internal fun filterCrons(crons: List<Cron>, query: String): List<Cron> {
+    val q = query.trim().lowercase()
+    if (q.isEmpty()) return crons
+    return crons.filter {
+        it.title.lowercase().contains(q) ||
+            it.desc.lowercase().contains(q) ||
+            it.cron.lowercase().contains(q)
+    }
+}
+
+internal fun filterProjects(projects: List<Project>, query: String): List<Project> {
+    val q = query.trim().lowercase()
+    if (q.isEmpty()) return projects
+    return projects.mapNotNull { project ->
+        val projectMatches = project.name.lowercase().contains(q) ||
+            project.desc.lowercase().contains(q)
+        val matchingSessions = project.sessions.filter { s ->
+            s.title.lowercase().contains(q) ||
+                s.preview.lowercase().contains(q)
+        }
+        when {
+            // Project header matched → keep it with all its sessions.
+            projectMatches -> project
+            // Only some sessions matched → keep the project narrowed to those.
+            matchingSessions.isNotEmpty() -> project.copy(sessions = matchingSessions)
+            // No match anywhere → drop the project.
+            else -> null
         }
     }
 }

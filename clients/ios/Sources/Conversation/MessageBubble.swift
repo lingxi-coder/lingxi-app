@@ -15,7 +15,10 @@ struct MessageBubble: View {
             HStack {
                 Spacer(minLength: 0)
                 Text(message.text)
-                    .font(.system(size: 15.5))
+                    // Dynamic Type: scale the body relative to .body so the
+                    // transcript honors the user's text-size setting while
+                    // keeping the design's 15.5pt baseline.
+                    .font(.scaledSystem(15.5, relativeTo: .body))
                     .lineSpacing(15.5 * 0.5)
                     .foregroundColor(t.text)
                     .padding(.horizontal, 16).padding(.vertical, 12)
@@ -41,6 +44,7 @@ struct MessageBubble: View {
                             .contentShape(RoundedRectangle(cornerRadius: 8))
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("分享回复")
                 }
                 Spacer(minLength: 0)
             }
@@ -74,6 +78,7 @@ struct AssistantAvatar: View {
             .frame(width: size, height: size)
             .overlay(LXIcon(name: .sparkle, size: glyph, color: .white, stroke: 2))
             .shadow(color: t.accent.tint(0.30), radius: 6, y: 4)
+            .accessibilityHidden(true)
     }
 }
 
@@ -154,7 +159,7 @@ struct AIText: View {
     private func listRow(marker: String, _ s: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Text(marker)
-                .font(.system(size: Self.bodySize))
+                .font(.scaledSystem(Self.bodySize, relativeTo: .body))
                 .foregroundColor(t.text2)
                 .frame(minWidth: 14, alignment: .trailing)
             inlineText(s)
@@ -162,8 +167,11 @@ struct AIText: View {
     }
 
     private func inlineText(_ s: String) -> some View {
+        // Dynamic Type: the assistant body scales relative to .body. The inline
+        // spans carry their own fixed-point fonts (bold / code) inside the
+        // AttributedString; the outer .font sets the scalable default size.
         Text(Self.parseInline(s, size: Self.bodySize))
-            .font(.system(size: Self.bodySize))
+            .font(.scaledSystem(Self.bodySize, relativeTo: .body))
             .lineSpacing(Self.bodySize * 0.6)
             .foregroundColor(t.text)
             .fixedSize(horizontal: false, vertical: true)

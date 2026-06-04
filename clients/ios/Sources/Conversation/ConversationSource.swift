@@ -186,6 +186,21 @@ protocol ConversationSource: AnyObject {
     /// confirming `ModelChanged`; the mock just swaps the chip. `id` is a real
     /// engine model id when `model.availableModels` is populated.
     func setModel(_ id: String)
+    /// Switch the active conversation to `session` (the iOS analog of Android's
+    /// `ChatViewModel.openSession`). MUST cancel any in-flight turn and reset the
+    /// streaming bookkeeping FIRST so a turn that completes after the switch can't
+    /// land its deltas / notice in the newly-shown session. A no-op when the id is
+    /// already active.
+    func openSession(_ session: SessionRef)
+    /// Lifecycle: the app moved to the background (`scenePhase == .background`).
+    /// MUST clear any stuck `streaming` flag (and the engine's per-turn
+    /// bookkeeping) so a turn parked mid-stream when the user backgrounded the app
+    /// is not left "streaming" forever, and persist any state worth restoring.
+    /// The in-flight engine turn is cancelled so a late delta can't resurrect it.
+    func handleBackground()
+    /// Lifecycle: the app returned to the foreground (`scenePhase == .active`). A
+    /// hook to restore/refresh state; the default is a no-op.
+    func handleForeground()
     /// Optionally build the engine eagerly so the real model catalog
     /// (`ModelList`) populates before the first send (SHIP-BLOCKER #2). A no-op on
     /// the mock; idempotent on the engine.
@@ -201,9 +216,11 @@ protocol ConversationSource: AnyObject {
 }
 
 /// Default `warmUp` for sources with nothing to pre-build (the mock). The engine
-/// source overrides it to eagerly build the handle + list models.
+/// source overrides it to eagerly build the handle + list models. `handleForeground`
+/// is a no-op by default; the engine source may override to refresh state.
 extension ConversationSource {
     func warmUp() {}
+    func handleForeground() {}
 }
 
 #if canImport(engine_mobileFFI)
@@ -322,6 +339,28 @@ final class MockConversationSource: ConversationSource {
         if let opt = MockData.models.first(where: { $0.id == id }) {
             model.model = opt
         }
+    }
+
+    /// Switch sessions: drop the in-flight canned reply (bump the token so its
+    /// timer no-ops when it fires) and reset the conversation to the new session's
+    /// default transcript. Without the token bump a reply scheduled for the OLD
+    /// session would append into the NEW one (the wrong-session bug).
+    func openSession(_ session: SessionRef) {
+        turnToken &+= 1
+        model.messages = MockData.messagesDefault
+        model.streaming = false
+        model.isNew = false
+        model.statusLine = nil
+        model.error = nil
+        model.notice = nil
+    }
+
+    /// Background: drop any in-flight canned reply so a turn isn't left
+    /// "streaming" forever after the app is backgrounded.
+    func handleBackground() {
+        guard model.streaming else { return }
+        turnToken &+= 1
+        model.streaming = false
     }
 }
 
@@ -669,6 +708,40 @@ final class MockConversationSource: ConversationSource {
                     await self.fail(.host, "切换模型失败：\(error)")
                 }
             }
+        }
+
+        // MARK: session + lifecycle
+
+        /// Switch the active conversation to another session (iOS analog of
+        /// Android `ChatViewModel.openSession`). Cancels the in-flight turn FIRST
+        /// — clearing `streaming` / `streamingIndex` / `currentTurnId` and
+        /// submitting `.cancel(turnId:)` — so a turn that completes after the
+        /// switch can't append its deltas (or its `TurnEnded` notice) into the new
+        /// session. Then resets the transcript to the session's default.
+        func openSession(_ session: SessionRef) {
+            // Cancel the in-flight turn on the engine so its late deltas/outcome
+            // can't bleed into the new session. `cancel()` is a no-op if idle.
+            cancel()
+            model.messages = MockData.messagesDefault
+            model.streaming = false
+            model.isNew = false
+            model.statusLine = nil
+            model.error = nil
+            model.notice = nil
+            streamingIndex = nil
+            currentTurnId = nil
+            // A parked permission belongs to the turn we're leaving — drop it so a
+            // stale prompt can't leak into the session we just switched to.
+            model.pendingPermissions = []
+        }
+
+        /// Background: the user left the app while a turn was streaming. Cancel the
+        /// in-flight turn so it isn't left "streaming" forever and a late delta
+        /// can't resurrect it; the cancel narrows to `currentTurnId`. Idempotent /
+        /// no-op when nothing is in flight.
+        func handleBackground() {
+            guard model.streaming else { return }
+            cancel()
         }
 
         // MARK: permission gating (SHIP-BLOCKER #3)

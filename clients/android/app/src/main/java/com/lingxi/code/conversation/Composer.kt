@@ -28,6 +28,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -140,7 +142,7 @@ fun Composer(
             // Action row: attach · model chip · spacer · mic|send.
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconHit(onClick = {}) {
-                    LXIcon(name = LXIconName.Plus, size = 18.dp, color = t.text3, stroke = 1.8f)
+                    LXIcon(name = LXIconName.Plus, size = 18.dp, color = t.text3, stroke = 1.8f, contentDescription = "更多")
                 }
                 // Camera affordance: tap drives a real on-device capture through
                 // the same CameraController the engine bridges onto
@@ -150,7 +152,7 @@ fun Composer(
                     onClick = onCameraClick,
                     modifier = Modifier.testTag(UiTags.COMPOSER_CAMERA),
                 ) {
-                    LXIcon(name = LXIconName.Paperclip, size = 18.dp, color = t.text3, stroke = 1.8f)
+                    LXIcon(name = LXIconName.Paperclip, size = 18.dp, color = t.text3, stroke = 1.8f, contentDescription = "拍照")
                 }
                 ModelChip(model = model, models = availableModels, onModelChange = onModelChange)
                 Spacer(Modifier.weight(1f))
@@ -171,7 +173,8 @@ fun Composer(
                             modifier = Modifier
                                 .size(12.dp)
                                 .clip(RoundedCornerShape(3.dp))
-                                .background(Color.White),
+                                .background(Color.White)
+                                .clearAndSetSemantics { contentDescription = "停止生成" },
                         )
                     }
                     // Idle with text: the accent Send button.
@@ -184,7 +187,7 @@ fun Composer(
                             .testTag(UiTags.COMPOSER_SEND),
                         contentAlignment = Alignment.Center,
                     ) {
-                        LXIcon(name = LXIconName.ArrowUp, size = 16.dp, color = Color.White)
+                        LXIcon(name = LXIconName.ArrowUp, size = 16.dp, color = Color.White, contentDescription = "发送")
                     }
                     // Idle, empty: the mic (voice-hold) affordance.
                     else -> IconHit(
@@ -194,7 +197,7 @@ fun Composer(
                             onRelease = onMicHoldRelease,
                         ),
                     ) {
-                        LXIcon(name = LXIconName.Mic, size = 18.dp, color = t.text2, stroke = 1.8f)
+                        LXIcon(name = LXIconName.Mic, size = 18.dp, color = t.text2, stroke = 1.8f, contentDescription = "按住说话")
                     }
                 }
             }
@@ -245,7 +248,7 @@ private fun AttachmentThumb(attachment: ComposerAttachment, onRemove: () -> Unit
                 .clickable(onClick = onRemove),
             contentAlignment = Alignment.Center,
         ) {
-            LXIcon(name = LXIconName.X, size = 14.dp, color = t.text3, stroke = 2f)
+            LXIcon(name = LXIconName.X, size = 14.dp, color = t.text3, stroke = 2f, contentDescription = "移除照片")
         }
     }
 }

@@ -106,7 +106,7 @@ fun MessageBubble(
                             .testTag(UiTags.MESSAGE_SHARE),
                         contentAlignment = Alignment.Center,
                     ) {
-                        LXIcon(name = LXIconName.Share, size = 15.dp, color = t.text3, stroke = 1.8f)
+                        LXIcon(name = LXIconName.Share, size = 15.dp, color = t.text3, stroke = 1.8f, contentDescription = "分享回复")
                     }
                 }
             }

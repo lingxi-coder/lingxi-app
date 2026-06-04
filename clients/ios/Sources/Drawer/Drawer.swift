@@ -11,10 +11,37 @@ struct Drawer: View {
     private enum Section: String { case chats, projects, crons }
     @State private var section: Section = .chats
     @State private var openProjects: Set<String> = ["p1"]
+    /// The live drawer search query (real `TextField` — was a static label). It
+    /// filters the chats / projects / crons lists below by a case-insensitive
+    /// substring over the visible fields.
+    @State private var query: String = ""
+    @FocusState private var searchFocused: Bool
 
-    private var chats: [Chat] { MockData.chats.filter { $0.wsId == activeWs } }
-    private var projects: [Project] { MockData.projects.filter { $0.wsId == activeWs } }
-    private var crons: [Cron] { MockData.crons.filter { $0.wsId == activeWs } }
+    /// `s` trimmed + lowercased contains the trimmed query (empty query ⇒ match
+    /// everything). The shared predicate every section filter runs through.
+    private func matches(_ haystacks: String...) -> Bool {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return true }
+        return haystacks.contains { $0.lowercased().contains(q) }
+    }
+
+    private var chats: [Chat] {
+        MockData.chats.filter { $0.wsId == activeWs && matches($0.title, $0.preview, $0.activity) }
+    }
+    /// A project matches when its own name/desc match OR any of its sessions do;
+    /// when only sessions match we still show the project (so the row is reachable).
+    private var projects: [Project] {
+        MockData.projects.filter { p in
+            p.wsId == activeWs &&
+            (matches(p.name, p.desc) || p.sessions.contains { matches($0.title, $0.preview, $0.activity) })
+        }
+    }
+    private var crons: [Cron] {
+        MockData.crons.filter { $0.wsId == activeWs && matches($0.title, $0.cron, $0.next, $0.desc) }
+    }
+
+    /// True while the user is actively searching — drives the "no results" copy.
+    private var searching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -53,6 +80,7 @@ struct Drawer: View {
             Button(action: onClose) {
                 LXIcon(name: .x, size: 20, color: t.text3, stroke: 1.8).frame(width: 36, height: 36)
             }
+            .accessibilityLabel("关闭抽屉")
         }
         .padding(.horizontal, 18).padding(.top, 8).padding(.bottom, 12)
     }
@@ -82,13 +110,33 @@ struct Drawer: View {
     private var searchBar: some View {
         HStack(spacing: 8) {
             LXIcon(name: .search, size: 16, color: t.text4, stroke: 2)
-            Text("搜索会话").font(.system(size: 14)).foregroundColor(t.text4)
-            Spacer()
+                .accessibilityHidden(true)
+            TextField("", text: $query,
+                      prompt: Text("搜索会话").foregroundColor(t.text4))
+                .font(.scaledSystem(14, relativeTo: .subheadline))
+                .foregroundColor(t.text)
+                .focused($searchFocused)
+                .submitLabel(.search)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .accessibilityLabel("搜索会话")
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                    searchFocused = false
+                } label: {
+                    LXIcon(name: .x, size: 14, color: t.text4, stroke: 2)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("清除搜索")
+            }
         }
         .padding(.horizontal, 14).padding(.vertical, 11)
         .background(t.surface)
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(t.border, lineWidth: 0.5))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(searchFocused ? t.accent.opacity(0.5) : t.border, lineWidth: 0.5))
         .padding(.horizontal, 18).padding(.bottom, 14)
     }
 
@@ -124,15 +172,43 @@ struct Drawer: View {
     private var sectionBody: some View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 0) {
-                switch section {
-                case .chats:    chatsSection
-                case .projects: projectsSection
-                case .crons:    cronsSection
+                if currentSectionEmpty && searching {
+                    noResults
+                } else {
+                    switch section {
+                    case .chats:    chatsSection
+                    case .projects: projectsSection
+                    case .crons:    cronsSection
+                    }
                 }
             }
             .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 8)
         }
         .frame(maxHeight: .infinity)
+    }
+
+    /// True when the active section has no rows under the current filter.
+    private var currentSectionEmpty: Bool {
+        switch section {
+        case .chats:    return chats.isEmpty
+        case .projects: return projects.isEmpty
+        case .crons:    return crons.isEmpty
+        }
+    }
+
+    /// A centered "no results" line shown when a search matches nothing in the
+    /// active section (so the section doesn't render an empty body / lone "新建").
+    private var noResults: some View {
+        VStack(spacing: 8) {
+            LXIcon(name: .search, size: 22, color: t.text4, stroke: 1.8)
+                .accessibilityHidden(true)
+            Text("未找到与“\(query.trimmingCharacters(in: .whitespaces))”匹配的结果")
+                .font(.system(size: 13))
+                .foregroundColor(t.text4)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 40).padding(.horizontal, 16)
     }
 
     private var chatsSection: some View {
@@ -149,9 +225,11 @@ struct Drawer: View {
                 }
                 .padding(.bottom, 8)
             }
-            (Text("临时对话 30 天后自动归档 · ") + Text("转为项目").foregroundColor(t.accent))
-                .font(.system(size: 11.5)).foregroundColor(t.text4).lineSpacing(4)
-                .padding(.horizontal, 14).padding(.top, 14).padding(.bottom, 4)
+            if !searching {
+                (Text("临时对话 30 天后自动归档 · ") + Text("转为项目").foregroundColor(t.accent))
+                    .font(.system(size: 11.5)).foregroundColor(t.text4).lineSpacing(4)
+                    .padding(.horizontal, 14).padding(.top, 14).padding(.bottom, 4)
+            }
         }
     }
 
@@ -161,9 +239,9 @@ struct Drawer: View {
             ZStack(alignment: .leading) {
                 if active { Capsule().fill(t.accent).frame(width: 2.5).padding(.vertical, 12) }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(s.title).font(.system(size: 14, weight: active ? .semibold : .medium))
+                    Text(s.title).font(.scaledSystem(14, weight: active ? .semibold : .medium, relativeTo: .subheadline))
                         .foregroundColor(active ? t.text : t.text2).lineLimit(1)
-                    Text("\(s.activity) · \(s.preview)").font(.system(size: 12))
+                    Text("\(s.activity) · \(s.preview)").font(.scaledSystem(12, relativeTo: .caption))
                         .foregroundColor(t.text4).lineLimit(1)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 10)
@@ -178,21 +256,29 @@ struct Drawer: View {
     private var projectsSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(projects) { p in projectRow(p) }
-            dashedButton("新建项目")
+            if !searching { dashedButton("新建项目") }
         }
         .padding(.top, 4)
     }
 
     private func projectRow(_ p: Project) -> some View {
-        let isOpen = openProjects.contains(p.id)
+        // While searching, auto-expand matched projects so the matching session
+        // is visible, and narrow the session list to the matches (the project
+        // name/desc matching still shows all its sessions).
+        let nameMatches = matches(p.name, p.desc)
+        let visibleSessions = searching && !nameMatches
+            ? p.sessions.filter { matches($0.title, $0.preview, $0.activity) }
+            : p.sessions
+        let isOpen = searching ? true : openProjects.contains(p.id)
         let hasActive = p.sessions.contains { $0.id == activeSession }
         return VStack(alignment: .leading, spacing: 2) {
             Button {
-                if isOpen { openProjects.remove(p.id) } else { openProjects.insert(p.id) }
+                if openProjects.contains(p.id) { openProjects.remove(p.id) } else { openProjects.insert(p.id) }
             } label: {
                 HStack(spacing: 10) {
                     LXIcon(name: .chevronR, size: 12, color: t.text4, stroke: 2)
                         .rotationEffect(.degrees(isOpen ? 90 : 0))
+                        .accessibilityHidden(true)
                     projectIcon(p)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(p.name).font(.system(size: 14, weight: .semibold)).foregroundColor(t.text).lineLimit(1)
@@ -205,16 +291,20 @@ struct Drawer: View {
                 .background(hasActive && !isOpen ? t.surfaceActive : .clear)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             }
+            .accessibilityLabel("\(p.name)，\(p.sessions.count) 个会话")
+            .accessibilityHint(isOpen ? "收起项目" : "展开项目")
             if isOpen {
                 ZStack(alignment: .leading) {
                     Rectangle().fill(t.border).frame(width: 1).padding(.vertical, 4).padding(.leading, 22)
                     VStack(alignment: .leading, spacing: 0) {
-                        ForEach(p.sessions) { s in sessionRow(p, s) }
-                        HStack(spacing: 5) {
-                            LXIcon(name: .plus, size: 11, color: t.text4, stroke: 2)
-                            Text("新会话").font(.system(size: 12.5)).foregroundColor(t.text4)
+                        ForEach(visibleSessions) { s in sessionRow(p, s) }
+                        if !searching {
+                            HStack(spacing: 5) {
+                                LXIcon(name: .plus, size: 11, color: t.text4, stroke: 2)
+                                Text("新会话").font(.system(size: 12.5)).foregroundColor(t.text4)
+                            }
+                            .padding(.leading, 16).padding(.trailing, 12).padding(.vertical, 7)
                         }
-                        .padding(.leading, 16).padding(.trailing, 12).padding(.vertical, 7)
                     }
                     .padding(.leading, 22)
                 }
@@ -255,7 +345,7 @@ struct Drawer: View {
     private var cronsSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(crons) { c in cronCard(c) }
-            dashedButton("新建定时任务")
+            if !searching { dashedButton("新建定时任务") }
         }
         .padding(.top, 4)
     }

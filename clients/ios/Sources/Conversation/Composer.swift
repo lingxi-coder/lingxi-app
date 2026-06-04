@@ -62,6 +62,7 @@ struct Composer: View {
                         LXIcon(name: .plus, size: 18, color: t.text3, stroke: 1.8)
                             .frame(width: 34, height: 34)
                     }
+                    .accessibilityLabel("添加附件")
                     modelChip
                     Spacer()
                     if streaming {
@@ -82,6 +83,8 @@ struct Composer: View {
                                 .frame(width: 34, height: 34)
                         }
                         .simultaneousGesture(micHoldGesture)
+                        .accessibilityLabel("按住说话")
+                        .accessibilityHint("按住进入语音心流，松开转写为文本")
                     } else {
                         Button(action: send) {
                             LXIcon(name: .arrowUp, size: 16, color: .white)
@@ -90,6 +93,7 @@ struct Composer: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 10))
                                 .shadow(color: t.accent.tint(0.40), radius: 6, y: 4)
                         }
+                        .accessibilityLabel("发送")
                     }
                 }
             }
@@ -248,6 +252,7 @@ private struct AttachmentThumb: View {
                 LXIcon(name: .x, size: 14, color: t.text3, stroke: 2)
                     .frame(width: 28, height: 28)
             }
+            .accessibilityLabel("移除附件")
         }
         .padding(.horizontal, 4).padding(.vertical, 2)
     }

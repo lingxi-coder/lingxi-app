@@ -391,6 +391,10 @@ export type ClientEvent =
   | { type: 'task_status_changed'; task_id: string; status: TaskStatusDto }
   // ── Reserved / feed-deferred (round-trip only) ──────────────────────────────
   | { type: 'coordinator_status'; active_workers: number; team?: string }
+  | {
+      type: 'coordinator_worker';
+      worker: { agent_id: string; name: string; agent_type: string; status: string };
+    }
   | { type: 'thinking_delta'; thinking: string; signature?: string }
   | {
       type: 'usage_update';

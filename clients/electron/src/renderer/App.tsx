@@ -7,6 +7,7 @@ import { TopBar } from './components/TopBar';
 import { Stage } from './components/Stage';
 import { Composer } from './components/Composer';
 import { RightPanel } from './components/RightPanel';
+import { PermissionPrompt } from './components/PermissionPrompt';
 import { SettingsPage } from './components/settings/SettingsPage';
 import type { Mode } from './components/primitives';
 import { useBridge } from './bridge/useBridge';
@@ -97,6 +98,15 @@ export function App() {
           </div>
 
           {panelOpen && <RightPanel onClose={() => setPanelOpen(false)} />}
+
+          {/* Engine-parked permission requests: an allow-once / allow-always /
+              deny prompt wired straight back over the bridge. Renders nothing
+              when no request is pending. */}
+          <PermissionPrompt
+            request={bridge.pendingPermission}
+            onApprove={bridge.approve}
+            onDeny={bridge.deny}
+          />
         </div>
 
         <SettingsPage open={settingsOpen} onClose={() => setSettingsOpen(false)} theme={theme} setTheme={setTheme} />

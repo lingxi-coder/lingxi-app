@@ -12,7 +12,11 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ClientEvent } from '@lingxi/bridge-client';
+import type {
+  ClientEvent,
+  PermissionRequest,
+  PermissionResponseDto,
+} from '@lingxi/bridge-client';
 import type { ConnectionState } from './lingxi';
 import {
   appendUserPrompt,
@@ -36,10 +40,19 @@ export interface UseBridge {
   readonly usage: UsageSnapshot | null;
   /** True while a turn is streaming (drives the composer's thinking affordance). */
   readonly running: boolean;
+  /**
+   * The oldest still-unanswered {@link PermissionRequest}, or `null`. Drives the
+   * allow/deny prompt; cleared once the user responds (or another arrives).
+   */
+  readonly pendingPermission: PermissionRequest | null;
   /** Submit a prompt: echo it immediately, then drive a turn via the host. */
   sendPrompt(text: string): void;
   /** Cancel the in-flight turn (optionally a specific `turnId`). */
   cancel(turnId?: number): void;
+  /** Approve the given permission request (defaults to allow-once). */
+  approve(requestId: number, response?: PermissionResponseDto): void;
+  /** Deny the given permission request. */
+  deny(requestId: number): void;
 }
 
 /** Detect the Electron host once (stable across renders). */
@@ -54,6 +67,10 @@ export function useBridge(): UseBridge {
 
   const [connection, setConnection] = useState<ConnectionState>({ status: 'idle' });
   const [conversation, setConversation] = useState<ConversationState>(emptyConversation);
+  // FIFO queue of parked permission requests; the head is rendered as the prompt.
+  // Queueing (rather than a single slot) means a second request that arrives
+  // before the first is answered is not silently dropped.
+  const [permissionQueue, setPermissionQueue] = useState<PermissionRequest[]>([]);
 
   // Subscribe to the live feed + connection lifecycle for the app's lifetime.
   useEffect(() => {
@@ -65,6 +82,13 @@ export function useBridge(): UseBridge {
     const offState = host.onConnectionStateChanged((state) => {
       setConnection(state);
     });
+    const offPermission = host.onPermission((request: PermissionRequest) => {
+      // Replace any duplicate of the same request id, else append.
+      setPermissionQueue((prev) => [
+        ...prev.filter((r) => r.request_id !== request.request_id),
+        request,
+      ]);
+    });
 
     // Pull the current state once in case we mounted after the first transition.
     void host.connectionState().then(setConnection).catch(() => {
@@ -74,6 +98,7 @@ export function useBridge(): UseBridge {
     return () => {
       offEvent();
       offState();
+      offPermission();
     };
   }, [host]);
 
@@ -106,6 +131,27 @@ export function useBridge(): UseBridge {
     [host],
   );
 
+  /** Drop the head of the queue (the just-answered request) regardless of outcome. */
+  const dropPending = useCallback((requestId: number) => {
+    setPermissionQueue((prev) => prev.filter((r) => r.request_id !== requestId));
+  }, []);
+
+  const approve = useCallback(
+    (requestId: number, response?: PermissionResponseDto) => {
+      dropPending(requestId);
+      if (host) void host.approve(requestId, response).catch(() => undefined);
+    },
+    [host, dropPending],
+  );
+
+  const deny = useCallback(
+    (requestId: number) => {
+      dropPending(requestId);
+      if (host) void host.deny(requestId).catch(() => undefined);
+    },
+    [host, dropPending],
+  );
+
   const connected = connection.status === 'connected';
 
   return {
@@ -115,7 +161,10 @@ export function useBridge(): UseBridge {
     conversation,
     usage: conversation.usage,
     running: conversation.running,
+    pendingPermission: permissionQueue[0] ?? null,
     sendPrompt,
     cancel,
+    approve,
+    deny,
   };
 }

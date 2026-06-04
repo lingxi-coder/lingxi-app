@@ -3,8 +3,13 @@
 A faithful, production-structured recreation of the LingXi Code desktop design
 prototype, built with **Electron + Vite + React 18 + TypeScript**.
 
-This is the UI shell only: it renders the prototype's mock data. There is no
-backend/engine wiring (that is a later milestone).
+The renderer is wired to the real engine over the bridge: the main process
+spawns the Rust `bridge-server`, connects through its discovery lockfile with
+the shared `@lingxi/bridge-client` SDK, streams `ClientEvent`s to the renderer,
+and surfaces engine permission requests as an allow/deny prompt. When the
+`bridge-server` binary is not present (no engine), the renderer falls back to the
+prototype's mock data so the design preview still works in a plain browser. See
+[`../README-bridge.md`](../README-bridge.md) for the end-to-end run path.
 
 ## Stack
 
@@ -19,12 +24,21 @@ backend/engine wiring (that is a later milestone).
 
 ```
 src/
-  main/index.ts        Electron main process (frameless macOS-style window)
-  preload/index.ts     contextBridge surface (minimal; no backend yet)
+  main/
+    index.ts           Electron main process (frameless macOS-style window)
+    bridge.ts          BridgeManager: spawns bridge-server, connects the client,
+                       wires the renderer IPC seam (resolves the binary path)
+  preload/index.ts     contextBridge surface (window.lingxi: prompts, permissions,
+                       event/state subscriptions)
   renderer/
     main.tsx           React entry
     App.tsx            Root: window chrome, layout, top-level state
     global.css         Reset, keyframes, scrollbar, .mono
+    bridge/
+      useBridge.ts     Live-conversation store: folds ClientEvents, queues
+                       permission requests, exposes approve/deny
+      conversation.ts  Pure ClientEvent → view-model reducer
+      lingxi.d.ts      Ambient typing for window.lingxi
     theme/             tokens(dark/light) + Theme context
     data/              All mock data (PROJECTS, RUN, FILES_CHANGED, MODELS, …)
     components/
@@ -34,11 +48,29 @@ src/
       TopBar.tsx       Repo breadcrumb, branch chip, diff pill, theme toggle
       Stage.tsx        Agent-run scrollback (narration, agent cards, audio)
       Composer.tsx     Prompt input, slash menu, mic recording + waveform
+      PermissionPrompt.tsx  Allow-once / allow-always / deny modal for engine
+                       permission requests
       pickers.tsx      Permission / Model+Effort+Fast / Context donut popovers
       RightPanel.tsx   Diff / Plan / Tasks / Shell tabs
       BackgroundTasks.tsx  Running/finished task list + transcript view
       settings/        Full multi-page Settings (nav + pages)
 ```
+
+## Connecting to the engine
+
+On launch the main process resolves the `bridge-server` binary in this order:
+
+1. `BridgeManagerOptions.serverBin` (programmatic override), else
+2. the `LINGXI_BRIDGE_SERVER_BIN` environment variable, else
+3. a path derived **relative to the repo** — it walks up from the bundled main
+   process to the first existing `lingxi-code/target/{debug,release}/bridge-server`.
+
+If none resolve, the bridge surfaces a clear `error` connection state telling you
+to build the binary (`cd lingxi-code && cargo build -p bridge-server --bin
+bridge-server`) or set `LINGXI_BRIDGE_SERVER_BIN`. No absolute author paths are
+baked in, so a fresh clone works as long as the binary is built or the env var is
+set. The engine's `ANTHROPIC_API_KEY` / `LINGXI_API_BASE_URL` pass through from
+the environment untouched.
 
 ## Scripts
 

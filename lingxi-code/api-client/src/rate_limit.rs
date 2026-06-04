@@ -60,6 +60,44 @@ pub fn parse_anthropic_ratelimit_reset(
     Some(Duration::from_secs(target.saturating_sub(now_secs)))
 }
 
+/// Cap a persistent rate-limit reset wait at 6 hours (claude-code
+/// `PERSISTENT_RESET_CAP_MS`).
+pub const PERSISTENT_RESET_CAP_MS: u64 = 6 * 60 * 60 * 1000;
+
+/// Parse `anthropic-ratelimit-unified-reset` (a Unix-epoch **seconds** value —
+/// distinct from the ISO8601 `…-requests-reset` above) into a `Duration` from
+/// `now`, capped at [`PERSISTENT_RESET_CAP_MS`]. 1:1 with claude-code
+/// `getRateLimitResetDelayMs` (`withRetry.ts:814-821`): a past-or-equal reset
+/// (`delayMs <= 0`) returns `None` so the caller falls through to the next
+/// delay source (NOT clamped to zero, unlike the ISO parser above).
+///
+/// Divergence: claude-code uses JS `Number()`, accepting decimal/scientific
+/// forms; we parse integer epoch seconds (the form the server sends). A
+/// non-integer value yields `None` (same fail-soft outcome).
+#[must_use]
+pub fn parse_unified_reset(headers: &[(String, String)], now: SystemTime) -> Option<Duration> {
+    let raw = header_value(headers, "anthropic-ratelimit-unified-reset")?.trim();
+    let reset_unix_sec: u64 = raw.parse().ok()?;
+    let now_ms = u64::try_from(now.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()?;
+    let reset_ms = reset_unix_sec.checked_mul(1000)?;
+    // checked_sub → None for a PAST reset; an exactly-now reset (0) also yields
+    // None (claude-code `delayMs <= 0 → null`).
+    let delay_ms = reset_ms.checked_sub(now_ms)?;
+    if delay_ms == 0 {
+        return None;
+    }
+    Some(Duration::from_millis(delay_ms.min(PERSISTENT_RESET_CAP_MS)))
+}
+
+/// The `anthropic-ratelimit-unified-overage-disabled-reason` header value, if
+/// the server signalled that overage spend is disabled (claude-code
+/// `withRetry.ts:276`). Surfaced so callers can avoid retrying a 429 that
+/// cannot succeed until the window resets.
+#[must_use]
+pub fn overage_disabled_reason(headers: &[(String, String)]) -> Option<&str> {
+    header_value(headers, "anthropic-ratelimit-unified-overage-disabled-reason")
+}
+
 /// Parse the strict `YYYY-MM-DDTHH:MM:SSZ` form into a Unix-epoch second.
 /// Hand-rolled — no chrono runtime dep needed.
 #[allow(
@@ -140,6 +178,62 @@ mod tests {
     fn retry_after_seconds_form_parses() {
         let r = parse_retry_after(&h("Retry-After", "5"));
         assert_eq!(r, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn unified_reset_future_epoch_yields_delay() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        // reset 60s in the future (epoch seconds 1_000_060)
+        let r = parse_unified_reset(&h("anthropic-ratelimit-unified-reset", "1000060"), now);
+        assert_eq!(r, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn unified_reset_past_or_now_is_none() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        // past → None (fall through, NOT zero)
+        assert_eq!(
+            parse_unified_reset(&h("anthropic-ratelimit-unified-reset", "999000"), now),
+            None
+        );
+        // exactly now → None
+        assert_eq!(
+            parse_unified_reset(&h("anthropic-ratelimit-unified-reset", "1000000"), now),
+            None
+        );
+    }
+
+    #[test]
+    fn unified_reset_clamps_to_six_hours() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        // reset a year out → capped at 6h
+        let r = parse_unified_reset(
+            &h("anthropic-ratelimit-unified-reset", "1031536000"),
+            now,
+        );
+        assert_eq!(r, Some(Duration::from_millis(PERSISTENT_RESET_CAP_MS)));
+    }
+
+    #[test]
+    fn unified_reset_non_numeric_and_missing_are_none() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        assert_eq!(
+            parse_unified_reset(&h("anthropic-ratelimit-unified-reset", "soon"), now),
+            None
+        );
+        assert_eq!(parse_unified_reset(&[], now), None);
+    }
+
+    #[test]
+    fn overage_disabled_reason_reads_header() {
+        assert_eq!(
+            overage_disabled_reason(&h(
+                "anthropic-ratelimit-unified-overage-disabled-reason",
+                "spend_limit"
+            )),
+            Some("spend_limit")
+        );
+        assert_eq!(overage_disabled_reason(&[]), None);
     }
 
     #[test]

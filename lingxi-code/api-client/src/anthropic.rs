@@ -6,7 +6,7 @@
 //! (wired in Tasks 16–18).
 
 use crate::oauth_hook::{current_hook, OAuthRefreshHook, TokenHash};
-use crate::rate_limit::{parse_anthropic_ratelimit_reset, parse_retry_after};
+use crate::rate_limit::{parse_anthropic_ratelimit_reset, parse_retry_after, parse_unified_reset};
 use crate::retry::{with_retry, DEFAULT_BASE_DELAYS_MS, DEFAULT_RETRY_BUDGET};
 use crate::types::{MessageResponse, StreamEvent};
 use crate::ApiError;
@@ -721,7 +721,11 @@ async fn handle_429(
     model: &str,
 ) {
     let now = SystemTime::now();
+    // Delay source preference (claude-code): explicit retry-after, then the
+    // unified-reset window (Max/Pro 5-hr limits), then the per-requests reset,
+    // else 1s.
     let sleep = parse_retry_after(headers)
+        .or_else(|| parse_unified_reset(headers, now))
         .or_else(|| parse_anthropic_ratelimit_reset(headers, now))
         .unwrap_or(std::time::Duration::from_secs(1));
     telemetry::emit_rate_limited(bus, model, duration_ms_clamped(sleep)).await;

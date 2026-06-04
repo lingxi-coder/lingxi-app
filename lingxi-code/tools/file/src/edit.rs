@@ -329,7 +329,20 @@ impl Tool for FileEditTool {
                                 .into(),
                         ));
                     }
-                    let count = before.matches(old_string).count();
+                    // Curly-quote normalization (Batch E): when the file uses
+                    // typographic (curly) quotes but the model sent straight
+                    // quotes, recover the actual curly text from the file so the
+                    // match still locates its target, then re-apply the file's
+                    // curly style to `new_string` so the rewrite preserves the
+                    // typography. Match/count on `actual_old` and `actual_new`
+                    // (claude-code FileEditTool.ts:316,471-479). `before` is the
+                    // LF-normalized in-memory view from Batch D, so all curly
+                    // matching happens against that normalized content.
+                    let actual_old = crate::quotes::find_actual_string(&before, old_string)
+                        .unwrap_or_else(|| old_string.to_string());
+                    let actual_new =
+                        crate::quotes::preserve_quote_style(old_string, &actual_old, new_string);
+                    let count = before.matches(actual_old.as_str()).count();
                     if count == 0 {
                         self.emit_failed(&invocation_id, "no_match").await;
                         return Err(ToolError::InvalidInput(format!(
@@ -344,9 +357,9 @@ impl Tool for FileEditTool {
                         )));
                     }
                     let after = if replace_all {
-                        before.replace(old_string, new_string)
+                        before.replace(actual_old.as_str(), &actual_new)
                     } else {
-                        before.replacen(old_string, new_string, 1)
+                        before.replacen(actual_old.as_str(), &actual_new, 1)
                     };
                     let replacements = if replace_all { count as u32 } else { 1 };
                     (before, after, replacements)
@@ -815,6 +828,113 @@ mod tests {
         // ASSERT BYTES: the lone LF after `c\r\n` is rewritten to the dominant
         // CRLF (matches TS writeTextContent collapsing then re-applying CRLF).
         assert_eq!(std::fs::read(&target).unwrap(), b"a\r\nb\r\nc\r\nd\r\ndone");
+    }
+
+    #[tokio::test]
+    async fn curly_double_in_file_matches_straight_and_preserves_curly() {
+        // File has curly "hello"; model sends straight "hello". Edit must match
+        // and rewrite preserving the file's curly typography (Batch E).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("curly.txt");
+        std::fs::write(&target, "say \u{201C}hello\u{201D} now").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "\"hello\"",
+                "new_string": "\"world\""
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        // new_string straight doubles ⇒ curly applied by open/close context.
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "say \u{201C}world\u{201D} now"
+        );
+    }
+
+    #[tokio::test]
+    async fn curly_single_contraction_keeps_right_single() {
+        // File uses curly singles; new_string contains a contraction `don't`.
+        // The apostrophe (letter on both sides) must become a right single
+        // curly, NOT an opening quote.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("contraction.txt");
+        std::fs::write(&target, "a \u{2018}b\u{2019} c").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "'b'",
+                "new_string": "don't"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "a don\u{2019}t c"
+        );
+    }
+
+    #[tokio::test]
+    async fn curly_single_open_vs_close_positions() {
+        // Leading quote (start of replacement) ⇒ opening; trailing quote (after
+        // a letter, end) ⇒ closing.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("quotes.txt");
+        std::fs::write(&target, "x \u{2018}q\u{2019} y").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "'q'",
+                "new_string": "'word'"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "x \u{2018}word\u{2019} y"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_curly_in_file_leaves_new_string_untouched() {
+        // Plain ASCII file ⇒ exact match ⇒ no quote normalization ⇒ new_string
+        // straight quotes stay straight.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("plain.txt");
+        std::fs::write(&target, "say \"hello\" now").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "\"hello\"",
+                "new_string": "\"world\""
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        // Straight quotes preserved verbatim (no curly applied).
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "say \"world\" now"
+        );
     }
 
     #[tokio::test]

@@ -26,6 +26,7 @@ pub mod file_meta;
 pub mod glob;
 pub mod grep;
 pub mod notebook_edit;
+pub mod quotes;
 pub mod read;
 pub mod shared;
 pub mod write;

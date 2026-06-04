@@ -94,6 +94,19 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 /// literally starts with `~` or has surrounding whitespace); and `BashTool`'s
 /// `readFileState.set` for files a bash command writes is out of scope (the
 /// bash file-write interception is itself unported).
+///
+/// This function only populates the ordered `Vec` backing `/files`. The
+/// RICHER `{content, mtime_ms, offset, limit}` registry
+/// ([`ConversationOrchestrator::read_state_map`], the 1:1 port of TS
+/// `readFileState`) is populated by the *tools themselves* — each file tool's
+/// `call` does `ctx.read_file_state.set(…)` on its construction-time
+/// [`tool_api::BuiltinToolContext`] (matching TS, where every file tool calls
+/// `readFileState.set`). The composition root (`engine-desktop` / `mobile`)
+/// shares the SAME `Arc` between `orch.read_state_map` and the
+/// `BuiltinToolContext` it hands the file tools, so a tool's write is visible
+/// to the orchestrator. The orchestrator never constructs the file tools (they
+/// arrive pre-built in `orch.tools`), so there is no `BuiltinToolContext`
+/// construction in this crate to thread the `Arc` through.
 async fn record_read_file_state(
     orch: &ConversationOrchestrator,
     name: &str,
@@ -932,6 +945,56 @@ mod read_file_state_tests {
 
         let files = orch.files_in_context().await;
         assert_eq!(files, vec![cwd.join("src").join("a.rs")]);
+        // The richer `read_state_map` is a SEPARATE registry from the `/files`
+        // `Vec`. `record_read_file_state` (which a `StubFileTool` dispatch
+        // exercises) only touches the `Vec`; the map is populated by the real
+        // file tools' `readFileState.set`, which the stub does not call. So the
+        // `/files` ordering semantics above are unaffected by Batch B.
+        assert!(
+            orch.read_state_map.lock().unwrap().is_empty(),
+            "the richer read-state map is independent of the /files Vec"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_state_map_starts_empty_and_is_distinct_from_files_vec() {
+        // Behavior-neutral wiring check: a fresh orchestrator has an empty
+        // read-state registry, separate from the `/files` `Vec`.
+        let orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
+        assert!(orch.read_state_map.lock().unwrap().is_empty());
+        assert!(orch.files_in_context().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_state_map_arc_is_shareable_and_visible_through_orchestrator() {
+        // Proves the composition-root contract: the SAME `Arc` the orchestrator
+        // holds in `read_state_map` is what the file tools' `BuiltinToolContext`
+        // share, so a `readFileState.set` performed against a clone of that
+        // `Arc` (as the real `FileReadTool` does — see the `tool-file`
+        // `read_populates_read_file_state_map_with_offset_limit` test) is
+        // visible through `orch.read_state_map`. Simulated here with a direct
+        // `set` (the orchestrator crate cannot depend on `tool-file`), keeping
+        // the wiring assertion crate-local. The `/files` `Vec` is untouched.
+        let orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
+        let shared = orch.read_state_map.clone();
+        tool_api::read_file_state::set(
+            &shared,
+            PathBuf::from("/tmp/a.txt"),
+            tool_api::read_file_state::ReadFileEntry {
+                content: "line2\n".into(),
+                mtime_ms: 42,
+                offset: Some(2),
+                limit: Some(1),
+            },
+        );
+        let entry =
+            tool_api::read_file_state::get(&orch.read_state_map, std::path::Path::new("/tmp/a.txt"))
+                .expect("orchestrator registry sees the shared-Arc set");
+        assert_eq!(entry.content, "line2\n");
+        assert_eq!(entry.offset, Some(2));
+        assert_eq!(entry.limit, Some(1));
+        // The `/files` `Vec` remains independent and empty.
+        assert!(orch.files_in_context().await.is_empty());
     }
 
     #[tokio::test]

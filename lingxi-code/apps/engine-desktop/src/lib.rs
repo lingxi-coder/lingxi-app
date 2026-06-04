@@ -964,6 +964,10 @@ pub async fn build(
             None
         };
     let tool_ctx = BuiltinToolContext {
+        // FILE.B: file tools share one read-state map for the (future) staleness
+        // guard / Read-dedup; the composition-root Arc-share with the orchestrator
+        // is wired when a consumer (FILE.A/D/E/F) reads it.
+        read_file_state: tool_api::read_file_state::new_read_file_state_map(),
         fs: Arc::new(PosixFileSystem::new(cwd.clone())),
         bus: Arc::new(telemetry::AnalyticsBus::new()),
         trusted_dirs: vec![cwd.clone()],

@@ -7,6 +7,7 @@
 //! reshape (individual `Arc<dyn Platform>` handles, no god-object) will
 //! eventually slim this surface.
 
+use crate::read_file_state::ReadFileStateMap;
 use api_client::AnthropicProvider;
 use permission::PermissionMode;
 use traits::permission_gate::PermissionGate;
@@ -142,4 +143,15 @@ pub struct BuiltinToolContext {
     /// (`computer`/`android_use`/`ios_use`) route here. `None` unless a
     /// desktop automation backend or a mobile UniFFI impl is wired.
     pub computer_control: Option<Arc<dyn ComputerControl>>,
+
+    // ===== file-tools-remainder Batch B: read-state registry =====
+    /// Per-path read-state map (`path → {content, mtime_ms, offset, limit}`).
+    /// 1:1 port of claude-code's `readFileState`
+    /// (`FileReadTool.ts:1032`): a successful `Read` records the file's
+    /// content, floor-truncated mtime (ms), and the `offset`/`limit` it read
+    /// with. The orchestrator shares ONE `Arc<Mutex<HashMap<…>>>` across the
+    /// file tools it constructs so a write from one tool is visible to the
+    /// others (and to the future staleness guards / Read dedup that will read
+    /// this map). Cheap to clone (`Arc`).
+    pub read_file_state: ReadFileStateMap,
 }

@@ -183,8 +183,14 @@ impl Tool for FileReadTool {
             .get("file_path")
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("file_path is required".into()))?;
-        let offset = input.get("offset").and_then(Value::as_u64).unwrap_or(1);
-        let limit = input.get("limit").and_then(Value::as_u64);
+        // Raw input values, preserved verbatim for the read-state registry
+        // (TS `readFileState.set` stores the `offset`/`limit` as provided —
+        // `undefined` when absent). `offset` below defaults to `1` only for
+        // slicing; the registry records the un-defaulted `Option`.
+        let input_offset = input.get("offset").and_then(Value::as_u64);
+        let input_limit = input.get("limit").and_then(Value::as_u64);
+        let offset = input_offset.unwrap_or(1);
+        let limit = input_limit;
 
         let started = Instant::now();
         let path = PathBuf::from(file_path);
@@ -199,13 +205,21 @@ impl Tool for FileReadTool {
             }
         };
 
-        let size = match tokio::fs::metadata(&canon).await {
-            Ok(m) => m.len(),
+        let metadata = match tokio::fs::metadata(&canon).await {
+            Ok(m) => m,
             Err(e) => {
                 self.emit_failed(&invocation_id, "io_metadata").await;
                 return Err(ToolError::Io(e.to_string()));
             }
         };
+        let size = metadata.len();
+        // Floor-truncated mtime in ms, matching TS `Math.floor(mtimeMs)` for
+        // the read-state registry (`readFileState.set`). A missing mtime
+        // (rare; e.g. platforms without mtime) falls back to the epoch (`0`).
+        let mtime_ms = metadata
+            .modified()
+            .map(tool_api::read_file_state::mtime_ms_floor)
+            .unwrap_or(0);
         if size > MAX_FILE_READ_SIZE {
             self.emit_failed(&invocation_id, "file_too_large").await;
             return Err(ToolError::Io(format_too_large(&canon, size)));
@@ -250,6 +264,25 @@ impl Tool for FileReadTool {
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, bytes.len() as u64, duration_ms)
             .await;
+
+        // Record the read into the shared read-state registry — 1:1 with TS
+        // `readFileState.set(fullFilePath, {content, timestamp, offset,
+        // limit})` (`FileReadTool.ts:1032`). `content` is the range-limited
+        // slice TS stores (from `readFileInRange`), `mtime_ms` is floored, and
+        // `offset`/`limit` are the verbatim (un-defaulted) input values. The
+        // key is the canonicalized absolute path. Behavior-neutral side-effect:
+        // nothing reads this map yet (staleness guards + Read dedup are later
+        // batches), so the tool's result shape is unchanged.
+        tool_api::read_file_state::set(
+            &self.ctx.read_file_state,
+            canon.clone(),
+            tool_api::read_file_state::ReadFileEntry {
+                content: slice.clone(),
+                mtime_ms,
+                offset: input_offset,
+                limit: input_limit,
+            },
+        );
 
         Ok(ToolCallResult {
             data: json!({
@@ -443,6 +476,76 @@ mod tests {
             .unwrap();
         assert_eq!(result.data["content"], "alpha\nbeta\ngamma\n");
         assert_eq!(result.data["total_lines"], 3);
+    }
+
+    #[tokio::test]
+    async fn read_populates_read_file_state_map_with_offset_limit() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("a.txt");
+        std::fs::write(&target, "line1\nline2\nline3\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        // Hold a handle to the shared registry BEFORE the ctx is moved into the
+        // tool — the tool's `readFileState.set` mutates this same `Arc`.
+        let map = ctx.read_file_state.clone();
+        let tool = FileReadTool::new(ctx);
+        // canonicalize the target the same way the tool keys the entry.
+        let canon = std::fs::canonicalize(&target).unwrap();
+        tool.call(
+            json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 1 }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let entry =
+            tool_api::read_file_state::get(&map, &canon).expect("registry entry recorded on read");
+        // Content is the range-limited slice (TS stores `readFileInRange`'s
+        // output), and offset/limit are the verbatim input values.
+        assert_eq!(entry.content, "line2\n");
+        assert_eq!(entry.offset, Some(2));
+        assert_eq!(entry.limit, Some(1));
+        // mtime recorded as a non-negative floor-truncated millisecond value.
+        assert!(entry.mtime_ms >= 0);
+    }
+
+    #[tokio::test]
+    async fn read_without_offset_limit_records_none() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("b.txt");
+        std::fs::write(&target, "alpha\nbeta\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let map = ctx.read_file_state.clone();
+        let tool = FileReadTool::new(ctx);
+        let canon = std::fs::canonicalize(&target).unwrap();
+        tool.call(
+            json!({ "file_path": target.to_str().unwrap() }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let entry = tool_api::read_file_state::get(&map, &canon).unwrap();
+        assert_eq!(entry.content, "alpha\nbeta\n");
+        assert_eq!(entry.offset, None);
+        assert_eq!(entry.limit, None);
+    }
+
+    #[tokio::test]
+    async fn failed_read_does_not_populate_map() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("missing.txt");
+        let (ctx, _sink) = make_ctx(&tmp);
+        let map = ctx.read_file_state.clone();
+        let tool = FileReadTool::new(ctx);
+        let _ = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await;
+        // A read that errored (missing file) records nothing.
+        assert!(map.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -211,6 +211,21 @@ pub struct ConversationOrchestrator {
     ///   display order of re-read files differs — never the set itself.
     /// - The 100-entry LRU eviction is intentionally not reproduced (MVP).
     pub(crate) read_file_state: Arc<Mutex<Vec<std::path::PathBuf>>>,
+    /// Richer per-path read-state registry (`path → {content, mtime_ms,
+    /// offset, limit}`) — the 1:1 port of claude-code's `readFileState` map
+    /// (`FileReadTool.ts:1032`). Kept SEPARATE from the `read_file_state`
+    /// `Vec` above, which preserves the existing `/files` ordering semantics.
+    /// The orchestrator shares this `Arc` with the file tools' construction-
+    /// time `BuiltinToolContext` so a tool's `readFileState.set` is visible
+    /// here (and to the future staleness guards / Read dedup). Behavior-neutral
+    /// for now: the map is populated but nothing reads it yet.
+    ///
+    /// Intentionally write-only THIS batch (file-tools-remainder Batch B): the
+    /// staleness guards (D/E/F) and Read dedup (A) are the first consumers, and
+    /// the composition root shares this `Arc` into the file tools'
+    /// `BuiltinToolContext`. Allow `dead_code` until those land.
+    #[allow(dead_code)]
+    pub(crate) read_state_map: tool_api::read_file_state::ReadFileStateMap,
 }
 
 impl ConversationOrchestrator {
@@ -258,6 +273,7 @@ impl ConversationOrchestrator {
             agent_catalog: None,
             compaction: None,
             read_file_state: Arc::new(Mutex::new(Vec::new())),
+            read_state_map: tool_api::read_file_state::new_read_file_state_map(),
         }
     }
 

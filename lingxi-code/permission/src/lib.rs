@@ -8,6 +8,7 @@
 pub mod auto_edit_safety;
 pub mod classifier;
 pub mod dangerous_patterns;
+pub mod dangerous_perms;
 pub mod defaults_per_tool;
 pub mod denial_tracking;
 pub mod filesystem;
@@ -32,6 +33,14 @@ pub use auto_edit_safety::{
     DANGEROUS_DIRECTORIES, DANGEROUS_FILES,
 };
 pub use classifier::is_classifier_permissions_enabled;
+pub use dangerous_patterns::{
+    dangerous_bash_patterns, CROSS_PLATFORM_CODE_EXEC, POWERSHELL_DANGEROUS_PATTERNS,
+};
+pub use dangerous_perms::{
+    find_dangerous_classifier_permissions, is_dangerous_bash_permission,
+    is_dangerous_classifier_permission, is_dangerous_powershell_permission,
+    is_dangerous_task_permission, DangerousPermissionInfo,
+};
 pub use defaults_per_tool::tool_default;
 pub use filesystem::FsRoots;
 pub use gate::{

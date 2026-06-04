@@ -20,6 +20,7 @@ pub mod codec;
 pub mod error;
 pub mod eventstream;
 pub mod gemini;
+pub mod model_capabilities;
 pub mod model_spec;
 /// `OpenAI` / OpenAI-compatible chat-completions codec.
 pub mod openai;
@@ -45,6 +46,10 @@ pub use client::GenericClient;
 pub use codec::{SseDecoder, WireCodec};
 pub use error::CodecError;
 pub use gemini::GeminiCodec;
+pub use model_capabilities::{
+    get_model_capability, is_model_capabilities_eligible, load_cache, refresh_model_capabilities,
+    sort_for_matching, ModelCapability,
+};
 pub use model_spec::{ModelSpec, DEFAULT_PROFILE};
 pub use openai::OpenAiCodec;
 pub use profile::{builtin_profiles, parse_profiles, ProviderKind, ProviderProfile};

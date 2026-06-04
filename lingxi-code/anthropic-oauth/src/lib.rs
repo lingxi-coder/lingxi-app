@@ -24,9 +24,11 @@ pub mod config;
 pub mod handle;
 pub mod limits;
 pub mod pkce;
+pub mod profile;
 pub mod refresh;
 pub mod resolver;
 pub mod scope_upgrade;
+pub mod subscription;
 
 #[cfg(test)]
 mod testsupport;
@@ -38,7 +40,14 @@ pub use config::{ClaudeAiOAuthConfig, CLAUDE_CODE_OAUTH_SCOPES, REFRESH_GRANT_TY
 pub use handle::OAuthHandle;
 pub use limits::{ClaudeAiLimitsState, ClaudeAiLimitsTracker, SubscriptionType};
 pub use pkce::{generate_pkce, generate_state_token};
+pub use profile::{
+    fetch_profile_from_api_key, fetch_profile_from_oauth_token, OAuthAccount, OAuthOrganization,
+    OAuthProfileResponse,
+};
 pub use refresh::{AuthState, RefreshDriver};
+pub use subscription::{
+    apply_profile, has_profile_scope, is_enterprise, is_subscriber_tier, subscription_from_scopes,
+};
 pub use resolver::{resolve, AuthSource, ResolverContext};
 pub use scope_upgrade::{
     parse_scope_upgrade, run_scope_upgrade, PkceRunResult, PkceRunner, ScopeUpgradeRequired,

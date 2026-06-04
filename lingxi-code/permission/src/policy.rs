@@ -51,6 +51,19 @@ pub struct PermissionPolicy {
     /// matched by exact tool name); production sets this via [`Self::with_roots`]
     /// so `Edit(src/**)` / `Read(./secrets/**)` match the input path.
     pub roots: Option<FsRoots>,
+    /// Allow rules stripped out on entry to [`PermissionMode::Auto`] because
+    /// they would bypass the auto-mode classifier (`Bash(python:*)`, `Agent(*)`,
+    /// `PowerShell(iex:*)`, …). Stashed here by
+    /// [`Self::strip_dangerous_for_auto`] and re-added verbatim by
+    /// [`Self::restore_dangerous`] when leaving Auto. Empty in every other mode.
+    /// 1:1 with the TS `strippedDangerousRules` field on `ToolPermissionContext`.
+    pub stripped_dangerous: Vec<PermissionRule>,
+    /// Per-stripped-rule `(source, original_index_within_source_bucket)`, kept
+    /// parallel to [`Self::stripped_dangerous`] so [`Self::restore_dangerous`]
+    /// re-inserts each rule at its original position — making `strip → restore`
+    /// an EXACT identity (TS only guarantees set-equality via `applyPermissionUpdate`
+    /// re-add; the position record is a Rust-side strengthening, documented).
+    stripped_positions: Vec<(PermissionRuleSource, usize)>,
 }
 
 impl PermissionPolicy {
@@ -65,6 +78,8 @@ impl PermissionPolicy {
             denial_tracking: Mutex::new(DenialTrackingState::default()),
             bypass_killswitch_active: false,
             roots: None,
+            stripped_dangerous: Vec::new(),
+            stripped_positions: Vec::new(),
         }
     }
 
@@ -196,6 +211,87 @@ impl PermissionPolicy {
             PermissionMode::DontAsk => deny_with_mode(PermissionMode::DontAsk),
             _ => ask_with_mode(self.mode, tool_name),
         }
+    }
+
+    /// Strip every ALLOW rule that would bypass the auto-mode classifier (e.g.
+    /// `Bash(python:*)`, `Agent(*)`, `PowerShell(iex:*)`), stashing the removed
+    /// rules in [`Self::stripped_dangerous`] so [`Self::restore_dangerous`] can
+    /// re-add them verbatim. 1:1 with `stripDangerousPermissionsForAutoMode`
+    /// (`permissionSetup.ts:510-553`): the predicate is
+    /// [`crate::dangerous_perms::is_dangerous_classifier_permission`].
+    ///
+    /// Deny/ask rules are never touched (only allow rules can auto-allow an
+    /// arbitrary-code command ahead of the classifier). Idempotent in spirit but
+    /// NOT a no-op on a fresh strip — call [`Self::restore_dangerous`] before
+    /// re-stripping to avoid stacking the stash. (The mode-transition driver
+    /// [`Self::set_mode`] guarantees a strip is always paired with a restore.)
+    ///
+    /// This does NOT change [`Self::authorize`] behavior on its own: Auto mode's
+    /// classifier is unwired externally (Batch 6 stub), so stripping is
+    /// behavior-neutral until a future wiring batch consumes Auto mode.
+    pub fn strip_dangerous_for_auto(&mut self) {
+        for (&source, rules) in &mut self.allow_rules {
+            // Record each dangerous rule's ORIGINAL index within this bucket, then
+            // restore re-inserts in ascending original-index order — which exactly
+            // reconstructs the pre-strip vec (a removed slot's gap is re-filled
+            // before any later removed slot is, so indices stay valid).
+            let mut kept = Vec::with_capacity(rules.len());
+            for (orig_idx, rule) in std::mem::take(rules).into_iter().enumerate() {
+                if crate::dangerous_perms::is_dangerous_classifier_permission(
+                    &rule.value.tool_name,
+                    &rule.value.rule_content,
+                ) {
+                    self.stripped_dangerous.push(rule);
+                    self.stripped_positions.push((source, orig_idx));
+                } else {
+                    kept.push(rule);
+                }
+            }
+            *rules = kept;
+        }
+    }
+
+    /// Re-add every allow rule previously stashed by
+    /// [`Self::strip_dangerous_for_auto`] at its original bucket position, then
+    /// clear the stash so a second call is a no-op. 1:1 with
+    /// `restoreDangerousPermissions` (`permissionSetup.ts:561-579`). Exact
+    /// inverse of a strip: `strip → restore` returns [`Self::allow_rules`] to its
+    /// pre-strip contents (positions included — see [`Self::stripped_positions`]).
+    pub fn restore_dangerous(&mut self) {
+        let rules = std::mem::take(&mut self.stripped_dangerous);
+        let positions = std::mem::take(&mut self.stripped_positions);
+        // Re-insert in ascending recorded-index order so each rule lands back in
+        // the same slot it was removed from (strip recorded indices in this order).
+        for (rule, (source, idx)) in rules.into_iter().zip(positions) {
+            let bucket = self.allow_rules.entry(source).or_default();
+            let at = idx.min(bucket.len());
+            bucket.insert(at, rule);
+        }
+    }
+
+    /// Transition the active mode, running the auto-mode strip/restore
+    /// side-effects. 1:1 with the strip/restore arms of `transitionPermissionMode`
+    /// (`permissionSetup.ts:597-646`, the `:627-637` block):
+    ///
+    /// - entering `Auto` (from a non-Auto mode) → [`Self::strip_dangerous_for_auto`];
+    /// - leaving `Auto` (to a non-Auto mode) → [`Self::restore_dangerous`].
+    ///
+    /// `to == from` is a no-op (matches the TS `fromMode === toMode` guard).
+    /// The Plan-mode attachment and classifier-gate side-effects from TS are out
+    /// of scope here (Plan is Batch 3; the LLM classifier is the stubbed Batch 6
+    /// non-goal). Strip/restore is behavior-neutral on [`Self::authorize`] until
+    /// Auto's classifier is wired, so this is safe to call now.
+    pub fn set_mode(&mut self, to: PermissionMode) {
+        let from = self.mode;
+        if from == to {
+            return;
+        }
+        if to == PermissionMode::Auto && from != PermissionMode::Auto {
+            self.strip_dangerous_for_auto();
+        } else if from == PermissionMode::Auto && to != PermissionMode::Auto {
+            self.restore_dangerous();
+        }
+        self.mode = to;
     }
 
     /// Does `rule` apply to a call of `tool_name` with `input`?
@@ -952,6 +1048,133 @@ mod tests {
         assert!(matches!(
             p.authorize("Read", &edit("/proj/agents/foo.md")),
             PermissionResult::Ask { .. }
+        ));
+    }
+
+    // ── Batch 4: auto-mode dangerous-permission strip/restore ─────────────
+
+    fn allow_rule(tool: &str, content: Option<&str>) -> PermissionRule {
+        PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: tool.into(),
+                rule_content: content.map(str::to_string),
+            },
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::UserSettings,
+        }
+    }
+
+    fn allow_count(p: &PermissionPolicy) -> usize {
+        p.allow_rules.values().flatten().count()
+    }
+
+    fn seeded_policy(mode: PermissionMode) -> PermissionPolicy {
+        let mut p = PermissionPolicy::new(mode);
+        for r in [
+            allow_rule("Bash", Some("python:*")), // dangerous
+            allow_rule("Bash", Some("ls:*")),     // safe
+            allow_rule("Agent", None),            // dangerous
+            allow_rule("Read", None),             // safe
+        ] {
+            p.allow_rules.entry(r.source).or_default().push(r);
+        }
+        p
+    }
+
+    #[test]
+    fn strip_removes_only_dangerous_allow_rules_and_stashes_them() {
+        let mut p = seeded_policy(PermissionMode::Default);
+        assert_eq!(allow_count(&p), 4);
+        p.strip_dangerous_for_auto();
+        // Two dangerous rules stripped (Bash(python:*) + Agent), two kept.
+        assert_eq!(allow_count(&p), 2);
+        assert_eq!(p.stripped_dangerous.len(), 2);
+        // The kept rules are the safe ones.
+        let kept: Vec<_> = p.allow_rules.values().flatten().collect();
+        assert!(kept.iter().all(|r| !crate::dangerous_perms::is_dangerous_classifier_permission(
+            &r.value.tool_name,
+            &r.value.rule_content
+        )));
+    }
+
+    #[test]
+    fn restore_is_exact_inverse_of_strip() {
+        let mut p = seeded_policy(PermissionMode::Default);
+        let before = p.allow_rules.clone();
+        p.strip_dangerous_for_auto();
+        p.restore_dangerous();
+        assert_eq!(p.allow_rules, before, "strip→restore must be identity");
+        assert!(p.stripped_dangerous.is_empty());
+    }
+
+    #[test]
+    fn second_restore_is_a_noop() {
+        let mut p = seeded_policy(PermissionMode::Default);
+        p.strip_dangerous_for_auto();
+        p.restore_dangerous();
+        let after_first = p.allow_rules.clone();
+        p.restore_dangerous(); // stash already empty
+        assert_eq!(p.allow_rules, after_first);
+        assert!(p.stripped_dangerous.is_empty());
+    }
+
+    #[test]
+    fn set_mode_strips_on_enter_auto_and_restores_on_leave() {
+        let mut p = seeded_policy(PermissionMode::Default);
+        let before = p.allow_rules.clone();
+
+        p.set_mode(PermissionMode::Auto);
+        assert_eq!(p.mode, PermissionMode::Auto);
+        assert_eq!(allow_count(&p), 2); // dangerous stripped
+        assert_eq!(p.stripped_dangerous.len(), 2);
+
+        p.set_mode(PermissionMode::Default);
+        assert_eq!(p.mode, PermissionMode::Default);
+        assert_eq!(p.allow_rules, before); // restored
+        assert!(p.stripped_dangerous.is_empty());
+    }
+
+    #[test]
+    fn set_mode_to_same_mode_is_noop() {
+        let mut p = seeded_policy(PermissionMode::Auto);
+        // Already Auto; transitioning Auto→Auto must NOT strip.
+        p.set_mode(PermissionMode::Auto);
+        assert_eq!(allow_count(&p), 4);
+        assert!(p.stripped_dangerous.is_empty());
+    }
+
+    #[test]
+    fn set_mode_between_two_non_auto_modes_leaves_rules_untouched() {
+        let mut p = seeded_policy(PermissionMode::Default);
+        let before = p.allow_rules.clone();
+        p.set_mode(PermissionMode::AcceptEdits);
+        assert_eq!(p.mode, PermissionMode::AcceptEdits);
+        assert_eq!(p.allow_rules, before);
+        assert!(p.stripped_dangerous.is_empty());
+    }
+
+    #[test]
+    fn auto_fallback_asks_for_stripped_tool() {
+        // After stripping the `Agent` allow rule on entry to Auto, `Agent` has no
+        // remaining allow rule, so Auto (classifier unwired) falls through to ask
+        // — strip is behavior-neutral relative to the unwired Auto classifier.
+        let mut p = seeded_policy(PermissionMode::Default);
+        // Before: the Agent allow rule auto-allows (tool-wide, no roots).
+        assert!(matches!(
+            p.authorize("Agent", &serde_json::json!({})),
+            PermissionResult::Allow { .. }
+        ));
+        p.set_mode(PermissionMode::Auto);
+        // After strip: no Agent allow rule remains → Auto fallback asks.
+        assert!(matches!(
+            p.authorize("Agent", &serde_json::json!({})),
+            PermissionResult::Ask { .. }
+        ));
+        // Leaving Auto restores it → auto-allow again.
+        p.set_mode(PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Agent", &serde_json::json!({})),
+            PermissionResult::Allow { .. }
         ));
     }
 }

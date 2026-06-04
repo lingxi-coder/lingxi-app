@@ -25,6 +25,7 @@
 pub mod bash;
 pub mod command_semantics;
 pub mod powershell;
+pub mod prompt;
 pub mod read_only;
 pub mod repl;
 pub mod shared;

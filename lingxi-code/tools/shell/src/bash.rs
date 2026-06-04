@@ -192,17 +192,19 @@ impl Tool for BashTool {
     }
 
     async fn description(&self, input: &Value, _opts: &DescriptionOptions) -> String {
-        if let Some(d) = input.get("description").and_then(Value::as_str) {
-            return d.to_string();
-        }
-        match input.get("command").and_then(Value::as_str) {
-            Some(c) => format!("Running: {}", c.lines().next().unwrap_or("")),
-            None => "Running shell command".into(),
+        // claude-code `BashTool.tsx:426-429`: `return description || 'Run shell
+        // command'`. A present-but-empty `description` falls through to the
+        // default (JS `||` is falsy on `''`); the command is NOT used.
+        match input.get("description").and_then(Value::as_str) {
+            Some(d) if !d.is_empty() => d.to_string(),
+            _ => "Run shell command".into(),
         }
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        "Run a shell command via the Bash tool.".into()
+        // BASH.6 — faithful ~370-line port of claude-code `getSimplePrompt`,
+        // driven by the live sandbox runtime config on this context.
+        crate::prompt::simple_prompt(&self.ctx.sandbox_runtime)
     }
 
     async fn validate_input(

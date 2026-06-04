@@ -2,32 +2,46 @@
 //! [`crate::RuntimeSpawner`] so their completions can be collected on a
 //! dedicated channel.
 //!
-//! The full implementation (timeout enforcement, cancellation, telemetry) is
-//! delivered in Plan 09 alongside the Skills / Commands / Output Styles
-//! plumbing. M1.4 ships only the type so other crates can reference it.
+//! This is the config-`async` (`blocking == false`) backgrounding path,
+//! mirroring claude-code `executeInBackground` (`utils/hooks.ts:995-1030`):
+//! a hook flagged non-blocking is detached from the in-flight action so the
+//! engine proceeds immediately, and its eventual result folds back through a
+//! completion channel rather than gating the originating turn.
+//!
+//! The runtime first-line `{"async":true}` detection path (`hooks.ts:1117-1166`)
+//! is DEFERRED — it needs an incremental-stdout `ProcessRunner` capability that
+//! the buffered `ProcessRunner::run` does not provide. Only the config-`async`
+//! path ships here.
 
-use crate::definition::HookDefinition;
-use crate::events::HookEvent;
-use crate::registry::HookContext;
-use crate::response::HookResult;
+use crate::response::{HookOutcome, HookResult};
 use protocol::HookId;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use traits::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 
+/// Default async-hook timeout (15s) — matches claude-code
+/// `registerPendingAsyncHook` (`utils/hooks/AsyncHookRegistry.ts:51`):
+/// `const timeout = asyncResponse.asyncTimeout || 15000`.
+pub const DEFAULT_ASYNC_HOOK_TIMEOUT_MS: u64 = 15_000;
+
+/// Boxed `'static` future producing the eventual [`HookResult`] of a
+/// backgrounded hook. The executor builds one of these (capturing owned
+/// `Arc`s for the relevant arm) and hands it to [`AsyncHookRegistry::spawn`].
+pub type HookWork = Pin<Box<dyn Future<Output = HookResult> + Send + 'static>>;
+
 /// Registry of currently-running non-blocking hooks.
 ///
-/// Each `spawn` call hands the hook off to the runtime spawner and stores
-/// the resulting handle so the engine can cancel or join it later. Completed
-/// hooks publish a `(HookId, HookResult)` tuple on `completion_tx` so the
-/// engine can fold the result back into the originating session.
+/// Each `spawn` call hands the hook off to the runtime spawner and stores the
+/// resulting handle so the engine can cancel or join it later. Completed hooks
+/// publish a `(HookId, HookResult)` tuple on `completion_tx` so the engine can
+/// fold the result back into the originating session.
 pub struct AsyncHookRegistry {
-    #[allow(dead_code)] // Wired up in Plan 09 with the full async dispatch logic.
     runtime: Arc<dyn RuntimeSpawner>,
-    #[allow(dead_code)] // Wired up in Plan 09.
     in_flight: Arc<Mutex<HashMap<HookId, BackgroundTaskHandle>>>,
-    #[allow(dead_code)] // Wired up in Plan 09.
     completion_tx: mpsc::Sender<(HookId, HookResult)>,
 }
 
@@ -46,18 +60,260 @@ impl AsyncHookRegistry {
         }
     }
 
-    /// Spawn a non-blocking hook into the background. Stubbed for M1.4 —
-    /// returns `Ok(())` without spawning anything. The full body lands in
-    /// Plan 09.
-    #[allow(clippy::unused_async)] // Full impl awaits the spawned task; stub does not.
+    /// Spawn a non-blocking hook into the background.
+    ///
+    /// `work` is the future that actually executes the hook (built by the
+    /// executor for the appropriate arm); `hook_id` keys the in-flight entry
+    /// and the completion tuple; `async_timeout` bounds the wall-clock the
+    /// hook may run (falling back to [`DEFAULT_ASYNC_HOOK_TIMEOUT_MS`] when
+    /// `None`, matching claude-code's `asyncTimeout || 15000`).
+    ///
+    /// The spawned task races `work` against `runtime.sleep(timeout)`. On
+    /// expiry the completion carries a [`HookOutcome::Timeout`] result; on
+    /// normal completion it carries the hook's own [`HookResult`]. Either way
+    /// the entry is removed from `in_flight` and the result is published on
+    /// `completion_tx` (best-effort — a closed receiver is ignored).
+    ///
+    /// Returns the [`BackgroundTaskHandle`] of the spawned task so callers can
+    /// later `cancel` it.
+    ///
+    /// # Errors
+    /// Returns [`RuntimeError`] if the runtime refuses the spawn (e.g. it is
+    /// shutting down).
     pub async fn spawn(
         &self,
-        _hook: HookDefinition,
-        _event: HookEvent,
-        _ctx: HookContext,
-    ) -> Result<(), RuntimeError> {
-        // Full impl in Plan 09 (Skills / Cmd / Styles tie-in). M1.4 ships the
-        // type so the dispatcher can reference it.
+        hook_id: HookId,
+        async_timeout: Option<Duration>,
+        work: HookWork,
+    ) -> Result<BackgroundTaskHandle, RuntimeError> {
+        let timeout = async_timeout
+            .unwrap_or_else(|| Duration::from_millis(DEFAULT_ASYNC_HOOK_TIMEOUT_MS));
+        // One clone races the timeout inside the task; a second drives the
+        // spawn below (the first is moved into the `async move` block).
+        let timeout_runtime = self.runtime.clone();
+        let in_flight = self.in_flight.clone();
+        let completion_tx = self.completion_tx.clone();
+
+        let task: Pin<Box<dyn Future<Output = ()> + Send + 'static>> = Box::pin(async move {
+            // Race the hook against its timeout via the runtime's `sleep`.
+            // `tokio::select!` polls both arms; whichever resolves first wins.
+            let result = tokio::select! {
+                biased;
+                r = work => r,
+                () = timeout_runtime.sleep(timeout) => timeout_result(),
+            };
+            // Drop the in-flight entry before publishing so a draining engine
+            // never observes a completed-but-still-tracked hook.
+            in_flight.lock().await.remove(&hook_id);
+            // Best-effort publish: a closed receiver (engine torn down) is not
+            // an error for a fire-and-forget hook.
+            let _ = completion_tx.send((hook_id, result)).await;
+        });
+
+        // Hold the in-flight lock across spawn + insert so the spawned task's
+        // own removal (which takes the same lock) can never run before this
+        // insert — otherwise a fast hook could remove-then-be-re-inserted,
+        // leaking a stale entry on a multi-threaded runtime.
+        let mut guard = self.in_flight.lock().await;
+        let handle = self.runtime.spawn("async_hook", task).await?;
+        guard.insert(hook_id, handle.clone());
+        drop(guard);
+        Ok(handle)
+    }
+
+    /// Number of hooks currently tracked as in-flight. Primarily for tests and
+    /// diagnostics.
+    #[must_use]
+    pub async fn in_flight_len(&self) -> usize {
+        self.in_flight.lock().await.len()
+    }
+
+    /// Whether `hook_id` is currently tracked as in-flight.
+    #[must_use]
+    pub async fn is_in_flight(&self, hook_id: HookId) -> bool {
+        self.in_flight.lock().await.contains_key(&hook_id)
+    }
+
+    /// Cancel a previously-spawned background hook, dropping its in-flight
+    /// entry. No-op if the hook already completed or was never tracked.
+    ///
+    /// # Errors
+    /// Propagates a [`RuntimeError`] from the runtime's `cancel`.
+    pub async fn cancel(&self, hook_id: HookId) -> Result<(), RuntimeError> {
+        let handle = self.in_flight.lock().await.remove(&hook_id);
+        if let Some(handle) = handle {
+            self.runtime.cancel(&handle).await?;
+        }
         Ok(())
+    }
+}
+
+/// The [`HookResult`] published when an async hook exceeds its timeout. Carries
+/// [`HookOutcome::Timeout`] with no parsed response so a draining engine never
+/// mistakes a timed-out hook for a `Block`.
+fn timeout_result() -> HookResult {
+    HookResult {
+        outcome: HookOutcome::Timeout,
+        stdout: String::new(),
+        stderr: "async hook timed out".to_string(),
+        exit_code: None,
+        response: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::response::HookOutcome;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::Notify;
+
+    /// Tokio-backed [`RuntimeSpawner`] for these unit tests. The hooks crate
+    /// already depends on tokio (the executor uses `tokio::sync::RwLock`), so
+    /// the test runtime can use `tokio::spawn` / `tokio::time::sleep` directly
+    /// without pulling in the test-harness mock.
+    struct TestRuntime {
+        next_id: AtomicU64,
+        handles: StdMutex<HashMap<u64, tokio::task::JoinHandle<()>>>,
+    }
+
+    impl TestRuntime {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                next_id: AtomicU64::new(1),
+                handles: StdMutex::new(HashMap::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeSpawner for TestRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<BackgroundTaskHandle, RuntimeError> {
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            let h = tokio::spawn(task);
+            self.handles.lock().unwrap().insert(id, h);
+            Ok(BackgroundTaskHandle {
+                task_name: name.into(),
+                task_id: id,
+            })
+        }
+        async fn sleep(&self, duration: Duration) {
+            tokio::time::sleep(duration).await;
+        }
+        async fn cancel(&self, handle: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
+            let h = self.handles.lock().unwrap().remove(&handle.task_id);
+            if let Some(h) = h {
+                h.abort();
+            }
+            Ok(())
+        }
+    }
+
+    fn ok_result(stdout: &str) -> HookResult {
+        HookResult {
+            outcome: HookOutcome::Success,
+            stdout: stdout.into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            response: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_records_in_flight_then_publishes_result() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let reg = AsyncHookRegistry::new(runtime, tx);
+
+        let hook_id = HookId::new();
+        // A hook whose completion we gate on a Notify so we can observe the
+        // in-flight entry BEFORE it resolves.
+        let gate = Arc::new(Notify::new());
+        let gate2 = gate.clone();
+        let work: HookWork = Box::pin(async move {
+            gate2.notified().await;
+            ok_result("done")
+        });
+
+        let handle = reg
+            .spawn(hook_id, Some(Duration::from_secs(30)), work)
+            .await
+            .expect("spawn must succeed");
+        assert_eq!(handle.task_name, "async_hook");
+
+        // The hook is parked on the gate → still in-flight, nothing published.
+        assert!(reg.is_in_flight(hook_id).await, "must be tracked in-flight");
+        assert_eq!(reg.in_flight_len().await, 1);
+
+        // Release the hook; its result must arrive on completion_tx and the
+        // in-flight entry must clear.
+        gate.notify_one();
+        let (got_id, got) = rx.recv().await.expect("completion must publish");
+        assert_eq!(got_id, hook_id);
+        assert!(matches!(got.outcome, HookOutcome::Success));
+        assert_eq!(got.stdout, "done");
+
+        // Drain the in-flight removal (it happens just before the send, but the
+        // map lock may settle a beat later — poll briefly).
+        for _ in 0..50 {
+            if !reg.is_in_flight(hook_id).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            !reg.is_in_flight(hook_id).await,
+            "in-flight entry must clear on completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_timeout_publishes_timeout_outcome() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let reg = AsyncHookRegistry::new(runtime, tx);
+
+        let hook_id = HookId::new();
+        // A hook that never completes within the timeout window.
+        let work: HookWork = Box::pin(async move {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            ok_result("never")
+        });
+
+        reg.spawn(hook_id, Some(Duration::from_millis(10)), work)
+            .await
+            .expect("spawn must succeed");
+
+        let (got_id, got) = rx.recv().await.expect("timeout must publish a result");
+        assert_eq!(got_id, hook_id);
+        assert!(
+            matches!(got.outcome, HookOutcome::Timeout),
+            "timeout must carry HookOutcome::Timeout"
+        );
+        assert!(got.stderr.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn spawn_defaults_to_15s_timeout_when_none() {
+        // With a None timeout the default is 15s, so a fast hook still wins the
+        // race and publishes its own result (not a timeout).
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let reg = AsyncHookRegistry::new(runtime, tx);
+
+        let hook_id = HookId::new();
+        let work: HookWork = Box::pin(async move { ok_result("fast") });
+
+        reg.spawn(hook_id, None, work).await.expect("spawn");
+
+        let (_id, got) = rx.recv().await.expect("result");
+        assert!(matches!(got.outcome, HookOutcome::Success));
+        assert_eq!(got.stdout, "fast");
     }
 }

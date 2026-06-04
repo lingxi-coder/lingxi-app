@@ -58,7 +58,7 @@ pub enum SlashCommandKind {
 }
 
 /// YAML frontmatter shape for markdown-defined slash commands.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CommandFrontmatter {
     /// Short user-facing description.
@@ -70,6 +70,10 @@ pub struct CommandFrontmatter {
     pub model: Option<String>,
     /// Free-form hints describing positional argument shape.
     pub argument_hints: Vec<String>,
+    /// Declared positional argument names (frontmatter `arguments`). Used by the
+    /// loader's named-argument substitution. Mirrors the TS frontmatter
+    /// `arguments: string | string[]` union that feeds `parseArgumentNames`.
+    pub argument_names: Vec<String>,
     /// Optional thinking-token budget.
     pub thinking: Option<u32>,
     /// Shell to route embedded shell-expansion blocks through. When absent the

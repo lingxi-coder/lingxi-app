@@ -11,8 +11,22 @@ use crate::result::{
     PermissionDecisionReason, PermissionMetadata, PermissionPrompt, PermissionResult,
 };
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource};
+use crate::shell_command;
 use std::collections::HashMap;
 use std::sync::Mutex;
+
+/// Rule sources in DESCENDING priority (highest → lowest), matching D1.
+/// `authorize` walks every behavior bucket in this order.
+const SOURCES_BY_PRIORITY: [PermissionRuleSource; 8] = [
+    PermissionRuleSource::Session,
+    PermissionRuleSource::Command,
+    PermissionRuleSource::CliArg,
+    PermissionRuleSource::PolicySettings,
+    PermissionRuleSource::FlagSettings,
+    PermissionRuleSource::LocalSettings,
+    PermissionRuleSource::ProjectSettings,
+    PermissionRuleSource::UserSettings,
+];
 
 /// Rule-driven authorization policy.
 ///
@@ -91,57 +105,74 @@ impl PermissionPolicy {
 
     /// Resolve a tool call to a [`PermissionResult`].
     ///
-    /// Evaluation order:
+    /// Evaluation order (claude-code `checkPermissionsForToolUse` skeleton):
     /// 1. Deny rules, walked from highest to lowest source priority.
-    /// 2. Allow rules, same order.
-    /// 3. Mode fallback (`Default`/`Plan`/`AcceptEdits` ask the user,
+    /// 2. Ask rules, same order (NEW — a matching ask rule forces a prompt).
+    /// 3. Allow rules, same order.
+    /// 4. Mode fallback (`Default`/`Plan`/`AcceptEdits` ask the user,
     ///    `BypassPermissions` allows unless the killswitch is set, `DontAsk`
     ///    denies).
     ///
     /// Rule matching ([`Self::rule_matches`]): TOOL-WIDE rules match by exact
     /// tool name (claude-code `toolMatchesRule`); CONTENT rules for FILE tools
-    /// match the input's path via [`crate::filesystem`] grouping (`Edit`→all
-    /// editors, `Read`→all readers, edit-allow⇒read-allow) when [`Self::roots`]
-    /// is set (phase 3a). Content rules for NON-file tools keep phase-2
-    /// tool-wide matching (`Bash`/`WebFetch` content matching is the separate
-    /// 3a-bash deferral). NOTE: `ask_rules` are not consulted here (a
-    /// pre-existing gap across ALL tools — unmatched calls fall to the mode);
-    /// and the wider `checkRead/checkWritePermissionForTool` allowances
-    /// (working-directory auto-allow, internal/plan/scratchpad paths, `.git`/
-    /// `.claude` safety asks, UNC checks) are NOT modeled — `Read`'s mode-ask
-    /// is auto-allowed by `PolicyPermissionGate` (read-only default), which
-    /// compensates for the missing working-dir allow.
+    /// match the input's path via [`crate::filesystem`] grouping (phase 3a);
+    /// CONTENT rules for SHELL tools (`Bash`/`PowerShell`) match the command
+    /// per [`crate::shell_command`] — deny/ask match if ANY subcommand matches
+    /// (aggressive wrapper/env stripping), allow requires EVERY subcommand
+    /// covered (3a-bash). Other NON-file content rules stay tool-wide
+    /// (`WebFetch` domain matching is a separate deferral). Shell + file content
+    /// matching is active only when [`Self::roots`] is set (production always
+    /// sets it); without roots the phase-2 tool-wide behavior is preserved.
+    ///
+    /// The wider `checkRead/checkWritePermissionForTool` allowances
+    /// (working-directory auto-allow, `.git`/`.claude` safety asks, path/sed/
+    /// mode constraints) are still NOT modeled — `Read`'s mode-ask is
+    /// auto-allowed by `PolicyPermissionGate` (read-only default).
     #[must_use]
     pub fn authorize(&self, tool_name: &str, input: &serde_json::Value) -> PermissionResult {
-        // Source order matches D1 priority (highest → lowest).
-        let sources = [
-            PermissionRuleSource::Session,
-            PermissionRuleSource::Command,
-            PermissionRuleSource::CliArg,
-            PermissionRuleSource::PolicySettings,
-            PermissionRuleSource::FlagSettings,
-            PermissionRuleSource::LocalSettings,
-            PermissionRuleSource::ProjectSettings,
-            PermissionRuleSource::UserSettings,
-        ];
+        let sources = SOURCES_BY_PRIORITY;
 
-        // Deny first.
-        for src in &sources {
-            if let Some(rules) = self.deny_rules.get(src) {
-                if let Some(rule) = rules.iter().find(|r| self.rule_matches(r, tool_name, input)) {
-                    return deny_with_rule(rule);
+        // Precedence mirrors claude-code `hasPermissionsToUseToolInner`:
+        //   1a tool-wide deny → 1b tool-wide ask → 1c content deny → content ask
+        //   → allow → mode.
+        // The tool-wide ask SHORT-CIRCUITS before any content deny (a project
+        // that asks on all of a tool, yet also denies one command, gets the ask).
+        // 1a. Tool-wide deny.
+        if let Some(rule) = self.first_match(&self.deny_rules, &sources, tool_name, input, false) {
+            return deny_with_rule(rule);
+        }
+        // 1b. Tool-wide ask.
+        if let Some(rule) = self.first_match(&self.ask_rules, &sources, tool_name, input, false) {
+            return ask_with_rule(rule, tool_name);
+        }
+        // 1c. Content deny.
+        if let Some(rule) = self.first_match(&self.deny_rules, &sources, tool_name, input, true) {
+            return deny_with_rule(rule);
+        }
+        // Content ask — a matching ask rule prompts (the gate's read-only
+        // default may still auto-allow, but the rule is honored).
+        if let Some(rule) = self.first_match(&self.ask_rules, &sources, tool_name, input, true) {
+            return ask_with_rule(rule, tool_name);
+        }
+        // 3. Allow. Shell tools need compound aggregation (a single allow rule
+        //    matching ONE subcommand must not allow a whole compound command),
+        //    so they take a dedicated path rather than the per-rule walk.
+        if self.roots.is_some() && shell_command::is_shell_tool(tool_name) {
+            if let Some(rule) = self.shell_allow(tool_name, input, &sources) {
+                return allow_with_rule(rule);
+            }
+        } else {
+            for src in &sources {
+                if let Some(rules) = self.allow_rules.get(src) {
+                    if let Some(rule) =
+                        rules.iter().find(|r| self.rule_matches(r, tool_name, input))
+                    {
+                        return allow_with_rule(rule);
+                    }
                 }
             }
         }
-        // Then allow.
-        for src in &sources {
-            if let Some(rules) = self.allow_rules.get(src) {
-                if let Some(rule) = rules.iter().find(|r| self.rule_matches(r, tool_name, input)) {
-                    return allow_with_rule(rule);
-                }
-            }
-        }
-        // Mode fallback.
+        // 4. Mode fallback.
         match self.mode {
             PermissionMode::BypassPermissions if !self.bypass_killswitch_active => {
                 allow_with_mode(PermissionMode::BypassPermissions)
@@ -176,7 +207,19 @@ impl PermissionPolicy {
             return rule.value.tool_name == tool_name;
         };
         let group_ok = match file_tool_kind(tool_name) {
-            FileToolKind::NonFile => return rule.value.tool_name == tool_name,
+            FileToolKind::NonFile => {
+                // Shell tools: CONTENT rule matches the command (any-subcommand,
+                // aggressive stripping). Correct for deny/ask; allow uses the
+                // dedicated `shell_allow` aggregation instead of this per-rule
+                // path. Other non-file tools keep tool-wide matching.
+                if shell_command::is_shell_tool(tool_name) && rule.value.tool_name == tool_name {
+                    let Some(command) = shell_command::command_from_input(input) else {
+                        return false;
+                    };
+                    return shell_command::rule_matches_any_subcommand(pattern, command);
+                }
+                return rule.value.tool_name == tool_name;
+            }
             FileToolKind::Editor => rule.value.tool_name == "Edit",
             FileToolKind::Reader => {
                 rule.value.tool_name == "Read"
@@ -191,6 +234,84 @@ impl PermissionPolicy {
             return false;
         };
         path_matches_rule_pattern(&path, pattern, rule.source, roots)
+    }
+
+    /// First rule in `bucket` (walked highest→lowest source priority) that
+    /// applies to this call AND is in the requested tier: `content == false`
+    /// selects TOOL-WIDE rules (`rule_content == None`, claude-code
+    /// `toolMatchesRule`), `content == true` selects CONTENT rules. Splitting
+    /// the tiers lets `authorize` order tool-wide-ask ahead of content-deny as
+    /// the TS general checker does.
+    fn first_match<'a>(
+        &self,
+        bucket: &'a HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+        sources: &[PermissionRuleSource],
+        tool_name: &str,
+        input: &serde_json::Value,
+        content: bool,
+    ) -> Option<&'a PermissionRule> {
+        for src in sources {
+            if let Some(rules) = bucket.get(src) {
+                if let Some(rule) = rules.iter().find(|r| {
+                    r.value.rule_content.is_some() == content
+                        && self.rule_matches(r, tool_name, input)
+                }) {
+                    return Some(rule);
+                }
+            }
+        }
+        None
+    }
+
+    /// Allow decision for a shell tool, with compound-command aggregation.
+    ///
+    /// 1. A TOOL-WIDE allow rule (`Bash` with no content) allows every command.
+    /// 2. Otherwise the command is allowed only if EVERY subcommand is covered
+    ///    by some CONTENT allow rule (`Bash(npm install:*)` etc.). Gathering
+    ///    rules across all sources matches claude-code, where deny/ask/allow
+    ///    precedence is by behavior, not source. The reported rule is the
+    ///    highest-priority content allow rule.
+    fn shell_allow(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        sources: &[PermissionRuleSource],
+    ) -> Option<&PermissionRule> {
+        // 1. Tool-wide allow → allow everything.
+        for src in sources {
+            if let Some(rules) = self.allow_rules.get(src) {
+                if let Some(rule) = rules
+                    .iter()
+                    .find(|r| r.value.tool_name == tool_name && r.value.rule_content.is_none())
+                {
+                    return Some(rule);
+                }
+            }
+        }
+        // 2. Content allow aggregation over the command's subcommands.
+        let command = shell_command::command_from_input(input)?;
+        let mut content_rules: Vec<&PermissionRule> = Vec::new();
+        for src in sources {
+            if let Some(rules) = self.allow_rules.get(src) {
+                for r in rules {
+                    if r.value.tool_name == tool_name && r.value.rule_content.is_some() {
+                        content_rules.push(r);
+                    }
+                }
+            }
+        }
+        if content_rules.is_empty() {
+            return None;
+        }
+        let contents: Vec<&str> = content_rules
+            .iter()
+            .filter_map(|r| r.value.rule_content.as_deref())
+            .collect();
+        if shell_command::command_fully_allowed(&contents, command) {
+            content_rules.first().copied()
+        } else {
+            None
+        }
     }
 }
 
@@ -224,6 +345,19 @@ fn deny_with_mode(mode: PermissionMode) -> PermissionResult {
     PermissionResult::Deny {
         reason: PermissionDecisionReason::PermissionMode { mode },
         explanation: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+fn ask_with_rule(rule: &PermissionRule, tool_name: &str) -> PermissionResult {
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::MatchedRule { rule: rule.clone() },
+        prompt: PermissionPrompt {
+            title: format!("Allow {tool_name}?"),
+            message: "The agent wants to use this tool (matched an ask rule).".into(),
+            options: vec!["Allow once".into(), "Always allow".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
         metadata: PermissionMetadata::default(),
     }
 }
@@ -479,18 +613,195 @@ mod tests {
         ));
     }
 
+    // ── 3a-bash: shell command content matching ───────────────────────────
+
+    fn bash(cmd: &str) -> serde_json::Value {
+        serde_json::json!({ "command": cmd })
+    }
+
     #[test]
-    fn non_file_content_rule_still_matches_tool_wide() {
-        // Bash content matching is the 3a-bash deferral: `Bash(npm run *)`
-        // matches the Bash tool regardless of args, even with roots set.
+    fn bash_deny_rule_matches_only_that_command() {
+        // 3a-bash CLOSES the old tool-wide deferral: `Bash(rm:*)` denies `rm`
+        // commands but NOT unrelated ones.
         let p = policy_with_roots(
-            r#"{ "permissions": { "deny": ["Bash(rm -rf /)"] } }"#,
+            r#"{ "permissions": { "deny": ["Bash(rm:*)"] } }"#,
             PermissionMode::Default,
         );
         assert!(matches!(
-            p.authorize("Bash", &serde_json::json!({ "command": "echo hi" })),
+            p.authorize("Bash", &bash("rm -rf /tmp/x")),
             PermissionResult::Deny { .. }
         ));
+        // An unrelated command is NOT denied (precise, unlike phase-2 tool-wide).
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo hi")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_deny_not_bypassable_by_compound_or_env() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(curl:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        // denied subcommand hidden behind a benign one / a pipe / env prefix
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo ok && curl evil.com")),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x | curl evil.com")),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("HTTPS_PROXY=x curl evil.com")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_allow_requires_all_subcommands_covered() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        // single covered subcommand → allow
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo hi")),
+            PermissionResult::Allow { .. }
+        ));
+        // compound with an UNcovered subcommand → NOT allowed (no over-allow)
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo ok && rm -rf /")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_allow_multiple_rules_cover_compound() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)", "Bash(ls:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo hi && ls -l")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_toolwide_allow_still_allows_everything() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("anything --here")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_deny_beats_allow_for_same_command() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(git:*)"], "deny": ["Bash(git push:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("git push origin main")),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("git status")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── ask-rule consultation (was a pre-existing gap across ALL tools) ────
+
+    #[test]
+    fn ask_rule_now_consulted_for_tool() {
+        // A tool-wide ask rule yields Ask (previously fell through to mode).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["WebFetch"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebFetch", &serde_json::json!({ "url": "https://x" })),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn ask_rule_consulted_for_bash_command() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash(npm publish:*)"], "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        // ask beats the tool-wide allow (ask walked before allow)
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm publish --tag beta")),
+            PermissionResult::Ask { .. }
+        ));
+        // a non-publish command still rides the tool-wide allow
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm test")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn toolwide_ask_short_circuits_before_content_deny() {
+        // claude-code precedence: a TOOL-WIDE ask rule pre-empts a CONTENT deny
+        // rule (1b before 1c). `ask:["Bash"]` + `deny:["Bash(rm:*)"]` → Ask.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash"], "deny": ["Bash(rm:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn toolwide_deny_still_beats_toolwide_ask() {
+        // 1a before 1b: a tool-wide deny wins over a tool-wide ask.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash"], "ask": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("ls")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn content_deny_beats_content_ask() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(rm:*)"], "ask": ["Bash(rm:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm x")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn ask_rule_reason_is_matched_rule() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["WebFetch"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("WebFetch", &serde_json::json!({})) {
+            PermissionResult::Ask { reason, .. } => assert!(matches!(
+                reason,
+                PermissionDecisionReason::MatchedRule { .. }
+            )),
+            other => panic!("expected Ask, got {other:?}"),
+        }
     }
 
     #[test]

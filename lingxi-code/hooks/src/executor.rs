@@ -10,6 +10,7 @@
 //! command-hook contract (`claude-code/src/utils/hooks.ts`).
 
 use crate::agent_executor::{AgentExecutionSignal, AgentExecutor};
+use crate::async_registry::{AsyncHookRegistry, HookWork};
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
 use crate::hook_payload::{
@@ -84,6 +85,11 @@ pub struct HookExecutorImpl {
     /// [`traits::SandboxedCommand`] the runner accepts. Attached via
     /// [`Self::with_process_runner`].
     sandbox: Option<Arc<dyn Sandbox>>,
+    /// Optional background registry for non-blocking (`blocking == false`)
+    /// hooks (B5). Attached via [`Self::with_async_registry`]. When `None`, a
+    /// non-blocking hook falls back to running synchronously (so its result is
+    /// never silently dropped) — the engine simply gains no backgrounding.
+    async_registry: Option<Arc<AsyncHookRegistry>>,
 }
 
 impl HookExecutorImpl {
@@ -107,7 +113,18 @@ impl HookExecutorImpl {
             agent_spawner: None,
             process: None,
             sandbox: None,
+            async_registry: None,
         }
+    }
+
+    /// Attach an [`AsyncHookRegistry`] so non-blocking (`blocking == false`)
+    /// hooks are backgrounded instead of awaited (B5). Without this, a
+    /// non-blocking hook still runs synchronously (its result is not dropped),
+    /// but the engine gains no backgrounding for it.
+    #[must_use]
+    pub fn with_async_registry(mut self, registry: Arc<AsyncHookRegistry>) -> Self {
+        self.async_registry = Some(registry);
+        self
     }
 
     /// Attach a [`SubagentSpawner`] so the `Agent` arm can fork subagents.
@@ -147,10 +164,34 @@ impl HookExecutorImpl {
         &self.http
     }
 
+    /// Snapshot the cheaply-cloneable dispatcher backing a single hook
+    /// invocation. Every field is an `Arc` / `Clone` so the snapshot can be
+    /// moved into a `'static` background future (B5) or borrowed inline for the
+    /// synchronous path — both go through the same [`Dispatcher::dispatch`].
+    fn dispatcher(&self) -> Dispatcher {
+        Dispatcher {
+            http: self.http.clone(),
+            ssrf_guard: self.ssrf_guard.clone(),
+            builtin_handlers: self.builtin_handlers.clone(),
+            agent_spawner: self.agent_spawner.clone(),
+            process: self.process.clone(),
+            sandbox: self.sandbox.clone(),
+        }
+    }
+
     /// Fire `event` and return the aggregated result of every matching hook.
     ///
     /// Hooks are evaluated in priority-descending order; processing stops
     /// early on the first `Block` decision.
+    ///
+    /// B5 — a matched hook with `blocking == false` is routed to the
+    /// [`AsyncHookRegistry`] (when wired) instead of being awaited: it is
+    /// backgrounded, EXCLUDED from the aggregate, and so can NEVER contribute a
+    /// `Block` decision. A `blocking == true` hook still runs synchronously,
+    /// exactly as before — the regression-guarded common case. (When no async
+    /// registry is wired, a non-blocking hook degrades to running synchronously
+    /// so its result is not silently dropped, but it is STILL excluded from the
+    /// aggregate to preserve the "non-blocking can't block" contract.)
     pub async fn execute(&self, event: HookEvent, ctx: HookContext) -> AggregateHookResult {
         let reg = self.registry.read().await;
         let matched: Vec<HookDefinition> =
@@ -158,20 +199,78 @@ impl HookExecutorImpl {
         drop(reg);
         let mut agg = AggregateHookResult::default();
         for hook in &matched {
-            let result = self.execute_single(hook, &event, &ctx).await;
-            Self::merge(&mut agg, hook, result);
-            if matches!(agg.decision, Some(crate::response::HookDecision::Block)) {
-                break;
+            if hook.blocking {
+                // Synchronous path — unchanged from M5-06.
+                let result = self.dispatcher().dispatch(hook, &event, &ctx).await;
+                Self::merge(&mut agg, hook, result);
+                if matches!(agg.decision, Some(crate::response::HookDecision::Block)) {
+                    break;
+                }
+            } else {
+                // B5 config-`async` path: background the hook and continue. It
+                // is excluded from `agg`, so it cannot block.
+                self.background_hook(hook, &event, &ctx).await;
             }
         }
         agg
     }
 
+    /// Route a `blocking == false` hook to the background async registry (B5).
+    ///
+    /// Mirrors claude-code `executeInBackground` (`utils/hooks.ts:995-1030`):
+    /// the engine proceeds immediately and the hook's eventual result folds
+    /// back through the registry's completion channel. When no registry is
+    /// wired the hook degrades to a synchronous run whose result is discarded
+    /// from the aggregate (it still cannot block) — this keeps a misconfigured
+    /// engine from silently no-op'ing the hook entirely.
+    async fn background_hook(&self, hook: &HookDefinition, event: &HookEvent, ctx: &HookContext) {
+        let Some(registry) = &self.async_registry else {
+            // No registry wired: run inline but discard from the aggregate so
+            // the "non-blocking can't block" contract still holds.
+            let _ = self.dispatcher().dispatch(hook, event, ctx).await;
+            return;
+        };
+        let dispatcher = self.dispatcher();
+        let hook_owned = hook.clone();
+        let event_owned = event.clone();
+        let ctx_owned = ctx.clone();
+        let work: HookWork = Box::pin(async move {
+            dispatcher
+                .dispatch(&hook_owned, &event_owned, &ctx_owned)
+                .await
+        });
+        if let Err(e) = registry.spawn(hook.id, hook.timeout, work).await {
+            tracing::warn!(
+                hook_id = %hook.id,
+                error = %e,
+                "failed to background async hook; it will not run",
+            );
+        }
+    }
+
+}
+
+/// Cheaply-cloneable snapshot of the executor dependencies needed to run a
+/// single hook. Built by [`HookExecutorImpl::dispatcher`]. Because every field
+/// is an `Arc` / `Clone`, a `Dispatcher` can be moved into a `'static`
+/// background future (B5 async path) or borrowed inline for the synchronous
+/// path — both reach the identical [`Self::dispatch`] arm logic.
+#[derive(Clone)]
+struct Dispatcher {
+    http: Arc<dyn HttpTransport>,
+    ssrf_guard: SsrfGuard,
+    builtin_handlers: HashMap<String, Arc<dyn BuiltinHookHandler>>,
+    agent_spawner: Option<Arc<dyn SubagentSpawner>>,
+    process: Option<Arc<dyn ProcessRunner>>,
+    sandbox: Option<Arc<dyn Sandbox>>,
+}
+
+impl Dispatcher {
     #[allow(
         clippy::too_many_lines,
         reason = "arm dispatch fan-out — splitting hurts readability"
     )]
-    async fn execute_single(
+    async fn dispatch(
         &self,
         hook: &HookDefinition,
         event: &HookEvent,
@@ -320,7 +419,9 @@ impl HookExecutorImpl {
             }
         }
     }
+}
 
+impl HookExecutorImpl {
     fn merge(agg: &mut AggregateHookResult, hook: &HookDefinition, r: HookResult) {
         if let Some(resp) = &r.response {
             if resp.decision.is_some() {
@@ -1221,5 +1322,325 @@ mod command_arm_tests {
             // round-trips through parse_response without a mismatch error.
             assert!(body.contains(&format!(r#""hook_event_name":"{expected}""#)));
         }
+    }
+}
+
+// ============================================================================
+// B5 — config-`async` (blocking == false) backgrounding through the executor.
+// ============================================================================
+#[cfg(test)]
+mod async_path_tests {
+    //! A non-blocking Command hook is routed to the [`AsyncHookRegistry`]
+    //! instead of being awaited: `execute` returns immediately, the hook can
+    //! NEVER contribute a `Block` to the aggregate, and a `blocking == true`
+    //! hook still runs synchronously (the regression guard).
+    use super::*;
+    use crate::async_registry::AsyncHookRegistry;
+    use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
+    use crate::events::{HookEvent, HookEventType};
+    use crate::response::HookDecision;
+    use protocol::{HookId, ToolUseId};
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::{mpsc, Notify};
+    use traits::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use traits::{
+        BackgroundTaskHandle, ProcessError, ProcessHandle, ProcessOutput, RuntimeError,
+        RuntimeSpawner, SandboxPolicy, SandboxedCommand,
+    };
+
+    /// Tokio-backed runtime — the hooks crate already depends on tokio, so the
+    /// background hook future can be spawned with `tokio::spawn` here.
+    struct TestRuntime {
+        next_id: AtomicU64,
+        handles: StdMutex<HashMap<u64, tokio::task::JoinHandle<()>>>,
+    }
+    impl TestRuntime {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                next_id: AtomicU64::new(1),
+                handles: StdMutex::new(HashMap::new()),
+            })
+        }
+    }
+    #[async_trait]
+    impl RuntimeSpawner for TestRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        ) -> Result<BackgroundTaskHandle, RuntimeError> {
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            let h = tokio::spawn(task);
+            self.handles.lock().unwrap().insert(id, h);
+            Ok(BackgroundTaskHandle {
+                task_name: name.into(),
+                task_id: id,
+            })
+        }
+        async fn sleep(&self, duration: Duration) {
+            tokio::time::sleep(duration).await;
+        }
+        async fn cancel(&self, handle: &BackgroundTaskHandle) -> Result<(), RuntimeError> {
+            if let Some(h) = self.handles.lock().unwrap().remove(&handle.task_id) {
+                h.abort();
+            }
+            Ok(())
+        }
+    }
+
+    /// `ProcessRunner` that parks on a [`Notify`] before producing its output,
+    /// so a test can prove the hook is still in-flight when `execute` returns.
+    struct GatedRunner {
+        gate: Arc<Notify>,
+        output: StdMutex<Option<ProcessOutput>>,
+        ran: Arc<Notify>,
+    }
+    impl GatedRunner {
+        fn new(gate: Arc<Notify>, ran: Arc<Notify>, output: ProcessOutput) -> Arc<Self> {
+            Arc::new(Self {
+                gate,
+                output: StdMutex::new(Some(output)),
+                ran,
+            })
+        }
+    }
+    #[async_trait]
+    impl ProcessRunner for GatedRunner {
+        async fn run(&self, _cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            self.ran.notify_one();
+            self.gate.notified().await;
+            Ok(self.output.lock().unwrap().take().unwrap())
+        }
+        async fn spawn_background(
+            &self,
+            _cmd: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+        async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// Minimal sandbox that mints a `SandboxedCommand` via the external-impl seam.
+    struct StubSandbox;
+    #[async_trait]
+    impl Sandbox for StubSandbox {
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn backend(&self) -> SandboxBackend {
+            SandboxBackend::None
+        }
+        fn prepare(
+            &self,
+            cmd: ProcessCommand,
+            _policy: &SandboxPolicy,
+        ) -> Result<SandboxedCommand, traits::SandboxError> {
+            Ok(SandboxedCommand::__new_sandboxed(
+                cmd,
+                SandboxedTag::BypassAuditedWithReason {
+                    reason: "test".into(),
+                },
+            ))
+        }
+        fn bypass_with_audit(&self, cmd: ProcessCommand, reason: &str) -> SandboxedCommand {
+            SandboxedCommand::__new_sandboxed(
+                cmd,
+                SandboxedTag::BypassAuditedWithReason {
+                    reason: reason.into(),
+                },
+            )
+        }
+        async fn probe_capability(&self) -> SandboxCapability {
+            SandboxCapability {
+                available: true,
+                reason: None,
+                features: traits::SandboxFeatures::default(),
+            }
+        }
+    }
+
+    /// `HttpTransport` stub — never exercised by these Command-arm tests.
+    struct UnusedHttp;
+    #[async_trait]
+    impl HttpTransport for UnusedHttp {
+        async fn request(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+    }
+
+    fn out(stdout: &str, stderr: &str, exit_code: i32) -> ProcessOutput {
+        ProcessOutput {
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            exit_code,
+            timed_out: false,
+        }
+    }
+
+    /// A Command hook with the supplied `blocking` flag, subscribed to `PreToolUse`.
+    fn command_hook(blocking: bool) -> HookDefinition {
+        HookDefinition {
+            id: HookId::new(),
+            name: "async-cmd".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Command {
+                command: "hook.sh".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+            source: HookSource::User,
+            blocking,
+            timeout: None,
+            priority: 0,
+        }
+    }
+
+    fn pre_event() -> HookEvent {
+        HookEvent::PreToolUse {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command": "ls"}),
+            tool_use_id: ToolUseId::new(),
+        }
+    }
+
+    /// (1) A `blocking == false` Command hook does NOT block the aggregate:
+    /// even though the hook would exit 2 (a Block in the sync path), `execute`
+    /// returns immediately with no decision while the hook is still parked.
+    #[tokio::test]
+    async fn non_blocking_hook_never_blocks_aggregate() {
+        let runtime = TestRuntime::new();
+        let (tx, _rx) = mpsc::channel(4);
+        let async_reg = Arc::new(AsyncHookRegistry::new(runtime, tx));
+
+        let gate = Arc::new(Notify::new());
+        let ran = Arc::new(Notify::new());
+        // exit 2 ⇒ would BLOCK on the synchronous path.
+        let runner = GatedRunner::new(gate.clone(), ran.clone(), out("", "denied", 2));
+
+        let hook = command_hook(false);
+        let hook_id = hook.id;
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            // The executor's own `runtime` field is unused on the async path
+            // (the registry owns spawning); a second TestRuntime satisfies the
+            // constructor.
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner, Arc::new(StubSandbox))
+        .with_async_registry(async_reg.clone());
+
+        // `execute` must return WITHOUT awaiting the (still-parked) hook.
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(
+            agg.decision, None,
+            "a backgrounded hook can never contribute a Block decision"
+        );
+        assert!(
+            agg.all_results.is_empty(),
+            "backgrounded hooks are excluded from the aggregate entirely"
+        );
+
+        // The hook is genuinely backgrounded and in-flight (its run() is parked
+        // on the gate). Wait until the runner has actually begun.
+        ran.notified().await;
+        assert!(
+            async_reg.is_in_flight(hook_id).await,
+            "the backgrounded hook must be tracked in-flight"
+        );
+
+        // Let it finish so the test runtime doesn't leak the task.
+        gate.notify_one();
+    }
+
+    /// (2) + (3) The registry records the in-flight handle and publishes the
+    /// eventual result on `completion_tx`; here the hook completes normally.
+    #[tokio::test]
+    async fn non_blocking_hook_publishes_completion() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let async_reg = Arc::new(AsyncHookRegistry::new(runtime, tx));
+
+        let gate = Arc::new(Notify::new());
+        let ran = Arc::new(Notify::new());
+        let runner = GatedRunner::new(gate.clone(), ran.clone(), out("ok", "", 0));
+
+        let hook = command_hook(false);
+        let hook_id = hook.id;
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner, Arc::new(StubSandbox))
+        .with_async_registry(async_reg.clone());
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert!(agg.all_results.is_empty());
+
+        ran.notified().await;
+        assert!(async_reg.is_in_flight(hook_id).await);
+
+        // Release the hook; its result must land on completion_tx keyed by id.
+        gate.notify_one();
+        let (got_id, got) = rx.recv().await.expect("completion must publish");
+        assert_eq!(got_id, hook_id);
+        assert!(matches!(got.outcome, HookOutcome::Success));
+        assert_eq!(got.exit_code, Some(0));
+    }
+
+    /// (4) Regression guard: a `blocking == true` Command hook still runs
+    /// SYNCHRONOUSLY — `execute` awaits it and its exit-2 Block is reflected in
+    /// the aggregate exactly as before B5. (No async registry is even wired.)
+    #[tokio::test]
+    async fn blocking_hook_runs_synchronously() {
+        let gate = Arc::new(Notify::new());
+        let ran = Arc::new(Notify::new());
+        // Pre-open the gate so the synchronous run() does not park.
+        gate.notify_one();
+        let runner = GatedRunner::new(gate, ran, out("", "policy violation", 2));
+
+        let mut registry = HookRegistry::new();
+        registry.register(command_hook(true));
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner, Arc::new(StubSandbox))
+        .with_async_registry(Arc::new(AsyncHookRegistry::new(
+            TestRuntime::new(),
+            mpsc::channel(1).0,
+        )));
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        // Synchronous: exit 2 ⇒ Block surfaces in the aggregate, result recorded.
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        assert_eq!(agg.reason.as_deref(), Some("policy violation"));
+        assert_eq!(agg.all_results.len(), 1, "blocking hook IS in the aggregate");
     }
 }

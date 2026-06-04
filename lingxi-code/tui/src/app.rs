@@ -316,6 +316,24 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 st.pending_open_stats = true;
                 return false;
             }
+            // `/tasks` opens the background-tasks dialog (claude-code
+            // `commands/tasks/tasks.tsx` → `<BackgroundTasksDialog>`). Unlike
+            // `/agents`/`/stats`, the open is SYNCHRONOUS — no fs walk or
+            // `OrchestratorHandle` call is needed: the dialog browses the live
+            // `AppState.multiagent.tasks` list. So we open the screen inline
+            // here, mirroring the Shift+Down open binding in `root.rs` (seed a
+            // fresh `BackgroundTasksState`, emit the same `screen_opened`
+            // telemetry). No echo, no turn. The `crates/commands` tasks handler
+            // stays the `--no-tui` text path, untouched.
+            if st.prompt_text.trim() == "/tasks" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.active_screen = Some(crate::screens::Screen::BackgroundTasks(
+                    crate::screens::background_tasks::BackgroundTasksState::default(),
+                ));
+                crate::telemetry::screen_opened("background_tasks");
+                return false;
+            }
             // (`/color`) Set the prompt-bar agent color for this session. An
             // IMMEDIATE arg command (claude-code `immediate: true`, NOT a
             // screen): parse the arg, push the `system` display, set the
@@ -1288,6 +1306,49 @@ mod dispatch_tests {
             !matches!(st.messages.last(), Some(RenderedMessage::UserText { .. })),
             "/doctor must not echo as a user message"
         );
+    }
+
+    #[test]
+    fn tasks_slash_opens_background_tasks_screen_via_dispatch() {
+        use crate::screens::Screen;
+        let mut st = s();
+        // Submit "/tasks" through the same path the live Enter uses. The open
+        // is synchronous (mirrors the Shift+Down binding in root.rs): seeds a
+        // fresh BackgroundTasksState, no pending flag, no UserText echo.
+        st.prompt_text = "/tasks".to_string();
+        st.prompt_cursor = "/tasks".len();
+        let should_run = dispatch(KeyAction::Submit, &mut st);
+        assert!(!should_run, "/tasks opens a screen, never runs a turn");
+        assert!(
+            matches!(&st.active_screen, Some(Screen::BackgroundTasks(_))),
+            "/tasks opens the BackgroundTasks screen inline"
+        );
+        assert!(st.prompt_text.is_empty(), "prompt cleared on submit");
+        // No system message and no UserText echo for the intercepted command.
+        assert!(
+            st.messages.is_empty(),
+            "/tasks must not push a system or user message"
+        );
+    }
+
+    #[test]
+    fn non_tasks_line_does_not_open_background_tasks_screen() {
+        let mut st = s();
+        // A normal prompt line must NOT be mistaken for the /tasks intercept:
+        // it runs a turn and leaves no screen open.
+        st.prompt_text = "list the tasks".to_string();
+        st.prompt_cursor = "list the tasks".len();
+        let should_run = dispatch(KeyAction::Submit, &mut st);
+        assert!(should_run, "a normal line runs a turn");
+        assert!(
+            st.active_screen.is_none(),
+            "a normal line never opens the BackgroundTasks screen"
+        );
+        // The line is echoed as a user message (normal submit path).
+        assert!(matches!(
+            st.messages.last(),
+            Some(RenderedMessage::UserText { .. })
+        ));
     }
 
     #[test]

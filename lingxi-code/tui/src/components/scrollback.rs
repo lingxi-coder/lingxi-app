@@ -56,6 +56,12 @@ use crate::theme::{Theme, ThemeName};
 /// theme (for syntect-colored diffs). Both come from `AppState.theme` /
 /// `theme_setting.resolve()`; the theme picker's live preview re-renders the
 /// whole list, so message colors follow the highlighted theme.
+///
+/// (A2) `width` is the scrollback viewport width in display columns, threaded
+/// into the markdown body renderer so markdown TABLES lay out to fit the
+/// terminal (the only block whose layout depends on width). `0` means "use the
+/// markdown default" — the height cache passes the same width so measurement
+/// stays in lock-step with what is drawn.
 #[must_use]
 #[allow(clippy::implicit_hasher)] // always called with `AppState.expanded`'s std hasher
 #[allow(clippy::too_many_lines)] // one arm per RenderedMessage variant (28 variants)
@@ -65,6 +71,7 @@ pub fn render_message(
     focused_tool_id: Option<ToolUseId>,
     theme: Theme,
     theme_name: ThemeName,
+    width: usize,
 ) -> AnyElement<'static> {
     match m {
         RenderedMessage::UserText { body, .. } => element! {
@@ -72,7 +79,7 @@ pub fn render_message(
         }
         .into_any(),
         RenderedMessage::AssistantText { body, .. } => element! {
-            AssistantTextMessage(body: body)
+            AssistantTextMessage(body: body, width: width)
         }
         .into_any(),
         RenderedMessage::SystemText { body, is_error, .. } => {

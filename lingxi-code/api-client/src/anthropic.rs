@@ -8,7 +8,9 @@
 use crate::oauth_hook::{current_hook, OAuthRefreshHook, TokenHash};
 use crate::overflow::{adjusted_max_tokens, parse_max_tokens_overflow, Overflow};
 use crate::rate_limit::{parse_anthropic_ratelimit_reset, parse_retry_after, parse_unified_reset};
-use crate::retry::{with_retry, DEFAULT_BASE_DELAYS_MS, DEFAULT_RETRY_BUDGET};
+use crate::retry::{
+    with_retry_ctl, RetryControl, DEFAULT_BASE_DELAYS_MS, DEFAULT_RETRY_BUDGET,
+};
 use crate::types::{MessageResponse, StreamEvent};
 use crate::ApiError;
 use protocol::{ConversationMessage, HttpMethod, HttpRequest};
@@ -297,13 +299,77 @@ impl AnthropicProvider {
         temperature: Option<f32>,
         transport: &T,
     ) -> Result<MessageResponse, ApiError> {
+        // Behaviour-neutral for existing callers: no fallback model and the
+        // consecutive-529 gate disabled (`RetryControl::default()` → the loop
+        // reduces to the budget-only path). The fallback-aware entrypoint is
+        // `messages_create_non_stream_with_fallback`.
+        self.messages_create_non_stream_with_fallback(
+            model,
+            system,
+            msgs,
+            max_tokens,
+            tools,
+            temperature,
+            None,
+            false,
+            transport,
+        )
+        .await
+    }
+
+    /// Non-streaming `POST /v1/messages` with the **consecutive-529 / Opus
+    /// model-fallback** policy (Batch 2). Same retry + rate-limit + OAuth-hook +
+    /// cost middleware as [`Self::messages_create_non_stream_with_opts`]; the
+    /// only addition is a [`crate::retry::RetryControl`] threaded into the retry
+    /// loop.
+    ///
+    /// 1:1 with claude-code `withRetry.ts:326-365`. After
+    /// [`crate::retry::MAX_529_RETRIES`] (3) consecutive 529s on a non-custom
+    /// Opus primary model — and the user is **not** a Claude.ai subscriber, OR
+    /// `FALLBACK_FOR_ALL_PRIMARY_MODELS` is set — the loop stops retrying:
+    ///
+    /// * if `fallback_model` is `Some` → returns [`ApiError::FallbackTriggered`]
+    ///   so the **orchestrator turn loop** can re-issue against the fallback
+    ///   model (the orchestrator wiring is a separate, out-of-crate batch; this
+    ///   api-client method only *surfaces* the signal — claude-code re-issues
+    ///   via `query.ts`, not inside `withRetry`);
+    /// * else if `USER_TYPE === 'external'` and `IS_SANDBOX` is unset → returns
+    ///   [`ApiError::Overloaded`] `{ repeated: true }` (byte-locked
+    ///   `Repeated 529 Overloaded errors`).
+    ///
+    /// The fallback gate is read once per request from the environment:
+    /// `FALLBACK_FOR_ALL_PRIMARY_MODELS`, `USER_TYPE`, `IS_SANDBOX`
+    /// (see [`resolve_retry_control`]). `is_subscriber` is stubbed to `false`
+    /// pending Batch 6 (OAuth subscription resolution), matching the spec's
+    /// ship-with-stub note; an external non-subscriber on an Opus model
+    /// therefore opens the gate exactly as TS does.
+    ///
+    /// # Errors
+    /// See [`ApiError`] — adds [`ApiError::FallbackTriggered`] /
+    /// [`ApiError::Overloaded`] `{ repeated: true }` from the 529 gate.
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    pub async fn messages_create_non_stream_with_fallback<T: HttpTransport>(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        max_tokens: u32,
+        tools: Vec<Value>,
+        temperature: Option<f32>,
+        fallback_model: Option<String>,
+        is_subscriber: bool,
+        transport: &T,
+    ) -> Result<MessageResponse, ApiError> {
         let request_id = new_request_id();
         let started = std::time::Instant::now();
         telemetry::emit_started(&self.bus, model, &request_id, false).await;
 
         let body = Self::build_messages_body(model, system, &msgs, max_tokens, &tools, temperature);
 
-        let resp_result = self.drive_retry_loop_with_429(&body, transport).await;
+        let ctl = resolve_retry_control(model, fallback_model, is_subscriber);
+        let resp_result = self
+            .drive_retry_loop_with_429(&body, &ctl, transport)
+            .await;
         let outcome = self
             .resolve_outcome(resp_result, &body, model, &request_id, transport)
             .await;
@@ -395,10 +461,14 @@ impl AnthropicProvider {
     /// **Every other status, including a real 529 or a streamed
     /// `overloaded_error` body, is passed through verbatim** so
     /// [`crate::retry::classify_retryable`] sees the real status/body and can
-    /// tag it `Overloaded`. Returns the underlying `with_retry` outcome.
+    /// tag it `Overloaded`. The supplied [`crate::retry::RetryControl`] carries
+    /// the consecutive-529 / Opus-fallback policy (Batch 2); a default control
+    /// (no fallback, gate disabled) reduces this to the budget-only loop.
+    /// Returns the underlying `with_retry_ctl` outcome.
     async fn drive_retry_loop_with_429<T: HttpTransport>(
         &self,
         body: &Value,
+        ctl: &crate::retry::RetryControl,
         transport: &T,
     ) -> Result<protocol::HttpResponse, ApiError> {
         let bus_for_loop = self.bus.clone();
@@ -426,7 +496,7 @@ impl AnthropicProvider {
         // reduced `max_tokens`). `tokio::sync::Mutex` because the closure is
         // async and the lock is held across an `.await`.
         let shared_body = Arc::new(tokio::sync::Mutex::new(body.clone()));
-        with_retry(DEFAULT_RETRY_BUDGET, DEFAULT_BASE_DELAYS_MS, |attempt| {
+        with_retry_ctl(DEFAULT_RETRY_BUDGET, DEFAULT_BASE_DELAYS_MS, ctl, |attempt| {
             let bus = bus_for_loop.clone();
             let model_s = model_for_loop.clone();
             let shared_body = Arc::clone(&shared_body);
@@ -859,6 +929,7 @@ fn error_kind(e: &ApiError) -> &'static str {
         ApiError::PromptTooLong { .. } => "prompt_too_long",
         ApiError::RateLimited { .. } => "rate_limited",
         ApiError::Overloaded { .. } => "overloaded",
+        ApiError::FallbackTriggered { .. } => "fallback_triggered",
         ApiError::Unauthorized(_) => "unauthorized",
         ApiError::MalformedStream(_) => "malformed_stream",
         ApiError::UnexpectedStreamEnd => "stream_end",
@@ -875,6 +946,49 @@ fn status_of(e: &ApiError) -> Option<u16> {
         ApiError::Server { status, .. } => Some(*status),
         ApiError::RetryExhausted { last_status } => *last_status,
         _ => None,
+    }
+}
+
+/// Build the [`RetryControl`] for a request from the environment + model.
+///
+/// Ports the gate expression at claude-code `withRetry.ts:331-332` plus the
+/// external/sandbox checks at `:354-355`:
+///
+/// * `allow_fallback` = `FALLBACK_FOR_ALL_PRIMARY_MODELS` is set to any
+///   non-empty value (TS raw truthy `||`, NOT `isEnvTruthy`), **OR**
+///   (`!is_subscriber && is_non_custom_opus(model)`).
+/// * `is_external` = `USER_TYPE === 'external'` (exact match).
+/// * `is_sandbox` = `IS_SANDBOX` is present (TS `!process.env.IS_SANDBOX` —
+///   any value, including empty, counts as sandboxed).
+///
+/// `fallback_model` is carried through verbatim; the [`RetryControl::default`]
+/// `max_529_retries` ([`crate::retry::MAX_529_RETRIES`] = 3) is used.
+///
+/// Env is read once per request (not cached) to honour mid-process overrides in
+/// tests; the values are tiny and the read is off the hot path.
+fn resolve_retry_control(
+    model: &str,
+    fallback_model: Option<String>,
+    is_subscriber: bool,
+) -> RetryControl {
+    // TS raw `process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS ||` — truthy means a
+    // non-empty string. An empty string is falsy in JS, so match that.
+    let fallback_for_all = std::env::var("FALLBACK_FOR_ALL_PRIMARY_MODELS")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    let allow_fallback =
+        fallback_for_all || (!is_subscriber && crate::opus::is_non_custom_opus(model));
+    let is_external = std::env::var("USER_TYPE").as_deref() == Ok("external");
+    // TS `!process.env.IS_SANDBOX` — present (defined) is sandboxed, regardless
+    // of value. `var()` returns Ok for any defined value including empty.
+    let is_sandbox = std::env::var("IS_SANDBOX").is_ok();
+    RetryControl {
+        fallback_model,
+        primary_model: model.to_string(),
+        allow_fallback,
+        is_external,
+        is_sandbox,
+        ..RetryControl::default()
     }
 }
 

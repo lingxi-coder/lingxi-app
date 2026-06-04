@@ -22,6 +22,11 @@ pub const DEFAULT_BASE_DELAYS_MS: &[u64] = &[500, 1_000, 2_000];
 /// Default retry budget (3 attempts). **Locked against spec §7**.
 pub const DEFAULT_RETRY_BUDGET: u8 = 3;
 
+/// Consecutive-529 threshold before the fallback / repeated-overload decision
+/// fires. Byte-locked to claude-code `withRetry.ts:54`
+/// (`const MAX_529_RETRIES = 3`).
+pub const MAX_529_RETRIES: u8 = 3;
+
 /// Lower jitter bound — exclusive end is 1.2 to avoid doubling the delay.
 pub const JITTER_LOW: f64 = 0.8;
 /// Upper jitter bound (exclusive).
@@ -187,6 +192,68 @@ pub fn classify_retryable(resp: &HttpResponse) -> RetryClass {
     }
 }
 
+/// Consecutive-529 / Opus-fallback policy threaded into [`with_retry_ctl`].
+///
+/// Ports the consecutive-529 block of claude-code `withRetry.ts:326-365`. The
+/// loop maintains a `consecutive_529` counter that increments on each 529 /
+/// overloaded response and **resets to 0 on any non-529 outcome** (success,
+/// timeout, or a non-overloaded retryable status). When the counter reaches
+/// [`Self::max_529_retries`] *and* [`Self::allow_fallback`] is set, the loop
+/// stops retrying and signals the caller:
+///
+/// * if [`Self::fallback_model`] is `Some` → [`ApiError::FallbackTriggered`]
+///   (the orchestrator re-issues against the fallback model — claude-code
+///   `withRetry.ts:347`);
+/// * else if the user is external & not sandboxed → [`ApiError::Overloaded`]
+///   `{ repeated: true }` with the byte-locked `Repeated 529 Overloaded errors`
+///   message (claude-code `withRetry.ts:359`);
+/// * else the loop keeps retrying (subject to the attempt budget), matching the
+///   TS fall-through when neither branch applies.
+///
+/// `allow_fallback` is the **pre-computed** TS guard
+/// `FALLBACK_FOR_ALL_PRIMARY_MODELS || (!isClaudeAISubscriber() &&
+/// isNonCustomOpusModel(model))` (`withRetry.ts:331-332`) — the caller resolves
+/// the env flag / subscriber state / Opus check once and hands the result in.
+#[derive(Debug, Clone)]
+pub struct RetryControl {
+    /// Consecutive-529 threshold. Defaults to [`MAX_529_RETRIES`] (3).
+    pub max_529_retries: u8,
+    /// Fallback model to signal via [`ApiError::FallbackTriggered`] once the
+    /// threshold trips; `None` disables the fallback signal.
+    pub fallback_model: Option<String>,
+    /// The primary model in flight — carried into
+    /// [`ApiError::FallbackTriggered::original_model`].
+    pub primary_model: String,
+    /// Pre-computed TS guard (`FALLBACK_FOR_ALL_PRIMARY_MODELS ||
+    /// (!is_subscriber && is_non_custom_opus(primary_model))`). When `false`,
+    /// the consecutive-529 gate never trips and the loop behaves like the
+    /// budget-only [`with_retry`].
+    pub allow_fallback: bool,
+    /// `USER_TYPE === 'external'` (claude-code `withRetry.ts:354`). Gates the
+    /// no-fallback `Overloaded { repeated: true }` terminal branch.
+    pub is_external: bool,
+    /// `!!process.env.IS_SANDBOX` (claude-code `withRetry.ts:355`). When set,
+    /// the no-fallback terminal branch is skipped (sandbox keeps retrying).
+    pub is_sandbox: bool,
+}
+
+impl Default for RetryControl {
+    /// Behaviour-neutral default: no fallback configured and the gate disabled,
+    /// so [`with_retry_ctl`] reduces exactly to the legacy [`with_retry`]
+    /// budget-only loop. Used by the thin [`with_retry`] wrapper and by callers
+    /// that have not wired the consecutive-529 policy yet.
+    fn default() -> Self {
+        Self {
+            max_529_retries: MAX_529_RETRIES,
+            fallback_model: None,
+            primary_model: String::new(),
+            allow_fallback: false,
+            is_external: false,
+            is_sandbox: false,
+        }
+    }
+}
+
 /// Wraps an HTTP call in exponential backoff with jitter.
 ///
 /// `attempts` is the **total** attempts (NOT retries). With `attempts = 3`
@@ -198,6 +265,11 @@ pub fn classify_retryable(resp: &HttpResponse) -> RetryClass {
 /// `base_delays_ms.len()` must be at least `attempts - 1`; shorter slices
 /// fall back to repeating the last entry.
 ///
+/// This is the budget-only entrypoint: it delegates to [`with_retry_ctl`] with
+/// a default ([`RetryControl::default`]) policy, so the consecutive-529 /
+/// Opus-fallback gate never fires. Callers that need the fallback signal use
+/// [`with_retry_ctl`] directly.
+///
 /// # Errors
 /// Returns the first non-retryable error encountered, or
 /// [`ApiError::RetryExhausted`] if every attempt failed with a retryable
@@ -206,6 +278,38 @@ pub fn classify_retryable(resp: &HttpResponse) -> RetryClass {
 pub async fn with_retry<F, Fut>(
     attempts: u8,
     base_delays_ms: &[u64],
+    f: F,
+) -> Result<HttpResponse, ApiError>
+where
+    F: FnMut(u8) -> Fut,
+    Fut: std::future::Future<Output = Result<HttpResponse, HttpError>>,
+{
+    with_retry_ctl(attempts, base_delays_ms, &RetryControl::default(), f).await
+}
+
+/// [`with_retry`] plus the consecutive-529 / Opus-fallback policy carried by
+/// [`RetryControl`].
+///
+/// Identical retry/backoff machinery as [`with_retry`], with one addition: a
+/// `consecutive_529` counter (claude-code `withRetry.ts:186,334`). On each
+/// `Retry { overloaded: true }` outcome the counter increments **only when
+/// `ctl.allow_fallback`** (the pre-computed TS guard, `:331-332`); any non-529
+/// outcome resets it to 0. When it reaches `ctl.max_529_retries`
+/// (`:335`):
+///
+/// * `ctl.fallback_model.is_some()` → [`ApiError::FallbackTriggered`] (`:347`);
+/// * else `ctl.is_external && !ctl.is_sandbox` → [`ApiError::Overloaded`]
+///   `{ repeated: true }` (`:359`);
+/// * else the loop keeps retrying under the normal attempt budget (TS
+///   fall-through — neither branch throws).
+///
+/// # Errors
+/// As [`with_retry`], plus [`ApiError::FallbackTriggered`] /
+/// [`ApiError::Overloaded`] `{ repeated: true }` from the consecutive-529 gate.
+pub async fn with_retry_ctl<F, Fut>(
+    attempts: u8,
+    base_delays_ms: &[u64],
+    ctl: &RetryControl,
     mut f: F,
 ) -> Result<HttpResponse, ApiError>
 where
@@ -217,6 +321,10 @@ where
     // response, so an exhausted budget surfaces the byte-locked
     // `ApiError::Overloaded { repeated: true }` instead of generic exhaustion.
     let mut last_overloaded = false;
+    // Consecutive-529 counter (claude-code withRetry.ts:186). Increments only
+    // when the fallback gate is open (`ctl.allow_fallback`); resets to 0 on any
+    // non-529 outcome (success / timeout / non-overloaded retryable status).
+    let mut consecutive_529: u8 = 0;
     for attempt in 0..attempts {
         if attempt > 0 {
             let base = base_delays_ms
@@ -238,11 +346,42 @@ where
                 RetryClass::Retry { overloaded } => {
                     last_status = Some(resp.status);
                     last_overloaded = overloaded;
+                    if overloaded {
+                        // Consecutive-529 gate (claude-code withRetry.ts:326-365).
+                        // Only counts when the pre-computed guard is open
+                        // (FALLBACK_FOR_ALL_PRIMARY_MODELS || (!subscriber &&
+                        // non-custom-opus)).
+                        if ctl.allow_fallback {
+                            consecutive_529 = consecutive_529.saturating_add(1);
+                            if consecutive_529 >= ctl.max_529_retries {
+                                if let Some(fallback) = &ctl.fallback_model {
+                                    // claude-code withRetry.ts:347 — signal the
+                                    // caller to re-issue against the fallback.
+                                    return Err(ApiError::FallbackTriggered {
+                                        original_model: ctl.primary_model.clone(),
+                                        fallback_model: fallback.clone(),
+                                    });
+                                }
+                                if ctl.is_external && !ctl.is_sandbox {
+                                    // claude-code withRetry.ts:359 — external,
+                                    // non-sandbox, no fallback → terminal.
+                                    return Err(ApiError::Overloaded { repeated: true });
+                                }
+                                // Neither branch applies → TS falls through to
+                                // the normal retry budget; keep retrying.
+                            }
+                        }
+                    } else {
+                        // Non-529 retryable (408/409/5xx) resets the consecutive
+                        // counter (the 529 run is broken).
+                        consecutive_529 = 0;
+                    }
                     tracing::warn!(
                         target: "lingxi::api_client::retry",
                         attempt = attempt + 1,
                         status = resp.status,
                         overloaded,
+                        consecutive_529,
                         "retryable response; will retry"
                     );
                     continue;
@@ -267,6 +406,8 @@ where
             },
             Err(HttpError::Timeout(_) | HttpError::Connection(_)) => {
                 last_overloaded = false;
+                // A transport error is a non-529 outcome → reset the run.
+                consecutive_529 = 0;
                 tracing::warn!(
                     target: "lingxi::api_client::retry",
                     attempt = attempt + 1,
@@ -559,6 +700,276 @@ mod with_retry_tests {
             elapsed.as_millis() >= 20,
             "expected at least ~24ms of cumulative sleep, got {elapsed:?}",
         );
+    }
+}
+
+#[cfg(test)]
+mod consecutive_529_fallback {
+    //! Tests for the consecutive-529 counter + Opus fallback policy
+    //! (`with_retry_ctl` / [`RetryControl`]), named so the cargo filter
+    //! `retry::consecutive_529_fallback` matches them all.
+    use super::*;
+    use protocol::HttpResponse;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
+
+    fn ok(status: u16, body: &str) -> HttpResponse {
+        HttpResponse {
+            status,
+            headers: Vec::new(),
+            body: body.into(),
+        }
+    }
+
+    /// Opus primary, gate open, fallback configured.
+    fn ctl_with_fallback() -> RetryControl {
+        RetryControl {
+            fallback_model: Some("claude-sonnet-4-6".into()),
+            primary_model: "claude-opus-4-6".into(),
+            allow_fallback: true,
+            is_external: true,
+            is_sandbox: false,
+            ..RetryControl::default()
+        }
+    }
+
+    /// Opus primary, gate open, NO fallback, external + non-sandbox.
+    fn ctl_no_fallback_external() -> RetryControl {
+        RetryControl {
+            fallback_model: None,
+            primary_model: "claude-opus-4-6".into(),
+            allow_fallback: true,
+            is_external: true,
+            is_sandbox: false,
+            ..RetryControl::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn three_529_with_fallback_triggers_fallback() {
+        let count = Arc::new(AtomicU8::new(0));
+        let c = Arc::clone(&count);
+        let ctl = ctl_with_fallback();
+        let r = with_retry_ctl(3, &[1, 1, 1], &ctl, move |_| {
+            let c = Arc::clone(&c);
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(ok(529, "overloaded"))
+            }
+        })
+        .await;
+        match r {
+            Err(ApiError::FallbackTriggered {
+                original_model,
+                fallback_model,
+            }) => {
+                assert_eq!(original_model, "claude-opus-4-6");
+                assert_eq!(fallback_model, "claude-sonnet-4-6");
+            }
+            other => panic!("expected FallbackTriggered, got {other:?}"),
+        }
+        // The gate fires on the 3rd 529 (counter reaches MAX_529_RETRIES).
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn three_529_no_fallback_external_is_repeated_overloaded() {
+        let count = Arc::new(AtomicU8::new(0));
+        let c = Arc::clone(&count);
+        let ctl = ctl_no_fallback_external();
+        let r = with_retry_ctl(3, &[1, 1, 1], &ctl, move |_| {
+            let c = Arc::clone(&c);
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(ok(529, "overloaded"))
+            }
+        })
+        .await;
+        match r {
+            Err(ApiError::Overloaded { repeated }) => assert!(repeated),
+            other => panic!("expected Overloaded {{ repeated: true }}, got {other:?}"),
+        }
+        // Byte-locked terminal message.
+        assert_eq!(
+            format!("{}", ApiError::Overloaded { repeated: true }),
+            "Repeated 529 Overloaded errors"
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn two_529_then_200_recovers_and_resets_counter() {
+        let count = Arc::new(AtomicU8::new(0));
+        let c = Arc::clone(&count);
+        let ctl = ctl_with_fallback();
+        let r = with_retry_ctl(3, &[1, 1, 1], &ctl, move |_| {
+            let c = Arc::clone(&c);
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Ok(ok(529, "overloaded"))
+                } else {
+                    Ok(ok(200, "ok"))
+                }
+            }
+        })
+        .await;
+        // 529, 529, 200 → counter never reaches 3, request succeeds.
+        assert!(r.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn non_529_breaks_the_run_before_threshold() {
+        // 529, 500, 529 → the 500 resets the consecutive-529 counter, so the
+        // gate never trips even though there were two 529s. The loop exhausts
+        // its 3-attempt budget; the final attempt was a 529 (overloaded), so
+        // exhaustion surfaces as Overloaded { repeated: true } via the existing
+        // last_overloaded path — NOT FallbackTriggered.
+        let count = Arc::new(AtomicU8::new(0));
+        let c = Arc::clone(&count);
+        let ctl = ctl_with_fallback();
+        let r = with_retry_ctl(3, &[1, 1, 1], &ctl, move |_| {
+            let c = Arc::clone(&c);
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                // Attempt 1 (n==1) is a 500 that resets the 529 run; attempts 0
+                // and 2 are 529s.
+                if n == 1 {
+                    Ok(ok(500, "transient"))
+                } else {
+                    Ok(ok(529, "overloaded"))
+                }
+            }
+        })
+        .await;
+        match r {
+            Err(ApiError::Overloaded { repeated }) => assert!(repeated),
+            other => panic!("expected Overloaded (budget exhausted), got {other:?}"),
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn gate_closed_means_no_fallback_even_on_repeated_529() {
+        // allow_fallback = false (e.g. a non-opus model, or a subscriber): the
+        // consecutive-529 counter never increments, so neither FallbackTriggered
+        // nor the early Repeated-Overloaded branch fires. The loop simply
+        // exhausts its budget; because the last attempt was a 529 it still
+        // surfaces Overloaded { repeated: true } via the budget path.
+        let count = Arc::new(AtomicU8::new(0));
+        let c = Arc::clone(&count);
+        let ctl = RetryControl {
+            fallback_model: Some("claude-sonnet-4-6".into()),
+            primary_model: "claude-sonnet-4-6".into(),
+            allow_fallback: false, // gate closed
+            is_external: true,
+            is_sandbox: false,
+            ..RetryControl::default()
+        };
+        let r = with_retry_ctl(3, &[1, 1, 1], &ctl, move |_| {
+            let c = Arc::clone(&c);
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(ok(529, "overloaded"))
+            }
+        })
+        .await;
+        match r {
+            Err(ApiError::Overloaded { repeated }) => assert!(repeated),
+            other => panic!("expected Overloaded (gate closed → budget path), got {other:?}"),
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn sandbox_skips_the_no_fallback_terminal_branch() {
+        // No fallback, gate open, but IS_SANDBOX set → the early terminal branch
+        // is skipped (TS `!process.env.IS_SANDBOX`). The loop keeps retrying and
+        // exhausts its budget, still surfacing Overloaded via last_overloaded.
+        let count = Arc::new(AtomicU8::new(0));
+        let c = Arc::clone(&count);
+        let ctl = RetryControl {
+            fallback_model: None,
+            primary_model: "claude-opus-4-6".into(),
+            allow_fallback: true,
+            is_external: true,
+            is_sandbox: true, // sandbox → skip the early terminal branch
+            ..RetryControl::default()
+        };
+        let r = with_retry_ctl(4, &[1, 1, 1, 1], &ctl, move |_| {
+            let c = Arc::clone(&c);
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(ok(529, "overloaded"))
+            }
+        })
+        .await;
+        match r {
+            Err(ApiError::Overloaded { repeated }) => assert!(repeated),
+            other => panic!("expected Overloaded, got {other:?}"),
+        }
+        // All 4 attempts ran (gate never short-circuited).
+        assert_eq!(count.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn non_external_no_fallback_keeps_retrying() {
+        // Gate open, no fallback, USER_TYPE != external → neither terminal
+        // branch fires; the loop runs to budget exhaustion (Overloaded via the
+        // last_overloaded path because the final attempt was a 529).
+        let count = Arc::new(AtomicU8::new(0));
+        let c = Arc::clone(&count);
+        let ctl = RetryControl {
+            fallback_model: None,
+            primary_model: "claude-opus-4-6".into(),
+            allow_fallback: true,
+            is_external: false, // not external
+            is_sandbox: false,
+            ..RetryControl::default()
+        };
+        let r = with_retry_ctl(3, &[1, 1, 1], &ctl, move |_| {
+            let c = Arc::clone(&c);
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(ok(529, "overloaded"))
+            }
+        })
+        .await;
+        match r {
+            Err(ApiError::Overloaded { repeated }) => assert!(repeated),
+            other => panic!("expected Overloaded, got {other:?}"),
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn default_ctl_reduces_to_budget_only_loop() {
+        // RetryControl::default() (allow_fallback=false, no fallback) must behave
+        // exactly like the legacy budget-only with_retry: 3×529 → Overloaded via
+        // the budget path, never FallbackTriggered.
+        let count = Arc::new(AtomicU8::new(0));
+        let c = Arc::clone(&count);
+        let r = with_retry_ctl(3, &[1, 1, 1], &RetryControl::default(), move |_| {
+            let c = Arc::clone(&c);
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(ok(529, "overloaded"))
+            }
+        })
+        .await;
+        match r {
+            Err(ApiError::Overloaded { repeated }) => assert!(repeated),
+            other => panic!("expected Overloaded, got {other:?}"),
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn max_529_retries_is_byte_locked() {
+        // claude-code withRetry.ts:54 — const MAX_529_RETRIES = 3.
+        assert_eq!(MAX_529_RETRIES, 3);
+        assert_eq!(RetryControl::default().max_529_retries, 3);
     }
 }
 

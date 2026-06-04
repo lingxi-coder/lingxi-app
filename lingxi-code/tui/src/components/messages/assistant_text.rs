@@ -24,9 +24,24 @@
 
 use iocraft::prelude::*;
 
-use crate::render::markdown::{render as render_markdown, MarkdownTheme};
+use crate::render::markdown::{render_with_width as render_markdown_width, MarkdownTheme};
 use crate::render::{StyleColor, StyledLine};
 use crate::theme::Theme;
+
+/// (A2) Fallback markdown width when the caller threads no terminal width
+/// (`width == 0`). Matches `render::markdown`'s default so the body wraps
+/// identically to the pure `render` path. Only table blocks consult width.
+const DEFAULT_BODY_WIDTH: usize = 80;
+
+/// Resolve the effective markdown width: a `0` prop (the [`Default`] for the
+/// component) means "use the default" so existing callers behave unchanged.
+fn effective_width(width: usize) -> usize {
+    if width == 0 {
+        DEFAULT_BODY_WIDTH
+    } else {
+        width
+    }
+}
 
 /// Locked dot marker — "● " (U+25CF + ASCII space). Sits once to the LEFT of
 /// the body column (claude-code `minWidth={2}` sibling box), NOT per line.
@@ -41,6 +56,10 @@ const CONT_INDENT: &str = "  ";
 pub struct AssistantTextMessageProps {
     /// Assistant body — rendered as markdown (multi-line; streaming-safe).
     pub body: String,
+    /// (A2) Available render width in display columns for table layout. `0`
+    /// (the default) means use [`DEFAULT_BODY_WIDTH`]; the live scrollback
+    /// threads the real viewport width so markdown tables fit the terminal.
+    pub width: usize,
 }
 
 /// `MarkdownTheme` for the STYLED assistant body. Unlike the plain-text
@@ -71,10 +90,16 @@ fn markdown_theme() -> MarkdownTheme {
 /// An empty flattened body still yields the marker (matches the prior
 /// always-show-marker behavior; the dispatcher only emits this variant for
 /// non-empty assistant text).
+///
+/// (A2) `width` is the markdown table layout width (0 → [`DEFAULT_BODY_WIDTH`]);
+/// the measurement oracle MUST pass the SAME width the component uses so the
+/// flattened-row count stays in lock-step with what is drawn. For bodies
+/// without a markdown table this is width-independent (only tables consult it),
+/// so the existing default-width callers are unaffected.
 #[must_use]
-pub fn render_assistant_text_to_string(body: &str) -> String {
+pub fn render_assistant_text_to_string(body: &str, width: usize) -> String {
     let theme = markdown_theme();
-    let flat = render_markdown(body, &theme)
+    let flat = render_markdown_width(body, &theme, effective_width(width))
         .iter()
         .map(StyledLine::plain_text)
         .collect::<Vec<_>>()
@@ -107,7 +132,7 @@ pub fn render_assistant_text_to_string(body: &str) -> String {
 /// body just grows each frame; `render::markdown` is streaming-safe).
 #[component]
 pub fn AssistantTextMessage(props: &AssistantTextMessageProps) -> impl Into<AnyElement<'static>> {
-    let lines = render_markdown(&props.body, &markdown_theme());
+    let lines = render_markdown_width(&props.body, &markdown_theme(), effective_width(props.width));
     let rows: Vec<AnyElement<'static>> = lines
         .into_iter()
         .map(|line| {
@@ -171,7 +196,7 @@ mod tests {
 
     #[test]
     fn oracle_prefixes_first_line_with_marker() {
-        let s = render_assistant_text_to_string("hello");
+        let s = render_assistant_text_to_string("hello", 0);
         assert!(s.starts_with(MARKER), "got: {s:?}");
         assert_eq!(s, "\u{25CF} hello");
     }
@@ -179,7 +204,7 @@ mod tests {
     #[test]
     fn oracle_indents_continuation_lines() {
         // Two paragraphs flatten to "a", "", "b" (blank between paragraphs).
-        let s = render_assistant_text_to_string("a\n\nb");
+        let s = render_assistant_text_to_string("a\n\nb", 0);
         let lines: Vec<&str> = s.lines().collect();
         assert_eq!(lines[0], "\u{25CF} a");
         // Continuation lines are indented 2 to align under the body column.
@@ -194,13 +219,13 @@ mod tests {
     #[test]
     fn oracle_flattens_bold_to_plain() {
         // Bold styling is dropped in the plain oracle; the literal text stays.
-        let s = render_assistant_text_to_string("a **b** c");
+        let s = render_assistant_text_to_string("a **b** c", 0);
         assert_eq!(s, "\u{25CF} a b c");
     }
 
     #[test]
     fn oracle_flattens_list() {
-        let s = render_assistant_text_to_string("- one\n- two");
+        let s = render_assistant_text_to_string("- one\n- two", 0);
         assert!(s.contains("- one"), "got: {s:?}");
         assert!(s.contains("- two"), "got: {s:?}");
         assert!(s.starts_with(MARKER));
@@ -210,7 +235,7 @@ mod tests {
     fn oracle_flattens_fenced_code_dropping_fences() {
         // The ``` fence lines are NOT part of the flattened output (markdown
         // renders the body, not the fence syntax).
-        let s = render_assistant_text_to_string("intro\n```rust\nlet x = 1;\n```\noutro");
+        let s = render_assistant_text_to_string("intro\n```rust\nlet x = 1;\n```\noutro", 0);
         assert!(!s.contains("```"), "fences must be dropped: {s:?}");
         assert!(s.contains("let x = 1;"), "got: {s:?}");
         assert!(s.contains("intro"));
@@ -219,14 +244,14 @@ mod tests {
 
     #[test]
     fn empty_body_yields_marker() {
-        assert_eq!(render_assistant_text_to_string(""), MARKER);
+        assert_eq!(render_assistant_text_to_string("", 0), MARKER);
     }
 
     #[test]
     fn inline_code_uses_permission_color() {
         // The STYLED renderer (not the plain oracle) colors inline code with
         // the dark `permission` palette rgb(177,185,249) per markdown.ts:88-91.
-        let lines = render_markdown("run `cargo test`", &markdown_theme());
+        let lines = render_markdown_width("run `cargo test`", &markdown_theme(), DEFAULT_BODY_WIDTH);
         let code = lines
             .iter()
             .flat_map(|l| &l.spans)

@@ -14,6 +14,7 @@
 pub mod ansi;
 pub mod diff;
 pub mod markdown;
+pub mod markdown_table;
 pub mod syntax;
 
 use iocraft::Color;

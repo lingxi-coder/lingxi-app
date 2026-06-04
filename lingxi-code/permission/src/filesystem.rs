@@ -189,7 +189,11 @@ fn pattern_with_root(
 /// `expandPath` mirror as the orchestrator's `absolutize` (trim; bare `~` /
 /// `~/…` against home; absolute kept; relative joined to cwd; then `.`/`..`
 /// collapsed without touching disk).
-fn expand_path(raw: &str, roots: &FsRoots) -> PathBuf {
+///
+/// `pub(crate)` so the auto-edit safety guard ([`crate::auto_edit_safety`]) can
+/// reuse the SAME lexical expansion claude-code's `expandPath` performs before
+/// the danger-segment scan — keeping the two paths byte-identical.
+pub(crate) fn expand_path(raw: &str, roots: &FsRoots) -> PathBuf {
     let trimmed = raw.trim();
     let expanded: PathBuf = if trimmed == "~" {
         roots.home.clone().unwrap_or_else(|| PathBuf::from(trimmed))

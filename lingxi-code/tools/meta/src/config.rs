@@ -1,5 +1,10 @@
 //! `ConfigTool` — get/set Claude Code settings against `~/.claude/settings.json`.
 //!
+//! no-truncation: ConfigTool returns a single bounded value — one setting's
+//! value (get) or a short confirmation/status (set/list) — never large content,
+//! so it intentionally opts out of output truncation (matches claude-code,
+//! whose ConfigTool result is a small status object).
+//!
 //! Ports `ConfigTool/supportedSettings.ts` (the `SUPPORTED_SETTINGS` registry +
 //! `isSupported`/`getConfig`/`getOptionsForSetting`/`getPath`) and
 //! `ConfigTool/ConfigTool.ts` (get/set semantics, boolean string-coercion,

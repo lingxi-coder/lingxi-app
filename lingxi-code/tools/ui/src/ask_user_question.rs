@@ -1,20 +1,33 @@
-//! `AskUserQuestionTool` — prompts the user with up to 4 labeled options.
+//! `AskUserQuestionTool` — asks the user one or more multiple-choice questions.
 //!
-//! Wire identifiers locked in spec §7:
-//! - Max 4 options.
-//! - Each label ≤ 60 chars.
-//! - Question ≤ 200 chars.
-//! - Returns `{ selected_index, selected_label }`.
+//! Ported to the real claude-code multi-question contract
+//! (`AskUserQuestionTool/AskUserQuestionTool.tsx:14-79`):
+//! - `questions: [{ question, header, options:[{label, description, preview?}],
+//!   multiSelect }]` — 1-4 questions, each with 2-4 options.
+//! - `header` is a short chip label (max `ASK_USER_QUESTION_TOOL_CHIP_WIDTH`).
+//! - Uniqueness refine (`UNIQUENESS_REFINE`): question texts must be unique and
+//!   option labels must be unique within each question.
+//! - Output `{ questions, answers, annotations? }` where `answers` maps each
+//!   question text to the chosen label (multi-select answers are comma-joined),
+//!   matching the TS `call` return shape.
 //!
-//! Hermetic by default: the question is not actually presented; the resolver
-//! `ctx.options.ask_user_question_selected_index` (advisory) returns 0 when
-//! absent. Production hosts override `AskUserQuestionTool` constructor input
-//! to inject a real terminal/UI prompt.
+//! Hermetic by default: in headless Rust there is no terminal/UI permission
+//! component to collect the user's selections, so the resolver synthesizes the
+//! `answers` map. The default `FirstOptionResolver` picks each question's first
+//! option label. Production hosts override via `with_resolver`.
 //!
-//! no-truncation: returns `{ selected_index: u32, selected_label: String }`.
-//! Selected label is bounded to ≤60 chars (input contract).
+//! Fidelity notes / divergences (see Batch 5 spec):
+//! - TS `checkPermissions` uses `behavior:'ask'` ("Answer questions?"); the Rust
+//!   headless path keeps `PermissionResult::Allow` (vestigial — no interactive
+//!   approval substrate). `requires_user_interaction()` stays true.
+//! - The HTML-preview validation (`validateHtmlPreview`, gated on
+//!   `getQuestionPreviewFormat()==='html'`) and the auto-injected "Other" option
+//!   / `annotations` notes are TUI-render concerns with no headless Rust path:
+//!   `preview` is a passthrough string, HTML validation + Other-injection omitted.
+//!
+//! no-truncation: bounded structured output (`{questions, answers, annotations?}`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -22,7 +35,7 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
@@ -37,46 +50,110 @@ use tool_api::tool_trait::{
     ToolStaticContext, ValidationError,
 };
 
-// -- Wire identifier locks (spec §7) -----------------------------------------
+// -- Wire identifier locks ---------------------------------------------------
 
-/// Tool name byte-lock.
+/// Tool name byte-lock (`prompt.ts:3`).
 pub const ASK_USER_QUESTION_TOOL_NAME: &str = "AskUserQuestion";
-/// Maximum number of options (spec §7).
+/// Maximum number of questions (`inputSchema` `.max(4)`).
+pub const MAX_ASK_QUESTIONS: usize = 4;
+/// Minimum number of questions (`inputSchema` `.min(1)`).
+pub const MIN_ASK_QUESTIONS: usize = 1;
+/// Maximum number of options per question (`questionSchema` `.max(4)`).
 pub const MAX_ASK_OPTIONS: usize = 4;
-/// Maximum label length per option (spec §7).
+/// Minimum number of options per question (`questionSchema` `.min(2)`).
+pub const MIN_ASK_OPTIONS: usize = 2;
+/// Header chip width — `ASK_USER_QUESTION_TOOL_CHIP_WIDTH` (`prompt.ts:5`).
+pub const ASK_USER_QUESTION_TOOL_CHIP_WIDTH: usize = 12;
+/// Header maximum length (chip width). LingXi enforces this as `maxLength`;
+/// TS documents it in the field description but does not hard-validate it.
+pub const MAX_ASK_HEADER_LEN: usize = ASK_USER_QUESTION_TOOL_CHIP_WIDTH;
+
+/// LingXi-only locks retained for the system-tools parity fixture. TS uses
+/// free-form `z.string()` for both `label` and `question` (no length cap), so
+/// these are NOT enforced in `validate_input`; they exist only as exported
+/// constants matching `parity/fixtures/system_tools.json`.
 pub const MAX_ASK_LABEL_LEN: usize = 60;
-/// Maximum question length (spec §7).
+/// LingXi-only lock (see [`MAX_ASK_LABEL_LEN`]). Not enforced.
 pub const MAX_ASK_QUESTION_LEN: usize = 200;
 
-/// Resolver trait — production wraps a terminal/UI prompt; the M4-08 default
-/// is a "first option" stub so dispatcher integration stays hermetic.
+/// Uniqueness-refine rejection message — byte-faithful to
+/// `UNIQUENESS_REFINE.message` (`AskUserQuestionTool.tsx:53`).
+pub const UNIQUENESS_REFINE_MESSAGE: &str =
+    "Question texts must be unique, option labels must be unique within each question";
+
+/// `checkPermissions` ask prompt — TS `message: 'Answer questions?'`
+/// (`AskUserQuestionTool.tsx`). Retained for documentation; the Rust headless
+/// path returns `Allow`.
+pub const ASK_USER_QUESTION_ASK_MESSAGE: &str = "Answer questions?";
+
+// -- Domain types ------------------------------------------------------------
+
+/// One selectable option (`questionOptionSchema`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionOption {
+    /// Display text the user selects (concise, 1-5 words).
+    pub label: String,
+    /// Explanation of what choosing this option means.
+    pub description: String,
+    /// Optional preview content rendered when this option is focused
+    /// (markdown/HTML/code/etc.). Passthrough in headless Rust.
+    pub preview: Option<String>,
+}
+
+/// One question (`questionSchema`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Question {
+    /// The complete question text.
+    pub question: String,
+    /// Very short chip/tag label (≤ chip width).
+    pub header: String,
+    /// 2-4 mutually-exclusive (unless `multi_select`) options.
+    pub options: Vec<QuestionOption>,
+    /// Allow multiple selections. Defaults to `false`.
+    pub multi_select: bool,
+}
+
+/// Resolver trait — production wraps the terminal/UI permission component that
+/// collects the user's answers; the headless default synthesizes them.
+///
+/// Returns a map from each question's `question` text to the chosen answer
+/// string (a single label, or for multi-select a comma-joined list of labels).
 #[async_trait]
 pub trait AskUserQuestionResolver: Send + Sync {
-    /// Return the selected option index, given the question and options list.
+    /// Resolve the answer map for the given questions.
     ///
     /// # Errors
     /// Implementations may surface `ToolError` if the prompt fails.
-    async fn resolve(&self, question: &str, options: &[String]) -> Result<usize, ToolError>;
+    async fn resolve(&self, questions: &[Question]) -> Result<HashMap<String, String>, ToolError>;
 }
 
-/// Default hermetic resolver — always returns index 0 (first option).
+/// Default hermetic resolver — answers each question with its first option's
+/// label (the TS prompt instructs models to put a recommended option first).
 pub struct FirstOptionResolver;
 
 #[async_trait]
 impl AskUserQuestionResolver for FirstOptionResolver {
-    async fn resolve(&self, _question: &str, _options: &[String]) -> Result<usize, ToolError> {
-        Ok(0)
+    async fn resolve(&self, questions: &[Question]) -> Result<HashMap<String, String>, ToolError> {
+        let mut out = HashMap::with_capacity(questions.len());
+        for q in questions {
+            // `options` is guaranteed non-empty by validation; first label is
+            // the synthesized single-select answer.
+            if let Some(first) = q.options.first() {
+                out.insert(q.question.clone(), first.label.clone());
+            }
+        }
+        Ok(out)
     }
 }
 
-/// `AskUserQuestionTool` — prompts the user with up to 4 labeled options.
+/// `AskUserQuestionTool` — asks the user one or more multiple-choice questions.
 pub struct AskUserQuestionTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
     pub(crate) resolver: Arc<dyn AskUserQuestionResolver>,
 }
 
 impl AskUserQuestionTool {
-    /// Construct with the default `FirstOptionResolver`.
+    /// Construct with the default [`FirstOptionResolver`].
     #[must_use]
     pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
         Self {
@@ -95,67 +172,263 @@ impl AskUserQuestionTool {
     }
 }
 
-pub(crate) fn validate_question(q: &str) -> Result<(), ToolError> {
-    if q.is_empty() {
-        return Err(ToolError::InvalidInput(
-            "AskUserQuestion: question is empty".into(),
-        ));
-    }
-    if q.chars().count() > MAX_ASK_QUESTION_LEN {
+// -- Parsing + validation ----------------------------------------------------
+
+/// Parse one option object. Requires non-empty string `label` + `description`;
+/// `preview` is an optional string.
+fn parse_option(idx_q: usize, idx_o: usize, v: &Value) -> Result<QuestionOption, ToolError> {
+    let obj = v.as_object().ok_or_else(|| {
+        ToolError::InvalidInput(format!(
+            "AskUserQuestion: questions[{idx_q}].options[{idx_o}] must be an object"
+        ))
+    })?;
+    let label = obj.get("label").and_then(Value::as_str).ok_or_else(|| {
+        ToolError::InvalidInput(format!(
+            "AskUserQuestion: questions[{idx_q}].options[{idx_o}].label must be a string"
+        ))
+    })?;
+    if label.is_empty() {
         return Err(ToolError::InvalidInput(format!(
-            "AskUserQuestion: question length {} exceeds max {}",
-            q.chars().count(),
-            MAX_ASK_QUESTION_LEN
+            "AskUserQuestion: questions[{idx_q}].options[{idx_o}].label is empty"
         )));
+    }
+    let description = obj
+        .get("description")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ToolError::InvalidInput(format!(
+                "AskUserQuestion: questions[{idx_q}].options[{idx_o}].description must be a string"
+            ))
+        })?;
+    // `preview` optional: if present it must be a string (passthrough).
+    let preview = match obj.get("preview") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => {
+            return Err(ToolError::InvalidInput(format!(
+                "AskUserQuestion: questions[{idx_q}].options[{idx_o}].preview must be a string"
+            )))
+        }
+    };
+    Ok(QuestionOption {
+        label: label.to_string(),
+        description: description.to_string(),
+        preview,
+    })
+}
+
+/// Parse one question object, enforcing the per-question option-count bounds
+/// and `header` length.
+fn parse_question(idx_q: usize, v: &Value) -> Result<Question, ToolError> {
+    let obj = v.as_object().ok_or_else(|| {
+        ToolError::InvalidInput(format!("AskUserQuestion: questions[{idx_q}] must be an object"))
+    })?;
+    let question = obj.get("question").and_then(Value::as_str).ok_or_else(|| {
+        ToolError::InvalidInput(format!(
+            "AskUserQuestion: questions[{idx_q}].question must be a string"
+        ))
+    })?;
+    if question.is_empty() {
+        return Err(ToolError::InvalidInput(format!(
+            "AskUserQuestion: questions[{idx_q}].question is empty"
+        )));
+    }
+    let header = obj.get("header").and_then(Value::as_str).ok_or_else(|| {
+        ToolError::InvalidInput(format!(
+            "AskUserQuestion: questions[{idx_q}].header must be a string"
+        ))
+    })?;
+    if header.chars().count() > MAX_ASK_HEADER_LEN {
+        return Err(ToolError::InvalidInput(format!(
+            "AskUserQuestion: questions[{idx_q}].header length {} exceeds max {}",
+            header.chars().count(),
+            MAX_ASK_HEADER_LEN
+        )));
+    }
+
+    let opts_v = obj.get("options").and_then(Value::as_array).ok_or_else(|| {
+        ToolError::InvalidInput(format!(
+            "AskUserQuestion: questions[{idx_q}].options must be an array"
+        ))
+    })?;
+    if opts_v.len() < MIN_ASK_OPTIONS {
+        return Err(ToolError::InvalidInput(format!(
+            "AskUserQuestion: questions[{idx_q}].options must have at least {MIN_ASK_OPTIONS} options"
+        )));
+    }
+    if opts_v.len() > MAX_ASK_OPTIONS {
+        return Err(ToolError::InvalidInput(format!(
+            "AskUserQuestion: questions[{idx_q}].options count {} exceeds max {MAX_ASK_OPTIONS}",
+            opts_v.len()
+        )));
+    }
+    let mut options = Vec::with_capacity(opts_v.len());
+    for (idx_o, ov) in opts_v.iter().enumerate() {
+        options.push(parse_option(idx_q, idx_o, ov)?);
+    }
+
+    // `multiSelect` defaults to false (TS `z.boolean().default(false)`).
+    let multi_select = match obj.get("multiSelect") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            return Err(ToolError::InvalidInput(format!(
+                "AskUserQuestion: questions[{idx_q}].multiSelect must be a boolean"
+            )))
+        }
+    };
+
+    Ok(Question {
+        question: question.to_string(),
+        header: header.to_string(),
+        options,
+        multi_select,
+    })
+}
+
+/// Parse the top-level `questions` array, enforcing question-count bounds.
+pub(crate) fn parse_questions(input: &Value) -> Result<Vec<Question>, ToolError> {
+    let arr = input
+        .get("questions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ToolError::InvalidInput("AskUserQuestion: missing or non-array questions".into())
+        })?;
+    if arr.len() < MIN_ASK_QUESTIONS {
+        return Err(ToolError::InvalidInput(format!(
+            "AskUserQuestion: at least {MIN_ASK_QUESTIONS} question is required"
+        )));
+    }
+    if arr.len() > MAX_ASK_QUESTIONS {
+        return Err(ToolError::InvalidInput(format!(
+            "AskUserQuestion: question count {} exceeds max {MAX_ASK_QUESTIONS}",
+            arr.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for (idx_q, qv) in arr.iter().enumerate() {
+        out.push(parse_question(idx_q, qv)?);
+    }
+    Ok(out)
+}
+
+/// Port of `UNIQUENESS_REFINE.check` (`AskUserQuestionTool.tsx:32-54`):
+/// question texts must be unique, and option labels must be unique within each
+/// question. On failure returns [`UNIQUENESS_REFINE_MESSAGE`].
+pub(crate) fn check_uniqueness(questions: &[Question]) -> Result<(), ToolError> {
+    let mut seen_q: HashSet<&str> = HashSet::with_capacity(questions.len());
+    for q in questions {
+        if !seen_q.insert(q.question.as_str()) {
+            return Err(ToolError::InvalidInput(UNIQUENESS_REFINE_MESSAGE.into()));
+        }
+        let mut seen_l: HashSet<&str> = HashSet::with_capacity(q.options.len());
+        for opt in &q.options {
+            if !seen_l.insert(opt.label.as_str()) {
+                return Err(ToolError::InvalidInput(UNIQUENESS_REFINE_MESSAGE.into()));
+            }
+        }
     }
     Ok(())
 }
 
-pub(crate) fn validate_options(opts: &[String]) -> Result<(), ToolError> {
-    if opts.is_empty() {
-        return Err(ToolError::InvalidInput(
-            "AskUserQuestion: at least one option is required".into(),
-        ));
-    }
-    if opts.len() > MAX_ASK_OPTIONS {
-        return Err(ToolError::InvalidInput(format!(
-            "AskUserQuestion: option count {} exceeds max {}",
-            opts.len(),
-            MAX_ASK_OPTIONS
-        )));
-    }
-    for (i, opt) in opts.iter().enumerate() {
-        if opt.is_empty() {
-            return Err(ToolError::InvalidInput(format!(
-                "AskUserQuestion: option[{i}] is empty"
-            )));
-        }
-        if opt.chars().count() > MAX_ASK_LABEL_LEN {
-            return Err(ToolError::InvalidInput(format!(
-                "AskUserQuestion: option[{i}] length {} exceeds max {}",
-                opt.chars().count(),
-                MAX_ASK_LABEL_LEN
-            )));
-        }
-    }
-    Ok(())
+/// Full input validation: parse + uniqueness refine.
+pub(crate) fn validate_input_internal(input: &Value) -> Result<Vec<Question>, ToolError> {
+    let questions = parse_questions(input)?;
+    check_uniqueness(&questions)?;
+    Ok(questions)
 }
+
+/// Re-serialize the parsed questions back to the wire/output shape, applying
+/// the `multiSelect` default and dropping absent `preview`. This is what the TS
+/// `call` echoes back as `data.questions`.
+fn questions_to_json(questions: &[Question]) -> Value {
+    Value::Array(
+        questions
+            .iter()
+            .map(|q| {
+                let mut opts = Vec::with_capacity(q.options.len());
+                for opt in &q.options {
+                    let mut o = Map::new();
+                    o.insert("label".into(), Value::String(opt.label.clone()));
+                    o.insert("description".into(), Value::String(opt.description.clone()));
+                    if let Some(p) = &opt.preview {
+                        o.insert("preview".into(), Value::String(p.clone()));
+                    }
+                    opts.push(Value::Object(o));
+                }
+                let mut m = Map::new();
+                m.insert("question".into(), Value::String(q.question.clone()));
+                m.insert("header".into(), Value::String(q.header.clone()));
+                m.insert("options".into(), Value::Array(opts));
+                m.insert("multiSelect".into(), Value::Bool(q.multi_select));
+                Value::Object(m)
+            })
+            .collect(),
+    )
+}
+
+// -- Schema ------------------------------------------------------------------
 
 static SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
         "properties": {
-            "question": { "type": "string", "minLength": 1, "maxLength": 200 },
-            "options": {
+            "questions": {
                 "type": "array",
-                "minItems": 1,
-                "maxItems": 4,
-                "items": { "type": "string", "minLength": 1, "maxLength": 60 }
+                "minItems": MIN_ASK_QUESTIONS,
+                "maxItems": MAX_ASK_QUESTIONS,
+                "description": "Questions to ask the user (1-4 questions)",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The complete question to ask the user. Should be clear, specific, and end with a question mark. Example: \"Which library should we use for date formatting?\" If multiSelect is true, phrase it accordingly, e.g. \"Which features do you want to enable?\""
+                        },
+                        "header": {
+                            "type": "string",
+                            "maxLength": MAX_ASK_HEADER_LEN,
+                            "description": "Very short label displayed as a chip/tag (max 12 chars). Examples: \"Auth method\", \"Library\", \"Approach\"."
+                        },
+                        "options": {
+                            "type": "array",
+                            "minItems": MIN_ASK_OPTIONS,
+                            "maxItems": MAX_ASK_OPTIONS,
+                            "description": "The available choices for this question. Must have 2-4 options. Each option should be a distinct, mutually exclusive choice (unless multiSelect is enabled). There should be no 'Other' option, that will be provided automatically.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": {
+                                        "type": "string",
+                                        "description": "The display text for this option that the user will see and select. Should be concise (1-5 words) and clearly describe the choice."
+                                    },
+                                    "description": {
+                                        "type": "string",
+                                        "description": "Explanation of what this option means or what will happen if chosen. Useful for providing context about trade-offs or implications."
+                                    },
+                                    "preview": {
+                                        "type": "string",
+                                        "description": "Optional preview content rendered when this option is focused. Use for mockups, code snippets, or visual comparisons that help users compare options. See the tool description for the expected content format."
+                                    }
+                                },
+                                "required": ["label", "description"]
+                            }
+                        },
+                        "multiSelect": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Set to true to allow the user to select multiple options instead of just one. Use when choices are not mutually exclusive."
+                        }
+                    },
+                    "required": ["question", "header", "options"]
+                }
             }
         },
-        "required": ["question", "options"]
+        "required": ["questions"]
     })
 });
+
+// -- Telemetry helpers -------------------------------------------------------
 
 fn pii_str(s: &str) -> AnalyticsValue {
     AnalyticsValue::String(PiiTagged::assert_pii_tagged_column(s.to_string()).into_inner())
@@ -175,6 +448,8 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
     bus.log_event(ASK_USER_QUESTION_FAILED, md).await;
 }
 
+// -- Tool impl ---------------------------------------------------------------
+
 #[async_trait]
 impl Tool for AskUserQuestionTool {
     fn name(&self) -> &str {
@@ -187,12 +462,15 @@ impl Tool for AskUserQuestionTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        4_096
+        // TS `maxResultSizeChars: 100_000`.
+        100_000
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
-        false
+        // TS `isConcurrencySafe() { return true }`.
+        true
     }
     fn is_read_only(&self, _: &Value) -> bool {
+        // TS `isReadOnly() { return true }`.
         true
     }
     fn is_destructive(&self, _: &Value) -> bool {
@@ -202,6 +480,7 @@ impl Tool for AskUserQuestionTool {
         false
     }
     fn requires_user_interaction(&self) -> bool {
+        // TS `requiresUserInteraction() { return true }`.
         true
     }
     fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
@@ -209,6 +488,8 @@ impl Tool for AskUserQuestionTool {
     }
 
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+        // TS uses `behavior:'ask'` ("Answer questions?"). The Rust headless
+        // path has no interactive approval substrate, so this stays Allow.
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "AskUserQuestion is a user-prompt UI action (always allowed)".into(),
@@ -220,11 +501,20 @@ impl Tool for AskUserQuestionTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "Ask the user a multiple-choice question (max 4 options, 60-char labels).".into()
+        // `prompt.ts:7-8` DESCRIPTION.
+        "Asks the user multiple choice questions to gather information, clarify ambiguity, understand preferences, make decisions or offer them choices.".into()
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "AskUserQuestion: prompts the user with up to 4 labeled options.".into()
+        // `prompt.ts:32-44` ASK_USER_QUESTION_TOOL_PROMPT. The preview-format
+        // suffix (`PREVIEW_FEATURE_PROMPT[format]`) is gated on
+        // `getQuestionPreviewFormat()` which has no Rust substrate — omitted.
+        "Use this tool when you need to ask the user questions during execution. This allows you to:\n\
+         1. Gather user preferences or requirements\n\
+         2. Clarify ambiguous instructions\n\
+         3. Get decisions on implementation choices as you work\n\
+         4. Offer choices to the user about what direction to take."
+            .into()
     }
 
     async fn validate_input(
@@ -232,24 +522,7 @@ impl Tool for AskUserQuestionTool {
         input: &Value,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        let q = input
-            .get("question")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                ValidationError("AskUserQuestion: missing or non-string question".into())
-            })?;
-        validate_question(q).map_err(|e| ValidationError(format!("{e}")))?;
-        let opts_v = input
-            .get("options")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                ValidationError("AskUserQuestion: missing or non-array options".into())
-            })?;
-        let opts: Vec<String> = opts_v
-            .iter()
-            .map(|v| v.as_str().unwrap_or("").to_string())
-            .collect();
-        validate_options(&opts).map_err(|e| ValidationError(format!("{e}")))?;
+        validate_input_internal(input).map_err(|e| ValidationError(format!("{e}")))?;
         Ok(())
     }
 
@@ -262,103 +535,71 @@ impl Tool for AskUserQuestionTool {
         let started = Instant::now();
         let bus = self.ctx.bus.clone();
 
-        let q = match input.get("question").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
-            None => {
-                emit_failed(
-                    &bus,
-                    "missing_question",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
-                return Err(ToolError::InvalidInput(
-                    "AskUserQuestion: missing or non-string question".into(),
-                ));
+        let questions = match validate_input_internal(&input) {
+            Ok(q) => q,
+            Err(e) => {
+                emit_failed(&bus, "invalid_input", started.elapsed().as_millis() as u64).await;
+                return Err(e);
             }
         };
-        if let Err(e) = validate_question(&q) {
-            emit_failed(
-                &bus,
-                "invalid_question",
-                started.elapsed().as_millis() as u64,
-            )
-            .await;
-            return Err(e);
-        }
-
-        let opts_v = match input.get("options").and_then(Value::as_array) {
-            Some(a) => a.clone(),
-            None => {
-                emit_failed(
-                    &bus,
-                    "missing_options",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
-                return Err(ToolError::InvalidInput(
-                    "AskUserQuestion: missing or non-array options".into(),
-                ));
-            }
-        };
-        let opts: Vec<String> = opts_v
-            .iter()
-            .map(|v| v.as_str().unwrap_or("").to_string())
-            .collect();
-        if let Err(e) = validate_options(&opts) {
-            emit_failed(
-                &bus,
-                "invalid_options",
-                started.elapsed().as_millis() as u64,
-            )
-            .await;
-            return Err(e);
-        }
 
         // Started event.
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
-            "question_len".into(),
-            AnalyticsValue::Int(q.chars().count() as i64),
+            "question_count".into(),
+            AnalyticsValue::Int(questions.len() as i64),
         );
-        md.insert(
-            "option_count".into(),
-            AnalyticsValue::Int(opts.len() as i64),
-        );
-        md.insert("_PROTO_question".into(), pii_str(&q));
+        // `toAutoClassifierInput`: questions joined with " | ".
+        let joined = questions
+            .iter()
+            .map(|q| q.question.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        md.insert("_PROTO_questions".into(), pii_str(&joined));
         bus.log_event(ASK_USER_QUESTION_STARTED, md).await;
 
-        let idx = match self.resolver.resolve(&q, &opts).await {
-            Ok(i) => i,
+        // Resolve the per-question answers (UI substitute).
+        let answers_map = match self.resolver.resolve(&questions).await {
+            Ok(m) => m,
             Err(e) => {
                 emit_failed(&bus, "resolver_error", started.elapsed().as_millis() as u64).await;
                 return Err(e);
             }
         };
 
-        if idx >= opts.len() {
-            emit_failed(
-                &bus,
-                "resolver_index_out_of_range",
-                started.elapsed().as_millis() as u64,
-            )
-            .await;
-            return Err(ToolError::InvalidInput(format!(
-                "AskUserQuestion: resolver returned index {idx} but only {} options were provided",
-                opts.len()
-            )));
+        // Build the answers object keyed by question text (insertion-stable in
+        // question order for deterministic output).
+        let mut answers = Map::new();
+        for q in &questions {
+            let answer = answers_map.get(&q.question).cloned().unwrap_or_default();
+            answers.insert(q.question.clone(), Value::String(answer));
         }
 
-        let label = opts[idx].clone();
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert(
+        let mut completed: LogEventMetadata = HashMap::new();
+        completed.insert(
             "duration_ms".into(),
             AnalyticsValue::Int(started.elapsed().as_millis() as i64),
         );
-        md.insert("selected_index".into(), AnalyticsValue::Int(idx as i64));
-        bus.log_event(ASK_USER_QUESTION_COMPLETED, md).await;
+        completed.insert(
+            "answer_count".into(),
+            AnalyticsValue::Int(answers.len() as i64),
+        );
+        bus.log_event(ASK_USER_QUESTION_COMPLETED, completed).await;
+
+        // Output `{ questions, answers, ...(annotations && {annotations}) }`.
+        // Rust headless has no UI to produce annotations, so they are omitted
+        // unless the input already carried them (passthrough parity).
+        let mut data = Map::new();
+        data.insert("questions".into(), questions_to_json(&questions));
+        data.insert("answers".into(), Value::Object(answers));
+        if let Some(ann) = input.get("annotations") {
+            if !ann.is_null() {
+                data.insert("annotations".into(), ann.clone());
+            }
+        }
 
         Ok(ToolCallResult {
-            data: json!({ "selected_index": idx, "selected_label": label }),
+            data: Value::Object(data),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -381,105 +622,327 @@ mod tests {
         }
     }
 
+    fn opt(label: &str, desc: &str) -> Value {
+        json!({ "label": label, "description": desc })
+    }
+
+    fn one_question() -> Value {
+        json!({
+            "questions": [{
+                "question": "Pick one?",
+                "header": "Choice",
+                "options": [opt("Alpha", "the a"), opt("Beta", "the b"), opt("Gamma", "the c")]
+            }]
+        })
+    }
+
     #[test]
     fn constants_locked() {
         assert_eq!(ASK_USER_QUESTION_TOOL_NAME, "AskUserQuestion");
         assert_eq!(MAX_ASK_OPTIONS, 4);
+        assert_eq!(MIN_ASK_OPTIONS, 2);
+        assert_eq!(MAX_ASK_QUESTIONS, 4);
+        assert_eq!(MIN_ASK_QUESTIONS, 1);
+        assert_eq!(ASK_USER_QUESTION_TOOL_CHIP_WIDTH, 12);
+        assert_eq!(MAX_ASK_HEADER_LEN, 12);
+        // Retained fixture locks (not enforced).
         assert_eq!(MAX_ASK_LABEL_LEN, 60);
         assert_eq!(MAX_ASK_QUESTION_LEN, 200);
+        assert_eq!(
+            UNIQUENESS_REFINE_MESSAGE,
+            "Question texts must be unique, option labels must be unique within each question"
+        );
+    }
+
+    // --- question-count bounds ---
+
+    #[test]
+    fn one_to_four_questions_accepted() {
+        for n in MIN_ASK_QUESTIONS..=MAX_ASK_QUESTIONS {
+            let qs: Vec<Value> = (0..n)
+                .map(|i| {
+                    json!({
+                        "question": format!("Q{i}?"),
+                        "header": "H",
+                        "options": [opt("A", "a"), opt("B", "b")]
+                    })
+                })
+                .collect();
+            let input = json!({ "questions": qs });
+            let parsed = validate_input_internal(&input).expect("n questions ok");
+            assert_eq!(parsed.len(), n);
+        }
     }
 
     #[test]
-    fn validate_question_at_limit_ok() {
-        let q = "x".repeat(MAX_ASK_QUESTION_LEN);
-        validate_question(&q).expect("ok at limit");
-    }
-
-    #[test]
-    fn validate_question_over_limit_rejects() {
-        let q = "x".repeat(MAX_ASK_QUESTION_LEN + 1);
-        let err = validate_question(&q).unwrap_err();
-        assert!(format!("{err}").contains("exceeds max 200"));
-    }
-
-    #[test]
-    fn validate_options_count_capped_at_4() {
-        let opts: Vec<String> = (0..5).map(|i| format!("opt{i}")).collect();
-        let err = validate_options(&opts).unwrap_err();
+    fn five_questions_rejected() {
+        let qs: Vec<Value> = (0..5)
+            .map(|i| {
+                json!({
+                    "question": format!("Q{i}?"),
+                    "header": "H",
+                    "options": [opt("A", "a"), opt("B", "b")]
+                })
+            })
+            .collect();
+        let input = json!({ "questions": qs });
+        let err = validate_input_internal(&input).unwrap_err();
         assert!(format!("{err}").contains("exceeds max 4"));
     }
 
     #[test]
-    fn validate_options_label_capped_at_60() {
-        let label = "x".repeat(MAX_ASK_LABEL_LEN + 1);
-        let err = validate_options(&[label]).unwrap_err();
-        assert!(format!("{err}").contains("exceeds max 60"));
+    fn zero_questions_rejected() {
+        let input = json!({ "questions": [] });
+        let err = validate_input_internal(&input).unwrap_err();
+        assert!(format!("{err}").contains("at least 1 question"));
+    }
+
+    // --- option-count bounds ---
+
+    #[test]
+    fn two_to_four_options_accepted() {
+        for n in MIN_ASK_OPTIONS..=MAX_ASK_OPTIONS {
+            let opts: Vec<Value> = (0..n).map(|i| opt(&format!("L{i}"), "d")).collect();
+            let input = json!({
+                "questions": [{ "question": "Q?", "header": "H", "options": opts }]
+            });
+            validate_input_internal(&input).expect("n options ok");
+        }
     }
 
     #[test]
-    fn validate_options_empty_rejected() {
-        let err = validate_options(&[]).unwrap_err();
-        assert!(format!("{err}").contains("at least one option"));
+    fn one_option_rejected() {
+        let input = json!({
+            "questions": [{ "question": "Q?", "header": "H", "options": [opt("A", "a")] }]
+        });
+        let err = validate_input_internal(&input).unwrap_err();
+        assert!(format!("{err}").contains("at least 2 options"));
     }
 
+    #[test]
+    fn five_options_rejected() {
+        let opts: Vec<Value> = (0..5).map(|i| opt(&format!("L{i}"), "d")).collect();
+        let input = json!({
+            "questions": [{ "question": "Q?", "header": "H", "options": opts }]
+        });
+        let err = validate_input_internal(&input).unwrap_err();
+        assert!(format!("{err}").contains("exceeds max 4"));
+    }
+
+    // --- uniqueness refine ---
+
+    #[test]
+    fn duplicate_question_text_rejected() {
+        let input = json!({
+            "questions": [
+                { "question": "Same?", "header": "H", "options": [opt("A", "a"), opt("B", "b")] },
+                { "question": "Same?", "header": "H", "options": [opt("C", "c"), opt("D", "d")] }
+            ]
+        });
+        let err = validate_input_internal(&input).unwrap_err();
+        assert!(format!("{err}").ends_with(UNIQUENESS_REFINE_MESSAGE));
+    }
+
+    #[test]
+    fn duplicate_label_within_question_rejected() {
+        let input = json!({
+            "questions": [{
+                "question": "Q?",
+                "header": "H",
+                "options": [opt("Dup", "a"), opt("Dup", "b")]
+            }]
+        });
+        let err = validate_input_internal(&input).unwrap_err();
+        assert!(format!("{err}").ends_with(UNIQUENESS_REFINE_MESSAGE));
+    }
+
+    #[test]
+    fn same_label_across_different_questions_ok() {
+        // Labels only need to be unique *within* a question.
+        let input = json!({
+            "questions": [
+                { "question": "Q1?", "header": "H", "options": [opt("Yes", "a"), opt("No", "b")] },
+                { "question": "Q2?", "header": "H", "options": [opt("Yes", "a"), opt("No", "b")] }
+            ]
+        });
+        validate_input_internal(&input).expect("cross-question dup labels ok");
+    }
+
+    // --- header chip width ---
+
+    #[test]
+    fn header_at_chip_width_ok() {
+        let header = "x".repeat(MAX_ASK_HEADER_LEN);
+        let input = json!({
+            "questions": [{ "question": "Q?", "header": header, "options": [opt("A", "a"), opt("B", "b")] }]
+        });
+        validate_input_internal(&input).expect("header at chip width ok");
+    }
+
+    #[test]
+    fn header_over_chip_width_rejected() {
+        let header = "x".repeat(MAX_ASK_HEADER_LEN + 1);
+        let input = json!({
+            "questions": [{ "question": "Q?", "header": header, "options": [opt("A", "a"), opt("B", "b")] }]
+        });
+        let err = validate_input_internal(&input).unwrap_err();
+        assert!(format!("{err}").contains("header length 13 exceeds max 12"));
+    }
+
+    // --- multiSelect default + preview passthrough ---
+
+    #[test]
+    fn multiselect_defaults_false_and_preview_passthrough() {
+        let input = json!({
+            "questions": [{
+                "question": "Q?",
+                "header": "H",
+                "options": [
+                    json!({ "label": "A", "description": "a", "preview": "```rust\nfn a(){}\n```" }),
+                    opt("B", "b")
+                ]
+            }]
+        });
+        let qs = validate_input_internal(&input).expect("ok");
+        assert!(!qs[0].multi_select);
+        assert_eq!(qs[0].options[0].preview.as_deref(), Some("```rust\nfn a(){}\n```"));
+        assert_eq!(qs[0].options[1].preview, None);
+    }
+
+    #[test]
+    fn multiselect_true_parsed() {
+        let input = json!({
+            "questions": [{
+                "question": "Q?",
+                "header": "H",
+                "multiSelect": true,
+                "options": [opt("A", "a"), opt("B", "b")]
+            }]
+        });
+        let qs = validate_input_internal(&input).expect("ok");
+        assert!(qs[0].multi_select);
+    }
+
+    // --- resolver / call output ---
+
     #[tokio::test]
-    async fn happy_path_returns_selected_label() {
+    async fn first_option_resolver_fills_first_label_per_question() {
         let tool = AskUserQuestionTool::new(shell_test_ctx(dummy_out()));
         let input = json!({
-            "question": "Pick one",
-            "options": ["Alpha", "Beta", "Gamma"]
+            "questions": [
+                { "question": "Q1?", "header": "H1", "options": [opt("A1", "a"), opt("B1", "b")] },
+                { "question": "Q2?", "header": "H2", "options": [opt("A2", "a"), opt("B2", "b")] }
+            ]
         });
         let out = tool.call(input, fresh_ctx(), fresh_tx()).await.expect("ok");
-        assert_eq!(out.data["selected_index"], json!(0));
-        assert_eq!(out.data["selected_label"], json!("Alpha"));
+        assert_eq!(out.data["answers"]["Q1?"], json!("A1"));
+        assert_eq!(out.data["answers"]["Q2?"], json!("A2"));
+        // Echoed questions present with normalized multiSelect default.
+        assert_eq!(out.data["questions"][0]["multiSelect"], json!(false));
+        assert_eq!(out.data["questions"][0]["question"], json!("Q1?"));
     }
 
     #[tokio::test]
-    async fn rejects_missing_question() {
+    async fn output_omits_annotations_when_absent() {
         let tool = AskUserQuestionTool::new(shell_test_ctx(dummy_out()));
-        let err = tool
-            .call(json!({"options": ["A"]}), fresh_ctx(), fresh_tx())
+        let out = tool
+            .call(one_question(), fresh_ctx(), fresh_tx())
             .await
-            .expect_err("missing question");
-        assert!(format!("{err}").contains("missing or non-string question"));
+            .expect("ok");
+        assert!(out.data.get("annotations").is_none());
     }
 
     #[tokio::test]
-    async fn rejects_too_many_options() {
+    async fn output_passes_through_annotations_when_present() {
         let tool = AskUserQuestionTool::new(shell_test_ctx(dummy_out()));
-        let err = tool
-            .call(
-                json!({"question": "Q", "options": ["a", "b", "c", "d", "e"]}),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .expect_err("too many");
-        assert!(format!("{err}").contains("exceeds max 4"));
+        let input = json!({
+            "questions": [{ "question": "Q?", "header": "H", "options": [opt("A", "a"), opt("B", "b")] }],
+            "annotations": { "Q?": { "notes": "looks good" } }
+        });
+        let out = tool.call(input, fresh_ctx(), fresh_tx()).await.expect("ok");
+        assert_eq!(out.data["annotations"]["Q?"]["notes"], json!("looks good"));
     }
 
-    struct FixedResolver(usize);
+    struct MultiResolver;
     #[async_trait]
-    impl AskUserQuestionResolver for FixedResolver {
-        async fn resolve(&self, _: &str, _: &[String]) -> Result<usize, ToolError> {
-            Ok(self.0)
+    impl AskUserQuestionResolver for MultiResolver {
+        async fn resolve(
+            &self,
+            questions: &[Question],
+        ) -> Result<HashMap<String, String>, ToolError> {
+            let mut m = HashMap::new();
+            for q in questions {
+                // Multi-select answer: comma-join all option labels.
+                let joined = q
+                    .options
+                    .iter()
+                    .map(|o| o.label.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                m.insert(q.question.clone(), joined);
+            }
+            Ok(m)
         }
     }
 
     #[tokio::test]
-    async fn rejects_resolver_index_out_of_range() {
+    async fn multiselect_answer_comma_joins() {
         let tool = AskUserQuestionTool::with_resolver(
             shell_test_ctx(dummy_out()),
-            Arc::new(FixedResolver(5)),
+            Arc::new(MultiResolver),
         );
+        let input = json!({
+            "questions": [{
+                "question": "Which features?",
+                "header": "Features",
+                "multiSelect": true,
+                "options": [opt("A", "a"), opt("B", "b"), opt("C", "c")]
+            }]
+        });
+        let out = tool.call(input, fresh_ctx(), fresh_tx()).await.expect("ok");
+        assert_eq!(out.data["answers"]["Which features?"], json!("A, B, C"));
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_questions() {
+        let tool = AskUserQuestionTool::new(shell_test_ctx(dummy_out()));
         let err = tool
-            .call(
-                json!({"question": "Pick", "options": ["A", "B"]}),
-                fresh_ctx(),
-                fresh_tx(),
-            )
+            .call(json!({}), fresh_ctx(), fresh_tx())
             .await
-            .expect_err("out of range");
-        assert!(format!("{err}").contains("returned index 5"));
+            .expect_err("missing questions");
+        assert!(format!("{err}").contains("missing or non-array questions"));
+    }
+
+    #[tokio::test]
+    async fn rejects_option_missing_label() {
+        let tool = AskUserQuestionTool::new(shell_test_ctx(dummy_out()));
+        let input = json!({
+            "questions": [{
+                "question": "Q?",
+                "header": "H",
+                "options": [json!({ "description": "no label" }), opt("B", "b")]
+            }]
+        });
+        let err = tool
+            .call(input, fresh_ctx(), fresh_tx())
+            .await
+            .expect_err("missing label");
+        assert!(format!("{err}").contains("label must be a string"));
+    }
+
+    #[test]
+    fn schema_shape_is_object_with_questions() {
+        let tool = AskUserQuestionTool::new(shell_test_ctx(dummy_out()));
+        let s = tool.input_schema();
+        assert_eq!(s["type"], json!("object"));
+        assert_eq!(s["required"], json!(["questions"]));
+        assert_eq!(s["properties"]["questions"]["minItems"], json!(1));
+        assert_eq!(s["properties"]["questions"]["maxItems"], json!(4));
+        let item = &s["properties"]["questions"]["items"];
+        assert_eq!(item["properties"]["options"]["minItems"], json!(2));
+        assert_eq!(item["properties"]["options"]["maxItems"], json!(4));
+        assert_eq!(item["properties"]["header"]["maxLength"], json!(12));
+        assert_eq!(item["properties"]["multiSelect"]["default"], json!(false));
+        assert_eq!(item["required"], json!(["question", "header", "options"]));
     }
 }

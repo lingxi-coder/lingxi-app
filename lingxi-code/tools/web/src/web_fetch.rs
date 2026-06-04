@@ -200,6 +200,31 @@ pub fn is_dns_failure(msg: &str) -> bool {
         || lower.contains("nodename nor servname")
 }
 
+/// Whether the domain blocklist preflight should be skipped for this fetch.
+///
+/// Mirrors `settings.skipWebFetchPreflight` (`utils.ts:423-424`) — the
+/// enterprise-customer escape hatch for hosts whose network policy blocks
+/// outbound connections to `claude.ai`/`api.anthropic.com`.
+///
+/// **Interim wiring (flagged):** the faithful source is a settings-derived
+/// `BuiltinToolContext::skip_web_fetch_preflight` field populated at tool
+/// registration. Threading that field touches `tool-api`'s shared
+/// `builtin_context.rs` plus the registration site in the composition crate —
+/// out of this batch's `tool-web`-only scope (and it would collide with Batch 5's
+/// `builtin_context.rs` edit). The batch spec explicitly sanctions an env-var
+/// interim: `LINGXI_SKIP_WEBFETCH_PREFLIGHT` truthy (`1`/`true`/`yes`/`on`,
+/// case-insensitive) skips the preflight. Follow-up: replace this with the
+/// context field once both `builtin_context.rs` fields land together.
+#[must_use]
+fn skip_web_fetch_preflight() -> bool {
+    std::env::var("LINGXI_SKIP_WEBFETCH_PREFLIGHT")
+        .ok()
+        .is_some_and(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        })
+}
+
 /// `WebFetchTool` — fetches an HTTPS/HTTP URL with a 5 MB cap and the locked
 /// truncation suffix on overflow. Never self-retries on transient 5xx (spec §5).
 pub struct WebFetchTool {
@@ -400,6 +425,30 @@ impl Tool for WebFetchTool {
         // request targets the upgraded one.
         upgrade_to_https(&mut parsed_url);
         let host = parsed_url.host_str().unwrap_or("<unknown>").to_string();
+
+        // Domain blocklist preflight (`utils.ts:420-435`). Runs on every host
+        // (cache-miss path only — a URL cache hit returned above) unless the
+        // user opted to skip it. `Blocked`/`CheckFailed` map to the byte-locked
+        // user-facing error messages; `Allowed` continues to the fetch.
+        if !skip_web_fetch_preflight() {
+            match crate::blocklist::check_domain_blocklist(self.ctx.http.as_ref(), &host).await {
+                crate::blocklist::DomainCheckResult::Allowed => {}
+                crate::blocklist::DomainCheckResult::Blocked => {
+                    self.emit_failed(&invocation_id, "domain_blocked", None, 0)
+                        .await;
+                    return Err(ToolError::Transport(crate::blocklist::domain_blocked_msg(
+                        &host,
+                    )));
+                }
+                crate::blocklist::DomainCheckResult::CheckFailed(_) => {
+                    self.emit_failed(&invocation_id, "domain_check_failed", None, 0)
+                        .await;
+                    return Err(ToolError::Transport(
+                        crate::blocklist::domain_check_failed_msg(&host),
+                    ));
+                }
+            }
+        }
 
         let started = Instant::now();
         let req = HttpRequest {
@@ -712,6 +761,15 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     use tool_api::test_support::{fresh_ctx, fresh_tx};
     use traits::http::HttpTransport;
 
+    /// Serializes every test that touches the process-global
+    /// `LINGXI_SKIP_WEBFETCH_PREFLIGHT` env var. The skip test *sets* it; the
+    /// preflight-dependent `call()` tests *read* it (via `skip_web_fetch_preflight`)
+    /// and would be corrupted if the skip test's mutation leaked into them while
+    /// running in parallel. Mirrors the `HOME_LOCK` env-isolation idiom. A tokio
+    /// mutex (not `std`) keeps the guard `Send` across the `.await` points in the
+    /// async tests.
+    static SKIP_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn make_web_ctx() -> (
         BuiltinToolContext,
         Arc<MockHttpTransport>,
@@ -737,16 +795,28 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         })
     }
 
+    /// A `domain_info` preflight response that allows the fetch. The mock
+    /// transport is FIFO and URL-agnostic, so the preflight GET (which the
+    /// `call()` pipeline issues first, on a cache miss) consumes whatever is at
+    /// the front of the queue — enqueue this *before* the fetch body response.
+    fn preflight_allow() -> ScriptedResponse {
+        ok_response(200, r#"{"can_fetch":true}"#)
+    }
+
     #[tokio::test]
     async fn surfaces_http_500_as_transport() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::blocklist::clear_domain_check_cache();
         let (ctx, http, sink) = make_web_ctx();
         ctx.bus.attach_sink(sink.clone()).await;
+        // Preflight allows, then the fetch returns 500.
+        http.enqueue(preflight_allow());
         http.enqueue(ok_response(500, "server error"));
 
         let tool = WebFetchTool::new(ctx);
         let err = tool
             .call(
-                json!({ "url": "https://example.com/x" }),
+                json!({ "url": "https://http500.example/x" }),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -754,7 +824,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .expect_err("500 must be Err");
         match err {
             ToolError::Transport(msg) => {
-                assert_eq!(msg, "WebFetch: HTTP 500 from https://example.com/x");
+                assert_eq!(msg, "WebFetch: HTTP 500 from https://http500.example/x");
             }
             other => panic!("expected Transport, got {other:?}"),
         }
@@ -767,23 +837,34 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn http_500_does_not_retry_internally() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::blocklist::clear_domain_check_cache();
         let (ctx, http, _sink) = make_web_ctx();
+        http.enqueue(preflight_allow());
         http.enqueue(ok_response(500, "boom"));
         let tool = WebFetchTool::new(ctx);
         let _ = tool
             .call(
-                json!({ "url": "https://example.com/" }),
+                json!({ "url": "https://noretry.example/" }),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await;
-        assert_eq!(http.received_requests().len(), 1, "must NOT self-retry");
+        // One preflight + exactly one fetch (no self-retry of the 500).
+        let reqs = http.received_requests();
+        assert_eq!(reqs.len(), 2, "must NOT self-retry");
+        assert!(reqs[0].url.contains("/api/web/domain_info?domain="));
+        assert_eq!(reqs[1].url, "https://noretry.example/");
     }
 
     #[tokio::test]
     async fn surfaces_dns_failure() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::blocklist::clear_domain_check_cache();
         let (ctx, http, sink) = make_web_ctx();
         ctx.bus.attach_sink(sink.clone()).await;
+        // Preflight allows; the *fetch* then fails DNS resolution.
+        http.enqueue(preflight_allow());
         http.enqueue(ScriptedResponse::SyncErr(HttpError::Connection(
             "failed to resolve host doesnotexist.invalid".into(),
         )));
@@ -809,15 +890,18 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn happy_path_emits_completed() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::blocklist::clear_domain_check_cache();
         let (ctx, http, sink) = make_web_ctx();
         ctx.bus.attach_sink(sink.clone()).await;
+        http.enqueue(preflight_allow());
         http.enqueue(ok_response(200, "hello world"));
         let tool = WebFetchTool::new(ctx);
         // Unique URL so the process-global cache can't be pre-warmed by another
         // parallel test (which would skip the fetch).
         let res = tool
             .call(
-                json!({ "url": "https://example.com/happy-path" }),
+                json!({ "url": "https://happy.example/happy-path" }),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -833,18 +917,22 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn sets_user_agent_header() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::blocklist::clear_domain_check_cache();
         let (ctx, http, _sink) = make_web_ctx();
+        http.enqueue(preflight_allow());
         http.enqueue(ok_response(200, "ok"));
         let tool = WebFetchTool::new(ctx);
         // Unique URL to avoid a process-global cache hit short-circuiting the
         // fetch (which would leave `received_requests()` empty).
         let _ = tool
             .call(
-                json!({ "url": "https://example.com/user-agent" }),
+                json!({ "url": "https://useragent.example/user-agent" }),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await;
+        // The fetch is the LAST request (the preflight has no UA header).
         let reqs = http.received_requests();
         let last_req = reqs.last().expect("captured");
         let (_, ua_value) = last_req
@@ -882,8 +970,11 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
 
     #[tokio::test]
     async fn upgrades_http_to_https_on_the_wire() {
+        let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
         let (ctx, http, _sink) = make_web_ctx();
+        http.enqueue(preflight_allow());
         http.enqueue(ok_response(200, "ok"));
         let tool = WebFetchTool::new(ctx);
         // Caller passes an http:// URL; the network request must target https://.
@@ -897,16 +988,26 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .expect("ok response");
         // Output echoes the ORIGINAL (un-upgraded) URL.
         assert_eq!(res.data["url"], "http://upgrade.example/page");
+        // reqs[0] = the preflight (against the UPGRADED host); reqs[1] = the fetch.
         let reqs = http.received_requests();
-        assert_eq!(reqs.len(), 1);
-        assert_eq!(reqs[0].url, "https://upgrade.example/page");
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(
+            reqs[0].url,
+            "https://api.anthropic.com/api/web/domain_info?domain=upgrade.example"
+        );
+        assert_eq!(reqs[1].url, "https://upgrade.example/page");
     }
 
     #[tokio::test]
     async fn second_call_is_served_from_cache() {
+        let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
         let (ctx, http, _sink) = make_web_ctx();
-        // Only ONE response is enqueued: a cache hit must not consume a second.
+        // One preflight + one fetch for the FIRST call only. The URL-cache hit on
+        // the second call short-circuits before the preflight, so no further
+        // requests are issued.
+        http.enqueue(preflight_allow());
         http.enqueue(ok_response(200, "cached body"));
         let tool = WebFetchTool::new(ctx);
         let url = json!({ "url": "https://cache-hit.example/doc" });
@@ -926,18 +1027,21 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         assert_eq!(second.data["bytes"], "cached body".len());
         assert_eq!(second.data["truncated"], false);
 
-        // Exactly one network round-trip for two identical fetches.
+        // First call: preflight + fetch. Second call: cache hit, zero requests.
         assert_eq!(
             http.received_requests().len(),
-            1,
-            "second call must hit the cache, not the network"
+            2,
+            "second call must hit the URL cache, not the network"
         );
     }
 
     #[tokio::test]
     async fn cache_keyed_by_original_url_so_http_and_https_share() {
+        let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
         let (ctx, http, _sink) = make_web_ctx();
+        http.enqueue(preflight_allow());
         http.enqueue(ok_response(200, "body"));
         let tool = WebFetchTool::new(ctx);
 
@@ -950,7 +1054,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("first ok");
-        // Re-fetching the same original http:// URL is a cache hit.
+        // Re-fetching the same original http:// URL is a URL-cache hit.
         let _ = tool
             .call(
                 json!({ "url": "http://key.example/p" }),
@@ -959,13 +1063,20 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("cache hit");
-        assert_eq!(http.received_requests().len(), 1);
+        // First call: preflight + fetch. Second call: URL-cache hit, zero requests.
+        assert_eq!(http.received_requests().len(), 2);
     }
 
     #[tokio::test]
     async fn distinct_urls_each_fetch() {
+        let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
         let (ctx, http, _sink) = make_web_ctx();
+        // Both URLs share the host `distinct.example`. The first call runs the
+        // preflight (allowing + caching the host); the second call's preflight is
+        // a domain-cache hit (no request), so it issues only its fetch.
+        http.enqueue(preflight_allow());
         http.enqueue(ok_response(200, "a"));
         http.enqueue(ok_response(200, "b"));
         let tool = WebFetchTool::new(ctx);
@@ -985,26 +1096,217 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             )
             .await
             .expect("b ok");
-        // Two different URLs ⇒ two network round-trips (no cross-key cache hit).
-        assert_eq!(http.received_requests().len(), 2);
+        // preflight (1) + two distinct URL fetches (2) = 3; the second preflight
+        // is a domain-cache hit (no cross-URL content-cache hit).
+        assert_eq!(http.received_requests().len(), 3);
     }
 
     #[tokio::test]
     async fn errors_are_not_cached() {
+        let _env = SKIP_ENV_LOCK.lock().await;
         crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
         let (ctx, http, _sink) = make_web_ctx();
-        // Two 500s enqueued: if errors were cached, the second call would not
-        // consume the second response and `received_requests` would be 1.
+        // Preflight allows (and caches the host); both fetches then 500. If 500s
+        // were content-cached, the second call would skip its fetch.
+        http.enqueue(preflight_allow());
         http.enqueue(ok_response(500, "boom"));
         http.enqueue(ok_response(500, "boom"));
         let tool = WebFetchTool::new(ctx);
         let url = json!({ "url": "https://err.example/x" });
         let _ = tool.call(url.clone(), fresh_ctx(), fresh_tx()).await;
         let _ = tool.call(url, fresh_ctx(), fresh_tx()).await;
+        // preflight (1, cached after) + two un-cached 500 fetches (2) = 3.
         assert_eq!(
             http.received_requests().len(),
-            2,
+            3,
             "failed fetches must NOT be cached"
         );
+    }
+
+    // ---- domain blocklist preflight (utils.ts:420-435) ---------------------
+
+    #[tokio::test]
+    async fn preflight_blocked_fails_with_domain_blocked_msg() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        let (ctx, http, sink) = make_web_ctx();
+        ctx.bus.attach_sink(sink.clone()).await;
+        // The very first request is the preflight; `can_fetch:false` blocks.
+        http.enqueue(ok_response(200, r#"{"can_fetch":false}"#));
+        let tool = WebFetchTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "url": "https://blocked-host.example/page" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("blocked domain must be Err");
+        match err {
+            ToolError::Transport(msg) => {
+                assert_eq!(msg, "Claude Code is unable to fetch from blocked-host.example");
+            }
+            other => panic!("expected Transport, got {other:?}"),
+        }
+        // No fetch was attempted — only the preflight ran.
+        assert_eq!(http.received_requests().len(), 1);
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
+        assert!(names.iter().any(|n| n == "tengu_tool_web_fetch_failed"));
+        assert!(!names.iter().any(|n| n == "tengu_tool_web_fetch_completed"));
+    }
+
+    #[tokio::test]
+    async fn preflight_non_200_fails_with_check_failed_msg() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        let (ctx, http, _sink) = make_web_ctx();
+        // Preflight returns a non-200 (but no transport error) → check_failed.
+        http.enqueue(ok_response(503, "service unavailable"));
+        let tool = WebFetchTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "url": "https://check-failed-503.example/page" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("non-200 preflight must be Err");
+        match err {
+            ToolError::Transport(msg) => {
+                assert_eq!(
+                    msg,
+                    "Unable to verify if domain check-failed-503.example is safe to fetch. \
+                     This may be due to network restrictions or enterprise security policies \
+                     blocking claude.ai."
+                );
+            }
+            other => panic!("expected Transport, got {other:?}"),
+        }
+        assert_eq!(http.received_requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn preflight_transport_error_fails_with_check_failed_msg() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        let (ctx, http, _sink) = make_web_ctx();
+        // Preflight itself errors at the transport layer → fail-open check_failed.
+        http.enqueue(ScriptedResponse::SyncErr(HttpError::Connection(
+            "egress proxy refused connection".into(),
+        )));
+        let tool = WebFetchTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "url": "https://check-failed-net.example/page" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("preflight transport error must be Err");
+        match err {
+            ToolError::Transport(msg) => {
+                assert_eq!(
+                    msg,
+                    "Unable to verify if domain check-failed-net.example is safe to fetch. \
+                     This may be due to network restrictions or enterprise security policies \
+                     blocking claude.ai."
+                );
+            }
+            other => panic!("expected Transport, got {other:?}"),
+        }
+        // Only the preflight ran; the fetch was never attempted.
+        assert_eq!(http.received_requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn preflight_caches_allowed_host_across_distinct_urls() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        let (ctx, http, _sink) = make_web_ctx();
+        // One preflight (allows + caches the host) + one fetch per distinct path.
+        // The second path's preflight is a domain-cache hit — NO second domain_info.
+        http.enqueue(preflight_allow());
+        http.enqueue(ok_response(200, "one"));
+        http.enqueue(ok_response(200, "two"));
+        let tool = WebFetchTool::new(ctx);
+        let _ = tool
+            .call(
+                json!({ "url": "https://cached-host.example/one" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("one ok");
+        let _ = tool
+            .call(
+                json!({ "url": "https://cached-host.example/two" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("two ok");
+        let reqs = http.received_requests();
+        // Exactly ONE domain_info request for the host (the second path reuses
+        // the 5-min domain cache).
+        let preflight_count = reqs
+            .iter()
+            .filter(|r| r.url.contains("/api/web/domain_info?domain="))
+            .count();
+        assert_eq!(preflight_count, 1, "host preflight must be cached for 5 min");
+        // preflight (1) + two fetches (2) = 3 total.
+        assert_eq!(reqs.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn skip_preflight_setting_issues_no_domain_info_request() {
+        let _env = SKIP_ENV_LOCK.lock().await;
+        crate::cache::clear_web_fetch_cache();
+        crate::blocklist::clear_domain_check_cache();
+        std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", "1");
+        // Sanity-check the helper sees the truthy value.
+        assert!(skip_web_fetch_preflight());
+
+        let (ctx, http, _sink) = make_web_ctx();
+        // ONLY the fetch is enqueued — no preflight response. If the preflight
+        // fired, it would consume this and the body assertion would fail.
+        http.enqueue(ok_response(200, "no preflight here"));
+        let tool = WebFetchTool::new(ctx);
+        let res = tool
+            .call(
+                json!({ "url": "https://skip-preflight.example/page" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await;
+        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+
+        let res = res.expect("fetch must proceed when preflight skipped");
+        assert_eq!(res.data["content"], "no preflight here");
+        let reqs = http.received_requests();
+        // Exactly one request — the fetch — and NO domain_info preflight.
+        assert_eq!(reqs.len(), 1);
+        assert!(!reqs[0].url.contains("/api/web/domain_info"));
+        assert_eq!(reqs[0].url, "https://skip-preflight.example/page");
+    }
+
+    #[test]
+    fn skip_preflight_env_parsing() {
+        // Exercised under the env lock so it never races a parallel call() test.
+        let _env = SKIP_ENV_LOCK.blocking_lock();
+        for truthy in ["1", "true", "TRUE", "Yes", "on", " on "] {
+            std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", truthy);
+            assert!(skip_web_fetch_preflight(), "{truthy:?} must be truthy");
+        }
+        for falsy in ["0", "false", "no", "off", "", "garbage"] {
+            std::env::set_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT", falsy);
+            assert!(!skip_web_fetch_preflight(), "{falsy:?} must be falsy");
+        }
+        std::env::remove_var("LINGXI_SKIP_WEBFETCH_PREFLIGHT");
+        assert!(!skip_web_fetch_preflight(), "unset must be falsy");
     }
 }

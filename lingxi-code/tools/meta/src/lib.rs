@@ -15,6 +15,7 @@
     clippy::manual_let_else
 )]
 pub mod config;
+pub mod repl_gate;
 pub mod tool_search;
 pub use config::ConfigTool;
 pub use tool_search::ToolSearchTool;

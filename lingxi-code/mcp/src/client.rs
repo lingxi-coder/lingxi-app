@@ -225,7 +225,16 @@ impl McpClient {
             .tools
             .into_iter()
             .map(|t| McpToolDto {
-                full_name: format!("mcp__{}__{}", self.server_name, t.name),
+                // The `<server>` token must satisfy the API name pattern
+                // `^[a-zA-Z0-9_-]{1,64}$`, so normalize it (claude-code
+                // `normalizeNameForMCP`). `server_name` below stays RAW for
+                // display/logging, matching claude-code which keeps client.name
+                // raw and normalizes only at the FQN boundary.
+                full_name: format!(
+                    "mcp__{}__{}",
+                    crate::normalization::normalize_name_for_mcp(&self.server_name),
+                    t.name
+                ),
                 server_name: self.server_name.clone(),
                 description: truncate_description(&t.description).into_owned(),
                 input_schema: t.input_schema,
@@ -257,8 +266,13 @@ impl McpClient {
         input: serde_json::Value,
         timeout: std::time::Duration,
     ) -> Result<McpToolResultDto, McpClientError> {
-        // Strip the mcp__<server>__ prefix to recover the wire `name`.
-        let prefix = format!("mcp__{}__", self.server_name);
+        // Strip the mcp__<server>__ prefix to recover the wire `name`. The
+        // server token is normalized to match how `list_tools` built the FQN
+        // (so the round-trip is self-consistent for invalid-char names).
+        let prefix = format!(
+            "mcp__{}__",
+            crate::normalization::normalize_name_for_mcp(&self.server_name)
+        );
         let tool_name = full_name
             .strip_prefix(&prefix)
             .ok_or_else(|| {

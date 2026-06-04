@@ -19,6 +19,7 @@ pub mod identity;
 pub mod inbound;
 pub mod initialize_params;
 pub mod json_config;
+pub mod normalization;
 pub mod oauth;
 pub mod registry;
 

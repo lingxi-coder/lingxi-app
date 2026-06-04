@@ -21,9 +21,17 @@ pub mod dispatcher;
 pub mod model;
 pub mod parser;
 pub mod registry;
+pub mod shell_expansion;
 
-pub use argument_substitution::substitute_arguments;
+pub use argument_substitution::{
+    parse_argument_names, parse_arguments, substitute_arguments, substitute_arguments_faithful,
+    FrontmatterArgs,
+};
 pub use dispatcher::RegistrySlashDispatcher;
 pub use model::*;
 pub use parser::{parse_slash_command, ParsedSlashCommand};
 pub use registry::CommandRegistry;
+pub use shell_expansion::{
+    execute_shell_commands_in_prompt, ShellExpansionCtx, ShellExpansionError, ShellOut,
+    ShellPermissionDecision, ShellPermissionGate, ShellRunError, ShellRunner,
+};

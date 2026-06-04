@@ -3,9 +3,18 @@
 //! Locked literals (plan §T0):
 //!   L5 prefix = "> "
 //!   user color = default fg (no override)
+//!
+//! Empty-message guard (claude-code parity, plan §A4): a body that is only
+//! prompt-XML scaffolding tags (`<commit_analysis>…`, `<context>…`,
+//! `<function_analysis>…`, `<pr_analysis>…`) — or the literal `(no content)` —
+//! renders NOTHING, matching claude-code's `UserTextMessage.tsx:39-41`
+//! (`return null` on `(no content)`) and the broader `isEmptyMessageText`
+//! suppression applied to the text body. We return an EMPTY `View` (no `"> "`
+//! prefix row) so the whole row disappears.
 
 use iocraft::prelude::*;
 
+use crate::components::messages::text_guard::is_empty_message_text;
 use crate::theme::TuiTheme;
 
 /// Props for `UserTextMessage`.
@@ -16,12 +25,44 @@ pub struct UserTextMessageProps {
 }
 
 /// Render a user-submitted prompt with the locked `"> "` prefix.
+///
+/// When [`is_empty_message_text`] reports the body is empty (only stripped
+/// scaffolding tags, or `(no content)`), the entire row is suppressed — an
+/// empty `View` is returned instead of the `"> "` prefix line, matching
+/// claude-code's `return null`.
 #[component]
 pub fn UserTextMessage(props: &UserTextMessageProps) -> impl Into<AnyElement<'static>> {
+    if is_empty_message_text(&props.body) {
+        // claude-code returns `null`; the iocraft equivalent is an empty View
+        // (zero rows), so the message contributes no visible output.
+        return element! { View() };
+    }
     let content = format!("> {}", props.body);
     element! {
         View(flex_direction: FlexDirection::Row) {
             Text(content: content, color: TuiTheme::USER)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_content_body_is_empty() {
+        assert!(is_empty_message_text("(no content)"));
+    }
+
+    #[test]
+    fn only_context_tag_is_empty() {
+        // A user message whose body is only `<context>x</context>` is empty, so
+        // the component must suppress the whole row (no `"> "` prefix).
+        assert!(is_empty_message_text("<context>x</context>"));
+    }
+
+    #[test]
+    fn plain_prompt_is_not_empty() {
+        assert!(!is_empty_message_text("what is 2 + 2?"));
     }
 }

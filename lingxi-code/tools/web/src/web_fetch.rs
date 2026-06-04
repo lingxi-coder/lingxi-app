@@ -87,6 +87,74 @@ pub fn validate_url(url_str: &str) -> Result<url::Url, String> {
     Ok(parsed)
 }
 
+/// Upgrade an `http:` URL to `https:` in place, mirroring `utils.ts:406-416`:
+///
+/// ```text
+/// if (parsedUrl.protocol === 'http:') {
+///   parsedUrl.protocol = 'https:'
+///   upgradedUrl = parsedUrl.toString()
+/// }
+/// ```
+///
+/// Only the scheme changes; the URL is otherwise untouched, and `https:` (or any
+/// other scheme) is left as-is. claude-code *upgrades* http→https rather than
+/// rejecting non-https, so the fetch always hits the secure URL while the cache
+/// and tool output still echo the caller's original URL.
+pub fn upgrade_to_https(url: &mut url::Url) {
+    if url.scheme() == "http" {
+        // `set_scheme` only fails on an invalid scheme transition; http→https is
+        // always valid, so the `Result` cannot be `Err` here. Ignore it.
+        let _ = url.set_scheme("https");
+    }
+}
+
+/// Map a redirect status code to its TS-exact status-text label, mirroring the
+/// ternary in `WebFetchTool.ts:218-225`:
+///
+/// `301 → "Moved Permanently"`, `308 → "Permanent Redirect"`,
+/// `307 → "Temporary Redirect"`, everything else → `"Found"`.
+#[must_use]
+pub fn redirect_status_text(code: u16) -> &'static str {
+    match code {
+        301 => "Moved Permanently",
+        308 => "Permanent Redirect",
+        307 => "Temporary Redirect",
+        _ => "Found",
+    }
+}
+
+/// Build the byte-exact "REDIRECT DETECTED" message from `WebFetchTool.ts:227-235`.
+///
+/// `prompt` is interpolated verbatim into the `- prompt: "${prompt}"` line; pass
+/// the empty string when the caller supplied no prompt (TS interpolates
+/// `undefined` as the string `"undefined"`, but the Rust input models an absent
+/// prompt as `None`/`""` — Batch 4 wires the real per-hop value through, so this
+/// scaffold takes the already-resolved string).
+///
+/// The returned string is suitable for the tool's `content`/`result` field once
+/// Batch 4 adds real per-hop redirect detection.
+#[must_use]
+pub fn format_redirect_message(
+    original_url: &str,
+    redirect_url: &str,
+    status_code: u16,
+    prompt: &str,
+) -> String {
+    let status_text = redirect_status_text(status_code);
+    format!(
+        "REDIRECT DETECTED: The URL redirects to a different host.\n\
+         \n\
+         Original URL: {original_url}\n\
+         Redirect URL: {redirect_url}\n\
+         Status: {status_code} {status_text}\n\
+         \n\
+         To complete your request, I need to fetch content from the redirected URL. \
+         Please use WebFetch again with these parameters:\n\
+         - url: \"{redirect_url}\"\n\
+         - prompt: \"{prompt}\""
+    )
+}
+
 /// Truncate `body` so that its byte length is `<= WEBFETCH_MAX_BYTES`, falling
 /// back to the nearest UTF-8 char boundary so we never split a multi-byte
 /// codepoint. If truncated, [`WEBFETCH_TRUNCATION_SUFFIX`] is appended.
@@ -292,8 +360,7 @@ impl Tool for WebFetchTool {
     ) -> Result<ToolCallResult, ToolError> {
         let parsed_input: WebFetchInput = serde_json::from_value(input)
             .map_err(|e| ToolError::InvalidInput(format!("invalid input: {e}")))?;
-        let parsed_url = validate_url(&parsed_input.url).map_err(ToolError::InvalidInput)?;
-        let host = parsed_url.host_str().unwrap_or("<unknown>").to_string();
+        let mut parsed_url = validate_url(&parsed_input.url).map_err(ToolError::InvalidInput)?;
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
 
         self.emit_started(
@@ -302,6 +369,37 @@ impl Tool for WebFetchTool {
             parsed_input.prompt.is_some(),
         )
         .await;
+
+        // Cache check (keyed by the *original* URL), before the http→https
+        // upgrade — mirrors `utils.ts:392-404`, which short-circuits on a hit
+        // ahead of the upgrade block at `utils.ts:406-416`. Repeat fetches of
+        // the same URL return instantly without a second network round-trip.
+        if let Some(hit) = crate::cache::cache_get(&parsed_input.url) {
+            // A fetch was truncated iff the raw body exceeded the cap; reproduce
+            // the same `truncated` flag the live path would have set.
+            let truncated = hit.bytes > WEBFETCH_MAX_BYTES;
+            // Cache hits do no network work, so the reported duration is 0 ms.
+            self.emit_completed(&invocation_id, hit.status, hit.bytes as u64, truncated, 0)
+                .await;
+            return Ok(ToolCallResult {
+                data: json!({
+                    "url": parsed_input.url,
+                    "status": hit.status,
+                    "content": hit.content,
+                    "truncated": truncated,
+                    "bytes": hit.bytes,
+                }),
+                new_messages: vec![],
+                context_modifier: None,
+                mcp_meta: None,
+            });
+        }
+
+        // Upgrade http→https before fetching (`utils.ts:406-416`). The cache and
+        // tool output still echo the caller's original URL; only the network
+        // request targets the upgraded one.
+        upgrade_to_https(&mut parsed_url);
+        let host = parsed_url.host_str().unwrap_or("<unknown>").to_string();
 
         let started = Instant::now();
         let req = HttpRequest {
@@ -327,7 +425,26 @@ impl Tool for WebFetchTool {
             Ok(resp) => {
                 let status = resp.status;
                 let body_bytes = resp.body.len();
+                let content_type = resp
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                    .map_or_else(String::new, |(_, v)| v.clone());
                 let (final_body, truncated) = truncate_body(resp.body);
+                // Store the successful fetch under the *original* URL
+                // (`utils.ts:505-517`) so repeat fetches hit the cache. The
+                // markdown/Haiku conversion lands in later batches; the cache
+                // stores whatever `content` the current pipeline produced.
+                crate::cache::cache_set(
+                    parsed_input.url.clone(),
+                    crate::cache::CachedFetch {
+                        content: final_body.clone(),
+                        status,
+                        content_type,
+                        bytes: body_bytes,
+                        persisted_path: None,
+                    },
+                );
                 self.emit_completed(
                     &invocation_id,
                     status,
@@ -515,6 +632,77 @@ mod tests {
         assert!(!is_dns_failure(""));
     }
 
+    // ---- http→https upgrade (utils.ts:406-416) -----------------------------
+
+    #[test]
+    fn upgrade_http_to_https() {
+        let mut u = url::Url::parse("http://x.com/a").unwrap();
+        upgrade_to_https(&mut u);
+        assert_eq!(u.as_str(), "https://x.com/a");
+        assert_eq!(u.scheme(), "https");
+    }
+
+    #[test]
+    fn upgrade_leaves_https_untouched() {
+        let mut u = url::Url::parse("https://x.com/a?q=1#frag").unwrap();
+        let before = u.as_str().to_string();
+        upgrade_to_https(&mut u);
+        assert_eq!(u.as_str(), before);
+    }
+
+    #[test]
+    fn upgrade_preserves_path_query_port() {
+        let mut u = url::Url::parse("http://x.com:8080/a/b?q=1&z=2#h").unwrap();
+        upgrade_to_https(&mut u);
+        // url normalizes 8080 (non-default for https) — it is retained.
+        assert_eq!(u.as_str(), "https://x.com:8080/a/b?q=1&z=2#h");
+    }
+
+    // ---- redirect status text (WebFetchTool.ts:218-225) --------------------
+
+    #[test]
+    fn redirect_status_text_matches_ts() {
+        assert_eq!(redirect_status_text(301), "Moved Permanently");
+        assert_eq!(redirect_status_text(308), "Permanent Redirect");
+        assert_eq!(redirect_status_text(307), "Temporary Redirect");
+        // Everything else (incl. 302, 303, 200, 0) falls through to "Found".
+        assert_eq!(redirect_status_text(302), "Found");
+        assert_eq!(redirect_status_text(303), "Found");
+        assert_eq!(redirect_status_text(200), "Found");
+        assert_eq!(redirect_status_text(0), "Found");
+    }
+
+    // ---- redirect message (WebFetchTool.ts:227-235) ------------------------
+
+    #[test]
+    fn format_redirect_message_byte_matches_ts() {
+        // Byte-for-byte reproduction of the WebFetchTool.ts template literal.
+        let expected = "REDIRECT DETECTED: The URL redirects to a different host.\n\
+\n\
+Original URL: https://orig.example/page\n\
+Redirect URL: https://other.example/landing\n\
+Status: 301 Moved Permanently\n\
+\n\
+To complete your request, I need to fetch content from the redirected URL. Please use WebFetch again with these parameters:\n\
+- url: \"https://other.example/landing\"\n\
+- prompt: \"summarize this\"";
+        let got = format_redirect_message(
+            "https://orig.example/page",
+            "https://other.example/landing",
+            301,
+            "summarize this",
+        );
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn format_redirect_message_uses_found_for_unknown_code() {
+        let got = format_redirect_message("https://a/", "https://b/", 302, "");
+        assert!(got.contains("Status: 302 Found"));
+        assert!(got.contains("- prompt: \"\""));
+        assert!(got.contains("- url: \"https://b/\""));
+    }
+
     // ---- async impl Tool tests using MockHttpTransport ---------------------
 
     use std::sync::Arc;
@@ -625,9 +813,11 @@ mod tests {
         ctx.bus.attach_sink(sink.clone()).await;
         http.enqueue(ok_response(200, "hello world"));
         let tool = WebFetchTool::new(ctx);
+        // Unique URL so the process-global cache can't be pre-warmed by another
+        // parallel test (which would skip the fetch).
         let res = tool
             .call(
-                json!({ "url": "https://example.com/" }),
+                json!({ "url": "https://example.com/happy-path" }),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -646,9 +836,11 @@ mod tests {
         let (ctx, http, _sink) = make_web_ctx();
         http.enqueue(ok_response(200, "ok"));
         let tool = WebFetchTool::new(ctx);
+        // Unique URL to avoid a process-global cache hit short-circuiting the
+        // fetch (which would leave `received_requests()` empty).
         let _ = tool
             .call(
-                json!({ "url": "https://example.com/" }),
+                json!({ "url": "https://example.com/user-agent" }),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -684,5 +876,135 @@ mod tests {
             .expect_err("file:// must be rejected");
         assert!(matches!(err, ToolError::InvalidInput(_)));
         assert!(format!("{err}").contains("URL scheme 'file' not allowed; only https/http"));
+    }
+
+    // ---- http→https upgrade + 15-min cache integration ---------------------
+
+    #[tokio::test]
+    async fn upgrades_http_to_https_on_the_wire() {
+        crate::cache::clear_web_fetch_cache();
+        let (ctx, http, _sink) = make_web_ctx();
+        http.enqueue(ok_response(200, "ok"));
+        let tool = WebFetchTool::new(ctx);
+        // Caller passes an http:// URL; the network request must target https://.
+        let res = tool
+            .call(
+                json!({ "url": "http://upgrade.example/page" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok response");
+        // Output echoes the ORIGINAL (un-upgraded) URL.
+        assert_eq!(res.data["url"], "http://upgrade.example/page");
+        let reqs = http.received_requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].url, "https://upgrade.example/page");
+    }
+
+    #[tokio::test]
+    async fn second_call_is_served_from_cache() {
+        crate::cache::clear_web_fetch_cache();
+        let (ctx, http, _sink) = make_web_ctx();
+        // Only ONE response is enqueued: a cache hit must not consume a second.
+        http.enqueue(ok_response(200, "cached body"));
+        let tool = WebFetchTool::new(ctx);
+        let url = json!({ "url": "https://cache-hit.example/doc" });
+
+        let first = tool
+            .call(url.clone(), fresh_ctx(), fresh_tx())
+            .await
+            .expect("first fetch ok");
+        assert_eq!(first.data["content"], "cached body");
+
+        let second = tool
+            .call(url, fresh_ctx(), fresh_tx())
+            .await
+            .expect("second fetch ok (from cache)");
+        assert_eq!(second.data["content"], "cached body");
+        assert_eq!(second.data["status"], 200);
+        assert_eq!(second.data["bytes"], "cached body".len());
+        assert_eq!(second.data["truncated"], false);
+
+        // Exactly one network round-trip for two identical fetches.
+        assert_eq!(
+            http.received_requests().len(),
+            1,
+            "second call must hit the cache, not the network"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_keyed_by_original_url_so_http_and_https_share() {
+        crate::cache::clear_web_fetch_cache();
+        let (ctx, http, _sink) = make_web_ctx();
+        http.enqueue(ok_response(200, "body"));
+        let tool = WebFetchTool::new(ctx);
+
+        // First fetch under http:// — stored under the original (http) key.
+        let _ = tool
+            .call(
+                json!({ "url": "http://key.example/p" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("first ok");
+        // Re-fetching the same original http:// URL is a cache hit.
+        let _ = tool
+            .call(
+                json!({ "url": "http://key.example/p" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("cache hit");
+        assert_eq!(http.received_requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn distinct_urls_each_fetch() {
+        crate::cache::clear_web_fetch_cache();
+        let (ctx, http, _sink) = make_web_ctx();
+        http.enqueue(ok_response(200, "a"));
+        http.enqueue(ok_response(200, "b"));
+        let tool = WebFetchTool::new(ctx);
+        let _ = tool
+            .call(
+                json!({ "url": "https://distinct.example/a" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("a ok");
+        let _ = tool
+            .call(
+                json!({ "url": "https://distinct.example/b" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("b ok");
+        // Two different URLs ⇒ two network round-trips (no cross-key cache hit).
+        assert_eq!(http.received_requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn errors_are_not_cached() {
+        crate::cache::clear_web_fetch_cache();
+        let (ctx, http, _sink) = make_web_ctx();
+        // Two 500s enqueued: if errors were cached, the second call would not
+        // consume the second response and `received_requests` would be 1.
+        http.enqueue(ok_response(500, "boom"));
+        http.enqueue(ok_response(500, "boom"));
+        let tool = WebFetchTool::new(ctx);
+        let url = json!({ "url": "https://err.example/x" });
+        let _ = tool.call(url.clone(), fresh_ctx(), fresh_tx()).await;
+        let _ = tool.call(url, fresh_ctx(), fresh_tx()).await;
+        assert_eq!(
+            http.received_requests().len(),
+            2,
+            "failed fetches must NOT be cached"
+        );
     }
 }

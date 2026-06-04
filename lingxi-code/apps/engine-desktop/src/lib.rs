@@ -743,6 +743,11 @@ pub async fn build(
         if std::env::var_os("LINGXI_ENFORCE_PERMISSIONS").is_some_and(|v| !v.is_empty()) {
             let mut rules = Vec::new();
             let mut mode = permission::PermissionMode::Default;
+            // Bypass-permissions killswitch: if ANY tier sets
+            // `disableBypassPermissionsMode: "disable"`, the policy refuses
+            // `BypassPermissions` mode (`authorize` falls back to Ask). Sticky
+            // across tiers — a disable is not overridable upward (claude-code).
+            let mut bypass_disabled = false;
             // Read the three persistable rule tiers in ASCENDING priority so
             // the highest-priority `defaultMode` wins (last write). settings.local.json
             // (3c) is read LAST so an `AllowAlways` persisted there is loaded back
@@ -775,6 +780,9 @@ pub async fn build(
                     if let Some(m) = permission::default_mode_from_settings_json(&raw) {
                         mode = m; // local settings read last → its defaultMode wins
                     }
+                    if permission::bypass_permissions_disabled_from_settings_json(&raw) {
+                        bypass_disabled = true; // sticky: any tier disabling wins
+                    }
                 }
             }
             let rule_count = rules.len();
@@ -788,8 +796,9 @@ pub async fn build(
                 home: dirs::home_dir(),
                 claude_home: cfg.claude_home.clone(),
             };
-            let policy =
-                Arc::new(permission::PermissionPolicy::from_rules(mode, rules).with_roots(roots));
+            let mut policy = permission::PermissionPolicy::from_rules(mode, rules).with_roots(roots);
+            policy.bypass_killswitch_active = bypass_disabled;
+            let policy = Arc::new(policy);
             tracing::info!(
                 rules = rule_count,
                 mode = ?mode,

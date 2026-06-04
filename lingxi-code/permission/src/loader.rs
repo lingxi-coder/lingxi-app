@@ -46,6 +46,8 @@ struct PermissionsBlock {
     ask: Vec<String>,
     #[serde(default, rename = "defaultMode")]
     default_mode: Option<String>,
+    #[serde(default, rename = "disableBypassPermissionsMode")]
+    disable_bypass_permissions_mode: Option<String>,
 }
 
 /// Parse one settings file's raw JSON into permission rules tagged with
@@ -97,6 +99,21 @@ pub fn default_mode_from_settings_json(raw: &str) -> Option<PermissionMode> {
         "dontAsk" => Some(PermissionMode::DontAsk),
         _ => None,
     }
+}
+
+/// Does this settings file DISABLE `bypassPermissions` mode? True iff
+/// `permissions.disableBypassPermissionsMode == "disable"` (claude-code's
+/// bypass-permissions killswitch). When any tier disables it, the constructed
+/// [`crate::PermissionPolicy`]'s `bypass_killswitch_active` is set so
+/// `authorize` falls back to `Ask` even in `BypassPermissions` mode.
+#[must_use]
+pub fn bypass_permissions_disabled_from_settings_json(raw: &str) -> bool {
+    serde_json::from_str::<SettingsTop>(raw)
+        .ok()
+        .and_then(|t| t.permissions)
+        .and_then(|p| p.disable_bypass_permissions_mode)
+        .as_deref()
+        == Some("disable")
 }
 
 #[cfg(test)]
@@ -173,6 +190,16 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn bypass_killswitch_parses() {
+        let f = bypass_permissions_disabled_from_settings_json;
+        assert!(f(r#"{ "permissions": { "disableBypassPermissionsMode": "disable" } }"#));
+        assert!(!f(r#"{ "permissions": { "disableBypassPermissionsMode": "enable" } }"#));
+        assert!(!f(r#"{ "permissions": {} }"#));
+        assert!(!f("{}"));
+        assert!(!f("not json"));
     }
 
     #[test]

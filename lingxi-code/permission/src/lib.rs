@@ -30,8 +30,11 @@ pub use gate::{
     PermissionDecision, PermissionGate, PermissionRequest, PermissionResponse, PromptDecision,
     PromptDefault, PromptError, PromptingGate,
 };
-pub use loader::{default_mode_from_settings_json, permission_rules_from_settings_json};
-pub use mode::PermissionMode;
+pub use loader::{
+    bypass_permissions_disabled_from_settings_json, default_mode_from_settings_json,
+    permission_rules_from_settings_json,
+};
+pub use mode::{next_permission_mode, PermissionMode};
 pub use persist::{persist_permission_update, PermissionPaths, PersistError};
 pub use policy::PermissionPolicy;
 pub use policy_gate::PolicyPermissionGate;

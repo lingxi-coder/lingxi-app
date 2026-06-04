@@ -31,8 +31,11 @@ pub fn parse_slash_command(input: &str) -> Option<ParsedSlashCommand> {
 }
 
 /// Split a string into tokens, respecting single- and double-quoted runs.
+///
+/// Shared with [`crate::argument_substitution::parse_arguments`] as the
+/// quote-aware substitute for the TS `shell-quote` tokenizer.
 #[allow(clippy::match_same_arms)] // arm order is significant — guards must run first.
-fn tokenize_args(s: &str) -> Vec<String> {
+pub(crate) fn tokenize_args(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut buf = String::new();
     let mut in_quote: Option<char> = None;

@@ -862,6 +862,15 @@ pub fn render_screen(
             // branch); `None` hides it. Reset (app.rs `/color default`) clears
             // it back to `None`.
             session_agent_color: state.session_agent_color.clone(),
+            // (A6) Custom status-line text + padding. `Some(text)` swaps the
+            // built-in status row for the custom command's transformed stdout;
+            // `None` (the default) keeps the built-in row byte-identical. The
+            // padding comes from the parsed `statusLine.padding` setting.
+            status_line_text: state.status_line_text.clone(),
+            status_line_padding: state
+                .status_line_config
+                .as_ref()
+                .map_or(0, |c| c.padding),
         )
     }
     .into_any()

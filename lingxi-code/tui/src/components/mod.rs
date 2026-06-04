@@ -11,5 +11,6 @@ pub mod prompt_input;
 pub mod scrollback;
 pub mod spinner;
 pub mod status_line;
+pub mod status_line_command;
 pub mod tasks;
 pub mod virtual_message_list;

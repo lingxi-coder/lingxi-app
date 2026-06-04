@@ -72,6 +72,21 @@ pub struct CommandFrontmatter {
     pub argument_hints: Vec<String>,
     /// Optional thinking-token budget.
     pub thinking: Option<u32>,
+    /// Shell to route embedded shell-expansion blocks through. When absent the
+    /// runtime defaults to bash (mirrors the TS `frontmatterParser`'s
+    /// `shell?: FrontmatterShell`).
+    pub shell: Option<FrontmatterShell>,
+}
+
+/// Shell selected by a markdown command's frontmatter for embedded shell
+/// expansion. Mirrors the TS `FrontmatterShell` union (`bash` | `powershell`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FrontmatterShell {
+    /// Route embedded shell commands through bash (the default).
+    Bash,
+    /// Route embedded shell commands through `PowerShell`.
+    PowerShell,
 }
 
 /// Where the command came from.

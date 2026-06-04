@@ -45,6 +45,26 @@
 //!   docs for what that elides.
 //! - **No Unicode NFC** on `~`-expansion (`homedir().normalize('NFC')`): a no-op
 //!   for ASCII paths and `OsStr` has no portable NFC primitive.
+//!
+//! ## Working-directory containment (`AcceptEdits` auto-allow, Batch 1)
+//! [`path_in_working_path`] / [`path_in_allowed_working_path`] port claude-code's
+//! `pathInWorkingPath` / `pathInAllowedWorkingPath` (`filesystem.ts:683-744`),
+//! which gate the `mode === 'acceptEdits' && isInWorkingDir` write auto-allow
+//! (`:1360-1375`). They expand both the target and each working dir, apply the
+//! macOS `/private/var`→`/var` & `/private/tmp`→`/tmp` symlink rewrites, lowercase
+//! case-fold (so `.cLaUdE/…` cannot bypass a case-insensitive filesystem), and
+//! accept iff the working-dir-relative path neither escapes upward (`..`-segment)
+//! nor is absolute.
+//!
+//! **Divergence (forced, pre-accepted): lexical only — no on-disk symlink
+//! resolution.** claude-code's `pathInAllowedWorkingPath` checks BOTH the
+//! original path AND its `realpathSync`-resolved form (`getPathsForPermissionCheck`
+//! / `getResolvedWorkingDirPaths`) against EVERY resolved working dir, to defeat
+//! symlink-escape. This port resolves nothing on disk (consistent with
+//! [`expand_path`]'s "Lexical, not `realpath`" decision): it compares the single
+//! lexically-expanded target against the single lexically-expanded working dir.
+//! Symlink-escape hardening is a known, already-accepted divergence in this crate
+//! (the `/private/var`↔`/var` rewrite still handles the one common macOS case).
 
 use crate::rule::PermissionRuleSource;
 use std::path::{Component, Path, PathBuf};
@@ -327,6 +347,120 @@ pub fn path_matches_rule_pattern(
         .is_ignore()
 }
 
+/// Normalize a path string for case-insensitive comparison — port of
+/// `normalizeCaseForComparison` (`filesystem.ts:90-92`). Always lowercases
+/// regardless of platform so a mixed-case `.cLauDe/CoMmAnDs` cannot bypass the
+/// security checks on a case-insensitive filesystem (macOS / Windows).
+///
+/// (A sibling [`crate::auto_edit_safety::normalize_case_for_comparison`] exists
+/// for the auto-edit safety guard; both are intentionally the same `to_lowercase`
+/// — kept per-module to mirror the two TS call sites without a cross-module dep.)
+#[must_use]
+pub fn normalize_case_for_comparison(s: &str) -> String {
+    s.to_lowercase()
+}
+
+/// Apply the macOS symlink rewrites claude-code performs before comparing paths
+/// for working-dir containment (`filesystem.ts:716-721`):
+/// `/private/var/` → `/var/` and `/private/tmp` (followed by `/` or end) →
+/// `/tmp`. Operates on the already-absolute, lexically-expanded path string.
+///
+/// Only the leading `/private/var/` and `/private/tmp` forms are rewritten (the
+/// TS regexes are anchored with `^`); an interior `/private/var` is untouched.
+fn rewrite_private_symlinks(abs: &str) -> String {
+    if let Some(rest) = abs.strip_prefix("/private/var/") {
+        return format!("/var/{rest}");
+    }
+    // `/private/tmp$` or `/private/tmp/…` (the `(\/|$)` capture is preserved).
+    if abs == "/private/tmp" {
+        return "/tmp".to_string();
+    }
+    if let Some(rest) = abs.strip_prefix("/private/tmp/") {
+        return format!("/tmp/{rest}");
+    }
+    abs.to_string()
+}
+
+/// Is `path` inside (or equal to) the single working directory `working`? — port
+/// of `pathInWorkingPath` (`filesystem.ts:709-744`).
+///
+/// 1. Lexically expand both `path` and `working` to absolute, normalized paths.
+/// 2. Apply the macOS `/private/var`→`/var` & `/private/tmp`→`/tmp` rewrites.
+/// 3. Lowercase case-fold both for case-insensitive comparison.
+/// 4. Compute the working-dir-relative path; accept iff it is the same path
+///    (`""`), does NOT contain a `..` traversal segment, and is NOT absolute.
+///
+/// Lexical only — see the module-header divergence note (no on-disk `realpath`).
+#[must_use]
+pub fn path_in_working_path(path: &Path, working: &Path, roots: &FsRoots) -> bool {
+    let absolute_path = expand_path(&path.to_string_lossy(), roots);
+    let absolute_working_path = expand_path(&working.to_string_lossy(), roots);
+
+    // macOS symlink rewrites (`/private/var`→`/var`, `/private/tmp`→`/tmp`).
+    let normalized_path = rewrite_private_symlinks(&absolute_path.to_string_lossy());
+    let normalized_working = rewrite_private_symlinks(&absolute_working_path.to_string_lossy());
+
+    // Case-fold for case-insensitive filesystems.
+    let case_path = normalize_case_for_comparison(&normalized_path);
+    let case_working = normalize_case_for_comparison(&normalized_working);
+
+    // POSIX relative path from working dir to target.
+    let relative = posix_relative(Path::new(&case_working), Path::new(&case_path));
+
+    // Same path.
+    if relative.is_empty() {
+        return true;
+    }
+
+    // `containsPathTraversal` (`path.ts:133-135`): `(?:^|[\\/])\.\.(?:[\\/]|$)` —
+    // a `..` segment bounded by separators / string ends. `posix_relative` only
+    // ever emits `..` at the START (or as the whole string), so this rejects an
+    // escaping target. We mirror the TS predicate's full segment semantics.
+    if contains_path_traversal(&relative) {
+        return false;
+    }
+
+    // Inside iff the relative path is not itself absolute (`posix.isAbsolute`).
+    !Path::new(&relative).is_absolute()
+}
+
+/// Port of `containsPathTraversal` (`path.ts:133-135`):
+/// JS `/(?:^|[\\/])\.\.(?:[\\/]|$)/` — true when a `..` appears as a whole path
+/// segment (bounded by `/`, `\`, or a string boundary on each side). A `..`
+/// embedded in a longer name (`..beta`, `x..y`) is NOT a traversal.
+fn contains_path_traversal(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let len = bytes.len();
+    let is_sep = |b: u8| b == b'/' || b == b'\\';
+    let mut i = 0;
+    while i + 1 < len {
+        if bytes[i] == b'.' && bytes[i + 1] == b'.' {
+            let left_ok = i == 0 || is_sep(bytes[i - 1]);
+            let right_idx = i + 2;
+            let right_ok = right_idx == len || is_sep(bytes[right_idx]);
+            if left_ok && right_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Is `path` inside ANY of the allowed working directories? — port of
+/// `pathInAllowedWorkingPath` (`filesystem.ts:683-707`), reduced to the lexical
+/// path set (one expanded path vs. one expanded working dir; no `realpath`).
+///
+/// claude-code's "every resolved input path must be within SOME working path"
+/// collapses, with a single lexical path, to "the path is within some working
+/// dir". Returns `false` for an empty `working_dirs` list (no allowance).
+#[must_use]
+pub fn path_in_allowed_working_path(path: &Path, working_dirs: &[PathBuf], roots: &FsRoots) -> bool {
+    working_dirs
+        .iter()
+        .any(|wd| path_in_working_path(path, wd, roots))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +680,115 @@ mod tests {
         // Missing required path → None.
         let empty = serde_json::json!({});
         assert!(input_path_for_tool("Edit", &empty, &r).is_none());
+    }
+
+    // ── Batch 1: working-dir containment ──────────────────────────────────
+
+    fn in_working(path: &str, working: &str) -> bool {
+        path_in_working_path(Path::new(path), Path::new(working), &roots())
+    }
+
+    #[test]
+    fn normalize_case_lowercases_in_filesystem() {
+        assert_eq!(normalize_case_for_comparison(".CLAUDE"), ".claude");
+        assert_eq!(normalize_case_for_comparison("Foo/Bar.RS"), "foo/bar.rs");
+    }
+
+    #[test]
+    fn path_inside_working_dir_is_contained() {
+        assert!(in_working("/proj/src/main.rs", "/proj"));
+        // Nested deeper.
+        assert!(in_working("/proj/a/b/c.rs", "/proj"));
+        // The working dir itself (same path) is contained.
+        assert!(in_working("/proj", "/proj"));
+        // A relative input path resolves against cwd (= /proj) → inside.
+        assert!(in_working("src/main.rs", "/proj"));
+    }
+
+    #[test]
+    fn path_outside_working_dir_is_not_contained() {
+        assert!(!in_working("/other/x.rs", "/proj"));
+        // A sibling that shares a prefix but is not under the dir.
+        assert!(!in_working("/projector/x.rs", "/proj"));
+    }
+
+    #[test]
+    fn dotdot_escape_is_rejected() {
+        // `..`-escaping the working dir must be rejected even though the lexical
+        // expansion of the working dir vs target could otherwise look adjacent.
+        assert!(!in_working("/proj/../etc/passwd", "/proj"));
+        // A `..` that stays inside is fine (`/proj/a/../b` == `/proj/b`).
+        assert!(in_working("/proj/a/../b.rs", "/proj"));
+    }
+
+    #[test]
+    fn private_var_rewrite_makes_paths_match() {
+        // `/private/var/...` target vs `/var/...` working dir → both rewrite to
+        // `/var/...` and compare equal-prefix → contained.
+        assert!(in_working("/private/var/folders/x/file.rs", "/var/folders/x"));
+        // And the reverse: `/var/...` target vs `/private/var/...` working dir.
+        assert!(in_working("/var/folders/x/file.rs", "/private/var/folders/x"));
+    }
+
+    #[test]
+    fn private_tmp_rewrite_makes_paths_match() {
+        assert!(in_working("/private/tmp/work/out.rs", "/tmp/work"));
+        assert!(in_working("/tmp/work/out.rs", "/private/tmp/work"));
+        // Bare `/private/tmp` rewrites to `/tmp` (the `$`-anchored branch).
+        assert!(in_working("/private/tmp", "/tmp"));
+    }
+
+    #[test]
+    fn comparison_is_case_insensitive() {
+        // A mixed-case `.CLAUDE` segment in the target still resolves under a
+        // lowercase working dir (case-folded comparison).
+        assert!(in_working("/Proj/SRC/Main.RS", "/proj/src"));
+        assert!(in_working("/proj/.ClAuDe/x", "/proj/.claude"));
+    }
+
+    #[test]
+    fn contains_path_traversal_segment_semantics() {
+        // Whole-segment `..` (bounded by separators / boundaries) → true.
+        assert!(contains_path_traversal(".."));
+        assert!(contains_path_traversal("../x"));
+        assert!(contains_path_traversal("a/../b"));
+        assert!(contains_path_traversal("a/.."));
+        assert!(contains_path_traversal("a\\..\\b"));
+        // `..` embedded in a longer name is NOT a traversal.
+        assert!(!contains_path_traversal("..beta"));
+        assert!(!contains_path_traversal("x..y"));
+        assert!(!contains_path_traversal("v2..beta/x"));
+        assert!(!contains_path_traversal("a/b/c"));
+        assert!(!contains_path_traversal(""));
+    }
+
+    #[test]
+    fn allowed_working_path_iterates_dirs() {
+        let r = roots();
+        let dirs = vec![PathBuf::from("/proj"), PathBuf::from("/extra/work")];
+        // Inside the first dir.
+        assert!(path_in_allowed_working_path(
+            Path::new("/proj/src/x.rs"),
+            &dirs,
+            &r
+        ));
+        // Inside the second (additional) dir.
+        assert!(path_in_allowed_working_path(
+            Path::new("/extra/work/y.rs"),
+            &dirs,
+            &r
+        ));
+        // Inside neither.
+        assert!(!path_in_allowed_working_path(
+            Path::new("/nope/z.rs"),
+            &dirs,
+            &r
+        ));
+        // Empty working-dir list → never contained.
+        assert!(!path_in_allowed_working_path(
+            Path::new("/proj/src/x.rs"),
+            &[],
+            &r
+        ));
     }
 }

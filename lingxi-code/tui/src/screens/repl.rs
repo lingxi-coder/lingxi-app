@@ -111,6 +111,14 @@ pub struct ReplScreenProps {
     /// hides it (no row) — matching claude-code's `color: undefined` →
     /// standalone branch falls through to `return null`.
     pub session_agent_color: Option<String>,
+    /// (A6) Resolved custom status-line text (clone of
+    /// `AppState.status_line_text`). `Some(text)` makes the top `StatusLine`
+    /// render the custom command's transformed stdout instead of the built-in
+    /// `model cwd cost ctx% mode` row; `None` keeps the built-in row unchanged.
+    pub status_line_text: Option<String>,
+    /// (A6) Horizontal padding (cells) for the custom status row, read from
+    /// `statusLine.padding` (default `0`). Forwarded to `StatusLine.padding_x`.
+    pub status_line_padding: usize,
 }
 
 impl Default for ReplScreenProps {
@@ -139,6 +147,8 @@ impl Default for ReplScreenProps {
             team_footer: None,
             viewing_teammate: None,
             session_agent_color: None,
+            status_line_text: None,
+            status_line_padding: 0,
         }
     }
 }
@@ -151,6 +161,10 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let cost = props.status.cost.clone();
     let context_pct = props.status.context_pct;
     let permission_mode = props.status.permission_mode;
+    // (A6) Custom status-line text + padding + width-for-truncation.
+    let status_line_text = props.status_line_text.clone();
+    let status_line_padding = props.status_line_padding;
+    let status_line_width = props.prompt_width;
     let messages = props.messages.clone();
     let cache = props.cache.clone();
     let prompt_text = props.prompt_text.clone();
@@ -184,6 +198,12 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 context_pct: context_pct,
                 permission_mode: permission_mode,
                 theme: theme,
+                // (A6) When the user configured a `statusLine` command and it
+                // produced output, render that custom text (padded + truncated)
+                // in place of the built-in row; `None` keeps the built-in row.
+                custom: status_line_text,
+                padding_x: status_line_padding,
+                width: status_line_width,
             )
             // (M9-06) Teammate-view header: renders above the transcript when a
             // teammate is being viewed. Hidden (no row) in normal mode.

@@ -4,8 +4,12 @@
 //! M1.3 evaluates rules in priority order (deny first, then allow) and
 //! falls back to the active mode for unmatched calls.
 
+use crate::auto_edit_safety::{check_path_safety_for_auto_edit, AutoEditSafety};
 use crate::denial_tracking::DenialTrackingState;
-use crate::filesystem::{file_tool_kind, input_path_for_tool, path_matches_rule_pattern, FsRoots, FileToolKind};
+use crate::filesystem::{
+    file_tool_kind, input_path_for_tool, path_in_allowed_working_path, path_matches_rule_pattern,
+    FileToolKind, FsRoots,
+};
 use crate::mode::PermissionMode;
 use crate::result::{
     PermissionDecisionReason, PermissionMetadata, PermissionPrompt, PermissionResult,
@@ -13,6 +17,7 @@ use crate::result::{
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource};
 use crate::shell_command;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Rule sources in DESCENDING priority (highest → lowest), matching D1.
@@ -64,6 +69,13 @@ pub struct PermissionPolicy {
     /// an EXACT identity (TS only guarantees set-equality via `applyPermissionUpdate`
     /// re-add; the position record is a Rust-side strengthening, documented).
     stripped_positions: Vec<(PermissionRuleSource, usize)>,
+    /// Extra directories (beyond `roots.cwd`) inside which `AcceptEdits` mode
+    /// auto-allows safe file edits. 1:1 with the keys of the TS
+    /// `ToolPermissionContext.additionalWorkingDirectories` map, which
+    /// `allWorkingDirectories` (`filesystem.ts:667-674`) unions with the original
+    /// cwd. Empty by default; set via [`Self::with_working_dirs`]. Production
+    /// engine wiring is deferred this batch (cwd comes from `roots.cwd`).
+    pub additional_working_dirs: Vec<PathBuf>,
 }
 
 impl PermissionPolicy {
@@ -80,7 +92,18 @@ impl PermissionPolicy {
             roots: None,
             stripped_dangerous: Vec::new(),
             stripped_positions: Vec::new(),
+            additional_working_dirs: Vec::new(),
         }
+    }
+
+    /// Set the extra working directories inside which `AcceptEdits` mode
+    /// auto-allows safe edits (beyond `roots.cwd`). Mirrors seeding the keys of
+    /// TS `ToolPermissionContext.additionalWorkingDirectories`. Backward-compatible
+    /// (default empty); production may leave it unset this batch.
+    #[must_use]
+    pub fn with_working_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.additional_working_dirs = dirs;
+        self
     }
 
     /// Enable phase-3a file-path content matching by supplying the filesystem
@@ -183,6 +206,38 @@ impl PermissionPolicy {
                         rules.iter().find(|r| self.rule_matches(r, tool_name, input))
                     {
                         return allow_with_rule(rule);
+                    }
+                }
+            }
+        }
+        // 3a. AcceptEdits working-dir auto-allow (claude-code `checkWritePermissionForTool`
+        //     step 3, `filesystem.ts:1360-1375`). In `AcceptEdits` mode an EDITOR
+        //     tool whose target path (a) passes the auto-edit safety guard
+        //     (`checkPathSafetyForAutoEdit`, Batch 2 — runs FIRST at `:1242`+, so
+        //     `.git`/`.claude`/dangerous/suspicious-Windows paths fall through to
+        //     ask) AND (b) lives inside an allowed working dir (cwd +
+        //     `additional_working_dirs`, `allWorkingDirectories` `:667-674`) is
+        //     auto-allowed with a `mode` reason. This runs AFTER the deny/ask/allow
+        //     walks (so explicit deny/ask rules still win — preserved by ordering)
+        //     and BEFORE the generic mode fallback. On any failure the branch is
+        //     simply not taken and control falls through to the `AcceptEdits`-mode
+        //     ask below. Requires [`Self::roots`] (the working-dir set is derived
+        //     from `roots.cwd`).
+        if self.mode == PermissionMode::AcceptEdits
+            && file_tool_kind(tool_name) == FileToolKind::Editor
+        {
+            if let Some(roots) = self.roots.as_ref() {
+                if let Some(raw_path) = input_path_for_tool(tool_name, input, roots) {
+                    // Safety guard runs first (Batch 2). Only a `Safe` verdict may
+                    // be auto-allowed; an `Unsafe` path falls through to ask.
+                    if check_path_safety_for_auto_edit(&raw_path, roots) == AutoEditSafety::Safe {
+                        // Working-dir set = cwd + additional dirs (`allWorkingDirectories`).
+                        let mut working_dirs = Vec::with_capacity(1 + self.additional_working_dirs.len());
+                        working_dirs.push(roots.cwd.clone());
+                        working_dirs.extend(self.additional_working_dirs.iter().cloned());
+                        if path_in_allowed_working_path(Path::new(raw_path.as_ref()), &working_dirs, roots) {
+                            return allow_with_mode(PermissionMode::AcceptEdits);
+                        }
                     }
                 }
             }
@@ -1174,6 +1229,196 @@ mod tests {
         p.set_mode(PermissionMode::Default);
         assert!(matches!(
             p.authorize("Agent", &serde_json::json!({})),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── Batch 1: AcceptEdits working-dir auto-allow for editors ───────────
+
+    fn accept_edits_policy(raw: &str) -> PermissionPolicy {
+        let rules = crate::loader::permission_rules_from_settings_json(
+            raw,
+            PermissionRuleSource::ProjectSettings,
+        )
+        .unwrap();
+        PermissionPolicy::from_rules(PermissionMode::AcceptEdits, rules).with_roots(roots())
+    }
+
+    #[test]
+    fn accept_edits_auto_allows_editor_inside_cwd() {
+        // (a) AcceptEdits + Edit inside cwd → Allow tagged with AcceptEdits mode.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        match p.authorize("Edit", &edit("/proj/src/x.rs")) {
+            PermissionResult::Allow { reason, .. } => assert!(
+                matches!(
+                    reason,
+                    PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::AcceptEdits
+                    }
+                ),
+                "auto-allow must be tagged with AcceptEdits mode, got {reason:?}"
+            ),
+            other => panic!("expected Allow(AcceptEdits), got {other:?}"),
+        }
+        // Write / NotebookEdit (other editors) are likewise auto-allowed.
+        assert!(matches!(
+            p.authorize("Write", &edit("/proj/out/y.rs")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            p.authorize(
+                "NotebookEdit",
+                &serde_json::json!({ "notebook_path": "/proj/nb.ipynb" })
+            ),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_asks_for_editor_outside_cwd() {
+        // (b) Edit outside cwd → not auto-allowed → falls through to AcceptEdits
+        // mode ask.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        match p.authorize("Edit", &edit("/elsewhere/x.rs")) {
+            PermissionResult::Ask { reason, .. } => assert!(matches!(
+                reason,
+                PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                }
+            )),
+            other => panic!("expected Ask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_edits_does_not_auto_allow_non_editors() {
+        // (c) AcceptEdits must NOT auto-allow Bash / Read / other non-editor
+        // tools — those fall through to the AcceptEdits-mode ask.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        // Bash: a non-file tool, even with a command "inside" cwd.
+        assert!(matches!(
+            p.authorize("Bash", &serde_json::json!({ "command": "rm -rf /proj" })),
+            PermissionResult::Ask { .. }
+        ));
+        // Read: a reader (not an editor) targeting a path inside cwd.
+        assert!(matches!(
+            p.authorize("Read", &edit("/proj/src/x.rs")),
+            PermissionResult::Ask { .. }
+        ));
+        // Glob (reader) inside cwd is also not auto-allowed.
+        assert!(matches!(
+            p.authorize("Glob", &serde_json::json!({ "path": "/proj/src" })),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_content_deny_rule_still_wins() {
+        // (d) A content DENY rule on the path beats the AcceptEdits auto-allow
+        // (the deny walk precedes the auto-allow branch).
+        let p = accept_edits_policy(r#"{ "permissions": { "deny": ["Edit(src/**)"] } }"#);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/secret.rs")),
+            PermissionResult::Deny { .. }
+        ));
+        // A path NOT covered by the deny rule is still auto-allowed.
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/other/ok.rs")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_safety_blocks_git_config_inside_cwd() {
+        // (e) `.git/config` inside cwd → the auto-edit safety guard fails, so the
+        // branch is NOT taken and the call falls through to the AcceptEdits ask
+        // (never auto-allowed).
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/.git/config")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+        // `.claude/settings.json` (claude-config) is likewise blocked → ask.
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/.claude/settings.json")),
+            PermissionResult::Ask { .. }
+        ));
+        // …but a path under `.claude/worktrees/` is structural → auto-allowed.
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/.claude/worktrees/x/file.rs")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_additional_working_dir_is_honored() {
+        // An editor inside an ADDITIONAL working dir is auto-allowed.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#)
+            .with_working_dirs(vec![PathBuf::from("/extra/work")]);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/extra/work/file.rs")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+        // Still outside both cwd and the extra dir → ask.
+        assert!(matches!(
+            p.authorize("Edit", &edit("/nope/file.rs")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_without_roots_falls_through_to_ask() {
+        // No roots → the working-dir auto-allow cannot run; AcceptEdits collapses
+        // to the mode ask (backward-compatible with the pre-Batch-1 behavior).
+        let p = PermissionPolicy::new(PermissionMode::AcceptEdits);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_explicit_allow_rule_still_allows() {
+        // An explicit allow rule continues to win (allow walk precedes the
+        // auto-allow branch) — and still produces an Allow.
+        let p = accept_edits_policy(r#"{ "permissions": { "allow": ["Edit(src/**)"] } }"#);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/x.rs")),
             PermissionResult::Allow { .. }
         ));
     }

@@ -15,6 +15,7 @@
     clippy::doc_markdown,
     clippy::manual_let_else
 )]
+pub mod url_safety;
 pub mod web_fetch;
 pub mod web_search;
 pub use web_fetch::WebFetchTool;

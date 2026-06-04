@@ -209,6 +209,27 @@ pub(crate) async fn execute_one_turn_with_recovery(
     system: Option<&str>,
     recovery: Option<&mut RecoveryState>,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
+    // Drop the per-call output-token count (A3 callers use the `_tracked`
+    // variant). Preserves the historical signature for every existing caller.
+    Ok(execute_one_turn_with_recovery_tracked(orch, system, recovery)
+        .await?
+        .0)
+}
+
+/// A3 twin of [`execute_one_turn_with_recovery`] that ALSO returns this turn
+/// step's output-token count (`response.usage.output_tokens`).
+///
+/// The token-budget continuation loop (`conversation.rs`) accumulates these
+/// into `global_turn_tokens` and feeds the running total to
+/// [`crate::token_budget::check_token_budget`] — mirroring TS
+/// `getTurnOutputTokens()`. The plain
+/// [`execute_one_turn_with_recovery`] wrapper drops the count so existing
+/// callers (the cancelable REPL driver + in-file tests) are unchanged.
+pub(crate) async fn execute_one_turn_with_recovery_tracked(
+    orch: &ConversationOrchestrator,
+    system: Option<&str>,
+    recovery: Option<&mut RecoveryState>,
+) -> Result<(TurnStepOutcome, u64), OrchestratorError> {
     // Snapshot the current session history for the API call.
     let (history_snapshot, model) = {
         let s = orch.session.lock().await;
@@ -222,6 +243,10 @@ pub(crate) async fn execute_one_turn_with_recovery(
         .api
         .messages_create(&model, system, history_snapshot, tools)
         .await?;
+
+    // A3: this call's output-token count, returned to the budget loop so it can
+    // accumulate `global_turn_tokens` (TS `getTurnOutputTokens()`).
+    let output_tokens = response.usage.output_tokens;
 
     // 1.5 M6-06: record this response's usage into the wired CostTracker (if any).
     // We pass `Duration::ZERO` (the api-client adapter does not currently
@@ -302,21 +327,22 @@ pub(crate) async fn execute_one_turn_with_recovery(
     }
 
     // 6. Decide loop disposition.
-    match response.stop_reason.as_deref() {
-        Some("end_turn") => Ok(TurnStepOutcome::Ended {
+    let outcome = match response.stop_reason.as_deref() {
+        Some("end_turn") => TurnStepOutcome::Ended {
             final_message_id: assistant_id,
             stop_reason: "end_turn".to_string(),
-        }),
+        },
         // A1: max_output_tokens recovery (TS `query.ts:1223-1255`). Only the
         // recovery-aware drivers (`Some(state)`) participate; the legacy shim
         // (`None`) falls through to Continue, unchanged.
         Some("max_tokens") if recovery.is_some() => {
             // `recovery.is_some()` guarded above — unwrap is infallible.
             let state = recovery.expect("recovery is Some");
-            handle_max_output_tokens(orch, assistant_id, state).await
+            handle_max_output_tokens(orch, assistant_id, state).await?
         }
-        _ => Ok(TurnStepOutcome::Continue),
-    }
+        _ => TurnStepOutcome::Continue,
+    };
+    Ok((outcome, output_tokens))
 }
 
 /// A1 `max_tokens` recovery decision (TS `query.ts:1223-1255`).

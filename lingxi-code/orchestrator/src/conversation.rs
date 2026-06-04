@@ -5,8 +5,9 @@
 use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
 use crate::test_support::{HookExecutor, PermissionGate};
+use crate::token_budget::{check_token_budget, BudgetTracker, TokenBudgetDecision};
 use crate::turn_loop::{
-    execute_one_turn, execute_one_turn_with_recovery, RecoveryState, TurnStepOutcome,
+    execute_one_turn, execute_one_turn_with_recovery_tracked, RecoveryState, TurnStepOutcome,
     MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
 };
 use api_client::{types::MessageResponse, AnthropicProvider, ApiError};
@@ -509,6 +510,108 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// A3: construct a fresh [`BudgetTracker`] for this turn IFF the
+    /// token-budget feature is enabled AND a positive budget is configured.
+    ///
+    /// Returns `None` (the parity default) when
+    /// [`OrchestratorConfig::enable_token_budget`] is `false` or
+    /// [`OrchestratorConfig::token_budget`] is `None`/`Some(0)` — in which case
+    /// the turn drivers skip the budget check entirely and stop at the first
+    /// `end_turn`, preserving the locked turn-loop behaviour.
+    fn new_budget_tracker(&self) -> Option<BudgetTracker> {
+        if self.config.enable_token_budget && matches!(self.config.token_budget, Some(b) if b > 0) {
+            Some(BudgetTracker::new())
+        } else {
+            None
+        }
+    }
+
+    /// A3: consult the token budget at a natural end-of-turn.
+    ///
+    /// Returns `true` if the loop should CONTINUE (a continuation nudge was
+    /// injected as a meta user message and the A1 recovery count was reset per
+    /// `query.ts:1332`); `false` if the loop should stop (budget off, agent
+    /// context, threshold reached, or diminishing returns).
+    ///
+    /// 1:1 with TS `query.ts:1308-1355`: gated by `feature('TOKEN_BUDGET')`,
+    /// drives [`check_token_budget`], and on `continue` appends a meta user
+    /// message carrying the byte-exact `getBudgetContinuationMessage` nudge.
+    /// The completion telemetry is emitted as a `tracing` event on stop.
+    async fn maybe_continue_for_budget(
+        &self,
+        budget: Option<&mut BudgetTracker>,
+        recovery: &mut RecoveryState,
+        global_turn_tokens: u64,
+    ) -> bool {
+        // No tracker → feature off / no budget → never continue (parity no-op).
+        let Some(tracker) = budget else {
+            return false;
+        };
+        // The orchestrator turn loop has no sub-agent `agentId` concept here
+        // (that lives in the agent-spawn path); pass `None`, matching the main
+        // query loop where `toolUseContext.agentId` is undefined for the root.
+        let decision = check_token_budget(
+            tracker,
+            None,
+            self.config.token_budget,
+            global_turn_tokens,
+        );
+        match decision {
+            TokenBudgetDecision::Continue {
+                nudge_message,
+                continuation_count,
+                pct,
+                turn_tokens,
+                budget,
+            } => {
+                tracing::info!(
+                    event = "token_budget_continuation",
+                    continuation_count,
+                    pct,
+                    turn_tokens,
+                    budget,
+                    "token budget continuation #{continuation_count}: {pct}% ({turn_tokens} / {budget})"
+                );
+                // Inject the continuation nudge as a meta user message. The
+                // protocol carries no `isMeta` flag, so it is a plain user text
+                // message with the byte-exact nudge string.
+                let nudge_msg = ConversationMessage::user(MessageId::new(), nudge_message);
+                {
+                    let mut s = self.session.lock().await;
+                    s.history.push(nudge_msg.clone());
+                }
+                self.persist_message_to_jsonl(&nudge_msg).await;
+                // Reset the A1 recovery count on each budget continuation
+                // (TS `query.ts:1332` `maxOutputTokensRecoveryCount: 0`).
+                recovery.max_output_tokens_recovery_count = 0;
+                recovery.max_output_tokens_override = None;
+                true
+            }
+            TokenBudgetDecision::Stop { completion_event } => {
+                if let Some(ev) = completion_event {
+                    if ev.diminishing_returns {
+                        tracing::info!(
+                            event = "token_budget_completed",
+                            pct = ev.pct,
+                            "token budget early stop: diminishing returns at {}%",
+                            ev.pct
+                        );
+                    }
+                    tracing::info!(
+                        event = "token_budget_completed",
+                        continuation_count = ev.continuation_count,
+                        pct = ev.pct,
+                        turn_tokens = ev.turn_tokens,
+                        budget = ev.budget,
+                        diminishing_returns = ev.diminishing_returns,
+                        duration_ms = u64::try_from(ev.duration_ms).unwrap_or(u64::MAX),
+                    );
+                }
+                false
+            }
+        }
+    }
+
     /// Convert an in-memory `ConversationMessage` into a `JsonlMessage`.
     ///
     /// `parent_uuid` is the UUID of the prior persisted entry (None for the
@@ -670,6 +773,11 @@ impl ConversationOrchestrator {
         // A1: per-conversation max_output_tokens recovery bookkeeping carried
         // across turn-steps (the 3-retry limit is consecutive).
         let mut recovery = RecoveryState::default();
+        // A3: token-budget continuation bookkeeping. `Some` only when the gate
+        // is enabled AND a budget is set; otherwise the budget check is a
+        // NO-OP and the loop stops at the first `end_turn` (parity default).
+        let mut budget = self.new_budget_tracker();
+        let mut global_turn_tokens: u64 = 0;
         let mut turn_count: u32 = 0;
         let final_message_id;
         loop {
@@ -680,18 +788,35 @@ impl ConversationOrchestrator {
             }
             turn_count = turn_count.saturating_add(1);
 
-            let step = execute_one_turn_with_recovery(
+            let (step, output_tokens) = execute_one_turn_with_recovery_tracked(
                 self,
                 system_prompt.as_deref(),
                 Some(&mut recovery),
             )
             .await?;
+            // A3: accumulate the running per-turn output tokens (TS
+            // `getTurnOutputTokens()`). No-op for accounting when budget is off.
+            global_turn_tokens = global_turn_tokens.saturating_add(output_tokens);
             match step {
                 TurnStepOutcome::Continue => continue,
                 TurnStepOutcome::Ended {
                     final_message_id: id,
                     stop_reason,
                 } => {
+                    // A3: at a natural end-of-turn, consult the token budget. If
+                    // it says `continue`, inject the meta nudge, reset the A1
+                    // recovery count (per `query.ts:1332`), and loop again
+                    // instead of breaking. When budget is off this is a no-op.
+                    if self
+                        .maybe_continue_for_budget(
+                            budget.as_mut(),
+                            &mut recovery,
+                            global_turn_tokens,
+                        )
+                        .await
+                    {
+                        continue;
+                    }
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn(&stop_reason, &cost).await;
                     final_message_id = id;
@@ -779,6 +904,11 @@ impl ConversationOrchestrator {
         // twin of the batched driver). Carried across turn-steps so the 3-retry
         // limit is consecutive.
         let mut recovery = RecoveryState::default();
+        // A3: token-budget continuation bookkeeping (streaming twin). `Some`
+        // only when the gate is enabled AND a budget is set; otherwise the
+        // budget check is a NO-OP and the loop stops at the first `end_turn`.
+        let mut budget = self.new_budget_tracker();
+        let mut global_turn_tokens: u64 = 0;
         let mut turn_count: u32 = 0;
         let final_message_id;
         loop {
@@ -807,6 +937,8 @@ impl ConversationOrchestrator {
 
             // 3. Pump the stream.
             let pumped = pump_stream(stream, &self.output).await?;
+            // A3: accumulate this turn's output tokens (TS `getTurnOutputTokens()`).
+            global_turn_tokens = global_turn_tokens.saturating_add(pumped.output_tokens);
 
             // 4. Assemble + append the assistant message.
             let assistant_id = MessageId::new();
@@ -854,6 +986,19 @@ impl ConversationOrchestrator {
             // 6. Decide loop disposition.
             match pumped.stop_reason.as_deref() {
                 Some("end_turn") => {
+                    // A3: token-budget continuation (streaming twin). On a
+                    // natural end, consult the budget; on `continue`, inject the
+                    // meta nudge, reset the A1 recovery count, and loop again.
+                    if self
+                        .maybe_continue_for_budget(
+                            budget.as_mut(),
+                            &mut recovery,
+                            global_turn_tokens,
+                        )
+                        .await
+                    {
+                        continue;
+                    }
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn("end_turn", &cost).await;
                     final_message_id = assistant_id;
@@ -897,7 +1042,18 @@ impl ConversationOrchestrator {
                 }
                 None => {
                     // Stream ended without a stop_reason — treat as
-                    // end_turn (rare; claude.ts uses the same fallback).
+                    // end_turn (rare; claude.ts uses the same fallback). The
+                    // token-budget check applies here too (A3).
+                    if self
+                        .maybe_continue_for_budget(
+                            budget.as_mut(),
+                            &mut recovery,
+                            global_turn_tokens,
+                        )
+                        .await
+                    {
+                        continue;
+                    }
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn("end_turn", &cost).await;
                     final_message_id = assistant_id;

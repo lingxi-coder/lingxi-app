@@ -67,6 +67,24 @@ pub struct OrchestratorConfig {
     /// a follow-up can complete the escalation without a config migration.
     #[serde(default)]
     pub escalate_max_output_tokens: bool,
+
+    /// A3: feature gate for token-budget auto-continuation (TS `feature('TOKEN_BUDGET')`).
+    /// Defaults `false` for parity — TS gates the whole `+500k` continuation
+    /// block. When `false` (or [`Self::token_budget`] is `None`), the turn
+    /// loop's end-of-turn budget check is a NO-OP and the loop stops at the
+    /// first `end_turn`, exactly as before. Set BOTH this flag `true` AND
+    /// [`Self::token_budget`] to `Some(n)` to enable the continuation behaviour.
+    #[serde(default)]
+    pub enable_token_budget: bool,
+
+    /// A3: the active per-turn output-token budget (e.g. `Some(500_000)` for
+    /// `"+500k"`). `None` (the parity default) disables continuation. Callers
+    /// may populate this from
+    /// [`crate::token_budget::parse_token_budget`] applied to the user prompt,
+    /// or set it explicitly. Only honoured when [`Self::enable_token_budget`]
+    /// is also `true`.
+    #[serde(default)]
+    pub token_budget: Option<u64>,
 }
 
 impl Default for OrchestratorConfig {
@@ -78,6 +96,8 @@ impl Default for OrchestratorConfig {
             interactive_permissions: false,
             resume_session_id: None,
             escalate_max_output_tokens: false,
+            enable_token_budget: false,
+            token_budget: None,
         }
     }
 }
@@ -113,6 +133,8 @@ mod tests {
             interactive_permissions: true,
             resume_session_id: None,
             escalate_max_output_tokens: true,
+            enable_token_budget: true,
+            token_budget: Some(500_000),
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
@@ -122,6 +144,15 @@ mod tests {
         assert!(back.interactive_permissions);
         assert!(back.resume_session_id.is_none());
         assert!(back.escalate_max_output_tokens);
+        assert!(back.enable_token_budget);
+        assert_eq!(back.token_budget, Some(500_000));
+    }
+
+    #[test]
+    fn default_token_budget_disabled() {
+        let cfg = OrchestratorConfig::default();
+        assert!(!cfg.enable_token_budget);
+        assert!(cfg.token_budget.is_none());
     }
 
     #[test]

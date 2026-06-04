@@ -354,7 +354,12 @@ impl Tool for BashTool {
             Ok(out) => {
                 let (stdout_clean, ansi_dropped_out) = strip_ansi_count(&out.stdout);
                 let (stderr_clean, ansi_dropped_err) = strip_ansi_count(&out.stderr);
-                let (stdout_final, truncated_out) = truncate_default(stdout_clean);
+                // Model-facing stdout normalization (claude-code): strip leading
+                // whitespace-only lines + trimEnd, then drop outer empty lines.
+                let normalized = crate::shared::strip_empty_lines(&crate::shared::normalize_stdout(
+                    &stdout_clean,
+                ));
+                let (stdout_final, truncated_out) = truncate_default(normalized);
                 // Exit-code reinterpretation (claude-code interpretCommandResult):
                 // e.g. `grep` no-match (exit 1) is NOT an error.
                 let interp =
@@ -487,7 +492,9 @@ mod tests {
             .await
             .expect("call should succeed");
         assert_eq!(res.data["exit_code"], 0);
-        assert_eq!(res.data["stdout"], "hello\n");
+        // claude-code normalizes model-facing stdout (trimEnd + stripEmptyLines),
+        // so the trailing newline is dropped.
+        assert_eq!(res.data["stdout"], "hello");
         assert_eq!(res.data["is_error"], false);
         assert_eq!(res.data["timed_out"], false);
     }
@@ -546,7 +553,8 @@ mod tests {
             .call(json!({"command": "printf-red"}), use_ctx(), fresh_tx())
             .await
             .expect("ok");
-        assert_eq!(res.data["stdout"], "red\n");
+        // ANSI stripped → "red\n", then normalized (trimEnd) → "red".
+        assert_eq!(res.data["stdout"], "red");
     }
 
     #[tokio::test]

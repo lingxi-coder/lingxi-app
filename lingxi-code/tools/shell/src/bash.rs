@@ -397,6 +397,7 @@ impl Tool for BashTool {
                         "return_code_interpretation": interp.message,
                         "timed_out": false,
                         "truncated": truncated_out,
+                        "no_output_expected": crate::silent::is_silent_bash_command(&cmd_str),
                     }),
                     new_messages: vec![],
                     context_modifier: None,
@@ -555,6 +556,55 @@ mod tests {
             .expect("ok");
         // ANSI stripped → "red\n", then normalized (trimEnd) → "red".
         assert_eq!(res.data["stdout"], "red");
+    }
+
+    #[tokio::test]
+    async fn foreground_normalizes_leading_and_trailing_blank_lines() {
+        let out = ProcessOutput {
+            stdout: "\n\n\nhello\nworld\n\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let res = tool
+            .call(json!({"command": "cat thing"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        // Leading blank lines stripped, trailing whitespace trimmed, inner kept.
+        assert_eq!(res.data["stdout"], "hello\nworld");
+    }
+
+    #[tokio::test]
+    async fn foreground_sets_no_output_expected_for_silent_command() {
+        let out = ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let res = tool
+            .call(json!({"command": "mkdir foo"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(res.data["no_output_expected"], true);
+    }
+
+    #[tokio::test]
+    async fn foreground_no_output_expected_false_for_non_silent_command() {
+        let out = ProcessOutput {
+            stdout: "a\nb\n".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        };
+        let tool = BashTool::new(shell_test_ctx(out));
+        let res = tool
+            .call(json!({"command": "ls -la"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(res.data["no_output_expected"], false);
     }
 
     #[tokio::test]

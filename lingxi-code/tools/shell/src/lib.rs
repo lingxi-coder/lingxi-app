@@ -27,6 +27,7 @@ pub mod command_semantics;
 pub mod powershell;
 pub mod repl;
 pub mod shared;
+pub mod silent;
 
 pub use bash::BashTool;
 pub use powershell::PowerShellTool;

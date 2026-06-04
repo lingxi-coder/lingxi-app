@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auto_edit_safety;
 pub mod classifier;
 pub mod dangerous_patterns;
 pub mod defaults_per_tool;
@@ -24,6 +25,11 @@ pub mod shell_command;
 pub mod shell_rule_matching;
 pub mod update;
 
+pub use auto_edit_safety::{
+    check_path_safety_for_auto_edit, has_suspicious_windows_path_pattern,
+    is_dangerous_file_path_to_auto_edit, normalize_case_for_comparison, AutoEditSafety,
+    DANGEROUS_DIRECTORIES, DANGEROUS_FILES,
+};
 pub use classifier::is_classifier_permissions_enabled;
 pub use defaults_per_tool::tool_default;
 pub use filesystem::FsRoots;

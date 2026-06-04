@@ -172,6 +172,22 @@ impl PermissionPolicy {
                 }
             }
         }
+        // 3b. Plan-mode mutation backstop (claude-code `prepareContextForPlanMode`,
+        //     `permissionSetup.ts:1462-1500`). In `Plan` mode, the primary
+        //     enforcement is that mutating tools are NOT advertised on the wire
+        //     (a conversation-layer concern, out of scope here); this is the
+        //     permission-layer backstop. A tool that is NOT on the read-only /
+        //     planning-safe allowlist ([`crate::mode_policy::is_plan_safe_tool`],
+        //     the external `SAFE_YOLO_ALLOWLISTED_TOOLS` subset) and that no
+        //     allow rule matched is treated as a state mutation and ASKED about
+        //     (NOT denied — matching TS, the user may approve and thereby exit
+        //     plan-mode constraints). Deny/ask rules and explicit allow rules
+        //     already won above, so they are preserved. Plan-safe tools fall
+        //     through to the generic mode fallback below (and the gate's
+        //     read-only auto-allow), keeping their existing path.
+        if self.mode == PermissionMode::Plan && !crate::mode_policy::is_plan_safe_tool(tool_name) {
+            return ask_plan_mutation(tool_name);
+        }
         // 4. Mode fallback.
         match self.mode {
             PermissionMode::BypassPermissions if !self.bypass_killswitch_active => {
@@ -368,6 +384,27 @@ fn ask_with_mode(mode: PermissionMode, tool_name: &str) -> PermissionResult {
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
             message: "The agent wants to use this tool.".into(),
+            options: vec!["Allow once".into(), "Always allow".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// Plan-mode mutation backstop ask: a tool that would mutate state in `Plan`
+/// mode. Tagged with [`PermissionMode::Plan`]; the message tells the user that
+/// approving exits the plan-mode constraints (matching claude-code, which
+/// surfaces a plan-mode mutation as an interactive ask, NOT a hard deny).
+fn ask_plan_mutation(tool_name: &str) -> PermissionResult {
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::PermissionMode {
+            mode: PermissionMode::Plan,
+        },
+        prompt: PermissionPrompt {
+            title: format!("Allow {tool_name}?"),
+            message: "Plan mode: this tool would modify state; approve to exit \
+                plan-mode constraints."
+                .into(),
             options: vec!["Allow once".into(), "Always allow".into(), "Deny".into()],
         },
         pending_classifier_check: None,
@@ -802,6 +839,100 @@ mod tests {
             )),
             other => panic!("expected Ask, got {other:?}"),
         }
+    }
+
+    // ── Batch 3: Plan-mode mutation backstop ──────────────────────────────
+
+    #[test]
+    fn plan_mode_asks_on_mutating_tool() {
+        // Plan + Edit → Ask tagged with Plan mode (NOT deny), even with no rules.
+        let p = PermissionPolicy::new(PermissionMode::Plan);
+        match p.authorize("Edit", &edit("/proj/src/x.rs")) {
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert!(
+                    matches!(
+                        reason,
+                        PermissionDecisionReason::PermissionMode {
+                            mode: PermissionMode::Plan
+                        }
+                    ),
+                    "Plan-mutation ask must be tagged with Plan mode"
+                );
+                assert!(
+                    prompt.message.contains("Plan mode"),
+                    "Plan-mutation ask carries the plan-specific message: {}",
+                    prompt.message
+                );
+            }
+            other => panic!("expected Ask(Plan), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_mode_asks_on_bash() {
+        // Plan + Bash → Ask (Bash is not plan-safe).
+        let p = PermissionPolicy::new(PermissionMode::Plan);
+        match p.authorize("Bash", &bash("rm -rf /")) {
+            PermissionResult::Ask { reason, .. } => assert!(matches!(
+                reason,
+                PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::Plan
+                }
+            )),
+            other => panic!("expected Ask(Plan), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_mode_does_not_block_plan_safe_tools() {
+        // Plan + Read/Grep/Glob → the plan backstop is NOT taken; they fall
+        // through to the generic mode fallback (a plain Ask tagged Plan, which
+        // the gate later auto-allows since they are read-only). The key
+        // assertion is that the decision is NOT the plan-mutation ask: the
+        // mode-fallback ask carries the generic message, not the "Plan mode:"
+        // backstop message.
+        let p = PermissionPolicy::new(PermissionMode::Plan);
+        for tool in ["Read", "Grep", "Glob"] {
+            match p.authorize(tool, &edit("/proj/src/main.rs")) {
+                PermissionResult::Ask { prompt, .. } => assert!(
+                    !prompt.message.contains("Plan mode"),
+                    "{tool} is plan-safe; must not trip the mutation backstop"
+                ),
+                other => panic!("expected Ask for plan-safe {tool}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn plan_mode_explicit_allow_rule_wins_over_block() {
+        // An explicit allow rule on Edit still wins in Plan mode (the allow walk
+        // runs before the plan backstop).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Edit(src/**)"] } }"#,
+            PermissionMode::Plan,
+        );
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/main.rs")),
+            PermissionResult::Allow { .. }
+        ));
+        // …but an Edit outside the allow scope still trips the plan block (Ask).
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/other/x.rs")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn plan_mode_deny_rule_still_wins() {
+        // A deny rule wins over the plan ask (deny walk precedes the backstop).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Edit(src/**)"] } }"#,
+            PermissionMode::Plan,
+        );
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/secret.rs")),
+            PermissionResult::Deny { .. }
+        ));
     }
 
     #[test]

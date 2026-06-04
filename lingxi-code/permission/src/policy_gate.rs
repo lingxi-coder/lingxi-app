@@ -21,12 +21,22 @@
 //! `Read(./secrets/**)`). `Bash`/`WebFetch` content matching (e.g.
 //! `Bash(npm run *)`) is still tool-wide (the 3a-bash deferral). The subagent
 //! path ([`RegistryToolInvoker`]) is now ALSO gated (phase 3b — closed the
-//! bypass; subagent + teammate tool calls consult this same gate). `Plan` /
-//! `AcceptEdits` modes still COLLAPSE to plain `Ask` (the mode fallback only
-//! special-cases `BypassPermissions` + `DontAsk`), so they do NOT yet impose
-//! `Plan`'s mutation block or `AcceptEdits`' edit auto-allow. This gate is built
-//! at boot only behind an OPT-IN toggle; the default remains the always-allow
-//! `NoOpPermissionGate`.
+//! bypass; subagent + teammate tool calls consult this same gate).
+//!
+//! ## `Plan` mode (Batch 3)
+//! `Plan` mode now imposes a mutation backstop in
+//! [`PermissionPolicy::authorize`]: a tool that is NOT on the read-only /
+//! planning-safe allowlist ([`crate::mode_policy::is_plan_safe_tool`]) and that
+//! matched no allow rule returns `Ask` tagged with `Plan`. That ask is a
+//! `DenyByDefault` outcome for mutating tools (`Edit`/`Write`/`Bash`/…), so it
+//! is DELEGATED to the inner prompt transport here — it is NOT short-circuited
+//! to auto-allow. Plan-safe READ-ONLY tools (`Read`/`Grep`/`Glob`/`LSP`/…) do
+//! NOT trip the backstop; they fall through to the generic mode-fallback ask
+//! and, being [`PromptDefault::AllowByDefault`], are AUTO-ALLOWED here without a
+//! prompt — so plan mode keeps read access frictionless while still gating
+//! mutations. (`AcceptEdits`' edit auto-allow is a separate batch.) This gate
+//! is built at boot only behind an OPT-IN toggle; the default remains the
+//! always-allow `NoOpPermissionGate`.
 
 use crate::defaults_per_tool::tool_default;
 use crate::gate::{PermissionDecision, PermissionGate, PromptDefault};
@@ -188,6 +198,42 @@ mod tests {
             PermissionDecision::Allow // whatever the inner prompt returned
         );
         assert_eq!(inner.calls(), 1, "non-read-only ask delegates to the inner gate");
+    }
+
+    #[tokio::test]
+    async fn plan_mode_read_only_tool_auto_allows() {
+        // Plan + Read: the backstop is NOT taken (Read is plan-safe), it falls to
+        // the mode-fallback ask, and Read is AllowByDefault → auto-allow, no prompt.
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Plan);
+        let inner = RecordingInner::new(PermissionDecision::Deny {
+            reason: "should not prompt for read-only in plan mode".into(),
+        });
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.check("Read", &serde_json::json!({})).await,
+            PermissionDecision::Allow
+        );
+        assert_eq!(inner.calls(), 0, "plan-safe read-only tool auto-allows");
+    }
+
+    #[tokio::test]
+    async fn plan_mode_mutating_tool_delegates_to_inner() {
+        // Plan + Edit: the backstop fires (Edit is not plan-safe) → Ask(Plan);
+        // Edit is DenyByDefault → the ask is delegated to the inner transport,
+        // NOT short-circuited to auto-allow.
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Plan);
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.check("Edit", &serde_json::json!({ "file_path": "/x.rs" }))
+                .await,
+            PermissionDecision::Allow // whatever the prompt returned
+        );
+        assert_eq!(
+            inner.calls(),
+            1,
+            "plan-mode mutating tool delegates to the inner gate"
+        );
     }
 
     #[tokio::test]

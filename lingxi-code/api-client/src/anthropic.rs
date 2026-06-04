@@ -512,6 +512,8 @@ impl AnthropicProvider {
                 // classifier recognise the transient-capacity (overloaded)
                 // error instead of mis-bucketing it.
                 if resp.status == 429 {
+                    // TS withRetry.ts:767-769: subscriber 429 terminal gate —
+                    // deferred, blocked on subscription resolution (Batch 6).
                     handle_429(&resp.headers, &bus, &model_s).await;
                     return Ok(protocol::HttpResponse {
                         status: 503,

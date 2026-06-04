@@ -24,6 +24,7 @@ pub mod shell_command;
 pub mod shell_rule_matching;
 pub mod update;
 
+pub use classifier::is_classifier_permissions_enabled;
 pub use defaults_per_tool::tool_default;
 pub use filesystem::FsRoots;
 pub use gate::{
@@ -44,4 +45,7 @@ pub use result::{
     SandboxOverrideReason,
 };
 pub use rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
+pub use shadow::{
+    detect_unreachable_rules, is_shared_setting_source, ShadowType, UnreachableRule,
+};
 pub use update::PermissionUpdate;

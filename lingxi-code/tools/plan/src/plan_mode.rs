@@ -1,6 +1,30 @@
 //! `EnterPlanModeTool` + `ExitPlanModeTool` — flip `SessionState.plan_mode`
 //! and emit the byte-locked markers `[PLAN MODE]` / `[EXIT PLAN MODE]`
 //! (spec §7 line 487).
+//!
+//! ## Divergence from TS (parity Batch MISC.11 — close-parity, flag prominently)
+//!
+//! The TS reference (`EnterPlanModeTool.ts`, `ExitPlanModeV2Tool.ts`) implements
+//! plan mode on top of a real permission-mode substrate: it sets
+//! `toolPermissionContext.mode = 'plan'` via `applyPermissionUpdate`, runs the
+//! classifier activation in `prepareContextForPlanMode`, reads the plan from disk
+//! (`getPlan`/`getPlanFilePath`), and performs a plan-approval handoff
+//! (`setAwaitingPlanApproval`, teammate mailbox). LingXi's `SessionState` has only
+//! a `plan_mode: bool`, **not** a permission-mode enum — none of that machinery
+//! has a Rust home. This batch lands only the guardable, headless-meaningful
+//! pieces faithful to TS:
+//!   * the agent-context guard (`EnterPlanMode` rejects when `ctx.agent_id` is set;
+//!     TS throws at `EnterPlanModeTool.ts:78-80`),
+//!   * the `Entered plan mode...` instruction block reaching the model
+//!     (port of `mapToolResultToToolResultBlockParam` `:103-125`),
+//!   * the `ExitPlanMode` `{allowedPrompts?:[{tool:"Bash", prompt}]}` input schema
+//!     (`ExitPlanModeV2Tool.ts:64-89`) and the `{plan, isAgent, allowedPrompts}`
+//!     output passthrough (`:110-120`). Rust has no on-disk plan store, so `plan`
+//!     is whatever the model passed (or `null`).
+//!
+//! TS uses prose, not literal markers; LingXi keeps the byte-locked
+//! `[PLAN MODE]` / `[EXIT PLAN MODE]` markers (LingXi fixture lock) **and** adds
+//! the TS instruction prose alongside them.
 
 use std::time::Instant;
 
@@ -30,6 +54,28 @@ pub const PLAN_MODE_ENTER_MARKER: &str = "[PLAN MODE]";
 /// Byte-locked marker emitted when exiting plan mode (spec §7 line 487).
 pub const PLAN_MODE_EXIT_MARKER: &str = "[EXIT PLAN MODE]";
 
+/// Instruction block surfaced to the model on entering plan mode. Byte-faithful
+/// port of the non-interview-phase branch of `EnterPlanModeTool.ts`
+/// `mapToolResultToToolResultBlockParam` (`:108-118`). LingXi has no
+/// `isPlanModeInterviewPhaseEnabled` substrate, so the close-parity default
+/// (the numbered exploration steps) is always emitted.
+pub const ENTER_PLAN_MODE_INSTRUCTIONS: &str = "Entered plan mode. You should now focus on exploring the codebase and designing an implementation approach.
+
+In plan mode, you should:
+1. Thoroughly explore the codebase to understand existing patterns
+2. Identify similar features and architectural approaches
+3. Consider multiple approaches and their trade-offs
+4. Use AskUserQuestion if you need to clarify the approach
+5. Design a concrete implementation strategy
+6. When ready, use ExitPlanMode to present your plan for approval
+
+Remember: DO NOT write or edit any files yet. This is a read-only exploration and planning phase.";
+
+/// Locked rejection string for using `EnterPlanMode` inside an agent context.
+/// Byte-faithful to the TS throw at `EnterPlanModeTool.ts:79`.
+const ENTER_PLAN_MODE_AGENT_GUARD_MSG: &str =
+    "EnterPlanMode tool cannot be used in agent contexts";
+
 /// Canonical tool name in the registry for `EnterPlanModeTool`.
 pub const ENTER_TOOL_NAME: &str = "EnterPlanMode";
 /// Canonical tool name in the registry for `ExitPlanModeTool`.
@@ -40,6 +86,44 @@ static EMPTY_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "type": "object",
         "properties": {},
         "additionalProperties": false
+    })
+});
+
+/// `ExitPlanMode` input schema — port of `ExitPlanModeV2Tool.ts:64-89`. Accepts
+/// an optional `allowedPrompts` array of prompt-based permission requests, each
+/// `{tool:"Bash", prompt:string}`. The schema is a `passthrough()` in TS (extra
+/// keys allowed so `normalizeToolInput` can inject `plan`/`planFilePath`), hence
+/// `additionalProperties: true` here.
+// Mirrors the pre-existing `EMPTY_INPUT_SCHEMA` `once_cell::Lazy` style above;
+// `allow` keeps this batch from adding a net-new pedantic warning while staying
+// consistent with the surrounding code (a `LazyLock` migration is out of scope).
+#[allow(clippy::non_std_lazy_statics)]
+static EXIT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    json!({
+        "type": "object",
+        "properties": {
+            "allowedPrompts": {
+                "type": "array",
+                "description": "Prompt-based permissions needed to implement the plan. These describe categories of actions rather than specific commands.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "tool": {
+                            "type": "string",
+                            "enum": ["Bash"],
+                            "description": "The tool this prompt applies to"
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Semantic description of the action, e.g. \"run tests\", \"install dependencies\""
+                        }
+                    },
+                    "required": ["tool", "prompt"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "additionalProperties": true
     })
 });
 
@@ -150,6 +234,17 @@ impl Tool for EnterPlanModeTool {
         let started_at = Instant::now();
         self.emit_started(&invocation_id).await;
 
+        // Agent-context guard — TS throws here (`EnterPlanModeTool.ts:78-80`):
+        // plan mode is a user-interactive control that has no meaning inside a
+        // spawned agent. Reject before touching session state.
+        if ctx.agent_id.is_some() {
+            let dur = started_at.elapsed().as_millis() as u64;
+            self.emit_failed(&invocation_id, "agent_context", dur).await;
+            return Err(ToolError::InvalidInput(
+                ENTER_PLAN_MODE_AGENT_GUARD_MSG.into(),
+            ));
+        }
+
         let session = ctx.session.as_ref().ok_or_else(|| {
             ToolError::Internal(
                 "EnterPlanMode: session not wired into ToolUseContext (M4-04 contract)".into(),
@@ -174,6 +269,10 @@ impl Tool for EnterPlanModeTool {
             data: json!({
                 "marker": PLAN_MODE_ENTER_MARKER,
                 "plan_mode": true,
+                // Instruction block ported from TS `mapToolResultToToolResultBlockParam`
+                // (`EnterPlanModeTool.ts:103-125`) so the exploration guidance reaches
+                // the model (TS embeds it as the `tool_result` content).
+                "instructions": ENTER_PLAN_MODE_INSTRUCTIONS,
             }),
             new_messages: Vec::new(),
             context_modifier: None,
@@ -232,7 +331,7 @@ impl Tool for ExitPlanModeTool {
         EXIT_TOOL_NAME
     }
     fn input_schema(&self) -> &Value {
-        &EMPTY_INPUT_SCHEMA
+        &EXIT_INPUT_SCHEMA
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -274,7 +373,7 @@ impl Tool for ExitPlanModeTool {
 
     async fn call(
         &self,
-        _input: Value,
+        input: Value,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -302,10 +401,23 @@ impl Tool for ExitPlanModeTool {
         }
         let duration_ms = started_at.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, duration_ms).await;
+
+        // Output passthrough ported from `ExitPlanModeV2Tool.ts:110-120` (the
+        // `{plan, isAgent, filePath?}` output shape). Rust has no on-disk plan
+        // store (`getPlan`/`getPlanFilePath`), so `plan` is whatever the model
+        // injected via `input.plan` or `null`; `filePath` is intentionally
+        // omitted. `allowedPrompts` is echoed back from the input schema.
+        let is_agent = ctx.agent_id.is_some();
+        let plan = input.get("plan").cloned().unwrap_or(Value::Null);
+        let allowed_prompts = input.get("allowedPrompts").cloned().unwrap_or(Value::Null);
+
         Ok(ToolCallResult {
             data: json!({
                 "marker": PLAN_MODE_EXIT_MARKER,
                 "plan_mode": false,
+                "plan": plan,
+                "isAgent": is_agent,
+                "allowedPrompts": allowed_prompts,
             }),
             new_messages: Vec::new(),
             context_modifier: None,
@@ -318,7 +430,7 @@ impl Tool for ExitPlanModeTool {
 mod tests {
     use super::*;
     use engine::SessionState;
-    use protocol::SessionId;
+    use protocol::{AgentId, SessionId};
     use std::sync::Arc;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tokio::sync::Mutex;
@@ -369,10 +481,37 @@ mod tests {
             .expect("enter must succeed on fresh session");
         assert_eq!(res.data["marker"], "[PLAN MODE]");
         assert_eq!(res.data["plan_mode"], true);
+        // Instruction block (TS `mapToolResultToToolResultBlockParam`) reaches the model.
+        assert_eq!(res.data["instructions"], ENTER_PLAN_MODE_INSTRUCTIONS);
+        let instructions = res.data["instructions"].as_str().unwrap();
+        assert!(instructions.starts_with("Entered plan mode."));
+        assert!(instructions.contains("6. When ready, use ExitPlanMode to present your plan for approval"));
+        assert!(instructions.contains("DO NOT write or edit any files yet"));
         assert!(session.lock().await.plan_mode);
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&ENTER_PLAN_MODE_STARTED.to_string()));
         assert!(names.contains(&ENTER_PLAN_MODE_COMPLETED.to_string()));
+    }
+
+    #[tokio::test]
+    async fn enter_in_agent_context_rejects_with_locked_string() {
+        let (bctx, sink, session, mut use_ctx) = make_ctx();
+        bctx.bus.attach_sink(sink.clone()).await;
+        use_ctx.agent_id = Some(AgentId::new());
+        let tool = EnterPlanModeTool::new(bctx);
+        let err = tool
+            .call(json!({}), use_ctx, fresh_tx())
+            .await
+            .expect_err("enter in agent context must fail");
+        assert_eq!(
+            format!("{err}"),
+            "invalid input: EnterPlanMode tool cannot be used in agent contexts"
+        );
+        // The guard runs before any session mutation.
+        assert!(!session.lock().await.plan_mode);
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
+        assert!(names.contains(&ENTER_PLAN_MODE_STARTED.to_string()));
+        assert!(names.contains(&ENTER_PLAN_MODE_FAILED.to_string()));
     }
 
     #[tokio::test]
@@ -407,9 +546,66 @@ mod tests {
             .expect("exit must succeed when in plan mode");
         assert_eq!(res.data["marker"], "[EXIT PLAN MODE]");
         assert_eq!(res.data["plan_mode"], false);
+        // No model-supplied plan / agent context → null plan, isAgent false.
+        assert_eq!(res.data["plan"], Value::Null);
+        assert_eq!(res.data["isAgent"], false);
         assert!(!session.lock().await.plan_mode);
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&EXIT_PLAN_MODE_COMPLETED.to_string()));
+    }
+
+    #[test]
+    fn exit_input_schema_accepts_allowed_prompts() {
+        let schema = &*EXIT_INPUT_SCHEMA;
+        let props = &schema["properties"]["allowedPrompts"];
+        assert_eq!(props["type"], "array");
+        let item = &props["items"];
+        assert_eq!(item["properties"]["tool"]["enum"], json!(["Bash"]));
+        assert_eq!(item["properties"]["prompt"]["type"], "string");
+        assert_eq!(item["required"], json!(["tool", "prompt"]));
+        // passthrough() in TS → extra keys (plan/planFilePath) allowed.
+        assert_eq!(schema["additionalProperties"], true);
+    }
+
+    #[tokio::test]
+    async fn exit_accepts_allowed_prompts_and_passes_through() {
+        let (bctx, sink, session, use_ctx) = make_ctx();
+        bctx.bus.attach_sink(sink.clone()).await;
+        session.lock().await.plan_mode = true; // pre-arm
+        let tool = ExitPlanModeTool::new(bctx);
+        let input = json!({
+            "allowedPrompts": [{ "tool": "Bash", "prompt": "run tests" }],
+            "plan": "Step 1. Do the thing.",
+        });
+        let res = tool
+            .call(input, use_ctx, fresh_tx())
+            .await
+            .expect("exit must succeed with allowedPrompts");
+        assert_eq!(res.data["marker"], "[EXIT PLAN MODE]");
+        assert_eq!(res.data["plan_mode"], false);
+        // Model-supplied plan is echoed back (no on-disk store in Rust).
+        assert_eq!(res.data["plan"], "Step 1. Do the thing.");
+        assert_eq!(res.data["isAgent"], false);
+        assert_eq!(
+            res.data["allowedPrompts"],
+            json!([{ "tool": "Bash", "prompt": "run tests" }])
+        );
+        assert!(!session.lock().await.plan_mode);
+    }
+
+    #[tokio::test]
+    async fn exit_in_agent_context_reports_is_agent() {
+        let (bctx, sink, session, mut use_ctx) = make_ctx();
+        bctx.bus.attach_sink(sink.clone()).await;
+        session.lock().await.plan_mode = true; // pre-arm
+        use_ctx.agent_id = Some(AgentId::new());
+        let tool = ExitPlanModeTool::new(bctx);
+        let res = tool
+            .call(json!({}), use_ctx, fresh_tx())
+            .await
+            .expect("exit must succeed in agent context");
+        assert_eq!(res.data["isAgent"], true);
+        assert_eq!(res.data["plan"], Value::Null);
     }
 
     #[tokio::test]

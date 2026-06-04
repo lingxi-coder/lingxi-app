@@ -20,6 +20,8 @@ pub mod prompting_gate;
 pub mod result;
 pub mod rule;
 pub mod shadow;
+pub mod shell_command;
+pub mod shell_rule_matching;
 pub mod update;
 
 pub use defaults_per_tool::tool_default;

@@ -222,9 +222,11 @@ impl Tool for FileEditTool {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        if old_string.is_empty() {
+        // No-op edit: identical strings (claude-code validateInput, errorCode 1).
+        if old_string == new_string {
+            self.emit_failed(&invocation_id, "no_change").await;
             return Err(ToolError::InvalidInput(
-                "old_string must not be empty".into(),
+                "No changes to make: old_string and new_string are exactly the same.".into(),
             ));
         }
 
@@ -232,6 +234,8 @@ impl Tool for FileEditTool {
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
 
+        // `canonicalize_and_validate` tolerates a nonexistent target (it
+        // canonicalizes the parent) so an empty `old_string` can create a file.
         let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs) {
             Ok(p) => p,
             Err(_) => {
@@ -241,33 +245,85 @@ impl Tool for FileEditTool {
             }
         };
 
-        let before = match tokio::fs::read_to_string(&canon).await {
-            Ok(s) => s,
+        // Distinguish "does not exist" from a real read error so an empty
+        // `old_string` can mean new-file creation (claude-code FileEditTool).
+        //
+        // DEFERRED (own batch): claude-code normalizes CRLF→LF on read for
+        // matching and re-applies the file's original line endings on write
+        // (utils.ts writeTextContent). We read/write raw, so an `old_string`
+        // spanning a line break won't match a CRLF file. A correct fix needs
+        // line-ending detection + preservation (the audit's "Edit/Write drop
+        // CRLF/utf16" item), not a one-sided normalize that would convert
+        // endings — so it is intentionally NOT done here.
+        let existing = match tokio::fs::read_to_string(&canon).await {
+            Ok(s) => Some(s),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
                 self.emit_failed(&invocation_id, "io_read").await;
                 return Err(ToolError::Io(e.to_string()));
             }
         };
 
-        let count = before.matches(old_string).count();
-        if count == 0 {
-            self.emit_failed(&invocation_id, "no_match").await;
-            return Err(ToolError::InvalidInput(format!(
-                "old_string not found in {}",
-                canon.display()
-            )));
-        }
-        if !replace_all && count > 1 {
-            self.emit_failed(&invocation_id, "ambiguous_match").await;
-            return Err(ToolError::InvalidInput(format!(
-                "old_string matched {count} times; pass replace_all=true or expand old_string"
-            )));
-        }
-
-        let after = if replace_all {
-            before.replace(old_string, new_string)
-        } else {
-            before.replacen(old_string, new_string, 1)
+        let (before, after, replacements): (String, String, u32) = match existing {
+            // File does not exist.
+            None => {
+                if !old_string.is_empty() {
+                    self.emit_failed(&invocation_id, "file_not_found").await;
+                    return Err(ToolError::InvalidInput(format!(
+                        "File does not exist: {}",
+                        canon.display()
+                    )));
+                }
+                // Empty `old_string` on a nonexistent file → create it.
+                (String::new(), new_string.to_string(), 1)
+            }
+            // File exists.
+            Some(before) => {
+                if old_string.is_empty() {
+                    // Empty `old_string` is only valid for an (effectively) empty
+                    // file — otherwise it's a creation attempt on existing content.
+                    if !before.trim().is_empty() {
+                        self.emit_failed(&invocation_id, "file_exists").await;
+                        return Err(ToolError::InvalidInput(
+                            "Cannot create new file - file already exists.".into(),
+                        ));
+                    }
+                    (before, new_string.to_string(), 1)
+                } else {
+                    // Edit must not corrupt notebooks — route to NotebookEdit.
+                    if std::path::Path::new(file_path)
+                        .extension()
+                        .is_some_and(|e| e == "ipynb")
+                    {
+                        self.emit_failed(&invocation_id, "ipynb").await;
+                        return Err(ToolError::InvalidInput(
+                            "File is a Jupyter Notebook. Use the NotebookEdit to edit this file."
+                                .into(),
+                        ));
+                    }
+                    let count = before.matches(old_string).count();
+                    if count == 0 {
+                        self.emit_failed(&invocation_id, "no_match").await;
+                        return Err(ToolError::InvalidInput(format!(
+                            "old_string not found in {}",
+                            canon.display()
+                        )));
+                    }
+                    if !replace_all && count > 1 {
+                        self.emit_failed(&invocation_id, "ambiguous_match").await;
+                        return Err(ToolError::InvalidInput(format!(
+                            "old_string matched {count} times; pass replace_all=true or expand old_string"
+                        )));
+                    }
+                    let after = if replace_all {
+                        before.replace(old_string, new_string)
+                    } else {
+                        before.replacen(old_string, new_string, 1)
+                    };
+                    let replacements = if replace_all { count as u32 } else { 1 };
+                    (before, after, replacements)
+                }
+            }
         };
 
         if let Err(e) = tokio::fs::write(&canon, after.as_bytes()).await {
@@ -275,7 +331,6 @@ impl Tool for FileEditTool {
             return Err(ToolError::Io(e.to_string()));
         }
 
-        let replacements = if replace_all { count as u32 } else { 1 };
         let patch_preview = Self::build_patch_preview(&before, &after);
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, replacements, duration_ms)
@@ -357,6 +412,142 @@ mod tests {
             .unwrap();
         assert_eq!(result.data["replacements"], 1);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello Rust");
+    }
+
+    #[tokio::test]
+    async fn empty_old_string_creates_new_file() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("created.txt");
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        let result = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "",
+                    "new_string": "brand new contents\n"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["replacements"], 1);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "brand new contents\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_old_string_on_existing_content_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("exists.txt");
+        std::fs::write(&target, "already here").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "",
+                    "new_string": "x"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Cannot create new file - file already exists."));
+        // original content untouched
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "already here");
+    }
+
+    #[tokio::test]
+    async fn empty_old_string_replaces_empty_file() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("blank.txt");
+        std::fs::write(&target, "   \n").unwrap(); // whitespace-only ⇒ effectively empty
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        tool.call(
+            json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "",
+                "new_string": "seeded"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "seeded");
+    }
+
+    #[tokio::test]
+    async fn rejects_editing_notebook() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, "{\"cells\": []}").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "cells",
+                    "new_string": "x"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Jupyter Notebook"));
+        assert!(err.to_string().contains("NotebookEdit"));
+    }
+
+    #[tokio::test]
+    async fn rejects_identical_old_and_new() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("a.txt");
+        std::fs::write(&target, "hello").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "hello",
+                    "new_string": "hello"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("No changes to make"));
+    }
+
+    #[tokio::test]
+    async fn nonexistent_file_with_nonempty_old_string_errors() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("missing.txt");
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "file_path": target.to_str().unwrap(),
+                    "old_string": "x",
+                    "new_string": "y"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("File does not exist"));
     }
 
     #[tokio::test]
@@ -460,25 +651,4 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn rejects_empty_old_string() {
-        let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("a.txt");
-        std::fs::write(&target, "x").unwrap();
-        let (ctx, _sink) = make_ctx(&tmp);
-        let tool = FileEditTool::new(ctx);
-        let err = tool
-            .call(
-                json!({
-                    "file_path": target.to_str().unwrap(),
-                    "old_string": "",
-                    "new_string": "y"
-                }),
-                fresh_ctx(),
-                fresh_tx(),
-            )
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("old_string must not be empty"));
-    }
 }

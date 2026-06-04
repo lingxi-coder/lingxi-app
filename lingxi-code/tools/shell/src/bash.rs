@@ -159,12 +159,21 @@ impl Tool for BashTool {
         MAX_TOOL_OUTPUT_LENGTH
     }
 
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        false
+    fn is_concurrency_safe(&self, input: &Value) -> bool {
+        // claude-code `BashTool.tsx:434-436`: `isConcurrencySafe` delegates to
+        // `isReadOnly`.
+        self.is_read_only(input)
     }
 
-    fn is_read_only(&self, _input: &Value) -> bool {
-        false
+    fn is_read_only(&self, input: &Value) -> bool {
+        // claude-code `BashTool.tsx:437-441`: derive from
+        // `checkReadOnlyConstraints(input, commandHasAnyCd(input.command))`,
+        // read-only iff `result.behavior === 'allow'`.
+        let Some(command) = input.get("command").and_then(Value::as_str) else {
+            return false;
+        };
+        let compound_has_cd = crate::read_only::command_has_any_cd(command);
+        crate::read_only::check_read_only(command, compound_has_cd).is_read_only()
     }
 
     fn is_destructive(&self, _input: &Value) -> bool {

@@ -220,6 +220,16 @@ class ChatViewModel(
         viewModelScope.launch {
             source.sessionState.collect { engine -> _sessions.value = engine }
         }
+        // Mirror the engine's OUT-OF-BAND live-resume result (sibling of the
+        // catalog above): a real `SessionResumed` carries the rehydrated
+        // transcript, which `applyRestoredSession` swaps into state so the user
+        // sees the prior conversation the next turn continues from. Mock sources
+        // keep this null forever, so this never disturbs the local-only resume.
+        viewModelScope.launch {
+            source.resumedSession.collect { restored ->
+                restored?.let { applyRestoredSession(it) }
+            }
+        }
         // Keep the persisted transcript + session id in lock-step with state, so a
         // process-death kill at any moment restores the latest committed transcript.
         if (savedState != null) {
@@ -249,6 +259,36 @@ class ChatViewModel(
         val options = EngineModelCatalog.options(engine.available)
         val active = options.firstOrNull { it.id == engine.active } ?: options.first()
         _state.update { it.copy(availableModels = options, model = active) }
+    }
+
+    /**
+     * Apply a LIVE resume the engine confirmed (`SessionResumed`): adopt the REAL
+     * session id and REPLACE the transcript with the rehydrated, oldest-first
+     * scrollback so the user sees the prior conversation the next turn continues
+     * from. Any in-flight turn is abandoned first (the orphaned-turn guard, so a
+     * late event from the pre-resume turn can't mutate the restored transcript).
+     *
+     * The title is preserved from the drawer's optimistic local select when the
+     * id matches (`resumeSession` set it before submitting `ResumeSession`), else
+     * resolved from the session catalog, else the current title — so the title
+     * bar never reverts to a placeholder on a real resume. Extracted (internal)
+     * so the rehydration is exercised directly in unit tests with a fake source.
+     */
+    internal fun applyRestoredSession(restored: RestoredSession) {
+        abandonInFlightTurn()
+        val title = _state.value.session.takeIf { it.id == restored.sessionId }?.title
+            ?: _sessions.value.rows.firstOrNull { it.uuid == restored.sessionId }?.title
+            ?: _state.value.session.title
+        _state.update {
+            it.copy(
+                session = SessionRef(id = restored.sessionId, title = title),
+                messages = restored.transcript, // clear-then-restore (oldest-first)
+                isNew = false,
+                streaming = false,
+                statusLine = null,
+                error = null,
+            )
+        }
     }
 
     /**

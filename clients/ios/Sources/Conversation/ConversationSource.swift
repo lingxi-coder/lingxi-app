@@ -732,11 +732,24 @@ final class MockConversationSource: ConversationSource {
                     resetTranscriptForSessionSwitch(isNew: true)
                 }
 
-            case let .sessionResumed(sessionId):
+            case let .sessionResumed(sessionId, messages):
                 // A prior session was resumed (1:1 with a successful
-                // `ResumeSession`). Adopt it as active; the transcript was already
-                // reset by `resumeSession`, so just track the id here.
+                // `ResumeSession`). Adopt it as active AND surface the restored
+                // transcript the engine just hot-loaded into the running
+                // orchestrator, so the scrollback shows the prior conversation
+                // and the user can see exactly the context the next turn will
+                // continue from. `messages` is OLDEST-FIRST and always present
+                // (may be empty for a zero-message session). We clear the
+                // placeholder transcript `resumeSession` left in place and append
+                // each restored message as a completed bubble — the out-of-band
+                // session-state sibling of `SessionList` / `SessionStarted`.
                 model.activeSessionId = sessionId
+                model.messages = messages.map(Self.message(from:))
+                model.isNew = messages.isEmpty
+                model.streaming = false
+                streamingIndex = nil
+                model.statusLine = nil
+                model.notice = nil
 
             case .sessionEnded:
                 // The current session ended (e.g. cleared). Drop the active id;
@@ -748,6 +761,16 @@ final class MockConversationSource: ConversationSource {
                 // P3a conversation surface; ignored without breaking the stream.
                 break
             }
+        }
+
+        /// Test seam (the iOS analog of Android's `reduceSessionEvent`): drive one
+        /// inbound `ClientEvent` through the same `apply` reducer the live listener
+        /// uses, so a unit test can assert the out-of-band session-state mapping
+        /// (notably `SessionResumed` → restored transcript) without standing up the
+        /// engine. `internal` so `@testable import LingxiCode` reaches it; the live
+        /// path still goes through `apply` directly.
+        func applyForTesting(_ event: ClientEvent) {
+            apply(event)
         }
 
         /// Append streamed text into the in-flight assistant message, creating it
@@ -766,6 +789,52 @@ final class MockConversationSource: ConversationSource {
                 model.messages.append(Message(role: .ai, text: delta))
                 streamingIndex = model.messages.count - 1
             }
+        }
+
+        // MARK: restored-transcript lowering (live ResumeSession)
+
+        /// Map one restored `MessageDto` (the engine's lowered transcript line,
+        /// `SessionResumed.messages`) onto the UI `Message` the scrollback renders.
+        ///
+        /// The engine roles are `"user" | "assistant" | "system"`; the iOS
+        /// `Message.role` is the binary user/AI split, so non-user roles (assistant
+        /// AND system) render as the AI side. The block list is flattened to the
+        /// single display string the `Message` model carries (it has no per-block
+        /// structure) via `text(from:)`, byte-faithful to the live `MessageComplete`
+        /// shape so a resumed bubble reads identically to one streamed this session.
+        fileprivate static func message(from dto: MessageDto) -> Message {
+            let role: Role = (dto.role == "user") ? .user : .ai
+            return Message(role: role, text: text(from: dto.blocks))
+        }
+
+        /// Flatten a restored message's `MessageBlockDto` list into the plain
+        /// display text the iOS `Message` model carries. Text/thinking blocks
+        /// contribute their body; tool-use/result blocks contribute a compact,
+        /// human-readable line (the conversation surface has no tool cards yet —
+        /// spec §5 item 3 — so a resumed tool block shows as a labeled line rather
+        /// than vanishing). Blocks join on blank lines, mirroring paragraph breaks.
+        /// `#[non_exhaustive]` on the enum ⇒ `@unknown default` degrades a future
+        /// block kind to an empty contribution rather than crashing.
+        private static func text(from blocks: [MessageBlockDto]) -> String {
+            blocks.compactMap { block -> String? in
+                switch block {
+                case let .text(text):
+                    return text
+                case let .thinking(thinking, _):
+                    return thinking
+                case .redactedThinking:
+                    // Opaque encrypted reasoning — nothing user-readable to show.
+                    return nil
+                case let .toolUse(_, tool, _):
+                    return "调用工具 \(tool)"
+                case let .toolResult(_, _, _, isError, _, _, _):
+                    return isError ? "工具调用失败" : nil
+                @unknown default:
+                    return nil
+                }
+            }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
         }
 
         /// Map the lowered `ErrorKindDto` onto the UI-facing `ConversationError.Kind`.
@@ -856,10 +925,14 @@ final class MockConversationSource: ConversationSource {
 
         /// Resume a prior engine session by UUID (the drawer-tap path for a REAL
         /// history row). Cancels any in-flight turn FIRST and resets the
-        /// transcript (so a late delta can't bleed into the resumed session),
-        /// optimistically marks the row active so the UI reflects the choice
-        /// immediately, then submits `ResumeSession`. The engine confirms with
-        /// `SessionResumed`, which re-adopts the id. No-op when already active.
+        /// transcript to a placeholder (so a late delta can't bleed into the
+        /// resumed session), optimistically marks the row active so the UI
+        /// reflects the choice immediately, then submits `ResumeSession`. The
+        /// engine hot-restores the prior transcript into the running orchestrator
+        /// and confirms with `SessionResumed{session_id, messages}`, which
+        /// re-adopts the id AND replaces the placeholder with the real restored
+        /// conversation (oldest-first) so the next turn continues with full prior
+        /// context visible. No-op when already active.
         func resumeSession(_ uuid: String) {
             guard !uuid.isEmpty, uuid != model.activeSessionId else { return }
             cancel()

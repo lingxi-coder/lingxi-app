@@ -77,7 +77,7 @@
   {
     "rendered_message": "SessionResumed",
     "status": "reserved",
-    "note": "lifecycle event; lossy on replay (carries only session_id, decision §0.5)"
+    "note": "lifecycle event (not part of the per-turn message feed); now carries the full restored transcript (session_id + messages, oldest-first) from the live ResumeSession path rather than session_id alone"
   },
   {
     "rendered_message": "TurnStarted",

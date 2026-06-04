@@ -202,6 +202,7 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientEvent::SessionResumed", "session_resumed");
     put("ClientEvent::SessionResumed.session_id", "String");
+    put("ClientEvent::SessionResumed.messages", "Vec<MessageDto>");
 
     put("ClientEvent::SessionList", "session_list");
     put("ClientEvent::SessionList.sessions", "Vec<SessionRowDto>");

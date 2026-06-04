@@ -281,8 +281,14 @@ function validateEvent(name: string, v: unknown): void {
       );
       break;
     case 'session_started':
+      assert.ok(isString(o['session_id']));
+      break;
     case 'session_resumed':
       assert.ok(isString(o['session_id']));
+      // `messages` is REQUIRED (Vec<MessageDto>, no skip_serializing_if) — it
+      // carries the full restored transcript (oldest-first); may be empty.
+      assert.ok(Array.isArray(o['messages']));
+      for (const m of o['messages'] as unknown[]) validateMessage(m);
       break;
     case 'session_ended':
       break;

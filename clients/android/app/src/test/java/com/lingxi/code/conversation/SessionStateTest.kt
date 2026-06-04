@@ -2,6 +2,8 @@ package com.lingxi.code.conversation
 
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.ErrorKindDto
+import com.lingxi.code.bindings.MessageBlockDto
+import com.lingxi.code.bindings.MessageDto
 import com.lingxi.code.bindings.SessionRowDto
 import com.lingxi.code.model.EngineModelState
 import com.lingxi.code.model.EngineSessionState
@@ -22,6 +24,8 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -132,7 +136,10 @@ class SessionStateTest {
         // TextDelta / Error / lifecycle events must NOT disturb the catalog.
         assertSame(prev, reduceSessionEvent(prev, ClientEvent.TextDelta("hi"), now))
         assertSame(prev, reduceSessionEvent(prev, ClientEvent.SessionStarted(sessionId = "x"), now))
-        assertSame(prev, reduceSessionEvent(prev, ClientEvent.SessionResumed(sessionId = "x"), now))
+        assertSame(
+            prev,
+            reduceSessionEvent(prev, ClientEvent.SessionResumed(sessionId = "x", messages = emptyList()), now),
+        )
         assertSame(prev, reduceSessionEvent(prev, ClientEvent.SessionEnded, now))
         assertSame(
             prev,
@@ -142,9 +149,10 @@ class SessionStateTest {
 
     // --- ChatViewModel session integration --------------------------------
 
-    /** A source whose session state we drive; submit/streams are inert. */
+    /** A source whose session + resume state we drive; submit/streams are inert. */
     private class FakeSessionSource(
         private val sessions: MutableStateFlow<EngineSessionState>,
+        private val resumed: MutableStateFlow<RestoredSession?> = MutableStateFlow(null),
     ) : ConversationSource {
         val resumeCalls = mutableListOf<String>()
         var newSessionCalls = 0
@@ -152,6 +160,7 @@ class SessionStateTest {
         override fun initialMessages(): List<Message> = emptyList()
         override fun submit(text: String): Flow<ReplyEvent> = emptyFlow()
         override val sessionState: StateFlow<EngineSessionState> = sessions.asStateFlow()
+        override val resumedSession: StateFlow<RestoredSession?> = resumed.asStateFlow()
         override suspend fun refreshSessions() { refreshCalls++ }
         override suspend fun resumeSession(uuid: String) { resumeCalls += uuid }
         override suspend fun newSession() { newSessionCalls++ }
@@ -190,6 +199,144 @@ class SessionStateTest {
         assertFalse(vm.state.value.isNew)
         // AND the engine was told to resume by the REAL wire uuid.
         assertEquals(listOf("uuid-42"), source.resumeCalls)
+    }
+
+    // --- restoredSessionFrom: the out-of-band live-resume recognizer -------
+
+    private fun userDto(text: String) =
+        MessageDto(role = "user", blocks = listOf(MessageBlockDto.Text(text)))
+
+    private fun assistantDto(vararg blocks: MessageBlockDto) =
+        MessageDto(role = "assistant", blocks = blocks.toList())
+
+    @Test
+    fun restoredSessionFrom_sessionResumed_lowersTranscriptOldestFirst() {
+        val restored = restoredSessionFrom(
+            ClientEvent.SessionResumed(
+                sessionId = "22222222-2222-4222-8222-222222222222",
+                messages = listOf(
+                    userDto("第一条问题"),
+                    assistantDto(
+                        MessageBlockDto.Thinking(thinking = "推理…", signature = null),
+                        MessageBlockDto.Text("第一条回答"),
+                    ),
+                ),
+            ),
+        )
+        assertNotNull(restored)
+        assertEquals("22222222-2222-4222-8222-222222222222", restored!!.sessionId)
+        // Two messages, OLDEST-FIRST, role-mapped.
+        assertEquals(2, restored.transcript.size)
+        assertEquals(com.lingxi.code.model.Role.User, restored.transcript[0].role)
+        assertEquals("第一条问题", restored.transcript[0].text)
+        assertEquals(com.lingxi.code.model.Role.Ai, restored.transcript[1].role)
+        // The assistant body folds thinking + text into one block-joined string.
+        assertTrue(restored.transcript[1].text.contains("推理…"))
+        assertTrue(restored.transcript[1].text.contains("第一条回答"))
+    }
+
+    @Test
+    fun restoredSessionFrom_emptyTranscript_isNonNullWithNoMessages() {
+        val restored = restoredSessionFrom(
+            ClientEvent.SessionResumed(sessionId = "s", messages = emptyList()),
+        )
+        assertNotNull(restored)
+        assertTrue(restored!!.transcript.isEmpty())
+        assertEquals("s", restored.sessionId)
+    }
+
+    @Test
+    fun restoredSessionFrom_nonResumeEvent_isNull() {
+        assertNull(restoredSessionFrom(ClientEvent.TextDelta("hi")))
+        assertNull(restoredSessionFrom(ClientEvent.SessionStarted(sessionId = "x")))
+        assertNull(restoredSessionFrom(ClientEvent.SessionList(sessions = emptyList())))
+    }
+
+    @Test
+    fun messageDtoText_foldsEveryBlockKind_droppingBlanks() {
+        val text = messageDtoText(
+            listOf(
+                MessageBlockDto.Text("正文"),
+                MessageBlockDto.Text("   "), // blank → dropped
+                MessageBlockDto.ToolUse(id = "t1", tool = "bash", inputJson = "{}"),
+                MessageBlockDto.ToolResult(
+                    id = "t1", tool = "bash", resultJson = "ok", isError = false,
+                    oldString = null, newString = null, filePath = null,
+                ),
+                MessageBlockDto.RedactedThinking(data = "opaque"),
+            ),
+        )
+        assertTrue(text.contains("正文"))
+        assertTrue(text.contains("bash")) // the tool-use activity line
+        assertTrue(text.contains("工具结果"))
+        assertTrue(text.contains("已折叠的思考"))
+        // The blank text block left no dangling double-blank run.
+        assertFalse(text.contains("\n\n\n"))
+    }
+
+    // --- ChatViewModel resume rehydration (the inbound SessionResumed path) -
+
+    @Test
+    fun resumedSession_rehydratesTranscript_andSetsActiveSession_outOfBand() {
+        val resumed = MutableStateFlow<RestoredSession?>(null)
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState()), resumed)
+        val vm = ChatViewModel(source)
+
+        // A live SessionResumed lands with 3 messages, oldest-first.
+        resumed.value = RestoredSession(
+            sessionId = "uuid-99",
+            transcript = listOf(
+                Message(role = com.lingxi.code.model.Role.User, text = "q1"),
+                Message(role = com.lingxi.code.model.Role.Ai, text = "a1"),
+                Message(role = com.lingxi.code.model.Role.User, text = "q2"),
+            ),
+        )
+
+        // N messages rendered, in order.
+        assertEquals(3, vm.state.value.messages.size)
+        assertEquals(listOf("q1", "a1", "q2"), vm.state.value.messages.map { it.text })
+        // Active session id swapped to the REAL resumed uuid.
+        assertEquals("uuid-99", vm.state.value.session.id)
+        assertFalse(vm.state.value.isNew)
+        assertFalse(vm.state.value.streaming)
+    }
+
+    @Test
+    fun resumedSession_replacesCurrentTranscript_wholesale() {
+        val resumed = MutableStateFlow<RestoredSession?>(null)
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState()), resumed)
+        val vm = ChatViewModel(source)
+
+        // Seed a stale transcript (a prior turn), then resume swaps it wholesale.
+        vm.reduce(ReplyEvent.Delta("stale turn"))
+        assertEquals(1, vm.state.value.messages.size)
+
+        resumed.value = RestoredSession(
+            sessionId = "uuid-77",
+            transcript = listOf(Message(role = com.lingxi.code.model.Role.User, text = "restored")),
+        )
+
+        assertEquals(listOf("restored"), vm.state.value.messages.map { it.text })
+    }
+
+    @Test
+    fun applyRestoredSession_preservesDrawerSelectedTitle_whenIdMatches() {
+        val source = FakeSessionSource(MutableStateFlow(EngineSessionState()))
+        val vm = ChatViewModel(source)
+
+        // The drawer's optimistic local select set the title before resume landed.
+        vm.resumeSession(SessionRow(uuid = "uuid-55", title = "差旅规划", messageCount = 3, relativeTime = "昨天"))
+        // The engine confirms with the rehydrated transcript (id matches the select).
+        vm.applyRestoredSession(
+            RestoredSession(
+                sessionId = "uuid-55",
+                transcript = listOf(Message(role = com.lingxi.code.model.Role.User, text = "hi")),
+            ),
+        )
+
+        assertEquals("uuid-55", vm.state.value.session.id)
+        assertEquals("差旅规划", vm.state.value.session.title) // preserved, not a placeholder
+        assertEquals(listOf("hi"), vm.state.value.messages.map { it.text })
     }
 
     @Test

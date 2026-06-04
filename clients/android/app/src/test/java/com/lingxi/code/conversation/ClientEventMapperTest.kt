@@ -3,7 +3,10 @@ package com.lingxi.code.conversation
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.CostDto
 import com.lingxi.code.bindings.ErrorKindDto
+import com.lingxi.code.bindings.MessageBlockDto
+import com.lingxi.code.bindings.MessageDto
 import com.lingxi.code.bindings.TurnOutcomeDto
+import com.lingxi.code.model.Role
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -142,5 +145,50 @@ class ClientEventMapperTest {
     @Test
     fun modelChanged_isIgnored() {
         assertNull(clientEventToReply(ClientEvent.ModelChanged(model = "opus")))
+    }
+
+    @Test
+    fun sessionResumed_isIgnoredByPerTurnMapper_ridesOutOfBandPath() {
+        // SessionResumed carries the restored transcript on the SEPARATE
+        // out-of-band path (restoredSessionFrom → resumedSession), NOT the
+        // per-turn reply stream — so the reply mapper drops it.
+        val r = clientEventToReply(
+            ClientEvent.SessionResumed(
+                sessionId = "s",
+                messages = listOf(MessageDto(role = "user", blocks = listOf(MessageBlockDto.Text("hi")))),
+            ),
+        )
+        assertNull(r)
+    }
+
+    // --- MessageDto → UI Message lowering (resume scrollback) --------------
+
+    @Test
+    fun messageDtoToMessage_userRole_mapsToUser_withFlatText() {
+        val m = messageDtoToMessage(
+            MessageDto(role = "user", blocks = listOf(MessageBlockDto.Text("你好"))),
+        )
+        assertEquals(Role.User, m.role)
+        assertEquals("你好", m.text)
+    }
+
+    @Test
+    fun messageDtoToMessage_assistantRole_mapsToAi() {
+        val m = messageDtoToMessage(
+            MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("回答"))),
+        )
+        assertEquals(Role.Ai, m.role)
+        assertEquals("回答", m.text)
+    }
+
+    @Test
+    fun messageDtoToMessage_systemRole_mapsToAi() {
+        // System messages have no dedicated UI role — they render as the
+        // assistant (avatar+markdown) bubble.
+        val m = messageDtoToMessage(
+            MessageDto(role = "system", blocks = listOf(MessageBlockDto.Text("系统提示"))),
+        )
+        assertEquals(Role.Ai, m.role)
+        assertEquals("系统提示", m.text)
     }
 }

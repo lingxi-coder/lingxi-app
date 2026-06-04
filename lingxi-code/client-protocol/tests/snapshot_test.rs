@@ -206,6 +206,19 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/session_resumed.json",
             ClientEvent::SessionResumed {
                 session_id: "22222222-2222-4222-8222-222222222222".to_string(),
+                // The restored transcript, OLDEST-FIRST. The canonical golden
+                // carries a two-message conversation (a user turn + the
+                // assistant block set) so the wire shape pins the lowered
+                // `MessageDto` element exactly for the client mappers.
+                messages: vec![
+                    MessageDto {
+                        role: "user".to_string(),
+                        blocks: vec![MessageBlockDto::Text {
+                            text: "Resume me.".to_string(),
+                        }],
+                    },
+                    canonical_message(),
+                ],
             },
         ),
         (
@@ -947,7 +960,7 @@ fn feed_status_table() -> Vec<FeedStatusEntry> {
         entry(
             "SessionResumed",
             Reserved,
-            "lifecycle event; lossy on replay (carries only session_id, decision §0.5)",
+            "lifecycle event (not part of the per-turn message feed); now carries the full restored transcript (session_id + messages, oldest-first) from the live ResumeSession path rather than session_id alone",
         ),
         entry(
             "TurnStarted",

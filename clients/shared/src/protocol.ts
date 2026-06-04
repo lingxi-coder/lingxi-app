@@ -366,7 +366,7 @@ export type ClientEvent =
   // ── Session lifecycle ───────────────────────────────────────────────────────
   | { type: 'session_started'; session_id: string }
   | { type: 'session_ended' }
-  | { type: 'session_resumed'; session_id: string }
+  | { type: 'session_resumed'; session_id: string; messages: MessageDto[] }
   | { type: 'session_list'; sessions: SessionRowDto[] }
   // ── Listing / screen events ─────────────────────────────────────────────────
   | { type: 'model_list'; models: string[]; current: string }

@@ -101,6 +101,7 @@
   "ClientEvent::SessionList": "session_list",
   "ClientEvent::SessionList.sessions": "Vec<SessionRowDto>",
   "ClientEvent::SessionResumed": "session_resumed",
+  "ClientEvent::SessionResumed.messages": "Vec<MessageDto>",
   "ClientEvent::SessionResumed.session_id": "String",
   "ClientEvent::SessionStarted": "session_started",
   "ClientEvent::SessionStarted.session_id": "String",

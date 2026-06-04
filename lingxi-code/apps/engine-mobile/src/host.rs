@@ -654,9 +654,14 @@ impl MobileEngineHandle {
     ///   `client_adapter::lower_session_metadata`, reply with `SessionList`.
     /// - `NewSession` → `clear_session` (mints a fresh `SessionId`) + optional
     ///   `switch_model`, confirmed by `SessionStarted` (SESSIONS/HISTORY).
-    /// - `ResumeSession` → REJECTED honestly: the orchestrator exposes no
-    ///   transcript-rehydrate API, so we return `ClientError::Rejected` rather
-    ///   than fake a `SessionResumed` (lighting it up needs a new engine API).
+    /// - `ResumeSession` → LIVE hot-restore (SESSIONS/HISTORY): reject mid-turn,
+    ///   parse the `session_id` as a `Uuid`, load + validate the on-disk JSONL via
+    ///   `orchestrator::replay_session_state`, adopt it into the running
+    ///   orchestrator with `OrchestratorHandle::resume_session`, and confirm with a
+    ///   `SessionResumed { session_id, messages }` carrying the full restored
+    ///   transcript (lowered via `client_adapter::lowering::lower_transcript`). A
+    ///   missing / corrupt / malformed session is honestly `Rejected` — we never
+    ///   emit a false `SessionResumed`.
     ///
     /// Remaining host-driven / reserved commands (the task commands — mobile binds
     /// no `TaskRegistry`) are accepted and no-op'd (the `#[non_exhaustive]` enum
@@ -913,24 +918,91 @@ impl MobileEngineHandle {
                 Ok(())
             }
 
-            // `ResumeSession` names a prior session to rehydrate onto the live
-            // orchestrator. BLOCKED / honestly rejected: the `OrchestratorHandle`
-            // trait exposes NO method to load a JSONL transcript back into a
-            // running orchestrator (only `clear_session`, which mints a FRESH id —
-            // it cannot adopt the named target). Faking a `SessionResumed` here
-            // would lie to the client (the transcript would NOT actually be the
-            // resumed one), so we reject with a typed error rather than emit a
-            // false confirmation. Lighting this up needs a new engine rehydrate
-            // API (out of scope; tracked as the SESSIONS/HISTORY follow-up).
-            ClientCommand::ResumeSession { session_id, .. } => {
-                Err(ClientError::Rejected {
-                    message: format!(
-                        "resume is not yet supported by the mobile engine: \
-                         the orchestrator has no transcript-rehydrate API to adopt \
-                         session {session_id} (a fresh clear_session would mint a new \
-                         id, not resume the named one)"
-                    ),
-                })
+            // `ResumeSession` names a prior session to hot-restore onto the live
+            // orchestrator (SESSIONS/HISTORY). The orchestrator now exposes a real
+            // rehydrate seam (`OrchestratorHandle::resume_session`, the symmetric
+            // twin of `clear_session`): we load + validate the on-disk JSONL, adopt
+            // it into the RUNNING orchestrator IN PLACE (named id + replayed
+            // history + JSONL parent-uuid chain pointer), and emit a
+            // `SessionResumed` carrying the full restored transcript so the client
+            // renders the rehydrated conversation atomically. A missing / corrupt /
+            // malformed session is honestly `Rejected` — a session that is not
+            // resumable is genuinely not resumable, so we reject rather than emit a
+            // FALSE `SessionResumed`.
+            ClientCommand::ResumeSession { session_id, cwd } => {
+                // (a) Reject mid-turn (same contract as `ClearSession` /
+                // `NewSession`): a resume must not race an in-flight turn.
+                let mid_turn = self
+                    .active_cancel
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|t| !t.is_cancelled());
+                if mid_turn {
+                    return Err(ClientError::Rejected {
+                        message: "cannot resume while a turn is in flight".into(),
+                    });
+                }
+
+                // (b) Parse the named session id as a `Uuid`. A malformed id is
+                // honestly rejected (not faked) — there is no session to adopt.
+                let uuid = match uuid::Uuid::parse_str(&session_id) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        return Err(ClientError::Rejected {
+                            message: format!("resume: malformed session id {session_id:?}: {e}"),
+                        });
+                    }
+                };
+
+                // (c) cwd: use the command's override if Some, else the
+                // connection's session cwd (the project-dir key the loader walks).
+                let cwd = cwd.unwrap_or_else(|| self.session_cwd.clone());
+
+                // (d) Load + validate the on-disk JSONL. A SessionNotFound /
+                // ChainBroken / SessionIdMismatch / Io / Parse / EmptyDirectory is
+                // genuinely not resumable — reject carrying the loader's message
+                // (HONEST: we never emit a false SessionResumed for a missing /
+                // corrupt session).
+                let replayed = match orchestrator::replay_session_state(
+                    &self.claude_home,
+                    &cwd,
+                    uuid,
+                    self.fs.clone(),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Err(ClientError::Rejected {
+                            message: format!("resume: session {session_id} not resumable: {e}"),
+                        });
+                    }
+                };
+
+                // (e) Adopt the replayed session INTO the running orchestrator
+                // (named id + history + JSONL chain pointer), then confirm with a
+                // `SessionResumed` carrying the full restored transcript.
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                handle
+                    .resume_session(
+                        protocol::SessionId::from_uuid(uuid),
+                        replayed.state.history.clone(),
+                        replayed.last_message_uuid.map(|u| u.to_string()),
+                    )
+                    .await
+                    .map_err(|e| ClientError::Internal {
+                        message: format!("resume_session failed: {e}"),
+                    })?;
+
+                let messages = client_adapter::lowering::lower_transcript(&replayed.state.history);
+                self.event_sink
+                    .emit(ClientEvent::SessionResumed {
+                        session_id: uuid.to_string(),
+                        messages,
+                    })
+                    .await;
+                Ok(())
             }
 
             // ── Host-driven / reserved in the foundation ────────────────────
@@ -1636,31 +1708,211 @@ mod tests {
         });
     }
 
-    /// SESSIONS/HISTORY: `submit(ResumeSession)` is honestly REJECTED, not faked.
-    /// The orchestrator exposes no transcript-rehydrate API, so the engine returns
-    /// `ClientError::Rejected` and emits NO `SessionResumed` (a fake confirmation
-    /// would lie about which transcript is live). This pins the BLOCKED contract.
+    /// Seed a REPLAY-VALID session JSONL under
+    /// `<claude_home>/projects/<sanitize(cwd)>/<uuid>.jsonl` — a user+assistant
+    /// pair with a proper `parentUuid` chain (first msg parent=null, the second's
+    /// parent = the first's uuid, both `sessionId == <file uuid>`) so it PASSES
+    /// the loader's `validate_chain`. Returns `(file_uuid, user_assistant_count)`.
+    fn seed_replay_valid_session(root: &std::path::Path) -> (String, usize) {
+        let cfg = test_config(root);
+        let cwd = cfg.cwd.to_string_lossy().into_owned();
+        let project_dir = cfg
+            .claude_home
+            .join("projects")
+            .join(session::jsonl::project_dir_name(&cwd));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+
+        // Fixed, valid UUID literals (engine-mobile parses, never mints, in the
+        // test). The file stem IS the sessionId; the two messages carry DISTINCT
+        // `uuid`s forming a one-link parent chain.
+        let file_uuid = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa".to_string();
+        let user_uuid = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb".to_string();
+        let asst_uuid = "cccccccc-3333-4333-8333-cccccccccccc".to_string();
+        let path = project_dir.join(format!("{file_uuid}.jsonl"));
+
+        let user_line = serde_json::json!({
+            "type": "user",
+            "uuid": user_uuid,
+            "parentUuid": serde_json::Value::Null,
+            "sessionId": file_uuid,
+            "timestamp": "2026-05-25T12:00:00.000Z",
+            "cwd": cwd,
+            "version": "0.6.0",
+            "isSidechain": false,
+            "userType": "external",
+            "message": {"role": "user", "content": "resume me from disk"}
+        });
+        let asst_line = serde_json::json!({
+            "type": "assistant",
+            "uuid": asst_uuid,
+            "parentUuid": user_uuid,
+            "sessionId": file_uuid,
+            "timestamp": "2026-05-25T12:00:01.000Z",
+            "cwd": cwd,
+            "version": "0.6.0",
+            "isSidechain": false,
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "resumed!"}]}
+        });
+        let body = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&user_line).unwrap(),
+            serde_json::to_string(&asst_line).unwrap()
+        );
+        std::fs::write(&path, body).expect("write replay-valid session file");
+        (file_uuid, 2)
+    }
+
+    /// SESSIONS/HISTORY (live ResumeSession): `submit(ResumeSession)` against a
+    /// REPLAY-VALID on-disk session hot-restores it into the running orchestrator.
+    /// Asserts a `SessionResumed` event is emitted whose `messages.len()` equals
+    /// the seeded user+assistant count, AND the orchestrator's live
+    /// `conversation_transcript` equals the restored history (proving the model
+    /// will see prior context on the next turn).
     #[test]
-    fn submit_resume_session_is_rejected_not_faked() {
+    fn submit_resume_session_rehydrates_and_emits() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (file_uuid, seeded_count) = seed_replay_valid_session(tmp.path());
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            use traits::OrchestratorHandle;
+
+            let result = handle
+                .submit(ClientCommand::ResumeSession {
+                    session_id: file_uuid.clone(),
+                    cwd: None,
+                })
+                .await;
+            assert!(
+                result.is_ok(),
+                "ResumeSession against a replay-valid session must succeed, got {result:?}"
+            );
+
+            // A SessionResumed carrying the full restored transcript was emitted.
+            let events = drained(&listener).await;
+            let messages = events
+                .iter()
+                .find_map(|e| match e {
+                    Ev::SessionResumed { session_id, messages } => {
+                        assert_eq!(session_id, &file_uuid, "resumed id must be the named session");
+                        Some(messages.clone())
+                    }
+                    _ => None,
+                })
+                .expect("a SessionResumed event must be emitted on a successful resume");
+            assert_eq!(
+                messages.len(),
+                seeded_count,
+                "SessionResumed.messages must carry every replayed user/assistant message"
+            );
+
+            // The RUNNING orchestrator adopted the restored history — the next
+            // turn will see the prior context.
+            let oh: Arc<dyn OrchestratorHandle> = handle.inner().orchestrator.clone();
+            let transcript = oh.conversation_transcript().await;
+            assert_eq!(
+                transcript.len(),
+                seeded_count,
+                "the live orchestrator must hold the restored transcript after resume"
+            );
+            // The adopted id is the named session (resume does NOT mint a fresh one).
+            assert_eq!(
+                oh.current_session_id().await.as_uuid().to_string(),
+                file_uuid,
+                "resume must adopt the named session id on the live orchestrator"
+            );
+        });
+    }
+
+    /// SESSIONS/HISTORY (live ResumeSession): an UNKNOWN session uuid (no on-disk
+    /// file) is honestly REJECTED — a missing session is genuinely not resumable,
+    /// so we return `ClientError::Rejected` rather than emit a false `SessionResumed`.
+    #[test]
+    fn submit_resume_session_missing_is_rejected() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle(tmp.path());
 
         handle.runtime().block_on(async {
             let result = handle
                 .submit(ClientCommand::ResumeSession {
-                    session_id: "sess:00000000-0000-0000-0000-000000000000".into(),
+                    // A well-formed uuid that names no on-disk session.
+                    session_id: "dddddddd-4444-4444-8444-dddddddddddd".into(),
                     cwd: None,
                 })
                 .await;
             assert!(
                 matches!(result, Err(ClientError::Rejected { .. })),
-                "ResumeSession must be rejected (no rehydrate API), got {result:?}"
+                "an unknown session must be Rejected, got {result:?}"
             );
-
             let events = drained(&listener).await;
             assert!(
                 !events.iter().any(|e| matches!(e, Ev::SessionResumed { .. })),
-                "a rejected ResumeSession must NOT emit a (fake) SessionResumed event"
+                "a rejected ResumeSession must NOT emit a (false) SessionResumed event"
+            );
+        });
+    }
+
+    /// SESSIONS/HISTORY (live ResumeSession): a MALFORMED session id (not a uuid)
+    /// is honestly REJECTED — we parse the id as a `Uuid` first and reject a
+    /// non-uuid rather than fake a confirmation.
+    #[test]
+    fn submit_resume_session_malformed_id_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let result = handle
+                .submit(ClientCommand::ResumeSession {
+                    session_id: "not-a-uuid".into(),
+                    cwd: None,
+                })
+                .await;
+            assert!(
+                matches!(result, Err(ClientError::Rejected { .. })),
+                "a malformed session id must be Rejected, got {result:?}"
+            );
+            let events = drained(&listener).await;
+            assert!(
+                !events.iter().any(|e| matches!(e, Ev::SessionResumed { .. })),
+                "a rejected ResumeSession must NOT emit a SessionResumed event"
+            );
+        });
+    }
+
+    /// SESSIONS/HISTORY (live ResumeSession): resume is REJECTED while a turn is in
+    /// flight (mirror of `ClearSession` / `NewSession` mid-turn guards). We arm a
+    /// live (un-cancelled) cancel token via `SendPrompt`, then submit Resume.
+    #[test]
+    fn submit_resume_session_mid_turn_is_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (file_uuid, _count) = seed_replay_valid_session(tmp.path());
+        let (handle, _listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            // Arm an in-flight turn so a live cancel token is recorded.
+            handle
+                .submit(ClientCommand::SendPrompt {
+                    text: "drive a turn".into(),
+                    prompt_mode: None,
+                    images: Vec::new(),
+                    turn_id: None,
+                })
+                .await
+                .expect("submit(SendPrompt) ok");
+            assert!(
+                !handle.active_turn_is_cancelled().await,
+                "the freshly-armed turn token must not be cancelled yet"
+            );
+
+            let result = handle
+                .submit(ClientCommand::ResumeSession {
+                    session_id: file_uuid,
+                    cwd: None,
+                })
+                .await;
+            assert!(
+                matches!(result, Err(ClientError::Rejected { .. })),
+                "resume must be Rejected while a turn is in flight, got {result:?}"
             );
         });
     }

@@ -44,6 +44,12 @@ uniffi = [
     # to. Engine-tier (no `apps/*` edge), optional + uniffi-gated like the other
     # runtime-wiring crates so the default host build stays lean.
     "dep:session",
+    # SESSIONS/HISTORY (live ResumeSession): the `ResumeSession` arm parses the
+    # command's `session_id` String into a `uuid::Uuid` to feed the orchestrator's
+    # resume path (`orchestrator::replay_session_state`) + `SessionId::from_uuid`.
+    # Optional + uniffi-gated like its siblings (no v4/serde features needed —
+    # parse-only).
+    "dep:uuid",
     "dep:tokio",
     # F3-05: the connection-scoped `CancellationToken` the async `submit` arms on
     # `SendPrompt` and fires on `Cancel` (the orchestrator's
@@ -97,6 +103,9 @@ platform-posix-minimal = { path = "../../platforms/posix-minimal", optional = tr
 # session catalog for the `ListSessions` command. Engine-tier, optional +
 # uniffi-gated like its siblings above.
 session = { path = "../../session", optional = true }
+# SESSIONS/HISTORY (live ResumeSession): parse the command's `session_id` String
+# into a `uuid::Uuid`. Parse-only (no v4/serde) — optional + uniffi-gated.
+uuid = { version = "1.10", optional = true }
 
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync"] }
 # F3-05: `CancellationToken` for the cancelable streaming turn the async `submit`

@@ -52,6 +52,21 @@ pub struct OrchestratorConfig {
     /// session.
     #[serde(default)]
     pub resume_session_id: Option<uuid::Uuid>,
+
+    /// A1: gate for the 8k→64k output-token escalation retry (TS gate
+    /// `tengu_otk_slot_v1`, 3P default `false` — not validated on
+    /// Bedrock/Vertex). When `false` (the parity default), the loop performs
+    /// ONLY the multi-turn "resume directly" nudge recovery on a `max_tokens`
+    /// `stop_reason`; the single-shot escalation to
+    /// [`crate::turn_loop::ESCALATED_MAX_TOKENS`] is skipped.
+    ///
+    /// DEFERRED: even when `true`, the escalation is currently a no-op because
+    /// the api-client `messages_create` signature has no `max_tokens` override
+    /// argument (see A1 spec — escalation needs an api-client change that is
+    /// out of scope for this crate-local batch). The flag + const are wired so
+    /// a follow-up can complete the escalation without a config migration.
+    #[serde(default)]
+    pub escalate_max_output_tokens: bool,
 }
 
 impl Default for OrchestratorConfig {
@@ -62,6 +77,7 @@ impl Default for OrchestratorConfig {
             system_prompt_override: None,
             interactive_permissions: false,
             resume_session_id: None,
+            escalate_max_output_tokens: false,
         }
     }
 }
@@ -96,6 +112,7 @@ mod tests {
             system_prompt_override: Some("custom".into()),
             interactive_permissions: true,
             resume_session_id: None,
+            escalate_max_output_tokens: true,
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
@@ -104,6 +121,12 @@ mod tests {
         assert_eq!(back.system_prompt_override.as_deref(), Some("custom"));
         assert!(back.interactive_permissions);
         assert!(back.resume_session_id.is_none());
+        assert!(back.escalate_max_output_tokens);
+    }
+
+    #[test]
+    fn default_escalate_max_output_tokens_is_false() {
+        assert!(!OrchestratorConfig::default().escalate_max_output_tokens);
     }
 
     #[test]

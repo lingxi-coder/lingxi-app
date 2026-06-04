@@ -117,6 +117,51 @@ async fn record_read_file_state(
     }
 }
 
+/// Maximum number of consecutive `max_tokens` recovery nudges before the
+/// turn loop gives up and surfaces the `max_tokens` `stop_reason`. 1:1 with TS
+/// `query.ts:164` `MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3`.
+pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT: u32 = 3;
+
+/// Escalated output-token cap for the single-shot 8k→64k retry. 1:1 with TS
+/// `utils/context.ts:25` `ESCALATED_MAX_TOKENS = 64_000`.
+///
+/// DEFERRED (A1): not wired into any API call yet. The api-client
+/// `messages_create` signature carries no `max_tokens` override argument, so
+/// the escalation retry cannot be performed crate-locally without editing
+/// api-client (out of scope). [`RecoveryState::max_output_tokens_override`]
+/// and [`crate::OrchestratorConfig::escalate_max_output_tokens`] are wired so
+/// a follow-up can plumb this through without further config/struct churn.
+pub(crate) const ESCALATED_MAX_TOKENS: u32 = 64_000;
+
+/// The byte-exact meta "resume directly" nudge injected as a user message on a
+/// `max_tokens` `stop_reason`. 1:1 with TS `query.ts:1226-1227` (note the U+2014
+/// em-dash in "directly —"). Concatenating these two string literals — exactly
+/// as TS does — yields one contiguous line with NO separator between them.
+pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_NUDGE: &str = concat!(
+    "Output token limit hit. Resume directly — no apology, no recap of what you were doing. ",
+    "Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
+);
+
+/// Per-conversation recovery bookkeeping carried by the turn drivers in
+/// `conversation.rs` and threaded `&mut` into [`execute_one_turn_with_recovery`].
+///
+/// Mirrors the TS recovery sub-state on `query.ts`'s loop `State`
+/// (`maxOutputTokensRecoveryCount`, `maxOutputTokensOverride`). One instance
+/// lives per `try_run_turn` / `try_run_turn_streaming` invocation; it persists
+/// the nudge count ACROSS turn-steps so the 3-retry limit is consecutive.
+#[derive(Debug, Default)]
+pub(crate) struct RecoveryState {
+    /// How many consecutive `max_tokens` nudges have been injected this
+    /// conversation. Capped at [`MAX_OUTPUT_TOKENS_RECOVERY_LIMIT`]; once it
+    /// reaches the limit the next `max_tokens` ends the turn.
+    pub(crate) max_output_tokens_recovery_count: u32,
+    /// When `Some(n)`, the next API call should use `n` as its output-token
+    /// cap (the escalated retry). DEFERRED: never set today because the
+    /// escalation is not wired into the api-client call (see
+    /// [`ESCALATED_MAX_TOKENS`]).
+    pub(crate) max_output_tokens_override: Option<u32>,
+}
+
 /// What one turn step decided.
 pub(crate) enum TurnStepOutcome {
     /// Continue the loop (e.g. model returned `tool_use`).
@@ -139,6 +184,30 @@ pub(crate) enum TurnStepOutcome {
 pub(crate) async fn execute_one_turn(
     orch: &ConversationOrchestrator,
     system: Option<&str>,
+) -> Result<TurnStepOutcome, OrchestratorError> {
+    // Backward-compatible shim: no recovery state → legacy disposition
+    // (any non-`end_turn` stop_reason Continues). Used by the cancelable
+    // REPL driver and the in-file tests. The recovery-aware drivers call
+    // [`execute_one_turn_with_recovery`] with a live `RecoveryState`.
+    execute_one_turn_with_recovery(orch, system, None).await
+}
+
+/// Recovery-aware twin of [`execute_one_turn`].
+///
+/// When `recovery` is `Some`, a `max_tokens` `stop_reason` triggers the A1
+/// multi-turn nudge: while the consecutive recovery count is below
+/// [`MAX_OUTPUT_TOKENS_RECOVERY_LIMIT`], a byte-exact "resume directly" meta
+/// user message ([`MAX_OUTPUT_TOKENS_RECOVERY_NUDGE`]) is appended to history,
+/// the counter is incremented, and the step returns
+/// [`TurnStepOutcome::Continue`] (1:1 with TS `query.ts:1223-1252`). When the
+/// count has reached the limit, the turn ends with `stop_reason = "max_tokens"`
+/// (TS `query.ts:1254-1255` surfaces the withheld error). When `recovery` is
+/// `None`, the `max_tokens` path falls through to the legacy disposition
+/// (Continue), preserving the cancelable driver's behavior.
+pub(crate) async fn execute_one_turn_with_recovery(
+    orch: &ConversationOrchestrator,
+    system: Option<&str>,
+    recovery: Option<&mut RecoveryState>,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
     // Snapshot the current session history for the API call.
     let (history_snapshot, model) = {
@@ -238,8 +307,77 @@ pub(crate) async fn execute_one_turn(
             final_message_id: assistant_id,
             stop_reason: "end_turn".to_string(),
         }),
+        // A1: max_output_tokens recovery (TS `query.ts:1223-1255`). Only the
+        // recovery-aware drivers (`Some(state)`) participate; the legacy shim
+        // (`None`) falls through to Continue, unchanged.
+        Some("max_tokens") if recovery.is_some() => {
+            // `recovery.is_some()` guarded above — unwrap is infallible.
+            let state = recovery.expect("recovery is Some");
+            handle_max_output_tokens(orch, assistant_id, state).await
+        }
         _ => Ok(TurnStepOutcome::Continue),
     }
+}
+
+/// A1 `max_tokens` recovery decision (TS `query.ts:1223-1255`).
+///
+/// While `count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT`: append the byte-exact
+/// meta nudge user message to history, increment the counter, and Continue.
+/// On exhaustion (count has reached the limit): end the turn with
+/// `stop_reason = "max_tokens"` (current behavior — surface the cap).
+///
+/// The 8k→64k escalation (TS `query.ts:1199-1221`) is DEFERRED: it requires an
+/// api-client `max_tokens` override the current signature lacks, so even with
+/// [`crate::OrchestratorConfig::escalate_max_output_tokens`] enabled this code
+/// goes straight to the multi-turn nudge. See [`ESCALATED_MAX_TOKENS`].
+async fn handle_max_output_tokens(
+    orch: &ConversationOrchestrator,
+    assistant_id: MessageId,
+    state: &mut RecoveryState,
+) -> Result<TurnStepOutcome, OrchestratorError> {
+    // Escalation (8k→64k) — DEFERRED. TS performs this single-shot retry
+    // (`query.ts:1199-1221`) BEFORE the multi-turn nudge, gated by
+    // `tengu_otk_slot_v1` and "no override already applied". The port keeps
+    // the gate (`escalate_max_output_tokens`) and the target cap
+    // ([`ESCALATED_MAX_TOKENS`]) wired, but the api-client `messages_create`
+    // signature carries no `max_tokens` override argument, so the escalation
+    // cannot be performed crate-locally. We therefore record the intended
+    // override (so a follow-up that plumbs the api-client arg can act on it)
+    // and fall through to the multi-turn nudge regardless.
+    if orch.config.escalate_max_output_tokens && state.max_output_tokens_override.is_none() {
+        // NOTE: setting this does not change the API call today (deferred); it
+        // only documents the intended escalation target for the follow-up.
+        state.max_output_tokens_override = Some(ESCALATED_MAX_TOKENS);
+    }
+
+    if state.max_output_tokens_recovery_count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
+        // Inject the meta "resume directly" nudge as a fresh user message.
+        // The protocol has no `isMeta` flag; the nudge is a plain user text
+        // message carrying the byte-exact string (spec: "assert it's a User
+        // message with the exact bytes").
+        let nudge_msg = ConversationMessage::user(
+            MessageId::new(),
+            MAX_OUTPUT_TOKENS_RECOVERY_NUDGE.to_string(),
+        );
+        {
+            let mut s = orch.session.lock().await;
+            s.history.push(nudge_msg.clone());
+        }
+        orch.persist_message_to_jsonl(&nudge_msg).await;
+
+        state.max_output_tokens_recovery_count =
+            state.max_output_tokens_recovery_count.saturating_add(1);
+        // A clean nudge retry never carries an escalated override forward
+        // (TS sets `maxOutputTokensOverride: undefined` here).
+        state.max_output_tokens_override = None;
+        return Ok(TurnStepOutcome::Continue);
+    }
+
+    // Recovery exhausted — surface the cap by ending the turn.
+    Ok(TurnStepOutcome::Ended {
+        final_message_id: assistant_id,
+        stop_reason: "max_tokens".to_string(),
+    })
 }
 
 /// Translate api-client content blocks into protocol content blocks.
@@ -868,5 +1006,229 @@ mod read_file_state_tests {
 
         let files = orch.files_in_context().await;
         assert_eq!(files, vec![cwd.join("e.rs"), cwd.join("w.rs")]);
+    }
+}
+
+// ============================================================================
+// A1: max_output_tokens recovery (multi-turn nudge + escalation/exhaustion).
+// Drives `execute_one_turn_with_recovery` directly with a `max_tokens`-scripted
+// MockApiClient and asserts the nudge injection, counter increments, and
+// disposition (Continue while under the limit; Ended on exhaustion).
+// ============================================================================
+#[cfg(test)]
+mod max_output_tokens_recovery_tests {
+    use super::{
+        execute_one_turn_with_recovery, RecoveryState, TurnStepOutcome,
+        MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
+    };
+    use crate::conversation::ConversationOrchestrator;
+    use crate::test_support::{
+        mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
+        NoOpPermissionGate, StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use api_client::types::ContentBlockApi;
+    use protocol::{ContentBlock, ConversationMessage};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::registry::ToolRegistry;
+
+    /// Build an orchestrator whose batched API returns the given scripted
+    /// `MessageResponse`s in order. No tools registered (recovery never needs
+    /// them).
+    fn orch_with_responses(
+        responses: Vec<api_client::types::MessageResponse>,
+    ) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(responses)),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// A `max_tokens` response carrying one text block.
+    fn max_tokens_response() -> api_client::types::MessageResponse {
+        mock_message_response(
+            vec![ContentBlockApi::Text {
+                text: "partial".into(),
+            }],
+            Some("max_tokens"),
+        )
+    }
+
+    /// Snapshot the current session history.
+    async fn history(orch: &ConversationOrchestrator) -> Vec<ConversationMessage> {
+        orch.session.lock().await.history.clone()
+    }
+
+    /// The exact-bytes nudge string is byte-faithful to TS `query.ts:1226-1227`,
+    /// including the U+2014 em-dash and the single space joining the two literals.
+    #[test]
+    fn nudge_string_is_byte_exact() {
+        assert_eq!(
+            MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
+            "Output token limit hit. Resume directly \u{2014} no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces."
+        );
+        // The em-dash is U+2014, not an ASCII hyphen or U+2013 en-dash.
+        assert!(MAX_OUTPUT_TOKENS_RECOVERY_NUDGE.contains('\u{2014}'));
+        assert!(!MAX_OUTPUT_TOKENS_RECOVERY_NUDGE.contains("directly -"));
+    }
+
+    #[test]
+    fn recovery_limit_is_three() {
+        assert_eq!(MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, 3);
+    }
+
+    /// (Test plan 1) `max_tokens` at recovery_count 0 → Continue, the exact
+    /// nudge is appended as a User message, and the counter becomes 1.
+    #[tokio::test]
+    async fn max_tokens_at_count_zero_continues_and_injects_nudge() {
+        let orch = orch_with_responses(vec![max_tokens_response()]);
+        let mut state = RecoveryState::default();
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("turn step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert_eq!(state.max_output_tokens_recovery_count, 1);
+        assert_eq!(state.max_output_tokens_override, None);
+
+        // History: [assistant(max_tokens), user(nudge)].
+        let h = history(&orch).await;
+        let last = h.last().expect("nudge appended");
+        match last {
+            ConversationMessage::User { content, .. } => {
+                assert_eq!(content.len(), 1, "single text block");
+                match &content[0] {
+                    // (Test plan 4) the nudge is a User message with exact bytes.
+                    ContentBlock::Text { text } => {
+                        assert_eq!(text, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE);
+                    }
+                    other => panic!("expected text block, got {other:?}"),
+                }
+            }
+            other => panic!("expected User nudge message, got {other:?}"),
+        }
+    }
+
+    /// (Test plan 1) `max_tokens` at counts 1 and 2 → Continue, counter
+    /// increments to 2 then 3. A fresh `max_tokens` is queued per step.
+    #[tokio::test]
+    async fn max_tokens_at_counts_one_and_two_continue_and_increment() {
+        let orch = orch_with_responses(vec![max_tokens_response(), max_tokens_response()]);
+        let mut state = RecoveryState {
+            max_output_tokens_recovery_count: 1,
+            max_output_tokens_override: None,
+        };
+
+        // count 1 → 2
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert_eq!(state.max_output_tokens_recovery_count, 2);
+
+        // count 2 → 3 (still < limit, so still nudges)
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert_eq!(state.max_output_tokens_recovery_count, 3);
+
+        // Two nudges were appended (one per step).
+        let h = history(&orch).await;
+        let nudges = h
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m,
+                    ConversationMessage::User { content, .. }
+                        if matches!(content.first(), Some(ContentBlock::Text { text })
+                            if text == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE)
+                )
+            })
+            .count();
+        assert_eq!(nudges, 2);
+    }
+
+    /// (Test plan 2) the 4th consecutive `max_tokens` (count already at the
+    /// limit of 3) → Ended with stop_reason `max_tokens`, no further nudge.
+    #[tokio::test]
+    async fn fourth_consecutive_max_tokens_ends_turn() {
+        let orch = orch_with_responses(vec![max_tokens_response()]);
+        let mut state = RecoveryState {
+            max_output_tokens_recovery_count: MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+            max_output_tokens_override: None,
+        };
+
+        let len_before = history(&orch).await.len();
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        match step {
+            TurnStepOutcome::Ended { stop_reason, .. } => {
+                assert_eq!(stop_reason, "max_tokens");
+            }
+            TurnStepOutcome::Continue => panic!("expected Ended on exhaustion"),
+        }
+        // The counter is NOT incremented past the limit, and NO nudge is
+        // appended on exhaustion (only the assistant message from this step).
+        assert_eq!(state.max_output_tokens_recovery_count, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT);
+        let h = history(&orch).await;
+        assert_eq!(h.len(), len_before + 1, "only the assistant msg, no nudge");
+        assert!(matches!(h.last(), Some(ConversationMessage::Assistant { .. })));
+    }
+
+    /// (Test plan 3) a normal `end_turn` is unaffected by the recovery wiring:
+    /// it Ends with `end_turn`, never touches the recovery counter, and appends
+    /// no nudge.
+    #[tokio::test]
+    async fn normal_end_turn_unaffected_by_recovery() {
+        let orch = orch_with_responses(vec![mock_message_response(
+            vec![ContentBlockApi::Text { text: "done".into() }],
+            Some("end_turn"),
+        )]);
+        let mut state = RecoveryState::default();
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("step");
+        match step {
+            TurnStepOutcome::Ended { stop_reason, .. } => assert_eq!(stop_reason, "end_turn"),
+            TurnStepOutcome::Continue => panic!("expected Ended"),
+        }
+        assert_eq!(state.max_output_tokens_recovery_count, 0);
+        let h = history(&orch).await;
+        // [assistant] only — no nudge.
+        assert!(matches!(h.last(), Some(ConversationMessage::Assistant { .. })));
+        assert!(!h.iter().any(|m| matches!(
+            m,
+            ConversationMessage::User { content, .. }
+                if matches!(content.first(), Some(ContentBlock::Text { text })
+                    if text == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE)
+        )));
+    }
+
+    /// The legacy 2-arg shim (`recovery = None`) preserves the bare behavior:
+    /// `max_tokens` falls through to Continue WITHOUT injecting a nudge — the
+    /// cancelable REPL driver depends on this no-op.
+    #[tokio::test]
+    async fn legacy_shim_does_not_recover_on_max_tokens() {
+        let orch = orch_with_responses(vec![max_tokens_response()]);
+        let step = super::execute_one_turn(&orch, None).await.expect("step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+        let h = history(&orch).await;
+        // Only the assistant message; no nudge appended by the shim.
+        assert!(!h.iter().any(|m| matches!(
+            m,
+            ConversationMessage::User { content, .. }
+                if matches!(content.first(), Some(ContentBlock::Text { text })
+                    if text == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE)
+        )));
     }
 }

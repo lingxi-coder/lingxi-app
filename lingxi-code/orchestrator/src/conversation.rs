@@ -5,7 +5,10 @@
 use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
 use crate::test_support::{HookExecutor, PermissionGate};
-use crate::turn_loop::{execute_one_turn, TurnStepOutcome};
+use crate::turn_loop::{
+    execute_one_turn, execute_one_turn_with_recovery, RecoveryState, TurnStepOutcome,
+    MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
+};
 use api_client::{types::MessageResponse, AnthropicProvider, ApiError};
 use async_trait::async_trait;
 use engine::SessionState;
@@ -664,6 +667,9 @@ impl ConversationOrchestrator {
         self.persist_message_to_jsonl(&user_msg).await;
 
         // 2. Turn-by-turn driver.
+        // A1: per-conversation max_output_tokens recovery bookkeeping carried
+        // across turn-steps (the 3-retry limit is consecutive).
+        let mut recovery = RecoveryState::default();
         let mut turn_count: u32 = 0;
         let final_message_id;
         loop {
@@ -674,7 +680,12 @@ impl ConversationOrchestrator {
             }
             turn_count = turn_count.saturating_add(1);
 
-            let step = execute_one_turn(self, system_prompt.as_deref()).await?;
+            let step = execute_one_turn_with_recovery(
+                self,
+                system_prompt.as_deref(),
+                Some(&mut recovery),
+            )
+            .await?;
             match step {
                 TurnStepOutcome::Continue => continue,
                 TurnStepOutcome::Ended {
@@ -764,6 +775,10 @@ impl ConversationOrchestrator {
         // across turns; see `build_wire_tools`). Cloned into each turn's stream.
         let wire_tools = self.build_wire_tools().await;
 
+        // A1: per-conversation max_output_tokens recovery bookkeeping (streaming
+        // twin of the batched driver). Carried across turn-steps so the 3-retry
+        // limit is consecutive.
+        let mut recovery = RecoveryState::default();
         let mut turn_count: u32 = 0;
         let final_message_id;
         loop {
@@ -845,10 +860,36 @@ impl ConversationOrchestrator {
                     break;
                 }
                 Some("tool_use") if !pumped.tool_uses.is_empty() => continue,
+                // A1: intercept `max_tokens` BEFORE the generic terminal arm.
+                // While recovery is not exhausted, inject the byte-exact meta
+                // nudge user message, increment the counter, and Continue
+                // (TS `query.ts:1223-1252`). On exhaustion, fall through to the
+                // generic terminal below (end with stop_reason `max_tokens`).
+                Some("max_tokens")
+                    if recovery.max_output_tokens_recovery_count
+                        < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT =>
+                {
+                    // The nudge is a plain user text message carrying the
+                    // byte-exact string (the protocol has no `isMeta` flag).
+                    let nudge_msg = ConversationMessage::user(
+                        MessageId::new(),
+                        MAX_OUTPUT_TOKENS_RECOVERY_NUDGE.to_string(),
+                    );
+                    {
+                        let mut s = self.session.lock().await;
+                        s.history.push(nudge_msg.clone());
+                    }
+                    self.persist_message_to_jsonl(&nudge_msg).await;
+                    recovery.max_output_tokens_recovery_count = recovery
+                        .max_output_tokens_recovery_count
+                        .saturating_add(1);
+                    recovery.max_output_tokens_override = None;
+                    continue;
+                }
                 Some(other) => {
-                    // max_tokens / stop_sequence / pause_turn / refusal —
-                    // terminate the loop with the value as-is, mirroring
-                    // claude-code's behavior (claude.ts:2269).
+                    // max_tokens (recovery exhausted) / stop_sequence /
+                    // pause_turn / refusal — terminate the loop with the value
+                    // as-is, mirroring claude-code's behavior (claude.ts:2269).
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn(other, &cost).await;
                     final_message_id = assistant_id;

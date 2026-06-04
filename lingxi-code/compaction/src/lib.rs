@@ -32,8 +32,9 @@ pub use boundary::{
     BOUNDARY_CONTENT,
 };
 pub use microcompact::{
-    compactable_tools, reset_microcompact_state, MicrocompactResult, Microcompactor,
-    TIME_BASED_MC_CLEARED_MESSAGE,
+    collect_compactable_tool_ids, compactable_tools, evaluate_time_based_trigger,
+    reset_microcompact_state, MicrocompactResult, Microcompactor, TimeBasedMCConfig,
+    TimeBasedTrigger, TIME_BASED_MC_CLEARED_MESSAGE,
 };
 pub use orchestrator::{CompactionOrchestrator, IterationCompactionResult};
 pub use post_compact::{is_main_thread_compact, run_post_compact_cleanup};

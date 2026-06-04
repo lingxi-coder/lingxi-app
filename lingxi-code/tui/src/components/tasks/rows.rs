@@ -17,7 +17,7 @@ fn unread_suffix(status: &str, notified: bool) -> Option<&'static str> {
     (status == "completed" && !notified).then_some(", unread")
 }
 
-/// local_agent: `{description} ({label}[, unread])`.
+/// `local_agent`: `{description} ({label}[, unread])`.
 #[must_use]
 pub fn render_local_agent_row(description: &str, status: &str, notified: bool) -> String {
     format!(
@@ -26,7 +26,7 @@ pub fn render_local_agent_row(description: &str, status: &str, notified: bool) -
     )
 }
 
-/// remote_agent: `◇|◆ {title} · {progress}` where progress is `{done}/{total}`
+/// `remote_agent`: `◇|◆ {title} · {progress}` where progress is `{done}/{total}`
 /// when counts are known, else `done`/`error`/`stopped`/`{status}…`.
 #[must_use]
 pub fn render_remote_agent_row(title: &str, status: &str, progress: Option<(u64, u64)>) -> String {
@@ -47,7 +47,7 @@ pub fn render_remote_agent_row(title: &str, status: &str, progress: Option<(u64,
     format!("{diamond} {title}{MIDDOT}{prog}")
 }
 
-/// in_process_teammate: `@{name} : {activity}` when activity known, else
+/// `in_process_teammate`: `@{name} : {activity}` when activity known, else
 /// `@{name} ({label})`.
 #[must_use]
 pub fn render_in_process_teammate_row(name: &str, status: &str, activity: Option<&str>) -> String {
@@ -57,7 +57,7 @@ pub fn render_in_process_teammate_row(name: &str, status: &str, activity: Option
     }
 }
 
-/// local_workflow: `{name} ({n agents}|{label}[, unread])` — running shows the
+/// `local_workflow`: `{name} ({n agents}|{label}[, unread])` — running shows the
 /// agent count when known.
 #[must_use]
 pub fn render_local_workflow_row(
@@ -77,7 +77,7 @@ pub fn render_local_workflow_row(
     format!("{name} {text}")
 }
 
-/// monitor_mcp: `{description} ({label}[, unread])`.
+/// `monitor_mcp`: `{description} ({label}[, unread])`.
 #[must_use]
 pub fn render_monitor_mcp_row(description: &str, status: &str, notified: bool) -> String {
     format!(

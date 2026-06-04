@@ -18,11 +18,11 @@
 //!   max-token overrides — the ant-model registry lives elsewhere. The
 //!   `CLAUDE_CODE_MAX_CONTEXT_TOKENS` override (which TS *also* gates on
 //!   `USER_TYPE === 'ant'`) IS honored here because it is a pure env read.
-//! - `getSonnet1mExpTreatmentEnabled` (GrowthBook `coral_reef_sonnet`
-//!   client-data-cache flag) — GrowthBook config has no Rust equivalent here;
+//! - `getSonnet1mExpTreatmentEnabled` (`GrowthBook` `coral_reef_sonnet`
+//!   client-data-cache flag) — `GrowthBook` config has no Rust equivalent here;
 //!   omitted.
-//! - `isMaxTokensCapEnabled` (GrowthBook `tengu_otk_slot_v1` slot-reservation
-//!   cap → drop default to [`CAPPED_DEFAULT_MAX_TOKENS`]) — GrowthBook flag is
+//! - `isMaxTokensCapEnabled` (`GrowthBook` `tengu_otk_slot_v1` slot-reservation
+//!   cap → drop default to [`CAPPED_DEFAULT_MAX_TOKENS`]) — `GrowthBook` flag is
 //!   unwired in Rust, so the cap is NOT applied; [`max_output_tokens_for_model`]
 //!   returns the model's native default. The `CLAUDE_CODE_MAX_OUTPUT_TOKENS`
 //!   env override (a pure env read) IS honored, clamped to the upper limit.
@@ -214,7 +214,7 @@ fn parse_positive_i64(raw: &str) -> Option<u64> {
     // a clean unsigned integer, which covers every realistic override value.
     let digits: String = trimmed
         .chars()
-        .take_while(|c| c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
         .collect();
     if digits.is_empty() {
         return None;

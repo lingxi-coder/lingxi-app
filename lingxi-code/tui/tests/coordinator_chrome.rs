@@ -1,4 +1,4 @@
-//! M9-06 — coordinator chrome snapshots + a fixture WorkersRefreshed check + state tests.
+//! M9-06 — coordinator chrome snapshots + a fixture `WorkersRefreshed` check + state tests.
 
 use tui::components::coordinator::agent_progress::{
     render_agent_progress_line, AgentProgressState,

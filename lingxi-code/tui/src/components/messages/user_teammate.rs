@@ -1,7 +1,7 @@
 //! `UserTeammateMessage` — teammate transcript message.
 //!
 //! Literal lock (claude-code `UserTeammateMessage.tsx`): `@{display_name}❯`
-//! header in the teammate's agent color. TaskCompleted → TWO lines: the header
+//! header in the teammate's agent color. `TaskCompleted` → TWO lines: the header
 //! line, then a `MessageResponse`-guttered line
 //! `  ⎿  ✓ Completed task #{task_id}` + optional ` ({task_subject})` (dim).
 //! Note → `@name❯` + optional ` {summary}` (same line); transcript mode
@@ -20,7 +20,7 @@ use crate::theme::Theme;
 pub const POINTER: &str = "\u{276F}";
 /// `✓` completed check (U+2713).
 pub const CHECK: &str = "\u{2713}";
-/// `  ⎿  ` MessageResponse gutter (2 spaces + U+23BF + 2 spaces).
+/// `  ⎿  ` `MessageResponse` gutter (2 spaces + U+23BF + 2 spaces).
 pub const GUTTER: &str = "  \u{23BF}  ";
 
 /// Props for [`UserTeammateMessage`].

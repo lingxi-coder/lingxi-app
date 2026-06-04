@@ -81,11 +81,11 @@ pub enum Screen {
     BackgroundTasks(background_tasks::BackgroundTasksState),
     /// (M9-08) The agent-discovery screen — claude-code `AgentsList.tsx` +
     /// `AgentDetail.tsx`. Carries its own list↔detail state (selection + mode
-    /// + the agent catalog rows). Interactive like BackgroundTasks:
-    /// `root::handle_screen_key` runs the pure `agents::handle_agents_key`
-    /// (↑/↓ move, Enter open detail, Esc/`q` close; in detail Esc/`←`/`q`
-    /// returns to the list). Opened by `/agents`; rows come from
-    /// `OrchestratorHandle::list_agents` (name/description/tools_allowed).
+    /// + the agent catalog rows). Interactive like `BackgroundTasks`:
+    ///   `root::handle_screen_key` runs the pure `agents::handle_agents_key`
+    ///   (↑/↓ move, Enter open detail, Esc/`q` close; in detail Esc/`←`/`q`
+    ///   returns to the list). Opened by `/agents`; rows come from
+    ///   `OrchestratorHandle::list_agents` (`name/description/tools_allowed`).
     Agents(agents::AgentsScreenState),
     /// (M9-09) The `/skills` registry viewer — claude-code `SkillsMenu.tsx`. A
     /// read-only, scrollable list of discovered skills grouped by source.

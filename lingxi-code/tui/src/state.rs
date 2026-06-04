@@ -528,6 +528,9 @@ impl Default for StreamingState {
 pub type StreamingTurn = StreamingState;
 
 /// Root TUI state. Owned by the `App` root component.
+// Many independent UI flags map 1:1 to claude-code's React state fields; collapsing
+// them into enums would diverge from the reference layout and churn the public API.
+#[allow(clippy::struct_excessive_bools)]
 pub struct AppState {
     /// Scrollback buffer. (M7-03) Full log retained — no eviction; the
     /// `VirtualMessageList` windows the viewport.

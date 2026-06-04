@@ -1,10 +1,25 @@
 //! Compaction orchestrator — runs each layer in order, escalating only when
 //! cheaper layers leave us over the autocompact threshold.
+//!
+//! Order mirrors the TS query pipeline (`query.ts:400-467`): **snip →
+//! microcompact → autocompact**. The `contextCollapse` layer that TS runs
+//! between microcompact and autocompact is feature-gated and absent from the
+//! reference checkout, so it is **intentionally omitted here** (documented as a
+//! known gap, not a divergence).
+//!
+//! Autocompact is gated through [`crate::threshold_calc::should_auto_compact`]
+//! and guarded by the circuit breaker from `autoCompactIfNeeded`
+//! (`autoCompact.ts:241-351`): after
+//! [`MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`](crate::thresholds::MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES)
+//! consecutive failures the layer short-circuits without calling the
+//! summarizer.
 
 use crate::autocompact::{Autocompactor, CompactionError};
 use crate::microcompact::{Microcompactor, TimeBasedMCConfig};
 use crate::snip::SnipCompactor;
-use crate::thresholds::CompactionLayer;
+use crate::thresholds::{
+    AutoCompactTrackingState, CompactionLayer, MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
+};
 use protocol::ConversationMessage;
 use std::time::SystemTime;
 
@@ -17,6 +32,19 @@ pub struct IterationCompactionResult {
     pub layers_applied: Vec<CompactionLayer>,
     /// Approximate tokens freed across all layers.
     pub total_tokens_freed: u64,
+    /// Consecutive autocompact-failure count after this pass. Mirrors the
+    /// `consecutiveFailures` value `autoCompactIfNeeded` threads back to the
+    /// caller (`autoCompact.ts:328-349`): reset to `0` on a successful
+    /// autocompact, incremented on a failed one, and carried through unchanged
+    /// when autocompact did not run. The caller persists this into its
+    /// `AutoCompactTrackingState` so the next iteration's circuit breaker sees
+    /// it.
+    pub consecutive_failures: u32,
+    /// Whether the autocompact layer actually ran and succeeded this pass.
+    /// Mirrors `wasCompacted` from `autoCompactIfNeeded`. `false` when
+    /// autocompact was skipped (under threshold or circuit-breaker tripped) or
+    /// failed; snip/micro firing alone does **not** set this.
+    pub was_compacted: bool,
 }
 
 /// Owns one instance of each layer + the autocompact threshold.
@@ -45,12 +73,65 @@ impl CompactionOrchestrator {
         }
     }
 
-    /// Run one full orchestrator pass. `snip_tokens_freed_already` lets the
-    /// caller report snip work done outside this entry point.
+    /// Run one full orchestrator pass with a **fresh** tracking state.
+    ///
+    /// Thin wrapper over [`Self::process_iteration_tracked`] that starts from a
+    /// default [`AutoCompactTrackingState`] (zero consecutive failures), so the
+    /// circuit breaker never short-circuits on this path. Used by the manual
+    /// `/compact` entry point (`force_compact_with_cancel`), whose behavior is
+    /// unchanged by Batch 3: snip runs first but targets the autocompact
+    /// threshold, so a history that is over the threshold still escalates to
+    /// autocompact exactly as before.
+    ///
+    /// `snip_tokens_freed_already` lets the caller report snip work done outside
+    /// this entry point; it is folded into the freed total and the
+    /// should-auto-compact subtraction.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`CompactionError`] from the autocompact layer when it fires
+    /// and fails.
     pub async fn process_iteration(
+        &self,
+        messages: Vec<ConversationMessage>,
+        snip_tokens_freed_already: u64,
+    ) -> Result<IterationCompactionResult, CompactionError> {
+        let mut tracking = AutoCompactTrackingState::default();
+        self.process_iteration_tracked(messages, snip_tokens_freed_already, &mut tracking)
+            .await
+    }
+
+    /// Run one full orchestrator pass, threading `tracking` for the autocompact
+    /// circuit breaker.
+    ///
+    /// Order (TS `query.ts:400-467`):
+    /// 1. **Snip** — drop oldest messages targeting the autocompact threshold
+    ///    (cheapest, no LLM). Records [`CompactionLayer::Snip`] when it removed
+    ///    at least one message.
+    /// 2. **Microcompact** — clear large tool results. Records
+    ///    [`CompactionLayer::Microcompact`] when it cleared anything.
+    /// 3. **Autocompact** — only when still over threshold per
+    ///    [`should_auto_compact`](crate::threshold_calc::should_auto_compact)
+    ///    **and** the circuit breaker has not tripped
+    ///    (`tracking.consecutive_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`).
+    ///    On success resets `tracking.consecutive_failures` to `0` and sets
+    ///    `was_compacted = true`; on error increments it and propagates the
+    ///    error.
+    ///
+    /// `snip_tokens_freed_already` accounts for snip work the caller already did
+    /// before this entry point (TS `snipTokensFreed`); it is added to this
+    /// pass's snip savings for the threshold subtraction.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`CompactionError`] from the autocompact layer when it fires
+    /// and fails. On error `tracking.consecutive_failures` has already been
+    /// incremented.
+    pub async fn process_iteration_tracked(
         &self,
         mut messages: Vec<ConversationMessage>,
         snip_tokens_freed_already: u64,
+        tracking: &mut AutoCompactTrackingState,
     ) -> Result<IterationCompactionResult, CompactionError> {
         let mut layers = Vec::new();
         let mut freed = snip_tokens_freed_already;
@@ -58,27 +139,266 @@ impl CompactionOrchestrator {
             layers.push(CompactionLayer::Snip);
         }
 
+        // --- Layer 1: snip (cheapest, no LLM) ----------------------------- //
+        // Target the autocompact threshold as the snip budget: snip is the
+        // cheap first escalation, so we let it shed the oldest messages toward
+        // the same ceiling autocompact defends. The protected-tail floor in
+        // `SnipCompactor::snip` means snip cannot drive a genuinely-oversized
+        // history below the threshold on its own, so autocompact still
+        // escalates when warranted (this preserves the manual `/compact`
+        // outcome — see `process_iteration`).
+        let current_tokens = crate::grouping::estimate_tokens_for_range(&messages);
+        let snip = SnipCompactor::snip(messages, current_tokens, self.autocompact_threshold);
+        if snip.removed_count > 0 {
+            layers.push(CompactionLayer::Snip);
+            freed = freed.saturating_add(snip.tokens_freed);
+        }
+        messages = snip.messages;
+
+        // --- Layer 2: microcompact ---------------------------------------- //
         let micro = self.micro.compact(messages, SystemTime::now());
         if micro.cleared_count > 0 {
             layers.push(CompactionLayer::Microcompact);
+            freed = freed.saturating_add(micro.tokens_saved);
         }
         messages = micro.messages;
 
-        let estimated = crate::grouping::estimate_tokens_for_range(&messages);
-        if estimated > self.autocompact_threshold {
-            let result = self.auto.compact(messages.clone()).await?;
-            messages.clone_from(&result.summary_messages);
-            freed = freed.saturating_add(
-                result
-                    .pre_compact_token_count
-                    .saturating_sub(result.post_compact_token_count),
-            );
-            layers.push(CompactionLayer::Autocompact);
+        // --- (collapse layer intentionally omitted — known gap) ----------- //
+
+        // --- Layer 3: autocompact (threshold + circuit-breaker gated) ----- //
+        let mut was_compacted = false;
+        let estimate_after_micro = crate::grouping::estimate_tokens_for_range(&messages);
+        let over_threshold = crate::threshold_calc::should_auto_compact(
+            estimate_after_micro,
+            // Snip removed messages but the surviving usage estimate above
+            // already reflects the post-snip set, so no extra subtraction is
+            // applied here (snip_freed = 0). The freed total still carries the
+            // savings for the caller's accounting.
+            0,
+            self.autocompact_threshold,
+        );
+        // Circuit breaker: after N consecutive failures, stop trying so a
+        // hopelessly-over-limit session does not hammer the summarizer every
+        // turn (`autoCompact.ts:260-265`).
+        let breaker_tripped =
+            tracking.consecutive_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES;
+
+        if over_threshold && !breaker_tripped {
+            match self.auto.compact(messages.clone()).await {
+                Ok(result) => {
+                    messages.clone_from(&result.summary_messages);
+                    freed = freed.saturating_add(
+                        result
+                            .pre_compact_token_count
+                            .saturating_sub(result.post_compact_token_count),
+                    );
+                    layers.push(CompactionLayer::Autocompact);
+                    was_compacted = true;
+                    // Reset the failure count on success.
+                    tracking.consecutive_failures = 0;
+                }
+                Err(e) => {
+                    // Increment for the circuit breaker, then propagate.
+                    tracking.consecutive_failures =
+                        tracking.consecutive_failures.saturating_add(1);
+                    return Err(e);
+                }
+            }
         }
+
         Ok(IterationCompactionResult {
             messages,
             layers_applied: layers,
             total_tokens_freed: freed,
+            consecutive_failures: tracking.consecutive_failures,
+            was_compacted,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::autocompact::CompactionResult;
+    use protocol::MessageId;
+
+    fn long_user(i: usize) -> ConversationMessage {
+        // ~80 chars → ~20 tokens each, so a handful clears any small threshold.
+        ConversationMessage::user(
+            MessageId::new(),
+            format!("turn-{i} padding text to push the token estimate over a small threshold value"),
+        )
+    }
+
+    /// An `Autocompactor` whose `compact` always returns `Err`, to exercise the
+    /// circuit breaker without a network call. Built by swapping the orchestrator
+    /// field after construction.
+    fn failing_autocompactor() -> Autocompactor {
+        // The default (unwired) autocompactor SUCCEEDS via the deterministic
+        // fallback, so to force failures we wire a runner with an empty slot:
+        // `compact` then returns `CompactionError::Internal("no cache-safe
+        // params")` on every call.
+        use sidequery::{CacheSafeParamsSlot, ForkedAgentRunner, SubagentSlotProvider};
+        use std::sync::Arc;
+        struct NoopProvider;
+        impl SubagentSlotProvider for NoopProvider {}
+        // No `with_side_query_client` → run() would fail too, but the empty slot
+        // is consulted first and short-circuits with an error before any call.
+        let runner = Arc::new(ForkedAgentRunner::new(Arc::new(NoopProvider)));
+        let slot = Arc::new(CacheSafeParamsSlot::new()); // never saved → empty
+        Autocompactor::with_forked_runner(runner, slot)
+    }
+
+    /// A panicking autocompactor: any call to `compact` would panic. Used to
+    /// prove the snip-only-under-threshold path never reaches autocompact.
+    ///
+    /// We cannot make `Autocompactor::compact` itself panic (it is a concrete
+    /// type), so instead we assert via the threshold gate: with a threshold
+    /// above the post-snip estimate, `should_auto_compact` is false and the
+    /// `auto.compact` arm is never entered. The default autocompactor here would
+    /// otherwise succeed; the test asserts it was NOT invoked by checking that
+    /// `was_compacted` is false and `Autocompact` is absent from the layers.
+    fn order_orchestrator(threshold: u64) -> CompactionOrchestrator {
+        CompactionOrchestrator::new(threshold)
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_short_circuits_after_three_failures() {
+        // Threshold 0 so `should_auto_compact` is always true: every pass tries
+        // autocompact. The failing autocompactor errors each time, so the first
+        // three passes return Err and bump consecutive_failures to 3; the fourth
+        // short-circuits (was_compacted=false) WITHOUT calling the summarizer.
+        let mut orch = order_orchestrator(0);
+        orch.auto = failing_autocompactor();
+
+        let mut tracking = AutoCompactTrackingState::default();
+        let msgs = vec![long_user(0), long_user(1), long_user(2)];
+
+        // 3 consecutive Err from the failing mock summarizer.
+        for expected in 1..=3u32 {
+            let r = orch
+                .process_iteration_tracked(msgs.clone(), 0, &mut tracking)
+                .await;
+            assert!(r.is_err(), "attempt {expected} should fail");
+            assert_eq!(
+                tracking.consecutive_failures, expected,
+                "failure count should increment to {expected}"
+            );
+        }
+
+        // 4th call: breaker tripped → short-circuit, no summarizer call, Ok with
+        // was_compacted=false.
+        let res = orch
+            .process_iteration_tracked(msgs.clone(), 0, &mut tracking)
+            .await
+            .expect("breaker short-circuits to Ok, not Err");
+        assert!(
+            !res.was_compacted,
+            "4th call must NOT compact (circuit breaker)"
+        );
+        assert!(
+            !res.layers_applied.contains(&CompactionLayer::Autocompact),
+            "autocompact layer must not fire when breaker is tripped"
+        );
+        assert_eq!(res.consecutive_failures, 3);
+    }
+
+    #[tokio::test]
+    async fn snip_alone_under_threshold_never_calls_summarizer() {
+        // A huge threshold means even the full (un-snipped) history is under it,
+        // so `should_auto_compact` is false and the autocompact arm is never
+        // entered. We assert no Autocompact layer and was_compacted=false. If the
+        // gate were broken and autocompact ran, the default autocompactor would
+        // succeed and the layer would appear — so its ABSENCE proves the
+        // summarizer was not invoked.
+        let orch = order_orchestrator(1_000_000);
+        let mut tracking = AutoCompactTrackingState::default();
+        let msgs = vec![long_user(0), long_user(1), long_user(2)];
+
+        let res = orch
+            .process_iteration_tracked(msgs, 0, &mut tracking)
+            .await
+            .expect("under threshold → Ok");
+
+        assert!(!res.was_compacted, "must not compact under threshold");
+        assert!(
+            !res.layers_applied.contains(&CompactionLayer::Autocompact),
+            "autocompact must not fire under threshold"
+        );
+        // No snip either (under budget) and no micro (no tool results).
+        assert!(res.layers_applied.is_empty(), "no layers should fire");
+        assert_eq!(tracking.consecutive_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn success_resets_consecutive_failures_and_sets_was_compacted() {
+        // Threshold 0 → always over threshold; default (unwired) autocompactor
+        // SUCCEEDS via the deterministic fallback. Seed a non-zero failure count
+        // (below the breaker limit) and confirm a successful pass resets it and
+        // reports was_compacted=true.
+        let orch = order_orchestrator(0);
+        let mut tracking = AutoCompactTrackingState {
+            consecutive_failures: 2,
+            ..Default::default()
+        };
+        let msgs = vec![long_user(0), long_user(1)];
+
+        let res = orch
+            .process_iteration_tracked(msgs, 0, &mut tracking)
+            .await
+            .expect("default autocompactor succeeds");
+
+        assert!(res.was_compacted, "autocompact should have run");
+        assert!(res.layers_applied.contains(&CompactionLayer::Autocompact));
+        assert_eq!(
+            tracking.consecutive_failures, 0,
+            "success resets the failure count"
+        );
+        assert_eq!(res.consecutive_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn process_iteration_wrapper_uses_fresh_tracking() {
+        // The thin wrapper starts from a fresh tracking state, so even after
+        // (hypothetical) prior failures elsewhere it always attempts autocompact
+        // when over threshold. Threshold 0 + default autocompactor → success.
+        let orch = order_orchestrator(0);
+        let msgs = vec![long_user(0), long_user(1)];
+        let res = orch
+            .process_iteration(msgs, 0)
+            .await
+            .expect("wrapper succeeds");
+        assert!(res.was_compacted);
+        assert!(res.layers_applied.contains(&CompactionLayer::Autocompact));
+    }
+
+    #[tokio::test]
+    async fn snip_fires_and_is_recorded_when_over_budget() {
+        // Many messages with a small threshold: snip removes the oldest down to
+        // the protected tail, recording the Snip layer; autocompact then still
+        // fires because the protected tail remains over threshold.
+        let orch = order_orchestrator(50);
+        let mut tracking = AutoCompactTrackingState::default();
+        let msgs: Vec<_> = (0..40).map(long_user).collect();
+
+        let res = orch
+            .process_iteration_tracked(msgs, 0, &mut tracking)
+            .await
+            .expect("over threshold → autocompact succeeds");
+
+        assert!(
+            res.layers_applied.contains(&CompactionLayer::Snip),
+            "snip should fire when over budget"
+        );
+        assert!(res.total_tokens_freed > 0, "snip should free tokens");
+    }
+
+    // Keep an explicit reference to CompactionResult's shape so the test module
+    // documents the success contract it relies on (pre/post token counts feed
+    // total_tokens_freed).
+    #[allow(dead_code)]
+    fn _result_shape(r: &CompactionResult) -> u64 {
+        r.pre_compact_token_count
+            .saturating_sub(r.post_compact_token_count)
     }
 }

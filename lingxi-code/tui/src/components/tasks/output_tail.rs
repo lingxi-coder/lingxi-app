@@ -89,7 +89,7 @@ mod tests {
             offset: Option<u64>,
         ) -> Result<TaskOutputChunk, TaskRegistryError> {
             let spool = self.spool.lock().unwrap();
-            let off = offset.unwrap_or(0) as usize;
+            let off = usize::try_from(offset.unwrap_or(0)).unwrap_or(usize::MAX);
             let content = spool
                 .as_bytes()
                 .get(off..)

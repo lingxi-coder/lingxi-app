@@ -2,6 +2,9 @@
 //! `< 1000` → as-is; `>= 1000` → `1.2k`; `>= 1_000_000` → `1.2M`.
 
 /// Format a token count compactly. Drops a trailing `.0`.
+// f64 precision loss is intentional and inherent to compact one-decimal display
+// (parity with claude-code `formatNumber`); changing the cast would alter output.
+#[allow(clippy::cast_precision_loss)]
 #[must_use]
 pub fn format_token_count(n: u64) -> String {
     if n < 1000 {

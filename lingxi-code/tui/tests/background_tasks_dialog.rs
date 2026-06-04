@@ -1,4 +1,4 @@
-//! M9-05 — BackgroundTasksDialog behavior + snapshots.
+//! M9-05 — `BackgroundTasksDialog` behavior + snapshots.
 
 use tui::components::tasks::output_tail::OutputTailState;
 use tui::multiagent::state::TaskRow;

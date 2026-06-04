@@ -43,6 +43,26 @@ pub fn patch_truncation_suffix(n: usize) -> String {
     PATCH_TRUNCATION_SUFFIX_TEMPLATE.replace("{N}", &n.to_string())
 }
 
+/// Build the model-facing `tool_result` message for an Edit, byte-faithful to
+/// claude-code `FileEditTool.mapToolResultToToolResultBlockParam`
+/// (`FileEditTool.ts:575-594`).
+///
+/// `path` is the ORIGINAL `file_path` input string (claude-code echoes the
+/// caller's path verbatim, not a canonicalized form).
+///
+/// The interactive-only `userModified` variant — which inserts
+/// `".  The user modified your proposed changes before accepting them. "` —
+/// is out of scope for the non-interactive orchestrator (there is no
+/// human-in-the-loop accept step), so `modifiedNote` is always empty here.
+#[must_use]
+pub fn edit_result_message(path: &str, replace_all: bool) -> String {
+    if replace_all {
+        format!("The file {path} has been updated. All occurrences were successfully replaced.")
+    } else {
+        format!("The file {path} has been updated successfully.")
+    }
+}
+
 /// `FileEditTool` — literal-search replacement in a UTF-8 file.
 pub struct FileEditTool {
     ctx: BuiltinToolContext,
@@ -336,8 +356,16 @@ impl Tool for FileEditTool {
         self.emit_completed(&invocation_id, replacements, duration_ms)
             .await;
 
+        // Model-facing result string is byte-faithful to claude-code
+        // (`FileEditTool.ts:575-594`); it echoes the ORIGINAL `file_path` arg,
+        // not the canonicalized path. Batch A's serialization rule emits
+        // `data["content"]` verbatim to the model; `replacements` /
+        // `patch_preview` remain for the TUI diff render only.
+        let content = edit_result_message(file_path, replace_all);
+
         Ok(ToolCallResult {
             data: json!({
+                "content": content,
                 "replacements": replacements,
                 "patch_preview": patch_preview
             }),
@@ -390,6 +418,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn edit_result_message_single_is_byte_locked() {
+        // FileEditTool.ts:589-593 (non-interactive, modifiedNote empty).
+        assert_eq!(
+            edit_result_message("/tmp/a.txt", false),
+            "The file /tmp/a.txt has been updated successfully."
+        );
+    }
+
+    #[test]
+    fn edit_result_message_replace_all_is_byte_locked() {
+        // FileEditTool.ts:581-586 (non-interactive, modifiedNote empty).
+        assert_eq!(
+            edit_result_message("/tmp/a.txt", true),
+            "The file /tmp/a.txt has been updated. All occurrences were successfully replaced."
+        );
+    }
+
+    #[test]
+    fn edit_result_message_echoes_original_path_verbatim() {
+        // claude-code echoes the input path, not a canonicalized form.
+        assert_eq!(
+            edit_result_message("./relative/../weird/path.txt", false),
+            "The file ./relative/../weird/path.txt has been updated successfully."
+        );
+    }
+
     #[tokio::test]
     async fn single_replacement_succeeds() {
         let tmp = TempDir::new().unwrap();
@@ -411,6 +466,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["replacements"], 1);
+        // Model-facing `content` is the byte-faithful single-edit message and
+        // echoes the ORIGINAL input path verbatim (not canonicalized).
+        let input_path = target.to_str().unwrap();
+        assert_eq!(
+            result.data["content"].as_str().unwrap(),
+            format!("The file {input_path} has been updated successfully.")
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello Rust");
     }
 
@@ -594,6 +656,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["replacements"], 3);
+        // replace_all path emits the "All occurrences were successfully
+        // replaced." message verbatim to the model.
+        let input_path = target.to_str().unwrap();
+        assert_eq!(
+            result.data["content"].as_str().unwrap(),
+            format!(
+                "The file {input_path} has been updated. All occurrences were successfully replaced."
+            )
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "bar bar bar");
     }
 

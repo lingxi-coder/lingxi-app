@@ -271,8 +271,8 @@ mod tests {
     fn parse_cost_usd_handles_formatted_and_garbage() {
         assert!((parse_cost_usd("$0.0042") - 0.0042).abs() < 1e-9);
         assert!((parse_cost_usd("$12.5") - 12.5).abs() < 1e-9);
-        assert_eq!(parse_cost_usd(""), 0.0);
-        assert_eq!(parse_cost_usd("n/a"), 0.0);
+        assert!(parse_cost_usd("").abs() < 1e-9);
+        assert!(parse_cost_usd("n/a").abs() < 1e-9);
     }
 
     #[test]

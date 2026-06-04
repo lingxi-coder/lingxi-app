@@ -1004,8 +1004,10 @@ mod tests {
         assert_eq!(render_stats_to_string(&s), format!("{LOADING_LINE}\n{FOOTER}"));
 
         // Filling data clears the loading flag and switches to the real render.
-        let mut data = StatsData::default();
-        data.total_sessions = 3;
+        let data = StatsData {
+            total_sessions: 3,
+            ..Default::default()
+        };
         s.set_data(data);
         assert!(!s.loading);
         assert!(!render_stats_to_string(&s).contains(LOADING_LINE));

@@ -1228,6 +1228,8 @@ mod command_arm_tests {
             blocking: true,
             timeout: None,
             priority: 0,
+            once: false,
+            status_message: None,
         }
     }
 
@@ -2102,6 +2104,8 @@ mod async_path_tests {
             blocking,
             timeout: None,
             priority: 0,
+            once: false,
+            status_message: None,
         }
     }
 

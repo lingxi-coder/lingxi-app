@@ -17,6 +17,7 @@ pub mod gate;
 pub mod loader;
 pub mod mode;
 pub mod mode_policy;
+pub mod path_constraints;
 pub mod persist;
 pub mod policy;
 pub mod policy_gate;
@@ -55,6 +56,7 @@ pub use loader::{
 };
 pub use mode::{next_permission_mode, PermissionMode};
 pub use mode_policy::is_plan_safe_tool;
+pub use path_constraints::{check_path_constraints, PathConstraintAsk};
 pub use persist::{persist_permission_update, PermissionPaths, PersistError};
 pub use policy::PermissionPolicy;
 pub use policy_gate::PolicyPermissionGate;

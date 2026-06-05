@@ -142,6 +142,8 @@ fn make_builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinit
         blocking: true,
         timeout: None,
         priority: 0,
+        once: false,
+        status_message: None,
     }
 }
 

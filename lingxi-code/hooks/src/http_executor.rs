@@ -234,6 +234,8 @@ mod tests {
             blocking: true,
             timeout: None,
             priority: 0,
+            once: false,
+            status_message: None,
         }
     }
 

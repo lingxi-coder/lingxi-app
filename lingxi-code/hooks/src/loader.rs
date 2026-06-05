@@ -25,13 +25,34 @@
 //!
 //! ## Per-hook fields & deferrals
 //!
-//! Only the `"command"` hook type is parsed; the `prompt` / `http` / `agent`
-//! types are deferred (they need executor variants wired through the loader).
+//! The `"command"`, `"http"`, and `"agent"` hook types are parsed (mapping onto
+//! [`HookExecutor::Command`] / [`HookExecutor::Http`] / [`HookExecutor::Agent`]
+//! respectively; the executor already routes each variant to its runner in
+//! `executor.rs`). The `"prompt"` type (`schemas/hooks.ts:67-95`) is DEFERRED:
+//! there is no matching `HookExecutor` variant for an inline-LLM-prompt hook,
+//! and inventing one would require a `traits`/`protocol`-side change, so a
+//! `prompt` entry is skipped rather than mis-parsed.
+//!
 //! The additive `once` (`schemas/hooks.ts:51-54`) and `statusMessage`
 //! (`schemas/hooks.ts:47-50`) fields ARE parsed and carried onto
 //! [`HookDefinition`], but their behaviors — `once` self-removal-after-success
 //! and the `statusMessage` spinner display — are executor / TUI work and are
 //! NOT wired here.
+//!
+//! ### `http` / `agent` field-level deferrals
+//!
+//! The claude-code `http` schema (`schemas/hooks.ts:97-126`) carries `headers`
+//! env-var interpolation gated by an `allowedEnvVars` allowlist; the Rust
+//! [`HookExecutor::Http`] variant has no `allowed_env_vars` field, so headers
+//! are carried verbatim and `allowedEnvVars` is dropped (interpolation deferred
+//! — would need a frozen-side field). The `agent` schema
+//! (`schemas/hooks.ts:128-163`) carries NO `agent_type` (claude-code's agent
+//! hook runs an inline verifier `query()`, not a named subagent); the Rust
+//! [`HookExecutor::Agent`] variant requires a non-optional `agent_type`, so it
+//! is filled with the crate's canonical default `"general-purpose"` (matching
+//! the agent-hook fixtures in `parity_hooks_runtime.rs` and the default in
+//! `agent_executor.rs`). The `model` field both schemas allow is dropped: no
+//! Rust variant carries it.
 
 use crate::definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
 use crate::events::HookEventType;
@@ -59,8 +80,22 @@ struct MatcherGroup {
 struct HookEntry {
     #[serde(default, rename = "type")]
     kind: Option<String>,
+    /// `command` hook executable (`schemas/hooks.ts:33-34`).
     #[serde(default)]
     command: Option<String>,
+    /// `http` hook endpoint URL (`schemas/hooks.ts:99`). Always sent via POST.
+    #[serde(default)]
+    url: Option<String>,
+    /// `http` hook request headers (`schemas/hooks.ts:106-111`). Carried
+    /// verbatim; `allowedEnvVars` env-var interpolation is deferred (no Rust
+    /// field for the allowlist).
+    #[serde(default)]
+    headers: Option<HashMap<String, String>>,
+    /// `agent` hook verifier prompt (`schemas/hooks.ts:138-142`).
+    #[serde(default)]
+    prompt: Option<String>,
+    /// `timeout` in seconds, shared by all hook types
+    /// (`schemas/hooks.ts:42-46` / `75-79` / `101-105` / `144-148`).
     #[serde(default)]
     timeout: Option<u64>,
     /// claude-code `once` (`schemas/hooks.ts:51-54`): run once then remove.
@@ -75,10 +110,23 @@ struct HookEntry {
     status_message: Option<String>,
 }
 
+/// Default agent type for an `agent` hook.
+///
+/// claude-code's `agent` schema (`schemas/hooks.ts:128-163`) carries NO agent
+/// type — its agent hook runs an inline verifier `query()` rather than a named
+/// subagent. The Rust [`HookExecutor::Agent`] variant, by contrast, spawns a
+/// subagent and so requires a non-optional `agent_type`. This crate's canonical
+/// default (the `agent_executor.rs` spawn target, the `parity_hooks_runtime.rs`
+/// fixture, and the `agent_type` doc example in `definition.rs`) is
+/// `"general-purpose"`, so that is what an `agent` settings entry resolves to.
+const DEFAULT_AGENT_TYPE: &str = "general-purpose";
+
 /// Parse the raw JSON string of a settings file into hook definitions.
 ///
-/// Unknown event names are silently skipped. Entries without a `command`
-/// field, or whose `type` is not `"command"`, are skipped. Returns
+/// Unknown event names are silently skipped. An entry whose `type` is
+/// `"command"`/`"http"`/`"agent"` but is missing the field that type requires
+/// (`command` / `url` / `prompt`) is skipped, as is any entry whose `type` is
+/// unrecognized or absent (including the deferred `"prompt"` type). Returns
 /// `Ok(vec![])` when the input has no `hooks` block at all.
 ///
 /// `source` is propagated onto every returned [`HookDefinition`] so the
@@ -94,29 +142,21 @@ pub fn parse_hooks_from_settings_json(
             continue;
         };
         for group in groups {
+            let condition = group.matcher.as_ref().map(|m| HookCondition {
+                pattern: m.clone(),
+                match_tool_name: true,
+                match_input: false,
+            });
             for entry in group.hooks {
-                let Some(command) = entry.command else {
+                let Some((name, executor)) = build_executor(&entry) else {
                     continue;
                 };
-                if entry.kind.as_deref() != Some("command") {
-                    continue;
-                }
-                let condition = group.matcher.as_ref().map(|m| HookCondition {
-                    pattern: m.clone(),
-                    match_tool_name: true,
-                    match_input: false,
-                });
                 out.push(HookDefinition {
                     id: HookId::new(),
-                    name: command.clone(),
+                    name,
                     events: vec![event_type.clone()],
-                    if_condition: condition,
-                    executor: HookExecutor::Command {
-                        command,
-                        args: vec![],
-                        env: HashMap::new(),
-                        cwd: None,
-                    },
+                    if_condition: condition.clone(),
+                    executor,
                     source,
                     blocking: true,
                     timeout: entry.timeout.map(Duration::from_secs),
@@ -128,6 +168,57 @@ pub fn parse_hooks_from_settings_json(
         }
     }
     Ok(out)
+}
+
+/// Project a single settings [`HookEntry`] onto its `(name, HookExecutor)`.
+///
+/// Returns `None` (so the caller skips the entry) when the `type` is missing,
+/// unrecognized, the deferred `"prompt"` type, or is a known type missing its
+/// required field. The per-type timeout is NOT consumed here — it is carried
+/// onto [`HookDefinition::timeout`] by the caller for every type uniformly, so
+/// the executor's per-hook-timeout logic applies identically across arms.
+fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
+    match entry.kind.as_deref() {
+        Some("command") => {
+            let command = entry.command.clone()?;
+            let executor = HookExecutor::Command {
+                command: command.clone(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            };
+            Some((command, executor))
+        }
+        Some("http") => {
+            let url = entry.url.clone()?;
+            let executor = HookExecutor::Http {
+                url: url.clone(),
+                // claude-code always POSTs the hook input JSON
+                // (`utils/hooks/execHttpHook.ts`; `schemas/hooks.ts:99`).
+                method: "POST".to_string(),
+                headers: entry.headers.clone().unwrap_or_default(),
+                // A `timeout: 0` (or omitted) defers to the executor's HTTP
+                // default; the parsed seconds value is the per-hook override.
+                timeout: entry
+                    .timeout
+                    .map_or(Duration::ZERO, Duration::from_secs),
+            };
+            Some((url, executor))
+        }
+        Some("agent") => {
+            let prompt = entry.prompt.clone()?;
+            let executor = HookExecutor::Agent {
+                agent_type: DEFAULT_AGENT_TYPE.to_string(),
+                prompt,
+            };
+            // The hook name mirrors the command-hook convention of naming the
+            // hook after its primary user-supplied field — here the agent type.
+            Some((DEFAULT_AGENT_TYPE.to_string(), executor))
+        }
+        // `"prompt"` (deferred — no matching HookExecutor variant), any other
+        // unknown type, and a missing `type` are all skipped.
+        _ => None,
+    }
 }
 
 /// Map a settings hook event-name string to its [`HookEventType`] variant.
@@ -340,5 +431,165 @@ mod tests {
             hooks[0].if_condition.as_ref().map(|c| c.pattern.as_str()),
             Some("Write|Edit"),
         );
+    }
+
+    // ---- http hook parsing (schemas/hooks.ts:97-126) -----------------------
+
+    #[test]
+    fn http_hook_parses_to_http_executor_with_url_headers_timeout() {
+        let raw = r#"{
+          "hooks": {
+            "PreToolUse": [{ "matcher": "Write|Edit", "hooks": [
+              { "type": "http",
+                "url": "https://hooks.example.com/pre",
+                "headers": { "Authorization": "Bearer t", "X-Env": "prod" },
+                "timeout": 12 }
+            ]}]
+          }
+        }"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::Project).unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].events, vec![HookEventType::PreToolUse]);
+        assert_eq!(hooks[0].source, HookSource::Project);
+        // The per-hook timeout is carried onto the definition (seconds).
+        assert_eq!(hooks[0].timeout, Some(Duration::from_secs(12)));
+        let HookExecutor::Http {
+            url,
+            method,
+            headers,
+            timeout,
+        } = &hooks[0].executor
+        else {
+            panic!("expected Http executor, got {:?}", hooks[0].executor);
+        };
+        assert_eq!(url, "https://hooks.example.com/pre");
+        // claude-code always POSTs the hook input JSON.
+        assert_eq!(method, "POST");
+        assert_eq!(headers.get("Authorization").map(String::as_str), Some("Bearer t"));
+        assert_eq!(headers.get("X-Env").map(String::as_str), Some("prod"));
+        // The per-hook timeout is mirrored onto the executor's `timeout`.
+        assert_eq!(*timeout, Duration::from_secs(12));
+        // The hook name reflects the URL (primary user-supplied field).
+        assert_eq!(hooks[0].name, "https://hooks.example.com/pre");
+        // No matcher-independent matcher pattern is lost.
+        assert_eq!(
+            hooks[0].if_condition.as_ref().map(|c| c.pattern.as_str()),
+            Some("Write|Edit"),
+        );
+    }
+
+    #[test]
+    fn http_hook_without_headers_defaults_to_empty_and_zero_timeout() {
+        // No `headers` and no `timeout`: headers default empty, executor timeout
+        // is ZERO (the executor then falls back to its HTTP default), and the
+        // definition-level timeout is None.
+        let raw = r#"{
+          "hooks": {
+            "PostToolUse": [{ "hooks": [
+              { "type": "http", "url": "https://h.test/post" }
+            ]}]
+          }
+        }"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].timeout, None);
+        let HookExecutor::Http {
+            url,
+            headers,
+            timeout,
+            ..
+        } = &hooks[0].executor
+        else {
+            panic!("expected Http executor");
+        };
+        assert_eq!(url, "https://h.test/post");
+        assert!(headers.is_empty());
+        assert_eq!(*timeout, Duration::ZERO);
+    }
+
+    #[test]
+    fn http_hook_missing_url_is_skipped() {
+        let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
+            { "type": "http", "timeout": 5 }
+        ]}]}}"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
+        assert!(hooks.is_empty(), "an http entry without a url is skipped");
+    }
+
+    // ---- agent hook parsing (schemas/hooks.ts:128-163) ---------------------
+
+    #[test]
+    fn agent_hook_parses_to_agent_executor_with_prompt_and_default_type() {
+        let raw = r#"{
+          "hooks": {
+            "Stop": [{ "hooks": [
+              { "type": "agent",
+                "prompt": "Verify that unit tests ran and passed.",
+                "timeout": 90 }
+            ]}]
+          }
+        }"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::Local).unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].events, vec![HookEventType::Stop]);
+        assert_eq!(hooks[0].source, HookSource::Local);
+        assert_eq!(hooks[0].timeout, Some(Duration::from_secs(90)));
+        let HookExecutor::Agent { agent_type, prompt } = &hooks[0].executor else {
+            panic!("expected Agent executor, got {:?}", hooks[0].executor);
+        };
+        assert_eq!(prompt, "Verify that unit tests ran and passed.");
+        // The schema carries no agent type; the crate default is used.
+        assert_eq!(agent_type, "general-purpose");
+    }
+
+    #[test]
+    fn agent_hook_missing_prompt_is_skipped() {
+        let raw = r#"{ "hooks": { "Stop": [{ "hooks": [
+            { "type": "agent", "timeout": 30 }
+        ]}]}}"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
+        assert!(hooks.is_empty(), "an agent entry without a prompt is skipped");
+    }
+
+    // ---- deferred `prompt` type + mixed batches ----------------------------
+
+    #[test]
+    fn prompt_type_is_deferred_and_skipped() {
+        // `prompt` is a valid claude-code hook type but has NO matching
+        // HookExecutor variant, so it must be skipped (not mis-parsed).
+        let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
+            { "type": "prompt", "prompt": "evaluate this" }
+        ]}]}}"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
+        assert!(hooks.is_empty(), "the deferred prompt type is skipped");
+    }
+
+    #[test]
+    fn mixed_command_http_agent_in_one_group_all_parse() {
+        // One matcher group carrying a command, an http, an agent, and a
+        // (skipped) prompt hook. The command parsing is unchanged; http/agent
+        // parse to their executors; prompt is dropped.
+        let raw = r#"{
+          "hooks": {
+            "PreToolUse": [{ "matcher": "Bash", "hooks": [
+              { "type": "command", "command": "./guard.sh" },
+              { "type": "http", "url": "https://h.test/hook" },
+              { "type": "agent", "prompt": "vet it" },
+              { "type": "prompt", "prompt": "ignored" }
+            ]}]
+          }
+        }"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::Project).unwrap();
+        assert_eq!(hooks.len(), 3, "command + http + agent parse; prompt is skipped");
+        // Every parsed hook keeps the group's matcher.
+        for h in &hooks {
+            assert_eq!(
+                h.if_condition.as_ref().map(|c| c.pattern.as_str()),
+                Some("Bash"),
+            );
+        }
+        assert!(matches!(hooks[0].executor, HookExecutor::Command { .. }));
+        assert!(matches!(hooks[1].executor, HookExecutor::Http { .. }));
+        assert!(matches!(hooks[2].executor, HookExecutor::Agent { .. }));
     }
 }

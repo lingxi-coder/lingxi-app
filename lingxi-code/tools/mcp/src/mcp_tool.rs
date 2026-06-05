@@ -474,11 +474,23 @@ impl Tool for MCPTool {
                     ],
                 )
                 .await;
+                // Reshape each server content block into its model-facing form
+                // (text passthrough, resource-text prefixing, resource_link),
+                // mirroring claude-code's `transformResultContent` /
+                // `transformMCPResult` (`client.ts:2478-2697`). Only ARRAY
+                // `content` is walked — a bare value (e.g. a `toolResult`
+                // string) is forwarded verbatim, matching the TS branch that
+                // never reaches `transformResultContent`. image/audio/
+                // resource-blob remain a verbatim passthrough (DEFERRED — they
+                // need an image codec / disk persistence; see
+                // `transform_result.rs`).
+                let content =
+                    crate::transform_result::transform_result_content(&dto.content, &server);
                 Ok(ToolCallResult {
                     data: json!({
                         "server_name": server,
                         "tool_name": tool,
-                        "content": dto.content,
+                        "content": content,
                         "is_error": dto.is_error,
                     }),
                     new_messages: vec![],

@@ -19,6 +19,7 @@ pub mod cost_wiring;
 pub mod diagnostics;
 pub mod error;
 pub mod handle_impl;
+pub mod hook_prompt_runner;
 pub mod image_input;
 pub mod prompt;
 pub mod provider_adapter;
@@ -48,6 +49,7 @@ pub use conversation::{
     ConversationOutcome, OrchestratorApiClient, StreamingApiClient, TurnOutcome,
 };
 pub use error::OrchestratorError;
+pub use hook_prompt_runner::ApiClientHookPromptRunner;
 pub use prompt::{
     assemble_system_prompt, FileTree, FileTreeEntry, GitStatus, MemoryFile, SystemPromptContext,
 };

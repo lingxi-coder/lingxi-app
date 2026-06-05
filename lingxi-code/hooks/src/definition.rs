@@ -120,6 +120,25 @@ pub enum HookExecutor {
         /// Prompt text supplied to the spawned agent.
         prompt: String,
     },
+    /// Evaluate an inline single-turn LLM query and map the model's
+    /// `{ok, reason?}` JSON to a hook decision (claude-code
+    /// `utils/hooks/execPromptHook.ts`; `schemas/hooks.ts:67-95`).
+    ///
+    /// The query is run through the injected
+    /// [`crate::prompt_executor::HookPromptRunner`] (wired on the
+    /// [`crate::HookExecutorImpl`] via `with_prompt_runner`). When no runner is
+    /// wired the arm is a structured "not wired" no-op — it never blocks.
+    Prompt {
+        /// Prompt text to evaluate. May contain `$ARGUMENTS` placeholders that
+        /// the executor substitutes with the serialized event payload
+        /// (`addArgumentsToPrompt`; `execPromptHook.ts:35`).
+        prompt: String,
+        /// Optional model override (`schemas/hooks.ts:81-86`). When `None` the
+        /// runner falls back to its default small-fast model
+        /// (`getSmallFastModel()`; `execPromptHook.ts:79`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
     /// Dispatch to an in-process Rust handler registered via
     /// [`crate::HookExecutorImpl::register_builtin`].
     Builtin {

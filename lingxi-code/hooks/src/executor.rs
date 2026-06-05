@@ -29,6 +29,9 @@ use crate::hook_payload::{
     TaskCompletedPayload, UserPromptSubmitPayload, WorktreeCreatePayload, WorktreeRemovePayload,
 };
 use crate::http_executor::{HttpExecutionSignal, HttpExecutor};
+use crate::prompt_executor::{
+    HookPromptRunner, PromptExecutionSignal, PromptExecutor, HOOK_PROMPT_TIMEOUT_MS,
+};
 use crate::registry::{HookContext, HookRegistry};
 use crate::response::{AggregateHookResult, HookDecision, HookOutcome, HookResponse, HookResult};
 use crate::ssrf_guard::SsrfGuard;
@@ -85,6 +88,12 @@ pub struct HookExecutorImpl {
     /// When `None`, the `Agent` arm returns `HookOutcome::Error` with
     /// `stderr: "Hook {id} failed: agent executor not wired"`. M5-06.
     agent_spawner: Option<Arc<dyn SubagentSpawner>>,
+    /// Optional single-turn LLM runner — attached via
+    /// [`Self::with_prompt_runner`]. When `None`, the `Prompt` arm returns a
+    /// structured "not wired" no-op (never blocks). The orchestrator wires this
+    /// over its existing one-shot `messages_create` call to keep the hooks
+    /// crate decoupled from the api-client.
+    prompt_runner: Option<Arc<dyn HookPromptRunner>>,
     /// Optional process runner — attached via [`Self::with_process_runner`].
     /// When `None`, the `Command` arm returns `HookOutcome::Error` with
     /// `stderr: "Hook {id} failed: command executor not wired"`.
@@ -119,6 +128,7 @@ impl HookExecutorImpl {
             builtin_handlers: HashMap::new(),
             ssrf_guard: SsrfGuard::with_defaults(),
             agent_spawner: None,
+            prompt_runner: None,
             process: None,
             sandbox: None,
             async_registry: None,
@@ -141,6 +151,18 @@ impl HookExecutorImpl {
     #[must_use]
     pub fn with_agent_spawner(mut self, spawner: Arc<dyn SubagentSpawner>) -> Self {
         self.agent_spawner = Some(spawner);
+        self
+    }
+
+    /// Attach a [`HookPromptRunner`] so the `Prompt` arm can evaluate inline
+    /// single-turn LLM queries (`execPromptHook.ts`). Without this,
+    /// [`HookExecutor::Prompt`] hooks return a structured "not wired" no-op and
+    /// never block. The orchestrator implements the runner over its existing
+    /// one-shot `messages_create` call, keeping the hooks crate independent of
+    /// the api-client.
+    #[must_use]
+    pub fn with_prompt_runner(mut self, runner: Arc<dyn HookPromptRunner>) -> Self {
+        self.prompt_runner = Some(runner);
         self
     }
 
@@ -182,6 +204,7 @@ impl HookExecutorImpl {
             ssrf_guard: self.ssrf_guard.clone(),
             builtin_handlers: self.builtin_handlers.clone(),
             agent_spawner: self.agent_spawner.clone(),
+            prompt_runner: self.prompt_runner.clone(),
             process: self.process.clone(),
             sandbox: self.sandbox.clone(),
         }
@@ -286,6 +309,7 @@ struct Dispatcher {
     ssrf_guard: SsrfGuard,
     builtin_handlers: HashMap<String, Arc<dyn BuiltinHookHandler>>,
     agent_spawner: Option<Arc<dyn SubagentSpawner>>,
+    prompt_runner: Option<Arc<dyn HookPromptRunner>>,
     process: Option<Arc<dyn ProcessRunner>>,
     sandbox: Option<Arc<dyn Sandbox>>,
 }
@@ -467,6 +491,36 @@ impl Dispatcher {
                     )
                     .await;
                 emit_agent_signal(hook, &outcome.signal, effective_timeout);
+                outcome.result
+            }
+            HookExecutor::Prompt { prompt, model } => {
+                let Some((_expected_event, body)) = build_envelope_body(event, ctx) else {
+                    return HookResult {
+                        outcome: HookOutcome::Error,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "Hook {} failed: Prompt arm only supports PreToolUse / PostToolUse",
+                            hook.id
+                        ),
+                        exit_code: None,
+                        response: None,
+                    };
+                };
+                // `execPromptHook.ts:55`: `hook.timeout * 1000` (seconds → ms),
+                // else the 30 s default. Our `hook.timeout` is already a
+                // `Duration`; a zero/absent timeout defers to the default.
+                let effective_timeout = match hook.timeout {
+                    Some(t) if !t.is_zero() => t,
+                    _ => Duration::from_millis(HOOK_PROMPT_TIMEOUT_MS),
+                };
+                let exec = PromptExecutor {
+                    runner: self.prompt_runner.clone(),
+                    timeout: effective_timeout,
+                };
+                let outcome = exec
+                    .execute(hook, prompt, model.as_deref(), &body)
+                    .await;
+                emit_prompt_signal(hook, &outcome.signal, effective_timeout);
                 outcome.result
             }
         }
@@ -1147,6 +1201,24 @@ fn emit_agent_signal(hook: &HookDefinition, signal: &AgentExecutionSignal, timeo
             event = telemetry::tengu::orchestrator::HOOK_TIMEOUT,
             hook_id = %hook.id,
             hook_kind = "agent",
+            timeout_ms = timeout_ms,
+        );
+    }
+}
+
+/// Emit arm-level telemetry for a Prompt signal (timeout). Mirrors
+/// [`emit_agent_signal`]; the success / not-met / parse-error / not-wired
+/// signals carry no dedicated telemetry event (parity with the Agent arm,
+/// which only emits on timeout).
+fn emit_prompt_signal(hook: &HookDefinition, signal: &PromptExecutionSignal, timeout: Duration) {
+    if matches!(signal, PromptExecutionSignal::TimedOut) {
+        // hook timeout bounded to seconds — u128 ms cannot exceed u64::MAX
+        #[allow(clippy::cast_possible_truncation)]
+        let timeout_ms = timeout.as_millis() as u64;
+        tracing::info!(
+            event = telemetry::tengu::orchestrator::HOOK_TIMEOUT,
+            hook_id = %hook.id,
+            hook_kind = "prompt",
             timeout_ms = timeout_ms,
         );
     }
@@ -3047,5 +3119,196 @@ mod http_agent_dispatch_tests {
         assert_eq!(agg.decision, Some(HookDecision::Approve));
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Success));
+    }
+}
+
+// ============================================================================
+// PROMPT-ARM DISPATCH TESTS
+//
+// Prove the executor's `dispatch` routes a `HookExecutor::Prompt` definition
+// to the injected `HookPromptRunner` with the `$ARGUMENTS`-substituted prompt,
+// and that the runner's `{ok:false}` verdict surfaces as a Block decision on
+// the aggregate. Also proves the no-runner path is a strict no-op.
+// ============================================================================
+#[cfg(test)]
+mod prompt_dispatch_tests {
+    use super::*;
+    use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
+    use crate::events::{HookEvent, HookEventType};
+    use crate::prompt_executor::{HookPromptRunner, PromptHookError, PromptHookRequest};
+    use crate::response::HookDecision;
+    use protocol::{HookId, ToolUseId};
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    /// `RuntimeSpawner` stub — never exercised by these tests.
+    struct UnusedRuntime;
+    #[async_trait]
+    impl RuntimeSpawner for UnusedRuntime {
+        async fn spawn(
+            &self,
+            _name: &str,
+            _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            Err(traits::RuntimeError::Internal("unused".into()))
+        }
+        async fn sleep(&self, _duration: Duration) {}
+        async fn cancel(
+            &self,
+            _handle: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    /// `HttpTransport` stub — never exercised by these tests.
+    struct UnusedHttp;
+    #[async_trait]
+    impl HttpTransport for UnusedHttp {
+        async fn request(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+    }
+
+    /// `HookPromptRunner` mock that records the request and returns a canned
+    /// body — so a test can prove the Prompt arm reached it with the
+    /// `$ARGUMENTS`-substituted prompt.
+    struct RecordingRunner {
+        recorded: Mutex<Vec<PromptHookRequest>>,
+        result: Mutex<Option<Result<String, PromptHookError>>>,
+    }
+    #[async_trait]
+    impl HookPromptRunner for RecordingRunner {
+        async fn run(&self, req: PromptHookRequest) -> Result<String, PromptHookError> {
+            self.recorded.lock().unwrap().push(req);
+            self.result
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| Err(PromptHookError::Query("no script".into())))
+        }
+    }
+
+    fn pre_event() -> HookEvent {
+        HookEvent::PreToolUse {
+            tool_name: "Bash".into(),
+            tool_input: json!({"command": "rm -rf /"}),
+            tool_use_id: ToolUseId::new(),
+        }
+    }
+
+    fn prompt_hook() -> HookDefinition {
+        HookDefinition {
+            id: HookId::new(),
+            name: "prompt".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Prompt {
+                prompt: "Is this safe? $ARGUMENTS".into(),
+                model: Some("claude-sonnet-4-6".into()),
+            },
+            source: HookSource::Project,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_hook_definition_dispatches_to_prompt_runner() {
+        let runner = Arc::new(RecordingRunner {
+            recorded: Mutex::new(Vec::new()),
+            result: Mutex::new(Some(Ok(r#"{"ok": false, "reason": "destructive"}"#.into()))),
+        });
+        let mut registry = HookRegistry::new();
+        registry.register(prompt_hook());
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_prompt_runner(runner.clone());
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        // The Prompt arm reached the runner with the substituted prompt + the
+        // serialized event payload + the model override.
+        let recorded = runner.recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "the Prompt arm must reach the runner");
+        assert!(
+            recorded[0].prompt.starts_with("Is this safe? "),
+            "prompt template precedes the payload: {:?}",
+            recorded[0].prompt,
+        );
+        assert!(
+            recorded[0].prompt.contains(r#""hook_event_name":"PreToolUse""#),
+            "the serialized event payload is spliced into $ARGUMENTS",
+        );
+        assert_eq!(recorded[0].model.as_deref(), Some("claude-sonnet-4-6"));
+        drop(recorded);
+        // The runner's `{ok:false}` verdict surfaces as a Block decision.
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        assert_eq!(
+            agg.reason.as_deref(),
+            Some("Prompt hook condition was not met: destructive")
+        );
+        assert!(agg.prevent_continuation);
+        let (_, r) = &agg.all_results[0];
+        assert!(matches!(r.outcome, HookOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn prompt_hook_ok_true_does_not_block() {
+        let runner = Arc::new(RecordingRunner {
+            recorded: Mutex::new(Vec::new()),
+            result: Mutex::new(Some(Ok(r#"{"ok": true}"#.into()))),
+        });
+        let mut registry = HookRegistry::new();
+        registry.register(prompt_hook());
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_prompt_runner(runner.clone());
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(agg.decision, None, "condition met must not block");
+        assert!(!agg.prevent_continuation);
+        let (_, r) = &agg.all_results[0];
+        assert!(matches!(r.outcome, HookOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn prompt_hook_without_runner_is_strict_noop() {
+        let mut registry = HookRegistry::new();
+        registry.register(prompt_hook());
+        // No `.with_prompt_runner(..)` — the Prompt arm must be a no-op.
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        // No decision: a no-runner prompt hook can NEVER block.
+        assert_eq!(agg.decision, None);
+        assert!(!agg.prevent_continuation);
+        let (_, r) = &agg.all_results[0];
+        assert!(matches!(r.outcome, HookOutcome::Error));
+        assert!(r.stderr.contains("prompt executor not wired"));
     }
 }

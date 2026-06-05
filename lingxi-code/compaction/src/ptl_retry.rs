@@ -153,10 +153,6 @@ mod tests {
         }
     }
 
-    fn marker() -> ConversationMessage {
-        ConversationMessage::user(MessageId::new(), PTL_RETRY_MARKER.to_string())
-    }
-
     /// Three distinct-assistant-id rounds (no preamble): a user text leads round
     /// 0, then each new assistant id opens a fresh round. Returns the messages;
     /// the grouping is `[u0,a0,r0] [a1,r1] [a2,r2]`.

@@ -107,6 +107,13 @@ hook_event_name_marker!(HookEventNameSubagentStart, "SubagentStart");
 hook_event_name_marker!(HookEventNameCwdChanged, "CwdChanged");
 hook_event_name_marker!(HookEventNameFileChanged, "FileChanged");
 hook_event_name_marker!(HookEventNameWorktreeRemove, "WorktreeRemove");
+// Deferred-completion batch — the final four events whose `HookEvent` variant
+// previously lacked a field to source a *required* wire value. Each marker
+// serializes to exactly its wire literal.
+hook_event_name_marker!(HookEventNameConfigChange, "ConfigChange");
+hook_event_name_marker!(HookEventNameInstructionsLoaded, "InstructionsLoaded");
+hook_event_name_marker!(HookEventNameElicitation, "Elicitation");
+hook_event_name_marker!(HookEventNameWorktreeCreate, "WorktreeCreate");
 
 /// Wire-format `PreToolUse` payload (1:1 with `coreSchemas.ts:414-423`).
 ///
@@ -533,6 +540,115 @@ pub struct WorktreeRemovePayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub agent_type: Option<String>,
     pub worktree_path: String,
+}
+
+/// Wire-format `ConfigChange` payload (1:1 with `coreSchemas.ts:670-678`
+/// `ConfigChangeHookInputSchema`; constructed at `utils/hooks.ts:4219-4224`).
+///
+/// `source` is required (one of [`ConfigChangeSource`]); `file_path` is
+/// `.optional()` so it is skipped when absent. The base shape is built with
+/// `createBaseHookInput(undefined)` — no `permission_mode` is threaded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct ConfigChangePayload {
+    pub hook_event_name: HookEventNameConfigChange,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub source: crate::events::ConfigChangeSource,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub file_path: Option<String>,
+}
+
+/// Wire-format `InstructionsLoaded` payload (1:1 with `coreSchemas.ts:695-707`
+/// `InstructionsLoadedHookInputSchema`; constructed at
+/// `utils/hooks.ts:4353-4362`).
+///
+/// `file_path` / `memory_type` / `load_reason` are required; `globs` /
+/// `trigger_file_path` / `parent_file_path` are `.optional()` and skipped when
+/// absent. Built with `createBaseHookInput(undefined)` — no `permission_mode`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct InstructionsLoadedPayload {
+    pub hook_event_name: HookEventNameInstructionsLoaded,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub file_path: String,
+    pub memory_type: crate::events::InstructionsMemoryType,
+    pub load_reason: crate::events::InstructionsLoadReason,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub globs: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub trigger_file_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub parent_file_path: Option<String>,
+}
+
+/// Wire-format `Elicitation` payload (1:1 with `coreSchemas.ts:627-643`
+/// `ElicitationHookInputSchema`; constructed at `utils/hooks.ts:4491-4500`).
+///
+/// `mcp_server_name` / `message` are required; `mode` / `url` /
+/// `elicitation_id` / `requested_schema` are `.optional()` and skipped when
+/// absent. Built with `createBaseHookInput(permissionMode)` — unlike the other
+/// three deferred events, `permission_mode` IS threaded here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct ElicitationPayload {
+    pub hook_event_name: HookEventNameElicitation,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub mcp_server_name: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mode: Option<crate::events::ElicitationMode>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub elicitation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub requested_schema: Option<Value>,
+}
+
+/// Wire-format `WorktreeCreate` payload (1:1 with `coreSchemas.ts:709-716`
+/// `WorktreeCreateHookInputSchema`; constructed at `utils/hooks.ts:4931-4935`).
+///
+/// `name` is the only event-specific field — the hook's stdout returns the
+/// resolved worktree path, so the input carries just the requested `name`.
+/// Built with `createBaseHookInput(undefined)` — no `permission_mode`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct WorktreeCreatePayload {
+    pub hook_event_name: HookEventNameWorktreeCreate,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub name: String,
 }
 
 /// Envelope used to send one of either payload kind across the wire.
@@ -1377,5 +1493,181 @@ mod tests {
         let _: HookEventNameSessionEnd = serde_json::from_str(r#""SessionEnd""#).unwrap();
         let _: HookEventNameWorktreeRemove = serde_json::from_str(r#""WorktreeRemove""#).unwrap();
         assert!(serde_json::from_str::<HookEventNameSetup>(r#""Notification""#).is_err());
+    }
+
+    // ---- deferred-completion batch: final-four payload byte-lock tests ------
+
+    #[test]
+    fn config_change_payload_serializes_byte_lock() {
+        let p = ConfigChangePayload {
+            hook_event_name: HookEventNameConfigChange,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            source: crate::events::ConfigChangeSource::LocalSettings,
+            file_path: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"ConfigChange","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","source":"local_settings"}"#
+        );
+    }
+
+    #[test]
+    fn config_change_payload_serializes_with_file_path() {
+        let p = ConfigChangePayload {
+            hook_event_name: HookEventNameConfigChange,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            source: crate::events::ConfigChangeSource::PolicySettings,
+            file_path: Some("/etc/claude/policy.json".into()),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"ConfigChange","session_id":"s","transcript_path":"/t","cwd":"/w","source":"policy_settings","file_path":"/etc/claude/policy.json"}"#
+        );
+    }
+
+    #[test]
+    fn instructions_loaded_payload_serializes_byte_lock() {
+        let p = InstructionsLoadedPayload {
+            hook_event_name: HookEventNameInstructionsLoaded,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            file_path: "/work/CLAUDE.md".into(),
+            memory_type: crate::events::InstructionsMemoryType::Project,
+            load_reason: crate::events::InstructionsLoadReason::SessionStart,
+            globs: None,
+            trigger_file_path: None,
+            parent_file_path: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"InstructionsLoaded","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","file_path":"/work/CLAUDE.md","memory_type":"Project","load_reason":"session_start"}"#
+        );
+    }
+
+    #[test]
+    fn instructions_loaded_payload_serializes_with_optionals() {
+        let p = InstructionsLoadedPayload {
+            hook_event_name: HookEventNameInstructionsLoaded,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            file_path: "/w/rules/api.md".into(),
+            memory_type: crate::events::InstructionsMemoryType::Managed,
+            load_reason: crate::events::InstructionsLoadReason::Compact,
+            globs: Some(vec!["src/**/*.rs".into()]),
+            trigger_file_path: Some("/w/src/main.rs".into()),
+            parent_file_path: Some("/w/CLAUDE.md".into()),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"InstructionsLoaded","session_id":"s","transcript_path":"/t","cwd":"/w","file_path":"/w/rules/api.md","memory_type":"Managed","load_reason":"compact","globs":["src/**/*.rs"],"trigger_file_path":"/w/src/main.rs","parent_file_path":"/w/CLAUDE.md"}"#
+        );
+    }
+
+    #[test]
+    fn elicitation_payload_serializes_byte_lock() {
+        let p = ElicitationPayload {
+            hook_event_name: HookEventNameElicitation,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            mcp_server_name: "github".into(),
+            message: "Authorize?".into(),
+            mode: None,
+            url: None,
+            elicitation_id: None,
+            requested_schema: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"Elicitation","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","mcp_server_name":"github","message":"Authorize?"}"#
+        );
+    }
+
+    #[test]
+    fn elicitation_payload_serializes_with_optionals_and_permission_mode() {
+        // Elicitation alone threads permission_mode (createBaseHookInput(permissionMode)).
+        let p = ElicitationPayload {
+            hook_event_name: HookEventNameElicitation,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: Some("default".into()),
+            agent_id: None,
+            agent_type: None,
+            mcp_server_name: "linear".into(),
+            message: "Pick".into(),
+            mode: Some(crate::events::ElicitationMode::Url),
+            url: Some("https://example.test".into()),
+            elicitation_id: Some("e-1".into()),
+            requested_schema: Some(json!({"type": "object"})),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"Elicitation","session_id":"s","transcript_path":"/t","cwd":"/w","permission_mode":"default","mcp_server_name":"linear","message":"Pick","mode":"url","url":"https://example.test","elicitation_id":"e-1","requested_schema":{"type":"object"}}"#
+        );
+    }
+
+    #[test]
+    fn worktree_create_payload_serializes_byte_lock() {
+        let p = WorktreeCreatePayload {
+            hook_event_name: HookEventNameWorktreeCreate,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            name: "feature-x".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"WorktreeCreate","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","name":"feature-x"}"#
+        );
+    }
+
+    #[test]
+    fn deferred_batch_event_name_markers_round_trip() {
+        for (got, want) in [
+            (serde_json::to_string(&HookEventNameConfigChange).unwrap(), r#""ConfigChange""#),
+            (serde_json::to_string(&HookEventNameInstructionsLoaded).unwrap(), r#""InstructionsLoaded""#),
+            (serde_json::to_string(&HookEventNameElicitation).unwrap(), r#""Elicitation""#),
+            (serde_json::to_string(&HookEventNameWorktreeCreate).unwrap(), r#""WorktreeCreate""#),
+        ] {
+            assert_eq!(got, want);
+        }
+        let _: HookEventNameConfigChange = serde_json::from_str(r#""ConfigChange""#).unwrap();
+        let _: HookEventNameInstructionsLoaded =
+            serde_json::from_str(r#""InstructionsLoaded""#).unwrap();
+        let _: HookEventNameElicitation = serde_json::from_str(r#""Elicitation""#).unwrap();
+        let _: HookEventNameWorktreeCreate = serde_json::from_str(r#""WorktreeCreate""#).unwrap();
+        assert!(serde_json::from_str::<HookEventNameConfigChange>(r#""Elicitation""#).is_err());
     }
 }

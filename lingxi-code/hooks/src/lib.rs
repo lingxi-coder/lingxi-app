@@ -46,5 +46,8 @@ pub use prompt_executor::{
     HookPromptRunner, PromptHookError, PromptHookRequest, HOOK_PROMPT_TIMEOUT_MS,
 };
 pub use registry::{HookContext, HookRegistry};
-pub use response::{AggregateHookResult, HookDecision, HookOutcome, HookResponse, HookResult};
+pub use response::{
+    AggregateHookResult, ElicitationHookResponse, HookDecision, HookOutcome, HookResponse,
+    HookResult,
+};
 pub use ssrf_guard::{IpRange, SsrfError, SsrfGuard};

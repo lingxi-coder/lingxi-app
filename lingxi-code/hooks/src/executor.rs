@@ -548,6 +548,12 @@ impl HookExecutorImpl {
             if resp.prevent_continuation {
                 agg.prevent_continuation = true;
             }
+            // Elicitation answer: keep the latest non-empty response, mirroring
+            // `executeElicitationHooks`'s loop (`utils/hooks.ts:4512-4520`)
+            // which overwrites `elicitationResponse` with each parsed result.
+            if let Some(er) = &resp.elicitation_response {
+                agg.elicitation_response = Some(er.clone());
+            }
             agg.attachments.extend(resp.attachments.clone());
         }
         agg.all_results.push((hook.id, r));

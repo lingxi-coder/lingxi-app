@@ -45,6 +45,29 @@ pub struct HookResponse {
     /// Caller-defined structured payload — for hooks that need to return
     /// metadata not covered by the canonical fields above.
     pub structured_content: Option<Value>,
+    /// Elicitation answer a hook provided via
+    /// `hookSpecificOutput.{action,content}` (claude-code
+    /// `parseElicitationHookOutput`, `utils/hooks.ts:4434-4446` /
+    /// `hooks.ts:674-688`). `Some` only for `Elicitation` / `ElicitationResult`
+    /// hooks that returned an `action`. The MCP elicitation handler consumes
+    /// this to PROVIDE the elicitation response; a `decline` action also
+    /// drives a `Block` decision. Additive default `None`.
+    pub elicitation_response: Option<ElicitationHookResponse>,
+}
+
+/// Structured elicitation answer a hook can return, mirroring claude-code's
+/// `ElicitationResponse` (`{ action, content? }`). 1:1 with the
+/// `hookSpecificOutput.action` / `hookSpecificOutput.content` fields parsed by
+/// `parseElicitationHookOutput`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ElicitationHookResponse {
+    /// One of `"accept"` / `"decline"` / `"cancel"` — forwarded verbatim so the
+    /// MCP handler can return it as the elicitation `action`. Kept as a raw
+    /// `String` to avoid coupling the hooks crate to the MCP action enum.
+    pub action: String,
+    /// Optional structured form content (only meaningful for `accept`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<Value>,
 }
 
 /// The action a hook recommends after observing an event.
@@ -122,4 +145,12 @@ pub struct AggregateHookResult {
     /// for the generic running line. Additive / `..Default::default()`-compatible;
     /// defaults to empty, so existing callers that ignore it are unaffected.
     pub progress: Vec<HookProgressEvent>,
+    /// The last elicitation answer any folded hook provided (claude-code
+    /// `executeElicitationHooks`: the loop keeps the latest non-empty
+    /// `elicitationResponse`). `Some` only for `Elicitation` /
+    /// `ElicitationResult` dispatches where a hook set
+    /// `hookSpecificOutput.action`. The MCP elicitation handler reads this to
+    /// PROVIDE the response. Additive default `None`, so non-elicitation
+    /// callers are unaffected.
+    pub elicitation_response: Option<ElicitationHookResponse>,
 }

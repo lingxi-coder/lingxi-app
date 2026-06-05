@@ -4,7 +4,7 @@
 
   "tool_names": {
     "ask_user_question": "AskUserQuestion",
-    "brief": "Brief",
+    "brief": "SendUserMessage",
     "config": "Config",
     "skill": "Skill",
     "schedule_cron": "ScheduleCron",

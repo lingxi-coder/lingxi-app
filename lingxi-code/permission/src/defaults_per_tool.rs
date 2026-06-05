@@ -23,7 +23,6 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     // Allow-by-default tools ([Y/n]) — 19 entries.
     m.insert("Agent", AllowByDefault);
     m.insert("AskUserQuestion", AllowByDefault);
-    m.insert("Brief", AllowByDefault);
     m.insert("Config", AllowByDefault);
     m.insert("EnterPlanMode", AllowByDefault);
     m.insert("ExitPlanMode", AllowByDefault);
@@ -31,6 +30,7 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("Grep", AllowByDefault);
     m.insert("LSP", AllowByDefault);
     m.insert("Read", AllowByDefault);
+    m.insert("SendUserMessage", AllowByDefault); // wire name of BriefTool (Brief alias)
     m.insert("Skill", AllowByDefault);
     m.insert("Sleep", AllowByDefault);
     m.insert("StructuredOutput", AllowByDefault);

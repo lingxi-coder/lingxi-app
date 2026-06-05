@@ -134,7 +134,7 @@ fn fixture_names_match_production_constants() {
             "AskUserQuestion",
             tool_ui::ask_user_question::ASK_USER_QUESTION_TOOL_NAME,
         ),
-        ("Brief", tool_ui::brief::BRIEF_TOOL_NAME),
+        ("SendUserMessage", tool_ui::brief::BRIEF_TOOL_NAME),
         ("Config", tool_meta::config::CONFIG_TOOL_NAME),
         ("Skill", tool_skill::skill::SKILL_TOOL_NAME),
         (

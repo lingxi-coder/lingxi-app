@@ -3,7 +3,6 @@ source: apps/engine-mobile/tests/mobile_tool_list_snapshot.rs
 expression: names
 ---
 - AskUserQuestion
-- Brief
 - Config
 - Edit
 - EnterPlanMode
@@ -15,6 +14,7 @@ expression: names
 - RemoteTrigger
 - ScheduleCron
 - SendMessage
+- SendUserMessage
 - Skill
 - Sleep
 - StructuredOutput

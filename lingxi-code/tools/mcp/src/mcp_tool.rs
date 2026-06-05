@@ -297,10 +297,12 @@ static MCP_AUTH_SCHEMA: Lazy<Value> = Lazy::new(|| {
 });
 
 static LIST_MCP_RESOURCES_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    // `server_name` is OPTIONAL (Batch 5c): absent → list EVERY connected
+    // server's resources, each tagged with its `server`. Mirrors
+    // `ListMcpResourcesTool.ts:15-22` (`server: z.string().optional()`).
     json!({
         "type": "object",
-        "properties": { "server_name": { "type": "string", "minLength": 1 } },
-        "required": ["server_name"]
+        "properties": { "server_name": { "type": "string", "minLength": 1 } }
     })
 });
 
@@ -733,20 +735,23 @@ impl Tool for ListMcpResourcesTool {
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
-        let server_name = input
+        // `server_name` is OPTIONAL (Batch 5c). Present → list one server's
+        // resources (legacy behavior). Absent → list EVERY connected server's
+        // resources, error-isolated per server. Mirrors
+        // `ListMcpResourcesTool.ts:66-101` (`targetServer` filter vs all clients).
+        let target_server = input
             .get("server_name")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidInput(
-                    "ListMcpResourcesTool: missing or non-string server_name".into(),
-                )
-            })?
-            .to_string();
+            .map(str::to_string);
+
         let bus = &self.ctx.bus;
         emit(
             bus,
             LIST_MCP_RESOURCES_STARTED,
-            &[("_PROTO_server_name", pii(&server_name))],
+            &[(
+                "_PROTO_server_name",
+                pii(target_server.as_deref().unwrap_or("<all>")),
+            )],
         )
         .await;
 
@@ -757,7 +762,10 @@ impl Tool for ListMcpResourcesTool {
                     bus,
                     LIST_MCP_RESOURCES_FAILED,
                     &[
-                        ("_PROTO_server_name", pii(&server_name)),
+                        (
+                            "_PROTO_server_name",
+                            pii(target_server.as_deref().unwrap_or("<all>")),
+                        ),
                         ("error_kind", verified_str("registry_unconfigured")),
                     ],
                 )
@@ -768,63 +776,126 @@ impl Tool for ListMcpResourcesTool {
             }
         };
 
-        let client = match registry.get_client(&server_name).await {
-            Some(c) => c,
-            None => {
-                emit(
-                    bus,
-                    LIST_MCP_RESOURCES_FAILED,
-                    &[
-                        ("_PROTO_server_name", pii(&server_name)),
-                        ("error_kind", verified_str("server_not_registered")),
-                    ],
-                )
-                .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "ListMcpResourcesTool: MCP server {server_name:?} is not registered"
-                )));
+        // Determine the set of servers to query.
+        let servers: Vec<String> = match &target_server {
+            Some(name) => {
+                // Single-server path keeps the strict "not registered" error
+                // (the model named a server that doesn't exist).
+                if registry.get_client(name).await.is_none() {
+                    emit(
+                        bus,
+                        LIST_MCP_RESOURCES_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(name)),
+                            ("error_kind", verified_str("server_not_registered")),
+                        ],
+                    )
+                    .await;
+                    return Err(ToolError::InvalidInput(format!(
+                        "ListMcpResourcesTool: MCP server {name:?} is not registered"
+                    )));
+                }
+                vec![name.clone()]
             }
+            // All-servers path: enumerate every `Connected` server.
+            None => connected_server_names(registry).await,
         };
 
-        match client.list_resources().await {
-            Ok(resources) => {
-                let count = resources.len() as u64;
-                emit(
-                    bus,
-                    LIST_MCP_RESOURCES_COMPLETED,
-                    &[
-                        ("_PROTO_server_name", pii(&server_name)),
-                        ("count", verified_int(count)),
-                        (
-                            "duration_ms",
-                            verified_int(started.elapsed().as_millis() as u64),
-                        ),
-                    ],
-                )
-                .await;
-                Ok(ToolCallResult {
-                    data: json!({ "server_name": server_name, "resources": resources }),
-                    new_messages: vec![],
-                    context_modifier: None,
-                    mcp_meta: None,
-                })
-            }
-            Err(e) => {
-                emit(
-                    bus,
-                    LIST_MCP_RESOURCES_FAILED,
-                    &[
-                        ("_PROTO_server_name", pii(&server_name)),
-                        ("error_kind", verified_str("rpc")),
-                    ],
-                )
-                .await;
-                Err(ToolError::Io(format!(
-                    "ListMcpResourcesTool: server {server_name:?} rpc error: {e}"
-                )))
+        // Fetch per server, tagging each resource with its `server` and
+        // ERROR-ISOLATING (one server's failure must not sink the whole call —
+        // `ListMcpResourcesTool.ts:84-96` catches per client and returns []).
+        let mut resources: Vec<Value> = Vec::new();
+        for server in &servers {
+            let Some(client) = registry.get_client(server).await else {
+                // A server vanished between enumeration and fetch — skip it
+                // (the all-servers contract is best-effort; the single-server
+                // path already hard-errored above when the named one is absent).
+                continue;
+            };
+            match client.list_resources().await {
+                Ok(list) => {
+                    for r in list {
+                        resources.push(tag_resource_with_server(&r, server));
+                    }
+                }
+                Err(_e) => {
+                    // Isolate: emit the per-server failure telemetry + continue
+                    // (do NOT fail the whole call). Mirrors the TS `catch` that
+                    // logs via `logMCPError` and returns [] for that client
+                    // (`ListMcpResourcesTool.ts:90-94`).
+                    emit(
+                        bus,
+                        LIST_MCP_RESOURCES_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(server)),
+                            ("error_kind", verified_str("rpc")),
+                        ],
+                    )
+                    .await;
+                }
             }
         }
+
+        let count = resources.len() as u64;
+        emit(
+            bus,
+            LIST_MCP_RESOURCES_COMPLETED,
+            &[
+                (
+                    "_PROTO_server_name",
+                    pii(target_server.as_deref().unwrap_or("<all>")),
+                ),
+                ("count", verified_int(count)),
+                (
+                    "duration_ms",
+                    verified_int(started.elapsed().as_millis() as u64),
+                ),
+            ],
+        )
+        .await;
+        Ok(ToolCallResult {
+            // `resources` is now a flat array of `{uri, name, mimeType?, server}`
+            // objects (matches `ListMcpResourcesTool.ts:26-34` output rows). The
+            // optional `server_name` echo is retained for the single-server path.
+            data: json!({ "server_name": target_server, "resources": resources }),
+            new_messages: vec![],
+            context_modifier: None,
+            mcp_meta: None,
+        })
     }
+}
+
+/// Names of every `Connected` MCP server in `registry`, sorted for determinism
+/// (mirrors `snapshot`'s ordering). Used by the all-servers `ListMcpResources`
+/// path to know which clients to fetch.
+async fn connected_server_names(registry: &McpRegistry) -> Vec<String> {
+    use mcp::McpConnectionState;
+    let conns = registry.connections.read().await;
+    let mut names: Vec<String> = conns
+        .values()
+        .filter_map(|s| match s {
+            McpConnectionState::Connected { config, .. } => Some(config.name.clone()),
+            _ => None,
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Shape one [`traits::McpResourceDto`] into the output row, adding the
+/// `server` tag. In-tool JSON shaping (NOT a `traits` DTO widen) so the
+/// frozen `McpResourceDto` is untouched. Field names mirror
+/// `ListMcpResourcesTool.ts:26-34` (`uri`, `name`, `mimeType`, `server`); a
+/// `None` `mime_type` is omitted (the TS field is `optional`).
+fn tag_resource_with_server(r: &traits::McpResourceDto, server: &str) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("uri".into(), json!(r.uri));
+    obj.insert("name".into(), json!(r.name));
+    if let Some(mime) = &r.mime_type {
+        obj.insert("mimeType".into(), json!(mime));
+    }
+    obj.insert("server".into(), json!(server));
+    Value::Object(obj)
 }
 
 // -- impl Tool for ReadMcpResourceTool ---------------------------------------

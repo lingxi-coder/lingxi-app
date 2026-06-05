@@ -14,10 +14,33 @@
 //! entries are accepted via the `url` field.
 
 use crate::connection::{ConfigScope, McpServerConfig};
+use crate::env_expansion::expand_env_vars_in_string;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 use traits::McpTransportSpec;
+
+/// Expand `${VAR}` / `${VAR:-default}` references in one string against the
+/// process environment, appending any missing-variable names to `missing`.
+/// 1:1 with the inner `expandString` of claude-code `expandEnvVars`
+/// (`services/mcp/config.ts:562-566`).
+fn expand_field(value: &str, missing: &mut Vec<String>) -> String {
+    let r = expand_env_vars_in_string(value);
+    missing.extend(r.missing_vars);
+    r.expanded
+}
+
+/// Expand the VALUES of a `HashMap` (keys untouched), mirroring the TS
+/// `mapValues(map, expandString)` used for `env` and `headers`
+/// (`services/mcp/config.ts:579,595`).
+fn expand_map_values(map: HashMap<String, String>, missing: &mut Vec<String>) -> HashMap<String, String> {
+    map.into_iter()
+        .map(|(k, v)| {
+            let v = expand_field(&v, missing);
+            (k, v)
+        })
+        .collect()
+}
 
 /// Errors raised while parsing a `.mcp.json` file.
 #[derive(Debug, thiserror::Error)]
@@ -68,29 +91,54 @@ pub fn parse_mcp_json_string(
     let top: McpJsonTop = serde_json::from_str(raw)?;
     let mut out = Vec::new();
     for (name, entry) in top.mcp_servers {
+        // Expand `${VAR}` / `${VAR:-default}` references in the transport
+        // fields, mirroring claude-code `expandEnvVars(config)`
+        // (`services/mcp/config.ts:556-615`): stdio expands `command`/`args`/
+        // `env` VALUES; remote expands `url`/`headers` VALUES. Missing-variable
+        // names (deduped, as TS `[...new Set(missingVars)]`) are logged but do
+        // NOT fail the parse — the literal `${VAR}` is left in place (TS surfaces
+        // a non-fatal config error; a `warn!` is the closest non-breaking
+        // analogue for this parser).
+        let mut missing: Vec<String> = Vec::new();
         let spec = if let Some(cmd) = entry.command {
             McpTransportSpec::Stdio {
-                command: cmd,
-                args: entry.args,
-                env: entry.env,
+                command: expand_field(&cmd, &mut missing),
+                args: entry
+                    .args
+                    .into_iter()
+                    .map(|a| expand_field(&a, &mut missing))
+                    .collect(),
+                env: expand_map_values(entry.env, &mut missing),
             }
         } else if let Some(url) = entry.url {
+            let url = expand_field(&url, &mut missing);
+            let headers = expand_map_values(entry.headers, &mut missing);
             match entry.transport_type.as_deref() {
                 Some("sse") => McpTransportSpec::Sse {
                     url,
-                    headers: entry.headers,
+                    headers,
                     headers_helper: None,
                     oauth: None,
                 },
                 _ => McpTransportSpec::Http {
                     url,
-                    headers: entry.headers,
+                    headers,
                     oauth: None,
                 },
             }
         } else {
             return Err(McpJsonError::UnknownTransport(name));
         };
+        if !missing.is_empty() {
+            // Dedup preserving first-seen order (TS `[...new Set(missingVars)]`).
+            let mut seen = std::collections::HashSet::new();
+            let deduped: Vec<&String> = missing.iter().filter(|v| seen.insert(*v)).collect();
+            tracing::warn!(
+                server = %name,
+                missing = ?deduped,
+                "mcp.json: unresolved ${{VAR}} references left literal"
+            );
+        }
         out.push(McpServerConfig {
             name,
             spec,
@@ -227,6 +275,84 @@ mod tests {
         match &cfgs[0].spec {
             McpTransportSpec::Stdio { command, .. } => assert_eq!(command, "project-x"),
             other => panic!("got {other:?}"),
+        }
+    }
+
+    // ── Batch 5b: ${VAR} env-expansion wired into the parse site ──────────
+
+    #[test]
+    fn stdio_fields_expand_default_values() {
+        // No env mutation needed: `${VAR:-default}` resolves to the default.
+        let raw = r#"{
+          "mcpServers": {
+            "s": {
+              "command": "${BIN:-mcp-memory}",
+              "args": ["--port", "${PORT:-8080}"],
+              "env": { "TOKEN": "${TOK:-abc}" }
+            }
+          }
+        }"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        match &cfgs[0].spec {
+            McpTransportSpec::Stdio { command, args, env } => {
+                assert_eq!(command, "mcp-memory");
+                assert_eq!(args, &vec!["--port".to_string(), "8080".to_string()]);
+                assert_eq!(env.get("TOKEN").map(String::as_str), Some("abc"));
+            }
+            other => panic!("expected Stdio, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn url_and_headers_expand_default_values() {
+        let raw = r#"{
+          "mcpServers": {
+            "r": {
+              "url": "${BASE:-https://example.test}/mcp",
+              "headers": { "Authorization": "Bearer ${TOKEN:-xyz}" }
+            }
+          }
+        }"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        match &cfgs[0].spec {
+            McpTransportSpec::Http { url, headers, .. } => {
+                assert_eq!(url, "https://example.test/mcp");
+                assert_eq!(
+                    headers.get("Authorization").map(String::as_str),
+                    Some("Bearer xyz")
+                );
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_env_var_is_substituted_into_command() {
+        // A uniquely-named var (set for this process) is substituted.
+        std::env::set_var("LINGXI_MCP_TEST_BIN_5B", "/opt/mcp/bin");
+        let raw = r#"{"mcpServers":{"s":{"command":"${LINGXI_MCP_TEST_BIN_5B}"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        match &cfgs[0].spec {
+            McpTransportSpec::Stdio { command, .. } => assert_eq!(command, "/opt/mcp/bin"),
+            other => panic!("expected Stdio, got {other:?}"),
+        }
+        std::env::remove_var("LINGXI_MCP_TEST_BIN_5B");
+    }
+
+    #[test]
+    fn missing_var_is_left_literal_and_does_not_fail_parse() {
+        // An unset `${MISSING}` with no default is left verbatim; parsing still
+        // succeeds (TS surfaces a non-fatal error, never aborts the config).
+        let raw =
+            r#"{"mcpServers":{"s":{"command":"${LINGXI_MCP_TEST_UNSET_5B}","args":["ok"]}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        match &cfgs[0].spec {
+            McpTransportSpec::Stdio { command, args, .. } => {
+                assert_eq!(command, "${LINGXI_MCP_TEST_UNSET_5B}");
+                assert_eq!(args, &vec!["ok".to_string()]);
+            }
+            other => panic!("expected Stdio, got {other:?}"),
         }
     }
 

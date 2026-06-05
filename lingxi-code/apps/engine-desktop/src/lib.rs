@@ -182,6 +182,58 @@ pub struct CoordinatorWiring {
     pub output: Arc<dyn traits::OutputStream>,
 }
 
+/// Desktop [`ClaudeAiAuthProvider`](tool_cron::ClaudeAiAuthProvider) backed by
+/// the credential store.
+///
+/// `RemoteTrigger` calls this in-process to add the refreshed claude.ai OAuth
+/// access token + organization UUID to its requests — the token never reaches
+/// the shell. The token is read at call-time (not snapshotted at boot) so the
+/// proactive/reactive OAuth refresh driver — which persists rotated tokens back
+/// to the same keychain — is always reflected. Mirrors TS
+/// `checkAndRefreshOAuthTokenIfNeeded()` + `getClaudeAIOAuthTokens()`.
+///
+/// The credential read is async; the trait surface is sync. Desktop runs on a
+/// multi-thread tokio runtime, so we bridge with
+/// `block_in_place` + `Handle::block_on` (safe only on `rt-multi-thread`,
+/// which the desktop binary uses).
+struct CredentialStoreAuthProvider {
+    credentials: Arc<CredentialManager>,
+    base_api_url: String,
+}
+
+impl CredentialStoreAuthProvider {
+    /// Snapshot the current persisted tokens (`None` when unauthenticated or the
+    /// keychain read fails / the bridge cannot run — e.g. off a multi-thread
+    /// runtime). Reading at call-time keeps the token fresh across refreshes.
+    fn snapshot(&self) -> Option<secret::credential::OAuthTokens> {
+        let creds = self.credentials.clone();
+        let read = move || {
+            tokio::runtime::Handle::try_current()
+                .ok()
+                .and_then(|h| h.block_on(async { creds.get_oauth_tokens().await.ok().flatten() }))
+        };
+        // `block_on` inside an async task requires `block_in_place` (multi-thread
+        // runtime). If we're already off-runtime, call directly.
+        match tokio::runtime::Handle::try_current() {
+            Ok(_) => tokio::task::block_in_place(read),
+            Err(_) => None,
+        }
+    }
+}
+
+impl tool_cron::ClaudeAiAuthProvider for CredentialStoreAuthProvider {
+    fn access_token(&self) -> Option<String> {
+        self.snapshot()
+            .map(|t| t.access_token.expose_secret().clone())
+    }
+    fn org_uuid(&self) -> Option<String> {
+        self.snapshot().map(|t| t.org_id).filter(|o| !o.is_empty())
+    }
+    fn base_api_url(&self) -> String {
+        self.base_api_url.clone()
+    }
+}
+
 /// Assemble the desktop builtin **tool** registry from a freshly-built
 /// [`BuiltinToolContext`].
 ///
@@ -193,13 +245,18 @@ pub struct CoordinatorWiring {
 /// `coordinator` selects the team-tool variant at build time: `None` registers
 /// `tool_team`'s `TeamCreate` / `TeamDelete` (default), `Some(..)` registers the
 /// coordinator pair IN PLACE OF them. See [`CoordinatorWiring`].
+///
+/// `cron_auth` is the in-process OAuth resolver `RemoteTrigger` uses; `None`
+/// leaves the tool on its "not authenticated" pre-flight path (used by the
+/// offline registry-snapshot tests).
 #[must_use]
 pub fn desktop_tool_registry(
     ctx: BuiltinToolContext,
     coordinator: Option<CoordinatorWiring>,
+    cron_auth: Option<Arc<dyn tool_cron::ClaudeAiAuthProvider>>,
 ) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
-    register_desktop_tools(&mut reg, ctx, coordinator);
+    register_desktop_tools(&mut reg, ctx, coordinator, cron_auth);
     reg
 }
 
@@ -220,6 +277,7 @@ pub fn register_desktop_tools(
     reg: &mut ToolRegistry,
     ctx: BuiltinToolContext,
     coordinator: Option<CoordinatorWiring>,
+    cron_auth: Option<Arc<dyn tool_cron::ClaudeAiAuthProvider>>,
 ) {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
     tool_file::register_all(reg, ctx.clone());
@@ -227,7 +285,10 @@ pub fn register_desktop_tools(
     tool_web::register_all(reg, ctx.clone());
     tool_plan::register_all(reg, ctx.clone());
     tool_meta::register_all(reg, ctx.clone());
-    tool_cron::register_all(reg, ctx.clone());
+    // `RemoteTrigger` gets the credential-store auth provider on desktop so it
+    // can drive the claude.ai CCR API in-process. `register_all_with_auth`
+    // registers `ScheduleCron` + `RemoteTrigger` (the latter with `cron_auth`).
+    tool_cron::register_all_with_auth(reg, ctx.clone(), cron_auth);
     tool_ui::register_all(reg, ctx.clone());
     tool_skill::register_all(reg, ctx.clone());
     tool_task::register_all(reg, ctx.clone());
@@ -1075,7 +1136,20 @@ pub async fn build(
     //        `register_desktop_tools`, so the builder gets a clone taken first.
     let mcp_tool_ctx = tool_ctx.clone();
     let mut tools_inner = ToolRegistry::new();
-    register_desktop_tools(&mut tools_inner, tool_ctx, coordinator_wiring);
+    // `RemoteTrigger`'s in-process OAuth resolver, backed by the credential
+    // store built at (3). Reads tokens at call-time so the refresh driver wired
+    // at (3.1) is always reflected.
+    let cron_auth: Arc<dyn tool_cron::ClaudeAiAuthProvider> =
+        Arc::new(CredentialStoreAuthProvider {
+            credentials: credentials.clone(),
+            base_api_url: cfg.api_base.clone(),
+        });
+    register_desktop_tools(
+        &mut tools_inner,
+        tool_ctx,
+        coordinator_wiring,
+        Some(cron_auth),
+    );
     for (conn_id, mcp_tools) in
         tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx).await
     {
@@ -1467,7 +1541,7 @@ mod tests {
     /// vs. the coordinator tool's `100_000`. Guardrail: byte-identical default.
     #[test]
     fn tool_registry_default_mode_registers_tool_team_create() {
-        let reg = desktop_tool_registry(stub_tool_ctx(), None);
+        let reg = desktop_tool_registry(stub_tool_ctx(), None, None);
 
         let names = reg.all_names();
         assert_eq!(
@@ -1500,7 +1574,7 @@ mod tests {
     /// distinguished by `max_result_size_chars() == 100_000`.
     #[test]
     fn tool_registry_coordinator_mode_registers_coordinator_create() {
-        let reg = desktop_tool_registry(stub_tool_ctx(), Some(coordinator_wiring()));
+        let reg = desktop_tool_registry(stub_tool_ctx(), Some(coordinator_wiring()), None);
 
         let names = reg.all_names();
         assert_eq!(
@@ -1602,7 +1676,7 @@ mod tests {
             spawn_seam: Arc::new(NoopSeam),
             output: Arc::new(orchestrator::test_support::MockOutputStream::new()),
         };
-        let reg = desktop_tool_registry(ctx, Some(wiring));
+        let reg = desktop_tool_registry(ctx, Some(wiring), None);
 
         // The builtin SendMessage tool (from `tool_ui`) reads
         // `ctx.mailbox_router`. With the router wired, routing to the registered
@@ -1630,7 +1704,7 @@ mod tests {
         // coordinator session), so the SAME SendMessage call takes the
         // "router not wired" `Internal` error path. This locks both sides of
         // the T13 wiring decision so a regression in either is caught.
-        let default_reg = desktop_tool_registry(stub_tool_ctx(), None);
+        let default_reg = desktop_tool_registry(stub_tool_ctx(), None, None);
         let default_send = default_reg
             .find_by_name("SendMessage")
             .expect("SendMessage builtin must be registered in the default set too");

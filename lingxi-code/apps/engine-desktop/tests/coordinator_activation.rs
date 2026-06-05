@@ -451,7 +451,7 @@ fn stub_ctx() -> tool_api::BuiltinToolContext {
 /// of each team tool — no coordinator shadow.
 #[test]
 fn default_session_registers_tool_team_pair_not_coordinator() {
-    let reg = engine_desktop::desktop_tool_registry(stub_ctx(), None);
+    let reg = engine_desktop::desktop_tool_registry(stub_ctx(), None, None);
     let names = reg.all_names();
 
     assert_eq!(
@@ -480,7 +480,7 @@ fn default_session_registers_tool_team_pair_not_coordinator() {
 /// uphold.
 #[test]
 fn default_session_tool_list_has_no_duplicate_names() {
-    let reg = engine_desktop::desktop_tool_registry(stub_ctx(), None);
+    let reg = engine_desktop::desktop_tool_registry(stub_ctx(), None, None);
     let mut names = reg.all_names();
     names.sort();
     let mut deduped = names.clone();

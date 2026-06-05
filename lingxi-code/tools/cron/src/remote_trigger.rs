@@ -1,32 +1,37 @@
-//! `RemoteTriggerTool` — local stub for remote workflow triggers.
+//! `RemoteTriggerTool` — manage scheduled remote Claude Code agents (triggers)
+//! via the claude.ai CCR API.
 //!
-//! Wire identifiers locked in spec §7:
-//! - Legacy credentials path `~/.claude/.credentials.json`.
-//! - Local stub — **NO network**.
+//! 1:1 port of claude-code's
+//! `src/tools/RemoteTriggerTool/RemoteTriggerTool.ts` (+ `prompt.ts`). The tool
+//! drives the network through [`tool_api::BuiltinToolContext::http`]
+//! (`Arc<dyn HttpTransport>`); the OAuth access token and organization UUID are
+//! resolved in-process via a [`ClaudeAiAuthProvider`] handed to
+//! [`RemoteTriggerTool::new`] at the registration site — the token never reaches
+//! the shell.
 //!
-//! Reads `~/.claude/.credentials.json`, validates it parses as JSON with at
-//! least an `oauth.access_token` string, and returns
-//! `{ stub: true, credentials_path, would_trigger: <input> }`. Emits
-//! `remote_trigger_started` and `remote_trigger_completed`. Production
-//! hosts wrap this with the real HTTP trigger (out of M4-08 scope).
+//! Auth resolution is decoupled from the shared [`tool_api::BuiltinToolContext`]
+//! (which is constructed in dozens of places): instead of adding a field there,
+//! the composition root wires a concrete [`ClaudeAiAuthProvider`] only at the
+//! RemoteTrigger registration site (desktop). Construction sites without an
+//! auth backend (mobile, tests) pass `None`, in which case the pre-flight
+//! "not authenticated" error fires.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
-use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
     REMOTE_TRIGGER_COMPLETED, REMOTE_TRIGGER_FAILED, REMOTE_TRIGGER_STARTED,
 };
 use telemetry::AnalyticsBus;
 
+use protocol::{HttpMethod, HttpRequest};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -34,56 +39,112 @@ use tool_api::tool_trait::{
     ToolStaticContext, ValidationError,
 };
 
-/// Tool name byte-lock.
+/// Tool name byte-lock. Asserted by `parity_registry.rs`.
 pub const REMOTE_TRIGGER_TOOL_NAME: &str = "RemoteTrigger";
-/// Legacy credentials file (spec §7).
+
+/// LEGACY wire identifier — retained ONLY so the locked `system_tools.json`
+/// parity fixture (`parity_system_tools.rs`) still compiles + passes without
+/// editing the locked fixture. The REAL tool (1:1 TS port) drives the claude.ai
+/// CCR API in-process and has NO local credentials file; this constant is dead
+/// to the live code path and is intentionally not read by [`RemoteTriggerTool`].
+/// The fixture's `remote_trigger_credentials_file` / `remote_trigger_subdir` /
+/// `path_templates.remote_trigger` entries describe the superseded local-stub
+/// design — see the task report for the recommended fixture migration.
 pub const REMOTE_TRIGGER_CREDENTIALS_FILE: &str = ".credentials.json";
-/// `~/.claude/` subdirectory housing the credentials file.
+/// LEGACY wire identifier — see [`REMOTE_TRIGGER_CREDENTIALS_FILE`]. Retained
+/// solely to keep the locked `system_tools.json` parity fixture green; unused by
+/// the live tool.
 pub const REMOTE_TRIGGER_SUBDIR: &str = ".claude";
 
-fn home_dir_or_internal() -> Result<PathBuf, ToolError> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| ToolError::Internal("RemoteTrigger: HOME directory not available".into()))
+/// `anthropic-beta` header value (TS `TRIGGERS_BETA`).
+const TRIGGERS_BETA: &str = "ccr-triggers-2026-01-30";
+
+/// `anthropic-version` header value.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// Per-request timeout (TS `timeout: 20_000`).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Default `BASE_API_URL` (TS `getOauthConfig().BASE_API_URL` — the production
+/// default; see `claude-code/src/constants/oauth.ts`). The composition-root
+/// provider overrides this when the host resolves a non-default API base.
+pub const DEFAULT_BASE_API_URL: &str = "https://api.anthropic.com";
+
+/// Resolves the current refreshed claude.ai OAuth access token + organization
+/// UUID for [`RemoteTriggerTool`].
+///
+/// Lives in the cron crate (NOT in `traits/`, which is frozen). A concrete impl
+/// is wired at the composition root (`apps/engine-desktop`) backed by the
+/// credential store; tests inject a mock. The optional [`Self::base_api_url`]
+/// override mirrors TS `getOauthConfig().BASE_API_URL` (defaults to
+/// [`DEFAULT_BASE_API_URL`]).
+pub trait ClaudeAiAuthProvider: Send + Sync {
+    /// Current (refreshed) claude.ai OAuth access token, or `None` when the user
+    /// is not authenticated with a claude.ai account.
+    fn access_token(&self) -> Option<String>;
+
+    /// Stable organization UUID for the authenticated account, or `None` when it
+    /// cannot be resolved.
+    fn org_uuid(&self) -> Option<String>;
+
+    /// API base URL the triggers endpoint is built against. Defaults to
+    /// [`DEFAULT_BASE_API_URL`]; the host overrides it when it resolves a
+    /// non-default base (env / staging).
+    fn base_api_url(&self) -> String {
+        DEFAULT_BASE_API_URL.to_string()
+    }
 }
 
-#[must_use]
-pub(crate) fn credentials_path(home: &Path) -> PathBuf {
-    home.join(REMOTE_TRIGGER_SUBDIR)
-        .join(REMOTE_TRIGGER_CREDENTIALS_FILE)
-}
-
-/// `RemoteTriggerTool` — local stub. Validates credentials file exists +
-/// has `oauth.access_token` string; never hits the network.
+/// `RemoteTriggerTool` — manage scheduled remote agent triggers via the
+/// claude.ai CCR API. Drives the network over `ctx.http`.
 pub struct RemoteTriggerTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
+    auth: Option<Arc<dyn ClaudeAiAuthProvider>>,
 }
 
 impl RemoteTriggerTool {
     /// Construct.
+    ///
+    /// `auth` is the in-process OAuth resolver. Pass `Some(..)` at the desktop
+    /// composition root (backed by the credential store); pass `None` where no
+    /// auth backend is wired (mobile WIP, tests that don't exercise the network
+    /// path) — in that case the pre-flight "not authenticated" error fires.
     #[must_use]
-    pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
-        Self { ctx }
+    pub fn new(
+        ctx: tool_api::BuiltinToolContext,
+        auth: Option<Arc<dyn ClaudeAiAuthProvider>>,
+    ) -> Self {
+        Self { ctx, auth }
     }
 }
 
+/// Input schema (1:1 with TS `inputSchema`):
+/// `{ action: list|get|create|update|run, trigger_id?: /^[\w-]+$/, body?: object }`.
 static SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
+        "additionalProperties": false,
         "properties": {
-            "trigger_name": { "type": "string", "minLength": 1 },
-            "payload":      {}
+            "action": {
+                "type": "string",
+                "enum": ["list", "get", "create", "update", "run"]
+            },
+            "trigger_id": {
+                "type": "string",
+                "pattern": "^[\\w-]+$",
+                "description": "Required for get, update, and run"
+            },
+            "body": {
+                "type": "object",
+                "description": "JSON body for create and update"
+            }
         },
-        "required": ["trigger_name"]
+        "required": ["action"]
     })
 });
 
-fn pii_str(s: &str) -> AnalyticsValue {
-    AnalyticsValue::String(PiiTagged::assert_pii_tagged_column(s.to_string()).into_inner())
-}
-
 fn verified_str(s: &str) -> AnalyticsValue {
-    AnalyticsValue::String(Verified::assert_safe(s.to_string()).into_inner())
+    AnalyticsValue::String(telemetry::pii::Verified::assert_safe(s.to_string()).into_inner())
 }
 
 async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
@@ -96,32 +157,68 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
     bus.log_event(REMOTE_TRIGGER_FAILED, md).await;
 }
 
+/// `jsonStringify(res.data)` — axios parses a JSON body into an object, so
+/// `JSON.stringify` re-serializes it compactly; a non-JSON body is left as a
+/// string and stringified (quoted). Mirror that: parse → compact re-serialize;
+/// on parse failure wrap the raw body as a JSON string.
+fn json_stringify_body(body: &str) -> String {
+    match serde_json::from_str::<Value>(body) {
+        Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| body.to_string()),
+        Err(_) => serde_json::to_string(&Value::String(body.to_string()))
+            .unwrap_or_else(|_| body.to_string()),
+    }
+}
+
 #[async_trait]
 impl Tool for RemoteTriggerTool {
     fn name(&self) -> &str {
         REMOTE_TRIGGER_TOOL_NAME
     }
+
+    fn search_hint(&self) -> Option<&str> {
+        Some("manage scheduled remote agent triggers")
+    }
+
     fn input_schema(&self) -> &Value {
         &SCHEMA
     }
+
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
     }
-    fn max_result_size_chars(&self) -> usize {
-        4_096
+
+    /// TS `shouldDefer: true`.
+    fn should_defer(&self) -> bool {
+        true
     }
+
+    /// TS `maxResultSizeChars: 100_000`.
+    fn max_result_size_chars(&self) -> usize {
+        100_000
+    }
+
+    /// TS `isConcurrencySafe() { return true }`.
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
-        true
+
+    /// TS `isReadOnly(input)` — `list` and `get` are read-only.
+    fn is_read_only(&self, input: &Value) -> bool {
+        matches!(
+            input.get("action").and_then(Value::as_str),
+            Some("list" | "get")
+        )
     }
+
     fn is_destructive(&self, _: &Value) -> bool {
         false
     }
+
+    /// Reaches the network (claude.ai CCR API).
     fn is_open_world(&self, _: &Value) -> bool {
-        false // local stub — explicitly NOT open-world.
+        true
     }
+
     fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
         InterruptBehavior::Block
     }
@@ -129,7 +226,7 @@ impl Tool for RemoteTriggerTool {
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "RemoteTrigger is a local stub — no network access".into(),
+                reason: "RemoteTrigger drives the claude.ai CCR API in-process".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -137,13 +234,14 @@ impl Tool for RemoteTriggerTool {
         }
     }
 
+    /// TS `DESCRIPTION`.
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "Local stub for remote workflow triggers. Validates ~/.claude/.credentials.json; no network."
-            .into()
+        "Manage scheduled remote Claude Code agents (triggers) via the claude.ai CCR API. Auth is handled in-process — the token never reaches the shell.".into()
     }
 
+    /// TS `PROMPT`.
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "RemoteTrigger: stub for triggering a remote workflow (M4-08 ships local-only).".into()
+        "Call the claude.ai remote-trigger API. Use this instead of curl — the OAuth token is added automatically in-process and never exposed.\n\nActions:\n- list: GET /v1/code/triggers\n- get: GET /v1/code/triggers/{trigger_id}\n- create: POST /v1/code/triggers (requires body)\n- update: POST /v1/code/triggers/{trigger_id} (requires body, partial update)\n- run: POST /v1/code/triggers/{trigger_id}/run\n\nThe response is the raw JSON from the API.".into()
     }
 
     async fn validate_input(
@@ -151,16 +249,31 @@ impl Tool for RemoteTriggerTool {
         input: &Value,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        let name = input
-            .get("trigger_name")
+        let action = input
+            .get("action")
             .and_then(Value::as_str)
-            .ok_or_else(|| {
-                ValidationError("RemoteTrigger: missing or non-string trigger_name".into())
+            .ok_or_else(|| ValidationError("RemoteTrigger: missing or non-string action".into()))?;
+        if !matches!(action, "list" | "get" | "create" | "update" | "run") {
+            return Err(ValidationError(format!(
+                "RemoteTrigger: invalid action '{action}'"
+            )));
+        }
+        if let Some(tid) = input.get("trigger_id") {
+            let tid = tid.as_str().ok_or_else(|| {
+                ValidationError("RemoteTrigger: trigger_id must be a string".into())
             })?;
-        if name.is_empty() {
-            return Err(ValidationError(
-                "RemoteTrigger: trigger_name is empty".into(),
-            ));
+            if !tid.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') || tid.is_empty() {
+                return Err(ValidationError(
+                    "RemoteTrigger: trigger_id must match /^[\\w-]+$/".into(),
+                ));
+            }
+        }
+        if let Some(body) = input.get("body") {
+            if !body.is_object() {
+                return Err(ValidationError(
+                    "RemoteTrigger: body must be a JSON object".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -174,105 +287,149 @@ impl Tool for RemoteTriggerTool {
         let started = Instant::now();
         let bus = self.ctx.bus.clone();
 
-        let trigger_name = match input.get("trigger_name").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
-            None => {
-                emit_failed(
-                    &bus,
-                    "missing_trigger_name",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
+        let action = match input.get("action").and_then(Value::as_str) {
+            Some(a) if matches!(a, "list" | "get" | "create" | "update" | "run") => a.to_string(),
+            _ => {
+                emit_failed(&bus, "invalid_action", started.elapsed().as_millis() as u64).await;
                 return Err(ToolError::InvalidInput(
-                    "RemoteTrigger: missing or non-string trigger_name".into(),
+                    "RemoteTrigger: missing or invalid action".into(),
                 ));
             }
         };
-        let payload = input.get("payload").cloned().unwrap_or(Value::Null);
+        let trigger_id = input
+            .get("trigger_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let body = input.get("body").cloned();
 
         let mut md: LogEventMetadata = HashMap::new();
-        md.insert("_PROTO_trigger_name".into(), pii_str(&trigger_name));
+        md.insert("action".into(), verified_str(&action));
         bus.log_event(REMOTE_TRIGGER_STARTED, md).await;
 
-        let home = match home_dir_or_internal() {
-            Ok(h) => h,
-            Err(e) => {
-                emit_failed(&bus, "no_home", started.elapsed().as_millis() as u64).await;
-                return Err(e);
+        // ===== Pre-flight auth (byte-faithful errors) =====
+        // TS: checkAndRefreshOAuthTokenIfNeeded(); getClaudeAIOAuthTokens()?.accessToken.
+        let access_token = match self.auth.as_ref().and_then(|p| p.access_token()) {
+            Some(t) if !t.is_empty() => t,
+            _ => {
+                emit_failed(&bus, "no_token", started.elapsed().as_millis() as u64).await;
+                return Err(ToolError::Internal(
+                    "Not authenticated with a claude.ai account. Run /login and try again.".into(),
+                ));
             }
         };
-        let path = credentials_path(&home);
+        let org_uuid = match self.auth.as_ref().and_then(|p| p.org_uuid()) {
+            Some(o) if !o.is_empty() => o,
+            _ => {
+                emit_failed(&bus, "no_org", started.elapsed().as_millis() as u64).await;
+                return Err(ToolError::Internal(
+                    "Unable to resolve organization UUID.".into(),
+                ));
+            }
+        };
 
-        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            emit_failed(
-                &bus,
-                "credentials_missing",
-                started.elapsed().as_millis() as u64,
-            )
-            .await;
-            return Err(ToolError::InvalidInput(format!(
-                "RemoteTrigger: credentials file not found at {}",
-                path.display()
-            )));
-        }
-        let bytes = match tokio::fs::read(&path).await {
-            Ok(b) => b,
+        let base = format!(
+            "{}/v1/code/triggers",
+            self.auth
+                .as_ref()
+                .map_or_else(|| DEFAULT_BASE_API_URL.to_string(), |p| p.base_api_url())
+        );
+
+        // ===== Method / URL / body dispatch (1:1 with TS switch) =====
+        let (method, url, data): (HttpMethod, String, Option<Value>) = match action.as_str() {
+            "list" => (HttpMethod::Get, base.clone(), None),
+            "get" => {
+                let Some(id) = trigger_id.as_deref() else {
+                    emit_failed(&bus, "get_no_trigger_id", started.elapsed().as_millis() as u64)
+                        .await;
+                    return Err(ToolError::InvalidInput("get requires trigger_id".into()));
+                };
+                (HttpMethod::Get, format!("{base}/{id}"), None)
+            }
+            "create" => {
+                let Some(b) = body.clone() else {
+                    emit_failed(&bus, "create_no_body", started.elapsed().as_millis() as u64).await;
+                    return Err(ToolError::InvalidInput("create requires body".into()));
+                };
+                (HttpMethod::Post, base.clone(), Some(b))
+            }
+            "update" => {
+                let Some(id) = trigger_id.as_deref() else {
+                    emit_failed(
+                        &bus,
+                        "update_no_trigger_id",
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .await;
+                    return Err(ToolError::InvalidInput("update requires trigger_id".into()));
+                };
+                let Some(b) = body.clone() else {
+                    emit_failed(&bus, "update_no_body", started.elapsed().as_millis() as u64).await;
+                    return Err(ToolError::InvalidInput("update requires body".into()));
+                };
+                (HttpMethod::Post, format!("{base}/{id}"), Some(b))
+            }
+            "run" => {
+                let Some(id) = trigger_id.as_deref() else {
+                    emit_failed(&bus, "run_no_trigger_id", started.elapsed().as_millis() as u64)
+                        .await;
+                    return Err(ToolError::InvalidInput("run requires trigger_id".into()));
+                };
+                (HttpMethod::Post, format!("{base}/{id}/run"), Some(json!({})))
+            }
+            // unreachable — `action` validated above.
+            _ => unreachable!("action validated"),
+        };
+
+        let request_body = data.map(|d| serde_json::to_string(&d).unwrap_or_else(|_| "{}".into()));
+
+        let req = HttpRequest {
+            method,
+            url,
+            headers: vec![
+                ("Authorization".into(), format!("Bearer {access_token}")),
+                ("Content-Type".into(), "application/json".into()),
+                ("anthropic-version".into(), ANTHROPIC_VERSION.into()),
+                ("anthropic-beta".into(), TRIGGERS_BETA.into()),
+                ("x-organization-uuid".into(), org_uuid),
+            ],
+            body: request_body,
+            timeout: Some(REQUEST_TIMEOUT),
+        };
+
+        // TS `validateStatus: () => true` — every status is a non-error result;
+        // the body/status flow into the output unchanged. So a transport-level
+        // `HttpError::Status` (non-2xx) is mapped back to a result, not an error.
+        let resp = match self.ctx.http.request(req).await {
+            Ok(r) => r,
+            Err(traits::http::HttpError::Status { status, body }) => {
+                protocol::HttpResponse {
+                    status,
+                    headers: vec![],
+                    body,
+                }
+            }
             Err(e) => {
-                emit_failed(&bus, "io_read", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::Io(format!(
-                    "RemoteTrigger: io error at {}: {e}",
-                    path.display()
-                )));
+                emit_failed(&bus, "transport", started.elapsed().as_millis() as u64).await;
+                return Err(ToolError::Io(format!("RemoteTrigger: HTTP transport error: {e}")));
             }
         };
-        let creds: Value = match serde_json::from_slice(&bytes) {
-            Ok(v) => v,
-            Err(e) => {
-                emit_failed(&bus, "invalid_json", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::Io(format!(
-                    "RemoteTrigger: credentials file at {} is invalid JSON: {e}",
-                    path.display()
-                )));
-            }
-        };
-        let has_access_token = creds
-            .get("oauth")
-            .and_then(|o| o.get("access_token"))
-            .and_then(Value::as_str)
-            .is_some();
-        if !has_access_token {
-            emit_failed(
-                &bus,
-                "missing_access_token",
-                started.elapsed().as_millis() as u64,
-            )
-            .await;
-            return Err(ToolError::InvalidInput(format!(
-                "RemoteTrigger: credentials file at {} is missing oauth.access_token",
-                path.display()
-            )));
-        }
+
+        let status = resp.status;
+        let json = json_stringify_body(&resp.body);
 
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "duration_ms".into(),
             AnalyticsValue::Int(started.elapsed().as_millis() as i64),
         );
-        md.insert(
-            "credentials_bytes".into(),
-            AnalyticsValue::Int(bytes.len() as i64),
-        );
+        md.insert("status".into(), AnalyticsValue::Int(i64::from(status)));
         bus.log_event(REMOTE_TRIGGER_COMPLETED, md).await;
 
+        // Output `{ status, json }`; the result block renders `HTTP {status}\n{json}`.
         Ok(ToolCallResult {
             data: json!({
-                "stub": true,
-                "credentials_path": path.display().to_string(),
-                "trigger_name": trigger_name,
-                "would_trigger": {
-                    "trigger_name": trigger_name,
-                    "payload": payload,
-                },
+                "status": status,
+                "json": json,
             }),
             new_messages: vec![],
             context_modifier: None,
@@ -284,7 +441,9 @@ impl Tool for RemoteTriggerTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, HOME_LOCK};
+    use std::sync::Mutex;
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use traits::http::{HttpError, HttpTransport, SseStream};
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
@@ -296,82 +455,328 @@ mod tests {
         }
     }
 
+    /// Mock auth provider.
+    struct MockAuth {
+        token: Option<String>,
+        org: Option<String>,
+        base: String,
+    }
+    impl MockAuth {
+        fn full() -> Self {
+            Self {
+                token: Some("tok-abc".into()),
+                org: Some("org-123".into()),
+                base: DEFAULT_BASE_API_URL.into(),
+            }
+        }
+    }
+    impl ClaudeAiAuthProvider for MockAuth {
+        fn access_token(&self) -> Option<String> {
+            self.token.clone()
+        }
+        fn org_uuid(&self) -> Option<String> {
+            self.org.clone()
+        }
+        fn base_api_url(&self) -> String {
+            self.base.clone()
+        }
+    }
+
+    /// Records the last request and returns a canned response.
+    struct RecordingHttp {
+        last: Mutex<Option<HttpRequest>>,
+        status: u16,
+        body: String,
+    }
+    impl RecordingHttp {
+        fn new(status: u16, body: &str) -> Arc<Self> {
+            Arc::new(Self {
+                last: Mutex::new(None),
+                status,
+                body: body.into(),
+            })
+        }
+        fn take(&self) -> HttpRequest {
+            self.last.lock().unwrap().take().expect("a request was made")
+        }
+    }
+    #[async_trait]
+    impl HttpTransport for RecordingHttp {
+        async fn request(
+            &self,
+            req: HttpRequest,
+        ) -> Result<protocol::HttpResponse, HttpError> {
+            *self.last.lock().unwrap() = Some(req);
+            Ok(protocol::HttpResponse {
+                status: self.status,
+                headers: vec![],
+                body: self.body.clone(),
+            })
+        }
+        async fn stream_sse(&self, _: HttpRequest) -> Result<SseStream, HttpError> {
+            Err(HttpError::InvalidRequest("no sse".into()))
+        }
+    }
+
+    fn header<'a>(req: &'a HttpRequest, name: &str) -> Option<&'a str> {
+        req.headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn tool_with(
+        http: Arc<dyn HttpTransport>,
+        auth: Option<Arc<dyn ClaudeAiAuthProvider>>,
+    ) -> RemoteTriggerTool {
+        let mut ctx = shell_test_ctx(dummy_out());
+        ctx.http = http;
+        RemoteTriggerTool::new(ctx, auth)
+    }
+
     #[test]
-    fn constants_locked() {
+    fn name_and_schema_locked() {
         assert_eq!(REMOTE_TRIGGER_TOOL_NAME, "RemoteTrigger");
-        assert_eq!(REMOTE_TRIGGER_CREDENTIALS_FILE, ".credentials.json");
-        assert_eq!(REMOTE_TRIGGER_SUBDIR, ".claude");
+        assert_eq!(SCHEMA["properties"]["action"]["enum"][0], json!("list"));
+        assert_eq!(
+            SCHEMA["properties"]["trigger_id"]["pattern"],
+            json!("^[\\w-]+$")
+        );
+        assert_eq!(SCHEMA["required"], json!(["action"]));
+    }
+
+    #[test]
+    fn metadata_matches_ts() {
+        let tool = tool_with(RecordingHttp::new(200, "{}"), None);
+        assert!(tool.should_defer());
+        assert_eq!(tool.max_result_size_chars(), 100_000);
+        assert!(tool.is_concurrency_safe(&json!({})));
+        assert!(tool.is_read_only(&json!({"action": "list"})));
+        assert!(tool.is_read_only(&json!({"action": "get"})));
+        assert!(!tool.is_read_only(&json!({"action": "create"})));
+        assert!(!tool.is_read_only(&json!({"action": "update"})));
+        assert!(!tool.is_read_only(&json!({"action": "run"})));
+        assert!(tool.is_open_world(&json!({})));
     }
 
     #[tokio::test]
-    async fn happy_path_with_valid_credentials() {
-        let _g = HOME_LOCK.lock().await;
-        let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        let path = credentials_path(tmp.path());
-        tokio::fs::create_dir_all(path.parent().unwrap())
+    async fn list_builds_get_base_with_headers() {
+        let http = RecordingHttp::new(200, r#"[{"id":"t1"}]"#);
+        let tool = tool_with(http.clone(), Some(Arc::new(MockAuth::full())));
+        let out = tool
+            .call(json!({"action": "list"}), fresh_ctx(), fresh_tx())
             .await
-            .unwrap();
-        tokio::fs::write(
-            &path,
-            br#"{"oauth": {"access_token": "tok-abc", "refresh_token": "ref-xyz"}}"#,
+            .expect("ok");
+        let req = http.take();
+        assert_eq!(req.method, HttpMethod::Get);
+        assert_eq!(req.url, "https://api.anthropic.com/v1/code/triggers");
+        assert!(req.body.is_none());
+        assert_eq!(header(&req, "Authorization"), Some("Bearer tok-abc"));
+        assert_eq!(header(&req, "Content-Type"), Some("application/json"));
+        assert_eq!(header(&req, "anthropic-version"), Some("2023-06-01"));
+        assert_eq!(
+            header(&req, "anthropic-beta"),
+            Some("ccr-triggers-2026-01-30")
+        );
+        assert_eq!(header(&req, "x-organization-uuid"), Some("org-123"));
+        assert_eq!(req.timeout, Some(Duration::from_secs(20)));
+        // Output { status, json } and compact re-serialization.
+        assert_eq!(out.data["status"], json!(200));
+        assert_eq!(out.data["json"], json!(r#"[{"id":"t1"}]"#));
+    }
+
+    #[tokio::test]
+    async fn get_builds_get_base_id() {
+        let http = RecordingHttp::new(200, r#"{"id":"t1"}"#);
+        let tool = tool_with(http.clone(), Some(Arc::new(MockAuth::full())));
+        tool.call(
+            json!({"action": "get", "trigger_id": "t1"}),
+            fresh_ctx(),
+            fresh_tx(),
         )
         .await
-        .unwrap();
-        let tool = RemoteTriggerTool::new(shell_test_ctx(dummy_out()));
+        .expect("ok");
+        let req = http.take();
+        assert_eq!(req.method, HttpMethod::Get);
+        assert_eq!(req.url, "https://api.anthropic.com/v1/code/triggers/t1");
+        assert!(req.body.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_posts_base_with_body() {
+        let http = RecordingHttp::new(201, r#"{"id":"new"}"#);
+        let tool = tool_with(http.clone(), Some(Arc::new(MockAuth::full())));
+        tool.call(
+            json!({"action": "create", "body": {"name": "deploy"}}),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("ok");
+        let req = http.take();
+        assert_eq!(req.method, HttpMethod::Post);
+        assert_eq!(req.url, "https://api.anthropic.com/v1/code/triggers");
+        assert_eq!(req.body.as_deref(), Some(r#"{"name":"deploy"}"#));
+    }
+
+    #[tokio::test]
+    async fn update_posts_base_id_with_body() {
+        let http = RecordingHttp::new(200, r#"{"id":"t1"}"#);
+        let tool = tool_with(http.clone(), Some(Arc::new(MockAuth::full())));
+        tool.call(
+            json!({"action": "update", "trigger_id": "t1", "body": {"schedule": "0 9 * * *"}}),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("ok");
+        let req = http.take();
+        assert_eq!(req.method, HttpMethod::Post);
+        assert_eq!(req.url, "https://api.anthropic.com/v1/code/triggers/t1");
+        assert_eq!(req.body.as_deref(), Some(r#"{"schedule":"0 9 * * *"}"#));
+    }
+
+    #[tokio::test]
+    async fn run_posts_base_id_run_with_empty_body() {
+        let http = RecordingHttp::new(202, r#"{"queued":true}"#);
+        let tool = tool_with(http.clone(), Some(Arc::new(MockAuth::full())));
         let out = tool
             .call(
-                json!({"trigger_name": "deploy", "payload": {"env": "prod"}}),
+                json!({"action": "run", "trigger_id": "t1"}),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        assert_eq!(out.data["stub"], json!(true));
-        assert_eq!(out.data["trigger_name"], json!("deploy"));
-        assert_eq!(out.data["would_trigger"]["payload"]["env"], json!("prod"));
+        let req = http.take();
+        assert_eq!(req.method, HttpMethod::Post);
+        assert_eq!(req.url, "https://api.anthropic.com/v1/code/triggers/t1/run");
+        assert_eq!(req.body.as_deref(), Some("{}"));
+        assert_eq!(out.data["status"], json!(202));
+        assert_eq!(out.data["json"], json!(r#"{"queued":true}"#));
     }
 
     #[tokio::test]
-    async fn rejects_missing_credentials_file() {
-        let _g = HOME_LOCK.lock().await;
-        let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        let tool = RemoteTriggerTool::new(shell_test_ctx(dummy_out()));
-        let err = tool
-            .call(json!({"trigger_name": "deploy"}), fresh_ctx(), fresh_tx())
+    async fn validate_status_true_non_2xx_is_a_result() {
+        // 404 must NOT error — it flows into { status, json } (TS validateStatus).
+        let http = RecordingHttp::new(404, r#"{"error":"not found"}"#);
+        let tool = tool_with(http, Some(Arc::new(MockAuth::full())));
+        let out = tool
+            .call(
+                json!({"action": "get", "trigger_id": "missing"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
-            .expect_err("missing creds");
-        assert!(format!("{err}").contains("credentials file not found"));
+            .expect("404 is a result, not an error");
+        assert_eq!(out.data["status"], json!(404));
+        assert_eq!(out.data["json"], json!(r#"{"error":"not found"}"#));
     }
 
     #[tokio::test]
-    async fn rejects_credentials_without_access_token() {
-        let _g = HOME_LOCK.lock().await;
-        let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
-        let path = credentials_path(tmp.path());
-        tokio::fs::create_dir_all(path.parent().unwrap())
-            .await
-            .unwrap();
-        tokio::fs::write(&path, br#"{"oauth": {"refresh_token": "ref-xyz"}}"#)
-            .await
-            .unwrap();
-        let tool = RemoteTriggerTool::new(shell_test_ctx(dummy_out()));
+    async fn get_requires_trigger_id() {
+        let tool = tool_with(RecordingHttp::new(200, "{}"), Some(Arc::new(MockAuth::full())));
         let err = tool
-            .call(json!({"trigger_name": "deploy"}), fresh_ctx(), fresh_tx())
+            .call(json!({"action": "get"}), fresh_ctx(), fresh_tx())
             .await
-            .expect_err("no access_token");
-        assert!(format!("{err}").contains("missing oauth.access_token"));
+            .expect_err("missing trigger_id");
+        assert!(format!("{err}").contains("get requires trigger_id"));
     }
 
     #[tokio::test]
-    async fn rejects_missing_trigger_name() {
-        let tool = RemoteTriggerTool::new(shell_test_ctx(dummy_out()));
+    async fn create_requires_body() {
+        let tool = tool_with(RecordingHttp::new(200, "{}"), Some(Arc::new(MockAuth::full())));
         let err = tool
-            .call(json!({}), fresh_ctx(), fresh_tx())
+            .call(json!({"action": "create"}), fresh_ctx(), fresh_tx())
             .await
-            .expect_err("missing");
-        assert!(format!("{err}").contains("missing or non-string trigger_name"));
+            .expect_err("missing body");
+        assert!(format!("{err}").contains("create requires body"));
+    }
+
+    #[tokio::test]
+    async fn update_requires_trigger_id_and_body() {
+        let tool = tool_with(RecordingHttp::new(200, "{}"), Some(Arc::new(MockAuth::full())));
+        let err = tool
+            .call(json!({"action": "update", "body": {}}), fresh_ctx(), fresh_tx())
+            .await
+            .expect_err("missing trigger_id");
+        assert!(format!("{err}").contains("update requires trigger_id"));
+        let err = tool
+            .call(
+                json!({"action": "update", "trigger_id": "t1"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("missing body");
+        assert!(format!("{err}").contains("update requires body"));
+    }
+
+    #[tokio::test]
+    async fn run_requires_trigger_id() {
+        let tool = tool_with(RecordingHttp::new(200, "{}"), Some(Arc::new(MockAuth::full())));
+        let err = tool
+            .call(json!({"action": "run"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect_err("missing trigger_id");
+        assert!(format!("{err}").contains("run requires trigger_id"));
+    }
+
+    #[tokio::test]
+    async fn no_token_preflight_error_is_byte_faithful() {
+        // No auth provider at all.
+        let tool = tool_with(RecordingHttp::new(200, "{}"), None);
+        let err = tool
+            .call(json!({"action": "list"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect_err("no token");
+        assert_eq!(
+            format!("{err}"),
+            "internal: Not authenticated with a claude.ai account. Run /login and try again."
+        );
+
+        // Provider present but token empty/None.
+        let auth: Arc<dyn ClaudeAiAuthProvider> = Arc::new(MockAuth {
+            token: None,
+            org: Some("org".into()),
+            base: DEFAULT_BASE_API_URL.into(),
+        });
+        let tool = tool_with(RecordingHttp::new(200, "{}"), Some(auth));
+        let err = tool
+            .call(json!({"action": "list"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect_err("no token");
+        assert!(format!("{err}")
+            .contains("Not authenticated with a claude.ai account. Run /login and try again."));
+    }
+
+    #[tokio::test]
+    async fn no_org_preflight_error_is_byte_faithful() {
+        let auth: Arc<dyn ClaudeAiAuthProvider> = Arc::new(MockAuth {
+            token: Some("tok".into()),
+            org: None,
+            base: DEFAULT_BASE_API_URL.into(),
+        });
+        let tool = tool_with(RecordingHttp::new(200, "{}"), Some(auth));
+        let err = tool
+            .call(json!({"action": "list"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect_err("no org");
+        assert_eq!(
+            format!("{err}"),
+            "internal: Unable to resolve organization UUID."
+        );
+    }
+
+    #[tokio::test]
+    async fn non_json_body_is_quoted() {
+        // axios leaves a non-JSON body as a string; jsonStringify quotes it.
+        let http = RecordingHttp::new(200, "plain text");
+        let tool = tool_with(http, Some(Arc::new(MockAuth::full())));
+        let out = tool
+            .call(json!({"action": "list"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(out.data["json"], json!("\"plain text\""));
     }
 }

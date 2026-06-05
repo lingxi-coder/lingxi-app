@@ -5,6 +5,7 @@
 //! reply. The executor merges all matching hooks' responses into a single
 //! [`AggregateHookResult`] consumed by the calling subsystem.
 
+use crate::events::HookProgressEvent;
 use protocol::HookId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -115,4 +116,10 @@ pub struct AggregateHookResult {
     pub attachments: Vec<Value>,
     /// Per-hook results, in execution order — for telemetry and debugging.
     pub all_results: Vec<(HookId, HookResult)>,
+    /// One `hook_progress` event per matching hook, in execution order,
+    /// emitted *before* each hook runs (claude-code `utils/hooks.ts:2094-2116`).
+    /// Carries the per-hook `status_message` so the spinner can substitute it
+    /// for the generic running line. Additive / `..Default::default()`-compatible;
+    /// defaults to empty, so existing callers that ignore it are unaffected.
+    pub progress: Vec<HookProgressEvent>,
 }

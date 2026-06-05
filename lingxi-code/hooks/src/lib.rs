@@ -30,7 +30,7 @@ pub mod ssrf_guard;
 
 pub use async_registry::AsyncHookRegistry;
 pub use definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
-pub use events::{HookEvent, HookEventType};
+pub use events::{HookEvent, HookEventType, HookProgressEvent};
 pub use executor::{
     BuiltinHookHandler, HookExecutorImpl, HOOK_AGENT_TIMEOUT_MS, HOOK_COMMAND_TIMEOUT_MS,
     HOOK_HTTP_TIMEOUT_MS,

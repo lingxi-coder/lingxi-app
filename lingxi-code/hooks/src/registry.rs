@@ -4,7 +4,7 @@
 use crate::definition::{HookDefinition, HookSource};
 use crate::events::HookEvent;
 use crate::matcher::matches_pattern;
-use protocol::{AgentId, PluginId, SessionId};
+use protocol::{AgentId, HookId, PluginId, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use traits::SubagentInheritance;
@@ -106,6 +106,42 @@ impl HookRegistry {
     /// Drop every hook owned by `plugin_id` (used when a plugin unloads).
     pub fn unregister_plugin(&mut self, plugin_id: &PluginId) {
         self.plugin.remove(plugin_id);
+    }
+
+    /// Remove the hook with `hook_id` from whichever bucket it lives in,
+    /// returning `true` when a hook was actually dropped.
+    ///
+    /// This is the RUNTIME half of the claude-code `once` field
+    /// (`registerSkillHooks.ts:35-36`, `utils/hooks.ts:2918-2919`): a hook
+    /// declared `once: true` is removed from its source bucket after it runs
+    /// with a *success* outcome, so it never fires again. The executor calls
+    /// this only on success — an erroring `once` hook is left in place (it may
+    /// succeed on a later dispatch), exactly mirroring TS's
+    /// `result.outcome === 'success'` guard around `onHookSuccess`.
+    ///
+    /// Scans every source bucket plus the plugin and front-matter indexes so a
+    /// `once` hook is removed wherever it was registered. `HookId`s are unique
+    /// per definition, so at most one entry is dropped.
+    pub fn remove_once_hook(&mut self, hook_id: HookId) -> bool {
+        for hooks in self.sources.values_mut() {
+            if let Some(pos) = hooks.iter().position(|h| h.id == hook_id) {
+                hooks.remove(pos);
+                return true;
+            }
+        }
+        for hooks in self.plugin.values_mut() {
+            if let Some(pos) = hooks.iter().position(|h| h.id == hook_id) {
+                hooks.remove(pos);
+                return true;
+            }
+        }
+        for hooks in self.frontmatter.values_mut() {
+            if let Some(pos) = hooks.iter().position(|h| h.id == hook_id) {
+                hooks.remove(pos);
+                return true;
+            }
+        }
+        false
     }
 
     /// Return every hook subscribed to `event`'s type that ALSO satisfies its
@@ -231,6 +267,36 @@ mod all_hooks_tests {
     #[test]
     fn all_hooks_returns_empty_for_fresh_registry() {
         let r = HookRegistry::new();
+        assert!(r.all_hooks().is_empty());
+    }
+
+    #[test]
+    fn remove_once_hook_drops_from_source_bucket_and_reports() {
+        let mut r = HookRegistry::new();
+        let keep = hk("keep", HookEventType::PostToolUse, HookSource::User);
+        let drop = hk("drop", HookEventType::PostToolUse, HookSource::User);
+        let drop_id = drop.id;
+        let absent = HookId::new();
+        r.register(keep);
+        r.register(drop);
+
+        // Removing a registered hook reports `true` and leaves only the other.
+        assert!(r.remove_once_hook(drop_id), "registered hook is removed");
+        let names: Vec<&str> = r.all_hooks().iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, vec!["keep"]);
+
+        // Removing again (or removing an unknown id) reports `false`, no panic.
+        assert!(!r.remove_once_hook(drop_id), "second removal is a no-op");
+        assert!(!r.remove_once_hook(absent), "unknown id is a no-op");
+    }
+
+    #[test]
+    fn remove_once_hook_drops_from_plugin_bucket() {
+        let mut r = HookRegistry::new();
+        let h = hk("plugin-once", HookEventType::PreToolUse, HookSource::Plugin);
+        let id = h.id;
+        r.register_plugin_hooks(protocol::PluginId::new(), vec![h]);
+        assert!(r.remove_once_hook(id));
         assert!(r.all_hooks().is_empty());
     }
 

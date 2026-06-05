@@ -204,10 +204,27 @@ impl HookExecutorImpl {
             reg.match_event(&event, &ctx).into_iter().cloned().collect();
         drop(reg);
         let mut agg = AggregateHookResult::default();
+        let hook_event = format!("{:?}", event.event_type());
         for hook in &matched {
+            // Emit a `hook_progress` event for every matching hook *before* it
+            // runs, carrying the per-hook `status_message` (claude-code
+            // `utils/hooks.ts:2094-2116`). The spinner substitutes this text
+            // for the generic running line when present.
+            agg.progress.push(crate::events::HookProgressEvent {
+                hook_event: hook_event.clone(),
+                hook_name: hook.name.clone(),
+                status_message: hook.status_message.clone(),
+            });
             if hook.blocking {
                 // Synchronous path — unchanged from M5-06.
                 let result = self.dispatcher().dispatch(hook, &event, &ctx).await;
+                // `once` runtime removal (claude-code `registerSkillHooks.ts:35-36`,
+                // `utils/hooks.ts:2918-2919`): drop the hook from the registry
+                // only after it runs with a *success* outcome, so it never fires
+                // again. An erroring `once` hook is left in place.
+                if hook.once && matches!(result.outcome, HookOutcome::Success) {
+                    self.registry.write().await.remove_once_hook(hook.id);
+                }
                 Self::merge(&mut agg, hook, result);
                 if matches!(agg.decision, Some(crate::response::HookDecision::Block)) {
                     break;
@@ -2236,5 +2253,241 @@ mod async_path_tests {
         assert_eq!(agg.decision, Some(HookDecision::Block));
         assert_eq!(agg.reason.as_deref(), Some("policy violation"));
         assert_eq!(agg.all_results.len(), 1, "blocking hook IS in the aggregate");
+    }
+}
+
+#[cfg(test)]
+mod once_and_status_message_tests {
+    //! RUNTIME wiring for the additive `once` / `status_message` hook fields.
+    //!
+    //! * `once: true` — a hook is dropped from the registry after it runs with
+    //!   a *success* outcome (claude-code `registerSkillHooks.ts:35-36` +
+    //!   `utils/hooks.ts:2918-2919`): the second dispatch finds nothing to run.
+    //!   A `once` hook whose first run ERRORS is left in place — TS guards
+    //!   `onHookSuccess` behind `result.outcome === 'success'`.
+    //! * `status_message` — threaded onto the per-hook `hook_progress` event the
+    //!   executor emits before each hook (claude-code `utils/hooks.ts:2094-2116`).
+    use super::*;
+    use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
+    use crate::events::{HookEvent, HookEventType};
+    use protocol::{HookId, ToolUseId};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// `HttpTransport` stub — never exercised by these Builtin-arm tests.
+    struct UnusedHttp;
+    #[async_trait]
+    impl HttpTransport for UnusedHttp {
+        async fn request(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+    }
+
+    /// `RuntimeSpawner` stub — backgrounding is never exercised here.
+    struct UnusedRuntime;
+    #[async_trait]
+    impl RuntimeSpawner for UnusedRuntime {
+        async fn spawn(
+            &self,
+            _name: &str,
+            _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            Err(traits::RuntimeError::Internal("unused".into()))
+        }
+        async fn sleep(&self, _duration: Duration) {}
+        async fn cancel(
+            &self,
+            _handle: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    /// A builtin handler that counts invocations and returns a fixed outcome,
+    /// so a test can prove a `once` hook ran exactly N times.
+    struct CountingBuiltin {
+        id: String,
+        runs: Arc<AtomicU32>,
+        outcome: HookOutcome,
+    }
+    #[async_trait]
+    impl BuiltinHookHandler for CountingBuiltin {
+        async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            let exit_code = i32::from(!matches!(self.outcome, HookOutcome::Success));
+            HookResult {
+                outcome: self.outcome,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(exit_code),
+                response: None,
+            }
+        }
+        fn id(&self) -> &str {
+            &self.id
+        }
+    }
+
+    fn pre_event() -> HookEvent {
+        HookEvent::PreToolUse {
+            tool_name: "Bash".into(),
+            tool_input: serde_json::json!({"command": "ls"}),
+            tool_use_id: ToolUseId::new(),
+        }
+    }
+
+    /// A Builtin hook subscribed to `PreToolUse`, with the supplied `once` flag,
+    /// `status_message`, and handler id.
+    fn builtin_hook(
+        handler_id: &str,
+        once: bool,
+        status_message: Option<&str>,
+    ) -> HookDefinition {
+        HookDefinition {
+            id: HookId::new(),
+            name: "once-hook".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: handler_id.into(),
+            },
+            source: HookSource::Skill,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once,
+            status_message: status_message.map(Into::into),
+        }
+    }
+
+    fn executor_with(
+        hook: HookDefinition,
+        handler: Arc<dyn BuiltinHookHandler>,
+    ) -> (HookExecutorImpl, Arc<RwLock<HookRegistry>>) {
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let reg = Arc::new(RwLock::new(registry));
+        let mut exec =
+            HookExecutorImpl::new(reg.clone(), Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(handler);
+        (exec, reg)
+    }
+
+    /// A `once: true` hook fires on the first dispatch and is then removed from
+    /// the registry, so a second dispatch runs nothing.
+    #[tokio::test]
+    async fn once_hook_fires_once_then_is_gone() {
+        let runs = Arc::new(AtomicU32::new(0));
+        let handler = Arc::new(CountingBuiltin {
+            id: "once-success".into(),
+            runs: runs.clone(),
+            outcome: HookOutcome::Success,
+        });
+        let (exec, reg) = executor_with(builtin_hook("once-success", true, None), handler);
+
+        // First dispatch: the hook runs and its result is in the aggregate.
+        let agg1 = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(agg1.all_results.len(), 1, "first dispatch runs the hook");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        // It was removed from the registry after the successful run.
+        assert!(
+            reg.read().await.all_hooks().is_empty(),
+            "a once hook is dropped from the registry after success",
+        );
+
+        // Second dispatch: nothing matches, nothing runs.
+        let agg2 = exec.execute(pre_event(), HookContext::default()).await;
+        assert!(
+            agg2.all_results.is_empty(),
+            "the removed once hook does not fire a second time",
+        );
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "the handler ran exactly once across both dispatches",
+        );
+    }
+
+    /// A `once: true` hook whose run ERRORS is NOT removed — it stays in the
+    /// registry and runs again on the next dispatch (TS guards removal behind a
+    /// `success` outcome).
+    #[tokio::test]
+    async fn once_hook_that_errors_is_not_removed() {
+        let runs = Arc::new(AtomicU32::new(0));
+        let handler = Arc::new(CountingBuiltin {
+            id: "once-error".into(),
+            runs: runs.clone(),
+            outcome: HookOutcome::Error,
+        });
+        let (exec, reg) = executor_with(builtin_hook("once-error", true, None), handler);
+
+        let _ = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            reg.read().await.all_hooks().len(),
+            1,
+            "an erroring once hook is left in the registry",
+        );
+
+        // Second dispatch still finds and runs the hook.
+        let _ = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "the un-removed once hook fires again after an error",
+        );
+    }
+
+    /// The per-hook `status_message` is carried onto the emitted `hook_progress`
+    /// event; a hook with no `status_message` carries `None`.
+    #[tokio::test]
+    async fn status_message_is_carried_on_progress_event() {
+        let runs = Arc::new(AtomicU32::new(0));
+        let handler = Arc::new(CountingBuiltin {
+            id: "with-status".into(),
+            runs,
+            outcome: HookOutcome::Success,
+        });
+        let (exec, _reg) = executor_with(
+            builtin_hook("with-status", false, Some("Formatting\u{2026}")),
+            handler,
+        );
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(agg.progress.len(), 1, "one progress event per matching hook");
+        let p = &agg.progress[0];
+        assert_eq!(p.hook_event, "PreToolUse");
+        assert_eq!(p.hook_name, "once-hook");
+        assert_eq!(
+            p.status_message.as_deref(),
+            Some("Formatting\u{2026}"),
+            "the per-hook status_message threads onto the progress event",
+        );
+    }
+
+    /// A hook with no `status_message` yields a progress event whose
+    /// `status_message` is `None` (the spinner falls back to the generic line).
+    #[tokio::test]
+    async fn absent_status_message_is_none_on_progress_event() {
+        let runs = Arc::new(AtomicU32::new(0));
+        let handler = Arc::new(CountingBuiltin {
+            id: "no-status".into(),
+            runs,
+            outcome: HookOutcome::Success,
+        });
+        let (exec, _reg) = executor_with(builtin_hook("no-status", false, None), handler);
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(agg.progress.len(), 1);
+        assert_eq!(agg.progress[0].status_message, None);
     }
 }

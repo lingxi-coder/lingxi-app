@@ -262,6 +262,39 @@ pub enum HookEvent {
     },
 }
 
+/// A `hook_progress` progress message emitted once per matching hook *before*
+/// that hook executes, mirroring claude-code's progress yield
+/// (`utils/hooks.ts:2094-2116`):
+///
+/// ```ts
+/// yield { message: { type: 'progress', data: {
+///   type: 'hook_progress', hookEvent, hookName, command: getHookDisplayText(hook),
+///   ...(hook.type === 'prompt' && { promptText: hook.prompt }),
+///   ...('statusMessage' in hook && hook.statusMessage != null &&
+///     { statusMessage: hook.statusMessage }),
+/// }, … } }
+/// ```
+///
+/// The spinner consumes [`Self::status_message`] in place of the default
+/// `Running {event} hook…` line when it is `Some`. This crate ORIGINATES the
+/// event (carrying the per-hook `statusMessage` text from the definition); the
+/// TUI render that swaps it into the spinner line is presentation work tracked
+/// separately (see the `hook_progress` component).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookProgressEvent {
+    /// The hook event name (e.g. `"PreToolUse"`) — claude-code `hookEvent`.
+    pub hook_event: String,
+    /// Human-readable hook name — claude-code `hookName`.
+    pub hook_name: String,
+    /// Per-hook spinner override text. `Some` only when the hook declared a
+    /// `statusMessage`; `None` falls back to the engine's generic running
+    /// line. Mirrors the conditional-spread of claude-code's `statusMessage`
+    /// field — the key is present in the TS payload only when non-null, which
+    /// `Option` models exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_message: Option<String>,
+}
+
 impl HookEvent {
     /// Return the type-tag for this event payload. Used by the registry to
     /// match events against subscribed hooks without copying the payload.

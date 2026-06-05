@@ -2769,3 +2769,277 @@ mod once_and_status_message_tests {
         assert_eq!(agg.progress[0].status_message, None);
     }
 }
+
+// ============================================================================
+// Http / Agent arm dispatch routing through the full `execute` path.
+//
+// The loader now emits `HookExecutor::Http` / `HookExecutor::Agent`
+// definitions (loader.rs). These tests prove the executor's `dispatch` routes
+// each variant to its dedicated runner — the HTTP arm reaches the injected
+// `HttpTransport` and the Agent arm reaches the injected `SubagentSpawner` —
+// so a settings-declared http/agent hook is actually executed end-to-end.
+// ============================================================================
+#[cfg(test)]
+mod http_agent_dispatch_tests {
+    use super::*;
+    use crate::definition::{HookExecutor as DefHookExecutor, HookSource};
+    use crate::events::{HookEvent, HookEventType};
+    use crate::response::HookDecision;
+    use protocol::{HookId, HttpResponse, ToolUseId};
+    use serde_json::json;
+    use std::sync::Mutex;
+    use traits::budget::{BudgetEnforcerHandle, BudgetError};
+    use traits::subagent_spawn::{
+        SubagentInheritance, SubagentResult, SubagentSpawnError, SubagentSpawnRequest,
+        SubagentUsage,
+    };
+    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+
+    /// `RuntimeSpawner` stub — never exercised by these tests.
+    struct UnusedRuntime;
+    #[async_trait]
+    impl RuntimeSpawner for UnusedRuntime {
+        async fn spawn(
+            &self,
+            _name: &str,
+            _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            Err(traits::RuntimeError::Internal("unused".into()))
+        }
+        async fn sleep(&self, _duration: Duration) {}
+        async fn cancel(
+            &self,
+            _handle: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    /// `HttpTransport` mock that records each request and returns a canned body
+    /// — so a test can prove the HTTP arm reached it with the right URL.
+    struct RecordingHttp {
+        recorded: Mutex<Vec<protocol::HttpRequest>>,
+        body: String,
+        status: u16,
+    }
+    #[async_trait]
+    impl HttpTransport for RecordingHttp {
+        async fn request(
+            &self,
+            req: protocol::HttpRequest,
+        ) -> Result<HttpResponse, traits::HttpError> {
+            self.recorded.lock().unwrap().push(req);
+            Ok(HttpResponse {
+                status: self.status,
+                headers: Vec::new(),
+                body: self.body.clone(),
+            })
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+    }
+
+    fn pre_event() -> HookEvent {
+        HookEvent::PreToolUse {
+            tool_name: "Bash".into(),
+            tool_input: json!({"command": "ls"}),
+            tool_use_id: ToolUseId::new(),
+        }
+    }
+
+    /// An `Http` hook subscribed to `PreToolUse` pointing at `url`.
+    fn http_hook(url: &str) -> HookDefinition {
+        HookDefinition {
+            id: HookId::new(),
+            name: url.into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Http {
+                url: url.into(),
+                method: "POST".into(),
+                headers: HashMap::new(),
+                timeout: Duration::from_secs(5),
+            },
+            source: HookSource::Project,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn http_hook_definition_dispatches_to_http_executor() {
+        let http = Arc::new(RecordingHttp {
+            recorded: Mutex::new(Vec::new()),
+            status: 200,
+            body:
+                r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#
+                    .into(),
+        });
+        let mut registry = HookRegistry::new();
+        registry.register(http_hook("https://hooks.example.com/pre"));
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            http.clone(),
+            Arc::new(UnusedRuntime),
+        );
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        // The HTTP arm reached the transport with the hook's URL.
+        let recorded = http.recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "the Http arm must reach the transport");
+        assert_eq!(recorded[0].url, "https://hooks.example.com/pre");
+        drop(recorded);
+        // The parsed allow response surfaces as an Approve decision.
+        assert_eq!(agg.decision, Some(HookDecision::Approve));
+        let (_, r) = &agg.all_results[0];
+        assert!(matches!(r.outcome, HookOutcome::Success));
+    }
+
+    // ---- agent arm ---------------------------------------------------------
+
+    struct InertInvoker;
+    #[async_trait]
+    impl ToolInvoker for InertInvoker {
+        async fn invoke(
+            &self,
+            _name: &str,
+            _input: serde_json::Value,
+            _ctx: SubagentInvocationContext,
+        ) -> Result<serde_json::Value, ToolInvokerError> {
+            Err(ToolInvokerError::Internal("inert".into()))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+    struct InertBudget;
+    #[async_trait]
+    impl BudgetEnforcerHandle for InertBudget {
+        async fn check_and_charge(&self, _nano_usd: u64) -> Result<(), BudgetError> {
+            Ok(())
+        }
+        async fn snapshot_total_nano_usd(&self) -> u64 {
+            0
+        }
+    }
+    fn dummy_inherit() -> SubagentInheritance {
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: Arc::new(InertBudget),
+        }
+    }
+
+    /// `HttpTransport` stub — never exercised by the agent test.
+    struct UnusedHttp;
+    #[async_trait]
+    impl HttpTransport for UnusedHttp {
+        async fn request(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<HttpResponse, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+    }
+
+    /// `SubagentSpawner` mock that records the request and returns a canned
+    /// terminal result — so a test can prove the Agent arm reached it with the
+    /// hook's `agent_type` + spliced prompt.
+    struct RecordingSpawner {
+        recorded: Mutex<Vec<SubagentSpawnRequest>>,
+        result: Mutex<Option<Result<SubagentResult, SubagentSpawnError>>>,
+    }
+    #[async_trait]
+    impl SubagentSpawner for RecordingSpawner {
+        async fn spawn(
+            &self,
+            request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, SubagentSpawnError> {
+            self.recorded.lock().unwrap().push(request);
+            self.result
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| Err(SubagentSpawnError::Internal("no script".into())))
+        }
+    }
+
+    /// An `Agent` hook subscribed to `PreToolUse`.
+    fn agent_hook() -> HookDefinition {
+        HookDefinition {
+            id: HookId::new(),
+            name: "agent".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Agent {
+                agent_type: "general-purpose".into(),
+                prompt: "vet this".into(),
+            },
+            source: HookSource::Project,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_hook_definition_dispatches_to_agent_executor() {
+        let spawner = Arc::new(RecordingSpawner {
+            recorded: Mutex::new(Vec::new()),
+            result: Mutex::new(Some(Ok(SubagentResult::Completed {
+                content: json!(r#"{"decision":"approve"}"#),
+                usage: SubagentUsage::default(),
+            }))),
+        });
+        let mut registry = HookRegistry::new();
+        registry.register(agent_hook());
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_agent_spawner(spawner.clone());
+
+        // The Agent arm needs the inheritance bundle on the context.
+        let ctx = HookContext {
+            inherit: Some(dummy_inherit()),
+            ..Default::default()
+        };
+        let agg = exec.execute(pre_event(), ctx).await;
+
+        // The Agent arm reached the spawner with the hook's agent_type and a
+        // prompt that spliced the template + the serialized payload.
+        let recorded = spawner.recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "the Agent arm must reach the spawner");
+        assert_eq!(recorded[0].subagent_type, "general-purpose");
+        assert!(
+            recorded[0].prompt.starts_with("vet this"),
+            "prompt template is spliced ahead of the payload",
+        );
+        assert!(
+            recorded[0].prompt.contains(r#""hook_event_name":"PreToolUse""#),
+            "the serialized event payload is appended to the prompt",
+        );
+        drop(recorded);
+        // The subagent's approve content surfaces as an Approve decision.
+        assert_eq!(agg.decision, Some(HookDecision::Approve));
+        let (_, r) = &agg.all_results[0];
+        assert!(matches!(r.outcome, HookOutcome::Success));
+    }
+}

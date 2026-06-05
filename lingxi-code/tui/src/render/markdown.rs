@@ -127,6 +127,10 @@ struct Builder<'a> {
     pending: Vec<StyledSpan>,
     inline: InlineState,
     link_url: Option<String>,
+    /// When inside `Start(Image)`/`End(Image)`: the image's destination URL.
+    /// claude-code renders an image as just its href (`markdown.ts:139-140`),
+    /// so the inner alt `Text` is suppressed and the URL emitted on close.
+    image_url: Option<String>,
     /// Stack of list contexts (outer to inner). `Some(n)` = ordered list at
     /// next item number `n`; `None` = unordered.
     list_stack: Vec<Option<u64>>,
@@ -171,6 +175,7 @@ impl<'a> Builder<'a> {
             pending: Vec::new(),
             inline: InlineState::default(),
             link_url: None,
+            image_url: None,
             list_stack: Vec::new(),
             emphasis_depth: 0,
             blockquote_depth: 0,
@@ -246,8 +251,21 @@ impl<'a> Builder<'a> {
                     self.push_text(&format!(" ({url})"));
                 }
             }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                // Remember the URL; suppress the alt text until the image closes.
+                self.image_url = Some(dest_url.to_string());
+            }
+            Event::End(TagEnd::Image) => {
+                // claude-code renders the image as just its href.
+                if let Some(url) = self.image_url.take() {
+                    self.push_text(&url);
+                }
+            }
             Event::Text(text) => {
-                if let Some(cb) = self.code_block.as_mut() {
+                if self.image_url.is_some() {
+                    // Inside an image: the alt text is suppressed; the href is
+                    // emitted on `End(Image)` (`markdown.ts:139-140`).
+                } else if let Some(cb) = self.code_block.as_mut() {
                     cb.text.push_str(&text);
                 } else {
                     self.push_text(&text);
@@ -281,6 +299,15 @@ impl<'a> Builder<'a> {
                 self.flush();
                 self.inline = InlineState::default();
                 self.lines.push(StyledLine::empty());
+            }
+            Event::Rule => {
+                // Thematic break → a literal "---" line. claude-code
+                // (`markdown.ts:137-138`) emits exactly "---", not a
+                // full-width horizontal rule.
+                self.flush();
+                self.lines.push(StyledLine {
+                    spans: vec![StyledSpan::styled("---", SpanStyle::default())],
+                });
             }
             Event::Start(Tag::List(first)) => {
                 self.list_stack.push(first);
@@ -527,6 +554,39 @@ mod tests {
         let texts: Vec<String> = lines.iter().map(StyledLine::plain_text).collect();
         assert!(texts.iter().any(|t| t == "- a"));
         assert!(texts.iter().any(|t| t == "  - b"));
+    }
+
+    #[test]
+    fn horizontal_rule_renders_three_dashes() {
+        // claude-code emits exactly "---" for a thematic break (`***` here is
+        // unambiguously a thematic break, never a setext underline).
+        let lines = render("above\n\n***\n\nbelow", &theme());
+        let texts: Vec<String> = lines.iter().map(StyledLine::plain_text).collect();
+        assert!(
+            texts.iter().any(|t| t == "---"),
+            "expected a '---' line, got {texts:?}"
+        );
+        assert!(texts.iter().any(|t| t == "above"));
+        assert!(texts.iter().any(|t| t == "below"));
+    }
+
+    #[test]
+    fn image_renders_href_and_suppresses_alt() {
+        // claude-code renders an image as just its href; the alt text is dropped.
+        let lines = render("![the alt text](https://img.example/x.png)", &theme());
+        let joined = lines
+            .iter()
+            .map(StyledLine::plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("https://img.example/x.png"),
+            "href missing: {joined:?}"
+        );
+        assert!(
+            !joined.contains("the alt text"),
+            "alt text should be suppressed: {joined:?}"
+        );
     }
 
     #[test]

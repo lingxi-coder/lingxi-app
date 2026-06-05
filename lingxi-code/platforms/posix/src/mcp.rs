@@ -218,6 +218,8 @@ struct ResourceReadResult {
 #[derive(Deserialize)]
 struct RawResourceContent {
     uri: Option<String>,
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
     text: Option<String>,
     blob: Option<String>,
 }
@@ -527,6 +529,48 @@ impl McpTransport for PosixMcpTransport {
             uri: first.uri.unwrap_or_else(|| uri.to_string()),
             content,
         })
+    }
+
+    async fn read_resource_rich(
+        &self,
+        conn: &McpRawConnection,
+        uri: &str,
+        output_dir: &std::path::Path,
+    ) -> Result<Vec<traits::McpResourceContentsRich>, McpError> {
+        let connection = self.connection_for_result(conn.connection_id)?;
+        let raw: Value = connection
+            .call("resources/read", json!({ "uri": uri }))
+            .await
+            .map_err(|e| map_call_err(&e))?;
+        let parsed: ResourceReadResult =
+            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+        // Map EVERY content block (not just the first) into the rich shape:
+        // text → text, base64 blob → decode + persist under `output_dir`. The
+        // logical server name is not tracked at this transport layer (the map is
+        // keyed by connection id), so the `[Resource from <server> at <uri>] `
+        // prefix uses an empty server name; the production read path that knows
+        // the server name is `mcp::McpClient::read_resource_rich`.
+        let contents: Vec<mcp::RawResourceContentRich> = parsed
+            .contents
+            .into_iter()
+            .map(|c| mcp::RawResourceContentRich {
+                uri: c.uri.unwrap_or_else(|| uri.to_string()),
+                mime_type: c.mime_type,
+                text: c.text,
+                blob: c.blob,
+            })
+            .collect();
+        let now_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        Ok(mcp::map_resource_contents(
+            contents,
+            "",
+            output_dir,
+            now_millis,
+            "posix",
+        ))
     }
 
     async fn ping(&self, conn_id: McpConnectionId) -> Result<(), McpError> {

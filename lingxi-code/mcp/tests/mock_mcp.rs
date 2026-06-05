@@ -622,6 +622,86 @@ async fn list_resources_and_read_resource_roundtrip() {
     assert_eq!(content.content, "hello");
 }
 
+/// MCP-5d: `read_resource_rich` returns the FULL multi-content `contents[]`
+/// array — a text block passes through with its `mimeType`, and a base64 blob
+/// block is decoded, persisted under the supplied output dir, and reported via
+/// `blob_saved_to` + a `getBinaryBlobSavedMessage` text line. The legacy
+/// single-content `read_resource` is unaffected (asserted alongside).
+#[tokio::test]
+async fn read_resource_rich_returns_multi_content_with_blob_persisted() {
+    // base64("%PDF-1.4") == "JVBERi0xLjQ=".
+    let pdf_b64 = "JVBERi0xLjQ=";
+    let (client, _cap, _h) = make_client_against_mock(
+        "rich-srv",
+        std::path::PathBuf::from("/tmp/work"),
+        move |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "resources": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "resources/read" => json!({
+                    "contents": [
+                        { "uri": "file:///doc", "mimeType": "text/markdown", "text": "# Title" },
+                        { "uri": "file:///doc.pdf", "mimeType": "application/pdf", "blob": pdf_b64 }
+                    ]
+                }),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        },
+    )
+    .await;
+
+    client.initialize().await.expect("init");
+
+    let out_dir = tempfile::tempdir().expect("tempdir");
+    let contents = client
+        .read_resource_rich("file:///doc", out_dir.path())
+        .await
+        .expect("read_resource_rich");
+
+    assert_eq!(contents.len(), 2, "both content blocks surfaced");
+
+    // Text block: passthrough, no blob.
+    assert_eq!(contents[0].uri, "file:///doc");
+    assert_eq!(contents[0].mime_type.as_deref(), Some("text/markdown"));
+    assert_eq!(contents[0].text.as_deref(), Some("# Title"));
+    assert_eq!(contents[0].blob_saved_to, None);
+
+    // Blob block: decoded + persisted under out_dir; mimeType carried.
+    assert_eq!(contents[1].uri, "file:///doc.pdf");
+    assert_eq!(contents[1].mime_type.as_deref(), Some("application/pdf"));
+    let saved = contents[1]
+        .blob_saved_to
+        .as_deref()
+        .expect("blob persisted to disk");
+    assert_eq!(
+        std::path::Path::new(saved).extension().and_then(|e| e.to_str()),
+        Some("pdf"),
+        "mime-derived extension: {saved}"
+    );
+    assert!(
+        saved.starts_with(out_dir.path().to_str().unwrap()),
+        "persisted under the supplied output dir: {saved}"
+    );
+    assert_eq!(
+        std::fs::read(saved).expect("read persisted blob"),
+        b"%PDF-1.4",
+        "raw decoded bytes written verbatim (not base64)"
+    );
+    // text carries the getBinaryBlobSavedMessage line with the server name.
+    let text = contents[1].text.as_deref().expect("blob saved message");
+    assert!(
+        text.starts_with("[Resource from rich-srv at file:///doc.pdf] Binary content (application/pdf,"),
+        "saved message prefix: {text}"
+    );
+    assert!(text.ends_with(&format!("saved to {saved}")), "saved message tail: {text}");
+}
+
 #[tokio::test]
 async fn ping_returns_ok_on_empty_result() {
     let (client, captured, _h) =

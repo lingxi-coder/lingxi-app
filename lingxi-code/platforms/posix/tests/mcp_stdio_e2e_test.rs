@@ -180,6 +180,27 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     assert_eq!(content.uri, "mock://readme", "read echoes the resource uri");
     assert_eq!(content.content, "hello from mock resource");
 
+    // --- resources/read (MCP-5d rich multi-content path) ---------------
+    // `read_resource_rich` returns the full `contents[]` array; the mock's
+    // text block surfaces as a `text` entry with no persisted blob.
+    let out_dir = tempfile::tempdir().expect("tempdir");
+    let rich = tokio::time::timeout(
+        Duration::from_secs(5),
+        transport.read_resource_rich(&conn, "mock://readme", out_dir.path()),
+    )
+    .await
+    .expect("read_resource_rich timed out")
+    .expect("read_resource_rich failed");
+    assert_eq!(rich.len(), 1, "fixture exposes one content block");
+    assert_eq!(rich[0].uri, "mock://readme", "rich read echoes the uri");
+    assert_eq!(rich[0].text.as_deref(), Some("hello from mock resource"));
+    assert_eq!(rich[0].blob_saved_to, None, "text block persists nothing");
+    // Nothing written to disk for a pure text resource.
+    assert!(
+        std::fs::read_dir(out_dir.path()).map(|mut d| d.next().is_none()).unwrap_or(true),
+        "no blob files for a text resource"
+    );
+
     // --- prompts/list --------------------------------------------------
     let prompts = tokio::time::timeout(Duration::from_secs(5), transport.list_prompts(&conn))
         .await

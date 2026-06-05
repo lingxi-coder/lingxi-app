@@ -23,7 +23,6 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex as AsyncMutex;
 use traits::{
@@ -41,10 +40,6 @@ use traits::{
 /// latest supported value (there is no `MCP-Protocol-Version` header to echo
 /// as there would be for Streamable HTTP).
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
-
-/// Per-call timeout budget for `tools/call`, in whole seconds. Surfaced in the
-/// load-bearing [`McpError::Timeout`] Display string when exceeded.
-const TOOL_CALL_TIMEOUT_SECS: u64 = 60;
 
 /// Per-connection state held by `PosixMcpTransport`.
 ///
@@ -469,7 +464,10 @@ impl McpTransport for PosixMcpTransport {
         input: Value,
     ) -> Result<McpToolResultDto, McpError> {
         let connection = self.connection_for_result(conn.connection_id)?;
-        let timeout = Duration::from_secs(TOOL_CALL_TIMEOUT_SECS);
+        // Per-call budget resolved 1:1 with claude-code via the shared resolver
+        // (the `MCP_TOOL_TIMEOUT` env var, else the ~27.8h default). Previously a
+        // hardcoded 60s, which spuriously timed out legitimately long MCP tools.
+        let timeout = mcp::client::mcp_tool_timeout();
         let raw: Value = connection
             .call_with_timeout(
                 "tools/call",
@@ -480,11 +478,13 @@ impl McpTransport for PosixMcpTransport {
             .map_err(|e| match &e {
                 // Honor the per-call budget with the load-bearing Display
                 // string. `tool` is the unprefixed name; no logical server
-                // name is available at this layer, so it is left empty.
+                // name is available at this layer, so it is left empty. `secs`
+                // reports the actual resolved budget (ceil to ≥1, as the
+                // McpClient path does).
                 ConnectionError::Router(RouterError::Timeout(_)) => McpError::Timeout {
                     server: String::new(),
                     tool: tool.to_string(),
-                    secs: TOOL_CALL_TIMEOUT_SECS,
+                    secs: timeout.as_secs().max(1),
                 },
                 // The server reports an unknown tool via -32601.
                 _ if is_method_not_found(&e) => McpError::ToolNotFound(tool.to_string()),
@@ -839,10 +839,15 @@ mod re_export_tests {
 
 #[cfg(test)]
 mod error_mapping_tests {
-    use super::{is_method_not_found, map_call_err, TOOL_CALL_TIMEOUT_SECS};
+    use super::{is_method_not_found, map_call_err};
     use jsonrpc::{ConnectionError, JsonRpcError, RouterError};
     use std::time::Duration;
     use traits::McpError;
+
+    /// Example seconds value for the Display-format assertion below. The
+    /// production timeout is resolved at call time via
+    /// `mcp::client::mcp_tool_timeout`, so this is a fixed illustrative value.
+    const EXAMPLE_TIMEOUT_SECS: u64 = 60;
 
     /// A remote `-32601` is recognized as a method-not-found error (the MCP
     /// convention for an unknown tool); other remote codes are not.
@@ -887,11 +892,11 @@ mod error_mapping_tests {
         let err = McpError::Timeout {
             server: String::new(),
             tool: "echo".into(),
-            secs: TOOL_CALL_TIMEOUT_SECS,
+            secs: EXAMPLE_TIMEOUT_SECS,
         };
         assert_eq!(
             err.to_string(),
-            format!("MCP server \"\" tool \"echo\" timed out after {TOOL_CALL_TIMEOUT_SECS}s")
+            format!("MCP server \"\" tool \"echo\" timed out after {EXAMPLE_TIMEOUT_SECS}s")
         );
     }
 }

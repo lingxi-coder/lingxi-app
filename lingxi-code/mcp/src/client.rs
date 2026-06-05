@@ -243,19 +243,20 @@ impl McpClient {
             .collect())
     }
 
-    /// Invoke a tool by its `mcp__<server>__<tool>` full-name with the
-    /// default 60-second timeout.
+    /// Invoke a tool by its `mcp__<server>__<tool>` full-name with the resolved
+    /// per-call timeout ([`mcp_tool_timeout`]: the `MCP_TOOL_TIMEOUT` env var,
+    /// else the ~27.8h default).
     pub async fn call_tool(
         &self,
         full_name: &str,
         input: serde_json::Value,
     ) -> Result<McpToolResultDto, McpClientError> {
-        self.call_tool_with_timeout(full_name, input, DEFAULT_CALL_TOOL_TIMEOUT)
+        self.call_tool_with_timeout(full_name, input, mcp_tool_timeout())
             .await
     }
 
     /// `call_tool` with a custom timeout — used by tests to exercise the
-    /// timeout branch without waiting the full 60 seconds.
+    /// timeout branch without waiting the full default.
     ///
     /// Strips the `mcp__<server>__` prefix from `full_name` to recover the
     /// unprefixed wire `name`. On timeout produces
@@ -442,9 +443,47 @@ struct RawResourceContent {
     text: String,
 }
 
-/// Default per-call timeout for `tools/call`, matching claude-code's
-/// `MCP_TOOL_TIMEOUT_MS` (60 seconds).
-pub const DEFAULT_CALL_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Default per-call timeout for `tools/call` — 1:1 with claude-code's
+/// `DEFAULT_MCP_TOOL_TIMEOUT_MS = 100_000_000` (~27.8h, "effectively infinite";
+/// `client.ts:208-211`). Overridable per call via the `MCP_TOOL_TIMEOUT` env
+/// var; see [`mcp_tool_timeout`]. (The previous 60s value was a fidelity bug:
+/// it spuriously timed out legitimately long-running MCP tools that claude-code
+/// lets run.)
+pub const DEFAULT_CALL_TOOL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(100_000_000);
+
+/// Resolve the per-call `tools/call` timeout — mirrors `getMcpToolTimeoutMs`
+/// (`client.ts:220-229`): the `MCP_TOOL_TIMEOUT` env var, falling back to
+/// [`DEFAULT_CALL_TOOL_TIMEOUT`].
+#[must_use]
+pub fn mcp_tool_timeout() -> std::time::Duration {
+    resolve_tool_timeout(std::env::var("MCP_TOOL_TIMEOUT").ok().as_deref())
+}
+
+/// Pure core of [`mcp_tool_timeout`] (env value injected for testability).
+/// Mirrors the JS `parseInt(process.env.MCP_TOOL_TIMEOUT || '', 10) ||
+/// DEFAULT_MCP_TOOL_TIMEOUT_MS`: a value that parses to a positive integer (ms)
+/// is used; unset / unparseable / non-positive falls back to the default
+/// (matching JS where `0` and `NaN` are falsy).
+fn resolve_tool_timeout(env_value: Option<&str>) -> std::time::Duration {
+    env_value
+        .and_then(parse_int_base10_prefix)
+        .filter(|&ms| ms > 0)
+        .map_or(DEFAULT_CALL_TOOL_TIMEOUT, std::time::Duration::from_millis)
+}
+
+/// JS `parseInt(s, 10)` for the non-negative case: skip leading ASCII
+/// whitespace, accept an optional `+`, consume leading base-10 digits, and
+/// ignore any trailing characters (`"100abc"` → `100`). Returns `None` when no
+/// digits lead (JS `NaN`). A leading `-` also yields `None` — negative timeouts
+/// are nonsensical and would be rejected by the `> 0` filter anyway (a safer,
+/// documented divergence from JS, which would treat a negative as immediate).
+fn parse_int_base10_prefix(s: &str) -> Option<u64> {
+    let t = s.trim_start();
+    let t = t.strip_prefix('+').unwrap_or(t);
+    let digits: String = t.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse::<u64>().ok()
+}
 
 /// Wire-level shape of a `tools/list` response body.
 #[derive(Debug, Deserialize)]
@@ -598,5 +637,43 @@ mod constructor_tests {
             text2.contains(r#""action":"cancel""#),
             "elicitation/create handler not registered: {text2}",
         );
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::{
+        parse_int_base10_prefix, resolve_tool_timeout, DEFAULT_CALL_TOOL_TIMEOUT,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn default_value_is_byte_locked_to_claude_code() {
+        // DEFAULT_MCP_TOOL_TIMEOUT_MS = 100_000_000 (client.ts:211).
+        assert_eq!(DEFAULT_CALL_TOOL_TIMEOUT, Duration::from_millis(100_000_000));
+    }
+
+    #[test]
+    fn parse_int_mirrors_js_parse_int() {
+        assert_eq!(parse_int_base10_prefix("5000"), Some(5000));
+        assert_eq!(parse_int_base10_prefix("  42  "), Some(42)); // leading ws skipped
+        assert_eq!(parse_int_base10_prefix("+7"), Some(7)); // optional plus
+        assert_eq!(parse_int_base10_prefix("100abc"), Some(100)); // trailing garbage ignored
+        assert_eq!(parse_int_base10_prefix("0"), Some(0));
+        assert_eq!(parse_int_base10_prefix(""), None); // NaN
+        assert_eq!(parse_int_base10_prefix("abc"), None); // NaN
+        assert_eq!(parse_int_base10_prefix("-5"), None); // safer-than-JS: rejected
+    }
+
+    #[test]
+    fn resolve_uses_env_else_default() {
+        // unset / unparseable / zero → default (JS `|| default`, 0/NaN falsy).
+        assert_eq!(resolve_tool_timeout(None), DEFAULT_CALL_TOOL_TIMEOUT);
+        assert_eq!(resolve_tool_timeout(Some("")), DEFAULT_CALL_TOOL_TIMEOUT);
+        assert_eq!(resolve_tool_timeout(Some("abc")), DEFAULT_CALL_TOOL_TIMEOUT);
+        assert_eq!(resolve_tool_timeout(Some("0")), DEFAULT_CALL_TOOL_TIMEOUT);
+        // a positive integer (ms) is honored.
+        assert_eq!(resolve_tool_timeout(Some("30000")), Duration::from_millis(30_000));
+        assert_eq!(resolve_tool_timeout(Some("250abc")), Duration::from_millis(250));
     }
 }

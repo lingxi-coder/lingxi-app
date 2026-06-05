@@ -21,6 +21,12 @@ use tool_api::context::{ToolUseContext, ToolUseOptions};
 const READ_FILE_STATE_TOOLS: &[&str] =
     &["Read", "Edit", "Write", "MultiEdit", "NotebookEdit"];
 
+/// Registry name of the worktree-creation tool (`tool_worktree::ENTER_TOOL_NAME`).
+/// A successful invocation of this tool is the port's sole worktree-creation
+/// path, so it is where the turn loop fires the `WorktreeCreate` hook. Held as a
+/// literal (not imported) so `orchestrator` keeps no dependency on `tool-worktree`.
+const ENTER_WORKTREE_TOOL_NAME: &str = "EnterWorktree";
+
 /// Lexically expand a tool's `file_path` argument to an absolute, normalized
 /// path — the cache key for [`ConversationOrchestrator::files_in_context`].
 ///
@@ -891,7 +897,7 @@ pub(crate) async fn dispatch_tool_uses(
             event = orch_events::HOOK_POST_STARTED,
             tool_name = %name,
         );
-        let post_agg = orch.hooks.execute(post_event, hook_ctx).await;
+        let post_agg = orch.hooks.execute(post_event, hook_ctx.clone()).await;
         // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
         #[allow(clippy::cast_possible_truncation)]
         let post_dur_ms = post_started.elapsed().as_millis() as u64;
@@ -914,6 +920,57 @@ pub(crate) async fn dispatch_tool_uses(
             duration_ms = post_dur_ms,
             mutated_response = mutated,
         );
+
+        // Worktree-creation hook (parity with claude-code `executeWorktreeCreateHook`,
+        // `utils/hooks.ts:4928`). claude-code fires `WorktreeCreate` from the
+        // worktree-creation logic (`createWorktreeForSession` /
+        // `createAgentWorktree`); the LingXi port creates worktrees only through
+        // the registered, turn_loop-dispatched `EnterWorktree` tool, so we fire it
+        // here — same TIMING (immediately after the worktree exists), the fire just
+        // lives in the dispatch chokepoint alongside `PostToolUse`. Only a
+        // SUCCESSFUL `EnterWorktree` result counts (an errored create never made a
+        // worktree). The wire payload carries only `name` — the requested slug, the
+        // single field claude-code passes to `executeWorktreeCreateHook(slug)`. We
+        // thread the resolved `path`/`branch` as engine-side context too (not on the
+        // wire). Best-effort: a failing/absent hook never breaks the worktree op
+        // (`orch.hooks.execute` is a strict no-op when no `WorktreeCreate` hook is
+        // registered, mirroring the `PostToolUse` arm above).
+        if !is_error && name == ENTER_WORKTREE_TOOL_NAME {
+            // `name` (slug) is the requested input; `path`/`branch_name` come from
+            // the tool's result data (`{"path":…,"branch_name":…}`).
+            let slug = effective_input
+                .get("slug")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let wt_path = emit_payload
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let wt_branch = emit_payload
+                .get("branch_name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let wt_event = HookEvent::WorktreeCreate {
+                name: slug,
+                path: std::path::PathBuf::from(wt_path),
+                branch: wt_branch,
+            };
+            let wt_started = std::time::Instant::now();
+            // Reuse the same hook context (session_id / cwd) the pre/post hooks used.
+            let _wt_agg = orch.hooks.execute(wt_event, hook_ctx).await;
+            // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
+            #[allow(clippy::cast_possible_truncation)]
+            let wt_dur_ms = wt_started.elapsed().as_millis() as u64;
+            // No `tengu_*` analytic here: claude-code's worktree-create path emits
+            // no orchestrator-lifecycle event, so we keep parity by logging only.
+            tracing::debug!(
+                tool_name = %name,
+                duration_ms = wt_dur_ms,
+                "fired WorktreeCreate hook after successful EnterWorktree",
+            );
+        }
 
         results.push(ContentBlock::ToolResult {
             tool_use_id: *tool_use_id,

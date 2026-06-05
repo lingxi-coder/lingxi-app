@@ -254,7 +254,11 @@ impl Tool for NotebookEditTool {
             .iter()
             .position(|c| c.get("id").and_then(Value::as_str) == Some(cell_id));
 
-        match edit_mode {
+        // Model-facing result string per edit mode — byte-faithful to
+        // claude-code's `NotebookEditTool` mapper (`NotebookEditTool.ts:145-170`).
+        // FILE.A's serialization rule emits `data["content"]` verbatim to the
+        // model (`cells_edited` below remains the structured TUI payload).
+        let content = match edit_mode {
             EDIT_MODE_REPLACE => {
                 let i = idx.ok_or_else(|| {
                     ToolError::InvalidInput(format!("cell_id {cell_id} not found"))
@@ -262,12 +266,16 @@ impl Tool for NotebookEditTool {
                 let src = new_source.ok_or_else(|| {
                     ToolError::InvalidInput("new_source required for replace".into())
                 })?;
+                let msg = format!("Updated cell {cell_id} with {src}");
                 cells[i]["source"] = json!(src);
+                msg
             }
             EDIT_MODE_INSERT => {
                 let src = new_source.ok_or_else(|| {
                     ToolError::InvalidInput("new_source required for insert".into())
                 })?;
+                // Build the message before `src` is moved into the new cell.
+                let msg = format!("Inserted cell {cell_id} with {src}");
                 let new_cell = json!({
                     "cell_type": "code",
                     "id": cell_id,
@@ -280,12 +288,14 @@ impl Tool for NotebookEditTool {
                     Some(i) => cells.insert(i + 1, new_cell),
                     None => cells.push(new_cell),
                 }
+                msg
             }
             EDIT_MODE_DELETE => {
                 let i = idx.ok_or_else(|| {
                     ToolError::InvalidInput(format!("cell_id {cell_id} not found"))
                 })?;
                 cells.remove(i);
+                format!("Deleted cell {cell_id}")
             }
             other => {
                 self.emit_failed(&invocation_id, "bad_edit_mode").await;
@@ -293,7 +303,7 @@ impl Tool for NotebookEditTool {
                     "unknown edit_mode {other:?}"
                 )));
             }
-        }
+        };
 
         let serialized = match serde_json::to_string_pretty(&nb) {
             Ok(s) => s,
@@ -333,7 +343,7 @@ impl Tool for NotebookEditTool {
         self.emit_completed(&invocation_id, 1, duration_ms).await;
 
         Ok(ToolCallResult {
-            data: json!({ "cells_edited": 1 }),
+            data: json!({ "content": content, "cells_edited": 1 }),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -415,7 +425,7 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
-        let _ = tool
+        let result = tool
             .call(
                 json!({
                     "notebook_path": target.to_str().unwrap(),
@@ -428,6 +438,11 @@ mod tests {
             )
             .await
             .unwrap();
+        // Model-facing string is byte-faithful to NotebookEditTool.ts:147-151.
+        assert_eq!(
+            result.data["content"],
+            "Updated cell c1 with print('world')"
+        );
         let modified: Value =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
         assert_eq!(modified["cells"][0]["source"], "print('world')");
@@ -441,7 +456,7 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
-        let _ = tool
+        let result = tool
             .call(
                 json!({
                     "notebook_path": target.to_str().unwrap(),
@@ -453,6 +468,8 @@ mod tests {
             )
             .await
             .unwrap();
+        // Model-facing string is byte-faithful to NotebookEditTool.ts:158-162.
+        assert_eq!(result.data["content"], "Deleted cell c1");
         let modified: Value =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
         let cells = modified["cells"].as_array().unwrap();
@@ -468,7 +485,7 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         seed_full_read(&ctx, &target);
         let tool = NotebookEditTool::new(ctx);
-        let _ = tool
+        let result = tool
             .call(
                 json!({
                     "notebook_path": target.to_str().unwrap(),
@@ -481,6 +498,11 @@ mod tests {
             )
             .await
             .unwrap();
+        // Model-facing string is byte-faithful to NotebookEditTool.ts:152-156.
+        assert_eq!(
+            result.data["content"],
+            "Inserted cell c1 with print('inserted')"
+        );
         let modified: Value =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
         let cells = modified["cells"].as_array().unwrap();

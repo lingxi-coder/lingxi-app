@@ -235,6 +235,37 @@ pub struct McpResourceContentDto {
     pub content: String,
 }
 
+/// One element of a `resources/read` `contents[]` array, preserving the full
+/// claude-code shape (`ReadMcpResourceTool.ts:106-139`).
+///
+/// Unlike the legacy [`McpResourceContentDto`] (which collapses a read to a
+/// single `{uri, content}` and drops the `mimeType`/blob distinction), this
+/// DTO carries every field the TS tool surfaces:
+///
+/// * a text content block → `text` is `Some`, `blob_saved_to` is `None`;
+/// * a base64 *blob* content block → the bytes are decoded and persisted to
+///   disk, `blob_saved_to` holds the path, and `text` carries the
+///   `getBinaryBlobSavedMessage` line (or a "could not be saved" message on a
+///   persistence failure);
+/// * an empty/unrecognized block → both `text` and `blob_saved_to` are `None`.
+///
+/// `mime_type` is carried verbatim from the wire (absent → `None`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpResourceContentsRich {
+    /// Echoed resource URI for this content block.
+    pub uri: String,
+    /// MIME type as advertised by the server (absent on the wire → `None`).
+    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none", default)]
+    pub mime_type: Option<String>,
+    /// Text content of the block (text blocks; also the human-readable
+    /// "saved to disk" message for persisted blobs).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub text: Option<String>,
+    /// Filesystem path a decoded binary blob was persisted to, if any.
+    #[serde(rename = "blobSavedTo", skip_serializing_if = "Option::is_none", default)]
+    pub blob_saved_to: Option<String>,
+}
+
 /// Stream of notifications pushed by a server.
 pub type McpNotificationStream = Pin<Box<dyn Stream<Item = McpNotificationDto> + Send>>;
 
@@ -278,6 +309,34 @@ pub trait McpTransport: Send + Sync {
         conn: &McpRawConnection,
         uri: &str,
     ) -> Result<McpResourceContentDto, McpError>;
+
+    /// Read the FULL multi-content `contents[]` array of a resource, preserving
+    /// `mimeType`, distinguishing text from base64 blobs, and persisting
+    /// decoded blobs to disk (`blob_saved_to`). Mirrors claude-code's
+    /// `ReadMcpResourceTool.ts:106-139`.
+    ///
+    /// `output_dir` is the directory binary blobs are written to (the
+    /// `getToolResultsDir()` equivalent); the caller picks a session/temp dir.
+    ///
+    /// Additive method: the DEFAULT body wraps [`Self::read_resource`] so every
+    /// existing implementation compiles unchanged — it returns a single
+    /// text-only entry from the legacy single-content DTO and never persists a
+    /// blob. Production transports (POSIX) override it to return the genuine
+    /// multi-content array with blob persistence.
+    async fn read_resource_rich(
+        &self,
+        conn: &McpRawConnection,
+        uri: &str,
+        _output_dir: &std::path::Path,
+    ) -> Result<Vec<McpResourceContentsRich>, McpError> {
+        let single = self.read_resource(conn, uri).await?;
+        Ok(vec![McpResourceContentsRich {
+            uri: single.uri,
+            mime_type: None,
+            text: Some(single.content),
+            blob_saved_to: None,
+        }])
+    }
 
     /// Liveness probe used by the registry's health checker.
     async fn ping(&self, conn_id: McpConnectionId) -> Result<(), McpError>;

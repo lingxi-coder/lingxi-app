@@ -1023,9 +1023,14 @@ impl Tool for ReadMcpResourceTool {
             }
         };
 
-        match client.read_resource(&uri).await {
-            Ok(dto) => {
-                let bytes_approx = serde_json::to_vec(&dto)
+        // MCP-5d: read the FULL multi-content `contents[]` array, carrying
+        // `mimeType`, distinguishing text from base64 blobs, persisting decoded
+        // blobs to disk under a project-local tool-results dir, and surfacing
+        // `blobSavedTo` paths. Mirrors `ReadMcpResourceTool.ts:95-143`.
+        let output_dir = self.ctx.workspace.join(".claude").join("tool-results");
+        match client.read_resource_rich(&uri, &output_dir).await {
+            Ok(contents) => {
+                let bytes_approx = serde_json::to_vec(&contents)
                     .map(|v| v.len() as u64)
                     .unwrap_or(0);
                 emit(
@@ -1043,10 +1048,14 @@ impl Tool for ReadMcpResourceTool {
                 )
                 .await;
                 Ok(ToolCallResult {
+                    // Output shape mirrors `ReadMcpResourceTool.ts` `outputSchema`
+                    // `{ contents: [{uri, mimeType?, text?, blobSavedTo?}] }`,
+                    // wrapped with the existing `{server_name, uri}` envelope the
+                    // Rust tool surfaces.
                     data: json!({
                         "server_name": server_name,
                         "uri": uri,
-                        "content": dto,
+                        "contents": contents,
                     }),
                     new_messages: vec![],
                     context_modifier: None,

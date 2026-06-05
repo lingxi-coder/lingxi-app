@@ -410,6 +410,49 @@ impl McpClient {
             })
     }
 
+    /// Fetch the FULL multi-content `contents[]` array of a resource (MCP-5d).
+    ///
+    /// Unlike [`Self::read_resource`] (which collapses to the first text block
+    /// and drops `mimeType`/blob), this returns every content block with its
+    /// `mimeType`, distinguishes text from base64 blobs, decodes blobs, and
+    /// persists their bytes under `output_dir` — returning `blobSavedTo` paths.
+    /// 1:1 with `ReadMcpResourceTool.ts:95-139`.
+    ///
+    /// `server_name` is used to build the `"[Resource from <server> at <uri>] "`
+    /// prefix of the persisted-blob message. `output_dir` is the directory blob
+    /// bytes are written to (a session/tool-results dir in production).
+    pub async fn read_resource_rich(
+        &self,
+        uri: &str,
+        output_dir: &std::path::Path,
+    ) -> Result<Vec<traits::McpResourceContentsRich>, McpClientError> {
+        let resp: ResourceReadRichResponse = self
+            .connection
+            .call("resources/read", serde_json::json!({ "uri": uri }))
+            .await
+            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+        let raw: Vec<crate::mcp_output_storage::RawResourceContent> = resp
+            .contents
+            .into_iter()
+            .map(|c| crate::mcp_output_storage::RawResourceContent {
+                // Echo the request URI when the server omits one (parity with
+                // the posix transport).
+                uri: c.uri.unwrap_or_else(|| uri.to_string()),
+                mime_type: c.mime_type,
+                text: c.text,
+                blob: c.blob,
+            })
+            .collect();
+        let (now_millis, rand_tag) = persist_id_seed();
+        Ok(crate::mcp_output_storage::map_resource_contents(
+            raw,
+            &self.server_name,
+            output_dir,
+            now_millis,
+            &rand_tag,
+        ))
+    }
+
     /// Liveness probe — JSON-RPC `ping` with no params; success on any
     /// non-error response. The health checker uses this to detect dead
     /// servers without forcing a full `tools/list` roundtrip.
@@ -465,6 +508,56 @@ struct RawResourceContent {
     uri: String,
     #[serde(default)]
     text: String,
+}
+
+/// Wire-level shape of a `resources/read` response for the MCP-5d rich path.
+/// Separate from [`ResourceReadResponse`] so the legacy single-content path is
+/// untouched: here every field is optional so a text block, a blob block, or an
+/// opaque block all deserialize.
+#[derive(Debug, Deserialize)]
+struct ResourceReadRichResponse {
+    #[serde(default)]
+    contents: Vec<RawResourceContentRich>,
+}
+
+/// Wire-level shape for one `contents[]` element on the rich path.
+#[derive(Debug, Deserialize)]
+struct RawResourceContentRich {
+    #[serde(default)]
+    uri: Option<String>,
+    #[serde(rename = "mimeType", default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    blob: Option<String>,
+}
+
+/// Produce the `(now_millis, rand_tag)` seed for a blob `persistId`, mirroring
+/// the TS `Date.now()` + `Math.random().toString(36).slice(2, 8)` pair
+/// (`ReadMcpResourceTool.ts:114`). The exact value is non-load-bearing (it only
+/// has to be unique per block); only the *template shape* is locked.
+fn persist_id_seed() -> (u128, String) {
+    // 6 lowercase-alphanumeric chars derived from a coarse nanosecond mix —
+    // avoids pulling in an RNG crate while staying collision-resistant enough
+    // for per-block filenames.
+    const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let now_millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_nanos()))
+        .unwrap_or(0)
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    let mut tag = String::with_capacity(6);
+    for _ in 0..6 {
+        tag.push(ALPHABET[(seed % 36) as usize] as char);
+        seed /= 36;
+    }
+    (now_millis, tag)
 }
 
 /// Default per-call timeout for `tools/call` — 1:1 with claude-code's

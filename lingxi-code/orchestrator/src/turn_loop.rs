@@ -850,14 +850,41 @@ pub(crate) async fn dispatch_tool_uses(
             record_read_file_state(orch, name, &effective_input).await;
         }
 
-        // M5-06 Task 14: PostToolUse hook chain. Best-effort — a Post
-        // hook's system_messages are appended to the result text, but
-        // failures do NOT mutate `content` or `is_error`.
-        let post_event = HookEvent::PostToolUse {
-            tool_name: name.clone(),
-            tool_input: effective_input.clone(),
-            tool_output: emit_payload.clone(),
-            tool_use_id: *tool_use_id,
+        // M5-06 Task 14 + hooks B-tool-failure: the post-dispatch hook chain.
+        // Byte-faithful to claude-code's split: a SUCCESSFUL tool result fires
+        // `PostToolUse` (`executePostToolUseHooks`), a FAILED one fires
+        // `PostToolUseFailure` (`executePostToolUseFailureHooks`,
+        // `utils/hooks.ts:3492`) — never both. The `is_error` flag here is the
+        // same `is_error` that lands on the `ToolResult` block (TS keys off the
+        // tool result's `is_error`). Best-effort for BOTH arms — a Post hook's
+        // `system_messages` are appended to the result text, but a hook failure
+        // does NOT mutate `content` or `is_error`.
+        //
+        // The `PostToolUseFailure` variant carries `tool_name` / `tool_use_id`
+        // (matching the prior `PreToolUse`) + the stringified `error`; the
+        // dispatched `tool_input` is threaded into the wire payload by the
+        // executor's default-fill convention (it currently defaults `tool_input`
+        // to `null`, documented in `hooks/hook_payload.rs`). We pass the raw
+        // error string the tool returned (the `{"error": …}` envelope value =
+        // `format!("{err}")`), NOT the `"Error: "`-prefixed model-facing
+        // `content`, mirroring the TS `PostToolUseFailure` input's `error`.
+        let post_event = if is_error {
+            let error = emit_payload
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .map_or_else(|| content.clone(), ToString::to_string);
+            HookEvent::PostToolUseFailure {
+                tool_name: name.clone(),
+                error,
+                tool_use_id: *tool_use_id,
+            }
+        } else {
+            HookEvent::PostToolUse {
+                tool_name: name.clone(),
+                tool_input: effective_input.clone(),
+                tool_output: emit_payload.clone(),
+                tool_use_id: *tool_use_id,
+            }
         };
         let post_started = std::time::Instant::now();
         tracing::info!(

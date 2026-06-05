@@ -1241,6 +1241,61 @@ impl ConversationOrchestrator {
             .await;
     }
 
+    /// Fire the `SessionStart` lifecycle hooks at session startup (hooks
+    /// session lifecycle, TS `SessionStart` event fired by `executeSetupHooks` /
+    /// the `SessionStart` path at session startup — `utils/hooks.ts:3876-3881`).
+    ///
+    /// `source` is the TS `SessionStart` `source` discriminator — one of
+    /// `startup` / `resume` / `clear` / `compact`. The host composition root
+    /// (`engine-desktop` / `engine-mobile`) owns the session lifecycle (it
+    /// constructs the orchestrator), so it calls this ONCE immediately after
+    /// `build()` returns a fully-wired runtime, passing `"startup"` for a fresh
+    /// session.
+    ///
+    /// Best-effort, exactly like [`Self::fire_pre_compact`]: the aggregate is
+    /// discarded so a failing `SessionStart` hook never breaks boot. Strict no-op
+    /// when no `SessionStart` hook is registered. The hook executor reads
+    /// `session_id` / `cwd` from the lifecycle [`HookContext`]; the variant's
+    /// `session_id` field is filled from the live session for symmetry.
+    pub async fn fire_session_start(&self, source: &str) {
+        let session_id = { self.session.lock().await.session_id };
+        let ctx = self.lifecycle_hook_ctx(false).await;
+        let _ = self
+            .hooks
+            .execute(
+                HookEvent::SessionStart {
+                    session_id,
+                    source: source.to_string(),
+                },
+                ctx,
+            )
+            .await;
+    }
+
+    /// Fire the `SessionEnd` lifecycle hooks at session teardown (hooks session
+    /// lifecycle, TS `executeSessionEndHooks` — `utils/hooks.ts:4097-4117`).
+    ///
+    /// `reason` is the TS `SessionEnd` `reason` (`ExitReason`) discriminator
+    /// (e.g. `clear` / `logout` / `prompt_input_exit` / `other`). The host
+    /// composition root owns teardown; it calls this at an explicit session-end
+    /// seam when one exists. Best-effort like [`Self::fire_session_start`] — a
+    /// failing hook never breaks teardown, and it is a strict no-op when no
+    /// `SessionEnd` hook is registered.
+    pub async fn fire_session_end(&self, reason: &str) {
+        let session_id = { self.session.lock().await.session_id };
+        let ctx = self.lifecycle_hook_ctx(false).await;
+        let _ = self
+            .hooks
+            .execute(
+                HookEvent::SessionEnd {
+                    session_id,
+                    reason: reason.to_string(),
+                },
+                ctx,
+            )
+            .await;
+    }
+
     /// Append a Stop hook's blocking messages as a meta user message so the
     /// model sees the hook feedback on the continued turn (TS appends the
     /// blocking reason). Best-effort persist, like the other meta appends.

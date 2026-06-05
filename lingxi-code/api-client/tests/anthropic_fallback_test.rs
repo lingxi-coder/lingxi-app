@@ -88,6 +88,7 @@ async fn three_529_with_fallback_surfaces_fallback_triggered() {
             None,
             Some("claude-sonnet-4-6".into()),
             false, // is_subscriber stub (Batch 6 refines)
+            false, // is_enterprise
             transport.as_ref(),
         )
         .await;
@@ -125,6 +126,7 @@ async fn non_opus_model_does_not_trigger_fallback() {
             None,
             Some("claude-haiku-4-5".into()), // fallback present but gate closed
             false,
+            false, // is_enterprise
             transport.as_ref(),
         )
         .await;
@@ -190,10 +192,134 @@ async fn two_529_then_200_recovers() {
             None,
             Some("claude-sonnet-4-6".into()),
             false,
+            false, // is_enterprise
             transport.as_ref(),
         )
         .await;
 
     assert!(r.is_ok(), "2×529 then 200 must recover: {r:?}");
     assert_eq!(*transport.calls.lock().unwrap(), 3);
+}
+
+/// GAP 1 — claude-code withRetry.ts:767-769. A non-enterprise Claude.ai
+/// subscriber must NOT retry a 429 (their reset is hours away): the 429 is
+/// terminal on the FIRST attempt. The pre-computed gate is
+/// `retry_429_allowed = !is_subscriber || is_enterprise`; with
+/// `is_subscriber = true, is_enterprise = false` it is `false`.
+#[tokio::test]
+async fn subscriber_non_enterprise_429_is_terminal_no_retry() {
+    // Unified-limit headers so the terminal path also builds the user-facing
+    // message; the message bytes are asserted in the unit tests.
+    let headers = vec![(
+        "anthropic-ratelimit-unified-representative-claim".to_string(),
+        "five_hour".to_string(),
+    )];
+    let transport = Arc::new(ScriptedTransport::always(HttpResponse {
+        status: 429,
+        headers,
+        body: "rate limited".into(),
+    }));
+    let provider = AnthropicProvider::new("sk-test", Some("http://test.invalid".into()));
+
+    let r = provider
+        .messages_create_non_stream_with_fallback(
+            "claude-opus-4-6",
+            None,
+            make_msgs(),
+            4096,
+            Vec::new(),
+            None,
+            None,
+            true,  // is_subscriber
+            false, // is_enterprise → gate closed → 429 terminal
+            transport.as_ref(),
+        )
+        .await;
+
+    match r {
+        // Terminal 429 surfaces as Server{429}; body is the byte-faithful
+        // user-facing rate-limit message (session limit / five_hour).
+        Err(ApiError::Server { status: 429, body }) => {
+            assert_eq!(body, "You've hit your session limit");
+        }
+        other => panic!("expected terminal Server{{429}}, got {other:?}"),
+    }
+    // Hard proof of "no retry": exactly ONE request was made.
+    assert_eq!(transport.call_count(), 1, "subscriber 429 must not retry");
+}
+
+/// GAP 1 — a non-subscriber's 429 IS retryable (`retry_429_allowed = true`):
+/// the loop sleeps on the rate-limit window and re-attempts, so more than one
+/// request is made before the budget exhausts.
+#[tokio::test]
+async fn non_subscriber_429_is_retried() {
+    // `retry-after: 0` keeps `handle_429`'s sleep at zero so the test is fast.
+    let transport = Arc::new(ScriptedTransport::always(HttpResponse {
+        status: 429,
+        headers: vec![("retry-after".to_string(), "0".to_string())],
+        body: "rate limited".into(),
+    }));
+    let provider = AnthropicProvider::new("sk-test", Some("http://test.invalid".into()));
+
+    let r = provider
+        .messages_create_non_stream_with_fallback(
+            "claude-opus-4-6",
+            None,
+            make_msgs(),
+            4096,
+            Vec::new(),
+            None,
+            None,
+            false, // is_subscriber → gate open
+            false, // is_enterprise
+            transport.as_ref(),
+        )
+        .await;
+
+    // 429 → 503 synthetic retryable each attempt → budget exhausts as
+    // RetryExhausted with the last synthetic 503 status (never a typed 429).
+    match r {
+        Err(ApiError::RetryExhausted { last_status }) => {
+            assert_eq!(last_status, Some(503));
+        }
+        other => panic!("expected RetryExhausted, got {other:?}"),
+    }
+    // Every budget attempt re-issued the request (retry happened).
+    assert_eq!(transport.call_count(), 3, "non-subscriber 429 must retry");
+}
+
+/// GAP 1 — an enterprise subscriber's 429 IS retryable even though they ARE a
+/// subscriber (`retry_429_allowed = !true || true = true`); enterprise plans
+/// use PAYG, not the hours-away reset.
+#[tokio::test]
+async fn enterprise_subscriber_429_is_retried() {
+    let transport = Arc::new(ScriptedTransport::always(HttpResponse {
+        status: 429,
+        headers: vec![("retry-after".to_string(), "0".to_string())],
+        body: "rate limited".into(),
+    }));
+    let provider = AnthropicProvider::new("sk-test", Some("http://test.invalid".into()));
+
+    let r = provider
+        .messages_create_non_stream_with_fallback(
+            "claude-opus-4-6",
+            None,
+            make_msgs(),
+            4096,
+            Vec::new(),
+            None,
+            None,
+            true, // is_subscriber
+            true, // is_enterprise → gate open despite being a subscriber
+            transport.as_ref(),
+        )
+        .await;
+
+    match r {
+        Err(ApiError::RetryExhausted { last_status }) => {
+            assert_eq!(last_status, Some(503));
+        }
+        other => panic!("expected RetryExhausted, got {other:?}"),
+    }
+    assert_eq!(transport.call_count(), 3, "enterprise 429 must retry");
 }

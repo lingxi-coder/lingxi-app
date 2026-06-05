@@ -101,6 +101,183 @@ pub fn overage_disabled_reason(headers: &[(String, String)]) -> Option<&str> {
     header_value(headers, "anthropic-ratelimit-unified-overage-disabled-reason")
 }
 
+/// Parsed unified rate-limit state used to render the user-facing 429 message.
+///
+/// Mirrors the subset of claude-code `ClaudeAILimits` (claudeAiLimits.ts:122)
+/// that the *error* (rejected) message path reads: the representative claim
+/// (`rate_limit_type`), the overage status, and the overage-disabled reason.
+/// The reset-time strings are pre-formatted by the caller (claude-code threads
+/// `formatResetTime(...)` output, which is locale/timezone dependent and thus
+/// not byte-reproducible here) — the *templates* around them are byte-locked.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RateLimitInfo {
+    /// `anthropic-ratelimit-unified-representative-claim` — which window was
+    /// exhausted (`five_hour` / `seven_day` / `seven_day_opus` /
+    /// `seven_day_sonnet`). `None` when the header is absent.
+    pub rate_limit_type: Option<String>,
+    /// `anthropic-ratelimit-unified-overage-status` — `allowed` /
+    /// `allowed_warning` / `rejected`. `None` when the header is absent.
+    pub overage_status: Option<String>,
+    /// `anthropic-ratelimit-unified-overage-disabled-reason` — e.g.
+    /// `out_of_credits`. `None` when the header is absent.
+    pub overage_disabled_reason: Option<String>,
+}
+
+impl RateLimitInfo {
+    /// Parse the unified rate-limit headers the 429 error-message path reads.
+    /// 1:1 with the `error.headers?.get(...)` reads in claude-code
+    /// `errors.ts:471-516` + `claudeAiLimits.ts` `computeNewLimitsFromHeaders`.
+    #[must_use]
+    pub fn from_headers(headers: &[(String, String)]) -> Self {
+        Self {
+            rate_limit_type: header_value(
+                headers,
+                "anthropic-ratelimit-unified-representative-claim",
+            )
+            .map(str::to_string),
+            overage_status: header_value(headers, "anthropic-ratelimit-unified-overage-status")
+                .map(str::to_string),
+            overage_disabled_reason: overage_disabled_reason(headers).map(str::to_string),
+        }
+    }
+
+    /// `true` when at least one unified-limit header is present — matches the
+    /// claude-code gate `if (rateLimitType || overageStatus)` (`errors.ts:480`)
+    /// that decides whether the new message generator runs at all.
+    #[must_use]
+    pub fn has_unified_headers(&self) -> bool {
+        self.rate_limit_type.is_some() || self.overage_status.is_some()
+    }
+}
+
+/// Pre-formatted reset-time strings threaded into the 429 message template.
+///
+/// claude-code derives these from `formatResetTime(limits.resetsAt, true)` and
+/// `formatResetTime(limits.overageResetsAt, true)` (`rateLimitMessages.ts:144-147`).
+/// That formatter is locale/timezone dependent, so the api-client layer accepts
+/// the already-formatted strings and only owns the byte-locked surrounding
+/// template. Pass `None` when the corresponding reset timestamp was absent.
+#[derive(Debug, Clone, Default)]
+pub struct ResetTimes<'a> {
+    /// Formatted `limits.resetsAt` (the primary window reset), if present.
+    pub reset_time: Option<&'a str>,
+    /// Formatted `limits.overageResetsAt` (the overage window reset), if present.
+    pub overage_reset_time: Option<&'a str>,
+    /// `true` when the *unformatted* `resetsAt` timestamp was present — used by
+    /// the dual-reset overage branch to pick the earlier of the two windows.
+    /// claude-code compares the raw `resetsAt < overageResetsAt` numbers
+    /// (`rateLimitMessages.ts:155-166`); the caller passes the comparison result
+    /// via [`Self::reset_is_earlier`] so this layer stays format-agnostic.
+    pub reset_is_earlier: Option<bool>,
+}
+
+impl<'a> ResetTimes<'a> {
+    /// Pick the reset message for the dual-overage-rejected branch
+    /// (claude-code `rateLimitMessages.ts:154-166`): when both reset times are
+    /// present, use the earlier window's formatted string (per
+    /// `reset_is_earlier`); otherwise fall back to whichever single one exists.
+    fn overage_reset_message(&self) -> String {
+        match (self.reset_time, self.overage_reset_time) {
+            (Some(rt), Some(ort)) => {
+                // Both present: claude-code uses the earlier of resetsAt /
+                // overageResetsAt. `reset_is_earlier` carries that numeric
+                // comparison; default to the primary reset when unknown.
+                if self.reset_is_earlier.unwrap_or(true) {
+                    format!(" · resets {rt}")
+                } else {
+                    format!(" · resets {ort}")
+                }
+            }
+            (Some(rt), None) => format!(" · resets {rt}"),
+            (None, Some(ort)) => format!(" · resets {ort}"),
+            (None, None) => String::new(),
+        }
+    }
+}
+
+/// Whether the running user is a Pro or Enterprise subscriber — gates the
+/// `seven_day_sonnet` wording (claude-code `rateLimitMessages.ts:176-181`,
+/// `getSubscriptionType() === 'pro' || 'enterprise'`). Pre-computed by the
+/// caller (subscription state lives outside api-client) and handed in, the same
+/// seam as `is_subscriber` / `is_enterprise` on the retry path.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SubscriptionContext {
+    /// `true` when `getSubscriptionType()` is `pro` or `enterprise`.
+    pub is_pro_or_enterprise: bool,
+}
+
+/// Build the byte-faithful user-facing 429 rate-limit error message from the
+/// rejected-limit state — the **error** (not warning) branch of claude-code
+/// `getRateLimitErrorMessage` → `getRateLimitMessage` → `getLimitReachedText`
+/// (`rateLimitMessages.ts:110-197`). Returns `None` when no error message
+/// applies (the TS warning/overage paths that return `null`), letting the
+/// caller fall through to its generic 429 handling.
+///
+/// Byte-locked templates (external build; the `USER_TYPE === 'ant'` feedback
+/// channel variant at `:339-340` is omitted — same external-only stance as the
+/// rest of api-client). `reset` carries the locale-formatted reset strings.
+#[must_use]
+pub fn rate_limit_error_message(
+    info: &RateLimitInfo,
+    reset: &ResetTimes<'_>,
+    sub: SubscriptionContext,
+) -> Option<String> {
+    // claude-code builds `limits` with status='rejected' and isUsingOverage
+    // defaulted false (errors.ts:482-486). getRateLimitMessage therefore skips
+    // the `isUsingOverage` branch and the `allowed_warning` warning branch, and
+    // lands directly on the rejected → getLimitReachedText path
+    // (rateLimitMessages.ts:63-64). getRateLimitErrorMessage only returns the
+    // message when severity === 'error', which this path always is.
+    Some(limit_reached_text(info, reset, sub))
+}
+
+/// Port of claude-code `getLimitReachedText` (`rateLimitMessages.ts:143-197`).
+fn limit_reached_text(
+    info: &RateLimitInfo,
+    reset: &ResetTimes<'_>,
+    sub: SubscriptionContext,
+) -> String {
+    // `const resetMessage = resetTime ? ` · resets ${resetTime}` : ''` (:149).
+    let reset_message = reset
+        .reset_time
+        .map(|rt| format!(" · resets {rt}"))
+        .unwrap_or_default();
+
+    // if BOTH subscription and overage are exhausted (:152).
+    if info.overage_status.as_deref() == Some("rejected") {
+        let overage_reset_message = reset.overage_reset_message();
+        // `out_of_credits` → "You're out of extra usage…" (:168-170).
+        if info.overage_disabled_reason.as_deref() == Some("out_of_credits") {
+            return format!("You're out of extra usage{overage_reset_message}");
+        }
+        // else formatLimitReachedText('limit', overageResetMessage) (:172).
+        return format_limit_reached_text("limit", &overage_reset_message);
+    }
+
+    match info.rate_limit_type.as_deref() {
+        Some("seven_day_sonnet") => {
+            // pro/enterprise: Sonnet limit is the weekly limit (:176-181).
+            let limit = if sub.is_pro_or_enterprise {
+                "weekly limit"
+            } else {
+                "Sonnet limit"
+            };
+            format_limit_reached_text(limit, &reset_message)
+        }
+        Some("seven_day_opus") => format_limit_reached_text("Opus limit", &reset_message),
+        Some("seven_day") => format_limit_reached_text("weekly limit", &reset_message),
+        Some("five_hour") => format_limit_reached_text("session limit", &reset_message),
+        _ => format_limit_reached_text("usage limit", &reset_message),
+    }
+}
+
+/// Port of claude-code `formatLimitReachedText` (`rateLimitMessages.ts:333-344`),
+/// external build only — the `USER_TYPE === 'ant'` feedback-channel variant is
+/// intentionally omitted (api-client is the external CLI surface).
+fn format_limit_reached_text(limit: &str, reset_message: &str) -> String {
+    format!("You've hit your {limit}{reset_message}")
+}
+
 /// Parse the strict `YYYY-MM-DDTHH:MM:SSZ` form into a Unix-epoch second.
 /// Hand-rolled — no chrono runtime dep needed.
 #[allow(
@@ -295,5 +472,199 @@ mod tests {
         // and be exactly 56 years × 365.25 days × 86400 sec ≈ 1.77 * 10^9.
         let secs = parse_iso8601_utc("2026-05-23T00:00:00Z").unwrap();
         assert!(secs > 1_700_000_000 && secs < 1_900_000_000);
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_message {
+    //! Byte-faithful tests for the 429 user-facing message
+    //! (`rate_limit_error_message` / `RateLimitInfo`), named so the cargo filter
+    //! `rate_limit::rate_limit_message` matches them all. Templates are locked
+    //! against claude-code `rateLimitMessages.ts`.
+    use super::*;
+
+    fn info(rate_limit_type: Option<&str>, overage_status: Option<&str>) -> RateLimitInfo {
+        RateLimitInfo {
+            rate_limit_type: rate_limit_type.map(str::to_string),
+            overage_status: overage_status.map(str::to_string),
+            overage_disabled_reason: None,
+        }
+    }
+
+    #[test]
+    fn from_headers_reads_unified_headers() {
+        let headers = vec![
+            (
+                "anthropic-ratelimit-unified-representative-claim".into(),
+                "five_hour".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-overage-status".into(),
+                "rejected".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-overage-disabled-reason".into(),
+                "out_of_credits".into(),
+            ),
+        ];
+        let parsed = RateLimitInfo::from_headers(&headers);
+        assert_eq!(parsed.rate_limit_type.as_deref(), Some("five_hour"));
+        assert_eq!(parsed.overage_status.as_deref(), Some("rejected"));
+        assert_eq!(
+            parsed.overage_disabled_reason.as_deref(),
+            Some("out_of_credits")
+        );
+        assert!(parsed.has_unified_headers());
+        assert!(!RateLimitInfo::default().has_unified_headers());
+    }
+
+    #[test]
+    fn five_hour_session_limit_message_is_byte_locked() {
+        // claude-code rateLimitMessages.ts:192-193 + :343.
+        let msg = rate_limit_error_message(
+            &info(Some("five_hour"), None),
+            &ResetTimes {
+                reset_time: Some("3pm"),
+                ..ResetTimes::default()
+            },
+            SubscriptionContext::default(),
+        );
+        assert_eq!(msg.as_deref(), Some("You've hit your session limit · resets 3pm"));
+    }
+
+    #[test]
+    fn five_hour_without_reset_time_omits_reset_clause() {
+        let msg = rate_limit_error_message(
+            &info(Some("five_hour"), None),
+            &ResetTimes::default(),
+            SubscriptionContext::default(),
+        );
+        assert_eq!(msg.as_deref(), Some("You've hit your session limit"));
+    }
+
+    #[test]
+    fn seven_day_weekly_and_opus_messages_are_byte_locked() {
+        let weekly = rate_limit_error_message(
+            &info(Some("seven_day"), None),
+            &ResetTimes::default(),
+            SubscriptionContext::default(),
+        );
+        assert_eq!(weekly.as_deref(), Some("You've hit your weekly limit"));
+
+        let opus = rate_limit_error_message(
+            &info(Some("seven_day_opus"), None),
+            &ResetTimes::default(),
+            SubscriptionContext::default(),
+        );
+        assert_eq!(opus.as_deref(), Some("You've hit your Opus limit"));
+    }
+
+    #[test]
+    fn seven_day_sonnet_wording_depends_on_subscription() {
+        // Non pro/enterprise → "Sonnet limit" (rateLimitMessages.ts:180).
+        let standard = rate_limit_error_message(
+            &info(Some("seven_day_sonnet"), None),
+            &ResetTimes::default(),
+            SubscriptionContext {
+                is_pro_or_enterprise: false,
+            },
+        );
+        assert_eq!(standard.as_deref(), Some("You've hit your Sonnet limit"));
+
+        // Pro/enterprise → "weekly limit" (rateLimitMessages.ts:178-181).
+        let pro = rate_limit_error_message(
+            &info(Some("seven_day_sonnet"), None),
+            &ResetTimes::default(),
+            SubscriptionContext {
+                is_pro_or_enterprise: true,
+            },
+        );
+        assert_eq!(pro.as_deref(), Some("You've hit your weekly limit"));
+    }
+
+    #[test]
+    fn unknown_or_absent_rate_limit_type_falls_back_to_usage_limit() {
+        // claude-code rateLimitMessages.ts:196 — default `usage limit`.
+        let msg = rate_limit_error_message(
+            &info(None, None),
+            &ResetTimes::default(),
+            SubscriptionContext::default(),
+        );
+        assert_eq!(msg.as_deref(), Some("You've hit your usage limit"));
+    }
+
+    #[test]
+    fn overage_rejected_out_of_credits_message_is_byte_locked() {
+        // claude-code rateLimitMessages.ts:168-170.
+        let limits = RateLimitInfo {
+            rate_limit_type: Some("five_hour".into()),
+            overage_status: Some("rejected".into()),
+            overage_disabled_reason: Some("out_of_credits".into()),
+        };
+        let msg = rate_limit_error_message(
+            &limits,
+            &ResetTimes {
+                overage_reset_time: Some("Jun 7, 9am"),
+                ..ResetTimes::default()
+            },
+            SubscriptionContext::default(),
+        );
+        assert_eq!(
+            msg.as_deref(),
+            Some("You're out of extra usage · resets Jun 7, 9am")
+        );
+    }
+
+    #[test]
+    fn overage_rejected_other_reason_uses_limit_wording() {
+        // claude-code rateLimitMessages.ts:172 — formatLimitReachedText('limit', …).
+        let limits = RateLimitInfo {
+            rate_limit_type: Some("seven_day".into()),
+            overage_status: Some("rejected".into()),
+            overage_disabled_reason: None,
+        };
+        let msg = rate_limit_error_message(
+            &limits,
+            &ResetTimes {
+                reset_time: Some("3pm"),
+                ..ResetTimes::default()
+            },
+            SubscriptionContext::default(),
+        );
+        // The overage-rejected branch outranks rate_limit_type wording.
+        assert_eq!(msg.as_deref(), Some("You've hit your limit · resets 3pm"));
+    }
+
+    #[test]
+    fn overage_rejected_dual_reset_picks_earlier_window() {
+        // claude-code rateLimitMessages.ts:154-166 — both present, earlier wins.
+        let limits = RateLimitInfo {
+            rate_limit_type: Some("seven_day".into()),
+            overage_status: Some("rejected".into()),
+            overage_disabled_reason: None,
+        };
+        // resetsAt is the earlier window → use its formatted string.
+        let earlier_primary = rate_limit_error_message(
+            &limits,
+            &ResetTimes {
+                reset_time: Some("3pm"),
+                overage_reset_time: Some("Jun 9, 9am"),
+                reset_is_earlier: Some(true),
+            },
+            SubscriptionContext::default(),
+        );
+        assert_eq!(earlier_primary.as_deref(), Some("You've hit your limit · resets 3pm"));
+
+        // overageResetsAt is the earlier window → use the overage string.
+        let earlier_overage = rate_limit_error_message(
+            &limits,
+            &ResetTimes {
+                reset_time: Some("Jun 9, 9am"),
+                overage_reset_time: Some("3pm"),
+                reset_is_earlier: Some(false),
+            },
+            SubscriptionContext::default(),
+        );
+        assert_eq!(earlier_overage.as_deref(), Some("You've hit your limit · resets 3pm"));
     }
 }

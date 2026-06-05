@@ -196,18 +196,17 @@ fn format_en_us_time(date: &DateTime<Local>, minutes: u32) -> String {
     }
 }
 
-/// Process-lifetime timezone string appended when `show_timezone` is set.
+/// Timezone string appended when `show_timezone` is set.
 ///
-/// **Divergence from claude-code (documented):** TS `getTimeZone()` returns the
-/// IANA zone *name* via `Intl.DateTimeFormat().resolvedOptions().timeZone` (e.g.
-/// `"America/Los_Angeles"`). Recovering that name in-tree requires
-/// `iana-time-zone`/`chrono-tz`, which the parity rules forbid adding as a new
-/// dependency. We therefore approximate with chrono `%Z`, which on this platform
-/// renders the local UTC offset (e.g. `"+08:00"` / `"-07:00"`). The date/time
-/// portion of `formatResetTime` is byte-faithful; only this parenthesised suffix
-/// diverges, and only when `show_timezone` is requested.
+/// Byte-faithful to claude-code `getTimeZone()`
+/// (`Intl.DateTimeFormat().resolvedOptions().timeZone`), which returns the IANA
+/// zone *name* (e.g. `"America/Los_Angeles"`). `iana-time-zone` is already in the
+/// locked dependency graph (transitive via chrono), so this adds an edge, not a
+/// new package. If the host zone cannot be resolved (rare), we fall back to the
+/// chrono `%Z` local-offset rendering (e.g. `"+08:00"`) so the suffix is never
+/// empty — `date` is retained only for that fallback.
 fn reset_time_zone(date: DateTime<Local>) -> String {
-    date.format("%Z").to_string()
+    iana_time_zone::get_timezone().unwrap_or_else(|_| date.format("%Z").to_string())
 }
 
 /// Owned, already-formatted reset strings derived from the unified-reset
@@ -672,9 +671,10 @@ mod format_reset_time_tests {
     //! into `format_reset_time_at`, so the assertions are independent of the
     //! runner's timezone: the function re-derives local Y/M/D/H/M from the epoch
     //! it is given, which round-trips the components we constructed. The tz
-    //! suffix (`reset_time_zone`) renders the chrono `%Z` offset — a documented
-    //! divergence from TS `getTimeZone()` (IANA name) — so the showTimezone
-    //! tests assert the structural ` (…)` shape, not a literal zone string.
+    //! suffix (`reset_time_zone`) renders the host IANA zone name via
+    //! `iana-time-zone` (byte-faithful to TS `getTimeZone()`), which is
+    //! host-dependent — so the showTimezone tests assert the structural ` (…)`
+    //! shape, not a literal zone string.
     use super::*;
 
     /// A `DateTime<Local>` for the given local wall-clock components. Tests pass

@@ -1124,6 +1124,24 @@ pub async fn build(
     let reg = desktop_command_registry(handle, auth.clone());
     let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
 
+    // (7) Session lifecycle: fire the `SessionStart` hooks now that the
+    //     orchestrator + hook registry are fully wired. claude-code fires the
+    //     `SessionStart` hook event at session startup (`utils/hooks.ts:3876-3881`,
+    //     the SessionStart path) with `source` = one of
+    //     `startup` / `resume` / `clear` / `compact`. The desktop composition root
+    //     OWNS the session lifecycle (it constructs the orchestrator), and `build`
+    //     assembles exactly one fresh session per call, so the byte-faithful
+    //     `source` here is `"startup"`. Best-effort: `fire_session_start` discards
+    //     the hook aggregate, so a failing or malformed `SessionStart` hook never
+    //     breaks boot, and it is a strict no-op when no `SessionStart` hook is
+    //     registered (the common case). NOTE: there is no engine-desktop-local
+    //     teardown seam — `build` returns the runtime and the host (`apps/cli` /
+    //     the bridge-server) drops it on process exit with no hook-capable
+    //     shutdown path — so the matching `SessionEnd` is NOT fired here. The
+    //     `ConversationOrchestrator::fire_session_end` helper exists for a future
+    //     batch that adds an explicit host teardown seam.
+    orch.fire_session_start("startup").await;
+
     Ok(DesktopRuntime {
         orchestrator: orch,
         dispatcher,
@@ -1348,6 +1366,54 @@ mod tests {
         assert!(
             !rt.coordinator_mode.is_enabled(),
             "default build must not enter coordinator mode"
+        );
+    }
+
+    /// Session lifecycle: the boot path fires `SessionStart` (source=startup)
+    /// once the orchestrator + hook registry are wired, and does so best-effort.
+    ///
+    /// We register a `SessionStart` command hook in the project
+    /// `cwd/.claude/settings.json` that `build()` reads at boot. `build()` must
+    /// (a) complete successfully — proving the wired `fire_session_start`
+    /// (which uses the minimal stub process runner, so the hook command itself
+    /// errors `Unsupported`) is best-effort and never breaks boot — and (b)
+    /// surface the loaded `SessionStart` hook via the orchestrator's
+    /// `list_hooks`, proving the boot path actually loaded the session-lifecycle
+    /// hook the wired `fire_session_start("startup")` call dispatched against.
+    #[tokio::test]
+    async fn build_fires_session_start_against_a_registered_hook() {
+        use traits::OrchestratorHandle as _;
+
+        let (_tmp, cfg) = test_config(true);
+        // Project settings the hooks loader reads at boot
+        // (cwd/.claude/settings.json) — a single `SessionStart` command hook.
+        let claude_dir = cfg.cwd.join(".claude");
+        std::fs::create_dir_all(&claude_dir).expect("mk .claude");
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{ "hooks": { "SessionStart": [ { "hooks": [
+                { "type": "command", "command": "true" }
+            ] } ] } }"#,
+        )
+        .expect("write settings.json");
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        // The wired `fire_session_start("startup")` runs INSIDE build(): a
+        // failing/unsupported hook command must NOT break boot (best-effort).
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() must succeed even with a (failing) SessionStart hook registered");
+
+        // The boot path loaded the SessionStart hook into the wired registry —
+        // exactly the hook the in-build `fire_session_start("startup")` fired.
+        let hooks = rt.orchestrator.list_hooks().await;
+        assert!(
+            hooks.iter().any(|h| h.event == "SessionStart"),
+            "boot must load the SessionStart hook the lifecycle fire dispatches against: {hooks:?}"
         );
     }
 

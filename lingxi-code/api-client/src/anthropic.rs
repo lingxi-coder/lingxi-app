@@ -312,6 +312,7 @@ impl AnthropicProvider {
             temperature,
             None,
             false,
+            false,
             transport,
         )
         .await
@@ -344,9 +345,20 @@ impl AnthropicProvider {
     /// ship-with-stub note; an external non-subscriber on an Opus model
     /// therefore opens the gate exactly as TS does.
     ///
+    /// `is_subscriber` / `is_enterprise` are the **pre-computed** subscription
+    /// flags that gate whether a 429 is retryable: claude-code `withRetry.ts:767-769`
+    /// only retries a 429 when `!isClaudeAISubscriber() || isEnterpriseSubscriber()`.
+    /// A non-enterprise Claude.ai subscriber's 429 reset is hours away, so the
+    /// 429 is treated as **terminal** (the loop returns the error instead of
+    /// sleeping + retrying). The flags are resolved by the caller (subscription
+    /// state lives outside api-client) and handed in — same seam as
+    /// `allow_fallback`/`is_subscriber` on the consecutive-529 path.
+    ///
     /// # Errors
     /// See [`ApiError`] — adds [`ApiError::FallbackTriggered`] /
-    /// [`ApiError::Overloaded`] `{ repeated: true }` from the 529 gate.
+    /// [`ApiError::Overloaded`] `{ repeated: true }` from the 529 gate, and
+    /// surfaces a terminal `Server { status: 429, .. }` when the subscriber gate
+    /// forbids retrying the 429.
     #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     pub async fn messages_create_non_stream_with_fallback<T: HttpTransport>(
         &self,
@@ -358,6 +370,7 @@ impl AnthropicProvider {
         temperature: Option<f32>,
         fallback_model: Option<String>,
         is_subscriber: bool,
+        is_enterprise: bool,
         transport: &T,
     ) -> Result<MessageResponse, ApiError> {
         let request_id = new_request_id();
@@ -366,9 +379,16 @@ impl AnthropicProvider {
 
         let body = Self::build_messages_body(model, system, &msgs, max_tokens, &tools, temperature);
 
+        // claude-code withRetry.ts:767-769 — a 429 is retryable ONLY when the
+        // user is not a Claude.ai subscriber, OR is an enterprise subscriber
+        // (enterprise typically uses PAYG, not the hours-away rate-limit reset).
+        // Pre-compute the gate once and thread it into the 429 caller path; when
+        // `false`, the 429 is terminal rather than sleep-and-retry.
+        let retry_429_allowed = !is_subscriber || is_enterprise;
+
         let ctl = resolve_retry_control(model, fallback_model, is_subscriber);
         let resp_result = self
-            .drive_retry_loop_with_429(&body, &ctl, transport)
+            .drive_retry_loop_with_429(&body, &ctl, retry_429_allowed, transport)
             .await;
         let outcome = self
             .resolve_outcome(resp_result, &body, model, &request_id, transport)
@@ -469,6 +489,7 @@ impl AnthropicProvider {
         &self,
         body: &Value,
         ctl: &crate::retry::RetryControl,
+        retry_429_allowed: bool,
         transport: &T,
     ) -> Result<protocol::HttpResponse, ApiError> {
         let bus_for_loop = self.bus.clone();
@@ -496,10 +517,17 @@ impl AnthropicProvider {
         // reduced `max_tokens`). `tokio::sync::Mutex` because the closure is
         // async and the lock is held across an `.await`.
         let shared_body = Arc::new(tokio::sync::Mutex::new(body.clone()));
-        with_retry_ctl(DEFAULT_RETRY_BUDGET, DEFAULT_BASE_DELAYS_MS, ctl, |attempt| {
+        // Captures the byte-faithful user-facing rate-limit message built from
+        // the terminal-429 response headers. The generic loop's `Server` error
+        // drops the response headers, so the message must be produced inside the
+        // closure (where the headers live) and stashed here for the caller.
+        let terminal_429_message: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let outcome = with_retry_ctl(DEFAULT_RETRY_BUDGET, DEFAULT_BASE_DELAYS_MS, ctl, |attempt| {
             let bus = bus_for_loop.clone();
             let model_s = model_for_loop.clone();
             let shared_body = Arc::clone(&shared_body);
+            let terminal_429_message = Arc::clone(&terminal_429_message);
             async move {
                 // Snapshot the (possibly already-reshrunk) body for this attempt.
                 let mut current = shared_body.lock().await.clone();
@@ -512,8 +540,34 @@ impl AnthropicProvider {
                 // classifier recognise the transient-capacity (overloaded)
                 // error instead of mis-bucketing it.
                 if resp.status == 429 {
-                    // TS withRetry.ts:767-769: subscriber 429 terminal gate —
-                    // deferred, blocked on subscription resolution (Batch 6).
+                    // TS withRetry.ts:767-769: a 429 is retryable ONLY when
+                    // `!isClaudeAISubscriber() || isEnterpriseSubscriber()`. The
+                    // gate is pre-computed by the caller and threaded in as
+                    // `retry_429_allowed`. When it is `false` (a non-enterprise
+                    // Claude.ai subscriber whose reset is hours away), the 429 is
+                    // TERMINAL: build the byte-faithful user-facing message from
+                    // the response headers (TS `getRateLimitErrorMessage`, the
+                    // 429 branch of `getAssistantMessageFromError`, errors.ts:519),
+                    // stash it for the caller, then pass the real 429 through so
+                    // the generic loop classifies it `Fallthrough` →
+                    // `Server { status: 429, .. }`. The caller swaps in the
+                    // stashed message instead of sleeping + retrying.
+                    if !retry_429_allowed {
+                        let info = crate::rate_limit::RateLimitInfo::from_headers(&resp.headers);
+                        if info.has_unified_headers() {
+                            // Reset-time strings are locale/timezone formatted in
+                            // TS; api-client surfaces the byte-locked template
+                            // without the (non-reproducible) formatted time.
+                            if let Some(msg) = crate::rate_limit::rate_limit_error_message(
+                                &info,
+                                &crate::rate_limit::ResetTimes::default(),
+                                crate::rate_limit::SubscriptionContext::default(),
+                            ) {
+                                *terminal_429_message.lock().unwrap() = Some(msg);
+                            }
+                        }
+                        return Ok(resp);
+                    }
                     handle_429(&resp.headers, &bus, &model_s).await;
                     return Ok(protocol::HttpResponse {
                         status: 503,
@@ -564,7 +618,21 @@ impl AnthropicProvider {
                 Ok(resp)
             }
         })
-        .await
+        .await;
+
+        // Subscriber-gated terminal 429: the closure stashed the byte-faithful
+        // user-facing rate-limit message. Swap it into the `Server { 429 }` body
+        // so the caller surfaces the exact claude-code message (the 429 branch
+        // of `getAssistantMessageFromError`) instead of the raw response body.
+        if let Err(ApiError::Server { status: 429, .. }) = &outcome {
+            if let Some(msg) = terminal_429_message.lock().unwrap().take() {
+                return Err(ApiError::Server {
+                    status: 429,
+                    body: msg,
+                });
+            }
+        }
+        outcome
     }
 
     /// Map the retry-loop outcome into the public response: parse 2xx bodies,

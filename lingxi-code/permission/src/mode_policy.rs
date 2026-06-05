@@ -13,9 +13,10 @@
 //!   the tool modules. This crate has no dependency on the tools crate (and
 //!   must not add one), so the wire names are inlined as string literals that
 //!   match the names this port advertises (see
-//!   [`crate::defaults_per_tool`]). Where the wire name differs from the TS
-//!   constant's value it follows THIS port (e.g. `ListMcpResources` /
-//!   `ReadMcpResource`, not the TS `ListMcpResourcesTool` / `ReadMcpResourceTool`).
+//!   [`crate::defaults_per_tool`]). These now match the TS constant values
+//!   byte-for-byte, including the MCP resource tools' `Tool` suffix
+//!   (`ListMcpResourcesTool` / `ReadMcpResourceTool`, per
+//!   `classifierDecision.ts:56-98`).
 //! - The `ant`-only safe tools (`TerminalCapture`, `OverflowTest`,
 //!   `VerifyPlanExecution`) and the internal `YoloClassifier` tool are OMITTED
 //!   — they are gated behind `USER_TYPE==='ant'` / feature flags in TS and are
@@ -39,8 +40,8 @@ const PLAN_SAFE_TOOLS: &[&str] = &[
     "Glob",
     "LSP",
     "ToolSearch",
-    "ListMcpResources",
-    "ReadMcpResource",
+    "ListMcpResourcesTool",
+    "ReadMcpResourceTool",
     // Task management (metadata only).
     "TodoWrite",
     "TaskCreate",
@@ -88,8 +89,8 @@ mod tests {
 
     #[test]
     fn mcp_resource_reads_are_plan_safe() {
-        assert!(is_plan_safe_tool("ListMcpResources"));
-        assert!(is_plan_safe_tool("ReadMcpResource"));
+        assert!(is_plan_safe_tool("ListMcpResourcesTool"));
+        assert!(is_plan_safe_tool("ReadMcpResourceTool"));
     }
 
     #[test]

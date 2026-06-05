@@ -10,7 +10,7 @@
     "workflow": ["TodoWrite", "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree"],
     "agent": ["Agent", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "TaskOutput", "SendMessage"],
     "team": ["TeamCreate", "TeamDelete"],
-    "mcp_lsp": ["MCP", "McpAuth", "ListMcpResources", "ReadMcpResource", "LSP"],
-    "system": ["AskUserQuestion", "Brief", "Config", "Skill", "ScheduleCron", "ToolSearch", "RemoteTrigger", "SyntheticOutput"]
+    "mcp_lsp": ["MCP", "McpAuth", "ListMcpResourcesTool", "ReadMcpResourceTool", "LSP"],
+    "system": ["AskUserQuestion", "Brief", "Config", "Skill", "ScheduleCron", "ToolSearch", "RemoteTrigger", "StructuredOutput"]
   }
 }

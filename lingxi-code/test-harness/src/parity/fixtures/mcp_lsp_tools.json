@@ -13,8 +13,8 @@
   "tool_names": {
     "mcp_tool": "MCP",
     "mcp_auth_tool": "McpAuth",
-    "list_mcp_resources_tool": "ListMcpResources",
-    "read_mcp_resource_tool": "ReadMcpResource",
+    "list_mcp_resources_tool": "ListMcpResourcesTool",
+    "read_mcp_resource_tool": "ReadMcpResourceTool",
     "lsp_tool": "LSP"
   },
 

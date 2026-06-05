@@ -16,11 +16,28 @@
 )]
 pub mod remote_trigger;
 pub mod schedule_cron;
-pub use remote_trigger::RemoteTriggerTool;
+pub use remote_trigger::{ClaudeAiAuthProvider, RemoteTriggerTool};
 pub use schedule_cron::ScheduleCronTool;
-/// Register the cron scheduling tool against `reg`.
+/// Register the cron scheduling tools against `reg`.
+///
+/// `RemoteTrigger` is registered WITHOUT an OAuth auth provider (`None`), so its
+/// pre-flight "not authenticated" error fires until a host wires one. The
+/// desktop composition root calls [`register_all_with_auth`] instead to hand the
+/// tool a credential-store-backed [`ClaudeAiAuthProvider`]. Mobile (WIP) uses
+/// this no-provider path.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
+    register_all_with_auth(reg, ctx, None);
+}
+
+/// Register the cron scheduling tools, handing `RemoteTrigger` an in-process
+/// [`ClaudeAiAuthProvider`] (`Some(..)` on desktop; `None` is equivalent to
+/// [`register_all`]).
+pub fn register_all_with_auth(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    auth: Option<std::sync::Arc<dyn ClaudeAiAuthProvider>>,
+) {
     use std::sync::Arc;
     reg.register_builtin(Arc::new(ScheduleCronTool::new(ctx.clone())));
-    reg.register_builtin(Arc::new(RemoteTriggerTool::new(ctx)));
+    reg.register_builtin(Arc::new(RemoteTriggerTool::new(ctx, auth)));
 }

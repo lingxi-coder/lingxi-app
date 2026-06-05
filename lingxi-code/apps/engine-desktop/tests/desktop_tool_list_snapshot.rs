@@ -23,7 +23,8 @@ fn desktop_tool_list_snapshot() {
         timed_out: false,
     });
     // `None` → default (non-coordinator) session: byte-identical to pre-M10.
-    let reg = desktop_tool_registry(ctx, None);
+    // Third `None` → no RemoteTrigger auth provider for the offline snapshot.
+    let reg = desktop_tool_registry(ctx, None, None);
 
     let mut names = reg.all_names();
     names.sort();

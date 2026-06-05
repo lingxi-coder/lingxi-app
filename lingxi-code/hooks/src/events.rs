@@ -72,6 +72,70 @@ pub enum HookEventType {
     Notification,
 }
 
+/// Source of a [`HookEvent::ConfigChange`] — which settings layer (or skills)
+/// mutated on disk. 1:1 with claude-code's `CONFIG_CHANGE_SOURCES`
+/// (`coreSchemas.ts:662-668`); the wire `source` value is the kebab/snake
+/// literal each variant serializes to (e.g. `"user_settings"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigChangeSource {
+    /// `~/.claude/settings.json` (user-global).
+    UserSettings,
+    /// `.claude/settings.json` (project-shared, checked in).
+    ProjectSettings,
+    /// `.claude/settings.local.json` (project-local, git-ignored).
+    LocalSettings,
+    /// Enterprise-managed policy settings (never blockable by hooks).
+    PolicySettings,
+    /// A skill definition changed.
+    Skills,
+}
+
+/// Which memory tier an [`HookEvent::InstructionsLoaded`] file belongs to.
+/// 1:1 with claude-code's `INSTRUCTIONS_MEMORY_TYPES`
+/// (`coreSchemas.ts:688-693`). Note: these serialize as `PascalCase` wire
+/// literals (`"User"` / `"Project"` / `"Local"` / `"Managed"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InstructionsMemoryType {
+    /// User-global instructions (`~/.claude/CLAUDE.md`).
+    User,
+    /// Project-shared instructions (`./CLAUDE.md`).
+    Project,
+    /// Project-local instructions (`./CLAUDE.local.md`).
+    Local,
+    /// Enterprise-managed (policy) instructions.
+    Managed,
+}
+
+/// Why an [`HookEvent::InstructionsLoaded`] file was (re)loaded. 1:1 with
+/// claude-code's `INSTRUCTIONS_LOAD_REASONS` (`coreSchemas.ts:680-686`); the
+/// wire value is the `snake_case` literal each variant serializes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstructionsLoadReason {
+    /// Eager load at session start.
+    SessionStart,
+    /// Lazy load triggered by traversing into a nested directory.
+    NestedTraversal,
+    /// Conditional rules whose `paths:` glob matched a touched file.
+    PathGlobMatch,
+    /// Loaded via an explicit `@include` directive.
+    Include,
+    /// Eager reload after a context compaction.
+    Compact,
+}
+
+/// Elicitation presentation mode (`form` / `url`). 1:1 with the `mode` enum in
+/// claude-code's `ElicitationHookInputSchema` (`coreSchemas.ts:634`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ElicitationMode {
+    /// Render a structured form from `requested_schema`.
+    Form,
+    /// Open a URL for the user to complete out-of-band.
+    Url,
+}
+
 /// Concrete payload for a hook event. The variant must match the
 /// corresponding [`HookEventType`] returned by [`HookEvent::event_type`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,10 +269,19 @@ pub enum HookEvent {
     },
     /// An MCP server requested user elicitation.
     Elicitation {
-        /// Name of the MCP server.
+        /// Name of the MCP server (wire `mcp_server_name`).
         server_name: String,
-        /// Server-supplied parameters.
-        params: Value,
+        /// Human-readable prompt shown to the user (wire `message`, required).
+        message: String,
+        /// Presentation mode (`form` / `url`), if specified.
+        mode: Option<ElicitationMode>,
+        /// URL to open when `mode == Url`, if specified.
+        url: Option<String>,
+        /// Server-assigned elicitation ID, if specified.
+        elicitation_id: Option<String>,
+        /// JSON Schema describing the requested form fields, if specified
+        /// (wire `requested_schema`).
+        requested_schema: Option<Value>,
     },
     /// User completed (or cancelled) an elicitation.
     ElicitationResult {
@@ -219,14 +292,22 @@ pub enum HookEvent {
     },
     /// Engine configuration changed at runtime.
     ConfigChange {
-        /// One element per altered config key; shape is system-defined JSON.
-        changes: Vec<Value>,
+        /// Which settings layer (or skills) changed (wire `source`, required).
+        source: ConfigChangeSource,
+        /// Path to the changed file, when known (wire `file_path`, optional).
+        file_path: Option<PathBuf>,
     },
     /// A new git worktree was created.
     WorktreeCreate {
-        /// Absolute path of the new worktree.
+        /// Requested worktree name (wire `name`, required). This is the only
+        /// field in the claude-code `WorktreeCreate` wire schema; the hook's
+        /// stdout returns the resolved path, so the input carries just `name`.
+        name: String,
+        /// Absolute path of the new worktree (engine-side context, not on the
+        /// wire).
         path: PathBuf,
-        /// Branch name checked out in the worktree.
+        /// Branch name checked out in the worktree (engine-side context, not
+        /// on the wire).
         branch: String,
     },
     /// An existing git worktree was removed.
@@ -234,10 +315,24 @@ pub enum HookEvent {
         /// Absolute path of the removed worktree.
         path: PathBuf,
     },
-    /// Per-cwd / per-session instructions were (re)loaded.
+    /// A per-cwd / per-session instruction file was (re)loaded. Fired once per
+    /// file (claude-code `executeInstructionsLoadedHooks`), so the payload
+    /// carries a single `file_path` rather than a list.
     InstructionsLoaded {
-        /// All instruction files included in the load.
-        paths: Vec<PathBuf>,
+        /// The instruction file that was loaded (wire `file_path`, required).
+        file_path: PathBuf,
+        /// Which memory tier the file belongs to (wire `memory_type`, required).
+        memory_type: InstructionsMemoryType,
+        /// Why the file was (re)loaded (wire `load_reason`, required).
+        load_reason: InstructionsLoadReason,
+        /// `paths:` frontmatter globs that gated the load, if any (optional).
+        globs: Option<Vec<String>>,
+        /// File whose access triggered a lazy/conditional load, if any
+        /// (wire `trigger_file_path`, optional).
+        trigger_file_path: Option<PathBuf>,
+        /// Parent instruction file that `@include`d this one, if any
+        /// (wire `parent_file_path`, optional).
+        parent_file_path: Option<PathBuf>,
     },
     /// The current working directory changed.
     CwdChanged {

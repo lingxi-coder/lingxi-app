@@ -14,17 +14,19 @@ use crate::async_registry::{AsyncHookRegistry, HookWork};
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
 use crate::hook_payload::{
-    parse_response, CwdChangedPayload, FileChangedPayload, HookEventNameCwdChanged,
-    HookEventNameFileChanged, HookEventNameNotification, HookEventNamePermissionRequest,
-    HookEventNamePost, HookEventNamePostCompact, HookEventNamePostToolUseFailure,
-    HookEventNamePre, HookEventNamePreCompact, HookEventNameSessionEnd,
-    HookEventNameSessionStart, HookEventNameSetup, HookEventNameStop, HookEventNameStopFailure,
-    HookEventNameSubagentStart, HookEventNameSubagentStop, HookEventNameTaskCompleted,
-    HookEventNameUserPromptSubmit, HookEventNameWorktreeRemove, NotificationPayload,
+    parse_response, ConfigChangePayload, CwdChangedPayload, ElicitationPayload, FileChangedPayload,
+    HookEventNameConfigChange, HookEventNameCwdChanged, HookEventNameElicitation,
+    HookEventNameFileChanged, HookEventNameInstructionsLoaded, HookEventNameNotification,
+    HookEventNamePermissionRequest, HookEventNamePost, HookEventNamePostCompact,
+    HookEventNamePostToolUseFailure, HookEventNamePre, HookEventNamePreCompact,
+    HookEventNameSessionEnd, HookEventNameSessionStart, HookEventNameSetup, HookEventNameStop,
+    HookEventNameStopFailure, HookEventNameSubagentStart, HookEventNameSubagentStop,
+    HookEventNameTaskCompleted, HookEventNameUserPromptSubmit, HookEventNameWorktreeCreate,
+    HookEventNameWorktreeRemove, InstructionsLoadedPayload, NotificationPayload,
     PermissionRequestPayload, PostCompactPayload, PostToolUseFailurePayload, PostToolUsePayload,
     PreCompactPayload, PreToolUsePayload, SessionEndPayload, SessionStartPayload, SetupPayload,
     StopFailurePayload, StopPayload, SubagentStartPayload, SubagentStopPayload,
-    TaskCompletedPayload, UserPromptSubmitPayload, WorktreeRemovePayload,
+    TaskCompletedPayload, UserPromptSubmitPayload, WorktreeCreatePayload, WorktreeRemovePayload,
 };
 use crate::http_executor::{HttpExecutionSignal, HttpExecutor};
 use crate::registry::{HookContext, HookRegistry};
@@ -593,11 +595,13 @@ impl BaseHookFields {
 /// Where a [`HookEvent`] variant carries fewer fields than the claude-code wire
 /// schema, the available fields are populated and the rest defaulted
 /// (`false` / `None` / empty string) — filled by later B-cluster batches.
-/// Every other (not-yet-ported) variant returns `None` — including events whose
-/// `HookEvent` variant has no field to source a *required* wire value
-/// (`ConfigChange` lacks `source`, `InstructionsLoaded` lacks `memory_type` /
-/// `load_reason`, `Elicitation` lacks `message`, `WorktreeCreate` lacks `name`);
-/// those need broader `HookEvent` work before they can serialize faithfully.
+///
+/// The final four events (`ConfigChange` / `InstructionsLoaded` /
+/// `Elicitation` / `WorktreeCreate`) — previously deferred because their
+/// `HookEvent` variant lacked a field to source a *required* wire value — now
+/// carry those fields and serialize faithfully. Every remaining (not-yet-ported)
+/// variant — `PermissionDenied`, `TeammateIdle`, `TaskCreated`,
+/// `ElicitationResult` — returns `None` until its wire schema is ported.
 #[allow(
     clippy::too_many_lines,
     reason = "per-event payload construction fan-out — splitting hurts readability"
@@ -869,6 +873,98 @@ fn build_lifecycle_envelope_body(
                 worktree_path: path.to_string_lossy().into_owned(),
             };
             Some(("WorktreeRemove", serde_json::to_string(&payload).ok()?))
+        }
+        // Deferred-completion batch — the final four events. Their `HookEvent`
+        // variant now carries the field(s) needed to source each *required*
+        // wire value, so they serialize faithfully.
+        //
+        // claude-code parity note on `permission_mode`: `ConfigChange`,
+        // `InstructionsLoaded`, and `WorktreeCreate` build their base shape with
+        // `createBaseHookInput(undefined)` (`utils/hooks.ts:4220` / `4354` /
+        // `4932`), so they emit NO `permission_mode` regardless of the engine's
+        // current mode — we pass `None` rather than `b.permission_mode`.
+        // `Elicitation` alone uses `createBaseHookInput(permissionMode)`
+        // (`utils/hooks.ts:4492`), so it threads `b.permission_mode`.
+        HookEvent::ConfigChange { source, file_path } => {
+            let payload = ConfigChangePayload {
+                hook_event_name: HookEventNameConfigChange,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: None,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                source: *source,
+                file_path: file_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            };
+            Some(("ConfigChange", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::InstructionsLoaded {
+            file_path,
+            memory_type,
+            load_reason,
+            globs,
+            trigger_file_path,
+            parent_file_path,
+        } => {
+            let payload = InstructionsLoadedPayload {
+                hook_event_name: HookEventNameInstructionsLoaded,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: None,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                file_path: file_path.to_string_lossy().into_owned(),
+                memory_type: *memory_type,
+                load_reason: *load_reason,
+                globs: globs.clone(),
+                trigger_file_path: trigger_file_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned()),
+                parent_file_path: parent_file_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned()),
+            };
+            Some(("InstructionsLoaded", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::Elicitation {
+            server_name,
+            message,
+            mode,
+            url,
+            elicitation_id,
+            requested_schema,
+        } => {
+            let payload = ElicitationPayload {
+                hook_event_name: HookEventNameElicitation,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                mcp_server_name: server_name.clone(),
+                message: message.clone(),
+                mode: *mode,
+                url: url.clone(),
+                elicitation_id: elicitation_id.clone(),
+                requested_schema: requested_schema.clone(),
+            };
+            Some(("Elicitation", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::WorktreeCreate { name, .. } => {
+            let payload = WorktreeCreatePayload {
+                hook_event_name: HookEventNameWorktreeCreate,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: None,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                name: name.clone(),
+            };
+            Some(("WorktreeCreate", serde_json::to_string(&payload).ok()?))
         }
         _ => None,
     }
@@ -1775,39 +1871,183 @@ mod command_arm_tests {
         assert!(stdin.contains(r#""worktree_path":"/work/.worktrees/feat""#));
     }
 
-    #[test]
-    fn deferred_events_still_return_none() {
-        // These events' `HookEvent` variants lack a field to source a *required*
-        // wire value, so they must still fall through to `None` until broader
-        // `HookEvent` work lands.
-        let ctx = HookContext::default();
-        let deferred = vec![
-            HookEvent::ConfigChange { changes: vec![] },
-            HookEvent::InstructionsLoaded { paths: vec![] },
+    // ---- deferred-completion batch: the final four events now serialize -----
+
+    #[tokio::test]
+    async fn config_change_event_serializes_source_and_file_path() {
+        let stdin = dispatch_and_capture(
+            HookEventType::ConfigChange,
+            HookEvent::ConfigChange {
+                source: crate::events::ConfigChangeSource::LocalSettings,
+                file_path: Some(std::path::PathBuf::from("/work/.claude/settings.local.json")),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"ConfigChange""#));
+        // `source` serializes to the snake_case wire literal.
+        assert!(stdin.contains(r#""source":"local_settings""#));
+        assert!(stdin.contains(r#""file_path":"/work/.claude/settings.local.json""#));
+    }
+
+    #[tokio::test]
+    async fn config_change_event_omits_absent_file_path() {
+        let stdin = dispatch_and_capture(
+            HookEventType::ConfigChange,
+            HookEvent::ConfigChange {
+                source: crate::events::ConfigChangeSource::PolicySettings,
+                file_path: None,
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""source":"policy_settings""#));
+        // `.optional()` field is skipped (not `null`) when absent.
+        assert!(!stdin.contains(r#""file_path""#));
+        // `createBaseHookInput(undefined)` ⇒ no permission_mode on the wire.
+        assert!(!stdin.contains(r#""permission_mode""#));
+    }
+
+    #[tokio::test]
+    async fn instructions_loaded_event_serializes_required_fields() {
+        let stdin = dispatch_and_capture(
+            HookEventType::InstructionsLoaded,
+            HookEvent::InstructionsLoaded {
+                file_path: std::path::PathBuf::from("/work/CLAUDE.md"),
+                memory_type: crate::events::InstructionsMemoryType::Project,
+                load_reason: crate::events::InstructionsLoadReason::SessionStart,
+                globs: None,
+                trigger_file_path: None,
+                parent_file_path: None,
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"InstructionsLoaded""#));
+        assert!(stdin.contains(r#""file_path":"/work/CLAUDE.md""#));
+        // `memory_type` serializes PascalCase (no rename) per the TS enum.
+        assert!(stdin.contains(r#""memory_type":"Project""#));
+        // `load_reason` serializes snake_case per the TS enum.
+        assert!(stdin.contains(r#""load_reason":"session_start""#));
+        // optional fields skipped when absent.
+        assert!(!stdin.contains(r#""globs""#));
+        assert!(!stdin.contains(r#""trigger_file_path""#));
+        assert!(!stdin.contains(r#""parent_file_path""#));
+    }
+
+    #[tokio::test]
+    async fn instructions_loaded_event_serializes_optionals() {
+        let stdin = dispatch_and_capture(
+            HookEventType::InstructionsLoaded,
+            HookEvent::InstructionsLoaded {
+                file_path: std::path::PathBuf::from("/work/rules/api.md"),
+                memory_type: crate::events::InstructionsMemoryType::Local,
+                load_reason: crate::events::InstructionsLoadReason::PathGlobMatch,
+                globs: Some(vec!["src/**/*.rs".into()]),
+                trigger_file_path: Some(std::path::PathBuf::from("/work/src/main.rs")),
+                parent_file_path: Some(std::path::PathBuf::from("/work/CLAUDE.md")),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""memory_type":"Local""#));
+        assert!(stdin.contains(r#""load_reason":"path_glob_match""#));
+        assert!(stdin.contains(r#""globs":["src/**/*.rs"]"#));
+        assert!(stdin.contains(r#""trigger_file_path":"/work/src/main.rs""#));
+        assert!(stdin.contains(r#""parent_file_path":"/work/CLAUDE.md""#));
+    }
+
+    #[tokio::test]
+    async fn elicitation_event_serializes_server_and_message() {
+        let stdin = dispatch_and_capture(
+            HookEventType::Elicitation,
             HookEvent::Elicitation {
-                server_name: "srv".into(),
-                params: json!({}),
+                server_name: "github".into(),
+                message: "Authorize access?".into(),
+                mode: None,
+                url: None,
+                elicitation_id: None,
+                requested_schema: None,
             },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"Elicitation""#));
+        assert!(stdin.contains(r#""mcp_server_name":"github""#));
+        assert!(stdin.contains(r#""message":"Authorize access?""#));
+        // optional fields skipped when absent.
+        assert!(!stdin.contains(r#""mode""#));
+        assert!(!stdin.contains(r#""url""#));
+        assert!(!stdin.contains(r#""elicitation_id""#));
+        assert!(!stdin.contains(r#""requested_schema""#));
+    }
+
+    #[tokio::test]
+    async fn elicitation_event_serializes_optionals() {
+        let stdin = dispatch_and_capture(
+            HookEventType::Elicitation,
+            HookEvent::Elicitation {
+                server_name: "linear".into(),
+                message: "Pick a project".into(),
+                mode: Some(crate::events::ElicitationMode::Form),
+                url: Some("https://example.test/auth".into()),
+                elicitation_id: Some("elic-42".into()),
+                requested_schema: Some(json!({"type": "object"})),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""mode":"form""#));
+        assert!(stdin.contains(r#""url":"https://example.test/auth""#));
+        assert!(stdin.contains(r#""elicitation_id":"elic-42""#));
+        assert!(stdin.contains(r#""requested_schema":{"type":"object"}"#));
+    }
+
+    #[tokio::test]
+    async fn worktree_create_event_serializes_name() {
+        let stdin = dispatch_and_capture(
+            HookEventType::WorktreeCreate,
             HookEvent::WorktreeCreate {
-                path: std::path::PathBuf::from("/w"),
-                branch: "main".into(),
+                name: "feature-x".into(),
+                path: std::path::PathBuf::from("/work/.worktrees/feature-x"),
+                branch: "feature-x".into(),
             },
-        ];
-        for ev in deferred {
-            assert!(
-                build_envelope_body(&ev, &ctx).is_none(),
-                "deferred event must not serialize: {ev:?}"
-            );
-        }
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"WorktreeCreate""#));
+        assert!(stdin.contains(r#""name":"feature-x""#));
+        // Only `name` is on the wire — the engine-side path/branch must NOT leak.
+        assert!(!stdin.contains(r#""path""#));
+        assert!(!stdin.contains(r#""branch""#));
+        assert!(!stdin.contains(r#"".worktrees""#));
     }
 
     #[test]
-    fn unsupported_event_still_returns_none() {
-        // `ConfigChange` has no ported wire schema yet — its `HookEvent` variant
-        // carries only `changes`, with no field to source the *required* wire
-        // `source` enum — so it must still fall through to `None`.
-        let ev = HookEvent::ConfigChange { changes: vec![] };
-        assert!(build_envelope_body(&ev, &HookContext::default()).is_none());
+    fn still_unported_events_return_none() {
+        // The deferred-completion batch ported the final four events that lacked
+        // a field to source a *required* wire value. The events still without a
+        // ported wire schema (`PermissionDenied` / `TeammateIdle` /
+        // `TaskCreated` / `ElicitationResult`) must continue to fall through to
+        // `None` until their schema is ported.
+        let ctx = HookContext::default();
+        let unported = vec![
+            HookEvent::PermissionDenied {
+                tool_name: "Bash".into(),
+                reason: "denied".into(),
+            },
+            HookEvent::TeammateIdle {
+                agent_id: protocol::AgentId::new(),
+            },
+            HookEvent::TaskCreated {
+                task_id: "t-1".into(),
+                task_type: "general".into(),
+                description: "do it".into(),
+            },
+            HookEvent::ElicitationResult {
+                server_name: "srv".into(),
+                result: json!({}),
+            },
+        ];
+        for ev in unported {
+            assert!(
+                build_envelope_body(&ev, &ctx).is_none(),
+                "still-unported event must not serialize: {ev:?}"
+            );
+        }
     }
 
     #[test]
@@ -1922,6 +2162,44 @@ mod command_arm_tests {
                     path: std::path::PathBuf::from("/w"),
                 },
                 "WorktreeRemove",
+            ),
+            // Deferred-completion batch.
+            (
+                HookEvent::ConfigChange {
+                    source: crate::events::ConfigChangeSource::UserSettings,
+                    file_path: None,
+                },
+                "ConfigChange",
+            ),
+            (
+                HookEvent::InstructionsLoaded {
+                    file_path: std::path::PathBuf::from("/work/CLAUDE.md"),
+                    memory_type: crate::events::InstructionsMemoryType::User,
+                    load_reason: crate::events::InstructionsLoadReason::Include,
+                    globs: None,
+                    trigger_file_path: None,
+                    parent_file_path: None,
+                },
+                "InstructionsLoaded",
+            ),
+            (
+                HookEvent::Elicitation {
+                    server_name: "srv".into(),
+                    message: "m".into(),
+                    mode: None,
+                    url: None,
+                    elicitation_id: None,
+                    requested_schema: None,
+                },
+                "Elicitation",
+            ),
+            (
+                HookEvent::WorktreeCreate {
+                    name: "feat".into(),
+                    path: std::path::PathBuf::from("/w"),
+                    branch: "feat".into(),
+                },
+                "WorktreeCreate",
             ),
         ];
         for (ev, expected) in cases {

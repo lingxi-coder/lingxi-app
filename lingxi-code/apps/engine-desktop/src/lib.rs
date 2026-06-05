@@ -377,6 +377,9 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     mcp_paths: vec![PathBuf::from("/tmp/project/.mcp.json")],
 ///     use_noop_permission_gate: false,
 ///     session_started_as_coordinator: false,
+///     // `None` ⟶ empty memory (deterministic). A production host injects
+///     // `Some(orchestrator::prompt::real_provider())` to load real CLAUDE.md.
+///     memory_provider: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -384,7 +387,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 /// // `DesktopConfig` is `Clone` so a host can fan it out to multiple builders.
 /// let _clone = cfg.clone();
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DesktopConfig {
     /// API base URL (default `https://api.anthropic.com`); env override
     /// `LINGXI_API_BASE_URL` is resolved by the host *before* it fills this.
@@ -423,6 +426,49 @@ pub struct DesktopConfig {
     /// (mode off, `tool_team` unchanged, no teammate spawned). Additive to the
     /// frozen field set.
     pub session_started_as_coordinator: bool,
+    /// The CLAUDE.md hierarchy provider the orchestrator loads project/user
+    /// memory from. `None` (the default) ⟶ the empty
+    /// [`StaticMemoryProvider::empty`], so a default build loads NO memory and
+    /// is fully deterministic (the boot tests rely on this). A production host
+    /// injects `Some(orchestrator::prompt::real_provider())` to load the real
+    /// `<cwd>/CLAUDE.md`, `<cwd>/CLAUDE.local.md`, and `~/.claude/CLAUDE.md`
+    /// into the system prompt (claude-code parity), which also makes the
+    /// session-start `fire_instructions_loaded()` fire over those files. The
+    /// field is injectable (not a `bool` flag) so tests can supply a CONTROLLED
+    /// in-memory [`StaticMemoryProvider::with_files`] and never touch the real
+    /// filesystem.
+    pub memory_provider: Option<Arc<dyn orchestrator::prompt::MemoryHierarchyProvider>>,
+}
+
+impl std::fmt::Debug for DesktopConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `dyn MemoryHierarchyProvider` is not `Debug`, so render the
+        // `memory_provider` field as a presence marker. Every other field is
+        // printed verbatim so `{cfg:?}` stays useful for host logging.
+        f.debug_struct("DesktopConfig")
+            .field("api_base", &self.api_base)
+            .field("api_key", &self.api_key)
+            .field("cwd", &self.cwd)
+            .field("claude_home", &self.claude_home)
+            .field("default_model", &self.default_model)
+            .field("provider_profiles", &self.provider_profiles)
+            .field("routing", &self.routing)
+            .field("mcp_paths", &self.mcp_paths)
+            .field("use_noop_permission_gate", &self.use_noop_permission_gate)
+            .field(
+                "session_started_as_coordinator",
+                &self.session_started_as_coordinator,
+            )
+            .field(
+                "memory_provider",
+                if self.memory_provider.is_some() {
+                    &"Some(<provider>)"
+                } else {
+                    &"None"
+                },
+            )
+            .finish()
+    }
 }
 
 impl Default for DesktopConfig {
@@ -438,6 +484,7 @@ impl Default for DesktopConfig {
             mcp_paths: Vec::new(),
             use_noop_permission_gate: true,
             session_started_as_coordinator: false,
+            memory_provider: None,
         }
     }
 }
@@ -717,8 +764,18 @@ pub async fn build(
     //     M5-13: the hook executor is no longer the `noop_hook_executor()` stub
     //     — it is constructed below (5.25) once `hook_registry` exists, so the
     //     HTTP / Command hook arms run for real.
-    let memory: Arc<dyn orchestrator::prompt::MemoryHierarchyProvider> =
-        Arc::new(StaticMemoryProvider::empty());
+    //     Memory provider: the production host injects
+    //     `cfg.memory_provider = Some(orchestrator::prompt::real_provider())`
+    //     so the orchestrator loads the real `<cwd>/CLAUDE.md` +
+    //     `~/.claude/CLAUDE.md` hierarchy into the system prompt (claude-code
+    //     parity) and `fire_instructions_loaded()` fires over those files.
+    //     `None` (the default + every test caller) falls back to the empty
+    //     `StaticMemoryProvider`, so a default build loads NO memory and the
+    //     boot tests stay deterministic (they never read the real filesystem).
+    let memory: Arc<dyn orchestrator::prompt::MemoryHierarchyProvider> = cfg
+        .memory_provider
+        .clone()
+        .unwrap_or_else(|| Arc::new(StaticMemoryProvider::empty()));
 
     let (perms, adapter_gate): (Arc<dyn PermissionGate>, Option<Arc<AdapterPermissionGate>>) =
         if cfg.use_noop_permission_gate {
@@ -1320,6 +1377,8 @@ mod tests {
             mcp_paths: vec![cwd.join(".mcp.json")],
             use_noop_permission_gate: use_noop,
             session_started_as_coordinator: false,
+            // Boot tests stay deterministic: empty memory, never the real FS.
+            memory_provider: None,
         };
         (tmp, cfg)
     }
@@ -1528,11 +1587,16 @@ mod tests {
     /// proving the boot path loaded the instruction-load-lifecycle hook the wired
     /// `fire_instructions_loaded()` call dispatched against.
     ///
-    /// NOTE: desktop boot currently wires the empty `StaticMemoryProvider`
-    /// (lib.rs §5), so no instruction file actually fires through the command
-    /// hook here — the helper is a no-op over zero files. Wiring the
-    /// `RealMemoryHierarchyProvider` into desktop boot is a separate gap; this
-    /// test pins the boot-path fire seam + best-effort contract regardless.
+    /// NOTE: this test uses the DEFAULT empty memory provider
+    /// (`cfg.memory_provider == None` ⟶ `StaticMemoryProvider::empty()`), so no
+    /// instruction file actually fires through the command hook here — the
+    /// helper is a no-op over zero files, and the assertion only pins the
+    /// boot-path fire seam + best-effort contract. The injectable
+    /// `cfg.memory_provider` (production wires `real_provider()`) closes the
+    /// load-NO-memory gap; the end-to-end "memory flows through build() and the
+    /// hook actually fires over it" path is proven with a CONTROLLED in-memory
+    /// provider in [`build_with_injected_memory_fires_instructions_loaded`]
+    /// (never the real filesystem).
     #[tokio::test]
     async fn build_fires_instructions_loaded_against_a_registered_hook() {
         use traits::OrchestratorHandle as _;
@@ -1568,6 +1632,130 @@ mod tests {
         assert!(
             hooks.iter().any(|h| h.event == "InstructionsLoaded"),
             "boot must load the InstructionsLoaded hook the lifecycle fire dispatches against: {hooks:?}"
+        );
+    }
+
+    /// End-to-end proof of the injectable memory-provider seam (the real-provider
+    /// path) using a CONTROLLED in-memory provider — NEVER the real filesystem.
+    ///
+    /// Production wires `cfg.memory_provider = Some(real_provider())`, which
+    /// reads the developer's real `~/.claude/CLAUDE.md` and would make the boot
+    /// tests non-deterministic. So this test instead injects
+    /// `Some(StaticMemoryProvider::with_files([..one CLAUDE.md..]))` — the SAME
+    /// `cfg.memory_provider` seam the real provider flows through — and proves
+    /// that the injected memory flows through `build()` into the orchestrator
+    /// and lands in the assembled SYSTEM PROMPT (the `<memory>` block with the
+    /// file's path + body). The default-empty sibling
+    /// ([`build_constructs_runtime_deterministically`] etc.) elides the
+    /// `<memory>` section entirely, so the block's presence is the load-bearing
+    /// difference the injected provider makes.
+    ///
+    /// The end-to-end "`fire_instructions_loaded()` fires the registered
+    /// `InstructionsLoaded` hook over the controlled memory" half is proven at
+    /// the orchestrator layer in `orchestrator/tests/instructions_loaded_hook_test.rs`
+    /// (a `RecordingHandler` observes the per-file fire). It is NOT re-asserted
+    /// here because `build()` wires the minimal-platform STUB process runner
+    /// (`platform_posix_minimal::PosixProcess::run` always returns
+    /// `ProcessError::Unsupported`), so a `command` hook produces no side effect
+    /// to observe from outside `build()`. We register the hook anyway, so the
+    /// fire still runs over the injected file (best-effort) inside `build()`.
+    #[tokio::test]
+    async fn build_with_injected_memory_reaches_system_prompt() {
+        use traits::OrchestratorHandle as _;
+
+        let (_tmp, mut cfg) = test_config(true);
+
+        // Register an InstructionsLoaded hook so the in-build
+        // `fire_instructions_loaded()` actually dispatches over the injected
+        // file (best-effort; the stub runner makes it a no-op side-effect-wise).
+        let claude_dir = cfg.cwd.join(".claude");
+        std::fs::create_dir_all(&claude_dir).expect("mk .claude");
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{ "hooks": { "InstructionsLoaded": [ { "hooks": [
+                { "type": "command", "command": "true" }
+            ] } ] } }"#,
+        )
+        .expect("write settings.json");
+
+        // INJECT a CONTROLLED in-memory provider (NOT the real FS): one
+        // top-level project CLAUDE.md. This is the exact `cfg.memory_provider`
+        // seam production fills with `orchestrator::prompt::real_provider()`.
+        let memory_path = cfg.cwd.join("CLAUDE.md");
+        let memory_body = "PROJECT MEMORY: always be terse.";
+        let memory_file = orchestrator::prompt::MemoryFile {
+            path: memory_path.clone(),
+            body: memory_body.to_string(),
+            is_local_override: false,
+        };
+        cfg.memory_provider = Some(Arc::new(
+            orchestrator::test_support::StaticMemoryProvider::with_files(vec![memory_file]),
+        ));
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        // build() runs the wired `fire_instructions_loaded()` over the injected
+        // memory (best-effort) and returns an orchestrator that loads that SAME
+        // provider for its system prompt.
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() with an injected memory provider must succeed");
+
+        // The injected CLAUDE.md must reach the assembled system prompt: the
+        // `<memory>` block carries the file's path + body. This proves the
+        // controlled provider flowed through build() into the orchestrator's
+        // prompt assembly — the gap (desktop loads NO memory) is closed.
+        let sys = rt.orchestrator.assemble_system_prompt_preview().await;
+        assert!(
+            sys.contains("<memory>"),
+            "injected memory must emit a <memory> block in the system prompt: {sys}"
+        );
+        assert!(
+            sys.contains(memory_body),
+            "the injected CLAUDE.md body must appear in the system prompt: {sys}"
+        );
+        assert!(
+            sys.contains(&memory_path.display().to_string()),
+            "the injected CLAUDE.md path must appear in the <memory> block: {sys}"
+        );
+
+        // Sanity: the InstructionsLoaded hook the in-build fire dispatched
+        // against was loaded into the wired registry.
+        let hooks = rt.orchestrator.list_hooks().await;
+        assert!(
+            hooks.iter().any(|h| h.event == "InstructionsLoaded"),
+            "boot must load the InstructionsLoaded hook: {hooks:?}"
+        );
+    }
+
+    /// Determinism guard for the default seam: a default-config build
+    /// (`cfg.memory_provider == None` ⟶ `StaticMemoryProvider::empty()`) loads
+    /// NO memory, so the system prompt has NO `<memory>` block. This pins that
+    /// the existing boot tests stay deterministic (they never read the real
+    /// `~/.claude/CLAUDE.md`).
+    #[tokio::test]
+    async fn build_default_loads_no_memory() {
+        let (_tmp, cfg) = test_config(true);
+        assert!(
+            cfg.memory_provider.is_none(),
+            "default config must leave memory_provider None (empty, deterministic)"
+        );
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() failed");
+
+        let sys = rt.orchestrator.assemble_system_prompt_preview().await;
+        assert!(
+            !sys.contains("<memory>"),
+            "default (empty) memory provider must elide the <memory> block: {sys}"
         );
     }
 

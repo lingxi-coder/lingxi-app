@@ -204,6 +204,12 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // M10: the bridge-server does not start a coordinator session by
         // default (threading this from session metadata is a follow-up).
         session_started_as_coordinator: false,
+        // Production memory: load the real `<cwd>/CLAUDE.md` +
+        // `~/.claude/CLAUDE.md` hierarchy into the system prompt (claude-code
+        // parity), which also makes the session-start
+        // `fire_instructions_loaded()` fire over those files. Tests inject a
+        // controlled provider (or `None`); only this real-host path reads the FS.
+        memory_provider: Some(orchestrator::prompt::real_provider()),
     }
 }
 
@@ -470,6 +476,8 @@ mod tests {
             mcp_paths: vec![cwd.join(".mcp.json")],
             use_noop_permission_gate: false,
             session_started_as_coordinator: false,
+            // Deterministic test: empty memory, never the real FS.
+            memory_provider: None,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

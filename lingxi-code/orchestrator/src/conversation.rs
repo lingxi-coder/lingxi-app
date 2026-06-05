@@ -1964,6 +1964,24 @@ impl ConversationOrchestrator {
             .collect()
     }
 
+    /// Assemble the system prompt this orchestrator would send on the next
+    /// turn, WITHOUT running a turn (no API call, no message mutation).
+    ///
+    /// Honors the same `system_prompt_override` bypass as [`Self::run_turn`]:
+    /// returns the override verbatim when set, otherwise the freshly assembled
+    /// prompt (cwd / git / file-tree / **memory** / tool-name context). This is
+    /// a read-only introspection seam — it lets a host/composition-root test
+    /// prove that its injected [`crate::prompt::MemoryHierarchyProvider`]
+    /// (e.g. a controlled `StaticMemoryProvider`, or the production
+    /// `real_provider()`) actually reaches the system prompt, without a live
+    /// model round-trip.
+    pub async fn assemble_system_prompt_preview(&self) -> String {
+        match &self.config.system_prompt_override {
+            Some(p) => p.clone(),
+            None => self.build_system_prompt().await,
+        }
+    }
+
     /// Build the per-turn system prompt by gathering cwd / git / file
     /// tree / memory / tool-name context and calling
     /// [`crate::prompt::assemble_system_prompt`]. Bypassed when

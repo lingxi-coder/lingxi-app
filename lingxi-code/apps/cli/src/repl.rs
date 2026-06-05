@@ -81,6 +81,17 @@ pub async fn run_repl(argv: &Argv) -> i32 {
 
     let orch = runtime.orchestrator.clone();
 
+    // hooks (runtime lifecycle): idle-prompt `Notification` wiring (parity
+    // `screens/REPL.tsx:3930-3940`). Resolve the cheap registration gate ONCE
+    // at startup — when no `Notification` hook subscribes, the notifier's timer
+    // is gated off (`arm_timer() == None`) so the repl input loop never arms a
+    // useless timer (mirrors the `ConfigChange` watcher gate in engine-desktop).
+    // The concrete `Arc<ConversationOrchestrator>` is required for
+    // `fire_notification` (the `OrchestratorHandle` trait does not expose it),
+    // and it is in scope here exactly like the `SessionEnd` fire below.
+    let notif_armed = orch.has_notification_hook().await;
+    let idle_notifier = crate::idle_notify::OrchestratorIdleNotifier::new(orch.clone(), notif_armed);
+
     let ended_via;
     let exit_code;
     loop {
@@ -100,6 +111,7 @@ pub async fn run_repl(argv: &Argv) -> i32 {
             handle.clone(),
             sink.clone(),
             &sigint,
+            Some(&idle_notifier),
             run_turn_fn,
         )
         .await;

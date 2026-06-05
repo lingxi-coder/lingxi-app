@@ -1368,6 +1368,53 @@ impl ConversationOrchestrator {
             .await;
     }
 
+    /// Whether any registered hook subscribes to the `Notification` event.
+    ///
+    /// Cheap gate read for callers that want to avoid arming a fire path with
+    /// no subscriber — e.g. the CLI repl's idle-prompt timer only arms when
+    /// this is `true`, mirroring how `engine-desktop`'s settings watcher only
+    /// arms the `ConfigChange` fire when a subscriber exists. A `true` here
+    /// reports event-type subscription only (a declared matcher may still
+    /// filter the hook out at fire time), which is exactly what the gate needs.
+    pub async fn has_notification_hook(&self) -> bool {
+        self.hooks
+            .has_hooks_for(&hooks::events::HookEventType::Notification)
+            .await
+    }
+
+    /// Fire the `Notification` lifecycle hooks (hooks runtime lifecycle, TS
+    /// `sendNotification` → `executeNotificationHooks`). `message` is the wire
+    /// `NotificationPayload.message`; `notification_type` is the byte-faithful
+    /// `notification_type` discriminator (e.g. `idle_prompt`) — it FEEDS the
+    /// `HookEvent::Notification { kind }` field, which the executor copies
+    /// verbatim into `NotificationPayload.notification_type`
+    /// (`hooks/executor.rs` Notification arm).
+    ///
+    /// The canonical caller is the REPL idle watcher: claude-code fires
+    /// `sendNotification({ message: "Claude is waiting for your input",
+    /// notificationType: "idle_prompt" })` once the repl has been idle for
+    /// `messageIdleNotifThresholdMs` after the last response
+    /// (`screens/REPL.tsx:3930-3940`).
+    ///
+    /// Best-effort, exactly like [`Self::fire_session_end`]: the aggregate is
+    /// discarded so a failing or blocking `Notification` hook can NEVER affect
+    /// the caller (the repl input loop), and it is a strict no-op when no
+    /// `Notification` hook is registered (the `execute` matcher returns an
+    /// empty set → default aggregate, no process spawned).
+    pub async fn fire_notification(&self, message: &str, notification_type: &str) {
+        let ctx = self.lifecycle_hook_ctx(false).await;
+        let _ = self
+            .hooks
+            .execute(
+                HookEvent::Notification {
+                    message: message.to_string(),
+                    kind: notification_type.to_string(),
+                },
+                ctx,
+            )
+            .await;
+    }
+
     /// Fire the `ConfigChange` hooks when a settings / skills file mutated on
     /// disk (hooks runtime lifecycle, TS `executeConfigChangeHooks` —
     /// `utils/hooks.ts:4214`, dispatched from the settings watcher

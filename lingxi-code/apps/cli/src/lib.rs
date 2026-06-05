@@ -57,6 +57,7 @@
 pub mod argv;
 pub mod cwd;
 pub mod exit_codes;
+pub mod idle_notify;
 pub mod init;
 pub mod logging;
 pub mod mode;

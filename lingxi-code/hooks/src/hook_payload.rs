@@ -94,6 +94,19 @@ hook_event_name_marker!(HookEventNameTaskCompleted, "TaskCompleted");
 hook_event_name_marker!(HookEventNameUserPromptSubmit, "UserPromptSubmit");
 hook_event_name_marker!(HookEventNameSessionStart, "SessionStart");
 hook_event_name_marker!(HookEventNameStopFailure, "StopFailure");
+// B6 — additional lifecycle / environment events whose `HookEvent` variant
+// already exists. Each marker serializes to exactly its wire literal.
+hook_event_name_marker!(HookEventNamePostToolUseFailure, "PostToolUseFailure");
+hook_event_name_marker!(HookEventNameSessionEnd, "SessionEnd");
+hook_event_name_marker!(HookEventNamePreCompact, "PreCompact");
+hook_event_name_marker!(HookEventNamePostCompact, "PostCompact");
+hook_event_name_marker!(HookEventNameNotification, "Notification");
+hook_event_name_marker!(HookEventNamePermissionRequest, "PermissionRequest");
+hook_event_name_marker!(HookEventNameSetup, "Setup");
+hook_event_name_marker!(HookEventNameSubagentStart, "SubagentStart");
+hook_event_name_marker!(HookEventNameCwdChanged, "CwdChanged");
+hook_event_name_marker!(HookEventNameFileChanged, "FileChanged");
+hook_event_name_marker!(HookEventNameWorktreeRemove, "WorktreeRemove");
 
 /// Wire-format `PreToolUse` payload (1:1 with `coreSchemas.ts:414-423`).
 ///
@@ -272,6 +285,254 @@ pub struct StopFailurePayload {
     pub error_details: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub last_assistant_message: Option<String>,
+}
+
+/// Wire-format `PostToolUseFailure` payload (1:1 with `coreSchemas.ts:448-459`
+/// `PostToolUseFailureHookInputSchema`; constructed at `utils/hooks.ts:3509-3517`).
+///
+/// The `HookEvent::PostToolUseFailure` variant does not yet carry the dispatched
+/// `tool_input` or the `is_interrupt` flag; both default (`Value::Null` / `None`)
+/// until richer context is threaded through (consistent with the B1 lifecycle
+/// arms' default-fill convention).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct PostToolUseFailurePayload {
+    pub hook_event_name: HookEventNamePostToolUseFailure,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub tool_name: String,
+    pub tool_input: Value,
+    pub tool_use_id: String,
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub is_interrupt: Option<bool>,
+}
+
+/// Wire-format `SessionEnd` payload (1:1 with `coreSchemas.ts:758-765`
+/// `SessionEndHookInputSchema`; constructed at `utils/hooks.ts:4113-4117`).
+///
+/// `reason` is one of the `ExitReason` enum members (`coreSchemas.ts:747-754`);
+/// modelled here as a free `String` (validation happens upstream).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct SessionEndPayload {
+    pub hook_event_name: HookEventNameSessionEnd,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub reason: String,
+}
+
+/// Wire-format `PreCompact` payload (1:1 with `coreSchemas.ts:569-577`
+/// `PreCompactHookInputSchema`; constructed at `utils/hooks.ts:3972-3977`).
+///
+/// `trigger` is `manual` / `auto` in TS; modelled here as a free `String` fed
+/// from `HookEvent::PreCompact.reason`. `custom_instructions` is `.nullable()`
+/// (not `.optional()`) in the schema, so it is always serialized — as JSON
+/// `null` when absent — rather than skipped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct PreCompactPayload {
+    pub hook_event_name: HookEventNamePreCompact,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub trigger: String,
+    /// `.nullable()` in the schema — always present, `null` when absent.
+    pub custom_instructions: Option<String>,
+}
+
+/// Wire-format `PostCompact` payload (1:1 with `coreSchemas.ts:579-589`
+/// `PostCompactHookInputSchema`; constructed at `utils/hooks.ts:4044-4049`).
+///
+/// `trigger` (`manual` / `auto`) has no field on the `HookEvent::PostCompact`
+/// variant yet, so it defaults to an empty string (the B1 default-fill
+/// convention). `compact_summary` is fed from the variant's `summary`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct PostCompactPayload {
+    pub hook_event_name: HookEventNamePostCompact,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub trigger: String,
+    pub compact_summary: String,
+}
+
+/// Wire-format `Notification` payload (1:1 with `coreSchemas.ts:473-482`
+/// `NotificationHookInputSchema`; constructed at `utils/hooks.ts:3579-3585`).
+///
+/// `notification_type` is fed from `HookEvent::Notification.kind`. `title` has
+/// no field on the variant yet and defaults to `None`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct NotificationPayload {
+    pub hook_event_name: HookEventNameNotification,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub title: Option<String>,
+    pub notification_type: String,
+}
+
+/// Wire-format `PermissionRequest` payload (1:1 with `coreSchemas.ts:425-434`
+/// `PermissionRequestHookInputSchema`; constructed at `utils/hooks.ts:4174-4180`).
+///
+/// The schema carries `tool_name`, `tool_input`, and optional
+/// `permission_suggestions`. The `HookEvent::PermissionRequest.reason` field has
+/// no wire counterpart (the schema has no `reason`), so it is intentionally
+/// dropped. `permission_suggestions` has no engine source yet → `None`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct PermissionRequestPayload {
+    pub hook_event_name: HookEventNamePermissionRequest,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub tool_name: String,
+    pub tool_input: Value,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_suggestions: Option<Vec<Value>>,
+}
+
+/// Wire-format `Setup` payload (1:1 with `coreSchemas.ts:504-511`
+/// `SetupHookInputSchema`; constructed at `utils/hooks.ts:3908-3912`).
+///
+/// `trigger` (`init` / `maintenance`) has no field on the unit
+/// `HookEvent::Setup` variant yet, so it defaults to an empty string (the B1
+/// default-fill convention).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct SetupPayload {
+    pub hook_event_name: HookEventNameSetup,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub trigger: String,
+}
+
+/// Wire-format `SubagentStart` payload (1:1 with `coreSchemas.ts:540-548`
+/// `SubagentStartHookInputSchema`; constructed at `utils/hooks.ts:3938-3943`).
+///
+/// `agent_id` / `agent_type` are **required** here and fed directly from the
+/// `HookEvent::SubagentStart` variant. `parent_agent_id` has no wire field and
+/// is dropped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct SubagentStartPayload {
+    pub hook_event_name: HookEventNameSubagentStart,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    pub agent_id: String,
+    pub agent_type: String,
+}
+
+/// Wire-format `CwdChanged` payload (1:1 with `coreSchemas.ts:727-735`
+/// `CwdChangedHookInputSchema`; constructed at `utils/hooks.ts:4269-4274`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct CwdChangedPayload {
+    pub hook_event_name: HookEventNameCwdChanged,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub old_cwd: String,
+    pub new_cwd: String,
+}
+
+/// Wire-format `FileChanged` payload (1:1 with `coreSchemas.ts:737-745`
+/// `FileChangedHookInputSchema`; constructed at `utils/hooks.ts:4287-4292`).
+///
+/// `file_path` is fed from `HookEvent::FileChanged.path`; `event`
+/// (`change` / `add` / `unlink`) from `.kind`, modelled as a free `String`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct FileChangedPayload {
+    pub hook_event_name: HookEventNameFileChanged,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub file_path: String,
+    pub event: String,
+}
+
+/// Wire-format `WorktreeRemove` payload (1:1 with `coreSchemas.ts:718-725`
+/// `WorktreeRemoveHookInputSchema`; constructed at `utils/hooks.ts` worktree
+/// removal site). `worktree_path` is fed from `HookEvent::WorktreeRemove.path`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct WorktreeRemovePayload {
+    pub hook_event_name: HookEventNameWorktreeRemove,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub worktree_path: String,
 }
 
 /// Envelope used to send one of either payload kind across the wire.
@@ -812,5 +1073,309 @@ mod tests {
                 HookResponseParseError::EventNameMismatch { .. }
             ));
         }
+    }
+
+    // ---- B6: additional-event payload byte-lock tests -------------------
+
+    #[test]
+    fn post_tool_use_failure_payload_serializes_byte_lock() {
+        let p = PostToolUseFailurePayload {
+            hook_event_name: HookEventNamePostToolUseFailure,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            tool_name: "Bash".into(),
+            tool_input: Value::Null,
+            tool_use_id: "tu-1".into(),
+            error: "boom".into(),
+            is_interrupt: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"PostToolUseFailure","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","tool_name":"Bash","tool_input":null,"tool_use_id":"tu-1","error":"boom"}"#
+        );
+    }
+
+    #[test]
+    fn post_tool_use_failure_payload_serializes_with_interrupt() {
+        let p = PostToolUseFailurePayload {
+            hook_event_name: HookEventNamePostToolUseFailure,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            tool_name: "Edit".into(),
+            tool_input: json!({"file_path": "/f"}),
+            tool_use_id: "tu".into(),
+            error: "cancelled".into(),
+            is_interrupt: Some(true),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains(r#""tool_input":{"file_path":"/f"}"#));
+        assert!(s.contains(r#""error":"cancelled","is_interrupt":true"#));
+    }
+
+    #[test]
+    fn session_end_payload_serializes_byte_lock() {
+        let p = SessionEndPayload {
+            hook_event_name: HookEventNameSessionEnd,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            reason: "logout".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"SessionEnd","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","reason":"logout"}"#
+        );
+    }
+
+    #[test]
+    fn pre_compact_payload_serializes_null_custom_instructions() {
+        // `custom_instructions` is `.nullable()` (not optional) — must always
+        // be present, serialized as `null` when absent.
+        let p = PreCompactPayload {
+            hook_event_name: HookEventNamePreCompact,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            trigger: "manual".into(),
+            custom_instructions: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"PreCompact","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","trigger":"manual","custom_instructions":null}"#
+        );
+    }
+
+    #[test]
+    fn pre_compact_payload_serializes_with_custom_instructions() {
+        let p = PreCompactPayload {
+            hook_event_name: HookEventNamePreCompact,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            trigger: "auto".into(),
+            custom_instructions: Some("keep the API surface".into()),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains(r#""trigger":"auto","custom_instructions":"keep the API surface""#));
+    }
+
+    #[test]
+    fn post_compact_payload_serializes_byte_lock() {
+        let p = PostCompactPayload {
+            hook_event_name: HookEventNamePostCompact,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            trigger: String::new(),
+            compact_summary: "did the thing".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"PostCompact","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","trigger":"","compact_summary":"did the thing"}"#
+        );
+    }
+
+    #[test]
+    fn notification_payload_serializes_byte_lock() {
+        let p = NotificationPayload {
+            hook_event_name: HookEventNameNotification,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            message: "build done".into(),
+            title: None,
+            notification_type: "info".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"Notification","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","message":"build done","notification_type":"info"}"#
+        );
+    }
+
+    #[test]
+    fn notification_payload_serializes_with_title() {
+        let p = NotificationPayload {
+            hook_event_name: HookEventNameNotification,
+            session_id: "s".into(),
+            transcript_path: "/t".into(),
+            cwd: "/w".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            message: "msg".into(),
+            title: Some("Heads up".into()),
+            notification_type: "warn".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains(r#""message":"msg","title":"Heads up","notification_type":"warn""#));
+    }
+
+    #[test]
+    fn permission_request_payload_serializes_byte_lock() {
+        let p = PermissionRequestPayload {
+            hook_event_name: HookEventNamePermissionRequest,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            tool_name: "Bash".into(),
+            tool_input: json!({"command": "rm -rf /"}),
+            permission_suggestions: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"PermissionRequest","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}"#
+        );
+    }
+
+    #[test]
+    fn setup_payload_serializes_byte_lock() {
+        let p = SetupPayload {
+            hook_event_name: HookEventNameSetup,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            trigger: String::new(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"Setup","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","trigger":""}"#
+        );
+    }
+
+    #[test]
+    fn subagent_start_payload_serializes_byte_lock() {
+        let p = SubagentStartPayload {
+            hook_event_name: HookEventNameSubagentStart,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: "agent-7".into(),
+            agent_type: "general-purpose".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"SubagentStart","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","agent_id":"agent-7","agent_type":"general-purpose"}"#
+        );
+    }
+
+    #[test]
+    fn cwd_changed_payload_serializes_byte_lock() {
+        let p = CwdChangedPayload {
+            hook_event_name: HookEventNameCwdChanged,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            old_cwd: "/old".into(),
+            new_cwd: "/new".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"CwdChanged","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","old_cwd":"/old","new_cwd":"/new"}"#
+        );
+    }
+
+    #[test]
+    fn file_changed_payload_serializes_byte_lock() {
+        let p = FileChangedPayload {
+            hook_event_name: HookEventNameFileChanged,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            file_path: "/work/src/main.rs".into(),
+            event: "change".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"FileChanged","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","file_path":"/work/src/main.rs","event":"change"}"#
+        );
+    }
+
+    #[test]
+    fn worktree_remove_payload_serializes_byte_lock() {
+        let p = WorktreeRemovePayload {
+            hook_event_name: HookEventNameWorktreeRemove,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            worktree_path: "/work/.worktrees/feat".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"WorktreeRemove","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","worktree_path":"/work/.worktrees/feat"}"#
+        );
+    }
+
+    #[test]
+    fn b6_event_name_markers_round_trip() {
+        for (got, want) in [
+            (serde_json::to_string(&HookEventNamePostToolUseFailure).unwrap(), r#""PostToolUseFailure""#),
+            (serde_json::to_string(&HookEventNameSessionEnd).unwrap(), r#""SessionEnd""#),
+            (serde_json::to_string(&HookEventNamePreCompact).unwrap(), r#""PreCompact""#),
+            (serde_json::to_string(&HookEventNamePostCompact).unwrap(), r#""PostCompact""#),
+            (serde_json::to_string(&HookEventNameNotification).unwrap(), r#""Notification""#),
+            (serde_json::to_string(&HookEventNamePermissionRequest).unwrap(), r#""PermissionRequest""#),
+            (serde_json::to_string(&HookEventNameSetup).unwrap(), r#""Setup""#),
+            (serde_json::to_string(&HookEventNameSubagentStart).unwrap(), r#""SubagentStart""#),
+            (serde_json::to_string(&HookEventNameCwdChanged).unwrap(), r#""CwdChanged""#),
+            (serde_json::to_string(&HookEventNameFileChanged).unwrap(), r#""FileChanged""#),
+            (serde_json::to_string(&HookEventNameWorktreeRemove).unwrap(), r#""WorktreeRemove""#),
+        ] {
+            assert_eq!(got, want);
+        }
+        let _: HookEventNamePostToolUseFailure =
+            serde_json::from_str(r#""PostToolUseFailure""#).unwrap();
+        let _: HookEventNameSessionEnd = serde_json::from_str(r#""SessionEnd""#).unwrap();
+        let _: HookEventNameWorktreeRemove = serde_json::from_str(r#""WorktreeRemove""#).unwrap();
+        assert!(serde_json::from_str::<HookEventNameSetup>(r#""Notification""#).is_err());
     }
 }

@@ -192,6 +192,32 @@ impl PermissionPolicy {
         if let Some(rule) = self.first_match(&self.ask_rules, &sources, tool_name, input, true) {
             return ask_with_rule(rule, tool_name);
         }
+        // 2. Dangerous-removal-path guard (claude-code `checkDangerousRemovalPaths`
+        //    via `createPathChecker`, `BashTool/pathValidation.ts:728-737`). An
+        //    `rm`/`rmdir` whose target resolves to a critical system path (`/`,
+        //    `/etc`, the home dir, a trailing `/*` glob, …) ALWAYS asks — and this
+        //    must OVERRIDE a matching allow rule (`Bash(rm:*)`), matching the TS
+        //    note that the operation "cannot be auto-allowed by permission rules".
+        //    Placed AFTER the deny/ask walks (explicit deny/ask rules still win,
+        //    mirroring TS where an explicit deny short-circuits the check) and
+        //    BEFORE the allow walk so it pre-empts any allow grant. Requires
+        //    [`Self::roots`] (cwd + home); without roots the guard is skipped
+        //    (preserves pre-guard behavior), consistent with shell content
+        //    matching being roots-gated.
+        if let Some(roots) = self.roots.as_ref() {
+            if shell_command::is_shell_tool(tool_name) {
+                if let Some(command) = shell_command::command_from_input(input) {
+                    let home = roots.home.as_deref().map(|p| p.to_string_lossy().into_owned());
+                    if let Some(danger) = crate::dangerous_removal::check_dangerous_removal(
+                        command,
+                        &roots.cwd,
+                        home.as_deref(),
+                    ) {
+                        return ask_dangerous_removal(tool_name, danger);
+                    }
+                }
+            }
+        }
         // 3. Allow. Shell tools need compound aggregation (a single allow rule
         //    matching ONE subcommand must not allow a whole compound command),
         //    so they take a dedicated path rather than the per-rule walk.
@@ -536,6 +562,30 @@ fn ask_with_mode(mode: PermissionMode, tool_name: &str) -> PermissionResult {
             title: format!("Allow {tool_name}?"),
             message: "The agent wants to use this tool.".into(),
             options: vec!["Allow once".into(), "Always allow".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// Dangerous-removal ask: an `rm`/`rmdir` targeting a critical system path
+/// (claude-code `checkDangerousRemovalPaths`). Tagged with
+/// [`PermissionDecisionReason::Other`] (the TS `decisionReason.type: 'other'`),
+/// carrying the byte-locked message; offers no rule-saving suggestion (TS:
+/// "Don't provide suggestions — we don't want to encourage saving dangerous
+/// commands").
+fn ask_dangerous_removal(
+    tool_name: &str,
+    danger: crate::dangerous_removal::DangerousRemoval,
+) -> PermissionResult {
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::Other {
+            reason: danger.reason,
+        },
+        prompt: PermissionPrompt {
+            title: format!("Allow {tool_name}?"),
+            message: danger.message,
+            options: vec!["Allow once".into(), "Deny".into()],
         },
         pending_classifier_check: None,
         metadata: PermissionMetadata::default(),
@@ -901,6 +951,130 @@ mod tests {
         ));
         assert!(matches!(
             p.authorize("Bash", &bash("git status")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── dangerous-removal-path guard (rm/rmdir on critical paths) ─────────
+
+    #[test]
+    fn dangerous_rm_asks_even_with_matching_allow_rule() {
+        // The headline guarantee: an explicit `Bash(rm:*)` allow rule does NOT
+        // bypass the dangerous-path ask — `rm -rf /` still asks.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(rm:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        match p.authorize("Bash", &bash("rm -rf /")) {
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert!(
+                    matches!(reason, PermissionDecisionReason::Other { .. }),
+                    "dangerous-removal ask must use the Other reason, got {reason:?}"
+                );
+                assert!(
+                    prompt
+                        .message
+                        .contains("cannot be auto-allowed by permission rules"),
+                    "carries the byte-locked dangerous message: {}",
+                    prompt.message
+                );
+            }
+            other => panic!("expected Ask(Other), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dangerous_rm_toolwide_allow_still_asks() {
+        // Even a tool-wide `Bash` allow rule does not bypass the guard.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /etc")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dangerous_rmdir_critical_path_asks() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(rmdir:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("rmdir /usr")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn explicit_deny_still_beats_dangerous_removal_ask() {
+        // An explicit deny rule short-circuits before the dangerous-removal
+        // guard (TS: createPathChecker respects an explicit deny first).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(rm:*)"], "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn non_dangerous_rm_inside_cwd_rides_the_allow_rule() {
+        // A normal `rm` inside cwd is NOT dangerous → the allow rule applies and
+        // it is allowed (the guard must not over-ask).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(rm:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm ./local/file")),
+            PermissionResult::Allow { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -f build/out.o")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn dangerous_rm_hidden_in_compound_with_allow_rule_asks() {
+        // `echo ok && rm -rf /` with allow rules covering both — the dangerous
+        // rm still trips the guard ahead of the allow grant.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)", "Bash(rm:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo ok && rm -rf /")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dangerous_removal_skipped_without_roots() {
+        // Without roots the guard cannot resolve cwd/home, so it is skipped and
+        // the allow rule applies (preserves pre-guard behavior).
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionRuleSource::ProjectSettings,
+        )
+        .unwrap();
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /")),
             PermissionResult::Allow { .. }
         ));
     }

@@ -9,6 +9,7 @@ pub mod auto_edit_safety;
 pub mod classifier;
 pub mod dangerous_patterns;
 pub mod dangerous_perms;
+pub mod dangerous_removal;
 pub mod defaults_per_tool;
 pub mod denial_tracking;
 pub mod filesystem;
@@ -41,6 +42,7 @@ pub use dangerous_perms::{
     is_dangerous_classifier_permission, is_dangerous_powershell_permission,
     is_dangerous_task_permission, DangerousPermissionInfo,
 };
+pub use dangerous_removal::{check_dangerous_removal, is_dangerous_removal_path, DangerousRemoval};
 pub use defaults_per_tool::tool_default;
 pub use filesystem::FsRoots;
 pub use gate::{

@@ -14,11 +14,17 @@ use crate::async_registry::{AsyncHookRegistry, HookWork};
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
 use crate::hook_payload::{
-    parse_response, HookEventNamePost, HookEventNamePre, HookEventNameSessionStart,
-    HookEventNameStop, HookEventNameStopFailure, HookEventNameSubagentStop,
-    HookEventNameTaskCompleted, HookEventNameUserPromptSubmit, PostToolUsePayload,
-    PreToolUsePayload, SessionStartPayload, StopFailurePayload, StopPayload, SubagentStopPayload,
-    TaskCompletedPayload, UserPromptSubmitPayload,
+    parse_response, CwdChangedPayload, FileChangedPayload, HookEventNameCwdChanged,
+    HookEventNameFileChanged, HookEventNameNotification, HookEventNamePermissionRequest,
+    HookEventNamePost, HookEventNamePostCompact, HookEventNamePostToolUseFailure,
+    HookEventNamePre, HookEventNamePreCompact, HookEventNameSessionEnd,
+    HookEventNameSessionStart, HookEventNameSetup, HookEventNameStop, HookEventNameStopFailure,
+    HookEventNameSubagentStart, HookEventNameSubagentStop, HookEventNameTaskCompleted,
+    HookEventNameUserPromptSubmit, HookEventNameWorktreeRemove, NotificationPayload,
+    PermissionRequestPayload, PostCompactPayload, PostToolUseFailurePayload, PostToolUsePayload,
+    PreCompactPayload, PreToolUsePayload, SessionEndPayload, SessionStartPayload, SetupPayload,
+    StopFailurePayload, StopPayload, SubagentStartPayload, SubagentStopPayload,
+    TaskCompletedPayload, UserPromptSubmitPayload, WorktreeRemovePayload,
 };
 use crate::http_executor::{HttpExecutionSignal, HttpExecutor};
 use crate::registry::{HookContext, HookRegistry};
@@ -562,12 +568,23 @@ impl BaseHookFields {
 }
 
 /// Serialize the B1 lifecycle events (`Stop` / `SubagentStop` /
-/// `TaskCompleted` / `UserPromptSubmit` / `SessionStart` / `StopFailure`).
+/// `TaskCompleted` / `UserPromptSubmit` / `SessionStart` / `StopFailure`) plus
+/// the B6 additions (`PostToolUseFailure` / `SessionEnd` / `PreCompact` /
+/// `PostCompact` / `Notification` / `PermissionRequest` / `Setup` /
+/// `SubagentStart` / `CwdChanged` / `FileChanged` / `WorktreeRemove`).
 ///
 /// Where a [`HookEvent`] variant carries fewer fields than the claude-code wire
 /// schema, the available fields are populated and the rest defaulted
 /// (`false` / `None` / empty string) — filled by later B-cluster batches.
-/// Every other (not-yet-ported) variant returns `None`.
+/// Every other (not-yet-ported) variant returns `None` — including events whose
+/// `HookEvent` variant has no field to source a *required* wire value
+/// (`ConfigChange` lacks `source`, `InstructionsLoaded` lacks `memory_type` /
+/// `load_reason`, `Elicitation` lacks `message`, `WorktreeCreate` lacks `name`);
+/// those need broader `HookEvent` work before they can serialize faithfully.
+#[allow(
+    clippy::too_many_lines,
+    reason = "per-event payload construction fan-out — splitting hurts readability"
+)]
 fn build_lifecycle_envelope_body(
     event: &HookEvent,
     ctx: &HookContext,
@@ -661,6 +678,180 @@ fn build_lifecycle_envelope_body(
                 last_assistant_message: None,
             };
             Some(("StopFailure", serde_json::to_string(&payload).ok()?))
+        }
+        // B6 — additional events whose `HookEvent` variant already exists.
+        // Where the variant carries fewer fields than the wire schema (e.g.
+        // `Setup`/`PostCompact` lack `trigger`, `PostToolUseFailure` lacks the
+        // dispatched `tool_input`), the missing fields default exactly as the
+        // B1 arms above (`""` / `Value::Null` / `None`) until richer context is
+        // threaded through `HookEvent` / `HookContext`.
+        HookEvent::PostToolUseFailure {
+            tool_name,
+            error,
+            tool_use_id,
+        } => {
+            let payload = PostToolUseFailurePayload {
+                hook_event_name: HookEventNamePostToolUseFailure,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                tool_name: tool_name.clone(),
+                tool_input: serde_json::Value::Null,
+                tool_use_id: tool_use_id.to_string(),
+                error: error.clone(),
+                is_interrupt: None,
+            };
+            Some(("PostToolUseFailure", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::SessionEnd { reason, .. } => {
+            let payload = SessionEndPayload {
+                hook_event_name: HookEventNameSessionEnd,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                reason: reason.clone(),
+            };
+            Some(("SessionEnd", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::PreCompact { reason } => {
+            let payload = PreCompactPayload {
+                hook_event_name: HookEventNamePreCompact,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                // `HookEvent::PreCompact.reason` is the `manual` / `auto`
+                // trigger in the wire schema.
+                trigger: reason.clone(),
+                custom_instructions: None,
+            };
+            Some(("PreCompact", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::PostCompact { summary, .. } => {
+            let payload = PostCompactPayload {
+                hook_event_name: HookEventNamePostCompact,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                trigger: String::new(),
+                compact_summary: summary.clone(),
+            };
+            Some(("PostCompact", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::Notification { message, kind } => {
+            let payload = NotificationPayload {
+                hook_event_name: HookEventNameNotification,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                message: message.clone(),
+                title: None,
+                notification_type: kind.clone(),
+            };
+            Some(("Notification", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::PermissionRequest {
+            tool_name,
+            tool_input,
+            ..
+        } => {
+            let payload = PermissionRequestPayload {
+                hook_event_name: HookEventNamePermissionRequest,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                tool_name: tool_name.clone(),
+                tool_input: tool_input.clone(),
+                permission_suggestions: None,
+            };
+            Some(("PermissionRequest", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::Setup => {
+            let payload = SetupPayload {
+                hook_event_name: HookEventNameSetup,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                trigger: String::new(),
+            };
+            Some(("Setup", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::SubagentStart {
+            agent_id,
+            agent_type,
+            ..
+        } => {
+            let payload = SubagentStartPayload {
+                hook_event_name: HookEventNameSubagentStart,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: agent_id.to_string(),
+                agent_type: agent_type.clone(),
+            };
+            Some(("SubagentStart", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::CwdChanged { old, new } => {
+            let payload = CwdChangedPayload {
+                hook_event_name: HookEventNameCwdChanged,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                old_cwd: old.to_string_lossy().into_owned(),
+                new_cwd: new.to_string_lossy().into_owned(),
+            };
+            Some(("CwdChanged", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::FileChanged { path, kind } => {
+            let payload = FileChangedPayload {
+                hook_event_name: HookEventNameFileChanged,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                file_path: path.to_string_lossy().into_owned(),
+                event: kind.clone(),
+            };
+            Some(("FileChanged", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::WorktreeRemove { path } => {
+            let payload = WorktreeRemovePayload {
+                hook_event_name: HookEventNameWorktreeRemove,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                worktree_path: path.to_string_lossy().into_owned(),
+            };
+            Some(("WorktreeRemove", serde_json::to_string(&payload).ok()?))
         }
         _ => None,
     }
@@ -1403,17 +1594,208 @@ mod command_arm_tests {
         assert!(stdin.contains(r#""error":"rate_limit""#));
     }
 
+    // ---- B6: additional events now serialize through the Command arm -----
+
+    #[tokio::test]
+    async fn post_tool_use_failure_event_serializes_error() {
+        let stdin = dispatch_and_capture(
+            HookEventType::PostToolUseFailure,
+            HookEvent::PostToolUseFailure {
+                tool_name: "Bash".into(),
+                error: "boom".into(),
+                tool_use_id: ToolUseId::new(),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"PostToolUseFailure""#));
+        assert!(stdin.contains(r#""tool_name":"Bash""#));
+        assert!(stdin.contains(r#""error":"boom""#));
+        assert!(stdin.contains(r#""tool_input":null"#));
+    }
+
+    #[tokio::test]
+    async fn session_end_event_serializes_reason() {
+        let stdin = dispatch_and_capture(
+            HookEventType::SessionEnd,
+            HookEvent::SessionEnd {
+                session_id: protocol::SessionId::nil(),
+                reason: "logout".into(),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"SessionEnd""#));
+        assert!(stdin.contains(r#""reason":"logout""#));
+    }
+
+    #[tokio::test]
+    async fn pre_compact_event_serializes_trigger_and_null_instructions() {
+        let stdin = dispatch_and_capture(
+            HookEventType::PreCompact,
+            HookEvent::PreCompact {
+                reason: "manual".into(),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"PreCompact""#));
+        assert!(stdin.contains(r#""trigger":"manual""#));
+        // `.nullable()` field is always present as `null` when absent.
+        assert!(stdin.contains(r#""custom_instructions":null"#));
+    }
+
+    #[tokio::test]
+    async fn post_compact_event_serializes_summary() {
+        let stdin = dispatch_and_capture(
+            HookEventType::PostCompact,
+            HookEvent::PostCompact {
+                summary: "did the thing".into(),
+                tokens_freed: 1234,
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"PostCompact""#));
+        assert!(stdin.contains(r#""compact_summary":"did the thing""#));
+    }
+
+    #[tokio::test]
+    async fn notification_event_serializes_message_and_type() {
+        let stdin = dispatch_and_capture(
+            HookEventType::Notification,
+            HookEvent::Notification {
+                message: "build done".into(),
+                kind: "info".into(),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"Notification""#));
+        assert!(stdin.contains(r#""message":"build done""#));
+        assert!(stdin.contains(r#""notification_type":"info""#));
+    }
+
+    #[tokio::test]
+    async fn permission_request_event_serializes_tool() {
+        let stdin = dispatch_and_capture(
+            HookEventType::PermissionRequest,
+            HookEvent::PermissionRequest {
+                tool_name: "Bash".into(),
+                tool_input: json!({"command": "rm -rf /"}),
+                reason: "destructive".into(),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"PermissionRequest""#));
+        assert!(stdin.contains(r#""tool_name":"Bash""#));
+        assert!(stdin.contains(r#""tool_input":{"command":"rm -rf /"}"#));
+        // The variant's `reason` has no wire counterpart and must NOT appear.
+        assert!(!stdin.contains(r#""reason""#));
+    }
+
+    #[tokio::test]
+    async fn setup_event_serializes_through_command_arm() {
+        let stdin = dispatch_and_capture(HookEventType::Setup, HookEvent::Setup).await;
+        assert!(stdin.contains(r#""hook_event_name":"Setup""#));
+        assert!(stdin.contains(r#""trigger":"""#));
+    }
+
+    #[tokio::test]
+    async fn subagent_start_event_serializes_agent() {
+        let agent_id = protocol::AgentId::new();
+        let stdin = dispatch_and_capture(
+            HookEventType::SubagentStart,
+            HookEvent::SubagentStart {
+                agent_id,
+                agent_type: "general-purpose".into(),
+                parent_agent_id: None,
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"SubagentStart""#));
+        assert!(stdin.contains(&format!(r#""agent_id":"{agent_id}""#)));
+        assert!(stdin.contains(r#""agent_type":"general-purpose""#));
+    }
+
+    #[tokio::test]
+    async fn cwd_changed_event_serializes_paths() {
+        let stdin = dispatch_and_capture(
+            HookEventType::CwdChanged,
+            HookEvent::CwdChanged {
+                old: std::path::PathBuf::from("/old"),
+                new: std::path::PathBuf::from("/new"),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"CwdChanged""#));
+        assert!(stdin.contains(r#""old_cwd":"/old""#));
+        assert!(stdin.contains(r#""new_cwd":"/new""#));
+    }
+
+    #[tokio::test]
+    async fn file_changed_event_serializes_path_and_event() {
+        let stdin = dispatch_and_capture(
+            HookEventType::FileChanged,
+            HookEvent::FileChanged {
+                path: std::path::PathBuf::from("/work/src/main.rs"),
+                kind: "change".into(),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"FileChanged""#));
+        assert!(stdin.contains(r#""file_path":"/work/src/main.rs""#));
+        assert!(stdin.contains(r#""event":"change""#));
+    }
+
+    #[tokio::test]
+    async fn worktree_remove_event_serializes_path() {
+        let stdin = dispatch_and_capture(
+            HookEventType::WorktreeRemove,
+            HookEvent::WorktreeRemove {
+                path: std::path::PathBuf::from("/work/.worktrees/feat"),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""hook_event_name":"WorktreeRemove""#));
+        assert!(stdin.contains(r#""worktree_path":"/work/.worktrees/feat""#));
+    }
+
+    #[test]
+    fn deferred_events_still_return_none() {
+        // These events' `HookEvent` variants lack a field to source a *required*
+        // wire value, so they must still fall through to `None` until broader
+        // `HookEvent` work lands.
+        let ctx = HookContext::default();
+        let deferred = vec![
+            HookEvent::ConfigChange { changes: vec![] },
+            HookEvent::InstructionsLoaded { paths: vec![] },
+            HookEvent::Elicitation {
+                server_name: "srv".into(),
+                params: json!({}),
+            },
+            HookEvent::WorktreeCreate {
+                path: std::path::PathBuf::from("/w"),
+                branch: "main".into(),
+            },
+        ];
+        for ev in deferred {
+            assert!(
+                build_envelope_body(&ev, &ctx).is_none(),
+                "deferred event must not serialize: {ev:?}"
+            );
+        }
+    }
+
     #[test]
     fn unsupported_event_still_returns_none() {
-        // `SessionEnd` has no ported wire schema yet — must fall through.
-        let ev = HookEvent::SessionEnd {
-            session_id: protocol::SessionId::nil(),
-            reason: "user_exit".into(),
-        };
+        // `ConfigChange` has no ported wire schema yet — its `HookEvent` variant
+        // carries only `changes`, with no field to source the *required* wire
+        // `source` enum — so it must still fall through to `None`.
+        let ev = HookEvent::ConfigChange { changes: vec![] };
         assert!(build_envelope_body(&ev, &HookContext::default()).is_none());
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exhaustive event-marker table — one entry per covered event"
+    )]
     fn build_envelope_body_returns_expected_event_markers() {
         let ctx = HookContext::default();
         let cases: Vec<(HookEvent, &'static str)> = vec![
@@ -1448,6 +1830,79 @@ mod command_arm_tests {
                     error: "unknown".into(),
                 },
                 "StopFailure",
+            ),
+            // B6 additions.
+            (
+                HookEvent::PostToolUseFailure {
+                    tool_name: "Bash".into(),
+                    error: "boom".into(),
+                    tool_use_id: ToolUseId::new(),
+                },
+                "PostToolUseFailure",
+            ),
+            (
+                HookEvent::SessionEnd {
+                    session_id: protocol::SessionId::nil(),
+                    reason: "logout".into(),
+                },
+                "SessionEnd",
+            ),
+            (
+                HookEvent::PreCompact {
+                    reason: "manual".into(),
+                },
+                "PreCompact",
+            ),
+            (
+                HookEvent::PostCompact {
+                    summary: "s".into(),
+                    tokens_freed: 0,
+                },
+                "PostCompact",
+            ),
+            (
+                HookEvent::Notification {
+                    message: "m".into(),
+                    kind: "info".into(),
+                },
+                "Notification",
+            ),
+            (
+                HookEvent::PermissionRequest {
+                    tool_name: "Bash".into(),
+                    tool_input: json!({}),
+                    reason: "r".into(),
+                },
+                "PermissionRequest",
+            ),
+            (HookEvent::Setup, "Setup"),
+            (
+                HookEvent::SubagentStart {
+                    agent_id: protocol::AgentId::new(),
+                    agent_type: "general-purpose".into(),
+                    parent_agent_id: None,
+                },
+                "SubagentStart",
+            ),
+            (
+                HookEvent::CwdChanged {
+                    old: std::path::PathBuf::from("/o"),
+                    new: std::path::PathBuf::from("/n"),
+                },
+                "CwdChanged",
+            ),
+            (
+                HookEvent::FileChanged {
+                    path: std::path::PathBuf::from("/f"),
+                    kind: "change".into(),
+                },
+                "FileChanged",
+            ),
+            (
+                HookEvent::WorktreeRemove {
+                    path: std::path::PathBuf::from("/w"),
+                },
+                "WorktreeRemove",
             ),
         ];
         for (ev, expected) in cases {

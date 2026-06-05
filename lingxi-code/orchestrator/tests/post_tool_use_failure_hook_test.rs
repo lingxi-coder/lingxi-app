@@ -206,6 +206,7 @@ enum Seen {
     Post { tool_name: String, tool_use_id: String },
     PostFailure {
         tool_name: String,
+        tool_input: serde_json::Value,
         error: String,
         tool_use_id: String,
     },
@@ -234,10 +235,12 @@ impl BuiltinHookHandler for RecordingHandler {
             }),
             HookEvent::PostToolUseFailure {
                 tool_name,
+                tool_input,
                 error,
                 tool_use_id,
             } => self.log.lock().unwrap().push(Seen::PostFailure {
                 tool_name: tool_name.clone(),
+                tool_input: tool_input.clone(),
                 error: error.clone(),
                 tool_use_id: tool_use_id.to_string(),
             }),
@@ -367,11 +370,16 @@ async fn errored_tool_fires_post_tool_use_failure_not_post_tool_use() {
     match &seen[0] {
         Seen::PostFailure {
             tool_name,
+            tool_input,
             error,
             tool_use_id: id,
         } => {
             assert_eq!(tool_name, "AlwaysFail");
             assert_eq!(id, &tool_use_id.to_string());
+            // The dispatched tool input is now carried on the failure payload
+            // (the same `effective_input` the success arm threads). The API
+            // turn emitted `input: json!({})`, so the dispatched input is `{}`.
+            assert_eq!(tool_input, &json!({}));
             // The raw tool error string is carried verbatim (NOT the
             // "Error: "-prefixed model-facing content).
             assert!(

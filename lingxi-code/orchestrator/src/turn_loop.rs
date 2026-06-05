@@ -861,13 +861,12 @@ pub(crate) async fn dispatch_tool_uses(
         // does NOT mutate `content` or `is_error`.
         //
         // The `PostToolUseFailure` variant carries `tool_name` / `tool_use_id`
-        // (matching the prior `PreToolUse`) + the stringified `error`; the
-        // dispatched `tool_input` is threaded into the wire payload by the
-        // executor's default-fill convention (it currently defaults `tool_input`
-        // to `null`, documented in `hooks/hook_payload.rs`). We pass the raw
-        // error string the tool returned (the `{"error": …}` envelope value =
-        // `format!("{err}")`), NOT the `"Error: "`-prefixed model-facing
-        // `content`, mirroring the TS `PostToolUseFailure` input's `error`.
+        // (matching the prior `PreToolUse`) + the dispatched `tool_input` (the
+        // same `effective_input` the `PostToolUse` success arm threads) + the
+        // stringified `error`. We pass the raw error string the tool returned
+        // (the `{"error": …}` envelope value = `format!("{err}")`), NOT the
+        // `"Error: "`-prefixed model-facing `content`, mirroring the TS
+        // `PostToolUseFailure` input's `error`.
         let post_event = if is_error {
             let error = emit_payload
                 .get("error")
@@ -875,6 +874,7 @@ pub(crate) async fn dispatch_tool_uses(
                 .map_or_else(|| content.clone(), ToString::to_string);
             HookEvent::PostToolUseFailure {
                 tool_name: name.clone(),
+                tool_input: effective_input.clone(),
                 error,
                 tool_use_id: *tool_use_id,
             }

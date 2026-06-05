@@ -23,7 +23,10 @@ pub fn format_rate_limited_msg(secs: u64) -> String {
 
 /// Look up `header_name` case-insensitively in a header vec and return the
 /// first matching value, if any.
-fn header_value<'a>(headers: &'a [(String, String)], header_name: &str) -> Option<&'a str> {
+pub(crate) fn header_value<'a>(
+    headers: &'a [(String, String)],
+    header_name: &str,
+) -> Option<&'a str> {
     headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(header_name))

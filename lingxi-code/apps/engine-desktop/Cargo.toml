@@ -46,6 +46,13 @@ tasks = { path = "../../tasks" }
 # the InProcessTeammate dependency set is absent there).
 coordinator = { path = "../../coordinator" }
 platform-posix-minimal = { path = "../../platforms/posix-minimal" }
+# ConfigChange settings watcher: the full `notify`-backed `FileSystem::watch`
+# primitive (`watch_helper`) lives in `platform-posix`; `posix-minimal`'s
+# `watch` is an empty-stream stub. The watcher drives ONLY the `FileSystem`
+# trait, so this edge is the in-tree fs_watch reuse (no NEW external dep —
+# `notify` is already a workspace dependency via this crate). App→platform is
+# allowed by the dep-graph gate (same class as the `posix-minimal` edge above).
+platform-posix = { path = "../../platforms/posix" }
 
 # F2-01: the engine→DTO adapter sinks (`AdapterOutputStream` /
 # `AdapterPermissionGate`) `build()` binds when a transport (not the CLI) drives
@@ -60,6 +67,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 # Phase 3a: resolve `~`-prefixed permission patterns + the home root for
 # file-path content matching (same `dirs` version as `orchestrator`).
 dirs = "5"
+# ConfigChange settings watcher: drive the `FileSystem::watch` event stream.
+futures-core = { workspace = true }
+tokio-stream = { workspace = true }
 
 # F2-00: `DesktopConfig` carries the settings-declared `providers` block as
 # raw JSON values so `build()` (F2-01) can feed them to

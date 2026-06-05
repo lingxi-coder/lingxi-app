@@ -1368,6 +1368,42 @@ impl ConversationOrchestrator {
             .await;
     }
 
+    /// Fire the `ConfigChange` hooks when a settings / skills file mutated on
+    /// disk (hooks runtime lifecycle, TS `executeConfigChangeHooks` —
+    /// `utils/hooks.ts:4214`, dispatched from the settings watcher
+    /// `utils/settings/changeDetector.ts:285-297`).
+    ///
+    /// claude-code's `changeDetector` watches the settings files via
+    /// `fs.watchFile` polling and, on every detected change, fires this hook
+    /// with the `source` (which settings layer / skills) and the changed
+    /// `file_path` BEFORE applying the change to the live session. The host
+    /// composition root (`engine-desktop`) owns the watcher; this method is the
+    /// single fire seam it calls per change event — the live settings RELOAD is
+    /// a separate concern handled (or not) by the composition root.
+    ///
+    /// `source` maps 1:1 onto claude-code's `ConfigChangeSource`
+    /// (`user_settings` / `project_settings` / `local_settings` /
+    /// `policy_settings` / `skills`); `file_path` is the absolute path that
+    /// changed (TS always passes the path, so this is `Some` in production —
+    /// the field stays `Option` because the wire schema marks it `.optional()`).
+    ///
+    /// Best-effort, exactly like [`Self::fire_session_start`]: the aggregate is
+    /// discarded so a failing or blocking `ConfigChange` hook never breaks the
+    /// watcher loop, and it is a strict no-op when no `ConfigChange` hook is
+    /// registered (the common case). The hook executor reads `session_id` /
+    /// `cwd` from the lifecycle [`HookContext`].
+    pub async fn fire_config_change(
+        &self,
+        source: hooks::events::ConfigChangeSource,
+        file_path: Option<std::path::PathBuf>,
+    ) {
+        let ctx = self.lifecycle_hook_ctx(false).await;
+        let _ = self
+            .hooks
+            .execute(HookEvent::ConfigChange { source, file_path }, ctx)
+            .await;
+    }
+
     /// Append a Stop hook's blocking messages as a meta user message so the
     /// model sees the hook feedback on the continued turn (TS appends the
     /// blocking reason). Best-effort persist, like the other meta appends.

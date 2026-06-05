@@ -1,0 +1,454 @@
+//! Settings-file watcher → `ConfigChange` hook fire (parity: claude-code
+//! `src/utils/settings/changeDetector.ts`).
+//!
+//! claude-code watches the settings files (user / project / local / policy)
+//! and, on every detected change, fires the `ConfigChange` hook with the layer
+//! `source` and the changed `file_path` BEFORE applying the change to the live
+//! session (`changeDetector.ts:285-297` → `executeConfigChangeHooks`,
+//! `utils/hooks.ts:4214`). The Rust port had no such watcher; this module adds
+//! it at the desktop composition root, where the orchestrator (`orch.hooks`),
+//! the `cwd`, the `claude_home`, and a `FileSystem` are all in scope.
+//!
+//! ## What this does (and does NOT do)
+//! SCOPE is firing the hook only. The live settings RELOAD / re-apply is a
+//! separate concern owned by the composition root and intentionally NOT done
+//! here (claude-code's `fanOut` step). This watcher: watches the relevant
+//! `.claude` (and managed) directories via the in-tree `fs_watch` primitive
+//! ([`traits::FileSystem::watch`]), classifies each changed path to a
+//! [`ConfigChangeSource`] layer, and fires
+//! [`ConversationOrchestrator::fire_config_change`] best-effort.
+//!
+//! ## `fs_watch` reuse
+//! The watcher is generic over `Arc<dyn FileSystem>` and drives it ONLY through
+//! the trait's `watch(dir)` method — the in-tree `notify`-backed primitive
+//! (`platforms/posix::watch_helper::watch_dir_with_debounce`, exposed via
+//! `PosixFileSystem::watch`). No new external dependency is introduced; the
+//! composition root injects whichever `FileSystem` it built.
+//!
+//! ## Path → source mapping (byte-faithful)
+//! Mirrors `getSourceForPath` (`changeDetector.ts:361-375`) +
+//! `getSettingsFilePathForSource` (`settings.ts:274-294`) +
+//! `getManagedFilePath` (`managedPath.ts`):
+//! - `<claude_home>/settings.json`            → `UserSettings`
+//! - `<cwd>/.claude/settings.json`            → `ProjectSettings`
+//! - `<cwd>/.claude/settings.local.json`      → `LocalSettings`
+//! - `<managed_dir>/managed-settings.json`    → `PolicySettings`
+//! - any `*.json` under `<managed_dir>/managed-settings.d/` → `PolicySettings`
+//!
+//! where `<managed_dir>` is the OS-specific managed root
+//! (`/Library/Application Support/ClaudeCode` on macOS,
+//! `C:\Program Files\ClaudeCode` on Windows, `/etc/claude-code` elsewhere).
+//!
+//! ## Lifecycle
+//! [`SettingsWatcher::spawn`] starts one background task per watched directory
+//! and returns a [`SettingsWatcherHandle`]. Dropping the handle aborts every
+//! task (RAII) and the underlying `notify` watcher is released when the
+//! [`traits::FileSystem::watch`] stream is dropped — a clean teardown with no
+//! lingering OS handles.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures_core::Stream;
+use hooks::events::ConfigChangeSource;
+use tokio::task::JoinHandle;
+use tokio_stream::StreamExt;
+use traits::{FileEvent, FileSystem};
+
+/// Narrow fire seam: the watcher fires a `ConfigChange` without depending on
+/// the full orchestrator surface. The composition root injects the live
+/// orchestrator (whose blanket impl below forwards to
+/// [`ConversationOrchestrator::fire_config_change`]); unit tests inject a
+/// recording fake so the watcher logic is exercised without a real
+/// orchestrator or any real filesystem timing.
+#[async_trait]
+pub trait ConfigChangeFirer: Send + Sync {
+    /// Fire the `ConfigChange` hook for a changed settings path. Best-effort:
+    /// implementors MUST NOT propagate failures (a failing hook never breaks
+    /// the watcher loop).
+    async fn fire_config_change(&self, source: ConfigChangeSource, file_path: Option<PathBuf>);
+}
+
+#[async_trait]
+impl ConfigChangeFirer for orchestrator::ConversationOrchestrator {
+    async fn fire_config_change(&self, source: ConfigChangeSource, file_path: Option<PathBuf>) {
+        orchestrator::ConversationOrchestrator::fire_config_change(self, source, file_path).await;
+    }
+}
+
+/// The OS-specific managed (policy) settings root, mirroring claude-code's
+/// `getManagedFilePath` (`managedPath.ts`).
+#[must_use]
+pub fn managed_settings_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/Library/Application Support/ClaudeCode")
+    } else if cfg!(target_os = "windows") {
+        PathBuf::from(r"C:\Program Files\ClaudeCode")
+    } else {
+        PathBuf::from("/etc/claude-code")
+    }
+}
+
+/// The set of settings paths the watcher cares about, resolved from the
+/// composition root's `claude_home` + `cwd`. Carries both the absolute file
+/// paths and the parent directories to watch.
+#[derive(Debug, Clone)]
+pub struct SettingsPaths {
+    /// `<claude_home>/settings.json`.
+    pub user_settings: PathBuf,
+    /// `<cwd>/.claude/settings.json`.
+    pub project_settings: PathBuf,
+    /// `<cwd>/.claude/settings.local.json`.
+    pub local_settings: PathBuf,
+    /// `<managed_dir>/managed-settings.json`.
+    pub policy_settings: PathBuf,
+    /// `<managed_dir>/managed-settings.d/` drop-in directory; any `*.json`
+    /// inside maps to [`ConfigChangeSource::PolicySettings`].
+    pub policy_drop_in_dir: PathBuf,
+}
+
+impl SettingsPaths {
+    /// Resolve the watched settings paths from the composition root inputs.
+    /// `claude_home` is the user-global config root (`~/.claude`); `cwd` is the
+    /// project root. The managed/policy paths come from [`managed_settings_dir`].
+    #[must_use]
+    pub fn resolve(claude_home: &Path, cwd: &Path) -> Self {
+        let managed = managed_settings_dir();
+        Self {
+            user_settings: claude_home.join("settings.json"),
+            project_settings: cwd.join(".claude").join("settings.json"),
+            local_settings: cwd.join(".claude").join("settings.local.json"),
+            policy_settings: managed.join("managed-settings.json"),
+            policy_drop_in_dir: managed.join("managed-settings.d"),
+        }
+    }
+
+    /// Classify a changed path to its [`ConfigChangeSource`] layer, or `None`
+    /// if the path is not a settings file we watch. Mirrors `getSourceForPath`
+    /// (`changeDetector.ts:361-375`): exact-match the three user/project/local
+    /// files and the policy file, and treat any path inside the
+    /// `managed-settings.d/` drop-in directory as `PolicySettings`.
+    #[must_use]
+    pub fn classify(&self, path: &Path) -> Option<ConfigChangeSource> {
+        // Drop-in directory check first (a `.json` fragment inside it).
+        if path.starts_with(&self.policy_drop_in_dir) {
+            // Only `.json` fragments are policy settings (TS watches the
+            // dir's `.json` children); ignore editor temp files etc.
+            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
+                return Some(ConfigChangeSource::PolicySettings);
+            }
+            return None;
+        }
+        if path == self.policy_settings {
+            return Some(ConfigChangeSource::PolicySettings);
+        }
+        if path == self.user_settings {
+            return Some(ConfigChangeSource::UserSettings);
+        }
+        if path == self.project_settings {
+            return Some(ConfigChangeSource::ProjectSettings);
+        }
+        if path == self.local_settings {
+            return Some(ConfigChangeSource::LocalSettings);
+        }
+        None
+    }
+
+    /// The deduplicated parent directories that must be watched so a change to
+    /// any of the settings files is observed. Mirrors `getWatchTargets`
+    /// (`changeDetector.ts:181-249`): watch the *directories* (not the files)
+    /// so files created after init are still detected.
+    #[must_use]
+    pub fn watch_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut push = |d: Option<&Path>| {
+            if let Some(d) = d {
+                let d = d.to_path_buf();
+                if !dirs.contains(&d) {
+                    dirs.push(d);
+                }
+            }
+        };
+        push(self.user_settings.parent());
+        push(self.project_settings.parent());
+        push(self.local_settings.parent());
+        push(self.policy_settings.parent());
+        // The drop-in directory itself is watched directly.
+        if !dirs.contains(&self.policy_drop_in_dir) {
+            dirs.push(self.policy_drop_in_dir.clone());
+        }
+        dirs
+    }
+}
+
+/// Handle owning the spawned watcher tasks. Dropping it aborts every task
+/// (RAII teardown); each aborted task drops its `FileSystem::watch` stream,
+/// releasing the underlying `notify` OS handle.
+#[derive(Debug)]
+pub struct SettingsWatcherHandle {
+    tasks: Vec<JoinHandle<()>>,
+}
+
+impl SettingsWatcherHandle {
+    /// An empty handle that owns no tasks (e.g. when no directory could be
+    /// watched). Dropping it is a no-op.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self { tasks: Vec::new() }
+    }
+
+    /// Number of live watch tasks (one per successfully-watched directory).
+    #[must_use]
+    pub fn task_count(&self) -> usize {
+        self.tasks.len()
+    }
+}
+
+impl Drop for SettingsWatcherHandle {
+    fn drop(&mut self) {
+        for t in &self.tasks {
+            t.abort();
+        }
+    }
+}
+
+/// The settings watcher. Owns the resolved paths + the fire seam and spawns the
+/// per-directory watch loops.
+pub struct SettingsWatcher {
+    paths: SettingsPaths,
+    firer: Arc<dyn ConfigChangeFirer>,
+}
+
+impl SettingsWatcher {
+    /// Construct a watcher for the given `claude_home` / `cwd`, firing through
+    /// `firer` (the live orchestrator in production).
+    #[must_use]
+    pub fn new(claude_home: &Path, cwd: &Path, firer: Arc<dyn ConfigChangeFirer>) -> Self {
+        Self {
+            paths: SettingsPaths::resolve(claude_home, cwd),
+            firer,
+        }
+    }
+
+    /// The resolved settings paths (exposed for tests / diagnostics).
+    #[must_use]
+    pub fn paths(&self) -> &SettingsPaths {
+        &self.paths
+    }
+
+    /// Spawn the background watch loops via the injected `FileSystem` and return
+    /// the owning [`SettingsWatcherHandle`].
+    ///
+    /// Only directories that currently exist are watched (the in-tree
+    /// `watch_dir_with_debounce` errors on a missing target); a directory that
+    /// appears later is simply not observed until the next boot — matching
+    /// claude-code's `dirsWithExistingFiles` init-time gate. Best-effort: a
+    /// directory that fails to watch is logged and skipped, never fatal.
+    pub async fn spawn(self, fs: Arc<dyn FileSystem>) -> SettingsWatcherHandle {
+        let Self { paths, firer } = self;
+        let mut tasks = Vec::new();
+        for dir in paths.watch_dirs() {
+            if !dir.is_dir() {
+                continue;
+            }
+            let dir_str = dir.to_string_lossy().into_owned();
+            let stream = match fs.watch(&dir_str).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, dir = %dir_str, "settings watch failed");
+                    continue;
+                }
+            };
+            let paths = paths.clone();
+            let firer = firer.clone();
+            tasks.push(tokio::spawn(async move {
+                run_watch_loop(stream, paths, firer).await;
+            }));
+        }
+        SettingsWatcherHandle { tasks }
+    }
+}
+
+/// Drive one directory's change stream, classifying + firing per event. Split
+/// out so tests can drive it with a synthetic stream (no real `FSEvents`).
+pub async fn run_watch_loop(
+    mut stream: std::pin::Pin<Box<dyn Stream<Item = FileEvent> + Send>>,
+    paths: SettingsPaths,
+    firer: Arc<dyn ConfigChangeFirer>,
+) {
+    while let Some(event) = stream.next().await {
+        handle_event(&event, &paths, firer.as_ref()).await;
+    }
+}
+
+/// Classify a single [`FileEvent`] and fire the `ConfigChange` hook when it
+/// maps to a watched settings layer. A non-settings path is silently ignored
+/// (mirrors `handleChange` early-returning when `getSourceForPath` is
+/// undefined). Exposed for deterministic unit tests.
+pub async fn handle_event(event: &FileEvent, paths: &SettingsPaths, firer: &dyn ConfigChangeFirer) {
+    let Some(source) = paths.classify(&event.path) else {
+        return;
+    };
+    firer
+        .fire_config_change(source, Some(event.path.clone()))
+        .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use traits::FileEventKind;
+
+    /// Recording fake firer — captures every `(source, file_path)` the watcher
+    /// fires so tests can assert deterministically without a real orchestrator.
+    #[derive(Default)]
+    struct RecordingFirer {
+        fired: Mutex<Vec<(ConfigChangeSource, Option<PathBuf>)>>,
+    }
+
+    #[async_trait]
+    impl ConfigChangeFirer for RecordingFirer {
+        async fn fire_config_change(
+            &self,
+            source: ConfigChangeSource,
+            file_path: Option<PathBuf>,
+        ) {
+            self.fired.lock().unwrap().push((source, file_path));
+        }
+    }
+
+    fn paths() -> SettingsPaths {
+        // Fixed roots so the mapping assertions are platform-independent for
+        // the user/project/local layers (policy uses the real managed dir).
+        SettingsPaths::resolve(Path::new("/home/u/.claude"), Path::new("/work/proj"))
+    }
+
+    fn ev(path: &str) -> FileEvent {
+        FileEvent {
+            path: PathBuf::from(path),
+            kind: FileEventKind::Modified,
+        }
+    }
+
+    #[test]
+    fn classify_user_project_local() {
+        let p = paths();
+        assert_eq!(
+            p.classify(Path::new("/home/u/.claude/settings.json")),
+            Some(ConfigChangeSource::UserSettings)
+        );
+        assert_eq!(
+            p.classify(Path::new("/work/proj/.claude/settings.json")),
+            Some(ConfigChangeSource::ProjectSettings)
+        );
+        assert_eq!(
+            p.classify(Path::new("/work/proj/.claude/settings.local.json")),
+            Some(ConfigChangeSource::LocalSettings)
+        );
+    }
+
+    #[test]
+    fn classify_policy_file_and_dropin() {
+        let managed = managed_settings_dir();
+        let p = paths();
+        assert_eq!(
+            p.classify(&managed.join("managed-settings.json")),
+            Some(ConfigChangeSource::PolicySettings)
+        );
+        // A `.json` fragment in the drop-in dir is policy settings.
+        assert_eq!(
+            p.classify(&managed.join("managed-settings.d").join("10-org.json")),
+            Some(ConfigChangeSource::PolicySettings)
+        );
+        // A non-json file in the drop-in dir is ignored.
+        assert_eq!(
+            p.classify(&managed.join("managed-settings.d").join("README.md")),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_unrelated_path_is_none() {
+        let p = paths();
+        assert_eq!(p.classify(Path::new("/work/proj/.claude/agents/x.md")), None);
+        assert_eq!(p.classify(Path::new("/work/proj/src/main.rs")), None);
+        // A sibling json in the project .claude dir that is NOT a watched
+        // settings file maps to nothing.
+        assert_eq!(p.classify(Path::new("/work/proj/.claude/other.json")), None);
+    }
+
+    #[tokio::test]
+    async fn handle_event_fires_with_correct_source_per_path() {
+        let p = paths();
+        let firer = RecordingFirer::default();
+
+        handle_event(&ev("/home/u/.claude/settings.json"), &p, &firer).await;
+        handle_event(&ev("/work/proj/.claude/settings.json"), &p, &firer).await;
+        handle_event(&ev("/work/proj/.claude/settings.local.json"), &p, &firer).await;
+        let policy = managed_settings_dir().join("managed-settings.json");
+        handle_event(&ev(&policy.to_string_lossy()), &p, &firer).await;
+
+        let recorded = firer.fired.lock().unwrap();
+        assert_eq!(recorded.len(), 4);
+        assert_eq!(recorded[0].0, ConfigChangeSource::UserSettings);
+        assert_eq!(
+            recorded[0].1,
+            Some(PathBuf::from("/home/u/.claude/settings.json"))
+        );
+        assert_eq!(recorded[1].0, ConfigChangeSource::ProjectSettings);
+        assert_eq!(recorded[2].0, ConfigChangeSource::LocalSettings);
+        assert_eq!(recorded[3].0, ConfigChangeSource::PolicySettings);
+        assert_eq!(recorded[3].1, Some(policy));
+    }
+
+    #[tokio::test]
+    async fn handle_event_non_settings_is_noop() {
+        let p = paths();
+        let firer = RecordingFirer::default();
+        handle_event(&ev("/work/proj/src/main.rs"), &p, &firer).await;
+        handle_event(&ev("/home/u/.claude/CLAUDE.md"), &p, &firer).await;
+        assert!(firer.fired.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_watch_loop_drives_synthetic_stream() {
+        // Inject a synthetic change stream (no real FSEvents) and assert the
+        // loop classifies + fires each event, then exits cleanly when the
+        // stream ends — deterministic, no FS timing dependency.
+        let p = paths();
+        let firer: Arc<RecordingFirer> = Arc::new(RecordingFirer::default());
+        let events = vec![
+            ev("/home/u/.claude/settings.json"),
+            ev("/work/proj/src/ignored.rs"),
+            ev("/work/proj/.claude/settings.local.json"),
+        ];
+        let stream = tokio_stream::iter(events);
+        run_watch_loop(Box::pin(stream), p, firer.clone()).await;
+
+        let recorded = firer.fired.lock().unwrap();
+        assert_eq!(recorded.len(), 2, "only the two settings paths fire");
+        assert_eq!(recorded[0].0, ConfigChangeSource::UserSettings);
+        assert_eq!(recorded[1].0, ConfigChangeSource::LocalSettings);
+    }
+
+    #[test]
+    fn watch_dirs_dedup_and_cover_layers() {
+        let p = paths();
+        let dirs = p.watch_dirs();
+        // user dir, project .claude dir (covers both project + local), policy
+        // managed dir, drop-in dir. project + local share `.claude/` so dedup
+        // collapses them.
+        assert!(dirs.contains(&PathBuf::from("/home/u/.claude")));
+        assert!(dirs.contains(&PathBuf::from("/work/proj/.claude")));
+        assert!(dirs.contains(&managed_settings_dir()));
+        assert!(dirs.contains(&managed_settings_dir().join("managed-settings.d")));
+        // `.claude` appears exactly once despite two files inside it.
+        let claude_count = dirs
+            .iter()
+            .filter(|d| *d == &PathBuf::from("/work/proj/.claude"))
+            .count();
+        assert_eq!(claude_count, 1);
+    }
+}

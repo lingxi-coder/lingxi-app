@@ -850,8 +850,30 @@ pub async fn build(
     let agent_catalog = Arc::new(tokio::sync::RwLock::new(agents));
 
     // (5.4) Real compaction. Threshold 150_000 tokens (M3 design lock for the
-    //       Anthropic prod context window).
-    let compactor = Arc::new(compaction::CompactionOrchestrator::new(150_000));
+    //       Anthropic prod context window). In-Loop Compaction Batch 6: back the
+    //       autocompact layer with a REAL forked summary call (sharing the
+    //       parent's prompt cache) instead of the deterministic-fallback
+    //       summarizer. The same `cache_safe_slot` is handed to BOTH the
+    //       summarizer (here) and the orchestrator (`with_cache_safe_slot`
+    //       below), so the turn loop's per-call snapshot is what the summary
+    //       call replays.
+    let cache_safe_slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let side_query_client: Arc<dyn sidequery::SideQueryClient> =
+        Arc::new(sidequery::ProviderSideQueryClient::new(
+            cfg.api_key.clone(),
+            Some(cfg.api_base.clone()),
+            http.clone() as Arc<dyn traits::HttpTransport>,
+        ));
+    let forked_runner = Arc::new(
+        sidequery::ForkedAgentRunner::new(Arc::new(sidequery::NoopSubagentSlotProvider))
+            .with_side_query_client(side_query_client, orch_cfg.model.clone()),
+    );
+    let autocompactor =
+        compaction::Autocompactor::with_forked_runner(forked_runner, cache_safe_slot.clone());
+    let compactor = Arc::new(compaction::CompactionOrchestrator::with_autocompactor(
+        autocompactor,
+        150_000,
+    ));
 
     // (5.45) The real desktop `TaskRegistry`, wired into the tool context. Tasks
     //        materialize stdout/stderr under `<cwd>/.claude/tasks-output`; the
@@ -1064,7 +1086,8 @@ pub async fn build(
         .with_mcp_registry(mcp_registry)
         .with_hook_registry(hook_registry)
         .with_agent_catalog(agent_catalog)
-        .with_compaction(compactor),
+        .with_compaction(compactor)
+        .with_cache_safe_slot(cache_safe_slot),
     );
 
     // (6) Command registry through the desktop composition root.

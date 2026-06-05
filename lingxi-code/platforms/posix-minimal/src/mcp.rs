@@ -111,3 +111,17 @@ impl McpTransport for PosixMcp {
         Vec::new()
     }
 }
+
+/// The stub transport owns no live `jsonrpc::Connection`s (every `connect`
+/// returns `UnsupportedTransport`), so it always hands back `None`. Providing
+/// the impl lets `engine-desktop` construct the registry via
+/// `McpRegistry::with_raw_conn` and exercise the production client-bridge path;
+/// because no real connection ever exists, `get_client` correctly stays empty.
+impl mcp::RawConnectionProvider for PosixMcp {
+    fn connection_for(
+        &self,
+        _id: McpConnectionId,
+    ) -> Option<std::sync::Arc<jsonrpc::Connection>> {
+        None
+    }
+}

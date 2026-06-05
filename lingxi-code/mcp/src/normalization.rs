@@ -6,22 +6,27 @@
 //! `^[a-zA-Z0-9_-]{1,64}$`. A server named `my.server` or `My Server` would
 //! otherwise produce an invalid tool name and break EVERY tool on that server.
 //!
-//! ## Wiring status (important)
-//! This is applied at the [`crate::client::McpClient`] FQN boundary (build in
-//! `list_tools`, strip in `call_tool`) so that round-trip is self-consistent
-//! for invalid-char names. The BROADER MCP-tool-to-model path is still UNWIRED
-//! in production and is the real prerequisite gap (separate batch):
-//! - the agent's wire tool list (`ConversationOrchestrator::build_wire_tools`)
-//!   serializes only the `ToolRegistry` (builtins + the generic `MCPTool`
-//!   meta-tool) — individual `mcp__server__tool` entries are NOT advertised;
-//! - `McpRegistry::register_client` has NO production caller, so
-//!   `get_client`/the `MCPTool` dispatch path returns `None` at runtime;
-//! - the posix transport emits an EMPTY `<server>` token (`platforms/posix/
-//!   src/mcp.rs`, "rewritten later") and no rewrite site exists yet.
-//! When that path is wired, ALSO normalize the rewrite site AND make
-//! `get_client`/`get_config` match by `normalize(stored_key) == arg` (claude-code
-//! `normalizeNameForMCP(client.name) === serverName`) to complete the round-trip,
-//! keeping the raw `config.name` for `/mcp` display.
+//! ## Wiring status
+//!
+//! Applied at two boundaries:
+//!
+//! - the [`crate::client::McpClient`] FQN boundary (build in `list_tools`,
+//!   strip in `call_tool`) so the round-trip is self-consistent for
+//!   invalid-char names;
+//! - the [`crate::registry::McpRegistry::connect`] rewrite site, which stamps
+//!   the normalized `<server>` token into each discovered tool's `full_name`
+//!   (the posix transport emits an EMPTY token, deferring the rewrite here),
+//!   and the [`crate::registry::McpRegistry::get_client`] /
+//!   [`crate::registry::McpRegistry::get_config`] normalize-match
+//!   (`normalize(stored_key) == arg`, mirroring claude-code's
+//!   `normalizeNameForMCP(client.name) === serverName`), which keeps the raw
+//!   `config.name` for `/mcp` display while resolving a model-supplied
+//!   normalized token.
+//!
+//! Still UNWIRED (a later batch): the agent's wire tool list
+//! (`ConversationOrchestrator::build_wire_tools`) serializes only the
+//! `ToolRegistry` (builtins + the generic `MCPTool` meta-tool) — individual
+//! `mcp__server__tool` entries are NOT advertised yet.
 
 /// Claude.ai server names are prefixed with this string.
 const CLAUDEAI_SERVER_PREFIX: &str = "claude.ai ";

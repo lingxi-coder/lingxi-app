@@ -136,7 +136,7 @@ impl PosixMcpTransport {
     /// the std `MutexGuard` before the caller `.await`s (`Connection` itself is
     /// not `Clone` — its `broadcast::Receiver` blocks the derive, which is why
     /// it is wrapped in an `Arc`).
-    fn connection_for(&self, id: McpConnectionId) -> Result<Arc<Connection>, McpError> {
+    fn connection_for_result(&self, id: McpConnectionId) -> Result<Arc<Connection>, McpError> {
         let guard = self
             .connections
             .lock()
@@ -154,6 +154,20 @@ impl PosixMcpTransport {
             ) => Ok(Arc::clone(connection)),
             None => Err(McpError::Connection(format!("no such connection: {id}"))),
         }
+    }
+}
+
+/// Bridge the privately-owned `Arc<jsonrpc::Connection>` out to the `mcp`
+/// crate so `McpRegistry::with_raw_conn` can build a live `McpClient` per
+/// connected server (the 4 builtin MCP tools dispatch through it).
+///
+/// Wraps the inherent `connection_for_result` (which returns a `Result`),
+/// mapping a missing connection to `None` per the trait contract. The trait
+/// lives in `mcp` (not `traits/`) so it can name `jsonrpc::Connection`; the
+/// `posix → mcp → jsonrpc` dep DAG makes this impl legal.
+impl mcp::RawConnectionProvider for PosixMcpTransport {
+    fn connection_for(&self, id: McpConnectionId) -> Option<Arc<Connection>> {
+        self.connection_for_result(id).ok()
     }
 }
 
@@ -332,7 +346,7 @@ impl McpTransport for PosixMcpTransport {
         &self,
         conn: &McpRawConnection,
     ) -> Result<ServerCapabilitiesDto, McpError> {
-        let connection = self.connection_for(conn.connection_id)?;
+        let connection = self.connection_for_result(conn.connection_id)?;
 
         // Send the MCP `initialize` request. We declare empty `capabilities`
         // (no roots/elicitation wiring yet) and identify ourselves as lingxi.
@@ -382,7 +396,7 @@ impl McpTransport for PosixMcpTransport {
     }
 
     async fn list_tools(&self, conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
-        let connection = self.connection_for(conn.connection_id)?;
+        let connection = self.connection_for_result(conn.connection_id)?;
         let raw: Value = connection
             .call("tools/list", json!({}))
             .await
@@ -412,7 +426,7 @@ impl McpTransport for PosixMcpTransport {
         &self,
         conn: &McpRawConnection,
     ) -> Result<Vec<McpResourceDto>, McpError> {
-        let connection = self.connection_for(conn.connection_id)?;
+        let connection = self.connection_for_result(conn.connection_id)?;
         let raw: Value = connection
             .call("resources/list", json!({}))
             .await
@@ -431,7 +445,7 @@ impl McpTransport for PosixMcpTransport {
     }
 
     async fn list_prompts(&self, conn: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
-        let connection = self.connection_for(conn.connection_id)?;
+        let connection = self.connection_for_result(conn.connection_id)?;
         let raw: Value = connection
             .call("prompts/list", json!({}))
             .await
@@ -454,7 +468,7 @@ impl McpTransport for PosixMcpTransport {
         tool: &str,
         input: Value,
     ) -> Result<McpToolResultDto, McpError> {
-        let connection = self.connection_for(conn.connection_id)?;
+        let connection = self.connection_for_result(conn.connection_id)?;
         let timeout = Duration::from_secs(TOOL_CALL_TIMEOUT_SECS);
         let raw: Value = connection
             .call_with_timeout(
@@ -489,7 +503,7 @@ impl McpTransport for PosixMcpTransport {
         conn: &McpRawConnection,
         uri: &str,
     ) -> Result<McpResourceContentDto, McpError> {
-        let connection = self.connection_for(conn.connection_id)?;
+        let connection = self.connection_for_result(conn.connection_id)?;
         let raw: Value = connection
             .call("resources/read", json!({ "uri": uri }))
             .await
@@ -516,7 +530,7 @@ impl McpTransport for PosixMcpTransport {
     }
 
     async fn ping(&self, conn_id: McpConnectionId) -> Result<(), McpError> {
-        let connection = self.connection_for(conn_id)?;
+        let connection = self.connection_for_result(conn_id)?;
         // Discard the result body (mock answers `{ "pong": true }`; the spec
         // answers `{}`). A failed ping is a connection-level failure.
         let _: Value = connection
@@ -531,7 +545,7 @@ impl McpTransport for PosixMcpTransport {
         conn: &McpRawConnection,
     ) -> Result<McpNotificationStream, McpError> {
         use futures::stream::unfold;
-        let connection = self.connection_for(conn.connection_id)?;
+        let connection = self.connection_for_result(conn.connection_id)?;
         let rx = connection.notifications();
         // Adapt the `broadcast::Receiver<Notification>` into the trait's
         // `Stream<Item = McpNotificationDto>`. Lagged/closed receivers end the

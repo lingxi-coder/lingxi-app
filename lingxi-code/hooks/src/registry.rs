@@ -217,6 +217,27 @@ impl HookRegistry {
         }
     }
 
+    /// Whether ANY registered hook (across every bucket) subscribes to
+    /// `event_type`, ignoring per-hook matchers.
+    ///
+    /// This is the cheap *gate* check (no `HookContext`, no matcher
+    /// evaluation, no payload) used to decide whether a best-effort lifecycle
+    /// fire is worth arming at all — mirroring how the `engine-desktop`
+    /// settings watcher only arms the `ConfigChange` fire path when a
+    /// subscriber exists. The idle-prompt timer in the CLI repl consults this
+    /// (via `ConversationOrchestrator::has_notification_hook`) so it never
+    /// arms a useless timer when no `Notification` hook is registered. A
+    /// `true` here does NOT guarantee a hook will run for a *specific* event
+    /// (a declared matcher may still filter it out at `execute` time); it only
+    /// reports event-type subscription, which is exactly what the gate needs.
+    #[must_use]
+    pub fn has_hooks_for(&self, event_type: &crate::events::HookEventType) -> bool {
+        let subscribed = |h: &&HookDefinition| h.events.contains(event_type);
+        self.sources.values().flatten().any(|h| subscribed(&h))
+            || self.plugin.values().flatten().any(|h| subscribed(&h))
+            || self.frontmatter.values().flatten().any(|h| subscribed(&h))
+    }
+
     /// Snapshot every registered hook across all sources (user / project /
     /// local / managed / plugin / frontmatter / session / skill).
     ///

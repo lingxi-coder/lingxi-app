@@ -210,6 +210,15 @@ impl HookExecutorImpl {
         }
     }
 
+    /// Whether any registered hook subscribes to `event_type` (ignoring
+    /// per-hook matchers). Cheap gate read over the live registry — see
+    /// [`HookRegistry::has_hooks_for`]. Used by best-effort lifecycle fire
+    /// paths (e.g. the CLI repl idle-prompt timer) to avoid arming work when
+    /// no subscriber exists.
+    pub async fn has_hooks_for(&self, event_type: &crate::events::HookEventType) -> bool {
+        self.registry.read().await.has_hooks_for(event_type)
+    }
+
     /// Fire `event` and return the aggregated result of every matching hook.
     ///
     /// Hooks are evaluated in priority-descending order; processing stops

@@ -1279,6 +1279,7 @@ dependencies = [
  "sandbox",
  "secret",
  "serde_json",
+ "sidequery",
  "skill-api",
  "skill-builtin",
  "tasks",

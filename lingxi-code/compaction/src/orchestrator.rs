@@ -73,6 +73,26 @@ impl CompactionOrchestrator {
         }
     }
 
+    /// Build an orchestrator with a caller-provided [`Autocompactor`], keeping
+    /// the default snip + microcompact layers.
+    ///
+    /// The composition root (In-Loop Compaction Batch 6) passes an autocompactor
+    /// wired via [`Autocompactor::with_forked_runner`] so the autocompact layer
+    /// issues a real forked summary call (sharing the parent's prompt cache)
+    /// instead of the deterministic fallback that [`Self::new`]'s
+    /// [`Autocompactor::new`] produces.
+    #[must_use]
+    pub fn with_autocompactor(auto: Autocompactor, autocompact_threshold: u64) -> Self {
+        Self {
+            snip: SnipCompactor,
+            micro: Microcompactor {
+                config: TimeBasedMCConfig::default(),
+            },
+            auto,
+            autocompact_threshold,
+        }
+    }
+
     /// Run one full orchestrator pass with a **fresh** tracking state.
     ///
     /// Thin wrapper over [`Self::process_iteration_tracked`] that starts from a

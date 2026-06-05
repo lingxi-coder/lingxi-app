@@ -36,6 +36,7 @@ mcp = { path = "../../mcp" }
 hooks = { path = "../../hooks" }
 agent = { path = "../../agent" }
 compaction = { path = "../../compaction" }
+sidequery = { path = "../../sidequery" }
 tasks = { path = "../../tasks" }
 # M10: coordinator multi-agent subsystem (`TeamRegistry` + `CoordinatorMode` +
 # `CoordinatorStatusSink`). `build()` constructs one per session and surfaces

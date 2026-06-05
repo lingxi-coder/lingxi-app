@@ -205,6 +205,17 @@ pub struct ConversationOrchestrator {
     /// fires inside `async` turn drivers; uncontended in practice (only the
     /// in-flight turn touches it). Default = zero consecutive failures.
     pub(crate) compaction_tracking: Mutex<compaction::AutoCompactTrackingState>,
+    /// Shared cache-safe prompt-prefix slot (In-Loop Compaction Batch 6). When
+    /// wired (via [`Self::with_cache_safe_slot`]), the turn drivers write a
+    /// [`sidequery::CacheSafeParams`] snapshot after every successful API call
+    /// so the forked autocompact summarizer can replay the parent's prefix
+    /// verbatim and hit Anthropic's prompt cache (TS `cacheSafeParams`,
+    /// `autoCompact.ts:241-326`). `None` in tests and any binary that has not
+    /// wired the forked runner — then [`Self::save_cache_safe_params`] is a
+    /// strict no-op. The same `Arc` is handed to
+    /// [`compaction::Autocompactor::with_forked_runner`] at the composition root
+    /// so producer (here) and consumer (the summarizer) share one slot.
+    pub(crate) cache_safe_slot: Option<Arc<sidequery::CacheSafeParamsSlot>>,
     /// Read-file-state cache backing `/files` (TS `context.readFileState`).
     /// The dispatch loop (`turn_loop::dispatch_tool_uses`) inserts the
     /// absolutized `file_path` of every successful
@@ -284,6 +295,7 @@ impl ConversationOrchestrator {
             agent_catalog: None,
             compaction: None,
             compaction_tracking: Mutex::new(compaction::AutoCompactTrackingState::default()),
+            cache_safe_slot: None,
             read_file_state: Arc::new(Mutex::new(Vec::new())),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
         }
@@ -374,6 +386,65 @@ impl ConversationOrchestrator {
     pub fn with_compaction(mut self, compactor: Arc<compaction::CompactionOrchestrator>) -> Self {
         self.compaction = Some(compactor);
         self
+    }
+
+    /// Attach the shared [`sidequery::CacheSafeParamsSlot`] the turn drivers
+    /// write after every successful API call (In-Loop Compaction Batch 6).
+    ///
+    /// Pass the SAME `Arc` that was handed to
+    /// [`compaction::Autocompactor::with_forked_runner`] at the composition
+    /// root, so the forked autocompact summarizer reads the prefix this
+    /// orchestrator produced. Without this the slot stays empty and the
+    /// summarizer falls back to a no-cache forked call.
+    #[must_use]
+    pub fn with_cache_safe_slot(mut self, slot: Arc<sidequery::CacheSafeParamsSlot>) -> Self {
+        self.cache_safe_slot = Some(slot);
+        self
+    }
+
+    /// Snapshot the cache-safe prompt prefix into the wired slot after a
+    /// successful API call (In-Loop Compaction Batch 6).
+    ///
+    /// Strict no-op when no slot is wired (every test + any binary that has not
+    /// wired the forked runner), so it adds zero work — and crucially no history
+    /// clone — off the production path. When wired, it stores the CURRENT
+    /// `session.history` as `fork_context_messages`: callers invoke this right
+    /// after the model call returns successfully but BEFORE appending the
+    /// assistant reply, so the snapshot is exactly the message set the model
+    /// saw (including any PTL truncation / reactive compaction the call applied).
+    ///
+    /// `user_context` / `system_context` / `tool_use_options` are not consulted
+    /// by the single-turn forked summary path (it exposes no tools and replays
+    /// `system_prompt` + `fork_context_messages` verbatim — see
+    /// `sidequery::ForkedAgentRunner::run`), so they are filled minimally; only
+    /// `system_prompt` and `fork_context_messages` drive the cache hit.
+    pub(crate) async fn save_cache_safe_params(&self, system: Option<&str>, model: &str) {
+        let Some(slot) = self.cache_safe_slot.as_ref() else {
+            return;
+        };
+        let fork_context_messages = {
+            let s = self.session.lock().await;
+            s.history.clone()
+        };
+        slot.save(sidequery::CacheSafeParams {
+            system_prompt: system.unwrap_or("").into(),
+            user_context: std::collections::HashMap::new(),
+            system_context: std::collections::HashMap::new(),
+            tool_use_options: tool_api::ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model: model.to_string(),
+                max_budget_nano_usd: None,
+                mcp_clients: Vec::new(),
+                is_non_interactive_session: false,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+            },
+            fork_context_messages,
+            // Overwritten by the slot on save; the value here is irrelevant.
+            generation: 0,
+        })
+        .await;
     }
 
     /// Whether a [`compaction::CompactionOrchestrator`] has been
@@ -1117,6 +1188,14 @@ impl ConversationOrchestrator {
             let pumped = pump_stream(stream, &self.output).await?;
             // A3: accumulate this turn's output tokens (TS `getTurnOutputTokens()`).
             global_turn_tokens = global_turn_tokens.saturating_add(pumped.output_tokens);
+
+            // In-Loop Compaction Batch 6: snapshot the cache-safe prompt prefix
+            // after a successful stream (streaming twin of the batched save).
+            // `session.history` here equals the streamed snapshot — the streaming
+            // path does not mutate history mid-call — taken before the assistant
+            // reply is appended below. Strict no-op when no slot is wired.
+            self.save_cache_safe_params(system_prompt.as_deref(), &model)
+                .await;
 
             // 4. Assemble + append the assistant message.
             let assistant_id = MessageId::new();

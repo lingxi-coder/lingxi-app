@@ -47,6 +47,7 @@ pub use prompt::{
     format_compact_summary, get_compact_prompt, get_compact_user_summary_message,
     BASE_COMPACT_PROMPT, NO_TOOLS_PREAMBLE, NO_TOOLS_TRAILER,
 };
+pub use ptl_retry::{truncate_head_for_ptl_retry, PTL_RETRY_MARKER};
 pub use snip::{SnipCompactor, SnipResult};
 pub use thresholds::*;
 // Pure threshold kernels (Batch 3). `threshold_calc::auto_compact_threshold`

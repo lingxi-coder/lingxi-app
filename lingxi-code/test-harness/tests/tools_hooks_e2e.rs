@@ -30,6 +30,9 @@ impl BuiltinHookHandler for BlockingBuiltin {
                 // hooks B4: additive `continue:false` (preventContinuation) wire
                 // field; `false` here preserves this mock's prior Block behavior.
                 prevent_continuation: false,
+                // Elicitation batch: additive `elicitation_response` (None here —
+                // this mock is a Block policy, not an elicitation responder).
+                elicitation_response: None,
             }),
         }
     }

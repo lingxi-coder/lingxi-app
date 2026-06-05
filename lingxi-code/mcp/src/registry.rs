@@ -7,6 +7,7 @@
 
 use crate::client::McpClient;
 use crate::connection::{McpConnectionState, McpServerConfig};
+use crate::hook_dispatch::HookDispatcher;
 use crate::normalization::normalize_name_for_mcp;
 use crate::raw_conn::RawConnectionProvider;
 use protocol::{AgentId, McpConnectionId};
@@ -52,6 +53,13 @@ pub struct McpRegistry {
     /// manually (e.g. `register_test_client`). Mirrors claude-code's
     /// `ensureConnectedClient` returning a live client (client.ts:1688-1709).
     raw_conn: Option<Arc<dyn RawConnectionProvider>>,
+    /// Optional hook-dispatch seam forwarded into each [`McpClient`]'s
+    /// `elicitation/create` handler. When `Some`, an incoming elicitation
+    /// consults the engine's `Elicitation` hook (claude-code
+    /// `runElicitationHooks`); when `None` (the default) the handler keeps its
+    /// `{"action":"cancel"}` behavior. Set via [`Self::with_hook_dispatcher`],
+    /// matching the `RawConnectionProvider` injection pattern.
+    hook_dispatcher: Option<Arc<dyn HookDispatcher>>,
     /// Interval used by the background health-check task.
     #[allow(dead_code)] // consumed by the health-check loop in Plan 13
     pub health_check_interval: Duration,
@@ -75,6 +83,7 @@ impl McpRegistry {
             agent_scoped: RwLock::new(HashMap::new()),
             transport,
             raw_conn: None,
+            hook_dispatcher: None,
             health_check_interval: Duration::from_secs(30),
             max_retry_count: 5,
         }
@@ -96,6 +105,23 @@ impl McpRegistry {
             raw_conn: Some(raw_conn),
             ..Self::new(transport)
         }
+    }
+
+    /// Inject the optional [`HookDispatcher`] forwarded into every
+    /// [`McpClient`] built by [`Self::connect`]. Builder-style so it composes
+    /// with [`Self::new`] / [`Self::with_raw_conn`]:
+    ///
+    /// ```ignore
+    /// let reg = McpRegistry::with_raw_conn(transport, raw_conn)
+    ///     .with_hook_dispatcher(Some(orchestrator_dispatcher));
+    /// ```
+    ///
+    /// `None` leaves the default behavior (handler returns
+    /// `{"action":"cancel"}`); `Some(_)` enables the `Elicitation` hook path.
+    #[must_use]
+    pub fn with_hook_dispatcher(mut self, dispatcher: Option<Arc<dyn HookDispatcher>>) -> Self {
+        self.hook_dispatcher = dispatcher;
+        self
     }
 
     /// Cache an `Arc<McpClient>` for `name` (M4-07).
@@ -234,7 +260,18 @@ impl McpRegistry {
         if let Some(raw_conn) = &self.raw_conn {
             if let Some(connection) = raw_conn.connection_for(connection_id) {
                 let cwd = std::env::current_dir().unwrap_or_default();
-                let client = Arc::new(McpClient::new(server_name.clone(), cwd, connection).await);
+                // Forward the optional hook dispatcher so this server's
+                // `elicitation/create` handler can fire the `Elicitation` hook.
+                // `None` => default `{"action":"cancel"}` (unchanged).
+                let client = Arc::new(
+                    McpClient::with_hook_dispatcher(
+                        server_name.clone(),
+                        cwd,
+                        connection,
+                        self.hook_dispatcher.clone(),
+                    )
+                    .await,
+                );
                 self.register_client(&server_name, client).await;
             }
         }

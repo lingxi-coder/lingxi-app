@@ -17,6 +17,7 @@ use traits::{
     ServerCapabilitiesDto,
 };
 
+use crate::hook_dispatch::HookDispatcher;
 use crate::inbound::{ElicitationCreateHandler, RootsListHandler};
 use crate::initialize_params::InitializeParams;
 
@@ -123,6 +124,23 @@ impl McpClient {
         cwd: PathBuf,
         connection: Arc<jsonrpc::Connection>,
     ) -> Self {
+        Self::with_hook_dispatcher(server_name, cwd, connection, None).await
+    }
+
+    /// Like [`Self::new`], but wires an optional [`HookDispatcher`] into the
+    /// registered [`ElicitationCreateHandler`] so an incoming
+    /// `elicitation/create` can consult the `Elicitation` hook.
+    ///
+    /// `dispatcher == None` is byte-identical to [`Self::new`]: the handler
+    /// keeps its default `{"action":"cancel"}` behavior. `Some(_)` enables the
+    /// hook fire-and-resolve path (claude-code `runElicitationHooks`).
+    pub async fn with_hook_dispatcher(
+        server_name: impl Into<String>,
+        cwd: PathBuf,
+        connection: Arc<jsonrpc::Connection>,
+        dispatcher: Option<Arc<dyn HookDispatcher>>,
+    ) -> Self {
+        let server_name = server_name.into();
         connection
             .register_handler(
                 "roots/list",
@@ -130,11 +148,17 @@ impl McpClient {
             )
             .await;
         connection
-            .register_handler("elicitation/create", Arc::new(ElicitationCreateHandler))
+            .register_handler(
+                "elicitation/create",
+                Arc::new(ElicitationCreateHandler::with_dispatcher(
+                    server_name.clone(),
+                    dispatcher,
+                )),
+            )
             .await;
 
         Self {
-            server_name: server_name.into(),
+            server_name,
             cwd,
             connection,
             server_capabilities: RwLock::new(None),

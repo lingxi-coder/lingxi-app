@@ -771,6 +771,24 @@ pub fn parse_response(
         if let Some(r) = hs.get("permissionDecisionReason").and_then(Value::as_str) {
             resp.reason = Some(r.to_string());
         }
+
+        // Elicitation answer (claude-code `parseElicitationHookOutput`,
+        // `utils/hooks.ts:4434-4446`): `hookSpecificOutput.action` is the
+        // elicitation response action; `.content` the optional form content.
+        // A `decline` action additionally drives a block (the JS path sets a
+        // `blockingError` => the handler returns `{action:'decline'}`), so we
+        // map it onto `HookDecision::Block` here, preserving any earlier
+        // reason. Only set when an `action` is present, exactly like the JS
+        // `if (!specific.action) return {}`.
+        if let Some(action) = hs.get("action").and_then(Value::as_str) {
+            resp.elicitation_response = Some(crate::response::ElicitationHookResponse {
+                action: action.to_string(),
+                content: hs.get("content").cloned(),
+            });
+            if action == "decline" {
+                resp.decision = Some(HookDecision::Block);
+            }
+        }
     }
 
     Ok(resp)
@@ -881,6 +899,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.system_message.as_deref(), Some("hello\nworld"));
+    }
+
+    #[test]
+    fn parse_response_elicitation_accept_with_content() {
+        // hookSpecificOutput.{action,content} -> elicitation_response, no block.
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"Elicitation","action":"accept","content":{"token":"xyz"}}}"#,
+            "Elicitation",
+        )
+        .unwrap();
+        let er = r.elicitation_response.expect("elicitation response");
+        assert_eq!(er.action, "accept");
+        assert_eq!(er.content, Some(json!({"token": "xyz"})));
+        assert_eq!(r.decision, None, "accept must NOT block");
+    }
+
+    #[test]
+    fn parse_response_elicitation_decline_blocks() {
+        // action:'decline' -> response set AND decision becomes Block (claude-code
+        // `parseElicitationHookOutput` sets a blockingError on decline).
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"Elicitation","action":"decline"}}"#,
+            "Elicitation",
+        )
+        .unwrap();
+        let er = r.elicitation_response.expect("elicitation response");
+        assert_eq!(er.action, "decline");
+        assert_eq!(er.content, None);
+        assert_eq!(r.decision, Some(HookDecision::Block));
+    }
+
+    #[test]
+    fn parse_response_no_action_leaves_elicitation_none() {
+        // `if (!specific.action) return {}` — no action => no elicitation response.
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"Elicitation","additionalContext":"x"}}"#,
+            "Elicitation",
+        )
+        .unwrap();
+        assert!(r.elicitation_response.is_none());
     }
 
     // ---- B1: lifecycle-event payload byte-lock tests --------------------

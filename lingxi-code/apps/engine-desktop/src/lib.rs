@@ -817,12 +817,13 @@ pub async fn build(
     // hands back `None` here today; the real `PosixMcpTransport` returns a live
     // `Arc<jsonrpc::Connection>` under the same wiring.
     let posix = Arc::new(PosixMcp::new());
-    let mcp_registry = Arc::new(mcp::McpRegistry::with_raw_conn(
-        posix.clone() as Arc<dyn McpTransport>,
-        posix as Arc<dyn mcp::RawConnectionProvider>,
-    ));
-    mcp_registry.connect_all(mcp_configs).await;
-    tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
+    // The registry is BUILT here but `connect_all` is deferred to (5.26),
+    // after the real `hooks` executor exists: the elicitation hook dispatcher
+    // (`OrchestratorHookDispatcher`) must be wired via `with_hook_dispatcher`
+    // BEFORE any server connects, so an incoming `elicitation/create` consults
+    // the `Elicitation` hook. The registry is not used by anything between here
+    // and (5.26), so deferring the connect is behavior-neutral aside from the
+    // dispatcher wiring.
 
     // (5.2) HookRegistry — read settings.json hooks from project
     //       (cwd/.claude/settings.json) then user (claude_home/settings.json),
@@ -973,6 +974,29 @@ pub async fn build(
             api_client.clone(),
         ))),
     );
+
+    // (5.26) Build the MCP registry NOW (deferred from (5.1)) so it can carry
+    //         the elicitation hook dispatcher, then auto-connect. The
+    //         `OrchestratorHookDispatcher` shares the SAME `hooks` executor, so
+    //         an inbound `elicitation/create` fires the `Elicitation` hook
+    //         (claude-code `runElicitationHooks`): a hook may PROVIDE the answer
+    //         or DENY it; with no hook it falls through to `{"action":"cancel"}`.
+    //         `with_hook_dispatcher(Some(..))` is the only behavioral delta from
+    //         the previous `with_raw_conn` wiring.
+    let elicitation_dispatcher: Arc<dyn mcp::HookDispatcher> =
+        Arc::new(orchestrator::OrchestratorHookDispatcher::new(
+            hooks.clone(),
+            cwd.clone(),
+        ));
+    let mcp_registry = Arc::new(
+        mcp::McpRegistry::with_raw_conn(
+            posix.clone() as Arc<dyn McpTransport>,
+            posix as Arc<dyn mcp::RawConnectionProvider>,
+        )
+        .with_hook_dispatcher(Some(elicitation_dispatcher)),
+    );
+    mcp_registry.connect_all(mcp_configs).await;
+    tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
 
     // (5.3) Agent catalog — load from project + user agents/. Project wins on
     //       collision (passed SECOND; later paths win). The user agents dir is

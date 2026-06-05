@@ -27,6 +27,15 @@ const READ_FILE_STATE_TOOLS: &[&str] =
 /// literal (not imported) so `orchestrator` keeps no dependency on `tool-worktree`.
 const ENTER_WORKTREE_TOOL_NAME: &str = "EnterWorktree";
 
+/// Registry name of the subagent-spawning tool (`tools/agent` `AGENT_TOOL_NAME`)
+/// and its legacy alias (`LEGACY_AGENT_TOOL_NAME`). A completed dispatch of this
+/// tool means the spawned subagent's loop has stopped, so it is where the turn
+/// loop fires the `SubagentStop` hook. Held as literals (not imported) so
+/// `orchestrator` keeps no dependency on `tools/agent` — same precedent as
+/// `ENTER_WORKTREE_TOOL_NAME`.
+const AGENT_TOOL_NAME: &str = "Agent";
+const LEGACY_AGENT_TOOL_NAME: &str = "Task";
+
 /// Lexically expand a tool's `file_path` argument to an absolute, normalized
 /// path — the cache key for [`ConversationOrchestrator::files_in_context`].
 ///
@@ -959,7 +968,7 @@ pub(crate) async fn dispatch_tool_uses(
             };
             let wt_started = std::time::Instant::now();
             // Reuse the same hook context (session_id / cwd) the pre/post hooks used.
-            let _wt_agg = orch.hooks.execute(wt_event, hook_ctx).await;
+            let _wt_agg = orch.hooks.execute(wt_event, hook_ctx.clone()).await;
             // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
             #[allow(clippy::cast_possible_truncation)]
             let wt_dur_ms = wt_started.elapsed().as_millis() as u64;
@@ -969,6 +978,80 @@ pub(crate) async fn dispatch_tool_uses(
                 tool_name = %name,
                 duration_ms = wt_dur_ms,
                 "fired WorktreeCreate hook after successful EnterWorktree",
+            );
+        }
+
+        // SubagentStop hook (parity with claude-code's `executeStopHooks(…,
+        // subagentId, …)` → `hook_event_name: 'SubagentStop'`,
+        // `utils/hooks.ts:3653-3678`). claude-code fires it from the unified
+        // turn-loop stop chokepoint (`runStopHooks`/`stopHooks.ts`) when a
+        // subagent's query loop ENDS — keyed on `toolUseContext.agentId` being
+        // set. The LingXi port spawns subagents only through the registered,
+        // turn_loop-dispatched `Agent` (legacy alias `Task`) tool: a completed
+        // `spawner.spawn()` MEANS the subagent's loop has stopped. So we fire it
+        // here at the spawn-completion site — same TIMING (subagent stopped),
+        // the fire just lives in this orchestrator-side dispatch chokepoint
+        // (alongside `PostToolUse`/`WorktreeCreate`) where `orch.hooks` is
+        // reachable, rather than inside the child runner (which has no hook
+        // seam). The documented minor divergence: it fires at spawn-completion
+        // vs. inside the subagent loop — identical observable timing.
+        //
+        // Fires on BOTH a successful AND a failed/killed dispatch: the subagent
+        // always STOPS (claude-code's stop chokepoint runs at the loop's natural
+        // end regardless of outcome). It does NOT fire on a pre-hook Block or a
+        // permission denial — those `continue` above before any spawn, so no
+        // subagent ever ran. Best-effort: `orch.hooks.execute` is a strict
+        // no-op when no `SubagentStop` hook is registered, and a failing hook
+        // never breaks the turn (mirroring the `PostToolUse`/`WorktreeCreate`
+        // arms).
+        //
+        // Wire payload: the executor's `SubagentStop` arm builds the byte-
+        // faithful `SubagentStopHookInput` (`hook_payload.rs` /
+        // `executor.rs:698`). `agent_type` rides on the hook context (the
+        // dispatched `subagent_type`, claude-code's `agentType`); `agent_id` is
+        // the spawn-site `AgentId` (the orchestrator does not receive the
+        // child's pool id back — see note below). `status` is engine-side
+        // metadata (claude-code's `SubagentStop` wire schema has no status
+        // field, mirroring the `Stop` schema it derives from).
+        if name == AGENT_TOOL_NAME || name == LEGACY_AGENT_TOOL_NAME {
+            let subagent_type = effective_input
+                .get("subagent_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let status = if is_error { "failed" } else { "completed" };
+            let sa_event = HookEvent::SubagentStop {
+                // The Agent tool discards the child's pool `AgentId`
+                // (`SubagentResult` carries no id back across the frozen
+                // `SubagentSpawner` seam), so the orchestrator mints a fresh id
+                // for the wire payload's `agent_id` — the field is required by
+                // the claude-code schema but is not asserted against any locked
+                // fixture. (Threading the real child id would require a frozen
+                // `traits/` change to `SubagentResult`; reported as a follow-up.)
+                agent_id: protocol::AgentId::new(),
+                status: status.to_string(),
+            };
+            // Carry the dispatched `subagent_type` as the hook context's
+            // `agent_type` so the wire payload's `agent_type` is faithful
+            // (claude-code passes the subagent's `agentType` into
+            // `executeStopHooks`). The session_id / cwd reuse the same context
+            // the pre/post hooks used.
+            let sa_ctx = HookContext {
+                agent_type: Some(subagent_type),
+                ..hook_ctx.clone()
+            };
+            let sa_started = std::time::Instant::now();
+            let _sa_agg = orch.hooks.execute(sa_event, sa_ctx).await;
+            // hook duration bounded by tokio timeout — u128 ms cannot exceed u64::MAX
+            #[allow(clippy::cast_possible_truncation)]
+            let sa_dur_ms = sa_started.elapsed().as_millis() as u64;
+            // No `tengu_*` analytic here: claude-code's subagent-stop path emits
+            // no orchestrator-lifecycle event, so we keep parity by logging only.
+            tracing::debug!(
+                tool_name = %name,
+                status,
+                duration_ms = sa_dur_ms,
+                "fired SubagentStop hook after Agent/Task tool completed",
             );
         }
 

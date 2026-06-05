@@ -54,7 +54,6 @@ fn wire_identifiers_match_production_constants() {
     let fx = fx();
     let w = &fx["wire_identifiers"];
 
-    use tool_cron::remote_trigger::{REMOTE_TRIGGER_CREDENTIALS_FILE, REMOTE_TRIGGER_SUBDIR};
     use tool_cron::schedule_cron::{
         CRON_FILE_SUFFIX, CRON_SUBDIR, CRON_TASK_ID_PREFIX, SIX_FIELD_REJECTION,
     };
@@ -114,14 +113,6 @@ fn wire_identifiers_match_production_constants() {
     assert_eq!(
         w["tool_search_max_results"].as_u64().unwrap(),
         TOOL_SEARCH_MAX_RESULTS as u64
-    );
-    assert_eq!(
-        w["remote_trigger_credentials_file"].as_str().unwrap(),
-        REMOTE_TRIGGER_CREDENTIALS_FILE
-    );
-    assert_eq!(
-        w["remote_trigger_subdir"].as_str().unwrap(),
-        REMOTE_TRIGGER_SUBDIR
     );
 }
 
@@ -220,14 +211,5 @@ fn cron_path_template_matches_resolver() {
     assert_eq!(
         fx["path_templates"]["schedule_cron"].as_str().unwrap(),
         "~/.claude/cron/<task_id>.json"
-    );
-}
-
-#[test]
-fn remote_trigger_path_template_matches_resolver() {
-    let fx = fx();
-    assert_eq!(
-        fx["path_templates"]["remote_trigger"].as_str().unwrap(),
-        "~/.claude/.credentials.json"
     );
 }

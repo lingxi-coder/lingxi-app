@@ -5,7 +5,6 @@ expression: names
 - Agent
 - AskUserQuestion
 - Bash
-- Brief
 - Config
 - Edit
 - EnterPlanMode
@@ -26,6 +25,7 @@ expression: names
 - RemoteTrigger
 - ScheduleCron
 - SendMessage
+- SendUserMessage
 - Skill
 - Sleep
 - StructuredOutput

@@ -26,8 +26,12 @@ use tool_api::tool_trait::{
     ToolStaticContext, ValidationError,
 };
 
-/// Tool name byte-lock.
-pub const BRIEF_TOOL_NAME: &str = "Brief";
+/// Tool name byte-lock. The model addresses this tool by its wire name
+/// `SendUserMessage` (claude-code `BriefTool/prompt.ts` `BRIEF_TOOL_NAME`).
+pub const BRIEF_TOOL_NAME: &str = "SendUserMessage";
+/// Legacy wire name still accepted as an alias (claude-code
+/// `LEGACY_BRIEF_TOOL_NAME = "Brief"`).
+pub const LEGACY_BRIEF_TOOL_NAME: &str = "Brief";
 /// Subdirectory under `~/.claude/`.
 pub const BRIEF_SUBDIR: &str = "brief";
 /// File extension.
@@ -111,6 +115,10 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
 impl Tool for BriefTool {
     fn name(&self) -> &str {
         BRIEF_TOOL_NAME
+    }
+    fn aliases(&self) -> &[&str] {
+        const ALIASES: &[&str] = &[LEGACY_BRIEF_TOOL_NAME];
+        ALIASES
     }
     fn input_schema(&self) -> &Value {
         &SCHEMA
@@ -285,10 +293,20 @@ mod tests {
 
     #[test]
     fn constants_locked() {
-        assert_eq!(BRIEF_TOOL_NAME, "Brief");
+        assert_eq!(BRIEF_TOOL_NAME, "SendUserMessage");
+        assert_eq!(LEGACY_BRIEF_TOOL_NAME, "Brief");
         assert_eq!(BRIEF_SUBDIR, "brief");
         assert_eq!(BRIEF_FILE_SUFFIX, ".txt");
         assert_eq!(BRIEF_TASK_ID_PREFIX, 'b');
+    }
+
+    #[test]
+    fn advertises_send_user_message_name_with_brief_alias() {
+        let tool = BriefTool::new(shell_test_ctx(dummy_out()));
+        assert_eq!(tool.name(), "SendUserMessage");
+        assert_eq!(tool.aliases(), &["Brief"]);
+        // The legacy wire name resolves through the alias list.
+        assert!(tool.aliases().contains(&"Brief"));
     }
 
     #[test]

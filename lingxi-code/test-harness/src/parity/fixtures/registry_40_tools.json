@@ -11,6 +11,6 @@
     "agent": ["Agent", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "TaskOutput", "SendMessage"],
     "team": ["TeamCreate", "TeamDelete"],
     "mcp_lsp": ["MCP", "McpAuth", "ListMcpResourcesTool", "ReadMcpResourceTool", "LSP"],
-    "system": ["AskUserQuestion", "Brief", "Config", "Skill", "ScheduleCron", "ToolSearch", "RemoteTrigger", "StructuredOutput"]
+    "system": ["AskUserQuestion", "SendUserMessage", "Config", "Skill", "ScheduleCron", "ToolSearch", "RemoteTrigger", "StructuredOutput"]
   }
 }

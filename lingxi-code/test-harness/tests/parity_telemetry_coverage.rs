@@ -75,7 +75,7 @@ const TOOL_SNAKE: &[(&str, &str)] = &[
     ("LSP", "lsp"),
     // System (8)
     ("AskUserQuestion", "ask_user_question"),
-    ("Brief", "brief"),
+    ("SendUserMessage", "brief"),
     ("Config", "config"),
     ("Skill", "skill"),
     ("ScheduleCron", "schedule_cron"),

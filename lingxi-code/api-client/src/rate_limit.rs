@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Locked rate-limit error message format. Used by `ApiError::RateLimited::fmt`.
@@ -90,6 +91,195 @@ pub fn parse_unified_reset(headers: &[(String, String)], now: SystemTime) -> Opt
         return None;
     }
     Some(Duration::from_millis(delay_ms.min(PERSISTENT_RESET_CAP_MS)))
+}
+
+/// 24h in milliseconds — the `formatResetTime` date-vs-time branch boundary
+/// (TS `hoursUntilReset > 24`).
+const TWENTY_FOUR_HOURS_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// Port of claude-code `formatResetTime` (`utils/format.ts:238-289`).
+///
+/// Renders a rate-limit reset timestamp (Unix **seconds**) the way claude-code
+/// does for the 429 message: `en-US` locale, 12-hour clock, the minute omitted
+/// when it is `:00`, the space before AM/PM removed, and AM/PM lowercased — e.g.
+/// `"3pm"`, `"3:30pm"`, `"Jun 7, 3:30pm"`. Resets more than 24h out include the
+/// month/day (and the year when it differs from the current year); resets within
+/// 24h render the time only. `show_time = false` drops the time entirely on the
+/// far-future branch. Returns `None` for a `None`/zero timestamp (TS
+/// `if (!timestampInSeconds) return undefined`).
+///
+/// All component reads (minute, year, formatting) use **local** time, matching
+/// the TS `Date` accessors (`getMinutes`/`getFullYear`) and `toLocaleString`.
+///
+/// `show_timezone` appends `" (<tz>)"`. See [`reset_time_zone`] for the
+/// documented divergence from TS `getTimeZone()` (IANA name vs. offset).
+#[must_use]
+pub fn format_reset_time(
+    timestamp_secs: Option<i64>,
+    show_timezone: bool,
+    show_time: bool,
+) -> Option<String> {
+    format_reset_time_at(timestamp_secs, Local::now(), show_timezone, show_time)
+}
+
+/// Testable core of [`format_reset_time`] with an injected `now` (so unit tests
+/// never read the wall clock). `now` is a `DateTime<Local>`; the reset timestamp
+/// is interpreted in the same local zone, exactly like the TS `Date` accessors.
+#[must_use]
+fn format_reset_time_at(
+    timestamp_secs: Option<i64>,
+    now: DateTime<Local>,
+    show_timezone: bool,
+    show_time: bool,
+) -> Option<String> {
+    // TS: `if (!timestampInSeconds) return undefined` — 0 is falsy too.
+    let ts = match timestamp_secs {
+        Some(t) if t != 0 => t,
+        _ => return None,
+    };
+
+    // `new Date(timestampInSeconds * 1000)` in the local zone. A timestamp that
+    // can't be represented (out of range) fails soft to `None`.
+    let date = Local.timestamp_opt(ts, 0).single()?;
+
+    let minutes = date.minute();
+
+    // TS: `hoursUntilReset = (date - now) / 3_600_000ms`, branch on `> 24`.
+    // Equivalent integer test `(date_ms - now_ms) > 24h_in_ms` — exact, no float
+    // cast, same `>` boundary (a reset exactly 24h out stays time-only).
+    let is_far_future =
+        date.timestamp_millis() - now.timestamp_millis() > TWENTY_FOUR_HOURS_MS;
+
+    let tz_suffix = |s: String| -> String {
+        if show_timezone {
+            format!("{s} ({})", reset_time_zone(date))
+        } else {
+            s
+        }
+    };
+
+    if is_far_future {
+        // Far-future branch: `month: short, day: numeric` always; `hour`/minute
+        // only when `show_time`; `year` only when it differs from `now`.
+        // en-US layouts (verified against Node `toLocaleString`):
+        //   "Jun 7"                 (show_time = false)
+        //   "Jun 7, 3pm"            (minutes == 0)
+        //   "Jun 7, 3:30pm"         (minutes != 0)
+        //   "Jun 7, 2027, 3:30pm"   (year differs)
+        let mut out = format!("{} {}", date.format("%b"), date.day());
+        if date.year() != now.year() {
+            out.push_str(&format!(", {}", date.year()));
+        }
+        if show_time {
+            out.push_str(&format!(", {}", format_en_us_time(&date, minutes)));
+        }
+        return Some(tz_suffix(out));
+    }
+
+    // Within 24h: time only, e.g. "3pm" / "3:30pm".
+    Some(tz_suffix(format_en_us_time(&date, minutes)))
+}
+
+/// Format the `en-US` 12-hour time component with the claude-code lowercasing
+/// applied: hour without a leading zero, the minute as `:MM` only when non-zero,
+/// then the AM/PM marker lowercased and joined with no space. Reproduces TS
+/// `toLocaleTimeString('en-US', { hour:'numeric', minute: …, hour12:true })`
+/// followed by `.replace(/ ([AP]M)/i, …toLowerCase())`.
+fn format_en_us_time(date: &DateTime<Local>, minutes: u32) -> String {
+    // `%-I` = 12-hour, no leading zero; `%p` = `AM`/`PM`.
+    let hour = date.format("%-I");
+    let ampm = date.format("%p").to_string().to_lowercase();
+    if minutes == 0 {
+        format!("{hour}{ampm}")
+    } else {
+        format!("{hour}:{minutes:02}{ampm}")
+    }
+}
+
+/// Process-lifetime timezone string appended when `show_timezone` is set.
+///
+/// **Divergence from claude-code (documented):** TS `getTimeZone()` returns the
+/// IANA zone *name* via `Intl.DateTimeFormat().resolvedOptions().timeZone` (e.g.
+/// `"America/Los_Angeles"`). Recovering that name in-tree requires
+/// `iana-time-zone`/`chrono-tz`, which the parity rules forbid adding as a new
+/// dependency. We therefore approximate with chrono `%Z`, which on this platform
+/// renders the local UTC offset (e.g. `"+08:00"` / `"-07:00"`). The date/time
+/// portion of `formatResetTime` is byte-faithful; only this parenthesised suffix
+/// diverges, and only when `show_timezone` is requested.
+fn reset_time_zone(date: DateTime<Local>) -> String {
+    date.format("%Z").to_string()
+}
+
+/// Owned, already-formatted reset strings derived from the unified-reset
+/// response headers. Lives one frame above [`ResetTimes`] (which borrows) so the
+/// caller can hand the borrowed view to [`rate_limit_error_message`].
+///
+/// 1:1 with the header reads in claude-code `computeNewLimitsFromHeaders`
+/// (`claudeAiLimits.ts:382-398`) feeding `getLimitReachedText`
+/// (`rateLimitMessages.ts:143-166`): `resetsAt =
+/// Number(anthropic-ratelimit-unified-reset)`, `overageResetsAt =
+/// Number(anthropic-ratelimit-unified-overage-reset)`, both rendered with
+/// `formatResetTime(..., /* showTimezone */ true)`, and the dual-window branch
+/// picking the earlier of `resetsAt < overageResetsAt`.
+#[derive(Debug, Clone, Default)]
+pub struct FormattedResetTimes {
+    /// `formatResetTime(resetsAt, true)`, if `resetsAt` was present.
+    pub reset_time: Option<String>,
+    /// `formatResetTime(overageResetsAt, true)`, if `overageResetsAt` present.
+    pub overage_reset_time: Option<String>,
+    /// `resetsAt < overageResetsAt` when both raw timestamps were present.
+    pub reset_is_earlier: Option<bool>,
+}
+
+impl FormattedResetTimes {
+    /// Borrowed view consumed by [`rate_limit_error_message`].
+    #[must_use]
+    pub fn as_reset_times(&self) -> ResetTimes<'_> {
+        ResetTimes {
+            reset_time: self.reset_time.as_deref(),
+            overage_reset_time: self.overage_reset_time.as_deref(),
+            reset_is_earlier: self.reset_is_earlier,
+        }
+    }
+}
+
+/// Read the unified reset headers and produce the locale-formatted reset strings
+/// the 429 message consumes — the api-client analogue of claude-code mapping the
+/// reset headers through `formatResetTime`. `showTimezone = true` matches the TS
+/// call sites (`rateLimitMessages.ts:145-148`).
+#[must_use]
+pub fn formatted_reset_times_from_headers(headers: &[(String, String)]) -> FormattedResetTimes {
+    formatted_reset_times_at(headers, Local::now())
+}
+
+/// Testable core of [`formatted_reset_times_from_headers`] with an injected
+/// `now` so unit tests never read the wall clock.
+#[must_use]
+fn formatted_reset_times_at(
+    headers: &[(String, String)],
+    now: DateTime<Local>,
+) -> FormattedResetTimes {
+    // `Number(header)` in TS: an absent/blank/non-numeric value yields `None`
+    // (NaN → falsy → `resetsAt` undefined), so the reset clause is dropped.
+    let parse = |name: &str| -> Option<i64> {
+        header_value(headers, name)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| s.parse::<i64>().ok())
+    };
+    let resets_at = parse("anthropic-ratelimit-unified-reset");
+    let overage_resets_at = parse("anthropic-ratelimit-unified-overage-reset");
+
+    FormattedResetTimes {
+        reset_time: format_reset_time_at(resets_at, now, true, true),
+        overage_reset_time: format_reset_time_at(overage_resets_at, now, true, true),
+        // `resetsAt < limits.overageResetsAt` (rateLimitMessages.ts:160) — only
+        // meaningful when both raw timestamps are present.
+        reset_is_earlier: match (resets_at, overage_resets_at) {
+            (Some(r), Some(o)) => Some(r < o),
+            _ => None,
+        },
+    }
 }
 
 /// The `anthropic-ratelimit-unified-overage-disabled-reason` header value, if
@@ -472,6 +662,252 @@ mod tests {
         // and be exactly 56 years × 365.25 days × 86400 sec ≈ 1.77 * 10^9.
         let secs = parse_iso8601_utc("2026-05-23T00:00:00Z").unwrap();
         assert!(secs > 1_700_000_000 && secs < 1_900_000_000);
+    }
+}
+
+#[cfg(test)]
+mod format_reset_time_tests {
+    //! Byte-faithful tests for the `formatResetTime` port. `now` and the reset
+    //! instant are both built from **local** wall-clock components and injected
+    //! into `format_reset_time_at`, so the assertions are independent of the
+    //! runner's timezone: the function re-derives local Y/M/D/H/M from the epoch
+    //! it is given, which round-trips the components we constructed. The tz
+    //! suffix (`reset_time_zone`) renders the chrono `%Z` offset — a documented
+    //! divergence from TS `getTimeZone()` (IANA name) — so the showTimezone
+    //! tests assert the structural ` (…)` shape, not a literal zone string.
+    use super::*;
+
+    /// A `DateTime<Local>` for the given local wall-clock components. Tests pass
+    /// `.timestamp()` of this into the formatter; `format_reset_time_at` then
+    /// rebuilds the same local components, so the rendered output matches what
+    /// these inputs describe regardless of the machine timezone.
+    fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Local> {
+        Local.with_ymd_and_hms(y, mo, d, h, mi, 0).single().unwrap()
+    }
+
+    fn fmt(
+        reset: DateTime<Local>,
+        now: DateTime<Local>,
+        show_tz: bool,
+        show_time: bool,
+    ) -> Option<String> {
+        format_reset_time_at(Some(reset.timestamp()), now, show_tz, show_time)
+    }
+
+    #[test]
+    fn none_or_zero_timestamp_returns_none() {
+        let now = local(2026, 6, 5, 12, 0);
+        assert_eq!(format_reset_time_at(None, now, false, true), None);
+        // TS `if (!timestampInSeconds)` treats 0 as falsy.
+        assert_eq!(format_reset_time_at(Some(0), now, false, true), None);
+    }
+
+    #[test]
+    fn within_24h_same_minute_zero_drops_minutes() {
+        // 3:00pm, ~3h out → "3pm".
+        let now = local(2026, 6, 5, 12, 0);
+        let reset = local(2026, 6, 5, 15, 0);
+        assert_eq!(fmt(reset, now, false, true).as_deref(), Some("3pm"));
+    }
+
+    #[test]
+    fn within_24h_with_minutes_renders_colon_minutes() {
+        // 3:30pm, ~3.5h out → "3:30pm".
+        let now = local(2026, 6, 5, 12, 0);
+        let reset = local(2026, 6, 5, 15, 30);
+        assert_eq!(fmt(reset, now, false, true).as_deref(), Some("3:30pm"));
+    }
+
+    #[test]
+    fn within_24h_midnight_and_noon_edges() {
+        // 12am (midnight) and 12pm (noon) — hour12 = 12, not 0.
+        let now = local(2026, 6, 5, 23, 0);
+        let midnight = local(2026, 6, 6, 0, 0);
+        assert_eq!(fmt(midnight, now, false, true).as_deref(), Some("12am"));
+
+        let now2 = local(2026, 6, 5, 10, 0);
+        let noon = local(2026, 6, 5, 12, 5);
+        assert_eq!(fmt(noon, now2, false, true).as_deref(), Some("12:05pm"));
+    }
+
+    #[test]
+    fn over_24h_same_year_includes_month_day_and_time() {
+        // Reset Jun 7 3:30pm, now Jun 5 → >24h, same year → "Jun 7, 3:30pm".
+        let now = local(2026, 6, 5, 10, 0);
+        let reset = local(2026, 6, 7, 15, 30);
+        assert_eq!(fmt(reset, now, false, true).as_deref(), Some("Jun 7, 3:30pm"));
+    }
+
+    #[test]
+    fn over_24h_same_year_minute_zero_drops_minutes() {
+        // Reset Jun 7 3:00pm → "Jun 7, 3pm".
+        let now = local(2026, 6, 5, 10, 0);
+        let reset = local(2026, 6, 7, 15, 0);
+        assert_eq!(fmt(reset, now, false, true).as_deref(), Some("Jun 7, 3pm"));
+    }
+
+    #[test]
+    fn over_24h_different_year_includes_year() {
+        // Reset 2027 → year differs → "Jun 7, 2027, 3:30pm".
+        let now = local(2026, 6, 5, 10, 0);
+        let reset = local(2027, 6, 7, 15, 30);
+        assert_eq!(
+            fmt(reset, now, false, true).as_deref(),
+            Some("Jun 7, 2027, 3:30pm")
+        );
+    }
+
+    #[test]
+    fn over_24h_show_time_false_drops_time() {
+        // showTime=false on the far-future branch → "Jun 7" (no time at all).
+        let now = local(2026, 6, 5, 10, 0);
+        let reset = local(2026, 6, 7, 15, 30);
+        assert_eq!(fmt(reset, now, false, false).as_deref(), Some("Jun 7"));
+    }
+
+    #[test]
+    fn over_24h_different_year_show_time_false_keeps_year() {
+        let now = local(2026, 6, 5, 10, 0);
+        let reset = local(2027, 6, 7, 15, 30);
+        assert_eq!(fmt(reset, now, false, false).as_deref(), Some("Jun 7, 2027"));
+    }
+
+    #[test]
+    fn ampm_is_lowercased_with_no_space() {
+        // Explicitly assert the AM/PM lowercasing + space removal: never "PM",
+        // never " pm".
+        let now = local(2026, 6, 5, 1, 0);
+        let am = local(2026, 6, 5, 9, 15);
+        let s = fmt(am, now, false, true).unwrap();
+        assert_eq!(s, "9:15am");
+        assert!(!s.contains("AM") && !s.contains("PM") && !s.contains(' '));
+    }
+
+    #[test]
+    fn show_timezone_appends_parenthesised_suffix() {
+        // Date/time portion is byte-faithful; the tz suffix is the chrono %Z
+        // offset (documented divergence), so assert the structural shape: the
+        // base string, a single space, then a non-empty "(…)".
+        let now = local(2026, 6, 5, 12, 0);
+        let reset = local(2026, 6, 5, 15, 30);
+        let off = fmt(reset, now, false, true).unwrap();
+        assert_eq!(off, "3:30pm");
+
+        let on = fmt(reset, now, true, true).unwrap();
+        assert!(on.starts_with("3:30pm ("), "got {on}");
+        assert!(on.ends_with(')'), "got {on}");
+        // The suffix is exactly " (<tz>)" with a non-empty tz.
+        let suffix = on.strip_prefix("3:30pm ").unwrap();
+        assert!(suffix.len() > 2, "tz suffix should be non-empty: {suffix}");
+    }
+
+    #[test]
+    fn show_timezone_on_far_future_branch_appends_suffix_after_time() {
+        let now = local(2026, 6, 5, 10, 0);
+        let reset = local(2026, 6, 7, 15, 30);
+        let on = fmt(reset, now, true, true).unwrap();
+        assert!(on.starts_with("Jun 7, 3:30pm ("), "got {on}");
+        assert!(on.ends_with(')'), "got {on}");
+    }
+
+    #[test]
+    fn exactly_24h_boundary_uses_time_only_branch() {
+        // hoursUntilReset must be strictly > 24 for the date branch. Exactly 24h
+        // stays on the time-only branch (TS `hoursUntilReset > 24`).
+        let now = local(2026, 6, 5, 15, 30);
+        let reset = local(2026, 6, 6, 15, 30); // exactly 24h
+        assert_eq!(fmt(reset, now, false, true).as_deref(), Some("3:30pm"));
+
+        // One minute past 24h flips to the date branch.
+        let reset_past = local(2026, 6, 6, 15, 31);
+        assert_eq!(
+            fmt(reset_past, now, false, true).as_deref(),
+            Some("Jun 6, 3:31pm")
+        );
+    }
+
+    #[test]
+    fn formatted_reset_times_from_headers_maps_both_windows() {
+        let now = local(2026, 6, 5, 10, 0);
+        let resets_at = local(2026, 6, 5, 13, 0).timestamp(); // 1pm, within 24h
+        let overage_at = local(2026, 6, 7, 9, 0).timestamp(); // Jun 7 9am, >24h
+        let headers = vec![
+            (
+                "anthropic-ratelimit-unified-reset".into(),
+                resets_at.to_string(),
+            ),
+            (
+                "anthropic-ratelimit-unified-overage-reset".into(),
+                overage_at.to_string(),
+            ),
+        ];
+        // `formatted_reset_times_*` calls the formatter with showTimezone=true
+        // (matching TS `formatResetTime(resetsAt, true)`), so each string carries
+        // the tz suffix. The date/time prefix is byte-faithful; the parenthesised
+        // suffix is the chrono %Z offset (documented divergence), so assert the
+        // prefix + shape rather than a literal zone.
+        let f = formatted_reset_times_at(&headers, now);
+        let rt = f.reset_time.as_deref().unwrap();
+        assert!(rt.starts_with("1pm ("), "got {rt}");
+        assert!(rt.ends_with(')'), "got {rt}");
+        let ort = f.overage_reset_time.as_deref().unwrap();
+        assert!(ort.starts_with("Jun 7, 9am ("), "got {ort}");
+        assert!(ort.ends_with(')'), "got {ort}");
+        // resetsAt (1pm today) < overageResetsAt (Jun 7) → earlier is the primary.
+        assert_eq!(f.reset_is_earlier, Some(true));
+
+        // The borrowed view threads straight into the message template, carrying
+        // the formatted reset string (with its tz suffix) into ` · resets …`.
+        let info = RateLimitInfo {
+            rate_limit_type: Some("five_hour".into()),
+            overage_status: None,
+            overage_disabled_reason: None,
+        };
+        let msg = rate_limit_error_message(
+            &info,
+            &f.as_reset_times(),
+            SubscriptionContext::default(),
+        )
+        .unwrap();
+        assert!(
+            msg.starts_with("You've hit your session limit · resets 1pm ("),
+            "got {msg}"
+        );
+        assert!(msg.ends_with(')'), "got {msg}");
+    }
+
+    #[test]
+    fn formatted_reset_times_absent_or_non_numeric_headers_yield_none() {
+        let now = local(2026, 6, 5, 10, 0);
+        // Missing both → all None (Number(undefined) → NaN → undefined).
+        let f = formatted_reset_times_at(&[], now);
+        assert_eq!(f.reset_time, None);
+        assert_eq!(f.overage_reset_time, None);
+        assert_eq!(f.reset_is_earlier, None);
+
+        // Non-numeric `reset` header → None (Number("soon") → NaN).
+        let headers = vec![("anthropic-ratelimit-unified-reset".into(), "soon".into())];
+        let f2 = formatted_reset_times_at(&headers, now);
+        assert_eq!(f2.reset_time, None);
+        assert_eq!(f2.reset_is_earlier, None);
+    }
+
+    #[test]
+    fn formatted_reset_times_overage_only_picks_overage_window() {
+        let now = local(2026, 6, 5, 10, 0);
+        let overage_at = local(2026, 6, 5, 14, 0).timestamp(); // 2pm
+        let headers = vec![(
+            "anthropic-ratelimit-unified-overage-reset".into(),
+            overage_at.to_string(),
+        )];
+        let f = formatted_reset_times_at(&headers, now);
+        assert_eq!(f.reset_time, None);
+        // showTimezone=true → "2pm (<offset>)"; assert prefix/shape.
+        let ort = f.overage_reset_time.as_deref().unwrap();
+        assert!(ort.starts_with("2pm ("), "got {ort}");
+        assert!(ort.ends_with(')'), "got {ort}");
+        // Only one timestamp present → comparison is undefined → None.
+        assert_eq!(f.reset_is_earlier, None);
     }
 }
 

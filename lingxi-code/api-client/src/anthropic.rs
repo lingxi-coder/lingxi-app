@@ -555,12 +555,16 @@ impl AnthropicProvider {
                     if !retry_429_allowed {
                         let info = crate::rate_limit::RateLimitInfo::from_headers(&resp.headers);
                         if info.has_unified_headers() {
-                            // Reset-time strings are locale/timezone formatted in
-                            // TS; api-client surfaces the byte-locked template
-                            // without the (non-reproducible) formatted time.
+                            // Render the reset clauses from the real reset
+                            // timestamps (`anthropic-ratelimit-unified-reset` /
+                            // `…-overage-reset`) via the `formatResetTime` port,
+                            // matching claude-code `getLimitReachedText`. `formatted`
+                            // owns the strings; `ResetTimes` borrows from it.
+                            let formatted =
+                                crate::rate_limit::formatted_reset_times_from_headers(&resp.headers);
                             if let Some(msg) = crate::rate_limit::rate_limit_error_message(
                                 &info,
-                                &crate::rate_limit::ResetTimes::default(),
+                                &formatted.as_reset_times(),
                                 crate::rate_limit::SubscriptionContext::default(),
                             ) {
                                 *terminal_429_message.lock().unwrap() = Some(msg);

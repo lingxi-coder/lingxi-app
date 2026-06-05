@@ -10,6 +10,10 @@ protocol = { path = "../protocol" }
 traits = { path = "../traits" }
 telemetry = { path = "../telemetry" }
 cost = { path = "../cost" }
+# Already compiled in the workspace (cost/tui/orchestrator depend on it; same
+# locked chrono 0.4.x). Adds no new crate to the graph — used only to reproduce
+# claude-code `formatResetTime` (en-US locale month/12-hour formatting).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

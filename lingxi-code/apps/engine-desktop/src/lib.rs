@@ -26,6 +26,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod settings_watch;
+
 use anthropic_oauth::client::ClaudeAiOAuthClient;
 use anthropic_oauth::config::ClaudeAiOAuthConfig;
 use anthropic_oauth::handle::OAuthHandle;
@@ -552,6 +554,13 @@ pub struct DesktopRuntime {
     /// from an inbound `ApprovePermission`/`DenyPermission` (F2-06). `None` when
     /// the host opted into the always-allow `NoOpPermissionGate` (the CLI).
     pub permission_gate: Option<Arc<AdapterPermissionGate>>,
+    /// Live settings watcher firing `ConfigChange` hooks when the user /
+    /// project / local / policy settings files mutate on disk (parity:
+    /// claude-code `changeDetector.ts` → `executeConfigChangeHooks`). Held by
+    /// the runtime so it lives for the session; dropping the runtime aborts the
+    /// watch tasks (RAII teardown). `None`-shaped as an empty handle (no tasks)
+    /// when no `.claude` directory exists to watch.
+    pub settings_watcher: settings_watch::SettingsWatcherHandle,
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -1272,6 +1281,19 @@ pub async fn build(
     let _ = subagent_tool_registry_cell.set(tools.clone());
     let _ = subagent_agent_catalog_cell.set(agent_catalog.clone());
 
+    // Clone `cwd` for the settings watcher before it is moved into the
+    // orchestrator constructor below.
+    let watch_cwd = cwd.clone();
+    // Decide whether to spawn the settings watcher (7.2) BEFORE `hook_registry`
+    // is moved into the orchestrator: spawn only when a `ConfigChange` hook is
+    // registered (the fire is a strict no-op otherwise, so the background
+    // watcher would be pure overhead).
+    let has_config_change_hook = hook_registry
+        .read()
+        .await
+        .all_hooks()
+        .iter()
+        .any(|h| h.events.contains(&hooks::events::HookEventType::ConfigChange));
     let orch = Arc::new(
         ConversationOrchestrator::new(
             orch_cfg, api_client, tools, hooks, perms, output, memory, cwd,
@@ -1321,6 +1343,47 @@ pub async fn build(
     //       common case) or when no instruction files are present.
     orch.fire_instructions_loaded().await;
 
+    // (7.2) ConfigChange lifecycle: start the settings watcher now that the
+    //       orchestrator + hook registry are wired. claude-code watches the
+    //       user / project / local / policy settings files and, on every
+    //       detected change, fires the `ConfigChange` hook with the layer
+    //       `source` + changed `file_path` BEFORE applying the change
+    //       (`changeDetector.ts:285-297` → `executeConfigChangeHooks`,
+    //       `utils/hooks.ts:4214`). The Rust port had no watcher; this wires it
+    //       at the composition root via the in-tree `notify`-backed
+    //       `FileSystem::watch` primitive (`platform-posix`'s `watch_helper`).
+    //       SCOPE is firing the hook only — the live settings RELOAD/re-apply
+    //       (claude-code's `fanOut`) is a separate concern, intentionally not
+    //       done here. Best-effort: the watcher fires `fire_config_change`,
+    //       which discards the aggregate (a failing/blocking `ConfigChange`
+    //       hook never breaks the watch loop) and is a strict no-op when no
+    //       `ConfigChange` hook is registered. The handle is returned on the
+    //       runtime so it lives for the session; dropping the runtime aborts
+    //       the watch tasks (RAII), releasing the OS handles cleanly.
+    //
+    //       The full `platform-posix` `FileSystem` is used here (NOT the
+    //       `posix-minimal` one wired into the engine) because only it has the
+    //       real `notify`-backed `watch`; `posix-minimal::watch` is an
+    //       empty-stream stub, so wiring it would observe no events.
+    //
+    //       GATED (decided above, before `hook_registry` moved into the
+    //       orchestrator): only spawn the watcher when at least one
+    //       `ConfigChange` hook is registered. The fire is a strict no-op
+    //       otherwise, so the background `notify` watcher (and its blocking pump
+    //       thread) would be pure overhead in the common no-hook case — gating
+    //       keeps boot cheap and avoids holding an OS watch handle nobody
+    //       consumes.
+    let settings_watcher = if has_config_change_hook {
+        let watch_fs: Arc<dyn traits::FileSystem> =
+            Arc::new(platform_posix::PosixFileSystem::new(watch_cwd.clone()));
+        let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
+        settings_watch::SettingsWatcher::new(&cfg.claude_home, &watch_cwd, firer)
+            .spawn(watch_fs)
+            .await
+    } else {
+        settings_watch::SettingsWatcherHandle::empty()
+    };
+
     Ok(DesktopRuntime {
         orchestrator: orch,
         dispatcher,
@@ -1329,6 +1392,7 @@ pub async fn build(
         coordinator,
         coordinator_mode,
         permission_gate: adapter_gate,
+        settings_watcher,
     })
 }
 

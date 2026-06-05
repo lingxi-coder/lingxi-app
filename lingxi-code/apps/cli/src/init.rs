@@ -44,6 +44,12 @@ pub struct Runtime {
     /// mount wraps it in a `PollerFeed` so the background-task footer + dialog
     /// read live state.
     pub task_registry: Arc<tasks::registry::TaskRegistry>,
+    /// Live settings watcher firing `ConfigChange` hooks when settings files
+    /// mutate on disk. Held here purely to keep the watcher alive for the
+    /// session: dropping the `Runtime` (process teardown) aborts the watch
+    /// tasks (RAII). If this field were dropped at `build_runtime` exit, the
+    /// watcher would stop immediately after boot — so it must live on `Runtime`.
+    pub settings_watcher: engine_desktop::settings_watch::SettingsWatcherHandle,
 }
 
 /// Build-result for the TUI startup path. (M6-03)
@@ -240,6 +246,7 @@ pub async fn build_runtime(
         dispatcher: rt.dispatcher,
         auth: rt.auth,
         task_registry: rt.task_registry,
+        settings_watcher: rt.settings_watcher,
     })
 }
 

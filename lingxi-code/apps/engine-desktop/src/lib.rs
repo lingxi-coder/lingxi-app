@@ -692,8 +692,17 @@ pub async fn build(
         .cloned()
         .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
     let mcp_configs = mcp::load_mcp_json_with_precedence(&project_mcp_path, &global_mcp_path);
-    let mcp_transport: Arc<dyn McpTransport> = Arc::new(PosixMcp::new());
-    let mcp_registry = Arc::new(mcp::McpRegistry::new(mcp_transport));
+    // Build one concrete `PosixMcp` and hand it to the registry as BOTH the
+    // `McpTransport` (discovery) and the `RawConnectionProvider` (live-client
+    // bridge), so a connected server yields a working `McpClient` via
+    // `get_client`. The minimal stub owns no live connections, so the bridge
+    // hands back `None` here today; the real `PosixMcpTransport` returns a live
+    // `Arc<jsonrpc::Connection>` under the same wiring.
+    let posix = Arc::new(PosixMcp::new());
+    let mcp_registry = Arc::new(mcp::McpRegistry::with_raw_conn(
+        posix.clone() as Arc<dyn McpTransport>,
+        posix as Arc<dyn mcp::RawConnectionProvider>,
+    ));
     mcp_registry.connect_all(mcp_configs).await;
     tokio::spawn(Arc::clone(&mcp_registry).run_reconnect_loop());
 

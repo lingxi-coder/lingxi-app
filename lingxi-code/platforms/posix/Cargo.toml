@@ -9,6 +9,10 @@ license.workspace = true
 protocol = { path = "../../protocol" }
 traits = { path = "../../traits" }
 jsonrpc = { path = "../../jsonrpc" }
+# `mcp::RawConnectionProvider` is implemented on `PosixMcpTransport` so the
+# registry can bridge the transport-owned `Arc<jsonrpc::Connection>` into a
+# live `McpClient`. Dep DAG: posix → mcp → jsonrpc (no cycle; mcp has no posix dep).
+mcp = { path = "../../mcp" }
 lsp = { path = "../../lsp" }
 platform-common = { path = "../common" }
 sandbox = { path = "../../sandbox" }
@@ -42,9 +46,9 @@ tempfile = "3.13"
 # (`tests/mcp_ws_test.rs`). `ws` enables the WebSocketUpgrade extractor.
 axum = { version = "0.7", features = ["ws"] }
 url = "2"
-# Integration test (`tests/mcp_client_stdio_test.rs`) drives the real
+# `mcp` is a regular dependency (see `[dependencies]`); it is also used by the
+# integration test (`tests/mcp_client_stdio_test.rs`) that drives the real
 # `lingxi_mcp::McpClient` over a stdio-spawned mock MCP server.
-mcp = { path = "../../mcp" }
 futures-util = "0.3"
 
 [lints]

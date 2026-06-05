@@ -8,9 +8,12 @@
 #![allow(clippy::unwrap_used)] // Mutex lock failures here mean the test is broken.
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use jsonrpc::{Connection, Mode};
 use protocol::McpConnectionId;
 use serde_json::Value;
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use traits::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
@@ -20,6 +23,10 @@ use traits::{
 /// In-memory MCP transport that returns canned responses to the registry.
 pub struct MockMcpTransport {
     tools: Mutex<Vec<McpToolDto>>,
+    /// Paired in-memory `jsonrpc::Connection`s minted per `connect`, keyed by
+    /// the `McpConnectionId` handed back. Exposed via [`RawConnectionProvider`]
+    /// so `McpRegistry::with_raw_conn` can bridge a live `McpClient`.
+    conns: Mutex<HashMap<McpConnectionId, Arc<Connection>>>,
 }
 
 impl Default for MockMcpTransport {
@@ -34,6 +41,7 @@ impl MockMcpTransport {
     pub fn new() -> Self {
         Self {
             tools: Mutex::new(Vec::new()),
+            conns: Mutex::new(HashMap::new()),
         }
     }
 
@@ -51,12 +59,30 @@ impl MockMcpTransport {
     }
 }
 
+/// Build a `Connection` over a fresh pair of `mpsc<Bytes>` channels (the
+/// `paired_connection` pattern from `mcp/src/client.rs:536`). The peer ends are
+/// dropped — lifecycle tests assert client *presence*, not wire round-trips.
+fn paired_connection() -> Arc<Connection> {
+    let (_peer_to_us_tx, peer_to_us_rx) = tokio::sync::mpsc::channel::<Bytes>(8);
+    let (us_to_peer_tx, _us_to_peer_rx) = tokio::sync::mpsc::channel::<Bytes>(8);
+    Arc::new(Connection::new_streams(
+        peer_to_us_rx,
+        us_to_peer_tx,
+        Mode::Lines,
+    ))
+}
+
 #[async_trait]
 impl McpTransport for MockMcpTransport {
     async fn connect(&self, _spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
-        Ok(McpRawConnection {
-            connection_id: McpConnectionId::new(),
-        })
+        let connection_id = McpConnectionId::new();
+        // Stash a paired connection so `RawConnectionProvider::connection_for`
+        // can hand the registry a live `Arc<jsonrpc::Connection>`.
+        self.conns
+            .lock()
+            .unwrap()
+            .insert(connection_id, paired_connection());
+        Ok(McpRawConnection { connection_id })
     }
 
     async fn initialize(
@@ -127,11 +153,18 @@ impl McpTransport for MockMcpTransport {
         Err(McpError::Internal("not implemented".into()))
     }
 
-    async fn disconnect(&self, _conn_id: McpConnectionId) -> Result<(), McpError> {
+    async fn disconnect(&self, conn_id: McpConnectionId) -> Result<(), McpError> {
+        self.conns.lock().unwrap().remove(&conn_id);
         Ok(())
     }
 
     fn supported_transports(&self) -> Vec<McpTransportKind> {
         vec![McpTransportKind::Stdio, McpTransportKind::InProcess]
+    }
+}
+
+impl mcp::RawConnectionProvider for MockMcpTransport {
+    fn connection_for(&self, id: McpConnectionId) -> Option<Arc<Connection>> {
+        self.conns.lock().unwrap().get(&id).cloned()
     }
 }

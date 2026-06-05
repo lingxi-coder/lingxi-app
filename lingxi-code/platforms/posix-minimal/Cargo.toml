@@ -8,6 +8,12 @@ license.workspace = true
 [dependencies]
 protocol = { path = "../../protocol" }
 traits = { path = "../../traits" }
+# `mcp` (+ its `jsonrpc` re-export via `RawConnectionProvider`) lets the stub
+# transport satisfy `mcp::RawConnectionProvider` so `engine-desktop` can build
+# the registry with `McpRegistry::with_raw_conn`. The stub owns no live
+# connections, so it always hands back `None`.
+mcp = { path = "../../mcp" }
+jsonrpc = { path = "../../jsonrpc" }
 async-trait.workspace = true
 tokio = { workspace = true, features = ["full"] }
 futures-core = { workspace = true }

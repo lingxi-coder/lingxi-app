@@ -21,6 +21,11 @@ api-client = { path = "../api-client" }
 cost = { path = "../cost" }
 hooks = { path = "../hooks" }
 mcp = { path = "../mcp" }
+# `MockMcpTransport` implements `mcp::RawConnectionProvider`, handing out a
+# paired in-memory `jsonrpc::Connection` so `McpRegistry::connect` can build a
+# live `McpClient` in lifecycle tests.
+jsonrpc = { path = "../jsonrpc" }
+bytes = "1"
 compaction = { path = "../compaction" }
 coordinator = { path = "../coordinator" }
 serde.workspace = true

@@ -1,0 +1,206 @@
+//! In-Loop Compaction Batch 4 — proactive pre-call compaction trigger.
+//!
+//! Verifies that the batched turn loop runs the proactive
+//! snip+micro+autocompact pass BEFORE each model call (TS pre-call pipeline
+//! `query.ts:365-467`):
+//!
+//! - With a compactor wired at a low test threshold and a history already over
+//!   that threshold, running a turn compacts history (boundary marker present),
+//!   the FIRST `messages_create` carries the compacted (not the seeded) history,
+//!   and a `CompactionCompleted` event is emitted.
+//! - With the history under the threshold (or no compactor wired), the trigger
+//!   is a strict NO-OP: history is identical and no `CompactionCompleted` fires.
+
+use compaction::CompactionOrchestrator;
+use orchestrator::test_support::{
+    mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
+};
+use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
+use protocol::{ConversationMessage, MessageId};
+use std::sync::Arc;
+use traits::OutputEvent;
+
+/// Build an orchestrator with a `MockApiClient` (single `end_turn` response)
+/// and an optional compactor at `threshold`. Returns the orch + the api mock so
+/// the test can inspect `captured_msgs()`.
+fn make_orch(
+    threshold: Option<u64>,
+) -> (Arc<ConversationOrchestrator>, Arc<MockApiClient>, Arc<MockOutputStream>) {
+    let api = Arc::new(MockApiClient::new(vec![mock_message_response(
+        vec![api_client::types::ContentBlockApi::Text {
+            text: "done".to_string(),
+        }],
+        Some("end_turn"),
+    )]));
+    let tools = Arc::new(tool_api::registry::ToolRegistry::new());
+    let hooks = noop_hook_executor();
+    let perms = Arc::new(NoOpPermissionGate);
+    let output = Arc::new(MockOutputStream::new());
+    let memory = Arc::new(StaticMemoryProvider::empty());
+    let mut orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        tools,
+        hooks,
+        perms,
+        output.clone(),
+        memory,
+        std::env::temp_dir(),
+    );
+    if let Some(t) = threshold {
+        orch = orch.with_compaction(Arc::new(CompactionOrchestrator::new(t)));
+    }
+    (Arc::new(orch), api, output)
+}
+
+/// Seed `n` filler user messages so the token estimate clears a small threshold.
+async fn seed_history(orch: &ConversationOrchestrator, n: usize) {
+    let session = orch.session();
+    let mut s = session.lock().await;
+    for i in 0..n {
+        s.history.push(ConversationMessage::user(
+            MessageId::new(),
+            format!("turn-{i} body padded with filler text to push token count up beyond autocompact threshold"),
+        ));
+    }
+}
+
+async fn history(orch: &ConversationOrchestrator) -> Vec<ConversationMessage> {
+    let session = orch.session();
+    let s = session.lock().await;
+    s.history.clone()
+}
+
+#[tokio::test]
+async fn proactive_compacts_over_threshold_and_next_call_carries_compacted_history() {
+    // Very low threshold (100 tokens) + a big seeded history => even after
+    // snip's 10-message protected-tail floor the estimate stays over threshold,
+    // so autocompact (not snip alone) fires in the proactive pre-call trigger
+    // before the first model call.
+    let (orch, api, output) = make_orch(Some(100));
+    seed_history(&orch, 60).await;
+    let before = history(&orch).await.len();
+    assert!(before >= 60, "seed should produce a large history");
+
+    orch.run_turn("hello").await.expect("turn ok");
+
+    // History after the turn = the compacted summary set + the `[Compacted N
+    // → M]` boundary marker + the user prompt + the assistant reply. The key
+    // proactive assertion: a System boundary marker is present and the total is
+    // far smaller than the seeded 60+.
+    let after = history(&orch).await;
+    let boundary = after.iter().find_map(|m| match m {
+        ConversationMessage::System { content, .. } if content.starts_with("[Compacted ") => {
+            Some(content.clone())
+        }
+        _ => None,
+    });
+    assert!(
+        boundary.is_some(),
+        "post-compact boundary marker must be present; history = {after:#?}"
+    );
+    assert!(
+        after.len() < before,
+        "compacted history ({}) must be smaller than the seeded history ({before})",
+        after.len()
+    );
+
+    // The FIRST (and only) messages_create must have carried the COMPACTED
+    // history, not the seeded 60+ messages. The proactive trigger ran before
+    // the snapshot, so the captured msgs are short.
+    let calls = api.captured_msgs().await;
+    assert_eq!(calls.len(), 1, "exactly one batched API call");
+    assert!(
+        calls[0].len() < before,
+        "the model call must carry the compacted history ({} msgs), not the seeded {before}",
+        calls[0].len()
+    );
+    // The compacted call must contain the boundary marker (it was applied to
+    // session.history before the snapshot).
+    let call_has_boundary = calls[0].iter().any(|m| {
+        matches!(m, ConversationMessage::System { content, .. } if content.starts_with("[Compacted "))
+    });
+    assert!(
+        call_has_boundary,
+        "the model call's messages must include the compaction boundary marker"
+    );
+
+    // CompactionCompleted must have been emitted.
+    let events = output.snapshot().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, OutputEvent::CompactionCompleted { .. })),
+        "CompactionCompleted event must be emitted; events = {events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn under_threshold_is_strict_noop() {
+    // High threshold (10M tokens) => the small seeded history is well under it,
+    // so the proactive trigger must be a strict no-op: history unchanged (apart
+    // from the turn's own user+assistant append) and NO CompactionCompleted.
+    let (orch, _api, output) = make_orch(Some(10_000_000));
+    seed_history(&orch, 3).await;
+    let before = history(&orch).await;
+
+    orch.run_turn("hello").await.expect("turn ok");
+
+    let after = history(&orch).await;
+    // No boundary marker anywhere.
+    assert!(
+        !after.iter().any(|m| matches!(
+            m,
+            ConversationMessage::System { content, .. } if content.starts_with("[Compacted ")
+        )),
+        "no compaction boundary marker may appear under threshold"
+    );
+    // The seeded prefix is preserved verbatim (proactive trigger did not touch
+    // it); the turn only appended the user prompt + assistant reply on top.
+    assert_eq!(
+        &after[..before.len()],
+        &before[..],
+        "the seeded history prefix must be untouched under threshold"
+    );
+
+    let events = output.snapshot().await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, OutputEvent::CompactionCompleted { .. })),
+        "no CompactionCompleted may fire under threshold"
+    );
+}
+
+#[tokio::test]
+async fn no_compactor_wired_is_strict_noop() {
+    // No compactor at all => proactive trigger is a strict no-op even with a
+    // large history.
+    let (orch, _api, output) = make_orch(None);
+    seed_history(&orch, 60).await;
+    let before = history(&orch).await;
+
+    orch.run_turn("hello").await.expect("turn ok");
+
+    let after = history(&orch).await;
+    assert!(
+        !after.iter().any(|m| matches!(
+            m,
+            ConversationMessage::System { content, .. } if content.starts_with("[Compacted ")
+        )),
+        "no boundary marker when no compactor is wired"
+    );
+    assert_eq!(
+        &after[..before.len()],
+        &before[..],
+        "seeded history prefix untouched when no compactor is wired"
+    );
+    let events = output.snapshot().await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, OutputEvent::CompactionCompleted { .. })),
+        "no CompactionCompleted when no compactor is wired"
+    );
+}

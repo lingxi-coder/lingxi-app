@@ -194,6 +194,17 @@ pub struct ConversationOrchestrator {
     /// no-op semantics. The CLI binary (M6-08 init.rs) always populates
     /// this. (M6-08)
     pub(crate) compaction: Option<Arc<compaction::CompactionOrchestrator>>,
+    /// Per-conversation autocompact circuit-breaker tracking (In-Loop
+    /// Compaction Batch 4). Threaded into
+    /// [`compaction::CompactionOrchestrator::process_iteration_tracked`] by
+    /// the proactive pre-call trigger (`maybe_compact_before_call`) and the
+    /// reactive 413 fallback so the consecutive-failure circuit breaker
+    /// (`autoCompact.ts:260-265`) survives across turns. Mirrors the
+    /// `autoCompactTracking` object TS threads through `autoCompactIfNeeded`
+    /// (`autoCompact.ts:241-351`). A `tokio::sync::Mutex` because the trigger
+    /// fires inside `async` turn drivers; uncontended in practice (only the
+    /// in-flight turn touches it). Default = zero consecutive failures.
+    pub(crate) compaction_tracking: Mutex<compaction::AutoCompactTrackingState>,
     /// Read-file-state cache backing `/files` (TS `context.readFileState`).
     /// The dispatch loop (`turn_loop::dispatch_tool_uses`) inserts the
     /// absolutized `file_path` of every successful
@@ -272,6 +283,7 @@ impl ConversationOrchestrator {
             hook_registry: None,
             agent_catalog: None,
             compaction: None,
+            compaction_tracking: Mutex::new(compaction::AutoCompactTrackingState::default()),
             read_file_state: Arc::new(Mutex::new(Vec::new())),
             read_state_map: tool_api::read_file_state::new_read_file_state_map(),
         }
@@ -442,6 +454,38 @@ impl ConversationOrchestrator {
                 .map_err(|e| traits::HandleError::ActionFailed(format!("compaction failed: {e}")))?,
         };
 
+        // Apply the post-compact transition (boundary marker + history swap +
+        // CompactionCompleted emit) via the shared helper reused by the
+        // proactive trigger (Batch 4) and the reactive 413 fallback (Batch 5).
+        // `bytes_before` was computed from the same `history_before` snapshot.
+        Ok(self
+            .apply_post_compact(result, messages_before, bytes_before)
+            .await)
+    }
+
+    /// Apply a completed compaction pass to the live session: append the
+    /// `[Compacted N → M messages]` boundary marker, swap `session.history`
+    /// under the lock, persist the marker to the optional JSONL writer, and
+    /// emit [`traits::OutputStream::emit_compaction_completed`].
+    ///
+    /// Factored out of [`Self::force_compact_with_cancel`] (Batch 4) so the
+    /// manual `/compact` path, the proactive pre-call trigger
+    /// ([`crate::turn_loop::maybe_compact_before_call`] via
+    /// [`Self::maybe_compact_before_call`]), and the reactive 413 fallback
+    /// (Batch 5) all replace history identically. Mirrors TS
+    /// `buildPostCompactMessages` + the `CompactionCompleted` yield
+    /// (`query.ts:528-534`).
+    ///
+    /// `messages_before` / `bytes_before` are computed by the caller from the
+    /// pre-compaction snapshot (the same snapshot fed to the compactor); the
+    /// helper does NOT re-read history before swapping because the caller has
+    /// not mutated it between snapshot and apply.
+    pub(crate) async fn apply_post_compact(
+        &self,
+        result: compaction::IterationCompactionResult,
+        messages_before: u32,
+        bytes_before: u64,
+    ) -> traits::CompactionSummary {
         let mut history_after = result.messages;
         // Append the boundary marker so the TUI scrollback and the next
         // turn's system-prompt assembly see the compaction transition.
@@ -450,7 +494,7 @@ impl ConversationOrchestrator {
             id: MessageId::new(),
             content: format!("[Compacted {messages_before} → {n_after_summary} messages]"),
         };
-        history_after.push(marker);
+        history_after.push(marker.clone());
 
         let messages_after = u32::try_from(history_after.len()).unwrap_or(u32::MAX);
         let bytes_after: u64 = history_after.iter().map(protocol::text_byte_size).sum();
@@ -462,16 +506,117 @@ impl ConversationOrchestrator {
             s.history = history_after;
         }
 
+        // Persist the boundary marker to the optional JSONL writer so a
+        // `--resume` of this session sees the compaction transition (the
+        // summary user message(s) inside `result.messages` are the compactor's
+        // output; the marker is the orchestrator-side boundary). Best-effort —
+        // a write failure never fails the turn.
+        self.persist_message_to_jsonl(&marker).await;
+
         // Best-effort emit so the TUI hears about it.
         self.output
             .emit_compaction_completed(messages_before, messages_after, bytes_saved)
             .await;
 
-        Ok(traits::CompactionSummary {
+        traits::CompactionSummary {
             messages_before,
             messages_after,
             bytes_saved,
-        })
+        }
+    }
+
+    /// Proactive pre-call compaction trigger (In-Loop Compaction Batch 4).
+    ///
+    /// Invoked at the TOP of both the batched
+    /// ([`crate::turn_loop::execute_one_turn_with_recovery_tracked`]) and the
+    /// streaming turn-driver loop bodies, BEFORE the history snapshot that
+    /// feeds the model call — so a proactive compact this turn makes the
+    /// subsequent snapshot read the NEW, compacted history. 1:1 with the TS
+    /// pre-call pipeline (`query.ts:365-467`, `autoCompactIfNeeded` contract at
+    /// `autoCompact.ts:241-351`).
+    ///
+    /// Behavior:
+    /// - **No compactor wired** (`compaction == None`): strict NO-OP — history
+    ///   untouched, no event. Keeps the locked turn-loop fixtures behaviour-
+    ///   neutral until the CLI wires a real compactor (Batch 6).
+    /// - **Under threshold**: strict NO-OP. We gate on
+    ///   [`compaction::should_auto_compact`] against the snapshot estimate
+    ///   BEFORE calling the orchestrator so that snip/microcompact do not
+    ///   silently rewrite history below threshold (the proactive trigger is
+    ///   an autocompact gate, not an unconditional snip pass).
+    /// - **Over threshold**: run `process_iteration_tracked` threading the
+    ///   per-conversation [`Self::compaction_tracking`] circuit-breaker state;
+    ///   when `was_compacted`, apply via [`Self::apply_post_compact`] (history
+    ///   swap + boundary marker + JSONL persist + `CompactionCompleted` emit).
+    ///   The updated `consecutive_failures` is persisted back into
+    ///   `compaction_tracking` regardless of success so the breaker survives
+    ///   across turns.
+    ///
+    /// **Recursion note** (parity with the TS `querySource === 'compact'`
+    /// recursion guard rationale, `query.ts:365`): the autocompact summarizer
+    /// runs as a SEPARATE stateless side-query (`ForkedAgentRunner` /
+    /// `SideQueryClient` inside `Autocompactor::compact`) — it does NOT
+    /// re-enter `execute_one_turn`/this trigger — so no explicit guard flag is
+    /// needed here. Documented to make the absence intentional.
+    pub(crate) async fn maybe_compact_before_call(&self) {
+        let Some(compactor) = self.compaction.clone() else {
+            // No compactor wired — strict no-op (history untouched).
+            return;
+        };
+
+        // Snapshot history + estimate tokens WITHOUT holding the lock across
+        // the (possibly networked) compaction call.
+        let snapshot = {
+            let s = self.session.lock().await;
+            s.history.clone()
+        };
+        let estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
+
+        // Threshold gate: under threshold ⇒ strict no-op. `snip_freed = 0`
+        // because we have done no snip work yet at the call site.
+        if !compaction::should_auto_compact(estimate, 0, compactor.autocompact_threshold) {
+            return;
+        }
+
+        let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
+        let bytes_before: u64 = snapshot.iter().map(protocol::text_byte_size).sum();
+
+        // Run the orchestrator pass under the per-conversation tracking lock so
+        // the circuit-breaker state is read + written atomically for this turn.
+        let mut tracking = self.compaction_tracking.lock().await;
+        let result = match compactor
+            .process_iteration_tracked(snapshot, 0, &mut tracking)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Autocompact failed: `tracking.consecutive_failures` has
+                // already been incremented in-place by the orchestrator and is
+                // retained (the lock guard writes it back on drop). History is
+                // left untouched — proactive compaction is best-effort and must
+                // never fail the turn (TS `autoCompactIfNeeded` swallows the
+                // error and proceeds with the un-compacted history).
+                tracing::warn!(error = %e, "proactive autocompact failed; continuing un-compacted");
+                return;
+            }
+        };
+
+        if !result.was_compacted {
+            // Snip/micro may have fired but autocompact did not (circuit
+            // breaker tripped, or the post-snip estimate fell under threshold).
+            // Keep history untouched so the proactive trigger stays a strict
+            // no-op whenever autocompact itself did not run — matching the
+            // manual-path contract that only the autocompact transition emits a
+            // boundary marker.
+            return;
+        }
+
+        // Drop the tracking guard before the apply so the history-swap lock and
+        // the tracking lock are never both held (avoid lock-ordering surprises).
+        drop(tracking);
+
+        self.apply_post_compact(result, messages_before, bytes_before)
+            .await;
     }
 
     /// Read the current cost state from the wired tracker, if any.
@@ -934,6 +1079,23 @@ impl ConversationOrchestrator {
                 });
             }
             turn_count = turn_count.saturating_add(1);
+
+            // In-Loop Compaction Batch 4 (streaming twin): proactively
+            // snip+micro+autocompact BEFORE snapshotting history for the
+            // stream, so a long conversation self-compacts mid-turn. A strict
+            // no-op when no compactor is wired or the history is under
+            // threshold, so the locked streaming fixtures are unaffected. After
+            // a proactive compact the snapshot below reads the NEW history.
+            //
+            // Batch 5 streaming-PTL DIVERGENCE: the reactive 413/prompt-too-long
+            // recovery loop is applied to the BATCHED path only. On the
+            // streaming path a 413 surfaces as a stream error through
+            // `OrchestratorError::Streaming`; threading `ApiError::PromptTooLong`
+            // out of the SSE plumbing cleanly is deferred (the TS B5 test plan
+            // targets the batched `messages_create`). The proactive B4 trigger
+            // above still shrinks the prompt before the call, which is the
+            // common case; the reactive tail is a documented close divergence.
+            self.maybe_compact_before_call().await;
 
             // 2. Open the stream for this turn.
             let (snapshot, model) = {

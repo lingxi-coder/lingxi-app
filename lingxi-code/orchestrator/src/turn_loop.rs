@@ -3,7 +3,8 @@
 use crate::conversation::ConversationOrchestrator;
 use crate::error::OrchestratorError;
 use crate::test_support::PermissionDecision;
-use api_client::types::ContentBlockApi;
+use api_client::types::{ContentBlockApi, MessageResponse};
+use api_client::ApiError;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use hooks::response::HookDecision;
@@ -155,6 +156,15 @@ pub(crate) const MAX_OUTPUT_TOKENS_RECOVERY_NUDGE: &str = concat!(
     "Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
 );
 
+/// Byte-exact user-facing message surfaced when the prompt is too long and the
+/// reactive 413 recovery (Batch 5) is exhausted. 1:1 with claude-code
+/// `errors.ts` `PROMPT_TOO_LONG_ERROR_MESSAGE = 'Prompt is too long'`.
+///
+/// Re-exported from the api-client crate (which owns the prompt-too-long
+/// classification + this const) so the model-facing string has a single source
+/// of truth and the two cannot drift.
+pub(crate) use api_client::PROMPT_TOO_LONG_ERROR_MESSAGE;
+
 /// Per-conversation recovery bookkeeping carried by the turn drivers in
 /// `conversation.rs` and threaded `&mut` into [`execute_one_turn_with_recovery`].
 ///
@@ -243,6 +253,14 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     system: Option<&str>,
     recovery: Option<&mut RecoveryState>,
 ) -> Result<(TurnStepOutcome, u64), OrchestratorError> {
+    // In-Loop Compaction Batch 4: proactively snip+micro+autocompact BEFORE
+    // snapshotting history for the model call, so a long conversation
+    // self-compacts mid-turn (TS pre-call pipeline `query.ts:365-467`). A strict
+    // no-op when no compactor is wired or the history is under threshold, so the
+    // locked turn-loop fixtures are unaffected. After a proactive compact, the
+    // snapshot below reads the NEW, compacted history.
+    orch.maybe_compact_before_call().await;
+
     // Snapshot the current session history for the API call.
     let (history_snapshot, model) = {
         let s = orch.session.lock().await;
@@ -250,12 +268,28 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     };
 
     // 1. Call the API. Advertise the registry's wire tool definitions
-    //    (same set + serialization as the streaming path).
+    //    (same set + serialization as the streaming path). Batch 5: the call is
+    //    wrapped in the blocking-limit preempt + 413/prompt-too-long reactive
+    //    recovery loop. When recovery is exhausted the helper returns
+    //    `PtlCallOutcome::PromptTooLong`, and we end the turn with a byte-exact
+    //    `PROMPT_TOO_LONG_ERROR_MESSAGE` assistant message instead of bubbling a
+    //    hard error.
     let tools = orch.build_wire_tools().await;
-    let response = orch
-        .api
-        .messages_create(&model, system, history_snapshot, tools)
-        .await?;
+    let response = match call_api_with_ptl_recovery(orch, system, &model, history_snapshot, tools)
+        .await?
+    {
+        PtlCallOutcome::Response(resp) => resp,
+        PtlCallOutcome::PromptTooLong => {
+            let assistant_id = surface_prompt_too_long(orch).await;
+            return Ok((
+                TurnStepOutcome::Ended {
+                    final_message_id: assistant_id,
+                    stop_reason: "prompt_too_long".to_string(),
+                },
+                0,
+            ));
+        }
+    };
 
     // A3: this call's output-token count, returned to the budget loop so it can
     // accumulate `global_turn_tokens` (TS `getTurnOutputTokens()`).
@@ -356,6 +390,179 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         _ => TurnStepOutcome::Continue,
     };
     Ok((outcome, output_tokens))
+}
+
+/// Outcome of [`call_api_with_ptl_recovery`]: either a successful
+/// `MessageResponse`, or a signal that the prompt-too-long reactive recovery
+/// (Batch 5) was exhausted and the turn should end with the byte-exact
+/// [`PROMPT_TOO_LONG_ERROR_MESSAGE`].
+enum PtlCallOutcome {
+    /// The API call (or a retry after truncation/compaction) succeeded.
+    Response(Box<MessageResponse>),
+    /// The blocking-limit preempt fired, or the PTL retry budget +
+    /// reactive-compact fallback were all exhausted. End the turn.
+    PromptTooLong,
+}
+
+/// Wrap the batched `messages_create` with the 413 / prompt-too-long reactive
+/// recovery loop (In-Loop Compaction Batch 5, BATCHED path only).
+///
+/// TS refs: `query.ts:628-648` (blocking-limit preempt),
+/// `compact.ts:227-291` (`truncateHeadForPTLRetry`, `MAX_PTL_RETRIES`),
+/// `compact.ts:450-491` (the PTL retry loop), `query.ts:1070-1183` (the
+/// reactive recovery after 413 — feature-gated, treated as fallback semantics).
+///
+/// Flow:
+/// 1. **Blocking-limit preempt**: estimate tokens on the pre-call history; if
+///    the prompt is already at the hard blocking limit
+///    ([`compaction::calculate_token_warning_state`]`.is_at_blocking_limit`,
+///    i.e. `effective_window − MANUAL_COMPACT_BUFFER_TOKENS`), surface
+///    `PromptTooLong` WITHOUT calling the API.
+/// 2. Call the API. On `Ok` → `Response`. On a non-PTL `Err` → bubble.
+/// 3. On `Err(ApiError::PromptTooLong { token_gap, .. })` run a PTL retry loop
+///    (≤ [`compaction::MAX_PTL_RETRIES`]):
+///    [`compaction::ptl_retry::truncate_head_for_ptl_retry`]`(history, gap)` →
+///    if `Some`, swap `session.history`, retry; if `None`, break (nothing safe
+///    to drop).
+/// 4. On loop exhaustion, attempt ONE reactive full compact
+///    (`process_iteration_tracked` + [`ConversationOrchestrator::apply_post_compact`])
+///    and retry once more. If that STILL returns `PromptTooLong`, return
+///    `PromptTooLong` (the caller ends the turn).
+///
+/// DIVERGENCE (documented in SPECS §"Non-byte-faithful divergences" #1): TS's
+/// `reactiveCompact.tryReactiveCompact` / `contextCollapse.recoverFromOverflow`
+/// multi-stage drain is absent from this checkout, so the fallback is the
+/// simpler "PTL-truncate ×N → one full compact → error" tail.
+///
+/// `betas` for the blocking-limit window math is `&[]` (conservative): the
+/// orchestrator does not currently thread the per-request beta set down to this
+/// call site, and the default window is the parity 200k. Documented divergence,
+/// not a frozen-surface change.
+async fn call_api_with_ptl_recovery(
+    orch: &ConversationOrchestrator,
+    system: Option<&str>,
+    model: &str,
+    history_snapshot: Vec<ConversationMessage>,
+    tools: Vec<serde_json::Value>,
+) -> Result<PtlCallOutcome, OrchestratorError> {
+    // (1) Blocking-limit preempt. `is_at_blocking_limit` is
+    // `token_usage >= effective_window − MANUAL_COMPACT_BUFFER_TOKENS`
+    // (`autoCompact.ts` `calculateTokenWarningState`). `auto_compact_enabled`
+    // is `true` to mirror the always-on default of this port (no GrowthBook).
+    let estimate = compaction::grouping::estimate_tokens_for_range(&history_snapshot);
+    let warning = compaction::calculate_token_warning_state(estimate, model, &[], true);
+    if warning.is_at_blocking_limit {
+        tracing::warn!(
+            estimate,
+            model,
+            "prompt at blocking limit — preempting before API call"
+        );
+        return Ok(PtlCallOutcome::PromptTooLong);
+    }
+
+    // (2) Initial call.
+    let first = orch
+        .api
+        .messages_create(model, system, history_snapshot, tools.clone())
+        .await;
+    let mut token_gap = match first {
+        Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
+        Err(ApiError::PromptTooLong { token_gap, .. }) => token_gap,
+        Err(other) => return Err(other.into()),
+    };
+
+    // (3) PTL retry loop: drop oldest API-round groups and retry, ≤ MAX retries.
+    for _attempt in 0..compaction::MAX_PTL_RETRIES {
+        // Snapshot the current (possibly already-truncated) history.
+        let history = {
+            let s = orch.session.lock().await;
+            s.history.clone()
+        };
+        let Some(truncated) = compaction::ptl_retry::truncate_head_for_ptl_retry(history, token_gap)
+        else {
+            // Nothing safe to drop (< 2 groups). Stop truncating and fall
+            // through to the reactive-compact fallback.
+            break;
+        };
+        {
+            let mut s = orch.session.lock().await;
+            s.history.clone_from(&truncated);
+        }
+        match orch
+            .api
+            .messages_create(model, system, truncated, tools.clone())
+            .await
+        {
+            Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
+            Err(ApiError::PromptTooLong { token_gap: gap, .. }) => {
+                token_gap = gap;
+            }
+            Err(other) => return Err(other.into()),
+        }
+    }
+
+    // (4) Reactive-compact fallback: one full compact, then retry once more.
+    if let Some(compactor) = orch.compaction.clone() {
+        let snapshot = {
+            let s = orch.session.lock().await;
+            s.history.clone()
+        };
+        let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
+        let bytes_before: u64 = snapshot.iter().map(protocol::text_byte_size).sum();
+        let compact_result = {
+            let mut tracking = orch.compaction_tracking.lock().await;
+            compactor
+                .process_iteration_tracked(snapshot, 0, &mut tracking)
+                .await
+        };
+        if let Ok(result) = compact_result {
+            if result.was_compacted {
+                // Apply the post-compact transition (history swap + boundary
+                // marker + CompactionCompleted) via the shared helper.
+                orch.apply_post_compact(result, messages_before, bytes_before)
+                    .await;
+                let history = {
+                    let s = orch.session.lock().await;
+                    s.history.clone()
+                };
+                match orch
+                    .api
+                    .messages_create(model, system, history, tools)
+                    .await
+                {
+                    Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
+                    Err(ApiError::PromptTooLong { .. }) => {}
+                    Err(other) => return Err(other.into()),
+                }
+            }
+        }
+    }
+
+    // Still over the limit after truncation + one reactive compact: surface the
+    // byte-exact prompt-too-long message and end the turn (no hard error).
+    Ok(PtlCallOutcome::PromptTooLong)
+}
+
+/// Append the byte-exact [`PROMPT_TOO_LONG_ERROR_MESSAGE`] as an assistant text
+/// message to history (and emit it to the output stream), returning its id so
+/// the caller can end the turn. Mirrors the TS path where the prompt-too-long
+/// error is surfaced as the assistant turn before the loop terminates.
+async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> MessageId {
+    let assistant_id = MessageId::new();
+    let assistant_msg = ConversationMessage::Assistant {
+        id: assistant_id,
+        content: vec![ContentBlock::Text {
+            text: PROMPT_TOO_LONG_ERROR_MESSAGE.to_string(),
+        }],
+        stop_reason: Some("prompt_too_long".to_string()),
+    };
+    {
+        let mut s = orch.session.lock().await;
+        s.history.push(assistant_msg.clone());
+    }
+    orch.persist_message_to_jsonl(&assistant_msg).await;
+    orch.output.emit_text(PROMPT_TOO_LONG_ERROR_MESSAGE).await;
+    assistant_id
 }
 
 /// A1 `max_tokens` recovery decision (TS `query.ts:1223-1255`).

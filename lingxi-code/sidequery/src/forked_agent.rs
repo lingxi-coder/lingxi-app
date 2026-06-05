@@ -50,6 +50,18 @@ const DEFAULT_FORK_MAX_TOKENS: u32 = 20_000;
 /// M1.14 only requires `Send + Sync` so the runner can hold an `Arc`.
 pub trait SubagentSlotProvider: Send + Sync {}
 
+/// A [`SubagentSlotProvider`] that never allocates a slot.
+///
+/// The single-turn side-query path (`with_side_query_client` → [`ForkedAgentRunner::run`])
+/// does not touch `pool` — slot allocation is the future multi-turn runner's
+/// job — so a composition root that wires the forked autocompact summarizer
+/// (In-Loop Compaction Batch 6) can pass this no-op provider. Replace it with
+/// the real `agent::StateMachinePool` once the multi-turn fork path lands.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopSubagentSlotProvider;
+
+impl SubagentSlotProvider for NoopSubagentSlotProvider {}
+
 /// Coarse purpose tag for a forked agent. Mirrors [`QuerySource`] for the
 /// subset of purposes that legitimately fork (full loops), and is carried
 /// inside [`ForkedAgentRequest`] for log/telemetry rendering.

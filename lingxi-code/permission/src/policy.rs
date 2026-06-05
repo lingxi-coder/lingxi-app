@@ -20,6 +20,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+/// Base commands a Bash invocation may auto-allow in `AcceptEdits` mode — 1:1
+/// with claude-code `ACCEPT_EDITS_ALLOWED_COMMANDS` (`BashTool/modeValidation.ts:7-15`).
+/// `sed` is included here but is FURTHER gated by the sed auto-allow verdict
+/// (`sedValidation.ts`): it auto-allows only when [`crate::sed_validation::SedVerdict::Safe`].
+const ACCEPT_EDITS_ALLOWED_COMMANDS: [&str; 7] =
+    ["mkdir", "touch", "rm", "rmdir", "mv", "cp", "sed"];
+
 /// Rule sources in DESCENDING priority (highest → lowest), matching D1.
 /// `authorize` walks every behavior bucket in this order.
 const SOURCES_BY_PRIORITY: [PermissionRuleSource; 8] = [
@@ -285,6 +292,30 @@ impl PermissionPolicy {
                 }
             }
         }
+        // 3a-bash. AcceptEdits bash auto-allow (claude-code `checkPermissionMode`
+        //     + `ACCEPT_EDITS_ALLOWED_COMMANDS`, `BashTool/modeValidation.ts`,
+        //     wired at `bashPermissions.ts:1142-1151`: sed-constraints THEN mode
+        //     auto-allow). Sibling of the editor-tool branch above: in `AcceptEdits`
+        //     mode a SHELL command auto-allows with a `mode` reason when EVERY
+        //     subcommand's base command is in [`ACCEPT_EDITS_ALLOWED_COMMANDS`] —
+        //     EXCEPT `sed`, which auto-allows only when its
+        //     [`crate::sed_validation::sed_auto_allow_verdict`] is `Safe` (a
+        //     dangerous or out-of-workdir in-place sed falls through to ask, 1:1
+        //     with the TS `checkSedConstraints` step running BEFORE the mode
+        //     auto-allow). ORDER: this runs AFTER the dangerous-removal (step 2)
+        //     and path-constraint (step 2b) guards — which already returned an ask
+        //     for `rm -rf /` / out-of-workdir redirects+cd — so it NEVER bypasses
+        //     them. Requires [`Self::roots`] for the sed containment check (the
+        //     working-dir set is derived from `roots.cwd` + additional dirs).
+        if self.mode == PermissionMode::AcceptEdits && shell_command::is_shell_tool(tool_name) {
+            if let Some(roots) = self.roots.as_ref() {
+                if let Some(command) = shell_command::command_from_input(input) {
+                    if let Some(result) = self.accept_edits_bash_auto_allow(command, roots) {
+                        return result;
+                    }
+                }
+            }
+        }
         // 3b. Plan-mode mutation backstop (claude-code `prepareContextForPlanMode`,
         //     `permissionSetup.ts:1462-1500`). In `Plan` mode, the primary
         //     enforcement is that mutating tools are NOT advertised on the wire
@@ -522,6 +553,84 @@ impl PermissionPolicy {
         } else {
             None
         }
+    }
+
+    /// `AcceptEdits` bash auto-allow decision (claude-code `checkPermissionMode`
+    /// + `ACCEPT_EDITS_ALLOWED_COMMANDS`). Returns:
+    /// - `Some(Allow(mode=AcceptEdits))` when EVERY subcommand's base command is
+    ///   in [`ACCEPT_EDITS_ALLOWED_COMMANDS`] AND every `sed` subcommand is
+    ///   [`crate::sed_validation::SedVerdict::Safe`];
+    /// - `Some(Ask(Other))` when a `sed` subcommand is otherwise on the
+    ///   allowlist BUT its verdict is `Unsafe` (the byte-locked sed ask, 1:1 with
+    ///   TS `checkSedConstraints` returning `behavior: 'ask'` ahead of the mode
+    ///   auto-allow — a dangerous or out-of-workdir in-place sed prompts even in
+    ///   `acceptEdits`);
+    /// - `None` when some subcommand's base command is NOT on the allowlist (the
+    ///   command falls through to the generic mode fallback / ask).
+    ///
+    /// `roots` supplies the working-dir set for the sed containment check
+    /// (cwd + [`Self::additional_working_dirs`]).
+    fn accept_edits_bash_auto_allow(
+        &self,
+        command: &str,
+        roots: &FsRoots,
+    ) -> Option<PermissionResult> {
+        let subs = shell_command::split_command(command);
+        if subs.is_empty() {
+            return None;
+        }
+        // FIRST pass mirrors the TS step ordering (sed-constraints BEFORE the
+        // mode auto-allow): an UNSAFE sed subcommand asks immediately, even when
+        // another subcommand would otherwise disqualify the whole command from
+        // auto-allow. (TS `checkSedConstraints` runs over the whole command and
+        // returns its ask before `checkPermissionMode` is consulted at all.)
+        for sub in &subs {
+            if base_command(sub) == Some("sed") {
+                if let crate::sed_validation::SedVerdict::Unsafe { message, reason } =
+                    crate::sed_validation::sed_auto_allow_verdict(
+                        sub,
+                        roots,
+                        &self.additional_working_dirs,
+                    )
+                {
+                    return Some(ask_sed_constraint(message, reason));
+                }
+            }
+        }
+        // SECOND: every subcommand's base command must be on the allowlist (sed
+        // already verified Safe above). Any non-allowlisted base → fall through.
+        let all_allowed = subs.iter().all(|sub| {
+            base_command(sub).is_some_and(|base| ACCEPT_EDITS_ALLOWED_COMMANDS.contains(&base))
+        });
+        if all_allowed {
+            Some(allow_with_mode(PermissionMode::AcceptEdits))
+        } else {
+            None
+        }
+    }
+}
+
+/// Base (first) command word of a subcommand — TS `trimmedCmd.split(/\s+/)[0]`.
+/// Returns `None` for an empty subcommand.
+fn base_command(sub: &str) -> Option<&str> {
+    sub.split_whitespace().next()
+}
+
+/// Byte-locked sed-constraint ask: an `acceptEdits` `sed` subcommand whose
+/// auto-allow verdict is `Unsafe` (claude-code `checkSedConstraints` returning
+/// `behavior: 'ask'`, `sedValidation.ts:665-675`). Tagged
+/// [`PermissionDecisionReason::Other`] (TS `decisionReason.type: 'other'`),
+/// carrying the byte-locked message + reason.
+fn ask_sed_constraint(message: String, reason: String) -> PermissionResult {
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::Other { reason },
+        prompt: PermissionPrompt {
+            title: "Allow Bash?".to_string(),
+            message,
+            options: vec!["Allow once".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
     }
 }
 
@@ -1624,13 +1733,20 @@ mod tests {
 
     #[test]
     fn accept_edits_does_not_auto_allow_non_editors() {
-        // (c) AcceptEdits must NOT auto-allow Bash / Read / other non-editor
-        // tools — those fall through to the AcceptEdits-mode ask.
+        // (c) AcceptEdits must NOT auto-allow Read / Glob (non-editor file tools)
+        // — those fall through to the AcceptEdits-mode ask. A Bash command whose
+        // base command is NOT on `ACCEPT_EDITS_ALLOWED_COMMANDS` (`curl`) likewise
+        // falls through (the bash auto-allow arm declines and the mode ask fires).
         let p = accept_edits_policy(r#"{ "permissions": {} }"#);
-        // Bash: a non-file tool, even with a command "inside" cwd.
+        // Bash with a non-allowlisted base command → not auto-allowed → ask.
         assert!(matches!(
-            p.authorize("Bash", &serde_json::json!({ "command": "rm -rf /proj" })),
-            PermissionResult::Ask { .. }
+            p.authorize("Bash", &serde_json::json!({ "command": "curl https://x" })),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
         ));
         // Read: a reader (not an editor) targeting a path inside cwd.
         assert!(matches!(
@@ -1742,6 +1858,154 @@ mod tests {
         assert!(matches!(
             p.authorize("Edit", &edit("/proj/src/x.rs")),
             PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── PERM final: AcceptEdits bash auto-allow (modeValidation + sed guard) ─
+
+    #[test]
+    fn accept_edits_bash_mkdir_inside_cwd_auto_allows() {
+        // AcceptEdits + `mkdir foo` (an ACCEPT_EDITS_ALLOWED_COMMAND) inside cwd
+        // → Allow tagged with AcceptEdits mode.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        match p.authorize("Bash", &bash("mkdir foo")) {
+            PermissionResult::Allow { reason, .. } => assert!(
+                matches!(
+                    reason,
+                    PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::AcceptEdits
+                    }
+                ),
+                "bash auto-allow must be tagged AcceptEdits, got {reason:?}"
+            ),
+            other => panic!("expected Allow(AcceptEdits), got {other:?}"),
+        }
+        // A compound of allowlisted commands is likewise auto-allowed.
+        assert!(matches!(
+            p.authorize("Bash", &bash("mkdir foo && touch foo/bar")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_bash_dangerous_rm_still_asks() {
+        // `rm -rf /` STILL asks — the dangerous-removal guard (step 2) runs BEFORE
+        // the bash auto-allow arm, so the auto-allow never bypasses it.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_bash_redirect_outside_cwd_still_asks() {
+        // `echo x > /etc/y` STILL asks — the path-constraint guard (step 2b) runs
+        // before the bash auto-allow arm. (echo is not even on the allowlist, but
+        // the path-constraint ask is what wins, and it wins regardless.)
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x > /etc/y")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_bash_safe_sed_inside_cwd_auto_allows() {
+        // A safe read-only `sed -n p file` inside cwd → Allow(AcceptEdits).
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        assert!(matches!(
+            p.authorize("Bash", &bash("sed -n p file.txt")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+        // An in-place sed writing inside cwd is also auto-allowed.
+        assert!(matches!(
+            p.authorize("Bash", &bash("sed -i 's/a/b/' ./local.txt")),
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn accept_edits_bash_unsafe_sed_asks() {
+        // `sed -i ... /etc/passwd` writes in-place OUTSIDE cwd → the sed guard
+        // (Part A) returns Unsafe → ask with the byte-locked Other reason.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        match p.authorize("Bash", &bash("sed -i 's/a/b/' /etc/passwd")) {
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert!(
+                    matches!(reason, PermissionDecisionReason::Other { .. }),
+                    "sed ask must use the Other reason, got {reason:?}"
+                );
+                assert_eq!(
+                    prompt.message,
+                    crate::sed_validation::SED_ASK_MESSAGE,
+                    "carries the byte-locked sed ask message"
+                );
+            }
+            other => panic!("expected Ask(Other), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_edits_bash_curl_not_auto_allowed() {
+        // `curl ...` is NOT on ACCEPT_EDITS_ALLOWED_COMMANDS → the bash auto-allow
+        // arm declines → falls through to the AcceptEdits-mode ask.
+        let p = accept_edits_policy(r#"{ "permissions": {} }"#);
+        assert!(matches!(
+            p.authorize("Bash", &bash("curl https://evil.test")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+        // A compound with even ONE non-allowlisted base command is not allowed.
+        assert!(matches!(
+            p.authorize("Bash", &bash("mkdir foo && curl https://x")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::AcceptEdits
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn non_accept_edits_mode_bash_auto_allow_unaffected() {
+        // In a non-AcceptEdits mode the bash auto-allow arm never runs: `mkdir foo`
+        // falls through to the Default-mode ask (no auto-allow).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("mkdir foo")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::Default
+                },
+                ..
+            }
         ));
     }
 }

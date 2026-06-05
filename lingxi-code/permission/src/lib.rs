@@ -24,6 +24,7 @@ pub mod policy_gate;
 pub mod prompting_gate;
 pub mod result;
 pub mod rule;
+pub mod sed_validation;
 pub mod shadow;
 pub mod shell_command;
 pub mod shell_rule_matching;
@@ -66,6 +67,9 @@ pub use result::{
     SandboxOverrideReason,
 };
 pub use rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
+pub use sed_validation::{
+    sed_auto_allow_verdict, SedVerdict, SED_ASK_MESSAGE, SED_ASK_REASON,
+};
 pub use shadow::{
     detect_unreachable_rules, is_shared_setting_source, ShadowType, UnreachableRule,
 };

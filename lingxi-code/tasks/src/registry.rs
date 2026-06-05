@@ -39,6 +39,12 @@ pub struct TaskRegistry {
     fs: Arc<dyn FileSystem>,
     /// Owner of task spool files.
     pub output_manager: Arc<TaskOutputManager>,
+    /// Best-effort seam to fire the `TaskCompleted` hook when a task reaches a
+    /// terminal status. `None` (the default) => strict no-op; the orchestrator
+    /// injects a real firer via [`with_task_completed_firer`](Self::with_task_completed_firer).
+    /// Mirrors the `TeamSpawnSeam` decoupling: the `tasks` leaf cannot reach a
+    /// live hook executor, so it calls through this narrow trait instead.
+    task_completed_firer: hooks::OptionalTaskCompletedFirer,
 }
 
 impl TaskRegistry {
@@ -57,7 +63,21 @@ impl TaskRegistry {
             runtime,
             fs,
             output_manager,
+            task_completed_firer: None,
         }
+    }
+
+    /// Inject the best-effort `TaskCompleted` hook firer. Default-`None`
+    /// builder (the `RemoteTrigger`/seam pattern): existing `new()` callers and
+    /// tests stay no-op; the composition root threads the orchestrator's firer
+    /// here so a terminal status transition fires the `TaskCompleted` hook.
+    #[must_use]
+    pub fn with_task_completed_firer(
+        mut self,
+        firer: Arc<dyn hooks::TaskCompletedFirer>,
+    ) -> Self {
+        self.task_completed_firer = Some(firer);
+        self
     }
 
     /// Register a per-type handler.
@@ -213,20 +233,59 @@ impl TaskRegistry {
         task_id: &str,
         status: TaskStatus,
     ) -> Result<TaskState, TaskError> {
-        let mut map = self.tasks.write().await;
-        let entry = map
-            .get_mut(task_id)
-            .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
-        match entry {
-            TaskState::LocalBash(b) => b.base.status = status,
-            TaskState::LocalAgent(a) => a.base.status = status,
-            TaskState::RemoteAgent(r) => r.base.status = status,
-            TaskState::InProcessTeammate(t) => t.base.status = status,
-            TaskState::LocalWorkflow(w) => w.base.status = status,
-            TaskState::MonitorMcp(m) => m.base.status = status,
-            TaskState::Dream(d) => d.base.status = status,
+        let updated = {
+            let mut map = self.tasks.write().await;
+            let entry = map
+                .get_mut(task_id)
+                .ok_or_else(|| TaskError::NotFound(task_id.to_string()))?;
+            match entry {
+                TaskState::LocalBash(b) => b.base.status = status,
+                TaskState::LocalAgent(a) => a.base.status = status,
+                TaskState::RemoteAgent(r) => r.base.status = status,
+                TaskState::InProcessTeammate(t) => t.base.status = status,
+                TaskState::LocalWorkflow(w) => w.base.status = status,
+                TaskState::MonitorMcp(m) => m.base.status = status,
+                TaskState::Dream(d) => d.base.status = status,
+            }
+            entry.clone()
+            // `map` write-guard drops here — the best-effort hook fire below
+            // runs WITHOUT holding the registry lock so a slow/blocking hook
+            // never stalls other task operations.
+        };
+
+        // Best-effort `TaskCompleted` fire on the terminal transition
+        // (claude-code `executeTaskCompletedHooks`). Only `Completed` / `Failed`
+        // mirror claude-code's fire points (`TaskUpdateTool` status →
+        // `completed`; `stopHooks.ts` for a teammate's in-progress tasks). A
+        // `Killed` transition is terminal but has no claude-code counterpart, so
+        // it does NOT fire. No-op when no firer is registered.
+        if let Some(firer) = &self.task_completed_firer {
+            let status_str = match status {
+                TaskStatus::Completed => Some("completed"),
+                TaskStatus::Failed => Some("failed"),
+                _ => None,
+            };
+            if let Some(status_str) = status_str {
+                let base = updated.base();
+                // Wire payload (`TaskCompletedHookInputSchema`): `task_subject`
+                // and `task_description` both source from the task's
+                // `description` — the M-surface task state carries no distinct
+                // `subject` field. `teammate_name` / `team_name` are not stored
+                // on the task state, so they ride as `None` (documented gap).
+                firer
+                    .fire(hooks::TaskCompletedFire {
+                        task_id: task_id.to_string(),
+                        status: status_str.to_string(),
+                        task_subject: base.description.clone(),
+                        task_description: Some(base.description.clone()),
+                        teammate_name: None,
+                        team_name: None,
+                    })
+                    .await;
+            }
         }
-        Ok(entry.clone())
+
+        Ok(updated)
     }
 
     /// Kill a task, cancelling its background handle if any.
@@ -819,5 +878,171 @@ mod spawn_tests {
             matches!(err, TeamSpawnError::Unsupported(_)),
             "missing teammate handler maps to TeamSpawnError::Unsupported; got {err:?}"
         );
+    }
+
+    // ---- TaskCompleted hook firer seam -------------------------------------
+    //
+    // Mirrors the `subagent_stop` / `stop_hooks` test patterns: a registered
+    // firer receives the byte-faithful fire when a task reaches a terminal
+    // status (completed + failed); a registry with NO firer is a strict no-op.
+
+    /// A fake [`TaskCompletedFirer`] that records every fire it receives.
+    struct RecordingFirer {
+        fires: StdMutex<Vec<hooks::TaskCompletedFire>>,
+    }
+    impl RecordingFirer {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                fires: StdMutex::new(Vec::new()),
+            })
+        }
+        fn recorded(&self) -> Vec<hooks::TaskCompletedFire> {
+            self.fires.lock().unwrap().clone()
+        }
+    }
+    #[async_trait]
+    impl hooks::TaskCompletedFirer for RecordingFirer {
+        async fn fire(&self, fire: hooks::TaskCompletedFire) {
+            self.fires.lock().unwrap().push(fire);
+        }
+    }
+
+    /// A [`TaskCompletedFirer`] whose `fire` itself does nothing observable —
+    /// stand-in for a firer that swallows a failing hook. Proves the registry's
+    /// status transition succeeds regardless of what the firer does.
+    struct SwallowingFirer;
+    #[async_trait]
+    impl hooks::TaskCompletedFirer for SwallowingFirer {
+        async fn fire(&self, _fire: hooks::TaskCompletedFire) {}
+    }
+
+    /// Build a registry with a `RecordingFirer` and seed a single `LocalBash`
+    /// task with a known description, returning the firer + task id.
+    async fn registry_with_firer(
+        description: &str,
+    ) -> (tempfile::TempDir, TaskRegistry, Arc<RecordingFirer>, String) {
+        let dir = tempdir().unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let out_mgr = Arc::new(crate::output_manager::TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
+        let firer = RecordingFirer::new();
+        let registry = TaskRegistry::new(runtime, fs, out_mgr)
+            .with_task_completed_firer(firer.clone());
+        let task_id = registry
+            .create(TaskType::LocalBash, teammate_input(), description.to_string())
+            .await
+            .unwrap();
+        (dir, registry, firer, task_id)
+    }
+
+    #[tokio::test]
+    async fn completed_transition_fires_byte_faithful_payload() {
+        let (_d, registry, firer, task_id) =
+            registry_with_firer("ship the parity port").await;
+
+        let updated = registry
+            .set_status(&task_id, TaskStatus::Completed)
+            .await
+            .unwrap();
+        assert_eq!(updated.base().status, TaskStatus::Completed);
+
+        let recorded = firer.recorded();
+        assert_eq!(recorded.len(), 1, "exactly one TaskCompleted fire: {recorded:?}");
+        let f = &recorded[0];
+        assert_eq!(f.task_id, task_id);
+        assert_eq!(f.status, "completed");
+        // Wire payload (`TaskCompletedHookInputSchema`): subject + description
+        // both source from the task description (no distinct subject field).
+        assert_eq!(f.task_subject, "ship the parity port");
+        assert_eq!(f.task_description.as_deref(), Some("ship the parity port"));
+        // teammate/team are not stored on the M-surface task state => None.
+        assert_eq!(f.teammate_name, None);
+        assert_eq!(f.team_name, None);
+    }
+
+    #[tokio::test]
+    async fn failed_transition_also_fires() {
+        // claude-code also fires `executeTaskCompletedHooks` from `stopHooks.ts`
+        // when a teammate stops with in-progress tasks — the terminal transition
+        // must fire on `Failed`, not just `Completed`.
+        let (_d, registry, firer, task_id) = registry_with_firer("do the thing").await;
+
+        registry
+            .set_status(&task_id, TaskStatus::Failed)
+            .await
+            .unwrap();
+
+        let recorded = firer.recorded();
+        assert_eq!(recorded.len(), 1, "a Failed transition fires TaskCompleted: {recorded:?}");
+        assert_eq!(recorded[0].status, "failed");
+        assert_eq!(recorded[0].task_subject, "do the thing");
+    }
+
+    #[tokio::test]
+    async fn non_terminal_and_killed_transitions_do_not_fire() {
+        let (_d, registry, firer, task_id) = registry_with_firer("x").await;
+
+        // Running is non-terminal => no fire.
+        registry
+            .set_status(&task_id, TaskStatus::Running)
+            .await
+            .unwrap();
+        // Killed is terminal but has no claude-code `executeTaskCompletedHooks`
+        // counterpart => no fire.
+        registry
+            .set_status(&task_id, TaskStatus::Killed)
+            .await
+            .unwrap();
+
+        assert!(
+            firer.recorded().is_empty(),
+            "neither Running nor Killed fires TaskCompleted: {:?}",
+            firer.recorded()
+        );
+    }
+
+    #[tokio::test]
+    async fn no_firer_registered_is_a_noop() {
+        // The default registry holds no firer: a terminal transition must still
+        // succeed and simply not fire anything (the strict no-op contract).
+        let (_d, registry) = make_registry();
+        let task_id = registry
+            .create(TaskType::LocalBash, teammate_input(), "no firer".into())
+            .await
+            .unwrap();
+
+        let updated = registry
+            .set_status(&task_id, TaskStatus::Completed)
+            .await
+            .expect("set_status succeeds with no firer registered");
+        assert_eq!(updated.base().status, TaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn firer_that_swallows_does_not_break_transition() {
+        // Best-effort contract: whatever the firer does, the status transition
+        // succeeds (the firer is responsible for swallowing hook failures).
+        let dir = tempdir().unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let out_mgr = Arc::new(crate::output_manager::TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
+        let registry = TaskRegistry::new(runtime, fs, out_mgr)
+            .with_task_completed_firer(Arc::new(SwallowingFirer));
+        let task_id = registry
+            .create(TaskType::LocalBash, teammate_input(), "swallow".into())
+            .await
+            .unwrap();
+
+        let updated = registry
+            .set_status(&task_id, TaskStatus::Completed)
+            .await
+            .expect("transition succeeds even though the firer is a black hole");
+        assert_eq!(updated.base().status, TaskStatus::Completed);
     }
 }

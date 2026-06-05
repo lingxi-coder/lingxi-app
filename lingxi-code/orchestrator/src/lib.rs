@@ -27,6 +27,7 @@ pub mod provider_adapter;
 pub mod resume;
 pub mod sse;
 pub mod streaming_loop;
+pub mod task_completed_firer;
 pub mod token_budget;
 pub mod turn_loop;
 
@@ -52,6 +53,7 @@ pub use conversation::{
 pub use error::OrchestratorError;
 pub use hook_prompt_runner::ApiClientHookPromptRunner;
 pub use mcp_hook_dispatcher::OrchestratorHookDispatcher;
+pub use task_completed_firer::OrchestratorTaskCompletedFirer;
 pub use prompt::{
     assemble_system_prompt, FileTree, FileTreeEntry, GitStatus, MemoryFile, SystemPromptContext,
 };

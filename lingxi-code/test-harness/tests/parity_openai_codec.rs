@@ -1,4 +1,4 @@
-//! Parity fixtures for the OpenAI codec — exercise the pure encode/decode/SSE
+//! Parity fixtures for the `OpenAI` codec — exercise the pure encode/decode/SSE
 //! functions against representative wire samples so the shapes stay locked.
 
 use providers::openai::decode::decode_chat_response;

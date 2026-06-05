@@ -20,7 +20,9 @@ use async_trait::async_trait;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
-use traits::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
+use traits::{
+    WorktreeChangeSummary, WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager,
+};
 
 /// Maximum allowed total length of a worktree slug.
 ///
@@ -86,6 +88,18 @@ fn parse_prune_v_stdout(stdout: &str, repo_root: &std::path::Path) -> Vec<PathBu
             Some(repo_root.join(".claude").join("worktrees").join(name))
         })
         .collect()
+}
+
+/// Count the non-blank lines of `git status --porcelain` stdout.
+///
+/// Byte-faithful to claude-code's
+/// `count(status.stdout.split('\n'), l => l.trim() !== '')`
+/// (`src/tools/ExitWorktreeTool/ExitWorktreeTool.ts:92`): split on `'\n'`
+/// (NOT `lines()`, which also splits on `\r\n` and drops a trailing newline
+/// differently), then count entries whose trimmed value is non-empty. A
+/// trailing newline yields a final empty entry that is correctly excluded.
+fn count_porcelain_changed_files(stdout: &str) -> usize {
+    stdout.split('\n').filter(|l| !l.trim().is_empty()).count()
 }
 
 /// Flatten a `/`-separated slug into a single filesystem-friendly name.
@@ -271,6 +285,43 @@ impl WorktreeManager for PosixWorktreeManager {
     fn is_supported(&self) -> bool {
         true
     }
+
+    async fn worktree_change_summary(
+        &self,
+        handle: &WorktreeHandle,
+    ) -> Result<Option<WorktreeChangeSummary>, WorktreeError> {
+        // Mirror claude-code `countWorktreeChanges`
+        // (ExitWorktreeTool.ts:79-113): `git status --porcelain` for the
+        // working-tree dirty count. Fail-closed (`Ok(None)`) on a non-zero
+        // exit — a lock file, corrupt index, or non-git path. A spawn failure
+        // (no git binary) is a hard `Git` error, matching the rest of this
+        // impl's error surface.
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&handle.path)
+            .arg("status")
+            .arg("--porcelain")
+            .output()
+            .await
+            .map_err(|e| WorktreeError::Git(e.to_string()))?;
+        if !status.status.success() {
+            return Ok(None);
+        }
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        let changed_files = count_porcelain_changed_files(&stdout);
+
+        // The TS counts ahead-commits via `rev-list --count base..HEAD`, but
+        // that needs `originalHeadCommit` — a baseline the Rust
+        // `WorktreeHandle` does not carry. Without a baseline we cannot prove
+        // a commit count, so we report `commits: 0` and let the working-tree
+        // dirty count stand on its own. (TS fail-closes the whole summary to
+        // null in this case; here the file count is still meaningful for the
+        // exit summary, so we surface it rather than discarding it.)
+        Ok(Some(WorktreeChangeSummary {
+            changed_files,
+            commits: 0,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -455,5 +506,124 @@ Removing worktrees/topic+area: gitdir file points to non-existent location
     #[test]
     fn parse_prune_output_empty_stdout() {
         assert!(parse_prune_v_stdout("", &PathBuf::from("/r")).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod change_summary_tests {
+    use super::*;
+    use tempfile::TempDir;
+    use tokio::process::Command;
+    use traits::WorktreeManager;
+
+    #[test]
+    fn count_porcelain_clean_is_zero() {
+        assert_eq!(count_porcelain_changed_files(""), 0);
+        // Even a lone trailing newline (git's empty-status output) is zero.
+        assert_eq!(count_porcelain_changed_files("\n"), 0);
+    }
+
+    #[test]
+    fn count_porcelain_counts_non_blank_lines() {
+        // Two changed entries with a trailing newline → 2 (the trailing
+        // empty split entry is excluded, matching the TS `trim() !== ''`).
+        let stdout = " M src/a.rs\n?? new.txt\n";
+        assert_eq!(count_porcelain_changed_files(stdout), 2);
+    }
+
+    #[test]
+    fn count_porcelain_ignores_whitespace_only_lines() {
+        let stdout = " M a\n   \n A b\n";
+        assert_eq!(count_porcelain_changed_files(stdout), 2);
+    }
+
+    async fn git(dir: &std::path::Path, args: &[&str]) {
+        let mut c = Command::new("git");
+        c.current_dir(dir);
+        for a in args {
+            c.arg(a);
+        }
+        assert!(
+            c.output().await.unwrap().status.success(),
+            "git {args:?} failed"
+        );
+    }
+
+    /// Deterministic git repo: one commit, then a controllable dirty state.
+    async fn init_repo(dir: &std::path::Path) {
+        git(dir, &["init", "-q", "-b", "main"]).await;
+        git(dir, &["config", "user.email", "ci@test"]).await;
+        git(dir, &["config", "user.name", "ci"]).await;
+        tokio::fs::write(dir.join("seed.txt"), "seed")
+            .await
+            .unwrap();
+        git(dir, &["add", "seed.txt"]).await;
+        git(dir, &["commit", "-qm", "seed"]).await;
+    }
+
+    #[tokio::test]
+    async fn change_summary_clean_repo_is_zero() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().to_path_buf();
+        init_repo(&repo).await;
+        let handle = WorktreeHandle {
+            path: repo.clone(),
+            branch_name: "main".into(),
+        };
+        let summary = PosixWorktreeManager::new(repo)
+            .worktree_change_summary(&handle)
+            .await
+            .unwrap()
+            .expect("git status succeeds → Some");
+        assert_eq!(summary.changed_files, 0);
+        assert_eq!(summary.commits, 0);
+        assert!(!summary.is_dirty());
+    }
+
+    #[tokio::test]
+    async fn change_summary_counts_uncommitted_files() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().to_path_buf();
+        init_repo(&repo).await;
+        // One tracked-file modification + one untracked file = 2 porcelain
+        // lines.
+        tokio::fs::write(repo.join("seed.txt"), "changed")
+            .await
+            .unwrap();
+        tokio::fs::write(repo.join("untracked.txt"), "x")
+            .await
+            .unwrap();
+        let handle = WorktreeHandle {
+            path: repo.clone(),
+            branch_name: "main".into(),
+        };
+        let summary = PosixWorktreeManager::new(repo)
+            .worktree_change_summary(&handle)
+            .await
+            .unwrap()
+            .expect("git status succeeds → Some");
+        assert_eq!(summary.changed_files, 2);
+        assert!(summary.is_dirty());
+        assert_eq!(
+            summary.changed_files_phrase(),
+            Some("2 uncommitted files".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn change_summary_non_git_path_fails_closed() {
+        // A directory that is not a git repo → git status exits non-zero →
+        // Ok(None) (fail-closed "unknown").
+        let tmp = TempDir::new().unwrap();
+        let not_git = tmp.path().to_path_buf();
+        let handle = WorktreeHandle {
+            path: not_git.clone(),
+            branch_name: "x".into(),
+        };
+        let summary = PosixWorktreeManager::new(not_git)
+            .worktree_change_summary(&handle)
+            .await
+            .unwrap();
+        assert_eq!(summary, None, "non-git path must fail-closed to None");
     }
 }

@@ -49,6 +49,104 @@ pub trait WorktreeManager: Send + Sync {
     /// [`WorktreeRequirement::Optional`](crate::worktree::WorktreeError) can
     /// degrade to in-place execution.
     fn is_supported(&self) -> bool;
+
+    /// Summarize the dirty state of the worktree at `handle` — how many
+    /// uncommitted files it has and how many commits sit ahead of its base.
+    ///
+    /// Mirrors claude-code's `countWorktreeChanges`
+    /// (`src/tools/ExitWorktreeTool/ExitWorktreeTool.ts:79-113`): a
+    /// `git status --porcelain` non-blank line count, plus a
+    /// `git rev-list --count base..HEAD` ahead-commit count.
+    ///
+    /// Returns `Ok(None)` to mean "state could not be reliably determined" —
+    /// callers using this as a safety gate before a destructive removal MUST
+    /// treat `None` as *unknown, assume unsafe* (fail-closed). A silent
+    /// `0/0` would let a removal destroy real work. `None` is returned when
+    /// git cannot be queried (lock file, corrupt index, not a git dir) or
+    /// when no baseline commit is available to count ahead-commits.
+    ///
+    /// The default implementation returns `Ok(None)` so platforms without git
+    /// (and the pre-existing impls predating this method) compile unchanged
+    /// and fail-closed by default — only platforms that actually shell out to
+    /// git override it.
+    async fn worktree_change_summary(
+        &self,
+        handle: &WorktreeHandle,
+    ) -> Result<Option<WorktreeChangeSummary>, WorktreeError> {
+        let _ = handle;
+        Ok(None)
+    }
+}
+
+/// Dirty-state summary of a worktree returned by
+/// [`WorktreeManager::worktree_change_summary`].
+///
+/// Byte-faithful to claude-code's `ChangeSummary`
+/// (`src/tools/ExitWorktreeTool/ExitWorktreeTool.ts:62-65`): the uncommitted
+/// working-tree file count plus the number of commits ahead of the base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeChangeSummary {
+    /// Number of uncommitted files (non-blank `git status --porcelain` lines).
+    pub changed_files: usize,
+    /// Number of commits on the worktree branch ahead of its base.
+    pub commits: usize,
+}
+
+impl WorktreeChangeSummary {
+    /// `true` when the worktree carries work a removal would discard.
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        self.changed_files > 0 || self.commits > 0
+    }
+
+    /// The uncommitted-files fragment, e.g. `"3 uncommitted files"` or
+    /// `"1 uncommitted file"`. Byte-faithful to claude-code
+    /// (`ExitWorktreeTool.ts:205-208`). Returns `None` when there are none.
+    #[must_use]
+    pub fn changed_files_phrase(&self) -> Option<String> {
+        if self.changed_files == 0 {
+            return None;
+        }
+        let noun = if self.changed_files == 1 { "file" } else { "files" };
+        Some(format!("{} uncommitted {noun}", self.changed_files))
+    }
+
+    /// The ahead-commits fragment, e.g. `"2 commits on <branch>"` or
+    /// `"1 commit on <branch>"`. Byte-faithful to claude-code
+    /// (`ExitWorktreeTool.ts:210-213`). `branch` falls back to
+    /// `"the worktree branch"` upstream when unknown. Returns `None` when
+    /// there are no ahead-commits.
+    #[must_use]
+    pub fn commits_phrase(&self, branch: &str) -> Option<String> {
+        if self.commits == 0 {
+            return None;
+        }
+        let noun = if self.commits == 1 { "commit" } else { "commits" };
+        Some(format!("{} {noun} on {branch}", self.commits))
+    }
+
+    /// The trailing "Discarded …" note for a removal, byte-faithful to
+    /// claude-code (`ExitWorktreeTool.ts:299-309`): the commits fragment
+    /// comes first, then the uncommitted-files fragment, joined by `" and "`,
+    /// wrapped as `" Discarded <parts>."`. Empty string when nothing to
+    /// discard. The commits fragment here omits the branch (matches TS, which
+    /// uses the bare `${commits} commit(s)` form in the discard note).
+    #[must_use]
+    pub fn discard_note(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if self.commits > 0 {
+            let noun = if self.commits == 1 { "commit" } else { "commits" };
+            parts.push(format!("{} {noun}", self.commits));
+        }
+        if let Some(files) = self.changed_files_phrase() {
+            parts.push(files);
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" Discarded {}.", parts.join(" and "))
+        }
+    }
 }
 
 /// Stable handle to a worktree created by [`WorktreeManager::create_worktree`].
@@ -103,5 +201,77 @@ mod m2_01_tests {
         let s = format!("{e}");
         assert!(s.contains("invalid slug"));
         assert!(s.contains("contains '*'"));
+    }
+
+    #[test]
+    fn change_summary_is_dirty_reflects_either_count() {
+        assert!(!WorktreeChangeSummary { changed_files: 0, commits: 0 }.is_dirty());
+        assert!(WorktreeChangeSummary { changed_files: 1, commits: 0 }.is_dirty());
+        assert!(WorktreeChangeSummary { changed_files: 0, commits: 1 }.is_dirty());
+        assert!(WorktreeChangeSummary { changed_files: 3, commits: 2 }.is_dirty());
+    }
+
+    #[test]
+    fn changed_files_phrase_singular_and_plural() {
+        assert_eq!(
+            WorktreeChangeSummary { changed_files: 0, commits: 0 }.changed_files_phrase(),
+            None
+        );
+        assert_eq!(
+            WorktreeChangeSummary { changed_files: 1, commits: 0 }.changed_files_phrase(),
+            Some("1 uncommitted file".to_string())
+        );
+        assert_eq!(
+            WorktreeChangeSummary { changed_files: 5, commits: 0 }.changed_files_phrase(),
+            Some("5 uncommitted files".to_string())
+        );
+    }
+
+    #[test]
+    fn commits_phrase_singular_and_plural_with_branch() {
+        assert_eq!(
+            WorktreeChangeSummary { changed_files: 0, commits: 0 }
+                .commits_phrase("worktree-feat"),
+            None
+        );
+        assert_eq!(
+            WorktreeChangeSummary { changed_files: 0, commits: 1 }
+                .commits_phrase("worktree-feat"),
+            Some("1 commit on worktree-feat".to_string())
+        );
+        assert_eq!(
+            WorktreeChangeSummary { changed_files: 0, commits: 4 }
+                .commits_phrase("worktree-feat"),
+            Some("4 commits on worktree-feat".to_string())
+        );
+    }
+
+    #[test]
+    fn discard_note_byte_faithful_to_ts() {
+        // Nothing to discard → empty string (no leading space).
+        assert_eq!(
+            WorktreeChangeSummary { changed_files: 0, commits: 0 }.discard_note(),
+            ""
+        );
+        // Only uncommitted files.
+        assert_eq!(
+            WorktreeChangeSummary { changed_files: 2, commits: 0 }.discard_note(),
+            " Discarded 2 uncommitted files."
+        );
+        // Only commits (no branch in the discard note, matching TS).
+        assert_eq!(
+            WorktreeChangeSummary { changed_files: 0, commits: 1 }.discard_note(),
+            " Discarded 1 commit."
+        );
+        // Both — commits first, then files, joined by " and " (TS order).
+        assert_eq!(
+            WorktreeChangeSummary { changed_files: 3, commits: 2 }.discard_note(),
+            " Discarded 2 commits and 3 uncommitted files."
+        );
+        // Singular both.
+        assert_eq!(
+            WorktreeChangeSummary { changed_files: 1, commits: 1 }.discard_note(),
+            " Discarded 1 commit and 1 uncommitted file."
+        );
     }
 }

@@ -300,7 +300,9 @@ pub fn make_stub_http() -> Arc<dyn traits::http::HttpTransport> {
 
 use std::path::PathBuf;
 use std::time::Duration;
-use traits::worktree::{WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager};
+use traits::worktree::{
+    WorktreeChangeSummary, WorktreeError, WorktreeHandle, WorktreeInfo, WorktreeManager,
+};
 
 /// In-memory `WorktreeManager` for hermetic tests. Tracks every call so tests
 /// can assert on `created`, `removed`, `listed`. Reuses the M2-01 slug helpers
@@ -319,6 +321,11 @@ struct MockWtInner {
     next_path_root: Option<PathBuf>,
     scripted_create_error: Option<WorktreeError>,
     scripted_remove_error: Option<WorktreeError>,
+    /// Deterministic dirty-state to return from `worktree_change_summary`.
+    /// `None` (the default) → the trait default behavior (`Ok(None)`,
+    /// fail-closed "unknown"). `Some(Some(..))` → that summary; `Some(None)`
+    /// → an explicit fail-closed `Ok(None)`.
+    scripted_change_summary: Option<Option<WorktreeChangeSummary>>,
 }
 
 #[allow(dead_code)] // M4-04 Tasks 10/11/13 use these helpers
@@ -347,6 +354,14 @@ impl MockWorktreeManager {
     #[allow(dead_code)]
     pub fn script_remove_error(&self, err: WorktreeError) {
         self.inner.lock().unwrap().scripted_remove_error = Some(err);
+    }
+
+    /// Script the dirty-state `worktree_change_summary` returns. Pass
+    /// `Some(summary)` for a known state or `None` for fail-closed "unknown".
+    /// Persistent (not drained) so a test can query before and after removal.
+    #[allow(dead_code)]
+    pub fn script_change_summary(&self, summary: Option<WorktreeChangeSummary>) {
+        self.inner.lock().unwrap().scripted_change_summary = Some(summary);
     }
 
     /// Inspect created worktrees.
@@ -417,6 +432,21 @@ impl WorktreeManager for MockWorktreeManager {
 
     fn is_supported(&self) -> bool {
         true
+    }
+
+    async fn worktree_change_summary(
+        &self,
+        _handle: &WorktreeHandle,
+    ) -> Result<Option<WorktreeChangeSummary>, WorktreeError> {
+        // Return the scripted state if one was set; otherwise fall back to
+        // the trait default ("unknown"). Not drained, so repeated queries
+        // (e.g. an exit flow that checks then removes) stay consistent.
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .scripted_change_summary
+            .unwrap_or(None))
     }
 }
 

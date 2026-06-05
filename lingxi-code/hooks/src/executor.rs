@@ -710,7 +710,14 @@ fn build_lifecycle_envelope_body(
             };
             Some(("SubagentStop", serde_json::to_string(&payload).ok()?))
         }
-        HookEvent::TaskCompleted { task_id, .. } => {
+        HookEvent::TaskCompleted {
+            task_id,
+            task_subject,
+            task_description,
+            teammate_name,
+            team_name,
+            ..
+        } => {
             let payload = TaskCompletedPayload {
                 hook_event_name: HookEventNameTaskCompleted,
                 session_id: b.session_id,
@@ -720,10 +727,10 @@ fn build_lifecycle_envelope_body(
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
                 task_id: task_id.clone(),
-                task_subject: String::new(),
-                task_description: None,
-                teammate_name: None,
-                team_name: None,
+                task_subject: task_subject.clone(),
+                task_description: task_description.clone(),
+                teammate_name: teammate_name.clone(),
+                team_name: team_name.clone(),
             };
             Some(("TaskCompleted", serde_json::to_string(&payload).ok()?))
         }
@@ -1751,12 +1758,26 @@ mod command_arm_tests {
             HookEventType::TaskCompleted,
             HookEvent::TaskCompleted {
                 task_id: "task-99".into(),
-                status: "success".into(),
+                status: "completed".into(),
+                task_subject: "ship the thing".into(),
+                task_description: Some("do the work".into()),
+                teammate_name: Some("buddy".into()),
+                team_name: Some("alpha".into()),
             },
         )
         .await;
         assert!(stdin.contains(r#""hook_event_name":"TaskCompleted""#));
         assert!(stdin.contains(r#""task_id":"task-99""#));
+        // Full wire payload (coreSchemas.ts:614-625) — sourced from the event,
+        // not defaulted. `status` is routing-only and must NOT appear.
+        assert!(stdin.contains(r#""task_subject":"ship the thing""#));
+        assert!(stdin.contains(r#""task_description":"do the work""#));
+        assert!(stdin.contains(r#""teammate_name":"buddy""#));
+        assert!(stdin.contains(r#""team_name":"alpha""#));
+        assert!(
+            !stdin.contains(r#""status""#),
+            "TaskCompleted wire payload has no `status` field: {stdin}"
+        );
     }
 
     #[tokio::test]
@@ -2161,7 +2182,11 @@ mod command_arm_tests {
             (
                 HookEvent::TaskCompleted {
                     task_id: "t".into(),
-                    status: "success".into(),
+                    status: "completed".into(),
+                    task_subject: "s".into(),
+                    task_description: None,
+                    teammate_name: None,
+                    team_name: None,
                 },
                 "TaskCompleted",
             ),

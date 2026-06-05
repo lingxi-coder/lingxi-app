@@ -28,6 +28,7 @@ pub mod prompt_executor;
 pub mod registry;
 pub mod response;
 pub mod ssrf_guard;
+pub mod task_completed_firer;
 
 pub use async_registry::AsyncHookRegistry;
 pub use definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
@@ -51,3 +52,6 @@ pub use response::{
     HookResult,
 };
 pub use ssrf_guard::{IpRange, SsrfError, SsrfGuard};
+pub use task_completed_firer::{
+    OptionalTaskCompletedFirer, TaskCompletedFire, TaskCompletedFirer,
+};

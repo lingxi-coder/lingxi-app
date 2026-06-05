@@ -264,11 +264,32 @@ pub enum HookEvent {
         description: String,
     },
     /// A task transitioned to a terminal status.
+    ///
+    /// Field set mirrors `TaskCompletedHookInputSchema`
+    /// (`coreSchemas.ts:614-625`) so the executor arm can reproduce the wire
+    /// payload byte-faithfully: `task_subject` (required), `task_description` /
+    /// `teammate_name` / `team_name` (optional). `status` is carried for routing
+    /// only — it is NOT part of the wire payload (the schema has no `status`
+    /// field; claude-code fires `executeTaskCompletedHooks` only on the terminal
+    /// transition).
     TaskCompleted {
         /// Task ID matching the prior `TaskCreated`.
         task_id: String,
-        /// Terminal status (e.g. `"success"`, `"failure"`, `"cancelled"`).
+        /// Terminal status (e.g. `"completed"`, `"failed"`). Routing only — not
+        /// serialized into the wire payload.
         status: String,
+        /// Task subject/title (wire `task_subject`, required). claude-code
+        /// sources this from `existingTask.subject` / `task.subject`.
+        task_subject: String,
+        /// Task description (wire `task_description`, optional). claude-code
+        /// sources this from `existingTask.description` / `task.description`.
+        task_description: Option<String>,
+        /// Name of the teammate completing the task (wire `teammate_name`,
+        /// optional). claude-code sources this from `getAgentName()`.
+        teammate_name: Option<String>,
+        /// Team the teammate belongs to (wire `team_name`, optional).
+        /// claude-code sources this from `getTeamName()`.
+        team_name: Option<String>,
     },
     /// An MCP server requested user elicitation.
     Elicitation {

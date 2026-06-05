@@ -1057,7 +1057,14 @@ pub async fn build(
             task_output_dir,
             Arc::new(PosixFileSystem::new(cwd.clone())),
         )),
-    );
+    )
+    // Fire the `TaskCompleted` hook (claude-code `executeTaskCompletedHooks`)
+    // when a task reaches a terminal status. The firer wraps the SAME
+    // `Arc<HookExecutorImpl>` the orchestrator fires its other hooks through, so
+    // the `tasks` leaf reaches `orch.hooks` without a dependency cycle.
+    .with_task_completed_firer(Arc::new(
+        orchestrator::OrchestratorTaskCompletedFirer::new(hooks.clone(), cwd.clone()),
+    ));
     // Register the M2 self-contained per-type handlers (LocalBash + MonitorMcp)
     // before the registry is shared. Both depend only on platform traits we
     // already build here; agent/teammate/workflow/remote/dream handlers register

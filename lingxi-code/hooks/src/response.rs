@@ -30,6 +30,17 @@ pub struct HookResponse {
     /// for the in-flight action even when not blocked.
     #[serde(default)]
     pub suppress_output: bool,
+    /// `true` when the hook returned `continue: false` (claude-code
+    /// `hooks.ts:404`). For lifecycle hooks (`Stop` / `SubagentStop` /
+    /// `TaskCompleted`) this is the *preventContinuation* signal: the agent
+    /// loop must terminate rather than keep working, regardless of any
+    /// `decision: block` also present (B4 — `query.ts:1278`). Distinct from a
+    /// bare `Block` decision (exit-2 / `decision:block` without `continue:false`),
+    /// which for a Stop hook means "keep working" (`query.ts:1282`). Additive /
+    /// `..Default::default()`-compatible; defaults to `false` (the prior
+    /// behavior where `continue:false` only copied `stopReason` into `reason`).
+    #[serde(default)]
+    pub prevent_continuation: bool,
     /// Caller-defined structured payload — for hooks that need to return
     /// metadata not covered by the canonical fields above.
     pub structured_content: Option<Value>,
@@ -92,6 +103,14 @@ pub struct AggregateHookResult {
     pub modified_input: Option<Value>,
     /// All system messages emitted by hooks, in execution order.
     pub system_messages: Vec<String>,
+    /// `true` when ANY folded hook requested *preventContinuation*
+    /// (`continue: false`). For lifecycle (`Stop`) hooks this signals the
+    /// turn loop to TERMINATE the agent rather than continue working — it
+    /// takes precedence over a `Block` decision (B4 — `query.ts:1278`).
+    /// OR-folded across hooks in [`crate::HookExecutorImpl::execute`]'s
+    /// merge step; defaults to `false`, so a registry with no lifecycle
+    /// hook leaves it untouched (behavior-neutral for existing callers).
+    pub prevent_continuation: bool,
     /// All attachments produced by hooks, in execution order.
     pub attachments: Vec<Value>,
     /// Per-hook results, in execution order — for telemetry and debugging.

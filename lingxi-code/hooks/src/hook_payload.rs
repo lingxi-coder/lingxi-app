@@ -315,9 +315,15 @@ pub fn parse_response(
     let obj = v.as_object().ok_or(HookResponseParseError::NotObject)?;
     let mut resp = HookResponse::default();
 
-    // continue / stopReason
+    // continue / stopReason. `continue: false` is the *preventContinuation*
+    // signal for lifecycle (Stop / SubagentStop / TaskCompleted) hooks
+    // (claude-code `hooks.ts:404`, `query.ts:1278`): it terminates the agent
+    // loop regardless of any `decision: block`. `stopReason` becomes the
+    // surfaced `reason`. For non-lifecycle events the orchestrator ignores
+    // `prevent_continuation`, so this stays behavior-neutral there (B4).
     let cont = obj.get("continue").and_then(Value::as_bool).unwrap_or(true);
     if !cont {
+        resp.prevent_continuation = true;
         if let Some(reason) = obj.get("stopReason").and_then(Value::as_str) {
             resp.reason = Some(reason.to_string());
         }

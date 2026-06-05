@@ -295,6 +295,14 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // accumulate `global_turn_tokens` (TS `getTurnOutputTokens()`).
     let output_tokens = response.usage.output_tokens;
 
+    // In-Loop Compaction Batch 6: snapshot the cache-safe prompt prefix now the
+    // call has succeeded, so the forked autocompact summarizer can replay this
+    // turn's prefix and share Anthropic's prompt cache. `session.history` here is
+    // the exact message set the model saw (post any PTL truncation / reactive
+    // compaction inside `call_api_with_ptl_recovery`), BEFORE the assistant reply
+    // is appended below. Strict no-op when no cache-safe slot is wired.
+    orch.save_cache_safe_params(system, &model).await;
+
     // 1.5 M6-06: record this response's usage into the wired CostTracker (if any).
     // We pass `Duration::ZERO` (the api-client adapter does not currently
     // surface per-call wall-clock duration) and `retries = 0` (retries are

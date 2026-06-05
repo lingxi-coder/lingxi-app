@@ -15,6 +15,7 @@ pub mod error;
 pub mod oauth_hook;
 pub mod opus;
 pub mod overflow;
+pub mod prompt_too_long;
 pub mod rate_limit;
 pub mod retry;
 pub mod sse;
@@ -23,6 +24,10 @@ pub mod types;
 pub use anthropic::AnthropicProvider;
 pub use error::ApiError;
 pub use opus::is_non_custom_opus;
+pub use prompt_too_long::{
+    classify_prompt_too_long, parse_prompt_too_long_token_counts, prompt_too_long_token_gap,
+    reclassify_prompt_too_long, PROMPT_TOO_LONG_ERROR_MESSAGE,
+};
 pub use retry::{with_retry_ctl, RetryControl, MAX_529_RETRIES};
 pub use oauth_hook::{
     register_oauth_hook, BearerToken, MiddlewareError, NoOpOAuthHook, OAuthHookError,

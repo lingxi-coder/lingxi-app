@@ -587,7 +587,13 @@ impl AnthropicProvider {
                 self.refresh_and_retry_401(body, server_body, transport)
                     .await
             }
-            Err(other) => Err(other),
+            // Reclassify a prompt-too-long rejection (HTTP 413, or any non-2xx
+            // whose body says "prompt is too long" — Anthropic returns it as a
+            // 400) into the typed `ApiError::PromptTooLong` the orchestrator's
+            // reactive PTL-recovery loop matches on. Without this the variant is
+            // never constructed and recovery is dead code (TS classifies these
+            // 400/413 bodies — `errors.ts:62-118`).
+            Err(other) => Err(crate::prompt_too_long::reclassify_prompt_too_long(other)),
         }
         .inspect_err(|e| {
             tracing::debug!(

@@ -818,8 +818,7 @@ pub(crate) async fn dispatch_tool_uses(
 
         let (content, is_error, emit_payload) = match tool_outcome {
             Ok(result) => {
-                let text = serde_json::to_string(&result.data)
-                    .unwrap_or_else(|_| "<unserializable>".into());
+                let text = tool_result_to_model_text(&result.data);
                 (text, false, result.data)
             }
             Err(err) => {
@@ -885,6 +884,62 @@ pub(crate) async fn dispatch_tool_uses(
         });
     }
     Ok(results)
+}
+
+/// Serialize a successful tool result's data into the model-facing string.
+///
+/// Mirrors claude-code's per-tool `mapToolResultToToolResultBlockParam`: the
+/// model sees the tool's OWN string, never a JSON dump of the output object. A
+/// tool exposes that string via `model_content` (used when it must differ from
+/// the TUI payload — e.g. Read's cat -n + reminders, where the TUI shows raw
+/// content) or, failing that, the verbatim `content` string (Bash stdout,
+/// Edit/Write confirmations, where the model and TUI strings coincide). Tools
+/// that expose neither fall back to the JSON object — the legacy behavior, kept
+/// for structured-only results that have no human-facing string.
+///
+/// The full `result.data` object still flows to the TUI (`emit_tool_result`)
+/// and the `PostToolUse` hook unchanged; only the model-facing string is derived
+/// here.
+fn tool_result_to_model_text(data: &serde_json::Value) -> String {
+    data.get("model_content")
+        .and_then(|v| v.as_str())
+        .or_else(|| data.get("content").and_then(|v| v.as_str()))
+        .map_or_else(
+            || serde_json::to_string(data).unwrap_or_else(|_| "<unserializable>".into()),
+            std::string::ToString::to_string,
+        )
+}
+
+#[cfg(test)]
+mod model_text_tests {
+    use super::tool_result_to_model_text;
+    use serde_json::json;
+
+    #[test]
+    fn prefers_model_content_over_content() {
+        // Read-shaped: the model sees the cat -n string, not the raw `content`.
+        let data = json!({ "model_content": "1\thi\n2\t", "content": "hi\n" });
+        assert_eq!(tool_result_to_model_text(&data), "1\thi\n2\t");
+    }
+
+    #[test]
+    fn falls_back_to_content_string_verbatim() {
+        // Bash/Edit/Write-shaped: no `model_content`, so the model sees the raw
+        // `content` string verbatim — NOT a JSON dump of the object.
+        let data = json!({ "content": "build ok\n", "exit_code": 0 });
+        assert_eq!(tool_result_to_model_text(&data), "build ok\n");
+    }
+
+    #[test]
+    fn falls_back_to_json_when_no_string_content() {
+        // Structured-only result (no string `content`/`model_content`): legacy
+        // JSON serialization is preserved.
+        let data = json!({ "matches": ["a", "b"] });
+        assert_eq!(tool_result_to_model_text(&data), r#"{"matches":["a","b"]}"#);
+        // A non-string `content` also falls through to JSON.
+        let data2 = json!({ "content": 42 });
+        assert_eq!(tool_result_to_model_text(&data2), r#"{"content":42}"#);
+    }
 }
 
 #[cfg(test)]

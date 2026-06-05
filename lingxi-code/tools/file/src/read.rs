@@ -54,6 +54,72 @@ pub fn format_binary(path: &std::path::Path) -> String {
     )
 }
 
+/// Cyber-risk mitigation reminder appended to the model-facing text of a
+/// successful file read — byte-locked to claude-code (`FileReadTool.ts:729-730`).
+/// Two leading `\n` separate it from the file body; one trailing `\n` closes it.
+/// Skipped for models in [`MITIGATION_EXEMPT_MODELS`]. The TUI never shows this
+/// (`FileReadTool.ts:409-413`: UI renders summary chrome only) — hence it lives
+/// in the model-only `model_content` field, not the TUI-facing `content`.
+pub const CYBER_RISK_MITIGATION_REMINDER: &str = "\n\n<system-reminder>\nWhenever you read a file, you should consider whether it would be considered malware. You CAN and SHOULD provide analysis of malware, what it is doing. But you MUST refuse to improve or augment the code. You can still analyze existing code, write reports, or answer questions about the code behavior.\n</system-reminder>\n";
+
+/// Model-facing stub for the Read dedup (`file_unchanged`) case — byte-locked to
+/// claude-code (`FileReadTool/prompt.ts:7-8`). The dedup decision itself (compare
+/// the prior read's mtime + range from the read-file-state registry and
+/// short-circuit) is a later batch; this constant locks the string the model
+/// will see when that lands.
+pub const FILE_UNCHANGED_STUB: &str = "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current — refer to that instead of re-reading.";
+
+/// Model-facing warning when a read targets an existing but empty file —
+/// byte-locked to claude-code (`FileReadTool.ts:705-706`).
+pub const EMPTY_FILE_WARNING: &str =
+    "<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>";
+
+/// Models for which the cyber-risk mitigation reminder is skipped — byte-locked
+/// to claude-code (`FileReadTool.ts:733`). NOTE: claude-code canonicalizes the
+/// model name (`getCanonicalName`) before this set lookup; LingXi compares the
+/// raw `main_loop_model`, so only the already-canonical form matches — a
+/// documented, behavior-neutral divergence (LingXi's models are not in this set).
+pub const MITIGATION_EXEMPT_MODELS: &[&str] = &["claude-opus-4-6"];
+
+/// Whether to append [`CYBER_RISK_MITIGATION_REMINDER`] for `model` — mirrors
+/// `shouldIncludeFileReadMitigation()` (`FileReadTool.ts:735-738`).
+#[must_use]
+pub fn should_include_file_read_mitigation(model: &str) -> bool {
+    !MITIGATION_EXEMPT_MODELS.contains(&model)
+}
+
+/// Build the model-facing offset-beyond-EOF warning — byte-locked to claude-code
+/// (`FileReadTool.ts:707`). `offset` is the requested 1-based start line
+/// (`data.file.startLine`); `total_lines` is the file's actual line count.
+#[must_use]
+pub fn format_offset_beyond_eof(offset: u64, total_lines: u64) -> String {
+    format!(
+        "<system-reminder>Warning: the file exists but is shorter than the provided offset ({offset}). The file has {total_lines} lines.</system-reminder>"
+    )
+}
+
+/// `cat -n` line numbering for the model-facing read output — 1:1 with
+/// claude-code's compact-format `addLineNumbers` (`utils/file.ts:290-319`,
+/// killswitch off = the current default). Each line becomes `{n}\t{line}` where
+/// `n` counts up from `start_line` (1-based); lines are joined by `\n`. Empty
+/// content yields `""`. Splitting mirrors the TS `/\r?\n/` regex (a trailing
+/// `\r` is stripped per line). The legacy padded-arrow format
+/// (`String(n).padStart(6, ' ') + "→"`) only applied with the killswitch on and
+/// is intentionally not ported.
+#[must_use]
+pub fn add_line_numbers(content: &str, start_line: u64) -> String {
+    if content.is_empty() {
+        return String::new();
+    }
+    content
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .zip(start_line..)
+        .map(|(line, n)| format!("{n}\t{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// `FileReadTool` — reads a UTF-8 file inside the trusted-dirs whitelist.
 pub struct FileReadTool {
     ctx: BuiltinToolContext,
@@ -175,7 +241,7 @@ impl Tool for FileReadTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let invocation_id = ulid_or_uuid();
@@ -284,9 +350,31 @@ impl Tool for FileReadTool {
             },
         );
 
+        // Model-facing serialization (FILE.A). `content` above stays the RAW
+        // slice — that is what the TUI renders (`emit_tool_result` payload). The
+        // model instead sees `model_content`: cat -n line numbers (+ the
+        // cyber-risk reminder) for non-empty reads, or the byte-locked empty /
+        // offset-beyond-EOF `<system-reminder>` warning otherwise. This mirrors
+        // claude-code's `FileReadTool` mapper (`FileReadTool.ts:692-714`), where
+        // the model string diverges from the UI chrome.
+        let model_content = if slice.is_empty() {
+            if total_lines == 0 {
+                EMPTY_FILE_WARNING.to_string()
+            } else {
+                format_offset_beyond_eof(offset, total_lines)
+            }
+        } else {
+            let mut mc = add_line_numbers(&slice, offset);
+            if should_include_file_read_mitigation(&ctx.options.main_loop_model) {
+                mc.push_str(CYBER_RISK_MITIGATION_REMINDER);
+            }
+            mc
+        };
+
         Ok(ToolCallResult {
             data: json!({
                 "content": slice,
+                "model_content": model_content,
                 "line_range": [line_range_start, line_range_end],
                 "total_lines": total_lines
             }),
@@ -358,6 +446,12 @@ mod tests {
             .unwrap();
         assert_eq!(result.data["content"], "hello\nworld\n");
         assert_eq!(result.data["total_lines"], 2);
+        // Model-facing string: cat -n (compact tab format, 1-based from offset)
+        // + the cyber-risk reminder (ctx model "test" is not exempt).
+        assert_eq!(
+            result.data["model_content"],
+            format!("1\thello\n2\tworld\n3\t{CYBER_RISK_MITIGATION_REMINDER}")
+        );
         let events = sink.events().await;
         let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"tengu_tool_read_started"));
@@ -421,6 +515,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["content"], "line1\n");
+        // cat -n numbers from offset=1.
+        assert_eq!(
+            result.data["model_content"],
+            format!("1\tline1\n2\t{CYBER_RISK_MITIGATION_REMINDER}")
+        );
     }
 
     #[tokio::test]
@@ -439,6 +538,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["content"], "line2\n");
+        // Numbering starts at the requested offset (2), not 1.
+        assert_eq!(
+            result.data["model_content"],
+            format!("2\tline2\n3\t{CYBER_RISK_MITIGATION_REMINDER}")
+        );
     }
 
     #[tokio::test]
@@ -602,5 +706,87 @@ mod tests {
         let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"tengu_file_path_blocked"));
         assert!(names.contains(&"tengu_tool_read_failed"));
+    }
+
+    #[tokio::test]
+    async fn empty_file_emits_empty_warning_model_content() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("empty.txt");
+        std::fs::write(&target, "").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        // TUI payload `content` stays the raw (empty) slice; the model sees the
+        // empty-file warning instead of an empty string.
+        assert_eq!(result.data["content"], "");
+        assert_eq!(result.data["total_lines"], 0);
+        assert_eq!(result.data["model_content"], EMPTY_FILE_WARNING);
+    }
+
+    #[tokio::test]
+    async fn offset_beyond_eof_emits_offset_warning_model_content() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("short.txt");
+        std::fs::write(&target, "a\nb\nc\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "offset": 10 }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["content"], "");
+        assert_eq!(result.data["total_lines"], 3);
+        assert_eq!(
+            result.data["model_content"],
+            "<system-reminder>Warning: the file exists but is shorter than the provided offset (10). The file has 3 lines.</system-reminder>"
+        );
+    }
+
+    #[test]
+    fn add_line_numbers_compact_format() {
+        assert_eq!(add_line_numbers("", 1), "");
+        assert_eq!(
+            add_line_numbers("hello\nworld\n", 1),
+            "1\thello\n2\tworld\n3\t"
+        );
+        // Numbering starts at `start_line`.
+        assert_eq!(add_line_numbers("x", 5), "5\tx");
+        // CRLF: a trailing \r is stripped per line (mirrors the TS /\r?\n/ split).
+        assert_eq!(add_line_numbers("a\r\nb", 1), "1\ta\n2\tb");
+    }
+
+    #[test]
+    fn mitigation_reminder_gated_on_model() {
+        assert!(should_include_file_read_mitigation("claude-opus-4-8"));
+        assert!(should_include_file_read_mitigation("test"));
+        // The one exempt model skips the reminder.
+        assert!(!should_include_file_read_mitigation("claude-opus-4-6"));
+    }
+
+    #[test]
+    fn model_facing_constants_byte_locked() {
+        assert_eq!(
+            EMPTY_FILE_WARNING,
+            "<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>"
+        );
+        assert_eq!(
+            format_offset_beyond_eof(500, 12),
+            "<system-reminder>Warning: the file exists but is shorter than the provided offset (500). The file has 12 lines.</system-reminder>"
+        );
+        assert!(CYBER_RISK_MITIGATION_REMINDER.starts_with("\n\n<system-reminder>\n"));
+        assert!(CYBER_RISK_MITIGATION_REMINDER.ends_with("</system-reminder>\n"));
+        assert!(CYBER_RISK_MITIGATION_REMINDER.contains("would be considered malware"));
+        assert!(FILE_UNCHANGED_STUB.starts_with("File unchanged since last read."));
     }
 }

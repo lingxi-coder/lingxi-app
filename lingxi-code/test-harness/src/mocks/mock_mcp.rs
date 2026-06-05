@@ -20,6 +20,17 @@ use traits::{
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
 
+/// Per-server `resources/list` behavior the responder applies (Batch 5c).
+/// Keyed by the server's `InProcess` `registry_key` (== the config name).
+#[derive(Clone)]
+enum ResourceBehavior {
+    /// Answer `resources/list` with these `(uri, name)` rows.
+    List(Vec<(String, String)>),
+    /// Answer `resources/list` with a JSON-RPC error (server failure) so the
+    /// all-servers `ListMcpResources` path can prove error-isolation.
+    Error,
+}
+
 /// In-memory MCP transport that returns canned responses to the registry.
 pub struct MockMcpTransport {
     tools: Mutex<Vec<McpToolDto>>,
@@ -39,6 +50,11 @@ pub struct MockMcpTransport {
     /// assert dispatch actually reached the wire. Only populated when
     /// `respond_to_calls` is set.
     called_tools: Arc<Mutex<Vec<String>>>,
+    /// Per-server `resources/list` behavior, keyed by `InProcess` registry_key
+    /// (== config name). Consulted by the responder so a multi-server
+    /// all-servers `ListMcpResources` test can give each server its own
+    /// resources (or an error). Only used with `respond_to_calls`.
+    resources: Mutex<HashMap<String, ResourceBehavior>>,
 }
 
 impl Default for MockMcpTransport {
@@ -57,6 +73,7 @@ impl MockMcpTransport {
             conns: Mutex::new(HashMap::new()),
             respond_to_calls: false,
             called_tools: Arc::new(Mutex::new(Vec::new())),
+            resources: Mutex::new(HashMap::new()),
         }
     }
 
@@ -77,6 +94,31 @@ impl MockMcpTransport {
     #[must_use]
     pub fn called_tools(&self) -> Vec<String> {
         self.called_tools.lock().unwrap().clone()
+    }
+
+    /// Make the server identified by `registry_key` answer `resources/list`
+    /// with the given `(uri, name)` rows (Batch 5c). Each subsequent `connect`
+    /// for that `InProcess { registry_key }` spec wires its responder to return
+    /// them. Requires [`MockMcpTransport::with_call_responder`].
+    pub fn set_resources(&self, registry_key: &str, rows: &[(&str, &str)]) {
+        let list = rows
+            .iter()
+            .map(|(u, n)| ((*u).to_string(), (*n).to_string()))
+            .collect();
+        self.resources
+            .lock()
+            .unwrap()
+            .insert(registry_key.to_string(), ResourceBehavior::List(list));
+    }
+
+    /// Make the server identified by `registry_key` answer `resources/list`
+    /// with a JSON-RPC error (Batch 5c error-isolation test). Requires
+    /// [`MockMcpTransport::with_call_responder`].
+    pub fn set_resources_error(&self, registry_key: &str) {
+        self.resources
+            .lock()
+            .unwrap()
+            .insert(registry_key.to_string(), ResourceBehavior::Error);
     }
 
     /// Register a tool named `name` under the server label `mock`.
@@ -111,7 +153,14 @@ fn paired_connection() -> Arc<Connection> {
 /// canned `{content: "ok", isError: false}` result, echoing the request `id`.
 /// Each observed FQN is recorded into `called_tools`. Used by the Batch 3
 /// invocation test so a live bridged `McpClient` round-trips.
-fn responding_connection(called_tools: Arc<Mutex<Vec<String>>>) -> Arc<Connection> {
+///
+/// `resources` (Batch 5c): how this connection answers `resources/list` —
+/// `Some(List)` returns the configured rows, `Some(Error)` returns a JSON-RPC
+/// error, `None` returns an empty list.
+fn responding_connection(
+    called_tools: Arc<Mutex<Vec<String>>>,
+    resources: Option<ResourceBehavior>,
+) -> Arc<Connection> {
     // `peer_to_us`: peer (responder) → client (responses).
     // `us_to_peer`: client → peer (the outbound requests we answer).
     let (peer_to_us_tx, peer_to_us_rx) = tokio::sync::mpsc::channel::<Bytes>(8);
@@ -131,8 +180,9 @@ fn responding_connection(called_tools: Arc<Mutex<Vec<String>>>) -> Arc<Connectio
             let Some(id) = req.get("id").cloned() else {
                 continue;
             };
+            let method = req.get("method").and_then(Value::as_str);
             // Record the dispatched tool name from the `tools/call` params.
-            if req.get("method").and_then(Value::as_str) == Some("tools/call") {
+            if method == Some("tools/call") {
                 if let Some(name) = req
                     .get("params")
                     .and_then(|p| p.get("name"))
@@ -141,11 +191,38 @@ fn responding_connection(called_tools: Arc<Mutex<Vec<String>>>) -> Arc<Connectio
                     called_tools.lock().unwrap().push(name.to_string());
                 }
             }
-            let resp = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "content": "ok", "isError": false },
-            });
+            // `resources/list` (Batch 5c): answer per the configured behavior.
+            let resp = if method == Some("resources/list") {
+                match &resources {
+                    Some(ResourceBehavior::Error) => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32000, "message": "mock resources/list failure" },
+                    }),
+                    Some(ResourceBehavior::List(rows)) => {
+                        let arr: Vec<Value> = rows
+                            .iter()
+                            .map(|(uri, name)| serde_json::json!({ "uri": uri, "name": name }))
+                            .collect();
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": { "resources": arr },
+                        })
+                    }
+                    None => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "resources": [] },
+                    }),
+                }
+            } else {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "content": "ok", "isError": false },
+                })
+            };
             let mut bytes = serde_json::to_vec(&resp).unwrap();
             bytes.push(b'\n'); // LineCodec frames on newline.
             if peer_to_us_tx.send(Bytes::from(bytes)).await.is_err() {
@@ -158,13 +235,21 @@ fn responding_connection(called_tools: Arc<Mutex<Vec<String>>>) -> Arc<Connectio
 
 #[async_trait]
 impl McpTransport for MockMcpTransport {
-    async fn connect(&self, _spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+    async fn connect(&self, spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
         let connection_id = McpConnectionId::new();
         // Stash a paired connection so `RawConnectionProvider::connection_for`
         // can hand the registry a live `Arc<jsonrpc::Connection>`. With the
         // responder opt-in, the peer side answers the client's `tools/call`.
         let conn = if self.respond_to_calls {
-            responding_connection(self.called_tools.clone())
+            // Look up this server's `resources/list` behavior (Batch 5c) by its
+            // `InProcess` registry_key (== config name).
+            let resources = match spec {
+                McpTransportSpec::InProcess { registry_key } => {
+                    self.resources.lock().unwrap().get(registry_key).cloned()
+                }
+                _ => None,
+            };
+            responding_connection(self.called_tools.clone(), resources)
         } else {
             paired_connection()
         };

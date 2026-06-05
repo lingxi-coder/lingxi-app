@@ -460,16 +460,45 @@ impl Tool for ExitWorktreeTool {
             path: PathBuf::from(&parsed.path),
             branch_name: parsed.branch_name.clone(),
         };
+
+        // Capture the worktree's dirty state BEFORE removal — once the
+        // worktree directory is gone, `git status` can no longer stat it.
+        // `Ok(None)` (git could not be queried) is treated as "unknown": we
+        // surface no summary rather than claiming a clean 0/0. Mirrors
+        // claude-code's ExitWorktreeTool, which re-counts changes at exit and
+        // appends a "Discarded …" note (ExitWorktreeTool.ts:256-318).
+        let change_summary = self
+            .ctx
+            .worktree
+            .worktree_change_summary(&handle)
+            .await
+            .unwrap_or(None);
+
         let result = self.ctx.worktree.remove_worktree(&handle).await;
         let duration_ms = started_at.elapsed().as_millis() as u64;
 
         match result {
             Ok(()) => {
                 self.emit_completed(&invocation_id, duration_ms).await;
+                let discard_note = change_summary
+                    .map(|s| s.discard_note())
+                    .unwrap_or_default();
+                let message = format!(
+                    "Exited and removed worktree at {}.{discard_note}",
+                    handle.path.to_string_lossy()
+                );
+                let summary_json = change_summary.map(|s| {
+                    json!({
+                        "changed_files": s.changed_files,
+                        "commits": s.commits,
+                    })
+                });
                 Ok(ToolCallResult {
                     data: json!({
                         "removed": true,
                         "branch_name": parsed.branch_name,
+                        "change_summary": summary_json,
+                        "message": message,
                     }),
                     new_messages: Vec::new(),
                     context_modifier: None,
@@ -701,6 +730,113 @@ mod tests {
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&EXIT_WORKTREE_STARTED.to_string()));
         assert!(names.contains(&EXIT_WORKTREE_COMPLETED.to_string()));
+    }
+
+    #[tokio::test]
+    async fn exit_surfaces_dirty_change_summary() {
+        use traits::worktree::WorktreeChangeSummary;
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-C"));
+        let _ = mock
+            .create_worktree("user/feature", None, &[])
+            .await
+            .expect("pre-create");
+        // Inject a deterministic dirty state — no real git repo involved.
+        mock.script_change_summary(Some(WorktreeChangeSummary {
+            changed_files: 3,
+            commits: 2,
+        }));
+        let (bctx, sink) = make_bctx(mock.clone());
+        bctx.bus.attach_sink(sink.clone()).await;
+        let tool = ExitWorktreeTool::new(bctx);
+        let res = tool
+            .call(
+                json!({
+                    "path": "/tmp/repo-C/.claude/worktrees/user+feature",
+                    "branch_name": "worktree-user+feature"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("remove must succeed");
+        assert_eq!(res.data["removed"], true);
+        // The structured summary is surfaced.
+        assert_eq!(res.data["change_summary"]["changed_files"], 3);
+        assert_eq!(res.data["change_summary"]["commits"], 2);
+        // The message carries the byte-faithful discard note (commits first).
+        let msg = res.data["message"].as_str().unwrap();
+        assert_eq!(
+            msg,
+            "Exited and removed worktree at /tmp/repo-C/.claude/worktrees/user+feature. \
+             Discarded 2 commits and 3 uncommitted files."
+        );
+        let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
+        assert!(names.contains(&EXIT_WORKTREE_COMPLETED.to_string()));
+    }
+
+    #[tokio::test]
+    async fn exit_clean_summary_has_no_discard_note() {
+        use traits::worktree::WorktreeChangeSummary;
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-D"));
+        let _ = mock
+            .create_worktree("feat", None, &[])
+            .await
+            .expect("pre-create");
+        mock.script_change_summary(Some(WorktreeChangeSummary {
+            changed_files: 0,
+            commits: 0,
+        }));
+        let (bctx, sink) = make_bctx(mock.clone());
+        bctx.bus.attach_sink(sink.clone()).await;
+        let tool = ExitWorktreeTool::new(bctx);
+        let res = tool
+            .call(
+                json!({
+                    "path": "/tmp/repo-D/.claude/worktrees/feat",
+                    "branch_name": "worktree-feat"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("remove must succeed");
+        assert_eq!(res.data["change_summary"]["changed_files"], 0);
+        let msg = res.data["message"].as_str().unwrap();
+        assert_eq!(
+            msg,
+            "Exited and removed worktree at /tmp/repo-D/.claude/worktrees/feat."
+        );
+        assert!(!msg.contains("Discarded"), "clean exit has no discard note");
+    }
+
+    #[tokio::test]
+    async fn exit_unknown_summary_is_null_no_discard_note() {
+        // No scripted summary → mock returns Ok(None) ("unknown"). The tool
+        // must surface a null change_summary and NOT claim a clean discard.
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-E"));
+        let _ = mock
+            .create_worktree("feat", None, &[])
+            .await
+            .expect("pre-create");
+        let (bctx, _sink) = make_bctx(mock.clone());
+        let tool = ExitWorktreeTool::new(bctx);
+        let res = tool
+            .call(
+                json!({
+                    "path": "/tmp/repo-E/.claude/worktrees/feat",
+                    "branch_name": "worktree-feat"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("remove must succeed");
+        assert!(
+            res.data["change_summary"].is_null(),
+            "unknown state surfaces as null, not 0/0"
+        );
+        let msg = res.data["message"].as_str().unwrap();
+        assert!(!msg.contains("Discarded"), "unknown state adds no discard note");
     }
 
     #[tokio::test]

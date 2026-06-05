@@ -33,7 +33,7 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("Read", AllowByDefault);
     m.insert("Skill", AllowByDefault);
     m.insert("Sleep", AllowByDefault);
-    m.insert("SyntheticOutput", AllowByDefault);
+    m.insert("StructuredOutput", AllowByDefault);
     m.insert("Task", AllowByDefault); // legacy alias of Agent
     m.insert("TaskGet", AllowByDefault);
     m.insert("TaskList", AllowByDefault);
@@ -46,13 +46,13 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("Edit", DenyByDefault);
     m.insert("EnterWorktree", DenyByDefault);
     m.insert("ExitWorktree", DenyByDefault);
-    m.insert("ListMcpResources", DenyByDefault);
+    m.insert("ListMcpResourcesTool", DenyByDefault);
     m.insert("MCP", DenyByDefault);
     m.insert("McpAuth", DenyByDefault);
     m.insert("NotebookEdit", DenyByDefault);
     m.insert("PowerShell", DenyByDefault);
     m.insert("REPL", DenyByDefault);
-    m.insert("ReadMcpResource", DenyByDefault);
+    m.insert("ReadMcpResourceTool", DenyByDefault);
     m.insert("RemoteTrigger", DenyByDefault);
     m.insert("ScheduleCron", DenyByDefault);
     m.insert("SendMessage", DenyByDefault);
@@ -116,11 +116,11 @@ mod tests {
         assert_eq!(tool_default("MCP"), PromptDefault::DenyByDefault);
         assert_eq!(tool_default("McpAuth"), PromptDefault::DenyByDefault);
         assert_eq!(
-            tool_default("ListMcpResources"),
+            tool_default("ListMcpResourcesTool"),
             PromptDefault::DenyByDefault
         );
         assert_eq!(
-            tool_default("ReadMcpResource"),
+            tool_default("ReadMcpResourceTool"),
             PromptDefault::DenyByDefault
         );
     }

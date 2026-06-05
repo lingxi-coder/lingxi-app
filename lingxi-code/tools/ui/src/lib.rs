@@ -1,5 +1,6 @@
 //! UI / interaction tools: AskUserQuestion, Brief, SendMessage, Sleep,
-//! SyntheticOutput. Extracted in M8-P7. Cross-platform.
+//! StructuredOutput (the `SyntheticOutputTool` struct, wire name
+//! `StructuredOutput`). Extracted in M8-P7. Cross-platform.
 #![forbid(unsafe_code)]
 #![allow(
     clippy::cast_possible_wrap,

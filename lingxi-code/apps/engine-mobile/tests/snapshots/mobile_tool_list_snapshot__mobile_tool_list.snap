@@ -17,7 +17,7 @@ expression: names
 - SendMessage
 - Skill
 - Sleep
-- SyntheticOutput
+- StructuredOutput
 - TaskCreate
 - TaskGet
 - TaskList

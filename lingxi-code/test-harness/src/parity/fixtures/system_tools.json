@@ -10,7 +10,7 @@
     "schedule_cron": "ScheduleCron",
     "tool_search": "ToolSearch",
     "remote_trigger": "RemoteTrigger",
-    "synthetic_output": "SyntheticOutput"
+    "synthetic_output": "StructuredOutput"
   },
 
   "wire_identifiers": {

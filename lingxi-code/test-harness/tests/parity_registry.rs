@@ -121,11 +121,11 @@ fn fixture_names_match_production_constants() {
         ("MCP", tool_mcp::mcp_tool::MCP_TOOL_NAME),
         ("McpAuth", tool_mcp::mcp_tool::MCP_AUTH_TOOL_NAME),
         (
-            "ListMcpResources",
+            "ListMcpResourcesTool",
             tool_mcp::mcp_tool::LIST_MCP_RESOURCES_TOOL_NAME,
         ),
         (
-            "ReadMcpResource",
+            "ReadMcpResourceTool",
             tool_mcp::mcp_tool::READ_MCP_RESOURCE_TOOL_NAME,
         ),
         ("LSP", tool_lsp::lsp_tool::LSP_TOOL_NAME),
@@ -147,7 +147,7 @@ fn fixture_names_match_production_constants() {
             tool_cron::remote_trigger::REMOTE_TRIGGER_TOOL_NAME,
         ),
         (
-            "SyntheticOutput",
+            "StructuredOutput",
             tool_ui::synthetic_output::SYNTHETIC_OUTPUT_TOOL_NAME,
         ),
     ];

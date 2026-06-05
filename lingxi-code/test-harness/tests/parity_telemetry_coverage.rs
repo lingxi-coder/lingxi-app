@@ -70,8 +70,8 @@ const TOOL_SNAKE: &[(&str, &str)] = &[
     // MCP + LSP (5)
     ("MCP", "mcp"),
     ("McpAuth", "mcp_auth"),
-    ("ListMcpResources", "list_mcp_resources"),
-    ("ReadMcpResource", "read_mcp_resource"),
+    ("ListMcpResourcesTool", "list_mcp_resources"),
+    ("ReadMcpResourceTool", "read_mcp_resource"),
     ("LSP", "lsp"),
     // System (8)
     ("AskUserQuestion", "ask_user_question"),
@@ -81,7 +81,7 @@ const TOOL_SNAKE: &[(&str, &str)] = &[
     ("ScheduleCron", "schedule_cron"),
     ("ToolSearch", "tool_search"),
     ("RemoteTrigger", "remote_trigger"),
-    ("SyntheticOutput", "synthetic_output"),
+    ("StructuredOutput", "synthetic_output"),
 ];
 
 #[test]

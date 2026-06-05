@@ -113,7 +113,7 @@ mod tests {
 
         let tools = coordinator_internal_tools(team, mode, seam, output);
 
-        // EXACTLY two tools — SendMessage / SyntheticOutput are dropped.
+        // EXACTLY two tools — SendMessage / StructuredOutput are dropped.
         assert_eq!(
             tools.len(),
             2,
@@ -123,7 +123,7 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert_eq!(names, vec!["TeamCreate", "TeamDelete"]);
 
-        // SendMessage / SyntheticOutput must NOT be present (builtins satisfy them).
+        // SendMessage / StructuredOutput must NOT be present (builtins satisfy them).
         assert!(
             !names.contains(&"SendMessage"),
             "SendMessage must be dropped from the coordinator factory"

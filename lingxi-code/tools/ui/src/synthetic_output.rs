@@ -29,8 +29,9 @@ use tool_api::tool_trait::{
 };
 use tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH;
 
-/// Tool name byte-lock.
-pub const SYNTHETIC_OUTPUT_TOOL_NAME: &str = "SyntheticOutput";
+/// Tool name byte-lock. Wire name `StructuredOutput` (claude-code
+/// `SyntheticOutputTool.ts:20` `SYNTHETIC_OUTPUT_TOOL_NAME = 'StructuredOutput'`).
+pub const SYNTHETIC_OUTPUT_TOOL_NAME: &str = "StructuredOutput";
 /// Truncation suffix appended when input exceeds `MAX_TOOL_OUTPUT_LENGTH`.
 /// Matches M4-01 truncation pattern (see `crates/tools/src/shared.rs`).
 pub const SYNTHETIC_TRUNCATION_SUFFIX: &str = "\n... [truncated]";
@@ -120,7 +121,7 @@ impl Tool for SyntheticOutputTool {
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "SyntheticOutput echoes input (replay-only)".into(),
+                reason: "StructuredOutput echoes input (replay-only)".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -133,7 +134,7 @@ impl Tool for SyntheticOutputTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "SyntheticOutput: echoes its input (used by parity replay).".into()
+        "StructuredOutput: echoes its input (used by parity replay).".into()
     }
 
     async fn validate_input(
@@ -145,7 +146,7 @@ impl Tool for SyntheticOutputTool {
             .get("content")
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                ValidationError("SyntheticOutput: missing or non-string content".into())
+                ValidationError("StructuredOutput: missing or non-string content".into())
             })?;
         Ok(())
     }
@@ -168,7 +169,7 @@ impl Tool for SyntheticOutputTool {
                 )
                 .await;
                 return Err(ToolError::InvalidInput(
-                    "SyntheticOutput: missing or non-string content".into(),
+                    "StructuredOutput: missing or non-string content".into(),
                 ));
             }
         };
@@ -227,7 +228,7 @@ mod tests {
 
     #[test]
     fn constants_locked() {
-        assert_eq!(SYNTHETIC_OUTPUT_TOOL_NAME, "SyntheticOutput");
+        assert_eq!(SYNTHETIC_OUTPUT_TOOL_NAME, "StructuredOutput");
     }
 
     #[tokio::test]

@@ -50,11 +50,14 @@ pub const MCP_TOOL_NAME: &str = "MCP";
 /// Tool name for `McpAuthTool`.
 pub const MCP_AUTH_TOOL_NAME: &str = "McpAuth";
 
-/// Tool name for `ListMcpResourcesTool`.
-pub const LIST_MCP_RESOURCES_TOOL_NAME: &str = "ListMcpResources";
+/// Tool name for `ListMcpResourcesTool`. Wire name carries the `Tool` suffix
+/// (claude-code `ListMcpResourcesTool/prompt.ts:1`
+/// `LIST_MCP_RESOURCES_TOOL_NAME = 'ListMcpResourcesTool'`).
+pub const LIST_MCP_RESOURCES_TOOL_NAME: &str = "ListMcpResourcesTool";
 
-/// Tool name for `ReadMcpResourceTool`.
-pub const READ_MCP_RESOURCE_TOOL_NAME: &str = "ReadMcpResource";
+/// Tool name for `ReadMcpResourceTool`. Wire name carries the `Tool` suffix
+/// (claude-code `ReadMcpResourceTool.ts:60` `name: 'ReadMcpResourceTool'`).
+pub const READ_MCP_RESOURCE_TOOL_NAME: &str = "ReadMcpResourceTool";
 
 /// Full-name prefix (`mcp__`) — M2-02b lock.
 pub const MCP_TOOL_FULL_NAME_PREFIX: &str = "mcp__";
@@ -737,7 +740,7 @@ impl Tool for ListMcpResourcesTool {
         "List resources advertised by a registered MCP server.".into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Use ListMcpResources to enumerate an MCP server's resources.".into()
+        "Use ListMcpResourcesTool to enumerate an MCP server's resources.".into()
     }
 
     async fn call(
@@ -947,7 +950,7 @@ impl Tool for ReadMcpResourceTool {
         "Read a single resource from a registered MCP server by URI.".into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Use ReadMcpResource to fetch an MCP resource's contents.".into()
+        "Use ReadMcpResourceTool to fetch an MCP resource's contents.".into()
     }
 
     async fn call(
@@ -1273,8 +1276,8 @@ mod tests {
     fn tool_name_locks() {
         assert_eq!(MCP_TOOL_NAME, "MCP");
         assert_eq!(MCP_AUTH_TOOL_NAME, "McpAuth");
-        assert_eq!(LIST_MCP_RESOURCES_TOOL_NAME, "ListMcpResources");
-        assert_eq!(READ_MCP_RESOURCE_TOOL_NAME, "ReadMcpResource");
+        assert_eq!(LIST_MCP_RESOURCES_TOOL_NAME, "ListMcpResourcesTool");
+        assert_eq!(READ_MCP_RESOURCE_TOOL_NAME, "ReadMcpResourceTool");
         assert_eq!(MCP_TOOL_FULL_NAME_PREFIX, "mcp__");
         assert_eq!(MCP_TOOL_FULL_NAME_SEPARATOR, "__");
     }

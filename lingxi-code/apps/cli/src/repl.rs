@@ -18,6 +18,31 @@ use tokio::io::{stderr, stdin, BufReader};
 use tokio_util::sync::CancellationToken;
 use traits::{OrchestratorHandle, OutputStream};
 
+/// Map a REPL `ended_via` discriminator to the claude-code `SessionEnd`
+/// `reason` (`ExitReason`) string fired at teardown.
+///
+/// Byte-faithful to claude-code: `/exit`, `/quit`, Ctrl+C (double-press), and
+/// Ctrl+D all funnel through the unified `handleExit` →
+/// `exit.tsx`/`ExitFlow.tsx` → `gracefulShutdown(0, 'prompt_input_exit')`
+/// (`commands/exit/exit.tsx:30`, `components/ExitFlow.tsx:26` — the exit.tsx
+/// comment is explicit: "Covers /exit, /quit, ctrl+c, ctrl+d"). So every clean
+/// user-initiated REPL exit emits `ExitReason = "prompt_input_exit"`. The
+/// `"other"` `ExitReason` (`gracefulShutdown`'s default, `coreTypes.ts:55`
+/// `EXIT_REASONS`) is reserved for error / signal / non-user-initiated
+/// shutdowns (sandbox failure, SSH drop, unhandled rejection), none of which
+/// correspond to a clean `StepOutcome` exit path — so all three of our
+/// `ended_via` values map to `prompt_input_exit`.
+fn session_end_reason(ended_via: &str) -> &'static str {
+    match ended_via {
+        // Ctrl+D (EOF), `/exit`/`/quit`, and double-Ctrl+C all route through
+        // claude-code's `handleExit` → `gracefulShutdown(0, "prompt_input_exit")`.
+        "eof" | "exit_command" | "double_sigint" => "prompt_input_exit",
+        // Defensive default mirrors `gracefulShutdown`'s `ExitReason = "other"`
+        // fallback for any non-user-initiated teardown.
+        _ => "other",
+    }
+}
+
 /// REPL entry point.  Builds the runtime, runs the prompt loop, emits
 /// `tengu_repl_session_started` / `tengu_repl_session_ended` telemetry.
 pub async fn run_repl(argv: &Argv) -> i32 {
@@ -100,6 +125,16 @@ pub async fn run_repl(argv: &Argv) -> i32 {
         }
     }
 
+    // hooks (session lifecycle): fire `SessionEnd` at the CLI session-end seam,
+    // mirroring how `engine_desktop::build` fires `fire_session_start("startup")`
+    // at boot. `orch` is the CONCRETE `Arc<ConversationOrchestrator>` (the
+    // `OrchestratorHandle` trait does NOT expose `fire_session_end`), so we fire
+    // here where the concrete type is still in scope, AFTER the repl loop breaks.
+    // Best-effort, like `fire_session_start`: a failing SessionEnd hook never
+    // breaks shutdown (the helper discards each hook aggregate). The `reason` is
+    // the byte-faithful claude-code `ExitReason` for this exit path.
+    orch.fire_session_end(session_end_reason(ended_via)).await;
+
     tracing::info!(
         event = telemetry::tengu::orchestrator::REPL_SESSION_ENDED,
         session_id = %session_id,
@@ -109,4 +144,30 @@ pub async fn run_repl(argv: &Argv) -> i32 {
     );
 
     exit_code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_end_reason;
+
+    /// Every clean REPL `StepOutcome` exit path (`eof` = Ctrl+D,
+    /// `exit_command` = `/exit`/`/quit`, `double_sigint` = double-Ctrl+C) maps
+    /// to the claude-code `ExitReason` `"prompt_input_exit"`, because all three
+    /// funnel through claude-code's unified `handleExit` →
+    /// `gracefulShutdown(0, "prompt_input_exit")` (`commands/exit/exit.tsx:30`,
+    /// `components/ExitFlow.tsx:26`).
+    #[test]
+    fn clean_exit_paths_map_to_prompt_input_exit() {
+        assert_eq!(session_end_reason("eof"), "prompt_input_exit");
+        assert_eq!(session_end_reason("exit_command"), "prompt_input_exit");
+        assert_eq!(session_end_reason("double_sigint"), "prompt_input_exit");
+    }
+
+    /// Any unrecognised discriminator falls back to `gracefulShutdown`'s default
+    /// `ExitReason = "other"` (`utils/gracefulShutdown.ts:393`).
+    #[test]
+    fn unknown_reason_falls_back_to_other() {
+        assert_eq!(session_end_reason("something_else"), "other");
+        assert_eq!(session_end_reason(""), "other");
+    }
 }

@@ -12,7 +12,13 @@
 
 #![forbid(unsafe_code)]
 
-// ---- 16 beta constants (spec §7 lines 676-700) ------------------------------
+// ---- beta constants (spec §7 lines 676-700; declaration order = betas.ts) ----
+//
+// Three of these — SUMMARIZE_CONNECTOR_TEXT / AFK_MODE / CLI_INTERNAL — are
+// feature()/USER_TYPE-gated in betas.ts and resolve to `''` in the external
+// default build. Their literals are reserved here byte-faithfully but are NOT
+// wired into `assemble_beta_header`, so the external header output is identical
+// to claude-code (never over-emitted).
 
 /// Core claude-code feature gate.
 pub const CLAUDE_CODE_BETA: &str = "claude-code-20250219";
@@ -42,6 +48,33 @@ pub const FAST_MODE: &str = "fast-mode-2026-02-01";
 pub const REDACT_THINKING: &str = "redact-thinking-2026-02-12";
 /// Token-efficient tool encoding.
 pub const TOKEN_EFFICIENT_TOOLS: &str = "token-efficient-tools-2026-03-28";
+/// Connector-text summarization.
+///
+/// **Feature-gated / inert in the external build.** In `betas.ts` this is
+/// `feature('CONNECTOR_TEXT') ? 'summarize-connector-text-2026-03-13' : ''`,
+/// so the literal is only emitted when the `CONNECTOR_TEXT` build feature is
+/// on; the external default build resolves it to `''`. The byte-faithful
+/// header literal is kept here as a reserved constant, but it is deliberately
+/// NOT wired into [`assemble_beta_header`] (mirroring the empty-string default)
+/// so it is never emitted unless that feature is enabled.
+pub const SUMMARIZE_CONNECTOR_TEXT: &str = "summarize-connector-text-2026-03-13";
+/// AFK ("away-from-keyboard") transcript-classifier mode.
+///
+/// **Feature-gated / inert in the external build.** In `betas.ts` this is
+/// `feature('TRANSCRIPT_CLASSIFIER') ? 'afk-mode-2026-01-31' : ''`, so the
+/// literal is only emitted when the `TRANSCRIPT_CLASSIFIER` build feature is
+/// on; the external default build resolves it to `''`. Reserved here; NOT
+/// wired into [`assemble_beta_header`] so it is never emitted externally.
+pub const AFK_MODE: &str = "afk-mode-2026-01-31";
+/// CLI-internal (Anthropic-employee) gate.
+///
+/// **`USER_TYPE === 'ant'`-gated / inert in the external build.** In
+/// `betas.ts` this is
+/// `process.env.USER_TYPE === 'ant' ? 'cli-internal-2026-02-09' : ''`, so the
+/// literal is only emitted for the internal Anthropic user type; the external
+/// default build resolves it to `''`. Reserved here; NOT wired into
+/// [`assemble_beta_header`] so it is never emitted externally.
+pub const CLI_INTERNAL: &str = "cli-internal-2026-02-09";
 /// Advisor tool integration.
 pub const ADVISOR_TOOL: &str = "advisor-tool-2026-03-01";
 /// OAuth bearer-token auth on the messages endpoint.
@@ -187,6 +220,38 @@ mod tests {
         assert_eq!(TOKEN_EFFICIENT_TOOLS, "token-efficient-tools-2026-03-28");
         assert_eq!(ADVISOR_TOOL, "advisor-tool-2026-03-01");
         assert_eq!(OAUTH, "oauth-2025-04-20");
+    }
+
+    /// The three feature()/USER_TYPE-gated betas: literals are byte-exact
+    /// against betas.ts (lines 23-30), regardless of the (inert) gating.
+    #[test]
+    fn feature_gated_beta_constants_match_betas_ts_byte_for_byte() {
+        assert_eq!(SUMMARIZE_CONNECTOR_TEXT, "summarize-connector-text-2026-03-13");
+        assert_eq!(AFK_MODE, "afk-mode-2026-01-31");
+        assert_eq!(CLI_INTERNAL, "cli-internal-2026-02-09");
+    }
+
+    /// In the external default build these three resolve to `''` in betas.ts,
+    /// so they must NEVER appear in any assembled header (any provider ×
+    /// endpoint). They are deliberately not wired into `assemble_beta_header`.
+    #[test]
+    fn feature_gated_betas_never_emitted_in_external_build() {
+        for provider in [Provider::Anthropic, Provider::Vertex, Provider::Bedrock] {
+            for endpoint in [
+                Endpoint::MessagesCreate,
+                Endpoint::MessagesCreateStream,
+                Endpoint::CountTokens,
+            ] {
+                let s = assemble_beta_header(provider, endpoint);
+                for gated in [SUMMARIZE_CONNECTOR_TEXT, AFK_MODE, CLI_INTERNAL] {
+                    assert!(
+                        !s.split(',').any(|p| p == gated),
+                        "feature-gated beta {gated} must NOT be emitted externally \
+                         for {provider:?}/{endpoint:?}; got: {s}",
+                    );
+                }
+            }
+        }
     }
 
     #[test]

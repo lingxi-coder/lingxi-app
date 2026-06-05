@@ -215,6 +215,23 @@ impl PermissionPolicy {
                     ) {
                         return ask_dangerous_removal(tool_name, danger);
                     }
+                    // 2b. Bash path-constraint guard (claude-code `checkPathConstraints`,
+                    //     `BashTool/pathValidation.ts:1013`). A bash command that writes
+                    //     (output redirection), `cd`s, or uses process substitution to
+                    //     touch a path OUTSIDE the allowed working dirs (cwd +
+                    //     `additional_working_dirs`) ALWAYS asks — even past a matching
+                    //     allow rule, matching the TS `behavior: 'ask'` return. Shares the
+                    //     dangerous-removal slot (after deny/ask walks, before the allow
+                    //     walk, roots- + shell-gated). The `astCommands` branch is dropped
+                    //     in favor of the `split_command` path (documented in
+                    //     `path_constraints`).
+                    if let Some(ask) = crate::path_constraints::check_path_constraints(
+                        command,
+                        roots,
+                        &self.additional_working_dirs,
+                    ) {
+                        return ask_path_constraint(tool_name, ask);
+                    }
                 }
             }
         }
@@ -585,6 +602,28 @@ fn ask_dangerous_removal(
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
             message: danger.message,
+            options: vec!["Allow once".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// Bash path-constraint ask: a command writing/`cd`-ing/process-substituting
+/// outside the allowed working dirs (claude-code `checkPathConstraints`). Tagged
+/// with [`PermissionDecisionReason::Other`] (the TS `decisionReason.type:
+/// 'other'`), carrying the byte-locked message. Offers no rule-saving
+/// suggestion (the TS suggestions are a UI concern modeled elsewhere; the
+/// permission-layer decision is the ask itself).
+fn ask_path_constraint(
+    tool_name: &str,
+    ask: crate::path_constraints::PathConstraintAsk,
+) -> PermissionResult {
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::Other { reason: ask.reason },
+        prompt: PermissionPrompt {
+            title: format!("Allow {tool_name}?"),
+            message: ask.message,
             options: vec!["Allow once".into(), "Deny".into()],
         },
         pending_classifier_check: None,
@@ -1075,6 +1114,115 @@ mod tests {
         let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
         assert!(matches!(
             p.authorize("Bash", &bash("rm -rf /")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── bash path-constraint guard (checkPathConstraints) ──────────────────
+
+    #[test]
+    fn redirect_outside_cwd_asks_over_allow_rule() {
+        // `echo x > /etc/foo` writes outside cwd → ask even though `Bash(echo:*)`
+        // would otherwise allow it (TS checkPathConstraints `behavior: 'ask'`).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x > /etc/foo")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn redirect_inside_cwd_rides_the_allow_rule() {
+        // `echo x > ./local` stays inside cwd → the constraint guard does NOT
+        // trip and the allow rule applies.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x > ./local")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn cd_outside_cwd_asks_over_allow_rule() {
+        // `cd /tmp && ...` changes directory outside cwd → ask.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("cd /tmp && ls")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn process_substitution_asks_over_allow_rule() {
+        // Process substitution can run arbitrary commands → always ask.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo secret > >(tee /etc/passwd)")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn command_fully_inside_cwd_rides_the_allow_rule() {
+        // A command that only touches cwd-relative paths is allowed by the rule;
+        // the path-constraint guard must not over-ask.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x > out.txt && cat out.txt")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn explicit_deny_still_beats_path_constraint_ask() {
+        // An explicit deny rule short-circuits before the path-constraint guard
+        // (the deny walk runs first), so a denied redirect is denied, not asked.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(echo:*)"], "allow": ["Bash"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x > /etc/foo")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn path_constraint_skipped_without_roots() {
+        // Without roots the guard cannot resolve cwd, so it is skipped and the
+        // allow rule applies (preserves pre-guard behavior).
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "allow": ["Bash"] } }"#,
+            PermissionRuleSource::ProjectSettings,
+        )
+        .unwrap();
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo x > /etc/foo")),
             PermissionResult::Allow { .. }
         ));
     }

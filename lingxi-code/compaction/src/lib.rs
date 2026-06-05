@@ -18,6 +18,7 @@ pub mod ptl_retry;
 pub mod reactive;
 pub mod session_memory;
 pub mod snip;
+pub mod strip_media;
 pub mod threshold_calc;
 pub mod thresholds;
 pub mod warning_state;

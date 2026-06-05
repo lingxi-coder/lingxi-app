@@ -146,6 +146,33 @@ async fn emit(bus: &Arc<AnalyticsBus>, event: &'static str, fields: &[(&str, Ana
     bus.log_event(event, md).await;
 }
 
+/// Produce the `(now_millis, rand_tag)` seed for a blob `persistId`, mirroring
+/// the TS `Date.now()` + `Math.random().toString(36).slice(2, 8)` pair that
+/// `persistBlobToTextBlock` feeds into its persistId template
+/// (`client.ts:2604`). The exact value is non-load-bearing (it only has to be
+/// unique per blob); only the *template shape* (`mcp-<server>-blob-<now>-<rand>`)
+/// is locked, and that lives in `transform_result::persist_blob_to_text_block`.
+/// Mirrors the private `mcp::client::persist_id_seed` (kept in sync; no RNG dep).
+fn persist_id_seed() -> (u128, String) {
+    const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let now_millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_nanos()))
+        .unwrap_or(0)
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    let mut tag = String::with_capacity(6);
+    for _ in 0..6 {
+        tag.push(ALPHABET[(seed % 36) as usize] as char);
+        seed /= 36;
+    }
+    (now_millis, tag)
+}
+
 // -- Permission shape (shared by all four MCP tools) -------------------------
 
 fn allow_mcp(reason: &str) -> PermissionResult {
@@ -478,17 +505,30 @@ impl Tool for MCPTool {
                 )
                 .await;
                 // Reshape each server content block into its model-facing form
-                // (text passthrough, resource-text prefixing, resource_link),
-                // mirroring claude-code's `transformResultContent` /
-                // `transformMCPResult` (`client.ts:2478-2697`). Only ARRAY
+                // (text passthrough, image → base64 image block, audio + non-
+                // image resource-blob → persisted text block, resource-text
+                // prefixing, resource-image-blob → prefix + image block,
+                // resource_link), mirroring claude-code's `transformResultContent`
+                // / `transformMCPResult` (`client.ts:2478-2697`). Only ARRAY
                 // `content` is walked — a bare value (e.g. a `toolResult`
                 // string) is forwarded verbatim, matching the TS branch that
-                // never reaches `transformResultContent`. image/audio/
-                // resource-blob remain a verbatim passthrough (DEFERRED — they
-                // need an image codec / disk persistence; see
-                // `transform_result.rs`).
-                let content =
-                    crate::transform_result::transform_result_content(&dto.content, &server);
+                // never reaches `transformResultContent` (MCP-5e). Blob bytes
+                // (audio + non-image resource blobs) are persisted under the
+                // project-local tool-results dir (same dir `ReadMcpResourceTool`
+                // uses) via the MCP-5d storage helpers. Image base64 is a
+                // PASSTHROUGH (`maybe_resize`); over-limit downsampling is the
+                // sole divergence (needs a codec — 5e-resize follow-up).
+                let output_dir = self.ctx.workspace.join(".claude").join("tool-results");
+                let (now_millis, rand_tag) = persist_id_seed();
+                let content = crate::transform_result::transform_result_content(
+                    &dto.content,
+                    &server,
+                    crate::transform_result::PersistContext {
+                        output_dir: &output_dir,
+                        now_millis,
+                        rand_tag: &rand_tag,
+                    },
+                );
                 Ok(ToolCallResult {
                     data: json!({
                         "server_name": server,

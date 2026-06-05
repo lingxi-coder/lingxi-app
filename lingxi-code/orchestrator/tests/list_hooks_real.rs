@@ -35,6 +35,8 @@ fn hk(
         blocking: true,
         timeout,
         priority: 0,
+        once: false,
+        status_message: None,
     }
 }
 

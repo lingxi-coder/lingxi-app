@@ -223,6 +223,8 @@ mod all_hooks_tests {
             blocking: true,
             timeout: None,
             priority: 0,
+            once: false,
+            status_message: None,
         }
     }
 
@@ -281,6 +283,8 @@ mod match_event_matcher_tests {
             blocking: true,
             timeout: None,
             priority: 0,
+            once: false,
+            status_message: None,
         }
     }
 

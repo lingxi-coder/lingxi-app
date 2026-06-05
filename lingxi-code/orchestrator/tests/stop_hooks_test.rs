@@ -138,6 +138,8 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         blocking: true,
         timeout: None,
         priority: 0,
+        once: false,
+        status_message: None,
     }
 }
 

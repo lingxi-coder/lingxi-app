@@ -53,6 +53,8 @@ async fn pretooluse_block_short_circuits() {
         blocking: true,
         timeout: None,
         priority: 100,
+        once: false,
+        status_message: None,
     });
 
     let http = Arc::new(MockHttpTransport::new());

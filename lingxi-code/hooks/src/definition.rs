@@ -37,6 +37,23 @@ pub struct HookDefinition {
     pub timeout: Option<Duration>,
     /// Higher values execute first. Ties resolved by registration order.
     pub priority: i32,
+    /// If `true`, the hook runs once and is removed after a successful
+    /// execution (claude-code `once` field; `schemas/hooks.ts:51-54`).
+    ///
+    /// This carries the parsed flag from settings; the actual self-removal
+    /// RUNTIME behavior (dropping the hook from the registry after it
+    /// succeeds) is executor work and is NOT wired here — see the loader
+    /// module docs. Defaults to `false`.
+    #[serde(default)]
+    pub once: bool,
+    /// Custom status message shown in the spinner while the hook runs
+    /// (claude-code `statusMessage` field; `schemas/hooks.ts:47-50`).
+    ///
+    /// This carries the parsed text from settings; the TUI spinner wiring
+    /// that actually displays it is presentation work and is NOT done here.
+    /// Defaults to `None` (use the engine's generic running message).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_message: Option<String>,
 }
 
 impl HookDefinition {

@@ -1272,6 +1272,78 @@ impl ConversationOrchestrator {
             .await;
     }
 
+    /// Fire the `InstructionsLoaded` hooks once per loaded instruction file at
+    /// session startup (hooks lifecycle, TS `executeInstructionsLoadedHooks`
+    /// dispatched from the eager `getMemoryFiles` pass — `utils/claudemd.ts:1054-1071`,
+    /// `utils/hooks.ts:4335-4369`).
+    ///
+    /// claude-code fires this fire-and-forget hook for **each** CLAUDE.md /
+    /// `CLAUDE.local.md` it splices into context, carrying that file's `file_path`,
+    /// `memory_type` (`User` / `Project` / `Local` / `Managed`), and `load_reason`.
+    /// The eager session-start pass reports `load_reason: 'session_start'` for every
+    /// top-level (parent-less) file (`eagerLoadReason`). The orchestrator's
+    /// [`crate::prompt::MemoryHierarchyProvider`] loads exactly that top-level
+    /// User/Project/Local hierarchy (no `@include` parents, no enterprise-`Managed`
+    /// tier), so every file fired here is top-level ⇒ `load_reason = session_start`,
+    /// with `memory_type` derived from the loaded file:
+    ///
+    /// - `is_local_override` ⇒ `Local` (a `CLAUDE.local.md`),
+    /// - path under `~/.claude` ⇒ `User` (user-global `CLAUDE.md`),
+    /// - otherwise ⇒ `Project` (a repo `CLAUDE.md`).
+    ///
+    /// `globs` / `trigger_file_path` / `parent_file_path` are omitted — the
+    /// hierarchy provider carries no `paths:`-frontmatter, lazy-trigger, or
+    /// `@include`-parent metadata (those wire fields are `.optional()` and elided
+    /// when absent, matching the TS session-start fire).
+    ///
+    /// The orchestrator already owns the memory provider AND the hook registry, so
+    /// it loads memory ONCE here (the same `memory.load(&cwd)` the system-prompt
+    /// assembler uses) and fires from a single point — no cross-crate seam. The
+    /// host composition root calls this ONCE immediately after [`Self::fire_session_start`].
+    ///
+    /// Best-effort, exactly like [`Self::fire_session_start`]: each hook aggregate
+    /// is discarded so a failing `InstructionsLoaded` hook never breaks boot, and
+    /// it is a strict no-op when no `InstructionsLoaded` hook is registered.
+    pub async fn fire_instructions_loaded(&self) {
+        let cwd = self.cwd.clone();
+        let memory_files = self.memory.load(&cwd).await;
+        if memory_files.is_empty() {
+            return;
+        }
+        let home = dirs::home_dir();
+        for file in memory_files {
+            let memory_type = if file.is_local_override {
+                hooks::events::InstructionsMemoryType::Local
+            } else if home
+                .as_ref()
+                .is_some_and(|h| file.path.starts_with(h.join(".claude")))
+            {
+                hooks::events::InstructionsMemoryType::User
+            } else {
+                hooks::events::InstructionsMemoryType::Project
+            };
+            // A fresh per-file `HookContext` (the executor reads `session_id` /
+            // `cwd` from it); `lifecycle_hook_ctx` re-locks the session each call,
+            // matching the other lifecycle fires.
+            let ctx = self.lifecycle_hook_ctx(false).await;
+            let _ = self
+                .hooks
+                .execute(
+                    HookEvent::InstructionsLoaded {
+                        file_path: file.path,
+                        memory_type,
+                        // Top-level eager session-start load (no `@include` parent).
+                        load_reason: hooks::events::InstructionsLoadReason::SessionStart,
+                        globs: None,
+                        trigger_file_path: None,
+                        parent_file_path: None,
+                    },
+                    ctx,
+                )
+                .await;
+        }
+    }
+
     /// Fire the `SessionEnd` lifecycle hooks at session teardown (hooks session
     /// lifecycle, TS `executeSessionEndHooks` — `utils/hooks.ts:4097-4117`).
     ///

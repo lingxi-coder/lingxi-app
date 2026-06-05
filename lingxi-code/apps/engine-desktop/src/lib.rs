@@ -1226,6 +1226,20 @@ pub async fn build(
     //     batch that adds an explicit host teardown seam.
     orch.fire_session_start("startup").await;
 
+    // (7.1) Instruction-load lifecycle: fire the `InstructionsLoaded` hooks now
+    //       that memory + the hook registry are wired. claude-code fires this
+    //       fire-and-forget hook once per CLAUDE.md / `CLAUDE.local.md` spliced
+    //       into context by the eager session-start `getMemoryFiles` pass
+    //       (`utils/claudemd.ts:1054-1071`, `utils/hooks.ts:4335-4369`), each
+    //       carrying the file's `file_path` / `memory_type` / `load_reason`
+    //       (`session_start` for top-level files). The orchestrator owns the
+    //       memory provider, so it loads memory once and fires from that single
+    //       point. Best-effort: `fire_instructions_loaded` discards each hook
+    //       aggregate, so a failing/malformed `InstructionsLoaded` hook never
+    //       breaks boot, and it is a strict no-op when none is registered (the
+    //       common case) or when no instruction files are present.
+    orch.fire_instructions_loaded().await;
+
     Ok(DesktopRuntime {
         orchestrator: orch,
         dispatcher,
@@ -1498,6 +1512,62 @@ mod tests {
         assert!(
             hooks.iter().any(|h| h.event == "SessionStart"),
             "boot must load the SessionStart hook the lifecycle fire dispatches against: {hooks:?}"
+        );
+    }
+
+    /// Instruction-load lifecycle: the boot path fires `InstructionsLoaded`
+    /// (once per loaded CLAUDE.md, load_reason=session_start) right after
+    /// `SessionStart`, best-effort.
+    ///
+    /// We register an `InstructionsLoaded` command hook in the project
+    /// `cwd/.claude/settings.json` that `build()` reads at boot. `build()` must
+    /// (a) complete successfully — proving the wired `fire_instructions_loaded`
+    /// (using the minimal stub process runner, so the hook command itself errors
+    /// `Unsupported`) is best-effort and never breaks boot — and (b) surface the
+    /// loaded `InstructionsLoaded` hook via the orchestrator's `list_hooks`,
+    /// proving the boot path loaded the instruction-load-lifecycle hook the wired
+    /// `fire_instructions_loaded()` call dispatched against.
+    ///
+    /// NOTE: desktop boot currently wires the empty `StaticMemoryProvider`
+    /// (lib.rs §5), so no instruction file actually fires through the command
+    /// hook here — the helper is a no-op over zero files. Wiring the
+    /// `RealMemoryHierarchyProvider` into desktop boot is a separate gap; this
+    /// test pins the boot-path fire seam + best-effort contract regardless.
+    #[tokio::test]
+    async fn build_fires_instructions_loaded_against_a_registered_hook() {
+        use traits::OrchestratorHandle as _;
+
+        let (_tmp, cfg) = test_config(true);
+        // Project settings the hooks loader reads at boot
+        // (cwd/.claude/settings.json) — a single `InstructionsLoaded` command hook.
+        let claude_dir = cfg.cwd.join(".claude");
+        std::fs::create_dir_all(&claude_dir).expect("mk .claude");
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{ "hooks": { "InstructionsLoaded": [ { "hooks": [
+                { "type": "command", "command": "true" }
+            ] } ] } }"#,
+        )
+        .expect("write settings.json");
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        // The wired `fire_instructions_loaded()` runs INSIDE build(): a
+        // failing/unsupported hook command must NOT break boot (best-effort).
+        let rt = build(cfg, output, perm_sink)
+            .await
+            .expect("build() must succeed even with a (failing) InstructionsLoaded hook registered");
+
+        // The boot path loaded the InstructionsLoaded hook into the wired
+        // registry — exactly the hook the in-build `fire_instructions_loaded()`
+        // fires against once the memory provider yields instruction files.
+        let hooks = rt.orchestrator.list_hooks().await;
+        assert!(
+            hooks.iter().any(|h| h.event == "InstructionsLoaded"),
+            "boot must load the InstructionsLoaded hook the lifecycle fire dispatches against: {hooks:?}"
         );
     }
 

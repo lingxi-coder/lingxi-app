@@ -8,7 +8,7 @@
 //!   truncates the head twice (`truncateHeadForPTLRetry`) and the third call
 //!   succeeds. We assert the API saw 3 calls with strictly-shrinking message
 //!   counts, and the turn ended normally with the model's text.
-//! - `ApiError::PromptTooLong` returned MAX_PTL_RETRIES+1 times → after the
+//! - `ApiError::PromptTooLong` returned `MAX_PTL_RETRIES`+1 times → after the
 //!   retry budget the loop attempts ONE reactive full compact and retries; when
 //!   that STILL 413s, the turn ends with the byte-exact
 //!   `PROMPT_TOO_LONG_ERROR_MESSAGE` assistant message (no hard error bubbled).
@@ -75,6 +75,9 @@ fn ptl_err(token_gap: u64) -> Result<MessageResponse, ApiError> {
     })
 }
 
+// The `Result` wrap is required: `ok_text` is pushed into the same scripted
+// response vec as `ptl_err` (which returns `Err`), so the type must match.
+#[allow(clippy::unnecessary_wraps)]
 fn ok_text(text: &str) -> Result<MessageResponse, ApiError> {
     Ok(mock_message_response(
         vec![ContentBlockApi::Text {

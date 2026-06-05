@@ -1,11 +1,11 @@
-//! hooks B4 — Stop / UserPromptSubmit lifecycle hooks fired from the turn loop.
+//! hooks B4 — Stop / `UserPromptSubmit` lifecycle hooks fired from the turn loop.
 //!
 //! Exercises the core Stop continuation contract (TS `query.ts:1262-1308`):
 //! - a Stop hook `Block` (keep working) continues ONE extra turn with the
 //!   blocking message appended + `stop_hook_active=true`; a SECOND block does
 //!   NOT loop forever (re-entry guard);
 //! - `preventContinuation` (`continue:false`) terminates as `StopHookPrevented`;
-//! - a UserPromptSubmit `Block` aborts the turn BEFORE any API call.
+//! - a `UserPromptSubmit` `Block` aborts the turn BEFORE any API call.
 
 use api_client::types::ContentBlockApi;
 use async_trait::async_trait;
@@ -102,7 +102,7 @@ impl BuiltinHookHandler for StopPreventHandler {
     }
 }
 
-/// UserPromptSubmit hook that blocks the prompt.
+/// `UserPromptSubmit` hook that blocks the prompt.
 struct PromptBlockHandler;
 #[async_trait]
 impl BuiltinHookHandler for PromptBlockHandler {

@@ -172,11 +172,19 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
         "run_turn_streaming must advertise the registry's wire tools (sorted by name)"
     );
 
-    // Concurrent execution: total wall time ~50ms (Slow's sleep), NOT
-    // ~100ms (50ms × 2 sequential).
+    // Concurrency is proven DETERMINISTICALLY by the completion-order assertion
+    // below (`result_tools == ["Fast", "Slow"]`): Fast is dispatched SECOND but
+    // emits its ToolResult FIRST, which is only possible if the two tools ran
+    // concurrently — sequential dispatch-order execution would complete Slow
+    // first. The wall-clock measurement here is therefore only a coarse
+    // hang-guard: a generous bound that catches a genuine deadlock without
+    // flaking under the CPU contention of a full `cargo test --workspace` run.
+    // (The previous 90ms bound was contention-sensitive AND did not actually
+    // distinguish concurrency: FastTool sleeps 0ms, so concurrent and sequential
+    // wall-times are both ~50ms — the bound only measured scheduler latency.)
     assert!(
-        elapsed < Duration::from_millis(90),
-        "expected concurrent (~50ms), got {elapsed:?}"
+        elapsed < Duration::from_secs(5),
+        "tool dispatch appears to have hung (expected well under 5s, got {elapsed:?})"
     );
 
     let events = output.snapshot().await;

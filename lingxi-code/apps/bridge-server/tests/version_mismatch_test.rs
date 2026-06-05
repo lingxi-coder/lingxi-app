@@ -242,8 +242,10 @@ async fn client_protocol_version_mismatch_refuses() {
     let mut ws = connect(endpoint.port()).await;
 
     // Matching wire envelope, but a mismatched MAJOR client-protocol version.
-    let mut caps = Capabilities::default();
-    caps.client_protocol_version = "99.0.0".into();
+    let caps = Capabilities {
+        client_protocol_version: "99.0.0".into(),
+        ..Default::default()
+    };
     send_hello(
         &mut ws,
         &ClientHello {

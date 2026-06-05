@@ -204,6 +204,12 @@ fn resolve_desktop_config(argv: &Argv) -> DesktopConfig {
         // from session metadata is a follow-up; the default is byte-identical
         // to the pre-M10 build).
         session_started_as_coordinator: false,
+        // Production memory: load the real `<cwd>/CLAUDE.md` +
+        // `~/.claude/CLAUDE.md` hierarchy into the system prompt (claude-code
+        // parity), which also makes the session-start
+        // `fire_instructions_loaded()` fire over those files. Tests inject a
+        // controlled provider (or `None`); only this real-host path reads the FS.
+        memory_provider: Some(orchestrator::prompt::real_provider()),
     }
 }
 

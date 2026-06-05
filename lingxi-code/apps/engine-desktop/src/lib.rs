@@ -895,6 +895,13 @@ pub async fn build(
     //        distinct injection points. The orchestrator's `hooks` param is the
     //        concrete `Arc<hooks::HookExecutorImpl>`, so no trait-object coercion
     //        is needed.
+    //        The Prompt arm is wired via `with_prompt_runner`: the
+    //        `ApiClientHookPromptRunner` reuses the SAME `api_client`
+    //        (`OrchestratorApiClient::messages_create`) the orchestrator uses
+    //        for its other one-shot LLM passes, so a `prompt` hook
+    //        (`execPromptHook.ts`) runs an inline single-turn query through the
+    //        shared provider/routing/telemetry plumbing. Decoupled: the hooks
+    //        crate only sees the `HookPromptRunner` trait, never the api-client.
     let hooks = Arc::new(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
@@ -904,7 +911,10 @@ pub async fn build(
         .with_process_runner(
             Arc::new(PosixProcess::new()) as Arc<dyn traits::ProcessRunner>,
             Arc::new(PosixSandbox::new()) as Arc<dyn traits::Sandbox>,
-        ),
+        )
+        .with_prompt_runner(Arc::new(orchestrator::ApiClientHookPromptRunner::new(
+            api_client.clone(),
+        ))),
     );
 
     // (5.3) Agent catalog — load from project + user agents/. Project wins on

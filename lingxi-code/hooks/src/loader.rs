@@ -25,13 +25,15 @@
 //!
 //! ## Per-hook fields & deferrals
 //!
-//! The `"command"`, `"http"`, and `"agent"` hook types are parsed (mapping onto
-//! [`HookExecutor::Command`] / [`HookExecutor::Http`] / [`HookExecutor::Agent`]
-//! respectively; the executor already routes each variant to its runner in
-//! `executor.rs`). The `"prompt"` type (`schemas/hooks.ts:67-95`) is DEFERRED:
-//! there is no matching `HookExecutor` variant for an inline-LLM-prompt hook,
-//! and inventing one would require a `traits`/`protocol`-side change, so a
-//! `prompt` entry is skipped rather than mis-parsed.
+//! The `"command"`, `"http"`, `"agent"`, and `"prompt"` hook types are parsed
+//! (mapping onto [`HookExecutor::Command`] / [`HookExecutor::Http`] /
+//! [`HookExecutor::Agent`] / [`HookExecutor::Prompt`] respectively; the executor
+//! already routes each variant to its runner in `executor.rs`). The `"prompt"`
+//! type (`schemas/hooks.ts:67-95`) is the inline single-turn LLM evaluator
+//! (`execPromptHook.ts`): its `prompt` (required) and optional `model` are
+//! carried onto [`HookExecutor::Prompt`], and `prompt_executor.rs` runs it
+//! against the injected `HookPromptRunner` (a structured no-op when no runner is
+//! wired). A `prompt` entry missing its `prompt` field is skipped.
 //!
 //! The additive `once` (`schemas/hooks.ts:51-54`) and `statusMessage`
 //! (`schemas/hooks.ts:47-50`) fields ARE parsed and carried onto
@@ -91,9 +93,16 @@ struct HookEntry {
     /// field for the allowlist).
     #[serde(default)]
     headers: Option<HashMap<String, String>>,
-    /// `agent` hook verifier prompt (`schemas/hooks.ts:138-142`).
+    /// `agent` / `prompt` hook prompt text (`schemas/hooks.ts:138-142` /
+    /// `67-73`). For an `agent` hook it is the verifier prompt; for a `prompt`
+    /// hook it is the inline-LLM evaluation prompt (with `$ARGUMENTS`).
     #[serde(default)]
     prompt: Option<String>,
+    /// `prompt` / `agent` hook model override (`schemas/hooks.ts:81-86`).
+    /// Consumed only by the `prompt` arm; the `agent` arm has no model field on
+    /// its [`HookExecutor::Agent`] variant, so it is dropped there.
+    #[serde(default)]
+    model: Option<String>,
     /// `timeout` in seconds, shared by all hook types
     /// (`schemas/hooks.ts:42-46` / `75-79` / `101-105` / `144-148`).
     #[serde(default)]
@@ -124,10 +133,10 @@ const DEFAULT_AGENT_TYPE: &str = "general-purpose";
 /// Parse the raw JSON string of a settings file into hook definitions.
 ///
 /// Unknown event names are silently skipped. An entry whose `type` is
-/// `"command"`/`"http"`/`"agent"` but is missing the field that type requires
-/// (`command` / `url` / `prompt`) is skipped, as is any entry whose `type` is
-/// unrecognized or absent (including the deferred `"prompt"` type). Returns
-/// `Ok(vec![])` when the input has no `hooks` block at all.
+/// `"command"`/`"http"`/`"agent"`/`"prompt"` but is missing the field that type
+/// requires (`command` / `url` / `prompt` / `prompt`) is skipped, as is any
+/// entry whose `type` is unrecognized or absent. Returns `Ok(vec![])` when the
+/// input has no `hooks` block at all.
 ///
 /// `source` is propagated onto every returned [`HookDefinition`] so the
 /// registry can later display trust info per origin.
@@ -173,8 +182,8 @@ pub fn parse_hooks_from_settings_json(
 /// Project a single settings [`HookEntry`] onto its `(name, HookExecutor)`.
 ///
 /// Returns `None` (so the caller skips the entry) when the `type` is missing,
-/// unrecognized, the deferred `"prompt"` type, or is a known type missing its
-/// required field. The per-type timeout is NOT consumed here — it is carried
+/// unrecognized, or is a known type missing its required field. The per-type
+/// timeout is NOT consumed here — it is carried
 /// onto [`HookDefinition::timeout`] by the caller for every type uniformly, so
 /// the executor's per-hook-timeout logic applies identically across arms.
 fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
@@ -215,8 +224,22 @@ fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
             // hook after its primary user-supplied field — here the agent type.
             Some((DEFAULT_AGENT_TYPE.to_string(), executor))
         }
-        // `"prompt"` (deferred — no matching HookExecutor variant), any other
-        // unknown type, and a missing `type` are all skipped.
+        Some("prompt") => {
+            // `prompt` hook (`schemas/hooks.ts:67-95`): the inline single-turn
+            // LLM evaluator (`execPromptHook.ts`). Routes to
+            // [`HookExecutor::Prompt`], executed by `prompt_executor.rs` against
+            // the injected `HookPromptRunner`.
+            let prompt = entry.prompt.clone()?;
+            let executor = HookExecutor::Prompt {
+                prompt,
+                model: entry.model.clone(),
+            };
+            // The hook name mirrors the command/http/agent convention; the
+            // prompt's primary user-supplied field is the prompt itself, so
+            // name the hook `"prompt"` (the type) to stay short and stable.
+            Some(("prompt".to_string(), executor))
+        }
+        // Any other unknown type and a missing `type` are skipped.
         _ => None,
     }
 }
@@ -551,36 +574,77 @@ mod tests {
         assert!(hooks.is_empty(), "an agent entry without a prompt is skipped");
     }
 
-    // ---- deferred `prompt` type + mixed batches ----------------------------
+    // ---- prompt hook parsing (schemas/hooks.ts:67-95) + mixed batches ------
 
     #[test]
-    fn prompt_type_is_deferred_and_skipped() {
-        // `prompt` is a valid claude-code hook type but has NO matching
-        // HookExecutor variant, so it must be skipped (not mis-parsed).
-        let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
-            { "type": "prompt", "prompt": "evaluate this" }
-        ]}]}}"#;
-        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
-        assert!(hooks.is_empty(), "the deferred prompt type is skipped");
+    fn prompt_hook_parses_to_prompt_executor_with_prompt_and_model() {
+        // `prompt` is the inline single-turn LLM evaluator (execPromptHook.ts).
+        let raw = r#"{
+          "hooks": {
+            "PreToolUse": [{ "matcher": "Bash", "hooks": [
+              { "type": "prompt",
+                "prompt": "Is $ARGUMENTS a safe command?",
+                "model": "claude-sonnet-4-6",
+                "timeout": 15 }
+            ]}]
+          }
+        }"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::Project).unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].events, vec![HookEventType::PreToolUse]);
+        assert_eq!(hooks[0].source, HookSource::Project);
+        assert_eq!(hooks[0].timeout, Some(Duration::from_secs(15)));
+        let HookExecutor::Prompt { prompt, model } = &hooks[0].executor else {
+            panic!("expected Prompt executor, got {:?}", hooks[0].executor);
+        };
+        assert_eq!(prompt, "Is $ARGUMENTS a safe command?");
+        assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(hooks[0].name, "prompt");
+        assert_eq!(
+            hooks[0].if_condition.as_ref().map(|c| c.pattern.as_str()),
+            Some("Bash"),
+        );
     }
 
     #[test]
-    fn mixed_command_http_agent_in_one_group_all_parse() {
-        // One matcher group carrying a command, an http, an agent, and a
-        // (skipped) prompt hook. The command parsing is unchanged; http/agent
-        // parse to their executors; prompt is dropped.
+    fn prompt_hook_without_model_defaults_to_none() {
+        let raw = r#"{ "hooks": { "PostToolUse": [{ "hooks": [
+            { "type": "prompt", "prompt": "evaluate this" }
+        ]}]}}"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
+        assert_eq!(hooks.len(), 1);
+        let HookExecutor::Prompt { prompt, model } = &hooks[0].executor else {
+            panic!("expected Prompt executor");
+        };
+        assert_eq!(prompt, "evaluate this");
+        assert_eq!(*model, None);
+    }
+
+    #[test]
+    fn prompt_hook_missing_prompt_is_skipped() {
+        let raw = r#"{ "hooks": { "PreToolUse": [{ "hooks": [
+            { "type": "prompt", "model": "claude-sonnet-4-6" }
+        ]}]}}"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
+        assert!(hooks.is_empty(), "a prompt entry without a prompt is skipped");
+    }
+
+    #[test]
+    fn mixed_command_http_agent_prompt_in_one_group_all_parse() {
+        // One matcher group carrying a command, an http, an agent, and a prompt
+        // hook. All four now parse to their executors.
         let raw = r#"{
           "hooks": {
             "PreToolUse": [{ "matcher": "Bash", "hooks": [
               { "type": "command", "command": "./guard.sh" },
               { "type": "http", "url": "https://h.test/hook" },
               { "type": "agent", "prompt": "vet it" },
-              { "type": "prompt", "prompt": "ignored" }
+              { "type": "prompt", "prompt": "is $ARGUMENTS safe?" }
             ]}]
           }
         }"#;
         let hooks = parse_hooks_from_settings_json(raw, HookSource::Project).unwrap();
-        assert_eq!(hooks.len(), 3, "command + http + agent parse; prompt is skipped");
+        assert_eq!(hooks.len(), 4, "command + http + agent + prompt all parse");
         // Every parsed hook keeps the group's matcher.
         for h in &hooks {
             assert_eq!(
@@ -591,5 +655,6 @@ mod tests {
         assert!(matches!(hooks[0].executor, HookExecutor::Command { .. }));
         assert!(matches!(hooks[1].executor, HookExecutor::Http { .. }));
         assert!(matches!(hooks[2].executor, HookExecutor::Agent { .. }));
+        assert!(matches!(hooks[3].executor, HookExecutor::Prompt { .. }));
     }
 }

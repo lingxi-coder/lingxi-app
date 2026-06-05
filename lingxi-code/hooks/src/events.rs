@@ -166,6 +166,9 @@ pub enum HookEvent {
     PostToolUseFailure {
         /// Canonical name of the tool.
         tool_name: String,
+        /// The tool input the engine ultimately dispatched (post-mutation),
+        /// matching the `tool_input` carried by `PostToolUse`.
+        tool_input: Value,
         /// Stringified error for log / display.
         error: String,
         /// Tool invocation ID, matching the prior `PreToolUse`.

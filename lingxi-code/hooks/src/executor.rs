@@ -702,12 +702,15 @@ fn build_lifecycle_envelope_body(
         }
         // B6 — additional events whose `HookEvent` variant already exists.
         // Where the variant carries fewer fields than the wire schema (e.g.
-        // `Setup`/`PostCompact` lack `trigger`, `PostToolUseFailure` lacks the
-        // dispatched `tool_input`), the missing fields default exactly as the
-        // B1 arms above (`""` / `Value::Null` / `None`) until richer context is
-        // threaded through `HookEvent` / `HookContext`.
+        // `Setup`/`PostCompact` lack `trigger`), the missing fields default
+        // exactly as the B1 arms above (`""` / `Value::Null` / `None`) until
+        // richer context is threaded through `HookEvent` / `HookContext`.
+        // `PostToolUseFailure` now carries the dispatched `tool_input` (the
+        // same `effective_input` the `PostToolUse` arm threads), matching the
+        // claude-code `PostToolUseFailure` input schema.
         HookEvent::PostToolUseFailure {
             tool_name,
+            tool_input,
             error,
             tool_use_id,
         } => {
@@ -720,7 +723,7 @@ fn build_lifecycle_envelope_body(
                 agent_id: b.agent_id,
                 agent_type: b.agent_type,
                 tool_name: tool_name.clone(),
-                tool_input: serde_json::Value::Null,
+                tool_input: tool_input.clone(),
                 tool_use_id: tool_use_id.to_string(),
                 error: error.clone(),
                 is_interrupt: None,
@@ -1712,11 +1715,12 @@ mod command_arm_tests {
     // ---- B6: additional events now serialize through the Command arm -----
 
     #[tokio::test]
-    async fn post_tool_use_failure_event_serializes_error() {
+    async fn post_tool_use_failure_event_serializes_error_and_tool_input() {
         let stdin = dispatch_and_capture(
             HookEventType::PostToolUseFailure,
             HookEvent::PostToolUseFailure {
                 tool_name: "Bash".into(),
+                tool_input: json!({"command": "ls"}),
                 error: "boom".into(),
                 tool_use_id: ToolUseId::new(),
             },
@@ -1725,7 +1729,8 @@ mod command_arm_tests {
         assert!(stdin.contains(r#""hook_event_name":"PostToolUseFailure""#));
         assert!(stdin.contains(r#""tool_name":"Bash""#));
         assert!(stdin.contains(r#""error":"boom""#));
-        assert!(stdin.contains(r#""tool_input":null"#));
+        // The dispatched `tool_input` is now carried verbatim, not `null`.
+        assert!(stdin.contains(r#""tool_input":{"command":"ls"}"#));
     }
 
     #[tokio::test]
@@ -2094,6 +2099,7 @@ mod command_arm_tests {
             (
                 HookEvent::PostToolUseFailure {
                     tool_name: "Bash".into(),
+                    tool_input: json!({}),
                     error: "boom".into(),
                     tool_use_id: ToolUseId::new(),
                 },

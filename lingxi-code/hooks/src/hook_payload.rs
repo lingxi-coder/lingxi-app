@@ -297,8 +297,9 @@ pub struct StopFailurePayload {
 /// Wire-format `PostToolUseFailure` payload (1:1 with `coreSchemas.ts:448-459`
 /// `PostToolUseFailureHookInputSchema`; constructed at `utils/hooks.ts:3509-3517`).
 ///
-/// The `HookEvent::PostToolUseFailure` variant does not yet carry the dispatched
-/// `tool_input` or the `is_interrupt` flag; both default (`Value::Null` / `None`)
+/// The `HookEvent::PostToolUseFailure` variant carries the dispatched
+/// `tool_input` (threaded from the turn loop's `effective_input`, matching the
+/// `PostToolUse` success arm). The `is_interrupt` flag still defaults to `None`
 /// until richer context is threaded through (consistent with the B1 lifecycle
 /// arms' default-fill convention).
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -160,10 +160,18 @@ impl Autocompactor {
 
         // Plan 08 path — closes C2. Wired summarizer via the forked runner.
         if let (Some(runner), Some(slot)) = (&self.forked_runner, &self.cache_slot) {
-            let cache_params = slot
+            let mut cache_params = slot
                 .get_last()
                 .await
                 .ok_or_else(|| CompactionError::Internal("no cache-safe params".into()))?;
+
+            // Strip image blocks from the replayed context before the summary
+            // request — the text summarizer must not receive raw image data
+            // (TS `stripImagesFromMessages`, `compact.ts:145-200`, applied at the
+            // summary call site). `get_last` returned an owned clone, so this
+            // only affects this summary request, not the stored slot.
+            cache_params.fork_context_messages =
+                crate::strip_media::strip_images_from_messages(cache_params.fork_context_messages);
 
             let req = ForkedAgentRequest {
                 prompt_messages: vec![ConversationMessage::user(

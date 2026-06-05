@@ -517,6 +517,11 @@ async fn call_api_with_ptl_recovery(
         };
         let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
         let bytes_before: u64 = snapshot.iter().map(protocol::text_byte_size).sum();
+        // hooks compaction lifecycle: PreCompact fires before the reactive
+        // summary pass. The reactive 413/PTL fallback is part of the automatic
+        // recovery pipeline, so the trigger is `auto` (TS treats reactive
+        // overflow recovery as a non-manual compact). Best-effort.
+        orch.fire_pre_compact("auto").await;
         let compact_result = {
             let mut tracking = orch.compaction_tracking.lock().await;
             compactor
@@ -525,10 +530,16 @@ async fn call_api_with_ptl_recovery(
         };
         if let Ok(result) = compact_result {
             if result.was_compacted {
+                // hooks compaction lifecycle: capture the PostCompact payload
+                // BEFORE `apply_post_compact` consumes the result.
+                let summary = ConversationOrchestrator::compaction_summary_text(&result);
+                let tokens_freed = result.total_tokens_freed;
                 // Apply the post-compact transition (history swap + boundary
                 // marker + CompactionCompleted) via the shared helper.
                 orch.apply_post_compact(result, messages_before, bytes_before)
                     .await;
+                // PostCompact fires AFTER the transition is applied.
+                orch.fire_post_compact("auto", summary, tokens_freed).await;
                 let history = {
                     let s = orch.session.lock().await;
                     s.history.clone()

@@ -555,6 +555,12 @@ impl ConversationOrchestrator {
             ));
         }
 
+        // hooks compaction lifecycle: PreCompact fires before the summary pass.
+        // This is the explicit `/compact` entry point, so the trigger is
+        // `manual` (TS `isAutoCompact ? 'auto' : 'manual'`). Best-effort — a
+        // hook failure/Block never aborts compaction.
+        self.fire_pre_compact("manual").await;
+
         // Run the 5-layer compactor, racing against the cancel token.
         // process_iteration takes no CancellationToken; drop-on-cancel
         // leaves history untouched because we have not written back.
@@ -571,13 +577,26 @@ impl ConversationOrchestrator {
                 .map_err(|e| traits::HandleError::ActionFailed(format!("compaction failed: {e}")))?,
         };
 
+        // hooks compaction lifecycle: capture the summary + freed-token count
+        // BEFORE `apply_post_compact` consumes the result, so PostCompact can
+        // carry the byte-faithful payload (TS `compactData.compactSummary`).
+        let summary = Self::compaction_summary_text(&result);
+        let tokens_freed = result.total_tokens_freed;
+
         // Apply the post-compact transition (boundary marker + history swap +
         // CompactionCompleted emit) via the shared helper reused by the
         // proactive trigger (Batch 4) and the reactive 413 fallback (Batch 5).
         // `bytes_before` was computed from the same `history_before` snapshot.
-        Ok(self
+        let summary_out = self
             .apply_post_compact(result, messages_before, bytes_before)
-            .await)
+            .await;
+
+        // PostCompact fires AFTER the compaction transition has been applied
+        // (TS `compact.ts:723`). Manual `/compact` ⇒ `manual` trigger.
+        // Best-effort — never fails the call.
+        self.fire_post_compact("manual", summary, tokens_freed).await;
+
+        Ok(summary_out)
     }
 
     /// Apply a completed compaction pass to the live session: append the
@@ -698,6 +717,13 @@ impl ConversationOrchestrator {
         let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
         let bytes_before: u64 = snapshot.iter().map(protocol::text_byte_size).sum();
 
+        // hooks compaction lifecycle: PreCompact fires once we have crossed the
+        // autocompact threshold and are about to run the summary pass (TS
+        // `executePreCompactHooks` BEFORE the summary request, `compact.ts:413`).
+        // The proactive trigger is always the `auto` arm. Best-effort — a hook
+        // failure/Block never aborts compaction.
+        self.fire_pre_compact("auto").await;
+
         // Run the orchestrator pass under the per-conversation tracking lock so
         // the circuit-breaker state is read + written atomically for this turn.
         let mut tracking = self.compaction_tracking.lock().await;
@@ -732,8 +758,21 @@ impl ConversationOrchestrator {
         // the tracking lock are never both held (avoid lock-ordering surprises).
         drop(tracking);
 
+        // hooks compaction lifecycle: capture the summary + freed-token count
+        // from the compaction result BEFORE `apply_post_compact` consumes it,
+        // so the PostCompact hook can carry the byte-faithful payload (TS
+        // `compactData.compactSummary`). The proactive trigger is always the
+        // `auto` arm (TS `isAutoCompact`).
+        let summary = Self::compaction_summary_text(&result);
+        let tokens_freed = result.total_tokens_freed;
+
         self.apply_post_compact(result, messages_before, bytes_before)
             .await;
+
+        // PostCompact fires AFTER the compaction transition has been applied to
+        // the live session (TS `compact.ts:723`). Best-effort — never fails the
+        // turn.
+        self.fire_post_compact("auto", summary, tokens_freed).await;
     }
 
     /// Read the current cost state from the wired tracker, if any.
@@ -1125,6 +1164,81 @@ impl ConversationOrchestrator {
             }
             StopHookDisposition::Pass => StopHookFlow::FallThrough,
         }
+    }
+
+    /// Fire the `PreCompact` lifecycle hooks immediately BEFORE a compaction
+    /// pass runs (hooks compaction lifecycle, TS `executePreCompactHooks` called
+    /// from `services/compact/compact.ts:413` BEFORE the summary request).
+    ///
+    /// `trigger` is the `auto` / `manual` discriminator carried verbatim into
+    /// the wire payload's `trigger` field (TS `compactData.trigger`): `auto` for
+    /// the proactive pre-call autocompact and the reactive 413/PTL fallback,
+    /// `manual` for an explicit `/compact`. Best-effort: a hook failure (or a
+    /// hook returning a `Block` decision) must NEVER abort compaction — we fire
+    /// and continue, mirroring how the `PostToolUse` hooks are best-effort
+    /// (`turn_loop.rs`). Strict no-op when no `PreCompact` hook is registered.
+    ///
+    /// DEFERRED (documented divergence, not a parity gap): TS
+    /// `executePreCompactHooks` returns `newCustomInstructions` which the caller
+    /// merges into the summary prompt (`compact.ts:420`). This port does NOT
+    /// thread that back into the summarizer: the `HookEvent::PreCompact` wire
+    /// builder hard-codes `custom_instructions: None` (`hooks/executor.rs:755`)
+    /// and the compaction seam (`process_iteration` / `process_iteration_tracked`)
+    /// accepts no custom-instruction argument, so there is no clean seam to feed
+    /// the aggregate's instructions into the summary request. Firing the hook so
+    /// it RUNS is the byte-faithful behaviour for the event itself; consuming its
+    /// returned instructions is left for a future batch that widens the seam.
+    pub(crate) async fn fire_pre_compact(&self, trigger: &str) {
+        let ctx = self.lifecycle_hook_ctx(false).await;
+        // Best-effort: we deliberately discard the aggregate. A PreCompact hook
+        // cannot block compaction (see DEFERRED note re: custom_instructions).
+        let _ = self
+            .hooks
+            .execute(HookEvent::PreCompact { reason: trigger.to_string() }, ctx)
+            .await;
+    }
+
+    /// Fire the `PostCompact` lifecycle hooks immediately AFTER a compaction pass
+    /// has been applied to the live session (hooks compaction lifecycle, TS
+    /// `executePostCompactHooks` called from `services/compact/compact.ts:723`
+    /// AFTER the summary is produced).
+    ///
+    /// `summary` carries the compaction summary text (TS `compactData.compactSummary`
+    /// = `getAssistantMessageText(summaryResponse)`); `tokens_freed` is the
+    /// approximate reclaimed-token count. Best-effort, exactly like
+    /// [`Self::fire_pre_compact`]: the aggregate is discarded so a failing
+    /// `PostCompact` hook never breaks the turn. Strict no-op when no
+    /// `PostCompact` hook is registered.
+    /// Derive the `PostCompact` `summary` payload text from a completed
+    /// compaction pass. Mirrors TS `compactData.compactSummary =
+    /// getAssistantMessageText(summaryResponse)`: the autocompact layer replaces
+    /// history with the summarizer's output message(s)
+    /// ([`compaction::IterationCompactionResult::messages`] ==
+    /// `summary_messages`), so concatenating their text reconstitutes the
+    /// summary the model produced. Empty when the pass produced no text.
+    pub(crate) fn compaction_summary_text(
+        result: &compaction::IterationCompactionResult,
+    ) -> String {
+        result
+            .messages
+            .iter()
+            .map(protocol::ConversationMessage::text_content)
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub(crate) async fn fire_post_compact(&self, trigger: &str, summary: String, tokens_freed: u64) {
+        // `trigger` is part of the TS PostCompact `matchQuery` but the
+        // `HookEvent::PostCompact` wire builder emits an empty `trigger` field
+        // (`hooks/executor.rs:768`); accepted here for call-site symmetry with
+        // `fire_pre_compact` and forward-compatibility if the payload widens.
+        let _ = trigger;
+        let ctx = self.lifecycle_hook_ctx(false).await;
+        let _ = self
+            .hooks
+            .execute(HookEvent::PostCompact { summary, tokens_freed }, ctx)
+            .await;
     }
 
     /// Append a Stop hook's blocking messages as a meta user message so the

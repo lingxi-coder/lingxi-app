@@ -158,9 +158,34 @@ fn allow_mcp(reason: &str) -> PermissionResult {
 
 // -- Tool structs ------------------------------------------------------------
 
-/// Generic MCP dispatcher — forwards to `McpClient::call_tool`.
+/// MCP tool — forwards to `McpClient::call_tool`.
+///
+/// Two shapes share this one struct:
+/// - **Generic dispatcher** (the legacy [`MCPTool::new`] constructor): its
+///   wire `name()` is the constant [`MCP_TOOL_NAME`] (`"MCP"`) and its
+///   `input_schema()` is the generic `{full_name, arguments}` envelope; the
+///   model addresses an MCP tool by passing `full_name` in the payload.
+/// - **Per-tool wire entry** (the [`MCPTool::new_for_tool`] constructor,
+///   Batch 3): one instance per discovered server tool. Its `name()` is the
+///   real `mcp__<server>__<tool>` FQN, its `input_schema()` is the server's
+///   own `inputSchema`, and its `description()`/`prompt()` is the server's
+///   (truncated) description. The model addresses it BY NAME and supplies the
+///   raw tool arguments as the tool-use `input` directly — there is no
+///   `{full_name, arguments}` envelope. Mirrors claude-code's
+///   `fetchToolsForClient` building one `Tool` per server tool with
+///   `name = fullyQualifiedName`, `inputJSONSchema = tool.inputSchema`
+///   (`services/mcp/client.ts:1766-1990`, description truncation `:1786-1794`).
 pub struct MCPTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
+    /// `Some(fqn)` for a per-tool wire entry; `None` for the generic
+    /// dispatcher (whose `name()` is [`MCP_TOOL_NAME`]).
+    full_name: Option<String>,
+    /// The server's own `inputSchema` for a per-tool wire entry; `None`
+    /// falls back to the generic `{full_name, arguments}` schema.
+    bound_schema: Option<Value>,
+    /// The server's (truncated) description for a per-tool wire entry; `None`
+    /// falls back to the generic dispatcher blurb.
+    bound_desc: Option<String>,
 }
 
 /// Inspect a configured MCP server's auth/transport surface.
@@ -179,11 +204,48 @@ pub struct ReadMcpResourceTool {
 }
 
 impl MCPTool {
-    /// Construct a new [`MCPTool`] over the supplied context.
+    /// Construct the generic MCP dispatcher over the supplied context.
+    ///
+    /// Its wire `name()` is [`MCP_TOOL_NAME`] and the model addresses an MCP
+    /// tool by passing `full_name` in the `{full_name, arguments}` payload.
     #[must_use]
     pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            full_name: None,
+            bound_schema: None,
+            bound_desc: None,
+        }
     }
+
+    /// Construct a per-tool wire entry for ONE discovered server tool (Batch 3).
+    ///
+    /// `full_name` is the `mcp__<server>__<tool>` FQN (the wire `name()`),
+    /// `input_schema` is the server's own `inputSchema` (the wire
+    /// `input_schema()`), and `description` is the server's description
+    /// (truncated to [`mcp::MAX_MCP_DESCRIPTION_LENGTH`] —
+    /// `services/mcp/client.ts:1786-1794`). Invoking it dispatches the FQN +
+    /// the raw `input` object to `McpClient::call_tool`. Mirrors claude-code's
+    /// `fetchToolsForClient` per-tool `Tool` (`client.ts:1766-1990`).
+    #[must_use]
+    pub fn new_for_tool(
+        ctx: tool_api::BuiltinToolContext,
+        full_name: String,
+        description: String,
+        input_schema: Value,
+    ) -> Self {
+        Self {
+            ctx,
+            full_name: Some(full_name),
+            bound_schema: Some(input_schema),
+            // Truncate to the TS limit (client.ts:1786-1794). The DTO is
+            // already truncated on receipt (client.rs:54-55), so this is a
+            // defensive no-op for in-band descriptions but keeps the per-tool
+            // wire entry within the documented bound for any out-of-band source.
+            bound_desc: Some(mcp::truncate_description(&description).into_owned()),
+        }
+    }
+
     fn mcp_registry(&self) -> Option<&Arc<McpRegistry>> {
         self.ctx.mcp_registry.as_ref()
     }
@@ -258,10 +320,15 @@ static READ_MCP_RESOURCE_SCHEMA: Lazy<Value> = Lazy::new(|| {
 #[async_trait]
 impl Tool for MCPTool {
     fn name(&self) -> &str {
-        MCP_TOOL_NAME
+        // Per-tool wire entry → the `mcp__<server>__<tool>` FQN; generic
+        // dispatcher → the constant `MCP` (client.ts:1768 `name = fqn`).
+        self.full_name.as_deref().unwrap_or(MCP_TOOL_NAME)
     }
     fn input_schema(&self) -> &Value {
-        &MCP_TOOL_SCHEMA
+        // Per-tool wire entry → the server's own `inputSchema`
+        // (client.ts:1808 `inputJSONSchema = tool.inputSchema`); generic
+        // dispatcher → the `{full_name, arguments}` envelope schema.
+        self.bound_schema.as_ref().unwrap_or(&MCP_TOOL_SCHEMA)
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -290,10 +357,22 @@ impl Tool for MCPTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "Invoke a tool on a registered MCP server via mcp__<server>__<tool> full-name.".into()
+        // Per-tool wire entry → the server's (truncated) description
+        // (client.ts:1786-1794); generic dispatcher → the dispatcher blurb.
+        match &self.bound_desc {
+            Some(d) => d.clone(),
+            None => {
+                "Invoke a tool on a registered MCP server via mcp__<server>__<tool> full-name.".into()
+            }
+        }
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Use MCP to dispatch to an MCP-server-provided tool.".into()
+        // The system-prompt `<tools>` blurb is the same server description as
+        // `description()` for a per-tool wire entry (client.ts:1786-1794).
+        match &self.bound_desc {
+            Some(d) => d.clone(),
+            None => "Use MCP to dispatch to an MCP-server-provided tool.".into(),
+        }
     }
 
     async fn call(
@@ -303,14 +382,27 @@ impl Tool for MCPTool {
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
-        let full_name = input
-            .get("full_name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidInput("MCPTool: missing or non-string full_name".into())
-            })?
-            .to_string();
-        let arguments = input.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        // Per-tool wire entry (Batch 3): the FQN is the bound `name()` and the
+        // RAW `input` object is the tool arguments — there is NO
+        // `{full_name, arguments}` envelope to unwrap (the model addressed this
+        // tool by name and supplied the server schema's payload directly).
+        // Mirrors claude-code's per-tool `call(args)` →
+        // `callMCPToolWithUrlElicitationRetry` (client.ts:1766-1990). The
+        // generic dispatcher path keeps reading `full_name`/`arguments`.
+        let (full_name, arguments) = match &self.full_name {
+            Some(fqn) => (fqn.clone(), input),
+            None => {
+                let fqn = input
+                    .get("full_name")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        ToolError::InvalidInput("MCPTool: missing or non-string full_name".into())
+                    })?
+                    .to_string();
+                let args = input.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                (fqn, args)
+            }
+        };
 
         // Parse name first; malformed names short-circuit BEFORE STARTED.
         let (server, tool) = parse_full_name(&full_name)?;
@@ -892,6 +984,60 @@ impl Tool for ReadMcpResourceTool {
             }
         }
     }
+}
+
+// -- Per-tool wire-entry builder (Batch 3) -----------------------------------
+
+/// Build one [`MCPTool`] per-tool wire entry for EVERY `Connected` server,
+/// grouped by [`McpConnectionId`] so the engine can register them through
+/// [`tool_api::ToolRegistry::register_mcp_tools`] (and drop them en masse on
+/// disconnect via the matching `conn_id`).
+///
+/// For each `Connected` server we map each [`traits::McpToolDto`] →
+/// `Arc::new(MCPTool::new_for_tool(ctx, dto.full_name, dto.description,
+/// dto.input_schema))`. The resulting tool's wire `name()` is the real
+/// `mcp__<server>__<tool>` FQN, its `input_schema()` is the server's own
+/// `inputSchema`, and its `description()`/`prompt()` is the server's
+/// (truncated) description — so the model addresses it by name with the
+/// server schema's payload, and dispatch routes back through the same
+/// connection's `McpClient::call_tool`. Mirrors claude-code's
+/// `fetchToolsForClient` building one `Tool` per server tool
+/// (`services/mcp/client.ts:1766-1990`).
+///
+/// Placed here (in `tool-mcp`, which already deps both `mcp` and `tool-api`)
+/// rather than in the `mcp` crate, to keep `mcp` free of a `tool-api`
+/// dependency. Reads the registry's `pub connections` state-map directly (the
+/// same accessor the existing `snapshot` walks).
+pub async fn build_registered_mcp_tools(
+    registry: &McpRegistry,
+    ctx: tool_api::BuiltinToolContext,
+) -> Vec<(protocol::McpConnectionId, Vec<Arc<dyn Tool>>)> {
+    use mcp::McpConnectionState;
+
+    let conns = registry.connections.read().await;
+    let mut out: Vec<(protocol::McpConnectionId, Vec<Arc<dyn Tool>>)> = Vec::new();
+    for state in conns.values() {
+        if let McpConnectionState::Connected {
+            connection_id,
+            tools,
+            ..
+        } = state
+        {
+            let handles: Vec<Arc<dyn Tool>> = tools
+                .iter()
+                .map(|dto| {
+                    Arc::new(MCPTool::new_for_tool(
+                        ctx.clone(),
+                        dto.full_name.clone(),
+                        dto.description.clone(),
+                        dto.input_schema.clone(),
+                    )) as Arc<dyn Tool>
+                })
+                .collect();
+            out.push((*connection_id, handles));
+        }
+    }
+    out
 }
 
 #[cfg(test)]

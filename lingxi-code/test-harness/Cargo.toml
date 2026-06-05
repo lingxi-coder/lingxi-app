@@ -72,7 +72,9 @@ filetime = "0.2"
 anthropic-oauth = { path = "../anthropic-oauth" }
 # M8-P7-final: the `tools` monolith is dissolved; parity drivers now assert
 # fixture constants directly against the per-category tool crates + tool-api.
-tool-api = { path = "../tool-api" }
+# `test-support` enables `tool_api::test_support::shell_test_ctx`, used by the
+# Batch 3 `parity_mcp_invocation` driver to mint a `BuiltinToolContext`.
+tool-api = { path = "../tool-api", features = ["test-support"] }
 tool-file = { path = "../tools/file" }
 tool-shell = { path = "../tools/shell" }
 tool-task = { path = "../tools/task" }

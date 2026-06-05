@@ -27,6 +27,18 @@ pub struct MockMcpTransport {
     /// the `McpConnectionId` handed back. Exposed via [`RawConnectionProvider`]
     /// so `McpRegistry::with_raw_conn` can bridge a live `McpClient`.
     conns: Mutex<HashMap<McpConnectionId, Arc<Connection>>>,
+    /// When `true`, each minted paired connection gets a background responder
+    /// task that answers the client's outbound `tools/call` requests with a
+    /// canned `{content: "ok", isError: false}` result, so a live `McpClient`
+    /// bridged through `RawConnectionProvider` actually round-trips (the
+    /// default presence-only mode drops the peer ends and never responds).
+    /// Opt-in via [`MockMcpTransport::with_call_responder`] so the existing
+    /// presence-only lifecycle tests are unaffected.
+    respond_to_calls: bool,
+    /// Records each FQN passed to a responder's `tools/call` so a test can
+    /// assert dispatch actually reached the wire. Only populated when
+    /// `respond_to_calls` is set.
+    called_tools: Arc<Mutex<Vec<String>>>,
 }
 
 impl Default for MockMcpTransport {
@@ -36,13 +48,35 @@ impl Default for MockMcpTransport {
 }
 
 impl MockMcpTransport {
-    /// Build a fresh mock with no tools.
+    /// Build a fresh mock with no tools (presence-only: minted paired
+    /// connections have NO responder, matching the lifecycle tests).
     #[must_use]
     pub fn new() -> Self {
         Self {
             tools: Mutex::new(Vec::new()),
             conns: Mutex::new(HashMap::new()),
+            respond_to_calls: false,
+            called_tools: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Build a mock whose minted paired connections spawn a background
+    /// responder that answers the bridged `McpClient`'s outbound `tools/call`
+    /// requests, so dispatch through the live client round-trips (Batch 3
+    /// invocation test). Additive — `new()` behavior is unchanged.
+    #[must_use]
+    pub fn with_call_responder() -> Self {
+        Self {
+            respond_to_calls: true,
+            ..Self::new()
+        }
+    }
+
+    /// The FQNs the responder observed on `tools/call` (in call order). Empty
+    /// unless built via [`MockMcpTransport::with_call_responder`].
+    #[must_use]
+    pub fn called_tools(&self) -> Vec<String> {
+        self.called_tools.lock().unwrap().clone()
     }
 
     /// Register a tool named `name` under the server label `mock`.
@@ -72,16 +106,69 @@ fn paired_connection() -> Arc<Connection> {
     ))
 }
 
+/// Build a paired `Connection` AND spawn a background responder that answers
+/// the client's outbound `tools/call` requests (line-framed JSON-RPC) with a
+/// canned `{content: "ok", isError: false}` result, echoing the request `id`.
+/// Each observed FQN is recorded into `called_tools`. Used by the Batch 3
+/// invocation test so a live bridged `McpClient` round-trips.
+fn responding_connection(called_tools: Arc<Mutex<Vec<String>>>) -> Arc<Connection> {
+    // `peer_to_us`: peer (responder) → client (responses).
+    // `us_to_peer`: client → peer (the outbound requests we answer).
+    let (peer_to_us_tx, peer_to_us_rx) = tokio::sync::mpsc::channel::<Bytes>(8);
+    let (us_to_peer_tx, mut us_to_peer_rx) = tokio::sync::mpsc::channel::<Bytes>(8);
+    let conn = Arc::new(Connection::new_streams(
+        peer_to_us_rx,
+        us_to_peer_tx,
+        Mode::Lines,
+    ));
+    tokio::spawn(async move {
+        while let Some(frame) = us_to_peer_rx.recv().await {
+            let Ok(req) = serde_json::from_slice::<Value>(&frame) else {
+                continue;
+            };
+            // Notifications (e.g. `notifications/initialized`) carry no `id` —
+            // ignore them; only id-bearing requests get a response.
+            let Some(id) = req.get("id").cloned() else {
+                continue;
+            };
+            // Record the dispatched tool name from the `tools/call` params.
+            if req.get("method").and_then(Value::as_str) == Some("tools/call") {
+                if let Some(name) = req
+                    .get("params")
+                    .and_then(|p| p.get("name"))
+                    .and_then(Value::as_str)
+                {
+                    called_tools.lock().unwrap().push(name.to_string());
+                }
+            }
+            let resp = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "content": "ok", "isError": false },
+            });
+            let mut bytes = serde_json::to_vec(&resp).unwrap();
+            bytes.push(b'\n'); // LineCodec frames on newline.
+            if peer_to_us_tx.send(Bytes::from(bytes)).await.is_err() {
+                break; // client connection dropped.
+            }
+        }
+    });
+    conn
+}
+
 #[async_trait]
 impl McpTransport for MockMcpTransport {
     async fn connect(&self, _spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
         let connection_id = McpConnectionId::new();
         // Stash a paired connection so `RawConnectionProvider::connection_for`
-        // can hand the registry a live `Arc<jsonrpc::Connection>`.
-        self.conns
-            .lock()
-            .unwrap()
-            .insert(connection_id, paired_connection());
+        // can hand the registry a live `Arc<jsonrpc::Connection>`. With the
+        // responder opt-in, the peer side answers the client's `tools/call`.
+        let conn = if self.respond_to_calls {
+            responding_connection(self.called_tools.clone())
+        } else {
+            paired_connection()
+        };
+        self.conns.lock().unwrap().insert(connection_id, conn);
         Ok(McpRawConnection { connection_id })
     }
 

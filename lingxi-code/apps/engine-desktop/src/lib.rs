@@ -1061,7 +1061,27 @@ pub async fn build(
         let _ = &spawn_seam;
         None
     };
-    let tools = Arc::new(desktop_tool_registry(tool_ctx, coordinator_wiring));
+    // (5.5b) MCP-invocation Batch 3: expose each Connected server's tools by
+    //        their real `mcp__<server>__<tool>` FQN as individual wire entries
+    //        (server `inputSchema` + truncated description), routed back to that
+    //        connection's `McpClient::call_tool`. Mirrors claude-code's
+    //        `fetchToolsForClient` per-tool `Tool` (services/mcp/client.ts:1766-1990).
+    //
+    //        SEQUENCING: this MUST run BEFORE the registry is sealed into its
+    //        final `Arc` (registration is `&mut self`), and the MCP servers are
+    //        ALREADY connected at this point — `mcp_registry.connect_all` ran at
+    //        (5.1). So we build the registry mutably, register the per-connection
+    //        MCP partitions, then `Arc`-wrap. `tool_ctx` is consumed by
+    //        `register_desktop_tools`, so the builder gets a clone taken first.
+    let mcp_tool_ctx = tool_ctx.clone();
+    let mut tools_inner = ToolRegistry::new();
+    register_desktop_tools(&mut tools_inner, tool_ctx, coordinator_wiring);
+    for (conn_id, mcp_tools) in
+        tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx).await
+    {
+        tools_inner.register_mcp_tools(conn_id, mcp_tools);
+    }
+    let tools = Arc::new(tools_inner);
 
     // (5.5a) M10 (T13): bind the teammate handler's `DeferredToolInvoker` to the
     //        real `RegistryToolInvoker` now that `tools` exists. The invoker

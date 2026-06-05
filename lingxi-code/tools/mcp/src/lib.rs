@@ -17,7 +17,9 @@
     clippy::manual_let_else
 )]
 pub mod mcp_tool;
-pub use mcp_tool::{ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool};
+pub use mcp_tool::{
+    build_registered_mcp_tools, ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool,
+};
 /// Register the MCP tools (call, list/read resources, auth) against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;

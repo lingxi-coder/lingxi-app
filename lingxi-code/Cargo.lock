@@ -163,6 +163,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "iana-time-zone",
  "protocol",
  "rand 0.8.6",
  "regex",

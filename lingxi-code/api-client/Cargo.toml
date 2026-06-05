@@ -14,6 +14,10 @@ cost = { path = "../cost" }
 # locked chrono 0.4.x). Adds no new crate to the graph — used only to reproduce
 # claude-code `formatResetTime` (en-US locale month/12-hour formatting).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Already in the locked graph (transitive via chrono's `clock` feature on unix).
+# Adds an EDGE, not a new package — reproduces claude-code `getTimeZone()`
+# (Intl…timeZone, the IANA zone NAME) for the rate-limit reset-time suffix.
+iana-time-zone = "0.1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

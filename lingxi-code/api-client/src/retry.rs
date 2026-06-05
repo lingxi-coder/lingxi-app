@@ -163,9 +163,10 @@ pub enum RetryClass {
 /// Classify a completed (already-received) [`HttpResponse`] for retry.
 ///
 /// Order matches claude-code `shouldRetry`: the `overloaded_error` /529
-/// short-circuit (`:722`) is checked first, then 408 (`:760`), 409 (`:763`),
-/// 429 (`:767`, caller-handled), and the trailing `status >= 500` rule
-/// (`:784`). 2xx responses never reach here — `with_retry` returns them before
+/// short-circuit (`:722`) is checked first, then the `x-should-retry: false`
+/// server directive (`:746`, terminal), then 408 (`:760`), 409 (`:763`), 429
+/// (`:767`, caller-handled), and the trailing `status >= 500` rule (`:784`).
+/// 2xx responses never reach here — `with_retry` returns them before
 /// classifying.
 #[must_use]
 pub fn classify_retryable(resp: &HttpResponse) -> RetryClass {
@@ -180,6 +181,20 @@ pub fn classify_retryable(resp: &HttpResponse) -> RetryClass {
     // by the caller (body reshrink), like the 429 Fallthrough.
     if let Some(overflow) = parse_max_tokens_overflow(resp.status, &resp.body) {
         return RetryClass::AdjustAndRetry(overflow);
+    }
+    // Server retry directive (claude-code `withRetry.ts:731-751`). An explicit
+    // `x-should-retry: false` means "do not retry" — obeyed here for ALL status
+    // codes (the ant-only `USER_TYPE==='ant'` 5xx carve-out at `:748` is omitted
+    // in the external build). Checked AFTER the 529/overflow short-circuits
+    // (which TS evaluates first at `:719`/`:727`) and BEFORE the status ladder,
+    // so a 5xx carrying `x-should-retry: false` is terminal instead of retried.
+    // The subscriber-gated `true` directive (`:737-742`,
+    // `!isClaudeAISubscriber() || isEnterpriseSubscriber()`) is owned by the
+    // caller's subscriber-aware path — like 429's `Fallthrough` — so it is NOT
+    // handled here; a `true` value falls through to the status ladder
+    // (documented partial port).
+    if crate::rate_limit::header_value(&resp.headers, "x-should-retry") == Some("false") {
+        return RetryClass::Terminal;
     }
     match resp.status {
         // Rate limit — owned by the caller (subscriber gates, reset delays).
@@ -1048,6 +1063,52 @@ mod classify {
     #[test]
     fn classify_429_is_fallthrough() {
         assert_eq!(classify_retryable(&resp(429, "")), RetryClass::Fallthrough);
+    }
+
+    fn resp_with_header(status: u16, body: &str, header: (&str, &str)) -> HttpResponse {
+        HttpResponse {
+            status,
+            headers: vec![(header.0.to_string(), header.1.to_string())],
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn classify_x_should_retry_false_is_terminal_even_for_5xx() {
+        // The server's explicit "do not retry" overrides the normal 5xx-retry.
+        assert_eq!(
+            classify_retryable(&resp_with_header(503, "boom", ("x-should-retry", "false"))),
+            RetryClass::Terminal,
+        );
+        // Header name match is case-insensitive; the directive applies to non-5xx too.
+        assert_eq!(
+            classify_retryable(&resp_with_header(408, "", ("X-Should-Retry", "false"))),
+            RetryClass::Terminal,
+        );
+    }
+
+    #[test]
+    fn classify_x_should_retry_false_does_not_override_529() {
+        // 529/overloaded short-circuits BEFORE the directive (matching TS order),
+        // so a 529 still retries even with `x-should-retry: false`.
+        assert_eq!(
+            classify_retryable(&resp_with_header(529, "", ("x-should-retry", "false"))),
+            RetryClass::Retry { overloaded: true },
+        );
+    }
+
+    #[test]
+    fn classify_x_should_retry_true_falls_through_to_status_ladder() {
+        // The subscriber-gated `true` directive is not handled here; a `true`
+        // value leaves the status-based classification unchanged.
+        assert_eq!(
+            classify_retryable(&resp_with_header(503, "boom", ("x-should-retry", "true"))),
+            RetryClass::Retry { overloaded: false },
+        );
+        assert_eq!(
+            classify_retryable(&resp_with_header(429, "", ("x-should-retry", "true"))),
+            RetryClass::Fallthrough,
+        );
     }
 
     #[test]

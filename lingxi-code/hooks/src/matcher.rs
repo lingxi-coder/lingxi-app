@@ -21,29 +21,38 @@
 
 use regex::Regex;
 
-/// Maps a legacy tool name to its canonical name.
+/// Maps a legacy tool name to its canonical name — `normalizeLegacyToolName`
+/// (`permissionRuleParser.ts:21-33`): `LEGACY_TOOL_NAME_ALIASES[name] ?? name`.
 ///
-/// In claude-code this consults `LEGACY_TOOL_NAME_ALIASES`
-/// (`permissionRuleParser.ts:21-33`), e.g. `Task → Agent`. Those aliases have
-/// NOT been ported into the Rust tree yet, so per the B3 spec this is a
-/// **no-op pass-through**: the input name is returned unchanged. The function
-/// exists so the call sites mirror the TS structure 1:1; when the alias table
-/// lands, only this body changes.
+/// The external (non-ant) alias table mirrors the canonical copy in
+/// `permission::rule::normalize_legacy_tool_name` (kept in sync; both port the
+/// same TS source). The KAIROS-gated `Brief → SendUserMessage` alias is omitted
+/// in external builds, matching `permission`.
 #[must_use]
 pub fn normalize_legacy_tool_name(name: &str) -> String {
-    name.to_string()
+    match name {
+        "Task" => "Agent",
+        "KillShell" => "TaskStop",
+        "AgentOutputTool" | "BashOutputTool" => "TaskOutput",
+        other => other,
+    }
+    .to_string()
 }
 
-/// Returns the legacy aliases that map to `canonical_name`.
-///
-/// Mirrors `getLegacyToolNames` (`permissionRuleParser.ts:35-41`). Because the
-/// alias table is not yet ported (see [`normalize_legacy_tool_name`]), this
-/// always returns an empty list — so the regex branch's legacy fallback loop
-/// in [`matches_pattern`] iterates over nothing, identical to running the TS
-/// with an empty `LEGACY_TOOL_NAME_ALIASES`.
+/// Returns the legacy aliases that map to `canonical_name` — the reverse of
+/// [`normalize_legacy_tool_name`], mirroring `getLegacyToolNames`
+/// (`permissionRuleParser.ts:35-41`): every legacy key whose canonical value
+/// equals `canonical_name`, in `LEGACY_TOOL_NAME_ALIASES` insertion order. Used
+/// by [`matches_pattern`]'s regex branch so a pattern like `^Task$` still
+/// matches the canonical tool `Agent`.
 #[must_use]
-pub fn get_legacy_tool_names(_canonical_name: &str) -> Vec<String> {
-    Vec::new()
+pub fn get_legacy_tool_names(canonical_name: &str) -> Vec<String> {
+    match canonical_name {
+        "Agent" => vec!["Task".to_string()],
+        "TaskStop" => vec!["KillShell".to_string()],
+        "TaskOutput" => vec!["AgentOutputTool".to_string(), "BashOutputTool".to_string()],
+        _ => Vec::new(),
+    }
 }
 
 /// Returns `true` if `matcher` matches `match_query`.
@@ -85,7 +94,7 @@ pub fn matches_pattern(match_query: &str, matcher: &str) -> bool {
         return true;
     }
     // TS: also test against legacy names so patterns like "^Task$" still match
-    // the canonical name. (Empty until the alias table is ported.)
+    // the canonical name (e.g. query "Agent" → legacy ["Task"]).
     for legacy_name in get_legacy_tool_names(match_query) {
         if regex.is_match(&legacy_name) {
             return true;
@@ -169,14 +178,39 @@ mod tests {
     }
 
     #[test]
-    fn legacy_normalize_is_passthrough() {
-        // No-op pass-through until alias table lands.
-        assert_eq!(normalize_legacy_tool_name("Task"), "Task");
+    fn legacy_aliases_resolve_to_canonical() {
+        // Forward map (permissionRuleParser.ts LEGACY_TOOL_NAME_ALIASES).
+        assert_eq!(normalize_legacy_tool_name("Task"), "Agent");
+        assert_eq!(normalize_legacy_tool_name("KillShell"), "TaskStop");
+        assert_eq!(normalize_legacy_tool_name("AgentOutputTool"), "TaskOutput");
+        assert_eq!(normalize_legacy_tool_name("BashOutputTool"), "TaskOutput");
+        // Non-legacy names pass through unchanged.
         assert_eq!(normalize_legacy_tool_name("Write"), "Write");
-        assert!(get_legacy_tool_names("Agent").is_empty());
-        // Because normalization is a no-op, a simple "Task" matcher matches
-        // exactly the literal "Task" query and nothing else.
-        assert!(matches_pattern("Task", "Task"));
-        assert!(!matches_pattern("Agent", "Task"));
+        assert_eq!(normalize_legacy_tool_name("Agent"), "Agent");
+        // Reverse map (insertion order matters for the two-alias TaskOutput).
+        assert_eq!(get_legacy_tool_names("Agent"), vec!["Task".to_string()]);
+        assert_eq!(get_legacy_tool_names("TaskStop"), vec!["KillShell".to_string()]);
+        assert_eq!(
+            get_legacy_tool_names("TaskOutput"),
+            vec!["AgentOutputTool".to_string(), "BashOutputTool".to_string()]
+        );
+        assert!(get_legacy_tool_names("Write").is_empty());
+    }
+
+    #[test]
+    fn legacy_matcher_resolves_to_canonical_tool() {
+        // A simple "Task" matcher now matches the canonical tool "Agent"
+        // (matcher normalizes to "Agent"; matchQuery is the canonical name).
+        assert!(matches_pattern("Agent", "Task"));
+        // Pipe lists normalize each side.
+        assert!(matches_pattern("TaskStop", "KillShell|Write"));
+        // The regex branch falls back to the query's legacy names, so "^Task$"
+        // matches the canonical "Agent".
+        assert!(matches_pattern("Agent", "^Task$"));
+        // Parity: the matcher is normalized but the query is not, so a literal
+        // legacy "Task" query (a tool name that no longer exists) does NOT match
+        // a "Task" matcher — `"Task" === normalizeLegacyToolName("Task") ("Agent")`
+        // is false in TS too.
+        assert!(!matches_pattern("Task", "Task"));
     }
 }

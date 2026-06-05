@@ -50,7 +50,7 @@ pub struct MockMcpTransport {
     /// assert dispatch actually reached the wire. Only populated when
     /// `respond_to_calls` is set.
     called_tools: Arc<Mutex<Vec<String>>>,
-    /// Per-server `resources/list` behavior, keyed by `InProcess` registry_key
+    /// Per-server `resources/list` behavior, keyed by `InProcess` `registry_key`
     /// (== config name). Consulted by the responder so a multi-server
     /// all-servers `ListMcpResources` test can give each server its own
     /// resources (or an error). Only used with `respond_to_calls`.

@@ -42,19 +42,6 @@ use tool_api::tool_trait::{
 /// Tool name byte-lock. Asserted by `parity_registry.rs`.
 pub const REMOTE_TRIGGER_TOOL_NAME: &str = "RemoteTrigger";
 
-/// LEGACY wire identifier — retained ONLY so the locked `system_tools.json`
-/// parity fixture (`parity_system_tools.rs`) still compiles + passes without
-/// editing the locked fixture. The REAL tool (1:1 TS port) drives the claude.ai
-/// CCR API in-process and has NO local credentials file; this constant is dead
-/// to the live code path and is intentionally not read by [`RemoteTriggerTool`].
-/// The fixture's `remote_trigger_credentials_file` / `remote_trigger_subdir` /
-/// `path_templates.remote_trigger` entries describe the superseded local-stub
-/// design — see the task report for the recommended fixture migration.
-pub const REMOTE_TRIGGER_CREDENTIALS_FILE: &str = ".credentials.json";
-/// LEGACY wire identifier — see [`REMOTE_TRIGGER_CREDENTIALS_FILE`]. Retained
-/// solely to keep the locked `system_tools.json` parity fixture green; unused by
-/// the live tool.
-pub const REMOTE_TRIGGER_SUBDIR: &str = ".claude";
 
 /// `anthropic-beta` header value (TS `TRIGGERS_BETA`).
 const TRIGGERS_BETA: &str = "ccr-triggers-2026-01-30";

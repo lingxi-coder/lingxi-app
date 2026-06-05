@@ -2,7 +2,7 @@
 //! `mcp__<server>__<tool>` FQN.
 //!
 //! Locks the claim that when an MCP tool is invoked, the enforcement chokepoint
-//! (`orch.perms.check(name, input)`, turn_loop.rs:357) sees the FQN
+//! (`orch.perms.check(name, input)`, `turn_loop.rs:357`) sees the FQN
 //! `mcp__server__tool` and applies allow/deny rules keyed on that exact string,
 //! WITHOUT colliding with a builtin of the same short name. No production code
 //! change was needed (the FQN already flows to the gate and the policy matches
@@ -15,8 +15,8 @@
 //! Two layers:
 //!   1. Direct policy/gate assertions — the namespace-isolation core: a deny
 //!      rule `mcp__mock__a` denies `mcp__mock__a` but NOT a builtin `a`.
-//!   2. End-to-end dispatch — a denied FQN tool_use yields the
-//!      `Permission denied:` ToolResult (turn_loop.rs:359) and never reaches the
+//!   2. End-to-end dispatch — a denied FQN `tool_use` yields the
+//!      `Permission denied:` `ToolResult` (`turn_loop.rs:359`) and never reaches the
 //!      server; an allowed FQN reaches the server's `call_tool`.
 
 #![allow(clippy::field_reassign_with_default)]

@@ -28,16 +28,13 @@
     "cron_file_suffix": ".json",
     "cron_task_id_prefix": "d",
     "six_field_rejection": "ScheduleCron: 6-field cron (with seconds) is not supported; use 5-field cron (minute hour day month weekday)",
-    "tool_search_max_results": 20,
-    "remote_trigger_credentials_file": ".credentials.json",
-    "remote_trigger_subdir": ".claude"
+    "tool_search_max_results": 20
   },
 
   "path_templates": {
     "brief":          "~/.claude/brief/<task_id>.txt",
     "config":         "~/.claude/settings.json",
-    "schedule_cron":  "~/.claude/cron/<task_id>.json",
-    "remote_trigger": "~/.claude/.credentials.json"
+    "schedule_cron":  "~/.claude/cron/<task_id>.json"
   },
 
   "telemetry_events": [

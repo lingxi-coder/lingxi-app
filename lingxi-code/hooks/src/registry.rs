@@ -48,6 +48,23 @@ pub struct HookContext {
     /// distinct project-root concept (that wiring lives in `turn_loop.rs`,
     /// out of this crate's scope). Additive / `..Default::default()`-compatible.
     pub project_dir: Option<PathBuf>,
+    /// `true` when this dispatch is a *re-entry* of the Stop hook after a
+    /// previous Stop hook returned a blocking error and the agent loop
+    /// continued one extra turn (B4). claude-code threads `stop_hook_active`
+    /// into the Stop hook payload (`query.ts:1300`) and uses it as the
+    /// infinite-loop guard: when already `true`, a fresh Stop block must NOT
+    /// loop again (`query.ts:1297` rationale). Additive default `false`.
+    pub stop_hook_active: bool,
+    /// The text of the final assistant message of the turn, spliced into the
+    /// `Stop` / `UserPromptSubmit` payload (claude-code `BaseHookInputSchema`
+    /// surfaces the transcript; B1 payloads consume this). `None` when no
+    /// assistant message is available (e.g. a `UserPromptSubmit` fired at
+    /// prompt ingress before any model reply). Additive default.
+    pub last_assistant_message: Option<String>,
+    /// Path to the agent-scoped transcript file when the dispatch happened
+    /// inside a subagent context. Distinct from [`Self::transcript_path`]
+    /// (the session transcript); `None` outside a subagent. Additive default.
+    pub agent_transcript_path: Option<PathBuf>,
 }
 
 /// In-memory registry of hook definitions, sharded by their declared source.

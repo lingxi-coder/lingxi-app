@@ -463,6 +463,12 @@ impl HookExecutorImpl {
             if let Some(msg) = &resp.system_message {
                 agg.system_messages.push(msg.clone());
             }
+            // B4: OR-fold the preventContinuation (`continue:false`) signal so
+            // a single lifecycle hook can terminate the agent loop even when
+            // earlier hooks did not. Independent of `decision`.
+            if resp.prevent_continuation {
+                agg.prevent_continuation = true;
+            }
             agg.attachments.extend(resp.attachments.clone());
         }
         agg.all_results.push((hook.id, r));

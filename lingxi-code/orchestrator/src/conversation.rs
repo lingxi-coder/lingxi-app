@@ -13,6 +13,8 @@ use crate::turn_loop::{
 use api_client::{types::MessageResponse, AnthropicProvider, ApiError};
 use async_trait::async_trait;
 use engine::SessionState;
+use hooks::events::HookEvent;
+use hooks::registry::HookContext;
 use protocol::{ConversationMessage, MessageId, SessionId};
 use session::JsonlWriter;
 use std::sync::Arc;
@@ -120,6 +122,50 @@ pub enum ConversationOutcome {
         /// Stable identifier of the final assistant message.
         final_message_id: MessageId,
     },
+    /// A `Stop` lifecycle hook requested *preventContinuation* (`continue:false`)
+    /// — the turn loop terminated the agent rather than continuing to work
+    /// (hooks B4, TS `query.ts:1278`). Distinct from [`Self::EndTurn`] so callers
+    /// can tell a hook-forced stop from a natural `end_turn`.
+    StopHookPrevented {
+        /// Number of API round-trips before the Stop hook forced termination.
+        turn_count: u32,
+        /// Stable identifier of the final assistant message, if any.
+        final_message_id: MessageId,
+    },
+}
+
+/// Outcome of firing the `Stop` lifecycle hooks at end-of-turn (hooks B4).
+///
+/// Mirrors the three-way branch in TS `query.ts:1267-1306`: a Stop hook can
+/// force termination (`preventContinuation`), ask the agent to keep working
+/// (a bare `Block` / exit-2), or pass (no Stop hook, or it allowed the stop).
+enum StopHookDisposition {
+    /// No Stop hook fired, or it allowed the stop — proceed to the normal
+    /// end-of-turn (token-budget check then `emit_end_turn`).
+    Pass,
+    /// A Stop hook blocked the stop (wants the agent to keep working). The turn
+    /// loop appends the carried messages as a meta user message, sets
+    /// `stop_hook_active = true`, and runs one more turn step. The re-entry
+    /// guard converts a *second* such block into [`Self::Pass`] so a hook that
+    /// always blocks cannot loop forever (TS `query.ts:1297`).
+    Continue(Vec<String>),
+    /// A Stop hook requested `continue: false` — terminate the agent loop
+    /// (TS `query.ts:1278`); the turn ends as `StopHookPrevented`.
+    Prevent,
+}
+
+/// Driver control-flow directive produced by `handle_stop_at_end` (hooks B4) so
+/// the three turn drivers (batched / streaming / cancelable) translate the Stop
+/// disposition into their own loop mechanics uniformly.
+enum StopHookFlow {
+    /// Terminate the turn loop, returning this outcome (`emit_end_turn` already
+    /// fired inside the helper).
+    Terminate(ConversationOutcome),
+    /// A Stop hook asked the agent to keep working — loop one more turn step.
+    LoopAgain,
+    /// No Stop hook intervened — fall through to the driver's normal end
+    /// (token-budget check, then `emit_end_turn` + break).
+    FallThrough,
 }
 
 /// The orchestrator. Owns the session, dispatches tools, drives the loop.
@@ -969,7 +1015,8 @@ impl ConversationOrchestrator {
         // ConversationOutcome is #[non_exhaustive] so future variants will
         // also log as Completed when the only existing variant is EndTurn.
         match &result {
-            Ok(ConversationOutcome::EndTurn { turn_count, .. }) => {
+            Ok(ConversationOutcome::EndTurn { turn_count, .. }
+            | ConversationOutcome::StopHookPrevented { turn_count, .. }) => {
                 tracing::info!(
                     event = orch_events::CONVERSATION_COMPLETED,
                     turn_count = *turn_count
@@ -986,6 +1033,116 @@ impl ConversationOrchestrator {
     }
 
     /// Internal turn driver (no telemetry — wrapped by `run_turn`).
+    /// Build the lifecycle `HookContext` for this conversation (hooks B4),
+    /// mirroring the `PreToolUse` context construction in `turn_loop.rs` plus
+    /// the B4 additive fields.
+    async fn lifecycle_hook_ctx(&self, stop_hook_active: bool) -> HookContext {
+        let session_id = { self.session.lock().await.session_id };
+        HookContext {
+            session_id,
+            cwd: self.cwd.clone(),
+            stop_hook_active,
+            ..Default::default()
+        }
+    }
+
+    /// Fire the `UserPromptSubmit` lifecycle hooks at prompt ingress (hooks B4,
+    /// TS `executeUserPromptSubmitHooks` / `query.ts` prompt path). Returns
+    /// `true` when a hook returned a `Block` decision, signalling the caller to
+    /// ABORT the turn before any API call. Strict no-op (returns `false`) when
+    /// no matching hook is registered, so existing flows are unaffected.
+    async fn fire_user_prompt_submit(&self, prompt: &str) -> bool {
+        let ctx = self.lifecycle_hook_ctx(false).await;
+        let agg = self
+            .hooks
+            .execute(HookEvent::UserPromptSubmit { prompt: prompt.to_string() }, ctx)
+            .await;
+        matches!(agg.decision, Some(hooks::response::HookDecision::Block))
+    }
+
+    /// Fire the `Stop` lifecycle hooks at end-of-turn and classify the result
+    /// (hooks B4, TS `handleStopHooks` + `query.ts:1267-1306`).
+    ///
+    /// `stop_hook_active` carries the re-entry flag into the hook payload AND
+    /// gates the continuation guard: a `Block` when already active becomes
+    /// [`StopHookDisposition::Pass`] so a perpetually-blocking Stop hook cannot
+    /// loop forever. `prevent_continuation` (`continue:false`) always wins →
+    /// [`StopHookDisposition::Prevent`]. Strict no-op (`Pass`) when no Stop hook
+    /// is registered.
+    async fn fire_stop_hooks(&self, reason: &str, stop_hook_active: bool) -> StopHookDisposition {
+        tracing::debug!(event = "hook_stop_started", reason, stop_hook_active);
+        let ctx = self.lifecycle_hook_ctx(stop_hook_active).await;
+        let agg = self
+            .hooks
+            .execute(HookEvent::Stop { reason: reason.to_string() }, ctx)
+            .await;
+        let disposition = if agg.prevent_continuation {
+            StopHookDisposition::Prevent
+        } else if matches!(agg.decision, Some(hooks::response::HookDecision::Block))
+            && !stop_hook_active
+        {
+            StopHookDisposition::Continue(agg.system_messages)
+        } else {
+            StopHookDisposition::Pass
+        };
+        tracing::debug!(
+            event = "hook_stop_completed",
+            prevent_continuation = agg.prevent_continuation,
+            blocked = matches!(agg.decision, Some(hooks::response::HookDecision::Block)),
+        );
+        disposition
+    }
+
+    /// Fire Stop hooks at a natural end-of-turn arm and translate the
+    /// disposition into a driver control-flow directive (hooks B4). Shared by
+    /// all three turn drivers. Skips firing (returns `FallThrough`) on the
+    /// `prompt_too_long` error surface — the port of the skip-on-API-error guard
+    /// (`query.ts:1262`). On `Prevent` it emits the end-turn before terminating
+    /// so the cost/UI bookkeeping still fires.
+    async fn handle_stop_at_end(
+        &self,
+        stop_reason: &str,
+        stop_hook_active: &mut bool,
+        turn_count: u32,
+        final_message_id: MessageId,
+    ) -> StopHookFlow {
+        if stop_reason == "prompt_too_long" {
+            return StopHookFlow::FallThrough;
+        }
+        match self.fire_stop_hooks(stop_reason, *stop_hook_active).await {
+            StopHookDisposition::Prevent => {
+                let cost = self.snapshot_cost_real().await;
+                self.output.emit_end_turn(stop_reason, &cost).await;
+                StopHookFlow::Terminate(ConversationOutcome::StopHookPrevented {
+                    turn_count,
+                    final_message_id,
+                })
+            }
+            StopHookDisposition::Continue(msgs) => {
+                self.append_stop_hook_messages(&msgs).await;
+                *stop_hook_active = true;
+                StopHookFlow::LoopAgain
+            }
+            StopHookDisposition::Pass => StopHookFlow::FallThrough,
+        }
+    }
+
+    /// Append a Stop hook's blocking messages as a meta user message so the
+    /// model sees the hook feedback on the continued turn (TS appends the
+    /// blocking reason). Best-effort persist, like the other meta appends.
+    async fn append_stop_hook_messages(&self, messages: &[String]) {
+        if messages.is_empty() {
+            return;
+        }
+        let combined = messages.join("\n");
+        let msg = ConversationMessage::user(MessageId::new(), combined);
+        {
+            let mut s = self.session.lock().await;
+            s.history.push(msg.clone());
+        }
+        self.persist_message_to_jsonl(&msg).await;
+    }
+
     async fn try_run_turn(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError> {
         // 0. Build the system prompt for THIS turn. Override always wins.
         let system_prompt: Option<String> = match &self.config.system_prompt_override {
@@ -1001,10 +1158,22 @@ impl ConversationOrchestrator {
         }
         self.persist_message_to_jsonl(&user_msg).await;
 
+        // hooks B4: fire UserPromptSubmit. A Block decision aborts the turn
+        // BEFORE any API call (TS prompt-ingress hook). No-op when unregistered.
+        if self.fire_user_prompt_submit(prompt).await {
+            return Ok(ConversationOutcome::StopHookPrevented {
+                turn_count: 0,
+                final_message_id: user_msg.id(),
+            });
+        }
+
         // 2. Turn-by-turn driver.
         // A1: per-conversation max_output_tokens recovery bookkeeping carried
         // across turn-steps (the 3-retry limit is consecutive).
         let mut recovery = RecoveryState::default();
+        // hooks B4: Stop-hook re-entry guard. Set true after a Stop hook blocks
+        // and we loop once more; a second block then passes (no infinite loop).
+        let mut stop_hook_active = false;
         // A3: token-budget continuation bookkeeping. `Some` only when the gate
         // is enabled AND a budget is set; otherwise the budget check is a
         // NO-OP and the loop stops at the first `end_turn` (parity default).
@@ -1035,6 +1204,17 @@ impl ConversationOrchestrator {
                     final_message_id: id,
                     stop_reason,
                 } => {
+                    // hooks B4: fire Stop hooks BEFORE the token-budget check
+                    // (order: recovery → stop-hooks → token-budget, TS
+                    // `query.ts:1262-1308`).
+                    match self
+                        .handle_stop_at_end(&stop_reason, &mut stop_hook_active, turn_count, id)
+                        .await
+                    {
+                        StopHookFlow::Terminate(outcome) => return Ok(outcome),
+                        StopHookFlow::LoopAgain => continue,
+                        StopHookFlow::FallThrough => {}
+                    }
                     // A3: at a natural end-of-turn, consult the token budget. If
                     // it says `continue`, inject the meta nudge, reset the A1
                     // recovery count (per `query.ts:1332`), and loop again
@@ -1085,7 +1265,8 @@ impl ConversationOrchestrator {
         );
         let result = self.try_run_turn_streaming(prompt, &[]).await;
         match &result {
-            Ok(ConversationOutcome::EndTurn { turn_count, .. }) => {
+            Ok(ConversationOutcome::EndTurn { turn_count, .. }
+            | ConversationOutcome::StopHookPrevented { turn_count, .. }) => {
                 tracing::info!(
                     event = orch_events::TURN_STREAMING_COMPLETED,
                     turn_count = *turn_count
@@ -1128,6 +1309,15 @@ impl ConversationOrchestrator {
         }
         self.persist_message_to_jsonl(&user_msg).await;
 
+        // hooks B4: UserPromptSubmit (streaming twin). A Block aborts before the
+        // first stream is opened. No-op when unregistered.
+        if self.fire_user_prompt_submit(prompt).await {
+            return Ok(ConversationOutcome::StopHookPrevented {
+                turn_count: 0,
+                final_message_id: user_msg.id(),
+            });
+        }
+
         // Build the wire tool definitions once for the conversation (stable
         // across turns; see `build_wire_tools`). Cloned into each turn's stream.
         let wire_tools = self.build_wire_tools().await;
@@ -1136,6 +1326,8 @@ impl ConversationOrchestrator {
         // twin of the batched driver). Carried across turn-steps so the 3-retry
         // limit is consecutive.
         let mut recovery = RecoveryState::default();
+        // hooks B4: Stop-hook re-entry guard (streaming twin).
+        let mut stop_hook_active = false;
         // A3: token-budget continuation bookkeeping (streaming twin). `Some`
         // only when the gate is enabled AND a budget is set; otherwise the
         // budget check is a NO-OP and the loop stops at the first `end_turn`.
@@ -1243,6 +1435,21 @@ impl ConversationOrchestrator {
             // 6. Decide loop disposition.
             match pumped.stop_reason.as_deref() {
                 Some("end_turn") => {
+                    // hooks B4: Stop hooks BEFORE the budget check (streaming
+                    // twin; order recovery → stop-hooks → token-budget).
+                    match self
+                        .handle_stop_at_end(
+                            "end_turn",
+                            &mut stop_hook_active,
+                            turn_count,
+                            assistant_id,
+                        )
+                        .await
+                    {
+                        StopHookFlow::Terminate(outcome) => return Ok(outcome),
+                        StopHookFlow::LoopAgain => continue,
+                        StopHookFlow::FallThrough => {}
+                    }
                     // A3: token-budget continuation (streaming twin). On a
                     // natural end, consult the budget; on `continue`, inject the
                     // meta nudge, reset the A1 recovery count, and loop again.
@@ -1301,6 +1508,21 @@ impl ConversationOrchestrator {
                     // Stream ended without a stop_reason — treat as
                     // end_turn (rare; claude.ts uses the same fallback). The
                     // token-budget check applies here too (A3).
+                    // hooks B4: Stop hooks before the budget check (same as the
+                    // explicit end_turn arm).
+                    match self
+                        .handle_stop_at_end(
+                            "end_turn",
+                            &mut stop_hook_active,
+                            turn_count,
+                            assistant_id,
+                        )
+                        .await
+                    {
+                        StopHookFlow::Terminate(outcome) => return Ok(outcome),
+                        StopHookFlow::LoopAgain => continue,
+                        StopHookFlow::FallThrough => {}
+                    }
                     if self
                         .maybe_continue_for_budget(
                             budget.as_mut(),
@@ -1370,8 +1592,16 @@ impl ConversationOrchestrator {
         }
         self.persist_message_to_jsonl(&user_msg).await;
 
+        // hooks B4: UserPromptSubmit (cancelable REPL twin). A Block aborts the
+        // turn before any API call. No-op when unregistered.
+        if self.fire_user_prompt_submit(prompt).await {
+            return Ok(TurnOutcome::EndTurn);
+        }
+
         // 2. Turn-by-turn loop — check cancel before each API call.
         let mut turn_count: u32 = 0;
+        // hooks B4: Stop-hook re-entry guard (cancelable twin).
+        let mut stop_hook_active = false;
         loop {
             if cancel.is_cancelled() {
                 return Ok(TurnOutcome::Cancelled);
@@ -1388,7 +1618,24 @@ impl ConversationOrchestrator {
             };
             match step {
                 TurnStepOutcome::Continue => continue,
-                TurnStepOutcome::Ended { stop_reason, .. } => {
+                TurnStepOutcome::Ended {
+                    stop_reason,
+                    final_message_id: id,
+                } => {
+                    // hooks B4: Stop hooks (cancelable twin). `TurnOutcome` does
+                    // not distinguish StopHookPrevented from EndTurn, so both the
+                    // Terminate and FallThrough dispositions end the REPL turn as
+                    // EndTurn; only `LoopAgain` (a Stop hook asking to keep
+                    // working) loops. `handle_stop_at_end` already emits the
+                    // end-turn on Terminate, so we don't re-emit there.
+                    match self
+                        .handle_stop_at_end(&stop_reason, &mut stop_hook_active, turn_count, id)
+                        .await
+                    {
+                        StopHookFlow::Terminate(_) => return Ok(TurnOutcome::EndTurn),
+                        StopHookFlow::LoopAgain => continue,
+                        StopHookFlow::FallThrough => {}
+                    }
                     let cost = self.snapshot_cost_real().await;
                     self.output.emit_end_turn(&stop_reason, &cost).await;
                     return Ok(TurnOutcome::EndTurn);
@@ -1450,7 +1697,8 @@ impl ConversationOrchestrator {
             biased;
             () = cancel.cancelled() => Ok(TurnOutcome::Cancelled),
             r = self.try_run_turn_streaming(prompt, image_paths) => match r {
-                Ok(ConversationOutcome::EndTurn { turn_count, .. }) => {
+                Ok(ConversationOutcome::EndTurn { turn_count, .. }
+                | ConversationOutcome::StopHookPrevented { turn_count, .. }) => {
                     tracing::info!(
                         event = orch_events::TURN_STREAMING_COMPLETED,
                         turn_count

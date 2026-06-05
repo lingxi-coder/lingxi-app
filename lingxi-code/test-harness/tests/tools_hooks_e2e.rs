@@ -27,6 +27,9 @@ impl BuiltinHookHandler for BlockingBuiltin {
                 attachments: vec![],
                 suppress_output: false,
                 structured_content: None,
+                // hooks B4: additive `continue:false` (preventContinuation) wire
+                // field; `false` here preserves this mock's prior Block behavior.
+                prevent_continuation: false,
             }),
         }
     }

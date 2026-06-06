@@ -49,6 +49,37 @@ pub trait OrchestratorApiClient: Send + Sync {
         tools: Vec<serde_json::Value>,
     ) -> Result<MessageResponse, ApiError>;
 
+    /// Non-streaming `messages.create` with the **Opus-fallback** policy wired
+    /// (Opus-fallback batch). Identical to [`Self::messages_create`] except the
+    /// caller hands in the configured `fallback_model` (+ the pre-computed
+    /// subscription flags `is_subscriber` / `is_enterprise`) so the api-client
+    /// can surface [`ApiError::FallbackTriggered`] after
+    /// [`api_client::MAX_529_RETRIES`] consecutive 529s on a non-custom Opus
+    /// primary model (1:1 with claude-code `withRetry.ts:326-365`).
+    ///
+    /// The DEFAULT body delegates to [`Self::messages_create`], dropping the
+    /// fallback args — so every existing impl (mocks, the router adapter, the
+    /// hook-prompt mock) compiles unchanged and behaves byte-identically. Only
+    /// [`AnthropicProviderAdapter`] overrides it to thread the fallback into
+    /// `AnthropicProvider::messages_create_non_stream_with_fallback`. The turn
+    /// loop only calls THIS method when `config.fallback_model.is_some()`; with
+    /// no fallback configured it stays on `messages_create`, a strict no-op.
+    #[allow(clippy::too_many_arguments)]
+    async fn messages_create_with_fallback(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        _fallback_model: Option<&str>,
+        _is_subscriber: bool,
+        _is_enterprise: bool,
+    ) -> Result<MessageResponse, ApiError> {
+        // Default: ignore the fallback args and use the plain seam. Keeps all
+        // non-Anthropic impls (and mocks) byte-identical.
+        self.messages_create(model, system, msgs, tools).await
+    }
+
     /// Enumerate available `provider/model` ids + `@aliases` for `/model`'s
     /// list mode. Default returns empty so non-routing impls (mocks / the
     /// no-streaming stub) need no override; `ProviderApiAdapter` overrides it
@@ -2185,6 +2216,41 @@ impl<T: HttpTransport + Send + Sync + 'static> OrchestratorApiClient
                 4096,
                 tools,
                 None,
+                self.transport.as_ref(),
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn messages_create_with_fallback(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        fallback_model: Option<&str>,
+        is_subscriber: bool,
+        is_enterprise: bool,
+    ) -> Result<MessageResponse, ApiError> {
+        // Thread the configured fallback + subscription flags into the
+        // fallback-aware provider seam. Same `max_tokens = 4096` / no-temperature
+        // defaults as `messages_create` above; when `fallback_model` is `None`
+        // this is byte-identical to `messages_create` (the consecutive-529 gate
+        // stays closed). `is_subscriber` / `is_enterprise` are the documented
+        // stub `false` until OAuth subscription resolution lands (matching the
+        // api-client `messages_create_non_stream_with_fallback` ship-with-stub
+        // note); the orchestrator does not yet resolve subscription state.
+        self.provider
+            .messages_create_non_stream_with_fallback(
+                model,
+                system,
+                msgs,
+                4096,
+                tools,
+                None,
+                fallback_model.map(str::to_owned),
+                is_subscriber,
+                is_enterprise,
                 self.transport.as_ref(),
             )
             .await

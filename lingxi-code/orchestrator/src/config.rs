@@ -29,6 +29,21 @@ pub struct OrchestratorConfig {
     /// `AnthropicProvider::messages_create_non_stream`).
     pub model: String,
 
+    /// Opus-fallback model (claude-code `--fallback-model`). When `Some(id)`,
+    /// the batched turn loop routes its primary API call through the
+    /// fallback-aware api-client path so a consecutive-529 gate on a non-custom
+    /// Opus primary model can surface [`api_client::ApiError::FallbackTriggered`];
+    /// the turn loop then switches the session model to `id`, warns the user,
+    /// and re-issues against it (1:1 with claude-code `query.ts:894-948`).
+    ///
+    /// `None` (the parity default) is a STRICT no-op: the primary call keeps
+    /// using the plain `messages_create` seam (fallback disabled), so the locked
+    /// turn-loop fixtures are byte-unaffected. claude-code restricts
+    /// `--fallback-model` to `--print`/non-interactive mode; the CLI mirrors that
+    /// guard (M5-12 `argv.rs`).
+    #[serde(default)]
+    pub fallback_model: Option<String>,
+
     /// Optional system prompt override. `None` means the default
     /// claude-code-equivalent system prompt is assembled (M5-03 wires
     /// the dynamic assembly; M5-02 leaves this `None` and the API call
@@ -92,6 +107,7 @@ impl Default for OrchestratorConfig {
         Self {
             max_turns: MAX_TURNS_DEFAULT,
             model: DEFAULT_MODEL.to_string(),
+            fallback_model: None,
             system_prompt_override: None,
             interactive_permissions: false,
             resume_session_id: None,
@@ -129,6 +145,7 @@ mod tests {
         let cfg = OrchestratorConfig {
             max_turns: 5,
             model: "x".into(),
+            fallback_model: Some("claude-sonnet-4-6".into()),
             system_prompt_override: Some("custom".into()),
             interactive_permissions: true,
             resume_session_id: None,
@@ -140,12 +157,28 @@ mod tests {
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(back.max_turns, 5);
         assert_eq!(back.model, "x");
+        assert_eq!(back.fallback_model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(back.system_prompt_override.as_deref(), Some("custom"));
         assert!(back.interactive_permissions);
         assert!(back.resume_session_id.is_none());
         assert!(back.escalate_max_output_tokens);
         assert!(back.enable_token_budget);
         assert_eq!(back.token_budget, Some(500_000));
+    }
+
+    #[test]
+    fn default_fallback_model_is_none() {
+        assert!(OrchestratorConfig::default().fallback_model.is_none());
+    }
+
+    #[test]
+    fn fallback_model_defaults_when_absent_from_json() {
+        // `#[serde(default)]` — a config JSON without `fallback_model` must
+        // deserialize with `None` (back-compat with pre-fallback persisted cfgs).
+        let s = r#"{"max_turns":7,"model":"m"}"#;
+        let back: OrchestratorConfig = serde_json::from_str(s).unwrap();
+        assert!(back.fallback_model.is_none());
+        assert_eq!(back.model, "m");
     }
 
     #[test]

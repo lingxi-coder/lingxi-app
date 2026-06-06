@@ -5,6 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# Default-off feature flags mirroring claude-code `betas.ts` build features.
+# When OFF (the external default) the corresponding `anthropic-beta` entry is
+# never emitted by `assemble_beta_header`, keeping the header byte-identical to
+# the external claude-code build. These add NO new crate to the dependency
+# graph — they are pure `cfg!(feature = …)` compile-time toggles.
+# - `connector_text`        ≙ TS `feature('CONNECTOR_TEXT')`        → SUMMARIZE_CONNECTOR_TEXT
+# - `transcript_classifier` ≙ TS `feature('TRANSCRIPT_CLASSIFIER')` → AFK_MODE
+[features]
+default = []
+connector_text = []
+transcript_classifier = []
+
 [dependencies]
 protocol = { path = "../protocol" }
 traits = { path = "../traits" }

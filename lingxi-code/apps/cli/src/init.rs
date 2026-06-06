@@ -274,6 +274,7 @@ mod tests {
             print: true,
             resume: None,
             model: None,
+            fallback_model: None,
             cwd: None,
             no_stream: true,
             json: false,

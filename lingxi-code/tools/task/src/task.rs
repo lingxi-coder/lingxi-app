@@ -1323,11 +1323,39 @@ impl Tool for TaskUpdateTool {
 
 // ==== TaskStopTool ===========================================================
 
+// no-truncation: TaskStop + TaskOutput bound their model-facing output via their
+// own `max_result_size_chars` (100_000) cap — the same value claude-code sets on
+// `maxResultSizeChars` — rather than the shared `MAX_TOOL_OUTPUT_LENGTH`/`truncate`
+// path used by the variable-length file/shell tools.
+
+/// `TaskStopTool` description (`TaskStopTool.ts` `async description()`).
+const TASK_STOP_DESCRIPTION: &str = "Stop a running background task by ID";
+
+/// `TaskStopTool` prompt — `DESCRIPTION` from `TaskStopTool/prompt.ts` (verbatim,
+/// including the leading + trailing newlines of the TS template literal).
+const TASK_STOP_PROMPT: &str = "
+- Stops a running background task by its ID
+- Takes a task_id parameter identifying the task to stop
+- Returns a success or failure status
+- Use this tool when you need to terminate a long-running task
+";
+
 static TASK_STOP_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    // `z.strictObject` with two OPTIONAL strings and no `required` array
+    // (`TaskStopTool.ts:10-19`). `shell_id` is the deprecated KillShell field.
     json!({
         "type": "object",
-        "properties": { "task_id": { "type": "string" } },
-        "required": ["task_id"]
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "The ID of the background task to stop"
+            },
+            "shell_id": {
+                "type": "string",
+                "description": "Deprecated: use task_id instead"
+            }
+        },
+        "additionalProperties": false
     })
 });
 
@@ -1349,6 +1377,12 @@ impl Tool for TaskStopTool {
     fn name(&self) -> &str {
         TASK_STOP_TOOL_NAME
     }
+    /// `KillShell` is the deprecated name kept as an alias for backward
+    /// compatibility (`TaskStopTool.ts:44`). `find_by_name` honours aliases.
+    fn aliases(&self) -> &[&str] {
+        const ALIASES: &[&str] = &["KillShell"];
+        ALIASES
+    }
     fn input_schema(&self) -> &Value {
         &TASK_STOP_SCHEMA
     }
@@ -1356,7 +1390,7 @@ impl Tool for TaskStopTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
+        100_000
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         false
@@ -1386,10 +1420,10 @@ impl Tool for TaskStopTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "Kill a running task".into()
+        TASK_STOP_DESCRIPTION.into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Use TaskStop to cancel a running task by id.".into()
+        TASK_STOP_PROMPT.into()
     }
 
     async fn call(
@@ -1402,33 +1436,28 @@ impl Tool for TaskStopTool {
         let invocation_id = fresh_invocation_id();
         let bus = self.ctx.bus.clone();
 
-        let task_id = match input.get("task_id").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
-            None => {
-                emit_failed(
-                    &bus,
-                    TASK_STOP_FAILED,
-                    &invocation_id,
-                    "missing_task_id",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
-                return Err(ToolError::InvalidInput(
-                    "TaskStop: missing 'task_id'".into(),
-                ));
-            }
-        };
-        if let Err(msg) = validate_task_id(&task_id) {
+        // Resolve id: `task_id ?? shell_id`, then `if (!id)` (`TaskStopTool.ts:111-115`).
+        // `??` (`Option::or`) only falls back for an absent `task_id`; a present
+        // empty string survives the coalesce and is then rejected by `!id`.
+        let resolved = input
+            .get("task_id")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("shell_id").and_then(Value::as_str))
+            .unwrap_or("");
+        if resolved.is_empty() {
             emit_failed(
                 &bus,
                 TASK_STOP_FAILED,
                 &invocation_id,
-                "malformed_task_id",
+                "missing_task_id",
                 started.elapsed().as_millis() as u64,
             )
             .await;
-            return Err(ToolError::InvalidInput(msg));
+            return Err(ToolError::InvalidInput(
+                "Missing required parameter: task_id".into(),
+            ));
         }
+        let task_id = resolved.to_string();
 
         emit_started(&bus, TASK_STOP_STARTED, &invocation_id, &[]).await;
 
@@ -1448,8 +1477,25 @@ impl Tool for TaskStopTool {
                 ));
             }
         };
-        let record = match registry.kill(&task_id).await {
-            Ok(r) => r,
+
+        // Pre-validation against the pre-kill record (`stopTask.ts:44-55`):
+        // missing → "No task found with ID: {id}"; non-running →
+        // "Task {id} is not running (status: {status})".
+        let record = match registry.get(&task_id).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                emit_failed(
+                    &bus,
+                    TASK_STOP_FAILED,
+                    &invocation_id,
+                    "not_found",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "No task found with ID: {task_id}"
+                )));
+            }
             Err(e) => {
                 emit_failed(
                     &bus,
@@ -1462,6 +1508,38 @@ impl Tool for TaskStopTool {
                 return Err(registry_err_to_tool_err("TaskStop", e));
             }
         };
+        if record.status != "running" {
+            emit_failed(
+                &bus,
+                TASK_STOP_FAILED,
+                &invocation_id,
+                "not_running",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(ToolError::InvalidInput(format!(
+                "Task {task_id} is not running (status: {})",
+                record.status
+            )));
+        }
+
+        // Capture command + type from the pre-kill record. The narrow registry
+        // surface carries `description` (no separate `command` field), so it
+        // backs both the bash `command` and the agent `description` TS sources.
+        let task_type = record.task_type.clone();
+        let command = record.description.clone();
+
+        if let Err(e) = registry.kill(&task_id).await {
+            emit_failed(
+                &bus,
+                TASK_STOP_FAILED,
+                &invocation_id,
+                "registry_error",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(registry_err_to_tool_err("TaskStop", e));
+        }
         emit_completed(
             &bus,
             TASK_STOP_COMPLETED,
@@ -1471,8 +1549,15 @@ impl Tool for TaskStopTool {
         )
         .await;
 
+        // No `content` key → the orchestrator JSON-stringifies the whole data
+        // (matches TS `mapToolResultToToolResultBlockParam` → `jsonStringify`).
         Ok(ToolCallResult {
-            data: json!({ "task_id": record.task_id, "status": record.status }),
+            data: json!({
+                "message": format!("Successfully stopped task: {task_id} ({command})"),
+                "task_id": task_id,
+                "task_type": task_type,
+                "command": command,
+            }),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -1482,18 +1567,86 @@ impl Tool for TaskStopTool {
 
 // ==== TaskOutputTool =========================================================
 
+/// `TaskOutputTool` description (`TaskOutputTool.tsx` `async description()`).
+const TASK_OUTPUT_DESCRIPTION: &str = "[Deprecated] — prefer Read on the task output file path";
+
+/// `TaskOutputTool` prompt (`TaskOutputTool.tsx` `async prompt()`, verbatim).
+const TASK_OUTPUT_PROMPT: &str = "DEPRECATED: Prefer using the Read tool on the task's output file path instead. Background tasks return their output file path in the tool result, and you receive a <task-notification> with the same path when the task completes — Read that file directly.
+
+- Retrieves output from a running or completed task (background shell, agent, or remote session)
+- Takes a task_id parameter identifying the task
+- Returns the task output along with status information
+- Use block=true (default) to wait for task completion
+- Use block=false for non-blocking check of current status
+- Task IDs can be found using the /tasks command
+- Works with all task types: background shells, async agents, and remote sessions";
+
 static TASK_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    // `z.strictObject` (`TaskOutputTool.tsx:30-34`): required `task_id`, a
+    // `block` bool (default true), and a `timeout` integer 0..600000 (default
+    // 30000 ms). Replaces the old `offset`/`limit` paging params.
     json!({
         "type": "object",
         "properties": {
-            "task_id": { "type": "string" },
-            "block":   { "type": "boolean", "default": true },
-            "offset":  { "type": "integer", "minimum": 0 },
-            "limit":   { "type": "integer", "minimum": 1, "maximum": 1_048_576 }
+            "task_id": {
+                "type": "string",
+                "description": "The task ID to get output from"
+            },
+            "block": {
+                "type": "boolean",
+                "default": true,
+                "description": "Whether to wait for completion"
+            },
+            "timeout": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 600_000,
+                "default": 30_000,
+                "description": "Max wait time in ms"
+            }
         },
-        "required": ["task_id"]
+        "required": ["task_id"],
+        "additionalProperties": false
     })
 });
+
+/// 1:1 port of `TaskOutputTool.tsx`'s `mapToolResultToToolResultBlockParam`
+/// (lines 283-308): the XML render of a `retrieval_status` + optional `task`,
+/// joined by a blank line. Fed to the model verbatim via the `content` key.
+fn render_task_output(
+    retrieval_status: &str,
+    task: Option<&TaskOutputView>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(format!(
+        "<retrieval_status>{retrieval_status}</retrieval_status>"
+    ));
+    if let Some(t) = task {
+        parts.push(format!("<task_id>{}</task_id>", t.task_id));
+        parts.push(format!("<task_type>{}</task_type>", t.task_type));
+        parts.push(format!("<status>{}</status>", t.status));
+        // `<exit_code>` only when the task carries one (TS: defined && non-null).
+        if let Some(code) = t.exit_code {
+            parts.push(format!("<exit_code>{code}</exit_code>"));
+        }
+        // `<output>` only when the trimmed output is non-blank (TS `output?.trim()`).
+        if !t.output.trim().is_empty() {
+            parts.push(format!("<output>\n{}\n</output>", t.output.trim_end()));
+        }
+    }
+    parts.join("\n\n")
+}
+
+/// The `task` payload surfaced by `TaskOutputTool` — the subset of the TS
+/// `TaskOutput` shape the narrow registry surface can resolve.
+struct TaskOutputView {
+    task_id: String,
+    task_type: String,
+    status: String,
+    description: String,
+    output: String,
+    exit_code: Option<i32>,
+}
 
 /// Byte-faithful port of `TaskOutputTool.tsx`'s `retrieval_status` decision.
 ///
@@ -1535,6 +1688,12 @@ impl Tool for TaskOutputTool {
     fn name(&self) -> &str {
         TASK_OUTPUT_TOOL_NAME
     }
+    /// Backwards-compatible aliases for the renamed tools
+    /// (`TaskOutputTool.tsx:150`).
+    fn aliases(&self) -> &[&str] {
+        const ALIASES: &[&str] = &["AgentOutputTool", "BashOutputTool"];
+        ALIASES
+    }
     fn input_schema(&self) -> &Value {
         &TASK_OUTPUT_SCHEMA
     }
@@ -1542,7 +1701,7 @@ impl Tool for TaskOutputTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH
+        100_000
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -1569,10 +1728,10 @@ impl Tool for TaskOutputTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "Read a task's stdout/stderr spool".into()
+        TASK_OUTPUT_DESCRIPTION.into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Use TaskOutput to read accumulated stdout/stderr for a task.".into()
+        TASK_OUTPUT_PROMPT.into()
     }
 
     async fn call(
@@ -1585,9 +1744,11 @@ impl Tool for TaskOutputTool {
         let invocation_id = fresh_invocation_id();
         let bus = self.ctx.bus.clone();
 
+        // `task_id` is required by the schema; guard mirrors `validateInput`
+        // (`TaskOutputTool.tsx:188-193`): `if (!task_id)` → "Task ID is required".
         let task_id = match input.get("task_id").and_then(Value::as_str) {
-            Some(s) => s.to_string(),
-            None => {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
                 emit_failed(
                     &bus,
                     TASK_OUTPUT_FAILED,
@@ -1596,22 +1757,9 @@ impl Tool for TaskOutputTool {
                     started.elapsed().as_millis() as u64,
                 )
                 .await;
-                return Err(ToolError::InvalidInput(
-                    "TaskOutput: missing 'task_id'".into(),
-                ));
+                return Err(ToolError::InvalidInput("Task ID is required".into()));
             }
         };
-        if let Err(msg) = validate_task_id(&task_id) {
-            emit_failed(
-                &bus,
-                TASK_OUTPUT_FAILED,
-                &invocation_id,
-                "malformed_task_id",
-                started.elapsed().as_millis() as u64,
-            )
-            .await;
-            return Err(ToolError::InvalidInput(msg));
-        }
 
         emit_started(&bus, TASK_OUTPUT_STARTED, &invocation_id, &[]).await;
 
@@ -1631,10 +1779,45 @@ impl Tool for TaskOutputTool {
                 ));
             }
         };
-        let offset = input.get("offset").and_then(Value::as_u64);
-        // `block` defaults to true (TS `semanticBoolean(z.boolean().default(true))`).
+
+        // `block` defaults to true (TS `semanticBoolean(z.boolean().default(true))`);
+        // `timeout` defaults to 30000 ms (`z.number().min(0).max(600000).default(30000)`).
         let block = input.get("block").and_then(Value::as_bool).unwrap_or(true);
-        let chunk = match registry.output(&task_id, offset).await {
+        let timeout_ms = input.get("timeout").and_then(Value::as_u64).unwrap_or(30_000);
+
+        // Existence check (`TaskOutputTool.tsx:215-218`): `if (!task) throw …`.
+        // The record carries `task_type` + `description`, which the output
+        // chunk does not.
+        let record = match registry.get(&task_id).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                emit_failed(
+                    &bus,
+                    TASK_OUTPUT_FAILED,
+                    &invocation_id,
+                    "not_found",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "No task found with ID: {task_id}"
+                )));
+            }
+            Err(e) => {
+                emit_failed(
+                    &bus,
+                    TASK_OUTPUT_FAILED,
+                    &invocation_id,
+                    "registry_error",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(registry_err_to_tool_err("TaskOutput", e));
+            }
+        };
+
+        // First (and, for `block==false`, only) read.
+        let mut chunk = match registry.output(&task_id, None).await {
             Ok(c) => c,
             Err(e) => {
                 emit_failed(
@@ -1648,6 +1831,34 @@ impl Tool for TaskOutputTool {
                 return Err(registry_err_to_tool_err("TaskOutput", e));
             }
         };
+
+        // Blocking wait (`waitForTaskCompletion`, `TaskOutputTool.tsx:118-143`):
+        // re-read every 100 ms until the task is terminal (`done`) or the
+        // timeout elapses. Elapsed is measured on a `std::time::Instant`.
+        if block && !chunk.done {
+            let wait_started = Instant::now();
+            while !chunk.done {
+                if (wait_started.elapsed().as_millis() as u64) >= timeout_ms {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                chunk = match registry.output(&task_id, None).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        emit_failed(
+                            &bus,
+                            TASK_OUTPUT_FAILED,
+                            &invocation_id,
+                            "registry_error",
+                            started.elapsed().as_millis() as u64,
+                        )
+                        .await;
+                        return Err(registry_err_to_tool_err("TaskOutput", e));
+                    }
+                };
+            }
+        }
+
         emit_completed(
             &bus,
             TASK_OUTPUT_COMPLETED,
@@ -1658,17 +1869,37 @@ impl Tool for TaskOutputTool {
         .await;
 
         let retrieval_status = task_output_retrieval_status(chunk.done, block);
+        let view = TaskOutputView {
+            task_id: chunk.task_id.clone(),
+            task_type: record.task_type.clone(),
+            // Status from the (latest) chunk; fall back to the record if the
+            // registry could not resolve it at the chunk point.
+            status: chunk.status.clone().unwrap_or_else(|| record.status.clone()),
+            description: record.description.clone(),
+            output: chunk.content.clone(),
+            exit_code: chunk.exit_code,
+        };
+        let content = render_task_output(retrieval_status, Some(&view));
 
+        // `exit_code` is optional (TS attaches it only for `local_bash`); omit
+        // the key entirely when the chunk carries none.
+        let mut task_obj = Map::new();
+        task_obj.insert("task_id".into(), json!(view.task_id));
+        task_obj.insert("task_type".into(), json!(view.task_type));
+        task_obj.insert("status".into(), json!(view.status));
+        task_obj.insert("description".into(), json!(view.description));
+        task_obj.insert("output".into(), json!(view.output));
+        if let Some(code) = view.exit_code {
+            task_obj.insert("exit_code".into(), json!(code));
+        }
+
+        // Nested `{ retrieval_status, task: { … } }` plus the `content` render so
+        // the model sees it (`TaskOutputTool.tsx` data + `…BlockParam`).
         Ok(ToolCallResult {
             data: json!({
                 "retrieval_status": retrieval_status,
-                "task_id": chunk.task_id,
-                "content": chunk.content,
-                "total_lines": chunk.total_lines,
-                "truncated": chunk.truncated,
-                "status": chunk.status,
-                "exit_code": chunk.exit_code,
-                "done": chunk.done,
+                "task": Value::Object(task_obj),
+                "content": content,
             }),
             new_messages: vec![],
             context_modifier: None,
@@ -1921,5 +2152,401 @@ mod tests {
             s["properties"]["status"]["enum"],
             json!(["pending", "in_progress", "completed", "deleted"])
         );
+    }
+
+    // ── Product-B TaskStop / TaskOutput drift (batch [3]) ────────────────
+    //
+    // A small in-memory `TaskRegistryHandle` mock backs the `call`-level
+    // tests for the two background-registry tools.
+
+    mod product_b {
+        use super::*;
+        use std::collections::VecDeque;
+        use std::sync::Mutex as StdMutex;
+        use telemetry::AnalyticsBus;
+        use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
+        use traits::task_registry::{
+            TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryHandle,
+            TaskUpdatePatch,
+        };
+
+        #[derive(Default)]
+        struct MockRegistry {
+            /// `None` ⇒ task not found.
+            record: StdMutex<Option<TaskRecord>>,
+            /// Successive `output()` results; the last entry repeats once drained.
+            chunks: StdMutex<VecDeque<TaskOutputChunk>>,
+            kill_calls: StdMutex<u32>,
+            output_calls: StdMutex<u32>,
+        }
+
+        impl MockRegistry {
+            fn with_record(record: Option<TaskRecord>) -> Arc<Self> {
+                Arc::new(Self {
+                    record: StdMutex::new(record),
+                    ..Self::default()
+                })
+            }
+            fn push_chunk(self: &Arc<Self>, c: TaskOutputChunk) {
+                self.chunks.lock().unwrap().push_back(c);
+            }
+        }
+
+        #[async_trait]
+        impl TaskRegistryHandle for MockRegistry {
+            async fn create(
+                &self,
+                _input: TaskCreateInput,
+            ) -> Result<TaskRecord, TaskRegistryError> {
+                Err(TaskRegistryError::Internal("unused in product_b tests".into()))
+            }
+            async fn get(&self, _id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+                Ok(self.record.lock().unwrap().clone())
+            }
+            async fn list(
+                &self,
+                _filter: TaskListFilter,
+            ) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+                Ok(self.record.lock().unwrap().clone().into_iter().collect())
+            }
+            async fn update(
+                &self,
+                _id: &str,
+                _patch: TaskUpdatePatch,
+            ) -> Result<TaskRecord, TaskRegistryError> {
+                Err(TaskRegistryError::Internal("unused in product_b tests".into()))
+            }
+            async fn set_status(
+                &self,
+                _id: &str,
+                _status: &str,
+            ) -> Result<TaskRecord, TaskRegistryError> {
+                Err(TaskRegistryError::Internal("unused in product_b tests".into()))
+            }
+            async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
+                *self.kill_calls.lock().unwrap() += 1;
+                let mut guard = self.record.lock().unwrap();
+                match guard.as_mut() {
+                    Some(r) => {
+                        r.status = "killed".into();
+                        Ok(r.clone())
+                    }
+                    None => Err(TaskRegistryError::NotFound(id.into())),
+                }
+            }
+            async fn output(
+                &self,
+                id: &str,
+                _offset: Option<u64>,
+            ) -> Result<TaskOutputChunk, TaskRegistryError> {
+                *self.output_calls.lock().unwrap() += 1;
+                let mut q = self.chunks.lock().unwrap();
+                if q.len() > 1 {
+                    Ok(q.pop_front().unwrap())
+                } else if let Some(front) = q.front() {
+                    Ok(front.clone())
+                } else {
+                    Err(TaskRegistryError::NotFound(id.into()))
+                }
+            }
+        }
+
+        fn rec(status: &str) -> TaskRecord {
+            TaskRecord {
+                task_id: "b12345678".into(),
+                task_type: "local_bash".into(),
+                status: status.into(),
+                description: "echo hi".into(),
+            }
+        }
+
+        fn chunk(status: &str, done: bool, exit_code: Option<i32>, content: &str) -> TaskOutputChunk {
+            TaskOutputChunk {
+                task_id: "b12345678".into(),
+                content: content.into(),
+                total_lines: 1,
+                truncated: false,
+                status: Some(status.into()),
+                exit_code,
+                done,
+            }
+        }
+
+        fn bctx(reg: Arc<dyn TaskRegistryHandle>) -> BuiltinToolContext {
+            let bus = Arc::new(AnalyticsBus::new());
+            let mut c = ctx_for_file_tools(make_dummy_fs(), bus, vec![std::env::temp_dir()]);
+            c.task_registry = Some(reg);
+            c
+        }
+
+        fn err_msg(e: ToolError) -> String {
+            match e {
+                ToolError::InvalidInput(s) | ToolError::Internal(s) => s,
+                other => panic!("unexpected error variant: {other:?}"),
+            }
+        }
+
+        // ── schemas ──────────────────────────────────────────────────────
+
+        #[test]
+        fn task_stop_schema_two_optional_strings_no_required() {
+            let s = &*TASK_STOP_SCHEMA;
+            assert_eq!(s["additionalProperties"], false);
+            assert!(s.get("required").is_none(), "no required array");
+            assert_eq!(s["properties"]["task_id"]["type"], "string");
+            assert_eq!(
+                s["properties"]["task_id"]["description"],
+                "The ID of the background task to stop"
+            );
+            assert_eq!(s["properties"]["shell_id"]["type"], "string");
+            assert_eq!(
+                s["properties"]["shell_id"]["description"],
+                "Deprecated: use task_id instead"
+            );
+        }
+
+        #[test]
+        fn task_output_schema_drops_offset_limit_adds_timeout() {
+            let s = &*TASK_OUTPUT_SCHEMA;
+            assert_eq!(s["additionalProperties"], false);
+            assert_eq!(s["required"], json!(["task_id"]));
+            assert!(s["properties"].get("offset").is_none());
+            assert!(s["properties"].get("limit").is_none());
+            let t = &s["properties"]["timeout"];
+            assert_eq!(t["type"], "integer");
+            assert_eq!(t["minimum"], 0);
+            assert_eq!(t["maximum"], 600_000);
+            assert_eq!(t["default"], 30_000);
+            assert_eq!(s["properties"]["block"]["default"], true);
+        }
+
+        #[test]
+        fn aliases_match_ts() {
+            let stop = TaskStopTool::new(bctx(MockRegistry::with_record(None)));
+            assert_eq!(stop.aliases(), &["KillShell"]);
+            let out = TaskOutputTool::new(bctx(MockRegistry::with_record(None)));
+            assert_eq!(out.aliases(), &["AgentOutputTool", "BashOutputTool"]);
+        }
+
+        // ── TaskStop ─────────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn task_stop_success_result_shape() {
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            let tool = TaskStopTool::new(bctx(reg.clone()));
+            let res = tool
+                .call(json!({ "task_id": "b12345678" }), fresh_ctx(), fresh_tx())
+                .await
+                .expect("stop ok");
+            assert_eq!(
+                res.data["message"],
+                "Successfully stopped task: b12345678 (echo hi)"
+            );
+            assert_eq!(res.data["task_id"], "b12345678");
+            assert_eq!(res.data["task_type"], "local_bash");
+            assert_eq!(res.data["command"], "echo hi");
+            // No `content` key ⇒ orchestrator JSON-stringifies the whole data.
+            assert!(res.data.get("content").is_none());
+            assert_eq!(*reg.kill_calls.lock().unwrap(), 1);
+        }
+
+        #[tokio::test]
+        async fn task_stop_accepts_shell_id_alias() {
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            let tool = TaskStopTool::new(bctx(reg.clone()));
+            let res = tool
+                .call(json!({ "shell_id": "b12345678" }), fresh_ctx(), fresh_tx())
+                .await
+                .expect("shell_id resolves");
+            assert_eq!(res.data["task_id"], "b12345678");
+            assert_eq!(*reg.kill_calls.lock().unwrap(), 1);
+        }
+
+        #[tokio::test]
+        async fn task_stop_empty_task_id_falls_through_to_missing() {
+            // `"" ?? shell_id` keeps "" (not nullish) → `!id` → missing error,
+            // even though shell_id is present (TS quirk, reproduced 1:1).
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            let tool = TaskStopTool::new(bctx(reg.clone()));
+            let err = tool
+                .call(
+                    json!({ "task_id": "", "shell_id": "b12345678" }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect_err("empty task_id is missing");
+            assert_eq!(err_msg(err), "Missing required parameter: task_id");
+            assert_eq!(*reg.kill_calls.lock().unwrap(), 0);
+        }
+
+        #[tokio::test]
+        async fn task_stop_missing_param() {
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            let tool = TaskStopTool::new(bctx(reg));
+            let err = tool
+                .call(json!({}), fresh_ctx(), fresh_tx())
+                .await
+                .expect_err("missing");
+            assert_eq!(err_msg(err), "Missing required parameter: task_id");
+        }
+
+        #[tokio::test]
+        async fn task_stop_not_found() {
+            let reg = MockRegistry::with_record(None);
+            let tool = TaskStopTool::new(bctx(reg));
+            let err = tool
+                .call(json!({ "task_id": "b12345678" }), fresh_ctx(), fresh_tx())
+                .await
+                .expect_err("not found");
+            assert_eq!(err_msg(err), "No task found with ID: b12345678");
+        }
+
+        #[tokio::test]
+        async fn task_stop_not_running() {
+            let reg = MockRegistry::with_record(Some(rec("completed")));
+            let tool = TaskStopTool::new(bctx(reg.clone()));
+            let err = tool
+                .call(json!({ "task_id": "b12345678" }), fresh_ctx(), fresh_tx())
+                .await
+                .expect_err("not running");
+            assert_eq!(
+                err_msg(err),
+                "Task b12345678 is not running (status: completed)"
+            );
+            // Pre-validation rejects before any kill.
+            assert_eq!(*reg.kill_calls.lock().unwrap(), 0);
+        }
+
+        // ── TaskOutput ───────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn task_output_nonblock_done_is_success() {
+            let reg = MockRegistry::with_record(Some(rec("completed")));
+            reg.push_chunk(chunk("completed", true, Some(0), "all done\n"));
+            let tool = TaskOutputTool::new(bctx(reg.clone()));
+            let res = tool
+                .call(
+                    json!({ "task_id": "b12345678", "block": false }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["retrieval_status"], "success");
+            assert_eq!(res.data["task"]["task_id"], "b12345678");
+            assert_eq!(res.data["task"]["task_type"], "local_bash");
+            assert_eq!(res.data["task"]["status"], "completed");
+            assert_eq!(res.data["task"]["description"], "echo hi");
+            assert_eq!(res.data["task"]["output"], "all done\n");
+            assert_eq!(res.data["task"]["exit_code"], 0);
+            // Non-blocking ⇒ exactly one output read.
+            assert_eq!(*reg.output_calls.lock().unwrap(), 1);
+            let content = res.data["content"].as_str().unwrap();
+            assert!(content.contains("<retrieval_status>success</retrieval_status>"));
+            assert!(content.contains("<task_id>b12345678</task_id>"));
+            assert!(content.contains("<task_type>local_bash</task_type>"));
+            assert!(content.contains("<status>completed</status>"));
+            assert!(content.contains("<exit_code>0</exit_code>"));
+            assert!(content.contains("<output>\nall done\n</output>"));
+            // Tags joined by a blank line.
+            assert!(content.contains("</retrieval_status>\n\n<task_id>"));
+        }
+
+        #[tokio::test]
+        async fn task_output_nonblock_running_is_not_ready() {
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            reg.push_chunk(chunk("running", false, None, ""));
+            let tool = TaskOutputTool::new(bctx(reg.clone()));
+            let res = tool
+                .call(
+                    json!({ "task_id": "b12345678", "block": false }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["retrieval_status"], "not_ready");
+            // Blank output ⇒ no <output> tag; running ⇒ no <exit_code>.
+            let content = res.data["content"].as_str().unwrap();
+            assert!(content.contains("<status>running</status>"));
+            assert!(!content.contains("<output>"));
+            assert!(!content.contains("<exit_code>"));
+            // exit_code key omitted when the chunk carries none.
+            assert!(res.data["task"].get("exit_code").is_none());
+        }
+
+        #[tokio::test]
+        async fn task_output_block_polls_until_done() {
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            // running, running, then completed — the poll loop must reach it.
+            reg.push_chunk(chunk("running", false, None, ""));
+            reg.push_chunk(chunk("running", false, None, ""));
+            reg.push_chunk(chunk("completed", true, Some(0), "final\n"));
+            let tool = TaskOutputTool::new(bctx(reg.clone()));
+            let res = tool
+                .call(
+                    json!({ "task_id": "b12345678", "block": true, "timeout": 600_000 }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["retrieval_status"], "success");
+            assert_eq!(res.data["task"]["status"], "completed");
+            assert_eq!(res.data["task"]["output"], "final\n");
+            assert!(*reg.output_calls.lock().unwrap() >= 3);
+        }
+
+        #[tokio::test]
+        async fn task_output_block_timeout_is_timeout() {
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            reg.push_chunk(chunk("running", false, None, "still going\n"));
+            let tool = TaskOutputTool::new(bctx(reg.clone()));
+            // timeout=0 ⇒ the loop breaks immediately without sleeping.
+            let res = tool
+                .call(
+                    json!({ "task_id": "b12345678", "block": true, "timeout": 0 }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("ok");
+            assert_eq!(res.data["retrieval_status"], "timeout");
+            assert_eq!(res.data["task"]["status"], "running");
+            let content = res.data["content"].as_str().unwrap();
+            assert!(content.contains("<retrieval_status>timeout</retrieval_status>"));
+        }
+
+        #[tokio::test]
+        async fn task_output_not_found() {
+            let reg = MockRegistry::with_record(None);
+            let tool = TaskOutputTool::new(bctx(reg));
+            let err = tool
+                .call(json!({ "task_id": "b12345678" }), fresh_ctx(), fresh_tx())
+                .await
+                .expect_err("not found");
+            assert_eq!(err_msg(err), "No task found with ID: b12345678");
+        }
+
+        #[tokio::test]
+        async fn task_output_missing_task_id() {
+            let reg = MockRegistry::with_record(Some(rec("running")));
+            let tool = TaskOutputTool::new(bctx(reg));
+            let err = tool
+                .call(json!({}), fresh_ctx(), fresh_tx())
+                .await
+                .expect_err("missing");
+            assert_eq!(err_msg(err), "Task ID is required");
+        }
+
+        #[test]
+        fn render_task_output_null_task_is_status_only() {
+            // The `task: null` (timeout) branch renders just the status line.
+            assert_eq!(
+                render_task_output("timeout", None),
+                "<retrieval_status>timeout</retrieval_status>"
+            );
+        }
     }
 }

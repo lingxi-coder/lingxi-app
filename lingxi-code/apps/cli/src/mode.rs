@@ -160,6 +160,7 @@ mod tests {
             print: false,
             resume: None,
             model: None,
+            fallback_model: None,
             cwd: None,
             no_stream: false,
             json: false,

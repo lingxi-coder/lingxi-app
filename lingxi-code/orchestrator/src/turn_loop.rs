@@ -461,6 +461,7 @@ enum PtlCallOutcome {
 /// orchestrator does not currently thread the per-request beta set down to this
 /// call site, and the default window is the parity 200k. Documented divergence,
 /// not a frozen-surface change.
+#[allow(clippy::too_many_lines)]
 async fn call_api_with_ptl_recovery(
     orch: &ConversationOrchestrator,
     system: Option<&str>,
@@ -483,11 +484,53 @@ async fn call_api_with_ptl_recovery(
         return Ok(PtlCallOutcome::PromptTooLong);
     }
 
-    // (2) Initial call.
-    let first = orch
-        .api
-        .messages_create(model, system, history_snapshot, tools.clone())
-        .await;
+    // (2) Initial call. When an Opus-fallback model is configured, route the
+    // primary request through the fallback-aware seam so a consecutive-529 gate
+    // on a non-custom Opus primary model can surface
+    // `ApiError::FallbackTriggered` (Opus-fallback batch, 1:1 with claude-code
+    // `withRetry.ts:326-365`). With NO fallback configured this is a STRICT
+    // no-op: the plain `messages_create` seam is taken, byte-identical to before
+    // — so the locked turn-loop fixtures (which wire no fallback) are unaffected,
+    // and `FallbackTriggered` can never arise on that path (the adapter passes
+    // `fallback_model = None` to the api-client, leaving the 529 gate closed).
+    let first = if orch.config.fallback_model.is_some() {
+        orch.api
+            .messages_create_with_fallback(
+                model,
+                system,
+                history_snapshot,
+                tools.clone(),
+                orch.config.fallback_model.as_deref(),
+                false, // is_subscriber — documented stub until OAuth resolution
+                false, // is_enterprise — documented stub
+            )
+            .await
+    } else {
+        orch.api
+            .messages_create(model, system, history_snapshot, tools.clone())
+            .await
+    };
+    // Opus-fallback interception: catch `ApiError::FallbackTriggered` BEFORE the
+    // OrchestratorError conversion and re-issue ONCE against the fallback model
+    // (port of `query.ts:894-948`). This arm is dead on the no-fallback path
+    // (that path can't raise it), so the interception is gated by construction
+    // on `config.fallback_model.is_some()` and is a strict no-op otherwise.
+    let first = match first {
+        Err(ApiError::FallbackTriggered {
+            original_model,
+            fallback_model,
+        }) => {
+            reissue_after_model_fallback(
+                orch,
+                system,
+                &original_model,
+                fallback_model,
+                tools.clone(),
+            )
+            .await
+        }
+        other => other,
+    };
     let mut token_gap = match first {
         Ok(resp) => return Ok(PtlCallOutcome::Response(Box::new(resp))),
         Err(ApiError::PromptTooLong { token_gap, .. }) => token_gap,
@@ -575,6 +618,99 @@ async fn call_api_with_ptl_recovery(
     // Still over the limit after truncation + one reactive compact: surface the
     // byte-exact prompt-too-long message and end the turn (no hard error).
     Ok(PtlCallOutcome::PromptTooLong)
+}
+
+/// Port of the Opus-fallback re-issue (claude-code `query.ts:894-948`'s
+/// `catch (FallbackTriggeredError)` arm).
+///
+/// Invoked when the primary batched call surfaces
+/// [`ApiError::FallbackTriggered`] — only possible when
+/// `config.fallback_model.is_some()` (see [`call_api_with_ptl_recovery`]). Ports
+/// the TS arm MINIMALLY and faithfully:
+///
+/// 1. **(i) switch the working/session model** to `fallback_model` (TS
+///    `currentModel = fallbackModel`). The next turn step re-snapshots
+///    `session.model`, so the whole conversation continues on the fallback.
+/// 2. **(ii) clear the in-flight assistant + `tool_use`/`tool_result`
+///    accumulators** for the current step — a STRUCTURAL no-op in this port: the
+///    assistant reply and its `tool_result`s are appended to history only AFTER a
+///    successful
+///    response (see [`execute_one_turn_with_recovery_tracked`]), so at the
+///    `FallbackTriggered` point nothing has been appended for this step. TS
+///    mutates JS-side arrays (`assistantMessages.length = 0`, etc.) that have no
+///    standing analog here — documented, not a parity gap.
+/// 3. **(iii) surface a user-visible `warning`** conveying the switch (TS
+///    `createSystemMessage('Switched to … due to high demand for …', 'warning')`).
+///    We emit it on the output stream — the turn loop's user-visible notice
+///    mechanism (same channel [`surface_prompt_too_long`] uses) — rather than
+///    pushing a `ConversationMessage::System` into history: TS's
+///    `createSystemMessage` is a UI/progress message filtered out of the model
+///    request, and a `role:"system"` entry in the `messages` array is rejected by
+///    the Anthropic API, so keeping it out of model-bound history is both
+///    faithful and correct for the re-issue + subsequent turns.
+/// 4. **(iv) emit the `tengu_model_fallback_triggered` analytic** via the loop's
+///    `tracing` telemetry path, with an INLINE event-name string (NOT a locked
+///    telemetry const) so the event-name fixture lock is not perturbed. This is
+///    the success-path orchestrator event, distinct from the api-client
+///    request-failed `error_kind = "fallback_triggered"` label.
+/// 5. **(v) re-issue ONE round-trip** via `messages_create_with_fallback` against
+///    the fallback model with `fallback_model = None`: the fallback model is
+///    non-Opus, so the consecutive-529 gate is closed → this cannot recurse into
+///    another `FallbackTriggered` (TS `continue` re-enters the loop once).
+///
+/// DOCUMENTED bounded divergences: TS also sets
+/// `toolUseContext.options.mainLoopModel = fallbackModel`, but this port derives
+/// the tool context's `main_loop_model` from `config.model` (immutable `&self`),
+/// so only `session.model` (which drives the API model) switches. TS's ant-only
+/// `stripSignatureBlocks` thinking-signature scrub is omitted — it is
+/// `USER_TYPE === 'ant'`-gated and this port carries no protected-thinking replay.
+async fn reissue_after_model_fallback(
+    orch: &ConversationOrchestrator,
+    system: Option<&str>,
+    original_model: &str,
+    fallback_model: String,
+    tools: Vec<serde_json::Value>,
+) -> Result<MessageResponse, ApiError> {
+    // (i) Switch the working/session model to the fallback.
+    {
+        let mut s = orch.session.lock().await;
+        s.model.clone_from(&fallback_model);
+    }
+
+    // (ii) Clear in-flight accumulators — structural no-op here (see doc above).
+
+    // (iii) Surface the user-visible warning (byte-shaped on the TS intent;
+    // includes both model names).
+    let warning =
+        format!("Switched to {fallback_model} due to high demand for {original_model}");
+    orch.output.emit_text(&warning).await;
+
+    // (iv) Success-path analytics — inline event name (NOT a locked const).
+    tracing::info!(
+        event = "tengu_model_fallback_triggered",
+        original_model = %original_model,
+        fallback_model = %fallback_model,
+        entrypoint = "cli",
+    );
+
+    // (v) Re-issue ONE round-trip against the fallback model. Re-snapshot the
+    // current history (unchanged by steps i–iv). `fallback_model = None` keeps
+    // the 529 gate closed → no recursion.
+    let history = {
+        let s = orch.session.lock().await;
+        s.history.clone()
+    };
+    orch.api
+        .messages_create_with_fallback(
+            &fallback_model,
+            system,
+            history,
+            tools,
+            None,
+            false,
+            false,
+        )
+        .await
 }
 
 /// Append the byte-exact [`PROMPT_TOO_LONG_ERROR_MESSAGE`] as an assistant text

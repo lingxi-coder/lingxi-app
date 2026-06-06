@@ -33,6 +33,19 @@ pub struct Argv {
     #[arg(long = "model", value_name = "NAME")]
     pub model: Option<String>,
 
+    /// Enable automatic fallback to specified model when default model is overloaded (only works with --print)
+    ///
+    /// Maps to `OrchestratorConfig::fallback_model`. claude-code accepts this
+    /// flag unconditionally but only HONORS it in `--print`/non-interactive mode
+    /// (`main.tsx:1000` documents "only works with --print"; it is consumed only
+    /// on the print/query path). We mirror that SOFT restriction: parse it always
+    /// (no parse-time `requires` error, matching claude-code), and the honoring is
+    /// gated to print mode by the consumer. When the primary model hits the
+    /// consecutive-529 Opus gate, the turn loop switches to this model
+    /// (`query.ts:894-948`).
+    #[arg(long = "fallback-model", value_name = "MODEL")]
+    pub fallback_model: Option<String>,
+
     /// Change to this directory before initialising
     #[arg(long = "cwd", value_name = "DIR")]
     pub cwd: Option<PathBuf>,
@@ -138,6 +151,34 @@ mod tests {
     fn model_flag() {
         let a = Argv::from_iter(["lingxi-cli", "--model", "claude-sonnet-4-6", "hi"]).unwrap();
         assert_eq!(a.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn fallback_model_flag() {
+        let a = Argv::from_iter([
+            "lingxi-cli",
+            "--print",
+            "--fallback-model",
+            "claude-sonnet-4-6",
+            "hi",
+        ])
+        .unwrap();
+        assert_eq!(a.fallback_model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn fallback_model_default_none() {
+        let a = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert!(a.fallback_model.is_none());
+    }
+
+    #[test]
+    fn fallback_model_accepted_without_print() {
+        // Soft restriction (parity with claude-code): the flag PARSES regardless
+        // of --print; honoring is deferred to the print/non-interactive consumer.
+        let a = Argv::from_iter(["lingxi-cli", "--fallback-model", "claude-sonnet-4-6", "hi"])
+            .unwrap();
+        assert_eq!(a.fallback_model.as_deref(), Some("claude-sonnet-4-6"));
     }
 
     #[test]

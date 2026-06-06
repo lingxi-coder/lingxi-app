@@ -16,9 +16,14 @@
 //
 // Three of these — SUMMARIZE_CONNECTOR_TEXT / AFK_MODE / CLI_INTERNAL — are
 // feature()/USER_TYPE-gated in betas.ts and resolve to `''` in the external
-// default build. Their literals are reserved here byte-faithfully but are NOT
-// wired into `assemble_beta_header`, so the external header output is identical
-// to claude-code (never over-emitted).
+// default build. Their literals are reserved here byte-faithfully and ARE now
+// wired into `assemble_beta_header` in TS declaration order, but behind
+// emit-gates that are ALWAYS FALSE in the default external build (two compile-
+// time `cfg!(feature = …)` flags that are default-off, and one runtime
+// `USER_TYPE`/`CLAUDE_CODE_ENTRYPOINT` env check). The default header output is
+// therefore byte-identical to claude-code (never over-emitted); the structure
+// merely mirrors the TS file so a future build that flips a feature/env emits
+// the entry in the correct declaration-order slot.
 
 /// Core claude-code feature gate.
 pub const CLAUDE_CODE_BETA: &str = "claude-code-20250219";
@@ -53,27 +58,38 @@ pub const TOKEN_EFFICIENT_TOOLS: &str = "token-efficient-tools-2026-03-28";
 /// **Feature-gated / inert in the external build.** In `betas.ts` this is
 /// `feature('CONNECTOR_TEXT') ? 'summarize-connector-text-2026-03-13' : ''`,
 /// so the literal is only emitted when the `CONNECTOR_TEXT` build feature is
-/// on; the external default build resolves it to `''`. The byte-faithful
-/// header literal is kept here as a reserved constant, but it is deliberately
-/// NOT wired into [`assemble_beta_header`] (mirroring the empty-string default)
-/// so it is never emitted unless that feature is enabled.
+/// on; the external default build resolves it to `''`. It is wired into
+/// [`assemble_beta_header`] in declaration order behind the default-off
+/// `connector_text` Cargo feature, so it is emitted only when that feature is
+/// compiled in (the external default build resolves it to `''`, exactly as TS).
 pub const SUMMARIZE_CONNECTOR_TEXT: &str = "summarize-connector-text-2026-03-13";
 /// AFK ("away-from-keyboard") transcript-classifier mode.
 ///
 /// **Feature-gated / inert in the external build.** In `betas.ts` this is
 /// `feature('TRANSCRIPT_CLASSIFIER') ? 'afk-mode-2026-01-31' : ''`, so the
 /// literal is only emitted when the `TRANSCRIPT_CLASSIFIER` build feature is
-/// on; the external default build resolves it to `''`. Reserved here; NOT
-/// wired into [`assemble_beta_header`] so it is never emitted externally.
+/// on; the external default build resolves it to `''`. It is wired into
+/// [`assemble_beta_header`] in declaration order behind the default-off
+/// `transcript_classifier` Cargo feature, so it is never emitted externally.
 pub const AFK_MODE: &str = "afk-mode-2026-01-31";
 /// CLI-internal (Anthropic-employee) gate.
 ///
 /// **`USER_TYPE === 'ant'`-gated / inert in the external build.** In
 /// `betas.ts` this is
-/// `process.env.USER_TYPE === 'ant' ? 'cli-internal-2026-02-09' : ''`, so the
-/// literal is only emitted for the internal Anthropic user type; the external
-/// default build resolves it to `''`. Reserved here; NOT wired into
-/// [`assemble_beta_header`] so it is never emitted externally.
+/// `process.env.USER_TYPE === 'ant' ? 'cli-internal-2026-02-09' : ''`, and the
+/// `utils/betas.ts` assembler only pushes it when `USER_TYPE === 'ant' &&
+/// CLAUDE_CODE_ENTRYPOINT === 'cli'` **and** the model is not a Haiku model
+/// (`!isHaiku`). It is wired into [`assemble_beta_header`] behind the runtime
+/// `USER_TYPE`/`CLAUDE_CODE_ENTRYPOINT` env gate ([`cli_internal_emit_gate`]).
+///
+/// BOUNDED DIVERGENCE (documented, not a parity gap — same style as the
+/// `opus.rs` Opus-id divergence note): the TS `!isHaiku` sub-condition CANNOT
+/// be honored here because [`assemble_beta_header`] takes no model parameter
+/// (it routes on `Provider` × `Endpoint` only). The gate therefore omits the
+/// `!isHaiku` clause; in the default external build `USER_TYPE` is unset so the
+/// entry is never emitted regardless, and a Haiku request from an `ant`+`cli`
+/// environment would over-emit this single beta versus TS. Threading the model
+/// down to this assembler is the follow-up that closes the gap.
 pub const CLI_INTERNAL: &str = "cli-internal-2026-02-09";
 /// Advisor tool integration.
 pub const ADVISOR_TOOL: &str = "advisor-tool-2026-03-01";
@@ -144,6 +160,26 @@ pub fn assemble_beta_header(provider: Provider, endpoint: Endpoint) -> String {
         (FAST_MODE, applies_messages_only(endpoint)),
         (REDACT_THINKING, applies_messages_only(endpoint)),
         (TOKEN_EFFICIENT_TOOLS, applies_messages_only(endpoint)),
+        // ---- feature()/USER_TYPE-gated trio (betas.ts declaration order) ----
+        // All three resolve to NOT-emitted in the default external build:
+        // - SUMMARIZE_CONNECTOR_TEXT / AFK_MODE are behind default-off Cargo
+        //   features (`connector_text` / `transcript_classifier`), mirroring
+        //   TS `feature('CONNECTOR_TEXT')` / `feature('TRANSCRIPT_CLASSIFIER')`.
+        // - CLI_INTERNAL is behind the runtime `USER_TYPE`/`CLAUDE_CODE_ENTRYPOINT`
+        //   env gate (see `cli_internal_emit_gate`), mirroring TS
+        //   `process.env.USER_TYPE === 'ant' && CLAUDE_CODE_ENTRYPOINT === 'cli'`.
+        (
+            SUMMARIZE_CONNECTOR_TEXT,
+            cfg!(feature = "connector_text") && applies_messages_only(endpoint),
+        ),
+        (
+            AFK_MODE,
+            cfg!(feature = "transcript_classifier") && applies_messages_only(endpoint),
+        ),
+        (
+            CLI_INTERNAL,
+            cli_internal_emit_gate() && applies_messages_only(endpoint),
+        ),
         (ADVISOR_TOOL, applies_messages_only(endpoint)),
         // OAUTH rides only on the token-refresh POST in M3-04; never on
         // messages.create.
@@ -182,6 +218,19 @@ pub fn assemble_beta_header(provider: Provider, endpoint: Endpoint) -> String {
         }
     }
     parts.join(",")
+}
+
+/// Runtime emit-gate for [`CLI_INTERNAL`]. Mirrors the `utils/betas.ts`
+/// assembler condition `process.env.USER_TYPE === 'ant' &&
+/// process.env.CLAUDE_CODE_ENTRYPOINT === 'cli'`. Returns `false` (the default
+/// external build, where neither var is set) so the entry is never emitted.
+///
+/// See the [`CLI_INTERNAL`] doc for the BOUNDED divergence: the TS `!isHaiku`
+/// sub-condition is not honored here because [`assemble_beta_header`] has no
+/// model parameter.
+fn cli_internal_emit_gate() -> bool {
+    std::env::var("USER_TYPE").as_deref() == Ok("ant")
+        && std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref() == Ok("cli")
 }
 
 /// Entries that apply to every endpoint variant.
@@ -251,6 +300,44 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The [`CLI_INTERNAL`] runtime emit-gate is `false` in the default env
+    /// (neither `USER_TYPE` nor `CLAUDE_CODE_ENTRYPOINT` set), so it stays inert.
+    /// (Asserted without mutating process env so the test is parallel-safe.)
+    #[test]
+    fn cli_internal_emit_gate_is_false_in_default_env() {
+        // In CI / external builds USER_TYPE is unset → gate closed.
+        if std::env::var("USER_TYPE").is_err() {
+            assert!(!cli_internal_emit_gate());
+        }
+    }
+
+    /// The two compile-time-gated entries ([`SUMMARIZE_CONNECTOR_TEXT`] /
+    /// [`AFK_MODE`])
+    /// are behind default-off Cargo features, so the default build never emits
+    /// them. Assert the features are NOT compiled in for this (default) test run.
+    #[test]
+    fn connector_text_and_transcript_classifier_features_are_default_off() {
+        assert!(!cfg!(feature = "connector_text"));
+        assert!(!cfg!(feature = "transcript_classifier"));
+    }
+
+    /// Even though the trio is now wired into the `all` array (in declaration
+    /// order, between [`TOKEN_EFFICIENT_TOOLS`] and [`ADVISOR_TOOL`]), the build
+    /// must keep emitting them as NOT-present for every provider × endpoint.
+    /// (Complements `feature_gated_betas_never_emitted_in_external_build`, which
+    /// asserts the same observable contract; this one documents the wiring.)
+    #[test]
+    fn wired_feature_gated_trio_stays_inert_in_default_build() {
+        // Only meaningful when USER_TYPE is unset (the external default).
+        if std::env::var("USER_TYPE").is_ok() {
+            return;
+        }
+        let s = assemble_beta_header(Provider::Anthropic, Endpoint::MessagesCreate);
+        for gated in [SUMMARIZE_CONNECTOR_TEXT, AFK_MODE, CLI_INTERNAL] {
+            assert!(!s.split(',').any(|p| p == gated), "{gated} leaked: {s}");
         }
     }
 

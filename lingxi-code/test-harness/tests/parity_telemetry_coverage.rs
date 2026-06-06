@@ -73,29 +73,31 @@ const TOOL_SNAKE: &[(&str, &str)] = &[
     ("ListMcpResourcesTool", "list_mcp_resources"),
     ("ReadMcpResourceTool", "read_mcp_resource"),
     ("LSP", "lsp"),
-    // System (8)
+    // System (10)
     ("AskUserQuestion", "ask_user_question"),
     ("SendUserMessage", "brief"),
     ("Config", "config"),
     ("Skill", "skill"),
     ("CronCreate", "schedule_cron"),
+    ("CronDelete", "cron_delete"),
+    ("CronList", "cron_list"),
     ("ToolSearch", "tool_search"),
     ("RemoteTrigger", "remote_trigger"),
     ("StructuredOutput", "synthetic_output"),
 ];
 
 #[test]
-fn snake_table_covers_40_tools() {
+fn snake_table_covers_42_tools() {
     assert_eq!(
         TOOL_SNAKE.len(),
-        40,
-        "telemetry snake table must cover 40 tools (got {})",
+        42,
+        "telemetry snake table must cover 42 tools (got {})",
         TOOL_SNAKE.len()
     );
     let unique: BTreeSet<&str> = TOOL_SNAKE.iter().map(|(n, _)| *n).collect();
-    assert_eq!(unique.len(), 40, "tool display-names unique");
+    assert_eq!(unique.len(), 42, "tool display-names unique");
     let unique_snakes: BTreeSet<&str> = TOOL_SNAKE.iter().map(|(_, s)| *s).collect();
-    assert_eq!(unique_snakes.len(), 40, "snake suffixes unique");
+    assert_eq!(unique_snakes.len(), 42, "snake suffixes unique");
 }
 
 #[test]
@@ -125,8 +127,8 @@ fn names_cardinality_locked() {
     // counted as "their" additions. See M4-09 plan reconciliation note.)
     let count = tool_event_names().len();
     assert_eq!(
-        count, 134,
-        "tengu_tool_* events in ALL_EVENT_NAMES locked at 134 entries"
+        count, 140,
+        "tengu_tool_* events in ALL_EVENT_NAMES locked at 140 entries (134 + CronDelete/CronList 6)"
     );
 }
 

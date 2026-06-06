@@ -1,7 +1,7 @@
 {
   "_source": "docs/superpowers/specs/2026-05-24-m4-tools-implementation-design.md §1 Goal (lines 1-60); claude-code upstream tools/ directory.",
-  "_note": "Registry cardinality lock for v0.5.0. Asserts that register_all_builtin_tools(reg, ctx) produces exactly 40 builtin tools across the 9 categories below. Driver derives the sorted-name set from by_category at runtime; do not add a parallel flat list (single source of truth). Per v3 §32.6 parity protocol.",
-  "total": 40,
+  "_note": "Registry cardinality lock for v0.5.0. Asserts that register_all_builtin_tools(reg, ctx) produces exactly 42 builtin tools across the 9 categories below. Driver derives the sorted-name set from by_category at runtime; do not add a parallel flat list (single source of truth). Per v3 §32.6 parity protocol.",
+  "total": 42,
   "by_category": {
     "file": ["Read", "Write", "Edit", "NotebookEdit", "Glob"],
     "search": ["Grep"],
@@ -11,6 +11,6 @@
     "agent": ["Agent", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "TaskOutput", "SendMessage"],
     "team": ["TeamCreate", "TeamDelete"],
     "mcp_lsp": ["MCP", "McpAuth", "ListMcpResourcesTool", "ReadMcpResourceTool", "LSP"],
-    "system": ["AskUserQuestion", "SendUserMessage", "Config", "Skill", "CronCreate", "ToolSearch", "RemoteTrigger", "StructuredOutput"]
+    "system": ["AskUserQuestion", "SendUserMessage", "Config", "Skill", "CronCreate", "CronDelete", "CronList", "ToolSearch", "RemoteTrigger", "StructuredOutput"]
   }
 }

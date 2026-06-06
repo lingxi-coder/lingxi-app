@@ -24,6 +24,7 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("Agent", AllowByDefault);
     m.insert("AskUserQuestion", AllowByDefault);
     m.insert("Config", AllowByDefault);
+    m.insert("CronList", AllowByDefault); // read-only: lists local scheduled jobs
     m.insert("EnterPlanMode", AllowByDefault);
     m.insert("ExitPlanMode", AllowByDefault);
     m.insert("Glob", AllowByDefault);
@@ -55,6 +56,7 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("ReadMcpResourceTool", DenyByDefault);
     m.insert("RemoteTrigger", DenyByDefault);
     m.insert("CronCreate", DenyByDefault);
+    m.insert("CronDelete", DenyByDefault);
     m.insert("SendMessage", DenyByDefault);
     m.insert("TaskCreate", DenyByDefault);
     m.insert("TaskStop", DenyByDefault);
@@ -65,7 +67,7 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("WebSearch", DenyByDefault);
     m.insert("Write", DenyByDefault);
 
-    debug_assert_eq!(m.len(), 41, "tool defaults table must list all 41 tools");
+    debug_assert_eq!(m.len(), 43, "tool defaults table must list all 43 tools");
     m
 }
 
@@ -139,8 +141,8 @@ mod tests {
     }
 
     #[test]
-    fn table_size_is_41() {
+    fn table_size_is_43() {
         let m = init_defaults();
-        assert_eq!(m.len(), 41);
+        assert_eq!(m.len(), 43);
     }
 }

@@ -164,7 +164,7 @@ const MAX_JOBS: usize = 50;
 /// Recurring jobs auto-expire after this many days (CronCreateTool.ts prompt.ts).
 const DEFAULT_MAX_AGE_DAYS: i64 = 30;
 
-fn home_dir_or_internal() -> Result<PathBuf, ToolError> {
+pub(crate) fn home_dir_or_internal() -> Result<PathBuf, ToolError> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| ToolError::Internal("CronCreate: HOME directory not available".into()))
@@ -280,7 +280,7 @@ fn format_time_utc(minute: u32, hour: u32) -> String {
 }
 
 /// Render a 5-field cron expression as a human-readable schedule string.
-fn cron_to_human(cron: &str) -> String {
+pub(crate) fn cron_to_human(cron: &str) -> String {
     let parts: Vec<&str> = cron.split_whitespace().collect();
     if parts.len() != 5 {
         return cron.to_string();

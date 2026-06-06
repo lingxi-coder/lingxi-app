@@ -8,6 +8,8 @@ expression: names
 - Bash
 - Config
 - CronCreate
+- CronDelete
+- CronList
 - Edit
 - EnterPlanMode
 - EnterWorktree

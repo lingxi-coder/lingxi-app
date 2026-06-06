@@ -611,6 +611,29 @@ pub enum BuildError {
 ///   `cfg.use_noop_permission_gate` is `false`; the CLI passes a sink that is
 ///   never used because it opts into `NoOpPermissionGate`.
 ///
+/// Resolve the Claude.ai-subscriber flag (`isClaudeAISubscriber`, `auth.ts:1564`)
+/// for a session that holds a stored OAuth token.
+///
+/// `isClaudeAISubscriber()` is `isAnthropicAuthEnabled() && shouldUseClaudeAIAuth(scopes)`.
+/// `isAnthropicAuthEnabled()` is `false` whenever a non-OAuth source OUTRANKS
+/// stored OAuth in the auth resolver (`anthropic_oauth::resolver`). The two such
+/// sources surfaced into the desktop build are the env `ANTHROPIC_API_KEY`
+/// (`api_key_present`) and `ANTHROPIC_AUTH_TOKEN` (`auth_token_present`); when
+/// either is set the effective auth is that key/bearer, not Claude.ai OAuth.
+/// Bedrock / api-key-helper / settings keys rank BELOW stored OAuth, so OAuth
+/// wins over them — no exclusion needed. With neither override present, the token
+/// is the effective auth and `shouldUseClaudeAIAuth(scopes)` (== presence of the
+/// `user:inference` scope, via `anthropic_oauth::subscription_from_scopes`)
+/// decides.
+///
+/// PARITY-GAP: FD-inherited keys + managed-context OAuth forcing are not surfaced
+/// into [`DesktopConfig`]; the common desktop API-key-vs-OAuth split is covered.
+fn oauth_subscriber_flag(api_key_present: bool, auth_token_present: bool, scopes: &[String]) -> bool {
+    !api_key_present
+        && !auth_token_present
+        && anthropic_oauth::subscription_from_scopes(scopes)
+}
+
 /// # Errors
 ///
 /// Returns [`BuildError`] if the api-client or orchestrator cannot be
@@ -681,8 +704,17 @@ pub async fn build(
     //        process; gating it on "tokens present" keeps the API-key path on the
     //        correct `NoOpOAuthHook`. When no OAuth token is stored (the common
     //        API-key case) we skip it entirely.
+    //
+    //        (3.2) API.6: while we have the token in hand, resolve the Claude.ai
+    //        subscriber flag from its scopes (see [`oauth_subscriber_flag`]).
+    let mut is_subscriber = false;
     match credentials.get_oauth_tokens().await {
         Ok(Some(tokens)) => {
+            is_subscriber = oauth_subscriber_flag(
+                !cfg.api_key.is_empty(),
+                std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some(),
+                &tokens.scopes,
+            );
             if let Err(e) = anthropic_oauth::client::init_refresh_driver(
                 oauth_cfg,
                 tokens.access_token,
@@ -715,6 +747,13 @@ pub async fn build(
     // into `OrchestratorConfig.fallback_model`. `None` keeps the turn_loop's
     // 529-overload interception a strict no-op (`turn_loop.rs:496`).
     orch_cfg.fallback_model.clone_from(&cfg.fallback_model);
+    // Subscription-flag hop (API.6): thread the resolved Claude.ai-subscriber flag
+    // (computed in step 3.2 from the OAuth token scopes) into the orchestrator
+    // config so the fallback-aware api-client seam resolves the consecutive-529
+    // Opus-fallback gate and the 429-retry gate exactly as claude-code does.
+    // `is_enterprise` stays `false` (PARITY-GAP: enterprise tier needs a profile
+    // fetch not performed in this build hot path).
+    orch_cfg.is_subscriber = is_subscriber;
 
     // (4.5) One CostTracker per process. The persist channel drains into a
     //       fire-and-forget task that discards snapshots (on-disk persistence is
@@ -1450,6 +1489,23 @@ mod tests {
         };
         assert!(!custom.use_noop_permission_gate);
         let _ = format!("{custom:?}");
+    }
+
+    #[test]
+    fn oauth_subscriber_flag_gating() {
+        let inference = vec!["user:inference".to_string(), "user:profile".to_string()];
+        let no_inference = vec!["user:profile".to_string()];
+        // Clean OAuth (no overriding env key/token) + inference scope ⇒ subscriber.
+        assert!(super::oauth_subscriber_flag(false, false, &inference));
+        // Inference scope present, but an env ANTHROPIC_API_KEY outranks stored
+        // OAuth in the resolver ⇒ isAnthropicAuthEnabled() false ⇒ not subscriber.
+        assert!(!super::oauth_subscriber_flag(true, false, &inference));
+        // Likewise an env ANTHROPIC_AUTH_TOKEN bearer outranks stored OAuth.
+        assert!(!super::oauth_subscriber_flag(false, true, &inference));
+        // Clean OAuth but no inference scope (e.g. profile-only) ⇒ not subscriber.
+        assert!(!super::oauth_subscriber_flag(false, false, &no_inference));
+        // No scopes at all ⇒ not subscriber.
+        assert!(!super::oauth_subscriber_flag(false, false, &[]));
     }
 
     /// A [`client_adapter::PermissionRequestSink`] that records the requests the

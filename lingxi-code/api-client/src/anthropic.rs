@@ -340,10 +340,12 @@ impl AnthropicProvider {
     ///
     /// The fallback gate is read once per request from the environment:
     /// `FALLBACK_FOR_ALL_PRIMARY_MODELS`, `USER_TYPE`, `IS_SANDBOX`
-    /// (see [`resolve_retry_control`]). `is_subscriber` is stubbed to `false`
-    /// pending Batch 6 (OAuth subscription resolution), matching the spec's
-    /// ship-with-stub note; an external non-subscriber on an Opus model
-    /// therefore opens the gate exactly as TS does.
+    /// (see [`resolve_retry_control`]). `is_subscriber` is resolved by the caller
+    /// (Batch 6 OAuth subscription resolution): `engine_desktop::build` derives it
+    /// from the OAuth token scopes via `anthropic_oauth::subscription_from_scopes`
+    /// and threads it through `OrchestratorConfig`; non-OAuth sessions and tests
+    /// pass `false`, so an external non-subscriber on an Opus model opens the gate
+    /// exactly as TS does.
     ///
     /// `is_subscriber` / `is_enterprise` are the **pre-computed** subscription
     /// flags that gate whether a 429 is retryable: claude-code `withRetry.ts:767-769`

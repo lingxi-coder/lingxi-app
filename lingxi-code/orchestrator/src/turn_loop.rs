@@ -501,8 +501,8 @@ async fn call_api_with_ptl_recovery(
                 history_snapshot,
                 tools.clone(),
                 orch.config.fallback_model.as_deref(),
-                false, // is_subscriber — documented stub until OAuth resolution
-                false, // is_enterprise — documented stub
+                orch.config.is_subscriber,
+                orch.config.is_enterprise,
             )
             .await
     } else {
@@ -707,8 +707,8 @@ async fn reissue_after_model_fallback(
             history,
             tools,
             None,
-            false,
-            false,
+            orch.config.is_subscriber,
+            orch.config.is_enterprise,
         )
         .await
 }

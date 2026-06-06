@@ -168,6 +168,9 @@ fn load_routing() -> Option<serde_json::Value> {
 ///   any `--cwd`).
 /// - `claude_home` ← `~/.claude` (the hook / agents / settings loader root).
 /// - `default_model` ← `Argv::model`, else the desktop default.
+/// - `fallback_model` ← `Argv::fallback_model`, but ONLY in `--print` mode
+///   (claude-code restricts `--fallback-model` to non-interactive runs); the
+///   interactive TUI path resolves it to `None`.
 /// - `provider_profiles` ← settings `providers` block (`load_provider_profiles`).
 /// - `routing` ← settings `routing` block (`load_routing`).
 /// - `mcp_paths` ← `[<cwd>/.mcp.json, <config_dir>/lingxi/mcp.json]` (project
@@ -191,6 +194,16 @@ fn resolve_desktop_config(argv: &Argv) -> DesktopConfig {
     if let Some(m) = &argv.model {
         default_model.clone_from(m);
     }
+    // Opus-fallback: `--fallback-model` parses unconditionally (`argv.rs`) but
+    // claude-code only HONORS it in `--print`/non-interactive mode
+    // (`main.tsx:1000` "only works with --print"). Mirror that SOFT restriction
+    // here — the interactive TUI path leaves it `None`, so the turn_loop's
+    // 529-overload interception stays a no-op for interactive sessions.
+    let fallback_model = if argv.print {
+        argv.fallback_model.clone()
+    } else {
+        None
+    };
     // `--no-stream` is always honoured in the baseline pipeline (only the
     // batched constructor is wired). Read the flag to silence the unused-field
     // warning and preserve the pre-lift behavior.
@@ -202,6 +215,7 @@ fn resolve_desktop_config(argv: &Argv) -> DesktopConfig {
         cwd,
         claude_home,
         default_model,
+        fallback_model,
         provider_profiles: load_provider_profiles(),
         routing: load_routing(),
         mcp_paths: vec![project_mcp_path, global_mcp_path],
@@ -308,6 +322,49 @@ mod tests {
             r.orchestrator.has_compaction(),
             "build_runtime did not wire CompactionOrchestrator"
         );
+    }
+
+    /// Opus-fallback hop: `--fallback-model` threads into
+    /// `DesktopConfig.fallback_model` in `--print` mode, and is dropped (left
+    /// `None`) in interactive mode — mirroring claude-code's "only works with
+    /// --print" restriction.
+    #[test]
+    fn fallback_model_threads_through_in_print_mode() {
+        let base = Argv {
+            prompt: Some("hi".into()),
+            print: true,
+            resume: None,
+            model: None,
+            fallback_model: Some("claude-opus-4-20250514".into()),
+            cwd: None,
+            no_stream: true,
+            json: false,
+            debug: false,
+            no_tui: false,
+        };
+
+        // `--print` ⟶ honored.
+        let cfg = resolve_desktop_config(&base);
+        assert_eq!(
+            cfg.fallback_model.as_deref(),
+            Some("claude-opus-4-20250514")
+        );
+
+        // Interactive (no `--print`) ⟶ dropped to `None`.
+        let interactive = Argv {
+            print: false,
+            ..base.clone()
+        };
+        let cfg = resolve_desktop_config(&interactive);
+        assert!(cfg.fallback_model.is_none());
+
+        // No flag at all ⟶ `None` even in print mode.
+        let absent = Argv {
+            fallback_model: None,
+            ..base
+        };
+        let cfg = resolve_desktop_config(&absent);
+        assert!(cfg.fallback_model.is_none());
     }
 
     #[test]

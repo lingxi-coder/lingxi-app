@@ -374,6 +374,7 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     cwd: PathBuf::from("/tmp/project"),
 ///     claude_home: PathBuf::from("/tmp/home/.claude"),
 ///     default_model: "claude-sonnet-4-20250514".to_string(),
+///     fallback_model: None,
 ///     provider_profiles: Some(BTreeMap::new()),
 ///     routing: None,
 ///     mcp_paths: vec![PathBuf::from("/tmp/project/.mcp.json")],
@@ -405,6 +406,12 @@ pub struct DesktopConfig {
     pub claude_home: std::path::PathBuf,
     /// Model id the build defaults to (`OrchestratorConfig.model`).
     pub default_model: String,
+    /// Fallback model id (`OrchestratorConfig.fallback_model`). `None` ⟶ no
+    /// fallback, so the 529-overload interception in `turn_loop` stays a strict
+    /// no-op. Mirrors `Argv::fallback_model`, which claude-code only HONORS in
+    /// `--print`/non-interactive mode ("only works with --print"); the CLI host
+    /// applies that gate before filling this field (`resolve_desktop_config`).
+    pub fallback_model: Option<String>,
     /// Settings-declared `providers` block as raw JSON, fed verbatim to
     /// `providers::parse_profiles`. `None` ⟶ built-in profiles only.
     pub provider_profiles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
@@ -453,6 +460,7 @@ impl std::fmt::Debug for DesktopConfig {
             .field("cwd", &self.cwd)
             .field("claude_home", &self.claude_home)
             .field("default_model", &self.default_model)
+            .field("fallback_model", &self.fallback_model)
             .field("provider_profiles", &self.provider_profiles)
             .field("routing", &self.routing)
             .field("mcp_paths", &self.mcp_paths)
@@ -481,6 +489,7 @@ impl Default for DesktopConfig {
             cwd: std::path::PathBuf::from("."),
             claude_home: std::path::PathBuf::new(),
             default_model: DesktopEngineConfig::default().default_model,
+            fallback_model: None,
             provider_profiles: None,
             routing: None,
             mcp_paths: Vec::new(),
@@ -702,6 +711,10 @@ pub async fn build(
     // (4) Orchestrator config from `cfg` (was `argv.model`).
     let mut orch_cfg = OrchestratorConfig::default();
     orch_cfg.model.clone_from(&cfg.default_model);
+    // Opus-fallback hop: thread the (already print-mode-gated) fallback model
+    // into `OrchestratorConfig.fallback_model`. `None` keeps the turn_loop's
+    // 529-overload interception a strict no-op (`turn_loop.rs:496`).
+    orch_cfg.fallback_model.clone_from(&cfg.fallback_model);
 
     // (4.5) One CostTracker per process. The persist channel drains into a
     //       fire-and-forget task that discards snapshots (on-disk persistence is
@@ -1421,6 +1434,8 @@ mod tests {
         assert_eq!(cfg.claude_home, std::path::PathBuf::new());
         // Mirrors `DesktopEngineConfig::default().default_model`.
         assert_eq!(cfg.default_model, "claude-sonnet-4-20250514");
+        // Opus-fallback default: no fallback model unless argv supplies one.
+        assert!(cfg.fallback_model.is_none());
         assert!(cfg.provider_profiles.is_none());
         assert!(cfg.routing.is_none());
         assert!(cfg.mcp_paths.is_empty());
@@ -1467,6 +1482,7 @@ mod tests {
             cwd: cwd.clone(),
             claude_home,
             default_model: "claude-sonnet-4-20250514".to_string(),
+            fallback_model: None,
             provider_profiles: None,
             routing: None,
             mcp_paths: vec![cwd.join(".mcp.json")],

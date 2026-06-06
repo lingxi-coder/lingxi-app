@@ -145,6 +145,7 @@ impl TaskRegistryHandle for MockTaskRegistry {
             content: "line1\nline2".into(),
             total_lines: 2,
             truncated: false,
+            ..Default::default()
         })
     }
 }

@@ -223,6 +223,27 @@ impl TaskRegistry {
         self.tasks.read().await.values().cloned().collect()
     }
 
+    /// Test-only: force a `local_bash` task into a known status + exit code so
+    /// `output()`'s `status`/`exit_code`/`done` projection can be exercised
+    /// deterministically (`set_status` cannot set `exit_code`). Panics if the
+    /// id is unknown or not a `local_bash` task.
+    #[cfg(test)]
+    pub(crate) async fn force_bash_terminal_for_test(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        exit_code: Option<i32>,
+    ) {
+        let mut map = self.tasks.write().await;
+        match map.get_mut(task_id) {
+            Some(TaskState::LocalBash(b)) => {
+                b.base.status = status;
+                b.exit_code = exit_code;
+            }
+            _ => panic!("expected a local_bash task with id {task_id}"),
+        }
+    }
+
     /// Force `task_id`'s status to `status`. Returns
     /// [`TaskError::NotFound`] if the id is unknown. Only Bash and Agent
     /// variants currently carry a writable `status` field in the M1 surface;

@@ -209,6 +209,7 @@ fn task_output_chunk_parity() {
         content: "a\nb\nc\nd\ne".to_string(),
         total_lines: 5,
         truncated: true,
+        ..Default::default()
     };
 
     let (task_id, content, total_lines, truncated) = lower_task_output_chunk(&chunk);

@@ -99,6 +99,7 @@ mod tests {
                 content,
                 total_lines: spool.lines().count() as u64,
                 truncated: false,
+                ..Default::default()
             })
         }
     }

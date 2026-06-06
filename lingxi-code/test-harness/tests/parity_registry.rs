@@ -138,8 +138,8 @@ fn fixture_names_match_production_constants() {
         ("Config", tool_meta::config::CONFIG_TOOL_NAME),
         ("Skill", tool_skill::skill::SKILL_TOOL_NAME),
         (
-            "ScheduleCron",
-            tool_cron::schedule_cron::SCHEDULE_CRON_TOOL_NAME,
+            "CronCreate",
+            tool_cron::schedule_cron::CRON_CREATE_TOOL_NAME,
         ),
         ("ToolSearch", tool_meta::tool_search::TOOL_SEARCH_TOOL_NAME),
         (

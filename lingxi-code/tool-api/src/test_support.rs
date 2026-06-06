@@ -82,7 +82,7 @@ pub fn make_dummy_fs() -> Arc<dyn traits::filesystem::FileSystem> {
 
 /// Process-wide HOME lock for tests that mutate `$HOME` via `std::env::set_var`.
 ///
-/// M4-08 builtin tools (Brief, Config, ScheduleCron, RemoteTrigger) each
+/// M4-08 builtin tools (Brief, Config, CronCreate, RemoteTrigger) each
 /// resolve their on-disk dir from `$HOME`. Their unit tests redirect HOME to
 /// a `tempfile::TempDir`; serialize them through this single lock so parallel
 /// test threads from different modules don't race on the same env var.

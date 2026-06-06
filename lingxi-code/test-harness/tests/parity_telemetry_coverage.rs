@@ -78,7 +78,7 @@ const TOOL_SNAKE: &[(&str, &str)] = &[
     ("SendUserMessage", "brief"),
     ("Config", "config"),
     ("Skill", "skill"),
-    ("ScheduleCron", "schedule_cron"),
+    ("CronCreate", "schedule_cron"),
     ("ToolSearch", "tool_search"),
     ("RemoteTrigger", "remote_trigger"),
     ("StructuredOutput", "synthetic_output"),

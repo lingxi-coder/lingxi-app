@@ -54,7 +54,7 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("REPL", DenyByDefault);
     m.insert("ReadMcpResourceTool", DenyByDefault);
     m.insert("RemoteTrigger", DenyByDefault);
-    m.insert("ScheduleCron", DenyByDefault);
+    m.insert("CronCreate", DenyByDefault);
     m.insert("SendMessage", DenyByDefault);
     m.insert("TaskCreate", DenyByDefault);
     m.insert("TaskStop", DenyByDefault);

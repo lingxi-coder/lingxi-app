@@ -215,8 +215,10 @@ impl Tool for TodoWriteTool {
     fn input_schema(&self) -> &Value {
         &INPUT_SCHEMA
     }
-    fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        true
+    fn is_enabled(&self, ctx: &ToolStaticContext) -> bool {
+        // V1/V2 mutex: TodoWrite (V1) is advertised only when the V2 Task tools
+        // are NOT (claude-code `isEnabled: () => !isTodoV2Enabled()`).
+        !crate::task::is_todo_v2_enabled(ctx)
     }
     fn max_result_size_chars(&self) -> usize {
         tool_api::util::output_truncation::MAX_TOOL_OUTPUT_LENGTH

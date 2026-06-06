@@ -329,6 +329,8 @@ impl McpClient {
             Ok(Ok(resp)) => Ok(McpToolResultDto {
                 content: resp.content,
                 is_error: resp.is_error,
+                meta: resp.meta,
+                structured_content: resp.structured_content,
             }),
         }
     }
@@ -643,12 +645,22 @@ pub struct ToolMeta {
 }
 
 /// Wire-level shape of a `tools/call` response body.
+///
+/// The MCP `CallToolResult` also carries two optional, arbitrary-JSON members:
+/// `_meta` and `structuredContent`. Both are parsed as opaque
+/// `Option<serde_json::Value>` and forwarded verbatim (no transformation),
+/// matching claude-code (`services/mcp/client.ts` reads `result._meta` /
+/// `result.structuredContent` straight off the raw result).
 #[derive(Debug, Deserialize)]
 struct ToolCallResponse {
     #[serde(default)]
     content: serde_json::Value,
     #[serde(rename = "isError", default)]
     is_error: bool,
+    #[serde(rename = "_meta", default)]
+    meta: Option<serde_json::Value>,
+    #[serde(rename = "structuredContent", default)]
+    structured_content: Option<serde_json::Value>,
 }
 
 /// Errors emitted by [`McpClient`] operations.
@@ -754,6 +766,64 @@ mod constructor_tests {
             text2.contains(r#""action":"cancel""#),
             "elicitation/create handler not registered: {text2}",
         );
+    }
+
+    #[test]
+    fn call_tool_passes_through_meta_and_structured_content() {
+        // Drive the parse directly through the wire DTO: this is the unit that
+        // owns `_meta` / `structuredContent` decoding. (A full transport
+        // loopback is exercised by the constructor tests above; here we assert
+        // the byte-faithful passthrough deterministically.)
+        let body = serde_json::json!({
+            "content": [{ "type": "text", "text": "ok" }],
+            "isError": false,
+            "_meta": { "anthropic/trace": "abc", "nested": { "k": [1, 2, 3] } },
+            "structuredContent": { "rows": [{ "id": 7 }], "total": 1 },
+        });
+        let resp: super::ToolCallResponse =
+            serde_json::from_value(body).expect("decode tools/call body");
+        let dto = super::McpToolResultDto {
+            content: resp.content,
+            is_error: resp.is_error,
+            meta: resp.meta,
+            structured_content: resp.structured_content,
+        };
+
+        assert!(!dto.is_error);
+        assert_eq!(
+            dto.meta.as_ref().expect("meta present"),
+            &serde_json::json!({ "anthropic/trace": "abc", "nested": { "k": [1, 2, 3] } }),
+            "_meta must round-trip byte-for-byte",
+        );
+        assert_eq!(
+            dto.structured_content.as_ref().expect("structured present"),
+            &serde_json::json!({ "rows": [{ "id": 7 }], "total": 1 }),
+            "structuredContent must round-trip byte-for-byte",
+        );
+    }
+
+    #[test]
+    fn call_tool_absent_meta_yields_none_no_empty_object() {
+        // A result WITHOUT `_meta` / `structuredContent` must decode to `None`
+        // for both — never an empty object, never a panic.
+        let body = serde_json::json!({
+            "content": [{ "type": "text", "text": "ok" }],
+            "isError": false,
+        });
+        let resp: super::ToolCallResponse =
+            serde_json::from_value(body).expect("decode tools/call body");
+        assert!(resp.meta.is_none(), "absent _meta must be None");
+        assert!(
+            resp.structured_content.is_none(),
+            "absent structuredContent must be None",
+        );
+
+        // Wholly empty body (server returned `{}`) is still safe.
+        let empty: super::ToolCallResponse =
+            serde_json::from_value(serde_json::json!({})).expect("decode empty body");
+        assert!(empty.meta.is_none());
+        assert!(empty.structured_content.is_none());
+        assert!(!empty.is_error);
     }
 }
 

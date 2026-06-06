@@ -195,12 +195,31 @@ pub struct McpPromptDto {
 }
 
 /// Result of a tool invocation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The MCP `CallToolResult` wire shape also carries two optional, arbitrary
+/// JSON members alongside `content`/`isError`: `_meta` and `structuredContent`
+/// (MCP spec; claude-code reads both off the raw result in
+/// `services/mcp/client.ts` and forwards them onto the surfaced `ToolResult`).
+/// Both are carried here verbatim (no transformation) and default to `None`
+/// when the server omits them, so non-claude-code servers decode cleanly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct McpToolResultDto {
     /// JSON content returned by the tool.
     pub content: Value,
     /// True when the server flagged the result as an error.
     pub is_error: bool,
+    /// Server-supplied `_meta` block (arbitrary JSON object), passed through
+    /// byte-for-byte. `None` when the wire result omits `_meta`.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none", default)]
+    pub meta: Option<Value>,
+    /// Server-supplied `structuredContent` (arbitrary JSON), passed through
+    /// byte-for-byte. `None` when the wire result omits `structuredContent`.
+    #[serde(
+        rename = "structuredContent",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub structured_content: Option<Value>,
 }
 
 /// Arbitrary notification pushed by a server (logging, progress, etc).

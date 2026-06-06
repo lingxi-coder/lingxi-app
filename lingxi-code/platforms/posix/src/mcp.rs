@@ -192,6 +192,13 @@ struct ToolCallResult {
     content: Value,
     #[serde(rename = "isError", default)]
     is_error: bool,
+    // Optional, arbitrary-JSON MCP `CallToolResult` members. Parsed as opaque
+    // values and forwarded verbatim onto the DTO (no transformation), matching
+    // claude-code's `result._meta` / `result.structuredContent` passthrough.
+    #[serde(rename = "_meta", default)]
+    meta: Option<Value>,
+    #[serde(rename = "structuredContent", default)]
+    structured_content: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -497,6 +504,8 @@ impl McpTransport for PosixMcpTransport {
         Ok(McpToolResultDto {
             content: parsed.content,
             is_error: parsed.is_error,
+            meta: parsed.meta,
+            structured_content: parsed.structured_content,
         })
     }
 

@@ -197,6 +197,91 @@ pub const INTENTIONALLY_DISABLED_COMMANDS: &[(&str, &str)] = &[
     ("reload-plugins", "local/internal stub in claude-code"),
 ];
 
+// ============================================================================
+// STUB.6 — faithful-stub audit: refine the bucket-(d) table into TWO disjoint
+// partitions, verified against the claude-code TypeScript/compiled reference.
+//
+// The legacy `INTENTIONALLY_DISABLED_COMMANDS` table (above, kept verbatim for
+// git-history + existing-test continuity) conflated two *different* parity
+// situations under one "disabled" label. STUB.6 splits them so a future
+// contributor can tell, per command, whether the Rust stub is **faithful**
+// (claude-code itself ships nothing to run) or a **real (deferred) gap**
+// (claude-code ships a working command; the Rust port only lacks the host
+// infra to run it). The two are not interchangeable: only the first set is
+// "correct-by-design", and only the second is worth implementation effort.
+//
+// Evidence was taken directly from `claude-code/src/commands/<name>/`:
+//   - compiled `index.js` literally `{ isEnabled: () => false, isHidden: true,
+//     name: 'stub' }`  → the command never runs for ANYONE.
+//   - `isEnabled: () => process.env.USER_TYPE === 'ant'`  → Anthropic-internal.
+//   - `isEnabled: () => checkStatsigFeatureGate(...)` / `feature('KAIROS')`  →
+//     feature-gated OFF in the external build.
+//   - `isEnabled: () => canUserConfigureAdvisor()` + `isHidden` when not
+//     configurable  → entitlement-gated OFF + hidden by default.
+// ============================================================================
+
+/// **Partition A — CORRECT-BY-DESIGN faithful stubs.** claude-code *itself*
+/// disables, hides, feature-gates-OFF, or ships a literal no-op `name: 'stub'`
+/// for each of these, so the Rust port returning the locked
+/// `"{name}: not implemented in v0.6.0 (M5)"` literal is **behaviorally
+/// faithful** — there is no command body to port. These are non-goals: a
+/// future contributor must NOT "implement" them.
+///
+/// Each entry is `(name, why-claude-code-ships-nothing)`. Every `name` is a
+/// member of [`BUILTIN_COMMAND_NAMES`], disjoint from the implemented core set
+/// [`BUILTIN_CORE_NAMES`], and disjoint from [`HOST_BOUND_DEFERRED_GAPS`]
+/// (asserted by the STUB.6 partition tests in the test-harness).
+///
+/// This is the refined subset of [`INTENTIONALLY_DISABLED_COMMANDS`]: it is
+/// that table MINUS the three names that claude-code actually implements
+/// (see [`HOST_BOUND_DEFERRED_GAPS`]).
+pub const CORRECT_BY_DESIGN_STUBS: &[(&str, &str)] = &[
+    // --- 18 compiled `{ isEnabled:()=>false, isHidden:true, name:'stub' }` ---
+    ("ant-trace", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("autofix-pr", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("backfill-sessions", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("break-cache", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("bughunter", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("ctx-viz", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("debug-tool-call", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("env", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("good-claude", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("issue", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("mock-limits", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("oauth-refresh", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("onboarding", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("perf-issue", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("reset-limits", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("share", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("summary", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    ("teleport", "compiled `name:'stub'` (isEnabled:()=>false, isHidden) in claude-code"),
+    // --- USER_TYPE==='ant' (Anthropic-internal only) ---
+    ("tag", "isEnabled:()=>process.env.USER_TYPE==='ant' (Anthropic-internal only)"),
+    // --- statsig / feature-gated OFF in the external build ---
+    ("thinkback", "isEnabled gated by statsig `tengu_thinkback` (off externally)"),
+    ("thinkback-play", "statsig `tengu_thinkback` + isHidden:true (off externally)"),
+    ("brief", "isEnabled:()=>feature('KAIROS')&&config — feature gate OFF externally"),
+    // --- entitlement-gated OFF + hidden by default ---
+    ("advisor", "isEnabled:()=>canUserConfigureAdvisor() (false by default) + isHidden"),
+];
+
+/// **Partition B — HOST-BOUND-DEFERRED gaps (NOT correct-by-design).**
+/// claude-code *implements* each of these (the source has a real body and is
+/// enabled for ordinary users — **no** `isEnabled:()=>false`, no ant/statsig
+/// gate). The Rust port returns the stub literal only because the supporting
+/// host surface is not wired yet (an interactive JSX/TUI dialog, or an SDK
+/// control-request path that has no plain-text registry analog). These are
+/// **genuine deferred gaps**, a different partition from
+/// [`CORRECT_BY_DESIGN_STUBS`]: implementing them IS in-scope future work, so
+/// they must never be mislabeled as faithful-by-design.
+///
+/// Each entry is `(name, what-claude-code-actually-ships + why-deferred)`.
+pub const HOST_BOUND_DEFERRED_GAPS: &[(&str, &str)] = &[
+    ("btw", "claude-code ships a `local-jsx` side-question dialog, enabled (no gate); deferred for lack of TUI dialog infra"),
+    ("x402", "claude-code ships a `local` text command (supportsNonInteractive, no isEnabled gate); deferred host wallet/x402 service infra"),
+    ("reload-plugins", "claude-code ships a `local` command (no gate); driven via SDK control-request, no plain-text registry analog yet"),
+];
+
 /// Descriptions for the 18 core commands, used for `/help` rendering in M5-10.
 /// Lookup by core name; falls back to `"(unimplemented in v0.6.0)"` for the 81
 /// non-core entries.
@@ -434,5 +519,96 @@ mod tests {
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
         assert_eq!(BUILTIN_COMMAND_NAMES.len(), 99);
+    }
+
+    // ========================================================================
+    // STUB.6 — the refined two-partition split (CORRECT_BY_DESIGN_STUBS vs
+    // HOST_BOUND_DEFERRED_GAPS). These lock the *classification invariant* of
+    // the constants; the end-to-end "still dispatches to the stub literal"
+    // regression lives in test-harness (parity_slash_command_stub_partition).
+    // ========================================================================
+
+    fn name_set(table: &[(&'static str, &'static str)]) -> std::collections::HashSet<&'static str> {
+        table.iter().map(|(n, _)| *n).collect()
+    }
+
+    #[test]
+    fn correct_by_design_count_is_23() {
+        assert_eq!(CORRECT_BY_DESIGN_STUBS.len(), 23);
+    }
+
+    #[test]
+    fn host_bound_deferred_count_is_3() {
+        assert_eq!(HOST_BOUND_DEFERRED_GAPS.len(), 3);
+    }
+
+    #[test]
+    fn every_partitioned_name_is_a_real_builtin() {
+        let full: std::collections::HashSet<&str> = BUILTIN_COMMAND_NAMES.iter().copied().collect();
+        for (name, _) in CORRECT_BY_DESIGN_STUBS.iter().chain(HOST_BOUND_DEFERRED_GAPS) {
+            assert!(full.contains(name), "partitioned name '{name}' is not a real builtin");
+        }
+    }
+
+    #[test]
+    fn every_partitioned_reason_is_documented() {
+        for (name, reason) in CORRECT_BY_DESIGN_STUBS.iter().chain(HOST_BOUND_DEFERRED_GAPS) {
+            assert!(!reason.trim().is_empty(), "'{name}' must document a reason");
+        }
+    }
+
+    #[test]
+    fn no_duplicate_names_within_each_partition() {
+        let mut seen = std::collections::HashSet::new();
+        for (name, _) in CORRECT_BY_DESIGN_STUBS.iter().chain(HOST_BOUND_DEFERRED_GAPS) {
+            assert!(seen.insert(*name), "duplicate partitioned name '{name}'");
+        }
+    }
+
+    #[test]
+    fn the_two_partitions_are_disjoint() {
+        // The whole point of STUB.6: a name cannot be BOTH a faithful
+        // correct-by-design stub AND a genuine deferred gap.
+        let cbd = name_set(CORRECT_BY_DESIGN_STUBS);
+        let gaps = name_set(HOST_BOUND_DEFERRED_GAPS);
+        assert!(cbd.is_disjoint(&gaps), "correct-by-design and host-bound-deferred overlap");
+    }
+
+    #[test]
+    fn both_partitions_are_disjoint_from_implemented_core() {
+        // Neither a faithful stub nor a deferred gap may also be a wired core
+        // command — that would be a contradiction.
+        let core: std::collections::HashSet<&str> = BUILTIN_CORE_NAMES.iter().copied().collect();
+        for (name, _) in CORRECT_BY_DESIGN_STUBS.iter().chain(HOST_BOUND_DEFERRED_GAPS) {
+            assert!(!core.contains(name), "'{name}' is both core (implemented) and stubbed");
+        }
+    }
+
+    #[test]
+    fn partitions_union_equals_legacy_intentionally_disabled_set() {
+        // The refined split is exactly the legacy bucket-(d) table re-bucketed:
+        // CORRECT_BY_DESIGN ∪ HOST_BOUND_DEFERRED == INTENTIONALLY_DISABLED.
+        // This proves the refinement neither dropped nor invented a name; it
+        // only moved the three host-bound names into their correct partition.
+        let legacy = name_set(INTENTIONALLY_DISABLED_COMMANDS);
+        let mut union = name_set(CORRECT_BY_DESIGN_STUBS);
+        union.extend(name_set(HOST_BOUND_DEFERRED_GAPS));
+        assert_eq!(union, legacy, "partition union must equal the legacy disabled set");
+        assert_eq!(
+            CORRECT_BY_DESIGN_STUBS.len() + HOST_BOUND_DEFERRED_GAPS.len(),
+            INTENTIONALLY_DISABLED_COMMANDS.len(),
+            "23 + 3 == 26"
+        );
+    }
+
+    #[test]
+    fn host_bound_deferred_holds_exactly_the_three_implemented_names() {
+        // Lock the specific three claude-code IMPLEMENTS (verified against
+        // src/commands/{btw,x402,reload-plugins}: no isEnabled gate, real body)
+        // so they can never silently slide back into the correct-by-design set.
+        let gaps = name_set(HOST_BOUND_DEFERRED_GAPS);
+        let expected: std::collections::HashSet<&str> =
+            ["btw", "x402", "reload-plugins"].into_iter().collect();
+        assert_eq!(gaps, expected);
     }
 }

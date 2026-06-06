@@ -18,6 +18,13 @@ pub const MAX_TURNS_DEFAULT: u32 = 30;
 pub const DEFAULT_MODEL: &str = "claude-opus-4-7";
 
 /// Runtime configuration for [`crate::ConversationOrchestrator`].
+//
+// Independent feature/auth flags — claude-code carries these as separate
+// booleans too (interactive vs print, the otk/token-budget gates, the resolved
+// subscription flags); collapsing them into a state enum would obscure the 1:1
+// mapping, so we suppress `struct_excessive_bools` (as `anthropic-oauth`'s
+// resolver does for the same reason).
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestratorConfig {
     /// Maximum number of turns before the loop aborts with
@@ -100,6 +107,36 @@ pub struct OrchestratorConfig {
     /// is also `true`.
     #[serde(default)]
     pub token_budget: Option<u64>,
+
+    /// Pre-computed `isClaudeAISubscriber()` (`auth.ts:1564-1571`): `true` when
+    /// the active session authenticates via a Claude.ai OAuth token carrying the
+    /// `user:inference` scope (and Anthropic auth is enabled — no overriding env
+    /// API key). Threaded into the fallback-aware api-client seam
+    /// ([`crate::OrchestratorApiClient::messages_create_with_fallback`]) so the
+    /// consecutive-529 Opus-fallback gate
+    /// (`allow_fallback = fallback_for_all || (!is_subscriber && is_non_custom_opus)`)
+    /// and the 429-retry gate (`retry_429_allowed = !is_subscriber || is_enterprise`)
+    /// resolve to the same branch claude-code takes.
+    ///
+    /// `false` (the parity default) is byte-identical to the pre-wiring stub: the
+    /// turn loop passed `is_subscriber = false` until OAuth subscription
+    /// resolution landed. Populated at the composition root
+    /// (`engine_desktop::build`) via `anthropic_oauth::subscription_from_scopes`.
+    #[serde(default)]
+    pub is_subscriber: bool,
+
+    /// Pre-computed `isEnterpriseSubscriber()` (`auth.ts:1694`): `true` when the
+    /// resolved subscription tier is Enterprise. Only consulted when
+    /// [`Self::is_subscriber`] is `true`, where it re-enables the 429 retry that
+    /// `is_subscriber` would otherwise suppress (`!is_subscriber || is_enterprise`).
+    ///
+    /// `false` (the parity default) is conservative. PARITY-GAP: enterprise tier
+    /// requires the subscription type, which comes from a profile fetch
+    /// (`anthropic_oauth::fetch_profile_from_oauth_token` + `apply_profile`) not
+    /// performed in the desktop build hot path; `engine_desktop::build` leaves
+    /// this `false` pending that fetch.
+    #[serde(default)]
+    pub is_enterprise: bool,
 }
 
 impl Default for OrchestratorConfig {
@@ -114,6 +151,8 @@ impl Default for OrchestratorConfig {
             escalate_max_output_tokens: false,
             enable_token_budget: false,
             token_budget: None,
+            is_subscriber: false,
+            is_enterprise: false,
         }
     }
 }
@@ -152,6 +191,8 @@ mod tests {
             escalate_max_output_tokens: true,
             enable_token_budget: true,
             token_budget: Some(500_000),
+            is_subscriber: true,
+            is_enterprise: true,
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: OrchestratorConfig = serde_json::from_str(&s).unwrap();
@@ -164,11 +205,32 @@ mod tests {
         assert!(back.escalate_max_output_tokens);
         assert!(back.enable_token_budget);
         assert_eq!(back.token_budget, Some(500_000));
+        assert!(back.is_subscriber);
+        assert!(back.is_enterprise);
     }
 
     #[test]
     fn default_fallback_model_is_none() {
         assert!(OrchestratorConfig::default().fallback_model.is_none());
+    }
+
+    #[test]
+    fn default_subscription_flags_are_false() {
+        // The parity default: no subscription resolved → byte-identical to the
+        // pre-wiring `is_subscriber = false` / `is_enterprise = false` stub.
+        let cfg = OrchestratorConfig::default();
+        assert!(!cfg.is_subscriber);
+        assert!(!cfg.is_enterprise);
+    }
+
+    #[test]
+    fn subscription_flags_default_when_absent_from_json() {
+        // `#[serde(default)]` — a pre-subscription persisted config must
+        // deserialize with both flags `false`.
+        let s = r#"{"max_turns":7,"model":"m"}"#;
+        let back: OrchestratorConfig = serde_json::from_str(s).unwrap();
+        assert!(!back.is_subscriber);
+        assert!(!back.is_enterprise);
     }
 
     #[test]

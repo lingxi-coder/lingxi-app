@@ -2236,10 +2236,11 @@ impl<T: HttpTransport + Send + Sync + 'static> OrchestratorApiClient
         // fallback-aware provider seam. Same `max_tokens = 4096` / no-temperature
         // defaults as `messages_create` above; when `fallback_model` is `None`
         // this is byte-identical to `messages_create` (the consecutive-529 gate
-        // stays closed). `is_subscriber` / `is_enterprise` are the documented
-        // stub `false` until OAuth subscription resolution lands (matching the
-        // api-client `messages_create_non_stream_with_fallback` ship-with-stub
-        // note); the orchestrator does not yet resolve subscription state.
+        // stays closed). `is_subscriber` / `is_enterprise` are the resolved
+        // subscription flags the turn loop sources from `OrchestratorConfig`
+        // (populated at `engine_desktop::build` from the OAuth token scopes via
+        // `anthropic_oauth::subscription_from_scopes`); `false`/`false` in tests
+        // and non-OAuth sessions keeps the gates byte-identical to the prior stub.
         self.provider
             .messages_create_non_stream_with_fallback(
                 model,

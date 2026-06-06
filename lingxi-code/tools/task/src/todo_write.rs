@@ -60,6 +60,9 @@ pub fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
         if t.content.is_empty() {
             return Err("TodoWrite: todo content is empty".into());
         }
+        if t.active_form.is_empty() {
+            return Err("TodoWrite: todo activeForm is empty".into());
+        }
         let n = t.content.chars().count();
         if n > TODO_MAX_CONTENT_CHARS {
             return Err(format!(
@@ -111,9 +114,10 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                         "status":  {
                             "type": "string",
                             "enum": ["pending", "in_progress", "completed"]
-                        }
+                        },
+                        "activeForm": { "type": "string", "minLength": 1 }
                     },
-                    "required": ["id", "content", "status"]
+                    "required": ["id", "content", "status", "activeForm"]
                 }
             }
         },
@@ -420,16 +424,19 @@ mod tests {
                 id: "a".into(),
                 content: "x".into(),
                 status: TodoState::Pending,
+                active_form: "active".into(),
             },
             TodoItem {
                 id: "b".into(),
                 content: "y".into(),
                 status: TodoState::InProgress,
+                active_form: "active".into(),
             },
             TodoItem {
                 id: "c".into(),
                 content: "z".into(),
                 status: TodoState::Completed,
+                active_form: "active".into(),
             },
         ];
         assert!(validate_todos(&todos).is_ok());
@@ -441,6 +448,7 @@ mod tests {
             id: "a".into(),
             content: String::new(),
             status: TodoState::Pending,
+            active_form: "active".into(),
         }];
         let err = validate_todos(&todos).expect_err("empty content must reject");
         assert_eq!(err, "TodoWrite: todo content is empty");
@@ -454,6 +462,7 @@ mod tests {
             id: "a".into(),
             content: huge,
             status: TodoState::Pending,
+            active_form: "active".into(),
         }];
         let err = validate_todos(&todos).expect_err("over-long must reject");
         assert_eq!(
@@ -469,11 +478,13 @@ mod tests {
                 id: "dup".into(),
                 content: "x".into(),
                 status: TodoState::Pending,
+                active_form: "active".into(),
             },
             TodoItem {
                 id: "dup".into(),
                 content: "y".into(),
                 status: TodoState::Pending,
+                active_form: "active".into(),
             },
         ];
         let err = validate_todos(&todos).expect_err("dup id must reject");
@@ -487,11 +498,13 @@ mod tests {
                 id: "a".into(),
                 content: "x".into(),
                 status: TodoState::InProgress,
+                active_form: "active".into(),
             },
             TodoItem {
                 id: "b".into(),
                 content: "y".into(),
                 status: TodoState::InProgress,
+                active_form: "active".into(),
             },
         ];
         let err = validate_todos(&todos).expect_err("two in_progress must reject");
@@ -508,11 +521,13 @@ mod tests {
                 id: "a".into(),
                 content: "x".into(),
                 status: TodoState::Pending,
+                active_form: "active".into(),
             },
             TodoItem {
                 id: "b".into(),
                 content: "y".into(),
                 status: TodoState::Completed,
+                active_form: "active".into(),
             },
         ];
         assert!(validate_todos(&todos).is_ok());
@@ -525,21 +540,25 @@ mod tests {
                 id: "a".into(),
                 content: "x".into(),
                 status: TodoState::Pending,
+                active_form: "active".into(),
             },
             TodoItem {
                 id: "b".into(),
                 content: "y".into(),
                 status: TodoState::Pending,
+                active_form: "active".into(),
             },
             TodoItem {
                 id: "c".into(),
                 content: "z".into(),
                 status: TodoState::InProgress,
+                active_form: "active".into(),
             },
             TodoItem {
                 id: "d".into(),
                 content: "w".into(),
                 status: TodoState::Completed,
+                active_form: "active".into(),
             },
         ];
         assert_eq!(summary(&todos), (2_u32, 1_u32, 1_u32));
@@ -551,9 +570,9 @@ mod tests {
         tool.ctx.bus.attach_sink(sink.clone()).await;
         let input = json!({
             "todos": [
-                { "id": "t1", "content": "first",  "status": "pending"     },
-                { "id": "t2", "content": "second", "status": "in_progress" },
-                { "id": "t3", "content": "third",  "status": "completed"   }
+                { "id": "t1", "content": "first",  "status": "pending",     "activeForm": "Doing first"  },
+                { "id": "t2", "content": "second", "status": "in_progress", "activeForm": "Doing second" },
+                { "id": "t3", "content": "third",  "status": "completed",   "activeForm": "Doing third"  }
             ]
         });
         let res = tool
@@ -602,8 +621,8 @@ mod tests {
         tool.ctx.bus.attach_sink(sink.clone()).await;
         let input = json!({
             "todos": [
-                { "id": "a", "content": "x", "status": "in_progress" },
-                { "id": "b", "content": "y", "status": "in_progress" }
+                { "id": "a", "content": "x", "status": "in_progress", "activeForm": "Doing x" },
+                { "id": "b", "content": "y", "status": "in_progress", "activeForm": "Doing y" }
             ]
         });
         let err = tool
@@ -616,5 +635,35 @@ mod tests {
         );
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&TODO_WRITE_FAILED.to_string()));
+    }
+
+    #[test]
+    fn validate_rejects_empty_active_form() {
+        // claude-code TodoItemSchema requires `activeForm` non-empty (min(1)).
+        let todos = vec![TodoItem {
+            id: "a".into(),
+            content: "x".into(),
+            status: TodoState::Pending,
+            active_form: String::new(),
+        }];
+        let err = validate_todos(&todos).expect_err("empty activeForm must reject");
+        assert_eq!(err, "TodoWrite: todo activeForm is empty");
+    }
+
+    #[tokio::test]
+    async fn execute_round_trips_active_form() {
+        let (tool, sink, session, use_ctx) = make_tool_and_session();
+        tool.ctx.bus.attach_sink(sink.clone()).await;
+        let input = json!({
+            "todos": [
+                { "id": "t1", "content": "ship it", "status": "in_progress", "activeForm": "Shipping it" }
+            ]
+        });
+        tool.call(input, use_ctx, fresh_tx())
+            .await
+            .expect("activeForm happy path");
+        let s = session.lock().await;
+        assert_eq!(s.todos.len(), 1);
+        assert_eq!(s.todos[0].active_form, "Shipping it");
     }
 }

@@ -228,6 +228,7 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
             content: String::new(),
             total_lines: 0,
             truncated: false,
+            ..Default::default()
         })
     }
 }

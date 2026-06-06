@@ -55,6 +55,17 @@ pub struct TaskOutputChunk {
     pub total_lines: u64,
     /// `true` when the surfaced content was truncated by a limit.
     pub truncated: bool,
+    /// Task status wire string at the chunk point (one of the 5 byte-locked
+    /// status strings), if the registry could resolve it. Mirrors the TS
+    /// `task.status` carried by `TaskOutputTool`'s `TaskOutput`.
+    pub status: Option<String>,
+    /// Process exit code at the chunk point, if terminal and applicable.
+    /// Mirrors the TS `exitCode` (`bashTask.result?.code ?? null`).
+    pub exit_code: Option<i32>,
+    /// `true` when the task has reached a terminal status (completed / failed /
+    /// killed). Lets the tool compute `block`/`retrieval_status` without a
+    /// second registry round-trip.
+    pub done: bool,
 }
 
 /// Failure modes for [`TaskRegistryHandle`] operations.

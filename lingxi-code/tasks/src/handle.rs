@@ -216,6 +216,16 @@ impl TaskRegistryHandle for TaskRegistry {
             .get(id)
             .await
             .ok_or_else(|| TaskRegistryError::NotFound(id.into()))?;
+        let status = state.base().status;
+        // Mirror TS `bashTask.result?.code ?? null`: only local-bash tasks carry
+        // a process exit code; other task types report `None`.
+        let exit_code = match &state {
+            TaskState::LocalBash(s) => s.exit_code,
+            _ => None,
+        };
+        // Mirror the TS poll predicate `status !== 'running' && status !==
+        // 'pending'` — terminal means the task is "done" for retrieval.
+        let done = status.is_terminal();
         let output_file = state.base().output_file.clone();
         let opts = crate::output_manager::OutputOptions {
             offset,
@@ -238,6 +248,9 @@ impl TaskRegistryHandle for TaskRegistry {
             content: out.content,
             total_lines: out.total_lines,
             truncated: out.truncated,
+            status: Some(status_to_wire(status).to_string()),
+            exit_code,
+            done,
         })
     }
 }
@@ -487,6 +500,63 @@ mod tests {
         );
         assert_eq!(chunk.total_lines, 3, "total_lines reflects the spool");
         assert!(!chunk.truncated, "no truncation on unlimited read");
+    }
+
+    #[tokio::test]
+    async fn output_running_task_is_not_done_and_carries_no_exit_code() {
+        let (_d, registry) = make_registry();
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
+        let rec = h
+            .create(TaskCreateInput {
+                task_type: "local_bash".into(),
+                description: "sleep".into(),
+            })
+            .await
+            .unwrap();
+        registry.force_bash_terminal_for_test(&rec.task_id, TaskStatus::Running, None).await;
+
+        let chunk = h.output(&rec.task_id, None).await.unwrap();
+        assert_eq!(chunk.status.as_deref(), Some("running"));
+        assert!(!chunk.done, "running task is not terminal");
+        assert_eq!(chunk.exit_code, None, "no exit code while running");
+    }
+
+    #[tokio::test]
+    async fn output_completed_task_is_done_with_exit_code_zero() {
+        let (_d, registry) = make_registry();
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
+        let rec = h
+            .create(TaskCreateInput {
+                task_type: "local_bash".into(),
+                description: "echo".into(),
+            })
+            .await
+            .unwrap();
+        registry.force_bash_terminal_for_test(&rec.task_id, TaskStatus::Completed, Some(0)).await;
+
+        let chunk = h.output(&rec.task_id, None).await.unwrap();
+        assert_eq!(chunk.status.as_deref(), Some("completed"));
+        assert!(chunk.done, "completed task is terminal");
+        assert_eq!(chunk.exit_code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn output_failed_task_is_done_with_nonzero_exit_code() {
+        let (_d, registry) = make_registry();
+        let h: &dyn TaskRegistryHandle = registry.as_ref();
+        let rec = h
+            .create(TaskCreateInput {
+                task_type: "local_bash".into(),
+                description: "false".into(),
+            })
+            .await
+            .unwrap();
+        registry.force_bash_terminal_for_test(&rec.task_id, TaskStatus::Failed, Some(1)).await;
+
+        let chunk = h.output(&rec.task_id, None).await.unwrap();
+        assert_eq!(chunk.status.as_deref(), Some("failed"));
+        assert!(chunk.done, "failed task is terminal");
+        assert_eq!(chunk.exit_code, Some(1));
     }
 
     #[tokio::test]

@@ -1128,12 +1128,35 @@ static TASK_OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "type": "object",
         "properties": {
             "task_id": { "type": "string" },
+            "block":   { "type": "boolean", "default": true },
             "offset":  { "type": "integer", "minimum": 0 },
             "limit":   { "type": "integer", "minimum": 1, "maximum": 1_048_576 }
         },
         "required": ["task_id"]
     })
 });
+
+/// Byte-faithful port of `TaskOutputTool.tsx`'s `retrieval_status` decision.
+///
+/// TS computes (`call`, lines 219-281):
+/// - non-blocking (`block=false`): terminal task → `success`, otherwise
+///   `not_ready`;
+/// - blocking (`block=true`): a task that is terminal (after the poll) →
+///   `success`, otherwise (still running/pending) → `timeout`.
+///
+/// `done` is the chunk's terminal flag (`status` ∈ {completed, failed, killed});
+/// the Rust registry `output()` is a single read (the `block`/`timeout` poll
+/// loop is Batch 3), so the blocking branch resolves against the chunk's
+/// current `done` rather than re-polling.
+fn task_output_retrieval_status(done: bool, block: bool) -> &'static str {
+    if done {
+        "success"
+    } else if block {
+        "timeout"
+    } else {
+        "not_ready"
+    }
+}
 
 /// Reads a task's spool file (surface stub).
 pub struct TaskOutputTool {
@@ -1250,6 +1273,8 @@ impl Tool for TaskOutputTool {
             }
         };
         let offset = input.get("offset").and_then(Value::as_u64);
+        // `block` defaults to true (TS `semanticBoolean(z.boolean().default(true))`).
+        let block = input.get("block").and_then(Value::as_bool).unwrap_or(true);
         let chunk = match registry.output(&task_id, offset).await {
             Ok(c) => c,
             Err(e) => {
@@ -1273,12 +1298,18 @@ impl Tool for TaskOutputTool {
         )
         .await;
 
+        let retrieval_status = task_output_retrieval_status(chunk.done, block);
+
         Ok(ToolCallResult {
             data: json!({
+                "retrieval_status": retrieval_status,
                 "task_id": chunk.task_id,
                 "content": chunk.content,
                 "total_lines": chunk.total_lines,
                 "truncated": chunk.truncated,
+                "status": chunk.status,
+                "exit_code": chunk.exit_code,
+                "done": chunk.done,
             }),
             new_messages: vec![],
             context_modifier: None,
@@ -1299,6 +1330,35 @@ mod tests {
         assert_eq!(TASK_UPDATE_TOOL_NAME, "TaskUpdate");
         assert_eq!(TASK_STOP_TOOL_NAME, "TaskStop");
         assert_eq!(TASK_OUTPUT_TOOL_NAME, "TaskOutput");
+    }
+
+    // ── retrieval_status (TaskOutputTool.tsx `call` lines 219-281) ───────────
+
+    #[test]
+    fn retrieval_status_done_is_success_regardless_of_block() {
+        // TS: a terminal task → `success` in both the blocking and
+        // non-blocking branches.
+        assert_eq!(task_output_retrieval_status(true, true), "success");
+        assert_eq!(task_output_retrieval_status(true, false), "success");
+    }
+
+    #[test]
+    fn retrieval_status_running_non_blocking_is_not_ready() {
+        // TS non-blocking branch: running/pending → `not_ready`.
+        assert_eq!(task_output_retrieval_status(false, false), "not_ready");
+    }
+
+    #[test]
+    fn retrieval_status_running_blocking_is_timeout() {
+        // TS blocking branch: still running/pending after the wait → `timeout`.
+        assert_eq!(task_output_retrieval_status(false, true), "timeout");
+    }
+
+    #[test]
+    fn task_output_schema_declares_block_default_true() {
+        let block = &TASK_OUTPUT_SCHEMA["properties"]["block"];
+        assert_eq!(block["type"], "boolean");
+        assert_eq!(block["default"], true);
     }
 
     #[test]

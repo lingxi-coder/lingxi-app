@@ -632,6 +632,7 @@ mod tests {
             content: "line1\nline2".to_string(),
             total_lines: 2,
             truncated: true,
+            ..Default::default()
         };
         let (id, content, lines, truncated) = lower_task_output_chunk(&chunk);
         assert_eq!(id, "b3f9zk2xq");

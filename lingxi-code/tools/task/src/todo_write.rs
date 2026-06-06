@@ -324,14 +324,37 @@ impl Tool for TodoWriteTool {
             .await;
 
         let (pending, in_progress, completed) = summary(&todos);
+
+        // Model-facing result text (`TodoWriteTool.ts:104-113`
+        // `mapToolResultToToolResultBlockParam`): the fixed base string, plus
+        // the structural verification nudge when the main-thread agent closes
+        // out a 3+ item all-completed list with no verification step
+        // (`TodoWriteTool.ts:72-86`; regex runs over each todo's `content`).
+        let all_done = todos.iter().all(|t| t.status == TodoState::Completed);
+        let nudge_needed = crate::task::verification_nudge_needed(
+            ctx.agent_id.is_none(),
+            ctx.options.is_non_interactive_session,
+            all_done,
+            todos.len(),
+            todos.iter().map(|t| t.content.as_str()),
+        );
+        let mut content = String::from(
+            "Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable",
+        );
+        if nudge_needed {
+            content.push_str(&crate::task::verification_nudge_suffix());
+        }
+
         Ok(ToolCallResult {
             data: json!({
+                "content": content,
                 "todos": todos,
                 "summary": {
                     "pending": pending,
                     "in_progress": in_progress,
                     "completed": completed,
-                }
+                },
+                "verificationNudgeNeeded": nudge_needed,
             }),
             new_messages: Vec::new(),
             context_modifier: None,
@@ -667,5 +690,94 @@ mod tests {
         let s = session.lock().await;
         assert_eq!(s.todos.len(), 1);
         assert_eq!(s.todos[0].active_form, "Shipping it");
+    }
+
+    // ── verification nudge (sub-batch [5]) ───────────────────────────────
+
+    const TODO_BASE: &str = "Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable";
+
+    const NUDGE_MARKER: &str = "spawn the verification agent (subagent_type=\"verification\")";
+
+    fn completed(id: &str, content: &str) -> Value {
+        json!({ "id": id, "content": content, "status": "completed", "activeForm": content })
+    }
+
+    #[tokio::test]
+    async fn nudge_fires_when_all_completed_3plus_no_verif() {
+        let (tool, sink, _session, use_ctx) = make_tool_and_session();
+        tool.ctx.bus.attach_sink(sink.clone()).await;
+        let input = json!({
+            "todos": [
+                completed("1", "Implement parser"),
+                completed("2", "Wire it up"),
+                completed("3", "Write docs"),
+            ]
+        });
+        let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
+        let content = res.data["content"].as_str().unwrap();
+        assert!(content.starts_with(TODO_BASE), "base prefix: {content}");
+        assert!(content.contains(NUDGE_MARKER), "nudge present: {content}");
+        assert_eq!(res.data["verificationNudgeNeeded"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn no_nudge_when_fewer_than_three() {
+        let (tool, sink, _session, use_ctx) = make_tool_and_session();
+        tool.ctx.bus.attach_sink(sink.clone()).await;
+        let input = json!({
+            "todos": [completed("1", "Implement"), completed("2", "Document")]
+        });
+        let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
+        assert_eq!(res.data["content"], json!(TODO_BASE));
+        assert_eq!(res.data["verificationNudgeNeeded"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn no_nudge_when_content_matches_verif() {
+        let (tool, sink, _session, use_ctx) = make_tool_and_session();
+        tool.ctx.bus.attach_sink(sink.clone()).await;
+        let input = json!({
+            "todos": [
+                completed("1", "Implement parser"),
+                completed("2", "Verify the fix"),
+                completed("3", "Write docs"),
+            ]
+        });
+        let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
+        assert_eq!(res.data["content"], json!(TODO_BASE));
+        assert_eq!(res.data["verificationNudgeNeeded"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn no_nudge_for_subagent() {
+        let (tool, sink, _session, mut use_ctx) = make_tool_and_session();
+        tool.ctx.bus.attach_sink(sink.clone()).await;
+        use_ctx.agent_id = Some(protocol::AgentId::new());
+        let input = json!({
+            "todos": [
+                completed("1", "Implement parser"),
+                completed("2", "Wire it up"),
+                completed("3", "Write docs"),
+            ]
+        });
+        let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
+        assert_eq!(res.data["content"], json!(TODO_BASE));
+        assert_eq!(res.data["verificationNudgeNeeded"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn no_nudge_when_not_all_completed() {
+        let (tool, sink, _session, use_ctx) = make_tool_and_session();
+        tool.ctx.bus.attach_sink(sink.clone()).await;
+        let input = json!({
+            "todos": [
+                completed("1", "Implement parser"),
+                completed("2", "Wire it up"),
+                { "id": "3", "content": "Write docs", "status": "pending", "activeForm": "Writing docs" },
+            ]
+        });
+        let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
+        assert_eq!(res.data["content"], json!(TODO_BASE));
+        assert_eq!(res.data["verificationNudgeNeeded"], json!(false));
     }
 }

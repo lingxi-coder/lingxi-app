@@ -172,6 +172,75 @@ pub fn is_todo_v2_enabled(ctx: &ToolStaticContext) -> bool {
     todo_v2_enabled_inner(env_truthy("CLAUDE_CODE_ENABLE_TASKS"), non_interactive)
 }
 
+// ==== Verification nudge (sub-batch [5]) ====================================
+//
+// Structural verification nudge shared by the V2 `TaskUpdate` (todo store) and
+// the V1 `TodoWrite` (in-memory session todos) tools. When the main-thread
+// agent closes out a 3+ item list with every item completed and none of those
+// items a verification step, the tool appends a reminder to its model-facing
+// result text suggesting the model spawn the verification subagent.
+//
+// claude-code: `TaskUpdateTool.ts:326-349` + `:396-398` (regex over task
+// subjects) and `TodoWriteTool.ts:72-86` + `:104-113` (regex over todo
+// contents). The nudge suffix is byte-identical in both (em-dash U+2014).
+
+/// `VERIFICATION_AGENT_TYPE` (`AgentTool/constants.ts:4`) — the `subagent_type`
+/// the nudge tells the model to spawn.
+pub(crate) const VERIFICATION_AGENT_TYPE: &str = "verification";
+
+/// The exact claude-code verification-nudge suffix (`TaskUpdateTool.ts:397` /
+/// `TodoWriteTool.ts:107`), with `${VERIFICATION_AGENT_TYPE}` interpolated and
+/// the leading `\n\n`. The dash before "only the verifier" is an em-dash
+/// (U+2014), matching the TS `—` / literal `—`.
+pub(crate) fn verification_nudge_suffix() -> String {
+    format!("\n\nNOTE: You just closed out 3+ tasks and none of them was a verification step. Before writing your final summary, spawn the verification agent (subagent_type=\"{VERIFICATION_AGENT_TYPE}\"). You cannot self-assign PARTIAL by listing caveats in your summary — only the verifier issues a verdict.")
+}
+
+/// Case-insensitive `/verif/i` test (`TaskUpdateTool.ts:345` over `t.subject` /
+/// `TodoWriteTool.ts:83` over `t.content`). "verif" is ASCII, so
+/// ASCII-lowercasing the haystack and substring-searching is equivalent to the
+/// JS regex (no non-ASCII codepoint case-folds into `v`/`e`/`r`/`i`/`f`).
+pub(crate) fn matches_verif(s: &str) -> bool {
+    s.to_ascii_lowercase().contains("verif")
+}
+
+/// Shared predicate for the structural verification nudge — the common core of
+/// `TaskUpdateTool.ts:333-349` and `TodoWriteTool.ts:77-86`. Returns `true`
+/// when the nudge should be appended: the feature is on, this is the main
+/// thread, every item is completed, there are `>= 3` items, and no item's
+/// subject/content matches `/verif/i`.
+///
+/// `items` yields the per-item text the regex runs over (TaskUpdate: task
+/// subjects; TodoWrite: todo contents). `all_completed` is whether every item
+/// is `completed` (JS `Array.every`, vacuously `true` for an empty list — the
+/// `count >= 3` guard rejects that case); `count` is the item count.
+///
+/// PARITY-GAP: the exact TS feature gate is
+/// `feature('VERIFICATION_AGENT') && getFeatureValue_CACHED_MAY_BE_STALE('tengu_hive_evidence', false)`.
+/// Neither the bundle feature nor the growthbook flag is threaded into
+/// `ToolUseContext` / `BuiltinToolContext`, so — following the V2 gating
+/// convention (`is_todo_v2_enabled`) — we approximate the feature gate with the
+/// interactive-session signal (`!is_non_interactive_session`) plus the EXACT
+/// main-thread check `agent_id.is_none()` (== `!context.agentId`). This errs
+/// toward NOT firing (conservative). Caveat: because the V1 `TodoWrite` tool is
+/// itself only advertised in non-interactive sessions, this proxy suppresses
+/// the TodoWrite nudge in production; it surfaces in the V2 `TaskUpdate` path
+/// (and in interactive tests). Swap this term if the host later threads the
+/// real flags through.
+pub(crate) fn verification_nudge_needed<'a>(
+    agent_id_is_none: bool,
+    is_non_interactive_session: bool,
+    all_completed: bool,
+    count: usize,
+    mut items: impl Iterator<Item = &'a str>,
+) -> bool {
+    !is_non_interactive_session
+        && agent_id_is_none
+        && all_completed
+        && count >= 3
+        && !items.any(matches_verif)
+}
+
 // ==== Product-A V2 shared helpers ==========================================
 
 /// Wire string for an `engine::TodoState` (`pending`/`in_progress`/`completed`).
@@ -1299,15 +1368,40 @@ impl Tool for TaskUpdateTool {
                 updated_fields.push("blockedBy".into());
             }
         }
-        // PARITY-GAP: structural verification nudge (TaskUpdateTool.ts:875-891) omitted.
+        // Structural verification nudge (TaskUpdateTool.ts:326-349 + 396-398).
+        // Gated (cheaply) on the INPUT `status: "completed"` + main thread +
+        // interactive before re-listing the store, mirroring TS which only
+        // calls `listTasks` once `updates.status === 'completed'` and the
+        // feature/agent gate holds. `store.list()` here reflects the just-
+        // applied update (the store mutation above already persisted it).
+        let mut nudge_needed = false;
+        if input.get("status").and_then(Value::as_str) == Some("completed")
+            && ctx.agent_id.is_none()
+            && !ctx.options.is_non_interactive_session
+        {
+            let all_tasks = store.list().await;
+            let all_done = all_tasks.iter().all(|t| t.status == TodoState::Completed);
+            nudge_needed = verification_nudge_needed(
+                ctx.agent_id.is_none(),
+                ctx.options.is_non_interactive_session,
+                all_done,
+                all_tasks.len(),
+                all_tasks.iter().map(|t| t.subject.as_str()),
+            );
+        }
 
         emit_completed(&bus, TASK_UPDATE_COMPLETED, &invocation_id, duration(), &[]).await;
 
+        let mut content = render_task_update_success(&task_id, &updated_fields);
+        if nudge_needed {
+            content.push_str(&verification_nudge_suffix());
+        }
         let mut data = json!({
-            "content": render_task_update_success(&task_id, &updated_fields),
+            "content": content,
             "success": true,
             "taskId": task_id,
             "updatedFields": updated_fields,
+            "verificationNudgeNeeded": nudge_needed,
         });
         if let Some((from, to)) = status_change {
             data["statusChange"] = json!({ "from": status_wire(from), "to": status_wire(to) });
@@ -2098,6 +2192,98 @@ mod tests {
         assert_eq!(render_task_update_fail("9", Some("Task not found")), "Task not found");
         assert_eq!(render_task_update_fail("9", None), "Task #9 not found");
         assert_eq!(render_task_update_fail("9", Some("")), "Task #9 not found");
+    }
+
+    // ── verification nudge (sub-batch [5]) ───────────────────────────────
+
+    #[test]
+    fn verification_nudge_suffix_is_byte_exact() {
+        // Byte-locked against TaskUpdateTool.ts:397 / TodoWriteTool.ts:107 with
+        // VERIFICATION_AGENT_TYPE = 'verification'. Note the em-dash (U+2014).
+        assert_eq!(VERIFICATION_AGENT_TYPE, "verification");
+        assert_eq!(
+            verification_nudge_suffix(),
+            "\n\nNOTE: You just closed out 3+ tasks and none of them was a verification step. Before writing your final summary, spawn the verification agent (subagent_type=\"verification\"). You cannot self-assign PARTIAL by listing caveats in your summary \u{2014} only the verifier issues a verdict."
+        );
+    }
+
+    #[test]
+    fn matches_verif_is_case_insensitive_substring() {
+        assert!(matches_verif("Run verification tests"));
+        assert!(matches_verif("VERIFY the build"));
+        assert!(matches_verif("Reverify outputs"));
+        assert!(!matches_verif("Ship the feature"));
+        assert!(!matches_verif("verfy")); // typo: not a /verif/ match
+    }
+
+    #[test]
+    fn verification_nudge_fires_on_main_thread_all_done_3plus_no_verif() {
+        // main thread (agent_id none) + interactive + all completed + 3 items
+        // + none /verif/ ⇒ nudge.
+        assert!(verification_nudge_needed(
+            true,
+            false,
+            true,
+            3,
+            ["Implement", "Wire it up", "Document"].into_iter(),
+        ));
+    }
+
+    #[test]
+    fn verification_nudge_absent_when_fewer_than_three() {
+        assert!(!verification_nudge_needed(
+            true,
+            false,
+            true,
+            2,
+            ["Implement", "Document"].into_iter(),
+        ));
+    }
+
+    #[test]
+    fn verification_nudge_absent_when_an_item_matches_verif() {
+        assert!(!verification_nudge_needed(
+            true,
+            false,
+            true,
+            3,
+            ["Implement", "Verify the fix", "Document"].into_iter(),
+        ));
+    }
+
+    #[test]
+    fn verification_nudge_absent_for_subagent() {
+        // agent_id present (!context.agentId is false) ⇒ no nudge.
+        assert!(!verification_nudge_needed(
+            false,
+            false,
+            true,
+            3,
+            ["Implement", "Wire it up", "Document"].into_iter(),
+        ));
+    }
+
+    #[test]
+    fn verification_nudge_absent_when_not_all_completed() {
+        assert!(!verification_nudge_needed(
+            true,
+            false,
+            false,
+            3,
+            ["Implement", "Wire it up", "Document"].into_iter(),
+        ));
+    }
+
+    #[test]
+    fn verification_nudge_absent_in_non_interactive_session() {
+        // PARITY-GAP approximation of the unexpressible feature gate.
+        assert!(!verification_nudge_needed(
+            true,
+            true,
+            true,
+            3,
+            ["Implement", "Wire it up", "Document"].into_iter(),
+        ));
     }
 
     #[test]

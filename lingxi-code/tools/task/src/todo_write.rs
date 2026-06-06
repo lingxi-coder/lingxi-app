@@ -308,7 +308,13 @@ impl Tool for TodoWriteTool {
             return Err(ToolError::InvalidInput(msg));
         }
 
-        // Mutate session.
+        // Mutate session. `TodoWriteTool.ts:69-70` — `allDone = todos.every(completed)`
+        // and `newTodos = allDone ? [] : todos`: an all-completed write CLEARS the
+        // stored list (the loop has exited; nothing is left to track), while the
+        // result still reports the full `todos` the model sent (`newTodos: todos`,
+        // `:99`). An empty write (`todos = []`) is vacuously all-completed, so it
+        // also clears — matching TS `[].every(...) === true`.
+        let all_done = todos.iter().all(|t| t.status == TodoState::Completed);
         let session = ctx.session.as_ref().ok_or_else(|| {
             ToolError::Internal(
                 "TodoWrite: session not wired into ToolUseContext (M4-04 contract)".into(),
@@ -316,7 +322,11 @@ impl Tool for TodoWriteTool {
         })?;
         {
             let mut guard = session.lock().await;
-            guard.todos.clone_from(&todos);
+            if all_done {
+                guard.todos.clear();
+            } else {
+                guard.todos.clone_from(&todos);
+            }
         }
 
         let duration_ms = started_at.elapsed().as_millis() as u64;
@@ -330,7 +340,7 @@ impl Tool for TodoWriteTool {
         // the structural verification nudge when the main-thread agent closes
         // out a 3+ item all-completed list with no verification step
         // (`TodoWriteTool.ts:72-86`; regex runs over each todo's `content`).
-        let all_done = todos.iter().all(|t| t.status == TodoState::Completed);
+        // `all_done` was computed above for the clear-on-completion store.
         let nudge_needed = crate::task::verification_nudge_needed(
             ctx.agent_id.is_none(),
             ctx.options.is_non_interactive_session,
@@ -690,6 +700,48 @@ mod tests {
         let s = session.lock().await;
         assert_eq!(s.todos.len(), 1);
         assert_eq!(s.todos[0].active_form, "Shipping it");
+    }
+
+    // ── all-completed clears the stored list (TodoWriteTool.ts:70) ───────
+
+    #[tokio::test]
+    async fn all_completed_write_clears_session_but_reports_full_list() {
+        // `newTodos = allDone ? [] : todos`: every-completed write clears the
+        // stored list, while the result still reports the full list the model
+        // sent (`newTodos: todos`).
+        let (tool, sink, session, use_ctx) = make_tool_and_session();
+        tool.ctx.bus.attach_sink(sink.clone()).await;
+        let input = json!({
+            "todos": [
+                { "id": "a", "content": "build", "status": "completed", "activeForm": "Building" },
+                { "id": "b", "content": "ship",  "status": "completed", "activeForm": "Shipping" }
+            ]
+        });
+        let res = tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
+        {
+            let s = session.lock().await;
+            assert!(s.todos.is_empty(), "all-completed write clears the stored todos");
+        }
+        // The result still reports the full 2-item list + all-completed summary.
+        assert_eq!(res.data["todos"].as_array().unwrap().len(), 2);
+        assert_eq!(res.data["summary"]["completed"], 2);
+        assert_eq!(res.data["summary"]["pending"], 0);
+    }
+
+    #[tokio::test]
+    async fn partial_write_retains_session_todos() {
+        // Not all completed ⇒ the stored list is the full write (no clear).
+        let (tool, sink, session, use_ctx) = make_tool_and_session();
+        tool.ctx.bus.attach_sink(sink.clone()).await;
+        let input = json!({
+            "todos": [
+                { "id": "a", "content": "build", "status": "completed",   "activeForm": "Building" },
+                { "id": "b", "content": "ship",  "status": "in_progress", "activeForm": "Shipping" }
+            ]
+        });
+        tool.call(input, use_ctx, fresh_tx()).await.expect("ok");
+        let s = session.lock().await;
+        assert_eq!(s.todos.len(), 2, "a not-all-completed write is stored verbatim");
     }
 
     // ── verification nudge (sub-batch [5]) ───────────────────────────────

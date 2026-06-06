@@ -196,6 +196,9 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         cwd,
         claude_home,
         default_model,
+        // The Electron bridge does not expose --fallback-model (CLI --print
+        // only); the Opus consecutive-529 fallback stays disabled here.
+        fallback_model: None,
         provider_profiles,
         routing,
         mcp_paths: vec![project_mcp_path, global_mcp_path],
@@ -471,6 +474,7 @@ mod tests {
             cwd: cwd.clone(),
             claude_home: cwd.join(".claude"),
             default_model: "claude-sonnet-4-20250514".to_string(),
+            fallback_model: None,
             provider_profiles: None,
             routing: None,
             mcp_paths: vec![cwd.join(".mcp.json")],

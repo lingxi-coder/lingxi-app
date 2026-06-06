@@ -47,6 +47,7 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
         cwd: cwd.clone(),
         claude_home: cwd.join(".claude"),
         default_model: "claude-sonnet-4-20250514".to_string(),
+        fallback_model: None,
         provider_profiles: None,
         routing: None,
         mcp_paths: vec![cwd.join(".mcp.json")],

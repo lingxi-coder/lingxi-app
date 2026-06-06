@@ -294,6 +294,7 @@ impl McpTransport for MockMcpTransport {
         Ok(McpToolResultDto {
             content: serde_json::json!("ok"),
             is_error: false,
+            ..Default::default()
         })
     }
 

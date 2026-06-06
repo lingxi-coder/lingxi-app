@@ -636,6 +636,7 @@ mod tests {
             Ok(McpToolResultDto {
                 content: Value::Null,
                 is_error: false,
+                ..Default::default()
             })
         }
         async fn read_resource(

@@ -99,6 +99,27 @@ pub(crate) fn parse_full_name(full_name: &str) -> Result<(&str, &str), ToolError
     Ok((server, tool))
 }
 
+/// Assemble the optional `mcp_meta` passthrough for a surfaced tool result.
+///
+/// Mirrors claude-code (`services/mcp/client.ts:1897-1909`): the surfaced
+/// result carries a `mcpMeta` object ONLY when the server returned at least
+/// one of `_meta` / `structuredContent`, and that object contains ONLY the
+/// keys that were present (no empty-object, no `null` placeholders). The JSON
+/// values are forwarded byte-for-byte with no transformation.
+fn build_mcp_meta(meta: Option<Value>, structured_content: Option<Value>) -> Option<Value> {
+    if meta.is_none() && structured_content.is_none() {
+        return None;
+    }
+    let mut obj = serde_json::Map::new();
+    if let Some(m) = meta {
+        obj.insert("_meta".to_string(), m);
+    }
+    if let Some(sc) = structured_content {
+        obj.insert("structuredContent".to_string(), sc);
+    }
+    Some(Value::Object(obj))
+}
+
 /// Inspect an [`McpTransportSpec`] and return `(transport_kind, auth_kind)`.
 ///
 /// `transport_kind`: lowercase discriminator (`"stdio"`, `"sse"`, etc.).
@@ -538,7 +559,7 @@ impl Tool for MCPTool {
                     }),
                     new_messages: vec![],
                     context_modifier: None,
-                    mcp_meta: None,
+                    mcp_meta: build_mcp_meta(dto.meta, dto.structured_content),
                 })
             }
             Err(e) => {
@@ -1376,5 +1397,49 @@ mod tests {
             s,
             "ReadMcpResourceTool: MCP server \"fs\" is not registered"
         );
+    }
+
+    // -- build_mcp_meta passthrough (MCP Batch 6) ----------------------------
+
+    #[test]
+    fn build_mcp_meta_both_present_byte_faithful() {
+        let meta = json!({ "anthropic/trace": "abc", "nested": { "k": [1, 2, 3] } });
+        let sc = json!({ "rows": [{ "id": 7 }], "total": 1 });
+        let out = build_mcp_meta(Some(meta.clone()), Some(sc.clone())).expect("Some when present");
+        // Mirrors claude-code `{ _meta, structuredContent }` with verbatim values.
+        assert_eq!(out, json!({ "_meta": meta, "structuredContent": sc }));
+    }
+
+    #[test]
+    fn build_mcp_meta_only_meta() {
+        let meta = json!({ "x": 1 });
+        let out = build_mcp_meta(Some(meta.clone()), None).expect("Some when _meta present");
+        // Only the present key is included — no `structuredContent` placeholder.
+        assert_eq!(out, json!({ "_meta": meta }));
+        assert!(out.as_object().expect("object").get("structuredContent").is_none());
+    }
+
+    #[test]
+    fn build_mcp_meta_only_structured_content() {
+        let sc = json!({ "y": 2 });
+        let out = build_mcp_meta(None, Some(sc.clone())).expect("Some when structuredContent present");
+        assert_eq!(out, json!({ "structuredContent": sc }));
+        assert!(out.as_object().expect("object").get("_meta").is_none());
+    }
+
+    #[test]
+    fn build_mcp_meta_both_absent_is_none() {
+        // No `_meta`/`structuredContent` → `None` (never an empty object).
+        assert!(build_mcp_meta(None, None).is_none());
+    }
+
+    #[test]
+    fn build_mcp_meta_preserves_explicit_null_values() {
+        // A present-but-`null` member is still "present" on the wire and is
+        // forwarded verbatim (claude-code keys off truthiness; in Rust the
+        // serde layer already distinguishes absent (`None`) from `null`
+        // (`Some(Value::Null)`), so an explicit null is carried through).
+        let out = build_mcp_meta(Some(Value::Null), None).expect("Some when key present");
+        assert_eq!(out, json!({ "_meta": Value::Null }));
     }
 }

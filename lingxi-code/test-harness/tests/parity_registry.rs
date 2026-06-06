@@ -1,6 +1,6 @@
 //! M4-09 parity driver — locks v0.5.0 registry cardinality.
 //!
-//! Asserts that the fixture `registry_40_tools.json` declares exactly 40
+//! Asserts that the fixture `registry_42_tools.json` declares exactly 42
 //! tools across 9 categories AND that each declared name is a known
 //! `*_TOOL_NAME` constant in production (`tools::builtin`).
 //!
@@ -25,24 +25,24 @@ struct Fixture {
 }
 
 fn fx() -> Fixture {
-    load_fixture::<Fixture>("registry_40_tools")
+    load_fixture::<Fixture>("registry_42_tools")
 }
 
 #[test]
-fn registry_40_tools_fixture_totals_to_40() {
+fn registry_42_tools_fixture_totals_to_42() {
     let f = fx();
-    assert_eq!(f.total, 40, "fixture declares total=40");
+    assert_eq!(f.total, 42, "fixture declares total=42");
     let summed: usize = f.by_category.values().map(Vec::len).sum();
     assert_eq!(
-        summed, 40,
-        "sum of by_category lengths is 40 (got {summed})"
+        summed, 42,
+        "sum of by_category lengths is 42 (got {summed})"
     );
     let unique: BTreeSet<&String> = f.by_category.values().flat_map(|v| v.iter()).collect();
-    assert_eq!(unique.len(), 40, "by_category names are unique");
+    assert_eq!(unique.len(), 42, "by_category names are unique");
 }
 
 #[test]
-fn registry_40_tools_fixture_categories_locked() {
+fn registry_42_tools_fixture_categories_locked() {
     let f = fx();
     let cats: BTreeSet<&str> = f.by_category.keys().map(String::as_str).collect();
     let expected: BTreeSet<&str> = [
@@ -65,7 +65,7 @@ fn registry_40_tools_fixture_categories_locked() {
     assert_eq!(lens["agent"], 8);
     assert_eq!(lens["team"], 2);
     assert_eq!(lens["mcp_lsp"], 5);
-    assert_eq!(lens["system"], 8);
+    assert_eq!(lens["system"], 10);
 }
 
 /// Cross-check the fixture's 40 names against the production
@@ -141,6 +141,8 @@ fn fixture_names_match_production_constants() {
             "CronCreate",
             tool_cron::schedule_cron::CRON_CREATE_TOOL_NAME,
         ),
+        ("CronDelete", tool_cron::cron_delete::CRON_DELETE_TOOL_NAME),
+        ("CronList", tool_cron::cron_list::CRON_LIST_TOOL_NAME),
         ("ToolSearch", tool_meta::tool_search::TOOL_SEARCH_TOOL_NAME),
         (
             "RemoteTrigger",
@@ -152,7 +154,7 @@ fn fixture_names_match_production_constants() {
         ),
     ];
 
-    assert_eq!(pairs.len(), 40, "production-constant lock covers 40 tools");
+    assert_eq!(pairs.len(), 42, "production-constant lock covers 42 tools");
 
     for (fixture_name, production_const) in pairs {
         assert_eq!(
@@ -165,7 +167,7 @@ fn fixture_names_match_production_constants() {
         );
     }
 
-    // Final sanity: the 40 paired names exactly match the fixture set.
+    // Final sanity: the 42 paired names exactly match the fixture set.
     let paired: BTreeSet<String> = pairs.iter().map(|(n, _)| (*n).to_string()).collect();
     assert_eq!(paired, names, "fixture and production-constant sets agree");
 }

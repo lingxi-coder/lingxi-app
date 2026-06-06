@@ -24,7 +24,9 @@ fn exempt_tools() -> HashSet<&'static str> {
         "exit_plan_mode", // returns empty object (handled in plan_mode.rs alongside enter)
         "exit_worktree",  // returns empty object (handled in worktree.rs alongside enter)
         "sleep",          // returns { slept_ms: u64 }
-        "schedule_cron",  // returns { next_fire_unix_secs, task_id }
+        "schedule_cron",  // returns { id, humanSchedule, recurring, durable }
+        "cron_delete",    // returns { id } (fixed shape)
+        "cron_list",      // returns a bounded jobs array (<= MAX_JOBS=50); max_result_size_chars caps it
         "task_stop",      // returns { stopped: bool, task_id }
         "task_update",    // returns { task_id, status }
         "team_delete",    // returns { deleted: bool }
@@ -61,6 +63,8 @@ fn resolve_tool_src(repo_root: &std::path::Path, file: &str) -> PathBuf {
         "config.rs" => Some("meta/src/config.rs"),
         "tool_search.rs" => Some("meta/src/tool_search.rs"),
         "schedule_cron.rs" => Some("cron/src/schedule_cron.rs"),
+        "cron_delete.rs" => Some("cron/src/cron_delete.rs"),
+        "cron_list.rs" => Some("cron/src/cron_list.rs"),
         "remote_trigger.rs" => Some("cron/src/remote_trigger.rs"),
         "ask_user_question.rs" => Some("ui/src/ask_user_question.rs"),
         "brief.rs" => Some("ui/src/brief.rs"),
@@ -109,6 +113,8 @@ fn tool_files() -> Vec<&'static str> {
         "config.rs",
         "skill.rs",
         "schedule_cron.rs",
+        "cron_delete.rs",
+        "cron_list.rs",
         "tool_search.rs",
         "remote_trigger.rs",
         "synthetic_output.rs",

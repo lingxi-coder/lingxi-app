@@ -36,6 +36,14 @@ fn tool_names_match_production_constants() {
         tool_cron::schedule_cron::CRON_CREATE_TOOL_NAME
     );
     assert_eq!(
+        n["cron_delete"].as_str().unwrap(),
+        tool_cron::cron_delete::CRON_DELETE_TOOL_NAME
+    );
+    assert_eq!(
+        n["cron_list"].as_str().unwrap(),
+        tool_cron::cron_list::CRON_LIST_TOOL_NAME
+    );
+    assert_eq!(
         n["tool_search"].as_str().unwrap(),
         tool_meta::tool_search::TOOL_SEARCH_TOOL_NAME
     );

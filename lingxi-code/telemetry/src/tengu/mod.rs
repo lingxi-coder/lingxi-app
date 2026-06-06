@@ -60,7 +60,9 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     //        → 330 total. Cumulative across releases:
     //          v0.4.0 (M3-06): 196 · v0.5.0 (M4-09): 238 ·
     //          v0.6.0 (M5-14): 315 · v0.7.0 (M6-09): 326 · v0.8.0 (M7-16): 330.
-    const TOTAL: usize = 25 + 30 + 20 + 134 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13;
+    // CronDelete/CronList: tool block grows 134 → 140 (+6, 2 tools × 3 stages)
+    //        → 336 total.
+    const TOTAL: usize = 25 + 30 + 20 + 140 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;

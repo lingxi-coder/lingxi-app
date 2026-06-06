@@ -6,6 +6,8 @@ expression: names
 - AskUserQuestion
 - Config
 - CronCreate
+- CronDelete
+- CronList
 - Edit
 - EnterPlanMode
 - ExitPlanMode

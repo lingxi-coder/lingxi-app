@@ -8,6 +8,8 @@
     "config": "Config",
     "skill": "Skill",
     "schedule_cron": "CronCreate",
+    "cron_delete": "CronDelete",
+    "cron_list": "CronList",
     "tool_search": "ToolSearch",
     "remote_trigger": "RemoteTrigger",
     "synthetic_output": "StructuredOutput"

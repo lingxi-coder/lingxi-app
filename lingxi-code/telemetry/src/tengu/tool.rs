@@ -298,6 +298,18 @@ pub const SCHEDULE_CRON_STARTED: &str = "tengu_tool_schedule_cron_started";
 pub const SCHEDULE_CRON_COMPLETED: &str = "tengu_tool_schedule_cron_completed";
 /// `tengu_tool_schedule_cron_failed` — `ScheduleCron` tool errored (M4-08).
 pub const SCHEDULE_CRON_FAILED: &str = "tengu_tool_schedule_cron_failed";
+/// `tengu_tool_cron_delete_started` — `CronDelete` tool began locating the job.
+pub const CRON_DELETE_STARTED: &str = "tengu_tool_cron_delete_started";
+/// `tengu_tool_cron_delete_completed` — `CronDelete` tool removed the descriptor.
+pub const CRON_DELETE_COMPLETED: &str = "tengu_tool_cron_delete_completed";
+/// `tengu_tool_cron_delete_failed` — `CronDelete` tool errored.
+pub const CRON_DELETE_FAILED: &str = "tengu_tool_cron_delete_failed";
+/// `tengu_tool_cron_list_started` — `CronList` tool began scanning the dir.
+pub const CRON_LIST_STARTED: &str = "tengu_tool_cron_list_started";
+/// `tengu_tool_cron_list_completed` — `CronList` tool returned the job list.
+pub const CRON_LIST_COMPLETED: &str = "tengu_tool_cron_list_completed";
+/// `tengu_tool_cron_list_failed` — `CronList` tool errored.
+pub const CRON_LIST_FAILED: &str = "tengu_tool_cron_list_failed";
 /// `tengu_tool_tool_search_started` — `ToolSearch` began scoring (M4-08).
 pub const TOOL_SEARCH_STARTED: &str = "tengu_tool_tool_search_started";
 /// `tengu_tool_tool_search_completed` — `ToolSearch` returned ranked list (M4-08).
@@ -324,11 +336,12 @@ pub const LSP_COMPLETED: &str = "tengu_tool_lsp_completed";
 /// `tengu_tool_lsp_failed` — `LSPTool` errored (M4-07).
 pub const LSP_FAILED: &str = "tengu_tool_lsp_failed";
 
-/// Order-locked array of all 134 names; consumed by `tengu::ALL_EVENT_NAMES`.
+/// Order-locked array of all 140 names; consumed by `tengu::ALL_EVENT_NAMES`.
 /// M3-06 locked the first 40; M4-02 appended 9 (powershell/repl/sleep);
 /// M4-03 appended 3 (`web_search`); M4-04 appended 15 workflow events;
 /// M4-05 appended 24 agent/task events; M4-06 appends 6 team events;
-/// M4-07 appends 13 MCP + LSP events; M4-08 appends 24 system events.
+/// M4-07 appends 13 MCP + LSP events; M4-08 appends 24 system events;
+/// CronDelete/CronList append 6 (2 tools × 3 lifecycle stages).
 pub(crate) const NAMES: &[&str] = &[
     STARTED,
     COMPLETED,
@@ -462,6 +475,13 @@ pub(crate) const NAMES: &[&str] = &[
     SCHEDULE_CRON_STARTED,
     SCHEDULE_CRON_COMPLETED,
     SCHEDULE_CRON_FAILED,
+    // CronDelete / CronList lifecycle events (6, 2 tools × 3 stages)
+    CRON_DELETE_STARTED,
+    CRON_DELETE_COMPLETED,
+    CRON_DELETE_FAILED,
+    CRON_LIST_STARTED,
+    CRON_LIST_COMPLETED,
+    CRON_LIST_FAILED,
     TOOL_SEARCH_STARTED,
     TOOL_SEARCH_COMPLETED,
     TOOL_SEARCH_FAILED,
@@ -554,9 +574,41 @@ mod m4_04_workflow_event_tests {
         }
         assert_eq!(
             NAMES.len(),
-            134,
-            "M3-06 40 + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 = 134"
+            140,
+            "M3-06 40 + M4-02 9 + M4-03 3 + M4-04 15 + M4-05 24 + M4-06 6 + M4-07 13 + M4-08 24 + cron_delete/cron_list 6 = 140"
         );
+    }
+}
+
+#[cfg(test)]
+mod cron_delete_list_event_tests {
+    use super::*;
+
+    #[test]
+    fn cron_delete_list_constants_are_locked() {
+        assert_eq!(CRON_DELETE_STARTED, "tengu_tool_cron_delete_started");
+        assert_eq!(CRON_DELETE_COMPLETED, "tengu_tool_cron_delete_completed");
+        assert_eq!(CRON_DELETE_FAILED, "tengu_tool_cron_delete_failed");
+        assert_eq!(CRON_LIST_STARTED, "tengu_tool_cron_list_started");
+        assert_eq!(CRON_LIST_COMPLETED, "tengu_tool_cron_list_completed");
+        assert_eq!(CRON_LIST_FAILED, "tengu_tool_cron_list_failed");
+    }
+
+    #[test]
+    fn names_array_contains_all_6_cron_events() {
+        for name in [
+            CRON_DELETE_STARTED,
+            CRON_DELETE_COMPLETED,
+            CRON_DELETE_FAILED,
+            CRON_LIST_STARTED,
+            CRON_LIST_COMPLETED,
+            CRON_LIST_FAILED,
+        ] {
+            assert!(
+                NAMES.contains(&name),
+                "NAMES array missing cron delete/list event: {name}"
+            );
+        }
     }
 }
 

@@ -44,7 +44,8 @@ fn registry_is_exactly_330_entries() {
     // AppState::open_*/close_screen + MessageSelectorState::open/open_export).
     // tengu_tui_command_palette_opened/vim_mode_entered/key_pressed stay
     // deferred to M8 (no clean/aggregated emit site). 326 + 4 = 330.
-    assert_eq!(ALL_EVENT_NAMES.len(), 330);
+    // CronDelete/CronList added 6 (2 tools × 3 lifecycle stages): 330 + 6 = 336.
+    assert_eq!(ALL_EVENT_NAMES.len(), 336);
 }
 
 #[test]
@@ -167,19 +168,21 @@ fn category_ordering_preserved() {
     // shifting downstream offsets by +24.
     // M5-07 shifts all post-session offsets by +3.
     // M5-08 shifts all post-session offsets by another +2.
-    for n in &ALL_EVENT_NAMES[75..209] {
+    // CronDelete/CronList grow the tool block by +6 (134 → 140), shifting all
+    // downstream offsets by +6.
+    for n in &ALL_EVENT_NAMES[75..215] {
         assert!(n.starts_with("tengu_tool_"), "tool block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[209..219] {
+    for n in &ALL_EVENT_NAMES[215..225] {
         assert!(n.starts_with("tengu_cost_"), "cost block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[219..227] {
+    for n in &ALL_EVENT_NAMES[225..233] {
         assert!(n.starts_with("tengu_oauth_"), "oauth block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[227..239] {
+    for n in &ALL_EVENT_NAMES[233..245] {
         assert!(n.starts_with("tengu_memory_"), "memory block: {n}");
     }
-    for n in &ALL_EVENT_NAMES[239..242] {
+    for n in &ALL_EVENT_NAMES[245..248] {
         assert!(n.starts_with("tengu_settings_"), "settings block: {n}");
     }
     // M5-02 grew the orchestrator block by +3 (conversation lifecycle).
@@ -189,7 +192,7 @@ fn category_ordering_preserved() {
     // Block size is now 17; release marker still trails. Walk order is
     // fixed by tengu::mod.rs's concat_all (settings → orchestrator →
     // release).
-    for n in &ALL_EVENT_NAMES[242..259] {
+    for n in &ALL_EVENT_NAMES[248..265] {
         assert!(
             n.starts_with("tengu_orchestrator_") || n.starts_with("tengu_repl_"),
             "orchestrator block: {n}"
@@ -197,15 +200,17 @@ fn category_ordering_preserved() {
     }
     // M5-14 grew the release block from 1 to 2 (+lingxi_core_v0_6_0_released).
     // M6-09 grew it from 2 to 3 (+lingxi_core_v0_7_0_released).
-    // M7-16 grew it from 3 to 4 (+lingxi_core_v0_8_0_released): 259..263.
-    for n in &ALL_EVENT_NAMES[259..263] {
+    // M7-16 grew it from 3 to 4 (+lingxi_core_v0_8_0_released).
+    // CronDelete/CronList shift the start by +6 (tool block 134→140): 265..269.
+    for n in &ALL_EVENT_NAMES[265..269] {
         assert!(n.starts_with("lingxi_core_"), "release block: {n}");
     }
     // M5-10/M5-11: command block (54 events: 18 batch-1 + 36 batch-2) follows
     // the release markers. Walk order (per tengu::mod.rs concat_all):
     // … → release → command. M6-09 shifted the start by +1 (release 2→3);
-    // M7-16 shifts it another +1 (release 3→4): 263..317.
-    for n in &ALL_EVENT_NAMES[263..317] {
+    // M7-16 shifts it another +1 (release 3→4). CronDelete/CronList shift it
+    // by +6 (tool block 134→140): 269..323.
+    for n in &ALL_EVENT_NAMES[269..323] {
         assert!(n.starts_with("tengu_command_"), "command block: {n}");
     }
     // M6-01: tui block (4 events) trails command.
@@ -214,8 +219,9 @@ fn category_ordering_preserved() {
     // M6-09: tui block grows to 10 events (+scroll_started/scroll_ended).
     // M7-16: tui block grows to 13 events
     //        (+screen_opened/screen_closed/search_opened). Block shifted by +2
-    //        total vs M6-09 (release 2→3→4): 317..330.
-    for n in &ALL_EVENT_NAMES[317..330] {
+    //        total vs M6-09 (release 2→3→4). CronDelete/CronList shift it by +6
+    //        (tool block 134→140): 323..336.
+    for n in &ALL_EVENT_NAMES[323..336] {
         assert!(n.starts_with("tengu_tui_"), "tui block: {n}");
     }
 }

@@ -1,4 +1,5 @@
-//! Scheduling tools: CronCreate, RemoteTrigger. Extracted in M8-P7. Cross-platform.
+//! Scheduling tools: CronCreate, CronDelete, CronList, RemoteTrigger.
+//! Extracted in M8-P7. Cross-platform.
 #![forbid(unsafe_code)]
 #![allow(
     clippy::cast_possible_wrap,
@@ -14,8 +15,12 @@
     clippy::doc_markdown,
     clippy::manual_let_else
 )]
+pub mod cron_delete;
+pub mod cron_list;
 pub mod remote_trigger;
 pub mod schedule_cron;
+pub use cron_delete::CronDeleteTool;
+pub use cron_list::CronListTool;
 pub use remote_trigger::{ClaudeAiAuthProvider, RemoteTriggerTool};
 pub use schedule_cron::CronCreateTool;
 /// Register the cron scheduling tools against `reg`.
@@ -39,5 +44,7 @@ pub fn register_all_with_auth(
 ) {
     use std::sync::Arc;
     reg.register_builtin(Arc::new(CronCreateTool::new(ctx.clone())));
+    reg.register_builtin(Arc::new(CronDeleteTool::new(ctx.clone())));
+    reg.register_builtin(Arc::new(CronListTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(RemoteTriggerTool::new(ctx, auth)));
 }

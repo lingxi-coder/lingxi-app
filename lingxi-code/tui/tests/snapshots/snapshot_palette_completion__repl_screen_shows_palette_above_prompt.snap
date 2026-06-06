@@ -1,6 +1,6 @@
 ---
-source: crates/tui/tests/snapshot_palette_completion.rs
-assertion_line: 59
+source: tui/tests/snapshot_palette_completion.rs
+assertion_line: 62
 expression: out
 ---
  . $0.0000 0% default
@@ -9,6 +9,6 @@ expression: out
 /color – (unimplemented in v0.6.0)
 /commit – (unimplemented in v0.6.0)
 /config – Open config panel
-❯ /co
+❯ /co 
 ❯
 ? for shortcuts     shift + ⏎ for newline

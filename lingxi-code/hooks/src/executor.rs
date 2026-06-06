@@ -2502,6 +2502,12 @@ mod async_path_tests {
 
     /// A Command hook with the supplied `blocking` flag, subscribed to `PreToolUse`.
     fn command_hook(blocking: bool) -> HookDefinition {
+        command_hook_with_priority(blocking, 0)
+    }
+
+    /// As [`command_hook`] but with an explicit `priority` so a test can pin the
+    /// firing order of a mixed (async + blocking) set deterministically.
+    fn command_hook_with_priority(blocking: bool, priority: i32) -> HookDefinition {
         HookDefinition {
             id: HookId::new(),
             name: "async-cmd".into(),
@@ -2516,9 +2522,45 @@ mod async_path_tests {
             source: HookSource::User,
             blocking,
             timeout: None,
-            priority: 0,
+            priority,
             once: false,
             status_message: None,
+        }
+    }
+
+    /// A `ProcessRunner` that returns a pre-canned [`ProcessOutput`] immediately
+    /// (no gate) and records how many times it was invoked. Used by the mixed
+    /// test where both the async and the blocking hook share one runner: we only
+    /// need to assert the aggregate, not park either run.
+    struct CountingRunner {
+        output: StdMutex<ProcessOutput>,
+        runs: AtomicU64,
+    }
+    impl CountingRunner {
+        fn new(output: ProcessOutput) -> Arc<Self> {
+            Arc::new(Self {
+                output: StdMutex::new(output),
+                runs: AtomicU64::new(0),
+            })
+        }
+    }
+    #[async_trait]
+    impl ProcessRunner for CountingRunner {
+        async fn run(&self, _cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            Ok(self.output.lock().unwrap().clone())
+        }
+        async fn spawn_background(
+            &self,
+            _cmd: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+        async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
         }
     }
 
@@ -2649,6 +2691,82 @@ mod async_path_tests {
         assert_eq!(agg.decision, Some(HookDecision::Block));
         assert_eq!(agg.reason.as_deref(), Some("policy violation"));
         assert_eq!(agg.all_results.len(), 1, "blocking hook IS in the aggregate");
+    }
+
+    /// (5) Mixed: one async (`blocking == false`) + one blocking hook fire for
+    /// the same event. ONLY the blocking hook contributes to the aggregate.
+    ///
+    /// The async hook is given the HIGHER priority so it is evaluated FIRST
+    /// (`match_event` sorts priority-descending). Even though it would exit 2 —
+    /// a `Block` on the synchronous path — it is backgrounded and excluded, so
+    /// the aggregate's eventual `Block` comes solely from the lower-priority
+    /// blocking hook. Both share one immediate runner: it is invoked exactly
+    /// twice (once inline for the blocking hook, once in the background for the
+    /// async hook), proving the async hook still runs — just not in the
+    /// aggregate.
+    #[tokio::test]
+    async fn mixed_async_and_blocking_only_blocking_contributes() {
+        let runtime = TestRuntime::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let async_reg = Arc::new(AsyncHookRegistry::new(runtime, tx));
+
+        // exit 2 on BOTH: if the async hook could contribute, the aggregate
+        // would still Block — but with the WRONG reason. We assert the reason is
+        // the blocking hook's, proving the async exit-2 was never folded in.
+        let runner = CountingRunner::new(out("", "blocking-reason", 2));
+
+        // Async hook: HIGHER priority ⇒ evaluated first ⇒ backgrounded, excluded.
+        let async_hook = command_hook_with_priority(false, 100);
+        let async_id = async_hook.id;
+        // Blocking hook: LOWER priority ⇒ evaluated second ⇒ its Block is the
+        // aggregate's only decision.
+        let blocking_hook = command_hook_with_priority(true, 0);
+        let blocking_id = blocking_hook.id;
+
+        let mut registry = HookRegistry::new();
+        registry.register(async_hook);
+        registry.register(blocking_hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner.clone(), Arc::new(StubSandbox))
+        .with_async_registry(async_reg.clone());
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        // The aggregate Block comes ONLY from the blocking hook.
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        assert_eq!(
+            agg.reason.as_deref(),
+            Some("blocking-reason"),
+            "the Block reason must be the blocking hook's, not the backgrounded one's",
+        );
+        assert_eq!(
+            agg.all_results.len(),
+            1,
+            "only the blocking hook is recorded in the aggregate",
+        );
+        assert_eq!(
+            agg.all_results[0].0, blocking_id,
+            "the single aggregate result is the blocking hook's",
+        );
+
+        // The async hook still RAN (fire-and-forget) — its completion lands on
+        // the channel keyed by its own id, and it was never in the aggregate.
+        let (got_id, _got) = rx.recv().await.expect("async hook completion publishes");
+        assert_eq!(
+            got_id, async_id,
+            "the backgrounded completion is the async hook's, separate from the aggregate",
+        );
+
+        // Both hooks executed exactly once (inline blocking + background async).
+        assert_eq!(
+            runner.runs.load(Ordering::SeqCst),
+            2,
+            "both the blocking (inline) and async (background) hooks ran",
+        );
     }
 }
 

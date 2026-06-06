@@ -38,7 +38,8 @@ pub const BRIEF_SUBDIR: &str = "brief";
 pub const BRIEF_FILE_SUFFIX: &str = ".txt";
 /// 9-char task-id prefix character (`b` for brief).
 pub const BRIEF_TASK_ID_PREFIX: char = 'b';
-/// Maximum body length (sane upper bound; 1 MB matches BashTool output cap).
+/// Maximum message length (sane upper bound; 1 MB matches BashTool output cap).
+/// Rust-side file-write guard only — the TS `message: z.string()` has no max.
 pub const MAX_BRIEF_BODY_LEN: usize = 1_048_576;
 
 /// Generate a 9-char `[b][0-9a-z]{8}` task id matching M1 `TaskId` format.
@@ -84,12 +85,28 @@ impl BriefTool {
 }
 
 static SCHEMA: Lazy<Value> = Lazy::new(|| {
+    // TS `z.strictObject({ message, attachments?, status })`
+    // (`BriefTool.ts:20-39`). Byte-faithful field descriptions.
     json!({
         "type": "object",
+        "additionalProperties": false,
         "properties": {
-            "body": { "type": "string", "minLength": 1 }
+            "message": {
+                "type": "string",
+                "description": "The message for the user. Supports markdown formatting."
+            },
+            "attachments": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional file paths (absolute or relative to cwd) to attach. Use for photos, screenshots, diffs, logs, or any file the user should see alongside your message."
+            },
+            "status": {
+                "type": "string",
+                "enum": ["normal", "proactive"],
+                "description": "Use 'proactive' when you're surfacing something the user hasn't asked for and needs to see now — task completion while they're away, a blocker you hit, an unsolicited status update. Use 'normal' when replying to something the user just said."
+            }
         },
-        "required": ["body"]
+        "required": ["message", "status"]
     })
 });
 
@@ -169,17 +186,16 @@ impl Tool for BriefTool {
         input: &Value,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        let body = input
-            .get("body")
+        // TS schema: `message: z.string()` (no minLength). Require a string but
+        // accept empty. `MAX_BRIEF_BODY_LEN` is a Rust-side file-write guard.
+        let message = input
+            .get("message")
             .and_then(Value::as_str)
-            .ok_or_else(|| ValidationError("Brief: missing or non-string body".into()))?;
-        if body.is_empty() {
-            return Err(ValidationError("Brief: body is empty".into()));
-        }
-        if body.len() > MAX_BRIEF_BODY_LEN {
+            .ok_or_else(|| ValidationError("Brief: missing or non-string message".into()))?;
+        if message.len() > MAX_BRIEF_BODY_LEN {
             return Err(ValidationError(format!(
-                "Brief: body length {} exceeds max {}",
-                body.len(),
+                "Brief: message length {} exceeds max {}",
+                message.len(),
                 MAX_BRIEF_BODY_LEN
             )));
         }
@@ -195,33 +211,40 @@ impl Tool for BriefTool {
         let started = Instant::now();
         let bus = self.ctx.bus.clone();
 
-        let body = match input.get("body").and_then(Value::as_str) {
+        let message = match input.get("message").and_then(Value::as_str) {
             Some(s) => s.to_string(),
             None => {
-                emit_failed(&bus, "missing_body", started.elapsed().as_millis() as u64).await;
+                emit_failed(
+                    &bus,
+                    "missing_message",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
                 return Err(ToolError::InvalidInput(
-                    "Brief: missing or non-string body".into(),
+                    "Brief: missing or non-string message".into(),
                 ));
             }
         };
-        if body.is_empty() {
-            emit_failed(&bus, "empty_body", started.elapsed().as_millis() as u64).await;
-            return Err(ToolError::InvalidInput("Brief: body is empty".into()));
-        }
-        if body.len() > MAX_BRIEF_BODY_LEN {
-            emit_failed(&bus, "body_too_large", started.elapsed().as_millis() as u64).await;
+        if message.len() > MAX_BRIEF_BODY_LEN {
+            emit_failed(
+                &bus,
+                "message_too_large",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
             return Err(ToolError::InvalidInput(format!(
-                "Brief: body length {} exceeds max {MAX_BRIEF_BODY_LEN}",
-                body.len()
+                "Brief: message length {} exceeds max {MAX_BRIEF_BODY_LEN}",
+                message.len()
             )));
         }
 
+        let preview: String = message.chars().take(80).collect();
         let mut md: LogEventMetadata = HashMap::new();
-        md.insert("body_len".into(), AnalyticsValue::Int(body.len() as i64));
         md.insert(
-            "_PROTO_body_preview".into(),
-            pii_str(&body[..body.len().min(80)]),
+            "message_len".into(),
+            AnalyticsValue::Int(message.len() as i64),
         );
+        md.insert("_PROTO_message_preview".into(), pii_str(&preview));
         bus.log_event(BRIEF_STARTED, md).await;
 
         let home = match home_dir_or_internal() {
@@ -243,7 +266,7 @@ impl Tool for BriefTool {
                 )));
             }
         }
-        if let Err(e) = tokio::fs::write(&path, body.as_bytes()).await {
+        if let Err(e) = tokio::fs::write(&path, message.as_bytes()).await {
             emit_failed(&bus, "io_write", started.elapsed().as_millis() as u64).await;
             return Err(ToolError::Io(format!(
                 "Brief: io error at {}: {e}",
@@ -258,7 +281,7 @@ impl Tool for BriefTool {
         );
         md.insert(
             "bytes_written".into(),
-            AnalyticsValue::Int(body.len() as i64),
+            AnalyticsValue::Int(message.len() as i64),
         );
         md.insert("_PROTO_path".into(), pii_str(&path.display().to_string()));
         bus.log_event(BRIEF_COMPLETED, md).await;
@@ -267,7 +290,7 @@ impl Tool for BriefTool {
             data: json!({
                 "task_id": task_id,
                 "path": path.display().to_string(),
-                "bytes_written": body.len(),
+                "bytes_written": message.len(),
             }),
             new_messages: vec![],
             context_modifier: None,
@@ -326,15 +349,40 @@ mod tests {
         assert_eq!(p, PathBuf::from("/tmp/h/.claude/brief/babcd1234.txt"));
     }
 
+    #[test]
+    fn schema_is_strict_object_with_message_and_status() {
+        // TS `z.strictObject({ message, attachments?, status })`.
+        let tool = BriefTool::new(shell_test_ctx(dummy_out()));
+        let schema = tool.input_schema();
+        assert_eq!(schema["type"], json!("object"));
+        assert_eq!(schema["additionalProperties"], json!(false));
+        assert_eq!(schema["required"], json!(["message", "status"]));
+        assert_eq!(schema["properties"]["message"]["type"], json!("string"));
+        assert_eq!(
+            schema["properties"]["status"]["enum"],
+            json!(["normal", "proactive"])
+        );
+        assert_eq!(
+            schema["properties"]["attachments"]["items"]["type"],
+            json!("string")
+        );
+        // minLength dropped from the message field.
+        assert!(schema["properties"]["message"].get("minLength").is_none());
+    }
+
     #[tokio::test]
     async fn writes_brief_under_home_dot_claude_brief() {
         let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
         let tool = BriefTool::new(shell_test_ctx(dummy_out()));
-        let body = "# Brief\n\nHello world.";
+        let message = "# Brief\n\nHello world.";
         let out = tool
-            .call(json!({"body": body}), fresh_ctx(), fresh_tx())
+            .call(
+                json!({"message": message, "status": "normal"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
             .await
             .expect("ok");
         let path = out.data["path"].as_str().unwrap();
@@ -344,26 +392,25 @@ mod tests {
         );
         assert!(path.to_lowercase().ends_with(".txt"));
         let written = tokio::fs::read_to_string(path).await.unwrap();
-        assert_eq!(written, body);
+        assert_eq!(written, message);
     }
 
     #[tokio::test]
-    async fn rejects_missing_body() {
+    async fn rejects_missing_message() {
         let tool = BriefTool::new(shell_test_ctx(dummy_out()));
         let err = tool
-            .call(json!({}), fresh_ctx(), fresh_tx())
+            .call(json!({"status": "normal"}), fresh_ctx(), fresh_tx())
             .await
             .expect_err("missing");
-        assert!(format!("{err}").contains("missing or non-string body"));
+        assert!(format!("{err}").contains("missing or non-string message"));
     }
 
     #[tokio::test]
-    async fn rejects_empty_body() {
+    async fn accepts_empty_message() {
+        // minLength dropped — an empty message now validates (TS `z.string()`).
         let tool = BriefTool::new(shell_test_ctx(dummy_out()));
-        let err = tool
-            .call(json!({"body": ""}), fresh_ctx(), fresh_tx())
+        tool.validate_input(&json!({"message": "", "status": "normal"}), &fresh_ctx())
             .await
-            .expect_err("empty");
-        assert!(format!("{err}").contains("body is empty"));
+            .expect("empty message validates");
     }
 }

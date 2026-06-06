@@ -118,13 +118,27 @@ async fn emit_failed(
 #[derive(Clone)]
 pub struct BashTool {
     ctx: BuiltinToolContext,
+    /// Persistent shell working directory (claude-code `STATE.cwd`).
+    ///
+    /// A foreground `cd` updates this via a `pwd -P` readback after the
+    /// command runs, so subsequent Bash calls inherit the new directory
+    /// (the tool registry holds one long-lived `Arc<BashTool>` per session,
+    /// so this `Arc<Mutex<..>>` field persists across calls — BASH.4 Design B).
+    ///
+    /// Design-B local-to-`BashTool` divergence: claude-code keeps this
+    /// session-global (`STATE.cwd`) and shares it with the permission gate; we
+    /// keep it `BashTool`-local until a permission-gate live-cwd consumer is
+    /// wired. Observable behavior is identical today since nothing else
+    /// consumes a shared session-cwd yet.
+    shell_cwd: std::sync::Arc<std::sync::Mutex<std::path::PathBuf>>,
 }
 
 impl BashTool {
     /// Construct a fresh tool bound to the given builtin context.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        let shell_cwd = std::sync::Arc::new(std::sync::Mutex::new(ctx.workspace.clone()));
+        Self { ctx, shell_cwd }
     }
 }
 
@@ -232,7 +246,7 @@ impl Tool for BashTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         use sandbox::decision::{should_use_sandbox, SandboxDecision};
@@ -317,18 +331,19 @@ impl Tool for BashTool {
             }
         };
 
-        let pcmd = SbxCommand {
-            command: shell,
-            args: vec!["-c".into(), inner_cmd],
-            cwd: Some(self.ctx.workspace.clone()),
-            env: HashMap::new(),
-            timeout: Some(Duration::from_millis(timeout_ms)),
-            stdin: None,
-        };
-        let sandboxed = self.ctx.sandbox.bypass_with_audit(pcmd, "bash_tool_call");
-
-        // ===== Background path =====
+        // ===== Background path (UNCHANGED — TS `!result.backgroundTaskId`) =====
+        // Background tasks never mutate the shared cwd, so they skip the
+        // `pwd -P` readback entirely and keep spawning under the workspace.
         if run_bg {
+            let pcmd = SbxCommand {
+                command: shell,
+                args: vec!["-c".into(), inner_cmd],
+                cwd: Some(self.ctx.workspace.clone()),
+                env: HashMap::new(),
+                timeout: Some(Duration::from_millis(timeout_ms)),
+                stdin: None,
+            };
+            let sandboxed = self.ctx.sandbox.bypass_with_audit(pcmd, "bash_tool_call");
             return match self.ctx.process.spawn_background(&sandboxed).await {
                 Ok(handle) => {
                     let out_path = task_output_path(&handle.task_id).display().to_string();
@@ -350,6 +365,51 @@ impl Tool for BashTool {
             };
         }
 
+        // ===== Foreground: BASH.4 persistent cwd =====
+        // Read the live shell cwd (claude-code `STATE.cwd` via `pwd()`).
+        let cwd = self.shell_cwd.lock().unwrap().clone();
+        // Deleted-cwd recovery (Shell.ts:220-238): if the live cwd no longer
+        // exists on disk (e.g. a prior command deleted its own dir), fall back
+        // to the tool workspace (TS `getOriginalCwd`); if that is also gone,
+        // fail with the byte-locked message.
+        let cwd = if std::fs::canonicalize(&cwd).is_ok() {
+            cwd
+        } else {
+            let workspace = self.ctx.workspace.clone();
+            if std::fs::canonicalize(&workspace).is_ok() {
+                self.shell_cwd.lock().unwrap().clone_from(&workspace);
+                workspace
+            } else {
+                return Err(ToolError::Internal(format!(
+                    "Working directory \"{}\" no longer exists. Please restart Claude from an existing directory.",
+                    cwd.display()
+                )));
+            }
+        };
+
+        // Internal cwd-tracking temp file (not model-facing): the shell writes
+        // its physical cwd here via `pwd -P` once the user command succeeds.
+        let cwd_file = std::env::temp_dir().join(format!("claude-{request_id}-cwd"));
+        let q = format!(
+            "'{}'",
+            cwd_file.display().to_string().replace('\'', "'\\''")
+        );
+        // Append the readback after the (possibly sandbox-wrapped) command
+        // (bashProvider.ts:185-187). `&&` skips the readback when the user
+        // command fails (cwd left unchanged — correct); `>|` overrides
+        // noclobber and is valid in both bash and zsh.
+        let fg_cmd = format!("{inner_cmd} && pwd -P >| {q}");
+
+        let pcmd = SbxCommand {
+            command: shell,
+            args: vec!["-c".into(), fg_cmd],
+            cwd: Some(cwd.clone()),
+            env: HashMap::new(),
+            timeout: Some(Duration::from_millis(timeout_ms)),
+            stdin: None,
+        };
+        let sandboxed = self.ctx.sandbox.bypass_with_audit(pcmd, "bash_tool_call");
+
         // ===== Foreground spawn =====
         match self.ctx.process.run(&sandboxed).await {
             Ok(out) if out.timed_out => {
@@ -363,6 +423,26 @@ impl Tool for BashTool {
                 Err(ToolError::Internal(format_timeout_error(timeout_ms)))
             }
             Ok(out) => {
+                // BASH.4 cwd readback (Shell.ts:395-419). Subagents must NOT
+                // mutate the shared cwd — TS `preventCwdChanges = !isMainThread`.
+                // The main thread has no `agent_id`; a subagent call carries one.
+                let prevent_cwd_changes = ctx.agent_id.is_some();
+                if !prevent_cwd_changes {
+                    if let Ok(contents) = std::fs::read_to_string(&cwd_file) {
+                        let trimmed = contents.trim();
+                        if !trimmed.is_empty() {
+                            let new_cwd = std::path::PathBuf::from(trimmed);
+                            if new_cwd != cwd {
+                                if let Ok(canon) = std::fs::canonicalize(&new_cwd) {
+                                    *self.shell_cwd.lock().unwrap() = canon;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Always clean up the tracking file (Shell.ts:415-419).
+                let _ = std::fs::remove_file(&cwd_file);
+
                 let (stdout_clean, ansi_dropped_out) = strip_ansi_count(&out.stdout);
                 let (stderr_clean, ansi_dropped_err) = strip_ansi_count(&out.stderr);
                 // Model-facing stdout normalization (claude-code): strip leading

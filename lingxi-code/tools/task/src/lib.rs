@@ -20,6 +20,7 @@
 )]
 
 pub mod task;
+pub mod todo_store;
 pub mod todo_write;
 
 pub use task::{

@@ -1,9 +1,11 @@
 ---
 source: apps/engine-mobile/tests/mobile_tool_list_snapshot.rs
+assertion_line: 52
 expression: names
 ---
 - AskUserQuestion
 - Config
+- CronCreate
 - Edit
 - EnterPlanMode
 - ExitPlanMode
@@ -12,7 +14,6 @@ expression: names
 - NotebookEdit
 - Read
 - RemoteTrigger
-- ScheduleCron
 - SendMessage
 - SendUserMessage
 - Skill

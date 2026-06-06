@@ -1,11 +1,13 @@
 ---
 source: apps/engine-desktop/tests/desktop_tool_list_snapshot.rs
+assertion_line: 32
 expression: names
 ---
 - Agent
 - AskUserQuestion
 - Bash
 - Config
+- CronCreate
 - Edit
 - EnterPlanMode
 - EnterWorktree
@@ -23,7 +25,6 @@ expression: names
 - Read
 - ReadMcpResourceTool
 - RemoteTrigger
-- ScheduleCron
 - SendMessage
 - SendUserMessage
 - Skill

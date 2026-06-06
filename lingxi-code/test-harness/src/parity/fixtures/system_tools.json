@@ -7,7 +7,7 @@
     "brief": "SendUserMessage",
     "config": "Config",
     "skill": "Skill",
-    "schedule_cron": "ScheduleCron",
+    "schedule_cron": "CronCreate",
     "tool_search": "ToolSearch",
     "remote_trigger": "RemoteTrigger",
     "synthetic_output": "StructuredOutput"

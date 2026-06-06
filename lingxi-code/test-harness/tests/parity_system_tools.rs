@@ -33,7 +33,7 @@ fn tool_names_match_production_constants() {
     );
     assert_eq!(
         n["schedule_cron"].as_str().unwrap(),
-        tool_cron::schedule_cron::SCHEDULE_CRON_TOOL_NAME
+        tool_cron::schedule_cron::CRON_CREATE_TOOL_NAME
     );
     assert_eq!(
         n["tool_search"].as_str().unwrap(),

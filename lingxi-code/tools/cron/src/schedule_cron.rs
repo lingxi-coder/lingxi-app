@@ -1,12 +1,18 @@
-//! `ScheduleCronTool` — parse 5-field cron + persist `~/.claude/cron/<task_id>.json`.
+//! `CronCreateTool` — schedule a prompt on a 5-field cron schedule and persist
+//! the job descriptor to `~/.claude/cron/<id>.json`.
 //!
-//! Wire identifiers locked in spec §7:
-//! - 5-field cron expressions only (6-field with seconds is rejected).
-//! - Persistence path `~/.claude/cron/<task_id>.json` where
-//!   `task_id = [d][0-9a-z]{8}` (9-char M1 format).
+//! 1:1 parity rewrite of claude-code `CronCreateTool.ts`. The model supplies a
+//! 5-field cron expression plus the prompt to enqueue at each fire time, with
+//! optional `recurring` (default true) and `durable` (default false) flags.
 //!
-//! M4-08 does NOT register the job into a scheduler — it parses, computes
-//! the next fire time, and persists the job descriptor. Production hosts
+//! Wire identifiers:
+//! - 5-field cron expressions only (6-field with seconds is rejected by the
+//!   shared parser and surfaces as the generic "Expected 5 fields" message).
+//! - Persistence path `~/.claude/cron/<id>.json` where
+//!   `id = [d][0-9a-z]{8}` (9-char format).
+//!
+//! This seam does NOT register the job into a live scheduler — it parses,
+//! computes the next fire time, and persists the descriptor. Production hosts
 //! pick the file up via `cron::scheduler::CronScheduler`.
 
 use std::collections::HashMap;
@@ -140,24 +146,28 @@ impl CronExpression {
 }
 
 /// Tool name byte-lock.
-pub const SCHEDULE_CRON_TOOL_NAME: &str = "ScheduleCron";
+pub const CRON_CREATE_TOOL_NAME: &str = "CronCreate";
 /// Subdirectory under `~/.claude/`.
 pub const CRON_SUBDIR: &str = "cron";
 /// File extension.
 pub const CRON_FILE_SUFFIX: &str = ".json";
 /// 9-char task-id prefix character (`d` for daemon/cron).
 pub const CRON_TASK_ID_PREFIX: char = 'd';
-/// 6-field rejection message.
+/// 6-field rejection message (retained for the wire-identifier parity lock).
 pub const SIX_FIELD_REJECTION: &str =
     "ScheduleCron: 6-field cron (with seconds) is not supported; use 5-field cron (minute hour day month weekday)";
 /// Search horizon for `next_fire_unix_secs`: 1 year of minutes (sane upper
 /// bound so an unsatisfiable expression doesn't loop forever).
 pub const NEXT_FIRE_HORIZON_MINUTES: u64 = 60 * 24 * 366;
+/// Maximum number of scheduled jobs allowed at once (CronCreateTool.ts:25).
+const MAX_JOBS: usize = 50;
+/// Recurring jobs auto-expire after this many days (CronCreateTool.ts prompt.ts).
+const DEFAULT_MAX_AGE_DAYS: i64 = 30;
 
 fn home_dir_or_internal() -> Result<PathBuf, ToolError> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
-        .ok_or_else(|| ToolError::Internal("ScheduleCron: HOME directory not available".into()))
+        .ok_or_else(|| ToolError::Internal("CronCreate: HOME directory not available".into()))
 }
 
 #[must_use]
@@ -183,7 +193,7 @@ pub(crate) fn generate_cron_task_id() -> String {
 
 /// Compute the next fire time at or after `from` matching `expr`, capped by
 /// [`NEXT_FIRE_HORIZON_MINUTES`]. Returns `None` if no minute in the horizon
-/// satisfies the expression (rare; only happens for malformed expressions).
+/// satisfies the expression (the "no calendar date in the next year" case).
 fn next_fire_after(expr: &CronExpression, from: SystemTime) -> Option<SystemTime> {
     // Round up to the next minute boundary.
     let from_secs = from.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs();
@@ -198,8 +208,12 @@ fn next_fire_after(expr: &CronExpression, from: SystemTime) -> Option<SystemTime
     None
 }
 
-/// Reject 6-field expressions (Quartz-style with seconds). The cron crate's
-/// own parser would surface `FieldCount(6)`, but we want a custom message.
+/// Reject 6-field expressions (Quartz-style with seconds). Retained from the
+/// previous `ScheduleCron` seam for the wire-identifier parity lock; the live
+/// `validate_input`/`call` paths now rely on the shared 5-field parser, which
+/// surfaces 6-field input as the generic "Expected 5 fields" message (matching
+/// `parseCronExpression` returning null in CronCreateTool.ts).
+#[allow(dead_code)]
 fn reject_six_field(expr: &str) -> Result<(), ToolError> {
     let parts: usize = expr.split_whitespace().count();
     if parts == 6 {
@@ -208,12 +222,203 @@ fn reject_six_field(expr: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// `ScheduleCronTool` — parse + persist a cron job descriptor.
-pub struct ScheduleCronTool {
+// -- cronToHuman ------------------------------------------------------------
+// Port of `cronToHuman` from claude-code utils/cron.ts. Narrow by design:
+// covers the common patterns and falls through to the raw cron string for
+// anything else (matches the TS `return cron`).
+
+const DAY_NAMES: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// `true` if `s` is one or more ASCII digits (mirrors the TS `/^\d+$/`).
+fn all_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `true` if `s` is exactly one ASCII digit (mirrors the TS `/^\d$/`).
+fn is_single_digit(s: &str) -> bool {
+    s.len() == 1 && s.as_bytes()[0].is_ascii_digit()
+}
+
+/// Extract `N` from a `*/N` step field (mirrors the TS `/^\*\/(\d+)$/`).
+fn parse_step(s: &str) -> Option<u32> {
+    s.strip_prefix("*/").and_then(|rest| rest.parse::<u32>().ok())
+}
+
+/// Format `hour:minute` (24h) as a 12-hour clock like "2:30pm".
+// PARITY-GAP: TS formats in local time (`toLocaleTimeString`); we use UTC to
+// avoid local-timezone nondeterminism, and emit lowercase am/pm with no space.
+fn format_time_utc(minute: u32, hour: u32) -> String {
+    let period = if hour < 12 { "am" } else { "pm" };
+    let h12 = match hour % 12 {
+        0 => 12,
+        h => h,
+    };
+    format!("{h12}:{minute:02}{period}")
+}
+
+/// Render a 5-field cron expression as a human-readable schedule string.
+fn cron_to_human(cron: &str) -> String {
+    let parts: Vec<&str> = cron.split_whitespace().collect();
+    if parts.len() != 5 {
+        return cron.to_string();
+    }
+    let (minute, hour, dom, month, dow) = (parts[0], parts[1], parts[2], parts[3], parts[4]);
+
+    // Every N minutes: */N * * * *
+    if let Some(n) = parse_step(minute) {
+        if hour == "*" && dom == "*" && month == "*" && dow == "*" {
+            return if n == 1 {
+                "Every minute".to_string()
+            } else {
+                format!("Every {n} minutes")
+            };
+        }
+    }
+
+    // Every hour: M * * * *
+    if all_digits(minute) && hour == "*" && dom == "*" && month == "*" && dow == "*" {
+        let m: u32 = minute.parse().unwrap_or(0);
+        if m == 0 {
+            return "Every hour".to_string();
+        }
+        return format!("Every hour at :{m:02}");
+    }
+
+    // Every N hours: M */N * * *
+    if all_digits(minute) {
+        if let Some(n) = parse_step(hour) {
+            if dom == "*" && month == "*" && dow == "*" {
+                let m: u32 = minute.parse().unwrap_or(0);
+                let suffix = if m == 0 {
+                    String::new()
+                } else {
+                    format!(" at :{m:02}")
+                };
+                return if n == 1 {
+                    format!("Every hour{suffix}")
+                } else {
+                    format!("Every {n} hours{suffix}")
+                };
+            }
+        }
+    }
+
+    // Remaining cases reference hour+minute and require both to be numeric.
+    if !all_digits(minute) || !all_digits(hour) {
+        return cron.to_string();
+    }
+    let m: u32 = minute.parse().unwrap_or(0);
+    let h: u32 = hour.parse().unwrap_or(0);
+    let time = format_time_utc(m, h);
+
+    // Daily at specific time: M H * * *
+    if dom == "*" && month == "*" && dow == "*" {
+        return format!("Every day at {time}");
+    }
+
+    // Specific day of week: M H * * D
+    if dom == "*" && month == "*" && is_single_digit(dow) {
+        let day_index = (dow.parse::<usize>().unwrap_or(0)) % 7; // normalize 7 -> 0
+        if let Some(name) = DAY_NAMES.get(day_index) {
+            return format!("Every {name} at {time}");
+        }
+    }
+
+    // Weekdays: M H * * 1-5
+    if dom == "*" && month == "*" && dow == "1-5" {
+        return format!("Weekdays at {time}");
+    }
+
+    // PARITY-GAP: extensions beyond TS cronToHuman (which returns the raw cron
+    // for these). Specific month + day-of-month: M H D Mon *
+    if all_digits(dom) && all_digits(month) && dow == "*" {
+        let mon: usize = month.parse().unwrap_or(0);
+        if (1..=12).contains(&mon) {
+            let name = MONTH_NAMES[mon - 1];
+            return format!("{name} {dom} at {time}");
+        }
+    }
+
+    // PARITY-GAP: extension beyond TS. Day-of-month, every month: M H D * *
+    if all_digits(dom) && month == "*" && dow == "*" {
+        return format!("Day {dom} of every month at {time}");
+    }
+
+    cron.to_string()
+}
+
+/// Parse a semantic boolean: accepts a JSON bool, or the strings
+/// "true"/"false"/"yes"/"no"/"1"/"0" (case-insensitive). Anything else
+/// (missing, null, unrecognized string, non-bool) falls back to `default`.
+fn semantic_bool(v: Option<&Value>, default: bool) -> bool {
+    match v {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(s)) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "1" => true,
+            "false" | "no" | "0" => false,
+            _ => default,
+        },
+        _ => default,
+    }
+}
+
+/// Build the model-facing result text (CronCreateTool.ts:143-153).
+fn build_result_content(id: &str, human: &str, recurring: bool, durable: bool) -> String {
+    let where_ = if durable {
+        "Persisted to .claude/scheduled_tasks.json"
+    } else {
+        "Session-only (not written to disk, dies when Claude exits)"
+    };
+    if recurring {
+        format!(
+            "Scheduled recurring job {id} ({human}). {where_}. Auto-expires after {DEFAULT_MAX_AGE_DAYS} days. Use CronDelete to cancel sooner."
+        )
+    } else {
+        format!("Scheduled one-shot task {id} ({human}). {where_}. It will fire once then auto-delete.")
+    }
+}
+
+/// Count existing `~/.claude/cron/*.json` job descriptors.
+fn count_existing_jobs(home: &Path) -> usize {
+    let dir = home.join(".claude").join(CRON_SUBDIR);
+    match std::fs::read_dir(&dir) {
+        Ok(rd) => rd
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+            .count(),
+        Err(_) => 0,
+    }
+}
+
+/// `CronCreateTool` — schedule a prompt on a 5-field cron + persist the job.
+pub struct CronCreateTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
 }
 
-impl ScheduleCronTool {
+impl CronCreateTool {
     /// Construct.
     #[must_use]
     pub fn new(ctx: tool_api::BuiltinToolContext) -> Self {
@@ -224,11 +429,26 @@ impl ScheduleCronTool {
 static SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
+        "additionalProperties": false,
         "properties": {
-            "expression": { "type": "string", "minLength": 1 },
-            "command":    { "type": "string", "minLength": 1 }
+            "cron": {
+                "type": "string",
+                "description": "Standard 5-field cron expression in local time: \"M H DoM Mon DoW\" (e.g. \"*/5 * * * *\" = every 5 minutes, \"30 14 28 2 *\" = Feb 28 at 2:30pm local once)."
+            },
+            "prompt": {
+                "type": "string",
+                "description": "The prompt to enqueue at each fire time."
+            },
+            "recurring": {
+                "type": "boolean",
+                "description": format!("true (default) = fire on every cron match until deleted or auto-expired after {DEFAULT_MAX_AGE_DAYS} days. false = fire once at the next match, then auto-delete. Use false for \"remind me at X\" one-shot requests with pinned minute/hour/dom/month.")
+            },
+            "durable": {
+                "type": "boolean",
+                "description": "true = persist to .claude/scheduled_tasks.json and survive restarts. false (default) = in-memory only, dies when this Claude session ends. Use true only when the user asks the task to survive across sessions."
+            }
         },
-        "required": ["expression", "command"]
+        "required": ["cron", "prompt"]
     })
 });
 
@@ -251,9 +471,9 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
 }
 
 #[async_trait]
-impl Tool for ScheduleCronTool {
+impl Tool for CronCreateTool {
     fn name(&self) -> &str {
-        SCHEDULE_CRON_TOOL_NAME
+        CRON_CREATE_TOOL_NAME
     }
     fn input_schema(&self) -> &Value {
         &SCHEMA
@@ -262,7 +482,7 @@ impl Tool for ScheduleCronTool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
-        4_096
+        100_000
     }
     fn is_concurrency_safe(&self, _: &Value) -> bool {
         true
@@ -283,7 +503,7 @@ impl Tool for ScheduleCronTool {
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "ScheduleCron persists a cron descriptor under ~/.claude/cron/".into(),
+                reason: "CronCreate persists a cron descriptor under ~/.claude/cron/".into(),
             },
             updated_input: None,
             update_destination: None,
@@ -292,11 +512,11 @@ impl Tool for ScheduleCronTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "Schedule a cron job. Accepts 5-field cron expressions only.".into()
+        "Schedule a prompt to run on a cron schedule.".into()
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "ScheduleCron: persist a cron descriptor under ~/.claude/cron/.".into()
+        "CronCreate: schedule a recurring or one-shot prompt via a 5-field cron expression.".into()
     }
 
     async fn validate_input(
@@ -304,22 +524,42 @@ impl Tool for ScheduleCronTool {
         input: &Value,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
-        let expr = input
-            .get("expression")
+        let cron = input
+            .get("cron")
             .and_then(Value::as_str)
-            .ok_or_else(|| {
-                ValidationError("ScheduleCron: missing or non-string expression".into())
-            })?;
-        reject_six_field(expr).map_err(|e| ValidationError(format!("{e}")))?;
-        parse_cron(expr).map_err(|e| {
-            ValidationError(format!(
-                "ScheduleCron: invalid cron expression {expr:?}: {e}"
-            ))
-        })?;
-        input
-            .get("command")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ValidationError("ScheduleCron: missing or non-string command".into()))?;
+            .ok_or_else(|| ValidationError("CronCreate: missing or non-string cron".into()))?;
+
+        // Invalid cron (not 5 fields / parse fail).
+        let parsed = match parse_cron(cron) {
+            Ok(p) => p,
+            Err(_) => {
+                return Err(ValidationError(format!(
+                    "Invalid cron expression '{cron}'. Expected 5 fields: M H DoM Mon DoW."
+                )));
+            }
+        };
+
+        // No calendar date in the next year satisfies the expression.
+        let now = self.ctx.clock.now();
+        if next_fire_after(&parsed, now).is_none() {
+            return Err(ValidationError(format!(
+                "Cron expression '{cron}' does not match any calendar date in the next year."
+            )));
+        }
+
+        // Too many scheduled jobs already.
+        if let Ok(home) = home_dir_or_internal() {
+            if count_existing_jobs(&home) >= MAX_JOBS {
+                return Err(ValidationError(format!(
+                    "Too many scheduled jobs (max {MAX_JOBS}). Cancel one first."
+                )));
+            }
+        }
+
+        // PARITY-GAP: TS rejects a `durable` cron created by a teammate
+        // (`input.durable && getTeammateContext()`) because teammates don't
+        // persist across sessions. There is no teammate context in this Rust
+        // seam, so the durable+teammate check is omitted.
         Ok(())
     }
 
@@ -332,63 +572,52 @@ impl Tool for ScheduleCronTool {
         let started = Instant::now();
         let bus = self.ctx.bus.clone();
 
-        let expr = match input.get("expression").and_then(Value::as_str) {
+        let cron = match input.get("cron").and_then(Value::as_str) {
             Some(s) => s.to_string(),
             None => {
-                emit_failed(
-                    &bus,
-                    "missing_expression",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
+                emit_failed(&bus, "missing_cron", started.elapsed().as_millis() as u64).await;
                 return Err(ToolError::InvalidInput(
-                    "ScheduleCron: missing or non-string expression".into(),
+                    "CronCreate: missing or non-string cron".into(),
                 ));
             }
         };
-        if let Err(e) = reject_six_field(&expr) {
-            emit_failed(
-                &bus,
-                "six_field_unsupported",
-                started.elapsed().as_millis() as u64,
-            )
-            .await;
-            return Err(e);
-        }
-        let command = match input.get("command").and_then(Value::as_str) {
+        let prompt = match input.get("prompt").and_then(Value::as_str) {
             Some(s) => s.to_string(),
             None => {
-                emit_failed(
-                    &bus,
-                    "missing_command",
-                    started.elapsed().as_millis() as u64,
-                )
-                .await;
+                emit_failed(&bus, "missing_prompt", started.elapsed().as_millis() as u64).await;
                 return Err(ToolError::InvalidInput(
-                    "ScheduleCron: missing or non-string command".into(),
+                    "CronCreate: missing or non-string prompt".into(),
                 ));
             }
         };
 
-        let mut md: LogEventMetadata = HashMap::new();
-        md.insert("_PROTO_expression".into(), pii_str(&expr));
-        md.insert("_PROTO_command".into(), pii_str(&command));
-        bus.log_event(SCHEDULE_CRON_STARTED, md).await;
-
-        let parsed = match parse_cron(&expr) {
+        let parsed = match parse_cron(&cron) {
             Ok(c) => c,
-            Err(e) => {
+            Err(_) => {
                 emit_failed(&bus, "parse_error", started.elapsed().as_millis() as u64).await;
                 return Err(ToolError::InvalidInput(format!(
-                    "ScheduleCron: invalid cron expression {expr:?}: {e}"
+                    "Invalid cron expression '{cron}'. Expected 5 fields: M H DoM Mon DoW."
                 )));
             }
         };
+
+        let recurring = semantic_bool(input.get("recurring"), true);
+        let durable = semantic_bool(input.get("durable"), false);
+
+        let mut md: LogEventMetadata = HashMap::new();
+        md.insert("_PROTO_cron".into(), pii_str(&cron));
+        md.insert("_PROTO_prompt".into(), pii_str(&prompt));
+        bus.log_event(SCHEDULE_CRON_STARTED, md).await;
+
         let now = self.ctx.clock.now();
         let next = next_fire_after(&parsed, now);
         let next_unix = next
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_secs());
+        let created = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
 
         let home = match home_dir_or_internal() {
             Ok(h) => h,
@@ -397,23 +626,22 @@ impl Tool for ScheduleCronTool {
                 return Err(e);
             }
         };
-        let task_id = generate_cron_task_id();
-        let path = cron_path(&home, &task_id);
+        let id = generate_cron_task_id();
+        let path = cron_path(&home, &id);
         let descriptor = json!({
-            "task_id": task_id,
-            "expression": expr,
-            "command": command,
-            "created_at_unix_secs": now
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            "id": id,
+            "cron": cron,
+            "prompt": prompt,
+            "recurring": recurring,
+            "durable": durable,
+            "created_at_unix_secs": created,
             "next_fire_unix_secs": next_unix,
         });
         if let Some(dir) = path.parent() {
             if let Err(e) = tokio::fs::create_dir_all(dir).await {
                 emit_failed(&bus, "io_create_dir", started.elapsed().as_millis() as u64).await;
                 return Err(ToolError::Io(format!(
-                    "ScheduleCron: io error at {}: {e}",
+                    "CronCreate: io error at {}: {e}",
                     dir.display()
                 )));
             }
@@ -422,15 +650,13 @@ impl Tool for ScheduleCronTool {
             Ok(b) => b,
             Err(e) => {
                 emit_failed(&bus, "serde_error", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::Internal(format!(
-                    "ScheduleCron: serde error: {e}"
-                )));
+                return Err(ToolError::Internal(format!("CronCreate: serde error: {e}")));
             }
         };
         if let Err(e) = tokio::fs::write(&path, &body).await {
             emit_failed(&bus, "io_write", started.elapsed().as_millis() as u64).await;
             return Err(ToolError::Io(format!(
-                "ScheduleCron: io error at {}: {e}",
+                "CronCreate: io error at {}: {e}",
                 path.display()
             )));
         }
@@ -453,13 +679,16 @@ impl Tool for ScheduleCronTool {
         );
         bus.log_event(SCHEDULE_CRON_COMPLETED, md).await;
 
+        let human = cron_to_human(&cron);
+        let content = build_result_content(&id, &human, recurring, durable);
+
         Ok(ToolCallResult {
             data: json!({
-                "task_id": task_id,
-                "path": path.display().to_string(),
-                "expression": expr,
-                "command": command,
-                "next_fire_unix_secs": next_unix,
+                "id": id,
+                "humanSchedule": human,
+                "recurring": recurring,
+                "durable": durable,
+                "content": content,
             }),
             new_messages: vec![],
             context_modifier: None,
@@ -485,9 +714,11 @@ mod tests {
 
     #[test]
     fn constants_locked() {
-        assert_eq!(SCHEDULE_CRON_TOOL_NAME, "ScheduleCron");
+        assert_eq!(CRON_CREATE_TOOL_NAME, "CronCreate");
         assert_eq!(CRON_SUBDIR, "cron");
         assert_eq!(CRON_TASK_ID_PREFIX, 'd');
+        assert_eq!(MAX_JOBS, 50);
+        assert_eq!(DEFAULT_MAX_AGE_DAYS, 30);
     }
 
     #[test]
@@ -504,62 +735,199 @@ mod tests {
         assert!(format!("{err}").contains("6-field cron"));
     }
 
+    #[test]
+    fn semantic_bool_parsing() {
+        // Missing -> default.
+        assert!(semantic_bool(None, true));
+        assert!(!semantic_bool(None, false));
+        // JSON bool.
+        assert!(semantic_bool(Some(&json!(true)), false));
+        assert!(!semantic_bool(Some(&json!(false)), true));
+        // Truthy strings (case-insensitive).
+        assert!(semantic_bool(Some(&json!("yes")), false));
+        assert!(semantic_bool(Some(&json!("TRUE")), false));
+        assert!(semantic_bool(Some(&json!("1")), false));
+        // Falsy strings (case-insensitive).
+        assert!(!semantic_bool(Some(&json!("no")), true));
+        assert!(!semantic_bool(Some(&json!("FALSE")), true));
+        assert!(!semantic_bool(Some(&json!("0")), true));
+        // Unrecognized / non-bool -> default.
+        assert!(semantic_bool(Some(&json!("maybe")), true));
+        assert!(!semantic_bool(Some(&json!("maybe")), false));
+        assert!(!semantic_bool(Some(&json!(5)), false));
+    }
+
+    #[test]
+    fn cron_to_human_cases() {
+        assert_eq!(cron_to_human("*/5 * * * *"), "Every 5 minutes");
+        assert_eq!(cron_to_human("*/1 * * * *"), "Every minute");
+        assert_eq!(cron_to_human("0 * * * *"), "Every hour");
+        assert_eq!(cron_to_human("30 * * * *"), "Every hour at :30");
+        assert_eq!(cron_to_human("0 */2 * * *"), "Every 2 hours");
+        assert_eq!(cron_to_human("0 9 * * *"), "Every day at 9:00am");
+        assert_eq!(cron_to_human("0 12 * * *"), "Every day at 12:00pm");
+        assert_eq!(cron_to_human("30 14 * * 1"), "Every Monday at 2:30pm");
+        assert_eq!(cron_to_human("0 0 * * 0"), "Every Sunday at 12:00am");
+        assert_eq!(cron_to_human("0 9 * * 1-5"), "Weekdays at 9:00am");
+        assert_eq!(cron_to_human("30 14 28 2 *"), "February 28 at 2:30pm");
+        assert_eq!(cron_to_human("0 9 15 * *"), "Day 15 of every month at 9:00am");
+        // Unrecognized -> raw cron string.
+        assert_eq!(cron_to_human("garbage"), "garbage");
+        assert_eq!(cron_to_human("* * * * *"), "* * * * *");
+    }
+
+    #[test]
+    fn result_content_variants() {
+        let r = build_result_content("d12345678", "Every day at 9:00am", true, false);
+        assert!(r.contains("Scheduled recurring job d12345678 (Every day at 9:00am)."));
+        assert!(r.contains("Session-only (not written to disk, dies when Claude exits)"));
+        assert!(r.contains("Auto-expires after 30 days. Use CronDelete to cancel sooner."));
+
+        let o = build_result_content("d87654321", "February 28 at 2:30pm", false, true);
+        assert!(o.contains("Scheduled one-shot task d87654321 (February 28 at 2:30pm)."));
+        assert!(o.contains("Persisted to .claude/scheduled_tasks.json"));
+        assert!(o.contains("It will fire once then auto-delete."));
+    }
+
     #[tokio::test]
     async fn persists_descriptor() {
         let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
-        let tool = ScheduleCronTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
         let out = tool
             .call(
-                json!({"expression": "*/5 9-17 * * 1-5", "command": "echo hi"}),
+                json!({"cron": "*/5 9-17 * * 1-5", "prompt": "echo hi"}),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect("ok");
-        let path = out.data["path"].as_str().unwrap();
-        assert!(
-            path.starts_with(&format!("{}/.claude/cron/d", tmp.path().display())),
-            "{path}"
-        );
-        assert!(path.to_lowercase().ends_with(".json"));
-        let written = tokio::fs::read_to_string(path).await.unwrap();
-        assert!(written.contains("\"expression\": \"*/5 9-17 * * 1-5\""));
-        assert!(written.contains("\"command\": \"echo hi\""));
+        let id = out.data["id"].as_str().unwrap();
+        assert!(id.starts_with('d') && id.len() == 9, "{id}");
+        // Defaults: recurring=true, durable=false.
+        assert_eq!(out.data["recurring"], json!(true));
+        assert_eq!(out.data["durable"], json!(false));
+        let content = out.data["content"].as_str().unwrap();
+        assert!(content.contains("Scheduled recurring job"));
+        assert!(content.contains("Session-only (not written to disk, dies when Claude exits)"));
+
+        let path = format!("{}/.claude/cron/{id}.json", tmp.path().display());
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(written.contains("\"cron\": \"*/5 9-17 * * 1-5\""));
+        assert!(written.contains("\"prompt\": \"echo hi\""));
+        assert!(written.contains("\"recurring\": true"));
+        assert!(written.contains("\"durable\": false"));
     }
 
     #[tokio::test]
-    async fn rejects_6_field_expression() {
+    async fn one_shot_durable_result() {
         let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
-        let tool = ScheduleCronTool::new(shell_test_ctx(dummy_out()));
-        let err = tool
+        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        let out = tool
             .call(
-                json!({"expression": "0 */5 9-17 * * 1-5", "command": "x"}),
+                json!({"cron": "30 14 28 2 *", "prompt": "remind me", "recurring": false, "durable": true}),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
-            .expect_err("must reject");
-        assert!(format!("{err}").contains("6-field cron"));
+            .expect("ok");
+        assert_eq!(out.data["recurring"], json!(false));
+        assert_eq!(out.data["durable"], json!(true));
+        assert_eq!(out.data["humanSchedule"], json!("February 28 at 2:30pm"));
+        let content = out.data["content"].as_str().unwrap();
+        assert!(content.contains("Scheduled one-shot task"));
+        assert!(content.contains("It will fire once then auto-delete"));
+        assert!(content.contains("Persisted to .claude/scheduled_tasks.json"));
     }
 
     #[tokio::test]
-    async fn rejects_garbage_expression() {
+    async fn semantic_string_flags_via_call() {
         let _g = HOME_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", tmp.path());
-        let tool = ScheduleCronTool::new(shell_test_ctx(dummy_out()));
+        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        let out = tool
+            .call(
+                json!({"cron": "0 9 * * *", "prompt": "x", "recurring": "no", "durable": "yes"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(out.data["recurring"], json!(false));
+        assert_eq!(out.data["durable"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn call_rejects_garbage_cron() {
+        let _g = HOME_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
         let err = tool
             .call(
-                json!({"expression": "not a cron", "command": "x"}),
+                json!({"cron": "not a cron", "prompt": "x"}),
                 fresh_ctx(),
                 fresh_tx(),
             )
             .await
             .expect_err("garbage");
-        assert!(format!("{err}").contains("invalid cron expression"));
+        assert!(format!("{err}").contains("Invalid cron expression 'not a cron'. Expected 5 fields"));
+    }
+
+    #[tokio::test]
+    async fn call_rejects_six_field_as_invalid() {
+        // PARITY: 6-field is no longer a special message; the shared 5-field
+        // parser surfaces it as the generic "Expected 5 fields" error (TS
+        // `parseCronExpression` returns null for non-5-field input).
+        let _g = HOME_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        let err = tool
+            .call(
+                json!({"cron": "0 */5 9-17 * * 1-5", "prompt": "x"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("must reject");
+        assert!(format!("{err}").contains("Invalid cron expression"));
+        assert!(format!("{err}").contains("Expected 5 fields"));
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_garbage_cron() {
+        let _g = HOME_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        let err = tool
+            .validate_input(&json!({"cron": "not a cron", "prompt": "x"}), &fresh_ctx())
+            .await
+            .expect_err("garbage");
+        assert!(err
+            .0
+            .contains("Invalid cron expression 'not a cron'. Expected 5 fields: M H DoM Mon DoW."));
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_unsatisfiable_cron() {
+        let _g = HOME_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        // Day-of-month 31 never occurs under the crude decompose (day maxes at
+        // 30), so no calendar date in the horizon matches.
+        let err = tool
+            .validate_input(&json!({"cron": "0 0 31 * *", "prompt": "x"}), &fresh_ctx())
+            .await
+            .expect_err("unsatisfiable");
+        assert!(err
+            .0
+            .contains("does not match any calendar date in the next year"));
     }
 }

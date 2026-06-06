@@ -1,4 +1,4 @@
-//! `ClientEventListener` — the outbound UniFFI callback interface (plan F3-02).
+//! `ClientEventListener` — the outbound `UniFFI` callback interface (plan F3-02).
 //!
 //! This is the mobile transport's analog of the bridge-server's outbound
 //! WebSocket `Frame::Event` writer: where bridge-server wraps an mpsc/socket in

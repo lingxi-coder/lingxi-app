@@ -9,7 +9,7 @@
 //! Both transports supply their own sink implementation:
 //! - bridge-server (Electron) wraps an outbound WebSocket `Frame::Event` writer
 //!   (F2),
-//! - mobile (iOS/Android) wraps the UniFFI `ClientEventListener` callback (F3).
+//! - mobile (iOS/Android) wraps the `UniFFI` `ClientEventListener` callback (F3).
 //!
 //! Keeping the adapter coupled only to this trait — and never to a transport —
 //! is what lets the SAME lowering logic feed both surfaces (governing decision

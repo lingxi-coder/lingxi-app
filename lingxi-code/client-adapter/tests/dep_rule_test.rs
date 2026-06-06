@@ -80,8 +80,7 @@ fn is_app_crate(meta: &Value, name: &str) -> bool {
             return rel
                 .components()
                 .next()
-                .map(|c| c.as_os_str() == "apps")
-                .unwrap_or(false);
+                .is_some_and(|c| c.as_os_str() == "apps");
         }
     }
     panic!("workspace package `{name}` not found in cargo metadata");

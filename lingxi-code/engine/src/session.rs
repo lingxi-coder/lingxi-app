@@ -27,6 +27,11 @@ pub struct TodoItem {
     pub content: String,
     /// Lifecycle state of this todo. Wire-locked.
     pub status: TodoState,
+    /// Present-tense form shown while the todo is in progress (claude-code
+    /// `TodoItemSchema.activeForm`). Wire key is camelCase `activeForm`;
+    /// `default` keeps pre-`activeForm` persisted sessions deserializable.
+    #[serde(rename = "activeForm", default)]
+    pub active_form: String,
 }
 
 /// Wire-locked todo lifecycle states.
@@ -100,11 +105,13 @@ mod m4_04_session_extension_tests {
             id: "t1".into(),
             content: "buy milk".into(),
             status: TodoState::Pending,
+            active_form: "Buying milk".into(),
         });
         s.todos.push(TodoItem {
             id: "t2".into(),
             content: "write plan".into(),
             status: TodoState::InProgress,
+            active_form: "Writing plan".into(),
         });
         s.plan_mode = true;
         let json = serde_json::to_string(&s).expect("serialize");

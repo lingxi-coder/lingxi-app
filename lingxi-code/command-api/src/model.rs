@@ -8,7 +8,16 @@ use std::path::PathBuf;
 
 /// A registered slash command (built-in, markdown-defined, plugin-supplied,
 /// or MCP-derived).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The trailing metadata fields mirror the TS `CommandBase` shape
+/// (`claude-code/src/types/command.ts:175`): `disableModelInvocation`,
+/// `hasUserSpecifiedDescription`, `loadedFrom`, `whenToUse`, `aliases`, and
+/// `argumentHint`. They drive model-invocable filtering, alias resolution, and
+/// the source-annotated description (see [`crate::describe`]). Each carries
+/// `#[serde(default, skip_serializing_if = …)]` so that when absent the wire
+/// JSON is byte-identical to the pre-existing `{name, description, source,
+/// kind}` shape.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SlashCommand {
     /// Command name (without the leading `/`).
     pub name: String,
@@ -18,6 +27,41 @@ pub struct SlashCommand {
     pub source: CommandSource,
     /// Concrete dispatch shape — built-in handler, markdown template, etc.
     pub kind: SlashCommandKind,
+    /// Whether the model is forbidden from invoking this command (TS
+    /// `disableModelInvocation`). Filtered out by
+    /// [`crate::registry::CommandRegistry::model_invocable_commands`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub disable_model_invocation: bool,
+    /// Whether the description came from an explicit user/frontmatter
+    /// `description` (TS `hasUserSpecifiedDescription`) rather than being
+    /// auto-derived from the markdown body.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_user_specified_description: bool,
+    /// Where the command was loaded from (TS `loadedFrom` string union:
+    /// `commands_DEPRECATED` | `skills` | `plugin` | `managed` | `bundled` |
+    /// `mcp`). Kept as a free-form string to mirror the TS union without a
+    /// closed Rust enum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_from: Option<String>,
+    /// Detailed "when to use" guidance for the model (TS `whenToUse`, from the
+    /// Skill spec).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_to_use: Option<String>,
+    /// Alternate names this command also resolves by (TS `aliases`). Indexed by
+    /// [`crate::registry::CommandRegistry::register_command`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// Hint text for the command's arguments, shown after the name (TS
+    /// `argumentHint`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+}
+
+/// Serde `skip_serializing_if` predicate for `bool` fields that default to
+/// `false` — keeps absent flags out of the wire JSON.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// What a `SlashCommand` actually dispatches to.
@@ -57,6 +101,17 @@ pub enum SlashCommandKind {
     },
 }
 
+impl Default for SlashCommandKind {
+    /// An empty built-in dispatch shape. Exists so [`SlashCommand`] can derive
+    /// [`Default`] (the derive macro cannot pick a default for an enum whose
+    /// variants all carry fields).
+    fn default() -> Self {
+        Self::Builtin {
+            handler_id: String::new(),
+        }
+    }
+}
+
 /// YAML frontmatter shape for markdown-defined slash commands.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -94,9 +149,10 @@ pub enum FrontmatterShell {
 }
 
 /// Where the command came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CommandSource {
     /// Compiled-in handler.
+    #[default]
     Builtin,
     /// User-level configuration directory.
     User,

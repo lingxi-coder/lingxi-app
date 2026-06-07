@@ -17,6 +17,7 @@
 
 pub mod argument_substitution;
 pub mod builtin_support;
+pub mod describe;
 pub mod dispatcher;
 pub mod expand;
 pub mod markdown_loader;
@@ -29,6 +30,7 @@ pub use argument_substitution::{
     parse_argument_names, parse_arguments, substitute_arguments, substitute_arguments_faithful,
     FrontmatterArgs,
 };
+pub use describe::format_description_with_source;
 pub use dispatcher::RegistrySlashDispatcher;
 pub use expand::{expand_markdown_command, ExpandCtx, ExpandError};
 pub use markdown_loader::{

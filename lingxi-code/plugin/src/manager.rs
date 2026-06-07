@@ -215,6 +215,8 @@ impl PluginManager {
                         frontmatter: command_api::CommandFrontmatter::default(),
                         prompt_template: String::new(),
                     },
+                    loaded_from: Some("plugin".to_string()),
+                    ..command_api::SlashCommand::default()
                 })
                 .collect();
             self.command_registry

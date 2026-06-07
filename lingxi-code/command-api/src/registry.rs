@@ -25,9 +25,21 @@ impl CommandRegistry {
         }
     }
 
-    /// Insert a fully-formed [`SlashCommand`] (used for markdown / plugin / MCP entries).
+    /// Insert a fully-formed [`SlashCommand`] (used for markdown / plugin / MCP
+    /// entries), indexing every entry in `cmd.aliases` so the command resolves by
+    /// any of its alternate names. Mirrors the TS `findCommand` search over
+    /// `name` + `aliases` (`claude-code/src/commands.ts:690`).
     pub fn register_command(&mut self, cmd: SlashCommand) {
+        self.index_aliases(&cmd.name, &cmd.aliases);
         self.commands.insert(cmd.name.clone(), cmd);
+    }
+
+    /// Point each alias at `target` in the alias map (used by
+    /// [`Self::register_command`] / [`Self::register_plugin_commands`]).
+    fn index_aliases(&mut self, target: &str, aliases: &[String]) {
+        for alias in aliases {
+            self.aliases.insert(alias.clone(), target.to_string());
+        }
     }
 
     /// Register a Rust-side built-in handler under its `name()`.
@@ -39,6 +51,7 @@ impl CommandRegistry {
             kind: SlashCommandKind::Builtin {
                 handler_id: h.name().to_string(),
             },
+            ..SlashCommand::default()
         };
         self.commands.insert(h.name().to_string(), cmd);
         self.builtin_handlers.insert(h.name().to_string(), h);
@@ -73,17 +86,39 @@ impl CommandRegistry {
     pub fn register_plugin_commands(&mut self, plugin_id: PluginId, cmds: Vec<SlashCommand>) {
         let names: Vec<String> = cmds.iter().map(|c| c.name.clone()).collect();
         for c in cmds {
+            self.index_aliases(&c.name, &c.aliases);
             self.commands.insert(c.name.clone(), c);
         }
         self.plugin_commands.insert(plugin_id, names);
     }
 
-    /// Remove every command previously registered under `plugin_id`.
+    /// Every registered command, in arbitrary order. Mirrors TS `getCommands`
+    /// returning the full command list before any UI/model filtering.
+    #[must_use]
+    pub fn list_all(&self) -> Vec<&SlashCommand> {
+        self.commands.values().collect()
+    }
+
+    /// Commands the model is allowed to invoke — every entry whose
+    /// `disable_model_invocation` flag is unset. Mirrors the TS filter
+    /// `!cmd.disableModelInvocation` used when building the model-facing skill
+    /// surface (`claude-code/src/commands.ts:571`).
+    #[must_use]
+    pub fn model_invocable_commands(&self) -> Vec<&SlashCommand> {
+        self.commands
+            .values()
+            .filter(|c| !c.disable_model_invocation)
+            .collect()
+    }
+
+    /// Remove every command previously registered under `plugin_id`, along with
+    /// any aliases that pointed at those commands.
     pub fn unregister_plugin(&mut self, plugin_id: &PluginId) {
         if let Some(names) = self.plugin_commands.remove(plugin_id) {
             for n in &names {
                 self.commands.remove(n);
             }
+            self.aliases.retain(|_, target| !names.contains(target));
         }
     }
 }
@@ -98,6 +133,79 @@ impl Default for CommandRegistry {
 mod tests {
     use super::*;
     use crate::builtin_support::unimplemented::UnimplementedCommandHandler;
+    use crate::model::{CommandSource, SlashCommandKind};
+
+    fn markdown_cmd(name: &str, aliases: Vec<String>) -> SlashCommand {
+        SlashCommand {
+            name: name.to_string(),
+            description: format!("{name} cmd"),
+            source: CommandSource::Project,
+            kind: SlashCommandKind::Builtin {
+                handler_id: name.to_string(),
+            },
+            aliases,
+            ..SlashCommand::default()
+        }
+    }
+
+    /// A command registered with aliases resolves by its canonical name and by
+    /// each alias (TS `findCommand` over `name` + `aliases`).
+    #[test]
+    fn register_command_indexes_each_alias() {
+        let mut reg = CommandRegistry::new();
+        reg.register_command(markdown_cmd(
+            "resume",
+            vec!["continue".to_string(), "unpause".to_string()],
+        ));
+
+        assert_eq!(reg.resolve("resume").map(|c| c.name.as_str()), Some("resume"));
+        assert_eq!(
+            reg.resolve("continue").map(|c| c.name.as_str()),
+            Some("resume"),
+            "alias `continue` should resolve to `resume`"
+        );
+        assert_eq!(
+            reg.resolve("unpause").map(|c| c.name.as_str()),
+            Some("resume"),
+            "alias `unpause` should resolve to `resume`"
+        );
+        assert!(reg.resolve("missing").is_none());
+    }
+
+    /// `model_invocable_commands` excludes entries flagged
+    /// `disable_model_invocation` (TS `!cmd.disableModelInvocation`).
+    #[test]
+    fn model_invocable_commands_excludes_disabled() {
+        let mut reg = CommandRegistry::new();
+        reg.register_command(markdown_cmd("visible", vec![]));
+
+        let mut hidden = markdown_cmd("hidden", vec![]);
+        hidden.disable_model_invocation = true;
+        reg.register_command(hidden);
+
+        let invocable: Vec<&str> = reg
+            .model_invocable_commands()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(invocable.contains(&"visible"));
+        assert!(!invocable.contains(&"hidden"));
+
+        // `list_all` still includes both.
+        assert_eq!(reg.list_all().len(), 2);
+    }
+
+    /// A `SlashCommand::default()` leaves every new metadata field unset.
+    #[test]
+    fn default_slash_command_has_defaulted_metadata() {
+        let c = SlashCommand::default();
+        assert!(!c.disable_model_invocation);
+        assert!(!c.has_user_specified_description);
+        assert!(c.loaded_from.is_none());
+        assert!(c.when_to_use.is_none());
+        assert!(c.aliases.is_empty());
+        assert!(c.argument_hint.is_none());
+    }
 
     /// `get_handler` canonicalizes through the aliases map (mirroring `resolve`),
     /// so an alias (`continue` → `resume`) returns the target's handler while a

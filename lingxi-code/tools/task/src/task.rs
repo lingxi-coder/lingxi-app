@@ -1369,13 +1369,16 @@ impl Tool for TaskUpdateTool {
             }
         }
         // Structural verification nudge (TaskUpdateTool.ts:326-349 + 396-398).
-        // Gated (cheaply) on the INPUT `status: "completed"` + main thread +
-        // interactive before re-listing the store, mirroring TS which only
-        // calls `listTasks` once `updates.status === 'completed'` and the
-        // feature/agent gate holds. `store.list()` here reflects the just-
-        // applied update (the store mutation above already persisted it).
+        // Gated on the COMPUTED transition — TS checks `updates.status ===
+        // 'completed'`, and `updates.status` is set only when `status !==
+        // existingTask.status` (TaskUpdateTool.ts:230,267). The Rust mirror is
+        // `new_status`, populated above only when `st != existing.status`, so a
+        // no-op write that re-sends an already-`completed` status does NOT fire
+        // the nudge. Gated (cheaply) with the main-thread + interactive checks
+        // before re-listing the store; `store.list()` reflects the just-applied
+        // update (the store mutation above already persisted it).
         let mut nudge_needed = false;
-        if input.get("status").and_then(Value::as_str) == Some("completed")
+        if new_status == Some(TodoState::Completed)
             && ctx.agent_id.is_none()
             && !ctx.options.is_non_interactive_session
         {
@@ -2284,6 +2287,121 @@ mod tests {
             3,
             ["Implement", "Wire it up", "Document"].into_iter(),
         ));
+    }
+
+    // ── TaskUpdate nudge gates on the COMPUTED transition (TaskUpdateTool.ts:
+    //    230,267,338) — a no-op `completed` re-send must NOT fire ────────────
+    mod task_update_nudge_transition_gate {
+        use super::*;
+        use std::sync::Arc;
+        use telemetry::AnalyticsBus;
+        use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
+
+        /// Restore-on-drop guard for the two process-global env vars this test
+        /// flips, plus cleanup of the throwaway store dir — runs even if an
+        /// assertion panics.
+        struct EnvGuard {
+            prev_config: Option<std::ffi::OsString>,
+            prev_list: Option<std::ffi::OsString>,
+            dir: std::path::PathBuf,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.prev_config {
+                    Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                    None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+                }
+                match &self.prev_list {
+                    Some(v) => std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", v),
+                    None => std::env::remove_var("CLAUDE_CODE_TASK_LIST_ID"),
+                }
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        fn bctx() -> BuiltinToolContext {
+            let bus = Arc::new(AnalyticsBus::new());
+            ctx_for_file_tools(make_dummy_fs(), bus, vec![std::env::temp_dir()])
+        }
+
+        fn task(subject: &str, status: TodoState) -> TodoTask {
+            let mut t = TodoTask::new(subject.into(), "desc".into(), None, Map::new());
+            t.status = status;
+            t
+        }
+
+        #[tokio::test]
+        async fn no_op_completed_does_not_fire_but_real_transition_does() {
+            // Isolate the file-backed store to a throwaway config dir + list id.
+            let unique = format!(
+                "lingxi-task-nudge-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            );
+            let dir = std::env::temp_dir().join(&unique);
+            let _guard = EnvGuard {
+                prev_config: std::env::var_os("CLAUDE_CONFIG_DIR"),
+                prev_list: std::env::var_os("CLAUDE_CODE_TASK_LIST_ID"),
+                dir: dir.clone(),
+            };
+            std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+            std::env::set_var("CLAUDE_CODE_TASK_LIST_ID", &unique);
+
+            // 3-item list, none /verif/: two completed + one pending.
+            let store = TodoStore::for_list(&unique);
+            let id1 = store
+                .create(task("Implement parser", TodoState::Completed))
+                .await
+                .unwrap();
+            store
+                .create(task("Wire it up", TodoState::Completed))
+                .await
+                .unwrap();
+            let id3 = store
+                .create(task("Write docs", TodoState::Pending))
+                .await
+                .unwrap();
+
+            let tool = TaskUpdateTool::new(bctx());
+
+            // Phase 1 — NO-OP: re-send `completed` on the already-completed #1.
+            // Raw input status == "completed" (the OLD buggy gate would fire),
+            // but the COMPUTED transition is empty, so the nudge must NOT fire.
+            let res = tool
+                .call(
+                    json!({ "taskId": &id1, "status": "completed" }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("no-op update ok");
+            assert_eq!(
+                res.data["verificationNudgeNeeded"],
+                json!(false),
+                "no-op completed re-send must not trip the nudge"
+            );
+            assert!(res.data.get("statusChange").is_none(), "no statusChange on a no-op");
+
+            // Phase 2 — REAL transition: #3 pending → completed closes the list
+            // (all 3 completed, >= 3, none /verif/), so the nudge fires.
+            let res = tool
+                .call(
+                    json!({ "taskId": &id3, "status": "completed" }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .expect("transition update ok");
+            assert_eq!(
+                res.data["verificationNudgeNeeded"],
+                json!(true),
+                "a real ->completed transition that closes a 3+ list fires the nudge"
+            );
+            assert_eq!(res.data["statusChange"]["to"], "completed");
+        }
     }
 
     #[test]

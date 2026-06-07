@@ -21,7 +21,13 @@ impl CumulativeUsage {
 /// or `"completed"` — see [`TodoState`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TodoItem {
-    /// Stable identifier (caller-supplied; uniqueness enforced by `TodoWriteTool`).
+    /// Stable identifier. claude-code `TodoItemSchema` is
+    /// `{ content, status, activeForm }` — the model-facing `TodoWrite` input
+    /// carries no `id`, so `default` lets id-less input deserialize, and
+    /// `skip_serializing_if` keeps the empty id out of the tool OUTPUT to
+    /// match TS `newTodos` (whose items omit `id`). The field type stays
+    /// `String` so existing readers keep compiling.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
     /// Human-readable description of the todo.
     pub content: String,

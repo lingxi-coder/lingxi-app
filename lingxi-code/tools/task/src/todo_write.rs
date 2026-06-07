@@ -3,7 +3,6 @@
 //! `pending` / `in_progress` / `completed`. The aliases `done` and `todo`
 //! are NOT accepted.
 
-use std::collections::HashSet;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -42,20 +41,18 @@ pub const TODO_MAX_CONTENT_CHARS: usize = 4_096;
 /// Canonical tool name in the registry.
 pub const TOOL_NAME: &str = "TodoWrite";
 
-/// Validate a `Vec<TodoItem>` for the locked TodoWrite contract.
+/// Validate a `Vec<TodoItem>` for the TodoWrite contract.
 ///
-/// Rules (spec §7 line 486 + this plan):
-/// - Each `content` is non-empty and `<= TODO_MAX_CONTENT_CHARS` chars.
-/// - All `id`s are unique within the list.
-/// - At most one item has `status == TodoState::InProgress`.
-///
-/// Returns the byte-locked error string on failure.
+/// Mirrors claude-code `TodoItemSchema` (`utils/todo/types.ts`), which only
+/// requires `content` and `activeForm` to be non-empty. TS does NOT reject a
+/// list with multiple `in_progress` items — the single-in-progress convention
+/// is advisory (surfaced in the prompt), never enforced — and TS input items
+/// carry no `id`, so neither an id-uniqueness nor an in-progress-count check
+/// exists.
 ///
 /// # Errors
 /// Returns a human-readable error string on the first rule violation.
 pub fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
-    let mut seen_ids: HashSet<&str> = HashSet::with_capacity(todos.len());
-    let mut in_progress_count: u32 = 0;
     for t in todos {
         if t.content.is_empty() {
             return Err("TodoWrite: todo content is empty".into());
@@ -69,17 +66,6 @@ pub fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
                 "TodoWrite: todo content exceeds {TODO_MAX_CONTENT_CHARS} chars (got {n})"
             ));
         }
-        if !seen_ids.insert(t.id.as_str()) {
-            return Err(format!("TodoWrite: duplicate id '{}'", t.id));
-        }
-        if t.status == TodoState::InProgress {
-            in_progress_count += 1;
-        }
-    }
-    if in_progress_count > 1 {
-        return Err(format!(
-            "TodoWrite: at most one todo may be 'in_progress' (got {in_progress_count})"
-        ));
     }
     Ok(())
 }
@@ -109,7 +95,6 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "id":      { "type": "string" },
                         "content": { "type": "string", "minLength": 1 },
                         "status":  {
                             "type": "string",
@@ -117,7 +102,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                         },
                         "activeForm": { "type": "string", "minLength": 1 }
                     },
-                    "required": ["id", "content", "status", "activeForm"]
+                    "required": ["content", "status", "activeForm"]
                 }
             }
         },
@@ -507,7 +492,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_duplicate_id() {
+    fn validate_accepts_duplicate_id() {
+        // TS `TodoItemSchema` has no `id` concept, so there is no uniqueness
+        // rule; id-less input deserializes to empty ids, which must not reject.
         let todos = vec![
             TodoItem {
                 id: "dup".into(),
@@ -522,12 +509,13 @@ mod tests {
                 active_form: "active".into(),
             },
         ];
-        let err = validate_todos(&todos).expect_err("dup id must reject");
-        assert_eq!(err, "TodoWrite: duplicate id 'dup'");
+        assert!(validate_todos(&todos).is_ok());
     }
 
     #[test]
-    fn validate_rejects_two_in_progress() {
+    fn validate_accepts_two_in_progress() {
+        // TS treats single-in-progress as advisory (prompt-only), never an
+        // error — multiple `in_progress` items must be accepted.
         let todos = vec![
             TodoItem {
                 id: "a".into(),
@@ -542,11 +530,7 @@ mod tests {
                 active_form: "active".into(),
             },
         ];
-        let err = validate_todos(&todos).expect_err("two in_progress must reject");
-        assert_eq!(
-            err,
-            "TodoWrite: at most one todo may be 'in_progress' (got 2)"
-        );
+        assert!(validate_todos(&todos).is_ok());
     }
 
     #[test]
@@ -651,25 +635,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_rejects_two_in_progress() {
-        let (tool, sink, _session, use_ctx) = make_tool_and_session();
+    async fn execute_accepts_two_in_progress() {
+        // TS does not reject multiple `in_progress`; the write succeeds and
+        // both items persist (id-less input — TS items have no `id`).
+        let (tool, sink, session, use_ctx) = make_tool_and_session();
         tool.ctx.bus.attach_sink(sink.clone()).await;
         let input = json!({
             "todos": [
-                { "id": "a", "content": "x", "status": "in_progress", "activeForm": "Doing x" },
-                { "id": "b", "content": "y", "status": "in_progress", "activeForm": "Doing y" }
+                { "content": "x", "status": "in_progress", "activeForm": "Doing x" },
+                { "content": "y", "status": "in_progress", "activeForm": "Doing y" }
             ]
         });
-        let err = tool
+        let res = tool
             .call(input, use_ctx, fresh_tx())
             .await
-            .expect_err("two in_progress must fail");
-        assert_eq!(
-            format!("{err}"),
-            "invalid input: TodoWrite: at most one todo may be 'in_progress' (got 2)"
-        );
+            .expect("two in_progress is accepted");
+        assert_eq!(res.data["summary"]["in_progress"], 2);
+        {
+            let s = session.lock().await;
+            assert_eq!(s.todos.len(), 2);
+        }
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
-        assert!(names.contains(&TODO_WRITE_FAILED.to_string()));
+        assert!(names.contains(&TODO_WRITE_COMPLETED.to_string()));
+        assert!(!names.contains(&TODO_WRITE_FAILED.to_string()));
+    }
+
+    #[tokio::test]
+    async fn execute_accepts_id_less_input_and_omits_id_in_output() {
+        // claude-code TodoItem input is `{ content, status, activeForm }` with
+        // no `id`. Such input must deserialize and persist, and the OUTPUT
+        // `todos` must not carry an `id` (TS `newTodos` items omit it).
+        let (tool, sink, session, use_ctx) = make_tool_and_session();
+        tool.ctx.bus.attach_sink(sink.clone()).await;
+        let input = json!({
+            "todos": [
+                { "content": "first",  "status": "pending",     "activeForm": "Doing first"  },
+                { "content": "second", "status": "in_progress",  "activeForm": "Doing second" }
+            ]
+        });
+        let res = tool
+            .call(input, use_ctx, fresh_tx())
+            .await
+            .expect("id-less input is accepted");
+        {
+            let s = session.lock().await;
+            assert_eq!(s.todos.len(), 2);
+            assert_eq!(s.todos[0].id, "", "id defaults to empty when absent");
+        }
+        let out = &res.data["todos"];
+        for item in out.as_array().expect("todos array") {
+            assert!(
+                item.get("id").is_none(),
+                "OUTPUT must not leak an id: {item}"
+            );
+        }
     }
 
     #[test]

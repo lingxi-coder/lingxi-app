@@ -377,6 +377,28 @@ impl Tool for WebFetchTool {
             .into()
     }
 
+    /// Reject an unparseable URL early with the byte-exact upstream message.
+    ///
+    /// Mirrors `WebFetchTool.validateInput` (`WebFetchTool.ts:191-204`,
+    /// `errorCode: 1`, `meta.reason: 'invalid_url'`): it only checks that the URL
+    /// PARSES (`new URL(url)` ⇄ `url::Url::parse`) — scheme/SSRF gating happens
+    /// later in `call()` via `validate_url`, exactly as upstream defers it to
+    /// `getURLMarkdownContent`. A parseable-but-wrong-scheme URL (e.g. `file://`)
+    /// passes this gate and is rejected in `call()`.
+    async fn validate_input(
+        &self,
+        input: &Value,
+        _ctx: &ToolUseContext,
+    ) -> Result<(), tool_api::tool_trait::ValidationError> {
+        let url = input.get("url").and_then(Value::as_str).unwrap_or("");
+        if url::Url::parse(url).is_err() {
+            return Err(tool_api::tool_trait::ValidationError(format!(
+                "Error: Invalid URL \"{url}\". The URL provided could not be parsed."
+            )));
+        }
+        Ok(())
+    }
+
     async fn call(
         &self,
         input: Value,
@@ -964,6 +986,61 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             .expect_err("file:// must be rejected");
         assert!(matches!(err, ToolError::InvalidInput(_)));
         assert!(format!("{err}").contains("URL scheme 'file' not allowed; only https/http"));
+    }
+
+    // ---- validateInput parity (WebFetchTool.ts:191-204) --------------------
+
+    #[tokio::test]
+    async fn validate_input_rejects_unparseable_url() {
+        let (ctx, _http, _sink) = make_web_ctx();
+        let tool = WebFetchTool::new(ctx);
+        let err = tool
+            .validate_input(&json!({ "url": "not a url" }), &fresh_ctx())
+            .await
+            .expect_err("unparseable URL must be rejected");
+        // `ValidationError`'s Display prepends `invalid tool input: `; the message
+        // bytes must match the TS string exactly.
+        assert!(
+            err.to_string().contains(
+                "Error: Invalid URL \"not a url\". The URL provided could not be parsed."
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_input_rejects_scheme_relative_url() {
+        // Like JS `new URL('example.com')`, `url::Url::parse` rejects a URL with
+        // no scheme/base.
+        let (ctx, _http, _sink) = make_web_ctx();
+        let tool = WebFetchTool::new(ctx);
+        let err = tool
+            .validate_input(&json!({ "url": "example.com/path" }), &fresh_ctx())
+            .await
+            .expect_err("schemeless URL must be rejected");
+        assert!(err.to_string().contains(
+            "Error: Invalid URL \"example.com/path\". The URL provided could not be parsed."
+        ));
+    }
+
+    #[tokio::test]
+    async fn validate_input_accepts_valid_https() {
+        let (ctx, _http, _sink) = make_web_ctx();
+        let tool = WebFetchTool::new(ctx);
+        tool.validate_input(&json!({ "url": "https://example.com/page" }), &fresh_ctx())
+            .await
+            .expect("a parseable https URL is valid input");
+    }
+
+    #[tokio::test]
+    async fn validate_input_passes_parseable_non_http_scheme() {
+        // Parity: validateInput only checks parseability. `file://` parses, so it
+        // passes this gate — the scheme is rejected later in `call()`.
+        let (ctx, _http, _sink) = make_web_ctx();
+        let tool = WebFetchTool::new(ctx);
+        tool.validate_input(&json!({ "url": "file:///etc/passwd" }), &fresh_ctx())
+            .await
+            .expect("file:// parses, so validateInput accepts it");
     }
 
     // ---- http→https upgrade + 15-min cache integration ---------------------

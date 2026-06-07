@@ -11,7 +11,7 @@
 
 use crate::web_fetch::WEBFETCH_USER_AGENT_PREFIX;
 use api_client::betas::WEB_SEARCH as WEB_SEARCH_BETA;
-use api_client::types::{ContentBlockApi, MessageResponse};
+use api_client::types::UsageApi;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
@@ -93,37 +93,120 @@ pub fn build_request_body(model: &str, input: &WebSearchInput) -> Value {
     })
 }
 
-/// One parsed search-output entry: either a free-form text block or a raw
-/// `server_tool_use` input payload.
+/// One parsed search-output entry: either a free-form text segment or a
+/// structured search-result hit object.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum SearchResultEntry {
-    /// Free-form text from a `text` content block.
+    /// Free-form text accumulated from one or more consecutive `text` blocks
+    /// (also used for the `Web search error: <code>` string emitted on a
+    /// `web_search_tool_result` error payload).
     Text(String),
-    /// Raw input payload from a `server_tool_use` block.
+    /// Structured search result from a `web_search_tool_result` block, shaped
+    /// `{ "tool_use_id": <id>, "content": [{ "title", "url" }, ...] }`.
     Hit(Value),
 }
 
-/// Walk a `MessageResponse.content` array and return the search output:
-/// each `text` block as a [`SearchResultEntry::Text`], each
-/// `server_tool_use` with `name == "web_search"` as a
-/// [`SearchResultEntry::Hit`] carrying the block's raw `input` payload.
-/// Mirrors upstream `makeOutputFromSearchResponse` (`WebSearchTool.ts`).
+/// Minimal view of the `messages` response consumed by WebSearch.
+///
+/// `content` is intentionally kept as raw `serde_json::Value` blocks rather than
+/// `api_client::types::ContentBlockApi`: the web-search response carries
+/// `web_search_tool_result` blocks that `ContentBlockApi` does not model, and
+/// adding that variant would break the exhaustive `ContentBlockApi` matches in
+/// the agent/orchestrator/sidequery crates. This mirrors how upstream consumes
+/// the response as an opaque `BetaContentBlock[]` (`WebSearchTool.ts:86`).
+#[derive(Debug, Deserialize)]
+struct WebSearchMessageResponse {
+    #[serde(default)]
+    content: Vec<Value>,
+    #[serde(default)]
+    usage: UsageApi,
+}
+
+/// Walk a response `content` array and produce the search output, mirroring
+/// upstream `makeOutputFromSearchResponse` (`WebSearchTool.ts:86-150`)
+/// byte-for-byte.
+///
+/// The block sequence is, repeated per search:
+/// `server_tool_use` → `web_search_tool_result` → intermingled `text`/citation
+/// blocks. The faithful state machine:
+/// - `text` blocks accumulate into a running buffer while `in_text` is set;
+/// - a `server_tool_use` block flushes the trimmed buffer (when non-empty) as a
+///   [`SearchResultEntry::Text`], clears it, and drops `in_text` — the
+///   `server_tool_use` block itself carries only the QUERY and is **never**
+///   emitted as a result;
+/// - a `web_search_tool_result` block whose `content` is an array emits a
+///   [`SearchResultEntry::Hit`] of `{ tool_use_id, content: [{title, url}] }`;
+///   when `content` is an error object instead, it emits the
+///   `Web search error: <error_code>` string as a [`SearchResultEntry::Text`];
+/// - a `text` block seen after a flush starts a fresh buffer.
+///
+/// Any trailing buffered text is flushed at the end.
 #[must_use]
-pub fn parse_response_content(content: &[ContentBlockApi]) -> Vec<SearchResultEntry> {
+pub fn parse_response_content(content: &[Value]) -> Vec<SearchResultEntry> {
     let mut out: Vec<SearchResultEntry> = Vec::new();
+    let mut text_acc = String::new();
+    let mut in_text = true;
+
     for block in content {
-        match block {
-            ContentBlockApi::Text { text } => {
-                out.push(SearchResultEntry::Text(text.clone()));
+        match block.get("type").and_then(Value::as_str).unwrap_or("") {
+            "server_tool_use" => {
+                if in_text {
+                    in_text = false;
+                    let trimmed = text_acc.trim();
+                    if !trimmed.is_empty() {
+                        out.push(SearchResultEntry::Text(trimmed.to_string()));
+                    }
+                    text_acc.clear();
+                }
             }
-            ContentBlockApi::ServerToolUse { name, input, .. }
-                if name == WEB_SEARCH_TOOL_BLOCK_NAME =>
-            {
-                out.push(SearchResultEntry::Hit(input.clone()));
+            "web_search_tool_result" => match block.get("content") {
+                // Success case — `content` is an array of search hits.
+                Some(Value::Array(items)) => {
+                    let hits: Vec<Value> = items
+                        .iter()
+                        .map(|r| {
+                            json!({
+                                "title": r.get("title").cloned().unwrap_or(Value::Null),
+                                "url": r.get("url").cloned().unwrap_or(Value::Null),
+                            })
+                        })
+                        .collect();
+                    out.push(SearchResultEntry::Hit(json!({
+                        "tool_use_id": block.get("tool_use_id").cloned().unwrap_or(Value::Null),
+                        "content": hits,
+                    })));
+                }
+                // Error case — `content` is a `WebSearchToolResultError`.
+                other => {
+                    let code = other
+                        .and_then(|c| c.get("error_code"))
+                        .map_or_else(
+                            || "undefined".to_string(),
+                            |v| match v {
+                                Value::String(s) => s.clone(),
+                                _ => v.to_string(),
+                            },
+                        );
+                    out.push(SearchResultEntry::Text(format!("Web search error: {code}")));
+                }
+            },
+            "text" => {
+                let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+                if in_text {
+                    text_acc.push_str(text);
+                } else {
+                    in_text = true;
+                    text_acc = text.to_string();
+                }
             }
             _ => {}
         }
+    }
+
+    // Flush any trailing buffered text (`if (textAcc.length)` in upstream).
+    if !text_acc.is_empty() {
+        out.push(SearchResultEntry::Text(text_acc.trim().to_string()));
     }
     out
 }
@@ -137,11 +220,9 @@ pub fn parse_response_content(content: &[ContentBlockApi]) -> Vec<SearchResultEn
 /// Per-entry rendering follows the TS branches:
 /// - a text segment is appended verbatim plus a blank line;
 /// - a hit object renders `Links: <json>` when it carries a non-empty
-///   `content` array, otherwise `No links found.`. Until WEB.4 reshapes
-///   [`SearchResultEntry::Hit`] into `{tool_use_id, content:[{title,url}]}`,
-///   today's raw `server_tool_use` input has no `content` array and so
-///   renders `No links found.` — the header + footer are parity-critical
-///   and correct regardless.
+///   `content` array, otherwise `No links found.`. After WEB.4,
+///   [`SearchResultEntry::Hit`] is `{tool_use_id, content:[{title,url}]}`, so
+///   `content` is the hits array serialized verbatim into the `Links:` line.
 #[must_use]
 pub fn build_model_content(query: &str, results: &[SearchResultEntry]) -> String {
     let mut out = format!("Web search results for query: \"{query}\"\n\n");
@@ -404,7 +485,8 @@ impl Tool for WebSearchTool {
 
         match resp_result {
             Ok(http_resp) if http_resp.status == 200 => {
-                let parsed: MessageResponse = match serde_json::from_str(&http_resp.body) {
+                let parsed: WebSearchMessageResponse = match serde_json::from_str(&http_resp.body)
+                {
                     Ok(p) => p,
                     Err(e) => {
                         self.emit_failed(&invocation_id, "invalid_response", None, elapsed_ms)
@@ -553,52 +635,134 @@ mod tests {
     }
 
     #[test]
-    fn parses_text_only_response() {
+    fn consecutive_text_blocks_concatenate_into_one_entry() {
+        // Mirrors upstream: while `in_text`, consecutive `text` blocks append to
+        // the same buffer and flush as a SINGLE entry at the end (not one per
+        // block).
         let blocks = vec![
-            ContentBlockApi::Text {
-                text: "Here are some results:".into(),
-            },
-            ContentBlockApi::Text {
-                text: "1. ...".into(),
-            },
+            json!({ "type": "text", "text": "Here are some results:" }),
+            json!({ "type": "text", "text": "1. ..." }),
         ];
         let parsed = parse_response_content(&blocks);
-        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed.len(), 1);
         match &parsed[0] {
-            SearchResultEntry::Text(s) => assert_eq!(s, "Here are some results:"),
+            SearchResultEntry::Text(s) => assert_eq!(s, "Here are some results:1. ..."),
             SearchResultEntry::Hit(_) => panic!("expected Text"),
         }
     }
 
     #[test]
-    fn parses_mixed_text_and_server_tool_use() {
+    fn web_search_tool_result_success_produces_hit() {
+        // The QUERY-carrying `server_tool_use` block is NOT a result; the actual
+        // results live in the `web_search_tool_result` block's `content` array.
         let blocks = vec![
-            ContentBlockApi::Text {
-                text: "Found:".into(),
-            },
-            ContentBlockApi::ServerToolUse {
-                id: "stu_1".into(),
-                name: "web_search".into(),
-                input: json!({ "url": "https://docs.rs", "title": "Docs.rs" }),
-            },
+            json!({
+                "type": "server_tool_use",
+                "id": "stu_1",
+                "name": "web_search",
+                "input": { "query": "rust async" }
+            }),
+            json!({
+                "type": "web_search_tool_result",
+                "tool_use_id": "stu_1",
+                "content": [
+                    { "title": "Docs.rs", "url": "https://docs.rs", "encrypted_content": "zzz" },
+                    { "title": "crates.io", "url": "https://crates.io" }
+                ]
+            }),
         ];
         let parsed = parse_response_content(&blocks);
-        assert_eq!(parsed.len(), 2);
-        match &parsed[1] {
-            SearchResultEntry::Hit(v) => assert_eq!(v["url"], "https://docs.rs"),
+        assert_eq!(parsed.len(), 1, "server_tool_use must not produce a result");
+        match &parsed[0] {
+            SearchResultEntry::Hit(v) => {
+                assert_eq!(v["tool_use_id"], "stu_1");
+                let hits = v["content"].as_array().expect("content array");
+                assert_eq!(hits.len(), 2);
+                // Only `title` and `url` are projected (extra fields dropped).
+                assert_eq!(hits[0], json!({ "title": "Docs.rs", "url": "https://docs.rs" }));
+                assert_eq!(hits[1], json!({ "title": "crates.io", "url": "https://crates.io" }));
+            }
             SearchResultEntry::Text(_) => panic!("expected Hit"),
         }
     }
 
     #[test]
-    fn ignores_non_web_search_server_tool_use() {
-        let blocks = vec![ContentBlockApi::ServerToolUse {
-            id: "stu_2".into(),
-            name: "advisor".into(),
-            input: json!({}),
-        }];
+    fn web_search_tool_result_error_produces_error_string() {
+        // When `content` is an error object (not an array), upstream pushes the
+        // `Web search error: <error_code>` string.
+        let blocks = vec![json!({
+            "type": "web_search_tool_result",
+            "tool_use_id": "stu_9",
+            "content": { "type": "web_search_tool_result_error", "error_code": "max_uses_exceeded" }
+        })];
         let parsed = parse_response_content(&blocks);
-        assert!(parsed.is_empty(), "advisor tool use must be skipped");
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0] {
+            SearchResultEntry::Text(s) => assert_eq!(s, "Web search error: max_uses_exceeded"),
+            SearchResultEntry::Hit(_) => panic!("expected Text error string"),
+        }
+    }
+
+    #[test]
+    fn server_tool_use_flushes_accumulated_text() {
+        // Leading text accumulates, then a `server_tool_use` flushes it (trimmed)
+        // as one entry; the `server_tool_use` itself is never emitted.
+        let blocks = vec![
+            json!({ "type": "text", "text": "Found: " }),
+            json!({ "type": "text", "text": "  things  " }),
+            json!({
+                "type": "server_tool_use",
+                "id": "stu_1",
+                "name": "web_search",
+                "input": { "query": "q" }
+            }),
+        ];
+        let parsed = parse_response_content(&blocks);
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0] {
+            SearchResultEntry::Text(s) => assert_eq!(s, "Found:   things"),
+            SearchResultEntry::Hit(_) => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn canonical_sequence_text_tooluse_result_text() {
+        // The documented per-search block order, with a trailing commentary text
+        // block after the result.
+        let blocks = vec![
+            json!({ "type": "text", "text": "Let me search." }),
+            json!({
+                "type": "server_tool_use",
+                "id": "stu_1",
+                "name": "web_search",
+                "input": { "query": "q" }
+            }),
+            json!({
+                "type": "web_search_tool_result",
+                "tool_use_id": "stu_1",
+                "content": [ { "title": "T", "url": "https://t.example" } ]
+            }),
+            json!({ "type": "text", "text": "Here is what I found." }),
+        ];
+        let parsed = parse_response_content(&blocks);
+        assert_eq!(parsed.len(), 3);
+        assert!(matches!(&parsed[0], SearchResultEntry::Text(s) if s == "Let me search."));
+        assert!(matches!(&parsed[1], SearchResultEntry::Hit(_)));
+        assert!(matches!(&parsed[2], SearchResultEntry::Text(s) if s == "Here is what I found."));
+    }
+
+    #[test]
+    fn server_tool_use_alone_yields_no_results() {
+        // A lone `server_tool_use` (query carrier) with no result block produces
+        // nothing — it only flushes the (empty) text buffer.
+        let blocks = vec![json!({
+            "type": "server_tool_use",
+            "id": "stu_2",
+            "name": "advisor",
+            "input": {}
+        })];
+        let parsed = parse_response_content(&blocks);
+        assert!(parsed.is_empty(), "server_tool_use must not become a result");
     }
 
     #[test]
@@ -647,10 +811,7 @@ mod tests {
 
     #[test]
     fn ignores_thinking_blocks() {
-        let blocks = vec![ContentBlockApi::Thinking {
-            thinking: "let me think".into(),
-            signature: None,
-        }];
+        let blocks = vec![json!({ "type": "thinking", "thinking": "let me think" })];
         let parsed = parse_response_content(&blocks);
         assert!(parsed.is_empty());
     }
@@ -696,6 +857,8 @@ mod tests {
     async fn happy_path_returns_results_and_emits_completed() {
         let (ctx, http, sink) = make_web_ctx();
         ctx.bus.attach_sink(sink.clone()).await;
+        // Realistic block order: leading text, the query-carrying
+        // `server_tool_use`, then the `web_search_tool_result` carrying hits.
         let resp_body = json!({
             "id": "msg_1",
             "model": "claude-sonnet-4-20250514",
@@ -705,7 +868,14 @@ mod tests {
                     "type": "server_tool_use",
                     "id": "stu_1",
                     "name": "web_search",
-                    "input": { "url": "https://docs.rs", "title": "docs.rs" }
+                    "input": { "query": "rust async" }
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "stu_1",
+                    "content": [
+                        { "title": "docs.rs", "url": "https://docs.rs" }
+                    ]
                 }
             ],
             "stop_reason": "end_turn",
@@ -723,7 +893,10 @@ mod tests {
             .await
             .expect("ok");
         let arr = res.data["results"].as_array().expect("results array");
+        // One text entry + one structured hit (the server_tool_use is dropped).
         assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0], "Here are results:");
+        assert_eq!(arr[1]["content"][0]["url"], "https://docs.rs");
         let events = sink.events().await;
         let names: Vec<&str> = events.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"tengu_tool_web_search_completed"));

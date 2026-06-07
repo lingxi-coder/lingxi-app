@@ -5,11 +5,13 @@
 //! falls back to the active mode for unmatched calls.
 
 use crate::auto_edit_safety::{check_path_safety_for_auto_edit, AutoEditSafety};
+use crate::defaults_per_tool::tool_default;
 use crate::denial_tracking::DenialTrackingState;
 use crate::filesystem::{
     file_tool_kind, input_path_for_tool, path_in_allowed_working_path, path_matches_rule_pattern,
     FileToolKind, FsRoots,
 };
+use crate::gate::PromptDefault;
 use crate::mode::PermissionMode;
 use crate::result::{
     PermissionDecisionReason, PermissionMetadata, PermissionPrompt, PermissionResult,
@@ -58,6 +60,15 @@ pub struct PermissionPolicy {
     pub denial_tracking: Mutex<DenialTrackingState>,
     /// Killswitch that overrides `BypassPermissions` back to `Ask`.
     pub bypass_killswitch_active: bool,
+    /// Was the session ORIGINALLY started with `BypassPermissions` available?
+    /// 1:1 with TS `ToolPermissionContext.isBypassPermissionsModeAvailable`.
+    /// When `true`, `Plan` mode ALSO bypasses permissions (claude-code
+    /// `permissions.ts:1268-1271` `shouldBypassPermissions`) — a plan started
+    /// from a bypass session keeps the bypass grant. Defaults to `false`
+    /// (preserving the plan-mode mutation backstop); production engine wiring of
+    /// this flag is deferred this batch. Subject to the same
+    /// [`Self::bypass_killswitch_active`] override as `BypassPermissions`.
+    pub bypass_permissions_available: bool,
     /// Filesystem roots for per-tool file-path CONTENT matching (phase 3a).
     /// `None` preserves the phase-2 tool-wide behavior (content ignored,
     /// matched by exact tool name); production sets this via [`Self::with_roots`]
@@ -96,6 +107,7 @@ impl PermissionPolicy {
             ask_rules: HashMap::new(),
             denial_tracking: Mutex::new(DenialTrackingState::default()),
             bypass_killswitch_active: false,
+            bypass_permissions_available: false,
             roots: None,
             stripped_dangerous: Vec::new(),
             stripped_positions: Vec::new(),
@@ -110,6 +122,16 @@ impl PermissionPolicy {
     #[must_use]
     pub fn with_working_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
         self.additional_working_dirs = dirs;
+        self
+    }
+
+    /// Mark whether `BypassPermissions` mode was available at session start
+    /// (TS `isBypassPermissionsModeAvailable`). When `true`, `Plan` mode bypasses
+    /// permissions like `BypassPermissions` (see
+    /// [`Self::bypass_permissions_available`]). Default `false`.
+    #[must_use]
+    pub fn with_bypass_available(mut self, available: bool) -> Self {
+        self.bypass_permissions_available = available;
         self
     }
 
@@ -175,6 +197,26 @@ impl PermissionPolicy {
     /// auto-allowed by `PolicyPermissionGate` (read-only default).
     #[must_use]
     pub fn authorize(&self, tool_name: &str, input: &serde_json::Value) -> PermissionResult {
+        let result = self.authorize_inner(tool_name, input);
+        // PERM.1 — DontAsk transform (claude-code `permissions.ts:503-517`):
+        // applied LAST so no early-return ask escapes it. A remaining `ask`
+        // becomes `deny`, EXCEPT for read-only / `AllowByDefault` tools — in TS
+        // their own `checkPermissions` returns `allow` BEFORE this transform, so
+        // they are never over-denied. Here the surviving `ask` is left for the
+        // gate's read-only default ([`crate::policy_gate`]) to auto-allow.
+        if self.mode == PermissionMode::DontAsk
+            && matches!(result, PermissionResult::Ask { .. })
+            && !matches!(tool_default(tool_name), PromptDefault::AllowByDefault)
+        {
+            return deny_with_mode(PermissionMode::DontAsk);
+        }
+        result
+    }
+
+    /// Rule + mode evaluation producing the pre-`DontAsk`-transform result.
+    /// See [`Self::authorize`] for the public contract and the evaluation order;
+    /// [`Self::authorize`] wraps this with the `DontAsk` ask→deny transform.
+    fn authorize_inner(&self, tool_name: &str, input: &serde_json::Value) -> PermissionResult {
         let sources = SOURCES_BY_PRIORITY;
 
         // Precedence mirrors claude-code `hasPermissionsToUseToolInner`:
@@ -329,15 +371,33 @@ impl PermissionPolicy {
         //     already won above, so they are preserved. Plan-safe tools fall
         //     through to the generic mode fallback below (and the gate's
         //     read-only auto-allow), keeping their existing path.
+        // PERM.4 — Plan-mode bypass (claude-code `permissions.ts:1268-1281`,
+        //     `shouldBypassPermissions`). A `Plan` session that ORIGINALLY had
+        //     `BypassPermissions` available ([`Self::bypass_permissions_available`],
+        //     TS `isBypassPermissionsModeAvailable`) bypasses permissions just like
+        //     `BypassPermissions` mode — the tool is ALLOWED, tagged `Plan` (1:1
+        //     with TS `decisionReason: { type: 'mode', mode: 'plan' }`). It runs
+        //     AFTER the deny/ask/safety walks above (which already returned), so
+        //     deny rules, ask rules, and the dangerous-removal / path-constraint /
+        //     sed asks stay bypass-immune — matching the TS step order (1a deny,
+        //     1d ask, 1g safety all precede the 2a bypass). Subject to the same
+        //     killswitch override as `BypassPermissions`.
+        if self.mode == PermissionMode::Plan
+            && self.bypass_permissions_available
+            && !self.bypass_killswitch_active
+        {
+            return allow_with_mode(PermissionMode::Plan);
+        }
         if self.mode == PermissionMode::Plan && !crate::mode_policy::is_plan_safe_tool(tool_name) {
             return ask_plan_mutation(tool_name);
         }
-        // 4. Mode fallback.
+        // 4. Mode fallback. `DontAsk` falls through to the generic mode ask here;
+        //    the `ask`→`deny` conversion (PERM.1) is applied last in
+        //    [`Self::authorize`], so read-only tools are not over-denied.
         match self.mode {
             PermissionMode::BypassPermissions if !self.bypass_killswitch_active => {
                 allow_with_mode(PermissionMode::BypassPermissions)
             }
-            PermissionMode::DontAsk => deny_with_mode(PermissionMode::DontAsk),
             _ => ask_with_mode(self.mode, tool_name),
         }
     }
@@ -441,11 +501,23 @@ impl PermissionPolicy {
     ///     because deny rules are only ever evaluated from the deny bucket.
     fn rule_matches(&self, rule: &PermissionRule, tool_name: &str, input: &serde_json::Value) -> bool {
         let Some(roots) = self.roots.as_ref() else {
-            return rule.value.tool_name == tool_name;
+            // No roots → phase-2: file/shell content is ignored (matched
+            // tool-wide). Tool-wide rules (`rule_content == None`) honor the
+            // MCP server-level prefix match (PERM.2, claude-code
+            // `toolMatchesRule`); content rules keep the phase-2 exact
+            // tool-name match.
+            return if rule.value.rule_content.is_none() {
+                tool_wide_name_matches(&rule.value.tool_name, tool_name)
+            } else {
+                rule.value.tool_name == tool_name
+            };
         };
         let Some(pattern) = rule.value.rule_content.as_deref() else {
-            // Tool-wide rule → exact tool-name match.
-            return rule.value.tool_name == tool_name;
+            // PERM.2 — tool-wide rule → tool-name match, INCLUDING the MCP
+            // server-level prefix match (claude-code `toolMatchesRule`: rule
+            // `mcp__server` matches tool `mcp__server__tool`; `mcp__server__*`
+            // matches all of that server's tools).
+            return tool_wide_name_matches(&rule.value.tool_name, tool_name);
         };
         let group_ok = match file_tool_kind(tool_name) {
             FileToolKind::NonFile => {
@@ -459,7 +531,18 @@ impl PermissionPolicy {
                     };
                     return shell_command::rule_matches_any_subcommand(pattern, command);
                 }
-                return rule.value.tool_name == tool_name;
+                // PERM.3 — other NON-file tools: a CONTENT rule applies ONLY when
+                // the rule's content equals the tool-specific content key derived
+                // from the input (claude-code per-tool
+                // `getRuleByContentsForTool(...).get(ruleContent)` — e.g. WebFetch
+                // `domain:{host}`, Agent `{agentType}`). A content rule must NOT
+                // match tool-wide; tools without a known content scheme never
+                // match on content (fail-safe, so an over-broad rule cannot deny
+                // unrelated calls).
+                if rule.value.tool_name != tool_name {
+                    return false;
+                }
+                return tool_content_key(tool_name, input).as_deref() == Some(pattern);
             }
             FileToolKind::Editor => rule.value.tool_name == "Edit",
             FileToolKind::Reader => {
@@ -614,6 +697,107 @@ impl PermissionPolicy {
 /// Returns `None` for an empty subcommand.
 fn base_command(sub: &str) -> Option<&str> {
     sub.split_whitespace().next()
+}
+
+/// Parsed MCP tool/rule name — 1:1 with claude-code
+/// `mcpInfoFromString` (`services/mcp/mcpStringUtils.ts:19-31`).
+struct McpInfo<'a> {
+    server_name: &'a str,
+    /// `None` for a server-level name (`mcp__server`); `Some("tool")` for a
+    /// fully-qualified name; `Some("*")` for the explicit wildcard.
+    tool_name: Option<&'a str>,
+}
+
+/// Split `mcp__<server>[__<tool…>]` into its parts, or `None` for a non-MCP
+/// string. Mirrors TS `mcpInfoFromString`: requires the `mcp` prefix and a
+/// non-empty server; everything after the server (joined back with `__`) is the
+/// tool name, or `None` when absent.
+fn mcp_info_from_string(s: &str) -> Option<McpInfo<'_>> {
+    let mut parts = s.splitn(3, "__");
+    let mcp_part = parts.next()?;
+    if mcp_part != "mcp" {
+        return None;
+    }
+    let server_name = parts.next().filter(|p| !p.is_empty())?;
+    // `splitn(3, ..)` keeps everything after the second `__` (incl. further
+    // `__`) intact as the tool name — matching TS `toolNameParts.join('__')`.
+    let tool_name = parts.next();
+    Some(McpInfo {
+        server_name,
+        tool_name,
+    })
+}
+
+/// Does a TOOL-WIDE rule name match a tool — 1:1 with the tool-name branch of
+/// claude-code `toolMatchesRule` (`permissions.ts:251-268`). Exact name match,
+/// OR an MCP server-level rule: `mcp__server` (or `mcp__server__*`) matches any
+/// `mcp__server__tool` of that server.
+fn tool_wide_name_matches(rule_tool_name: &str, tool_name: &str) -> bool {
+    if rule_tool_name == tool_name {
+        return true;
+    }
+    let (Some(rule_info), Some(tool_info)) = (
+        mcp_info_from_string(rule_tool_name),
+        mcp_info_from_string(tool_name),
+    ) else {
+        return false;
+    };
+    (rule_info.tool_name.is_none() || rule_info.tool_name == Some("*"))
+        && rule_info.server_name == tool_info.server_name
+}
+
+/// The tool-specific permission-rule CONTENT key derived from a tool call's
+/// input, for the NON-file/NON-shell content tools (PERM.3). A content rule
+/// matches iff its content string equals this key (claude-code per-tool
+/// `…ToPermissionRuleContent` + `getRuleByContentsForTool(...).get(key)`).
+///
+/// - `WebFetch` → `domain:{hostname}` from `input.url`
+///   (`WebFetchTool.ts:50-63`).
+/// - `Agent` (and its legacy alias `Task`) → the `subagent_type`, defaulting to
+///   `general-purpose` when omitted (claude-code `getDenyRuleForAgent`:
+///   `ruleContent === agentType`, with the general-purpose default).
+/// - any other tool → `None` (no content scheme ⇒ a content rule never matches).
+fn tool_content_key(tool_name: &str, input: &serde_json::Value) -> Option<String> {
+    match tool_name {
+        "WebFetch" => {
+            let url = input.get("url")?.as_str()?;
+            Some(format!("domain:{}", url_hostname(url)?))
+        }
+        "Agent" | "Task" => {
+            // TS resolves an omitted `subagent_type` to the general-purpose
+            // agent's type before matching deny rules.
+            let agent_type = input
+                .get("subagent_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("general-purpose");
+            Some(agent_type.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Extract the hostname from a URL string — a minimal stand-in for the WHATWG
+/// `new URL(url).hostname` used by claude-code for the `WebFetch` rule-content. Strips
+/// the scheme, userinfo, path/query/fragment, and port; preserves a bracketed
+/// IPv6 literal. Returns `None` when no host is present.
+fn url_hostname(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Drop any `user:pass@` userinfo (last `@` before the host).
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = if host_port.starts_with('[') {
+        // IPv6 literal: the hostname includes the brackets (`[::1]`).
+        host_port
+            .find(']')
+            .map_or(host_port, |i| &host_port[..=i])
+    } else {
+        // Strip a `:port` suffix.
+        host_port.split_once(':').map_or(host_port, |(h, _)| h)
+    };
+    (!host.is_empty()).then(|| host.to_string())
 }
 
 /// Byte-locked sed-constraint ask: an `acceptEdits` `sed` subcommand whose
@@ -2006,6 +2190,267 @@ mod tests {
                 },
                 ..
             }
+        ));
+    }
+
+    // ── PERM.1: DontAsk ask→deny transform (read-only tools exempt) ────────
+
+    #[test]
+    fn dontask_converts_final_ask_to_deny_for_mutating_tool() {
+        // A mutating tool with no matching rule → mode-fallback ask → converted
+        // to deny by the DontAsk transform (claude-code permissions.ts:503-517).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::DontAsk);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Deny {
+                reason: PermissionDecisionReason::PermissionMode {
+                    mode: PermissionMode::DontAsk
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn dontask_converts_ask_rule_to_deny() {
+        // An ASK RULE that fires used to escape the old mode-only deny (it
+        // returned Ask before the fallback). It is now converted to deny too.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash(npm publish:*)"] } }"#,
+            PermissionMode::DontAsk,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm publish --tag beta")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn dontask_does_not_over_deny_read_only_tools() {
+        // Read-only / AllowByDefault tools are NOT converted — they stay `Ask` so
+        // the gate's read-only default auto-allows them (TS: their checkPermissions
+        // returns allow before the transform). This is the over-denial fix.
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::DontAsk);
+        for tool in ["Read", "Grep", "Glob", "LSP"] {
+            assert!(
+                matches!(
+                    p.authorize(tool, &serde_json::json!({})),
+                    PermissionResult::Ask { .. }
+                ),
+                "DontAsk must not over-deny read-only {tool}"
+            );
+        }
+        // …but a mutating tool is still denied.
+        assert!(matches!(
+            p.authorize("Write", &edit("/proj/src/x.rs")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn dontask_allow_rule_still_allows() {
+        // An explicit allow rule wins (returns Allow before the transform).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(ls:*)"] } }"#,
+            PermissionMode::DontAsk,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("ls -l")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── PERM.2: MCP server-level rule matches the server's tools ───────────
+
+    #[test]
+    fn server_level_mcp_deny_matches_servers_tools() {
+        // `mcp__github` (no specific tool) denies every `mcp__github__*` tool.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["mcp__github"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("mcp__github__create_issue", &serde_json::json!({})),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("mcp__github__list_repos", &serde_json::json!({})),
+            PermissionResult::Deny { .. }
+        ));
+        // A DIFFERENT server is unaffected.
+        assert!(matches!(
+            p.authorize("mcp__gitlab__create_issue", &serde_json::json!({})),
+            PermissionResult::Ask { .. }
+        ));
+        // The exact server FQN itself is still matched.
+        assert!(matches!(
+            p.authorize("mcp__github", &serde_json::json!({})),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn server_level_mcp_wildcard_matches() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["mcp__github__*"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("mcp__github__create_issue", &serde_json::json!({})),
+            PermissionResult::Allow { .. }
+        ));
+        // Different server → no match.
+        assert!(matches!(
+            p.authorize("mcp__other__x", &serde_json::json!({})),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn server_level_mcp_match_works_without_roots() {
+        // The phase-2 (no-roots) path also honors the server-level match…
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": { "deny": ["mcp__github"] } }"#,
+            PermissionRuleSource::ProjectSettings,
+        )
+        .unwrap();
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        assert!(matches!(
+            p.authorize("mcp__github__create_issue", &serde_json::json!({})),
+            PermissionResult::Deny { .. }
+        ));
+        // …yet a server rule never matches a NON-mcp builtin of the same word.
+        assert!(matches!(
+            p.authorize("github", &serde_json::json!({})),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    // ── PERM.3: content-scoped rules apply only when the content matches ────
+
+    fn webfetch(url: &str) -> serde_json::Value {
+        serde_json::json!({ "url": url })
+    }
+
+    #[test]
+    fn webfetch_domain_deny_only_matches_that_domain() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["WebFetch(domain:evil.com)"] } }"#,
+            PermissionMode::Default,
+        );
+        // Matching domain → denied.
+        assert!(matches!(
+            p.authorize("WebFetch", &webfetch("https://evil.com/path?q=1")),
+            PermissionResult::Deny { .. }
+        ));
+        // A DIFFERENT domain is NOT denied (no over-match of the whole tool).
+        assert!(matches!(
+            p.authorize("WebFetch", &webfetch("https://good.com/page")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn webfetch_domain_allow_only_matches_that_domain() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["WebFetch(domain:api.example.com)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("WebFetch", &webfetch("https://api.example.com/v1")),
+            PermissionResult::Allow { .. }
+        ));
+        assert!(matches!(
+            p.authorize("WebFetch", &webfetch("https://other.example.com/v1")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn agent_type_deny_only_matches_that_type() {
+        // `Agent(Explore)` denies only the Explore subagent type, not all Agents.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Agent(Explore)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Agent", &serde_json::json!({ "subagent_type": "Explore" })),
+            PermissionResult::Deny { .. }
+        ));
+        // A different agent type is NOT denied (Agent is AllowByDefault → the
+        // gate would auto-allow; the parity point here is that it is NOT a deny).
+        assert!(matches!(
+            p.authorize(
+                "Agent",
+                &serde_json::json!({ "subagent_type": "general-purpose" })
+            ),
+            PermissionResult::Ask { .. }
+        ));
+        // The legacy alias `Task` resolves to `Agent` content matching as well.
+        let p2 = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Task(Explore)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p2.authorize("Agent", &serde_json::json!({ "subagent_type": "Explore" })),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    // ── PERM.4: Plan mode + isBypassPermissionsModeAvailable bypasses ──────
+
+    #[test]
+    fn plan_with_bypass_available_allows_mutating_tool() {
+        // Plan + bypass-available → a mutating tool is ALLOWED (tagged Plan),
+        // instead of the plan-mutation backstop ask.
+        let p = PermissionPolicy::new(PermissionMode::Plan).with_bypass_available(true);
+        match p.authorize("Edit", &edit("/proj/src/x.rs")) {
+            PermissionResult::Allow { reason, .. } => assert!(
+                matches!(
+                    reason,
+                    PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::Plan
+                    }
+                ),
+                "plan bypass must tag the Allow with Plan mode, got {reason:?}"
+            ),
+            other => panic!("expected Allow(Plan), got {other:?}"),
+        }
+        // Bash (also non-plan-safe) is likewise allowed.
+        assert!(matches!(
+            p.authorize("Bash", &serde_json::json!({ "command": "rm -rf /tmp/x" })),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn plan_without_bypass_available_still_asks() {
+        // No bypass-available → the plan-mutation backstop still fires.
+        let p = PermissionPolicy::new(PermissionMode::Plan);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn plan_bypass_respects_deny_rule_and_killswitch() {
+        // A deny rule still wins (bypass-immune — it runs before the bypass check).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Edit(src/**)"] } }"#,
+            PermissionMode::Plan,
+        )
+        .with_bypass_available(true);
+        assert!(matches!(
+            p.authorize("Edit", &edit("/proj/src/secret.rs")),
+            PermissionResult::Deny { .. }
+        ));
+        // The killswitch overrides the plan bypass → back to the plan-mutation ask.
+        let mut p2 = PermissionPolicy::new(PermissionMode::Plan).with_bypass_available(true);
+        p2.bypass_killswitch_active = true;
+        assert!(matches!(
+            p2.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Ask { .. }
         ));
     }
 }

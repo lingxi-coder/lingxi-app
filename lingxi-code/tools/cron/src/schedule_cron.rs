@@ -15,7 +15,7 @@
 //! computes the next fire time, and persists the descriptor. Production hosts
 //! pick the file up via `cron::scheduler::CronScheduler`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -49,14 +49,30 @@ use tool_api::tool_trait::{
 // equivalent; downstream parity is verified by the (out-of-cycle) M4-09
 // fixture driver against the canonical lingxi_cron table.
 
+/// A parsed cron field: the expanded, sorted, de-duplicated set of integer
+/// values it matches. Mirrors the `number[]` that `expandField` returns in
+/// claude-code `utils/cron.ts`.
 #[derive(Debug, Clone)]
-enum CronField {
-    Any,
-    Exact(u32),
-    Step(u32),
-    Range(u32, u32),
-    List(Vec<u32>),
+struct CronField(Vec<u32>);
+
+/// Inclusive `[min, max]` value range for a cron field. Mirrors the
+/// `FieldRange` rows of the `FIELD_RANGES` table in `utils/cron.ts`.
+#[derive(Debug, Clone, Copy)]
+struct FieldRange {
+    min: u32,
+    max: u32,
 }
+
+/// Per-field value ranges, indexed minute, hour, day-of-month, month,
+/// day-of-week — 1:1 with `cron.ts` `FIELD_RANGES`. Day-of-week is `0..=6`
+/// (Sunday = 0) with `7` accepted as a Sunday alias and normalized to `0`.
+const FIELD_RANGES: [FieldRange; 5] = [
+    FieldRange { min: 0, max: 59 }, // minute
+    FieldRange { min: 0, max: 23 }, // hour
+    FieldRange { min: 1, max: 31 }, // day-of-month
+    FieldRange { min: 1, max: 12 }, // month
+    FieldRange { min: 0, max: 6 },  // day-of-week (0=Sunday; 7 = Sunday alias)
+];
 
 #[derive(Debug, Clone)]
 struct CronExpression {
@@ -67,30 +83,111 @@ struct CronExpression {
     dow: CronField,
 }
 
-fn parse_cron_field(s: &str) -> Result<CronField, String> {
-    if s == "*" {
-        return Ok(CronField::Any);
+/// Expand one cron field into its sorted, de-duplicated set of matching values.
+///
+/// 1:1 port of `expandField` in claude-code `utils/cron.ts`. Each comma part is
+/// independently one of: a wildcard / step (`*`, `*/N`), a range or stepped
+/// range (`N-M`, `N-M/S`), or a single value (`N`). Mixed forms compose freely
+/// in one field (e.g. `1-5,0`, `0-30/10,45`, `*/15,7`). Day-of-week `7` is
+/// normalized to `0` (Sunday) — both as a bare value and at the high end of a
+/// range. Any value outside the field's `[min, max]` range (with `7` allowed
+/// for day-of-week) makes the whole field invalid. Returns `Err` — which maps
+/// to TS `null` — on any unsupported or out-of-range form, so the caller emits
+/// the generic "Invalid cron expression" message.
+fn expand_field(field: &str, range: FieldRange) -> Result<CronField, String> {
+    let FieldRange { min, max } = range;
+    // Day-of-week is the only `0..=6` field; it accepts `7` as a Sunday alias.
+    let is_dow = min == 0 && max == 6;
+    let mut out: BTreeSet<u32> = BTreeSet::new();
+
+    for part in field.split(',') {
+        // wildcard or `*/N`  (regex `^\*(?:\/(\d+))?$`)
+        if let Some(step) = match_star(part) {
+            if step < 1 {
+                return Err(format!("bad field: {field}"));
+            }
+            let mut i = min;
+            while i <= max {
+                out.insert(i);
+                i = i.saturating_add(step);
+            }
+            continue;
+        }
+
+        // `N-M` or `N-M/S`  (regex `^(\d+)-(\d+)(?:\/(\d+))?$`)
+        if let Some((lo, hi, step)) = match_range(part) {
+            let eff_max = if is_dow { 7 } else { max };
+            if lo > hi || step < 1 || lo < min || hi > eff_max {
+                return Err(format!("bad field: {field}"));
+            }
+            let mut i = lo;
+            while i <= hi {
+                out.insert(if is_dow && i == 7 { 0 } else { i });
+                i = i.saturating_add(step);
+            }
+            continue;
+        }
+
+        // plain `N`  (regex `^\d+$`)
+        if let Some(mut n) = match_single(part) {
+            if is_dow && n == 7 {
+                n = 0;
+            }
+            if n < min || n > max {
+                return Err(format!("bad field: {field}"));
+            }
+            out.insert(n);
+            continue;
+        }
+
+        return Err(format!("bad field: {field}"));
     }
-    if let Some(rest) = s.strip_prefix("*/") {
-        let n = rest.parse::<u32>().map_err(|_| format!("bad field: {s}"))?;
-        return Ok(CronField::Step(n));
+
+    if out.is_empty() {
+        return Err(format!("bad field: {field}"));
     }
-    if let Some((a, b)) = s.split_once('-') {
-        let a = a.parse::<u32>().map_err(|_| format!("bad field: {s}"))?;
-        let b = b.parse::<u32>().map_err(|_| format!("bad field: {s}"))?;
-        return Ok(CronField::Range(a, b));
+    Ok(CronField(out.into_iter().collect()))
+}
+
+/// Match `*` or `*/N`, returning the step (`1` for a bare `*`). Mirrors the
+/// `^\*(?:\/(\d+))?$` branch of `expandField`.
+fn match_star(part: &str) -> Option<u32> {
+    if part == "*" {
+        return Some(1);
     }
-    if s.contains(',') {
-        let list: Vec<u32> = s
-            .split(',')
-            .map(str::parse::<u32>)
-            .collect::<Result<_, _>>()
-            .map_err(|_| format!("bad field: {s}"))?;
-        return Ok(CronField::List(list));
+    let rest = part.strip_prefix("*/")?;
+    if !all_digits(rest) {
+        return None;
     }
-    s.parse::<u32>()
-        .map(CronField::Exact)
-        .map_err(|_| format!("bad field: {s}"))
+    rest.parse::<u32>().ok()
+}
+
+/// Match `N-M` or `N-M/S`, returning `(lo, hi, step)` with `step` defaulting to
+/// `1`. Mirrors the `^(\d+)-(\d+)(?:\/(\d+))?$` branch of `expandField`.
+fn match_range(part: &str) -> Option<(u32, u32, u32)> {
+    let (range_part, step) = match part.split_once('/') {
+        Some((r, s)) => {
+            if !all_digits(s) {
+                return None;
+            }
+            (r, s.parse::<u32>().ok()?)
+        }
+        None => (part, 1),
+    };
+    let (lo, hi) = range_part.split_once('-')?;
+    if !all_digits(lo) || !all_digits(hi) {
+        return None;
+    }
+    Some((lo.parse::<u32>().ok()?, hi.parse::<u32>().ok()?, step))
+}
+
+/// Match a bare `N` (regex `^\d+$`).
+fn match_single(part: &str) -> Option<u32> {
+    if all_digits(part) {
+        part.parse::<u32>().ok()
+    } else {
+        None
+    }
 }
 
 fn parse_cron(s: &str) -> Result<CronExpression, String> {
@@ -99,22 +196,16 @@ fn parse_cron(s: &str) -> Result<CronExpression, String> {
         return Err(format!("expected 5 fields, got {}", parts.len()));
     }
     Ok(CronExpression {
-        minute: parse_cron_field(parts[0])?,
-        hour: parse_cron_field(parts[1])?,
-        dom: parse_cron_field(parts[2])?,
-        month: parse_cron_field(parts[3])?,
-        dow: parse_cron_field(parts[4])?,
+        minute: expand_field(parts[0], FIELD_RANGES[0])?,
+        hour: expand_field(parts[1], FIELD_RANGES[1])?,
+        dom: expand_field(parts[2], FIELD_RANGES[2])?,
+        month: expand_field(parts[3], FIELD_RANGES[3])?,
+        dow: expand_field(parts[4], FIELD_RANGES[4])?,
     })
 }
 
 fn field_match(field: &CronField, value: u32) -> bool {
-    match field {
-        CronField::Any => true,
-        CronField::Exact(v) => *v == value,
-        CronField::Step(n) => *n > 0 && value % n == 0,
-        CronField::Range(a, b) => value >= *a && value <= *b,
-        CronField::List(list) => list.contains(&value),
-    }
+    field.0.contains(&value)
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -912,6 +1003,78 @@ mod tests {
         assert!(err
             .0
             .contains("Invalid cron expression 'not a cron'. Expected 5 fields: M H DoM Mon DoW."));
+    }
+
+    // -- CRON.3: day-of-week 7 (Sunday alias) normalizes to 0 -----------------
+    #[test]
+    fn dow_seven_normalizes_to_sunday() {
+        // Bare 7 -> 0 (both mean Sunday).
+        let e = parse_cron("0 0 * * 7").expect("dow 7 accepted");
+        assert_eq!(e.dow.0, vec![0]);
+        // 7 at the top of a range expands with 7 folded to 0 (5-7 = Fri,Sat,Sun).
+        let e = parse_cron("0 0 * * 5-7").expect("range ending at 7");
+        assert_eq!(e.dow.0, vec![0, 5, 6]);
+        // 0 and 7 collapse to a single Sunday entry.
+        let e = parse_cron("0 0 * * 0,7").expect("0 and 7 dedupe");
+        assert_eq!(e.dow.0, vec![0]);
+        // 7 is a Sunday alias ONLY for day-of-week; elsewhere it is a plain
+        // value and is NOT rewritten to 0.
+        assert_eq!(parse_cron("7 0 * * *").unwrap().minute.0, vec![7]);
+        assert_eq!(parse_cron("0 0 * 7 *").unwrap().month.0, vec![7]);
+    }
+
+    // -- CRON.4: mixed list / range / step forms in one field -----------------
+    #[test]
+    fn mixed_list_range_step_forms() {
+        // List + range + single composed in the day-of-week field.
+        let e = parse_cron("0 9 * * 1-5,0").expect("mixed dow");
+        assert_eq!(e.dow.0, vec![0, 1, 2, 3, 4, 5]);
+        // Stepped range plus an explicit single value.
+        let e = parse_cron("0-30/10,45 * * * *").expect("stepped range + single");
+        assert_eq!(e.minute.0, vec![0, 10, 20, 30, 45]);
+        // Wildcard step combined with a single value (deduped + sorted).
+        let e = parse_cron("*/15,7 * * * *").expect("wildcard step + single");
+        assert_eq!(e.minute.0, vec![0, 7, 15, 30, 45]);
+        // The previous parser rejected "1-5,0" (range branch swallowed the
+        // comma); confirm the whole expression now parses end-to-end.
+        assert!(parse_cron("30 14 * * 1-5,0").is_ok());
+    }
+
+    // -- CRON.2: per-field range validation -----------------------------------
+    #[test]
+    fn out_of_range_values_rejected() {
+        // One past the top of each field's range.
+        assert!(parse_cron("60 * * * *").is_err()); // minute max 59
+        assert!(parse_cron("* 24 * * *").is_err()); // hour max 23
+        assert!(parse_cron("* * 0 * *").is_err()); // dom min 1
+        assert!(parse_cron("* * 32 * *").is_err()); // dom max 31
+        assert!(parse_cron("* * * 0 *").is_err()); // month min 1
+        assert!(parse_cron("* * * 13 *").is_err()); // month max 12
+        assert!(parse_cron("* * * * 8").is_err()); // dow max 7 (alias), 8 invalid
+        // Out-of-range hidden inside a list / range is rejected too.
+        assert!(parse_cron("0,60 * * * *").is_err());
+        assert!(parse_cron("* * * * 5-8").is_err());
+        // Boundary values (including the dow 7 alias) are accepted.
+        assert!(parse_cron("59 23 31 12 7").is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_out_of_range_with_invalid_message() {
+        let _g = HOME_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let tool = CronCreateTool::new(shell_test_ctx(dummy_out()));
+        // Minute 99 is out of range -> the parser fails -> the generic
+        // byte-exact "Invalid cron expression" message (errorCode 1 in TS),
+        // NOT the "does not match any calendar date" message (errorCode 2).
+        let err = tool
+            .validate_input(&json!({"cron": "99 * * * *", "prompt": "x"}), &fresh_ctx())
+            .await
+            .expect_err("out of range");
+        assert_eq!(
+            err.0,
+            "Invalid cron expression '99 * * * *'. Expected 5 fields: M H DoM Mon DoW."
+        );
     }
 
     #[tokio::test]

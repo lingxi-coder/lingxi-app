@@ -228,7 +228,7 @@ async fn ptl_exhausted_attempts_reactive_compact_then_surfaces_error() {
     };
     let compacted = after.iter().any(|m| matches!(
         m,
-        ConversationMessage::System { content, .. } if content.starts_with("[Compacted ")
+        ConversationMessage::System { content, .. } if content == "Conversation compacted"
     ));
     assert!(
         compacted,

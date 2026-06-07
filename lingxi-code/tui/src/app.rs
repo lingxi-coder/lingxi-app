@@ -334,6 +334,22 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 crate::telemetry::screen_opened("background_tasks");
                 return false;
             }
+            // `/help` opens the read-only keyboard-shortcuts + slash-command
+            // viewer (claude-code `HelpV2`). Like `/tasks`, the open is fully
+            // SYNCHRONOUS — the content is a static shortcuts/command table (no
+            // fs walk, no `OrchestratorHandle` call), so we open the screen
+            // inline here (seed a fresh `HelpState`, emit the same
+            // `screen_opened` telemetry). No echo, no turn. The `crates/commands`
+            // `HelpHandler` stays the `--no-tui` text path, untouched.
+            if st.prompt_text.trim() == "/help" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.active_screen = Some(crate::screens::Screen::Help(
+                    crate::screens::help::HelpState::new(),
+                ));
+                crate::telemetry::screen_opened("help");
+                return false;
+            }
             // (`/color`) Set the prompt-bar agent color for this session. An
             // IMMEDIATE arg command (claude-code `immediate: true`, NOT a
             // screen): parse the arg, push the `system` display, set the
@@ -824,6 +840,23 @@ pub fn render_screen(
                 // View. Mirrors the Skills/Agents arms.
                 use crate::screens::stats::render_stats_to_string;
                 let body = render_stats_to_string(sts);
+                let lines: Vec<String> = body.lines().map(str::to_string).collect();
+                element! {
+                    View(flex_direction: FlexDirection::Column, padding: 1) {
+                        #(lines.into_iter().map(|line| element! {
+                            Text(content: line)
+                        }))
+                    }
+                }
+                .into_any()
+            }
+            Screen::Help(h) => {
+                // The `/help` shortcuts + slash-command viewer renders the pure
+                // `render_help_to_string` body (Shortcuts + Slash-commands
+                // sections) line-by-line in a column View. Mirrors the
+                // Skills/Stats arms.
+                use crate::screens::help::render_help_to_string;
+                let body = render_help_to_string(h);
                 let lines: Vec<String> = body.lines().map(str::to_string).collect();
                 element! {
                     View(flex_direction: FlexDirection::Column, padding: 1) {
@@ -1623,16 +1656,26 @@ mod dispatch_tests {
         );
     }
 
-    #[tokio::test]
-    async fn slash_help_pushes_system_message() {
+    #[test]
+    fn help_slash_opens_help_screen_via_dispatch() {
+        use crate::screens::Screen;
         let mut st = s();
-        let disp = dispatcher();
-        // /help is a M5-09 stub returning a "not implemented" display string.
-        // The TUI renders that display as a SystemText regardless.
-        handle_submit_line(&mut st, "/help", &disp).await;
-        assert!(matches!(
-            st.messages.last(),
-            Some(RenderedMessage::SystemText { .. })
-        ));
+        // Submit "/help" through the same path the live Enter uses. The open is
+        // synchronous (mirrors the /tasks inline open): seeds a fresh HelpState,
+        // no pending flag, no UserText echo.
+        st.prompt_text = "/help".to_string();
+        st.prompt_cursor = "/help".len();
+        let should_run = dispatch(KeyAction::Submit, &mut st);
+        assert!(!should_run, "/help opens a screen, never runs a turn");
+        assert!(
+            matches!(&st.active_screen, Some(Screen::Help(_))),
+            "/help opens the Help screen inline"
+        );
+        assert!(st.prompt_text.is_empty(), "prompt cleared on submit");
+        // No system message and no UserText echo for the intercepted command.
+        assert!(
+            st.messages.is_empty(),
+            "/help must not push a system or user message"
+        );
     }
 }

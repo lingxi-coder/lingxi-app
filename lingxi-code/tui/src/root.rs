@@ -500,6 +500,22 @@ fn handle_screen_key(st: &mut AppState, k: &KeyEvent) {
                 StatsOutcome::Stay => {}
             }
         }
+        Some(Screen::Help(state)) => {
+            // The `/help` shortcuts + slash-command viewer (read-only). The pure
+            // `handle_help_key` reducer delegates scroll keys to the embedded
+            // `ScrollState`, then closes on Esc / bare `q`. It needs the FULL
+            // `KeyEvent` (for the `q`-no-modifier guard + the scroll bindings),
+            // so we pass the bridged crossterm-0.28 event, mirroring the
+            // Skills/Stats arms.
+            //   - Close → back to REPL (the shared `close_screen` path).
+            //   - Stay  → scrolled or inert; keep open.
+            use crate::screens::help::{handle_help_key, HelpOutcome};
+            let ct = iocraft_to_crossterm028_key(k);
+            match handle_help_key(state, ct) {
+                HelpOutcome::Close => st.close_screen(),
+                HelpOutcome::Stay => {}
+            }
+        }
         None => {}
     }
 }

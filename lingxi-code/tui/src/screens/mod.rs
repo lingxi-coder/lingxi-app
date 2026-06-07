@@ -7,6 +7,7 @@
 pub mod agents;
 pub mod background_tasks;
 pub mod doctor;
+pub mod help;
 pub mod hooks;
 pub mod mcp;
 pub mod memory;
@@ -70,6 +71,19 @@ pub enum Screen {
     /// setting. Persists through the existing `~/.claude/settings.json` `theme`
     /// field (§4 R7 — best-effort, session-only on failure).
     Theme(theme::ThemePickerState),
+    /// The `/help` keyboard-shortcuts + slash-command viewer — claude-code
+    /// `HelpV2`. A read-only, scrollable screen carrying an embedded
+    /// `ScrollState` over the static Shortcuts + Slash-commands body.
+    /// Interactive like Skills/Stats (read-only): `root::handle_screen_key`
+    /// runs the pure `help::handle_help_key` (scroll keys via the embedded
+    /// `ScrollState`; Esc/`q` close). Opened SYNCHRONOUSLY by `/help` (the
+    /// content is static — no fs walk or handle call), mirroring the `/tasks`
+    /// inline open. The `crates/commands` `HelpHandler` stays the `--no-tui`
+    /// text path. PARITY-GAP: claude-code's multi-tab `HelpV2` is flattened to
+    /// one scrollable screen here (custom-commands / [ant-only] tabs omitted),
+    /// and the displayed chords are static defaults (no `useShortcutDisplay`
+    /// user-keybinding seam yet).
+    Help(help::HelpState),
     /// (M9-05) The background-tasks dialog — claude-code
     /// `BackgroundTasksDialog.tsx`. Carries its own list↔detail state
     /// (selection + mode + the open task's output tail). Interactive like

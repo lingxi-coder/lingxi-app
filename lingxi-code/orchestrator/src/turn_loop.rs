@@ -402,8 +402,16 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         })
         .collect();
 
+    // HOOK.2: a PreToolUse hook returning `continue:false` (preventContinuation)
+    // stops the agent loop AFTER this turn step's tools have run (TS
+    // `query.ts:1518-1521` returns `{ reason: 'hook_stopped' }`). The tracked
+    // dispatch ORs the per-tool `prevent_continuation` signal; the tool still
+    // executes and its results are still appended below, exactly like TS (where
+    // the tool runs and `hook_stopped_continuation` is yielded after success).
+    let mut hook_prevent_continuation = false;
     if !tool_uses.is_empty() {
-        let tool_results = dispatch_tool_uses(orch, &tool_uses).await?;
+        let (tool_results, prevent) = dispatch_tool_uses_tracked(orch, &tool_uses).await?;
+        hook_prevent_continuation = prevent;
         // Append a fresh user message carrying the tool results.
         let user_id = MessageId::new();
         let tool_results_msg = ConversationMessage::User {
@@ -419,20 +427,31 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     }
 
     // 6. Decide loop disposition.
-    let outcome = match response.stop_reason.as_deref() {
-        Some("end_turn") => TurnStepOutcome::Ended {
+    let outcome = if hook_prevent_continuation {
+        // HOOK.2: honor the PreToolUse `continue:false` request — end the turn
+        // step so the driver stops the loop (TS `{ reason: 'hook_stopped' }`).
+        // Takes precedence over the `stop_reason`-derived disposition (a step
+        // that ran tools never has `stop_reason == "end_turn"`).
+        TurnStepOutcome::Ended {
             final_message_id: assistant_id,
-            stop_reason: "end_turn".to_string(),
-        },
-        // A1: max_output_tokens recovery (TS `query.ts:1223-1255`). Only the
-        // recovery-aware drivers (`Some(state)`) participate; the legacy shim
-        // (`None`) falls through to Continue, unchanged.
-        Some("max_tokens") if recovery.is_some() => {
-            // `recovery.is_some()` guarded above — unwrap is infallible.
-            let state = recovery.expect("recovery is Some");
-            handle_max_output_tokens(orch, assistant_id, state).await?
+            stop_reason: "hook_stopped".to_string(),
         }
-        _ => TurnStepOutcome::Continue,
+    } else {
+        match response.stop_reason.as_deref() {
+            Some("end_turn") => TurnStepOutcome::Ended {
+                final_message_id: assistant_id,
+                stop_reason: "end_turn".to_string(),
+            },
+            // A1: max_output_tokens recovery (TS `query.ts:1223-1255`). Only the
+            // recovery-aware drivers (`Some(state)`) participate; the legacy shim
+            // (`None`) falls through to Continue, unchanged.
+            Some("max_tokens") if recovery.is_some() => {
+                // `recovery.is_some()` guarded above — unwrap is infallible.
+                let state = recovery.expect("recovery is Some");
+                handle_max_output_tokens(orch, assistant_id, state).await?
+            }
+            _ => TurnStepOutcome::Continue,
+        }
     };
     Ok((outcome, output_tokens))
 }
@@ -866,12 +885,33 @@ fn translate_response_blocks(content: &[ContentBlockApi]) -> Vec<ContentBlock> {
 /// Dispatch each `tool_use` block through hooks -> permission -> registry ->
 /// hooks. Returns a list of `ContentBlock::ToolResult` blocks for the
 /// next user message.
-#[allow(clippy::too_many_lines)]
+///
+/// Thin wrapper over [`dispatch_tool_uses_tracked`] that drops the
+/// `prevent_continuation` (HOOK.2) signal — preserves the historical
+/// signature for the streaming concurrent path
+/// ([`crate::streaming_loop::dispatch_tool_uses_concurrent`], which `pop()`s
+/// exactly one block per single-tool dispatch) and the in-file tests.
 pub(crate) async fn dispatch_tool_uses(
     orch: &ConversationOrchestrator,
     tool_uses: &[(ToolUseId, String, serde_json::Value)],
 ) -> Result<Vec<ContentBlock>, OrchestratorError> {
+    Ok(dispatch_tool_uses_tracked(orch, tool_uses).await?.0)
+}
+
+/// HOOK.2 twin of [`dispatch_tool_uses`] that ALSO returns whether any
+/// `PreToolUse` hook in this batch requested `continue:false`
+/// (preventContinuation). The batched turn loop
+/// ([`execute_one_turn_with_recovery_tracked`]) uses the flag to end the turn
+/// step (TS `query.ts:1518-1521` `{ reason: 'hook_stopped' }`); the streaming
+/// concurrent path keeps the plain [`dispatch_tool_uses`] wrapper.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn dispatch_tool_uses_tracked(
+    orch: &ConversationOrchestrator,
+    tool_uses: &[(ToolUseId, String, serde_json::Value)],
+) -> Result<(Vec<ContentBlock>, bool), OrchestratorError> {
     let mut results = Vec::with_capacity(tool_uses.len());
+    // HOOK.2: OR-fold each tool's PreToolUse `prevent_continuation` signal.
+    let mut prevent_continuation = false;
     for (tool_use_id, name, input) in tool_uses {
         orch.output.emit_tool_call(tool_use_id, name, input).await;
 
@@ -899,6 +939,37 @@ pub(crate) async fn dispatch_tool_uses(
         #[allow(clippy::cast_possible_truncation)]
         let pre_dur_ms = pre_started.elapsed().as_millis() as u64;
 
+        // HOOK.2: a PreToolUse hook's `continue:false` (preventContinuation)
+        // signal — OR-folded so a later turn-step disposition ends the loop.
+        // Captured BEFORE any early `continue` so a blocking hook that also
+        // requested preventContinuation still stops the loop (TS yields
+        // preventContinuation in the pre-hook phase regardless of the block).
+        if pre_agg.prevent_continuation {
+            prevent_continuation = true;
+        }
+        // HOOK.1: a PreToolUse hook's `hookSpecificOutput.additionalContext` and
+        // `systemMessage` (both folded into `system_messages` by the response
+        // parser + executor merge, mirroring TS `result.{additionalContext,
+        // systemMessage}`). TS injects each as a message into the conversation
+        // the model sees; here they are folded into THIS tool's model-facing
+        // tool-result content — the same mechanism the PostToolUse arm uses
+        // below, which keeps the dispatch's one-block-per-tool contract intact
+        // for the streaming concurrent path. Captured before any early `continue`
+        // so the context surfaces even on a block / permission denial.
+        let pre_hook_messages = pre_agg.system_messages.clone();
+        // Fold the captured PreToolUse context into a tool-result content
+        // string (HOOK.1). Mirrors the PostToolUse fold: each message on its
+        // own line, appended after `base`. A strict no-op when empty, so the
+        // locked turn-loop fixtures (noop hooks) are unaffected.
+        let fold_pre_context = |base: String| -> String {
+            let mut out = base;
+            for msg in &pre_hook_messages {
+                out.push('\n');
+                out.push_str(msg);
+            }
+            out
+        };
+
         if matches!(pre_agg.decision, Some(HookDecision::Block)) {
             let reason = pre_agg
                 .reason
@@ -912,7 +983,7 @@ pub(crate) async fn dispatch_tool_uses(
             );
             let result_block = ContentBlock::ToolResult {
                 tool_use_id: *tool_use_id,
-                content: format!("Hook blocked: {reason}"),
+                content: fold_pre_context(format!("Hook blocked: {reason}")),
                 is_error: true,
             };
             orch.output
@@ -944,26 +1015,45 @@ pub(crate) async fn dispatch_tool_uses(
             duration_ms = pre_dur_ms,
         );
 
+        // HOOK.3: a PreToolUse hook's permissionDecision "allow" (legacy
+        // `decision: "approve"`) bypasses the permission gate for this tool call
+        // (TS `resolveHookPermissionDecision`: a hook 'allow' skips the
+        // interactive prompt). Both wire forms parse to `HookDecision::Approve`.
+        // A hook "deny"/"block" already short-circuited above (parsed to
+        // `HookDecision::Block`); "ask" / no-decision leave `pre_agg.decision`
+        // unset and fall through to the normal gate.
+        //
+        // DOCUMENTED bounded divergence: TS still applies rule-based deny/ask
+        // (`checkRuleBasedPermissions`) on top of a hook 'allow'; this port's
+        // permission seam ([`orch.perms`]) is a single allow/deny gate with no
+        // rule/prompt split to layer underneath, so a hook 'allow' bypasses it
+        // wholesale.
+        let hook_allowed = matches!(
+            pre_agg.decision,
+            Some(HookDecision::Approve | HookDecision::Allow)
+        );
         // Permission gate. Use the post-hook effective_input so a Pre
         // hook can rewrite a tool argument before the permission check
         // sees it.
-        match orch.perms.check(name, &effective_input).await {
-            PermissionDecision::Allow => {}
-            PermissionDecision::Deny { reason } => {
-                let result_block = ContentBlock::ToolResult {
-                    tool_use_id: *tool_use_id,
-                    content: format!("Permission denied: {reason}"),
-                    is_error: true,
-                };
-                orch.output
-                    .emit_tool_result(
-                        tool_use_id,
-                        name,
-                        &serde_json::json!({ "error": format!("Permission denied: {reason}") }),
-                    )
-                    .await;
-                results.push(result_block);
-                continue;
+        if !hook_allowed {
+            match orch.perms.check(name, &effective_input).await {
+                PermissionDecision::Allow => {}
+                PermissionDecision::Deny { reason } => {
+                    let result_block = ContentBlock::ToolResult {
+                        tool_use_id: *tool_use_id,
+                        content: fold_pre_context(format!("Permission denied: {reason}")),
+                        is_error: true,
+                    };
+                    orch.output
+                        .emit_tool_result(
+                            tool_use_id,
+                            name,
+                            &serde_json::json!({ "error": format!("Permission denied: {reason}") }),
+                        )
+                        .await;
+                    results.push(result_block);
+                    continue;
+                }
             }
         }
 
@@ -971,7 +1061,7 @@ pub(crate) async fn dispatch_tool_uses(
         let Some(tool_handle) = orch.tools.find_by_name(name) else {
             let result_block = ContentBlock::ToolResult {
                 tool_use_id: *tool_use_id,
-                content: format!("Error: tool not found: {name}"),
+                content: fold_pre_context(format!("Error: tool not found: {name}")),
                 is_error: true,
             };
             orch.output
@@ -1086,9 +1176,15 @@ pub(crate) async fn dispatch_tool_uses(
         #[allow(clippy::cast_possible_truncation)]
         let post_dur_ms = post_started.elapsed().as_millis() as u64;
 
-        let mutated = !post_agg.system_messages.is_empty();
+        // HOOK.1 + PostToolUse fold: the model-facing tool-result content carries
+        // both this dispatch's PreToolUse `additionalContext`/`systemMessage`
+        // (`pre_hook_messages`, folded via `fold_pre_context`) and the PostToolUse
+        // hooks' `system_messages` — each on its own line. A strict no-op when
+        // both are empty, so the result text is byte-identical to before for the
+        // locked turn-loop fixtures (noop hooks).
+        let mutated = !pre_hook_messages.is_empty() || !post_agg.system_messages.is_empty();
         let final_content = if mutated {
-            let mut out = content.clone();
+            let mut out = fold_pre_context(content);
             for msg in &post_agg.system_messages {
                 out.push('\n');
                 out.push_str(msg);
@@ -1236,7 +1332,7 @@ pub(crate) async fn dispatch_tool_uses(
             is_error,
         });
     }
-    Ok(results)
+    Ok((results, prevent_continuation))
 }
 
 /// Serialize a successful tool result's data into the model-facing string.
@@ -2018,5 +2114,383 @@ mod max_output_tokens_recovery_tests {
                 if matches!(content.first(), Some(ContentBlock::Text { text })
                     if text == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE)
         )));
+    }
+}
+
+/// HOOK.1 / HOOK.2 / HOOK.3 — `PreToolUse` hook behaviors surfaced by the turn
+/// loop's `dispatch_tool_uses` chokepoint (TS `services/tools/toolExecution.ts`
+/// + `toolHooks.ts` + `query.ts:1518-1521`).
+#[cfg(test)]
+mod pre_tool_hook_tests {
+    use super::{dispatch_tool_uses_tracked, execute_one_turn, TurnStepOutcome};
+    use crate::conversation::ConversationOrchestrator;
+    use crate::test_support::{
+        mock_message_response, MockApiClient, MockOutputStream, PermissionDecision, PermissionGate,
+        StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use async_trait::async_trait;
+    use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
+    use hooks::events::{HookEvent, HookEventType};
+    use hooks::executor::BuiltinHookHandler;
+    use hooks::registry::{HookContext, HookRegistry};
+    use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
+    use hooks::HookExecutorImpl;
+    use protocol::{ContentBlock, HookId, ToolUseId};
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tool_api::context::ToolUseContext;
+    use tool_api::progress::ToolProgressSender;
+    use tool_api::registry::ToolRegistry;
+    use tool_api::tool_trait::{
+        DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+        ValidationError,
+    };
+
+    // ----- unused transport/runtime stubs for the builtin-only executor -----
+    struct UnusedHttp;
+    #[async_trait]
+    impl traits::HttpTransport for UnusedHttp {
+        async fn request(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+    }
+    struct UnusedRuntime;
+    #[async_trait]
+    impl traits::RuntimeSpawner for UnusedRuntime {
+        async fn spawn(
+            &self,
+            _name: &str,
+            _task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, traits::RuntimeError> {
+            Err(traits::RuntimeError::Internal("unused".into()))
+        }
+        async fn sleep(&self, _d: std::time::Duration) {}
+        async fn cancel(
+            &self,
+            _h: &traits::BackgroundTaskHandle,
+        ) -> Result<(), traits::RuntimeError> {
+            Ok(())
+        }
+    }
+
+    /// Builtin `PreToolUse` handler that returns a fixed [`HookResponse`].
+    struct FixedPreHook {
+        response: HookResponse,
+    }
+    #[async_trait]
+    impl BuiltinHookHandler for FixedPreHook {
+        async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                response: Some(self.response.clone()),
+            }
+        }
+        fn id(&self) -> &str {
+            "fixed-pre"
+        }
+    }
+
+    /// Build a `HookExecutorImpl` with a single unconditional `PreToolUse` hook
+    /// that yields `response`.
+    fn pre_hook_executor(response: HookResponse) -> Arc<HookExecutorImpl> {
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "fixed-pre".into(),
+            events: vec![HookEventType::PreToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "fixed-pre".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let reg = Arc::new(tokio::sync::RwLock::new(registry));
+        let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(FixedPreHook { response }));
+        Arc::new(exec)
+    }
+
+    /// Permission gate that denies every tool call.
+    struct DenyAllGate;
+    #[async_trait]
+    impl PermissionGate for DenyAllGate {
+        async fn check(&self, _tool: &str, _input: &serde_json::Value) -> PermissionDecision {
+            PermissionDecision::Deny {
+                reason: "denied-by-gate".into(),
+            }
+        }
+    }
+
+    /// A tool that always succeeds with the fixed string `ECHOED-OUTPUT`.
+    struct EchoTool;
+    #[async_trait]
+    impl Tool for EchoTool {
+        fn name(&self) -> &str {
+            "Echo"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "echo".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: json!({ "content": "ECHOED-OUTPUT" }),
+                new_messages: vec![],
+                context_modifier: None,
+                mcp_meta: None,
+            })
+        }
+    }
+
+    /// Build an orchestrator wired with the given hook executor + permission gate
+    /// and a single `Echo` tool.
+    fn orch_with(
+        hooks: Arc<HookExecutorImpl>,
+        perms: Arc<dyn PermissionGate>,
+        responses: Vec<api_client::types::MessageResponse>,
+    ) -> ConversationOrchestrator {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(responses)),
+            Arc::new(registry),
+            hooks,
+            perms,
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    fn uses() -> Vec<(ToolUseId, String, serde_json::Value)> {
+        vec![(ToolUseId::new(), "Echo".into(), json!({}))]
+    }
+
+    fn tool_result(block: &ContentBlock) -> (&str, bool) {
+        match block {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => (content.as_str(), *is_error),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    // ----- HOOK.1: additionalContext / systemMessage surfaced ---------------
+
+    #[tokio::test]
+    async fn hook1_additional_context_is_surfaced_into_tool_result() {
+        // The parser folds `additionalContext` + `systemMessage` into
+        // `system_messages`; the turn loop must surface them to the model.
+        let resp = HookResponse {
+            system_message: Some("INJECTED-CTX".into()),
+            ..HookResponse::default()
+        };
+        let orch = orch_with(
+            pre_hook_executor(resp),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            vec![],
+        );
+        let (results, prevent) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        assert!(!prevent);
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(!is_error, "tool ran successfully");
+        assert!(content.contains("ECHOED-OUTPUT"), "tool output preserved");
+        assert!(
+            content.contains("INJECTED-CTX"),
+            "PreToolUse additionalContext/systemMessage surfaced into the model-facing result: {content:?}"
+        );
+    }
+
+    // ----- HOOK.2: continue:false stops the loop ----------------------------
+
+    #[tokio::test]
+    async fn hook2_prevent_continuation_flag_is_tracked() {
+        let resp = HookResponse {
+            prevent_continuation: true,
+            ..HookResponse::default()
+        };
+        let orch = orch_with(
+            pre_hook_executor(resp),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            vec![],
+        );
+        let (_results, prevent) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        assert!(prevent, "continue:false must surface as prevent_continuation");
+    }
+
+    #[tokio::test]
+    async fn hook2_prevent_continuation_ends_the_turn_step() {
+        // A turn step that runs a tool whose PreToolUse hook set continue:false
+        // ends with stop_reason "hook_stopped" (TS query.ts `{reason:'hook_stopped'}`).
+        let tu = ToolUseId::new();
+        let api_resp = mock_message_response(
+            vec![api_client::types::ContentBlockApi::ToolUse {
+                id: tu,
+                name: "Echo".into(),
+                input: json!({}),
+            }],
+            Some("tool_use"),
+        );
+        let resp = HookResponse {
+            prevent_continuation: true,
+            ..HookResponse::default()
+        };
+        let orch = orch_with(
+            pre_hook_executor(resp),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            vec![api_resp],
+        );
+        match execute_one_turn(&orch, None).await.expect("turn step") {
+            TurnStepOutcome::Ended { stop_reason, .. } => {
+                assert_eq!(stop_reason, "hook_stopped");
+            }
+            TurnStepOutcome::Continue => panic!("expected Ended(hook_stopped), got Continue"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook2_no_prevent_continuation_continues() {
+        // Without continue:false a tool-bearing step keeps looping (Continue).
+        let tu = ToolUseId::new();
+        let api_resp = mock_message_response(
+            vec![api_client::types::ContentBlockApi::ToolUse {
+                id: tu,
+                name: "Echo".into(),
+                input: json!({}),
+            }],
+            Some("tool_use"),
+        );
+        let orch = orch_with(
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            vec![api_resp],
+        );
+        assert!(matches!(
+            execute_one_turn(&orch, None).await.expect("turn step"),
+            TurnStepOutcome::Continue
+        ));
+    }
+
+    // ----- HOOK.3: allow bypasses / deny denies / ask falls through ---------
+
+    #[tokio::test]
+    async fn hook3_allow_bypasses_permission_gate() {
+        // permissionDecision "allow"/legacy "approve" parses to Approve and must
+        // bypass the (here deny-everything) permission gate.
+        let resp = HookResponse {
+            decision: Some(HookDecision::Approve),
+            ..HookResponse::default()
+        };
+        let orch = orch_with(pre_hook_executor(resp), Arc::new(DenyAllGate), vec![]);
+        let (results, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(!is_error, "hook allow bypassed the deny gate; tool ran");
+        assert!(content.contains("ECHOED-OUTPUT"));
+        assert!(!content.contains("Permission denied"));
+    }
+
+    #[tokio::test]
+    async fn hook3_deny_denies_before_the_tool_runs() {
+        // permissionDecision "deny"/legacy "block" parses to Block → error result.
+        let resp = HookResponse {
+            decision: Some(HookDecision::Block),
+            reason: Some("nope".into()),
+            ..HookResponse::default()
+        };
+        let orch = orch_with(
+            pre_hook_executor(resp),
+            // allow-all gate proves the BLOCK came from the hook, not the gate.
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            vec![],
+        );
+        let (results, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error);
+        assert!(content.contains("Hook blocked: nope"));
+        assert!(!content.contains("ECHOED-OUTPUT"), "tool never ran");
+    }
+
+    #[tokio::test]
+    async fn hook3_ask_falls_through_to_the_gate() {
+        // No decision (the "ask"/passthrough case) leaves the gate authoritative.
+        let orch = orch_with(
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(DenyAllGate),
+            vec![],
+        );
+        let (results, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error, "gate denial applies when the hook makes no decision");
+        assert!(content.contains("Permission denied: denied-by-gate"));
     }
 }

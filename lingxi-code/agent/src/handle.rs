@@ -298,8 +298,43 @@ impl PoolSubagentSpawner {
     /// `rendered_system_prompt` with no user message at all.) `None` system
     /// prompt = the model gets no system prompt, the correct semantic for a
     /// definition without a body.
+    /// The `Notes:` trailer claude-code appends to every subagent system
+    /// prompt. In TS this is the `notes` element prepended ahead of the
+    /// `<env>` block by `enhanceSystemPromptWithEnvDetails`
+    /// (claude-code/src/constants/prompts.ts:766-770), invoked for subagents
+    /// via `getAgentSystemPrompt` (runAgent.ts:918) which returns
+    /// `[agentBody, notes, envInfo]`.
+    ///
+    /// Byte-locked: the em-dash `—` (U+2014) appears once, in bullet 2; the
+    /// literal carries NO trailing newline — TS keeps the `notes` array
+    /// element newline-free and joins the following block with a blank line.
+    /// (Same bytes as `orchestrator::prompt::locked_templates::FOOTER`, minus
+    /// that copy's terminal `\n`; the orchestrator crate is not reachable from
+    /// here — it depends on `agent` — so the literal is single-sourced locally.)
+    ///
+    /// NOTE: TS appends the `<env>` block (cwd / git / platform / shell / OS /
+    /// resolved model + cutoff) AFTER this trailer. That block is NOT ported
+    /// here: its byte-locked formatter lives in `orchestrator::prompt`
+    /// (`env_block` + `env_meta`), unreachable from `agent` without a
+    /// dependency cycle, and its inputs (the *resolved* model id, git/uname
+    /// probes) are not available at this synchronous call site. See the
+    /// SYSPROMPT.4 report for the unblock path.
+    const SUBAGENT_NOTES_TRAILER: &'static str = "Notes:\n\
+- Agent threads always have their cwd reset between bash calls, as a result please only use absolute file paths.\n\
+- In your final response, share file paths (always absolute, never relative) that are relevant to the task. Include code snippets only when the exact text is load-bearing (e.g., a bug you found, a function signature the caller asked for) — do not recap code you merely read.\n\
+- For clear communication with the user the assistant MUST avoid using emojis.\n\
+- Do not use a colon before tool calls. Text like \"Let me read the file:\" followed by a read tool call should just be \"Let me read the file.\" with a period.";
+
     fn make_subagent_context(def: AgentDefinition, prompt: &str) -> SubagentContext {
-        let rendered_system_prompt = def.system_prompt.as_deref().map(Arc::from);
+        // claude-code renders the subagent system prompt as the agent body
+        // followed by the env-details trailer (see `SUBAGENT_NOTES_TRAILER`).
+        // Append the `Notes:` trailer after the body, joined by a blank line
+        // (the codebase section separator, matching orchestrator's
+        // `SECTION_SEP`). A `None` body stays `None` (no body, no trailer) —
+        // the existing "definition without a body" semantic is preserved.
+        let rendered_system_prompt: Option<Arc<str>> = def.system_prompt.as_deref().map(|body| {
+            Arc::from(format!("{body}\n\n{}", Self::SUBAGENT_NOTES_TRAILER))
+        });
         SubagentContext {
             agent_id: AgentId::new(),
             parent_agent_id: None,
@@ -797,11 +832,14 @@ mod tests {
             })
         };
         let ctx = PoolSubagentSpawner::make_subagent_context(def, "do the task");
-        // Def body -> system prompt.
-        assert_eq!(
-            ctx.rendered_system_prompt.as_deref(),
-            Some("AGENT SYSTEM PROMPT")
-        );
+        // Def body -> system prompt, with the appended `Notes:` env-details
+        // trailer (claude-code `enhanceSystemPromptWithEnvDetails`). The body
+        // stays first, joined to the trailer by a blank line.
+        let sys = ctx.rendered_system_prompt.as_deref().unwrap();
+        assert!(sys.starts_with("AGENT SYSTEM PROMPT\n\n"));
+        assert!(sys.contains(
+            "Notes:\n- Agent threads always have their cwd reset between bash calls"
+        ));
         // Task prompt -> first (and only) user message (NOT the system slot).
         assert_eq!(ctx.prompt_messages.len(), 1);
         assert!(matches!(
@@ -809,6 +847,46 @@ mod tests {
             ConversationMessage::User { .. }
         ));
         assert_eq!(ctx.prompt_messages[0].text_content(), "do the task");
+    }
+
+    #[test]
+    fn make_subagent_context_appends_byte_locked_notes_trailer() {
+        // SYSPROMPT.4: the subagent system prompt must carry the `Notes:`
+        // env-details trailer claude-code appends via
+        // `enhanceSystemPromptWithEnvDetails` (prompts.ts:766-770).
+        let def = AgentDefinition {
+            system_prompt: Some("AGENT BODY".to_string()),
+            ..agent_def(AgentToolPolicy::All {
+                use_exact_tools: false,
+            })
+        };
+        let ctx = PoolSubagentSpawner::make_subagent_context(def, "task");
+        let sys = ctx.rendered_system_prompt.as_deref().unwrap();
+        // Body first, trailer joined by a blank line; whole string is exactly
+        // `body \n\n trailer`.
+        assert_eq!(
+            sys,
+            format!(
+                "AGENT BODY\n\n{}",
+                PoolSubagentSpawner::SUBAGENT_NOTES_TRAILER
+            )
+        );
+        // All four byte-locked bullets, including the em-dash (U+2014) in
+        // bullet 2 surviving byte-for-byte.
+        assert!(sys.contains(
+            "Notes:\n- Agent threads always have their cwd reset between bash calls, as a result please only use absolute file paths."
+        ));
+        assert!(sys.contains(
+            "the caller asked for) — do not recap code you merely read."
+        ));
+        assert!(sys.contains("the assistant MUST avoid using emojis."));
+        assert!(sys.contains(
+            "just be \"Let me read the file.\" with a period."
+        ));
+        // No trailing newline — the `notes` element is newline-free in TS
+        // (the next block, `<env>`, is joined with a blank line, not appended
+        // to the notes literal).
+        assert!(sys.ends_with("with a period."));
     }
 
     #[test]

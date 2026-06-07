@@ -156,6 +156,7 @@ mod tests {
                 },
                 prompt_template: body.to_string(),
             },
+            ..SlashCommand::default()
         }
     }
 
@@ -314,6 +315,7 @@ mod tests {
             kind: SlashCommandKind::Builtin {
                 handler_id: "help".to_string(),
             },
+            ..SlashCommand::default()
         };
         let parsed = parse_slash_command("/help").unwrap();
         let runner = Arc::new(EchoRunner {

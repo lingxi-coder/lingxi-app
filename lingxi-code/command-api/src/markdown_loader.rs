@@ -539,6 +539,10 @@ fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
 #[must_use]
 pub fn build_markdown_command(file: &MarkdownCommandFile, source: CommandSource) -> SlashCommand {
     let name = command_name_from_path(&file.file_path, &file.base_dir);
+    // Mirrors TS `hasUserSpecifiedDescription`: true when the frontmatter
+    // carried an explicit `description`, false when we auto-derive it from the
+    // body (`Custom command` fallback).
+    let has_user_specified_description = !file.frontmatter.description.is_empty();
     let description = if file.frontmatter.description.is_empty() {
         extract_description_from_markdown(&file.content, "Custom command")
     } else {
@@ -553,6 +557,8 @@ pub fn build_markdown_command(file: &MarkdownCommandFile, source: CommandSource)
             frontmatter: file.frontmatter.clone(),
             prompt_template: file.content.clone(),
         },
+        has_user_specified_description,
+        ..SlashCommand::default()
     }
 }
 

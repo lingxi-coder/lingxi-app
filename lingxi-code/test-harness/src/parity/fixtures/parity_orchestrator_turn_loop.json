@@ -43,7 +43,7 @@
       "expected_messages_before": 50,
       "expected_messages_after_max": 49,
       "expected_marker_present": true,
-      "expected_marker_prefix": "[Compacted 50 → "
+      "expected_marker_prefix": "Conversation compacted"
     }
   ],
   "telemetry_invariants": {

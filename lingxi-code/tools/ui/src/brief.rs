@@ -1,13 +1,15 @@
-//! `BriefTool` — writes a brief markdown to `~/.claude/brief/<task_id>.txt`.
+//! `BriefTool` — sends a message the user will read (wire name
+//! `SendUserMessage`). Byte-faithful port of claude-code `BriefTool`.
 //!
-//! Wire identifiers locked in spec §7:
-//! - Brief subdir literal `brief`.
-//! - File name uses M1 task-id format `[b][0-9a-z]{8}` (NOT uuid v4).
+//! Wire identifiers locked in spec §7 (asserted by
+//! `test-harness/tests/parity_system_tools.rs`): the `brief` subdir literal,
+//! `.txt` suffix, and `[b]…` task-id prefix. These are retained as `pub`
+//! constants even though the tool no longer writes a file — the parity
+//! fixtures still cover them.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -32,46 +34,26 @@ pub const BRIEF_TOOL_NAME: &str = "SendUserMessage";
 /// Legacy wire name still accepted as an alias (claude-code
 /// `LEGACY_BRIEF_TOOL_NAME = "Brief"`).
 pub const LEGACY_BRIEF_TOOL_NAME: &str = "Brief";
-/// Subdirectory under `~/.claude/`.
+/// Subdirectory under `~/.claude/` (wire identifier, parity-locked).
 pub const BRIEF_SUBDIR: &str = "brief";
-/// File extension.
+/// File extension (wire identifier, parity-locked).
 pub const BRIEF_FILE_SUFFIX: &str = ".txt";
-/// 9-char task-id prefix character (`b` for brief).
+/// 9-char task-id prefix character (`b` for brief; wire identifier,
+/// parity-locked).
 pub const BRIEF_TASK_ID_PREFIX: char = 'b';
 /// Maximum message length (sane upper bound; 1 MB matches BashTool output cap).
-/// Rust-side file-write guard only — the TS `message: z.string()` has no max.
+/// Rust-side guard only — the TS `message: z.string()` has no max.
 pub const MAX_BRIEF_BODY_LEN: usize = 1_048_576;
 
-/// Generate a 9-char `[b][0-9a-z]{8}` task id matching M1 `TaskId` format.
-#[must_use]
-pub(crate) fn generate_brief_task_id() -> String {
-    use rand::Rng;
-    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut rng = rand::rng();
-    let mut s = String::with_capacity(9);
-    s.push(BRIEF_TASK_ID_PREFIX);
-    for _ in 0..8 {
-        let idx = rng.random_range(0..ALPHABET.len());
-        s.push(ALPHABET[idx] as char);
-    }
-    s
-}
+/// Model-facing one-liner — claude-code `BriefTool/prompt.ts` `DESCRIPTION`.
+const DESCRIPTION: &str = "Send a message to the user";
 
-/// Resolve `<home>/.claude/brief/<task_id>.txt`.
-#[must_use]
-pub(crate) fn brief_path(home: &Path, task_id: &str) -> PathBuf {
-    home.join(".claude")
-        .join(BRIEF_SUBDIR)
-        .join(format!("{task_id}{BRIEF_FILE_SUFFIX}"))
-}
+/// Model-facing tool prompt — byte-faithful port of `BriefTool/prompt.ts`
+/// `BRIEF_TOOL_PROMPT`. The `\u{2014}` are em-dashes (U+2014) and the
+/// backtick-wrapped field names are reproduced exactly.
+const BRIEF_TOOL_PROMPT: &str = "Send a message the user will read. Text outside this tool is visible in the detail view, but most won't open it \u{2014} the answer lives here.\n\n`message` supports markdown. `attachments` takes file paths (absolute or cwd-relative) for images, diffs, logs.\n\n`status` labels intent: 'normal' when replying to what they just asked; 'proactive' when you're initiating \u{2014} a scheduled task finished, a blocker surfaced during background work, you need input on something they haven't asked about. Set it honestly; downstream routing uses it.";
 
-pub(crate) fn home_dir_or_internal() -> Result<PathBuf, ToolError> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| ToolError::Internal("Brief: HOME directory not available".into()))
-}
-
-/// `BriefTool` — writes a brief markdown to `~/.claude/brief/<task_id>.txt`.
+/// `BriefTool` — sends a message the user will read (wire `SendUserMessage`).
 pub struct BriefTool {
     pub(crate) ctx: tool_api::BuiltinToolContext,
 }
@@ -128,6 +110,76 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
     bus.log_event(BRIEF_FAILED, md).await;
 }
 
+/// `n === 1 ? word : word + 's'` — port of TS `plural()` (`stringUtils.ts:32`).
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
+    }
+}
+
+/// Extension-based image test — port of TS `IMAGE_EXTENSION_REGEX`
+/// (`/\.(png|jpe?g|gif|webp)$/i`).
+fn is_image_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
+/// Best-effort port of TS `resolveAttachments` — `{ path, size, isImage }`.
+///
+/// PARITY-GAP: TS additionally uploads each attachment in `BRIDGE_MODE` and
+/// attaches a `file_uuid`; we omit `file_uuid` (no bridge/upload seam here).
+/// `path` is taken as provided by the model (TS expands `~`/cwd-relative);
+/// `size` comes from `std::fs` metadata when the file exists, else `0`.
+fn resolve_attachments(paths: &[String]) -> Vec<Value> {
+    paths
+        .iter()
+        .map(|p| {
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            json!({
+                "path": p,
+                "size": size,
+                "isImage": is_image_path(p),
+            })
+        })
+        .collect()
+}
+
+/// Civil date `(year, month, day)` from days since the Unix epoch — port of
+/// Howard Hinnant's `civil_from_days`. Valid for the proleptic Gregorian
+/// calendar; we only ever feed it non-negative (post-1970) day counts.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// ISO-8601 UTC timestamp with millisecond precision
+/// (e.g. `2026-06-07T12:34:56.789Z`) — port of TS `new Date().toISOString()`.
+/// Std-only; deterministic for a fixed `SystemTime`.
+fn iso8601_utc(t: SystemTime) -> String {
+    let dur = t
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO);
+    let secs = dur.as_secs() as i64;
+    let millis = dur.subsec_millis();
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (hh, mm, ss) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
+}
+
 #[async_trait]
 impl Tool for BriefTool {
     fn name(&self) -> &str {
@@ -150,7 +202,8 @@ impl Tool for BriefTool {
         true
     }
     fn is_read_only(&self, _: &Value) -> bool {
-        false
+        // TS `isReadOnly() { return true }` — Brief never writes the filesystem.
+        true
     }
     fn is_destructive(&self, _: &Value) -> bool {
         false
@@ -165,7 +218,8 @@ impl Tool for BriefTool {
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
-                reason: "Brief writes to ~/.claude/brief/ (local stub)".into(),
+                reason: "SendUserMessage delivers a message to the user (no filesystem write)"
+                    .into(),
             },
             updated_input: None,
             update_destination: None,
@@ -174,11 +228,11 @@ impl Tool for BriefTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "Write a brief markdown to ~/.claude/brief/<task_id>.txt.".into()
+        DESCRIPTION.into()
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Brief: write a brief to a local file under ~/.claude/brief/.".into()
+        BRIEF_TOOL_PROMPT.into()
     }
 
     async fn validate_input(
@@ -187,7 +241,7 @@ impl Tool for BriefTool {
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         // TS schema: `message: z.string()` (no minLength). Require a string but
-        // accept empty. `MAX_BRIEF_BODY_LEN` is a Rust-side file-write guard.
+        // accept empty. `MAX_BRIEF_BODY_LEN` is a Rust-side guard.
         let message = input
             .get("message")
             .and_then(Value::as_str)
@@ -238,6 +292,20 @@ impl Tool for BriefTool {
             )));
         }
 
+        // `status === 'proactive'` flag (TS `logEvent('tengu_brief_send', …)`).
+        let proactive = input.get("status").and_then(Value::as_str) == Some("proactive");
+        // Input attachment paths (optional array of strings).
+        let attachment_paths: Vec<String> = input
+            .get("attachments")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let n = attachment_paths.len();
+
         let preview: String = message.chars().take(80).collect();
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
@@ -247,51 +315,37 @@ impl Tool for BriefTool {
         md.insert("_PROTO_message_preview".into(), pii_str(&preview));
         bus.log_event(BRIEF_STARTED, md).await;
 
-        let home = match home_dir_or_internal() {
-            Ok(h) => h,
-            Err(e) => {
-                emit_failed(&bus, "no_home", started.elapsed().as_millis() as u64).await;
-                return Err(e);
-            }
-        };
-        let task_id = generate_brief_task_id();
-        let path = brief_path(&home, &task_id);
+        // TS `const sentAt = new Date().toISOString()` — deterministic clock.
+        let sent_at = iso8601_utc(self.ctx.clock.now());
 
-        if let Some(dir) = path.parent() {
-            if let Err(e) = tokio::fs::create_dir_all(dir).await {
-                emit_failed(&bus, "io_create_dir", started.elapsed().as_millis() as u64).await;
-                return Err(ToolError::Io(format!(
-                    "Brief: io error at {}: {e}",
-                    dir.display()
-                )));
-            }
+        // Output shape mirrors TS `{ data: { message, [attachments], sentAt } }`.
+        let mut data = json!({
+            "message": message,
+            "sentAt": sent_at,
+        });
+        if n > 0 {
+            data["attachments"] = Value::Array(resolve_attachments(&attachment_paths));
         }
-        if let Err(e) = tokio::fs::write(&path, message.as_bytes()).await {
-            emit_failed(&bus, "io_write", started.elapsed().as_millis() as u64).await;
-            return Err(ToolError::Io(format!(
-                "Brief: io error at {}: {e}",
-                path.display()
-            )));
-        }
+        // `mapToolResultToToolResultBlockParam`: tool-result content text
+        // (`BriefTool.ts:175-181`). We surface it on `data` so hosts can read it.
+        let suffix = if n == 0 {
+            String::new()
+        } else {
+            format!(" ({n} {} included)", plural(n, "attachment"))
+        };
+        data["content"] = json!(format!("Message delivered to user.{suffix}"));
 
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "duration_ms".into(),
             AnalyticsValue::Int(started.elapsed().as_millis() as i64),
         );
-        md.insert(
-            "bytes_written".into(),
-            AnalyticsValue::Int(message.len() as i64),
-        );
-        md.insert("_PROTO_path".into(), pii_str(&path.display().to_string()));
+        md.insert("attachment_count".into(), AnalyticsValue::Int(n as i64));
+        md.insert("proactive".into(), AnalyticsValue::Bool(proactive));
         bus.log_event(BRIEF_COMPLETED, md).await;
 
         Ok(ToolCallResult {
-            data: json!({
-                "task_id": task_id,
-                "path": path.display().to_string(),
-                "bytes_written": message.len(),
-            }),
+            data,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -302,7 +356,7 @@ impl Tool for BriefTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, HOME_LOCK};
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
@@ -312,6 +366,26 @@ mod tests {
             exit_code: 0,
             timed_out: false,
         }
+    }
+
+    /// Matches `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$` (no regex dep).
+    fn iso_shape_ok(s: &str) -> bool {
+        let b = s.as_bytes();
+        if b.len() != 24 {
+            return false;
+        }
+        b[4] == b'-'
+            && b[7] == b'-'
+            && b[10] == b'T'
+            && b[13] == b':'
+            && b[16] == b':'
+            && b[19] == b'.'
+            && b[23] == b'Z'
+            && [
+                0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18, 20, 21, 22,
+            ]
+            .iter()
+            .all(|&i| b[i].is_ascii_digit())
     }
 
     #[test]
@@ -330,23 +404,6 @@ mod tests {
         assert_eq!(tool.aliases(), &["Brief"]);
         // The legacy wire name resolves through the alias list.
         assert!(tool.aliases().contains(&"Brief"));
-    }
-
-    #[test]
-    fn task_id_is_9_chars_with_b_prefix() {
-        let id = generate_brief_task_id();
-        assert_eq!(id.len(), 9, "got {id:?}");
-        assert_eq!(id.chars().next().unwrap(), 'b');
-        assert!(id
-            .chars()
-            .skip(1)
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
-    }
-
-    #[test]
-    fn brief_path_layout() {
-        let p = brief_path(Path::new("/tmp/h"), "babcd1234");
-        assert_eq!(p, PathBuf::from("/tmp/h/.claude/brief/babcd1234.txt"));
     }
 
     #[test]
@@ -370,11 +427,30 @@ mod tests {
         assert!(schema["properties"]["message"].get("minLength").is_none());
     }
 
+    #[test]
+    fn is_read_only_true() {
+        let tool = BriefTool::new(shell_test_ctx(dummy_out()));
+        assert!(tool.is_read_only(&json!({})));
+    }
+
+    #[test]
+    fn iso8601_utc_known_values() {
+        // 0 secs → epoch.
+        assert_eq!(iso8601_utc(SystemTime::UNIX_EPOCH), "1970-01-01T00:00:00.000Z");
+        // 1_000_000_000 secs → the Unix billennium.
+        assert_eq!(
+            iso8601_utc(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000)),
+            "2001-09-09T01:46:40.000Z"
+        );
+        // Sub-second millis are rendered with zero-padding.
+        assert_eq!(
+            iso8601_utc(SystemTime::UNIX_EPOCH + Duration::from_millis(789)),
+            "1970-01-01T00:00:00.789Z"
+        );
+    }
+
     #[tokio::test]
-    async fn writes_brief_under_home_dot_claude_brief() {
-        let _g = HOME_LOCK.lock().await;
-        let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", tmp.path());
+    async fn delivers_message_with_sent_at_and_content() {
         let tool = BriefTool::new(shell_test_ctx(dummy_out()));
         let message = "# Brief\n\nHello world.";
         let out = tool
@@ -385,14 +461,45 @@ mod tests {
             )
             .await
             .expect("ok");
-        let path = out.data["path"].as_str().unwrap();
-        assert!(
-            path.starts_with(&format!("{}/.claude/brief/b", tmp.path().display())),
-            "{path}"
+        // Output shape: { message, sentAt, content } — no attachments key.
+        assert_eq!(out.data["message"], json!(message));
+        let sent_at = out.data["sentAt"].as_str().expect("sentAt string");
+        assert!(iso_shape_ok(sent_at), "{sent_at}");
+        // Deterministic stub clock is anchored at the Unix epoch.
+        assert_eq!(sent_at, "1970-01-01T00:00:00.000Z");
+        let content = out.data["content"].as_str().expect("content string");
+        assert!(content.starts_with("Message delivered to user."));
+        assert_eq!(content, "Message delivered to user.");
+        assert!(out.data.get("attachments").is_none());
+    }
+
+    #[tokio::test]
+    async fn includes_attachments_array_and_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let img = tmp.path().join("shot.PNG");
+        std::fs::write(&img, b"x").unwrap();
+        let tool = BriefTool::new(shell_test_ctx(dummy_out()));
+        let out = tool
+            .call(
+                json!({
+                    "message": "see attached",
+                    "status": "proactive",
+                    "attachments": [img.to_str().unwrap()],
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        let atts = out.data["attachments"].as_array().expect("attachments array");
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0]["path"].as_str().unwrap(), img.to_str().unwrap());
+        assert_eq!(atts[0]["size"], json!(1));
+        assert_eq!(atts[0]["isImage"], json!(true)); // .PNG matches case-insensitively
+        assert_eq!(
+            out.data["content"].as_str().unwrap(),
+            "Message delivered to user. (1 attachment included)"
         );
-        assert!(path.to_lowercase().ends_with(".txt"));
-        let written = tokio::fs::read_to_string(path).await.unwrap();
-        assert_eq!(written, message);
     }
 
     #[tokio::test]

@@ -120,6 +120,20 @@ fn build_mcp_meta(meta: Option<Value>, structured_content: Option<Value>) -> Opt
     Some(Value::Object(obj))
 }
 
+/// Lift the first content block's `text` out of an MCP result, mirroring the TS
+/// `result.content[0].text` lookup on an `isError: true` result
+/// (`services/mcp/client.ts:3124-3142`). Returns `None` unless `content` is a
+/// non-empty array whose first element is an object carrying a string `text`
+/// (the caller falls back to `"Unknown error"`).
+fn first_content_block_text(content: &Value) -> Option<String> {
+    content
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|block| block.get("text"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 /// Inspect an [`McpTransportSpec`] and return `(transport_kind, auth_kind)`.
 ///
 /// `transport_kind`: lowercase discriminator (`"stdio"`, `"sse"`, etc.).
@@ -511,6 +525,30 @@ impl Tool for MCPTool {
 
         match client.call_tool(&full_name, arguments).await {
             Ok(dto) => {
+                // MCP.1: a server-flagged error result (`isError: true`) is mapped
+                // to a tool ERROR before the success path, mirroring the TS throw
+                // (`client.ts:3124-3148`) which fires BEFORE COMPLETED telemetry /
+                // result transform. We lift the first content block's `text` (else
+                // `"Unknown error"`) into the error message and emit MCP_FAILED.
+                // The orchestrator derives block-level is_error purely from Ok/Err,
+                // so returning `Err` renders the model "Error: <text>" — matching
+                // the TS throw — instead of silently embedding `is_error` as data.
+                if dto.is_error {
+                    let error_details = first_content_block_text(&dto.content)
+                        .unwrap_or_else(|| "Unknown error".to_string());
+                    emit(
+                        self.bus(),
+                        MCP_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(&server)),
+                            ("_PROTO_tool_name", pii(&tool)),
+                            ("error_kind", verified_str("tool_error")),
+                        ],
+                    )
+                    .await;
+                    return Err(ToolError::Io(error_details));
+                }
+
                 emit(
                     self.bus(),
                     MCP_COMPLETED,
@@ -525,38 +563,40 @@ impl Tool for MCPTool {
                     ],
                 )
                 .await;
-                // Reshape each server content block into its model-facing form
-                // (text passthrough, image → base64 image block, audio + non-
-                // image resource-blob → persisted text block, resource-text
-                // prefixing, resource-image-blob → prefix + image block,
-                // resource_link), mirroring claude-code's `transformResultContent`
-                // / `transformMCPResult` (`client.ts:2478-2697`). Only ARRAY
-                // `content` is walked — a bare value (e.g. a `toolResult`
-                // string) is forwarded verbatim, matching the TS branch that
-                // never reaches `transformResultContent` (MCP-5e). Blob bytes
-                // (audio + non-image resource blobs) are persisted under the
-                // project-local tool-results dir (same dir `ReadMcpResourceTool`
-                // uses) via the MCP-5d storage helpers. Image base64 is a
-                // PASSTHROUGH (`maybe_resize`); over-limit downsampling is the
-                // sole divergence (needs a codec — 5e-resize follow-up).
                 let output_dir = self.ctx.workspace.join(".claude").join("tool-results");
                 let (now_millis, rand_tag) = persist_id_seed();
-                let transformed = crate::transform_result::transform_result_content(
-                    &dto.content,
-                    &server,
-                    crate::transform_result::PersistContext {
-                        output_dir: &output_dir,
-                        now_millis,
-                        rand_tag: &rand_tag,
-                    },
-                );
+                // MCP.2: structuredContent takes PRIORITY over `content` for the
+                // model (transformMCPResult, `client.ts:2675-2684`): when the
+                // server returns `structuredContent` we hand the model
+                // `jsonStringify(structuredContent)` (compact JSON) instead of
+                // walking `content` — so a structured-only result no longer
+                // surfaces as `content:null`, and a both-present result shows the
+                // structured JSON. When it is absent we reshape the raw `content`
+                // blocks into their model-facing form (text passthrough, image →
+                // base64 image block, audio + non-image resource-blob → persisted
+                // text block, resource-text prefixing, resource-image-blob →
+                // prefix + image block, resource_link), mirroring
+                // `transformResultContent` (`client.ts:2478-2697`). Only ARRAY
+                // `content` is walked — a bare value is forwarded verbatim (MCP-5e).
+                let model_content = match &dto.structured_content {
+                    Some(sc) => Value::String(serde_json::to_string(sc).unwrap_or_default()),
+                    None => crate::transform_result::transform_result_content(
+                        &dto.content,
+                        &server,
+                        crate::transform_result::PersistContext {
+                            output_dir: &output_dir,
+                            now_millis,
+                            rand_tag: &rand_tag,
+                        },
+                    ),
+                };
                 // MCP large-output guard (claude-code `processMCPResult`): over-
                 // threshold non-image content is persisted to disk and replaced
                 // with read-it-from-file instructions; images / a falsy
                 // ENABLE_MCP_LARGE_OUTPUT_FILES / a failed write fall back to
                 // truncation. Under-threshold content is forwarded verbatim.
                 let content = crate::large_output::process_mcp_result(
-                    &transformed,
+                    &model_content,
                     &server,
                     &tool,
                     &output_dir,
@@ -1453,5 +1493,69 @@ mod tests {
         // (`Some(Value::Null)`), so an explicit null is carried through).
         let out = build_mcp_meta(Some(Value::Null), None).expect("Some when key present");
         assert_eq!(out, json!({ "_meta": Value::Null }));
+    }
+
+    // -- MCP.1: isError → tool error (first content block text lift) ----------
+
+    #[test]
+    fn first_content_block_text_lifts_first_text() {
+        // Mirrors the TS `result.content[0].text` lookup (client.ts:3124-3142):
+        // the FIRST block's text wins.
+        let content = json!([
+            { "type": "text", "text": "boom" },
+            { "type": "text", "text": "second" },
+        ]);
+        assert_eq!(first_content_block_text(&content).as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn first_content_block_text_none_for_non_text_shapes() {
+        // A bare string, an empty array, or a first block without a string `text`
+        // all yield None → the caller falls back to "Unknown error".
+        assert!(first_content_block_text(&json!("a bare string")).is_none());
+        assert!(first_content_block_text(&json!([])).is_none());
+        assert!(first_content_block_text(&json!([{ "type": "image" }])).is_none());
+        assert!(first_content_block_text(&json!([{ "text": 7 }])).is_none());
+    }
+
+    #[test]
+    fn is_error_maps_to_io_error_with_first_text() {
+        // The MCP.1 mapping: an isError:true result becomes ToolError::Io carrying
+        // the first block's text (the orchestrator then prepends "Error: ").
+        let content = json!([{ "type": "text", "text": "kaboom" }]);
+        let details =
+            first_content_block_text(&content).unwrap_or_else(|| "Unknown error".to_string());
+        match ToolError::Io(details) {
+            ToolError::Io(s) => assert_eq!(s, "kaboom"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_error_unknown_when_no_text() {
+        let details =
+            first_content_block_text(&json!([])).unwrap_or_else(|| "Unknown error".to_string());
+        assert_eq!(details, "Unknown error");
+    }
+
+    // -- MCP.2: structuredContent priority → compact JSON string --------------
+
+    #[test]
+    fn structured_only_model_content_is_compact_json_string() {
+        // MCP.2: when only structuredContent is present the model-facing content is
+        // `serde_json::to_string(sc)` (compact JSON), run through the large-output
+        // guard, which forwards under-threshold content verbatim. This is the exact
+        // expression the Ok(dto) arm builds for the structured-content branch.
+        let sc = json!({ "rows": [{ "id": 7 }], "total": 1 });
+        let model_content = Value::String(serde_json::to_string(&sc).expect("serialize sc"));
+        let out = crate::large_output::process_mcp_result(
+            &model_content,
+            "srv",
+            "tool",
+            &std::env::temp_dir(),
+            0,
+        );
+        // The model sees the JSON string (NOT content:null, NOT pretty-printed).
+        assert_eq!(out, json!(r#"{"rows":[{"id":7}],"total":1}"#));
     }
 }

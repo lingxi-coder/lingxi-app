@@ -117,6 +117,13 @@ struct HookEntry {
     /// TUI spinner wiring is presentation work (deferred).
     #[serde(default, rename = "statusMessage")]
     status_message: Option<String>,
+    /// claude-code per-hook `if` (`schemas/hooks.ts:35` `IfConditionSchema`):
+    /// a permission-rule-syntax pattern (e.g. `"Bash(git push:*)"`) that gates
+    /// the hook on the tool name + tool input matching. Parsed and carried onto
+    /// [`HookCondition::if_pattern`], evaluated by
+    /// [`crate::matcher::matches_if_condition`] in `match_event`.
+    #[serde(default, rename = "if")]
+    if_pattern: Option<String>,
 }
 
 /// Default agent type for an `agent` hook.
@@ -151,20 +158,20 @@ pub fn parse_hooks_from_settings_json(
             continue;
         };
         for group in groups {
-            let condition = group.matcher.as_ref().map(|m| HookCondition {
-                pattern: m.clone(),
-                match_tool_name: true,
-                match_input: false,
-            });
             for entry in group.hooks {
                 let Some((name, executor)) = build_executor(&entry) else {
                     continue;
                 };
+                // The tool-name `matcher` is per-GROUP; the `if`-condition is
+                // per-HOOK — combine them into one condition built per entry so a
+                // hook can carry both (claude-code applies both filters).
+                let condition =
+                    build_condition(group.matcher.as_deref(), entry.if_pattern.as_deref());
                 out.push(HookDefinition {
                     id: HookId::new(),
                     name,
                     events: vec![event_type.clone()],
-                    if_condition: condition.clone(),
+                    if_condition: condition,
                     executor,
                     source,
                     blocking: true,
@@ -177,6 +184,24 @@ pub fn parse_hooks_from_settings_json(
         }
     }
     Ok(out)
+}
+
+/// Combine a group's tool-name `matcher` and a hook's `if`-condition into a
+/// single [`HookCondition`], or `None` when neither is present.
+///
+/// `matcher` (per-group) populates the B3 tool-name fields; `if_pattern`
+/// (per-hook) populates the `if`-condition field. A hook may carry both — both
+/// gate firing in `match_event`, mirroring claude-code's two sequential filters.
+fn build_condition(matcher: Option<&str>, if_pattern: Option<&str>) -> Option<HookCondition> {
+    if matcher.is_none() && if_pattern.is_none() {
+        return None;
+    }
+    Some(HookCondition {
+        pattern: matcher.unwrap_or_default().to_string(),
+        match_tool_name: matcher.is_some(),
+        match_input: if_pattern.is_some(),
+        if_pattern: if_pattern.map(ToString::to_string),
+    })
 }
 
 /// Project a single settings [`HookEntry`] onto its `(name, HookExecutor)`.
@@ -314,6 +339,48 @@ mod tests {
         assert_eq!(hooks[0].source, HookSource::Project);
         let cond = hooks[0].if_condition.as_ref().expect("matcher present");
         assert_eq!(cond.pattern, "Write|Edit");
+        // No `if` → if_pattern stays None, match_input false.
+        assert_eq!(hooks[0].if_pattern(), None);
+        assert!(!cond.match_input);
+    }
+
+    #[test]
+    fn per_hook_if_condition_is_parsed_and_combines_with_matcher() {
+        let raw = r#"{
+          "hooks": {
+            "PreToolUse": [
+              { "matcher": "Bash", "hooks": [
+                { "type": "command", "command": "./guard.sh", "if": "Bash(git push:*)" }
+              ]}
+            ]
+          }
+        }"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::Project).unwrap();
+        assert_eq!(hooks.len(), 1);
+        // Tool-name matcher AND the `if`-condition are both carried on one condition.
+        assert_eq!(hooks[0].matcher(), Some("Bash"));
+        assert_eq!(hooks[0].if_pattern(), Some("Bash(git push:*)"));
+        let cond = hooks[0].if_condition.as_ref().expect("condition present");
+        assert!(cond.match_tool_name);
+        assert!(cond.match_input);
+    }
+
+    #[test]
+    fn if_condition_without_matcher_builds_condition() {
+        let raw = r#"{
+          "hooks": {
+            "PreToolUse": [
+              { "hooks": [
+                { "type": "command", "command": "./guard.sh", "if": "Bash(rm:*)" }
+              ]}
+            ]
+          }
+        }"#;
+        let hooks = parse_hooks_from_settings_json(raw, HookSource::User).unwrap();
+        assert_eq!(hooks.len(), 1);
+        // No group matcher → no tool-name matcher, but the `if` is carried.
+        assert_eq!(hooks[0].matcher(), None);
+        assert_eq!(hooks[0].if_pattern(), Some("Bash(rm:*)"));
     }
 
     #[test]

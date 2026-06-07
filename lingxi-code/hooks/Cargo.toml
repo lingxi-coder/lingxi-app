@@ -10,6 +10,10 @@ protocol = { path = "../protocol" }
 telemetry = { path = "../telemetry" }
 traits = { path = "../traits" }
 engine = { path = "../engine" }
+# Internal path dep (no new Cargo.lock package): the hook `if`-condition matcher
+# reuses the ported permission-rule parser + per-tool content matchers
+# (`PermissionRuleValue::from_rule_string`, `shell_command`, `shell_rule_matching`).
+permission = { path = "../permission" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

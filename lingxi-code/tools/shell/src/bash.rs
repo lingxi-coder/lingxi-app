@@ -22,7 +22,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
-use tool_api::util::output_truncation::{truncate_default, MAX_TOOL_OUTPUT_LENGTH};
+use tool_api::util::output_truncation::{truncate, MAX_TOOL_OUTPUT_LENGTH};
 use tool_api::BuiltinToolContext;
 
 // ===== Locked constants =====================================================
@@ -54,6 +54,184 @@ pub fn resolve_shell_path() -> &'static str {
     } else {
         BASH_SHELL_LINUX
     }
+}
+
+// ===== BASH.3 — output-length env override ==================================
+
+/// claude-code `outputLimits.ts` `BASH_MAX_OUTPUT_DEFAULT`.
+pub const BASH_MAX_OUTPUT_DEFAULT: usize = 30_000;
+/// claude-code `outputLimits.ts` `BASH_MAX_OUTPUT_UPPER_LIMIT`.
+pub const BASH_MAX_OUTPUT_UPPER_LIMIT: usize = 150_000;
+
+/// `parseInt(value, 10)` semantics: skip leading ASCII whitespace, an optional
+/// sign, then consume leading ASCII digits. Returns `None` (JS `NaN`) when no
+/// digit is found. Trailing non-digits are ignored (`"123abc"` ⇒ `123`).
+fn parse_int_js(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    let mut sign: i64 = 1;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        if b[i] == b'-' {
+            sign = -1;
+        }
+        i += 1;
+    }
+    let start = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    // Overflow (astronomically long digit run) ⇒ saturate so the upper-limit
+    // cap below still applies; JS would yield a huge float here.
+    match s[start..i].parse::<i64>() {
+        Ok(v) => Some(sign * v),
+        Err(_) => Some(sign * i64::MAX),
+    }
+}
+
+/// Resolve the effective Bash output cap from a raw `BASH_MAX_OUTPUT_LENGTH`
+/// value. 1:1 port of claude-code `envValidation.ts` `validateBoundedIntEnvVar`
+/// (driven by `outputLimits.ts` `getMaxOutputLength`): unset/empty/`NaN`/`<= 0`
+/// falls back to the default; values above the upper limit are capped.
+#[must_use]
+pub fn resolve_max_output_length(raw: Option<&str>) -> usize {
+    let Some(value) = raw.filter(|v| !v.is_empty()) else {
+        return BASH_MAX_OUTPUT_DEFAULT;
+    };
+    match parse_int_js(value) {
+        Some(parsed) if parsed > 0 => {
+            if parsed > BASH_MAX_OUTPUT_UPPER_LIMIT as i64 {
+                BASH_MAX_OUTPUT_UPPER_LIMIT
+            } else {
+                parsed as usize
+            }
+        }
+        _ => BASH_MAX_OUTPUT_DEFAULT,
+    }
+}
+
+/// Read `BASH_MAX_OUTPUT_LENGTH` from the environment and resolve the effective
+/// output cap. Mirrors claude-code `getMaxOutputLength()`.
+#[must_use]
+pub fn bash_max_output_length() -> usize {
+    resolve_max_output_length(std::env::var("BASH_MAX_OUTPUT_LENGTH").ok().as_deref())
+}
+
+// ===== BASH.1 — extended-glob disable prefix (SECURITY) =====================
+
+/// Return the shell command that disables extended-glob expansion for the
+/// given shell, or `None` for an unknown shell. 1:1 port of claude-code
+/// `bashProvider.ts` `getDisableExtglobCommand`.
+///
+/// Extended globs (bash `extglob`, zsh `EXTENDED_GLOB`) can be exploited via
+/// malicious filenames that expand *after* our security validation, so this
+/// prefix is prepended to the user command before it is spawned.
+#[must_use]
+pub fn disable_extglob_command(shell_path: &str) -> Option<String> {
+    // When CLAUDE_CODE_SHELL_PREFIX is set, the wrapper may run a different
+    // shell than `shell_path`, so emit commands for BOTH shells. Redirect
+    // stdout+stderr because zsh's `command_not_found_handler` writes to stdout.
+    if std::env::var("CLAUDE_CODE_SHELL_PREFIX").is_ok_and(|v| !v.is_empty()) {
+        return Some(
+            "{ shopt -u extglob || setopt NO_EXTENDED_GLOB; } >/dev/null 2>&1 || true".into(),
+        );
+    }
+    if shell_path.contains("bash") {
+        Some("shopt -u extglob 2>/dev/null || true".into())
+    } else if shell_path.contains("zsh") {
+        Some("setopt NO_EXTENDED_GLOB 2>/dev/null || true".into())
+    } else {
+        // Unknown shell — we don't know the right command.
+        None
+    }
+}
+
+// ===== BASH.2 — Windows null-redirect rewrite ===============================
+
+#[inline]
+fn is_ascii_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+}
+
+/// Rewrite Windows CMD-style `>nul` redirects to POSIX `/dev/null`. 1:1 port of
+/// claude-code `shellQuoting.ts` `rewriteWindowsNullRedirect`, implementing the
+/// regex `/(\d?&?>+\s*)[Nn][Uu][Ll](?=\s|$|[|&;)\n])/g` → `$1/dev/null`
+/// (no `regex` crate dep; ASCII whitespace approximates JS `\s`).
+///
+/// Matches `>nul`, `> NUL`, `2>nul`, `&>nul`, `>>nul` (case-insensitive); does
+/// NOT match `>null`, `>nullable`, `>nul.txt`, or `cat nul.txt`.
+#[must_use]
+pub fn rewrite_windows_null_redirect(command: &str) -> String {
+    let b = command.as_bytes();
+    let n = b.len();
+    let mut out: Vec<u8> = Vec::with_capacity(n);
+    let mut p = 0;
+    while p < n {
+        if let Some(group1_end) = match_null_redirect(b, p) {
+            // group1 = b[p..group1_end] (the `\d?&?>+\s*` prefix), then `nul`.
+            out.extend_from_slice(&b[p..group1_end]);
+            out.extend_from_slice(b"/dev/null");
+            p = group1_end + 3; // skip the matched `nul`
+        } else {
+            out.push(b[p]);
+            p += 1;
+        }
+    }
+    // Replacements only ever touch ASCII spans, so the bytes remain valid UTF-8.
+    String::from_utf8(out).unwrap_or_else(|_| command.to_owned())
+}
+
+/// Try to match `(\d?&?>+\s*)nul(?=\s|$|[|&;)\n])` at byte offset `p`. On
+/// success returns the byte offset where `nul` begins (i.e. the end of
+/// group 1); the caller knows the literal `nul` is exactly 3 bytes.
+fn match_null_redirect(b: &[u8], p: usize) -> Option<usize> {
+    let n = b.len();
+    let mut q = p;
+    // \d? — optional single digit
+    if q < n && b[q].is_ascii_digit() {
+        q += 1;
+    }
+    // &? — optional single ampersand
+    if q < n && b[q] == b'&' {
+        q += 1;
+    }
+    // >+ — one or more redirects (required)
+    let gt_start = q;
+    while q < n && b[q] == b'>' {
+        q += 1;
+    }
+    if q == gt_start {
+        return None;
+    }
+    // \s* — optional whitespace
+    while q < n && is_ascii_ws(b[q]) {
+        q += 1;
+    }
+    let nul_start = q;
+    // nul (case-insensitive), exactly 3 chars
+    if nul_start + 3 > n {
+        return None;
+    }
+    if !(b[nul_start].eq_ignore_ascii_case(&b'n')
+        && b[nul_start + 1].eq_ignore_ascii_case(&b'u')
+        && b[nul_start + 2].eq_ignore_ascii_case(&b'l'))
+    {
+        return None;
+    }
+    let after = nul_start + 3;
+    // Lookahead: \s | end-of-string | [|&;)\n]
+    let boundary = after == n
+        || is_ascii_ws(b[after])
+        || matches!(b[after], b'|' | b'&' | b';' | b')' | b'\n');
+    if !boundary {
+        return None;
+    }
+    Some(nul_start)
 }
 
 /// Compute the per-task output file path used when `run_in_background=true`.
@@ -149,7 +327,13 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "command":           { "type": "string" },
             "timeout_ms":        { "type": "integer", "minimum": 1, "maximum": 600_000 },
             "run_in_background": { "type": "boolean" },
-            "description":       { "type": "string" }
+            "description":       { "type": "string" },
+            // BASH.5: 1:1 with claude-code `BashTool.tsx` schema —
+            // `dangerouslyDisableSandbox: z.boolean().optional().describe(...)`.
+            "dangerouslyDisableSandbox": {
+                "type": "boolean",
+                "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing."
+            }
         },
         "required": ["command"]
     })
@@ -266,6 +450,11 @@ impl Tool for BashTool {
             .get("run_in_background")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        // BASH.5: optional `dangerouslyDisableSandbox` override.
+        let dangerously_disable_sandbox = input
+            .get("dangerouslyDisableSandbox")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if timeout_ms > BASH_MAX_TIMEOUT_MS {
             return Err(ToolError::InvalidInput(format!(
                 "timeout_ms {timeout_ms} exceeds limit {BASH_MAX_TIMEOUT_MS}"
@@ -293,20 +482,55 @@ impl Tool for BashTool {
         self.ctx.bus.log_event(BASH_STARTED, meta_start).await;
 
         // ===== Sandbox decision =====
-        let decision = should_use_sandbox(
-            &cmd_str,
-            self.ctx.permission_mode,
-            self.ctx.project_trust,
-            None,
-            self.ctx.sandbox_available,
-            self.ctx.workspace.clone(),
-        );
+        // BASH.5: `dangerouslyDisableSandbox` bypasses the sandbox decision when
+        // the policy allows unsandboxed commands. 1:1 with claude-code
+        // `shouldUseSandbox.ts`: `if (input.dangerouslyDisableSandbox &&
+        // SandboxManager.areUnsandboxedCommandsAllowed()) return false`.
+        // `areUnsandboxedCommandsAllowed()` ⇔ a non-empty allow-list (same
+        // mapping used by the BASH.6 prompt section).
+        let unsandboxed_allowed = !self
+            .ctx
+            .sandbox_runtime
+            .allow_unsandboxed_commands
+            .is_empty();
+        let decision = if dangerously_disable_sandbox && unsandboxed_allowed {
+            SandboxDecision::NoSandbox
+        } else {
+            should_use_sandbox(
+                &cmd_str,
+                self.ctx.permission_mode,
+                self.ctx.project_trust,
+                None,
+                self.ctx.sandbox_available,
+                self.ctx.workspace.clone(),
+            )
+        };
 
         let shell = resolve_shell_path().to_string();
+
+        // BASH.2: defensively rewrite Windows CMD-style `2>nul` redirects to
+        // POSIX `/dev/null` before the command is spawned (claude-code
+        // `bashProvider.ts` calls `rewriteWindowsNullRedirect(command)` to
+        // produce the `normalizedCommand` that is then eval'd).
+        //
+        // BASH.1 (SECURITY): prepend the extglob-disable prefix so extended
+        // globs cannot expand malicious filenames after security validation
+        // (claude-code `bashProvider.ts` pushes `getDisableExtglobCommand`
+        // before the user command in the `&&`-joined `commandParts`). The
+        // prefix is injected INTO the command that becomes `inner_cmd` so it
+        // runs in the SAME shell that expands the user's globs — inside the
+        // sandbox wrap for the sandbox path, or directly in the login shell for
+        // the no-sandbox path — mirroring the TS order `disableExtglob && <cmd>`.
+        let normalized_cmd = rewrite_windows_null_redirect(&cmd_str);
+        let spawn_cmd = match disable_extglob_command(&shell) {
+            Some(prefix) => format!("{prefix} && {normalized_cmd}"),
+            None => normalized_cmd,
+        };
+
         let inner_cmd = match decision {
-            SandboxDecision::NoSandbox => cmd_str.clone(),
+            SandboxDecision::NoSandbox => spawn_cmd.clone(),
             SandboxDecision::Sandbox { policy: _ } => {
-                match wrap_with_sandbox(&cmd_str, &self.ctx.sandbox_runtime, self.ctx.platform) {
+                match wrap_with_sandbox(&spawn_cmd, &self.ctx.sandbox_runtime, self.ctx.platform) {
                     Ok(wrapped) => wrapped,
                     Err(sandbox::wrap::SandboxWrapError::Unsupported(s)) => {
                         emit_failed(&self.ctx.bus, &request_id, "sandbox_refused", started_at)
@@ -460,7 +684,10 @@ impl Tool for BashTool {
                 let normalized = crate::shared::strip_empty_lines(&crate::shared::normalize_stdout(
                     &stdout_clean,
                 ));
-                let (stdout_final, truncated_out) = truncate_default(normalized);
+                // BASH.3: honor the `BASH_MAX_OUTPUT_LENGTH` env override
+                // (claude-code `outputLimits.ts` `getMaxOutputLength`); falls
+                // back to the 30_000-char default when unset/invalid.
+                let (stdout_final, truncated_out) = truncate(normalized, bash_max_output_length());
                 // Exit-code reinterpretation (claude-code interpretCommandResult):
                 // e.g. `grep` no-match (exit 1) is NOT an error.
                 let interp =
@@ -781,6 +1008,204 @@ mod tests {
         assert!(
             p.contains("task-abc123"),
             "task_output_path should embed task_id, got {p}",
+        );
+    }
+
+    // ----- BASH.1 / BASH.2 / BASH.3 / BASH.5 ports -------------------------
+
+    #[test]
+    fn disable_extglob_command_byte_locked_per_shell() {
+        // The CLAUDE_CODE_SHELL_PREFIX branch overrides the shell-specific form;
+        // only assert the per-shell strings when that env var is unset.
+        if !std::env::var("CLAUDE_CODE_SHELL_PREFIX").is_ok_and(|v| !v.is_empty()) {
+            assert_eq!(
+                disable_extglob_command("/bin/bash").as_deref(),
+                Some("shopt -u extglob 2>/dev/null || true")
+            );
+            assert_eq!(
+                disable_extglob_command("/bin/zsh").as_deref(),
+                Some("setopt NO_EXTENDED_GLOB 2>/dev/null || true")
+            );
+            assert_eq!(disable_extglob_command("/usr/bin/fish"), None);
+        }
+    }
+
+    #[test]
+    fn null_redirect_rewrite_matches_ts_regex() {
+        // Rewritten cases (case-insensitive `nul`, optional fd/`&`/whitespace).
+        assert_eq!(rewrite_windows_null_redirect("ls 2>nul"), "ls 2>/dev/null");
+        assert_eq!(rewrite_windows_null_redirect("ls >nul"), "ls >/dev/null");
+        assert_eq!(rewrite_windows_null_redirect("ls > NUL"), "ls > /dev/null");
+        assert_eq!(rewrite_windows_null_redirect("ls &>nul"), "ls &>/dev/null");
+        assert_eq!(rewrite_windows_null_redirect("ls >>nul"), "ls >>/dev/null");
+        assert_eq!(
+            rewrite_windows_null_redirect("a 2>nul | b"),
+            "a 2>/dev/null | b"
+        );
+        assert_eq!(rewrite_windows_null_redirect("(x 2>nul)"), "(x 2>/dev/null)");
+        // Non-matching cases (must pass through unchanged).
+        assert_eq!(rewrite_windows_null_redirect("ls >null"), "ls >null");
+        assert_eq!(rewrite_windows_null_redirect("ls >nullable"), "ls >nullable");
+        assert_eq!(rewrite_windows_null_redirect("ls >nul.txt"), "ls >nul.txt");
+        assert_eq!(rewrite_windows_null_redirect("cat nul.txt"), "cat nul.txt");
+        // UTF-8 passthrough around a rewritten redirect.
+        assert_eq!(
+            rewrite_windows_null_redirect("echo café 2>nul"),
+            "echo café 2>/dev/null"
+        );
+    }
+
+    #[test]
+    fn resolve_max_output_length_honors_env_value() {
+        assert_eq!(resolve_max_output_length(None), 30_000); // unset → default
+        assert_eq!(resolve_max_output_length(Some("")), 30_000); // empty → default
+        assert_eq!(resolve_max_output_length(Some("100")), 100); // valid
+        assert_eq!(resolve_max_output_length(Some("123abc")), 123); // parseInt prefix
+        assert_eq!(resolve_max_output_length(Some("abc")), 30_000); // NaN → default
+        assert_eq!(resolve_max_output_length(Some("0")), 30_000); // 0 → default
+        assert_eq!(resolve_max_output_length(Some("-5")), 30_000); // negative → default
+        assert_eq!(resolve_max_output_length(Some("999999")), 150_000); // capped
+        assert_eq!(resolve_max_output_length(Some("150000")), 150_000); // at limit
+        // The env-reading wrapper falls back to the default when unset.
+        if std::env::var_os("BASH_MAX_OUTPUT_LENGTH").is_none() {
+            assert_eq!(bash_max_output_length(), 30_000);
+        }
+    }
+
+    // Capturing runner that records the argv handed to the process runner so we
+    // can assert what actually gets spawned.
+    struct CapturingRunner {
+        out: ProcessOutput,
+        last_args: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    #[async_trait]
+    impl ProcessRunner for CapturingRunner {
+        async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            self.last_args
+                .lock()
+                .unwrap()
+                .clone_from(&cmd.inner().args);
+            Ok(self.out.clone())
+        }
+        async fn spawn_background(
+            &self,
+            _: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            unreachable!()
+        }
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    fn ok_output() -> ProcessOutput {
+        ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_spawn_prepends_extglob_disable_prefix() {
+        let last = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut ctx = shell_test_ctx(ok_output());
+        ctx.process = Arc::new(CapturingRunner {
+            out: ok_output(),
+            last_args: last.clone(),
+        });
+        let tool = BashTool::new(ctx);
+        tool.call(json!({"command": "echo hi"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        let args = last.lock().unwrap().clone();
+        // Spawn shape: `-c -l <command>`.
+        assert_eq!(args[0], "-c");
+        assert_eq!(args[1], "-l");
+        let spawned = &args[2];
+        let expected_prefix = disable_extglob_command(resolve_shell_path())
+            .expect("known host shell has an extglob-disable prefix");
+        assert!(
+            spawned.starts_with(&format!("{expected_prefix} && ")),
+            "extglob disable must lead the spawned command, got: {spawned}"
+        );
+        // The user command and the BASH.4 cwd readback survive after the prefix.
+        assert!(spawned.contains("echo hi"), "got: {spawned}");
+        assert!(spawned.contains("pwd -P >|"), "got: {spawned}");
+    }
+
+    #[tokio::test]
+    async fn dangerously_disable_sandbox_bypasses_when_unsandboxed_allowed() {
+        use sandbox::decision::ProjectTrustLevel;
+        let last = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut ctx = shell_test_ctx(ok_output());
+        // Force the default decision to Sandbox: available sandbox + untrusted
+        // project + Default mode yields `Sandbox { .. }`.
+        ctx.sandbox_available = true;
+        ctx.project_trust = ProjectTrustLevel::Untrusted;
+        ctx.sandbox_runtime.allow_unsandboxed_commands = vec!["echo".into()];
+        ctx.process = Arc::new(CapturingRunner {
+            out: ok_output(),
+            last_args: last.clone(),
+        });
+        let tool = BashTool::new(ctx);
+
+        // Baseline (no flag): the command is sandbox-wrapped.
+        tool.call(json!({"command": "echo hi"}), use_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        let wrapped = last.lock().unwrap()[2].clone();
+        assert!(
+            wrapped.contains("sandbox-exec") || wrapped.contains("bwrap"),
+            "baseline should be sandbox-wrapped, got: {wrapped}"
+        );
+
+        // With the flag AND a policy that allows unsandboxed commands, the
+        // sandbox is bypassed — no wrapper appears in the spawned command.
+        tool.call(
+            json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+            use_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("ok");
+        let bypassed = last.lock().unwrap()[2].clone();
+        assert!(
+            !bypassed.contains("sandbox-exec") && !bypassed.contains("bwrap"),
+            "dangerouslyDisableSandbox should bypass the sandbox, got: {bypassed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dangerously_disable_sandbox_ignored_when_policy_disallows() {
+        use sandbox::decision::ProjectTrustLevel;
+        let last = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut ctx = shell_test_ctx(ok_output());
+        ctx.sandbox_available = true;
+        ctx.project_trust = ProjectTrustLevel::Untrusted;
+        // Empty allow-list ⇒ `areUnsandboxedCommandsAllowed()` is false, so the
+        // flag must be ignored and the command stays sandboxed.
+        ctx.sandbox_runtime.allow_unsandboxed_commands = vec![];
+        ctx.process = Arc::new(CapturingRunner {
+            out: ok_output(),
+            last_args: last.clone(),
+        });
+        let tool = BashTool::new(ctx);
+        tool.call(
+            json!({"command": "echo hi", "dangerouslyDisableSandbox": true}),
+            use_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .expect("ok");
+        let spawned = last.lock().unwrap()[2].clone();
+        assert!(
+            spawned.contains("sandbox-exec") || spawned.contains("bwrap"),
+            "flag must be ignored when policy disallows unsandboxed cmds, got: {spawned}"
         );
     }
 }

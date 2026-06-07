@@ -14,8 +14,8 @@
 //! upstream LSP server is the trust boundary). Free-form text comes only
 //! from hover contents, which are bounded by the LSP protocol itself.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -35,7 +35,7 @@ use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
+    ToolStaticContext, ValidationError,
 };
 
 // -- Wire identifier locks (spec §7 line 695) --------------------------------
@@ -112,6 +112,236 @@ fn allow_lsp() -> PermissionResult {
     }
 }
 
+// -- Path expansion (`utils/path.ts:expandPath`) -----------------------------
+
+/// User home directory — the `os.homedir()` equivalent. `tool-lsp` does not
+/// depend on the `dirs` crate, so we resolve via the conventional env vars
+/// (`HOME` on posix, `USERPROFILE` on Windows).
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map_or_else(PathBuf::new, PathBuf::from)
+}
+
+/// Current working directory — the `getCwd()` equivalent.
+fn current_cwd() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// The graceful "file too large" message from `LSPTool.ts:268`. The size is
+/// reported in MB via `Math.ceil(size / 1_000_000)` — NOT in bytes.
+fn file_too_large_message(size: u64) -> String {
+    let mb = size.div_ceil(1_000_000);
+    format!("File too large for LSP analysis ({mb}MB exceeds 10MB limit)")
+}
+
+/// Core of `validateInput` (`LSPTool.ts:166-208`), split out for direct
+/// testing: confirm the (expanded) path exists and is a regular file, with
+/// byte-exact TS messages. Returns `Ok(())` for UNC paths (skipped for the
+/// NTLM-leak security reason in the TS source).
+fn validate_file_path(file_path: &str) -> Result<(), ValidationError> {
+    let absolute_path = expand_path(file_path);
+    let display = absolute_path.to_string_lossy();
+    if display.starts_with("\\\\") || display.starts_with("//") {
+        return Ok(());
+    }
+    match std::fs::metadata(&absolute_path) {
+        Ok(stats) => {
+            if stats.is_file() {
+                Ok(())
+            } else {
+                Err(ValidationError(format!("Path is not a file: {file_path}")))
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Err(ValidationError(format!("File does not exist: {file_path}")))
+        }
+        Err(err) => Err(ValidationError(format!(
+            "Cannot access file: {file_path}. {err}"
+        ))),
+    }
+}
+
+/// Expand a user-supplied path the way `utils/path.ts:expandPath` does:
+/// leading `~` -> home, `~/x` -> home/x, absolute -> unchanged, relative ->
+/// resolved against the current working directory. Mirrors the trim and
+/// empty-path handling of the TS implementation; the Windows POSIX-path
+/// conversion branch is not relevant on the target platform.
+fn expand_path(path: &str) -> PathBuf {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return current_cwd();
+    }
+    if trimmed == "~" {
+        return home_dir();
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return home_dir().join(rest);
+    }
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute() {
+        return candidate.to_path_buf();
+    }
+    current_cwd().join(candidate)
+}
+
+// -- gitignore filtering (`LSPTool.ts:336-374`, `filterGitIgnoredLocations`) --
+
+/// Percent-decode a `file://` path body, mirroring `decodeURIComponent`.
+/// Returns `None` on malformed input so the caller can fall back to the raw
+/// (un-decoded) path, exactly as the TS `try/catch` does.
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = (bytes[i + 1] as char).to_digit(16)?;
+            let lo = (bytes[i + 2] as char).to_digit(16)?;
+            out.push(u8::try_from(hi * 16 + lo).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Extract a filesystem path from a `file://` URI, decoding percent-encoded
+/// characters. Mirrors `LSPTool.ts:uriToFilePath`.
+fn uri_to_file_path(uri: &str) -> String {
+    let mut file_path = uri.strip_prefix("file://").unwrap_or(uri).to_string();
+    // On Windows, file:///C:/path becomes /C:/path — strip the leading slash.
+    let b = file_path.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        file_path = file_path[1..].to_string();
+    }
+    percent_decode(&file_path).unwrap_or(file_path)
+}
+
+/// `toLocation(item).uri` for a `Location` (`uri`) or `LocationLink`
+/// (`targetUri`). Returns `None` when the URI is absent/non-string (the TS
+/// `!loc.uri` keep-case).
+fn location_uri(item: &Value) -> Option<&str> {
+    if item.get("targetUri").is_some() {
+        return item.get("targetUri").and_then(Value::as_str);
+    }
+    item.get("uri").and_then(Value::as_str)
+}
+
+/// `SymbolInformation.location.uri`.
+fn symbol_location_uri(item: &Value) -> Option<&str> {
+    item.get("location")
+        .and_then(|l| l.get("uri"))
+        .and_then(Value::as_str)
+}
+
+/// Run `git check-ignore <paths...>` in `cwd`. Returns the stdout only when
+/// git exits 0 (≥1 path ignored). Exit 1 (none ignored) and 128 (not a repo)
+/// yield `None`. Matches `execFileNoThrowWithCwd('git', ['check-ignore', …])`.
+fn run_git_check_ignore(paths: &[String], cwd: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("check-ignore")
+        .args(paths)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if output.status.code() == Some(0) {
+        Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        None
+    }
+}
+
+/// Compute the set of URIs whose backing file is gitignored, batching the
+/// `git check-ignore` calls (50 paths per invocation) exactly like
+/// `filterGitIgnoredLocations`.
+fn ignored_uri_set(uris: &[&str], cwd: &Path) -> HashSet<String> {
+    let mut ignored_uris: HashSet<String> = HashSet::new();
+    // Unique URI -> filesystem path.
+    let mut uri_to_path: Vec<(String, String)> = Vec::new();
+    let mut seen_uri: HashSet<&str> = HashSet::new();
+    for &uri in uris {
+        if !uri.is_empty() && seen_uri.insert(uri) {
+            uri_to_path.push((uri.to_string(), uri_to_file_path(uri)));
+        }
+    }
+    // Unique paths (preserve first-seen order).
+    let mut unique_paths: Vec<String> = Vec::new();
+    let mut seen_path: HashSet<&str> = HashSet::new();
+    for (_, p) in &uri_to_path {
+        if seen_path.insert(p.as_str()) {
+            unique_paths.push(p.clone());
+        }
+    }
+    if unique_paths.is_empty() {
+        return ignored_uris;
+    }
+    // Batch-check paths; collect the absolute paths git reports as ignored.
+    let mut ignored_paths: HashSet<String> = HashSet::new();
+    for batch in unique_paths.chunks(50) {
+        if let Some(stdout) = run_git_check_ignore(batch, cwd) {
+            for line in stdout.split('\n') {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    ignored_paths.insert(trimmed.to_string());
+                }
+            }
+        }
+    }
+    if ignored_paths.is_empty() {
+        return ignored_uris;
+    }
+    for (uri, p) in uri_to_path {
+        if ignored_paths.contains(&p) {
+            ignored_uris.insert(uri);
+        }
+    }
+    ignored_uris
+}
+
+/// Filter gitignored files out of a location-bearing LSP result, mirroring
+/// `LSPTool.ts:336-374`. Only array results of `findReferences`,
+/// `goToDefinition`, `goToImplementation`, and `workspaceSymbol` are touched;
+/// everything else is returned unchanged. Items whose URI is absent are kept.
+fn filter_gitignored_results(operation: &str, raw: Value, cwd: &Path) -> Value {
+    let is_location_op = matches!(
+        operation,
+        "findReferences" | "goToDefinition" | "goToImplementation" | "workspaceSymbol"
+    );
+    if !is_location_op {
+        return raw;
+    }
+    let Value::Array(items) = &raw else {
+        return raw;
+    };
+    let is_workspace_symbol = operation == "workspaceSymbol";
+    let extract = |item: &Value| -> Option<String> {
+        if is_workspace_symbol {
+            symbol_location_uri(item)
+        } else {
+            location_uri(item)
+        }
+        .map(ToString::to_string)
+    };
+    let uris: Vec<String> = items.iter().filter_map(&extract).collect();
+    let uri_refs: Vec<&str> = uris.iter().map(String::as_str).collect();
+    let ignored = ignored_uri_set(&uri_refs, cwd);
+    if ignored.is_empty() {
+        return raw;
+    }
+    let filtered: Vec<Value> = items
+        .iter()
+        .filter(|item| extract(item).is_none_or(|uri| !ignored.contains(&uri)))
+        .cloned()
+        .collect();
+    Value::Array(filtered)
+}
+
 // -- Tool struct -------------------------------------------------------------
 
 /// Builtin tool — dispatches 4 LSP operations.
@@ -175,6 +405,26 @@ impl Tool for LSPTool {
     }
     fn interrupt_behavior(&self, _: &Value) -> InterruptBehavior {
         InterruptBehavior::Cancel
+    }
+
+    fn get_path(&self, input: &Value) -> Option<PathBuf> {
+        // `LSPTool.ts:152-154` `getPath({ filePath }) => expandPath(filePath)`.
+        let file_path = input.get("file_path").and_then(Value::as_str)?;
+        Some(expand_path(file_path))
+    }
+
+    /// Port of `LSPTool.ts:155-209` `validateInput`: confirm the (expanded)
+    /// path exists and is a regular file. Byte-exact TS messages.
+    async fn validate_input(
+        &self,
+        input: &Value,
+        _ctx: &ToolUseContext,
+    ) -> Result<(), ValidationError> {
+        let file_path = input
+            .get("file_path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        validate_file_path(file_path)
     }
 
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
@@ -310,7 +560,12 @@ impl Tool for LSPTool {
         };
 
         let tracker = OpenFileTracker::new();
-        let path = Path::new(&file_path);
+        // `LSPTool.ts:225` `expandPath(input.filePath)` — tilde / relative path
+        // resolution before the file is opened.
+        let expanded = expand_path(&file_path);
+        let path = expanded.as_path();
+        // `getCwd()` for the gitignore filter (`LSPTool.ts:226`).
+        let cwd = current_cwd();
 
         // `LSPTool.ts:427-` `getMethodAndParams` — per-operation dispatch. Position-
         // based ops use `line`/`character`; `documentSymbol` is file-level;
@@ -357,12 +612,45 @@ impl Tool for LSPTool {
                     ],
                 )
                 .await;
+                // `LSPTool.ts:336-374` — drop gitignored files from
+                // location-bearing array results before returning.
+                let result = filter_gitignored_results(&operation, r.raw, &cwd);
                 Ok(ToolCallResult {
                     data: json!({
                         "operation": operation,
                         "server_name": server_name,
                         "file_path": file_path,
-                        "result": r.raw,
+                        "result": result,
+                    }),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    mcp_meta: None,
+                })
+            }
+            // `LSPTool.ts:265-272` — a file over the 10 MB cap is NOT an error;
+            // it returns a graceful success whose `result` states the size in
+            // MB (`Math.ceil(size / 1_000_000)`), not a hard byte error.
+            Err(ops::LspOperationError::FileTooLarge { size, .. }) => {
+                emit(
+                    bus,
+                    LSP_COMPLETED,
+                    &[
+                        ("_PROTO_operation", pii(&operation)),
+                        ("_PROTO_server_name", pii(&server_name)),
+                        (
+                            "duration_ms",
+                            verified_int(started.elapsed().as_millis() as u64),
+                        ),
+                    ],
+                )
+                .await;
+                let result = file_too_large_message(size);
+                Ok(ToolCallResult {
+                    data: json!({
+                        "operation": operation,
+                        "server_name": server_name,
+                        "file_path": file_path,
+                        "result": result,
                     }),
                     new_messages: vec![],
                     context_modifier: None,
@@ -437,6 +725,216 @@ mod tests {
     fn lsp_server_not_running_template() {
         let s = format!("LSP server '{}' is not running", "rust-analyzer");
         assert_eq!(s, "LSP server 'rust-analyzer' is not running");
+    }
+
+    // -- LSP.1: too-large file → graceful MB success message -----------------
+
+    #[test]
+    fn file_too_large_message_reports_mb_byte_exact() {
+        // 20 MB exactly → 20MB; matches `Math.ceil(20_000_000 / 1_000_000)`.
+        assert_eq!(
+            file_too_large_message(20_000_000),
+            "File too large for LSP analysis (20MB exceeds 10MB limit)"
+        );
+        // One byte over 10 MB → ceil(10.000001) = 11MB (NOT bytes).
+        assert_eq!(
+            file_too_large_message(10_000_001),
+            "File too large for LSP analysis (11MB exceeds 10MB limit)"
+        );
+        // 15.5 MB → ceil = 16MB.
+        assert_eq!(
+            file_too_large_message(15_500_000),
+            "File too large for LSP analysis (16MB exceeds 10MB limit)"
+        );
+    }
+
+    // -- LSP.2: validate_input existence / not-a-file ------------------------
+
+    #[test]
+    fn validate_input_missing_file_message_byte_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.rs");
+        let p = missing.to_string_lossy().into_owned();
+        let err = validate_file_path(&p).unwrap_err();
+        assert_eq!(err.0, format!("File does not exist: {p}"));
+    }
+
+    #[test]
+    fn validate_input_directory_is_not_a_file_message_byte_exact() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().to_string_lossy().into_owned();
+        let err = validate_file_path(&p).unwrap_err();
+        assert_eq!(err.0, format!("Path is not a file: {p}"));
+    }
+
+    #[test]
+    fn validate_input_regular_file_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ok.rs");
+        std::fs::write(&file, b"fn main() {}").unwrap();
+        let p = file.to_string_lossy().into_owned();
+        assert!(validate_file_path(&p).is_ok());
+    }
+
+    // -- LSP.3: tilde / relative path expansion ------------------------------
+
+    #[test]
+    fn expand_path_tilde_forms() {
+        assert_eq!(expand_path("~"), home_dir());
+        assert_eq!(expand_path("~/foo/bar"), home_dir().join("foo/bar"));
+    }
+
+    #[test]
+    fn expand_path_absolute_unchanged() {
+        assert_eq!(
+            expand_path("/abs/path/file.rs"),
+            PathBuf::from("/abs/path/file.rs")
+        );
+    }
+
+    #[test]
+    fn expand_path_relative_resolves_against_cwd() {
+        let got = expand_path("rel/dir/file.rs");
+        assert!(got.is_absolute());
+        assert_eq!(got, current_cwd().join("rel/dir/file.rs"));
+    }
+
+    #[test]
+    fn uri_to_file_path_decodes_percent_encoding() {
+        assert_eq!(
+            uri_to_file_path("file:///tmp/a%20b/c.rs"),
+            "/tmp/a b/c.rs"
+        );
+        // Malformed percent escape → fall back to the un-decoded body.
+        assert_eq!(uri_to_file_path("file:///tmp/x%2"), "/tmp/x%2");
+    }
+
+    // -- LSP.4: gitignore filtering ------------------------------------------
+
+    fn file_uri(p: &std::path::Path) -> String {
+        format!("file://{}", p.to_string_lossy())
+    }
+
+    #[test]
+    fn filter_gitignored_drops_ignored_locations() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Real git repo so `git check-ignore` resolves.
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join(".gitignore"), b"ignored/\n").unwrap();
+        std::fs::create_dir(root.join("ignored")).unwrap();
+        std::fs::write(root.join("ignored/secret.rs"), b"x").unwrap();
+        std::fs::write(root.join("keep.rs"), b"y").unwrap();
+
+        let kept = file_uri(&root.join("keep.rs"));
+        let dropped = file_uri(&root.join("ignored/secret.rs"));
+        let raw = json!([
+            { "uri": kept, "range": {} },
+            { "uri": dropped, "range": {} },
+        ]);
+
+        let out = filter_gitignored_results("findReferences", raw, root);
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "ignored location should be filtered out");
+        assert_eq!(arr[0]["uri"].as_str().unwrap(), kept);
+    }
+
+    #[test]
+    fn filter_gitignored_workspace_symbol_uses_location_uri() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::fs::write(root.join(".gitignore"), b"target/\n").unwrap();
+        std::fs::create_dir(root.join("target")).unwrap();
+        std::fs::write(root.join("target/gen.rs"), b"x").unwrap();
+        std::fs::write(root.join("src.rs"), b"y").unwrap();
+
+        let kept = file_uri(&root.join("src.rs"));
+        let dropped = file_uri(&root.join("target/gen.rs"));
+        let raw = json!([
+            { "name": "A", "location": { "uri": kept, "range": {} } },
+            { "name": "B", "location": { "uri": dropped, "range": {} } },
+        ]);
+
+        let out = filter_gitignored_results("workspaceSymbol", raw, root);
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["name"].as_str().unwrap(), "A");
+    }
+
+    #[test]
+    fn filter_gitignored_ignores_non_location_ops_and_non_arrays() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // hover (not a location op) — returned verbatim.
+        let hover = json!({ "contents": "doc" });
+        assert_eq!(
+            filter_gitignored_results("hover", hover.clone(), root),
+            hover
+        );
+        // goToDefinition single (non-array) Location — TS only filters arrays.
+        let single = json!({ "uri": "file:///whatever.rs", "range": {} });
+        assert_eq!(
+            filter_gitignored_results("goToDefinition", single.clone(), root),
+            single
+        );
+    }
+
+    #[test]
+    fn filter_gitignored_keeps_all_when_nothing_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::fs::write(root.join("a.rs"), b"x").unwrap();
+        std::fs::write(root.join("b.rs"), b"y").unwrap();
+        let raw = json!([
+            { "uri": file_uri(&root.join("a.rs")), "range": {} },
+            { "uri": file_uri(&root.join("b.rs")), "range": {} },
+        ]);
+        let out = filter_gitignored_results("goToImplementation", raw.clone(), root);
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn filter_gitignored_location_link_uses_target_uri() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::fs::write(root.join(".gitignore"), b"dist/\n").unwrap();
+        std::fs::create_dir(root.join("dist")).unwrap();
+        std::fs::write(root.join("dist/out.rs"), b"x").unwrap();
+        std::fs::write(root.join("in.rs"), b"y").unwrap();
+
+        let kept = file_uri(&root.join("in.rs"));
+        let dropped = file_uri(&root.join("dist/out.rs"));
+        // LocationLink shape: `targetUri` rather than `uri`.
+        let raw = json!([
+            { "targetUri": kept, "targetRange": {} },
+            { "targetUri": dropped, "targetRange": {} },
+        ]);
+        let out = filter_gitignored_results("goToDefinition", raw, root);
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["targetUri"].as_str().unwrap(), kept);
     }
 
     #[test]

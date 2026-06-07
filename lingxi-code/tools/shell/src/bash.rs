@@ -337,7 +337,10 @@ impl Tool for BashTool {
         if run_bg {
             let pcmd = SbxCommand {
                 command: shell,
-                args: vec!["-c".into(), inner_cmd],
+                // BASH.4: login-shell init (see the foreground site) — `-l`
+                // after `-c`, matching `bashProvider.ts:201-205` with the
+                // snapshot path deferred.
+                args: vec!["-c".into(), "-l".into(), inner_cmd],
                 cwd: Some(self.ctx.workspace.clone()),
                 env: HashMap::new(),
                 timeout: Some(Duration::from_millis(timeout_ms)),
@@ -402,7 +405,14 @@ impl Tool for BashTool {
 
         let pcmd = SbxCommand {
             command: shell,
-            args: vec!["-c".into(), fg_cmd],
+            // BASH.4: login-shell init so the shell is "initialized from the
+            // user's profile" (the prompt's claim). 1:1 with `bashProvider.ts`
+            // `getSpawnArgs` (`:201-205`): `['-c', ...(skipLoginShell ? [] :
+            // ['-l']), cmd]`. TS skips `-l` only when a shell SNAPSHOT exists;
+            // the snapshot mechanism is deferred here, so `lastSnapshotFilePath`
+            // is always undefined ⇒ `skipLoginShell == false` ⇒ `-l` always
+            // added (TS's no-snapshot login-shell fallback, `:88-93`).
+            args: vec!["-c".into(), "-l".into(), fg_cmd],
             cwd: Some(cwd.clone()),
             env: HashMap::new(),
             timeout: Some(Duration::from_millis(timeout_ms)),

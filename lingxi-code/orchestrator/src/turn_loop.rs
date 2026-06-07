@@ -594,8 +594,13 @@ async fn call_api_with_ptl_recovery(
                 let tokens_freed = result.total_tokens_freed;
                 // Apply the post-compact transition (history swap + boundary
                 // marker + CompactionCompleted) via the shared helper.
-                orch.apply_post_compact(result, messages_before, bytes_before)
-                    .await;
+                orch.apply_post_compact(
+                    result,
+                    compaction::CompactTrigger::Auto,
+                    messages_before,
+                    bytes_before,
+                )
+                .await;
                 // PostCompact fires AFTER the transition is applied.
                 orch.fire_post_compact("auto", summary, tokens_freed).await;
                 let history = {

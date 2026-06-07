@@ -99,9 +99,9 @@ async fn post_compact_summary_is_visible_to_next_turn() {
     let ConversationMessage::System { content, .. } = last else {
         panic!("expected System message; got {last:?}");
     };
-    assert!(
-        content.starts_with("[Compacted "),
-        "marker missing; got: {content}"
+    assert_eq!(
+        content, "Conversation compacted",
+        "CSM.4 boundary sentinel missing; got: {content}"
     );
 
     // The summary message produced by the compactor sits before the
@@ -339,9 +339,12 @@ async fn compaction_safety_gate() {
         let last = s.history.last().unwrap();
         match last {
             ConversationMessage::System { content, .. } => {
-                assert!(
-                    content.starts_with("[Compacted 50 → "),
-                    "GATE#2 FAIL: marker malformed; got: {content}"
+                // CSM.4: the boundary is now the TS "Conversation compacted"
+                // sentinel; the pre/post counts live in the (sidecar) metadata,
+                // no longer inline in the marker.
+                assert_eq!(
+                    content, "Conversation compacted",
+                    "GATE#2 FAIL: boundary sentinel missing; got: {content}"
                 );
             }
             other => panic!("GATE#2 FAIL: expected System marker tail; got {other:?}"),

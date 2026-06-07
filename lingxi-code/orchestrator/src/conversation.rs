@@ -619,7 +619,12 @@ impl ConversationOrchestrator {
         // proactive trigger (Batch 4) and the reactive 413 fallback (Batch 5).
         // `bytes_before` was computed from the same `history_before` snapshot.
         let summary_out = self
-            .apply_post_compact(result, messages_before, bytes_before)
+            .apply_post_compact(
+                result,
+                compaction::CompactTrigger::Manual,
+                messages_before,
+                bytes_before,
+            )
             .await;
 
         // PostCompact fires AFTER the compaction transition has been applied
@@ -650,17 +655,20 @@ impl ConversationOrchestrator {
     pub(crate) async fn apply_post_compact(
         &self,
         result: compaction::IterationCompactionResult,
+        trigger: compaction::CompactTrigger,
         messages_before: u32,
         bytes_before: u64,
     ) -> traits::CompactionSummary {
         let mut history_after = result.messages;
-        // Append the boundary marker so the TUI scrollback and the next
-        // turn's system-prompt assembly see the compaction transition.
-        let n_after_summary = history_after.len();
-        let marker = ConversationMessage::System {
-            id: MessageId::new(),
-            content: format!("[Compacted {messages_before} → {n_after_summary} messages]"),
-        };
+        // CSM.4: append the TS-faithful compact boundary (`createCompactBoundaryMessage`,
+        // the byte-exact `"Conversation compacted"` sentinel) instead of the ad-hoc
+        // `[Compacted N → M]` marker, so the TUI scrollback + next-turn system-prompt
+        // assembly see the same boundary TS emits. The rich `CompactBoundaryMetadata`
+        // has no orchestrator-side consumer yet (no sidecar store / no
+        // `get_messages_after_compact_boundary` caller), so it is discarded here; a
+        // follow-up that persists it can swap `_metadata` for a real store.
+        let (marker, _metadata) =
+            compaction::create_compact_boundary(trigger, 0, None, None, None, &[]);
         history_after.push(marker.clone());
 
         let messages_after = u32::try_from(history_after.len()).unwrap_or(u32::MAX);
@@ -672,6 +680,11 @@ impl ConversationOrchestrator {
             let mut s = self.session.lock().await;
             s.history = history_after;
         }
+
+        // CSM.4: post-compact module-state reset (TS `resetPostCompactState`).
+        // This is a main-thread compact (no subagent `query_source`), so the
+        // main-thread resets fire.
+        compaction::run_post_compact_cleanup(None);
 
         // Persist the boundary marker to the optional JSONL writer so a
         // `--resume` of this session sees the compaction transition (the
@@ -797,8 +810,13 @@ impl ConversationOrchestrator {
         let summary = Self::compaction_summary_text(&result);
         let tokens_freed = result.total_tokens_freed;
 
-        self.apply_post_compact(result, messages_before, bytes_before)
-            .await;
+        self.apply_post_compact(
+            result,
+            compaction::CompactTrigger::Auto,
+            messages_before,
+            bytes_before,
+        )
+        .await;
 
         // PostCompact fires AFTER the compaction transition has been applied to
         // the live session (TS `compact.ts:723`). Best-effort — never fails the

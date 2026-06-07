@@ -91,7 +91,8 @@ async fn proactive_compacts_over_threshold_and_next_call_carries_compacted_histo
     // far smaller than the seeded 60+.
     let after = history(&orch).await;
     let boundary = after.iter().find_map(|m| match m {
-        ConversationMessage::System { content, .. } if content.starts_with("[Compacted ") => {
+        // CSM.4: the boundary is the TS "Conversation compacted" sentinel.
+        ConversationMessage::System { content, .. } if content == "Conversation compacted" => {
             Some(content.clone())
         }
         _ => None,
@@ -119,7 +120,7 @@ async fn proactive_compacts_over_threshold_and_next_call_carries_compacted_histo
     // The compacted call must contain the boundary marker (it was applied to
     // session.history before the snapshot).
     let call_has_boundary = calls[0].iter().any(|m| {
-        matches!(m, ConversationMessage::System { content, .. } if content.starts_with("[Compacted "))
+        matches!(m, ConversationMessage::System { content, .. } if content == "Conversation compacted")
     });
     assert!(
         call_has_boundary,
@@ -152,7 +153,7 @@ async fn under_threshold_is_strict_noop() {
     assert!(
         !after.iter().any(|m| matches!(
             m,
-            ConversationMessage::System { content, .. } if content.starts_with("[Compacted ")
+            ConversationMessage::System { content, .. } if content == "Conversation compacted"
         )),
         "no compaction boundary marker may appear under threshold"
     );
@@ -187,7 +188,7 @@ async fn no_compactor_wired_is_strict_noop() {
     assert!(
         !after.iter().any(|m| matches!(
             m,
-            ConversationMessage::System { content, .. } if content.starts_with("[Compacted ")
+            ConversationMessage::System { content, .. } if content == "Conversation compacted"
         )),
         "no boundary marker when no compactor is wired"
     );

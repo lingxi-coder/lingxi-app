@@ -128,6 +128,46 @@ pub fn parse_response_content(content: &[ContentBlockApi]) -> Vec<SearchResultEn
     out
 }
 
+/// Build the model-facing text block for a successful search, mirroring
+/// upstream `mapToolResultToToolResultBlockParam` (`WebSearchTool.ts:401`)
+/// byte-for-byte: a `Web search results for query: "<q>"` header, one
+/// rendered segment per result entry, and a trailing `REMINDER:` footer,
+/// with the whole string `.trim()`-ed.
+///
+/// Per-entry rendering follows the TS branches:
+/// - a text segment is appended verbatim plus a blank line;
+/// - a hit object renders `Links: <json>` when it carries a non-empty
+///   `content` array, otherwise `No links found.`. Until WEB.4 reshapes
+///   [`SearchResultEntry::Hit`] into `{tool_use_id, content:[{title,url}]}`,
+///   today's raw `server_tool_use` input has no `content` array and so
+///   renders `No links found.` — the header + footer are parity-critical
+///   and correct regardless.
+#[must_use]
+pub fn build_model_content(query: &str, results: &[SearchResultEntry]) -> String {
+    let mut out = format!("Web search results for query: \"{query}\"\n\n");
+    for entry in results {
+        match entry {
+            SearchResultEntry::Text(s) => {
+                out.push_str(s);
+                out.push_str("\n\n");
+            }
+            SearchResultEntry::Hit(v) => {
+                match v.get("content").and_then(Value::as_array) {
+                    Some(arr) if !arr.is_empty() => {
+                        let rendered = serde_json::to_string(arr).unwrap_or_default();
+                        out.push_str(&format!("Links: {rendered}\n\n"));
+                    }
+                    _ => out.push_str("No links found.\n\n"),
+                }
+            }
+        }
+    }
+    out.push_str(
+        "\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.",
+    );
+    out.trim().to_string()
+}
+
 /// `WebSearchTool` — routes the agent's query through Anthropic's Messages
 /// API with `anthropic-beta: web-search-2025-03-05` and the
 /// `web_search_20250305` tool block. Never self-retries.
@@ -299,6 +339,22 @@ impl Tool for WebSearchTool {
                 "query must be at least 2 characters".into(),
             ));
         }
+        // Mirror upstream `validateInput` (`WebSearchTool.ts:244`, errorCode 2):
+        // reject when BOTH allowed_domains and blocked_domains are non-empty.
+        let allowed_non_empty = input
+            .get("allowed_domains")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        let blocked_non_empty = input
+            .get("blocked_domains")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        if allowed_non_empty && blocked_non_empty {
+            return Err(tool_api::tool_trait::ValidationError(
+                "Error: Cannot specify both allowed_domains and blocked_domains in the same request"
+                    .into(),
+            ));
+        }
         Ok(())
     }
 
@@ -370,11 +426,17 @@ impl Tool for WebSearchTool {
                     elapsed_ms,
                 )
                 .await;
+                // Wrap the model-facing text (header + per-entry segments +
+                // mandatory cite-sources footer) the way upstream does, while
+                // keeping the structured `results` array for the TUI. Built
+                // before `results`/`query` are moved into `data`.
+                let model_content = build_model_content(&parsed_input.query, &results);
                 Ok(ToolCallResult {
                     data: json!({
                         "query": parsed_input.query,
                         "results": results,
                         "duration_ms": elapsed_ms,
+                        "model_content": model_content,
                     }),
                     new_messages: vec![],
                     context_modifier: None,
@@ -540,6 +602,50 @@ mod tests {
     }
 
     #[test]
+    fn model_content_has_header_and_reminder_footer() {
+        let results = vec![
+            SearchResultEntry::Text("First summary.".into()),
+            SearchResultEntry::Hit(json!({
+                "content": [ { "title": "Docs.rs", "url": "https://docs.rs" } ]
+            })),
+            SearchResultEntry::Hit(json!({ "query": "rust async" })),
+        ];
+        let mc = build_model_content("rust async", &results);
+        // Exact TS header bytes.
+        assert!(
+            mc.starts_with("Web search results for query: \"rust async\"\n\n"),
+            "model_content must start with the TS header, got: {mc}"
+        );
+        // Text entry rendered verbatim.
+        assert!(mc.contains("First summary."));
+        // Hit with a non-empty `content` array renders a `Links:` JSON line.
+        assert!(
+            mc.contains("Links: [{\"title\":\"Docs.rs\",\"url\":\"https://docs.rs\"}]"),
+            "hit with content must render Links: <json>, got: {mc}"
+        );
+        // Hit without a `content` array renders the `No links found.` fallback.
+        assert!(mc.contains("No links found."));
+        // Exact TS footer bytes, and trailing `.trim()` means it ends there.
+        assert!(
+            mc.ends_with(
+                "REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks."
+            ),
+            "model_content must end with the REMINDER footer, got: {mc}"
+        );
+    }
+
+    #[test]
+    fn model_content_trims_and_keeps_footer_when_no_results() {
+        let mc = build_model_content("q", &[]);
+        assert!(mc.starts_with("Web search results for query: \"q\""));
+        assert!(mc.ends_with(
+            "REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks."
+        ));
+        // `.trim()` removes any trailing whitespace; no trailing newline.
+        assert_eq!(mc, mc.trim());
+    }
+
+    #[test]
     fn ignores_thinking_blocks() {
         let blocks = vec![ContentBlockApi::Thinking {
             thinking: "let me think".into(),
@@ -691,6 +797,77 @@ mod tests {
             .await
             .expect_err("too short");
         assert!(err.to_string().contains("at least 2 characters"));
+    }
+
+    #[tokio::test]
+    async fn validation_rejects_both_domain_filters() {
+        let (ctx, _http, _sink) = make_web_ctx();
+        let tool = WebSearchTool::new(ctx);
+        let err = tool
+            .validate_input(
+                &json!({
+                    "query": "rust async",
+                    "allowed_domains": ["docs.rs"],
+                    "blocked_domains": ["spam.example"]
+                }),
+                &fresh_ctx(),
+            )
+            .await
+            .expect_err("both domain filters must be rejected");
+        // `ValidationError`'s Display prepends `invalid tool input: `; the
+        // message bytes must match the TS string exactly.
+        assert!(
+            err.to_string().contains(
+                "Error: Cannot specify both allowed_domains and blocked_domains in the same request"
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_allows_single_domain_filter() {
+        let (ctx, _http, _sink) = make_web_ctx();
+        let tool = WebSearchTool::new(ctx);
+        // Only allowed_domains set — must pass.
+        tool.validate_input(
+            &json!({ "query": "rust async", "allowed_domains": ["docs.rs"] }),
+            &fresh_ctx(),
+        )
+        .await
+        .expect("single allowed_domains is valid");
+        // Empty arrays on both sides are not "specifying both".
+        tool.validate_input(
+            &json!({ "query": "rust async", "allowed_domains": [], "blocked_domains": [] }),
+            &fresh_ctx(),
+        )
+        .await
+        .expect("empty domain arrays are valid");
+    }
+
+    #[tokio::test]
+    async fn call_exposes_model_content_with_header_and_footer() {
+        let (ctx, http, _sink) = make_web_ctx();
+        let resp_body = json!({
+            "id": "msg_mc",
+            "model": "claude-sonnet-4-20250514",
+            "content": [ { "type": "text", "text": "Here are results:" } ],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 1, "output_tokens": 1 }
+        });
+        http.enqueue(ok_response(200, &resp_body.to_string()));
+        let tool = WebSearchTool::new(ctx);
+        let res = tool
+            .call(json!({ "query": "rust async" }), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        let mc = res.data["model_content"].as_str().expect("model_content str");
+        assert!(mc.starts_with("Web search results for query: \"rust async\"\n\n"));
+        assert!(mc.contains("Here are results:"));
+        assert!(mc.ends_with(
+            "REMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks."
+        ));
+        // Structured results array is still present for the TUI.
+        assert!(res.data["results"].as_array().is_some());
     }
 
     #[tokio::test]

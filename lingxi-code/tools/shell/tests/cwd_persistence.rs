@@ -23,7 +23,8 @@ use traits::process::{ProcessError, ProcessHandle, ProcessOutput, ProcessRunner}
 use traits::sandbox::SandboxedCommand;
 
 /// One captured spawn: the working directory passed to the runner and the
-/// assembled `bash -c` command string (args[1]).
+/// assembled command string (the LAST arg — `bash -c -l <cmd>` after BASH.4's
+/// login-shell flag, so the command is no longer at a fixed index).
 #[derive(Clone)]
 struct Spawn {
     cwd: Option<PathBuf>,
@@ -73,7 +74,8 @@ fn extract_cwd_file(command: &str) -> Option<PathBuf> {
 impl ProcessRunner for RecordingRunner {
     async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
         let inner = cmd.inner();
-        let command = inner.args.get(1).cloned().unwrap_or_default();
+        // The command string is the LAST arg (`-c -l <cmd>` after BASH.4).
+        let command = inner.args.last().cloned().unwrap_or_default();
         // Simulate `pwd -P` writing the post-`cd` physical cwd to the tracking
         // file the tool appended to the command.
         let sim = self.sim_pwd.lock().unwrap().pop_front().flatten();
@@ -96,7 +98,7 @@ impl ProcessRunner for RecordingRunner {
         let inner = cmd.inner();
         self.bg.lock().unwrap().push(Spawn {
             cwd: inner.cwd.clone(),
-            command: inner.args.get(1).cloned().unwrap_or_default(),
+            command: inner.args.last().cloned().unwrap_or_default(),
         });
         if self.bg_ok {
             Ok(ProcessHandle {

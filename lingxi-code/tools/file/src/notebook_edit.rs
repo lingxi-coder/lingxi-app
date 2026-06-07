@@ -92,14 +92,21 @@ impl NotebookEditTool {
 }
 
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    // Requiredness mirrors the TS `inputSchema` strictObject
+    // (`NotebookEditTool.ts:30-57`): only `notebook_path` + `new_source` are
+    // required; `cell_id`, `cell_type`, and `edit_mode` are optional.
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["notebook_path", "cell_id", "edit_mode"],
+        "required": ["notebook_path", "new_source"],
         "properties": {
             "notebook_path": { "type": "string" },
             "cell_id":       { "type": "string" },
             "new_source":    { "type": "string" },
+            "cell_type":     {
+                "type": "string",
+                "enum": ["code", "markdown"]
+            },
             "edit_mode":     {
                 "type": "string",
                 "enum": ["replace", "insert", "delete"]
@@ -107,6 +114,17 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         }
     })
 });
+
+/// Parse a `cell-N` id into its numeric index, mirroring the TS `parseCellId`
+/// helper (`utils/notebook.ts`): matches `^cell-(\d+)$` and returns N, else
+/// `None`. Used as the fallback when an exact cell-`id` lookup misses.
+fn parse_cell_id(cell_id: &str) -> Option<usize> {
+    let digits = cell_id.strip_prefix("cell-")?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<usize>().ok()
+}
 
 #[async_trait]
 impl Tool for NotebookEditTool {
@@ -169,14 +187,19 @@ impl Tool for NotebookEditTool {
             .get("notebook_path")
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("notebook_path is required".into()))?;
-        let cell_id = input
-            .get("cell_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ToolError::InvalidInput("cell_id is required".into()))?;
+        // `cell_id` and `edit_mode` are optional per the TS schema
+        // (`NotebookEditTool.ts:37-55`): `cell_id` absent means "insert at the
+        // beginning"; `edit_mode` defaults to `replace`. `cell_type` is the
+        // newly-honored insert/replace cell kind.
+        let cell_id = input.get("cell_id").and_then(Value::as_str);
         let edit_mode = input
             .get("edit_mode")
             .and_then(Value::as_str)
-            .ok_or_else(|| ToolError::InvalidInput("edit_mode is required".into()))?;
+            .unwrap_or(EDIT_MODE_REPLACE);
+        let mut cell_type = input
+            .get("cell_type")
+            .and_then(Value::as_str)
+            .map(std::string::ToString::to_string);
         let new_source = input
             .get("new_source")
             .and_then(Value::as_str)
@@ -185,6 +208,25 @@ impl Tool for NotebookEditTool {
         let path = PathBuf::from(notebook_path);
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
+
+        // Up-front validation, mirroring TS `validateInput`
+        // (`NotebookEditTool.ts:198-216`): the edit_mode enum and the
+        // cell_type-required-for-insert rule. Both run before any file I/O.
+        if edit_mode != EDIT_MODE_REPLACE
+            && edit_mode != EDIT_MODE_INSERT
+            && edit_mode != EDIT_MODE_DELETE
+        {
+            self.emit_failed(&invocation_id, "bad_edit_mode").await;
+            return Err(ToolError::InvalidInput(
+                "Edit mode must be replace, insert, or delete.".into(),
+            ));
+        }
+        if edit_mode == EDIT_MODE_INSERT && cell_type.is_none() {
+            self.emit_failed(&invocation_id, "cell_type_required").await;
+            return Err(ToolError::InvalidInput(
+                "Cell type is required when using edit_mode=insert.".into(),
+            ));
+        }
 
         let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs) {
             Ok(p) => p,
@@ -245,64 +287,155 @@ impl Tool for NotebookEditTool {
             }
         };
 
+        // Only nbformat >= 4.5 notebooks carry stable cell ids
+        // (`NotebookEditTool.ts:381-384`). Read this before borrowing `cells`
+        // mutably below.
+        let supports_cell_ids = {
+            let nbformat = nb.get("nbformat").and_then(Value::as_i64).unwrap_or(0);
+            let nbformat_minor = nb.get("nbformat_minor").and_then(Value::as_i64).unwrap_or(0);
+            nbformat > 4 || (nbformat == 4 && nbformat_minor >= 5)
+        };
+
         let cells = nb
             .get_mut("cells")
             .and_then(Value::as_array_mut)
             .ok_or_else(|| ToolError::InvalidInput("notebook missing `cells` array".into()))?;
+        let cells_len = cells.len();
 
-        let idx = cells
-            .iter()
-            .position(|c| c.get("id").and_then(Value::as_str) == Some(cell_id));
+        // A missing `cell_id` is only valid for `insert` (TS validateInput
+        // `NotebookEditTool.ts:260-267`, errorCode 7).
+        if cell_id.is_none() && edit_mode != EDIT_MODE_INSERT {
+            self.emit_failed(&invocation_id, "cell_id_required").await;
+            return Err(ToolError::InvalidInput(
+                "Cell ID must be specified when not inserting a new cell.".into(),
+            ));
+        }
+
+        // Resolve the target index, mirroring TS `call` (`NotebookEditTool.ts:
+        // 350-368`): exact `id` match first, then the `cell-N` index form
+        // (`parseCellId`). The not-found / out-of-bounds rejections are folded
+        // in from TS `validateInput` (lines 268-290) since the Rust tool has no
+        // separate validate phase.
+        let mut cell_index: usize = match cell_id {
+            // No cell_id → default to inserting at the beginning (ts:351-352).
+            None => 0,
+            Some(id) => {
+                if let Some(i) = cells
+                    .iter()
+                    .position(|c| c.get("id").and_then(Value::as_str) == Some(id))
+                {
+                    i
+                } else if let Some(n) = parse_cell_id(id) {
+                    if n >= cells_len {
+                        self.emit_failed(&invocation_id, "cell_not_found").await;
+                        return Err(ToolError::InvalidInput(format!(
+                            "Cell with index {n} does not exist in notebook."
+                        )));
+                    }
+                    n
+                } else {
+                    self.emit_failed(&invocation_id, "cell_not_found").await;
+                    return Err(ToolError::InvalidInput(format!(
+                        "Cell with ID \"{id}\" not found in notebook."
+                    )));
+                }
+            }
+        };
+
+        // Insert lands AFTER the anchor when a cell_id was supplied (ts:365-367).
+        if edit_mode == EDIT_MODE_INSERT && cell_id.is_some() {
+            cell_index += 1;
+        }
+
+        // A `replace` that targets one past the end becomes an `insert`,
+        // defaulting cell_type to code (ts:370-377).
+        let mut effective_mode = edit_mode;
+        if effective_mode == EDIT_MODE_REPLACE && cell_index == cells_len {
+            effective_mode = EDIT_MODE_INSERT;
+            if cell_type.is_none() {
+                cell_type = Some("code".to_string());
+            }
+        }
+
+        // New-cell id (ts:380-390): inserts mint a FRESH id (never the anchor's,
+        // which previously produced duplicates); replace/delete reuse the
+        // supplied cell_id. Both only when the notebook supports cell ids.
+        let new_cell_id: Option<String> = if supports_cell_ids {
+            if effective_mode == EDIT_MODE_INSERT {
+                Some(tool_api::util::ids::ulid_or_uuid())
+            } else {
+                cell_id.map(std::string::ToString::to_string)
+            }
+        } else {
+            None
+        };
+        // The model-facing message renders this id; an absent id prints
+        // "undefined" exactly as the TS template literal would (ts:148-162).
+        let display_id = new_cell_id.as_deref().unwrap_or("undefined");
 
         // Model-facing result string per edit mode — byte-faithful to
         // claude-code's `NotebookEditTool` mapper (`NotebookEditTool.ts:145-170`).
         // FILE.A's serialization rule emits `data["content"]` verbatim to the
         // model (`cells_edited` below remains the structured TUI payload).
-        let content = match edit_mode {
-            EDIT_MODE_REPLACE => {
-                let i = idx.ok_or_else(|| {
-                    ToolError::InvalidInput(format!("cell_id {cell_id} not found"))
-                })?;
-                let src = new_source.ok_or_else(|| {
-                    ToolError::InvalidInput("new_source required for replace".into())
-                })?;
-                let msg = format!("Updated cell {cell_id} with {src}");
-                cells[i]["source"] = json!(src);
-                msg
+        let content = match effective_mode {
+            EDIT_MODE_DELETE => {
+                // `cell_id` was required + resolved above, so the index is valid.
+                cells.remove(cell_index);
+                format!("Deleted cell {display_id}")
             }
             EDIT_MODE_INSERT => {
                 let src = new_source.ok_or_else(|| {
                     ToolError::InvalidInput("new_source required for insert".into())
                 })?;
                 // Build the message before `src` is moved into the new cell.
-                let msg = format!("Inserted cell {cell_id} with {src}");
-                let new_cell = json!({
-                    "cell_type": "code",
-                    "id": cell_id,
-                    "source": src,
-                    "metadata": {},
-                    "outputs": [],
-                    "execution_count": null
-                });
-                match idx {
-                    Some(i) => cells.insert(i + 1, new_cell),
-                    None => cells.push(new_cell),
+                let msg = format!("Inserted cell {display_id} with {src}");
+                let is_markdown = cell_type.as_deref() == Some("markdown");
+                // Key order matches the TS object literals (ts:396-413).
+                let mut new_cell = serde_json::Map::new();
+                new_cell.insert(
+                    "cell_type".to_string(),
+                    json!(if is_markdown { "markdown" } else { "code" }),
+                );
+                // `id: undefined` is dropped by `JSON.stringify`, so only emit
+                // the key when the notebook supports cell ids.
+                if let Some(id) = &new_cell_id {
+                    new_cell.insert("id".to_string(), json!(id));
+                }
+                new_cell.insert("source".to_string(), json!(src));
+                new_cell.insert("metadata".to_string(), json!({}));
+                if !is_markdown {
+                    new_cell.insert("execution_count".to_string(), Value::Null);
+                    new_cell.insert("outputs".to_string(), json!([]));
+                }
+                cells.insert(cell_index, Value::Object(new_cell));
+                msg
+            }
+            EDIT_MODE_REPLACE => {
+                let src = new_source.ok_or_else(|| {
+                    ToolError::InvalidInput("new_source required for replace".into())
+                })?;
+                let msg = format!("Updated cell {display_id} with {src}");
+                let target = &mut cells[cell_index];
+                let was_code = target.get("cell_type").and_then(Value::as_str) == Some("code");
+                target["source"] = json!(src);
+                // A modified CODE cell drops its now-stale outputs +
+                // execution_count (ts:420-424).
+                if was_code {
+                    target["execution_count"] = Value::Null;
+                    target["outputs"] = json!([]);
+                }
+                // An explicit cell_type that differs switches the cell's type
+                // (ts:425-427).
+                if let Some(ct) = &cell_type {
+                    if target.get("cell_type").and_then(Value::as_str) != Some(ct.as_str()) {
+                        target["cell_type"] = json!(ct);
+                    }
                 }
                 msg
             }
-            EDIT_MODE_DELETE => {
-                let i = idx.ok_or_else(|| {
-                    ToolError::InvalidInput(format!("cell_id {cell_id} not found"))
-                })?;
-                cells.remove(i);
-                format!("Deleted cell {cell_id}")
-            }
-            other => {
-                self.emit_failed(&invocation_id, "bad_edit_mode").await;
-                return Err(ToolError::InvalidInput(format!(
-                    "unknown edit_mode {other:?}"
-                )));
-            }
+            // `edit_mode` was validated to the three modes above, and the
+            // replace→insert conversion only yields `insert`.
+            _ => unreachable!("edit_mode validated above"),
         };
 
         let serialized = match serde_json::to_string_pretty(&nb) {
@@ -491,6 +624,7 @@ mod tests {
                     "notebook_path": target.to_str().unwrap(),
                     "cell_id": "c1",
                     "edit_mode": "insert",
+                    "cell_type": "code",
                     "new_source": "print('inserted')"
                 }),
                 fresh_ctx(),
@@ -498,16 +632,323 @@ mod tests {
             )
             .await
             .unwrap();
-        // Model-facing string is byte-faithful to NotebookEditTool.ts:152-156.
-        assert_eq!(
-            result.data["content"],
-            "Inserted cell c1 with print('inserted')"
-        );
+        // The message renders the FRESH cell id (NB.2 / NotebookEditTool.ts:
+        // 152-156 with cell_id = new_cell_id), so only the static framing is
+        // byte-fixed.
+        let content = result.data["content"].as_str().unwrap();
+        assert!(content.starts_with("Inserted cell "));
+        assert!(content.ends_with(" with print('inserted')"));
         let modified: Value =
             serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
         let cells = modified["cells"].as_array().unwrap();
         assert_eq!(cells.len(), 3);
         assert_eq!(cells[1]["source"], "print('inserted')");
+        // NB.2: the inserted cell gets a fresh id, never the anchor's "c1".
+        let new_id = cells[1]["id"].as_str().unwrap();
+        assert!(!new_id.is_empty());
+        assert_ne!(new_id, "c1");
+        // The fresh id also appears in the model-facing message.
+        assert_eq!(content, format!("Inserted cell {new_id} with print('inserted')"));
+    }
+
+    // ───────────────────────── NB.1: replace clears code outputs ────────────
+
+    fn code_notebook_with_outputs() -> String {
+        serde_json::to_string_pretty(&json!({
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "id": "c1",
+                    "source": "print('hello')",
+                    "metadata": {},
+                    "outputs": [ { "output_type": "stream", "name": "stdout", "text": "hello\n" } ],
+                    "execution_count": 7
+                },
+                { "cell_type": "markdown", "id": "c2", "source": "# Heading", "metadata": {} }
+            ],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn replace_clears_outputs_and_execution_count_for_code_cell() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, code_notebook_with_outputs()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = NotebookEditTool::new(ctx);
+        tool.call(
+            json!({
+                "notebook_path": target.to_str().unwrap(),
+                "cell_id": "c1",
+                "edit_mode": "replace",
+                "new_source": "print('world')"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let modified: Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        let cell = &modified["cells"][0];
+        assert_eq!(cell["source"], "print('world')");
+        // NB.1: a modified code cell loses its stale outputs + execution_count.
+        assert_eq!(cell["outputs"], json!([]));
+        assert!(cell["execution_count"].is_null());
+    }
+
+    #[tokio::test]
+    async fn replace_leaves_markdown_outputs_untouched() {
+        // A markdown cell has no outputs/execution_count; NB.1 must not add any.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, code_notebook_with_outputs()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = NotebookEditTool::new(ctx);
+        tool.call(
+            json!({
+                "notebook_path": target.to_str().unwrap(),
+                "cell_id": "c2",
+                "edit_mode": "replace",
+                "new_source": "## Updated"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let modified: Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        let cell = &modified["cells"][1];
+        assert_eq!(cell["source"], "## Updated");
+        assert!(cell.get("outputs").is_none());
+        assert!(cell.get("execution_count").is_none());
+    }
+
+    // ───────────────────────── NB.2: fresh, unique insert ids ───────────────
+
+    #[tokio::test]
+    async fn two_inserts_produce_distinct_ids() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = NotebookEditTool::new(ctx);
+        for src in ["print('a')", "print('b')"] {
+            tool.call(
+                json!({
+                    "notebook_path": target.to_str().unwrap(),
+                    "cell_id": "c1",
+                    "edit_mode": "insert",
+                    "cell_type": "code",
+                    "new_source": src
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        }
+        let modified: Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        let cells = modified["cells"].as_array().unwrap();
+        let ids: Vec<&str> = cells
+            .iter()
+            .filter_map(|c| c.get("id").and_then(Value::as_str))
+            .collect();
+        // No duplicate ids anywhere in the notebook.
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "duplicate cell ids: {ids:?}");
+    }
+
+    // ───────────────────────── NB.3: cell-N index resolution ────────────────
+
+    #[tokio::test]
+    async fn resolves_cell_n_index_form() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = NotebookEditTool::new(ctx);
+        // "cell-0" addresses the first cell by index (parseCellId).
+        tool.call(
+            json!({
+                "notebook_path": target.to_str().unwrap(),
+                "cell_id": "cell-0",
+                "edit_mode": "replace",
+                "new_source": "print('by index')"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let modified: Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(modified["cells"][0]["source"], "print('by index')");
+    }
+
+    #[tokio::test]
+    async fn cell_n_out_of_bounds_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = NotebookEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "notebook_path": target.to_str().unwrap(),
+                    "cell_id": "cell-99",
+                    "edit_mode": "replace",
+                    "new_source": "x"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("does not exist in notebook"));
+    }
+
+    // ───────────────────────── NB.4: cell_type on insert ────────────────────
+
+    #[tokio::test]
+    async fn insert_markdown_cell_honors_cell_type() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = NotebookEditTool::new(ctx);
+        tool.call(
+            json!({
+                "notebook_path": target.to_str().unwrap(),
+                "cell_id": "c1",
+                "edit_mode": "insert",
+                "cell_type": "markdown",
+                "new_source": "# inserted md"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let modified: Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        let cell = &modified["cells"][1];
+        assert_eq!(cell["cell_type"], "markdown");
+        assert_eq!(cell["source"], "# inserted md");
+        // markdown cells carry no outputs / execution_count.
+        assert!(cell.get("outputs").is_none());
+        assert!(cell.get("execution_count").is_none());
+    }
+
+    #[tokio::test]
+    async fn insert_without_cell_type_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = NotebookEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "notebook_path": target.to_str().unwrap(),
+                    "cell_id": "c1",
+                    "edit_mode": "insert",
+                    "new_source": "x"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        // Byte-faithful to NotebookEditTool.ts:213.
+        assert_eq!(
+            err.to_string(),
+            "invalid input: Cell type is required when using edit_mode=insert."
+        );
+    }
+
+    // ───────────────────────── NB.5: schema + insert-at-0 ───────────────────
+
+    #[test]
+    fn schema_requiredness_matches_ts() {
+        let required = INPUT_SCHEMA["required"].as_array().unwrap();
+        assert_eq!(required, &[json!("notebook_path"), json!("new_source")]);
+        // cell_type is now a known property (enum code|markdown).
+        assert_eq!(
+            INPUT_SCHEMA["properties"]["cell_type"]["enum"],
+            json!(["code", "markdown"])
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_without_cell_id_lands_at_beginning() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = NotebookEditTool::new(ctx);
+        // No cell_id → insert at position 0 (NotebookEditTool.ts:351-352).
+        tool.call(
+            json!({
+                "notebook_path": target.to_str().unwrap(),
+                "edit_mode": "insert",
+                "cell_type": "code",
+                "new_source": "print('first cell now')"
+            }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let modified: Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        let cells = modified["cells"].as_array().unwrap();
+        assert_eq!(cells.len(), 3);
+        assert_eq!(cells[0]["source"], "print('first cell now')");
+        assert_eq!(cells[1]["id"], "c1");
+    }
+
+    #[tokio::test]
+    async fn replace_without_cell_id_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = NotebookEditTool::new(ctx);
+        let err = tool
+            .call(
+                json!({
+                    "notebook_path": target.to_str().unwrap(),
+                    "edit_mode": "replace",
+                    "new_source": "x"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        // Byte-faithful to NotebookEditTool.ts:264.
+        assert!(err
+            .to_string()
+            .contains("Cell ID must be specified when not inserting a new cell."));
     }
 
     #[tokio::test]

@@ -400,15 +400,20 @@ impl Tool for FileEditTool {
                     let count = before.matches(actual_old.as_str()).count();
                     if count == 0 {
                         self.emit_failed(&invocation_id, "no_match").await;
+                        // Byte-locked string-to-replace-not-found message
+                        // (FileEditTool.ts:321). Echoes the ORIGINAL `old_string`
+                        // input (TS `${old_string}`), not `actual_old`.
                         return Err(ToolError::InvalidInput(format!(
-                            "old_string not found in {}",
-                            canon.display()
+                            "String to replace not found in file.\nString: {old_string}"
                         )));
                     }
                     if !replace_all && count > 1 {
                         self.emit_failed(&invocation_id, "ambiguous_match").await;
+                        // Byte-locked multiple-match message (FileEditTool.ts:336).
+                        // `count` == TS `matches`; trailing `String:` echoes the
+                        // ORIGINAL `old_string` input (TS `${old_string}`).
                         return Err(ToolError::InvalidInput(format!(
-                            "old_string matched {count} times; pass replace_all=true or expand old_string"
+                            "Found {count} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: {old_string}"
                         )));
                     }
                     let after = if replace_all {
@@ -772,7 +777,15 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("matched 3 times"));
+        // Byte-locked multiple-match message (FileEditTool.ts:336): `count` ==
+        // TS `matches`, trailing `String:` echoes the original `old_string`.
+        match err {
+            ToolError::InvalidInput(m) => assert_eq!(
+                m,
+                "Found 3 matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: foo"
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "foo foo foo");
     }
 
@@ -830,7 +843,14 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("not found"));
+        // Byte-locked string-to-replace-not-found message (FileEditTool.ts:321),
+        // echoing the original `old_string` ("absent") verbatim.
+        match err {
+            ToolError::InvalidInput(m) => {
+                assert_eq!(m, "String to replace not found in file.\nString: absent");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
     }
 
     #[tokio::test]

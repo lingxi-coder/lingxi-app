@@ -7,8 +7,9 @@ use crate::error::OrchestratorError;
 use crate::test_support::{HookExecutor, PermissionGate};
 use crate::token_budget::{check_token_budget, BudgetTracker, TokenBudgetDecision};
 use crate::turn_loop::{
-    execute_one_turn, execute_one_turn_with_recovery_tracked, RecoveryState, TurnStepOutcome,
-    MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
+    execute_one_turn, execute_one_turn_with_recovery_tracked, surface_prompt_too_long,
+    RecoveryState, TurnStepOutcome, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+    MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
 };
 use api_client::{types::MessageResponse, AnthropicProvider, ApiError};
 use async_trait::async_trait;
@@ -976,11 +977,10 @@ impl ConversationOrchestrator {
                 }
                 self.persist_message_to_jsonl(&nudge_msg).await;
                 // Reset the A1 recovery count on each budget continuation
-                // (TS `query.ts:1332` `maxOutputTokensRecoveryCount: 0`).
-                recovery.max_output_tokens_recovery_count = 0;
-                recovery.max_output_tokens_override = None;
-                // REC.A1: a fresh recovery episode may escalate again.
-                recovery.max_output_tokens_escalated = false;
+                // (TS `query.ts:1332` `maxOutputTokensRecoveryCount: 0` +
+                // `maxOutputTokensOverride: undefined`; REC.A1: a fresh recovery
+                // episode may escalate again).
+                recovery.reset_max_output_tokens_recovery();
                 true
             }
             TokenBudgetDecision::Stop { completion_event } => {
@@ -1211,6 +1211,27 @@ impl ConversationOrchestrator {
         disposition
     }
 
+    /// Fire the `StopFailure` lifecycle hooks when a turn ends on an API error
+    /// (RECOV.2, TS `executeStopFailureHooks`, `query.ts:1174/1181/1263`).
+    ///
+    /// Distinct from [`Self::fire_stop_hooks`]: the model never produced a real
+    /// response, so the normal `Stop` hooks are skipped (they would create a
+    /// death spiral — error → hook blocking → retry → error → …) and the
+    /// `StopFailure` event fires instead. Fire-and-forget + best-effort exactly
+    /// like the other lifecycle fires: the aggregate is discarded (TS calls
+    /// `executeStopFailureHooks` as `void` — a `StopFailure` hook can neither
+    /// block nor continue the turn). Strict no-op when no `StopFailure` hook is
+    /// registered. `error` is the api-error discriminator carried verbatim into
+    /// the wire payload's `error` field (TS `lastMessage.error`).
+    async fn fire_stop_failure(&self, error: &str) {
+        tracing::debug!(event = "hook_stop_failure_started", error);
+        let ctx = self.lifecycle_hook_ctx(false).await;
+        let _ = self
+            .hooks
+            .execute(HookEvent::StopFailure { error: error.to_string() }, ctx)
+            .await;
+    }
+
     /// Fire Stop hooks at a natural end-of-turn arm and translate the
     /// disposition into a driver control-flow directive (hooks B4). Shared by
     /// all three turn drivers. Skips firing (returns `FallThrough`) on the
@@ -1225,6 +1246,17 @@ impl ConversationOrchestrator {
         final_message_id: MessageId,
     ) -> StopHookFlow {
         if stop_reason == "prompt_too_long" {
+            // RECOV.2: this turn ended on an API error — the model never produced
+            // a real response, so fire the `StopFailure` hooks (NOT the `Stop`
+            // hooks) before ending. 1:1 with TS `query.ts:1262-1264` (the
+            // api-error skip guard runs `executeStopFailureHooks(lastMessage)` then
+            // returns) and `query.ts:1174/1181` (PTL recovery exhausted). Running
+            // the normal `Stop` hooks here would risk the death-spiral TS warns
+            // against (error → hook blocking → retry → error → …). The wire
+            // `error` is `"invalid_request"`, matching TS
+            // `createAssistantAPIErrorMessage({ …, error: 'invalid_request' })`
+            // (`query.ts:642-644`).
+            self.fire_stop_failure("invalid_request").await;
             return StopHookFlow::FallThrough;
         }
         match self.fire_stop_hooks(stop_reason, *stop_hook_active).await {
@@ -1615,7 +1647,16 @@ impl ConversationOrchestrator {
                         .await
                     {
                         StopHookFlow::Terminate(outcome) => return Ok(outcome),
-                        StopHookFlow::LoopAgain => continue,
+                        StopHookFlow::LoopAgain => {
+                            // RECOV.4: a Stop hook forced the loop to continue —
+                            // reset the max_output_tokens recovery bookkeeping so the
+                            // continued turn starts a fresh escalation episode (TS
+                            // `query.ts:1291` sets `maxOutputTokensRecoveryCount: 0`
+                            // + `maxOutputTokensOverride: undefined` on the
+                            // stop-hook-blocking continuation).
+                            recovery.reset_max_output_tokens_recovery();
+                            continue;
+                        }
                         StopHookFlow::FallThrough => {}
                     }
                     // A3: at a natural end-of-turn, consult the token budget. If
@@ -1768,6 +1809,60 @@ impl ConversationOrchestrator {
                 let s = self.session.lock().await;
                 (s.history.clone(), s.model.clone())
             };
+
+            // RECOV.1: blocking-limit preempt — the streaming twin of the batched
+            // `call_api_with_ptl_recovery` step (1) (TS `query.ts:592-648`). If the
+            // pre-call prompt is already at the hard blocking limit
+            // (`token_usage >= effective_window − MANUAL_COMPACT_BUFFER_TOKENS`),
+            // surface the byte-exact `PROMPT_TOO_LONG_ERROR_MESSAGE` and END the
+            // turn WITHOUT opening the stream — mirroring the batched path (which
+            // returns `PtlCallOutcome::PromptTooLong` ⇒ ends with stop_reason
+            // `"prompt_too_long"`). Same window math as the batched path: `betas`
+            // is `&[]` (the orchestrator does not thread the per-request beta set
+            // here) and `auto_compact_enabled = true` for this always-on port. A
+            // strict no-op below the limit, so the locked streaming fixtures are
+            // unaffected.
+            let warning = compaction::calculate_token_warning_state(
+                compaction::grouping::estimate_tokens_for_range(&snapshot),
+                &model,
+                &[],
+                true,
+            );
+            if warning.is_at_blocking_limit {
+                tracing::warn!(
+                    model = %model,
+                    "prompt at blocking limit — preempting before stream"
+                );
+                let id = surface_prompt_too_long(self).await;
+                // RECOV.2 chokepoint: `handle_stop_at_end` fires the `StopFailure`
+                // hooks for this `"prompt_too_long"` api-error end; its guard always
+                // returns `FallThrough` for that reason (it short-circuits before
+                // the `Stop` hooks), so the directive is discarded and the normal
+                // end-of-turn tail runs — exactly mirroring the batched path.
+                let _ = self
+                    .handle_stop_at_end(
+                        "prompt_too_long",
+                        &mut stop_hook_active,
+                        turn_count,
+                        id,
+                    )
+                    .await;
+                if self
+                    .maybe_continue_for_budget(
+                        budget.as_mut(),
+                        &mut recovery,
+                        global_turn_tokens,
+                    )
+                    .await
+                {
+                    continue;
+                }
+                let cost = self.snapshot_cost_real().await;
+                self.output.emit_end_turn("prompt_too_long", &cost).await;
+                final_message_id = id;
+                break;
+            }
+
             let stream = self
                 .streaming_api
                 .stream(
@@ -1850,7 +1945,16 @@ impl ConversationOrchestrator {
                         .await
                     {
                         StopHookFlow::Terminate(outcome) => return Ok(outcome),
-                        StopHookFlow::LoopAgain => continue,
+                        StopHookFlow::LoopAgain => {
+                            // RECOV.4: a Stop hook forced the loop to continue —
+                            // reset the max_output_tokens recovery bookkeeping so the
+                            // continued turn starts a fresh escalation episode (TS
+                            // `query.ts:1291` sets `maxOutputTokensRecoveryCount: 0`
+                            // + `maxOutputTokensOverride: undefined` on the
+                            // stop-hook-blocking continuation).
+                            recovery.reset_max_output_tokens_recovery();
+                            continue;
+                        }
                         StopHookFlow::FallThrough => {}
                     }
                     // A3: token-budget continuation (streaming twin). On a
@@ -1923,7 +2027,16 @@ impl ConversationOrchestrator {
                         .await
                     {
                         StopHookFlow::Terminate(outcome) => return Ok(outcome),
-                        StopHookFlow::LoopAgain => continue,
+                        StopHookFlow::LoopAgain => {
+                            // RECOV.4: a Stop hook forced the loop to continue —
+                            // reset the max_output_tokens recovery bookkeeping so the
+                            // continued turn starts a fresh escalation episode (TS
+                            // `query.ts:1291` sets `maxOutputTokensRecoveryCount: 0`
+                            // + `maxOutputTokensOverride: undefined` on the
+                            // stop-hook-blocking continuation).
+                            recovery.reset_max_output_tokens_recovery();
+                            continue;
+                        }
                         StopHookFlow::FallThrough => {}
                     }
                     if self
@@ -2406,5 +2519,353 @@ impl StreamingApiClient for NoStreamingApiClient {
         Err(ApiError::Http(traits::HttpError::Connection(
             "no streaming client configured".into(),
         )))
+    }
+}
+
+// ============================================================================
+// Turn-recovery behaviors (RECOV.1 / RECOV.2 / RECOV.4)
+// ============================================================================
+//
+// In-file integration tests for the three turn-driver recovery behaviors ported
+// from claude-code `query.ts`:
+//   - RECOV.1 — the streaming driver's blocking-limit preempt
+//     (`query.ts:592-648`): a prompt already at the hard blocking limit ends the
+//     turn with the byte-exact prompt-too-long message WITHOUT opening the stream.
+//   - RECOV.2 — `StopFailure` hooks fire on an api-error turn-end
+//     (`query.ts:1174/1181/1263`); the normal `Stop` hooks do NOT.
+//   - RECOV.4 — a Stop-hook blocking continuation resets the
+//     `max_output_tokens` recovery budget (`query.ts:1291`).
+#[cfg(test)]
+mod turn_recovery_tests {
+    use super::*;
+    use crate::test_support::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, mock_message_response, noop_hook_executor, text_delta, MockApiClient,
+        MockOutputStream, MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
+    };
+    use crate::OrchestratorConfig;
+    use api_client::types::ContentBlockApi;
+    use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
+    use hooks::events::HookEventType;
+    use hooks::executor::BuiltinHookHandler;
+    use hooks::registry::HookRegistry;
+    use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
+    use hooks::HookExecutorImpl;
+    use protocol::{HookId, HttpRequest, HttpResponse};
+    use std::pin::Pin;
+    use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
+    use tokio::sync::RwLock;
+    use traits::{HttpError, OutputEvent, RuntimeError, RuntimeSpawner};
+
+    // ---- unused HTTP / Runtime stubs (Builtin hooks never touch them) ----
+    struct UnusedHttp;
+    #[async_trait]
+    impl HttpTransport for UnusedHttp {
+        async fn request(&self, _r: HttpRequest) -> Result<HttpResponse, HttpError> {
+            Err(HttpError::InvalidRequest("unused".into()))
+        }
+        async fn stream_sse(
+            &self,
+            _r: HttpRequest,
+        ) -> Result<traits::http::SseStream, HttpError> {
+            Err(HttpError::InvalidRequest("unused".into()))
+        }
+    }
+    struct UnusedRuntime;
+    #[async_trait]
+    impl RuntimeSpawner for UnusedRuntime {
+        async fn spawn(
+            &self,
+            _n: &str,
+            _t: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<traits::BackgroundTaskHandle, RuntimeError> {
+            Err(RuntimeError::Internal("unused".into()))
+        }
+        async fn sleep(&self, _d: Duration) {}
+        async fn cancel(
+            &self,
+            _h: &traits::BackgroundTaskHandle,
+        ) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    /// Records every `Stop` / `StopFailure` lifecycle event it sees as
+    /// `"Stop:<reason>"` / `"StopFailure:<error>"`. Pass-through (no decision).
+    struct RecordingLifecycleHandler {
+        log: Arc<StdMutex<Vec<String>>>,
+    }
+    #[async_trait]
+    impl BuiltinHookHandler for RecordingLifecycleHandler {
+        fn id(&self) -> &str {
+            "rec-lifecycle"
+        }
+        async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            match event {
+                HookEvent::Stop { reason } => {
+                    self.log.lock().unwrap().push(format!("Stop:{reason}"));
+                }
+                HookEvent::StopFailure { error } => {
+                    self.log.lock().unwrap().push(format!("StopFailure:{error}"));
+                }
+                _ => {}
+            }
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                response: None,
+            }
+        }
+    }
+
+    /// Stop hook that ALWAYS blocks (asks the agent to keep working). The
+    /// re-entry guard converts a SECOND block (when `stop_hook_active`) into a
+    /// pass so the loop cannot spin forever.
+    struct BlockingStopHandler;
+    #[async_trait]
+    impl BuiltinHookHandler for BlockingStopHandler {
+        fn id(&self) -> &str {
+            "block-stop"
+        }
+        async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+            let response = matches!(event, HookEvent::Stop { .. }).then(|| HookResponse {
+                decision: Some(HookDecision::Block),
+                reason: Some("keep going".into()),
+                system_message: Some("[stop-hook] please continue".into()),
+                ..Default::default()
+            });
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                response,
+            }
+        }
+    }
+
+    fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
+        HookDefinition {
+            id: HookId::new(),
+            name: handler_id.into(),
+            events: vec![event_type],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: handler_id.into(),
+            },
+            source: HookSource::User,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        }
+    }
+
+    async fn exec_recording(
+        log: Arc<StdMutex<Vec<String>>>,
+        events: &[HookEventType],
+    ) -> Arc<HookExecutorImpl> {
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        {
+            let mut r = registry.write().await;
+            for ev in events {
+                r.register(builtin_hook("rec-lifecycle", ev.clone()));
+            }
+        }
+        let mut exec =
+            HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(RecordingLifecycleHandler { log }));
+        Arc::new(exec)
+    }
+
+    async fn exec_blocking_stop() -> Arc<HookExecutorImpl> {
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry
+            .write()
+            .await
+            .register(builtin_hook("block-stop", HookEventType::Stop));
+        let mut exec =
+            HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(BlockingStopHandler));
+        Arc::new(exec)
+    }
+
+    /// Seed a history far past the hard blocking limit. The default model
+    /// (`claude-opus-4-7`, 200k window) blocks around ~177k tokens; 2M chars ≈
+    /// 500k tokens (estimator is chars/4), comfortably over.
+    async fn seed_over_blocking_limit(orch: &ConversationOrchestrator) {
+        let session = orch.session();
+        let mut s = session.lock().await;
+        s.history.push(ConversationMessage::user(
+            MessageId::new(),
+            "x".repeat(2_000_000),
+        ));
+    }
+
+    // -------- RECOV.1 — streaming blocking-limit preempt --------
+
+    #[tokio::test]
+    async fn recov1_streaming_blocking_limit_preempts_before_opening_stream() {
+        // One valid end_turn turn is scripted; if the preempt regresses the
+        // stream opens (captured_calls == 1) and the prompt-too-long text is
+        // absent — both asserted against below.
+        let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+            message_start("m", "claude-opus-4-7"),
+            content_block_start_text(0),
+            text_delta(0, "should not be reached"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]]));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        seed_over_blocking_limit(&orch).await;
+
+        let outcome = orch
+            .run_turn_streaming("go")
+            .await
+            .expect("turn ends without a hard error");
+        assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }), "{outcome:?}");
+
+        // The stream was NEVER opened — the preempt short-circuited the API call.
+        assert!(
+            streaming.captured_calls().await.is_empty(),
+            "the blocking-limit preempt must NOT open the stream"
+        );
+
+        // The byte-exact prompt-too-long message + an EndTurn("prompt_too_long").
+        let events = output.snapshot().await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, OutputEvent::Text { text } if text == "Prompt is too long")),
+            "byte-exact prompt-too-long message must be surfaced; events={events:#?}"
+        );
+        assert!(
+            events.iter().any(
+                |e| matches!(e, OutputEvent::EndTurn { stop_reason, .. } if stop_reason == "prompt_too_long")
+            ),
+            "the turn must end with stop_reason prompt_too_long; events={events:#?}"
+        );
+    }
+
+    // -------- RECOV.2 — StopFailure fires on an api-error turn-end --------
+
+    #[tokio::test]
+    async fn recov2_stop_failure_fires_on_api_error_end_and_stop_does_not() {
+        // A history over the blocking limit ⇒ the batched preempt surfaces
+        // prompt_too_long, which is an api-error end. `StopFailure` must fire
+        // (error == "invalid_request"); the normal `Stop` hooks must NOT.
+        let log = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let hooks = exec_recording(
+            log.clone(),
+            &[HookEventType::Stop, HookEventType::StopFailure],
+        )
+        .await;
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            // Never called — the blocking-limit preempt fires before the API call.
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            hooks,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        seed_over_blocking_limit(&orch).await;
+
+        orch.run_turn("go")
+            .await
+            .expect("turn ends without a hard error");
+
+        let seen = log.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|s| s == "StopFailure:invalid_request"),
+            "StopFailure must fire on the api-error end with error=invalid_request: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|s| s.starts_with("Stop:")),
+            "the normal Stop hooks must NOT fire on an api-error end: {seen:?}"
+        );
+    }
+
+    // -------- RECOV.4 — recovery budget reset on stop-hook continuation -----
+
+    #[tokio::test]
+    async fn recov4_stop_hook_continuation_resets_max_output_tokens_recovery() {
+        // Script: max_tokens, max_tokens, end_turn, then max_tokens ×4.
+        // With the reset on the stop-hook continuation, the post-continuation
+        // episode gets a FRESH budget of MAX_OUTPUT_TOKENS_RECOVERY_LIMIT (3)
+        // nudges, so the loop makes exactly 7 API calls and injects 5 nudges.
+        // WITHOUT the reset the carried count (2) would exhaust after only 2
+        // more calls (5 total, 3 nudges).
+        let mt = || {
+            mock_message_response(
+                vec![ContentBlockApi::Text {
+                    text: "partial".into(),
+                }],
+                Some("max_tokens"),
+            )
+        };
+        let et = || {
+            mock_message_response(
+                vec![ContentBlockApi::Text { text: "done".into() }],
+                Some("end_turn"),
+            )
+        };
+        let api = Arc::new(MockApiClient::new(vec![
+            mt(),
+            mt(),
+            et(),
+            mt(),
+            mt(),
+            mt(),
+            mt(),
+        ]));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            exec_blocking_stop().await,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+
+        let outcome = orch.run_turn("go").await.expect("turn ok");
+        assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }), "{outcome:?}");
+        assert_eq!(
+            api.captured_msgs().await.len(),
+            7,
+            "the stop-hook continuation must reset the recovery budget (fresh 3 nudges ⇒ 7 API calls)"
+        );
+        let nudges = orch
+            .session()
+            .lock()
+            .await
+            .history
+            .iter()
+            .filter(|m| m.text_content() == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE)
+            .count();
+        assert_eq!(
+            nudges, 5,
+            "5 recovery nudges expected across the two episodes (2 before + 3 after the reset)"
+        );
     }
 }

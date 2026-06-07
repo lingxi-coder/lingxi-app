@@ -208,6 +208,21 @@ pub(crate) struct RecoveryState {
     pub(crate) max_output_tokens_escalated: bool,
 }
 
+impl RecoveryState {
+    /// Reset the `max_output_tokens` recovery bookkeeping to begin a fresh
+    /// escalation episode: zero the consecutive nudge count, drop any armed
+    /// escalation override, and re-arm the 8k→64k single-shot. 1:1 with the TS
+    /// loop-state resets that set `maxOutputTokensRecoveryCount: 0` +
+    /// `maxOutputTokensOverride: undefined` on a continuation — the token-budget
+    /// continuation (`query.ts:1332`) AND the Stop-hook blocking continuation
+    /// (RECOV.4, `query.ts:1291`).
+    pub(crate) fn reset_max_output_tokens_recovery(&mut self) {
+        self.max_output_tokens_recovery_count = 0;
+        self.max_output_tokens_override = None;
+        self.max_output_tokens_escalated = false;
+    }
+}
+
 /// What one turn step decided.
 pub(crate) enum TurnStepOutcome {
     /// Continue the loop (e.g. model returned `tool_use`).
@@ -774,7 +789,11 @@ async fn reissue_after_model_fallback(
 /// message to history (and emit it to the output stream), returning its id so
 /// the caller can end the turn. Mirrors the TS path where the prompt-too-long
 /// error is surfaced as the assistant turn before the loop terminates.
-async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> MessageId {
+///
+/// `pub(crate)` so the streaming turn driver's RECOV.1 blocking-limit preempt
+/// (`conversation.rs`) can surface the same byte-exact message as the batched
+/// path before ending the turn.
+pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> MessageId {
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
         id: assistant_id,
@@ -2492,5 +2511,29 @@ mod pre_tool_hook_tests {
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "gate denial applies when the hook makes no decision");
         assert!(content.contains("Permission denied: denied-by-gate"));
+    }
+}
+
+// RECOV.4: the `max_output_tokens` recovery-reset helper used by both the
+// token-budget continuation and the Stop-hook blocking continuation.
+#[cfg(test)]
+mod recovery_state_reset_tests {
+    use super::{RecoveryState, ESCALATED_MAX_TOKENS};
+
+    /// `reset_max_output_tokens_recovery` zeroes the consecutive nudge count,
+    /// drops any armed escalation override, and re-arms the 8k→64k single-shot
+    /// — exactly the TS continuation reset (`query.ts:1291`/`1332`,
+    /// `maxOutputTokensRecoveryCount: 0` + `maxOutputTokensOverride: undefined`).
+    #[test]
+    fn reset_zeroes_all_three_fields() {
+        let mut s = RecoveryState {
+            max_output_tokens_recovery_count: 2,
+            max_output_tokens_override: Some(ESCALATED_MAX_TOKENS),
+            max_output_tokens_escalated: true,
+        };
+        s.reset_max_output_tokens_recovery();
+        assert_eq!(s.max_output_tokens_recovery_count, 0);
+        assert_eq!(s.max_output_tokens_override, None);
+        assert!(!s.max_output_tokens_escalated);
     }
 }

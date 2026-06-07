@@ -135,6 +135,13 @@ pub struct CommandFrontmatter {
     /// runtime defaults to bash (mirrors the TS `frontmatterParser`'s
     /// `shell?: FrontmatterShell`).
     pub shell: Option<FrontmatterShell>,
+    /// SLASH.1: TS `disable-model-invocation` frontmatter
+    /// (`parseBooleanFrontmatter`). When true the command is excluded from
+    /// model-driven invocation (carried onto [`SlashCommand::disable_model_invocation`]).
+    pub disable_model_invocation: bool,
+    /// SLASH.4: TS `when_to_use` frontmatter — advisory text describing when the
+    /// command applies (carried onto [`SlashCommand::when_to_use`]).
+    pub when_to_use: Option<String>,
 }
 
 /// Shell selected by a markdown command's frontmatter for embedded shell

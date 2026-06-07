@@ -160,6 +160,13 @@ impl CompactionOrchestrator {
         }
 
         // --- Layer 1: snip (cheapest, no LLM) ----------------------------- //
+        // COMPACT.4: TS gates the snip pass behind `feature('HISTORY_SNIP')`
+        // (`query.ts:401`), which resolves to `envBool('CLAUDE_CODE_HISTORY_SNIP',
+        // false)` (`shims/bun-bundle.ts:20`) — OFF by default in the reference
+        // checkout. The prior code ran the snip pass UNCONDITIONALLY, shedding
+        // the oldest messages on every iteration even with the feature off; gate
+        // it so the default matches TS.
+        //
         // Target the autocompact threshold as the snip budget: snip is the
         // cheap first escalation, so we let it shed the oldest messages toward
         // the same ceiling autocompact defends. The protected-tail floor in
@@ -167,13 +174,15 @@ impl CompactionOrchestrator {
         // history below the threshold on its own, so autocompact still
         // escalates when warranted (this preserves the manual `/compact`
         // outcome — see `process_iteration`).
-        let current_tokens = crate::grouping::estimate_tokens_for_range(&messages);
-        let snip = SnipCompactor::snip(messages, current_tokens, self.autocompact_threshold);
-        if snip.removed_count > 0 {
-            layers.push(CompactionLayer::Snip);
-            freed = freed.saturating_add(snip.tokens_freed);
+        if history_snip_enabled() {
+            let current_tokens = crate::grouping::estimate_tokens_for_range(&messages);
+            let snip = SnipCompactor::snip(messages, current_tokens, self.autocompact_threshold);
+            if snip.removed_count > 0 {
+                layers.push(CompactionLayer::Snip);
+                freed = freed.saturating_add(snip.tokens_freed);
+            }
+            messages = snip.messages;
         }
-        messages = snip.messages;
 
         // --- Layer 2: microcompact (time-gap gated) ----------------------- //
         // CSM.3: TS `maybeTimeBasedMicrocompact` only clears old tool results
@@ -189,6 +198,13 @@ impl CompactionOrchestrator {
             if micro.cleared_count > 0 {
                 layers.push(CompactionLayer::Microcompact);
                 freed = freed.saturating_add(micro.tokens_saved);
+                // COMPACT.3: TS `maybeTimeBasedMicrocompact` suppresses the
+                // "context left until autocompact" warning once it has actually
+                // cleared tool results (`microCompact.ts:511`, reached only when
+                // `tokensSaved > 0` — it returns null at :494-496 otherwise).
+                // The token counts are stale until the next API response, so the
+                // warning would be misleading. The prior code never suppressed.
+                crate::warning_state::suppress_compact_warning();
             }
             messages = micro.messages;
         }
@@ -243,6 +259,21 @@ impl CompactionOrchestrator {
             consecutive_failures: tracking.consecutive_failures,
             was_compacted,
         })
+    }
+}
+
+/// Whether the `HISTORY_SNIP` snip pass runs (COMPACT.4).
+///
+/// Mirrors TS `feature('HISTORY_SNIP')`, which resolves to
+/// `envBool('CLAUDE_CODE_HISTORY_SNIP', false)` (`shims/bun-bundle.ts:20,33-37`):
+/// the env var must be exactly `"1"` or `"true"` (byte-exact — `envBool` does NOT
+/// trim or case-fold, unlike `isEnvTruthy`). Absent or any other value → `false`,
+/// matching the reference checkout's default-off so the snip layer is a no-op
+/// unless explicitly enabled.
+fn history_snip_enabled() -> bool {
+    match std::env::var("CLAUDE_CODE_HISTORY_SNIP") {
+        Ok(v) => v == "1" || v == "true",
+        Err(_) => false,
     }
 }
 
@@ -402,25 +433,100 @@ mod tests {
         assert!(res.layers_applied.contains(&CompactionLayer::Autocompact));
     }
 
-    #[tokio::test]
-    async fn snip_fires_and_is_recorded_when_over_budget() {
-        // Many messages with a small threshold: snip removes the oldest down to
-        // the protected tail, recording the Snip layer; autocompact then still
-        // fires because the protected tail remains over threshold.
-        let orch = order_orchestrator(50);
-        let mut tracking = AutoCompactTrackingState::default();
-        let msgs: Vec<_> = (0..40).map(long_user).collect();
+    // --- COMPACT.4: HISTORY_SNIP gating ---------------------------------- //
 
-        let res = orch
-            .process_iteration_tracked(msgs, 0, &mut tracking)
-            .await
-            .expect("over threshold → autocompact succeeds");
+    /// Serializes the env-mutating COMPACT.4 tests so the shared
+    /// `CLAUDE_CODE_HISTORY_SNIP` process var isn't raced. The body runs with the
+    /// var set to `value` (or removed when `None`); the prior value is always
+    /// restored. The body is sync (drives async work via a local runtime) so the
+    /// guard is never held across an `.await`.
+    static SNIP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-        assert!(
-            res.layers_applied.contains(&CompactionLayer::Snip),
-            "snip should fire when over budget"
-        );
-        assert!(res.total_tokens_freed > 0, "snip should free tokens");
+    fn with_snip_env<R>(value: Option<&str>, body: impl FnOnce() -> R) -> R {
+        let _guard = SNIP_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let saved = std::env::var("CLAUDE_CODE_HISTORY_SNIP").ok();
+        match value {
+            Some(v) => std::env::set_var("CLAUDE_CODE_HISTORY_SNIP", v),
+            None => std::env::remove_var("CLAUDE_CODE_HISTORY_SNIP"),
+        }
+        let out = body();
+        match saved {
+            Some(v) => std::env::set_var("CLAUDE_CODE_HISTORY_SNIP", v),
+            None => std::env::remove_var("CLAUDE_CODE_HISTORY_SNIP"),
+        }
+        out
+    }
+
+    /// Run `fut` to completion on a fresh current-thread runtime, so an
+    /// env-serialized (sync) test can drive the async orchestrator without
+    /// holding `SNIP_ENV_LOCK` across an `.await`.
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(fut)
+    }
+
+    #[test]
+    fn snip_disabled_by_default_does_not_fire_over_budget() {
+        // COMPACT.4: with HISTORY_SNIP OFF (the default), the snip pass is a
+        // no-op even with a history far over budget — no Snip layer is recorded.
+        // Autocompact still escalates because the (un-snipped) history is over
+        // threshold.
+        with_snip_env(None, || {
+            let orch = order_orchestrator(50);
+            let mut tracking = AutoCompactTrackingState::default();
+            let msgs: Vec<_> = (0..40).map(long_user).collect();
+
+            let res = block_on(orch.process_iteration_tracked(msgs, 0, &mut tracking))
+                .expect("over threshold → autocompact succeeds");
+
+            assert!(
+                !res.layers_applied.contains(&CompactionLayer::Snip),
+                "snip must NOT fire when HISTORY_SNIP is off (default)"
+            );
+            assert!(
+                res.layers_applied.contains(&CompactionLayer::Autocompact),
+                "autocompact still escalates on the un-snipped, over-threshold history"
+            );
+        });
+    }
+
+    #[test]
+    fn history_snip_env_flag_enables_snip() {
+        // COMPACT.4: with CLAUDE_CODE_HISTORY_SNIP=1 the snip pass runs again,
+        // sheds the oldest messages down to the protected tail, and records the
+        // Snip layer (mirroring TS `feature('HISTORY_SNIP')` on).
+        with_snip_env(Some("1"), || {
+            let orch = order_orchestrator(50);
+            let mut tracking = AutoCompactTrackingState::default();
+            let msgs: Vec<_> = (0..40).map(long_user).collect();
+
+            let res = block_on(orch.process_iteration_tracked(msgs, 0, &mut tracking))
+                .expect("over threshold → autocompact succeeds");
+
+            assert!(
+                res.layers_applied.contains(&CompactionLayer::Snip),
+                "snip should fire when HISTORY_SNIP is enabled and over budget"
+            );
+            assert!(res.total_tokens_freed > 0, "snip should free tokens");
+        });
+    }
+
+    #[test]
+    fn history_snip_enabled_parses_envbool() {
+        // Byte-faithful `envBool('CLAUDE_CODE_HISTORY_SNIP', false)`: only the
+        // exact strings "1" and "true" enable it (no trim / case-fold), absent or
+        // anything else → false.
+        with_snip_env(None, || assert!(!history_snip_enabled()));
+        with_snip_env(Some("1"), || assert!(history_snip_enabled()));
+        with_snip_env(Some("true"), || assert!(history_snip_enabled()));
+        with_snip_env(Some("0"), || assert!(!history_snip_enabled()));
+        with_snip_env(Some("yes"), || assert!(!history_snip_enabled()));
+        with_snip_env(Some("TRUE"), || assert!(!history_snip_enabled()));
     }
 
     // Keep an explicit reference to CompactionResult's shape so the test module

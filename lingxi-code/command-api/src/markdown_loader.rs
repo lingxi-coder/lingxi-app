@@ -33,6 +33,16 @@
 //! * Frontmatter parsing reuses the existing `serde_yaml` dependency and the
 //!   `---`/`\n---\n` splitter pattern from `skill-api::frontmatter`
 //!   (`parse_skill_markdown`) without depending on `skill-api`.
+//! * **`disable-model-invocation` and `when_to_use` are not yet carried.** TS
+//!   `parseSkillFrontmatterFields` reads these two keys and `createSkillCommand`
+//!   places them on the top-level command (`disableModelInvocation`, `whenToUse`).
+//!   The matching `SlashCommand` fields exist, but the only path from the parse
+//!   step to [`build_markdown_command`] is [`MarkdownCommandFile`], whose
+//!   `frontmatter` is a [`CommandFrontmatter`] (defined in `crate::model`) with no
+//!   slot for either value. Carrying them needs a field added in another file
+//!   (`CommandFrontmatter`, or a new [`MarkdownCommandFile`] field that breaks the
+//!   exhaustive struct literal in `crate::expand`'s tests), so they are
+//!   intentionally left unported here.
 
 use crate::argument_substitution::{parse_argument_names, FrontmatterArgs};
 use crate::model::{
@@ -81,6 +91,21 @@ struct RawFrontmatter {
     arguments: Option<ArgumentsField>,
     #[serde(default)]
     shell: Option<String>,
+    /// SLASH.1: TS `disable-model-invocation` (boolean or the string `"true"`).
+    #[serde(default, rename = "disable-model-invocation")]
+    disable_model_invocation: Option<Boolish>,
+    /// SLASH.4: TS `when_to_use` (`snake_case` key, free-form string).
+    #[serde(default)]
+    when_to_use: Option<String>,
+}
+
+/// A frontmatter value that TS `parseBooleanFrontmatter` accepts as a boolean:
+/// either a real YAML bool or the literal string `"true"`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Boolish {
+    Bool(bool),
+    Str(String),
 }
 
 /// `allowed-tools` accepts either a single string or a list of strings
@@ -504,10 +529,15 @@ fn parse_frontmatter(raw: &str) -> (CommandFrontmatter, String) {
 
 /// Map the raw kebab-case YAML frontmatter onto the typed [`CommandFrontmatter`].
 fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
+    // SLASH.5: TS stores `allowed-tools` via
+    // `parseSlashCommandToolsFromFrontmatter`, which flattens the value to a
+    // `string[]` then runs it through `parseToolListFromCLI` (paren-aware
+    // comma/space split, trimmed) instead of keeping it verbatim. Both a single
+    // string and a YAML list go through the same splitter.
     let allowed_tools = match raw.allowed_tools {
         None => None,
-        Some(ToolsField::One(s)) => Some(vec![s]),
-        Some(ToolsField::Many(v)) => Some(v),
+        Some(ToolsField::One(s)) => Some(parse_slash_command_tools_from_frontmatter(&[s])),
+        Some(ToolsField::Many(v)) => Some(parse_slash_command_tools_from_frontmatter(&v)),
     };
     let argument_hints = raw.argument_hint.map(|h| vec![h]).unwrap_or_default();
     let argument_names = match raw.arguments {
@@ -520,6 +550,14 @@ fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
         "powershell" => Some(crate::model::FrontmatterShell::PowerShell),
         _ => None,
     });
+    // SLASH.1: TS `parseBooleanFrontmatter` (frontmatterParser.ts) returns true
+    // ONLY for a boolean `true` or the exact string `"true"` — every other value
+    // (including `"false"`, `"yes"`, `1`) is false.
+    let disable_model_invocation = match raw.disable_model_invocation {
+        Some(Boolish::Bool(b)) => b,
+        Some(Boolish::Str(s)) => s == "true",
+        None => false,
+    };
     CommandFrontmatter {
         description: raw.description.unwrap_or_default(),
         allowed_tools,
@@ -528,7 +566,86 @@ fn build_frontmatter(raw: RawFrontmatter) -> CommandFrontmatter {
         argument_names,
         thinking: None,
         shell,
+        disable_model_invocation,
+        // SLASH.4: TS copies `frontmatter.when_to_use` verbatim.
+        when_to_use: raw.when_to_use,
     }
+}
+
+/// Port of TS `parseSlashCommandToolsFromFrontmatter` (slice that applies once
+/// the value is already a `string[]`): run the tools through
+/// [`parse_tool_list_from_cli`], then collapse to `["*"]` if any parsed entry is
+/// the `*` wildcard (TS `parseToolListString` line `if (parsedTools.includes('*'))
+/// return ['*']`).
+fn parse_slash_command_tools_from_frontmatter(tools: &[String]) -> Vec<String> {
+    let parsed = parse_tool_list_from_cli(tools);
+    if parsed.iter().any(|t| t == "*") {
+        vec!["*".to_string()]
+    } else {
+        parsed
+    }
+}
+
+/// Faithful port of TS `parseToolListFromCLI` (`permissionSetup.ts`): split each
+/// string on top-level commas and spaces, trimming each tool, while keeping any
+/// separators that appear inside parentheses (e.g. `Bash(git log, foo)` stays one
+/// entry). Empty strings are skipped and empty/whitespace-only tools are dropped.
+fn parse_tool_list_from_cli(tools: &[String]) -> Vec<String> {
+    if tools.is_empty() {
+        return Vec::new();
+    }
+
+    let mut result: Vec<String> = Vec::new();
+
+    for tool_string in tools {
+        if tool_string.is_empty() {
+            continue;
+        }
+
+        let mut current = String::new();
+        let mut is_in_parens = false;
+
+        for ch in tool_string.chars() {
+            match ch {
+                '(' => {
+                    is_in_parens = true;
+                    current.push(ch);
+                }
+                ')' => {
+                    is_in_parens = false;
+                    current.push(ch);
+                }
+                ',' => {
+                    if is_in_parens {
+                        current.push(ch);
+                    } else {
+                        // Comma separator — push current tool and start a new one.
+                        if !current.trim().is_empty() {
+                            result.push(current.trim().to_string());
+                        }
+                        current.clear();
+                    }
+                }
+                ' ' => {
+                    if is_in_parens {
+                        current.push(ch);
+                    } else if !current.trim().is_empty() {
+                        // Space separator — push current tool and start a new one.
+                        result.push(current.trim().to_string());
+                        current.clear();
+                    }
+                }
+                _ => current.push(ch),
+            }
+        }
+
+        // Push any remaining tool.
+        if !current.trim().is_empty() {
+            result.push(current.trim().to_string());
+        }
+    }
+
+    result
 }
 
 /// Build a [`SlashCommand`] of kind [`SlashCommandKind::Markdown`] from a loaded
@@ -558,6 +675,20 @@ pub fn build_markdown_command(file: &MarkdownCommandFile, source: CommandSource)
             prompt_template: file.content.clone(),
         },
         has_user_specified_description,
+        // SLASH.2: TS `createSkillCommand` copies the frontmatter `argument-hint`
+        // onto the top-level command (`argumentHint`). The frontmatter parser
+        // stores it as a one-element `argument_hints` vec (empty when the key is
+        // absent), so its first element is the hint — mirroring TS
+        // `frontmatter['argument-hint'] != null ? String(...) : undefined`.
+        argument_hint: file.frontmatter.argument_hints.first().cloned(),
+        // SLASH.3: legacy `.claude/commands/**.md` files load through TS
+        // `loadSkillsFromCommandsDir`, which tags every command it builds with
+        // `loadedFrom: 'commands_DEPRECATED'`.
+        loaded_from: Some("commands_DEPRECATED".to_string()),
+        // SLASH.1/SLASH.4: TS `createSkillCommand` copies `disable-model-invocation`
+        // and `when_to_use` from the parsed frontmatter onto the top-level command.
+        disable_model_invocation: file.frontmatter.disable_model_invocation,
+        when_to_use: file.frontmatter.when_to_use.clone(),
         ..SlashCommand::default()
     }
 }
@@ -689,6 +820,75 @@ mod tests {
         assert_eq!(fm.allowed_tools, Some(vec!["Bash".to_string()]));
     }
 
+    // ---------- SLASH.5: allowed-tools is split via parseToolListFromCLI ----------
+
+    #[test]
+    fn frontmatter_allowed_tools_splits_comma_and_space_string() {
+        // A single comma/space separated string must split into individual tools
+        // (TS `parseToolListFromCLI`), each trimmed — not kept verbatim.
+        let (fm, _) = parse_frontmatter("---\nallowed-tools: Bash, Edit  Read\n---\nx");
+        assert_eq!(
+            fm.allowed_tools,
+            Some(vec![
+                "Bash".to_string(),
+                "Edit".to_string(),
+                "Read".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn frontmatter_allowed_tools_keeps_commas_inside_parens() {
+        // Commas/spaces inside `(...)` are part of the tool spec, not separators.
+        let (fm, _) = parse_frontmatter("---\nallowed-tools: Bash(git log, foo), Read\n---\nx");
+        assert_eq!(
+            fm.allowed_tools,
+            Some(vec!["Bash(git log, foo)".to_string(), "Read".to_string()])
+        );
+    }
+
+    #[test]
+    fn frontmatter_allowed_tools_list_entries_are_each_split() {
+        // Each YAML list entry is itself run through the splitter.
+        let (fm, _) =
+            parse_frontmatter("---\nallowed-tools:\n  - Bash, Edit\n  - Read\n---\nx");
+        assert_eq!(
+            fm.allowed_tools,
+            Some(vec![
+                "Bash".to_string(),
+                "Edit".to_string(),
+                "Read".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn frontmatter_allowed_tools_wildcard_collapses() {
+        // Any `*` among the parsed tools collapses the whole list to `["*"]`
+        // (TS `parseToolListString`).
+        let (fm, _) = parse_frontmatter("---\nallowed-tools: Bash, *\n---\nx");
+        assert_eq!(fm.allowed_tools, Some(vec!["*".to_string()]));
+    }
+
+    #[test]
+    fn parse_tool_list_from_cli_matches_ts_examples() {
+        assert_eq!(
+            parse_tool_list_from_cli(&["A, B C".to_string()]),
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
+        // Leading/trailing whitespace and empty segments are dropped.
+        assert_eq!(
+            parse_tool_list_from_cli(&["  Foo ,, , Bar  ".to_string()]),
+            vec!["Foo".to_string(), "Bar".to_string()]
+        );
+        // Empty strings in the array are skipped entirely.
+        assert_eq!(
+            parse_tool_list_from_cli(&[String::new(), "X".to_string()]),
+            vec!["X".to_string()]
+        );
+        assert!(parse_tool_list_from_cli(&[]).is_empty());
+    }
+
     #[test]
     fn frontmatter_absent_yields_defaults() {
         let (fm, body) = parse_frontmatter("just a body\nwith lines");
@@ -742,6 +942,94 @@ mod tests {
         };
         let cmd = build_markdown_command(&file, CommandSource::User);
         assert_eq!(cmd.description, "explicit");
+    }
+
+    #[test]
+    fn build_markdown_command_copies_argument_hint_and_sets_loaded_from() {
+        // SLASH.2: the frontmatter `argument-hint` is surfaced on the top-level
+        // command. SLASH.3: legacy commands are tagged `commands_DEPRECATED`.
+        let fm = CommandFrontmatter {
+            argument_hints: vec!["<file> [flags]".to_string()],
+            ..CommandFrontmatter::default()
+        };
+        let file = MarkdownCommandFile {
+            file_path: PathBuf::from("/r/.claude/commands/x.md"),
+            base_dir: PathBuf::from("/r/.claude/commands"),
+            frontmatter: fm,
+            content: "# Body".to_string(),
+            source: CommandSource::Project,
+        };
+        let cmd = build_markdown_command(&file, CommandSource::Project);
+        assert_eq!(cmd.argument_hint.as_deref(), Some("<file> [flags]"));
+        assert_eq!(cmd.loaded_from.as_deref(), Some("commands_DEPRECATED"));
+    }
+
+    #[test]
+    fn frontmatter_disable_model_invocation_bool_and_string_true() {
+        // SLASH.1: TS parseBooleanFrontmatter is true ONLY for `true` / "true".
+        let (fm, _) = parse_frontmatter("---\ndisable-model-invocation: true\n---\nx");
+        assert!(fm.disable_model_invocation);
+        let (fm, _) = parse_frontmatter("---\ndisable-model-invocation: \"true\"\n---\nx");
+        assert!(fm.disable_model_invocation);
+    }
+
+    #[test]
+    fn frontmatter_disable_model_invocation_false_and_absent() {
+        // SLASH.1: anything other than true/"true" (incl. "false", absent) is false.
+        let (fm, _) = parse_frontmatter("---\ndisable-model-invocation: false\n---\nx");
+        assert!(!fm.disable_model_invocation);
+        let (fm, _) = parse_frontmatter("---\ndisable-model-invocation: \"yes\"\n---\nx");
+        assert!(!fm.disable_model_invocation);
+        let (fm, _) = parse_frontmatter("---\ndescription: d\n---\nx");
+        assert!(!fm.disable_model_invocation);
+    }
+
+    #[test]
+    fn frontmatter_when_to_use_parsed_and_copied_to_command() {
+        // SLASH.4: `when_to_use` is parsed and surfaced on the top-level command.
+        let (fm, _) = parse_frontmatter("---\nwhen_to_use: use for X\n---\nbody");
+        assert_eq!(fm.when_to_use.as_deref(), Some("use for X"));
+        let file = MarkdownCommandFile {
+            file_path: PathBuf::from("/r/.claude/commands/x.md"),
+            base_dir: PathBuf::from("/r/.claude/commands"),
+            frontmatter: fm,
+            content: "# Body".to_string(),
+            source: CommandSource::Project,
+        };
+        let cmd = build_markdown_command(&file, CommandSource::Project);
+        assert_eq!(cmd.when_to_use.as_deref(), Some("use for X"));
+    }
+
+    #[test]
+    fn disable_model_invocation_excludes_command_from_model_invocable_set() {
+        // SLASH.1 end-to-end: the parsed flag flows onto SlashCommand so the
+        // registry model-invocable filter (`!disable_model_invocation`) drops it.
+        let (fm, _) = parse_frontmatter("---\ndisable-model-invocation: true\n---\nx");
+        let file = MarkdownCommandFile {
+            file_path: PathBuf::from("/r/.claude/commands/hidden.md"),
+            base_dir: PathBuf::from("/r/.claude/commands"),
+            frontmatter: fm,
+            content: "# Body".to_string(),
+            source: CommandSource::Project,
+        };
+        let cmd = build_markdown_command(&file, CommandSource::Project);
+        assert!(cmd.disable_model_invocation);
+    }
+
+    #[test]
+    fn build_markdown_command_argument_hint_absent_is_none() {
+        // No `argument-hint` frontmatter -> top-level hint stays `None`, but the
+        // `commands_DEPRECATED` marker is still set.
+        let file = MarkdownCommandFile {
+            file_path: PathBuf::from("/r/.claude/commands/y.md"),
+            base_dir: PathBuf::from("/r/.claude/commands"),
+            frontmatter: CommandFrontmatter::default(),
+            content: "# Body".to_string(),
+            source: CommandSource::Project,
+        };
+        let cmd = build_markdown_command(&file, CommandSource::Project);
+        assert_eq!(cmd.argument_hint, None);
+        assert_eq!(cmd.loaded_from.as_deref(), Some("commands_DEPRECATED"));
     }
 
     // ---------- filesystem loader (integration) ----------

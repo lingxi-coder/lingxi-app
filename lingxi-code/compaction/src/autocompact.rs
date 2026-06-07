@@ -173,22 +173,61 @@ impl Autocompactor {
             cache_params.fork_context_messages =
                 crate::strip_media::strip_images_from_messages(cache_params.fork_context_messages);
 
-            let req = ForkedAgentRequest {
-                prompt_messages: vec![ConversationMessage::user(
-                    protocol::MessageId::new(),
-                    self.config.compact_user_prompt.clone(),
-                )],
-                cache_safe_params: cache_params,
-                fork_label: "compaction".into(),
-                query_source: QuerySource::Compaction,
-                max_output_tokens: Some(
-                    u32::try_from(self.config.max_output_tokens).unwrap_or(u32::MAX),
-                ),
+            // COMPACT.2: prompt-too-long (PTL) retry loop — TS `compact.ts:445-491`.
+            // CC-1180: when the compact request ITSELF hits prompt-too-long, drop
+            // the oldest API-round groups from the replayed fork context and retry,
+            // up to `MAX_PTL_RETRIES` times, rather than leaving the user stuck. TS
+            // detects PTL by the summary text starting with
+            // `PROMPT_TOO_LONG_ERROR_MESSAGE`; we mirror that check on
+            // `final_text`, and thread the truncated set through
+            // `cache_safe_params.fork_context_messages` each attempt (TS's
+            // `retryCacheSafeParams.forkContextMessages = truncated`).
+            let mut ptl_attempts: u32 = 0;
+            let result = loop {
+                let req = ForkedAgentRequest {
+                    prompt_messages: vec![ConversationMessage::user(
+                        protocol::MessageId::new(),
+                        self.config.compact_user_prompt.clone(),
+                    )],
+                    cache_safe_params: cache_params.clone(),
+                    fork_label: "compaction".into(),
+                    query_source: QuerySource::Compaction,
+                    max_output_tokens: Some(
+                        u32::try_from(self.config.max_output_tokens).unwrap_or(u32::MAX),
+                    ),
+                };
+                let result = runner
+                    .run(req)
+                    .await
+                    .map_err(|e| CompactionError::Internal(e.to_string()))?;
+
+                // Not a prompt-too-long summary → accept it (TS `break`).
+                if !result
+                    .final_text
+                    .starts_with(api_client::PROMPT_TOO_LONG_ERROR_MESSAGE)
+                {
+                    break result;
+                }
+
+                // The compact request itself hit prompt-too-long: truncate the
+                // oldest API-round groups and retry. `None` (nothing safe left to
+                // drop) or exhausting `MAX_PTL_RETRIES` surfaces the failure — TS
+                // throws `ERROR_MESSAGE_PROMPT_TOO_LONG`; the Rust port models
+                // "exhausted PTL retries" as `MaxRetriesExceeded`.
+                ptl_attempts += 1;
+                let truncated = if ptl_attempts <= crate::thresholds::MAX_PTL_RETRIES {
+                    crate::ptl_retry::truncate_head_for_ptl_retry(
+                        cache_params.fork_context_messages.clone(),
+                        api_client::prompt_too_long_token_gap(&result.final_text),
+                    )
+                } else {
+                    None
+                };
+                let Some(truncated) = truncated else {
+                    return Err(CompactionError::MaxRetriesExceeded);
+                };
+                cache_params.fork_context_messages = truncated;
             };
-            let result = runner
-                .run(req)
-                .await
-                .map_err(|e| CompactionError::Internal(e.to_string()))?;
 
             // Strip <analysis>, rewrite <summary> → Summary:, then wrap in the
             // continuation message — the TS `compact.ts` summary-request path.
@@ -246,12 +285,13 @@ impl Autocompactor {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use protocol::MessageId;
+    use protocol::{ContentBlock, MessageId, ToolUseId};
+    use serde_json::json;
     use sidequery::{
         CacheSafeParams, SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
         SubagentSlotProvider,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::sync::Mutex;
     use tool_api::context::ToolUseOptions;
 
@@ -329,6 +369,75 @@ mod tests {
         let slot = Arc::new(CacheSafeParamsSlot::new());
         slot.save(cache_safe_params(prefix)).await;
         (Autocompactor::with_forked_runner(runner, slot), client)
+    }
+
+    /// Mock returning a queue of canned texts (one per call) and recording the
+    /// message count of every request, so the PTL retry tests can assert both the
+    /// retry count and that each retry's prompt shrank.
+    struct SeqMockClient {
+        texts: Mutex<VecDeque<String>>,
+        seen_lens: Mutex<Vec<usize>>,
+    }
+
+    #[async_trait]
+    impl SideQueryClient for SeqMockClient {
+        async fn query(
+            &self,
+            request: SideQueryRequest,
+        ) -> Result<SideQueryResponse, SideQueryError> {
+            self.seen_lens.lock().unwrap().push(request.messages.len());
+            let text = self.texts.lock().unwrap().pop_front().unwrap_or_default();
+            Ok(SideQueryResponse {
+                text: Some(text),
+                structured: None,
+                tool_calls: Vec::new(),
+                usage: Usage::default(),
+                stop_reason: Some("end_turn".into()),
+            })
+        }
+    }
+
+    /// Wire an autocompactor to a `SeqMockClient` that yields `texts` in order,
+    /// with the fork-context prefix pre-populated from `prefix`.
+    async fn wired_seq(
+        texts: Vec<String>,
+        prefix: Vec<ConversationMessage>,
+    ) -> (Autocompactor, Arc<SeqMockClient>) {
+        let client = Arc::new(SeqMockClient {
+            texts: Mutex::new(texts.into()),
+            seen_lens: Mutex::new(Vec::new()),
+        });
+        let runner = Arc::new(
+            ForkedAgentRunner::new(Arc::new(NoopProvider))
+                .with_side_query_client(client.clone(), "claude-opus-4-6".into()),
+        );
+        let slot = Arc::new(CacheSafeParamsSlot::new());
+        slot.save(cache_safe_params(prefix)).await;
+        (Autocompactor::with_forked_runner(runner, slot), client)
+    }
+
+    /// Assistant message carrying a tool-use block under `id` (opens a group).
+    fn assistant_tool(id: MessageId, tool: &str) -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id,
+            content: vec![ContentBlock::ToolUse {
+                id: ToolUseId::new(),
+                name: tool.into(),
+                input: json!({}),
+            }],
+            stop_reason: None,
+        }
+    }
+
+    fn tool_result_msg() -> ConversationMessage {
+        ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: ToolUseId::new(),
+                content: "ok".into(),
+                is_error: false,
+            }],
+        }
     }
 
     #[tokio::test]
@@ -470,5 +579,85 @@ mod tests {
         assert!(cfg
             .compact_user_prompt
             .contains("Your task is to create a detailed summary of the conversation so far"));
+    }
+
+    // --- COMPACT.2: prompt-too-long retry loop --------------------------- //
+
+    #[tokio::test]
+    async fn compact_ptl_retry_truncates_and_succeeds() {
+        // First summary call returns prompt-too-long; the loop drops the oldest
+        // API-round group from the fork context and retries, and the second call
+        // returns a real summary (TS `compact.ts:445-491`). Prefix groups:
+        // [u,u,u] [aA,result] [aB,result] → 3 groups; the unknown gap drops the
+        // 3-message preamble (group 0), so the retried prompt is strictly shorter.
+        let id_a = MessageId::new();
+        let id_b = MessageId::new();
+        let prefix = vec![
+            user_msg("preamble line one"),
+            user_msg("preamble line two"),
+            user_msg("preamble line three"),
+            assistant_tool(id_a, "Read"),
+            tool_result_msg(),
+            assistant_tool(id_b, "Bash"),
+            tool_result_msg(),
+        ];
+        let (compactor, client) = wired_seq(
+            vec![
+                "Prompt is too long".into(),
+                "<summary>RETRIED-OK</summary>".into(),
+            ],
+            prefix,
+        )
+        .await;
+
+        let result = compactor
+            .compact(vec![user_msg("trigger")])
+            .await
+            .expect("PTL retry then success");
+
+        let text = result.summary_messages[0].text_content();
+        assert!(
+            text.contains("Summary:\nRETRIED-OK"),
+            "retried summary not surfaced: {text}"
+        );
+
+        let lens = client.seen_lens.lock().unwrap().clone();
+        assert_eq!(lens.len(), 2, "exactly one PTL retry (two summary calls)");
+        assert!(
+            lens[1] < lens[0],
+            "the retry must send a SHORTER prompt after head-truncation: {lens:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_ptl_retry_exhausts_to_max_retries_error() {
+        // Every summary call returns prompt-too-long: the loop truncates until
+        // there is nothing safe left to drop, then surfaces MaxRetriesExceeded
+        // (TS throws ERROR_MESSAGE_PROMPT_TOO_LONG).
+        let id_a = MessageId::new();
+        let id_b = MessageId::new();
+        let prefix = vec![
+            user_msg("preamble"),
+            assistant_tool(id_a, "Read"),
+            tool_result_msg(),
+            assistant_tool(id_b, "Bash"),
+            tool_result_msg(),
+        ];
+        let (compactor, client) = wired_seq(vec!["Prompt is too long".into(); 6], prefix).await;
+
+        let err = compactor
+            .compact(vec![user_msg("trigger")])
+            .await
+            .expect_err("PTL exhaustion must error");
+        assert!(
+            matches!(err, CompactionError::MaxRetriesExceeded),
+            "expected MaxRetriesExceeded, got {err:?}"
+        );
+        // It actually retried (more than the single initial attempt) before
+        // giving up — bounded by what truncation can shed.
+        assert!(
+            client.seen_lens.lock().unwrap().len() >= 2,
+            "should attempt at least one truncated retry before exhausting"
+        );
     }
 }

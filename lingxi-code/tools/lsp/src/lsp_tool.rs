@@ -1,5 +1,7 @@
-//! LSP builtin tool — `LSPTool` exposes 4 operations (hover / completion /
-//! definition / references) over `lsp::LspClient` (M2-03).
+//! LSP builtin tool — `LSPTool` exposes 9 operations (goToDefinition /
+//! findReferences / hover / documentSymbol / workspaceSymbol /
+//! goToImplementation / prepareCallHierarchy / incomingCalls / outgoingCalls)
+//! over `lsp::LspClient` (M2-03; surface realigned to `LSPTool.ts:62-72`).
 //!
 //! Input position is 1-based (claude-code UI convention); we convert to
 //! 0-based via `lsp::tool_operations::position_from_one_based`
@@ -7,8 +9,8 @@
 //!
 //! Wire identifiers locked in spec §7 line 695.
 //!
-//! no-truncation: LSPTool returns structured hover/completion/definition/
-//! references payloads forwarded verbatim from lsp::LspClient (the
+//! no-truncation: LSPTool returns structured definition / references / hover /
+//! symbol / call-hierarchy payloads forwarded verbatim from lsp::LspClient (the
 //! upstream LSP server is the trust boundary). Free-form text comes only
 //! from hover contents, which are bounded by the LSP protocol itself.
 
@@ -42,21 +44,36 @@ use tool_api::tool_trait::{
 /// `LSPTool` identifier).
 pub const LSP_TOOL_NAME: &str = "LSP";
 
+/// Operation literal (`textDocument/definition`).
+pub const LSP_OPERATION_GO_TO_DEFINITION: &str = "goToDefinition";
+/// Operation literal (`textDocument/references`).
+pub const LSP_OPERATION_FIND_REFERENCES: &str = "findReferences";
 /// Operation literal (`textDocument/hover`).
 pub const LSP_OPERATION_HOVER: &str = "hover";
-/// Operation literal (`textDocument/completion`).
-pub const LSP_OPERATION_COMPLETION: &str = "completion";
-/// Operation literal (`textDocument/definition`).
-pub const LSP_OPERATION_DEFINITION: &str = "definition";
-/// Operation literal (`textDocument/references`).
-pub const LSP_OPERATION_REFERENCES: &str = "references";
+/// Operation literal (`textDocument/documentSymbol`).
+pub const LSP_OPERATION_DOCUMENT_SYMBOL: &str = "documentSymbol";
+/// Operation literal (`workspace/symbol`).
+pub const LSP_OPERATION_WORKSPACE_SYMBOL: &str = "workspaceSymbol";
+/// Operation literal (`textDocument/implementation`).
+pub const LSP_OPERATION_GO_TO_IMPLEMENTATION: &str = "goToImplementation";
+/// Operation literal (`textDocument/prepareCallHierarchy`).
+pub const LSP_OPERATION_PREPARE_CALL_HIERARCHY: &str = "prepareCallHierarchy";
+/// Operation literal (`callHierarchy/incomingCalls`).
+pub const LSP_OPERATION_INCOMING_CALLS: &str = "incomingCalls";
+/// Operation literal (`callHierarchy/outgoingCalls`).
+pub const LSP_OPERATION_OUTGOING_CALLS: &str = "outgoingCalls";
 
-/// All four operations in the locked surface order.
-pub const LSP_OPERATIONS_LOCKED: [&str; 4] = [
+/// All nine operations in the locked surface order (`LSPTool.ts:62-72`).
+pub const LSP_OPERATIONS_LOCKED: [&str; 9] = [
+    LSP_OPERATION_GO_TO_DEFINITION,
+    LSP_OPERATION_FIND_REFERENCES,
     LSP_OPERATION_HOVER,
-    LSP_OPERATION_COMPLETION,
-    LSP_OPERATION_DEFINITION,
-    LSP_OPERATION_REFERENCES,
+    LSP_OPERATION_DOCUMENT_SYMBOL,
+    LSP_OPERATION_WORKSPACE_SYMBOL,
+    LSP_OPERATION_GO_TO_IMPLEMENTATION,
+    LSP_OPERATION_PREPARE_CALL_HIERARCHY,
+    LSP_OPERATION_INCOMING_CALLS,
+    LSP_OPERATION_OUTGOING_CALLS,
 ];
 
 /// Position-validation error literal (LingXi lock; ASCII `>=` form).
@@ -117,7 +134,7 @@ static LSP_TOOL_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
         "properties": {
-            "operation":   { "type": "string", "enum": ["hover", "completion", "definition", "references"] },
+            "operation":   { "type": "string", "enum": ["goToDefinition", "findReferences", "hover", "documentSymbol", "workspaceSymbol", "goToImplementation", "prepareCallHierarchy", "incomingCalls", "outgoingCalls"] },
             "server_name": { "type": "string", "minLength": 1 },
             "file_path":   { "type": "string", "minLength": 1 },
             "line":        { "type": "integer", "minimum": 1 },
@@ -165,7 +182,7 @@ impl Tool for LSPTool {
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
-        "LSP-server operations (hover / completion / definition / references). 1-based positions."
+        "LSP-server operations (goToDefinition / findReferences / hover / documentSymbol / workspaceSymbol / goToImplementation / prepareCallHierarchy / incomingCalls / outgoingCalls). 1-based positions."
             .into()
     }
     async fn prompt(&self, _: &PromptOptions) -> String {
@@ -220,7 +237,7 @@ impl Tool for LSPTool {
         // Unknown-operation guard — also pre-STARTED.
         if !LSP_OPERATIONS_LOCKED.contains(&operation.as_str()) {
             return Err(ToolError::InvalidInput(format!(
-                "LSPTool: unknown operation {operation:?}; allowed: hover, completion, definition, references"
+                "LSPTool: unknown operation {operation:?}; allowed: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls"
             )));
         }
 
@@ -295,16 +312,32 @@ impl Tool for LSPTool {
         let tracker = OpenFileTracker::new();
         let path = Path::new(&file_path);
 
+        // `LSPTool.ts:427-` `getMethodAndParams` — per-operation dispatch. Position-
+        // based ops use `line`/`character`; `documentSymbol` is file-level;
+        // `workspaceSymbol` ignores the file and queries with an empty string
+        // ("returns all symbols", `LSPTool.ts:475`); the call-hierarchy ops do the
+        // two-step prepare-then-calls round-trip inside their `ops::` impl.
         let res = match operation.as_str() {
-            "hover" => ops::hover(&client, &tracker, &config, path, line, character).await,
-            "definition" => {
+            "goToDefinition" => {
                 ops::go_to_definition(&client, &tracker, &config, path, line, character).await
             }
-            "references" => {
+            "findReferences" => {
                 ops::find_references(&client, &tracker, &config, path, line, character, true).await
             }
-            "completion" => {
-                ops::completion(&client, &tracker, &config, path, line, character).await
+            "hover" => ops::hover(&client, &tracker, &config, path, line, character).await,
+            "documentSymbol" => ops::document_symbol(&client, &tracker, &config, path).await,
+            "workspaceSymbol" => ops::workspace_symbol(&client, None).await,
+            "goToImplementation" => {
+                ops::go_to_implementation(&client, &tracker, &config, path, line, character).await
+            }
+            "prepareCallHierarchy" => {
+                ops::prepare_call_hierarchy(&client, &tracker, &config, path, line, character).await
+            }
+            "incomingCalls" => {
+                ops::incoming_calls(&client, &tracker, &config, path, line, character).await
+            }
+            "outgoingCalls" => {
+                ops::outgoing_calls(&client, &tracker, &config, path, line, character).await
             }
             _ => unreachable!("validated above"),
         };
@@ -366,14 +399,30 @@ mod tests {
 
     #[test]
     fn lsp_operations_locked_array_matches_constants() {
+        // Locked to the TS surface order (`LSPTool.ts:62-72`).
         assert_eq!(
             LSP_OPERATIONS_LOCKED,
-            ["hover", "completion", "definition", "references"]
+            [
+                "goToDefinition",
+                "findReferences",
+                "hover",
+                "documentSymbol",
+                "workspaceSymbol",
+                "goToImplementation",
+                "prepareCallHierarchy",
+                "incomingCalls",
+                "outgoingCalls"
+            ]
         );
+        assert_eq!(LSP_OPERATION_GO_TO_DEFINITION, "goToDefinition");
+        assert_eq!(LSP_OPERATION_FIND_REFERENCES, "findReferences");
         assert_eq!(LSP_OPERATION_HOVER, "hover");
-        assert_eq!(LSP_OPERATION_COMPLETION, "completion");
-        assert_eq!(LSP_OPERATION_DEFINITION, "definition");
-        assert_eq!(LSP_OPERATION_REFERENCES, "references");
+        assert_eq!(LSP_OPERATION_DOCUMENT_SYMBOL, "documentSymbol");
+        assert_eq!(LSP_OPERATION_WORKSPACE_SYMBOL, "workspaceSymbol");
+        assert_eq!(LSP_OPERATION_GO_TO_IMPLEMENTATION, "goToImplementation");
+        assert_eq!(LSP_OPERATION_PREPARE_CALL_HIERARCHY, "prepareCallHierarchy");
+        assert_eq!(LSP_OPERATION_INCOMING_CALLS, "incomingCalls");
+        assert_eq!(LSP_OPERATION_OUTGOING_CALLS, "outgoingCalls");
     }
 
     #[test]
@@ -392,13 +441,15 @@ mod tests {
 
     #[test]
     fn lsp_unknown_operation_template() {
-        let op = "workspaceSymbol";
+        // `completion` is no longer a tool operation (TS LSPTool has no
+        // completion op) — it is now rejected as unknown.
+        let op = "completion";
         let s = format!(
-            "LSPTool: unknown operation {op:?}; allowed: hover, completion, definition, references"
+            "LSPTool: unknown operation {op:?}; allowed: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls"
         );
         assert_eq!(
             s,
-            "LSPTool: unknown operation \"workspaceSymbol\"; allowed: hover, completion, definition, references"
+            "LSPTool: unknown operation \"completion\"; allowed: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls"
         );
     }
 }

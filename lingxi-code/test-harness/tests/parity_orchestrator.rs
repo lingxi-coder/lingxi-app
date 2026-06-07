@@ -437,11 +437,14 @@ async fn parity_force_compact_50_messages() {
 
     let session = orch.session();
     let hist = session.lock().await;
-    let last = hist
+    // COMPACT.1: the compact boundary marker now LEADS the post-compact history
+    // (TS `buildPostCompactMessages` order `[boundaryMarker, ...summary, ...]`),
+    // so assert on `first()` rather than `last()`.
+    let first = hist
         .history
-        .last()
+        .first()
         .expect("history non-empty after compact");
-    match last {
+    match first {
         ConversationMessage::System { content, .. } => {
             assert!(
                 content.starts_with(&marker_prefix),

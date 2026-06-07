@@ -680,8 +680,7 @@ impl ConversationOrchestrator {
         messages_before: u32,
         bytes_before: u64,
     ) -> traits::CompactionSummary {
-        let mut history_after = result.messages;
-        // CSM.4: append the TS-faithful compact boundary (`createCompactBoundaryMessage`,
+        // CSM.4: build the TS-faithful compact boundary (`createCompactBoundaryMessage`,
         // the byte-exact `"Conversation compacted"` sentinel) instead of the ad-hoc
         // `[Compacted N → M]` marker, so the TUI scrollback + next-turn system-prompt
         // assembly see the same boundary TS emits. The rich `CompactBoundaryMetadata`
@@ -690,7 +689,15 @@ impl ConversationOrchestrator {
         // follow-up that persists it can swap `_metadata` for a real store.
         let (marker, _metadata) =
             compaction::create_compact_boundary(trigger, 0, None, None, None, &[]);
+        // COMPACT.1: the boundary marker leads the post-compact history, matching
+        // TS `buildPostCompactMessages` order `[boundaryMarker, ...summaryMessages,
+        // ...messagesToKeep, ...]` (compact.ts:330). Prepending (not appending) the
+        // marker is what lets a `get_messages_after_compact_boundary` consumer treat
+        // the summary + kept messages as the content AFTER the boundary, mirroring
+        // TS `getMessagesAfterCompactBoundary`.
+        let mut history_after = Vec::with_capacity(result.messages.len() + 1);
         history_after.push(marker.clone());
+        history_after.extend(result.messages);
 
         let messages_after = u32::try_from(history_after.len()).unwrap_or(u32::MAX);
         let bytes_after: u64 = history_after.iter().map(protocol::text_byte_size).sum();

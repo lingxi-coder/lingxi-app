@@ -17,6 +17,7 @@ pub mod compact;
 pub mod config;
 pub mod context;
 pub mod cost;
+pub mod custom_commands;
 pub mod doctor;
 pub mod effort;
 pub mod exit;
@@ -86,6 +87,7 @@ pub use stickers::StickersHandler;
 pub use templates::OLD_INIT_PROMPT;
 pub use version::VersionHandler;
 
+pub use custom_commands::load_and_register_custom_commands;
 pub use register::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_3, register_core_batch_4, register_core_batch_5, register_core_batch_6,

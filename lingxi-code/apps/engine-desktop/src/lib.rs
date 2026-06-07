@@ -507,9 +507,11 @@ impl Default for DesktopConfig {
 /// [`register_core_batch_1`] + [`register_core_batch_2`] overwrite the wired
 /// core handlers with their orchestrator/auth-bound implementations.
 #[must_use]
-pub fn desktop_command_registry(
+pub async fn desktop_command_registry(
     handle: Arc<dyn OrchestratorHandle>,
     auth: Arc<dyn AuthHandle>,
+    cwd: &std::path::Path,
+    claude_home: &std::path::Path,
 ) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
@@ -520,6 +522,20 @@ pub fn desktop_command_registry(
     // Desktop-only command handlers (no-op in M8 — the names remain
     // command-core unimplemented stubs until future milestones fill them).
     command_desktop::register(&mut reg);
+    // SLASH.2: discover + register custom `.claude/commands/**.md` commands
+    // (project up to git-root/home, plus user + managed layers), the same
+    // layering claude-code's getCommands uses. Registered AFTER builtins so a
+    // same-named custom command shadows a builtin (TS findCommand order).
+    let home = dirs::home_dir().unwrap_or_else(|| claude_home.to_path_buf());
+    let registered = command_core::load_and_register_custom_commands(
+        &mut reg,
+        cwd,
+        claude_home,
+        &crate::settings_watch::managed_settings_dir(),
+        &home,
+    )
+    .await;
+    tracing::debug!(custom_commands = registered, "registered custom slash commands");
     reg
 }
 
@@ -1367,7 +1383,7 @@ pub async fn build(
 
     // (6) Command registry through the desktop composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
-    let reg = desktop_command_registry(handle, auth.clone());
+    let reg = desktop_command_registry(handle, auth.clone(), &cfg.cwd, &cfg.claude_home).await;
     let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
 
     // (7) Session lifecycle: fire the `SessionStart` hooks now that the

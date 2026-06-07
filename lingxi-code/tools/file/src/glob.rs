@@ -12,7 +12,7 @@ use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -26,11 +26,55 @@ use tool_api::util::path_validation::{canonicalize_and_validate, emit_blocked_ev
 use tool_api::BuiltinToolContext;
 use walkdir::WalkDir;
 
+use crate::grep::to_relative_path;
+
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "Glob";
 
 /// Maximum match count returned. Spec §7 lock.
 pub const MAX_GLOB_MATCHES: usize = 100;
+
+/// Advisory appended to the model-facing result when matches were capped at
+/// `MAX_GLOB_MATCHES` (`GlobTool.ts:190-194`, byte-exact).
+const TRUNCATION_ADVISORY: &str =
+    "(Results are truncated. Consider using a more specific path or pattern.)";
+
+/// Model-facing string when no files matched (`GlobTool.ts:178-183`, byte-exact).
+const NO_FILES_FOUND: &str = "No files found";
+
+/// `extractGlobBaseDirectory` (`utils/glob.ts:17-64`): peel the static base
+/// directory (everything before the first glob metachar `* ? [ {`) off a
+/// pattern, returning `(base_dir, relative_pattern)`. Used to re-root absolute
+/// patterns — `Glob::new` matches against paths stripped of the canonical base,
+/// so an absolute pattern can never match unless its static prefix becomes the
+/// search root and the remainder is compiled instead (`utils/glob.ts:78-84`).
+///
+/// Returns an empty `base_dir` when there is no static directory prefix to peel
+/// off (the caller then keeps the original base + pattern).
+fn extract_glob_base_directory(pattern: &str) -> (String, String) {
+    // First glob special character: * ? [ {
+    let Some(idx) = pattern.find(['*', '?', '[', '{']) else {
+        // No glob characters — literal path: dirname / basename split.
+        let p = Path::new(pattern);
+        let dir = p
+            .parent()
+            .map_or_else(String::new, |d| d.to_string_lossy().into_owned());
+        let file = p
+            .file_name()
+            .map_or_else(String::new, |f| f.to_string_lossy().into_owned());
+        return (dir, file);
+    };
+
+    // Everything before the first glob char; find the last separator within it.
+    let static_prefix = &pattern[..idx];
+    match static_prefix.rfind('/') {
+        // No separator before the glob — pattern is relative to the base.
+        None => (String::new(), pattern.to_string()),
+        // Root-directory pattern (e.g. `/*.txt`): base dir is `/`.
+        Some(0) => ("/".to_string(), pattern[1..].to_string()),
+        Some(sep) => (pattern[..sep].to_string(), pattern[sep + 1..].to_string()),
+    }
+}
 
 /// `GlobTool` — pattern walker.
 pub struct GlobTool {
@@ -163,6 +207,22 @@ impl Tool for GlobTool {
         let started = Instant::now();
         self.emit_started(&invocation_id, pattern).await;
 
+        // GLOB.2: an absolute pattern (e.g. `/abs/proj/**/*.rs`) can never match,
+        // because the matcher is tested against paths stripped of `canon_base`.
+        // Mirror `glob.ts:78-84`: split the static base dir out and re-root the
+        // search there, compiling from the relative remainder.
+        let (base, pattern): (PathBuf, String) = if Path::new(pattern).is_absolute() {
+            let (base_dir, relative_pattern) = extract_glob_base_directory(pattern);
+            if base_dir.is_empty() {
+                (base, pattern.to_string())
+            } else {
+                (PathBuf::from(base_dir), relative_pattern)
+            }
+        } else {
+            (base, pattern.to_string())
+        };
+        let pattern = pattern.as_str();
+
         let canon_base = match canonicalize_and_validate(&base, &self.ctx.trusted_dirs) {
             Ok(p) => p,
             Err(_) => {
@@ -213,14 +273,37 @@ impl Tool for GlobTool {
             hits.truncate(MAX_GLOB_MATCHES);
         }
 
-        let matches: Vec<String> = hits.iter().map(|(p, _)| p.display().to_string()).collect();
+        // Relativize each hit against the canonicalized workspace (TS
+        // `files.map(toRelativePath)`, GlobTool.ts:166). The walk yields
+        // canonicalized paths, so the cwd must be canonicalized too for
+        // `strip_prefix` to match — same rule GrepTool uses.
+        let cwd_for_rel = std::fs::canonicalize(&self.ctx.workspace)
+            .unwrap_or_else(|_| self.ctx.workspace.clone());
+        let matches: Vec<String> = hits
+            .iter()
+            .map(|(p, _)| to_relative_path(p, &cwd_for_rel))
+            .collect();
+
+        // Model-facing string (`mapToolResultToToolResultBlockParam`,
+        // GlobTool.ts:177-197): "No files found" when empty, else the joined
+        // paths plus the truncation advisory when capped.
+        let content = if matches.is_empty() {
+            NO_FILES_FOUND.to_string()
+        } else if truncated {
+            format!("{}\n{TRUNCATION_ADVISORY}", matches.join("\n"))
+        } else {
+            matches.join("\n")
+        };
 
         let duration_ms = started.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, matches.len() as u64, duration_ms)
             .await;
 
         Ok(ToolCallResult {
-            data: json!({ "matches": matches, "truncated": truncated }),
+            // `content` is what the model sees (turn_loop `tool_result_to_model_text`
+            // surfaces `data.content` verbatim); `matches`/`truncated` stay for the
+            // TUI + existing tests.
+            data: json!({ "content": content, "matches": matches, "truncated": truncated }),
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -333,5 +416,115 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("invalid glob pattern"));
+    }
+
+    // --- GLOB.1: model-facing `content` + cwd-relative paths ---
+
+    #[tokio::test]
+    async fn content_and_matches_are_cwd_relative() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "x").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        let result = tool
+            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        // `matches` is relativized (not the canonical absolute path).
+        let matches: Vec<&str> = result.data["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(matches, vec!["a.rs"]);
+        // `content` is the model-facing string: joined relative paths.
+        assert_eq!(result.data["content"].as_str().unwrap(), "a.rs");
+    }
+
+    #[tokio::test]
+    async fn content_no_files_found_when_empty() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "x").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        let result = tool
+            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        assert_eq!(result.data["content"].as_str().unwrap(), "No files found");
+        assert_eq!(result.data["matches"].as_array().unwrap().len(), 0);
+        assert_eq!(result.data["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn content_appends_truncation_advisory_when_capped() {
+        let tmp = TempDir::new().unwrap();
+        for i in 0..150 {
+            std::fs::write(tmp.path().join(format!("f{i}.rs")), "x").unwrap();
+        }
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        let result = tool
+            .call(json!({ "pattern": "*.rs" }), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        let content = result.data["content"].as_str().unwrap();
+        assert!(
+            content.ends_with(
+                "\n(Results are truncated. Consider using a more specific path or pattern.)"
+            ),
+            "content should end with the truncation advisory: {content}"
+        );
+        assert_eq!(result.data["truncated"], true);
+    }
+
+    // --- GLOB.2: absolute patterns re-rooted via extractGlobBaseDirectory ---
+
+    #[test]
+    fn extract_glob_base_directory_splits_static_prefix() {
+        assert_eq!(
+            extract_glob_base_directory("/abs/proj/**/*.rs"),
+            ("/abs/proj".to_string(), "**/*.rs".to_string())
+        );
+        assert_eq!(
+            extract_glob_base_directory("/abs/*.rs"),
+            ("/abs".to_string(), "*.rs".to_string())
+        );
+        // Root-directory pattern → base dir is `/`.
+        assert_eq!(
+            extract_glob_base_directory("/*.rs"),
+            ("/".to_string(), "*.rs".to_string())
+        );
+        // No separator before the glob → nothing to peel off.
+        assert_eq!(
+            extract_glob_base_directory("*.rs"),
+            (String::new(), "*.rs".to_string())
+        );
+        // Literal path → dirname / basename.
+        assert_eq!(
+            extract_glob_base_directory("/abs/proj/file.rs"),
+            ("/abs/proj".to_string(), "file.rs".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn absolute_pattern_matches() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "x").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "x").unwrap();
+        std::fs::write(tmp.path().join("c.txt"), "x").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GlobTool::new(ctx);
+        // An absolute pattern would yield zero matches before GLOB.2 (the matcher
+        // was tested against base-stripped paths). Re-rooting fixes it.
+        let pattern = format!("{}/*.rs", tmp.path().display());
+        let result = tool
+            .call(json!({ "pattern": pattern }), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        let matches = result.data["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 2, "absolute pattern should match: {matches:?}");
+        assert_eq!(result.data["truncated"], false);
     }
 }

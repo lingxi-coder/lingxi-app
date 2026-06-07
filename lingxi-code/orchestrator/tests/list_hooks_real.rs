@@ -27,6 +27,7 @@ fn hk(
             pattern: m.into(),
             match_tool_name: true,
             match_input: false,
+            if_pattern: None,
         }),
         executor: HookExecutor::Builtin {
             handler_id: "noop".into(),

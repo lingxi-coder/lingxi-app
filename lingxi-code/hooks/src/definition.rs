@@ -73,15 +73,33 @@ impl HookDefinition {
     ///
     /// Returns `None` when the hook has no condition, or has an
     /// `if`-condition that is NOT a tool-name matcher (`match_tool_name ==
-    /// false`) — such a condition is a permission-rule / input matcher, which
-    /// is the `if`-condition half of B3 and is deferred (see
-    /// [`crate::matcher`] and `match_event`).
+    /// false`) — such a condition is a permission-rule / input matcher,
+    /// surfaced separately by [`Self::if_pattern`].
     #[must_use]
     pub fn matcher(&self) -> Option<&str> {
         self.if_condition
             .as_ref()
             .filter(|c| c.match_tool_name)
             .map(|c| c.pattern.as_str())
+    }
+
+    /// The hook's `if`-condition permission-rule string, if any (e.g.
+    /// `"Bash(git push:*)"`).
+    ///
+    /// This is the per-hook `if` field from claude-code's hook schema
+    /// (`schemas/hooks.ts:35` `IfConditionSchema`): a permission-rule-syntax
+    /// pattern evaluated against the event's tool name + tool input by
+    /// [`crate::matcher::matches_if_condition`] in
+    /// [`crate::registry::HookRegistry::match_event`]. It is INDEPENDENT of the
+    /// tool-name [`Self::matcher`] (the parent group `matcher`); a hook may
+    /// declare both, and claude-code requires BOTH to pass before the hook
+    /// fires (`utils/hooks.ts:1681-1685` then `:1808-1850`). Returns `None` when
+    /// the hook carries no `if`-condition.
+    #[must_use]
+    pub fn if_pattern(&self) -> Option<&str> {
+        self.if_condition
+            .as_ref()
+            .and_then(|c| c.if_pattern.as_deref())
     }
 }
 
@@ -157,22 +175,35 @@ pub enum HookExecutor {
 /// [`crate::registry::HookRegistry::match_event`]. This is the MATCHER half of
 /// B3 and is fully ported.
 ///
-/// When `match_input` is `true`, the pattern is intended to be a permission-rule
-/// string (e.g. `"Bash(rm:*)"`) matched against the serialized tool input —
-/// the `if`-condition half of B3. That rule-content matching is BLOCKED on the
-/// ported permission-rule parser and is NOT yet evaluated (such conditions are
-/// currently treated as non-tool-name matchers, i.e. they do not gate firing).
+/// When `match_input` is `true`, [`Self::if_pattern`] carries a permission-rule
+/// string (e.g. `"Bash(git push:*)"`) matched against the tool name + tool
+/// input — the `if`-condition half of B3. That rule-content matching is now
+/// PORTED ([`crate::matcher::matches_if_condition`], reusing the permission
+/// crate's `PermissionRuleValue::from_rule_string` + per-tool content matchers)
+/// and gates firing in [`crate::registry::HookRegistry::match_event`].
+///
+/// The tool-name [`Self::pattern`] (group `matcher`) and the [`Self::if_pattern`]
+/// (`if`-condition) are INDEPENDENT — a hook may carry both, and both must pass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookCondition {
-    /// Pattern text. A tool-name matcher when `match_tool_name` is `true`
-    /// (B3, ported); a permission-rule string when `match_input` is `true`
-    /// (`if`-condition, deferred).
+    /// Pattern text of the B3 tool-name matcher, evaluated when
+    /// `match_tool_name` is `true`. (The `if`-condition lives in
+    /// [`Self::if_pattern`], not here.)
     pub pattern: String,
-    /// If `true` the pattern is the B3 tool-name matcher (evaluated).
+    /// If `true` [`Self::pattern`] is the B3 tool-name matcher (evaluated).
     pub match_tool_name: bool,
-    /// If `true` the pattern is matched against `tool_input` serialized JSON
-    /// (the `if`-condition half of B3 — deferred, not yet evaluated).
+    /// If `true` an [`Self::if_pattern`] permission-rule string is present and
+    /// matched against the tool name + serialized `tool_input` (the
+    /// `if`-condition half of B3 — now ported). Kept in sync with
+    /// `if_pattern.is_some()`.
     pub match_input: bool,
+    /// The `if`-condition permission-rule string (claude-code per-hook `if`
+    /// field, `schemas/hooks.ts:35`). `None` when the hook has no `if`. Additive
+    /// (`#[serde(default)]`) so existing serialized hooks deserialize unchanged,
+    /// and `skip_serializing_if` keeps a `None` byte-identical to the pre-`if`
+    /// serialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_pattern: Option<String>,
 }
 
 /// Origin of a hook definition. Used by the engine to display trust info to

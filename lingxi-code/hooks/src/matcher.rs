@@ -15,10 +15,17 @@
 //!    regex logs and returns `false` (never panics), exactly like the TS
 //!    `try { new RegExp(...) } catch { … return false }`.
 //!
-//! The `if`-condition (permission-rule content) matching is intentionally NOT
-//! ported here — see [`crate::registry::HookRegistry::match_event`] for the gap
-//! note. This module is the MATCHER-only half of B3.
+//! The `if`-condition (permission-rule content) matcher is ported as
+//! [`matches_if_condition`] — a faithful port of `prepareIfConditionMatcher`
+//! (`utils/hooks.ts:1390-1422`) composed with each tool's
+//! `preparePermissionMatcher` closure. It reuses the permission crate's
+//! `PermissionRuleValue::from_rule_string` + per-tool content matchers, and is
+//! wired alongside the tool-name matcher in
+//! [`crate::registry::HookRegistry::match_event`].
 
+use permission::shell_command::{command_from_input, rule_matches_any_subcommand};
+use permission::shell_rule_matching::match_wildcard_pattern;
+use permission::PermissionRuleValue;
 use regex::Regex;
 
 /// Maps a legacy tool name to its canonical name — `normalizeLegacyToolName`
@@ -101,6 +108,99 @@ pub fn matches_pattern(match_query: &str, matcher: &str) -> bool {
         }
     }
     false
+}
+
+/// Returns `true` if a hook's `if`-condition `if_condition` (a permission-rule
+/// string such as `"Bash(git push:*)"`) matches the current tool invocation.
+///
+/// Byte-faithful port of `prepareIfConditionMatcher`'s returned closure
+/// (`utils/hooks.ts:1404-1421`) composed with each tool's
+/// `preparePermissionMatcher` (`BashTool.tsx:445`, `FileEditTool.ts:122`,
+/// `FileReadTool.ts:395`, `FileWriteTool.ts:132`, `GlobTool.ts:91`,
+/// `GrepTool.ts:198`):
+///
+/// 1. Parse `if_condition` into `{ tool_name, rule_content }` via
+///    [`PermissionRuleValue::from_rule_string`] (`permissionRuleValueFromString`).
+/// 2. If the rule's (legacy-normalized) tool name differs from the event's
+///    (legacy-normalized) `tool_name` → no match.
+/// 3. If the rule carries no content (bare `Tool`, or `Tool()` / `Tool(*)`) →
+///    match — tool-name agreement alone (`if (!parsed.ruleContent) return true`).
+/// 4. Otherwise dispatch to the tool's content matcher. Only the six tools that
+///    implement `preparePermissionMatcher` in claude-code can match a content
+///    rule; for every other tool (and an input missing the matched field) the
+///    TS `patternMatcher` is `undefined`, so the closure returns `false`.
+///
+/// `tool_name` is the event's tool (canonicalized internally);
+/// `tool_input` is the tool's raw JSON input (`hookInput.tool_input`).
+///
+/// ## Documented divergences (reused permission-crate matchers; safe direction)
+/// The per-tool content match reuses the permission crate's matchers rather than
+/// re-deriving each tool's closure:
+/// - **Bash** uses [`rule_matches_any_subcommand`] — the crate's deny-like
+///   "fires if ANY subcommand matches" aggregation, which is exactly the
+///   semantics the TS Bash matcher targets ("compound commands must fire the
+///   hook if ANY subcommand matches"). It strips safe wrappers / env-var
+///   prefixes and uses the quote-aware delimiter splitter (the crate's
+///   documented stand-in for tree-sitter `parseForSecurity`); all such
+///   differences make the hook fire MORE readily (the deny-safe direction the
+///   TS comment intends), never less, and the `prefix` / `wildcard` / exact
+///   match rules are identical.
+/// - **File / Glob / Grep** use [`match_wildcard_pattern`] (the port of
+///   `matchWildcardPattern`) against the raw `file_path` / search `pattern`
+///   string — byte-identical to TS (anchored wildcard, NOT a root-relative
+///   gitignore glob).
+#[must_use]
+pub fn matches_if_condition(
+    if_condition: &str,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+) -> bool {
+    let parsed = PermissionRuleValue::from_rule_string(if_condition);
+    // `from_rule_string` already legacy-normalizes the parsed tool name; the
+    // event tool name is normalized here so the comparison matches TS's
+    // `normalizeLegacyToolName(parsed.toolName) === normalizeLegacyToolName(toolName)`.
+    let canonical_tool = normalize_legacy_tool_name(tool_name);
+    if parsed.tool_name != canonical_tool {
+        return false;
+    }
+    // Bare tool name / `Tool()` / `Tool(*)` → tool-name agreement is enough.
+    let Some(content) = parsed.rule_content.as_deref() else {
+        return true;
+    };
+    matches_content_rule(&canonical_tool, content, tool_input)
+}
+
+/// The per-tool content matcher — the body of each tool's
+/// `preparePermissionMatcher` closure. `tool_name` is already
+/// legacy-normalized; `content` is the rule's parenthesized content.
+fn matches_content_rule(tool_name: &str, content: &str, input: &serde_json::Value) -> bool {
+    match tool_name {
+        // BashTool: split into subcommands, fire if ANY matches the content
+        // (prefix / wildcard / exact). Missing `command` field ⇒ TS input
+        // schema parse fails ⇒ `patternMatcher` undefined ⇒ false.
+        "Bash" => {
+            command_from_input(input).is_some_and(|cmd| rule_matches_any_subcommand(content, cmd))
+        }
+        // File tools match the content as a wildcard against the RAW `file_path`
+        // string (`matchWildcardPattern(pattern, file_path)`).
+        "Edit" | "Write" | "Read" => {
+            string_field(input, "file_path").is_some_and(|p| match_wildcard_pattern(content, p, false))
+        }
+        // Glob / Grep match against the SEARCH `pattern` field, not a path.
+        "Glob" | "Grep" => {
+            string_field(input, "pattern").is_some_and(|p| match_wildcard_pattern(content, p, false))
+        }
+        // Every other tool (PowerShell, NotebookEdit, MCP, …) has no
+        // `preparePermissionMatcher` in claude-code, so a content rule cannot
+        // match (TS `patternMatcher` is `undefined` → the closure returns false).
+        _ => false,
+    }
+}
+
+/// Extract a string field from a tool's JSON input, or `None` when absent /
+/// non-string (mirrors a TS input-schema parse failure for that field).
+fn string_field<'a>(input: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    input.get(field).and_then(serde_json::Value::as_str)
 }
 
 /// True when every byte of `s` is in `[A-Za-z0-9_|]` and `s` is non-empty —
@@ -212,5 +312,131 @@ mod tests {
         // a "Task" matcher — `"Task" === normalizeLegacyToolName("Task") ("Agent")`
         // is false in TS too.
         assert!(!matches_pattern("Task", "Task"));
+    }
+
+    // ── `if`-condition matcher (prepareIfConditionMatcher + per-tool) ──────────
+
+    use serde_json::json;
+
+    #[test]
+    fn if_bash_prefix_rule_fires_on_matching_command() {
+        let input = json!({ "command": "git push origin main" });
+        assert!(matches_if_condition("Bash(git push:*)", "Bash", &input));
+    }
+
+    #[test]
+    fn if_bash_prefix_rule_does_not_fire_on_non_matching_command() {
+        let input = json!({ "command": "git status" });
+        assert!(!matches_if_condition("Bash(git push:*)", "Bash", &input));
+        // A different command entirely.
+        let ls = json!({ "command": "ls -la" });
+        assert!(!matches_if_condition("Bash(git push:*)", "Bash", &ls));
+    }
+
+    #[test]
+    fn if_bash_fires_when_any_subcommand_matches() {
+        // Deny-like aggregation: a compound command fires the hook if ANY
+        // subcommand matches (BashTool.tsx comment).
+        let input = json!({ "command": "echo ok && git push" });
+        assert!(matches_if_condition("Bash(git push:*)", "Bash", &input));
+        // None of the subcommands match → no fire.
+        let benign = json!({ "command": "echo ok && ls" });
+        assert!(!matches_if_condition("Bash(git push:*)", "Bash", &benign));
+    }
+
+    #[test]
+    fn if_bash_wildcard_rule() {
+        let input = json!({ "command": "git commit -m x" });
+        assert!(matches_if_condition("Bash(git *)", "Bash", &input));
+        // word boundary: `git *` must not match `gitk`.
+        let gitk = json!({ "command": "gitk" });
+        assert!(!matches_if_condition("Bash(git *)", "Bash", &gitk));
+    }
+
+    #[test]
+    fn if_bare_tool_name_matches_on_tool_agreement_alone() {
+        // No rule content → matches purely on the tool name (TS `!parsed.ruleContent`).
+        let input = json!({ "command": "rm -rf /" });
+        assert!(matches_if_condition("Bash", "Bash", &input));
+        // `Bash()` and `Bash(*)` collapse to tool-wide too.
+        assert!(matches_if_condition("Bash()", "Bash", &input));
+        assert!(matches_if_condition("Bash(*)", "Bash", &input));
+    }
+
+    #[test]
+    fn if_tool_name_mismatch_does_not_fire() {
+        // The rule's tool name must equal the event's tool name.
+        let input = json!({ "command": "git push" });
+        assert!(!matches_if_condition("Bash(git push:*)", "Write", &input));
+        // Bare-tool rule for a different tool also fails.
+        assert!(!matches_if_condition("Read", "Bash", &input));
+    }
+
+    #[test]
+    fn if_legacy_tool_name_normalizes_both_sides() {
+        // Legacy `Task` rule normalizes to canonical `Agent`; event tool `Agent`
+        // matches. (Bare tool name → tool-agreement match.)
+        let input = json!({ "description": "x" });
+        assert!(matches_if_condition("Task", "Agent", &input));
+        assert!(matches_if_condition("Task(*)", "Agent", &input));
+    }
+
+    #[test]
+    fn if_malformed_rule_does_not_fire() {
+        // Unbalanced paren: `from_rule_string` treats the WHOLE string as a bare
+        // tool name (`"Bash(git push:*"`), which != "Bash" → no fire. Mirrors TS
+        // `permissionRuleValueFromString` producing toolName === the whole string.
+        let input = json!({ "command": "git push" });
+        assert!(!matches_if_condition("Bash(git push:*", "Bash", &input));
+        // Content after the close paren → bare tool name `"Bash(x)y"` != "Bash".
+        assert!(!matches_if_condition("Bash(x)y", "Bash", &input));
+    }
+
+    #[test]
+    fn if_file_tool_wildcards_match_raw_path() {
+        // matchWildcardPattern against the raw file_path (anchored wildcard).
+        let input = json!({ "file_path": "/proj/src/main.rs" });
+        assert!(matches_if_condition("Edit(*main.rs)", "Edit", &input));
+        assert!(matches_if_condition("Edit(/proj/src/*)", "Edit", &input));
+        assert!(matches_if_condition("Write(/proj/*)", "Write", &input));
+        assert!(matches_if_condition("Read(/proj/src/main.rs)", "Read", &input));
+        // Non-matching path.
+        assert!(!matches_if_condition("Edit(*.py)", "Edit", &input));
+        // A bare unanchored relative pattern does NOT match an absolute path
+        // (faithful to anchored `^src/.*$`).
+        assert!(!matches_if_condition("Edit(src/*)", "Edit", &input));
+    }
+
+    #[test]
+    fn if_glob_grep_match_search_pattern_not_path() {
+        // Glob/Grep match the rule against the SEARCH `pattern` field.
+        let glob = json!({ "pattern": "**/*.rs", "path": "/proj" });
+        assert!(matches_if_condition("Glob(**/*.rs)", "Glob", &glob));
+        let grep = json!({ "pattern": "TODO", "path": "/proj" });
+        assert!(matches_if_condition("Grep(TODO)", "Grep", &grep));
+        assert!(!matches_if_condition("Grep(FIXME)", "Grep", &grep));
+    }
+
+    #[test]
+    fn if_content_rule_on_unmatchable_tool_does_not_fire() {
+        // PowerShell / NotebookEdit have no preparePermissionMatcher in TS, so a
+        // CONTENT rule never matches (patternMatcher undefined → false). The bare
+        // tool-name form still matches on tool agreement.
+        let ps = json!({ "command": "Get-ChildItem" });
+        assert!(!matches_if_condition("PowerShell(Get-ChildItem:*)", "PowerShell", &ps));
+        assert!(matches_if_condition("PowerShell", "PowerShell", &ps));
+        let nb = json!({ "notebook_path": "/a.ipynb" });
+        assert!(!matches_if_condition("NotebookEdit(/a.ipynb)", "NotebookEdit", &nb));
+        assert!(matches_if_condition("NotebookEdit", "NotebookEdit", &nb));
+    }
+
+    #[test]
+    fn if_content_rule_with_missing_input_field_does_not_fire() {
+        // Missing the matched field ⇒ TS input-schema parse fails ⇒ undefined
+        // matcher ⇒ false. (A bare tool-name rule still matches.)
+        let empty = json!({});
+        assert!(!matches_if_condition("Bash(git push:*)", "Bash", &empty));
+        assert!(!matches_if_condition("Edit(*.rs)", "Edit", &empty));
+        assert!(matches_if_condition("Bash", "Bash", &empty));
     }
 }

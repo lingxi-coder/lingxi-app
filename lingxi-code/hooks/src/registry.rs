@@ -3,7 +3,7 @@
 
 use crate::definition::{HookDefinition, HookSource};
 use crate::events::HookEvent;
-use crate::matcher::matches_pattern;
+use crate::matcher::{matches_if_condition, matches_pattern};
 use protocol::{AgentId, HookId, PluginId, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -163,26 +163,59 @@ impl HookRegistry {
     /// fires, exactly as before this change. Events with no `match_query`
     /// (e.g. `TaskCompleted`) skip the matcher filter entirely.
     ///
-    /// NOTE (B3 `if`-condition gap): the `if`-condition rule-content matcher
-    /// (`match_input`-style permission rules like `"Bash(rm:*)"`) is NOT
-    /// evaluated here — that half of B3 is blocked on the ported permission-rule
-    /// parser. Only the tool-name `matcher` is enforced. Such conditions do not
-    /// (yet) gate firing.
+    /// The `if`-condition rule-content matcher (permission rules like
+    /// `"Bash(git push:*)"`) is now ALSO enforced (B3 second half): a hook with
+    /// an `if`-condition fires only when [`crate::matcher::matches_if_condition`]
+    /// also passes for the event's tool name + tool input. This mirrors
+    /// claude-code applying the tool-name `matcher` filter
+    /// (`utils/hooks.ts:1681-1685`) and THEN the `if`-condition filter
+    /// (`utils/hooks.ts:1808-1850`) — both must pass. The `if`-condition is only
+    /// evaluable for the four tool events `prepareIfConditionMatcher`
+    /// (`utils/hooks.ts:1390-1401`) accepts (`PreToolUse`, `PostToolUse`,
+    /// `PostToolUseFailure`, `PermissionRequest`); on any other event a hook
+    /// that DECLARES an `if`-condition is dropped (TS `ifMatcher` is `undefined`
+    /// → the filter returns `false`). Following TS, the `if`-condition is applied
+    /// only to externally-executed hook kinds (Command / Http / Agent / Prompt);
+    /// in-process [`crate::HookExecutor::Builtin`] hooks (the analogue of TS
+    /// `callback` / `function` hooks) ignore it.
     #[must_use]
     pub fn match_event(&self, event: &HookEvent, _ctx: &HookContext) -> Vec<&HookDefinition> {
         let et = event.event_type();
         let match_query = Self::match_query_for(event);
+        let if_target = Self::if_match_target(event);
         let keep = |h: &&HookDefinition| -> bool {
             if !h.events.contains(&et) {
                 return false;
             }
-            // TS `getMatchingHooks`: only apply the matcher filter when the
-            // event yields a `matchQuery`; otherwise every subscribed hook
+            // TS `getMatchingHooks`: only apply the tool-name matcher filter when
+            // the event yields a `matchQuery`; otherwise every subscribed hook
             // passes. A hook with no matcher always passes.
-            match (&match_query, h.matcher()) {
+            let tool_name_ok = match (&match_query, h.matcher()) {
                 (Some(query), Some(matcher)) => matches_pattern(query, matcher),
                 _ => true,
+            };
+            if !tool_name_ok {
+                return false;
             }
+            // TS `ifFilteredHooks` (utils/hooks.ts:1808-1850): the `if`-condition
+            // gates only externally-executed hook kinds; Builtin (callback /
+            // function) hooks bypass it. A hook without an `if`-condition passes.
+            if let Some(if_cond) = h.if_pattern() {
+                if Self::if_condition_applies(h) {
+                    match &if_target {
+                        // if-evaluable event → both tool-name + content must match.
+                        Some((tool_name, tool_input)) => {
+                            if !matches_if_condition(if_cond, tool_name, tool_input) {
+                                return false;
+                            }
+                        }
+                        // Non-tool event with an `if`-condition → cannot be
+                        // evaluated → drop (TS `if (!ifMatcher) return false`).
+                        None => return false,
+                    }
+                }
+            }
+            true
         };
         let mut matched: Vec<&HookDefinition> =
             self.sources.values().flatten().filter(keep).collect();
@@ -215,6 +248,52 @@ impl HookRegistry {
             | HookEvent::PermissionDenied { tool_name, .. } => Some(tool_name.clone()),
             _ => None,
         }
+    }
+
+    /// The `(tool_name, tool_input)` an `if`-condition is evaluated against, or
+    /// `None` when the event is not one `prepareIfConditionMatcher`
+    /// (`utils/hooks.ts:1390-1401`) accepts.
+    ///
+    /// Faithful to that guard: ONLY `PreToolUse`, `PostToolUse`,
+    /// `PostToolUseFailure`, and `PermissionRequest` yield a matcher. Notably
+    /// `PermissionDenied` — which DOES produce a tool-name `matchQuery`
+    /// ([`Self::match_query_for`]) — is deliberately excluded here (it also
+    /// carries no `tool_input`), so an `if`-conditioned hook subscribed to
+    /// `PermissionDenied` is dropped, exactly as in TS.
+    fn if_match_target(event: &HookEvent) -> Option<(&str, &serde_json::Value)> {
+        match event {
+            HookEvent::PreToolUse {
+                tool_name,
+                tool_input,
+                ..
+            }
+            | HookEvent::PostToolUse {
+                tool_name,
+                tool_input,
+                ..
+            }
+            | HookEvent::PostToolUseFailure {
+                tool_name,
+                tool_input,
+                ..
+            }
+            | HookEvent::PermissionRequest {
+                tool_name,
+                tool_input,
+                ..
+            } => Some((tool_name.as_str(), tool_input)),
+            _ => None,
+        }
+    }
+
+    /// Whether the `if`-condition filter applies to this hook's executor kind.
+    ///
+    /// TS gates the `if`-condition on `command` / `prompt` / `agent` / `http`
+    /// hooks only (`utils/hooks.ts:1824-1832`); `callback` / `function` hooks
+    /// bypass it. [`crate::HookExecutor::Builtin`] is the in-process analogue of
+    /// the latter, so it is the sole exempt arm.
+    fn if_condition_applies(hook: &HookDefinition) -> bool {
+        !matches!(hook.executor, crate::definition::HookExecutor::Builtin { .. })
     }
 
     /// Whether ANY registered hook (across every bucket) subscribes to
@@ -362,6 +441,7 @@ mod match_event_matcher_tests {
                 pattern: m.into(),
                 match_tool_name: true,
                 match_input: false,
+                if_pattern: None,
             }),
             executor: HookExecutor::Builtin {
                 handler_id: "noop".into(),
@@ -372,6 +452,48 @@ mod match_event_matcher_tests {
             priority: 0,
             once: false,
             status_message: None,
+        }
+    }
+
+    /// A hook carrying an `if`-condition (and optional tool-name `matcher`),
+    /// executed by a Command arm so the `if`-condition filter actually applies
+    /// (Builtin hooks bypass it, mirroring TS `callback`/`function`).
+    fn hook_with_if(
+        name: &str,
+        event: HookEventType,
+        matcher: Option<&str>,
+        if_cond: &str,
+    ) -> HookDefinition {
+        HookDefinition {
+            id: HookId::new(),
+            name: name.into(),
+            events: vec![event],
+            if_condition: Some(HookCondition {
+                pattern: matcher.unwrap_or_default().into(),
+                match_tool_name: matcher.is_some(),
+                match_input: true,
+                if_pattern: Some(if_cond.into()),
+            }),
+            executor: HookExecutor::Command {
+                command: "./noop.sh".into(),
+                args: vec![],
+                env: std::collections::HashMap::new(),
+                cwd: None,
+            },
+            source: HookSource::User,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        }
+    }
+
+    fn pre_tool_use_in(tool: &str, input: serde_json::Value) -> HookEvent {
+        HookEvent::PreToolUse {
+            tool_name: tool.into(),
+            tool_input: input,
+            tool_use_id: ToolUseId::new(),
         }
     }
 
@@ -483,5 +605,102 @@ mod match_event_matcher_tests {
             vec!["plugin-write"]
         );
         assert!(matched_names(&reg, &pre_tool_use("Bash")).is_empty());
+    }
+
+    // ── `if`-condition wiring (B3 second half) ────────────────────────────────
+
+    #[test]
+    fn if_condition_fires_only_on_matching_tool_input() {
+        // `if: "Bash(git push:*)"` fires on `git push …`, not on `git status`.
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with_if(
+            "guard",
+            HookEventType::PreToolUse,
+            Some("Bash"),
+            "Bash(git push:*)",
+        ));
+        let pushing = pre_tool_use_in("Bash", serde_json::json!({ "command": "git push origin x" }));
+        assert_eq!(matched_names(&reg, &pushing), vec!["guard"]);
+        let status = pre_tool_use_in("Bash", serde_json::json!({ "command": "git status" }));
+        assert!(matched_names(&reg, &status).is_empty());
+    }
+
+    #[test]
+    fn no_if_condition_fires_on_tool_name_match_alone() {
+        // Absent `if` → tool-name match alone (prior behavior preserved).
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with("plain", HookEventType::PreToolUse, Some("Bash")));
+        let any = pre_tool_use_in("Bash", serde_json::json!({ "command": "rm -rf /" }));
+        assert_eq!(matched_names(&reg, &any), vec!["plain"]);
+    }
+
+    #[test]
+    fn both_tool_name_matcher_and_if_must_pass() {
+        // matcher "Bash" AND if "Bash(git push:*)" — both gates enforced.
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with_if(
+            "both",
+            HookEventType::PreToolUse,
+            Some("Bash"),
+            "Bash(git push:*)",
+        ));
+        // tool-name matcher fails (Write != Bash) → dropped even though the
+        // event isn't even a git push.
+        let on_write = pre_tool_use_in("Write", serde_json::json!({ "file_path": "/a" }));
+        assert!(matched_names(&reg, &on_write).is_empty());
+        // tool-name matcher passes but the `if` content fails → dropped.
+        let wrong_cmd = pre_tool_use_in("Bash", serde_json::json!({ "command": "git pull" }));
+        assert!(matched_names(&reg, &wrong_cmd).is_empty());
+        // both pass → fires.
+        let ok = pre_tool_use_in("Bash", serde_json::json!({ "command": "git push" }));
+        assert_eq!(matched_names(&reg, &ok), vec!["both"]);
+    }
+
+    #[test]
+    fn malformed_if_condition_does_not_fire() {
+        // Unbalanced paren → parses as a bare tool name that won't equal "Bash".
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with_if(
+            "bad",
+            HookEventType::PreToolUse,
+            None,
+            "Bash(git push:*",
+        ));
+        let ev = pre_tool_use_in("Bash", serde_json::json!({ "command": "git push" }));
+        assert!(matched_names(&reg, &ev).is_empty());
+    }
+
+    #[test]
+    fn if_condition_hook_dropped_on_non_if_evaluable_event() {
+        // PermissionDenied yields a tool-name matchQuery but is NOT in the
+        // prepareIfConditionMatcher set → an `if`-conditioned hook is dropped.
+        let mut reg = HookRegistry::new();
+        reg.register(hook_with_if(
+            "denied-guard",
+            HookEventType::PermissionDenied,
+            None,
+            "Bash(git push:*)",
+        ));
+        let ev = HookEvent::PermissionDenied {
+            tool_name: "Bash".into(),
+            reason: "no".into(),
+        };
+        assert!(matched_names(&reg, &ev).is_empty());
+    }
+
+    #[test]
+    fn builtin_hook_bypasses_if_condition() {
+        // A Builtin (callback/function analogue) hook with an `if` ignores it —
+        // TS applies the `if` filter only to command/prompt/agent/http hooks.
+        let mut reg = HookRegistry::new();
+        let mut h = hook_with("builtin", HookEventType::PreToolUse, Some("Bash"));
+        // Attach an `if` that would NOT match the event, yet a Builtin bypasses it.
+        if let Some(c) = h.if_condition.as_mut() {
+            c.if_pattern = Some("Bash(git push:*)".into());
+            c.match_input = true;
+        }
+        reg.register(h);
+        let non_matching = pre_tool_use_in("Bash", serde_json::json!({ "command": "git status" }));
+        assert_eq!(matched_names(&reg, &non_matching), vec!["builtin"]);
     }
 }

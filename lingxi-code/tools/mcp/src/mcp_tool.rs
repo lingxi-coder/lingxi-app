@@ -36,7 +36,7 @@ use telemetry::AnalyticsBus;
 use traits::McpTransportSpec;
 
 use tool_api::context::ToolUseContext;
-use tool_api::progress::ToolProgressSender;
+use tool_api::progress::{ToolProgress, ToolProgressSender};
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolStaticContext,
@@ -118,6 +118,28 @@ fn build_mcp_meta(meta: Option<Value>, structured_content: Option<Value>) -> Opt
         obj.insert("structuredContent".to_string(), sc);
     }
     Some(Value::Object(obj))
+}
+
+/// Build the model-facing `mcp_progress` / `progress` event payload for one
+/// forwarded MCP `notifications/progress` (MCP.4). Mirrors
+/// `services/mcp/client.ts:3104-3112`:
+/// `{ type:'mcp_progress', status:'progress', serverName, toolName, progress,
+/// total?, progressMessage? }` — the optional `total` / `progressMessage` keys
+/// are omitted when the server left them absent.
+fn mcp_progress_event_data(server: &str, tool: &str, ev: &mcp::client::McpProgressEvent) -> Value {
+    let mut data = serde_json::Map::new();
+    data.insert("type".into(), json!("mcp_progress"));
+    data.insert("status".into(), json!("progress"));
+    data.insert("serverName".into(), json!(server));
+    data.insert("toolName".into(), json!(tool));
+    data.insert("progress".into(), json!(ev.progress));
+    if let Some(total) = ev.total {
+        data.insert("total".into(), json!(total));
+    }
+    if let Some(message) = &ev.message {
+        data.insert("progressMessage".into(), json!(message));
+    }
+    Value::Object(data)
 }
 
 /// Lift the first content block's `text` out of an MCP result, mirroring the TS
@@ -445,8 +467,8 @@ impl Tool for MCPTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
-        _progress: ToolProgressSender,
+        ctx: ToolUseContext,
+        progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
         // Per-tool wire entry (Batch 3): the FQN is the bound `name()` and the
@@ -523,7 +545,58 @@ impl Tool for MCPTool {
             }
         };
 
-        match client.call_tool(&full_name, arguments).await {
+        // MCP.3 + MCP.4: thread the model's toolUseId into the request and wire
+        // MCP progress-notification forwarding. claude-code reads the toolUseId
+        // off the parent assistant message (`extractToolUseId`,
+        // `client.ts:3247-3252`); here it travels on the `ToolUseContext`. It is
+        // stamped into the tools/call request `_meta` as `claudecode/toolUseId`
+        // (`client.ts:1840-1843`) and gates the `started`/`progress`/`completed`
+        // progress events (`onProgress && toolUseId`,
+        // `client.ts:1846`/`:1871`/`:1884`). `ToolUseId` is `Copy`.
+        let tool_use_id = ctx.tool_use_id;
+
+        // `started` progress event (`client.ts:1845-1856`).
+        if let Some(tuid) = tool_use_id {
+            let _ = progress.try_send(ToolProgress {
+                tool_use_id: tuid,
+                data: json!({
+                    "type": "mcp_progress",
+                    "status": "started",
+                    "serverName": server,
+                    "toolName": tool,
+                }),
+            });
+        }
+
+        // `progress` forwarder (`client.ts:1871-1879` + `:3102-3114`): each MCP
+        // `notifications/progress` becomes an `mcp_progress`/`progress` event.
+        // Only wired when a toolUseId is present (the `onProgress && toolUseId`
+        // gate). Sends are best-effort (`try_send`), like the synchronous TS
+        // `onProgress`.
+        let on_progress: Option<mcp::client::McpProgressCallback> = tool_use_id.map(|tuid| {
+            let sender = progress.clone();
+            let server_name = server.clone();
+            let tool_name = tool.clone();
+            Arc::new(move |ev: mcp::client::McpProgressEvent| {
+                let _ = sender.try_send(ToolProgress {
+                    tool_use_id: tuid,
+                    data: mcp_progress_event_data(&server_name, &tool_name, &ev),
+                });
+            }) as mcp::client::McpProgressCallback
+        });
+
+        // The wire form of a `ToolUseId` is its bare (serde-transparent) UUID.
+        let tool_use_id_str = tool_use_id.map(|tuid| tuid.as_uuid().to_string());
+
+        match client
+            .call_tool_with_progress(
+                &full_name,
+                arguments,
+                tool_use_id_str.as_deref(),
+                on_progress,
+            )
+            .await
+        {
             Ok(dto) => {
                 // MCP.1: a server-flagged error result (`isError: true`) is mapped
                 // to a tool ERROR before the success path, mirroring the TS throw
@@ -563,6 +636,24 @@ impl Tool for MCPTool {
                     ],
                 )
                 .await;
+
+                // `completed` progress event (`client.ts:1883-1895`). Emitted
+                // only on a non-error result (the TS `callMCPTool` throws on
+                // `isError` before reaching this point — handled above by the
+                // MCP.1 mapping).
+                if let Some(tuid) = tool_use_id {
+                    let _ = progress.try_send(ToolProgress {
+                        tool_use_id: tuid,
+                        data: json!({
+                            "type": "mcp_progress",
+                            "status": "completed",
+                            "serverName": server,
+                            "toolName": tool,
+                            "elapsedTimeMs": started.elapsed().as_millis() as u64,
+                        }),
+                    });
+                }
+
                 let output_dir = self.ctx.workspace.join(".claude").join("tool-results");
                 let (now_millis, rand_tag) = persist_id_seed();
                 // MCP.2: structuredContent takes PRIORITY over `content` for the
@@ -1493,6 +1584,57 @@ mod tests {
         // (`Some(Value::Null)`), so an explicit null is carried through).
         let out = build_mcp_meta(Some(Value::Null), None).expect("Some when key present");
         assert_eq!(out, json!({ "_meta": Value::Null }));
+    }
+
+    // -- MCP.4: progress-event payload shaping --------------------------------
+
+    #[test]
+    fn mcp_progress_event_data_full_payload() {
+        // All optional fields present → full `mcp_progress`/`progress` payload
+        // (client.ts:3104-3112).
+        let ev = mcp::client::McpProgressEvent {
+            progress: 3.0,
+            total: Some(10.0),
+            message: Some("halfway".into()),
+        };
+        let out = mcp_progress_event_data("srv", "tool", &ev);
+        assert_eq!(
+            out,
+            json!({
+                "type": "mcp_progress",
+                "status": "progress",
+                "serverName": "srv",
+                "toolName": "tool",
+                "progress": 3.0,
+                "total": 10.0,
+                "progressMessage": "halfway",
+            }),
+        );
+    }
+
+    #[test]
+    fn mcp_progress_event_data_omits_absent_optional_fields() {
+        // No `total` / `message` → those keys are omitted entirely (the TS
+        // payload simply carries `undefined`, which serializes away).
+        let ev = mcp::client::McpProgressEvent {
+            progress: 1.0,
+            total: None,
+            message: None,
+        };
+        let out = mcp_progress_event_data("srv", "tool", &ev);
+        assert_eq!(
+            out,
+            json!({
+                "type": "mcp_progress",
+                "status": "progress",
+                "serverName": "srv",
+                "toolName": "tool",
+                "progress": 1.0,
+            }),
+        );
+        let obj = out.as_object().expect("object");
+        assert!(obj.get("total").is_none());
+        assert!(obj.get("progressMessage").is_none());
     }
 
     // -- MCP.1: isError → tool error (first content block text lift) ----------

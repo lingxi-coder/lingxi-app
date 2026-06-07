@@ -280,16 +280,61 @@ impl McpClient {
     }
 
     /// `call_tool` with a custom timeout — used by tests to exercise the
-    /// timeout branch without waiting the full default.
-    ///
-    /// Strips the `mcp__<server>__` prefix from `full_name` to recover the
-    /// unprefixed wire `name`. On timeout produces
-    /// [`McpClientError::Timeout`] with its locked Display format.
+    /// timeout branch without waiting the full default. Carries no request
+    /// `_meta` and no progress wiring (delegates to [`Self::call_tool_with_meta`]
+    /// with `tool_use_id = None`, `on_progress = None`).
     pub async fn call_tool_with_timeout(
         &self,
         full_name: &str,
         input: serde_json::Value,
         timeout: std::time::Duration,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        self.call_tool_with_meta(full_name, input, timeout, None, None)
+            .await
+    }
+
+    /// [`Self::call_tool`] that also threads the model's `toolUseId` into the
+    /// request `_meta` (the byte-exact `claudecode/toolUseId` key) and forwards
+    /// MCP `notifications/progress` to `on_progress`. Resolves the per-call
+    /// timeout exactly like [`Self::call_tool`]
+    /// ([`mcp_tool_timeout`]). Mirrors claude-code's per-tool `call`
+    /// (`services/mcp/client.ts:1833-1881` + `:3029-3116`).
+    pub async fn call_tool_with_progress(
+        &self,
+        full_name: &str,
+        input: serde_json::Value,
+        tool_use_id: Option<&str>,
+        on_progress: Option<McpProgressCallback>,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        self.call_tool_with_meta(full_name, input, mcp_tool_timeout(), tool_use_id, on_progress)
+            .await
+    }
+
+    /// Core `tools/call` path with the optional `_meta` / progress wiring.
+    ///
+    /// Strips the `mcp__<server>__` prefix from `full_name` to recover the
+    /// unprefixed wire `name`. On timeout produces
+    /// [`McpClientError::Timeout`] with its locked Display format.
+    ///
+    /// MCP.3: when `tool_use_id` is `Some`, the request gains
+    /// `_meta: { "claudecode/toolUseId": <id> }` (byte-exact key, mirroring
+    /// `client.ts:1840-1843` building `meta` and `:3096` forwarding it as
+    /// `_meta` on `callTool`).
+    ///
+    /// MCP.4: when `on_progress` is `Some` AND a `tool_use_id` is present
+    /// (mirroring the `onProgress && toolUseId` gate at `client.ts:1846`/`:1871`),
+    /// the request `_meta` additionally carries a `progressToken` and a
+    /// forwarder task surfaces each matching inbound `notifications/progress`
+    /// (`{ progress, total, message }`) to the callback — mirroring how the SDK
+    /// registers an `onprogress` handler keyed by the request's progressToken
+    /// (`client.ts:3102-3114`).
+    pub async fn call_tool_with_meta(
+        &self,
+        full_name: &str,
+        input: serde_json::Value,
+        timeout: std::time::Duration,
+        tool_use_id: Option<&str>,
+        on_progress: Option<McpProgressCallback>,
     ) -> Result<McpToolResultDto, McpClientError> {
         // Strip the mcp__<server>__ prefix to recover the wire `name`. The
         // server token is normalized to match how `list_tools` built the FQN
@@ -305,10 +350,83 @@ impl McpClient {
             })?
             .to_string();
 
-        let params = serde_json::json!({
+        // MCP.3: assemble the request `_meta`. claude-code stamps
+        // `_meta: { "claudecode/toolUseId": <id> }` onto the tools/call request
+        // (`client.ts:1840-1843` builds `meta`; `:3096` forwards it as `_meta`).
+        let mut meta = serde_json::Map::new();
+        if let Some(id) = tool_use_id {
+            meta.insert(
+                "claudecode/toolUseId".to_string(),
+                serde_json::Value::String(id.to_string()),
+            );
+        }
+
+        // MCP.4: subscribe to inbound notifications BEFORE the request is sent
+        // (so no early `notifications/progress` is missed) and spawn a forwarder
+        // matching by the minted `progressToken`. Only wired when both a
+        // callback and a toolUseId exist (the `onProgress && toolUseId` gate).
+        let progress_active = on_progress.is_some() && tool_use_id.is_some();
+        let forwarder = if progress_active {
+            // The MCP SDK uses the outgoing request id as the progressToken; the
+            // router owns request ids here, so we mint a process-unique token and
+            // stamp it into `_meta.progressToken` for the server to echo back.
+            let token = serde_json::Value::String(format!(
+                "lingxi-mcp-progress-{}",
+                NEXT_PROGRESS_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            meta.insert("progressToken".to_string(), token.clone());
+            let callback = on_progress.expect("progress_active implies Some(callback)");
+            let mut notifications = self.connection.notifications();
+            Some(tokio::spawn(async move {
+                loop {
+                    match notifications.recv().await {
+                        Ok(n) => {
+                            if n.method != "notifications/progress" {
+                                continue;
+                            }
+                            let Some(p) = n.params.as_ref() else {
+                                continue;
+                            };
+                            if p.get("progressToken") != Some(&token) {
+                                continue;
+                            }
+                            // SDK `onprogress` payload: `{progress, total?, message?}`
+                            // (`client.ts:3109-3111`).
+                            let progress = p
+                                .get("progress")
+                                .and_then(serde_json::Value::as_f64)
+                                .unwrap_or(0.0);
+                            let total = p.get("total").and_then(serde_json::Value::as_f64);
+                            let message = p
+                                .get("message")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string);
+                            callback(McpProgressEvent {
+                                progress,
+                                total,
+                                message,
+                            });
+                        }
+                        // Fell behind the broadcast buffer — keep listening.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        // Connection's notification stream ended.
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        let mut params = serde_json::json!({
             "name": tool_name,
             "arguments": input,
         });
+        if !meta.is_empty() {
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert("_meta".to_string(), serde_json::Value::Object(meta));
+            }
+        }
 
         // Sub-second timeouts still report at least 1s to keep the
         // user-facing error string stable. Round up using ceil semantics on
@@ -319,7 +437,7 @@ impl McpClient {
             .connection
             .call::<_, ToolCallResponse>("tools/call", params);
 
-        match tokio::time::timeout(timeout, fut).await {
+        let outcome = match tokio::time::timeout(timeout, fut).await {
             Err(_elapsed) => Err(McpClientError::Timeout {
                 server: self.server_name.clone(),
                 tool: tool_name,
@@ -332,7 +450,14 @@ impl McpClient {
                 meta: resp.meta,
                 structured_content: resp.structured_content,
             }),
+        };
+
+        // The call settled — stop forwarding progress for this request.
+        if let Some(handle) = forwarder {
+            handle.abort();
         }
+
+        outcome
     }
 
     /// Enumerate every prompt advertised by the server.
@@ -467,6 +592,31 @@ impl McpClient {
         Ok(())
     }
 }
+
+/// Monotonic source for per-call MCP `progressToken`s (MCP.4). The MCP SDK
+/// reuses the outgoing request id as the progressToken; the router owns request
+/// ids here, so we mint a process-unique token and stamp it into the request
+/// `_meta.progressToken` so inbound `notifications/progress` can be matched back
+/// to the originating `tools/call`.
+static NEXT_PROGRESS_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// One MCP progress update forwarded from a `notifications/progress` received
+/// during an in-flight `tools/call` (MCP.4). Mirrors the SDK `onprogress`
+/// payload (`{ progress, total, message }`, `services/mcp/client.ts:3109-3111`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpProgressEvent {
+    /// Monotonic progress amount reported by the server.
+    pub progress: f64,
+    /// Optional total against which `progress` advances.
+    pub total: Option<f64>,
+    /// Optional human-readable status message.
+    pub message: Option<String>,
+}
+
+/// Callback invoked for each forwarded MCP progress notification (MCP.4).
+/// Cloneable and `Send + Sync` so it can be moved into the broadcast-forwarder
+/// task that [`McpClient::call_tool_with_meta`] spawns.
+pub type McpProgressCallback = Arc<dyn Fn(McpProgressEvent) + Send + Sync>;
 
 /// Wire-level shape of a `prompts/list` response body.
 #[derive(Debug, Deserialize)]
@@ -824,6 +974,263 @@ mod constructor_tests {
         assert!(empty.meta.is_none());
         assert!(empty.structured_content.is_none());
         assert!(!empty.is_error);
+    }
+
+    // -- MCP.3: request `_meta` carries `claudecode/toolUseId` ---------------
+
+    #[tokio::test]
+    async fn tools_call_request_carries_claudecode_tooluseid_meta() {
+        let (conn, peer_tx, mut peer_rx) = paired_connection();
+        let client =
+            McpClient::new("filesystem", std::path::PathBuf::from("/tmp/work"), conn).await;
+
+        // The call blocks until the peer responds — drive it on a task.
+        let handle = tokio::spawn(async move {
+            client
+                .call_tool_with_progress(
+                    "mcp__filesystem__read_file",
+                    serde_json::json!({ "path": "/x" }),
+                    Some("tu-123"),
+                    None,
+                )
+                .await
+        });
+
+        // Inspect the outbound `tools/call` request.
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("request within timeout")
+            .expect("frame sent");
+        let req: serde_json::Value = serde_json::from_slice(&frame).expect("json request");
+        assert_eq!(req["method"], "tools/call");
+        assert_eq!(req["params"]["name"], "read_file");
+        // Byte-exact key (claude-code `client.ts:1842`).
+        assert_eq!(
+            req["params"]["_meta"]["claudecode/toolUseId"], "tu-123",
+            "request _meta must carry the byte-exact claudecode/toolUseId key: {req}",
+        );
+        // No progress callback was wired → no progressToken minted.
+        assert!(
+            req["params"]["_meta"].get("progressToken").is_none(),
+            "progressToken must be absent when no on_progress is supplied: {req}",
+        );
+
+        // Respond so the awaiting call resolves.
+        let id = req["id"].clone();
+        let resp = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "content": [{ "type": "text", "text": "ok" }], "isError": false },
+        });
+        let mut bytes = serde_json::to_vec(&resp).expect("encode response");
+        bytes.push(b'\n');
+        peer_tx
+            .send(Bytes::from(bytes))
+            .await
+            .expect("send response");
+
+        let dto = handle.await.expect("join").expect("call ok");
+        assert!(!dto.is_error);
+    }
+
+    #[tokio::test]
+    async fn tools_call_request_omits_meta_when_no_tool_use_id() {
+        // The plain `call_tool` path threads no toolUseId → the request must
+        // carry no `_meta` block at all (no empty-object placeholder).
+        let (conn, peer_tx, mut peer_rx) = paired_connection();
+        let client =
+            McpClient::new("filesystem", std::path::PathBuf::from("/tmp/work"), conn).await;
+
+        let handle = tokio::spawn(async move {
+            client
+                .call_tool("mcp__filesystem__read_file", serde_json::json!({}))
+                .await
+        });
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("request within timeout")
+            .expect("frame sent");
+        let req: serde_json::Value = serde_json::from_slice(&frame).expect("json request");
+        assert_eq!(req["params"]["name"], "read_file");
+        assert!(
+            req["params"].get("_meta").is_none(),
+            "_meta must be omitted when no toolUseId is threaded: {req}",
+        );
+
+        let id = req["id"].clone();
+        let resp = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "content": [], "isError": false },
+        });
+        let mut bytes = serde_json::to_vec(&resp).expect("encode response");
+        bytes.push(b'\n');
+        peer_tx
+            .send(Bytes::from(bytes))
+            .await
+            .expect("send response");
+        let _ = handle.await.expect("join").expect("call ok");
+    }
+
+    // -- MCP.4: `notifications/progress` is forwarded to the callback --------
+
+    #[tokio::test]
+    async fn progress_notification_is_forwarded_to_callback() {
+        let (conn, peer_tx, mut peer_rx) = paired_connection();
+        let client =
+            McpClient::new("filesystem", std::path::PathBuf::from("/tmp/work"), conn).await;
+
+        let seen: Arc<std::sync::Mutex<Vec<McpProgressEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_cb = seen.clone();
+        let cb: McpProgressCallback = Arc::new(move |ev: McpProgressEvent| {
+            seen_cb.lock().expect("lock").push(ev);
+        });
+
+        let handle = tokio::spawn(async move {
+            client
+                .call_tool_with_progress(
+                    "mcp__filesystem__read_file",
+                    serde_json::json!({}),
+                    Some("tu-9"),
+                    Some(cb),
+                )
+                .await
+        });
+
+        // Read the request and recover the minted progressToken.
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("request within timeout")
+            .expect("frame sent");
+        let req: serde_json::Value = serde_json::from_slice(&frame).expect("json request");
+        let token = req["params"]["_meta"]["progressToken"].clone();
+        assert!(
+            token.is_string(),
+            "progressToken must be minted into _meta when on_progress is wired: {req}",
+        );
+
+        // Server addresses a progress notification to that token.
+        let notif = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": { "progressToken": token, "progress": 3, "total": 10, "message": "halfway" },
+        });
+        let mut nbytes = serde_json::to_vec(&notif).expect("encode notif");
+        nbytes.push(b'\n');
+        peer_tx
+            .send(Bytes::from(nbytes))
+            .await
+            .expect("send notif");
+
+        // Poll until the forwarder delivers the event.
+        let mut delivered = false;
+        for _ in 0..100 {
+            if !seen.lock().expect("lock").is_empty() {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            delivered,
+            "progress callback must fire for a token-matching notification",
+        );
+
+        // Respond so the call resolves.
+        let id = req["id"].clone();
+        let resp = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "content": [], "isError": false },
+        });
+        let mut bytes = serde_json::to_vec(&resp).expect("encode response");
+        bytes.push(b'\n');
+        peer_tx
+            .send(Bytes::from(bytes))
+            .await
+            .expect("send response");
+        let _ = handle.await.expect("join").expect("call ok");
+
+        let events = seen.lock().expect("lock");
+        assert_eq!(events.len(), 1, "exactly one progress event forwarded");
+        assert_eq!(
+            events[0],
+            McpProgressEvent {
+                progress: 3.0,
+                total: Some(10.0),
+                message: Some("halfway".to_string()),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_notification_with_mismatched_token_is_ignored() {
+        // A notification carrying a different progressToken must NOT fire the
+        // callback (the forwarder matches strictly by token).
+        let (conn, peer_tx, mut peer_rx) = paired_connection();
+        let client =
+            McpClient::new("filesystem", std::path::PathBuf::from("/tmp/work"), conn).await;
+
+        let seen: Arc<std::sync::Mutex<Vec<McpProgressEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_cb = seen.clone();
+        let cb: McpProgressCallback = Arc::new(move |ev: McpProgressEvent| {
+            seen_cb.lock().expect("lock").push(ev);
+        });
+
+        let handle = tokio::spawn(async move {
+            client
+                .call_tool_with_progress(
+                    "mcp__filesystem__read_file",
+                    serde_json::json!({}),
+                    Some("tu-1"),
+                    Some(cb),
+                )
+                .await
+        });
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("request within timeout")
+            .expect("frame sent");
+        let req: serde_json::Value = serde_json::from_slice(&frame).expect("json request");
+
+        // Wrong token.
+        let notif = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": { "progressToken": "some-other-token", "progress": 1 },
+        });
+        let mut nbytes = serde_json::to_vec(&notif).expect("encode notif");
+        nbytes.push(b'\n');
+        peer_tx
+            .send(Bytes::from(nbytes))
+            .await
+            .expect("send notif");
+
+        // Give the forwarder a chance to (incorrectly) deliver.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let id = req["id"].clone();
+        let resp = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "content": [], "isError": false },
+        });
+        let mut bytes = serde_json::to_vec(&resp).expect("encode response");
+        bytes.push(b'\n');
+        peer_tx
+            .send(Bytes::from(bytes))
+            .await
+            .expect("send response");
+        let _ = handle.await.expect("join").expect("call ok");
+
+        assert!(
+            seen.lock().expect("lock").is_empty(),
+            "callback must not fire for a non-matching progressToken",
+        );
     }
 }
 

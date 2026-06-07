@@ -175,13 +175,23 @@ impl CompactionOrchestrator {
         }
         messages = snip.messages;
 
-        // --- Layer 2: microcompact ---------------------------------------- //
-        let micro = self.micro.compact(messages, SystemTime::now());
-        if micro.cleared_count > 0 {
-            layers.push(CompactionLayer::Microcompact);
-            freed = freed.saturating_add(micro.tokens_saved);
+        // --- Layer 2: microcompact (time-gap gated) ----------------------- //
+        // CSM.3: TS `maybeTimeBasedMicrocompact` only clears old tool results
+        // when the idle-gap trigger fires; with `config.enabled == false` (the
+        // default) it is a no-op. The prior code ran `micro.compact`
+        // UNCONDITIONALLY, over-clearing tool results on every iteration even
+        // when time-based micro is disabled. PARITY-GAP: `ConversationMessage`
+        // carries no per-message timestamp, so when ENABLED we run on the
+        // `keep_recent` count alone (the SPECS-noted fallback) rather than the
+        // exact since-last-assistant idle gap.
+        if self.micro.config.enabled {
+            let micro = self.micro.compact(messages, SystemTime::now());
+            if micro.cleared_count > 0 {
+                layers.push(CompactionLayer::Microcompact);
+                freed = freed.saturating_add(micro.tokens_saved);
+            }
+            messages = micro.messages;
         }
-        messages = micro.messages;
 
         // --- (collapse layer intentionally omitted — known gap) ----------- //
 

@@ -49,6 +49,27 @@ pub trait OrchestratorApiClient: Send + Sync {
         tools: Vec<serde_json::Value>,
     ) -> Result<MessageResponse, ApiError>;
 
+    /// Non-streaming `messages.create` with an explicit `max_tokens` override
+    /// (REC.A1 8k→64k escalation, TS `query.ts:1199-1221`). The turn loop calls
+    /// this ONLY when a prior `max_tokens` recovery armed
+    /// [`crate::turn_loop::RecoveryState::max_output_tokens_override`]; otherwise
+    /// the plain [`Self::messages_create`] is used and this is never invoked.
+    ///
+    /// The DEFAULT body delegates to [`Self::messages_create`], dropping the
+    /// override — so every mock / non-Anthropic impl compiles unchanged and the
+    /// escalation is a strict no-op there. Only [`AnthropicProviderAdapter`]
+    /// overrides it to thread `max_tokens` into the provider call.
+    async fn messages_create_with_opts(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        _max_tokens: u32,
+    ) -> Result<MessageResponse, ApiError> {
+        self.messages_create(model, system, msgs, tools).await
+    }
+
     /// Non-streaming `messages.create` with the **Opus-fallback** policy wired
     /// (Opus-fallback batch). Identical to [`Self::messages_create`] except the
     /// caller hands in the configured `fallback_model` (+ the pre-computed
@@ -951,6 +972,8 @@ impl ConversationOrchestrator {
                 // (TS `query.ts:1332` `maxOutputTokensRecoveryCount: 0`).
                 recovery.max_output_tokens_recovery_count = 0;
                 recovery.max_output_tokens_override = None;
+                // REC.A1: a fresh recovery episode may escalate again.
+                recovery.max_output_tokens_escalated = false;
                 true
             }
             TokenBudgetDecision::Stop { completion_event } => {
@@ -2232,6 +2255,29 @@ impl<T: HttpTransport + Send + Sync + 'static> OrchestratorApiClient
                 system,
                 msgs,
                 4096,
+                tools,
+                None,
+                self.transport.as_ref(),
+            )
+            .await
+    }
+
+    async fn messages_create_with_opts(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        max_tokens: u32,
+    ) -> Result<MessageResponse, ApiError> {
+        // REC.A1: same call as `messages_create` but with the escalated
+        // `max_tokens` (8k→64k) the turn loop passes through the recovery state.
+        self.provider
+            .messages_create_non_stream_with_opts(
+                model,
+                system,
+                msgs,
+                max_tokens,
                 tools,
                 None,
                 self.transport.as_ref(),

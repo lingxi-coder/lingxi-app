@@ -188,16 +188,24 @@ pub(crate) use api_client::PROMPT_TOO_LONG_ERROR_MESSAGE;
 /// lives per `try_run_turn` / `try_run_turn_streaming` invocation; it persists
 /// the nudge count ACROSS turn-steps so the 3-retry limit is consecutive.
 #[derive(Debug, Default)]
+// The `max_output_tokens_*` prefix is the parity-faithful name for all three
+// fields (TS `maxOutputTokens*`); the shared prefix is intentional.
+#[allow(clippy::struct_field_names)]
 pub(crate) struct RecoveryState {
     /// How many consecutive `max_tokens` nudges have been injected this
     /// conversation. Capped at [`MAX_OUTPUT_TOKENS_RECOVERY_LIMIT`]; once it
     /// reaches the limit the next `max_tokens` ends the turn.
     pub(crate) max_output_tokens_recovery_count: u32,
-    /// When `Some(n)`, the next API call should use `n` as its output-token
-    /// cap (the escalated retry). DEFERRED: never set today because the
-    /// escalation is not wired into the api-client call (see
-    /// [`ESCALATED_MAX_TOKENS`]).
+    /// When `Some(n)`, the NEXT API call uses `n` as its output-token cap
+    /// (REC.A1 escalated retry). The turn loop TAKEs it (one-shot) before each
+    /// call via [`crate::OrchestratorApiClient::messages_create_with_opts`], so
+    /// it never leaks past the single escalated retry.
     pub(crate) max_output_tokens_override: Option<u32>,
+    /// Whether the 8k→64k escalation has already fired this recovery episode
+    /// (TS gates the single-shot retry on the override being unset; we use a
+    /// separate flag because the override is TAKEN per call). Reset alongside
+    /// [`Self::max_output_tokens_recovery_count`].
+    pub(crate) max_output_tokens_escalated: bool,
 }
 
 /// What one turn step decided.
@@ -263,10 +271,11 @@ pub(crate) async fn execute_one_turn_with_recovery(
 /// `getTurnOutputTokens()`. The plain
 /// [`execute_one_turn_with_recovery`] wrapper drops the count so existing
 /// callers (the cancelable REPL driver + in-file tests) are unchanged.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn execute_one_turn_with_recovery_tracked(
     orch: &ConversationOrchestrator,
     system: Option<&str>,
-    recovery: Option<&mut RecoveryState>,
+    mut recovery: Option<&mut RecoveryState>,
 ) -> Result<(TurnStepOutcome, u64), OrchestratorError> {
     // In-Loop Compaction Batch 4: proactively snip+micro+autocompact BEFORE
     // snapshotting history for the model call, so a long conversation
@@ -290,8 +299,21 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     //    `PROMPT_TOO_LONG_ERROR_MESSAGE` assistant message instead of bubbling a
     //    hard error.
     let tools = orch.build_wire_tools().await;
-    let response = match call_api_with_ptl_recovery(orch, system, &model, history_snapshot, tools)
-        .await?
+    // REC.A1: consume the one-shot escalated `max_tokens` override (armed by a
+    // prior `max_tokens` recovery via `handle_max_output_tokens`). TAKE it so it
+    // applies to EXACTLY this call and never leaks to the next turn.
+    let max_tokens_override = recovery
+        .as_deref_mut()
+        .and_then(|r| r.max_output_tokens_override.take());
+    let response = match call_api_with_ptl_recovery(
+        orch,
+        system,
+        &model,
+        history_snapshot,
+        tools,
+        max_tokens_override,
+    )
+    .await?
     {
         PtlCallOutcome::Response(resp) => resp,
         PtlCallOutcome::PromptTooLong => {
@@ -468,6 +490,7 @@ async fn call_api_with_ptl_recovery(
     model: &str,
     history_snapshot: Vec<ConversationMessage>,
     tools: Vec<serde_json::Value>,
+    max_tokens_override: Option<u32>,
 ) -> Result<PtlCallOutcome, OrchestratorError> {
     // (1) Blocking-limit preempt. `is_at_blocking_limit` is
     // `token_usage >= effective_window − MANUAL_COMPACT_BUFFER_TOKENS`
@@ -493,7 +516,17 @@ async fn call_api_with_ptl_recovery(
     // — so the locked turn-loop fixtures (which wire no fallback) are unaffected,
     // and `FallbackTriggered` can never arise on that path (the adapter passes
     // `fallback_model = None` to the api-client, leaving the 529 gate closed).
-    let first = if orch.config.fallback_model.is_some() {
+    let first = if let Some(max_tokens) = max_tokens_override {
+        // REC.A1 escalated single-shot (TS `query.ts:1199-1221`): re-issue with
+        // the override `max_tokens` (8k→64k). The escalation is orthogonal to the
+        // Opus-fallback gate, so it takes the plain `_with_opts` seam regardless
+        // of `fallback_model`. The no-override branches below are byte-identical
+        // to before, so the locked turn-loop fixtures (which never arm an
+        // override) are unaffected.
+        orch.api
+            .messages_create_with_opts(model, system, history_snapshot, tools.clone(), max_tokens)
+            .await
+    } else if orch.config.fallback_model.is_some() {
         orch.api
             .messages_create_with_fallback(
                 model,
@@ -747,28 +780,29 @@ async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> MessageId {
 /// On exhaustion (count has reached the limit): end the turn with
 /// `stop_reason = "max_tokens"` (current behavior — surface the cap).
 ///
-/// The 8k→64k escalation (TS `query.ts:1199-1221`) is DEFERRED: it requires an
-/// api-client `max_tokens` override the current signature lacks, so even with
-/// [`crate::OrchestratorConfig::escalate_max_output_tokens`] enabled this code
-/// goes straight to the multi-turn nudge. See [`ESCALATED_MAX_TOKENS`].
+/// The 8k→64k escalation (TS `query.ts:1199-1221`) fires FIRST when
+/// [`crate::OrchestratorConfig::escalate_max_output_tokens`] is on and it has
+/// not yet fired this episode: it arms the override and returns `Continue` so
+/// the SAME step re-issues once at [`ESCALATED_MAX_TOKENS`] with no nudge.
 async fn handle_max_output_tokens(
     orch: &ConversationOrchestrator,
     assistant_id: MessageId,
     state: &mut RecoveryState,
 ) -> Result<TurnStepOutcome, OrchestratorError> {
-    // Escalation (8k→64k) — DEFERRED. TS performs this single-shot retry
-    // (`query.ts:1199-1221`) BEFORE the multi-turn nudge, gated by
-    // `tengu_otk_slot_v1` and "no override already applied". The port keeps
-    // the gate (`escalate_max_output_tokens`) and the target cap
-    // ([`ESCALATED_MAX_TOKENS`]) wired, but the api-client `messages_create`
-    // signature carries no `max_tokens` override argument, so the escalation
-    // cannot be performed crate-locally. We therefore record the intended
-    // override (so a follow-up that plumbs the api-client arg can act on it)
-    // and fall through to the multi-turn nudge regardless.
-    if orch.config.escalate_max_output_tokens && state.max_output_tokens_override.is_none() {
-        // NOTE: setting this does not change the API call today (deferred); it
-        // only documents the intended escalation target for the follow-up.
+    // REC.A1 escalation (8k→64k). TS (`query.ts:1199-1221`) does a single-shot
+    // retry at the escalated cap BEFORE the multi-turn nudge, gated on
+    // `tengu_otk_slot_v1` (here `escalate_max_output_tokens`) and "not already
+    // escalated". We arm `max_output_tokens_override` — which the next
+    // `execute_one_turn_with_recovery_tracked` TAKEs and passes to
+    // `messages_create_with_opts` — and return `Continue` so the same step
+    // re-issues at 64k with NO nudge injected. The override is taken per call,
+    // so a separate `max_output_tokens_escalated` flag (reset alongside the
+    // recovery count) gates this to once per episode and prevents an
+    // escalate-forever loop when 64k also overflows.
+    if orch.config.escalate_max_output_tokens && !state.max_output_tokens_escalated {
         state.max_output_tokens_override = Some(ESCALATED_MAX_TOKENS);
+        state.max_output_tokens_escalated = true;
+        return Ok(TurnStepOutcome::Continue);
     }
 
     if state.max_output_tokens_recovery_count < MAX_OUTPUT_TOKENS_RECOVERY_LIMIT {
@@ -1696,7 +1730,7 @@ mod read_file_state_tests {
 #[cfg(test)]
 mod max_output_tokens_recovery_tests {
     use super::{
-        execute_one_turn_with_recovery, RecoveryState, TurnStepOutcome,
+        execute_one_turn_with_recovery, RecoveryState, TurnStepOutcome, ESCALATED_MAX_TOKENS,
         MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
     };
     use crate::conversation::ConversationOrchestrator;
@@ -1802,6 +1836,7 @@ mod max_output_tokens_recovery_tests {
         let mut state = RecoveryState {
             max_output_tokens_recovery_count: 1,
             max_output_tokens_override: None,
+            max_output_tokens_escalated: false,
         };
 
         // count 1 → 2
@@ -1842,6 +1877,7 @@ mod max_output_tokens_recovery_tests {
         let mut state = RecoveryState {
             max_output_tokens_recovery_count: MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
             max_output_tokens_override: None,
+            max_output_tokens_escalated: false,
         };
 
         let len_before = history(&orch).await.len();
@@ -1890,6 +1926,80 @@ mod max_output_tokens_recovery_tests {
                 if matches!(content.first(), Some(ContentBlock::Text { text })
                     if text == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE)
         )));
+    }
+
+    /// As [`orch_with_responses`] but with the REC.A1 8k→64k escalation enabled.
+    fn orch_with_responses_escalating(
+        responses: Vec<api_client::types::MessageResponse>,
+    ) -> ConversationOrchestrator {
+        ConversationOrchestrator::new(
+            OrchestratorConfig {
+                escalate_max_output_tokens: true,
+                ..OrchestratorConfig::default()
+            },
+            Arc::new(MockApiClient::new(responses)),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// REC.A1: with escalation ON, the FIRST `max_tokens` arms the 64k override
+    /// and the once-per-episode gate, and returns `Continue` WITHOUT a nudge —
+    /// the single-shot retry fires before the multi-turn nudge
+    /// (TS `query.ts:1199-1221`).
+    #[tokio::test]
+    async fn escalation_arms_override_and_continues_without_nudge() {
+        let orch = orch_with_responses_escalating(vec![max_tokens_response()]);
+        let mut state = RecoveryState::default();
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("turn step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+        assert_eq!(state.max_output_tokens_override, Some(ESCALATED_MAX_TOKENS));
+        assert!(state.max_output_tokens_escalated);
+        // No nudge counted/injected — the escalation precedes the nudge path.
+        assert_eq!(state.max_output_tokens_recovery_count, 0);
+        let h = history(&orch).await;
+        assert!(
+            !matches!(h.last(), Some(ConversationMessage::User { .. })),
+            "escalation must not inject a nudge; got {:?}",
+            h.last()
+        );
+    }
+
+    /// REC.A1: once escalated, a SECOND `max_tokens` TAKEs the armed override
+    /// (so the retry used 64k) and, since the episode already escalated, falls
+    /// through to the multi-turn nudge instead of escalating again — no
+    /// escalate-forever loop.
+    #[tokio::test]
+    async fn second_max_tokens_after_escalation_takes_override_then_nudges() {
+        let orch = orch_with_responses_escalating(vec![max_tokens_response()]);
+        let mut state = RecoveryState {
+            max_output_tokens_override: Some(ESCALATED_MAX_TOKENS),
+            max_output_tokens_escalated: true,
+            ..Default::default()
+        };
+
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .expect("turn step");
+        assert!(matches!(step, TurnStepOutcome::Continue));
+        // The one-shot override was consumed for this call; the nudge path ran.
+        assert_eq!(state.max_output_tokens_override, None);
+        assert!(
+            state.max_output_tokens_escalated,
+            "stays escalated for the rest of this episode"
+        );
+        assert_eq!(state.max_output_tokens_recovery_count, 1);
+        assert!(
+            matches!(history(&orch).await.last(), Some(ConversationMessage::User { .. })),
+            "nudge appended after the escalation was exhausted"
+        );
     }
 
     /// The legacy 2-arg shim (`recovery = None`) preserves the bare behavior:

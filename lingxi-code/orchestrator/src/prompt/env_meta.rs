@@ -1,0 +1,176 @@
+//! Pure `<env>`-block metadata lookups for the production system-prompt
+//! builder: marketing name + knowledge cutoff per model id, and the
+//! `uname -sr` OS-version string.
+//!
+//! Ported 1:1 from claude-code:
+//! - `getMarketingNameForModel` (`utils/model/model.ts:570-614`)
+//! - `getKnowledgeCutoff` (`constants/prompts.ts:712-730`)
+//! - `getUnameSR` (`constants/prompts.ts:745-756`)
+//!
+//! The [`env_block`](crate::prompt::env_block) formatter is unchanged; it
+//! consumes whatever values the builder places in
+//! [`SystemPromptContext`](crate::prompt::SystemPromptContext). Previously
+//! the builder stubbed `model_marketing_name`/`knowledge_cutoff` to `None`
+//! and `os_version` to `"<os> <arch>"`; these helpers feed the real values.
+#![forbid(unsafe_code)]
+
+/// Marketing name for a model id, e.g. `claude-opus-4-6` -> `Opus 4.6`.
+///
+/// Mirrors `getMarketingNameForModel`. The TS resolves the id to a canonical
+/// short name first (`getCanonicalName`, which unwraps Bedrock/Vertex ARNs);
+/// without that provider-resolution layer we substring-match the lowercased
+/// id directly, which is equivalent for first-party ids. The `[1m]` 1M-context
+/// suffix is detected on the lowercased id (TS `modelId.toLowerCase()`).
+///
+/// Order is significant — every later needle is a substring of an earlier one,
+/// so the most specific suffix must be checked first. Returns `None` for an
+/// unknown model (TS falls back to `You are powered by the model {id}.`).
+#[must_use]
+pub fn marketing_name_for_model(model_id: &str) -> Option<&'static str> {
+    let canonical = model_id.to_ascii_lowercase();
+    let has_1m = canonical.contains("[1m]");
+
+    if canonical.contains("claude-opus-4-6") {
+        return Some(if has_1m {
+            "Opus 4.6 (with 1M context)"
+        } else {
+            "Opus 4.6"
+        });
+    }
+    if canonical.contains("claude-opus-4-5") {
+        return Some("Opus 4.5");
+    }
+    if canonical.contains("claude-opus-4-1") {
+        return Some("Opus 4.1");
+    }
+    if canonical.contains("claude-opus-4") {
+        return Some("Opus 4");
+    }
+    if canonical.contains("claude-sonnet-4-6") {
+        return Some(if has_1m {
+            "Sonnet 4.6 (with 1M context)"
+        } else {
+            "Sonnet 4.6"
+        });
+    }
+    if canonical.contains("claude-sonnet-4-5") {
+        return Some(if has_1m {
+            "Sonnet 4.5 (with 1M context)"
+        } else {
+            "Sonnet 4.5"
+        });
+    }
+    if canonical.contains("claude-sonnet-4") {
+        return Some(if has_1m {
+            "Sonnet 4 (with 1M context)"
+        } else {
+            "Sonnet 4"
+        });
+    }
+    if canonical.contains("claude-3-7-sonnet") {
+        return Some("Claude 3.7 Sonnet");
+    }
+    if canonical.contains("claude-3-5-sonnet") {
+        return Some("Claude 3.5 Sonnet");
+    }
+    if canonical.contains("claude-haiku-4-5") {
+        return Some("Haiku 4.5");
+    }
+    if canonical.contains("claude-3-5-haiku") {
+        return Some("Claude 3.5 Haiku");
+    }
+    None
+}
+
+/// Knowledge-cutoff string for a model id, e.g. `claude-opus-4-6` ->
+/// `May 2025`. Mirrors `getKnowledgeCutoff`. `None` for unknown models (TS
+/// omits the `Assistant knowledge cutoff is ...` sentence entirely).
+#[must_use]
+pub fn knowledge_cutoff_for_model(model_id: &str) -> Option<&'static str> {
+    let canonical = model_id.to_ascii_lowercase();
+    if canonical.contains("claude-sonnet-4-6") {
+        Some("August 2025")
+    } else if canonical.contains("claude-opus-4-6") || canonical.contains("claude-opus-4-5") {
+        // TS lists `claude-opus-4-6` and `claude-opus-4-5` as separate arms
+        // that both return "May 2025"; merged here to satisfy clippy
+        // (if_same_then_else) — output is identical.
+        Some("May 2025")
+    } else if canonical.contains("claude-haiku-4") {
+        Some("February 2025")
+    } else if canonical.contains("claude-opus-4") || canonical.contains("claude-sonnet-4") {
+        Some("January 2025")
+    } else {
+        None
+    }
+}
+
+/// `uname -sr`-style OS version string, e.g. `Darwin 25.3.0` / `Linux 6.6.4`.
+///
+/// Mirrors `getUnameSR`: on POSIX, `os.type()` + `os.release()` is byte-equal
+/// to `uname -s -r`, so we shell out to that (one space-joined line) and trim.
+/// On Windows (no `uname`) or any spawn/exit failure, fall back to the prior
+/// `"<os> <arch>"` stub so the OS Version line is always populated.
+#[must_use]
+pub fn os_version_string() -> String {
+    if let Ok(out) = std::process::Command::new("uname")
+        .arg("-s")
+        .arg("-r")
+        .output()
+    {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marketing_names_match_ts_map() {
+        assert_eq!(marketing_name_for_model("claude-opus-4-6"), Some("Opus 4.6"));
+        assert_eq!(
+            marketing_name_for_model("claude-opus-4-6-20251101[1m]"),
+            Some("Opus 4.6 (with 1M context)")
+        );
+        assert_eq!(marketing_name_for_model("claude-opus-4-5"), Some("Opus 4.5"));
+        assert_eq!(marketing_name_for_model("claude-opus-4-1"), Some("Opus 4.1"));
+        assert_eq!(marketing_name_for_model("claude-opus-4-0"), Some("Opus 4"));
+        assert_eq!(
+            marketing_name_for_model("claude-sonnet-4-5[1m]"),
+            Some("Sonnet 4.5 (with 1M context)")
+        );
+        assert_eq!(marketing_name_for_model("claude-sonnet-4-5"), Some("Sonnet 4.5"));
+        assert_eq!(marketing_name_for_model("claude-haiku-4-5"), Some("Haiku 4.5"));
+        assert_eq!(
+            marketing_name_for_model("claude-3-7-sonnet"),
+            Some("Claude 3.7 Sonnet")
+        );
+        // Unknown / unmapped -> None (TS bare-id fallback).
+        assert_eq!(marketing_name_for_model("gpt-4o"), None);
+        assert_eq!(marketing_name_for_model("claude-opus-4-7"), Some("Opus 4"));
+    }
+
+    #[test]
+    fn knowledge_cutoffs_match_ts_map() {
+        assert_eq!(knowledge_cutoff_for_model("claude-sonnet-4-6"), Some("August 2025"));
+        assert_eq!(knowledge_cutoff_for_model("claude-opus-4-6"), Some("May 2025"));
+        assert_eq!(knowledge_cutoff_for_model("claude-opus-4-5"), Some("May 2025"));
+        assert_eq!(knowledge_cutoff_for_model("claude-haiku-4-5"), Some("February 2025"));
+        assert_eq!(knowledge_cutoff_for_model("claude-opus-4-1"), Some("January 2025"));
+        assert_eq!(knowledge_cutoff_for_model("claude-sonnet-4-0"), Some("January 2025"));
+        assert_eq!(knowledge_cutoff_for_model("gpt-4o"), None);
+    }
+
+    #[test]
+    fn os_version_is_populated() {
+        // Shells out to `uname` on this POSIX host; never empty (fallback
+        // guarantees a value even on spawn failure).
+        assert!(!os_version_string().is_empty());
+    }
+}

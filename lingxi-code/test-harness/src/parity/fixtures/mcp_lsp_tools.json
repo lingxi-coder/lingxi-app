@@ -25,7 +25,7 @@
     "mcp_timeout_concrete_example": "MCP server \"filesystem\" tool \"read\" timed out after 60s",
     "lsp_position_error": "LSP position must be 1-based (line >= 1, character >= 1)",
     "lsp_server_not_running_template": "LSP server '{name}' is not running",
-    "lsp_operations_locked": ["hover", "completion", "definition", "references"]
+    "lsp_operations_locked": ["goToDefinition", "findReferences", "hover", "documentSymbol", "workspaceSymbol", "goToImplementation", "prepareCallHierarchy", "incomingCalls", "outgoingCalls"]
   },
 
   "telemetry_events": [

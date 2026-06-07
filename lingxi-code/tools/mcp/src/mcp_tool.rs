@@ -541,7 +541,7 @@ impl Tool for MCPTool {
                 // sole divergence (needs a codec — 5e-resize follow-up).
                 let output_dir = self.ctx.workspace.join(".claude").join("tool-results");
                 let (now_millis, rand_tag) = persist_id_seed();
-                let content = crate::transform_result::transform_result_content(
+                let transformed = crate::transform_result::transform_result_content(
                     &dto.content,
                     &server,
                     crate::transform_result::PersistContext {
@@ -549,6 +549,18 @@ impl Tool for MCPTool {
                         now_millis,
                         rand_tag: &rand_tag,
                     },
+                );
+                // MCP large-output guard (claude-code `processMCPResult`): over-
+                // threshold non-image content is persisted to disk and replaced
+                // with read-it-from-file instructions; images / a falsy
+                // ENABLE_MCP_LARGE_OUTPUT_FILES / a failed write fall back to
+                // truncation. Under-threshold content is forwarded verbatim.
+                let content = crate::large_output::process_mcp_result(
+                    &transformed,
+                    &server,
+                    &tool,
+                    &output_dir,
+                    now_millis,
                 );
                 Ok(ToolCallResult {
                     data: json!({

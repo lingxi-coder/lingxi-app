@@ -89,27 +89,28 @@ async fn post_compact_summary_is_visible_to_next_turn() {
 
     orch.force_compact().await.unwrap();
 
-    // Inspect history: must contain the [Compacted ...] marker as the
-    // last message, AND at least one preceding message that is the
-    // summary (length-checked: compactor produces ≥1 message + our
+    // Inspect history: must contain the boundary marker as the FIRST
+    // message (COMPACT.1: marker leads post-compact history, matching TS
+    // buildPostCompactMessages), AND at least one following message that
+    // is the summary (length-checked: compactor produces ≥1 message + our
     // marker).
     let session = orch.session();
     let s = session.lock().await;
-    let last = s.history.last().expect("history non-empty after compact");
-    let ConversationMessage::System { content, .. } = last else {
-        panic!("expected System message; got {last:?}");
+    let first = s.history.first().expect("history non-empty after compact");
+    let ConversationMessage::System { content, .. } = first else {
+        panic!("expected System message; got {first:?}");
     };
     assert_eq!(
         content, "Conversation compacted",
         "CSM.4 boundary sentinel missing; got: {content}"
     );
 
-    // The summary message produced by the compactor sits before the
-    // marker. With the M3 stub Autocompactor this is `[stub-summary
-    // attempt=0; messages=20]`.
+    // The summary message produced by the compactor sits AFTER the
+    // marker (COMPACT.1). With the M3 stub Autocompactor this is
+    // `[stub-summary attempt=0; messages=20]`.
     assert!(
         s.history.len() >= 2,
-        "expected ≥2 messages (summary + marker), got {}",
+        "expected ≥2 messages (marker + summary), got {}",
         s.history.len()
     );
 }
@@ -336,23 +337,24 @@ async fn compaction_safety_gate() {
             history_is_valid(&s.history),
             "GATE#2 FAIL: post-compaction history is not a valid message sequence"
         );
-        let last = s.history.last().unwrap();
-        match last {
+        let first = s.history.first().unwrap();
+        match first {
             ConversationMessage::System { content, .. } => {
                 // CSM.4: the boundary is now the TS "Conversation compacted"
                 // sentinel; the pre/post counts live in the (sidecar) metadata,
-                // no longer inline in the marker.
+                // no longer inline in the marker. COMPACT.1: the marker now
+                // LEADS the post-compact history.
                 assert_eq!(
                     content, "Conversation compacted",
                     "GATE#2 FAIL: boundary sentinel missing; got: {content}"
                 );
             }
-            other => panic!("GATE#2 FAIL: expected System marker tail; got {other:?}"),
+            other => panic!("GATE#2 FAIL: expected System marker head; got {other:?}"),
         }
-        // The first message is valid (history head is present).
+        // The tail message is valid (history is non-empty).
         assert!(
-            s.history.first().is_some(),
-            "GATE#2 FAIL: first message missing"
+            s.history.last().is_some(),
+            "GATE#2 FAIL: tail message missing"
         );
     }
 

@@ -63,10 +63,22 @@ pub const BUILTIN_SUBAGENT_TYPES: &[&str] = &[
 /// `format!("Budget exceeded (${:.2}); stopped.", dollars)`.
 pub const SUBAGENT_BUDGET_DENIED_PREFIX: &str = "Budget exceeded ($";
 
+/// Default `subagent_type` when the caller omits it — byte-aligned with
+/// upstream `GENERAL_PURPOSE_AGENT.agentType` (`"general-purpose"`). See
+/// `claude-code/src/tools/AgentTool/AgentTool.tsx:322`
+/// (`subagent_type ?? GENERAL_PURPOSE_AGENT.agentType`) +
+/// `built-in/generalPurposeAgent.ts:26` (`agentType: 'general-purpose'`).
+fn default_subagent_type() -> String {
+    "general-purpose".to_string()
+}
+
 /// Input shape accepted by `AgentTool`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentToolInput {
-    /// One of [`BUILTIN_SUBAGENT_TYPES`].
+    /// One of [`BUILTIN_SUBAGENT_TYPES`]. Optional in TS
+    /// (`z.string().optional()`, `AgentTool.tsx:85`); when omitted it defaults
+    /// to `"general-purpose"` (see [`default_subagent_type`]).
+    #[serde(default = "default_subagent_type")]
     pub subagent_type: String,
     /// Initial prompt seeded into the subagent's first turn.
     pub prompt: String,
@@ -79,11 +91,13 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     json!({
         "type": "object",
         "properties": {
-            "subagent_type": { "type": "string", "minLength": 1 },
+            // Optional in TS (`z.string().optional()`); defaults to
+            // "general-purpose" when omitted (AgentTool.tsx:85 + :322).
+            "subagent_type": { "type": "string", "minLength": 1, "default": "general-purpose" },
             "prompt":        { "type": "string", "minLength": 1 },
             "context_paths": { "type": "array", "items": { "type": "string" }, "default": [] }
         },
-        "required": ["subagent_type", "prompt"]
+        "required": ["prompt"]
     })
 });
 
@@ -648,5 +662,27 @@ mod tests {
         let v = json!({"subagent_type": "Plan", "prompt": "Design."});
         let parsed: AgentToolInput = serde_json::from_value(v).unwrap();
         assert!(parsed.context_paths.is_empty());
+    }
+
+    // AGENT.1 — omitting `subagent_type` defaults to "general-purpose",
+    // matching TS `subagent_type ?? GENERAL_PURPOSE_AGENT.agentType`
+    // (AgentTool.tsx:85 optional + :322 default).
+    #[test]
+    fn agent_input_defaults_subagent_type_to_general_purpose() {
+        let v = json!({ "prompt": "Explore the repo." });
+        let parsed: AgentToolInput = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed.subagent_type, "general-purpose");
+        // The default is one of the six known built-in types, so the
+        // call-path validation accepts it.
+        assert!(BUILTIN_SUBAGENT_TYPES.contains(&parsed.subagent_type.as_str()));
+    }
+
+    // The advertised schema no longer requires `subagent_type` (TS optional).
+    #[test]
+    fn agent_schema_requires_only_prompt() {
+        let required = AGENT_INPUT_SCHEMA["required"]
+            .as_array()
+            .expect("required is an array");
+        assert_eq!(required, &[json!("prompt")]);
     }
 }

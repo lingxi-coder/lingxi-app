@@ -185,7 +185,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "required": ["file_path"],
         "properties": {
             "file_path": { "type": "string" },
-            "offset": { "type": "integer", "minimum": 1 },
+            "offset": { "type": "integer", "minimum": 0 },
             "limit":  { "type": "integer", "minimum": 1 }
         }
     })
@@ -286,7 +286,13 @@ impl Tool for FileReadTool {
             .modified()
             .map(tool_api::read_file_state::mtime_ms_floor)
             .unwrap_or(0);
-        if size > MAX_FILE_READ_SIZE {
+        // TS applies the byte cap ONLY when no `limit` is supplied
+        // (`readFileInRange(..., limit === undefined ? maxSizeBytes : undefined)`
+        // — FileReadTool.ts:1026). A ranged read (offset+limit) of a >256KB file
+        // must succeed and return just the requested lines, so the cap is gated
+        // on `input_limit.is_none()`. A no-limit oversize read still errors with
+        // the byte-locked template (fixture-pinned `error_template`).
+        if input_limit.is_none() && size > MAX_FILE_READ_SIZE {
             self.emit_failed(&invocation_id, "file_too_large").await;
             return Err(ToolError::Io(format_too_large(&canon, size)));
         }
@@ -463,6 +469,60 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("big.txt");
         std::fs::write(&target, vec![b'A'; (MAX_FILE_READ_SIZE + 1) as usize]).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exceeds 256KB read limit"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn ranged_read_of_oversize_file_returns_requested_lines() {
+        // FILE.1: TS gates the 256KB cap on `limit === undefined`
+        // (FileReadTool.ts:1026). A >256KB file read with offset+limit must
+        // return just the requested range, NOT the too-large error.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("big_ranged.txt");
+        // Build a >256KB file made of distinct 1-based lines so we can assert
+        // the slice precisely. Each "lineNN\n" is small; pad to exceed the cap.
+        let mut body = String::from("first\nsecond\nthird\n");
+        // Fill past MAX_FILE_READ_SIZE with filler lines.
+        while body.len() as u64 <= MAX_FILE_READ_SIZE {
+            body.push_str("filler-line-of-some-length\n");
+        }
+        assert!(body.len() as u64 > MAX_FILE_READ_SIZE);
+        std::fs::write(&target, &body).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 2 }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ranged read of an oversize file must succeed");
+        assert_eq!(result.data["content"], "second\nthird\n");
+    }
+
+    #[tokio::test]
+    async fn no_limit_read_of_oversize_file_still_errors() {
+        // FILE.1 invariant: with no `limit`, the byte cap still applies and the
+        // byte-locked too-large error is returned (fixture-pinned template).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("big_nolimit.txt");
+        let mut body = String::from("first\nsecond\nthird\n");
+        while body.len() as u64 <= MAX_FILE_READ_SIZE {
+            body.push_str("filler-line-of-some-length\n");
+        }
+        std::fs::write(&target, &body).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileReadTool::new(ctx);
         let err = tool

@@ -2170,10 +2170,20 @@ impl ConversationOrchestrator {
             cwd,
             platform: std::env::consts::OS.to_string(),
             model: self.config.model.clone(),
-            model_marketing_name: None, // M5-12 CLI fills this when known.
-            knowledge_cutoff: None,     // M5-12 CLI fills this when known.
+            // SYSPROMPT.1: port TS getMarketingNameForModel / getKnowledgeCutoff
+            // (`utils/model/model.ts:570`, `constants/prompts.ts:712`) so the
+            // model line + cutoff sentence match claude-code instead of being
+            // stubbed to None.
+            model_marketing_name: crate::prompt::env_meta::marketing_name_for_model(
+                &self.config.model,
+            )
+            .map(String::from),
+            knowledge_cutoff: crate::prompt::env_meta::knowledge_cutoff_for_model(&self.config.model)
+                .map(String::from),
             shell,
-            os_version: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+            // SYSPROMPT.1: `uname -sr` (TS getUnameSR) e.g. "Darwin 25.3.0",
+            // falling back to "<os> <arch>" on Windows / spawn failure.
+            os_version: crate::prompt::env_meta::os_version_string(),
             git_status: git,
             file_tree: tree,
             memory_files,

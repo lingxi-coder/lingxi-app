@@ -120,7 +120,10 @@ fn plural(n: usize, word: &str) -> String {
 
 /// `toRelativePath` (`path.ts:95-99`): relative to `cwd` if `cwd` is an ancestor,
 /// else keep absolute (TS keeps absolute when `relative()` would start with `..`).
-fn to_relative_path(abs: &Path, cwd: &Path) -> String {
+///
+/// `pub(crate)` so the sibling `glob` module reuses the exact same relativize
+/// rule (GLOB.1) instead of duplicating it.
+pub(crate) fn to_relative_path(abs: &Path, cwd: &Path) -> String {
     match abs.strip_prefix(cwd) {
         Ok(rel) if !rel.as_os_str().is_empty() => rel.to_string_lossy().into_owned(),
         _ => abs.to_string_lossy().into_owned(),

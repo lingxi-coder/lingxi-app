@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod env_block;
+pub mod env_meta;
 pub mod file_tree;
 pub mod git_status;
 pub mod locked_templates;

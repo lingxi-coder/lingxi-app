@@ -26,8 +26,30 @@ pub struct Argv {
     pub print: bool,
 
     /// Resume a previous session by UUID (or interactive picker if absent)
-    #[arg(long = "resume", value_name = "ID", num_args = 0..=1, default_missing_value = "")]
+    ///
+    /// claude-code: `-r, --resume [value]` — "Resume a conversation by session
+    /// ID, or open interactive picker with optional search term" (`main.tsx:988`).
+    /// The value is OPTIONAL (`[value]`): `-r`/`--resume` with no argument yields
+    /// the empty-string picker sentinel; with an argument it carries the id /
+    /// search term. (The user-facing help first line is byte-locked by plan
+    /// M5-12 / `cli_help.rs`, so it is kept as the original wording above.)
+    #[arg(short = 'r', long = "resume", value_name = "ID", num_args = 0..=1, default_missing_value = "")]
     pub resume: Option<String>,
+
+    /// Continue the most recent conversation in the current directory
+    ///
+    /// claude-code: `-c, --continue` (`main.tsx:988`). FLAG PARSE ONLY here — the
+    /// continue runtime (load-most-recent-in-cwd) is wired by the CLI entrypoint
+    /// (`lib.rs` / `run.rs`), not this struct.
+    #[arg(short = 'c', long = "continue")]
+    pub continue_session: bool,
+
+    /// When resuming, create a new session ID instead of reusing the original (use with --resume or --continue)
+    ///
+    /// claude-code: `--fork-session` (`main.tsx:988`). FLAG PARSE ONLY here — the
+    /// fork runtime (mint a fresh session id on resume) is wired downstream.
+    #[arg(long = "fork-session")]
+    pub fork_session: bool,
 
     /// Override the active model (e.g. claude-opus-4-7)
     #[arg(long = "model", value_name = "NAME")]
@@ -83,14 +105,16 @@ impl Argv {
         Self::try_parse_from(iter)
     }
 
-    /// True iff the binary should start the REPL.
+    /// True iff the binary should start a FRESH REPL.
     ///
-    /// Rules: prompt is None or trimmed-empty, AND `--resume` is also absent
-    /// (resume-without-prompt enters resumed-REPL handled in Task 8).
+    /// Rules: prompt is None or trimmed-empty, AND neither `--resume` nor
+    /// `--continue` is set. Resume-without-prompt enters a resumed-REPL (Task 8);
+    /// `--continue` likewise reopens the most-recent conversation rather than a
+    /// fresh session, so it is excluded here too.
     #[must_use]
     pub fn is_repl_mode(&self) -> bool {
         let no_prompt = self.prompt.as_deref().map_or(true, |s| s.trim().is_empty());
-        no_prompt && self.resume.is_none()
+        no_prompt && self.resume.is_none() && !self.continue_session
     }
 }
 
@@ -145,6 +169,68 @@ mod tests {
         let a = Argv::from_iter(["lingxi-cli", "--resume"]).unwrap();
         // Empty sentinel = picker.
         assert_eq!(a.resume.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn resume_short_alias_with_value() {
+        let a = Argv::from_iter([
+            "lingxi-cli",
+            "-r",
+            "00000000-0000-0000-0000-000000000001",
+        ])
+        .unwrap();
+        assert_eq!(
+            a.resume.as_deref(),
+            Some("00000000-0000-0000-0000-000000000001")
+        );
+        assert!(!a.is_repl_mode());
+    }
+
+    #[test]
+    fn resume_short_alias_without_value_enters_picker() {
+        // `-r` value is OPTIONAL (`[value]`): bare `-r` → empty picker sentinel.
+        let a = Argv::from_iter(["lingxi-cli", "-r"]).unwrap();
+        assert_eq!(a.resume.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn continue_long_flag() {
+        let a = Argv::from_iter(["lingxi-cli", "--continue"]).unwrap();
+        assert!(a.continue_session);
+        // `--continue` reopens the most-recent conversation, not a fresh REPL.
+        assert!(!a.is_repl_mode());
+    }
+
+    #[test]
+    fn continue_short_flag() {
+        let a = Argv::from_iter(["lingxi-cli", "-c"]).unwrap();
+        assert!(a.continue_session);
+    }
+
+    #[test]
+    fn continue_default_false() {
+        let a = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert!(!a.continue_session);
+    }
+
+    #[test]
+    fn fork_session_flag() {
+        let a = Argv::from_iter(["lingxi-cli", "--resume", "--fork-session"]).unwrap();
+        assert!(a.fork_session);
+        assert_eq!(a.resume.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn fork_session_default_false() {
+        let a = Argv::from_iter(["lingxi-cli", "hi"]).unwrap();
+        assert!(!a.fork_session);
+    }
+
+    #[test]
+    fn continue_and_fork_together() {
+        let a = Argv::from_iter(["lingxi-cli", "-c", "--fork-session"]).unwrap();
+        assert!(a.continue_session && a.fork_session);
+        assert!(!a.is_repl_mode());
     }
 
     #[test]

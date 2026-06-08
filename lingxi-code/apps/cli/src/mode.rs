@@ -166,6 +166,8 @@ mod tests {
             json: false,
             debug: false,
             no_tui,
+            continue_session: false,
+            fork_session: false,
         }
     }
 

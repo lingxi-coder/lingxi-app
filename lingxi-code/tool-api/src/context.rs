@@ -42,6 +42,38 @@ pub struct ToolUseContext {
     // File state cache wired in Plan 10.
 }
 
+impl ToolUseContext {
+    /// Build a minimal context that carries ONLY `main_loop_model`; every other
+    /// field is inert (`None` / empty / default).
+    ///
+    /// The turn loop seeds this with the live `session.model`, folds a tool
+    /// batch's [`crate::tool_trait::ContextModifier`]s over it, and reads back
+    /// the resolved `options.main_loop_model` to apply a skill's `model:`
+    /// override (SKILLEXEC.3, model scope). It is never handed to a tool, so the
+    /// inert fields are never observed.
+    #[must_use]
+    pub fn model_seed(main_loop_model: String) -> Self {
+        Self {
+            options: ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model,
+                max_budget_nano_usd: None,
+                mcp_clients: Vec::new(),
+                is_non_interactive_session: true,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+            },
+            messages: Vec::new(),
+            tool_use_id: None,
+            agent_id: None,
+            content_replacement_state: None,
+            session: None,
+            subagent_registry: None,
+        }
+    }
+}
+
 /// Per-call options that travel inside [`ToolUseContext`].
 #[derive(Clone)]
 pub struct ToolUseOptions {

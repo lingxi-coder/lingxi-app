@@ -14,6 +14,7 @@
     clippy::doc_markdown,
     clippy::manual_let_else
 )]
+pub mod model_override;
 pub mod skill;
 pub use skill::SkillTool;
 /// Register the skill-management tool against `reg`.

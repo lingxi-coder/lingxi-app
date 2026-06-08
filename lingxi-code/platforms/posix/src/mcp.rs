@@ -41,6 +41,44 @@ use traits::{
 /// as there would be for Streamable HTTP).
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 
+/// `clientInfo.description` literal — claude-code sends
+/// `"Anthropic's agentic coding tool"` (TS `services/mcp/client.ts:990`).
+/// The canonical `mcp::identity::ClientInfo` model does not (yet) carry a
+/// `description` field, so the literal lives here at the posix wire boundary.
+const CLIENT_DESCRIPTION: &str = "Anthropic's agentic coding tool";
+
+/// Build the `params` object for the MCP `initialize` request.
+///
+/// Factored out as a free function so the exact wire shape is unit-testable
+/// without a live connection. Mirrors claude-code's SDK `Client` construction
+/// (`services/mcp/client.ts:985-1002`):
+///
+/// * `capabilities` advertises the `roots` and `elicitation` markers as bare
+///   empty objects `{}` (NOT `null`, NOT `{form:{},url:{}}` — the Java MCP SDK
+///   rejects unknown elicitation props). The posix `McpClient` already
+///   registers `roots/list` + `elicitation/create` handlers, so advertising
+///   these lets spec-compliant servers issue those requests.
+/// * `clientInfo` carries claude-code's identity literals — reused from the
+///   canonical `mcp::identity` constants (`name`, `title`, `websiteUrl`) plus
+///   the `description` literal — while `version` stays this build's own
+///   product version (we do NOT impersonate claude-code's release number).
+fn initialize_params() -> Value {
+    json!({
+        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "capabilities": {
+            "roots": {},
+            "elicitation": {},
+        },
+        "clientInfo": {
+            "name": mcp::CLIENT_NAME,
+            "title": mcp::CLIENT_TITLE,
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": CLIENT_DESCRIPTION,
+            "websiteUrl": mcp::MCP_WEBSITE_URL,
+        },
+    })
+}
+
 /// Per-connection state held by `PosixMcpTransport`.
 ///
 /// Different transports keep slightly different ownership: `Stdio` owns the
@@ -352,20 +390,10 @@ impl McpTransport for PosixMcpTransport {
     ) -> Result<ServerCapabilitiesDto, McpError> {
         let connection = self.connection_for_result(conn.connection_id)?;
 
-        // Send the MCP `initialize` request. We declare empty `capabilities`
-        // (no roots/elicitation wiring yet) and identify ourselves as lingxi.
+        // Send the MCP `initialize` request. The advertised capabilities and
+        // `clientInfo` identity match claude-code 1:1 (see `initialize_params`).
         let result: Value = connection
-            .call(
-                "initialize",
-                json!({
-                    "protocolVersion": MCP_PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": {
-                        "name": "lingxi",
-                        "version": env!("CARGO_PKG_VERSION"),
-                    },
-                }),
-            )
+            .call("initialize", initialize_params())
             .await
             // A failed initialize is a handshake failure, not a generic error.
             .map_err(|e| McpError::Handshake(e.to_string()))?;
@@ -888,6 +916,83 @@ mod re_export_tests {
     /// import from `lingxi_platform_common` directly).
     #[allow(unused_imports)]
     use crate::mcp::connect_ws;
+}
+
+#[cfg(test)]
+mod initialize_params_tests {
+    //! MCP `initialize` request payload parity with claude-code
+    //! `services/mcp/client.ts:985-1002`.
+    use super::{initialize_params, CLIENT_DESCRIPTION, MCP_PROTOCOL_VERSION};
+
+    #[test]
+    fn capabilities_advertise_bare_empty_roots_and_elicitation() {
+        let params = initialize_params();
+        let caps = &params["capabilities"];
+        assert!(caps.is_object(), "capabilities must be a JSON object");
+        let caps_obj = caps.as_object().unwrap();
+        // EXACTLY the two markers claude-code advertises — nothing else.
+        assert_eq!(
+            caps_obj.len(),
+            2,
+            "capabilities must have exactly 2 keys (roots, elicitation), got {:?}",
+            caps_obj.keys().collect::<Vec<_>>(),
+        );
+        // Each marker is the LITERAL empty object `{}` — not null, not missing,
+        // not `{form:{},url:{}}` (the Java MCP SDK rejects unknown props).
+        assert!(caps["roots"].is_object(), "roots must be an object");
+        assert_eq!(caps["roots"].as_object().unwrap().len(), 0, "roots must be EMPTY");
+        assert!(
+            caps["elicitation"].is_object(),
+            "elicitation must be an object"
+        );
+        assert_eq!(
+            caps["elicitation"].as_object().unwrap().len(),
+            0,
+            "elicitation must be EMPTY",
+        );
+    }
+
+    #[test]
+    fn client_info_carries_claude_code_identity_literals() {
+        let params = initialize_params();
+        let info = &params["clientInfo"];
+        assert_eq!(info["name"], "claude-code");
+        assert_eq!(info["title"], "Claude Code");
+        assert_eq!(info["description"], "Anthropic's agentic coding tool");
+        assert_eq!(info["websiteUrl"], "https://claude.com/claude-code");
+        // The literals are sourced from the canonical `mcp::identity` constants
+        // (so a rename there propagates here) — cross-check the reused values.
+        assert_eq!(info["name"], mcp::CLIENT_NAME);
+        assert_eq!(info["title"], mcp::CLIENT_TITLE);
+        assert_eq!(info["websiteUrl"], mcp::MCP_WEBSITE_URL);
+        assert_eq!(info["description"], CLIENT_DESCRIPTION);
+        // `version` stays THIS build's product version — never faked to look
+        // like claude-code's release — and must look semver-like.
+        let version = info["version"].as_str().expect("version present");
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        assert!(
+            version.split('.').count() >= 3,
+            "version must look semver-like, got {version:?}",
+        );
+    }
+
+    #[test]
+    fn wire_bytes_are_camelcase_and_carry_literal_markers() {
+        let bytes = serde_json::to_vec(&initialize_params()).expect("serialize");
+        let s = std::str::from_utf8(&bytes).expect("utf8");
+        assert_eq!(initialize_params()["protocolVersion"], MCP_PROTOCOL_VERSION);
+        assert!(
+            s.contains(r#""name":"claude-code""#),
+            "wire bytes must carry literal claude-code name, got: {s}",
+        );
+        assert!(
+            s.contains(r#""websiteUrl":"https://claude.com/claude-code""#),
+            "websiteUrl must be camelCase, got: {s}",
+        );
+        // No stale `lingxi` client name and no snake_case `website_url` leak.
+        assert!(!s.contains(r#""name":"lingxi""#), "stale lingxi name leaked");
+        assert!(!s.contains("website_url"), "snake_case website_url leaked");
+    }
 }
 
 #[cfg(test)]

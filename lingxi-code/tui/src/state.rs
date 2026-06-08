@@ -685,6 +685,15 @@ pub struct AppState {
     /// teammate name; `Esc` returns. Entry is programmatic until the worker
     /// feed is live (R4/R5).
     pub viewing_teammate: Option<String>,
+    /// (`/compact`) Set by the `/compact` submit intercept: a request to run a
+    /// forced compaction pass. The SYNC submit path can't `.await`
+    /// `OrchestratorHandle::force_compact`, so it only RAISES this flag; the async
+    /// pump in `root.rs` (`pump_compact`, on the ticker `use_future`) runs the
+    /// compaction OUTSIDE the `AppState` lock and folds the `CompactionSummary`
+    /// into a `RenderedMessage::CompactBoundary` (or, on error, an `is_error`
+    /// `SystemText`). Mirrors `pending_open_settings` — handle-backed, so the
+    /// pump runs only when an `OrchestratorHandle` is wired.
+    pub pending_compact: bool,
     /// (M9-08) Set by the `/agents` submit intercept: a request to open the
     /// agent-discovery screen. The SYNC submit path can't `.await
     /// OrchestratorHandle::list_agents`, so it only RAISES this flag; the async
@@ -815,6 +824,7 @@ impl AppState {
             resume_request: None,
             pending_config_edit: false,
             pending_open_settings: None,
+            pending_compact: false,
             pending_turn: None,
             focused_tool_id: None,
             expanded: HashMap::new(),

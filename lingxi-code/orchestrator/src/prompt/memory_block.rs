@@ -28,8 +28,10 @@ pub trait MemoryHierarchyProvider: Send + Sync {
 }
 
 /// Production implementation — wraps `memory::claude_md::walk` +
-/// `load_file`. Reverses the walk order so the returned vec is in spec
-/// splice order (home → repo → local-override).
+/// `expand_memory_file`. Reverses the walk order so the returned vec is in
+/// spec splice order (home → repo → local-override), and recursively splices
+/// each file's `@import` references in directly after it (parity with
+/// claude-code `processMemoryFile`).
 pub struct RealMemoryHierarchyProvider;
 
 #[async_trait]
@@ -46,21 +48,42 @@ impl MemoryHierarchyProvider for RealMemoryHierarchyProvider {
         // local-override LAST — matching spec §4.3 splice order.
         let mut entries = h.entries;
         entries.reverse();
-        let mut out = Vec::with_capacity(entries.len());
+
+        // `@import` expansion (claude-code processMemoryFile): a single
+        // `processed` set is shared across the whole hierarchy load so an
+        // imported file is spliced at most once, and each top-level file is
+        // expanded at depth 0. Each `@import`'d file becomes its own
+        // `MemoryFile` entry, parent before children.
+        let user_dir = home.join(".claude");
+        let mut processed: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+        let mut out = Vec::new();
         for e in entries {
-            match memory::claude_md::loader::load_file(&e.path, None) {
-                Ok(loaded) => {
-                    let body = loaded.body.trim().to_string();
-                    if body.is_empty() {
-                        continue;
-                    }
-                    out.push(MemoryFile {
-                        path: e.path.clone(),
-                        body,
-                        is_local_override: e.is_local_override,
-                    });
+            // User memory (`~/.claude/...`) may include external files;
+            // Project/Local default to local-only. The TS
+            // `hasClaudeMdExternalIncludesApproved` opt-in is not plumbed
+            // into this seam, so Project/Local use the `false` default.
+            let include_external = e.path.starts_with(&user_dir);
+            let expanded = memory::claude_md::loader::expand_memory_file(
+                &e.path,
+                &mut processed,
+                include_external,
+                cwd,
+                Some(&home),
+                0,
+            );
+            for (idx, entry) in expanded.into_iter().enumerate() {
+                let body = entry.body.trim().to_string();
+                if body.is_empty() {
+                    continue;
                 }
-                Err(_) => continue, // skip unreadable / oversized
+                out.push(MemoryFile {
+                    path: entry.path,
+                    body,
+                    // Only the hierarchy entry itself can be a
+                    // `CLAUDE.local.md`; `@import`'d children are plain files.
+                    is_local_override: idx == 0 && e.is_local_override,
+                });
             }
         }
         out

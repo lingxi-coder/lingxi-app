@@ -110,6 +110,33 @@ pub fn parse_argument_names(argument_names: Option<&FrontmatterArgs>) -> Vec<Str
     }
 }
 
+/// Generate the progressive argument hint showing the remaining unfilled
+/// argument names (e.g. `"[arg2] [arg3]"`), or `None` once all are filled.
+///
+/// Faithful to TS `generateProgressiveArgumentHint`
+/// (`utils/argumentSubstitution.ts:76-83`): returns the names after the ones
+/// already typed, each wrapped in `[...]` and space-joined. TS `Array.slice`
+/// clamps when `typed_args.len() > arg_names.len()`, so the `.min()` here
+/// reproduces that clamp without panicking on the slice index.
+#[must_use]
+pub fn generate_progressive_argument_hint(
+    arg_names: &[String],
+    typed_args: &[String],
+) -> Option<String> {
+    let consumed = typed_args.len().min(arg_names.len());
+    let remaining = &arg_names[consumed..];
+    if remaining.is_empty() {
+        return None;
+    }
+    Some(
+        remaining
+            .iter()
+            .map(|name| format!("[{name}]"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
 /// `true` when `s` is non-empty and every byte is an ASCII digit — the Rust
 /// equivalent of the TS `/^\d+$/` test used for the numeric-only filter and the
 /// `$ARGUMENTS[N]` / `$N` index extraction.
@@ -472,6 +499,35 @@ mod tests {
             parse_argument_names(Some(&FrontmatterArgs::List(names(&["", "  ", "42", "ok"])))),
             vec!["ok"]
         );
+    }
+
+    // ----- progressive argument hint -----
+
+    #[test]
+    fn progressive_hint_matches_ts_semantics() {
+        let arg_names = names(&["arg1", "arg2", "arg3"]);
+        // zero typed → all remaining names, each bracketed, space-joined.
+        assert_eq!(
+            generate_progressive_argument_hint(&arg_names, &[]),
+            Some("[arg1] [arg2] [arg3]".to_string())
+        );
+        // partial typed → only the names after the typed count.
+        assert_eq!(
+            generate_progressive_argument_hint(&arg_names, &names(&["x"])),
+            Some("[arg2] [arg3]".to_string())
+        );
+        // all filled → None.
+        assert_eq!(
+            generate_progressive_argument_hint(&arg_names, &names(&["x", "y", "z"])),
+            None
+        );
+        // typed beyond the declared names → None (TS Array.slice clamps; no panic).
+        assert_eq!(
+            generate_progressive_argument_hint(&arg_names, &names(&["x", "y", "z", "w"])),
+            None
+        );
+        // no declared names → None regardless of typed args.
+        assert_eq!(generate_progressive_argument_hint(&[], &names(&["x"])), None);
     }
 
     // ----- indexed / shorthand substitution -----

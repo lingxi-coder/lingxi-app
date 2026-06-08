@@ -44,7 +44,7 @@ use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use telemetry::tengu::tool::{SKILL_COMPLETED, SKILL_FAILED, SKILL_STARTED};
+use telemetry::tengu::tool::{SKILL_COMPLETED, SKILL_FAILED, SKILL_INVOKED, SKILL_STARTED};
 use telemetry::AnalyticsBus;
 
 use tool_api::context::ToolUseContext;
@@ -199,6 +199,21 @@ async fn emit_failed(bus: &Arc<AnalyticsBus>, kind: &str, duration_ms: u64) {
 fn normalize_skill_name(skill: &str) -> String {
     let trimmed = skill.trim();
     trimmed.strip_prefix('/').unwrap_or(trimmed).to_string()
+}
+
+/// Sanitize a normalized skill name for the `SKILL_INVOKED` telemetry
+/// `skill_name` dimension (a `Verified`/whitelisted, non-PII field). Builtin
+/// command names pass through; any non-builtin collapses to `"custom"` — TS
+/// `command_name = NOT_CODE_OR_FILEPATHS` over `builtInCommandNames`
+/// (`commands.ts:350-353`). The descriptor carries no bundled/official-source
+/// flag, so bundled/official skills are indistinguishable here and all
+/// non-builtins map to `"custom"`.
+fn skill_name_dimension(command_name: &str) -> String {
+    if command_api::builtin_support::names::BUILTIN_COMMAND_NAMES.contains(&command_name) {
+        command_name.to_string()
+    } else {
+        "custom".to_string()
+    }
 }
 
 #[async_trait]
@@ -384,6 +399,24 @@ impl Tool for SkillTool {
                 "Skill {command_name} is not a prompt-based skill"
             )));
         }
+
+        // SKILLEXEC.5: fire the registered `SKILL_INVOKED` event on the success
+        // path — after validateInput passes (descriptor loaded, prompt-type, not
+        // disable-model-invocation) — mirroring TS `SkillTool.ts:654-709`. The
+        // `skill_name` dimension is a `Verified` (whitelisted, non-PII) field, so
+        // it is sanitized to the builtin command name, or `"custom"` for any
+        // non-builtin skill (TS `command_name = NOT_CODE_OR_FILEPATHS` over
+        // `builtInCommandNames`, `commands.ts:350-353`). The `SkillDescriptor`
+        // carries no bundled/official-source flag, so every non-builtin collapses
+        // to `"custom"` — faithful for the hermetic substrate.
+        let skill_name_dim = skill_name_dimension(&command_name);
+        let mut inv_md: LogEventMetadata = HashMap::new();
+        inv_md.insert(
+            "invocation_id".into(),
+            verified_str(&tool_api::util::ids::ulid_or_uuid()),
+        );
+        inv_md.insert("skill_name".into(), verified_str(&skill_name_dim));
+        bus.log_event(SKILL_INVOKED, inv_md).await;
 
         // Enforce descriptor cap byte-lock.
         let truncated = if desc.description.chars().count() > MAX_SKILL_DESCRIPTOR_LEN {
@@ -581,6 +614,19 @@ mod tests {
         assert_eq!(normalize_skill_name("commit"), "commit");
         // Only a single leading slash is stripped.
         assert_eq!(normalize_skill_name("//commit"), "/commit");
+    }
+
+    #[test]
+    fn skill_name_dimension_keeps_builtin_and_sanitizes_custom() {
+        // A known builtin command name passes through unchanged...
+        let a_builtin = command_api::builtin_support::names::BUILTIN_COMMAND_NAMES[0];
+        assert_eq!(skill_name_dimension(a_builtin), a_builtin);
+        // ...while any non-builtin (custom) skill collapses to "custom" — the
+        // Verified/whitelisted SKILL_INVOKED dimension never leaks a raw PII name.
+        assert_eq!(
+            skill_name_dimension("definitely-not-a-builtin-skill-xyz"),
+            "custom"
+        );
     }
 
     #[test]

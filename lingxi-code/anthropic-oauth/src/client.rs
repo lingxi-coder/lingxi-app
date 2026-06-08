@@ -31,8 +31,14 @@ pub enum OAuthError {
     TokenExchange(String),
     /// Stored `refresh_token` has expired or was revoked. User must re-authenticate.
     ///
-    /// Display string is locked byte-for-byte against claude-code @ 6a25909
-    /// (`"Session expired. Re-authenticate?"`).
+    /// OAUTHREF.5: this Display string is a LingXi-specific message, NOT a
+    /// claude-code byte-for-byte port (an earlier comment wrongly claimed it
+    /// was). claude-code's refresh path throws a generic
+    /// `Token refresh failed: ${statusText}` (services/oauth/client.ts) and has
+    /// no "Session expired" / re-auth string anywhere. This string also serves
+    /// as a control-flow key in the proactive-refresh loop (`refresh.rs`), which
+    /// is itself a LingXi-only redesign with no TS counterpart — so the string
+    /// is pinned as a LingXi-side value, not as a TS-parity target.
     #[error("Session expired. Re-authenticate?")]
     RefreshExpired,
     /// Scope upgrade attempt was denied by the provider.

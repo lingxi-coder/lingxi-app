@@ -65,7 +65,9 @@ fn oauth_wire_identifiers_match_claude_code() {
     let template = "http://127.0.0.1:{port}/callback";
     assert_eq!(template, fx.loopback_redirect_uri_template);
 
-    // Error strings (byte-for-byte).
+    // Error strings (OAUTHREF.5: LingXi-DESIGN messages, NOT claude-code
+    // byte-for-byte — TS throws a generic "Token refresh failed: <status>".
+    // Pinned here as LingXi values; see OAuthError::RefreshExpired docs).
     let refresh_expired = OAuthError::RefreshExpired;
     assert_eq!(
         format!("{refresh_expired}"),

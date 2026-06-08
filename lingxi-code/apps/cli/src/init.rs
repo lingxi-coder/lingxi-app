@@ -50,6 +50,13 @@ pub struct Runtime {
     /// tasks (RAII). If this field were dropped at `build_runtime` exit, the
     /// watcher would stop immediately after boot — so it must live on `Runtime`.
     pub settings_watcher: engine_desktop::settings_watch::SettingsWatcherHandle,
+    /// Live file-changed watcher firing `FileChanged` hooks when a path resolved
+    /// from a `FileChanged` hook's `matcher` mutates on disk. Held here purely to
+    /// keep the watcher alive for the session: dropping the `Runtime` (process
+    /// teardown) aborts the watch tasks (RAII). If dropped at `build_runtime`
+    /// exit, the watcher would stop immediately after boot — so it lives on
+    /// `Runtime`, exactly like `settings_watcher`.
+    pub file_changed_watcher: engine_desktop::file_changed_watch::FileChangedWatcherHandle,
 }
 
 /// Build-result for the TUI startup path. (M6-03)
@@ -270,6 +277,7 @@ pub async fn build_runtime(
         auth: rt.auth,
         task_registry: rt.task_registry,
         settings_watcher: rt.settings_watcher,
+        file_changed_watcher: rt.file_changed_watcher,
     })
 }
 

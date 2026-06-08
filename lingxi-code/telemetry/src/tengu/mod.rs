@@ -62,7 +62,11 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     //          v0.6.0 (M5-14): 315 · v0.7.0 (M6-09): 326 · v0.8.0 (M7-16): 330.
     // CronDelete/CronList: tool block grows 134 → 140 (+6, 2 tools × 3 stages)
     //        → 336 total.
-    const TOTAL: usize = 25 + 30 + 20 + 140 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13;
+    // FileReadTool analytics: +3 appended at the GLOBAL TAIL (tengu_file_read_dedup,
+    //        tengu_session_file_read, tengu_file_read_limits_override) — NOT in the
+    //        tool concat block (they are not tengu_tool_*) → 339 total. The trailing
+    //        `+ 3` is `tool::FILE_READ_ANALYTICS_NAMES.len()`.
+    const TOTAL: usize = 25 + 30 + 20 + 140 + 10 + 8 + 12 + 3 + 17 + 4 + 54 + 13 + 3;
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;
@@ -135,6 +139,17 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         let mut i = 0;
         while i < tui::NAMES.len() {
             out[idx] = tui::NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        // FileReadTool analytics names (`tengu_file_read_*` / `tengu_session_file_read`)
+        // are appended at the GLOBAL TAIL — they are not `tengu_tool_*`, so keeping
+        // them out of the tool concat block preserves every per-block prefix slice
+        // in event_name_completeness_test::category_ordering_preserved. Positions
+        // 336/337/338 (tengu_events.json fixture).
+        let mut i = 0;
+        while i < tool::FILE_READ_ANALYTICS_NAMES.len() {
+            out[idx] = tool::FILE_READ_ANALYTICS_NAMES[i];
             idx += 1;
             i += 1;
         }

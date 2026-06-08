@@ -144,7 +144,14 @@ pub async fn pump_stream(
 pub async fn dispatch_tool_uses_concurrent(
     orch: &ConversationOrchestrator,
     observed: &[ObservedToolUse],
-) -> Result<(Vec<ContentBlock>, Vec<protocol::ConversationMessage>), OrchestratorError> {
+) -> Result<
+    (
+        Vec<ContentBlock>,
+        Vec<protocol::ConversationMessage>,
+        Vec<tool_api::ContextModifier>,
+    ),
+    OrchestratorError,
+> {
     use futures::future::join_all;
 
     let futures: Vec<_> = observed
@@ -157,36 +164,51 @@ pub async fn dispatch_tool_uses_concurrent(
                 // injected `new_messages` (the Skill tool's expanded prompt) are
                 // threaded out and replayed into history, mirroring the batched
                 // path. `prevent_continuation` (.1) is dropped here — the streaming
-                // loop sources that signal separately.
-                let (mut blocks, _prevent, injected) =
+                // loop sources that signal separately. The `context_modifier`s
+                // (.3, e.g. a skill's `model:` override) ARE threaded out, in tool
+                // order, for the caller to fold POST-BATCH.
+                let (mut blocks, _prevent, injected, modifiers) =
                     dispatch_tool_uses_tracked(orch, &single).await?;
                 let block = blocks.pop().ok_or_else(|| {
                     OrchestratorError::StreamingProtocol(format!(
                         "dispatch returned empty for tool index {idx}"
                     ))
                 })?;
-                Ok::<(usize, ContentBlock, Vec<protocol::ConversationMessage>), OrchestratorError>((
-                    idx, block, injected,
-                ))
+                Ok::<
+                    (
+                        usize,
+                        ContentBlock,
+                        Vec<protocol::ConversationMessage>,
+                        Vec<tool_api::ContextModifier>,
+                    ),
+                    OrchestratorError,
+                >((idx, block, injected, modifiers))
             }
         })
         .collect();
 
-    let mut indexed: Vec<(usize, ContentBlock, Vec<protocol::ConversationMessage>)> =
-        Vec::with_capacity(observed.len());
+    let mut indexed: Vec<(
+        usize,
+        ContentBlock,
+        Vec<protocol::ConversationMessage>,
+        Vec<tool_api::ContextModifier>,
+    )> = Vec::with_capacity(observed.len());
     for r in join_all(futures).await {
         indexed.push(r?);
     }
-    indexed.sort_by_key(|(idx, _, _)| *idx);
-    // Blocks IN ORIGINAL ORDER; injected messages flattened in the same tool
-    // order so the Skill prompt lands deterministically after the tool_result.
+    indexed.sort_by_key(|(idx, _, _, _)| *idx);
+    // Blocks IN ORIGINAL ORDER; injected messages + context_modifiers flattened
+    // in the same tool order so the Skill prompt + model override land
+    // deterministically after the tool_result.
     let mut blocks = Vec::with_capacity(indexed.len());
     let mut injected_all: Vec<protocol::ConversationMessage> = Vec::new();
-    for (_, b, inj) in indexed {
+    let mut modifiers_all: Vec<tool_api::ContextModifier> = Vec::new();
+    for (_, b, inj, mods) in indexed {
         blocks.push(b);
         injected_all.extend(inj);
+        modifiers_all.extend(mods);
     }
-    Ok((blocks, injected_all))
+    Ok((blocks, injected_all, modifiers_all))
 }
 
 #[cfg(test)]

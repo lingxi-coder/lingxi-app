@@ -12,6 +12,7 @@ use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use std::path::{Component, Path, PathBuf};
 use telemetry::tengu::orchestrator as orch_events;
 use tool_api::context::{ToolUseContext, ToolUseOptions};
+use tool_api::ContextModifier;
 
 /// Tools whose successful execution records `file_path` (or `notebook_path`)
 /// into the orchestrator's read-file-state cache. Mirrors the TS sites that
@@ -438,7 +439,7 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // the tool runs and `hook_stopped_continuation` is yielded after success).
     let mut hook_prevent_continuation = false;
     if !tool_uses.is_empty() {
-        let (tool_results, prevent, injected_messages) =
+        let (tool_results, prevent, injected_messages, context_modifiers) =
             dispatch_tool_uses_tracked(orch, &tool_uses).await?;
         hook_prevent_continuation = prevent;
         // Append a fresh user message carrying the tool results.
@@ -468,6 +469,12 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         for m in &injected_messages {
             orch.persist_message_to_jsonl(m).await;
         }
+        // SKILLEXEC.3 (model scope): fold this batch's `context_modifier`s and
+        // switch `session.model` if a skill declared a `model:` override. Applied
+        // AFTER `injected_messages` so it mirrors the streaming twin's ordering.
+        // Empty for every existing tool + non-`model:` skills → strict no-op
+        // (session.model untouched → byte-identical turn-loop fixtures).
+        apply_model_context_modifiers(orch, context_modifiers).await;
     }
 
     // 6. Decide loop disposition.
@@ -961,7 +968,15 @@ pub(crate) async fn dispatch_tool_uses(
 pub(crate) async fn dispatch_tool_uses_tracked(
     orch: &ConversationOrchestrator,
     tool_uses: &[(ToolUseId, String, serde_json::Value)],
-) -> Result<(Vec<ContentBlock>, bool, Vec<ConversationMessage>), OrchestratorError> {
+) -> Result<
+    (
+        Vec<ContentBlock>,
+        bool,
+        Vec<ConversationMessage>,
+        Vec<ContextModifier>,
+    ),
+    OrchestratorError,
+> {
     let mut results = Vec::with_capacity(tool_uses.len());
     // HOOK.2: OR-fold each tool's PreToolUse `prevent_continuation` signal.
     let mut prevent_continuation = false;
@@ -971,6 +986,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     // the caller, which appends them to history right after this batch's
     // tool_result user message. Empty for every existing tool → no-op.
     let mut injected_messages: Vec<ConversationMessage> = Vec::new();
+    // SKILLEXEC.3 (model scope): one-shot `context_modifier`s a tool returns
+    // (TS `ToolResult.contextModifier`, e.g. the Skill tool's `model:` override).
+    // Collected in tool-dispatch order and folded POST-BATCH by the caller over a
+    // seed context carrying the live `session.model` (see
+    // [`apply_model_context_modifiers`]). Empty for every tool that returns
+    // `context_modifier: None` (every existing tool + skills WITHOUT a `model:`
+    // frontmatter) → the caller does NOTHING → byte-identical.
+    let mut context_modifiers: Vec<ContextModifier> = Vec::new();
     for (tool_use_id, name, input) in tool_uses {
         orch.output.emit_tool_call(tool_use_id, name, input).await;
 
@@ -1175,14 +1198,16 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // (the expanded skill prompt); empty for every other tool, so
                 // the locked turn-loop fixtures stay byte-identical.
                 injected_messages.extend(result.new_messages);
-                // `result.context_modifier` is intentionally DROPPED here.
-                // The `ToolUseContext` is rebuilt fresh per tool from `orch`
-                // state at the top of this loop (see the `let ctx = ToolUseContext
-                // { … }` synthesis above), so a one-shot mutator could not
-                // persist to subsequent tools in the turn anyway. Applying it to
-                // the about-to-be-discarded per-tool `ctx` would be a no-op
-                // theatre. Honoring `context_modifier` requires turning `ctx`
-                // into a turn-persistent value first — scoped out (see report).
+                // SKILLEXEC.3 (model scope): stash any one-shot `context_modifier`
+                // for the caller to fold POST-BATCH. NOT applied to the per-tool
+                // `ctx` here (which is discarded at loop end) and NOT applied
+                // per-tool — folding after the whole batch gives the concurrent
+                // streaming path a single, race-free application point. `None`
+                // for every existing tool + skills WITHOUT a `model:` frontmatter,
+                // so this is a strict no-op there (byte-identical).
+                if let Some(modifier) = result.context_modifier {
+                    context_modifiers.push(modifier);
+                }
                 (text, false, result.data)
             }
             Err(err) => {
@@ -1405,7 +1430,47 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             is_error,
         });
     }
-    Ok((results, prevent_continuation, injected_messages))
+    Ok((
+        results,
+        prevent_continuation,
+        injected_messages,
+        context_modifiers,
+    ))
+}
+
+/// SKILLEXEC.3 (model scope): fold a tool batch's `context_modifier`s over a
+/// seed context carrying the live `session.model`, then persist the resolved
+/// model back to `session.model` when it changed (TS `contextModifier` sets
+/// `options.mainLoopModel` for the rest of the session).
+///
+/// Called POST-BATCH by BOTH drivers (the batched [`execute_one_turn`] and the
+/// streaming `try_run_turn_streaming`) at the same point they append injected
+/// `new_messages`. Applying after the whole batch — rather than per tool —
+/// gives the concurrent streaming dispatch a SINGLE application point, so there
+/// is no race on `session.model` between concurrently-dispatched tools.
+///
+/// Empty `modifiers` (every existing tool + skills WITHOUT a `model:`
+/// frontmatter) → an early return that never touches the session lock →
+/// `session.model` is unchanged → byte-identical. The model override then
+/// persists: subsequent turns read the new `session.model` (TS sets
+/// `options.mainLoopModel` for the rest of the session).
+pub(crate) async fn apply_model_context_modifiers(
+    orch: &ConversationOrchestrator,
+    modifiers: Vec<ContextModifier>,
+) {
+    if modifiers.is_empty() {
+        return;
+    }
+    let mut s = orch.session.lock().await;
+    let current = s.model.clone();
+    let resolved = modifiers
+        .into_iter()
+        .fold(ToolUseContext::model_seed(current.clone()), |ctx, m| m(ctx))
+        .options
+        .main_loop_model;
+    if resolved != current {
+        s.model = resolved;
+    }
 }
 
 /// Serialize a successful tool result's data into the model-facing string.
@@ -2517,7 +2582,7 @@ mod pre_tool_hook_tests {
             PathBuf::from("/tmp"),
         );
         let uses = vec![(ToolUseId::new(), "Inject".to_string(), json!({}))];
-        let (results, _prevent, injected) =
+        let (results, _prevent, injected, _mods) =
             dispatch_tool_uses_tracked(&orch, &uses).await.unwrap();
         // The tool_result block still rides the first tuple element.
         let (content, is_error) = tool_result(&results[0]);
@@ -2589,7 +2654,7 @@ mod pre_tool_hook_tests {
             Arc::new(crate::test_support::NoOpPermissionGate),
             vec![],
         );
-        let (_results, _prevent, injected) =
+        let (_results, _prevent, injected, _mods) =
             dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
         assert!(
             injected.is_empty(),
@@ -2612,7 +2677,7 @@ mod pre_tool_hook_tests {
             Arc::new(crate::test_support::NoOpPermissionGate),
             vec![],
         );
-        let (results, prevent, _injected) =
+        let (results, prevent, _injected, _mods) =
             dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
         assert!(!prevent);
         let (content, is_error) = tool_result(&results[0]);
@@ -2637,7 +2702,7 @@ mod pre_tool_hook_tests {
             Arc::new(crate::test_support::NoOpPermissionGate),
             vec![],
         );
-        let (_results, prevent, _injected) =
+        let (_results, prevent, _injected, _mods) =
             dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
         assert!(prevent, "continue:false must surface as prevent_continuation");
     }
@@ -2706,7 +2771,7 @@ mod pre_tool_hook_tests {
             ..HookResponse::default()
         };
         let orch = orch_with(pre_hook_executor(resp), Arc::new(DenyAllGate), vec![]);
-        let (results, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(!is_error, "hook allow bypassed the deny gate; tool ran");
         assert!(content.contains("ECHOED-OUTPUT"));
@@ -2727,7 +2792,7 @@ mod pre_tool_hook_tests {
             Arc::new(crate::test_support::NoOpPermissionGate),
             vec![],
         );
-        let (results, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert!(content.contains("Hook blocked: nope"));
@@ -2742,7 +2807,7 @@ mod pre_tool_hook_tests {
             Arc::new(DenyAllGate),
             vec![],
         );
-        let (results, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "gate denial applies when the hook makes no decision");
         assert!(content.contains("Permission denied: denied-by-gate"));

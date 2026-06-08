@@ -476,6 +476,10 @@ impl Tool for SkillTool {
             "descriptor_truncated": truncated,
             "model_content": format!("Launching skill: {command_name}"),
         });
+        // Capture the model override BEFORE `desc.model` is moved into the
+        // result JSON below — it feeds the SKILLEXEC.3 `context_modifier`.
+        let model_override = desc.model.clone();
+
         let obj = data.as_object_mut().expect("json object");
         if !desc.allowed_tools.is_empty() {
             obj.insert(
@@ -490,10 +494,29 @@ impl Tool for SkillTool {
             obj.insert("args".into(), Value::String(args));
         }
 
+        // SKILLEXEC.3 (model scope): when the skill declares `model:` in its
+        // frontmatter, return a `context_modifier` that switches the session's
+        // main-loop model for the rest of the session — 1:1 with TS
+        // `SkillTool.ts:808-821` (`contextModifier` sets `options.mainLoopModel
+        // = resolveSkillModelOverride(model, ctx.options.mainLoopModel)`),
+        // including the `[1m]`-suffix preservation rule. The turn loop seeds the
+        // closure's `ctx` with the live `session.model` (the `currentModel`
+        // argument) and folds it POST-BATCH. When `model` is absent the modifier
+        // stays `None`, so the no-override path is byte-identical.
+        let context_modifier: Option<tool_api::ContextModifier> =
+            model_override.map(|model| -> tool_api::ContextModifier {
+                Box::new(move |mut ctx: ToolUseContext| {
+                    let current = ctx.options.main_loop_model.clone();
+                    ctx.options.main_loop_model =
+                        crate::model_override::resolve_skill_model_override(&model, &current);
+                    ctx
+                })
+            });
+
         Ok(ToolCallResult {
             data,
             new_messages,
-            context_modifier: None,
+            context_modifier,
             mcp_meta: None,
         })
     }
@@ -672,6 +695,69 @@ mod tests {
         assert!(out.data.get("model").is_none());
         assert!(out.data.get("allowedTools").is_none());
         assert_eq!(out.data["body"], json!("body here"));
+    }
+
+    #[tokio::test]
+    async fn model_frontmatter_returns_context_modifier_switching_main_loop_model() {
+        // SKILLEXEC.3 (model scope): a skill with `model:` returns a
+        // `context_modifier` that switches the turn's main-loop model. Here the
+        // seed `ctx` (fresh_ctx → main_loop_model "test", no `[1m]`) has no 1M
+        // suffix, so the resolved model is the bare override.
+        let desc = SkillDescriptor {
+            model: Some("claude-opus-4-6".into()),
+            ..prompt_desc("switcher")
+        };
+        let tool =
+            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let out = tool
+            .call(json!({"skill": "switcher"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        let modifier = out
+            .context_modifier
+            .expect("a skill with model: returns a context_modifier");
+        let modified = modifier(fresh_ctx());
+        assert_eq!(modified.options.main_loop_model, "claude-opus-4-6");
+    }
+
+    #[tokio::test]
+    async fn model_frontmatter_modifier_preserves_1m_suffix() {
+        // When the session is on `[1m]` and the skill's family supports 1M, the
+        // suffix is carried over (TS resolveSkillModelOverride).
+        let desc = SkillDescriptor {
+            model: Some("claude-sonnet-4-6".into()),
+            ..prompt_desc("switcher")
+        };
+        let tool =
+            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let out = tool
+            .call(json!({"skill": "switcher"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        let modifier = out.context_modifier.expect("context_modifier present");
+        let mut seed = fresh_ctx();
+        seed.options.main_loop_model = "claude-opus-4-6[1m]".into();
+        let modified = modifier(seed);
+        assert_eq!(modified.options.main_loop_model, "claude-sonnet-4-6[1m]");
+    }
+
+    #[tokio::test]
+    async fn no_model_frontmatter_returns_no_context_modifier() {
+        // Byte-identical guard: a skill WITHOUT a `model:` frontmatter returns
+        // `context_modifier: None`, so the turn loop's no-override path is
+        // untouched (session.model never changes).
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(prompt_desc("plain")))),
+        );
+        let out = tool
+            .call(json!({"skill": "plain"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert!(
+            out.context_modifier.is_none(),
+            "no model: frontmatter → no context_modifier (byte-identical)"
+        );
     }
 
     #[tokio::test]

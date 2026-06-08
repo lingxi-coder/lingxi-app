@@ -325,6 +325,9 @@ struct MockWtInner {
     /// `None` (the default) → the trait default behavior (`Ok(None)`,
     /// fail-closed "unknown"). `Some(Some(..))` → that summary; `Some(None)`
     /// → an explicit fail-closed `Ok(None)`.
+    /// The triple-state `Option<Option<_>>` is intentional (unset vs scripted
+    /// `Some` vs scripted `None`), so the `option_option` lint is suppressed.
+    #[allow(clippy::option_option)]
     scripted_change_summary: Option<Option<WorktreeChangeSummary>>,
 }
 

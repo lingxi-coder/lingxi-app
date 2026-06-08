@@ -213,6 +213,16 @@ pub enum InterruptBehavior {
     Block,
 }
 
+/// A one-shot mutator a tool returns to adjust the turn's [`ToolUseContext`] —
+/// the Rust twin of claude-code's `ToolResult.contextModifier`.
+///
+/// The turn loop folds a tool batch's modifiers POST-DISPATCH over a seed
+/// context and reads the result back (SKILLEXEC.3, model scope: a Skill tool's
+/// `model:` frontmatter switches the session's main-loop model for the rest of
+/// the session). `Send` so the streaming concurrent dispatch can collect them
+/// across `.await` points.
+pub type ContextModifier = Box<dyn FnOnce(ToolUseContext) -> ToolUseContext + Send>;
+
 /// Result of a successful [`Tool::call`].
 ///
 /// `data` is the JSON payload returned to the model. `new_messages` carries
@@ -226,7 +236,7 @@ pub struct ToolCallResult {
     /// Extra conversation messages to inject after this call.
     pub new_messages: Vec<protocol::ConversationMessage>,
     /// Optional one-shot mutator for the [`ToolUseContext`].
-    pub context_modifier: Option<Box<dyn FnOnce(ToolUseContext) -> ToolUseContext + Send>>,
+    pub context_modifier: Option<ContextModifier>,
     /// Opaque per-call metadata (used by MCP tools).
     pub mcp_meta: Option<serde_json::Value>,
 }

@@ -164,3 +164,295 @@ async fn pump_turn_is_a_noop_when_nothing_is_pending() {
     assert!(!spawned);
     assert!(st.lock().await.cancel_token.is_none());
 }
+
+// ============================================================================
+// TUI live-loop slash-command routing: /clear, /exit, /quit, /compact.
+//
+// The four immediate local commands claude-code `handlePromptSubmit` (~229)
+// executes inline on a leading-slash submit. `/clear`/`/exit`/`/quit` are fully
+// SYNCHRONOUS in `dispatch(Submit)`; `/compact` is ASYNC via `pump_compact`.
+// ============================================================================
+
+mod slash_routing {
+    use super::*;
+
+    use iocraft::prelude::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use orchestrator::test_support::MockOrchestratorHandle;
+    use traits::CompactionSummary;
+
+    use tui::root::{handle_live_key, pump_compact};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        let mut k = KeyEvent::new(KeyEventKind::Press, code);
+        k.modifiers = KeyModifiers::NONE;
+        k
+    }
+
+    // ---- dispatch-level: each command's sync effect + turn suppression ----
+
+    #[test]
+    fn slash_clear_empties_messages_and_suppresses_turn() {
+        let mut st = fresh_state();
+        st.push_message(RenderedMessage::AssistantText {
+            body: "stale".into(),
+            timestamp: 0,
+        });
+        st.scroll_offset = 7;
+        st.prompt_text = "/clear".to_string();
+        st.prompt_cursor = st.prompt_text.len();
+
+        let runs_turn = dispatch(KeyAction::Submit, &mut st);
+
+        assert!(!runs_turn, "/clear must suppress the turn");
+        assert!(st.messages.is_empty(), "/clear wipes the scrollback");
+        assert_eq!(st.scroll_offset, 0, "/clear resets the scroll offset");
+        assert!(st.prompt_text.is_empty(), "prompt buffer cleared");
+        assert_eq!(st.prompt_cursor, 0);
+        assert!(st.pending_turn.is_none(), "no turn queued");
+    }
+
+    #[test]
+    fn slash_clear_with_trailing_space_from_palette_accept_still_fires() {
+        // The palette Accept path rewrites the buffer to "/clear " (trailing
+        // space). The `.trim()` match must still intercept it.
+        let mut st = fresh_state();
+        st.push_message(RenderedMessage::AssistantText {
+            body: "stale".into(),
+            timestamp: 0,
+        });
+        st.prompt_text = "/clear ".to_string();
+        st.prompt_cursor = st.prompt_text.len();
+
+        let runs_turn = dispatch(KeyAction::Submit, &mut st);
+
+        assert!(!runs_turn);
+        assert!(st.messages.is_empty());
+        assert!(st.prompt_text.is_empty());
+    }
+
+    #[test]
+    fn slash_exit_sets_should_exit_and_suppresses_turn() {
+        let mut st = fresh_state();
+        st.prompt_text = "/exit".to_string();
+        st.prompt_cursor = st.prompt_text.len();
+
+        let runs_turn = dispatch(KeyAction::Submit, &mut st);
+
+        assert!(!runs_turn, "/exit must suppress the turn");
+        assert!(st.should_exit, "/exit flips should_exit");
+        assert!(st.prompt_text.is_empty());
+        assert!(st.pending_turn.is_none());
+    }
+
+    #[test]
+    fn slash_quit_alias_sets_should_exit_and_suppresses_turn() {
+        let mut st = fresh_state();
+        st.prompt_text = "/quit".to_string();
+        st.prompt_cursor = st.prompt_text.len();
+
+        let runs_turn = dispatch(KeyAction::Submit, &mut st);
+
+        assert!(!runs_turn, "/quit (the /exit alias) must suppress the turn");
+        assert!(st.should_exit, "/quit flips should_exit");
+        assert!(st.prompt_text.is_empty());
+        assert!(st.pending_turn.is_none());
+    }
+
+    #[test]
+    fn slash_compact_raises_pending_compact_and_suppresses_turn() {
+        let mut st = fresh_state();
+        st.prompt_text = "/compact".to_string();
+        st.prompt_cursor = st.prompt_text.len();
+
+        let runs_turn = dispatch(KeyAction::Submit, &mut st);
+
+        assert!(!runs_turn, "/compact must suppress the turn");
+        assert!(st.pending_compact, "/compact raises pending_compact");
+        assert!(st.prompt_text.is_empty());
+        assert!(st.pending_turn.is_none(), "no streaming turn queued");
+    }
+
+    #[test]
+    fn plain_prompt_mentioning_clear_still_runs_a_turn() {
+        // SAFETY INVARIANT: an ordinary prompt that merely MENTIONS a command
+        // word is NOT intercepted — it runs a normal turn.
+        let mut st = fresh_state();
+        st.prompt_text = "please clear the build cache".to_string();
+        st.prompt_cursor = st.prompt_text.len();
+
+        let runs_turn = dispatch(KeyAction::Submit, &mut st);
+
+        assert!(runs_turn, "a plain prompt must run a turn");
+        assert_eq!(
+            st.pending_turn.as_deref(),
+            Some("please clear the build cache")
+        );
+        assert!(!st.should_exit, "a plain prompt never flips should_exit");
+        assert!(
+            !st.pending_compact,
+            "a plain prompt never raises pending_compact"
+        );
+        assert!(matches!(
+            st.messages.last(),
+            Some(RenderedMessage::UserText { body, .. })
+                if body == "please clear the build cache"
+        ));
+    }
+
+    // ---- live-key level: drive the real `handle_live_key` (palette + Enter) --
+
+    #[test]
+    fn live_clear_reaches_dispatch_via_palette_accept_two_enters() {
+        // `/clear` HAS a palette row → first Enter is owned by the palette
+        // (Accept rewrites the buffer to "/clear " + closes it); the second
+        // Enter reaches dispatch where the `.trim()` match fires.
+        let mut st = fresh_state();
+        st.push_message(RenderedMessage::AssistantText {
+            body: "stale".into(),
+            timestamp: 0,
+        });
+        for ch in "/clear".chars() {
+            handle_live_key(&mut st, &key(KeyCode::Char(ch)), 24);
+        }
+        assert!(st.palette.open, "/clear opens the palette");
+        assert!(
+            st.palette.rows().iter().any(|r| r.name == "clear"),
+            "the palette has a clear row"
+        );
+
+        // First Enter: palette Accept rewrites to "/clear " and closes.
+        handle_live_key(&mut st, &key(KeyCode::Enter), 24);
+        assert_eq!(st.prompt_text, "/clear ");
+        assert!(!st.palette.open, "palette closed after Accept");
+        assert!(
+            !st.messages.is_empty(),
+            "first Enter does NOT clear yet (it only completed the palette)"
+        );
+
+        // Second Enter: reaches dispatch → `/clear` fires.
+        handle_live_key(&mut st, &key(KeyCode::Enter), 24);
+        assert!(st.messages.is_empty(), "second Enter ran /clear");
+        assert!(st.prompt_text.is_empty());
+    }
+
+    #[test]
+    fn live_exit_reaches_dispatch_via_palette_accept_two_enters() {
+        let mut st = fresh_state();
+        for ch in "/exit".chars() {
+            handle_live_key(&mut st, &key(KeyCode::Char(ch)), 24);
+        }
+        assert!(st.palette.open);
+        assert!(st.palette.rows().iter().any(|r| r.name == "exit"));
+
+        handle_live_key(&mut st, &key(KeyCode::Enter), 24);
+        assert_eq!(st.prompt_text, "/exit ");
+        assert!(!st.palette.open);
+        assert!(!st.should_exit, "first Enter only completed the palette");
+
+        handle_live_key(&mut st, &key(KeyCode::Enter), 24);
+        assert!(st.should_exit, "second Enter ran /exit");
+        assert!(st.prompt_text.is_empty());
+    }
+
+    #[test]
+    fn live_quit_submits_on_a_single_enter_no_palette_match() {
+        // No builtin command name contains 'q', so the fuzzy filter yields zero
+        // rows → palette Enter is PassThrough → dispatch fires on the FIRST Enter.
+        let mut st = fresh_state();
+        for ch in "/quit".chars() {
+            handle_live_key(&mut st, &key(KeyCode::Char(ch)), 24);
+        }
+        assert!(st.palette.open, "the leading / opens the palette");
+        assert!(
+            st.palette.rows().is_empty(),
+            "no name matches 'quit' → zero rows"
+        );
+
+        handle_live_key(&mut st, &key(KeyCode::Enter), 24);
+        assert!(st.should_exit, "single Enter ran /quit");
+        assert!(st.prompt_text.is_empty());
+    }
+
+    // ---- pump level: pump_compact runs force_compact + pushes a boundary -----
+
+    #[tokio::test]
+    async fn pump_compact_runs_force_compact_and_pushes_compact_boundary() {
+        let mock = Arc::new(MockOrchestratorHandle::new());
+        mock.set_compact_summary(CompactionSummary {
+            messages_before: 42,
+            messages_after: 6,
+            bytes_saved: 1234,
+        });
+        let handle: Arc<dyn OrchestratorHandle> = mock;
+
+        let st = Arc::new(Mutex::new(fresh_state()));
+        st.lock().await.pending_compact = true;
+
+        let ran = pump_compact(&st, &handle).await;
+
+        assert!(ran, "pump_compact runs when pending_compact is set");
+        let g = st.lock().await;
+        assert!(!g.pending_compact, "flag consumed so it does not re-run");
+        // Mirrors the bridge `CompactionCompleted` handler: a CompactBoundary
+        // carrying the summary counts.
+        assert!(matches!(
+            g.messages.last(),
+            Some(RenderedMessage::CompactBoundary {
+                messages_before: 42,
+                messages_after: 6,
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn pump_compact_pushes_error_system_text_on_failure() {
+        let mock = Arc::new(MockOrchestratorHandle::new());
+        mock.set_compact_error("model 429".to_string());
+        let handle: Arc<dyn OrchestratorHandle> = mock;
+
+        let st = Arc::new(Mutex::new(fresh_state()));
+        st.lock().await.pending_compact = true;
+
+        let ran = pump_compact(&st, &handle).await;
+
+        assert!(ran);
+        let g = st.lock().await;
+        assert!(matches!(
+            g.messages.last(),
+            Some(RenderedMessage::SystemText { is_error: true, body, .. })
+                if body.starts_with("Could not compact:")
+        ));
+    }
+
+    #[tokio::test]
+    async fn pump_compact_is_a_noop_while_a_screen_owns_the_surface() {
+        let st = Arc::new(Mutex::new(fresh_state()));
+        {
+            let mut g = st.lock().await;
+            g.pending_compact = true;
+            // A full-page screen owns the surface (priority 2).
+            g.active_screen = Some(tui::screens::Screen::Help(
+                tui::screens::help::HelpState::new(),
+            ));
+        }
+
+        let ran = pump_compact(&st, &handle()).await;
+
+        assert!(!ran, "pump_compact must not run over an open screen");
+        let g = st.lock().await;
+        assert!(
+            g.pending_compact,
+            "flag left set so a later tick retries once the screen closes"
+        );
+        // No boundary / error pushed.
+        assert!(g.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pump_compact_is_a_noop_when_nothing_is_pending() {
+        let st = Arc::new(Mutex::new(fresh_state()));
+        let ran = pump_compact(&st, &handle()).await;
+        assert!(!ran);
+        assert!(st.lock().await.messages.is_empty());
+    }
+}

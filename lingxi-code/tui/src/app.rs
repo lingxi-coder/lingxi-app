@@ -350,6 +350,47 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
                 crate::telemetry::screen_opened("help");
                 return false;
             }
+            // (`/clear`/`/exit`/`/quit`/`/compact`) The four immediate local
+            // commands claude-code `handlePromptSubmit` (~229) executes inline on
+            // a leading-slash submit: each runs its action, clears the prompt
+            // buffer, and returns WITHOUT queuing a turn — exactly the stdio
+            // `handle_submit_line` "clear"/"exit"/"quit" branches, lifted onto the
+            // live submit path. We `.trim()` the bare name in every match because
+            // the palette Accept path rewrites the buffer to e.g. "/clear " (with
+            // a trailing space) before the second Enter reaches `dispatch`.
+            //
+            // `/clear` wipes the scrollback + resets the scroll offset (the exact
+            // fields the stdio "clear" branch around `handle_submit_line` uses).
+            // `/exit` / `/quit` (the claude-code `commands/exit` alias) flip
+            // `should_exit` — the same flag the Ctrl-C/Ctrl-D quit path + the
+            // stdio "exit"/"quit" branch use. `/compact` is the lone ASYNC one:
+            // `force_compact` needs the `OrchestratorHandle` the sync seam can't
+            // `.await`, so we RAISE `pending_compact`; `root::pump_compact` runs
+            // it OUTSIDE the lock. The `crates/commands` clear/exit/compact
+            // handlers stay the `--no-tui` text path, untouched. No echo, no turn.
+            if st.prompt_text.trim() == "/clear" {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.messages.clear();
+                st.scroll_offset = 0;
+                return false;
+            }
+            if matches!(st.prompt_text.trim(), "/exit" | "/quit") {
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.should_exit = true;
+                return false;
+            }
+            if st.prompt_text.trim() == "/compact" {
+                // The `/compact <instructions>` arg form is OUT OF SCOPE here: the
+                // frozen `OrchestratorHandle::force_compact()` takes no
+                // instructions arg, so only the bare `/compact` is intercepted; an
+                // arg form falls through to the registry text handler.
+                st.prompt_text.clear();
+                st.prompt_cursor = 0;
+                st.pending_compact = true;
+                return false;
+            }
             // (`/color`) Set the prompt-bar agent color for this session. An
             // IMMEDIATE arg command (claude-code `immediate: true`, NOT a
             // screen): parse the arg, push the `system` display, set the

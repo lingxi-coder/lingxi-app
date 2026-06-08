@@ -1368,9 +1368,16 @@ pub async fn build(
     // `build()` returns, so the loader never reads the empty registry.
     let shared_command_registry: Arc<RwLock<CommandRegistry>> =
         Arc::new(RwLock::new(CommandRegistry::new()));
-    let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = Arc::new(
-        skill_loader::CommandRegistrySkillLoader::new(shared_command_registry.clone()),
-    );
+    // SKILLEXEC: the per-session id stamped onto every resolved skill descriptor
+    // so the `Skill` tool substitutes `${CLAUDE_SESSION_ID}` in the body (TS
+    // `getSessionId()`, a per-process session value). Generated once here at build
+    // time; format mirrors the engine's `SessionId` Display (`sess:<uuid>`).
+    let skill_session_id = protocol::SessionId::new().to_string();
+    let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> =
+        Arc::new(skill_loader::CommandRegistrySkillLoader::with_session_id(
+            shared_command_registry.clone(),
+            skill_session_id,
+        ));
     register_desktop_tools(
         &mut tools_inner,
         tool_ctx,

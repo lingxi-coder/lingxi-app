@@ -1194,6 +1194,77 @@ pub async fn pump_switch_model(
     true
 }
 
+/// (`/compact`) Async forced-compaction pump.
+///
+/// Mirrors `pump_switch_model` (handle-backed, pushes a result message): the
+/// sync `/compact` submit path raises `AppState.pending_compact = true` (it
+/// can't `.await OrchestratorHandle::force_compact`). This pump — driven by the
+/// same 100ms ticker `use_future` — observes the flag, runs `force_compact`
+/// OUTSIDE the lock, then folds the outcome into the scrollback:
+///   - `Ok(summary)` → a `RenderedMessage::CompactBoundary` built EXACTLY the
+///     way the bridge `CompactionCompleted` handler in `streaming.rs`
+///     constructs it (`messages_before` / `messages_after` from the summary),
+///     so the rendered surface (`✻ Conversation compacted …`) is identical.
+///   - `Err(e)` → an `is_error` `SystemText` matching the established
+///     `Could not compact: {msg}` wording (the `crates/commands` `CompactHandler`
+///     failure display + the `--no-tui` text path).
+///
+/// `/compact <instructions>` (a non-empty arg form) is OUT OF SCOPE: the frozen
+/// `OrchestratorHandle::force_compact()` takes no instructions arg, so the sync
+/// intercept only fires for the bare `/compact`.
+///
+/// **Priority guard (parent spec §2.5):** the compaction NEVER runs while a
+/// permission dialog (priority 1) or a full-page screen (priority 2) owns the
+/// surface, or while a turn is streaming — in those cases the flag is left set
+/// and a later tick retries. Returns `true` iff a compaction was attempted (the
+/// caller bumps the redraw tick).
+pub async fn pump_compact(
+    state: &Arc<Mutex<AppState>>,
+    handle: &Arc<dyn traits::OrchestratorHandle>,
+) -> bool {
+    // 1) Take the request under the lock, respecting priority + single-turn.
+    {
+        let mut st = state.lock().await;
+        if !st.pending_compact {
+            return false;
+        }
+        if st.pending_permission.is_some()
+            || st.active_screen.is_some()
+            || st.streaming.is_some()
+        {
+            // Priority 1/2 own the surface, or a turn is already in flight:
+            // leave the flag set and retry on a later tick.
+            return false;
+        }
+        st.pending_compact = false;
+    }
+
+    // 2) Run the compaction OUTSIDE the lock.
+    let result = handle.force_compact().await;
+
+    // 3) Re-acquire the lock and fold the outcome into the scrollback.
+    let mut st = state.lock().await;
+    match result {
+        Ok(summary) => {
+            // Mirror the bridge `CompactionCompleted` handler (streaming.rs):
+            // a `CompactBoundary` carrying the before/after counts → the UI
+            // renders `✻ Conversation compacted (ctrl+o for history)`.
+            st.push_message(crate::state::RenderedMessage::CompactBoundary {
+                messages_before: summary.messages_before,
+                messages_after: summary.messages_after,
+            });
+        }
+        Err(e) => {
+            st.push_message(crate::state::RenderedMessage::SystemText {
+                body: format!("Could not compact: {e}"),
+                timestamp: chrono::Utc::now().timestamp(),
+                is_error: true,
+            });
+        }
+    }
+    true
+}
+
 /// (M9-10) Async usage-stats open pump.
 ///
 /// Mirrors `pump_open_agents`, but needs NO `OrchestratorHandle`: the data is a
@@ -1852,6 +1923,15 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                         needs_redraw = true;
                     }
                     if pump_switch_model(&state, handle).await {
+                        needs_redraw = true;
+                    }
+                    // (`/compact`) Forced-compaction pump — handle-backed
+                    // (`force_compact`), so it shares the wired-handle block. When
+                    // a `/compact` submit raised `pending_compact` this runs the
+                    // compaction and folds a `CompactBoundary` (or error
+                    // `SystemText`) into the scrollback, under the same
+                    // permission/screen/streaming priority guard.
+                    if pump_compact(&state, handle).await {
                         needs_redraw = true;
                     }
                 }

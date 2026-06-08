@@ -22,13 +22,15 @@ use crate::hook_payload::{
     HookEventNamePostToolUseFailure, HookEventNamePre, HookEventNamePreCompact,
     HookEventNameSessionEnd, HookEventNameSessionStart, HookEventNameSetup, HookEventNameStop,
     HookEventNameStopFailure, HookEventNameSubagentStart, HookEventNameSubagentStop,
-    HookEventNameTaskCompleted, HookEventNameUserPromptSubmit, HookEventNameWorktreeCreate,
+    HookEventNameTaskCompleted, HookEventNameTaskCreated, HookEventNameUserPromptSubmit,
+    HookEventNameWorktreeCreate,
     HookEventNameWorktreeRemove, InstructionsLoadedPayload, NotificationPayload,
     PermissionDeniedPayload, PermissionRequestPayload, PostCompactPayload,
     PostToolUseFailurePayload, PostToolUsePayload,
     PreCompactPayload, PreToolUsePayload, SessionEndPayload, SessionStartPayload, SetupPayload,
     StopFailurePayload, StopPayload, SubagentStartPayload, SubagentStopPayload,
-    TaskCompletedPayload, UserPromptSubmitPayload, WorktreeCreatePayload, WorktreeRemovePayload,
+    TaskCompletedPayload, TaskCreatedPayload, UserPromptSubmitPayload, WorktreeCreatePayload,
+    WorktreeRemovePayload,
 };
 use crate::http_executor::{HttpExecutionSignal, HttpExecutor};
 use crate::prompt_executor::{
@@ -679,9 +681,10 @@ impl BaseHookFields {
 /// `HookEvent` variant lacked a field to source a *required* wire value — now
 /// carry those fields and serialize faithfully. `PermissionDenied` is likewise
 /// ported here (the hook-firing batch extended its variant with `tool_input` /
-/// `tool_use_id`). Every remaining (not-yet-ported) variant — `TeammateIdle`,
-/// `TaskCreated`, `ElicitationResult` — returns `None` until its wire schema is
-/// ported.
+/// `tool_use_id`). `TaskCreated` is now serialized too (mirroring the
+/// `TaskCompleted` arm, fired through the `TaskCreatedFirer` seam). Every
+/// remaining (not-yet-ported) variant — `TeammateIdle`, `ElicitationResult` —
+/// returns `None` until its wire schema is ported.
 #[allow(
     clippy::too_many_lines,
     reason = "per-event payload construction fan-out — splitting hurts readability"
@@ -744,6 +747,35 @@ fn build_lifecycle_envelope_body(
                 team_name: team_name.clone(),
             };
             Some(("TaskCompleted", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::TaskCreated {
+            task_id,
+            task_type,
+            description,
+        } => {
+            // `executeTaskCreatedHooks` (`utils/hooks.ts:3756-3764`): the wire
+            // payload carries `task_subject` (required) + optional
+            // `task_description` / `teammate_name` / `team_name`. The Rust
+            // `TaskCreated` variant sources the subject from the task's
+            // `task_type` taxonomy bucket and the description from
+            // `description`; `teammate_name` / `team_name` are not stored on the
+            // task state, so they ride as `None` (same documented gap as the
+            // `TaskCompleted` arm).
+            let payload = TaskCreatedPayload {
+                hook_event_name: HookEventNameTaskCreated,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                task_id: task_id.clone(),
+                task_subject: task_type.clone(),
+                task_description: Some(description.clone()),
+                teammate_name: None,
+                team_name: None,
+            };
+            Some(("TaskCreated", serde_json::to_string(&payload).ok()?))
         }
         HookEvent::UserPromptSubmit { prompt } => {
             let payload = UserPromptSubmitPayload {
@@ -2166,18 +2198,15 @@ mod command_arm_tests {
         // The deferred-completion batch ported the final four events that lacked
         // a field to source a *required* wire value; the hook-firing batch then
         // ported `PermissionDenied` (extending its `HookEvent` variant with
-        // `tool_input` / `tool_use_id`). The events still without a ported wire
-        // schema (`TeammateIdle` / `TaskCreated` / `ElicitationResult`) must
-        // continue to fall through to `None` until their schema is ported.
+        // `tool_input` / `tool_use_id`), and the lifecycle-firing batch ported
+        // `TaskCreated` (fired through the `TaskCreatedFirer` seam, mirroring
+        // `TaskCompleted`). The events still without a ported wire schema
+        // (`TeammateIdle` / `ElicitationResult`) must continue to fall through
+        // to `None` until their schema is ported.
         let ctx = HookContext::default();
         let unported = vec![
             HookEvent::TeammateIdle {
                 agent_id: protocol::AgentId::new(),
-            },
-            HookEvent::TaskCreated {
-                task_id: "t-1".into(),
-                task_type: "general".into(),
-                description: "do it".into(),
             },
             HookEvent::ElicitationResult {
                 server_name: "srv".into(),
@@ -2218,6 +2247,14 @@ mod command_arm_tests {
                     team_name: None,
                 },
                 "TaskCompleted",
+            ),
+            (
+                HookEvent::TaskCreated {
+                    task_id: "t".into(),
+                    task_type: "LocalBash".into(),
+                    description: "do the work".into(),
+                },
+                "TaskCreated",
             ),
             (
                 HookEvent::UserPromptSubmit { prompt: "p".into() },

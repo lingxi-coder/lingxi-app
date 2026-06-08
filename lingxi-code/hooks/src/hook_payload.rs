@@ -91,6 +91,7 @@ macro_rules! hook_event_name_marker {
 hook_event_name_marker!(HookEventNameStop, "Stop");
 hook_event_name_marker!(HookEventNameSubagentStop, "SubagentStop");
 hook_event_name_marker!(HookEventNameTaskCompleted, "TaskCompleted");
+hook_event_name_marker!(HookEventNameTaskCreated, "TaskCreated");
 hook_event_name_marker!(HookEventNameUserPromptSubmit, "UserPromptSubmit");
 hook_event_name_marker!(HookEventNameSessionStart, "SessionStart");
 hook_event_name_marker!(HookEventNameStopFailure, "StopFailure");
@@ -210,6 +211,35 @@ pub struct SubagentStopPayload {
 #[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
 pub struct TaskCompletedPayload {
     pub hook_event_name: HookEventNameTaskCompleted,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub task_id: String,
+    pub task_subject: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub task_description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub teammate_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub team_name: Option<String>,
+}
+
+/// Wire-format `TaskCreated` payload (1:1 with `coreSchemas.ts:601-612`
+/// `TaskCreatedHookInputSchema`; constructed at `utils/hooks.ts:3756-3764`).
+///
+/// Field set mirrors `TaskCompletedPayload` exactly (`task_id` / `task_subject`
+/// required, `task_description` / `teammate_name` / `team_name` optional) — the
+/// two schemas differ only in their `hook_event_name` literal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct TaskCreatedPayload {
+    pub hook_event_name: HookEventNameTaskCreated,
     pub session_id: String,
     pub transcript_path: String,
     pub cwd: String,
@@ -1164,6 +1194,29 @@ mod tests {
         assert_eq!(
             s,
             r#"{"hook_event_name":"TaskCompleted","session_id":"s","transcript_path":"/t","cwd":"/w","task_id":"t1","task_subject":"subj","task_description":"desc","teammate_name":"alice","team_name":"core"}"#
+        );
+    }
+
+    #[test]
+    fn task_created_payload_serializes_byte_lock() {
+        let p = TaskCreatedPayload {
+            hook_event_name: HookEventNameTaskCreated,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            task_id: "task-42".into(),
+            task_subject: "LocalBash".into(),
+            task_description: Some("do the work".into()),
+            teammate_name: None,
+            team_name: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            s,
+            r#"{"hook_event_name":"TaskCreated","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","task_id":"task-42","task_subject":"LocalBash","task_description":"do the work"}"#
         );
     }
 

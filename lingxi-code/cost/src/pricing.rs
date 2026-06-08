@@ -655,6 +655,57 @@ impl PricingCatalog {
             },
         }
     }
+
+    /// COST.3 — the Opus 4.6 **fast-mode** pricing tier ($30 in / $150 out /
+    /// $37.5 cache-write / $3 cache-read per Mtok, web search $0.01/request).
+    ///
+    /// Mirrors claude-code `COST_TIER_30_150` (`utils/modelCost.ts:62-69`),
+    /// which `getModelCosts` returns for `CLAUDE_OPUS_4_6` when
+    /// `usage.speed === 'fast'` (`modelCost.ts:94-99,144-153`). The catalog is
+    /// keyed only on `(provider, model)`, so the speed-dependent tier cannot
+    /// live as a second catalog entry; instead the calculator
+    /// ([`crate::calculator::CostCalculator::calculate_nano_usd`]) swaps in
+    /// these rates when it sees an `opus-4-6` + [`crate::usage::ApiSpeed::Fast`]
+    /// usage record. Rates are nano-USD per token (= milli-USD per Mtok).
+    #[must_use]
+    pub fn opus_4_6_fast_pricing(mr: &ModelRef) -> ModelPricing {
+        let mut rates: HashMap<TokenClass, MoneyPerToken> = HashMap::new();
+        rates.insert(
+            TokenClass::Input,
+            MoneyPerToken {
+                nano_usd_per_token: 30_000,
+            },
+        );
+        rates.insert(
+            TokenClass::Output,
+            MoneyPerToken {
+                nano_usd_per_token: 150_000,
+            },
+        );
+        rates.insert(
+            TokenClass::CacheWrite,
+            MoneyPerToken {
+                nano_usd_per_token: 37_500,
+            },
+        );
+        rates.insert(
+            TokenClass::CacheRead,
+            MoneyPerToken {
+                nano_usd_per_token: 3_000,
+            },
+        );
+        let mut non_token: HashMap<NonTokenBillableUnit, u64> = HashMap::new();
+        non_token.insert(NonTokenBillableUnit::WebSearchRequest, 10_000_000); // $0.01/request
+        ModelPricing {
+            model_ref: mr.clone(),
+            token_rates: rates,
+            non_token_rates_nano_usd: non_token,
+            effective_from: None,
+            source: PricingSource::BuiltInReference {
+                provider: mr.provider.clone(),
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -878,6 +929,50 @@ mod tests {
         assert_eq!(
             p.token_rates[&TokenClass::Output].nano_usd_per_token,
             75_000
+        );
+    }
+
+    #[test]
+    fn opus_4_6_fast_pricing_is_30_150_tier() {
+        // COST.3 — the fast-mode tier is $30 in / $150 out / $37.5 cache-write /
+        // $3 cache-read per Mtok (COST_TIER_30_150, modelCost.ts:62-69).
+        let mr = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-opus-4-6".into(),
+        };
+        let p = PricingCatalog::opus_4_6_fast_pricing(&mr);
+        assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 30_000);
+        assert_eq!(
+            p.token_rates[&TokenClass::Output].nano_usd_per_token,
+            150_000
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheWrite].nano_usd_per_token,
+            37_500
+        );
+        assert_eq!(
+            p.token_rates[&TokenClass::CacheRead].nano_usd_per_token,
+            3_000
+        );
+        assert_eq!(
+            p.non_token_rates_nano_usd[&NonTokenBillableUnit::WebSearchRequest],
+            10_000_000
+        );
+    }
+
+    #[test]
+    fn builtin_opus_4_6_standard_stays_5_25() {
+        // The catalog entry (non-fast tier) is unchanged: $5/$25.
+        let c = PricingCatalog::builtin_reference();
+        let mr = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-opus-4-6".into(),
+        };
+        let (p, _) = c.resolve(&mr).unwrap();
+        assert_eq!(p.token_rates[&TokenClass::Input].nano_usd_per_token, 5_000);
+        assert_eq!(
+            p.token_rates[&TokenClass::Output].nano_usd_per_token,
+            25_000
         );
     }
 

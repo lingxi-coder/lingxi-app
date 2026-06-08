@@ -9,7 +9,13 @@ use protocol::ImageSource;
 use std::path::Path;
 
 /// Detect the image MIME type from a file extension. `None` for unsupported
-/// extensions — the caller fails the turn rather than guessing a type.
+/// extensions.
+///
+/// This is only a *fallback hint*: the real media type comes from sniffing the
+/// file's magic bytes ([`detect_media_type_from_bytes`]), mirroring TS where the
+/// sent media type is `detectImageFormatFromBase64` (imagePaste.ts:409) and the
+/// extension is only used as a `metadata.format ?? ext` fallback
+/// (imageResizer.ts:186) with `jpg` normalized to `jpeg` (imageResizer.ts:188).
 fn media_type_for(path: &Path) -> Option<&'static str> {
     match path
         .extension()
@@ -18,11 +24,53 @@ fn media_type_for(path: &Path) -> Option<&'static str> {
         .as_deref()
     {
         Some("png") => Some("image/png"),
+        // `jpg` → `jpeg` normalization (imageResizer.ts:188).
         Some("jpg" | "jpeg") => Some("image/jpeg"),
         Some("gif") => Some("image/gif"),
         Some("webp") => Some("image/webp"),
         _ => None,
     }
+}
+
+/// Detect the image MIME type from the file's leading *magic bytes*, the way the
+/// model sees it — so a file whose extension lies about its real format (e.g. a
+/// `.png` that actually holds JPEG bytes) is sent with the correct media type.
+///
+/// Mirrors TS `detectImageFormatFromBuffer` (imageResizer.ts:769-812): PNG
+/// `89 50 4e 47`, JPEG `ff d8 ff`, GIF `47 49 46`, WEBP `RIFF`(`52 49 46 46`)…
+/// `WEBP`(`57 45 42 50`) at offset 8. Returns `None` for anything unrecognized
+/// (or fewer than 4 bytes); the caller then falls back to the extension hint and
+/// finally to `image/png`, matching the TS default.
+fn detect_media_type_from_bytes(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    // PNG signature: 89 50 4e 47
+    if bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4e && bytes[3] == 0x47 {
+        return Some("image/png");
+    }
+    // JPEG signature: ff d8 ff
+    if bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff {
+        return Some("image/jpeg");
+    }
+    // GIF signature: 47 49 46 ("GIF", covers GIF87a / GIF89a)
+    if bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 {
+        return Some("image/gif");
+    }
+    // WEBP signature: "RIFF" (52 49 46 46) then "WEBP" (57 45 42 50) at offset 8.
+    if bytes[0] == 0x52
+        && bytes[1] == 0x49
+        && bytes[2] == 0x46
+        && bytes[3] == 0x46
+        && bytes.len() >= 12
+        && bytes[8] == 0x57
+        && bytes[9] == 0x45
+        && bytes[10] == 0x42
+        && bytes[11] == 0x50
+    {
+        return Some("image/webp");
+    }
+    None
 }
 
 /// Standard base64 (RFC 4648) encoder with padding. No `data:` prefix.
@@ -51,19 +99,24 @@ fn base64_encode(data: &[u8]) -> String {
 
 /// Read an image file from disk and build a base64 [`ImageSource`].
 ///
+/// The media type is determined from the file's actual *magic bytes*
+/// ([`detect_media_type_from_bytes`], the authoritative source — TS
+/// imagePaste.ts:409), falling back to the extension hint
+/// ([`media_type_for`] — TS imageResizer.ts:186 `metadata.format ?? ext`) and
+/// finally to `image/png` (the TS default). This means a `.png` file that
+/// actually holds JPEG bytes is sent with `image/jpeg`, and an unrecognized file
+/// is never rejected for "unsupported type" — it defaults to PNG like TS.
+///
 /// # Errors
-/// Returns [`OrchestratorError::Internal`] if the extension is unsupported or
-/// the file cannot be read.
+/// Returns [`OrchestratorError::Internal`] only if the file cannot be read.
 pub fn load_image_source(path: &Path) -> Result<ImageSource, OrchestratorError> {
-    let media_type = media_type_for(path).ok_or_else(|| {
-        OrchestratorError::Internal(format!(
-            "unsupported image type for {} (expected png/jpg/jpeg/gif/webp)",
-            path.display()
-        ))
-    })?;
     let bytes = std::fs::read(path).map_err(|e| {
         OrchestratorError::Internal(format!("could not read image {}: {e}", path.display()))
     })?;
+    // Magic bytes win; extension is only a fallback hint; default PNG.
+    let media_type = detect_media_type_from_bytes(&bytes)
+        .or_else(|| media_type_for(path))
+        .unwrap_or("image/png");
     Ok(ImageSource::Base64 {
         media_type: media_type.to_string(),
         data: base64_encode(&bytes),
@@ -86,32 +139,93 @@ mod tests {
 
     #[test]
     fn media_type_detection() {
+        // Extension hint map (jpg normalized to jpeg).
         assert_eq!(media_type_for(Path::new("a.PNG")), Some("image/png"));
+        assert_eq!(media_type_for(Path::new("a.jpg")), Some("image/jpeg"));
         assert_eq!(media_type_for(Path::new("a.jpeg")), Some("image/jpeg"));
         assert_eq!(media_type_for(Path::new("a.webp")), Some("image/webp"));
         assert_eq!(media_type_for(Path::new("a.txt")), None);
         assert_eq!(media_type_for(Path::new("noext")), None);
     }
 
+    // Magic-byte prefixes for each recognized format (TS imageResizer.ts:769-812).
+    const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
+    const JPEG_MAGIC: &[u8] = b"\xff\xd8\xff\xe0";
+    const GIF_MAGIC: &[u8] = b"GIF89a";
+    // "RIFF" + 4-byte size + "WEBP".
+    const WEBP_MAGIC: &[u8] = b"RIFF\x00\x00\x00\x00WEBP";
+
     #[test]
-    fn loads_png_file_as_base64_source() {
-        let dir = std::env::temp_dir();
-        let p = dir.join("lingxi_test_img.png");
+    fn sniffs_each_format_from_bytes() {
+        assert_eq!(detect_media_type_from_bytes(PNG_MAGIC), Some("image/png"));
+        assert_eq!(detect_media_type_from_bytes(JPEG_MAGIC), Some("image/jpeg"));
+        assert_eq!(detect_media_type_from_bytes(GIF_MAGIC), Some("image/gif"));
+        assert_eq!(detect_media_type_from_bytes(WEBP_MAGIC), Some("image/webp"));
+        // Unrecognized / too short → None (caller defaults to PNG).
+        assert_eq!(detect_media_type_from_bytes(b"not an image"), None);
+        assert_eq!(detect_media_type_from_bytes(b"ab"), None);
+        // "RIFF" without the "WEBP" fourcc is not WebP.
+        assert_eq!(detect_media_type_from_bytes(b"RIFF\x00\x00\x00\x00AVI "), None);
+    }
+
+    fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("lingxi_img_test_{name}"));
         let mut f = std::fs::File::create(&p).unwrap();
-        f.write_all(b"\x89PNG\r\n\x1a\n test bytes").unwrap();
-        let src = load_image_source(&p).unwrap();
-        match src {
+        f.write_all(bytes).unwrap();
+        p
+    }
+
+    fn loaded_media_type(p: &Path) -> String {
+        match load_image_source(p).unwrap() {
             ImageSource::Base64 { media_type, data } => {
-                assert_eq!(media_type, "image/png");
                 assert!(!data.is_empty());
+                media_type
             }
             ImageSource::Url { .. } => panic!("expected base64"),
         }
+    }
+
+    #[test]
+    fn png_extension_holding_jpeg_bytes_is_sent_as_jpeg() {
+        // The key parity case: the extension lies, the bytes are authoritative.
+        let p = write_temp("liar.png", JPEG_MAGIC);
+        assert_eq!(loaded_media_type(&p), "image/jpeg");
         let _ = std::fs::remove_file(&p);
     }
 
     #[test]
-    fn unsupported_extension_errors() {
-        assert!(load_image_source(Path::new("/tmp/whatever.bmp")).is_err());
+    fn each_format_sniffed_through_load() {
+        for (name, magic, expect) in [
+            ("a.png", PNG_MAGIC, "image/png"),
+            ("a.jpg", JPEG_MAGIC, "image/jpeg"),
+            ("a.gif", GIF_MAGIC, "image/gif"),
+            ("a.webp", WEBP_MAGIC, "image/webp"),
+        ] {
+            let p = write_temp(name, magic);
+            assert_eq!(loaded_media_type(&p), expect, "for {name}");
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+
+    #[test]
+    fn unknown_bytes_default_to_png() {
+        // Unrecognized bytes + unrecognized extension → PNG default (TS default).
+        let p = write_temp("mystery.dat", b"definitely not an image");
+        assert_eq!(loaded_media_type(&p), "image/png");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn unknown_bytes_fall_back_to_extension_hint() {
+        // Unrecognized bytes but a known extension → extension hint is used.
+        let p = write_temp("hint.gif", b"xx");
+        assert_eq!(loaded_media_type(&p), "image/gif");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn unreadable_file_errors() {
+        // Read failure (missing file) is still the only error path.
+        assert!(load_image_source(Path::new("/tmp/lingxi_nonexistent_xyz.bmp")).is_err());
     }
 }

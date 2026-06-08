@@ -11,6 +11,10 @@ traits = { path = "../../traits" }
 protocol = { path = "../../protocol" }
 permission = { path = "../../permission" }
 telemetry = { path = "../../telemetry" }
+# SKILLEXEC.3: `substitute_arguments_faithful` expands the skill body's
+# `$ARGUMENTS` / `$N` / `$name` placeholders. command-api depends only on
+# protocol + traits, so this adds no cycle.
+command-api = { path = "../../command-api" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

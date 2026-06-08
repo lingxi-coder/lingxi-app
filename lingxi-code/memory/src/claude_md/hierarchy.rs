@@ -19,47 +19,170 @@ pub struct HierarchyEntry {
     pub exact_case: bool,
 }
 
-/// Snapshot of discovered CLAUDE.md locations, in walk order
-/// (innermost first: cwd, then each parent, then user home).
+/// Snapshot of discovered memory-file locations, innermost-first
+/// (cwd's files, then each parent's, then User). Consumers reverse this
+/// to reach claude-code's splice order. See [`walk`].
 #[derive(Debug, Default)]
 pub struct Hierarchy {
     /// Discovered entries in walk order.
     pub entries: Vec<HierarchyEntry>,
 }
 
-/// Walk cwd → parents → `<home>/.claude` collecting CLAUDE.md files.
+/// Directory name claude-code uses for nested config (`.claude/`).
+const DOT_CLAUDE: &str = ".claude";
+/// Subdirectory under `.claude/` holding `*.md` rule files.
+const RULES_DIR: &str = "rules";
+
+/// Discover the claude-code memory-file set, in `getMemoryFiles`
+/// tier order (`utils/claudemd.ts:790-934`):
+///   1. **User**:    `<home>/.claude/CLAUDE.md`, then `<home>/.claude/rules/**.md`.
+///   2. **Project + Local**, from the filesystem root DOWN to `cwd`; per dir:
+///      `CLAUDE.md`, `.claude/CLAUDE.md`, `.claude/rules/**.md`, `CLAUDE.local.md`.
 ///
-/// At each directory, `CLAUDE.local.md` (if present) is emitted FIRST,
-/// then `CLAUDE.md`. The walk visits each directory at most once.
-/// Returns an empty hierarchy when no files exist (NOT an error).
+/// claude-code splices files in exactly that order (User first, the innermost
+/// `cwd` last). The orchestrator (`prompt::memory_block`) **reverses** this
+/// primitive's output to reach that splice order, so `walk` upholds an
+/// innermost-first contract: it builds the list in claude-code splice order and
+/// reverses it once at the end, yielding `cwd` … parents … User.
+///
+/// NB: claude-code's MANAGED tier (`getManagedFilePath` → `/etc/claude-code` etc.)
+/// is intentionally NOT probed — this port has no managed-settings concept
+/// (the settings loader models only user + project layers), and probing an
+/// absolute system path would make the hermetic discovery machine-dependent.
+/// Deferred until the port grows a managed-settings tier.
+///
+/// Every file is emitted at most once, mirroring claude-code's shared
+/// `processedPaths` set. Missing dirs/files are silently skipped (NOT an error).
 #[must_use]
 pub fn walk(cwd: &Path, home: &Path) -> Hierarchy {
-    let mut entries = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let mut processed = std::collections::HashSet::new();
 
-    let mut walker: Option<&Path> = Some(cwd);
-    while let Some(dir) = walker {
-        if seen.insert(dir.to_path_buf()) {
-            collect_in_dir(dir, &mut entries);
-        }
-        walker = dir.parent();
+    // (1) User tier — `<home>/.claude/CLAUDE.md` + `<home>/.claude/rules/**`.
+    let user_dir = home.join(DOT_CLAUDE);
+    emit_probe(&user_dir, FILE_NAME, false, &mut out, &mut processed);
+    collect_rules(&user_dir.join(RULES_DIR), &mut out, &mut processed);
+
+    // (3) Project + Local tier — filesystem root DOWN to cwd.
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut cur: Option<&Path> = Some(cwd);
+    while let Some(dir) = cur {
+        dirs.push(dir.to_path_buf());
+        cur = dir.parent();
+    }
+    dirs.reverse(); // root → cwd
+    for dir in &dirs {
+        // Project: `CLAUDE.md`, then `.claude/CLAUDE.md`, then `.claude/rules/**`.
+        emit_probe(dir, FILE_NAME, false, &mut out, &mut processed);
+        emit_probe(
+            &dir.join(DOT_CLAUDE),
+            FILE_NAME,
+            false,
+            &mut out,
+            &mut processed,
+        );
+        collect_rules(
+            &dir.join(DOT_CLAUDE).join(RULES_DIR),
+            &mut out,
+            &mut processed,
+        );
+        // Local override LAST within the directory (claude-code emits Local
+        // after Project so it wins the model's recency attention).
+        emit_probe(dir, LOCAL_OVERRIDE_NAME, true, &mut out, &mut processed);
     }
 
-    let user_dir = home.join(".claude");
-    if seen.insert(user_dir.clone()) {
-        collect_in_dir(&user_dir, &mut entries);
-    }
-
-    Hierarchy { entries }
+    // `out` is now in claude-code splice order (User → root … → cwd).
+    // Reverse to the innermost-first contract this primitive promises; the
+    // orchestrator reverses again to restore the splice order.
+    out.reverse();
+    Hierarchy { entries: out }
 }
 
-fn collect_in_dir(dir: &Path, out: &mut Vec<HierarchyEntry>) {
-    // CLAUDE.local.md first (so it shadows the canonical entry).
-    if let Some(entry) = probe(dir, LOCAL_OVERRIDE_NAME, true) {
-        out.push(entry);
+/// Probe `dir` for a file named `want` (case-insensitive) and, when found and
+/// not already emitted, push a [`HierarchyEntry`]. Mirrors a single
+/// `processMemoryFile` call guarded by the shared `processedPaths` set.
+fn emit_probe(
+    dir: &Path,
+    want: &str,
+    is_local: bool,
+    out: &mut Vec<HierarchyEntry>,
+    processed: &mut std::collections::HashSet<PathBuf>,
+) {
+    if let Some(entry) = probe(dir, want, is_local) {
+        if processed.insert(entry.path.clone()) {
+            out.push(entry);
+        }
     }
-    if let Some(entry) = probe(dir, FILE_NAME, false) {
-        out.push(entry);
+}
+
+/// Recursively collect every `*.md` file under `rules_dir`, mirroring
+/// claude-code `processMdRules` (`utils/claudemd.ts:697-788`): descend into
+/// subdirectories depth-first, guard against symlink cycles with a visited-dir
+/// set, and silently ignore a missing / non-dir / permission-denied directory.
+///
+/// claude-code iterates entries in raw `readdir` order; that OS order is
+/// unstable and cannot be pinned in a fixture, so the Rust port sorts entries
+/// by file name for reproducibility. Only files whose name ends in `.md`
+/// (case-sensitive, matching `endsWith('.md')`) are emitted, each at most once
+/// via the shared `processed` set.
+fn collect_rules(
+    rules_dir: &Path,
+    out: &mut Vec<HierarchyEntry>,
+    processed: &mut std::collections::HashSet<PathBuf>,
+) {
+    let mut visited = std::collections::HashSet::new();
+    collect_rules_inner(rules_dir, out, processed, &mut visited);
+}
+
+fn collect_rules_inner(
+    rules_dir: &Path,
+    out: &mut Vec<HierarchyEntry>,
+    processed: &mut std::collections::HashSet<PathBuf>,
+    visited: &mut std::collections::HashSet<PathBuf>,
+) {
+    // visitedDirs cycle guard: key on the canonical (symlink-resolved) path so
+    // a symlink loop (A → B → A) terminates. Fall back to the raw path when it
+    // can't be canonicalized (e.g. missing — read_dir below then bails).
+    let key = std::fs::canonicalize(rules_dir).unwrap_or_else(|_| rules_dir.to_path_buf());
+    if !visited.insert(key) {
+        return;
+    }
+
+    // Missing / non-dir / permission-denied → silently ignored.
+    let Ok(read) = std::fs::read_dir(rules_dir) else {
+        return;
+    };
+
+    // Sort by file name for deterministic ordering (see fn docs).
+    let mut items: Vec<std::fs::DirEntry> = read.flatten().collect();
+    items.sort_by_key(std::fs::DirEntry::file_name);
+
+    for ent in items {
+        let path = ent.path();
+        let Ok(ft) = ent.file_type() else { continue };
+        // Resolve symlinks via stat() to classify the target, matching
+        // processMdRules' safeResolvePath handling.
+        let (is_dir, is_file) = if ft.is_symlink() {
+            match std::fs::metadata(&path) {
+                Ok(m) => (m.is_dir(), m.is_file()),
+                Err(_) => continue,
+            }
+        } else {
+            (ft.is_dir(), ft.is_file())
+        };
+
+        if is_dir {
+            collect_rules_inner(&path, out, processed, visited);
+        } else if is_file
+            && ent.file_name().to_string_lossy().ends_with(".md")
+            && processed.insert(path.clone())
+        {
+            out.push(HierarchyEntry {
+                path,
+                is_local_override: false,
+                exact_case: true,
+            });
+        }
     }
 }
 
@@ -191,6 +314,179 @@ mod tests {
         fs::create_dir_all(&home).unwrap(); // .claude does NOT exist
         let h = walk(&cwd, &home);
         assert!(h.entries.is_empty());
+    }
+
+    /// Helper: relative paths (under `root`) of the entries, in the
+    /// orchestrator's *splice* order (reverse of the innermost-first walk).
+    fn splice_order(h: &Hierarchy, root: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = h
+            .entries
+            .iter()
+            .map(|e| {
+                e.path
+                    .strip_prefix(root)
+                    .unwrap_or(&e.path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        v.reverse();
+        v
+    }
+
+    #[test]
+    fn discovers_dot_claude_claude_md() {
+        // `.claude/CLAUDE.md` (Project) must be found right after `CLAUDE.md`.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join(".claude")).unwrap();
+        touch(&repo, "CLAUDE.md");
+        touch(&repo.join(".claude"), "CLAUDE.md");
+
+        let h = walk(&repo, &home);
+        assert_eq!(
+            splice_order(&h, tmp.path()),
+            vec!["repo/CLAUDE.md", "repo/.claude/CLAUDE.md"],
+            "splice order: CLAUDE.md then .claude/CLAUDE.md"
+        );
+    }
+
+    #[test]
+    fn discovers_dot_claude_rules_including_nested_in_order() {
+        // `.claude/rules/**/*.md` (Project), recursive, sorted by name.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let repo = tmp.path().join("repo");
+        let rules = repo.join(".claude").join("rules");
+        fs::create_dir_all(rules.join("sub")).unwrap();
+        touch(&repo, "CLAUDE.md");
+        touch(&rules, "b.md");
+        touch(&rules, "a.md");
+        touch(&rules, "ignored.txt"); // non-.md skipped
+        touch(&rules.join("sub"), "z.md");
+
+        let h = walk(&repo, &home);
+        // Sorted readdir: `a.md`, `b.md`, then the `sub/` directory (recursed).
+        assert_eq!(
+            splice_order(&h, tmp.path()),
+            vec![
+                "repo/CLAUDE.md",
+                "repo/.claude/rules/a.md",
+                "repo/.claude/rules/b.md",
+                "repo/.claude/rules/sub/z.md",
+            ],
+            "rules discovered recursively, sorted, .md only"
+        );
+    }
+
+    #[test]
+    fn discovers_user_rules_tier() {
+        // `~/.claude/rules/**/*.md` (User) come right after `~/.claude/CLAUDE.md`.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let user = home.join(".claude");
+        fs::create_dir_all(user.join("rules")).unwrap();
+        touch(&user, "CLAUDE.md");
+        touch(&user.join("rules"), "u1.md");
+        touch(&user.join("rules"), "u2.md");
+        let cwd = tmp.path().join("repo");
+        fs::create_dir_all(&cwd).unwrap();
+        touch(&cwd, "CLAUDE.md");
+
+        let h = walk(&cwd, &home);
+        assert_eq!(
+            splice_order(&h, tmp.path()),
+            vec![
+                "home/.claude/CLAUDE.md",
+                "home/.claude/rules/u1.md",
+                "home/.claude/rules/u2.md",
+                "repo/CLAUDE.md",
+            ],
+            "User CLAUDE.md + rules precede the project tier"
+        );
+    }
+
+    #[test]
+    fn full_tier_order_user_project_local() {
+        // The MANAGED tier is intentionally not probed (no Rust managed-settings
+        // concept). Assert the User → Project → Local ordering with
+        // `.claude/CLAUDE.md`, rules, and the local override.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let user = home.join(".claude");
+        fs::create_dir_all(user.join("rules")).unwrap();
+        touch(&user, "CLAUDE.md");
+        touch(&user.join("rules"), "ur.md");
+
+        let repo = tmp.path().join("repo");
+        let pkg = repo.join("pkg");
+        fs::create_dir_all(pkg.join(".claude").join("rules")).unwrap();
+        touch(&repo, "CLAUDE.md");
+        touch(&pkg, "CLAUDE.md");
+        touch(&pkg.join(".claude"), "CLAUDE.md");
+        touch(&pkg.join(".claude").join("rules"), "pr.md");
+        touch(&pkg, "CLAUDE.local.md");
+
+        let h = walk(&pkg, &home);
+        assert_eq!(
+            splice_order(&h, tmp.path()),
+            vec![
+                "home/.claude/CLAUDE.md",
+                "home/.claude/rules/ur.md",
+                "repo/CLAUDE.md",
+                "repo/pkg/CLAUDE.md",
+                "repo/pkg/.claude/CLAUDE.md",
+                "repo/pkg/.claude/rules/pr.md",
+                "repo/pkg/CLAUDE.local.md",
+            ],
+            "tier order: User → Project(root→cwd: CLAUDE, .claude/CLAUDE, rules) → Local"
+        );
+    }
+
+    #[test]
+    fn missing_dot_claude_and_rules_dirs_silently_ignored() {
+        // No `.claude/` dir at all: walk yields only the plain CLAUDE.md, no panic.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        touch(&repo, "CLAUDE.md");
+
+        let h = walk(&repo, &home);
+        assert_eq!(splice_order(&h, tmp.path()), vec!["repo/CLAUDE.md"]);
+    }
+
+    #[test]
+    fn rules_recursion_visited_guard_breaks_symlink_cycle() {
+        // A symlink loop inside the rules tree must not recurse forever.
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let repo = tmp.path().join("repo");
+        let rules = repo.join(".claude").join("rules");
+        fs::create_dir_all(&rules).unwrap();
+        touch(&repo, "CLAUDE.md");
+        touch(&rules, "r.md");
+
+        // rules/loop -> rules (cycle). Skip the test if symlinks are unsupported.
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&rules, rules.join("loop")).is_ok();
+        #[cfg(not(unix))]
+        let made = false;
+
+        let h = walk(&repo, &home);
+        let order = splice_order(&h, tmp.path());
+        // Must terminate and still surface r.md (exactly once).
+        assert!(order.contains(&"repo/.claude/rules/r.md".to_string()));
+        assert_eq!(
+            order.iter().filter(|p| p.ends_with("r.md")).count(),
+            1,
+            "r.md emitted exactly once despite the cycle (made_symlink={made})"
+        );
     }
 
     #[test]

@@ -9,10 +9,25 @@
 //!
 //! Wire identifiers locked in spec §7 line 695.
 //!
-//! no-truncation: LSPTool returns structured definition / references / hover /
-//! symbol / call-hierarchy payloads forwarded verbatim from lsp::LspClient (the
-//! upstream LSP server is the trust boundary). Free-form text comes only
-//! from hover contents, which are bounded by the LSP protocol itself.
+//! Result formatting (LSP.5): `LSPTool.ts:636 formatResult` plus every
+//! sub-formatter in `LSPTool/formatters.ts` are ported here as
+//! [`format_result`] and the per-operation `format_*_result` helpers. The
+//! model is given the brief human-readable string TS produces — in TS this
+//! is `mapToolResultToToolResultBlockParam` returning `content:
+//! output.result`, where `output.result` is the formatted string (the raw
+//! structured payload is never retained). We mirror that exactly: the
+//! formatted string is placed in `model_content` (which
+//! `tool_result_to_model_text` routes to the model, the Rust analogue of
+//! `mapToolResultToToolResultBlockParam`) and ALSO in `result`, alongside
+//! `result_count` / `file_count`, to reproduce the TS `Output` shape for the
+//! UI.
+//!
+//! no-truncation: the model-facing string is the `formatResult` summary —
+//! `path:line:col` location lines, symbol outlines, and call-hierarchy
+//! entries grouped by file. These are bounded by the LSP server's own result
+//! set; free-form text comes only from hover contents, which the LSP protocol
+//! itself bounds. The TS tool likewise applies no inline truncation
+//! (`maxResultSizeChars` gates length at the framework layer).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -342,6 +357,660 @@ fn filter_gitignored_results(operation: &str, raw: Value, cwd: &Path) -> Value {
     Value::Array(filtered)
 }
 
+// -- Result formatting (`LSPTool.ts:636 formatResult` + `formatters.ts`) ------
+
+// Empty-result messages, byte-exact from `formatters.ts`.
+const NO_DEFINITION: &str = "No definition found. This may occur if the cursor is not on a symbol, or if the definition is in an external library not indexed by the LSP server.";
+const NO_REFERENCES: &str = "No references found. This may occur if the symbol has no usages, or if the LSP server has not fully indexed the workspace.";
+const NO_HOVER: &str = "No hover information available. This may occur if the cursor is not on a symbol, or if the LSP server has not fully indexed the file.";
+const NO_DOCUMENT_SYMBOLS: &str = "No symbols found in document. This may occur if the file is empty, not supported by the LSP server, or if the server has not fully indexed the file.";
+const NO_WORKSPACE_SYMBOLS: &str = "No symbols found in workspace. This may occur if the workspace is empty, or if the LSP server has not finished indexing the project.";
+const NO_CALL_HIERARCHY_ITEM: &str = "No call hierarchy item found at this position";
+const NO_INCOMING_CALLS: &str = "No incoming calls found (nothing calls this function)";
+const NO_OUTGOING_CALLS: &str = "No outgoing calls found (this function calls nothing)";
+
+/// `stringUtils.ts:plural` — singular for `n == 1`, else `word + "s"`.
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
+    }
+}
+
+/// UTF-16 code-unit length, matching JavaScript's `String.prototype.length`
+/// (used by `formatUri` for the relative-vs-absolute length comparison).
+fn utf16_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+/// `formatters.ts:symbolKindToString` — LSP `SymbolKind` (1-26) to label;
+/// anything out of range (or missing) maps to `Unknown`.
+fn symbol_kind_to_string(item: &Value) -> &'static str {
+    match item.get("kind").and_then(Value::as_u64) {
+        Some(1) => "File",
+        Some(2) => "Module",
+        Some(3) => "Namespace",
+        Some(4) => "Package",
+        Some(5) => "Class",
+        Some(6) => "Method",
+        Some(7) => "Property",
+        Some(8) => "Field",
+        Some(9) => "Constructor",
+        Some(10) => "Enum",
+        Some(11) => "Interface",
+        Some(12) => "Function",
+        Some(13) => "Variable",
+        Some(14) => "Constant",
+        Some(15) => "String",
+        Some(16) => "Number",
+        Some(17) => "Boolean",
+        Some(18) => "Array",
+        Some(19) => "Object",
+        Some(20) => "Key",
+        Some(21) => "Null",
+        Some(22) => "EnumMember",
+        Some(23) => "Struct",
+        Some(24) => "Event",
+        Some(25) => "Operator",
+        Some(26) => "TypeParameter",
+        _ => "Unknown",
+    }
+}
+
+/// Posix `path.relative(from, to)` for normalized absolute paths. Both inputs
+/// are absolute (cwd from `getCwd()` / file paths from `file://` URIs), so the
+/// segment-prefix algorithm reproduces Node's `posix.relative` output.
+fn path_relative(from: &str, to: &str) -> String {
+    fn segments(p: &str) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for seg in p.split('/') {
+            match seg {
+                "" | "." => {}
+                ".." => {
+                    out.pop();
+                }
+                s => out.push(s),
+            }
+        }
+        out
+    }
+    let f = segments(from);
+    let t = segments(to);
+    let mut i = 0;
+    while i < f.len() && i < t.len() && f[i] == t[i] {
+        i += 1;
+    }
+    let mut parts: Vec<&str> = vec![".."; f.len() - i];
+    parts.extend_from_slice(&t[i..]);
+    parts.join("/")
+}
+
+/// `formatters.ts:formatUri` — render a URI as a relative path against `cwd`
+/// when that is shorter and does not climb past `../..`; otherwise the
+/// absolute file path. A missing/empty URI renders `<unknown location>`.
+fn format_uri(uri: Option<&str>, cwd: &Path) -> String {
+    let Some(uri) = uri.filter(|u| !u.is_empty()) else {
+        return "<unknown location>".to_string();
+    };
+    // Strip the `file://` scheme, then the leading slash of a Windows
+    // drive-letter path (`/C:/...` -> `C:/...`).
+    let mut file_path = uri.strip_prefix("file://").unwrap_or(uri).to_string();
+    let b = file_path.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        file_path = file_path[1..].to_string();
+    }
+    // Decode percent-escapes; keep the un-decoded path on malformed input.
+    let file_path = percent_decode(&file_path).unwrap_or(file_path);
+
+    let cwd_str = cwd.to_string_lossy();
+    if !cwd_str.is_empty() {
+        let relative_path = path_relative(&cwd_str, &file_path).replace('\\', "/");
+        if utf16_len(&relative_path) < utf16_len(&file_path)
+            && !relative_path.starts_with("../../")
+        {
+            return relative_path;
+        }
+    }
+    file_path.replace('\\', "/")
+}
+
+/// `formatters.ts:toLocation` — yield `(uri, range)` for a `Location`
+/// (`uri`/`range`) or a `LocationLink` (`targetUri`,
+/// `targetSelectionRange || targetRange`).
+fn to_location(item: &Value) -> (Option<&str>, Option<&Value>) {
+    if item.get("targetUri").is_some() {
+        let uri = item.get("targetUri").and_then(Value::as_str);
+        let range = item
+            .get("targetSelectionRange")
+            .or_else(|| item.get("targetRange"));
+        (uri, range)
+    } else {
+        (item.get("uri").and_then(Value::as_str), item.get("range"))
+    }
+}
+
+/// 1-based-ready `(line, character)` of a `range.start` (0-based on the wire).
+fn range_start(range: Option<&Value>) -> (i64, i64) {
+    let start = range.and_then(|r| r.get("start"));
+    let line = start
+        .and_then(|s| s.get("line"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let character = start
+        .and_then(|s| s.get("character"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    (line, character)
+}
+
+/// `formatters.ts:formatLocation` — `path:line:character` (1-based).
+fn format_location(item: &Value, cwd: &Path) -> String {
+    let (uri, range) = to_location(item);
+    let (line, character) = range_start(range);
+    format!("{}:{}:{}", format_uri(uri, cwd), line + 1, character + 1)
+}
+
+/// String field that is present and non-empty (TS truthiness for `detail`,
+/// `containerName`, `name`).
+fn truthy_str(item: &Value, key: &str) -> Option<String> {
+    item.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
+fn name_of(item: &Value) -> &str {
+    item.get("name").and_then(Value::as_str).unwrap_or("")
+}
+
+/// Number of unique URIs in the iterator (`countUniqueFiles*`).
+fn unique_uri_count<'a>(uris: impl Iterator<Item = &'a str>) -> u64 {
+    uris.collect::<HashSet<&str>>().len() as u64
+}
+
+/// Group items into `(filePath, items)` buckets preserving first-seen order
+/// (a faithful stand-in for the insertion-ordered JS `Map`). `key` returns
+/// `None` to skip an item entirely.
+fn group_by_file<'a>(
+    items: &[&'a Value],
+    key: impl Fn(&Value) -> Option<String>,
+) -> Vec<(String, Vec<&'a Value>)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut buckets: HashMap<String, Vec<&'a Value>> = HashMap::new();
+    for &item in items {
+        if let Some(file_path) = key(item) {
+            if !buckets.contains_key(&file_path) {
+                order.push(file_path.clone());
+            }
+            buckets.entry(file_path).or_default().push(item);
+        }
+    }
+    order
+        .into_iter()
+        .map(|k| {
+            let v = buckets.remove(&k).unwrap_or_default();
+            (k, v)
+        })
+        .collect()
+}
+
+/// `formatGoToDefinitionResult` (also reused for `goToImplementation`).
+fn format_go_to_definition_result(result: &Value, cwd: &Path) -> String {
+    if result.is_null() {
+        return NO_DEFINITION.to_string();
+    }
+    if let Some(arr) = result.as_array() {
+        let valid: Vec<&Value> = arr
+            .iter()
+            .filter(|it| to_location(it).0.is_some_and(|u| !u.is_empty()))
+            .collect();
+        if valid.is_empty() {
+            return NO_DEFINITION.to_string();
+        }
+        if valid.len() == 1 {
+            return format!("Defined in {}", format_location(valid[0], cwd));
+        }
+        let list = valid
+            .iter()
+            .map(|loc| format!("  {}", format_location(loc, cwd)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return format!("Found {} definitions:\n{}", valid.len(), list);
+    }
+    // Single (non-array) result.
+    format!("Defined in {}", format_location(result, cwd))
+}
+
+/// `formatFindReferencesResult`.
+fn format_find_references_result(result: &Value, cwd: &Path) -> String {
+    let Some(arr) = result.as_array() else {
+        return NO_REFERENCES.to_string();
+    };
+    if arr.is_empty() {
+        return NO_REFERENCES.to_string();
+    }
+    let valid: Vec<&Value> = arr
+        .iter()
+        .filter(|loc| {
+            loc.get("uri")
+                .and_then(Value::as_str)
+                .is_some_and(|u| !u.is_empty())
+        })
+        .collect();
+    if valid.is_empty() {
+        return NO_REFERENCES.to_string();
+    }
+    if valid.len() == 1 {
+        return format!("Found 1 reference:\n  {}", format_location(valid[0], cwd));
+    }
+    let by_file = group_by_file(&valid, |loc| {
+        Some(format_uri(loc.get("uri").and_then(Value::as_str), cwd))
+    });
+    let mut lines: Vec<String> = vec![format!(
+        "Found {} references across {} files:",
+        valid.len(),
+        by_file.len()
+    )];
+    for (file_path, locations) in &by_file {
+        lines.push(format!("\n{file_path}:"));
+        for loc in locations {
+            let (line, character) = range_start(loc.get("range"));
+            lines.push(format!("  Line {}:{}", line + 1, character + 1));
+        }
+    }
+    lines.join("\n")
+}
+
+/// `formatters.ts:extractMarkupText` — flatten `Hover.contents` to text.
+fn extract_markup_text(contents: &Value) -> String {
+    if let Some(arr) = contents.as_array() {
+        return arr
+            .iter()
+            .map(|item| {
+                item.as_str().map_or_else(
+                    || {
+                        item.get("value")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    },
+                    ToString::to_string,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+    }
+    if let Some(s) = contents.as_str() {
+        return s.to_string();
+    }
+    // `MarkupContent` (has `kind`) or a `MarkedString` object — both `.value`.
+    contents
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// `formatHoverResult`.
+fn format_hover_result(result: &Value) -> String {
+    if result.is_null() {
+        return NO_HOVER.to_string();
+    }
+    let content = extract_markup_text(result.get("contents").unwrap_or(&Value::Null));
+    if let Some(range) = result.get("range").filter(|r| !r.is_null()) {
+        let (line, character) = range_start(Some(range));
+        return format!("Hover info at {}:{}:\n\n{}", line + 1, character + 1, content);
+    }
+    content
+}
+
+/// `formatters.ts:formatDocumentSymbolNode` — one DocumentSymbol (+children).
+fn format_document_symbol_node(symbol: &Value, indent: usize, lines: &mut Vec<String>) {
+    let prefix = "  ".repeat(indent);
+    let kind = symbol_kind_to_string(symbol);
+    let mut line = format!("{prefix}{} ({kind})", name_of(symbol));
+    if let Some(detail) = truthy_str(symbol, "detail") {
+        line.push_str(&format!(" {detail}"));
+    }
+    let (symbol_line, _) = range_start(symbol.get("range"));
+    line.push_str(&format!(" - Line {}", symbol_line + 1));
+    lines.push(line);
+    if let Some(children) = symbol.get("children").and_then(Value::as_array) {
+        for child in children {
+            format_document_symbol_node(child, indent + 1, lines);
+        }
+    }
+}
+
+/// `formatDocumentSymbolResult` — hierarchical outline; `SymbolInformation[]`
+/// results delegate to the workspace-symbol formatter (per LSP spec).
+fn format_document_symbol_result(result: &Value, cwd: &Path) -> String {
+    let Some(arr) = result.as_array() else {
+        return NO_DOCUMENT_SYMBOLS.to_string();
+    };
+    if arr.is_empty() {
+        return NO_DOCUMENT_SYMBOLS.to_string();
+    }
+    let is_symbol_information = arr[0].is_object() && arr[0].get("location").is_some();
+    if is_symbol_information {
+        return format_workspace_symbol_result(result, cwd);
+    }
+    let mut lines: Vec<String> = vec!["Document symbols:".to_string()];
+    for symbol in arr {
+        format_document_symbol_node(symbol, 0, &mut lines);
+    }
+    lines.join("\n")
+}
+
+/// `formatWorkspaceSymbolResult` — flat symbol list grouped by file.
+fn format_workspace_symbol_result(result: &Value, cwd: &Path) -> String {
+    let Some(arr) = result.as_array() else {
+        return NO_WORKSPACE_SYMBOLS.to_string();
+    };
+    if arr.is_empty() {
+        return NO_WORKSPACE_SYMBOLS.to_string();
+    }
+    let valid: Vec<&Value> = arr
+        .iter()
+        .filter(|sym| {
+            sym.get("location")
+                .and_then(|l| l.get("uri"))
+                .and_then(Value::as_str)
+                .is_some_and(|u| !u.is_empty())
+        })
+        .collect();
+    if valid.is_empty() {
+        return NO_WORKSPACE_SYMBOLS.to_string();
+    }
+    let mut lines: Vec<String> = vec![format!(
+        "Found {} {} in workspace:",
+        valid.len(),
+        plural(valid.len(), "symbol")
+    )];
+    let by_file = group_by_file(&valid, |sym| {
+        Some(format_uri(
+            sym.get("location").and_then(|l| l.get("uri")).and_then(Value::as_str),
+            cwd,
+        ))
+    });
+    for (file_path, symbols) in &by_file {
+        lines.push(format!("\n{file_path}:"));
+        for symbol in symbols {
+            let kind = symbol_kind_to_string(symbol);
+            let (line, _) = range_start(symbol.get("location").and_then(|l| l.get("range")));
+            let mut symbol_line = format!("  {} ({kind}) - Line {}", name_of(symbol), line + 1);
+            if let Some(container) = truthy_str(symbol, "containerName") {
+                symbol_line.push_str(&format!(" in {container}"));
+            }
+            lines.push(symbol_line);
+        }
+    }
+    lines.join("\n")
+}
+
+/// `formatters.ts:formatCallHierarchyItem`.
+fn format_call_hierarchy_item(item: &Value, cwd: &Path) -> String {
+    let kind = symbol_kind_to_string(item);
+    let uri = item.get("uri").and_then(Value::as_str).filter(|u| !u.is_empty());
+    let Some(uri) = uri else {
+        return format!("{} ({kind}) - <unknown location>", name_of(item));
+    };
+    let file_path = format_uri(Some(uri), cwd);
+    let (line, _) = range_start(item.get("range"));
+    let mut result = format!("{} ({kind}) - {file_path}:{}", name_of(item), line + 1);
+    if let Some(detail) = truthy_str(item, "detail") {
+        result.push_str(&format!(" [{detail}]"));
+    }
+    result
+}
+
+/// `formatPrepareCallHierarchyResult`.
+fn format_prepare_call_hierarchy_result(result: &Value, cwd: &Path) -> String {
+    let Some(arr) = result.as_array() else {
+        return NO_CALL_HIERARCHY_ITEM.to_string();
+    };
+    if arr.is_empty() {
+        return NO_CALL_HIERARCHY_ITEM.to_string();
+    }
+    if arr.len() == 1 {
+        return format!(
+            "Call hierarchy item: {}",
+            format_call_hierarchy_item(&arr[0], cwd)
+        );
+    }
+    let mut lines: Vec<String> = vec![format!("Found {} call hierarchy items:", arr.len())];
+    for item in arr {
+        lines.push(format!("  {}", format_call_hierarchy_item(item, cwd)));
+    }
+    lines.join("\n")
+}
+
+/// Render the `fromRanges` call-site suffix (`6:9, 10:3`).
+fn call_sites(call: &Value) -> Option<String> {
+    let ranges = call.get("fromRanges").and_then(Value::as_array)?;
+    if ranges.is_empty() {
+        return None;
+    }
+    Some(
+        ranges
+            .iter()
+            .map(|r| {
+                let (line, character) = range_start(Some(r));
+                format!("{}:{}", line + 1, character + 1)
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+/// `formatIncomingCallsResult`.
+fn format_incoming_calls_result(result: &Value, cwd: &Path) -> String {
+    let Some(arr) = result.as_array() else {
+        return NO_INCOMING_CALLS.to_string();
+    };
+    if arr.is_empty() {
+        return NO_INCOMING_CALLS.to_string();
+    }
+    let mut lines: Vec<String> = vec![format!(
+        "Found {} incoming {}:",
+        arr.len(),
+        plural(arr.len(), "call")
+    )];
+    let items: Vec<&Value> = arr.iter().collect();
+    let by_file = group_by_file(&items, |call| {
+        let from = call.get("from")?;
+        Some(format_uri(from.get("uri").and_then(Value::as_str), cwd))
+    });
+    for (file_path, calls) in &by_file {
+        lines.push(format!("\n{file_path}:"));
+        for call in calls {
+            let Some(from) = call.get("from") else {
+                continue;
+            };
+            let kind = symbol_kind_to_string(from);
+            let (line, _) = range_start(from.get("range"));
+            let mut call_line = format!("  {} ({kind}) - Line {}", name_of(from), line + 1);
+            if let Some(sites) = call_sites(call) {
+                call_line.push_str(&format!(" [calls at: {sites}]"));
+            }
+            lines.push(call_line);
+        }
+    }
+    lines.join("\n")
+}
+
+/// `formatOutgoingCallsResult`.
+fn format_outgoing_calls_result(result: &Value, cwd: &Path) -> String {
+    let Some(arr) = result.as_array() else {
+        return NO_OUTGOING_CALLS.to_string();
+    };
+    if arr.is_empty() {
+        return NO_OUTGOING_CALLS.to_string();
+    }
+    let mut lines: Vec<String> = vec![format!(
+        "Found {} outgoing {}:",
+        arr.len(),
+        plural(arr.len(), "call")
+    )];
+    let items: Vec<&Value> = arr.iter().collect();
+    let by_file = group_by_file(&items, |call| {
+        let to = call.get("to")?;
+        Some(format_uri(to.get("uri").and_then(Value::as_str), cwd))
+    });
+    for (file_path, calls) in &by_file {
+        lines.push(format!("\n{file_path}:"));
+        for call in calls {
+            let Some(to) = call.get("to") else {
+                continue;
+            };
+            let kind = symbol_kind_to_string(to);
+            let (line, _) = range_start(to.get("range"));
+            let mut call_line = format!("  {} ({kind}) - Line {}", name_of(to), line + 1);
+            if let Some(sites) = call_sites(call) {
+                call_line.push_str(&format!(" [called from: {sites}]"));
+            }
+            lines.push(call_line);
+        }
+    }
+    lines.join("\n")
+}
+
+/// Count DocumentSymbols including nested children (`countSymbols`).
+fn count_symbols(symbols: &[Value]) -> u64 {
+    let mut count = symbols.len() as u64;
+    for symbol in symbols {
+        if let Some(children) = symbol.get("children").and_then(Value::as_array) {
+            if !children.is_empty() {
+                count += count_symbols(children);
+            }
+        }
+    }
+    count
+}
+
+/// Port of `LSPTool.ts:636 formatResult` — returns the model-facing formatted
+/// string plus the `resultCount` / `fileCount` summary fields. `result` is the
+/// already-gitignore-filtered LSP payload.
+fn format_result(operation: &str, result: &Value, cwd: &Path) -> (String, u64, u64) {
+    match operation {
+        "goToDefinition" | "goToImplementation" => {
+            let formatted = format_go_to_definition_result(result, cwd);
+            let raw_results: Vec<&Value> = if let Some(a) = result.as_array() {
+                a.iter().collect()
+            } else if result.is_null() {
+                Vec::new()
+            } else {
+                vec![result]
+            };
+            let valid_uris: Vec<&str> = raw_results
+                .iter()
+                .filter_map(|it| to_location(it).0)
+                .filter(|u| !u.is_empty())
+                .collect();
+            let result_count = valid_uris.len() as u64;
+            let file_count = unique_uri_count(valid_uris.iter().copied());
+            (formatted, result_count, file_count)
+        }
+        "findReferences" => {
+            let formatted = format_find_references_result(result, cwd);
+            let valid_uris: Vec<&str> = result
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|loc| loc.get("uri").and_then(Value::as_str))
+                        .filter(|u| !u.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let result_count = valid_uris.len() as u64;
+            let file_count = unique_uri_count(valid_uris.iter().copied());
+            (formatted, result_count, file_count)
+        }
+        "hover" => {
+            let formatted = format_hover_result(result);
+            let n = u64::from(!result.is_null());
+            (formatted, n, n)
+        }
+        "documentSymbol" => {
+            let formatted = format_document_symbol_result(result, cwd);
+            let symbols = result.as_array().map(Vec::as_slice).unwrap_or_default();
+            let is_document_symbol = !symbols.is_empty()
+                && symbols[0].is_object()
+                && symbols[0].get("range").is_some();
+            let count = if is_document_symbol {
+                count_symbols(symbols)
+            } else {
+                symbols.len() as u64
+            };
+            let file_count = u64::from(!symbols.is_empty());
+            (formatted, count, file_count)
+        }
+        "workspaceSymbol" => {
+            let formatted = format_workspace_symbol_result(result, cwd);
+            let valid_uris: Vec<&str> = result
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|sym| {
+                            sym.get("location")
+                                .and_then(|l| l.get("uri"))
+                                .and_then(Value::as_str)
+                        })
+                        .filter(|u| !u.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let result_count = valid_uris.len() as u64;
+            let file_count = unique_uri_count(valid_uris.iter().copied());
+            (formatted, result_count, file_count)
+        }
+        "prepareCallHierarchy" => {
+            let formatted = format_prepare_call_hierarchy_result(result, cwd);
+            let items = result.as_array().map(Vec::as_slice).unwrap_or_default();
+            let result_count = items.len() as u64;
+            let file_count = if items.is_empty() {
+                0
+            } else {
+                unique_uri_count(items.iter().filter_map(|i| i.get("uri").and_then(Value::as_str)))
+            };
+            (formatted, result_count, file_count)
+        }
+        "incomingCalls" => {
+            let formatted = format_incoming_calls_result(result, cwd);
+            let calls = result.as_array().map(Vec::as_slice).unwrap_or_default();
+            let result_count = calls.len() as u64;
+            let file_count = if calls.is_empty() {
+                0
+            } else {
+                unique_uri_count(calls.iter().filter_map(|c| {
+                    c.get("from").and_then(|f| f.get("uri")).and_then(Value::as_str)
+                }))
+            };
+            (formatted, result_count, file_count)
+        }
+        "outgoingCalls" => {
+            let formatted = format_outgoing_calls_result(result, cwd);
+            let calls = result.as_array().map(Vec::as_slice).unwrap_or_default();
+            let result_count = calls.len() as u64;
+            let file_count = if calls.is_empty() {
+                0
+            } else {
+                unique_uri_count(calls.iter().filter_map(|c| {
+                    c.get("to").and_then(|t| t.get("uri")).and_then(Value::as_str)
+                }))
+            };
+            (formatted, result_count, file_count)
+        }
+        // Unreachable: `call` validates the operation before dispatch.
+        _ => (
+            serde_json::to_string(result).unwrap_or_default(),
+            0,
+            0,
+        ),
+    }
+}
+
 // -- Tool struct -------------------------------------------------------------
 
 /// Builtin tool — dispatches 4 LSP operations.
@@ -614,13 +1283,24 @@ impl Tool for LSPTool {
                 .await;
                 // `LSPTool.ts:336-374` — drop gitignored files from
                 // location-bearing array results before returning.
-                let result = filter_gitignored_results(&operation, r.raw, &cwd);
+                let filtered = filter_gitignored_results(&operation, r.raw, &cwd);
+                // `LSPTool.ts:376-389` — format the FILTERED result into the
+                // brief human-readable string TS gives the model, plus the
+                // `resultCount`/`fileCount` summary. `model_content` is what the
+                // model sees (the `mapToolResultToToolResultBlockParam`
+                // `content: output.result` split); `result` mirrors the TS
+                // `Output.result` field for the UI.
+                let (formatted, result_count, file_count) =
+                    format_result(&operation, &filtered, &cwd);
                 Ok(ToolCallResult {
                     data: json!({
                         "operation": operation,
                         "server_name": server_name,
                         "file_path": file_path,
-                        "result": result,
+                        "result": formatted,
+                        "result_count": result_count,
+                        "file_count": file_count,
+                        "model_content": formatted,
                     }),
                     new_messages: vec![],
                     context_modifier: None,
@@ -644,6 +1324,9 @@ impl Tool for LSPTool {
                     ],
                 )
                 .await;
+                // `LSPTool.ts:265-272` — `Output` carries the message as
+                // `result`; the model sees it via `model_content` (no
+                // `resultCount`/`fileCount`, matching the TS `Output`).
                 let result = file_too_large_message(size);
                 Ok(ToolCallResult {
                     data: json!({
@@ -651,6 +1334,7 @@ impl Tool for LSPTool {
                         "server_name": server_name,
                         "file_path": file_path,
                         "result": result,
+                        "model_content": result,
                     }),
                     new_messages: vec![],
                     context_modifier: None,
@@ -935,6 +1619,271 @@ mod tests {
         let arr = out.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["targetUri"].as_str().unwrap(), kept);
+    }
+
+    // -- LSP.5: result formatting (byte-exact, with-results + empty cases) ---
+
+    fn cwd() -> PathBuf {
+        PathBuf::from("/home/user/project")
+    }
+
+    fn loc(rel: &str, line: i64, character: i64) -> Value {
+        json!({
+            "uri": format!("file:///home/user/project/{rel}"),
+            "range": { "start": { "line": line, "character": character },
+                       "end": { "line": line, "character": character } },
+        })
+    }
+
+    #[test]
+    fn format_uri_renders_relative_when_shorter() {
+        // file:// → percent-decoded → relative to cwd, shorter and not ../..
+        assert_eq!(
+            format_uri(Some("file:///home/user/project/src/main.rs"), &cwd()),
+            "src/main.rs"
+        );
+        // Missing/empty URI → defensive backstop string.
+        assert_eq!(format_uri(None, &cwd()), "<unknown location>");
+        assert_eq!(format_uri(Some(""), &cwd()), "<unknown location>");
+    }
+
+    #[test]
+    fn format_uri_keeps_absolute_when_relative_climbs_two_levels() {
+        // ../../ outside cwd → keep the absolute path.
+        assert_eq!(
+            format_uri(Some("file:///etc/hosts"), &cwd()),
+            "/etc/hosts"
+        );
+    }
+
+    #[test]
+    fn go_to_definition_single_and_empty_and_multi() {
+        // Single Location.
+        let single = loc("src/main.rs", 9, 4);
+        let (s, rc, fc) = format_result("goToDefinition", &single, &cwd());
+        assert_eq!(s, "Defined in src/main.rs:10:5");
+        assert_eq!((rc, fc), (1, 1));
+
+        // Empty array → no-definition message.
+        let (e, rc, fc) = format_result("goToDefinition", &json!([]), &cwd());
+        assert_eq!(e, NO_DEFINITION);
+        assert_eq!((rc, fc), (0, 0));
+
+        // Multiple definitions.
+        let multi = json!([loc("src/a.rs", 0, 0), loc("src/b.rs", 1, 2)]);
+        let (m, rc, fc) = format_result("goToImplementation", &multi, &cwd());
+        assert_eq!(m, "Found 2 definitions:\n  src/a.rs:1:1\n  src/b.rs:2:3");
+        assert_eq!((rc, fc), (2, 2));
+    }
+
+    #[test]
+    fn go_to_definition_location_link_uses_target_selection_range() {
+        let link = json!([{
+            "targetUri": "file:///home/user/project/src/x.rs",
+            "targetRange": { "start": { "line": 0, "character": 0 } },
+            "targetSelectionRange": { "start": { "line": 41, "character": 7 } },
+        }]);
+        let (s, _, _) = format_result("goToDefinition", &link, &cwd());
+        assert_eq!(s, "Defined in src/x.rs:42:8");
+    }
+
+    #[test]
+    fn find_references_one_grouped_and_empty() {
+        let one = json!([loc("src/main.rs", 9, 4)]);
+        let (s, rc, fc) = format_result("findReferences", &one, &cwd());
+        assert_eq!(s, "Found 1 reference:\n  src/main.rs:10:5");
+        assert_eq!((rc, fc), (1, 1));
+
+        let grouped = json!([loc("a.rs", 0, 0), loc("a.rs", 4, 2), loc("b.rs", 1, 1)]);
+        let (g, rc, fc) = format_result("findReferences", &grouped, &cwd());
+        assert_eq!(
+            g,
+            "Found 3 references across 2 files:\n\na.rs:\n  Line 1:1\n  Line 5:3\n\nb.rs:\n  Line 2:2"
+        );
+        assert_eq!((rc, fc), (3, 2));
+
+        let (e, rc, fc) = format_result("findReferences", &json!([]), &cwd());
+        assert_eq!(e, NO_REFERENCES);
+        assert_eq!((rc, fc), (0, 0));
+    }
+
+    #[test]
+    fn hover_with_range_markup_and_null() {
+        let hover = json!({
+            "contents": { "kind": "markdown", "value": "fn foo() -> ()" },
+            "range": { "start": { "line": 9, "character": 4 } },
+        });
+        let (s, rc, fc) = format_result("hover", &hover, &cwd());
+        assert_eq!(s, "Hover info at 10:5:\n\nfn foo() -> ()");
+        assert_eq!((rc, fc), (1, 1));
+
+        // Array contents joined by blank lines; no range → bare content.
+        let arr = json!({ "contents": ["line one", { "value": "line two" }] });
+        let (a, _, _) = format_result("hover", &arr, &cwd());
+        assert_eq!(a, "line one\n\nline two");
+
+        let (e, rc, fc) = format_result("hover", &Value::Null, &cwd());
+        assert_eq!(e, NO_HOVER);
+        assert_eq!((rc, fc), (0, 0));
+    }
+
+    #[test]
+    fn document_symbol_hierarchy_and_empty() {
+        let symbols = json!([{
+            "name": "Foo",
+            "kind": 5,
+            "range": { "start": { "line": 0, "character": 0 } },
+            "children": [{
+                "name": "bar",
+                "kind": 6,
+                "detail": "() -> ()",
+                "range": { "start": { "line": 2, "character": 4 } },
+            }],
+        }]);
+        let (s, rc, fc) = format_result("documentSymbol", &symbols, &cwd());
+        assert_eq!(
+            s,
+            "Document symbols:\nFoo (Class) - Line 1\n  bar (Method) () -> () - Line 3"
+        );
+        // Counts nested children: Foo + bar = 2; one file.
+        assert_eq!((rc, fc), (2, 1));
+
+        let (e, rc, fc) = format_result("documentSymbol", &json!([]), &cwd());
+        assert_eq!(e, NO_DOCUMENT_SYMBOLS);
+        assert_eq!((rc, fc), (0, 0));
+    }
+
+    #[test]
+    fn document_symbol_information_delegates_to_workspace() {
+        // A `SymbolInformation[]` payload (has `location`) renders like the
+        // workspace-symbol formatter.
+        let symbols = json!([{
+            "name": "Foo",
+            "kind": 5,
+            "location": loc("src/lib.rs", 0, 0),
+        }]);
+        let (s, _, _) = format_result("documentSymbol", &symbols, &cwd());
+        assert_eq!(
+            s,
+            "Found 1 symbol in workspace:\n\nsrc/lib.rs:\n  Foo (Class) - Line 1"
+        );
+    }
+
+    #[test]
+    fn workspace_symbol_with_container_plural_and_empty() {
+        let symbols = json!([
+            { "name": "Foo", "kind": 5, "location": loc("src/lib.rs", 0, 0), "containerName": "mod" },
+            { "name": "bar", "kind": 12, "location": loc("src/lib.rs", 9, 0) },
+        ]);
+        let (s, rc, fc) = format_result("workspaceSymbol", &symbols, &cwd());
+        assert_eq!(
+            s,
+            "Found 2 symbols in workspace:\n\nsrc/lib.rs:\n  Foo (Class) - Line 1 in mod\n  bar (Function) - Line 10"
+        );
+        assert_eq!((rc, fc), (2, 1));
+
+        let (e, rc, fc) = format_result("workspaceSymbol", &json!([]), &cwd());
+        assert_eq!(e, NO_WORKSPACE_SYMBOLS);
+        assert_eq!((rc, fc), (0, 0));
+    }
+
+    #[test]
+    fn prepare_call_hierarchy_single_multi_and_empty() {
+        let single = json!([{
+            "name": "foo",
+            "kind": 12,
+            "uri": "file:///home/user/project/src/main.rs",
+            "range": { "start": { "line": 9, "character": 0 } },
+            "detail": "fn foo()",
+        }]);
+        let (s, rc, fc) = format_result("prepareCallHierarchy", &single, &cwd());
+        assert_eq!(
+            s,
+            "Call hierarchy item: foo (Function) - src/main.rs:10 [fn foo()]"
+        );
+        assert_eq!((rc, fc), (1, 1));
+
+        let multi = json!([
+            { "name": "a", "kind": 12, "uri": "file:///home/user/project/src/a.rs",
+              "range": { "start": { "line": 0, "character": 0 } } },
+            { "name": "b", "kind": 6, "uri": "file:///home/user/project/src/b.rs",
+              "range": { "start": { "line": 4, "character": 0 } } },
+        ]);
+        let (m, rc, fc) = format_result("prepareCallHierarchy", &multi, &cwd());
+        assert_eq!(
+            m,
+            "Found 2 call hierarchy items:\n  a (Function) - src/a.rs:1\n  b (Method) - src/b.rs:5"
+        );
+        assert_eq!((rc, fc), (2, 2));
+
+        let (e, rc, fc) = format_result("prepareCallHierarchy", &json!([]), &cwd());
+        assert_eq!(e, NO_CALL_HIERARCHY_ITEM);
+        assert_eq!((rc, fc), (0, 0));
+    }
+
+    #[test]
+    fn incoming_calls_with_sites_and_empty() {
+        let calls = json!([{
+            "from": {
+                "name": "caller",
+                "kind": 12,
+                "uri": "file:///home/user/project/src/a.rs",
+                "range": { "start": { "line": 4, "character": 0 } },
+            },
+            "fromRanges": [
+                { "start": { "line": 5, "character": 8 } },
+                { "start": { "line": 9, "character": 2 } },
+            ],
+        }]);
+        let (s, rc, fc) = format_result("incomingCalls", &calls, &cwd());
+        assert_eq!(
+            s,
+            "Found 1 incoming call:\n\nsrc/a.rs:\n  caller (Function) - Line 5 [calls at: 6:9, 10:3]"
+        );
+        assert_eq!((rc, fc), (1, 1));
+
+        let (e, rc, fc) = format_result("incomingCalls", &json!([]), &cwd());
+        assert_eq!(e, NO_INCOMING_CALLS);
+        assert_eq!((rc, fc), (0, 0));
+    }
+
+    #[test]
+    fn outgoing_calls_with_sites_and_empty() {
+        let calls = json!([{
+            "to": {
+                "name": "callee",
+                "kind": 6,
+                "uri": "file:///home/user/project/src/b.rs",
+                "range": { "start": { "line": 0, "character": 0 } },
+            },
+            "fromRanges": [{ "start": { "line": 1, "character": 0 } }],
+        }]);
+        let (s, rc, fc) = format_result("outgoingCalls", &calls, &cwd());
+        assert_eq!(
+            s,
+            "Found 1 outgoing call:\n\nsrc/b.rs:\n  callee (Method) - Line 1 [called from: 2:1]"
+        );
+        assert_eq!((rc, fc), (1, 1));
+
+        let (e, rc, fc) = format_result("outgoingCalls", &json!([]), &cwd());
+        assert_eq!(e, NO_OUTGOING_CALLS);
+        assert_eq!((rc, fc), (0, 0));
+    }
+
+    #[test]
+    fn call_hierarchy_item_unknown_location_when_uri_missing() {
+        let item = json!({ "name": "ghost", "kind": 12 });
+        assert_eq!(
+            format_call_hierarchy_item(&item, &cwd()),
+            "ghost (Function) - <unknown location>"
+        );
+    }
+
+    #[test]
+    fn plural_matches_ts_string_utils() {
+        assert_eq!(plural(1, "symbol"), "symbol");
+        assert_eq!(plural(0, "symbol"), "symbols");
+        assert_eq!(plural(3, "call"), "calls");
     }
 
     #[test]

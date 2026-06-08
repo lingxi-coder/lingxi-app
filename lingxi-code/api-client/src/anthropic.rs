@@ -11,7 +11,7 @@ use crate::rate_limit::{parse_anthropic_ratelimit_reset, parse_retry_after, pars
 use crate::retry::{
     with_retry_ctl, RetryControl, DEFAULT_BASE_DELAYS_MS, DEFAULT_RETRY_BUDGET,
 };
-use crate::types::{MessageResponse, StreamEvent};
+use crate::types::{MessageResponse, StreamEvent, ThinkingApi};
 use crate::ApiError;
 use protocol::{ConversationMessage, HttpMethod, HttpRequest};
 use serde_json::Value;
@@ -207,6 +207,12 @@ impl AnthropicProvider {
     /// `system.is_some()`, `body["tools"]` only when `!tools.is_empty()`, and
     /// `body["temperature"]` only when `temperature.is_some()`. Wire keys are
     /// the exact Anthropic names `"max_tokens"` / `"tools"` / `"temperature"`.
+    ///
+    /// `thinking` carries the extended-thinking block (claude-code
+    /// `claude.ts:1599-1630`): when `Some`, a `"thinking"` key is stamped via
+    /// [`apply_thinking`] (budget clamped to `max_tokens - 1`); when `None` the
+    /// key is OMITTED, leaving non-thinking requests byte-identical.
+    #[allow(clippy::too_many_arguments)]
     fn build_messages_body(
         model: &str,
         system: Option<&str>,
@@ -214,6 +220,7 @@ impl AnthropicProvider {
         max_tokens: u32,
         tools: &[Value],
         temperature: Option<f32>,
+        thinking: Option<ThinkingApi>,
     ) -> Value {
         let mut body = serde_json::json!({
             "model": model,
@@ -229,6 +236,9 @@ impl AnthropicProvider {
         if let Some(t) = temperature {
             body["temperature"] = serde_json::json!(t);
         }
+        // Extended thinking — stamp `"thinking"` only when enabled (no-op +
+        // byte-identical when `None`). claude-code `claude.ts:1716`.
+        apply_thinking(&mut body, thinking, max_tokens);
         // CACHE.1 + CACHE.2 — stamp Anthropic prompt-cache breakpoints at the
         // wire boundary (no-op + byte-identical when caching is disabled).
         apply_prompt_caching(&mut body, model);
@@ -378,11 +388,68 @@ impl AnthropicProvider {
         is_enterprise: bool,
         transport: &T,
     ) -> Result<MessageResponse, ApiError> {
+        // No extended-thinking block (the historical default) — byte-identical
+        // to before the `thinking` field existed. The thinking-aware seam is
+        // `messages_create_non_stream_with_thinking`.
+        self.messages_create_non_stream_with_thinking(
+            model,
+            system,
+            msgs,
+            max_tokens,
+            tools,
+            temperature,
+            None,
+            fallback_model,
+            is_subscriber,
+            is_enterprise,
+            transport,
+        )
+        .await
+    }
+
+    /// Non-streaming `POST /v1/messages` carrying the full request options
+    /// **plus the extended-thinking block** (claude-code `claude.ts:1599-1630` +
+    /// the `thinking` field at `claude.ts:1716`). Identical retry / rate-limit /
+    /// OAuth-hook / cost / 529-fallback middleware as
+    /// [`Self::messages_create_non_stream_with_fallback`]; the only addition is
+    /// the `thinking` option.
+    ///
+    /// When `thinking` is `None` the request body is byte-identical to the
+    /// thinking-free path (no `"thinking"` key). When `Some`, a
+    /// `"thinking":{"type":"enabled","budget_tokens":N}` (budget clamped to
+    /// `max_tokens - 1`) or `"thinking":{"type":"adaptive"}` block is stamped —
+    /// and the budget is the same value the overflow-reshrink loop reads back
+    /// from `thinking.budget_tokens`.
+    ///
+    /// Co-constraint: the Anthropic API requires `temperature: 1` (the default —
+    /// `temperature` OMITTED) when thinking is enabled (`claude.ts:1691-1695`).
+    /// Callers that pass `Some(thinking_enabled)` MUST pass `temperature: None`;
+    /// this method forwards both verbatim (it does not silently drop a stray
+    /// temperature, matching claude-code's caller-owned decision).
+    ///
+    /// # Errors
+    /// See [`Self::messages_create_non_stream_with_fallback`].
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    pub async fn messages_create_non_stream_with_thinking<T: HttpTransport>(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        max_tokens: u32,
+        tools: Vec<Value>,
+        temperature: Option<f32>,
+        thinking: Option<ThinkingApi>,
+        fallback_model: Option<String>,
+        is_subscriber: bool,
+        is_enterprise: bool,
+        transport: &T,
+    ) -> Result<MessageResponse, ApiError> {
         let request_id = new_request_id();
         let started = std::time::Instant::now();
         telemetry::emit_started(&self.bus, model, &request_id, false).await;
 
-        let body = Self::build_messages_body(model, system, &msgs, max_tokens, &tools, temperature);
+        let body =
+            Self::build_messages_body(model, system, &msgs, max_tokens, &tools, temperature, thinking);
 
         // claude-code withRetry.ts:767-769 — a 429 is retryable ONLY when the
         // user is not a Claude.ai subscriber, OR is an enterprise subscriber
@@ -845,22 +912,50 @@ impl AnthropicProvider {
         futures::stream::BoxStream<'static, Result<crate::types::StreamEvent, ApiError>>,
         ApiError,
     > {
+        // Historical defaults — `max_tokens = 4096`, no temperature, no thinking
+        // block — so every existing caller's wire body is byte-identical. Richer
+        // callers use `messages_create_stream_with_opts`.
+        self.messages_create_stream_with_opts(model, system, msgs, tools, 4096, None, None, transport)
+            .await
+    }
+
+    /// Streaming `POST /v1/messages` carrying the full request options
+    /// (`max_tokens` / `temperature` / extended-thinking block). Same SSE
+    /// handshake + decode as [`Self::messages_create_stream`]; only body
+    /// construction differs — it threads the supplied `max_tokens`,
+    /// `temperature`, and `thinking` instead of hard-coding 4096 / no-temperature
+    /// / no-thinking. The thin wrapper above forwards the historical defaults so
+    /// existing callers stay byte-identical.
+    ///
+    /// `thinking`: `None` → no `"thinking"` key (byte-identical); `Some` stamps
+    /// the extended-thinking block (claude-code `claude.ts:1599-1630`), with an
+    /// enabled budget clamped to `max_tokens - 1` (`claude.ts:1624`).
+    ///
+    /// # Errors
+    /// See [`Self::messages_create_stream`].
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    pub async fn messages_create_stream_with_opts<T: HttpTransport + Send + Sync + 'static>(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        msgs: Vec<ConversationMessage>,
+        tools: Vec<Value>,
+        max_tokens: u32,
+        temperature: Option<f32>,
+        thinking: Option<ThinkingApi>,
+        transport: Arc<T>,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<crate::types::StreamEvent, ApiError>>,
+        ApiError,
+    > {
         use futures::stream::StreamExt;
 
-        let mut body = serde_json::json!({
-            "model": model,
-            "max_tokens": 4096u32,
-            "messages": msgs,
-        });
-        if let Some(s) = system {
-            body["system"] = Value::String(s.to_string());
-        }
-        if !tools.is_empty() {
-            body["tools"] = Value::Array(tools);
-        }
-        // CACHE.1 + CACHE.2 — same wire-boundary cache stamping as the
-        // non-streaming builder (shared helper keeps both paths in lockstep).
-        apply_prompt_caching(&mut body, model);
+        // Shares the exact body-construction the non-streaming builder uses
+        // (system/tools/temperature/thinking + prompt-cache stamping) so the two
+        // paths stay in lockstep; `build_streaming_request` then adds
+        // `stream: true`.
+        let body =
+            Self::build_messages_body(model, system, &msgs, max_tokens, &tools, temperature, thinking);
 
         let req = self.build_streaming_request(&body);
         let wire_stream = transport.stream_sse(req).await?;
@@ -1137,6 +1232,35 @@ fn resolve_retry_control(
 /// `ttl` / `scope` / `cache_reference` extensions are out of scope (and the
 /// frozen `ContentBlock` cannot carry a `cache_reference`). When caching is
 /// disabled the body is left byte-identical to today (system stays a String).
+/// Stamp the extended-thinking block onto the request body.
+///
+/// 1:1 with claude-code `claude.ts:1599-1630` + the `thinking` field at
+/// `claude.ts:1716`:
+/// * `None` → no `"thinking"` key at all. This is the byte-identical,
+///   non-thinking path: an external/disabled request serializes exactly as it
+///   did before this field existed.
+/// * `Some(Adaptive)` → `"thinking":{"type":"adaptive"}` (no budget).
+/// * `Some(Enabled { budget_tokens })` →
+///   `"thinking":{"type":"enabled","budget_tokens":N}` where `N` is clamped to
+///   `max_tokens - 1` (`Math.min(maxOutputTokens - 1, thinkingBudget)`,
+///   `claude.ts:1624`) so the request always leaves at least one output token
+///   beyond the reasoning budget.
+///
+/// The wire field is the exact Anthropic name `"thinking"`; the budget is read
+/// back by [`AnthropicProvider::drive_retry_loop_with_429`] (`thinking.budget_tokens`)
+/// for the `max_tokens` overflow re-shrink, so producer and consumer now match.
+///
+/// Co-constraint (NOT enforced here): the Anthropic API requires
+/// `temperature: 1` (i.e. the default — `temperature` OMITTED) whenever thinking
+/// is enabled (`claude.ts:1691-1695`). That decision lives with the caller,
+/// which passes `temperature: None` alongside `Some(thinking)`; this helper only
+/// stamps the `thinking` key and never touches `temperature`.
+fn apply_thinking(body: &mut Value, thinking: Option<ThinkingApi>, max_tokens: u32) {
+    if let Some(cfg) = thinking {
+        body["thinking"] = cfg.to_wire(max_tokens);
+    }
+}
+
 fn apply_prompt_caching(body: &mut Value, model: &str) {
     if !prompt_caching_enabled(model) {
         return;
@@ -1796,7 +1920,7 @@ mod prompt_caching_tests {
 
         let msgs = user_msgs();
         let body =
-            AnthropicProvider::build_messages_body("claude-x", Some("SYS"), &msgs, 4096, &[], None);
+            AnthropicProvider::build_messages_body("claude-x", Some("SYS"), &msgs, 4096, &[], None, None);
 
         // CACHE.1: system is an array of one text block with cache_control.
         let sys = &body["system"];
@@ -1858,7 +1982,7 @@ mod prompt_caching_tests {
 
         let msgs = user_msgs();
         let actual =
-            AnthropicProvider::build_messages_body("claude-x", Some("SYS"), &msgs, 4096, &[], None);
+            AnthropicProvider::build_messages_body("claude-x", Some("SYS"), &msgs, 4096, &[], None, None);
 
         // Reconstruct exactly what the builder produced before CACHE.1/CACHE.2.
         let mut expected = json!({
@@ -1936,7 +2060,7 @@ mod prompt_caching_tests {
             stop_reason: None,
         }];
         let body =
-            AnthropicProvider::build_messages_body("claude-x", Some("SYS"), &msgs, 4096, &[], None);
+            AnthropicProvider::build_messages_body("claude-x", Some("SYS"), &msgs, 4096, &[], None, None);
 
         let content = &body["messages"][0]["content"];
         // text block (index 0) receives the marker...
@@ -2120,5 +2244,246 @@ mod prompt_caching_tests {
         std::env::remove_var("ANTHROPIC_DEFAULT_OPUS_MODEL");
 
         std::env::remove_var("DISABLE_PROMPT_CACHING_OPUS");
+    }
+}
+
+/// THINKING.1 — extended-thinking request-body parity. Asserts the SERIALIZED
+/// wire body's `"thinking"` block matches claude-code `claude.ts:1599-1630` +
+/// the `thinking` field (`claude.ts:1716`): enabled → `{type:'enabled',
+/// budget_tokens}` (budget clamped to `max_tokens - 1`), adaptive →
+/// `{type:'adaptive'}`, and `None` → NO `"thinking"` key (byte-identical to the
+/// pre-thinking body). Mirrors the `prompt_caching_tests` style (raw JSON body,
+/// non-stream builder + streaming builder via a capturing transport).
+#[cfg(test)]
+mod thinking_request_tests {
+    use super::AnthropicProvider;
+    use crate::types::ThinkingApi;
+    use protocol::{ContentBlock, ConversationMessage, HttpRequest, HttpResponse, MessageId};
+    use serde_json::Value;
+    use std::sync::{Arc, Mutex};
+    use traits::http::SseStream;
+    use traits::{HttpError, HttpTransport};
+
+    // NB: these tests deliberately do NOT touch DISABLE_PROMPT_CACHING (which is
+    // process-global and serialized by `prompt_caching_tests::ENV_LOCK`). The
+    // `thinking` block is orthogonal to prompt caching, so the assertions hold
+    // whether caching is on or off — keeping this module env-free avoids racing
+    // the caching tests in the shared test binary.
+
+    fn user_msgs() -> Vec<ConversationMessage> {
+        vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "hi".into(),
+            }],
+        }]
+    }
+
+    struct CapturingTransport {
+        body: Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpTransport for CapturingTransport {
+        async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
+            unimplemented!("non-streaming path is not exercised by these tests")
+        }
+        async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError> {
+            *self.body.lock().unwrap() = req.body.clone();
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    // (a) Enabled with budget N: the serialized body carries
+    // "thinking":{"type":"enabled","budget_tokens":N} (budget < max_tokens).
+    #[test]
+    fn enabled_budget_emits_thinking_block() {
+        let msgs = user_msgs();
+        // max_tokens 32000, budget 10000 → no clamp (10000 < 31999).
+        let body = AnthropicProvider::build_messages_body(
+            "claude-x",
+            None,
+            &msgs,
+            32_000,
+            &[],
+            None,
+            Some(ThinkingApi::Enabled {
+                budget_tokens: 10_000,
+            }),
+        );
+
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 10_000);
+        // Exact wire fragment (key order is stable for serde_json objects).
+        let s = body["thinking"].to_string();
+        assert_eq!(s, r#"{"type":"enabled","budget_tokens":10000}"#);
+        // Co-constraint: max_tokens still exceeds the budget.
+        assert!(body["max_tokens"].as_u64().unwrap() > 10_000);
+    }
+
+    // (a') Budget is clamped to max_tokens - 1 (claude.ts:1624) when it would
+    // otherwise meet/exceed max_tokens.
+    #[test]
+    fn enabled_budget_clamped_to_max_tokens_minus_one() {
+        let msgs = user_msgs();
+        // budget 8000 >= max_tokens 8000 → clamp to 7999.
+        let body = AnthropicProvider::build_messages_body(
+            "claude-x",
+            None,
+            &msgs,
+            8000,
+            &[],
+            None,
+            Some(ThinkingApi::Enabled {
+                budget_tokens: 8000,
+            }),
+        );
+
+        assert_eq!(body["thinking"]["budget_tokens"], 7999);
+        // The overflow-reshrink invariant: max_tokens > budget_tokens.
+        assert!(
+            body["max_tokens"].as_u64().unwrap()
+                > body["thinking"]["budget_tokens"].as_u64().unwrap()
+        );
+    }
+
+    // (b) None → NO "thinking" key. Adding the field must not alter the
+    // non-thinking body: the `None` build has no `thinking` key/substring at all.
+    #[test]
+    fn disabled_omits_thinking_key_byte_identical() {
+        let msgs = user_msgs();
+        let actual = AnthropicProvider::build_messages_body(
+            "claude-x",
+            Some("SYS"),
+            &msgs,
+            4096,
+            &[],
+            None,
+            None,
+        );
+
+        assert!(actual.get("thinking").is_none(), "no thinking key when None");
+        assert!(
+            !actual.to_string().contains("thinking"),
+            "no 'thinking' substring anywhere when disabled; got {actual}",
+        );
+        // The `None` path is byte-identical to the same args (the only new
+        // parameter is `thinking`, and it is the no-op default).
+        let again = AnthropicProvider::build_messages_body(
+            "claude-x",
+            Some("SYS"),
+            &msgs,
+            4096,
+            &[],
+            None,
+            None,
+        );
+        assert_eq!(actual, again);
+    }
+
+    // (c) Adaptive → {"type":"adaptive"} (no budget_tokens).
+    #[test]
+    fn adaptive_emits_typeless_block() {
+        let msgs = user_msgs();
+        let body = AnthropicProvider::build_messages_body(
+            "claude-x",
+            None,
+            &msgs,
+            32_000,
+            &[],
+            None,
+            Some(ThinkingApi::Adaptive),
+        );
+
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(
+            body["thinking"].get("budget_tokens").is_none(),
+            "adaptive block carries no budget_tokens",
+        );
+        assert_eq!(body["thinking"].to_string(), r#"{"type":"adaptive"}"#);
+    }
+
+    // (d) Streaming builder threads thinking + the real max_tokens onto the wire.
+    #[tokio::test]
+    async fn stream_with_opts_emits_thinking_block() {
+        let provider = AnthropicProvider::new("k", None);
+        let transport = Arc::new(CapturingTransport {
+            body: Mutex::new(None),
+        });
+        let _stream = provider
+            .messages_create_stream_with_opts(
+                "claude-x",
+                None,
+                user_msgs(),
+                Vec::new(),
+                20_000,
+                None,
+                Some(ThinkingApi::Enabled {
+                    budget_tokens: 12_000,
+                }),
+                transport.clone(),
+            )
+            .await
+            .expect("stream handshake");
+        let body_str = transport.body.lock().unwrap().clone().expect("body captured");
+
+        let body: Value = serde_json::from_str(&body_str).unwrap();
+        assert_eq!(body["stream"], true, "streaming flag set");
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 12_000);
+        assert_eq!(
+            body["max_tokens"], 20_000,
+            "streaming max_tokens threaded (not the legacy 4096)"
+        );
+    }
+
+    // (d') Streaming with None thinking → no thinking key on the wire body.
+    #[tokio::test]
+    async fn stream_with_opts_none_omits_thinking() {
+        let provider = AnthropicProvider::new("k", None);
+        let transport = Arc::new(CapturingTransport {
+            body: Mutex::new(None),
+        });
+        let _ = provider
+            .messages_create_stream_with_opts(
+                "claude-x",
+                None,
+                user_msgs(),
+                Vec::new(),
+                4096,
+                None,
+                None,
+                transport.clone(),
+            )
+            .await
+            .expect("stream handshake");
+        let body_str = transport.body.lock().unwrap().clone().expect("body captured");
+        assert!(
+            !body_str.contains("thinking"),
+            "no thinking key when None on the streaming path; got {body_str}",
+        );
+    }
+
+    // (e) ThinkingApi::to_wire unit: clamp + shape in isolation.
+    #[test]
+    fn to_wire_shapes_and_clamps() {
+        assert_eq!(
+            ThinkingApi::Adaptive.to_wire(1000),
+            serde_json::json!({"type":"adaptive"}),
+        );
+        assert_eq!(
+            ThinkingApi::Enabled { budget_tokens: 500 }.to_wire(1000),
+            serde_json::json!({"type":"enabled","budget_tokens":500}),
+        );
+        // clamp to max_tokens - 1.
+        assert_eq!(
+            ThinkingApi::Enabled { budget_tokens: 5000 }.to_wire(1000),
+            serde_json::json!({"type":"enabled","budget_tokens":999}),
+        );
+        // pathological max_tokens == 0 → saturating_sub → budget clamps to 0.
+        assert_eq!(
+            ThinkingApi::Enabled { budget_tokens: 5000 }.to_wire(0),
+            serde_json::json!({"type":"enabled","budget_tokens":0}),
+        );
     }
 }

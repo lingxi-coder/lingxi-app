@@ -30,6 +30,54 @@ pub struct MessageRequest {
     pub temperature: Option<f32>,
 }
 
+/// Extended-thinking config emitted on the request body's `thinking` field.
+///
+/// 1:1 with claude-code `BetaMessageStreamParams['thinking']`
+/// (`claude.ts:1599-1630`): either an *adaptive* block (newer models that
+/// support adaptive thinking — no budget) or an *enabled* block carrying an
+/// explicit `budget_tokens`. The `disabled` arm of the TS union is intentionally
+/// NOT modelled: when thinking is off, claude-code OMITS the `thinking` key
+/// entirely, so the Rust port represents "off" as `Option::None` rather than a
+/// serialized variant. This keeps non-thinking requests byte-identical.
+///
+/// Wire shape (matches the Anthropic Messages API exactly):
+/// * adaptive → `{"type":"adaptive"}`
+/// * enabled  → `{"type":"enabled","budget_tokens":N}`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingApi {
+    /// Adaptive thinking — models that support it run without a fixed budget
+    /// (claude-code `{ type: 'adaptive' }`, `claude.ts:1611-1613`).
+    Adaptive,
+    /// Budgeted thinking — `budget_tokens` reasoning tokens
+    /// (claude-code `{ budget_tokens, type: 'enabled' }`, `claude.ts:1625-1628`).
+    Enabled {
+        /// Reasoning-token budget. The request builder clamps this to
+        /// `max_tokens - 1` before serializing, mirroring
+        /// `Math.min(maxOutputTokens - 1, thinkingBudget)` (`claude.ts:1624`).
+        budget_tokens: u32,
+    },
+}
+
+impl ThinkingApi {
+    /// Serialize to the exact Anthropic `thinking` wire object, clamping an
+    /// enabled budget to `max_tokens - 1` so the request always leaves room for
+    /// at least one output token beyond the reasoning budget (claude-code
+    /// `claude.ts:1624`). For [`ThinkingApi::Adaptive`] `max_tokens` is unused
+    /// (the adaptive block carries no budget).
+    #[must_use]
+    pub fn to_wire(self, max_tokens: u32) -> Value {
+        match self {
+            Self::Adaptive => serde_json::json!({ "type": "adaptive" }),
+            Self::Enabled { budget_tokens } => {
+                // Math.min(maxOutputTokens - 1, thinkingBudget). `saturating_sub`
+                // guards the (pathological) max_tokens == 0 case.
+                let clamped = budget_tokens.min(max_tokens.saturating_sub(1));
+                serde_json::json!({ "type": "enabled", "budget_tokens": clamped })
+            }
+        }
+    }
+}
+
 /// Non-streaming response body from the `messages` endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageResponse {

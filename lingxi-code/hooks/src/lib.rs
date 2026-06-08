@@ -17,6 +17,7 @@
 mod agent_executor;
 pub mod async_registry;
 pub mod builtin;
+pub mod cwd_changed_firer;
 pub mod definition;
 pub mod events;
 pub mod executor;
@@ -32,6 +33,7 @@ pub mod task_completed_firer;
 pub mod task_created_firer;
 
 pub use async_registry::AsyncHookRegistry;
+pub use cwd_changed_firer::{CwdChangedFire, CwdChangedFirer, OptionalCwdChangedFirer};
 pub use definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
 pub use events::{HookEvent, HookEventType, HookProgressEvent};
 pub use executor::{

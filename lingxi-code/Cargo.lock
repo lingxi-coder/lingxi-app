@@ -4675,6 +4675,7 @@ dependencies = [
  "once_cell",
  "permission",
  "protocol",
+ "sandbox",
  "serde",
  "serde_json",
  "telemetry",

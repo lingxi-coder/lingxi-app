@@ -690,7 +690,23 @@ impl AnthropicProvider {
         transport: &T,
     ) -> Result<MessageResponse, ApiError> {
         let hook = self.effective_hook();
-        let result = match hook.refresh(TokenHash([0u8; 32])).await {
+        // Pass the SHA-256 of the token that authenticated the request that just
+        // 401'd (the `x-api-key`/Bearer value in `self.api_key`) as
+        // `prev_token_hash`, NOT an all-zero sentinel. This makes the OAuth
+        // hook's single-flight double-check behave like claude-code
+        // `handleOAuth401ErrorImpl(failedAccessToken)` (auth.ts:1373-1391):
+        //   * stored token still equals the failed one (not rotated) → hashes
+        //     match → the hook performs a real HTTP refresh + we retry with the
+        //     fresh token (TS `checkAndRefreshOAuthTokenIfNeeded(0, true)`);
+        //   * another task already rotated it → hashes differ → the hook returns
+        //     the rotated token without a redundant HTTP refresh (TS
+        //     "recovered from keychain").
+        // The old `TokenHash([0u8; 32])` always mismatched the (SHA-256, never
+        // zero) stored hash, so the hook returned the SAME already-rejected
+        // token and the retry 401'd again — the OAUTHREF.1 gap. When OAuth is
+        // not the active mode the registered hook is `NoOpOAuthHook`, which
+        // ignores this argument, so the change is a no-op outside the OAuth path.
+        let result = match hook.refresh(self.failed_token_hash()).await {
             Ok(crate::BearerToken(token)) => {
                 let bearer = self.bearer_to_header(&token);
                 let req = self.build_request_with_betas(body, Some(&bearer));
@@ -719,6 +735,25 @@ impl AnthropicProvider {
                 e
             }
         })
+    }
+
+    /// SHA-256 of the token that authenticated the request that just got a 401
+    /// (the `x-api-key`/Bearer value held in `self.api_key`). Fed to the OAuth
+    /// hook as `prev_token_hash` so its single-flight double-check can tell
+    /// whether the token was already rotated by another task.
+    ///
+    /// Uses the SAME hashing scheme as `anthropic_oauth::TokenInfo::token_hash`
+    /// (raw SHA-256 over the access-token bytes), so the value is byte-for-byte
+    /// comparable against the hook's stored `TokenHash`. We re-implement it here
+    /// rather than reuse that method because api-client cannot depend on
+    /// anthropic-oauth (it would be a dependency cycle — anthropic-oauth depends
+    /// on api-client for the `OAuthRefreshHook` trait).
+    fn failed_token_hash(&self) -> TokenHash {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.api_key.as_bytes());
+        let digest: [u8; 32] = hasher.finalize().into();
+        TokenHash(digest)
     }
 
     /// Emit the terminal telemetry event — either `tengu_api_request_succeeded`
@@ -1307,5 +1342,181 @@ mod tests {
         let id = crate::anthropic::new_request_id();
         assert!(!id.is_empty());
         assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    }
+}
+
+/// OAUTHREF.1 regression coverage for the reactive-401 → OAuth-refresh path.
+///
+/// These tests drive `messages_create_non_stream` against a scripted transport
+/// (`401` then `200`) and a hook that reproduces `RefreshDriver::refresh`'s
+/// single-flight double-check, asserting that `refresh_and_retry_401` now feeds
+/// the hook the hash of the *failed* token instead of an all-zero sentinel:
+///   * unrotated token → the hashes match → a real HTTP refresh fires;
+///   * already-rotated token → the hashes differ → no redundant refresh.
+#[cfg(test)]
+mod reactive_401_refresh_tests {
+    use super::AnthropicProvider;
+    use crate::oauth_hook::{BearerToken, OAuthHookError, OAuthRefreshHook, TokenHash};
+    use protocol::{
+        ContentBlock, ConversationMessage, HttpRequest, HttpResponse, MessageId, Secret,
+    };
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::{Arc, Mutex};
+    use traits::http::SseStream;
+    use traits::{HttpError, HttpTransport};
+
+    const OK_BODY: &str = r#"{"id":"msg_01","model":"claude-opus-4-6","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":1}}"#;
+
+    /// SHA-256 over the token bytes — identical scheme to
+    /// `AnthropicProvider::failed_token_hash` and
+    /// `anthropic_oauth::TokenInfo::token_hash`, so the mock hook compares the
+    /// same way `RefreshDriver` does.
+    fn sha256_token(token: &str) -> TokenHash {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(token.as_bytes());
+        let digest: [u8; 32] = h.finalize().into();
+        TokenHash(digest)
+    }
+
+    fn make_msgs() -> Vec<ConversationMessage> {
+        vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+        }]
+    }
+
+    /// Scripted transport: pops a `(status, body)` per request and records the
+    /// `authorization` header it saw (so the retry's bearer can be asserted).
+    struct ScriptedTransport {
+        responses: Mutex<VecDeque<(u16, String)>>,
+        seen_auth: Mutex<Vec<Option<String>>>,
+    }
+
+    impl ScriptedTransport {
+        fn new(responses: Vec<(u16, String)>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                seen_auth: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HttpTransport for ScriptedTransport {
+        async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+            let auth = req
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+                .map(|(_, v)| v.clone());
+            self.seen_auth.lock().unwrap().push(auth);
+            let (status, body) = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("scripted transport ran out of responses");
+            Ok(HttpResponse {
+                status,
+                headers: vec![],
+                body,
+            })
+        }
+
+        async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+            unimplemented!("streaming is not exercised by the reactive-401 tests")
+        }
+    }
+
+    /// Reproduces `RefreshDriver::refresh`'s double-check-after-acquire: hash the
+    /// stored token and compare against `prev`. Equal → perform a (simulated)
+    /// HTTP refresh and rotate; different → another task already rotated, so
+    /// return the stored token without a redundant refresh.
+    struct DoubleCheckHook {
+        stored: tokio::sync::Mutex<String>,
+        next: String,
+        http_refreshes: AtomicU8,
+    }
+
+    #[async_trait::async_trait]
+    impl OAuthRefreshHook for DoubleCheckHook {
+        async fn refresh(&self, prev: TokenHash) -> Result<BearerToken, OAuthHookError> {
+            let mut stored = self.stored.lock().await;
+            if sha256_token(&stored) != prev {
+                // Already rotated by another task → no HTTP call (TS
+                // "recovered from keychain", auth.ts:1385-1388).
+                return Ok(BearerToken(Secret::new(stored.clone())));
+            }
+            // Hash matches the failed token → force a real HTTP refresh + rotate
+            // (TS `checkAndRefreshOAuthTokenIfNeeded(0, true)`).
+            self.http_refreshes.fetch_add(1, Ordering::SeqCst);
+            *stored = self.next.clone();
+            Ok(BearerToken(Secret::new(stored.clone())))
+        }
+    }
+
+    #[tokio::test]
+    async fn unrotated_token_forces_http_refresh_then_retries() {
+        let hook = Arc::new(DoubleCheckHook {
+            stored: tokio::sync::Mutex::new("expired-oauth-token".to_string()),
+            next: "fresh-oauth-token".to_string(),
+            http_refreshes: AtomicU8::new(0),
+        });
+        // `api_key` is the still-current OAuth token the rejected request used.
+        let provider =
+            AnthropicProvider::new("expired-oauth-token", None).with_oauth_hook(hook.clone());
+        let transport = ScriptedTransport::new(vec![
+            (401, "token expired".to_string()),
+            (200, OK_BODY.to_string()),
+        ]);
+
+        let r = provider
+            .messages_create_non_stream("claude-opus-4-6", None, make_msgs(), &transport)
+            .await;
+
+        assert!(r.is_ok(), "401 → refresh → 200 must succeed: {r:?}");
+        // Exactly one REAL HTTP refresh — proving we no longer no-op return the
+        // already-rejected token (the OAUTHREF.1 bug).
+        assert_eq!(hook.http_refreshes.load(Ordering::SeqCst), 1);
+        let seen = transport.seen_auth.lock().unwrap();
+        assert_eq!(seen.len(), 2, "one 401 request + one retry");
+        assert_eq!(seen[0], None, "initial request uses x-api-key (no bearer)");
+        assert_eq!(
+            seen[1].as_deref(),
+            Some("Bearer fresh-oauth-token"),
+            "retry must carry the freshly-refreshed bearer",
+        );
+    }
+
+    #[tokio::test]
+    async fn already_rotated_token_skips_redundant_refresh() {
+        // Another task rotated the stored token before this 401 was handled.
+        let hook = Arc::new(DoubleCheckHook {
+            stored: tokio::sync::Mutex::new("rotated-by-another-task".to_string()),
+            next: "unused".to_string(),
+            http_refreshes: AtomicU8::new(0),
+        });
+        let provider =
+            AnthropicProvider::new("expired-oauth-token", None).with_oauth_hook(hook.clone());
+        let transport = ScriptedTransport::new(vec![
+            (401, "token expired".to_string()),
+            (200, OK_BODY.to_string()),
+        ]);
+
+        let r = provider
+            .messages_create_non_stream("claude-opus-4-6", None, make_msgs(), &transport)
+            .await;
+
+        assert!(r.is_ok(), "must recover with the already-rotated token: {r:?}");
+        // The double-check short-circuited — no redundant HTTP refresh.
+        assert_eq!(hook.http_refreshes.load(Ordering::SeqCst), 0);
+        let seen = transport.seen_auth.lock().unwrap();
+        assert_eq!(
+            seen[1].as_deref(),
+            Some("Bearer rotated-by-another-task"),
+            "retry uses the token another task already rotated to",
+        );
     }
 }

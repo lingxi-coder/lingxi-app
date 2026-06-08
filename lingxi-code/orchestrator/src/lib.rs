@@ -19,6 +19,7 @@ pub mod cost_wiring;
 pub mod cwd_changed_firer;
 pub mod diagnostics;
 pub mod error;
+pub mod file_changed_firer;
 pub mod handle_impl;
 pub mod hook_prompt_runner;
 pub mod image_input;
@@ -56,6 +57,7 @@ pub use error::OrchestratorError;
 pub use hook_prompt_runner::ApiClientHookPromptRunner;
 pub use mcp_hook_dispatcher::OrchestratorHookDispatcher;
 pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
+pub use file_changed_firer::OrchestratorFileChangedFirer;
 pub use task_completed_firer::OrchestratorTaskCompletedFirer;
 pub use task_created_firer::OrchestratorTaskCreatedFirer;
 pub use prompt::{

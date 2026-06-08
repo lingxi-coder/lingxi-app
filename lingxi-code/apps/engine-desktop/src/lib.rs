@@ -26,6 +26,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod file_changed_watch;
 pub mod settings_watch;
 mod skill_loader;
 
@@ -675,6 +676,13 @@ pub struct DesktopRuntime {
     /// watch tasks (RAII teardown). `None`-shaped as an empty handle (no tasks)
     /// when no `.claude` directory exists to watch.
     pub settings_watcher: settings_watch::SettingsWatcherHandle,
+    /// Live file-changed watcher firing `FileChanged` hooks when a path resolved
+    /// from a `FileChanged` hook's `matcher` mutates on disk (parity: claude-code
+    /// `fileChangedWatcher.ts` → `executeFileChangedHooks`). Held by the runtime
+    /// so it lives for the session; dropping the runtime aborts the watch tasks
+    /// (RAII teardown). An empty handle (no tasks) when no `FileChanged` hook is
+    /// configured — the no-watch case is byte-identical to before.
+    pub file_changed_watcher: file_changed_watch::FileChangedWatcherHandle,
 }
 
 /// Errors surfaced while building a [`DesktopRuntime`].
@@ -1528,12 +1536,42 @@ pub async fn build(
     // is moved into the orchestrator: spawn only when a `ConfigChange` hook is
     // registered (the fire is a strict no-op otherwise, so the background
     // watcher would be pure overhead).
-    let has_config_change_hook = hook_registry
-        .read()
-        .await
-        .all_hooks()
-        .iter()
-        .any(|h| h.events.contains(&hooks::events::HookEventType::ConfigChange));
+    // Snapshot under ONE registry read: both the `ConfigChange` gate and the
+    // `FileChanged` watch-path matchers (collected before `hook_registry` is
+    // moved into the orchestrator). A `FileChanged` hook's group `matcher`
+    // (`HookDefinition::matcher()`) is the pipe-separated filename list
+    // claude-code's `resolveWatchPaths` reads (`fileChangedWatcher.ts:48-65`).
+    let (has_config_change_hook, file_changed_matchers): (bool, Vec<String>) = {
+        let reg = hook_registry.read().await;
+        let all = reg.all_hooks();
+        let has_config_change = all
+            .iter()
+            .any(|h| h.events.contains(&hooks::events::HookEventType::ConfigChange));
+        let matchers = all
+            .iter()
+            .filter(|h| {
+                h.events
+                    .contains(&hooks::events::HookEventType::FileChanged)
+            })
+            .filter_map(|h| h.matcher().map(ToString::to_string))
+            .collect();
+        (has_config_change, matchers)
+    };
+    // Build the `FileChanged` firer over the SAME `Arc<HookExecutorImpl>` the
+    // orchestrator is about to take ownership of (mirrors the `cwd_changed_firer`
+    // built from `hooks.clone()` at (5.5)). Captured BEFORE `hooks` is moved into
+    // the orchestrator constructor below so the watcher (spawned at (7.3), after
+    // `hooks` is moved) reaches `orch.hooks` without a getter. Only built when at
+    // least one `FileChanged` matcher exists — otherwise it would be unused.
+    let file_changed_firer: Option<Arc<dyn hooks::FileChangedFirer>> =
+        if file_changed_matchers.is_empty() {
+            None
+        } else {
+            Some(Arc::new(orchestrator::OrchestratorFileChangedFirer::new(
+                hooks.clone(),
+                watch_cwd.clone(),
+            )))
+        };
     let orch = Arc::new(
         ConversationOrchestrator::new(
             orch_cfg, api_client, tools, hooks, perms, output, memory, cwd,
@@ -1629,6 +1667,55 @@ pub async fn build(
         settings_watch::SettingsWatcherHandle::empty()
     };
 
+    // (7.3) FileChanged lifecycle: start the file-changed watcher now that the
+    //       orchestrator + hook registry are wired. claude-code resolves a set
+    //       of watch paths from the user's `FileChanged` hook config (each
+    //       hook's `matcher` is a pipe-separated filename list,
+    //       `fileChangedWatcher.ts:48-65`), watches them, and on every debounced
+    //       `change` / `add` / `unlink` fires the `FileChanged` hook with the
+    //       path + chokidar event name (`handleFileEvent` →
+    //       `executeFileChangedHooks`, `utils/hooks.ts:4278`). The Rust port had
+    //       no watcher; this wires it at the composition root via the in-tree
+    //       `notify`-backed `FileSystem::watch` primitive (`platform-posix`'s
+    //       `watch_helper`), exactly as the settings watcher (7.2) does.
+    //
+    //       The firer is the `OrchestratorFileChangedFirer` over the SAME
+    //       `Arc<HookExecutorImpl>` the orchestrator fires its other hooks
+    //       through (mirrors the `CwdChanged` / task firers), so the watcher
+    //       reaches `orch.hooks` without a dependency cycle. Best-effort: a
+    //       failing/blocking `FileChanged` hook never breaks the watch loop.
+    //
+    //       GATED: spawn ONLY when at least one `FileChanged` hook is registered
+    //       AND it resolves to a non-empty watch-path set (a matcher-less hook
+    //       watches nothing — claude-code's `if (paths.length === 0) return`).
+    //       With no `FileChanged` hook the matcher list is empty, the watcher
+    //       resolves to zero paths, and the empty handle is returned — the
+    //       no-watch case is byte-identical to before. As with the settings
+    //       watcher, the full `platform-posix` `FileSystem` is used (the engine's
+    //       `posix-minimal::watch` is an empty-stream stub).
+    let file_changed_watcher = match file_changed_firer {
+        None => file_changed_watch::FileChangedWatcherHandle::empty(),
+        Some(firer) => {
+            let matcher_refs: Vec<&str> =
+                file_changed_matchers.iter().map(String::as_str).collect();
+            let watcher = file_changed_watch::FileChangedWatcher::new(
+                &matcher_refs,
+                &watch_cwd,
+                firer,
+            );
+            // Empty resolved-path set (matcher-less hooks only) ⇒ spawn returns
+            // an empty handle, so this stays a no-op even when a `FileChanged`
+            // hook is present but specifies no watch target.
+            if watcher.watch_paths().is_empty() {
+                file_changed_watch::FileChangedWatcherHandle::empty()
+            } else {
+                let watch_fs: Arc<dyn traits::FileSystem> =
+                    Arc::new(platform_posix::PosixFileSystem::new(watch_cwd.clone()));
+                watcher.spawn(watch_fs).await
+            }
+        }
+    };
+
     Ok(DesktopRuntime {
         orchestrator: orch,
         dispatcher,
@@ -1638,6 +1725,7 @@ pub async fn build(
         coordinator_mode,
         permission_gate: adapter_gate,
         settings_watcher,
+        file_changed_watcher,
     })
 }
 

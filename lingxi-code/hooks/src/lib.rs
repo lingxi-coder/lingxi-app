@@ -21,6 +21,7 @@ pub mod cwd_changed_firer;
 pub mod definition;
 pub mod events;
 pub mod executor;
+pub mod file_changed_firer;
 pub mod hook_payload;
 mod http_executor;
 pub mod loader;
@@ -36,6 +37,7 @@ pub use async_registry::AsyncHookRegistry;
 pub use cwd_changed_firer::{CwdChangedFire, CwdChangedFirer, OptionalCwdChangedFirer};
 pub use definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
 pub use events::{HookEvent, HookEventType, HookProgressEvent};
+pub use file_changed_firer::{FileChangedFire, FileChangedFirer, OptionalFileChangedFirer};
 pub use executor::{
     BuiltinHookHandler, HookExecutorImpl, HOOK_AGENT_TIMEOUT_MS, HOOK_COMMAND_TIMEOUT_MS,
     HOOK_HTTP_TIMEOUT_MS,

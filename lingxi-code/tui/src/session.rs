@@ -55,6 +55,12 @@ pub struct Runtime {
     /// `TaskRegistryHandle`). Drives the background-task footer + dialog. `None`
     /// (smoke gates / resume picker) leaves the task surface empty.
     pub multiagent_feed: Option<Arc<dyn crate::multiagent::MultiAgentFeed>>,
+    /// (MULTIMODAL.1) A clone of the bridge SENDER, threaded into the root
+    /// component so its live-key turn-spawn pump (`crate::root::pump_turn`) can
+    /// emit `TurnStarted`/`TurnEnded` on the same channel the orchestrator
+    /// streams text/tool events onto. `None` (smoke gates / resume picker)
+    /// leaves the live loop unable to spawn a turn — correct for those mounts.
+    pub turn_tx: Option<mpsc::UnboundedSender<crate::events::orchestrator_bridge::TurnEvent>>,
 }
 
 impl Runtime {
@@ -67,6 +73,7 @@ impl Runtime {
             status: StatusSnapshot::default(),
             orchestrator: None,
             multiagent_feed: None,
+            turn_tx: None,
         }
     }
 
@@ -83,6 +90,7 @@ impl Runtime {
             status,
             orchestrator: None,
             multiagent_feed: None,
+            turn_tx: None,
         }
     }
 
@@ -104,6 +112,18 @@ impl Runtime {
         feed: Arc<dyn crate::multiagent::MultiAgentFeed>,
     ) -> Self {
         self.multiagent_feed = Some(feed);
+        self
+    }
+
+    /// (MULTIMODAL.1) Attach the bridge sender clone so the root component's
+    /// live-key turn-spawn pump (`crate::root::pump_turn`) can drive streaming
+    /// turns. Without it the live loop echoes the user line but spawns no turn.
+    #[must_use]
+    pub fn with_turn_tx(
+        mut self,
+        turn_tx: mpsc::UnboundedSender<crate::events::orchestrator_bridge::TurnEvent>,
+    ) -> Self {
+        self.turn_tx = Some(turn_tx);
         self
     }
 }
@@ -176,6 +196,7 @@ pub async fn run_tui_session(
             multiagent_rx: multiagent_rx,
             multiagent_tx: multiagent_tx,
             multiagent_feed: runtime.multiagent_feed.clone(),
+            turn_tx: runtime.turn_tx.clone(),
         )
     }
     .fullscreen()

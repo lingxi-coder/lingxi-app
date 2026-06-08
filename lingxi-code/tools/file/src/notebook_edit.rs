@@ -469,6 +469,8 @@ impl Tool for NotebookEditTool {
                 mtime_ms: new_mtime_ms,
                 offset: None,
                 limit: None,
+                // Post-edit entry — not a Read.
+                from_read: false,
             },
         );
 
@@ -529,6 +531,8 @@ mod tests {
                 mtime_ms,
                 offset: None,
                 limit: None,
+                // Simulates a prior full `Read`.
+                from_read: true,
             },
         );
     }

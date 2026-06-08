@@ -456,6 +456,8 @@ impl Tool for FileEditTool {
                 mtime_ms: new_mtime_ms,
                 offset: None,
                 limit: None,
+                // Post-edit entry — not a Read; the dedup gate skips it.
+                from_read: false,
             },
         );
 
@@ -532,6 +534,8 @@ mod tests {
                 mtime_ms,
                 offset: None,
                 limit: None,
+                // Simulates a prior full `Read`.
+                from_read: true,
             },
         );
     }
@@ -1140,6 +1144,8 @@ mod tests {
                 mtime_ms,
                 offset: Some(1),
                 limit: Some(2),
+                // Simulates a prior PARTIAL `Read` (offset/limit set).
+                from_read: true,
             },
         );
         let tool = FileEditTool::new(ctx);

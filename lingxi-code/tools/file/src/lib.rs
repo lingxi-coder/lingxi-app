@@ -26,6 +26,7 @@ pub mod file_meta;
 pub mod glob;
 pub mod grep;
 pub mod notebook_edit;
+pub mod notebook_read;
 pub mod quotes;
 pub mod read;
 pub mod shared;
@@ -220,6 +221,7 @@ mod staleness_guard_tests {
                 mtime_ms: 100,
                 offset: Some(1),
                 limit: None,
+                from_read: true,
             },
         );
         assert_err_msg(check_read_before_write(&map, &p, 100, "c"), FILE_NOT_READ_ERROR);
@@ -232,6 +234,7 @@ mod staleness_guard_tests {
                 mtime_ms: 100,
                 offset: None,
                 limit: Some(5),
+                from_read: true,
             },
         );
         assert_err_msg(check_read_before_write(&map, &p, 100, "c"), FILE_NOT_READ_ERROR);
@@ -249,6 +252,7 @@ mod staleness_guard_tests {
                 mtime_ms: 100,
                 offset: None,
                 limit: None,
+                from_read: true,
             },
         );
         // current == recorded ⇒ not stale ⇒ Ok.
@@ -267,6 +271,7 @@ mod staleness_guard_tests {
                 mtime_ms: 100,
                 offset: None,
                 limit: None,
+                from_read: true,
             },
         );
         // mtime advanced but content matches ⇒ fallback proceeds.
@@ -285,6 +290,7 @@ mod staleness_guard_tests {
                 mtime_ms: 100,
                 offset: None,
                 limit: None,
+                from_read: true,
             },
         );
         assert_err_msg(

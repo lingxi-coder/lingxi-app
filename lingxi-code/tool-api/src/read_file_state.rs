@@ -32,6 +32,21 @@ pub struct ReadFileEntry {
     pub offset: Option<u64>,
     /// The `limit` the read used (`None` when the read had no `limit`).
     pub limit: Option<u64>,
+    /// Whether this entry was written by the `Read` tool (as opposed to
+    /// `Write`/`Edit`/`NotebookEdit`, which update the registry post-write).
+    ///
+    /// This is the Rust stand-in for TS's `existingState.offset !== undefined`
+    /// dedup gate (`FileReadTool.ts:550`). TS distinguishes Read entries from
+    /// Edit/Write entries because Read always stores a defaulted numeric
+    /// `offset` while Edit/Write store `offset: undefined`. The Rust `Read`
+    /// records the *un-defaulted* `offset` (so a full read stores `None`,
+    /// matching the staleness guard's full-read discriminator), making
+    /// `offset` unusable for the Read-vs-write distinction — hence this
+    /// explicit flag. The Read-dedup path (`FileReadTool.ts:547-573`) consults
+    /// it to avoid deduping a re-read against a post-edit entry (which would
+    /// wrongly point the model at pre-edit content). The staleness guard does
+    /// NOT read this field.
+    pub from_read: bool,
 }
 
 /// The shared, cheaply-clonable read-state map: absolute path → entry.
@@ -95,6 +110,7 @@ mod tests {
             mtime_ms: 1_234,
             offset: Some(2),
             limit: Some(10),
+            from_read: true,
         };
         set(&map, path.clone(), entry.clone());
         assert_eq!(get(&map, &path), Some(entry));
@@ -118,6 +134,7 @@ mod tests {
                 mtime_ms: 1,
                 offset: None,
                 limit: None,
+                from_read: true,
             },
         );
         set(
@@ -128,6 +145,7 @@ mod tests {
                 mtime_ms: 2,
                 offset: Some(5),
                 limit: Some(7),
+                from_read: true,
             },
         );
         let got = get(&map, &path).unwrap();
@@ -150,6 +168,7 @@ mod tests {
                 mtime_ms: 9,
                 offset: None,
                 limit: None,
+                from_read: true,
             },
         );
         // A write through `clone` is visible through the original handle.

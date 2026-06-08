@@ -94,6 +94,18 @@ pub struct PermissionPolicy {
     /// cwd. Empty by default; set via [`Self::with_working_dirs`]. Production
     /// engine wiring is deferred this batch (cwd comes from `roots.cwd`).
     pub additional_working_dirs: Vec<PathBuf>,
+    /// Minimal sandbox-runtime config for the bash sandbox-auto-allow layer
+    /// (`bashToolHasPermission`'s `isSandboxingEnabled() &&
+    /// isAutoAllowBashIfSandboxedEnabled() && shouldUseSandbox(input)` branch).
+    /// `None` (the DEFAULT) makes the sandbox-auto-allow layer a no-op, so
+    /// `authorize` behaves exactly as before when absent — preserving the
+    /// opt-in posture. Set via [`Self::with_sandbox_runtime`]; the `permission`
+    /// crate cannot depend on the `sandbox` crate (cycle), so this carries only
+    /// the three fields the auto-allow branch reads
+    /// ([`crate::sandbox_auto_allow::SandboxAutoAllowConfig`]). Production
+    /// engine wiring of this field is reported as a follow-up this batch (the
+    /// boot site currently constructs a disabled-default `SandboxRuntimeConfig`).
+    pub sandbox_runtime: Option<crate::sandbox_auto_allow::SandboxAutoAllowConfig>,
 }
 
 impl PermissionPolicy {
@@ -112,7 +124,24 @@ impl PermissionPolicy {
             stripped_dangerous: Vec::new(),
             stripped_positions: Vec::new(),
             additional_working_dirs: Vec::new(),
+            sandbox_runtime: None,
         }
+    }
+
+    /// Attach the minimal sandbox-runtime config that enables the bash
+    /// sandbox-auto-allow layer (`bashToolHasPermission`'s sandbox branch). When
+    /// absent (the default) the layer is a no-op. Populate at the engine boot
+    /// site from the real `sandbox::runtime_config::SandboxRuntimeConfig`
+    /// (copying its `enabled`, `auto_allow_bash_if_sandboxed`, and
+    /// `excluded_commands` into
+    /// [`crate::sandbox_auto_allow::SandboxAutoAllowConfig`]).
+    #[must_use]
+    pub fn with_sandbox_runtime(
+        mut self,
+        config: crate::sandbox_auto_allow::SandboxAutoAllowConfig,
+    ) -> Self {
+        self.sandbox_runtime = Some(config);
+        self
     }
 
     /// Set the extra working directories inside which `AcceptEdits` mode
@@ -241,6 +270,23 @@ impl PermissionPolicy {
         if let Some(rule) = self.first_match(&self.ask_rules, &sources, tool_name, input, true) {
             return ask_with_rule(rule, tool_name);
         }
+        // 1d. SANDBOX AUTO-ALLOW (claude-code `bashToolHasPermission`'s
+        //     sandbox branch, `bashPermissions.ts:1829-1843` + `checkSandboxAutoAllow`).
+        //     When sandboxing is enabled AND `autoAllowBashIfSandboxed` (default
+        //     true) AND the command WOULD be sandboxed (`shouldUseSandbox`), a
+        //     command that matched NO explicit deny/ask rule is auto-allowed —
+        //     the sandbox is the safety boundary, not the prompt. ORDER: this
+        //     runs AFTER the deny/ask walks (so explicit deny/ask rules still
+        //     win — TS `checkSandboxAutoAllow` itself re-checks deny/ask on the
+        //     full command + every subcommand before allowing; here those rules
+        //     already short-circuited above) and BEFORE the path-constraint /
+        //     dangerous-removal guards (1:1 with TS, where the sandbox branch
+        //     precedes `bashToolCheckPermission`'s path-constraint step). Gated
+        //     on [`Self::sandbox_runtime`]: `None` (the default) ⇒ no-op, so
+        //     behavior is unchanged when absent.
+        if self.shell_sandbox_auto_allows(tool_name, input) {
+            return allow_sandbox_auto();
+        }
         // 2. Dangerous-removal-path guard (claude-code `checkDangerousRemovalPaths`
         //    via `createPathChecker`, `BashTool/pathValidation.ts:728-737`). An
         //    `rm`/`rmdir` whose target resolves to a critical system path (`/`,
@@ -302,6 +348,23 @@ impl PermissionPolicy {
                 }
             }
         }
+        // 3-sed. SED CONSTRAINTS (claude-code `checkSedConstraints`, TS step 5b,
+        //     `bashPermissions.ts:1142-1146`). Runs in EVERY mode (not just
+        //     `AcceptEdits`): each `sed` subcommand is checked against the sed
+        //     allowlist — with file-writes permitted only in `AcceptEdits` — and
+        //     a sed the allowlist rejects (dangerous op, or an in-place write
+        //     outside the working dirs, or any in-place edit when NOT in
+        //     `AcceptEdits`) ASKS with the byte-locked sed message. ORDER (1:1
+        //     with TS): AFTER the allow walk (step 5 — an explicit `Bash(sed:*)`
+        //     allow rule already returned above) and BEFORE the mode auto-allow
+        //     (step 6) + read-only allow (step 7). A `Safe` verdict contributes
+        //     nothing here (falls through to the mode / read-only layers, exactly
+        //     like a TS `passthrough`). Requires [`Self::roots`] for the in-place
+        //     containment check; without roots the sed layer is skipped
+        //     (consistent with the other shell guards).
+        if let Some(ask) = self.shell_sed_constraint_ask(tool_name, input) {
+            return ask;
+        }
         // 3a. AcceptEdits working-dir auto-allow (claude-code `checkWritePermissionForTool`
         //     step 3, `filesystem.ts:1360-1375`). In `AcceptEdits` mode an EDITOR
         //     tool whose target path (a) passes the auto-edit safety guard
@@ -357,6 +420,25 @@ impl PermissionPolicy {
                     }
                 }
             }
+        }
+        // 3c. READ-ONLY ALLOW (claude-code `bashToolHasPermission` step 7,
+        //     `bashPermissions.ts:1154-1166`: `BashTool.isReadOnly(input)` →
+        //     `checkReadOnlyConstraints` → allow with `decisionReason.type:
+        //     'other', reason: 'Read-only command is allowed'`). A shell command
+        //     whose EVERY subcommand is read-only ([`crate::read_only_command::command_is_read_only`])
+        //     and that matched no deny/ask rule, no path-constraint / dangerous
+        //     guard, and no allow rule is auto-allowed — the gate need not prompt
+        //     for a `cat`/`ls`/`grep`. ORDER (1:1 with TS): AFTER the sed
+        //     constraints (step 5b) and the mode auto-allow (step 6) and BEFORE
+        //     the generic passthrough→ask (step 8). Placed ahead of the Plan
+        //     backstop so a read-only command is allowed even in `Plan` mode (TS
+        //     `checkReadOnlyConstraints` returns allow regardless of mode). The
+        //     read-only inference is roots-independent (a pure command-shape
+        //     check), so it runs whether or not [`Self::roots`] is set — but the
+        //     path-constraint guard above (roots-gated) already pre-empted any
+        //     out-of-workdir write, so this never auto-allows an escape.
+        if Self::shell_is_read_only(tool_name, input) {
+            return allow_read_only();
         }
         // 3b. Plan-mode mutation backstop (claude-code `prepareContextForPlanMode`,
         //     `permissionSetup.ts:1462-1500`). In `Plan` mode, the primary
@@ -691,6 +773,75 @@ impl PermissionPolicy {
             None
         }
     }
+
+    /// General sed-constraints ASK (claude-code `checkSedConstraints`, TS step
+    /// 5b — runs in EVERY mode). Walks the command's subcommands; for each `sed`
+    /// subcommand whose mode-aware verdict
+    /// ([`crate::sed_validation::sed_constraint_verdict`], `allow_file_writes`
+    /// true iff `AcceptEdits`) is `Unsafe`, returns the byte-locked sed ask. A
+    /// `Safe` verdict contributes nothing (returns `None`, falling through to the
+    /// mode / read-only layers — 1:1 with the TS `passthrough`). Returns the
+    /// FIRST unsafe sed in subcommand order, matching TS.
+    fn sed_constraint_ask(&self, command: &str, roots: &FsRoots) -> Option<PermissionResult> {
+        let allow_file_writes = self.mode == PermissionMode::AcceptEdits;
+        for sub in shell_command::split_command(command) {
+            if base_command(&sub) != Some("sed") {
+                continue;
+            }
+            if let crate::sed_validation::SedVerdict::Unsafe { message, reason } =
+                crate::sed_validation::sed_constraint_verdict(
+                    &sub,
+                    allow_file_writes,
+                    roots,
+                    &self.additional_working_dirs,
+                )
+            {
+                return Some(ask_sed_constraint(message, reason));
+            }
+        }
+        None
+    }
+
+    /// Shell-only sandbox-auto-allow guard (the 1d layer). `true` iff this is a
+    /// shell tool, a [`Self::sandbox_runtime`] config is attached, and the
+    /// command would be sandbox-auto-allowed. Non-shell tools / absent config ⇒
+    /// `false` (no-op).
+    fn shell_sandbox_auto_allows(&self, tool_name: &str, input: &serde_json::Value) -> bool {
+        let Some(sandbox) = self.sandbox_runtime.as_ref() else {
+            return false;
+        };
+        if !shell_command::is_shell_tool(tool_name) {
+            return false;
+        }
+        shell_command::command_from_input(input).is_some_and(|cmd| sandbox.auto_allows(cmd))
+    }
+
+    /// Shell-only general sed-constraint ASK (the 3-sed layer). Returns the
+    /// byte-locked sed ask for the first `Unsafe` sed subcommand, or `None` when
+    /// not a shell tool / no roots / no command / every sed is `Safe`.
+    fn shell_sed_constraint_ask(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> Option<PermissionResult> {
+        if !shell_command::is_shell_tool(tool_name) {
+            return None;
+        }
+        let roots = self.roots.as_ref()?;
+        let command = shell_command::command_from_input(input)?;
+        self.sed_constraint_ask(command, roots)
+    }
+
+    /// Shell-only read-only inference (the 3c layer). `true` iff this is a shell
+    /// tool whose command is wholly read-only
+    /// ([`crate::read_only_command::command_is_read_only`]).
+    fn shell_is_read_only(tool_name: &str, input: &serde_json::Value) -> bool {
+        if !shell_command::is_shell_tool(tool_name) {
+            return false;
+        }
+        shell_command::command_from_input(input)
+            .is_some_and(crate::read_only_command::command_is_read_only)
+    }
 }
 
 /// Base (first) command word of a subcommand — TS `trimmedCmd.split(/\s+/)[0]`.
@@ -838,6 +989,38 @@ fn deny_with_rule(rule: &PermissionRule) -> PermissionResult {
 fn allow_with_mode(mode: PermissionMode) -> PermissionResult {
     PermissionResult::Allow {
         reason: PermissionDecisionReason::PermissionMode { mode },
+        updated_input: None,
+        update_destination: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// Sandbox auto-allow grant (claude-code `checkSandboxAutoAllow`'s final
+/// `behavior: 'allow'`, `decisionReason: { type: 'other', reason: 'Auto-allowed
+/// with sandbox (autoAllowBashIfSandboxed enabled)' }`). Tagged
+/// [`PermissionDecisionReason::Other`] carrying the byte-faithful reason (TS
+/// uses `type: 'other'` here, NOT a sandbox-specific reason — preserved so the
+/// existing `SandboxOverrideReason` enum is untouched).
+fn allow_sandbox_auto() -> PermissionResult {
+    PermissionResult::Allow {
+        reason: PermissionDecisionReason::Other {
+            reason: "Auto-allowed with sandbox (autoAllowBashIfSandboxed enabled)".to_string(),
+        },
+        updated_input: None,
+        update_destination: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// Read-only command auto-allow (claude-code `bashToolHasPermission` step 7,
+/// `behavior: 'allow'`, `decisionReason: { type: 'other', reason: 'Read-only
+/// command is allowed' }`). Tagged [`PermissionDecisionReason::Other`] carrying
+/// the byte-faithful reason.
+fn allow_read_only() -> PermissionResult {
+    PermissionResult::Allow {
+        reason: PermissionDecisionReason::Other {
+            reason: "Read-only command is allowed".to_string(),
+        },
         updated_input: None,
         update_destination: None,
         metadata: PermissionMetadata::default(),
@@ -1202,8 +1385,10 @@ mod tests {
             PermissionResult::Deny { .. }
         ));
         // An unrelated command is NOT denied (precise, unlike phase-2 tool-wide).
+        // Use a non-read-only command so the read-only auto-allow (TS step 7)
+        // doesn't fire — the point here is "not denied", which the mode ask shows.
         assert!(matches!(
-            p.authorize("Bash", &bash("echo hi")),
+            p.authorize("Bash", &bash("npm test")),
             PermissionResult::Ask { .. }
         ));
     }
@@ -2451,6 +2636,342 @@ mod tests {
         assert!(matches!(
             p2.authorize("Edit", &edit("/proj/src/x.rs")),
             PermissionResult::Ask { .. }
+        ));
+    }
+
+    // ── PERM (bash extras): read-only allow (TS step 7) ────────────────────
+
+    fn matched_other(reason: &PermissionDecisionReason, needle: &str) -> bool {
+        matches!(reason, PermissionDecisionReason::Other { reason } if reason.contains(needle))
+    }
+
+    #[test]
+    fn read_only_command_auto_allows_with_other_reason() {
+        // (c) A read-only command with NO rules → Allow tagged Other("Read-only").
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        for cmd in ["cat foo.txt", "ls -la", "grep pat file", "pwd", "head -n3 a"] {
+            match p.authorize("Bash", &bash(cmd)) {
+                PermissionResult::Allow { reason, .. } => assert!(
+                    matched_other(&reason, "Read-only command is allowed"),
+                    "{cmd}: read-only allow must carry the byte-faithful reason, got {reason:?}"
+                ),
+                other => panic!("{cmd}: expected read-only Allow, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn read_only_compound_all_read_only_allows() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat a | grep b")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn read_only_does_not_allow_writing_command() {
+        // A writer (not read-only) still asks (no rule, Default mode).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("rm -rf /tmp/x")),
+            PermissionResult::Ask { .. }
+        ));
+        // A read command compounded with a writer is NOT auto-allowed.
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat a && rm b")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn read_only_does_not_allow_redirect_escape() {
+        // A read command WITH a redirect is not read-only — and a redirect
+        // outside cwd asks via the path-constraint guard (runs first). The
+        // read-only layer must never auto-allow an escape.
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat a > /etc/x")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn read_only_deny_rule_still_wins() {
+        // (a) An explicit deny on a read-only command still denies (deny walk runs
+        // before the read-only layer).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(cat:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat secret")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn read_only_ask_rule_still_asks() {
+        // An explicit ask on a read-only command still asks (ask walk precedes
+        // the read-only allow).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash(grep:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("grep pat file")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn read_only_works_without_roots() {
+        // The read-only inference is roots-independent — a read-only command is
+        // allowed even when no roots are configured.
+        let rules = crate::loader::permission_rules_from_settings_json(
+            r#"{ "permissions": {} }"#,
+            PermissionRuleSource::ProjectSettings,
+        )
+        .unwrap();
+        let p = PermissionPolicy::from_rules(PermissionMode::Default, rules);
+        assert!(matches!(
+            p.authorize("Bash", &bash("ls")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    // ── PERM (bash extras): general sed constraints (TS step 5b, all modes) ─
+
+    #[test]
+    fn default_mode_in_place_sed_asks() {
+        // (d, ask) In Default mode `allowFileWrites=false`, so an in-place sed is
+        // NOT on the read-only allowlist → ask with the byte-locked sed message.
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        match p.authorize("Bash", &bash("sed -i 's/a/b/' ./local.txt")) {
+            PermissionResult::Ask { reason, prompt, .. } => {
+                assert!(
+                    matches!(reason, PermissionDecisionReason::Other { .. }),
+                    "sed ask must use Other, got {reason:?}"
+                );
+                assert_eq!(prompt.message, crate::sed_validation::SED_ASK_MESSAGE);
+            }
+            other => panic!("expected Ask(Other), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_mode_read_only_sed_does_not_ask_from_sed_layer() {
+        // (d, safe) A read-only `sed -n p file` is Safe in every mode, so the sed
+        // layer does NOT ask. `sed` is NOT on the read-only base allowlist (1:1
+        // with TS `READONLY_COMMANDS`, which omits `sed`), so in Default mode it
+        // is neither sed-asked nor read-only-allowed → it falls through to the
+        // generic Default-mode ask (a PermissionMode reason, NOT the sed Other).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        match p.authorize("Bash", &bash("sed -n p file.txt")) {
+            PermissionResult::Ask { reason, .. } => assert!(
+                matches!(
+                    reason,
+                    PermissionDecisionReason::PermissionMode {
+                        mode: PermissionMode::Default
+                    }
+                ),
+                "a Safe sed must fall through to the mode ask, not the sed ask: {reason:?}"
+            ),
+            other => panic!("expected Default-mode Ask, got {other:?}"),
+        }
+        // In AcceptEdits mode the SAME safe sed IS auto-allowed (the AcceptEdits
+        // bash auto-allow arm covers `sed` when its verdict is Safe).
+        let pa = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::AcceptEdits);
+        assert!(matches!(
+            pa.authorize("Bash", &bash("sed -n p file.txt")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn default_mode_dangerous_sed_asks() {
+        // (d, deny→ask) A sed with a dangerous write command asks in Default mode.
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("sed -n 'w /tmp/out' file")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::Other { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sed_deny_rule_beats_sed_constraint_ask() {
+        // An explicit deny on the sed command wins over the sed-constraint ask.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(sed:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash("sed -i 's/a/b/' /etc/passwd")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    // ── PERM (bash extras): sandbox auto-allow ─────────────────────────────
+
+    fn sandbox_cfg(excluded: &[&str]) -> crate::sandbox_auto_allow::SandboxAutoAllowConfig {
+        crate::sandbox_auto_allow::SandboxAutoAllowConfig::new(
+            true,
+            true,
+            excluded.iter().map(|s| (*s).to_string()).collect(),
+        )
+    }
+
+    #[test]
+    fn sandbox_auto_allow_allows_sandboxable_command() {
+        // (e) sandbox config present + a sandboxable command + no deny/ask rule →
+        // Allow tagged Other("Auto-allowed with sandbox").
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+            .with_sandbox_runtime(sandbox_cfg(&[]));
+        // `npm install` is NOT read-only and matches no rule — without sandbox it
+        // would ask; WITH sandbox auto-allow it is allowed.
+        match p.authorize("Bash", &bash("npm install")) {
+            PermissionResult::Allow { reason, .. } => assert!(
+                matched_other(&reason, "Auto-allowed with sandbox"),
+                "sandbox auto-allow must carry the byte-faithful reason, got {reason:?}"
+            ),
+            other => panic!("expected sandbox Allow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sandbox_auto_allow_explicit_deny_still_wins() {
+        // (e) An explicit deny still wins over sandbox-auto-allow (deny walk runs
+        // before the sandbox layer).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(curl:*)"] } }"#,
+            PermissionMode::Default,
+        )
+        .with_sandbox_runtime(sandbox_cfg(&[]));
+        assert!(matches!(
+            p.authorize("Bash", &bash("curl https://evil")),
+            PermissionResult::Deny { .. }
+        ));
+        // …even hidden in a compound command.
+        assert!(matches!(
+            p.authorize("Bash", &bash("echo ok && curl https://evil")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn sandbox_auto_allow_ask_rule_still_asks() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "ask": ["Bash(npm publish:*)"] } }"#,
+            PermissionMode::Default,
+        )
+        .with_sandbox_runtime(sandbox_cfg(&[]));
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm publish --tag beta")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn sandbox_excluded_command_not_auto_allowed() {
+        // An excluded command is NOT sandboxed → NOT auto-allowed → falls through
+        // to the Default-mode ask (no rule, not read-only).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+            .with_sandbox_runtime(sandbox_cfg(&["bazel:*"]));
+        assert!(matches!(
+            p.authorize("Bash", &bash("bazel build //...")),
+            PermissionResult::Ask { .. }
+        ));
+        // A non-excluded command IS auto-allowed.
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm install")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[test]
+    fn no_sandbox_config_is_no_op() {
+        // Without a sandbox config the layer is a no-op: a non-read-only, no-rule
+        // command asks (unchanged behavior).
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm install")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn disabled_sandbox_config_is_no_op() {
+        // An explicitly-disabled sandbox config never auto-allows.
+        let cfg = crate::sandbox_auto_allow::SandboxAutoAllowConfig::new(false, true, vec![]);
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+            .with_sandbox_runtime(cfg);
+        assert!(matches!(
+            p.authorize("Bash", &bash("npm install")),
+            PermissionResult::Ask { .. }
+        ));
+    }
+
+    // ── SAFETY INVARIANT: non-shell tools are unaffected by the extras ─────
+
+    #[test]
+    fn non_shell_tool_decision_unchanged_by_extras() {
+        // (f) The sandbox / sed / read-only layers are shell-only. A non-shell
+        // tool's decision is identical with or without a sandbox config.
+        let base = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let with_sb = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+            .with_sandbox_runtime(sandbox_cfg(&[]));
+        // Edit (mutating, no rule) → ask in both.
+        assert!(matches!(
+            base.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Ask { .. }
+        ));
+        assert!(matches!(
+            with_sb.authorize("Edit", &edit("/proj/src/x.rs")),
+            PermissionResult::Ask { .. }
+        ));
+        // WebFetch is not a shell tool — a sandbox config must not auto-allow it.
+        assert!(matches!(
+            with_sb.authorize("WebFetch", &serde_json::json!({ "url": "https://x" })),
+            PermissionResult::Ask { .. }
+        ));
+        // A deny rule on a non-shell tool is unaffected.
+        let deny = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Read(./secrets/**)"] } }"#,
+            PermissionMode::Default,
+        )
+        .with_sandbox_runtime(sandbox_cfg(&[]));
+        assert!(matches!(
+            deny.authorize("Read", &edit("/proj/secrets/key.pem")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn env_prefix_and_compound_still_hit_deny_with_all_extras() {
+        // (g) With the sandbox config + read-only layer live, a denied command
+        // hidden behind an env prefix or a benign compound STILL denies.
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(secret-tool:*)"] } }"#,
+            PermissionMode::Default,
+        )
+        .with_sandbox_runtime(sandbox_cfg(&[]));
+        assert!(matches!(
+            p.authorize("Bash", &bash("FOO=bar secret-tool dump")),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat ok && secret-tool dump")),
+            PermissionResult::Deny { .. }
+        ));
+        assert!(matches!(
+            p.authorize("Bash", &bash("HTTPS_PROXY=x secret-tool dump")),
+            PermissionResult::Deny { .. }
         ));
     }
 }

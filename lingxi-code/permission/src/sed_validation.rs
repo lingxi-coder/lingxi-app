@@ -1205,6 +1205,41 @@ pub fn sed_auto_allow_verdict(
     SedVerdict::Safe
 }
 
+/// Mode-aware sed-constraint verdict — 1:1 with claude-code `checkSedConstraints`
+/// (`sedValidation.ts:644-684`), which runs in EVERY permission mode (not only
+/// `acceptEdits`). For a single `sed` subcommand:
+///
+/// - `allow_file_writes = false` (every non-`acceptEdits` mode): only the
+///   read-only allowlist (line-printing / stdout substitution) is `Safe`; a sed
+///   that writes in-place (`-i`) or carries file args under a substitution is
+///   `Unsafe` → ask (TS passes `allowFileWrites: false` outside `acceptEdits`).
+/// - `allow_file_writes = true` (`acceptEdits` mode): the in-place allowlist is
+///   permitted, but every in-place file target must lie inside an allowed
+///   working dir — exactly [`sed_auto_allow_verdict`]'s containment behavior.
+///
+/// This is the verdict [`crate::policy`] consults for its general (all-modes)
+/// sed-constraints layer; the `acceptEdits` bash auto-allow reuses
+/// [`sed_auto_allow_verdict`] (the `allow_file_writes = true` case) directly.
+#[must_use]
+pub fn sed_constraint_verdict(
+    command: &str,
+    allow_file_writes: bool,
+    roots: &FsRoots,
+    additional: &[PathBuf],
+) -> SedVerdict {
+    if allow_file_writes {
+        // `acceptEdits`: the in-place allowlist + working-dir containment.
+        return sed_auto_allow_verdict(command, roots, additional);
+    }
+    // Non-`acceptEdits`: read-only allowlist only. An in-place / file-writing sed
+    // is NOT allowed here (TS `allowFileWrites: false`), so it asks.
+    if sed_command_is_allowed_by_allowlist(command, false) {
+        SedVerdict::Safe
+    } else {
+        SedVerdict::unsafe_default()
+    }
+}
+
 /// Working-dir set (cwd + additional) as `PathBuf`s for the containment check.
 fn working_dir_paths(roots: &FsRoots, additional: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs = Vec::with_capacity(1 + additional.len());

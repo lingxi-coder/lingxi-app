@@ -22,8 +22,10 @@ pub mod persist;
 pub mod policy;
 pub mod policy_gate;
 pub mod prompting_gate;
+pub mod read_only_command;
 pub mod result;
 pub mod rule;
+pub mod sandbox_auto_allow;
 pub mod sed_validation;
 pub mod shadow;
 pub mod shell_command;
@@ -62,13 +64,15 @@ pub use persist::{persist_permission_update, PermissionPaths, PersistError};
 pub use policy::PermissionPolicy;
 pub use policy_gate::PolicyPermissionGate;
 pub use prompting_gate::InteractivePromptingGate;
+pub use read_only_command::command_is_read_only;
+pub use sandbox_auto_allow::SandboxAutoAllowConfig;
 pub use result::{
     ClassifierKind, PermissionDecisionReason, PermissionResult, PermissionUpdateDestination,
     SandboxOverrideReason,
 };
 pub use rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
 pub use sed_validation::{
-    sed_auto_allow_verdict, SedVerdict, SED_ASK_MESSAGE, SED_ASK_REASON,
+    sed_auto_allow_verdict, sed_constraint_verdict, SedVerdict, SED_ASK_MESSAGE, SED_ASK_REASON,
 };
 pub use shadow::{
     detect_unreachable_rules, is_shared_setting_source, ShadowType, UnreachableRule,

@@ -158,7 +158,6 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
         "properties": {
             "skill": {
                 "type": "string",
-                "minLength": 1,
                 "description": "The skill name. E.g., \"commit\", \"review-pr\", or \"pdf\""
             },
             "args": {
@@ -412,12 +411,22 @@ impl Tool for SkillTool {
         // surfacing. `commandName` is the normalized name. `body`/`args`/
         // `descriptor_truncated` ride along as extra fields (Rust substitute
         // for actually forking).
+        //
+        // `model_content` is the model-facing tool_result string. TS
+        // `mapToolResultToToolResultBlockParam` (SkillTool.ts:843-862) makes the
+        // model see ONLY a short line, never a JSON dump of the output object
+        // (which would leak the full skill `body`). The orchestrator's
+        // `tool_result_to_model_text` (turn_loop.rs) prefers `model_content`.
+        // This tool only produces the inline path (TS `status:'inline'` default
+        // → `Launching skill: ${commandName}`); the forked branch has no Rust
+        // substrate (see module doc), so only the inline string is emitted.
         let mut data = json!({
             "success": true,
             "commandName": command_name,
             "status": "inline",
             "body": desc.body,
             "descriptor_truncated": truncated,
+            "model_content": format!("Launching skill: {command_name}"),
         });
         let obj = data.as_object_mut().expect("json object");
         if !desc.allowed_tools.is_empty() {
@@ -507,7 +516,14 @@ mod tests {
     fn schema_uses_skill_and_optional_args() {
         let props = &SCHEMA["properties"];
         assert_eq!(props["skill"]["type"], json!("string"));
-        assert_eq!(props["skill"]["minLength"], json!(1));
+        // TS `inputSchema` is `skill: z.string().describe(...)` with NO `.min(1)`
+        // (SkillTool.ts:291-298) — the delivered schema must NOT carry a
+        // `minLength` constraint. The runtime "Invalid skill format" check
+        // (validate_input/call) is what enforces non-blankness, not the schema.
+        assert!(
+            props["skill"].get("minLength").is_none(),
+            "skill schema must not constrain minLength (TS has no .min(1))"
+        );
         assert_eq!(props["args"]["type"], json!("string"));
         assert_eq!(SCHEMA["required"], json!(["skill"]));
         // No legacy `name` field remains.
@@ -608,6 +624,35 @@ mod tests {
         assert!(out.data.get("model").is_none());
         assert!(out.data.get("allowedTools").is_none());
         assert_eq!(out.data["body"], json!("body here"));
+    }
+
+    #[tokio::test]
+    async fn model_content_is_inline_launching_line_and_omits_body() {
+        // TS inline path (SkillTool.ts:856-861): the model's tool_result content
+        // is exactly `Launching skill: ${commandName}` — never the JSON dump of
+        // the output object (which would leak the full skill `body`).
+        let desc = SkillDescriptor {
+            body: "SECRET FULL SKILL BODY that must not reach the model".into(),
+            ..prompt_desc("commit")
+        };
+        let tool =
+            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        // Slash-prefixed input: model_content uses the normalized name.
+        let out = tool
+            .call(json!({"skill": "/commit"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        let mc = out.data["model_content"]
+            .as_str()
+            .expect("model_content is a string");
+        assert_eq!(mc, "Launching skill: commit");
+        // The body still rides along for non-model consumers, but is NOT in the
+        // model-facing string.
+        assert!(!mc.contains("SECRET FULL SKILL BODY"));
+        assert_eq!(
+            out.data["body"],
+            json!("SECRET FULL SKILL BODY that must not reach the model")
+        );
     }
 
     #[tokio::test]

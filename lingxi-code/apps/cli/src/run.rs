@@ -13,8 +13,9 @@ use crate::exit_codes;
 use crate::init::Runtime;
 use crate::output::OutputSink;
 use session::jsonl::loader::{
-    list_recent_sessions, select_session_interactive, LoaderError, SessionMetadata,
+    list_recent_sessions, load_session, select_session_interactive, LoaderError, SessionMetadata,
 };
+use session::jsonl::JsonlMessage;
 use std::path::PathBuf;
 use std::sync::Arc;
 use traits::{FileSystem, SlashCommandDispatcher, SlashDispatchResult};
@@ -105,11 +106,15 @@ pub async fn run_resume(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -
     }
 }
 
-/// `--resume <uuid>` — the concrete-id path (M5-12 baseline, unchanged).
+/// `--resume <uuid>` — the concrete-id path.
 ///
-/// M5-12 baseline: surfaces the resolved id, runs a follow-up turn if a prompt
-/// is supplied, and defers the full file-system-backed replay. No behavior
-/// change from the pre-M7-12 `run_resume` body.
+/// Parses the arg as a UUID, then (SESSION.4) verifies the session actually
+/// exists on disk via [`load_session`] BEFORE reporting success: a valid-but-
+/// unknown id now errors with the TS "No conversation found with session ID:
+/// {id}" line and a non-zero exit instead of the old false "Resumed session
+/// {id}". Once confirmed present it surfaces the resolved id and runs a
+/// follow-up turn if a prompt is supplied; the full transcript replay into a
+/// live REPL is the deferred M5-13 milestone.
 async fn run_resume_by_id(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
     let arg = argv.resume.as_deref().unwrap_or("");
     let session_id = match resolve_session_id(arg) {
@@ -119,6 +124,23 @@ async fn run_resume_by_id(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink)
             return exit_codes::RUNTIME_ERROR;
         }
     };
+
+    // SESSION.4 parity: a `--resume <uuid>` for a session that does NOT exist
+    // on disk must NOT report success. TS (claude-code/src/main.tsx:3675-3681)
+    // calls `loadConversationForResume(sessionId)` and, when it yields nothing,
+    // exits via `exitWithError(root, "No conversation found with session ID:
+    // {sessionId}")` (exit code 1). We mirror that by loading the session up
+    // front and only printing "Resumed session {id}" once it is confirmed to
+    // exist and parse.
+    let loaded = load_resume_session(session_id).await;
+    if let Some((message, code)) = resume_by_id_error(session_id, loaded.as_ref()) {
+        sink.error("runtime", &message).await;
+        return code;
+    }
+    // Session exists and parsed. The transcript replay into the live REPL is
+    // the deferred M5-13 milestone, so the loaded messages are not yet threaded
+    // anywhere; keep them named to document that intent.
+    let _messages = loaded.unwrap_or_default();
 
     sink.text(&format!("Resumed session {session_id}\n")).await;
 
@@ -231,6 +253,35 @@ async fn load_resume_rows_from(
     list_recent_sessions(claude_home, &cwd_str, 5, fs).await
 }
 
+/// Load a concrete session by UUID for the `--resume <uuid>` path, using the
+/// live `claude_home` (`$CLAUDE_CONFIG_DIR` → `~/.claude`) + process cwd. Thin
+/// env-reading wrapper over [`load_resume_session_from`] (mirrors the
+/// `load_resume_rows` / `load_resume_rows_from` split so the disk logic stays
+/// testable with no env / process-cwd reads).
+async fn load_resume_session(session_id: uuid::Uuid) -> Result<Vec<JsonlMessage>, LoaderError> {
+    let claude_home = claude_home_dir();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    load_resume_session_from(&claude_home, &cwd, session_id).await
+}
+
+/// Production disk→`Vec<JsonlMessage>` load with the inputs passed in (no env /
+/// process-cwd reads) so it is directly testable. Builds the same disk-backed
+/// [`platform_posix_minimal::PosixFileSystem`] the row loader uses and asks the
+/// M5-07/M5-08 [`load_session`] loader for the session, which returns
+/// [`LoaderError::SessionNotFound`] when no `<uuid>.jsonl` exists under the
+/// cwd's project dir.
+async fn load_resume_session_from(
+    claude_home: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: uuid::Uuid,
+) -> Result<Vec<JsonlMessage>, LoaderError> {
+    let cwd_str = cwd.to_string_lossy().into_owned();
+    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix_minimal::PosixFileSystem::new(
+        cwd.to_path_buf(),
+    ));
+    load_session(claude_home, &cwd_str, session_id, fs).await
+}
+
 /// Claude config home dir. `$CLAUDE_CONFIG_DIR` (when non-empty) wins, else
 /// `~/.claude`. Mirrors the resolution the Doctor screen + session storage use.
 fn claude_home_dir() -> PathBuf {
@@ -247,6 +298,31 @@ fn resolve_session_id(arg: &str) -> Result<uuid::Uuid, LoaderError> {
     uuid::Uuid::parse_str(arg).map_err(|_| LoaderError::SessionNotFound {
         arg: arg.to_string(),
     })
+}
+
+/// Map a `--resume <uuid>` load outcome to the user-facing error to emit, if
+/// any. `None` means the session loaded — keep the "Resumed session {id}"
+/// success path. On [`LoaderError::SessionNotFound`] this returns the
+/// TS-faithful "No conversation found with session ID: {id}" line
+/// (claude-code/src/main.tsx:3681); any other loader failure maps to TS's
+/// catch-arm "Failed to resume session {id}" (main.tsx:3704). Both carry
+/// [`exit_codes::RUNTIME_ERROR`] (TS `exitWithError` → exit 1). Pure so the
+/// SESSION.4 existence check is unit-testable without a `Runtime` / sink.
+fn resume_by_id_error(
+    session_id: uuid::Uuid,
+    loaded: Result<&Vec<JsonlMessage>, &LoaderError>,
+) -> Option<(String, i32)> {
+    match loaded {
+        Ok(_) => None,
+        Err(LoaderError::SessionNotFound { .. }) => Some((
+            format!("No conversation found with session ID: {session_id}"),
+            exit_codes::RUNTIME_ERROR,
+        )),
+        Err(_) => Some((
+            format!("Failed to resume session {session_id}"),
+            exit_codes::RUNTIME_ERROR,
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -361,5 +437,74 @@ mod tests {
             Err(LoaderError::EmptyDirectory) => {}
             other => panic!("expected EmptyDirectory, got {other:?}"),
         }
+    }
+
+    // ── SESSION.4: `--resume <uuid>` existence check ────────────────────────
+
+    #[tokio::test]
+    async fn resume_by_id_nonexistent_uuid_errors_with_ts_message_and_nonzero_exit() {
+        // Regression: a valid-but-unknown session id used to print a false
+        // "Resumed session {id}" success. It must now error with the
+        // TS-faithful line (main.tsx:3681) and a non-zero exit instead.
+        let temp = tempfile::TempDir::new().unwrap();
+        let claude_home = temp.path().join("home");
+        let cwd = std::path::PathBuf::from("/tmp/resumeproj");
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        // Create the project dir but write NO session file for this id.
+        make_project_dir(&claude_home, &cwd_str);
+        let missing = Uuid::new_v4();
+
+        let loaded = load_resume_session_from(&claude_home, &cwd, missing).await;
+        assert!(
+            matches!(loaded, Err(LoaderError::SessionNotFound { .. })),
+            "a missing <uuid>.jsonl must surface SessionNotFound, got {loaded:?}"
+        );
+
+        let (message, code) =
+            resume_by_id_error(missing, loaded.as_ref()).expect("missing session must error");
+        assert_eq!(
+            message,
+            format!("No conversation found with session ID: {missing}"),
+            "exact TS string (claude-code/src/main.tsx:3681)"
+        );
+        assert_eq!(code, exit_codes::RUNTIME_ERROR);
+        assert_ne!(
+            code,
+            exit_codes::SUCCESS,
+            "a non-existent id must NOT report a zero (success) exit"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_by_id_existing_uuid_loads_and_does_not_error() {
+        // Happy path: when the <uuid>.jsonl exists the load succeeds and
+        // `resume_by_id_error` returns None, so the "Resumed session {id}"
+        // success line is reached.
+        let temp = tempfile::TempDir::new().unwrap();
+        let claude_home = temp.path().join("home");
+        let cwd = std::path::PathBuf::from("/tmp/resumeproj");
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let project_dir = make_project_dir(&claude_home, &cwd_str);
+        let id = write_session(&project_dir, "hello", SystemTime::now());
+
+        let loaded = load_resume_session_from(&claude_home, &cwd, id).await;
+        let messages = loaded.as_ref().expect("existing session must load");
+        assert_eq!(messages.len(), 1, "the single fixture line is parsed");
+        assert!(
+            resume_by_id_error(id, loaded.as_ref()).is_none(),
+            "an existing session must NOT produce an error"
+        );
+    }
+
+    #[test]
+    fn resume_by_id_error_maps_other_failures_to_failed_to_resume() {
+        // A non-SessionNotFound loader failure mirrors TS's catch arm
+        // ("Failed to resume session {id}", main.tsx:3704) with a non-zero exit.
+        let id = Uuid::new_v4();
+        let err = LoaderError::InvalidSelection;
+        let (message, code) =
+            resume_by_id_error(id, Err(&err)).expect("a loader failure must error");
+        assert_eq!(message, format!("Failed to resume session {id}"));
+        assert_eq!(code, exit_codes::RUNTIME_ERROR);
     }
 }

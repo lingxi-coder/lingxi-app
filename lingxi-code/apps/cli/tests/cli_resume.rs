@@ -10,16 +10,21 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 #[test]
-fn resume_with_valid_uuid_and_no_prompt_exits_64() {
-    // Valid UUID syntax → progresses past validation → reports
-    // "REPL not yet wired" and exits 64 (NOT_IMPLEMENTED).
+fn resume_with_nonexistent_uuid_errors_with_not_found() {
+    // SESSION.4: a syntactically-valid UUID with no session file on disk now
+    // verifies existence and errors like claude-code ("No conversation found
+    // with session ID: <id>", main.tsx:3681) with exit 1 — instead of falsely
+    // reporting success. (Full transcript replay for an existing session is the
+    // separately-deferred M5-13 REPL milestone.)
     Command::cargo_bin("lingxi-cli")
         .unwrap()
         .env("ANTHROPIC_API_KEY", "sk-test-fake")
         .args(["--resume", "00000000-0000-0000-0000-000000000002"])
         .assert()
-        .code(64)
-        .stderr(predicate::str::contains("resumed; REPL not yet wired"));
+        .code(1)
+        .stderr(predicate::str::contains(
+            "No conversation found with session ID: 00000000-0000-0000-0000-000000000002",
+        ));
 }
 
 #[test]

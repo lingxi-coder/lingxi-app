@@ -118,9 +118,16 @@ fn project_dir_for_cwd(claude_home: &Path, cwd: &str) -> PathBuf {
 /// JSONL content (we open + parse every candidate, then sort + truncate). This is O(N * lines)
 /// for N sessions; for the typical N ≤ 5 case (the picker limit) the cost is trivial.
 ///
+/// Sub-agent / sidechain transcripts are HIDDEN (SESSION.1): a session is dropped
+/// when its first parsed line is an `isSidechain` message or carries a truthy
+/// `teamName` field, matching claude-code's `parseSessionInfoFromLite`
+/// (listSessionsImpl.ts:88-95), `enrichLog` (sessionStorage.ts:5055-5067), and
+/// `filterResumableSessions` (resume picker).
+///
 /// Locked against `claude-code/src/utils/sessionStorage.ts::loadSameRepoMessageLogs` — except:
 /// - claude-code uses a 16-KiB head-only `enrichLogs` scan for the first user message; we
 ///   open + fully-parse because our `JsonlReader::read_all` is already in hand from M5-07.
+///   (The sidechain/teamName decision still reads ONLY the first line, per TS.)
 /// - claude-code includes worktrees; we list ONLY the exact cwd's project dir (cross-worktree
 ///   resume is deferred to a follow-up — spec §3 M5-08 row does not require it).
 pub async fn list_recent_sessions(
@@ -178,6 +185,30 @@ pub async fn list_recent_sessions(
             arg: path.display().to_string(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
         })?;
+
+        // SESSION.1 — claude-code HIDES sub-agent / sidechain transcripts from
+        // the /resume picker. The decision is made from the FIRST line only:
+        //   - `parseSessionInfoFromLite` returns null when the file's first line
+        //     contains `"isSidechain":true` (listSessionsImpl.ts:88-95);
+        //   - `enrichLog` returns null when the first entry `isSidechain` OR
+        //     carries a truthy `teamName` (sessionStorage.ts:5055-5067);
+        //   - `filterResumableSessions` drops `l.isSidechain` (resume picker).
+        // Mirror that: inspect only `messages.first()` (the first parsed line —
+        // we do NOT scan the whole file for the decision) and skip the session
+        // when it is a sidechain message or carries a truthy `teamName`. `teamName`
+        // is an outer field captured in `JsonlMessage::extra`; the truthiness test
+        // matches TS `if (enriched.teamName)` (an empty-string teamName is falsy).
+        if let Some(first) = messages.first() {
+            let has_team_name = first.extra.get("teamName").is_some_and(|v| match v {
+                serde_json::Value::Null => false,
+                serde_json::Value::String(s) => !s.is_empty(),
+                _ => true,
+            });
+            if first.is_sidechain || has_team_name {
+                continue;
+            }
+        }
+
         let title = extract_title(&messages);
         rows.push(SessionMetadata {
             uuid,
@@ -416,4 +447,136 @@ fn validate_chain(
         prev_uuid = Some(msg_uuid);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! SESSION.1 coverage — `list_recent_sessions` HIDES sub-agent / sidechain
+    //! transcripts (first line `isSidechain` or carrying a truthy `teamName`),
+    //! matching claude-code's `parseSessionInfoFromLite` / `enrichLog` /
+    //! `filterResumableSessions`. Driven over a real `tempfile` fixture via the
+    //! posix `FileSystem`, mirroring `session/tests/list_recent_test.rs`.
+
+    use super::*;
+    use platform_posix::fs::PosixFileSystem;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    fn make_fs(root: &Path) -> Arc<dyn FileSystem> {
+        Arc::new(PosixFileSystem::new(root.to_path_buf()))
+    }
+
+    /// Build `<claude_home>/projects/<sanitize(cwd)>/` and return
+    /// `(tempdir, claude_home, cwd, project_subdir)`.
+    fn setup() -> (TempDir, PathBuf, String, PathBuf) {
+        let temp = TempDir::new().expect("tempdir");
+        let cwd = temp
+            .path()
+            .join("workproj")
+            .to_string_lossy()
+            .into_owned();
+        let claude_home = temp.path().join("home");
+        let project_subdir = claude_home.join("projects").join(project_dir_name(&cwd));
+        std::fs::create_dir_all(&project_subdir).expect("mkdir");
+        (temp, claude_home, cwd, project_subdir)
+    }
+
+    /// Write one `<uuid>.jsonl` first-user-message session (the M5-07/M5-08
+    /// on-disk shape), optionally tagging it `isSidechain` and/or `teamName`,
+    /// then stamp its mtime. `prompt` becomes the row's extracted title.
+    fn write_session(
+        dir: &Path,
+        cwd: &str,
+        prompt: &str,
+        mtime: SystemTime,
+        is_sidechain: bool,
+        team_name: Option<&str>,
+    ) -> Uuid {
+        let uuid = Uuid::new_v4();
+        let mut line = serde_json::json!({
+            "type": "user",
+            "uuid": uuid.to_string(),
+            "parentUuid": null,
+            "sessionId": uuid.to_string(),
+            "timestamp": "2026-05-25T12:00:00.000Z",
+            "cwd": cwd,
+            "version": "0.12.0",
+            "isSidechain": is_sidechain,
+            "userType": "external",
+            "message": {"role": "user", "content": prompt},
+        });
+        if let Some(team) = team_name {
+            line["teamName"] = serde_json::Value::String(team.to_string());
+        }
+        let bytes = format!("{}\n", serde_json::to_string(&line).unwrap());
+        let path = dir.join(format!("{uuid}.jsonl"));
+        std::fs::write(&path, bytes).unwrap();
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(mtime)).unwrap();
+        uuid
+    }
+
+    #[tokio::test]
+    async fn excludes_sidechain_and_teamname_sessions() {
+        let (temp, claude_home, cwd, dir) = setup();
+        let base = SystemTime::now();
+        // Newer mtimes for the hidden rows ensures they would have sorted FIRST
+        // if not filtered — so a passing assertion proves the filter, not luck.
+        let main = write_session(&dir, &cwd, "main prompt", base, false, None);
+        let _sidechain = write_session(
+            &dir,
+            &cwd,
+            "sub-agent transcript",
+            base + Duration::from_secs(1),
+            true,
+            None,
+        );
+        let _team = write_session(
+            &dir,
+            &cwd,
+            "team chat",
+            base + Duration::from_secs(2),
+            false,
+            Some("squad"),
+        );
+
+        let fs = make_fs(temp.path());
+        let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+            .await
+            .expect("list");
+
+        assert_eq!(rows.len(), 1, "sidechain + teamName sessions are hidden");
+        assert_eq!(rows[0].uuid, main);
+        assert_eq!(rows[0].title, "main prompt");
+    }
+
+    #[tokio::test]
+    async fn empty_teamname_string_is_not_filtered() {
+        // TS `if (enriched.teamName)` is a truthiness check — an empty-string
+        // `teamName` is falsy and must NOT hide an otherwise-normal session.
+        let (temp, claude_home, cwd, dir) = setup();
+        let keep = write_session(&dir, &cwd, "kept", SystemTime::now(), false, Some(""));
+
+        let fs = make_fs(temp.path());
+        let rows = list_recent_sessions(&claude_home, &cwd, 5, fs)
+            .await
+            .expect("list");
+
+        assert_eq!(rows.len(), 1, "empty teamName is falsy → not hidden");
+        assert_eq!(rows[0].uuid, keep);
+    }
+
+    #[tokio::test]
+    async fn all_sidechain_dir_is_empty_directory() {
+        // If every candidate is a hidden sidechain, the picker has nothing to
+        // show — same surface as a project dir with no `.jsonl` files.
+        let (temp, claude_home, cwd, dir) = setup();
+        let _ = write_session(&dir, &cwd, "sub a", SystemTime::now(), true, None);
+        let _ = write_session(&dir, &cwd, "sub b", SystemTime::now(), true, None);
+
+        let fs = make_fs(temp.path());
+        match list_recent_sessions(&claude_home, &cwd, 5, fs).await {
+            Err(LoaderError::EmptyDirectory) => {}
+            other => panic!("expected EmptyDirectory, got {other:?}"),
+        }
+    }
 }

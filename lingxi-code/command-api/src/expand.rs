@@ -41,6 +41,11 @@ pub enum ExpandError {
     /// therefore has no body to expand.
     #[error("command '{0}' is not a markdown command")]
     NotMarkdown(String),
+    /// A frontmatter argument name formed an invalid regular expression during
+    /// argument substitution. Mirrors the `SyntaxError` TS throws from
+    /// `new RegExp(...)`, aborting expansion with a user-facing error.
+    #[error(transparent)]
+    Substitution(#[from] crate::argument_substitution::SubstitutionError),
     /// An embedded shell command was denied or failed during expansion.
     #[error(transparent)]
     Shell(#[from] ShellExpansionError),
@@ -88,7 +93,7 @@ pub async fn expand_markdown_command(
         Some(&args.raw_args),
         true,
         &frontmatter.argument_names,
-    );
+    )?;
 
     // (2) ${CLAUDE_SESSION_ID} -> session id (global literal replace).
     if content.contains(SESSION_ID_TOKEN) {
@@ -304,6 +309,24 @@ mod tests {
         let out = expand_markdown_command(&cmd, &parsed, &ctx).await.unwrap();
         assert_eq!(out, "OUT[echo XYZ]");
         assert_eq!(*runner.calls.lock().unwrap(), vec!["echo XYZ".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn invalid_argument_name_surfaces_substitution_error() {
+        // ARGS.2: a frontmatter argument name that forms an invalid regex
+        // (`a[b` -> unterminated character class) aborts expansion with an
+        // error, mirroring the TS `new RegExp(...)` SyntaxError throw.
+        let cmd = markdown_cmd("foo", "Hello $a[b", vec!["a[b".to_string()]);
+        let parsed = parse_slash_command("/foo world").unwrap();
+        let runner = Arc::new(EchoRunner {
+            calls: Mutex::new(Vec::new()),
+        });
+        let sc = shell_ctx(runner);
+        let ctx = make_ctx("s", &sc);
+        let err = expand_markdown_command(&cmd, &parsed, &ctx)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ExpandError::Substitution(_)), "got {err:?}");
     }
 
     #[tokio::test]

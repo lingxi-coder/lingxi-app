@@ -1007,6 +1007,28 @@ pub trait ConversationOrchestratorTrait: Send + Sync {
         prompt: &str,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<TurnTextOutcome, String>;
+
+    /// (MULTIMODAL.1) Image-capable variant of [`Self::run_turn`]: carries the
+    /// pasted/dragged image paths the prompt's `[Image #N]` placeholders refer
+    /// to, mirroring the orchestrator handle's
+    /// `run_turn_streaming_with_images`. The live submit ([`run_one_submit`])
+    /// calls THIS so captured image paths reach the model instead of being
+    /// dropped.
+    ///
+    /// The default DROPS the images and delegates to the text-only
+    /// [`Self::run_turn`], so existing impls keep compiling and a submit with
+    /// no captured images is byte-identical to the prior text-only path. A
+    /// production impl overrides this to forward the paths to
+    /// `OrchestratorHandle::run_turn_streaming_with_images`.
+    async fn run_turn_with_images(
+        &self,
+        prompt: &str,
+        image_paths: &[std::path::PathBuf],
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<TurnTextOutcome, String> {
+        let _ = image_paths;
+        self.run_turn(prompt, cancel).await
+    }
 }
 
 /// Process one submitted line end-to-end: slash dispatch OR `run_turn`.
@@ -1033,7 +1055,18 @@ pub async fn run_one_submit(
         cancel: cancel.clone(),
     });
 
-    let outcome = orch.run_turn(submitted, cancel).await;
+    // (MULTIMODAL.1) Consume any pasted/dragged image paths captured in the
+    // prompt's paste registry so they ride along to the model as real image
+    // content blocks (the `[Image #N]` placeholders in `submitted` point back
+    // to these). `take_image_paths` both drains the paths AND resets the
+    // registry, mirroring how `dispatch(Submit)` consumed `prompt_text` — so
+    // they reach THIS turn and don't leak into the next one. When nothing was
+    // pasted the list is empty and the trait's default delegates to the
+    // text-only `run_turn`, byte-identical to the prior behavior.
+    let image_paths = st.paste.take_image_paths();
+    let outcome = orch
+        .run_turn_with_images(submitted, &image_paths, cancel)
+        .await;
     st.in_flight_turn = None;
     match outcome {
         Ok(TurnTextOutcome { text }) => {
@@ -1677,5 +1710,153 @@ mod dispatch_tests {
             st.messages.is_empty(),
             "/help must not push a system or user message"
         );
+    }
+}
+
+/// (MULTIMODAL.1) The live submit must forward captured paste/drag image paths
+/// through the image-capable orchestrator entry (so they reach the model) and
+/// consume the paste registry on submit, while staying byte-identical to the
+/// text-only path when nothing was pasted.
+#[cfg(test)]
+mod image_submit_tests {
+    use super::*;
+    use crate::components::prompt_input::{process_paste, PasteState};
+    use crate::state::{AppState, RenderedMessage, StatusSnapshot};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    fn s() -> AppState {
+        AppState::new(StatusSnapshot::default())
+    }
+
+    fn dispatcher() -> command_api::RegistrySlashDispatcher {
+        use command_api::{CommandRegistry, RegistrySlashDispatcher};
+        use command_core::register_all_builtin_commands;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        let mut reg = CommandRegistry::new();
+        register_all_builtin_commands(&mut reg);
+        RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)))
+    }
+
+    /// Fake orchestrator that records the prompt + image paths it was asked to
+    /// run via the image-capable entry, so the test can assert the live submit
+    /// forwards the captured paste image paths.
+    #[derive(Default)]
+    struct RecordingOrch {
+        prompt: Mutex<Option<String>>,
+        images: Mutex<Option<Vec<PathBuf>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ConversationOrchestratorTrait for RecordingOrch {
+        async fn run_turn(
+            &self,
+            prompt: &str,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<TurnTextOutcome, String> {
+            // Should not be hit in these tests — the live submit always routes
+            // through `run_turn_with_images`. Record empty so a regression is
+            // visible.
+            *self.prompt.lock().unwrap() = Some(prompt.to_string());
+            *self.images.lock().unwrap() = Some(Vec::new());
+            Ok(TurnTextOutcome { text: "ok".into() })
+        }
+
+        async fn run_turn_with_images(
+            &self,
+            prompt: &str,
+            image_paths: &[PathBuf],
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<TurnTextOutcome, String> {
+            *self.prompt.lock().unwrap() = Some(prompt.to_string());
+            *self.images.lock().unwrap() = Some(image_paths.to_vec());
+            Ok(TurnTextOutcome { text: "ok".into() })
+        }
+    }
+
+    /// Text-only fake: implements ONLY `run_turn` and relies on the trait's
+    /// default `run_turn_with_images`. Proves the no-image submit still drives
+    /// the text-only path unchanged (default delegation = byte-identical).
+    struct TextOnlyOrch(&'static str);
+
+    #[async_trait::async_trait]
+    impl ConversationOrchestratorTrait for TextOnlyOrch {
+        async fn run_turn(
+            &self,
+            _prompt: &str,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<TurnTextOutcome, String> {
+            Ok(TurnTextOutcome {
+                text: self.0.to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_forwards_captured_image_paths_and_clears_registry() {
+        let mut st = s();
+        // Simulate a Finder drag-paste of two image paths: records two
+        // attachments in the paste registry (the `[Image #N]` refs land in the
+        // prompt, the source paths in `st.paste`).
+        st.paste = process_paste("/tmp/a.png /tmp/b.jpg", st.paste.clone()).state;
+        assert_eq!(st.paste.attachments.len(), 2);
+
+        let orch = RecordingOrch::default();
+        let disp = dispatcher();
+        run_one_submit(&mut st, "look [Image #1] [Image #2]", &orch, &disp).await;
+
+        // The image-capable entry received the two captured paths.
+        let images = orch.images.lock().unwrap().clone().expect("a turn ran");
+        assert_eq!(
+            images,
+            vec![PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.jpg")],
+            "captured paste image paths must be forwarded to the model"
+        );
+        // Registry consumed on submit → the next turn starts fresh.
+        assert_eq!(
+            st.paste,
+            PasteState::default(),
+            "paste registry must be cleared on submit so images don't leak"
+        );
+        assert!(st.in_flight_turn.is_none(), "in-flight turn cleared");
+        // The assistant reply was pushed (turn ran end-to-end).
+        assert!(matches!(
+            st.messages.last(),
+            Some(RenderedMessage::AssistantText { body, .. }) if body == "ok"
+        ));
+    }
+
+    #[tokio::test]
+    async fn submit_without_images_forwards_empty_list() {
+        let mut st = s();
+        assert!(st.paste.attachments.is_empty());
+
+        let orch = RecordingOrch::default();
+        let disp = dispatcher();
+        run_one_submit(&mut st, "just text", &orch, &disp).await;
+
+        let images = orch.images.lock().unwrap().clone().expect("a turn ran");
+        assert!(images.is_empty(), "no captured images → empty path list");
+        // Registry was already default; remains default (no observable change).
+        assert_eq!(st.paste, PasteState::default());
+    }
+
+    #[tokio::test]
+    async fn submit_without_images_is_byte_identical_text_only_path() {
+        // A fake that ONLY implements `run_turn` exercises the default
+        // `run_turn_with_images`, proving the no-image submit is unchanged from
+        // the prior text-only behavior (mirrors `behavior_run_turn.rs`).
+        let mut st = s();
+        let orch = TextOnlyOrch("Hello!");
+        let disp = dispatcher();
+        run_one_submit(&mut st, "hi", &orch, &disp).await;
+
+        assert_eq!(st.messages.len(), 1);
+        assert!(matches!(
+            &st.messages[0],
+            RenderedMessage::AssistantText { body, .. } if body == "Hello!"
+        ));
+        assert!(st.in_flight_turn.is_none());
     }
 }

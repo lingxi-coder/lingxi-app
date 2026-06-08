@@ -212,8 +212,25 @@ impl McpRegistry {
             },
         );
 
-        let conn = self.transport.connect(&config.spec).await?;
-        let caps = self.transport.initialize(&conn).await?;
+        // MCPLIFE.4: bound the connect + initialize handshake by MCP_TIMEOUT
+        // (default 30s), mirroring claude-code's getConnectionTimeoutMs() race
+        // (`services/mcp/client.ts:456-458` + the `Promise.race` at 1020-1080).
+        // The transport connect (SSE GET / process spawn) is otherwise unbounded;
+        // map an elapsed deadline to a `Connection` error (the frozen `McpError`
+        // has no connect-timeout variant — `Timeout` is tool-call-specific).
+        let connect_timeout = mcp_connection_timeout();
+        let (conn, caps) = tokio::time::timeout(connect_timeout, async {
+            let conn = self.transport.connect(&config.spec).await?;
+            let caps = self.transport.initialize(&conn).await?;
+            Ok::<_, McpError>((conn, caps))
+        })
+        .await
+        .map_err(|_elapsed| {
+            McpError::Connection(format!(
+                "MCP connection timed out after {}s",
+                connect_timeout.as_secs()
+            ))
+        })??;
         let mut tools = self.transport.list_tools(&conn).await?;
         let resources = self.transport.list_resources(&conn).await?;
         let prompts = self.transport.list_prompts(&conn).await?;
@@ -501,6 +518,19 @@ impl McpRegistry {
     }
 }
 
+/// MCPLIFE.4: the connect+initialize handshake deadline, mirroring claude-code's
+/// `getConnectionTimeoutMs()` (`services/mcp/client.ts:456-458`):
+/// `parseInt(process.env.MCP_TIMEOUT || '', 10) || 30000` — a positive integer
+/// number of milliseconds, defaulting to 30s when unset / non-numeric / zero.
+fn mcp_connection_timeout() -> Duration {
+    let ms = std::env::var("MCP_TIMEOUT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(30_000);
+    Duration::from_millis(ms)
+}
+
 /// Exponential backoff for reconnect `attempt` (1-based), capped at
 /// [`MAX_BACKOFF`]. Mirrors claude-code's
 /// `min(INITIAL_BACKOFF_MS * 2^(attempt-1), MAX_BACKOFF_MS)`.
@@ -525,6 +555,30 @@ fn post_attempt_backoff(attempt: u32, max: u32) -> Option<Duration> {
         None
     } else {
         Some(backoff_for(attempt))
+    }
+}
+
+#[cfg(test)]
+mod connection_timeout_tests {
+    //! MCPLIFE.4 — connect deadline parity with claude-code
+    //! `getConnectionTimeoutMs()` (`parseInt(MCP_TIMEOUT) || 30000`).
+    use super::mcp_connection_timeout;
+    use std::time::Duration;
+
+    // The only test in this crate that mutates MCP_TIMEOUT; the connect-path
+    // tests don't assert the deadline, so the shared-env mutation is harmless.
+    #[test]
+    fn timeout_defaults_to_30s_and_honors_positive_env() {
+        std::env::remove_var("MCP_TIMEOUT");
+        assert_eq!(mcp_connection_timeout(), Duration::from_secs(30));
+        std::env::set_var("MCP_TIMEOUT", "5000");
+        assert_eq!(mcp_connection_timeout(), Duration::from_millis(5000));
+        // parseInt(..) || 30000 — zero / non-numeric / empty fall back to 30s.
+        std::env::set_var("MCP_TIMEOUT", "0");
+        assert_eq!(mcp_connection_timeout(), Duration::from_secs(30));
+        std::env::set_var("MCP_TIMEOUT", "not-a-number");
+        assert_eq!(mcp_connection_timeout(), Duration::from_secs(30));
+        std::env::remove_var("MCP_TIMEOUT");
     }
 }
 

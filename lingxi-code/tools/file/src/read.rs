@@ -90,7 +90,8 @@ pub fn should_include_file_read_mitigation(model: &str) -> bool {
 
 /// Build the model-facing offset-beyond-EOF warning — byte-locked to claude-code
 /// (`FileReadTool.ts:707`). `offset` is the requested 1-based start line
-/// (`data.file.startLine`); `total_lines` is the file's actual line count.
+/// (`data.file.startLine`); `total_lines` is TS `readFileInRange.totalLines`
+/// (newline count + 1; see the FILE.4 note at the call site).
 #[must_use]
 pub fn format_offset_beyond_eof(offset: u64, total_lines: u64) -> String {
     format!(
@@ -323,7 +324,22 @@ impl Tool for FileReadTool {
         };
 
         let all_lines: Vec<&str> = content.split_inclusive('\n').collect();
-        let total_lines = all_lines.len() as u64;
+        // FILE.4: `total_lines` must match TS `readFileInRange.totalLines`
+        // (`utils/readFileInRange.ts:188`) = (number of '\n') + 1. TS does an
+        // UNCONDITIONAL post-loop `lineIndex++` that counts the (possibly empty)
+        // final fragment after the last newline, so a TRAILING newline adds a
+        // phantom final line (e.g. "a\nb\nc\n" => 4, not the natural 3). The prior
+        // `split_inclusive().len()` undercounted trailing-newline files by one in
+        // the model-facing `total_lines` field + the offset-beyond-EOF warning.
+        // An empty file stays 0 so the byte-locked EMPTY_FILE_WARNING branch still
+        // fires (TS's empty path is upstream of readFileInRange and not reproduced
+        // here). NOTE: `all_lines` (split_inclusive) is what the range SLICING below
+        // uses — only this model-facing count is TS-aligned.
+        let total_lines = if content.is_empty() {
+            0
+        } else {
+            content.bytes().filter(|&b| b == b'\n').count() as u64 + 1
+        };
         let start_idx = (offset.saturating_sub(1) as usize).min(all_lines.len());
         let end_idx = match limit {
             Some(l) => (start_idx + l as usize).min(all_lines.len()),
@@ -451,7 +467,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["content"], "hello\nworld\n");
-        assert_eq!(result.data["total_lines"], 2);
+        // FILE.4: TS counts the trailing newline's empty final fragment as a line
+        // ("hello\nworld\n" => 3, matching readFileInRange `lineIndex`).
+        assert_eq!(result.data["total_lines"], 3);
         // Model-facing string: cat -n (compact tab format, 1-based from offset)
         // + the cyber-risk reminder (ctx model "test" is not exempt).
         assert_eq!(
@@ -639,7 +657,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["content"], "alpha\nbeta\ngamma\n");
-        assert_eq!(result.data["total_lines"], 3);
+        // FILE.4: trailing newline => phantom final line ("...\n" => 4).
+        assert_eq!(result.data["total_lines"], 4);
     }
 
     #[tokio::test]
@@ -806,10 +825,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["content"], "");
-        assert_eq!(result.data["total_lines"], 3);
+        // FILE.4: "a\nb\nc\n" has 3 newlines => TS total_lines 4 (phantom final line).
+        assert_eq!(result.data["total_lines"], 4);
         assert_eq!(
             result.data["model_content"],
-            "<system-reminder>Warning: the file exists but is shorter than the provided offset (10). The file has 3 lines.</system-reminder>"
+            "<system-reminder>Warning: the file exists but is shorter than the provided offset (10). The file has 4 lines.</system-reminder>"
         );
     }
 

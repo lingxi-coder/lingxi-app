@@ -3,7 +3,9 @@
 //! Wire locks (spec §7):
 //! - `MAX_GLOB_MATCHES = 100`
 //! - Excess truncated → returns `truncated: true` field on output.
-//! - Results sorted newest-first by mtime (claude-code parity).
+//! - Results sorted OLDEST-first by mtime, capped to the first 100 (claude-code
+//!   `--sort=modified` is oldest-first + `slice(0, limit)`, `utils/glob.ts:94,124`).
+//!   (GLOB.3: the prior "newest-first" was a Spec §7 divergence from TS, corrected.)
 
 use async_trait::async_trait;
 use globset::Glob;
@@ -176,11 +178,11 @@ impl Tool for GlobTool {
     }
 
     async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        "Expand a glob pattern; returns up to 100 newest matches.".to_string()
+        "Expand a glob pattern; returns up to 100 matches sorted by modification time.".to_string()
     }
 
     async fn prompt(&self, _opts: &PromptOptions) -> String {
-        "Glob a pattern (e.g. **/*.rs). Sorted by mtime desc, capped at 100.".to_string()
+        "Glob a pattern (e.g. **/*.rs). Sorted by mtime ascending (oldest first), capped at 100.".to_string()
     }
 
     async fn call(
@@ -267,7 +269,9 @@ impl Tool for GlobTool {
         }
 
         let total = hits.len();
-        hits.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+        // GLOB.3: oldest-first by mtime, matching claude-code `--sort=modified`
+        // (`utils/glob.ts:94`) + `slice(0, limit)` keeping the OLDEST 100.
+        hits.sort_by(|a, b| a.1.cmp(&b.1)); // oldest first
         let truncated = total > MAX_GLOB_MATCHES;
         if truncated {
             hits.truncate(MAX_GLOB_MATCHES);
@@ -377,7 +381,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn results_sorted_newest_first() {
+    async fn results_sorted_oldest_first() {
         use filetime::{set_file_mtime, FileTime};
         let tmp = TempDir::new().unwrap();
         let old = tmp.path().join("old.rs");
@@ -401,9 +405,10 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert!(matches[0].ends_with("new.rs"));
+        // GLOB.3: oldest-first (claude-code `--sort=modified`).
+        assert!(matches[0].ends_with("old.rs"));
         assert!(matches[1].ends_with("mid.rs"));
-        assert!(matches[2].ends_with("old.rs"));
+        assert!(matches[2].ends_with("new.rs"));
     }
 
     #[tokio::test]

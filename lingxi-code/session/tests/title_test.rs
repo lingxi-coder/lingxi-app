@@ -22,22 +22,24 @@ fn make_user(content: serde_json::Value) -> JsonlMessage {
 }
 
 #[test]
-fn empty_messages_returns_empty_string() {
+fn empty_messages_returns_session_fallback() {
+    // SESSION.2: TS picker enrichLog sets firstPrompt='(session)' when the
+    // derivation yields nothing (sessionStorage.ts:5052-5053).
     let messages: Vec<JsonlMessage> = vec![];
-    assert_eq!(extract_title(&messages), "");
+    assert_eq!(extract_title(&messages), "(session)");
 }
 
 #[test]
-fn no_user_message_returns_empty_string() {
+fn no_user_message_returns_session_fallback() {
     let mut m = make_user(json!("hi"));
     m.message_type = "assistant".to_string();
-    assert_eq!(extract_title(&[m]), "");
+    assert_eq!(extract_title(&[m]), "(session)");
 }
 
 #[test]
-fn empty_user_content_returns_empty_string() {
+fn empty_user_content_returns_session_fallback() {
     let m = make_user(json!(""));
-    assert_eq!(extract_title(&[m]), "");
+    assert_eq!(extract_title(&[m]), "(session)");
 }
 
 #[test]
@@ -47,29 +49,38 @@ fn short_string_content_is_returned_verbatim() {
 }
 
 #[test]
-fn exactly_50_chars_is_returned_without_ellipsis() {
-    let s: String = "a".repeat(50);
+fn exactly_200_chars_is_returned_without_ellipsis() {
+    // SESSION.2: TS caps firstPrompt at 200 chars (sessionStorage.ts:1732-1733).
+    let s: String = "a".repeat(200);
     let m = make_user(json!(s.clone()));
     assert_eq!(extract_title(&[m]), s);
 }
 
 #[test]
-fn fifty_one_chars_is_truncated_with_ellipsis() {
-    let s: String = "a".repeat(51);
+fn two_hundred_one_chars_is_truncated_with_ellipsis() {
+    let s: String = "a".repeat(201);
     let m = make_user(json!(s));
     let title = extract_title(&[m]);
-    assert_eq!(title.chars().count(), 51); // 50 'a' + 1 ellipsis
+    assert_eq!(title.chars().count(), 201); // 200 'a' + 1 ellipsis
     assert!(title.ends_with('…'));
-    assert_eq!(title.chars().take(50).collect::<String>(), "a".repeat(50));
+    assert_eq!(title.chars().take(200).collect::<String>(), "a".repeat(200));
+}
+
+#[test]
+fn short_cjk_is_returned_verbatim_under_200() {
+    // 60 CJK chars = 180 UTF-8 bytes but only 60 chars < 200, so no truncation.
+    let s: String = "中".repeat(60);
+    let m = make_user(json!(s.clone()));
+    assert_eq!(extract_title(&[m]), s);
 }
 
 #[test]
 fn cjk_truncation_by_char_count_not_byte_count() {
-    // 60 CJK chars = 180 UTF-8 bytes; we want exactly 50 chars + ellipsis.
-    let s: String = "中".repeat(60);
+    // 250 CJK chars > 200, so truncate to 200 chars + ellipsis (char count, not bytes).
+    let s: String = "中".repeat(250);
     let m = make_user(json!(s));
     let title = extract_title(&[m]);
-    assert_eq!(title.chars().count(), 51); // 50 '中' + '…'
+    assert_eq!(title.chars().count(), 201); // 200 '中' + '…'
     assert!(title.ends_with('…'));
 }
 
@@ -83,11 +94,11 @@ fn array_content_uses_first_text_block() {
 }
 
 #[test]
-fn array_content_with_only_image_returns_empty() {
+fn array_content_with_only_image_returns_session_fallback() {
     let m = make_user(json!([
         {"type": "image", "source": {"type": "base64", "data": "xxxx"}}
     ]));
-    assert_eq!(extract_title(&[m]), "");
+    assert_eq!(extract_title(&[m]), "(session)");
 }
 
 #[test]

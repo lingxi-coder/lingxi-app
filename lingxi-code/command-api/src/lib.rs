@@ -28,7 +28,7 @@ pub mod shell_expansion;
 
 pub use argument_substitution::{
     parse_argument_names, parse_arguments, substitute_arguments, substitute_arguments_faithful,
-    FrontmatterArgs,
+    FrontmatterArgs, SubstitutionError,
 };
 pub use describe::format_description_with_source;
 pub use dispatcher::RegistrySlashDispatcher;

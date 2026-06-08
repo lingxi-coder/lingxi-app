@@ -294,6 +294,8 @@ mod tests {
             json: false,
             debug: false,
             no_tui: false,
+            continue_session: false,
+            fork_session: false,
         };
         let output: Arc<dyn OutputStream> =
             Arc::new(orchestrator::test_support::MockOutputStream::new());
@@ -341,6 +343,8 @@ mod tests {
             json: false,
             debug: false,
             no_tui: false,
+            continue_session: false,
+            fork_session: false,
         };
 
         // `--print` ⟶ honored.

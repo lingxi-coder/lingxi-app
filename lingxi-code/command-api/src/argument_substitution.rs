@@ -15,16 +15,51 @@
 //!   scanners. Each scanner is byte-faithful to the regex it mirrors, including
 //!   `\d+`'s greedy-with-backtracking interaction with the `(?!\w)` lookahead
 //!   (so `$12` consumes two digits → index 12, while `$12a` matches nothing).
-//! * **`parse_arguments` uses the quote-aware tokenizer** from [`crate::parser`]
-//!   instead of the `shell-quote` library. This is the "close" substitute the
-//!   spec calls for: it strips matched single/double quotes and splits on
-//!   whitespace, but (unlike `shell-quote`) does not treat shell operators
-//!   (`|`, `;`, `&`) as separate non-string tokens to be filtered out — they
-//!   remain part of an adjacent token. `$KEY` variable syntax is preserved
-//!   literally (the tokenizer performs no expansion), matching the TS
-//!   `tryParseShellCommand(args, key => "$" + key)` behaviour.
+//! * **`parse_arguments` is `shell-quote`-faithful** (ARGS.1). It delegates to
+//!   [`crate::parser::tokenize_args`], which reproduces `shell-quote@1.8.1`'s
+//!   `parse(args, key => "$" + key)` and keeps only the string tokens — glob,
+//!   operator, and comment entries are dropped, adjacent quoted/unquoted runs
+//!   concatenate, and a `${…}` "Bad substitution" falls back to a whitespace
+//!   split (see that function for the precise behaviour and fidelity notes).
+//! * **Named-argument regex semantics** (ARGS.2). TS builds
+//!   `new RegExp("\\$" + name + "(?![\\[\\w])", "g")` from the *unescaped*
+//!   frontmatter name, so the name is a regex *pattern*. Without the `regex`
+//!   crate (and because `(?!…)` lookaheads are unsupported by it anyway) we:
+//!   - apply the `(?![\[\w])` boundary by hand (next char is neither `[`, a
+//!     word char, nor `_`), and
+//!   - validate the name as a regex and **surface an expansion error**
+//!     ([`SubstitutionError`]) when it would make `new RegExp(...)` throw —
+//!     matching TS's `SyntaxError` throw rather than silently literal-replacing.
+//!
+//!   Fidelity boundary: full JS-`RegExp` pattern semantics are *not* emulated.
+//!   A name that is a *valid* regex with metacharacters (e.g. `a.b`) is matched
+//!   **literally** (`$a.b`), not as a pattern (TS would also match `$aXb`). The
+//!   validity check detects the cases that make JS `RegExp` throw — an
+//!   unterminated character class (`a[b`, the spec's named example), an
+//!   unbalanced group (`a(b`, `a)b`), and a name-trailing backslash — and
+//!   surfaces [`SubstitutionError::InvalidArgumentName`]; the diagnostic text
+//!   differs from V8's `SyntaxError` message.
 
 use crate::parser::{tokenize_args, ParsedSlashCommand};
+
+/// An argument name from frontmatter formed an invalid regular expression.
+///
+/// TS builds the named-argument matcher with `new RegExp(...)` and lets the
+/// resulting `SyntaxError` propagate, aborting expansion with a user-facing
+/// error. This is the Rust equivalent that callers surface to the user.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SubstitutionError {
+    /// The frontmatter argument `name` would make `new RegExp("\\$" + name +
+    /// "(?![\\[\\w])")` throw a `SyntaxError`. `reason` is a human-readable
+    /// description of why (it does not reproduce V8's exact wording).
+    #[error("invalid argument name `{name}`: forms an invalid regular expression ({reason})")]
+    InvalidArgumentName {
+        /// The offending frontmatter argument name.
+        name: String,
+        /// Why the name is not a valid regular expression.
+        reason: String,
+    },
+}
 
 /// Frontmatter `arguments` field: either a space-separated string or an array
 /// of names. Mirrors the TS `string | string[] | undefined` union.
@@ -39,8 +74,8 @@ pub enum FrontmatterArgs {
 /// Parse an arguments string into individual arguments.
 ///
 /// Faithful to TS `parseArguments`: empty/whitespace-only input yields an empty
-/// vector; otherwise the quote-aware tokenizer splits the string (see the
-/// module-level divergence note on `shell-quote`).
+/// vector; otherwise [`crate::parser::tokenize_args`] runs the
+/// `shell-quote`-faithful tokenizer and keeps only the string tokens.
 #[must_use]
 pub fn parse_arguments(args: &str) -> Vec<String> {
     if args.trim().is_empty() {
@@ -98,28 +133,34 @@ fn is_word_byte(b: u8) -> bool {
 /// 4. `replaceAll("$ARGUMENTS", args)`,
 /// 5. append `\n\nARGUMENTS: {args}` iff nothing changed, `append_if_no_placeholder`,
 ///    and `args` is non-empty.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns [`SubstitutionError::InvalidArgumentName`] when a frontmatter
+/// argument name forms an invalid regular expression (step 1), mirroring the
+/// `SyntaxError` TS throws from `new RegExp(...)`.
 pub fn substitute_arguments_faithful(
     content: &str,
     args: Option<&str>,
     append_if_no_placeholder: bool,
     argument_names: &[String],
-) -> String {
+) -> Result<String, SubstitutionError> {
     let Some(args) = args else {
-        return content.to_string();
+        return Ok(content.to_string());
     };
 
     let parsed_args = parse_arguments(args);
     let original_content = content;
     let mut content = content.to_string();
 
-    // (1) Named arguments: $name not followed by `[` or a word char.
+    // (1) Named arguments: $name not followed by `[` or a word char. TS builds
+    // the matcher per name and throws on an invalid pattern — we propagate.
     for (i, name) in argument_names.iter().enumerate() {
         if name.is_empty() {
             continue;
         }
         let replacement = parsed_args.get(i).map_or("", String::as_str);
-        content = replace_named_arg(&content, name, replacement);
+        content = replace_named_arg(&content, name, replacement)?;
     }
 
     // (2) Indexed: $ARGUMENTS[<digits>].
@@ -136,13 +177,28 @@ pub fn substitute_arguments_faithful(
         content = format!("{content}\n\nARGUMENTS: {args}");
     }
 
-    content
+    Ok(content)
 }
 
-/// Replace `$<name>` where `name` is a literal frontmatter argument name and the
-/// following char is neither `[` nor a word char. Mirrors the regex
-/// `new RegExp("\\$" + name + "(?![\\[\\w])", "g")`.
-fn replace_named_arg(content: &str, name: &str, replacement: &str) -> String {
+/// Replace `$<name>` where the frontmatter argument `name` is interpreted as a
+/// regex (per TS `new RegExp("\\$" + name + "(?![\\[\\w])", "g")`) and the
+/// following char is neither `[` nor a word char.
+///
+/// Fidelity boundary: a *valid* metacharacter name matches **literally** (no
+/// pattern semantics); an *invalid* name is rejected up front so the caller can
+/// surface the error TS would throw. See the module docs.
+fn replace_named_arg(
+    content: &str,
+    name: &str,
+    replacement: &str,
+) -> Result<String, SubstitutionError> {
+    validate_argument_name_regex(name).map_err(|reason| {
+        SubstitutionError::InvalidArgumentName {
+            name: name.to_string(),
+            reason,
+        }
+    })?;
+
     let bytes = content.as_bytes();
     let name_bytes = name.as_bytes();
     let pat_len = 1 + name_bytes.len(); // '$' + name
@@ -162,13 +218,70 @@ fn replace_named_arg(content: &str, name: &str, replacement: &str) -> String {
                 continue;
             }
         }
-        // SAFETY: `i` always sits on a char boundary — we only ever advance past
-        // whole matched ASCII spans or copy one UTF-8 char at a time below.
+        // `i` always sits on a char boundary — we only ever advance past whole
+        // matched ASCII spans or copy one UTF-8 char at a time below.
         let ch_len = utf8_char_len(bytes[i]);
         out.push_str(&content[i..i + ch_len]);
         i += ch_len;
     }
-    out
+    Ok(out)
+}
+
+/// Detect frontmatter argument names that would make
+/// `new RegExp("\\$" + name + "(?![\\[\\w])")` throw a `SyntaxError`.
+///
+/// This is a focused validity check, not a full JS-`RegExp` validator: it flags
+/// the constructs that throw and matter in practice — an unterminated character
+/// class (`[` with no closing `]`, which swallows the `(?![\[\w])` suffix and
+/// leaves an unmatched `)`), an unbalanced group (`(` / `)`), and a
+/// name-trailing backslash (which escapes the suffix's `(`). Other valid
+/// metacharacters are accepted (and then matched literally — see
+/// [`replace_named_arg`]). `\X` escapes are skipped, and `(`/`)` inside a `[…]`
+/// class are literal, matching JS.
+fn validate_argument_name_regex(name: &str) -> Result<(), String> {
+    let chars: Vec<char> = name.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    let mut in_class = false;
+    let mut paren_depth: i32 = 0;
+    while i < n {
+        let c = chars[i];
+        if c == '\\' {
+            // Escape: consumes the next char. A trailing `\` would escape the
+            // suffix's `(`, breaking the boundary assertion -> JS throws.
+            if i + 1 >= n {
+                return Err("name ends with a backslash".to_string());
+            }
+            i += 2;
+            continue;
+        }
+        if in_class {
+            if c == ']' {
+                in_class = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '[' => in_class = true,
+            '(' => paren_depth += 1,
+            ')' => {
+                if paren_depth == 0 {
+                    return Err("unmatched ')'".to_string());
+                }
+                paren_depth -= 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if in_class {
+        return Err("unterminated character class `[`".to_string());
+    }
+    if paren_depth > 0 {
+        return Err("unterminated group `(`".to_string());
+    }
+    Ok(())
 }
 
 /// Replace `$ARGUMENTS[<digits>]` (regex `\$ARGUMENTS\[(\d+)\]`). Out-of-range
@@ -273,11 +386,12 @@ fn utf8_char_len(b: u8) -> usize {
 /// Backwards-compatible 2-arg shim retained so downstream crates (e.g.
 /// `command-core`) keep compiling. Delegates to [`substitute_arguments_faithful`]
 /// with `append_if_no_placeholder = true` and no named arguments, passing the
-/// raw argument string. The pre-faithful naive behaviour is intentionally
-/// dropped in favour of TS parity.
+/// raw argument string. Because it passes **no** argument names, the named-arg
+/// regex path is never exercised and the call is infallible.
 #[must_use]
 pub fn substitute_arguments(template: &str, args: &ParsedSlashCommand) -> String {
     substitute_arguments_faithful(template, Some(&args.raw_args), true, &[])
+        .expect("substitute_arguments passes no argument names, so it cannot fail")
 }
 
 #[cfg(test)]
@@ -288,7 +402,12 @@ mod tests {
         v.iter().map(|s| (*s).to_string()).collect()
     }
 
-    // ----- parse_arguments -----
+    /// Unwrapping helper for the common (no invalid names) test paths.
+    fn sub(content: &str, args: Option<&str>, append: bool, names: &[String]) -> String {
+        substitute_arguments_faithful(content, args, append, names).expect("valid substitution")
+    }
+
+    // ----- parse_arguments (ARGS.1) -----
 
     #[test]
     fn parse_arguments_basic_and_quoted() {
@@ -313,6 +432,19 @@ mod tests {
     fn parse_arguments_preserves_dollar_key() {
         // No variable expansion: $KEY stays literal.
         assert_eq!(parse_arguments("$HOME path"), vec!["$HOME", "path"]);
+    }
+
+    #[test]
+    fn parse_arguments_drops_globs_operators_and_comments() {
+        // Glob word dropped, plain word kept.
+        assert_eq!(parse_arguments("*.ts foo"), vec!["foo"]);
+        // Redirect/pipe operators dropped.
+        assert_eq!(parse_arguments("report > out.txt"), vec!["report", "out.txt"]);
+        assert_eq!(parse_arguments("a | b"), vec!["a", "b"]);
+        // Comment truncates the remainder.
+        assert_eq!(parse_arguments("a # b"), vec!["a"]);
+        // Adjacent quoted/unquoted runs concatenate.
+        assert_eq!(parse_arguments("foo\"bar\"baz"), vec!["foobarbaz"]);
     }
 
     // ----- parse_argument_names -----
@@ -347,60 +479,36 @@ mod tests {
     #[test]
     fn arguments_indexed_and_shorthand() {
         // $ARGUMENTS[0] and $1 select the same token classes.
-        assert_eq!(
-            substitute_arguments_faithful("[$ARGUMENTS[0]]", Some("a b c"), true, &[]),
-            "[a]"
-        );
-        assert_eq!(
-            substitute_arguments_faithful("[$1]", Some("a b c"), true, &[]),
-            "[b]"
-        );
+        assert_eq!(sub("[$ARGUMENTS[0]]", Some("a b c"), true, &[]), "[a]");
+        assert_eq!(sub("[$1]", Some("a b c"), true, &[]), "[b]");
         // Out of range -> empty.
-        assert_eq!(
-            substitute_arguments_faithful("[$ARGUMENTS[9]]", Some("a b"), true, &[]),
-            "[]"
-        );
+        assert_eq!(sub("[$ARGUMENTS[9]]", Some("a b"), true, &[]), "[]");
     }
 
     #[test]
     fn shorthand_two_digit_consumes_both_digits() {
         // 13 args so index 12 exists; $12 must mean index 12, not $1 + "2".
         let args = "a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12";
-        assert_eq!(
-            substitute_arguments_faithful("[$12]", Some(args), true, &[]),
-            "[a12]"
-        );
+        assert_eq!(sub("[$12]", Some(args), true, &[]), "[a12]");
         // $1 alone still works and is not greedily merged with a following space.
-        assert_eq!(
-            substitute_arguments_faithful("[$1]", Some(args), true, &[]),
-            "[a1]"
-        );
+        assert_eq!(sub("[$1]", Some(args), true, &[]), "[a1]");
     }
 
     #[test]
     fn shorthand_followed_by_word_char_does_not_match() {
         // `$12a`: greedy `12` rejected by `a`; backtrack to `1` rejected by `2`.
         // No (?!\w) position -> no substitution at all.
-        assert_eq!(
-            substitute_arguments_faithful("x$12a", Some("a b c d"), false, &[]),
-            "x$12a"
-        );
+        assert_eq!(sub("x$12a", Some("a b c d"), false, &[]), "x$12a");
         // `$1a` likewise leaves the text untouched.
-        assert_eq!(
-            substitute_arguments_faithful("$1a", Some("a b"), false, &[]),
-            "$1a"
-        );
+        assert_eq!(sub("$1a", Some("a b"), false, &[]), "$1a");
     }
 
     #[test]
     fn full_arguments_replacement_uses_raw_string() {
-        assert_eq!(
-            substitute_arguments_faithful("all=$ARGUMENTS", Some("a b c"), true, &[]),
-            "all=a b c"
-        );
+        assert_eq!(sub("all=$ARGUMENTS", Some("a b c"), true, &[]), "all=a b c");
         // $ARGUMENTS[0] is consumed before bare $ARGUMENTS, so the bracket form wins.
         assert_eq!(
-            substitute_arguments_faithful("$ARGUMENTS[0]-$ARGUMENTS", Some("a b"), true, &[]),
+            sub("$ARGUMENTS[0]-$ARGUMENTS", Some("a b"), true, &[]),
             "a-a b"
         );
     }
@@ -413,7 +521,7 @@ mod tests {
         // $foo replaced; $foobar (word char after) NOT replaced; $foo[0] (next
         // char `[`) NOT replaced — the `(?![\[\w])` lookahead rejects both.
         assert_eq!(
-            substitute_arguments_faithful("$foo $foobar $foo[0]", Some("X"), true, &argnames),
+            sub("$foo $foobar $foo[0]", Some("X"), true, &argnames),
             "X $foobar $foo[0]"
         );
     }
@@ -422,19 +530,59 @@ mod tests {
     fn named_args_map_by_position() {
         let argnames = names(&["first", "second"]);
         assert_eq!(
-            substitute_arguments_faithful(
-                "$first then $second",
-                Some("alpha beta"),
-                true,
-                &argnames
-            ),
+            sub("$first then $second", Some("alpha beta"), true, &argnames),
             "alpha then beta"
         );
         // Missing positional -> empty.
-        assert_eq!(
-            substitute_arguments_faithful("$second", Some("alpha"), false, &argnames),
-            ""
-        );
+        assert_eq!(sub("$second", Some("alpha"), false, &argnames), "");
+    }
+
+    // ----- ARGS.2: named-name regex validity & metachar boundary -----
+
+    #[test]
+    fn named_arg_unterminated_class_surfaces_error() {
+        // arguments: ["a[b"] -> `new RegExp("\\$a[b(?![\\[\\w])")` throws in JS;
+        // we surface an InvalidArgumentName error instead of literal-replacing.
+        let argnames = names(&["a[b"]);
+        let err = substitute_arguments_faithful("see $a[b here", Some("V"), true, &argnames)
+            .unwrap_err();
+        match err {
+            SubstitutionError::InvalidArgumentName { name, .. } => assert_eq!(name, "a[b"),
+        }
+    }
+
+    #[test]
+    fn named_arg_unbalanced_parens_surface_error() {
+        for bad in ["a)b", "a(b"] {
+            let argnames = names(&[bad]);
+            assert!(
+                substitute_arguments_faithful("$x", Some("V"), true, &argnames).is_err(),
+                "name `{bad}` should be rejected as an invalid regex"
+            );
+        }
+    }
+
+    #[test]
+    fn named_arg_trailing_backslash_surfaces_error() {
+        let argnames = names(&["a\\"]);
+        assert!(substitute_arguments_faithful("$x", Some("V"), true, &argnames).is_err());
+    }
+
+    #[test]
+    fn named_arg_valid_metachar_matches_literally() {
+        // `a.b` is a VALID regex (dot = any char). Fidelity boundary: we match
+        // it LITERALLY (`$a.b`), so `$aXb` is left untouched (TS would replace
+        // it too). The literal occurrence IS replaced.
+        let argnames = names(&["a.b"]);
+        assert_eq!(sub("$a.b and $aXb", Some("V"), true, &argnames), "V and $aXb");
+    }
+
+    #[test]
+    fn named_arg_balanced_class_is_valid_and_literal() {
+        // Balanced `[bc]` -> a valid regex -> accepted; matched literally with
+        // the (?![\[\w]) boundary (here followed by `!`, which is allowed).
+        let argnames = names(&["a[bc]d"]);
+        assert_eq!(sub("$a[bc]d!", Some("V"), true, &argnames), "V!");
     }
 
     // ----- appendIfNoPlaceholder -----
@@ -442,7 +590,7 @@ mod tests {
     #[test]
     fn append_if_no_placeholder_on_appends_when_no_change() {
         assert_eq!(
-            substitute_arguments_faithful("no placeholders here", Some("a b"), true, &[]),
+            sub("no placeholders here", Some("a b"), true, &[]),
             "no placeholders here\n\nARGUMENTS: a b"
         );
     }
@@ -450,7 +598,7 @@ mod tests {
     #[test]
     fn append_if_no_placeholder_off_does_not_append() {
         assert_eq!(
-            substitute_arguments_faithful("no placeholders here", Some("a b"), false, &[]),
+            sub("no placeholders here", Some("a b"), false, &[]),
             "no placeholders here"
         );
     }
@@ -458,25 +606,19 @@ mod tests {
     #[test]
     fn append_if_no_placeholder_empty_vs_missing_args() {
         // Empty args: no append even though append flag on (TS `&& args` guard).
-        assert_eq!(
-            substitute_arguments_faithful("plain", Some(""), true, &[]),
-            "plain"
-        );
+        assert_eq!(sub("plain", Some(""), true, &[]), "plain");
         // Missing args (None): content returned unchanged.
-        assert_eq!(substitute_arguments_faithful("plain", None, true, &[]), "plain");
+        assert_eq!(sub("plain", None, true, &[]), "plain");
         // A placeholder present -> content changes -> no append even with text.
         // $1 is index 1 -> the SECOND token ("b"), matching $ARGUMENTS[1].
-        assert_eq!(
-            substitute_arguments_faithful("got $1", Some("a b"), true, &[]),
-            "got b"
-        );
+        assert_eq!(sub("got $1", Some("a b"), true, &[]), "got b");
     }
 
     #[test]
     fn session_id_placeholder_left_untouched() {
         // ${CLAUDE_SESSION_ID} is not an arg placeholder; substitution ignores it.
         // $1 -> index 1 -> "b".
-        let out = substitute_arguments_faithful("id=${CLAUDE_SESSION_ID} $1", Some("a b"), true, &[]);
+        let out = sub("id=${CLAUDE_SESSION_ID} $1", Some("a b"), true, &[]);
         assert_eq!(out, "id=${CLAUDE_SESSION_ID} b");
     }
 

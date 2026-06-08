@@ -681,6 +681,12 @@ pub fn build_markdown_command(file: &MarkdownCommandFile, source: CommandSource)
         // absent), so its first element is the hint — mirroring TS
         // `frontmatter['argument-hint'] != null ? String(...) : undefined`.
         argument_hint: file.frontmatter.argument_hints.first().cloned(),
+        // ARGS.3: TS `createSkillCommand` copies the parsed `argNames`
+        // (`parseArgumentNames(frontmatter.arguments)`) onto the top-level
+        // command. The frontmatter parser already stores that filtered list in
+        // `argument_names`, so carry it through verbatim. This is what drives the
+        // in-TUI progressive argument-hint (`generateProgressiveArgumentHint`).
+        argument_names: file.frontmatter.argument_names.clone(),
         // SLASH.3: legacy `.claude/commands/**.md` files load through TS
         // `loadSkillsFromCommandsDir`, which tags every command it builds with
         // `loadedFrom: 'commands_DEPRECATED'`.
@@ -962,6 +968,64 @@ mod tests {
         let cmd = build_markdown_command(&file, CommandSource::Project);
         assert_eq!(cmd.argument_hint.as_deref(), Some("<file> [flags]"));
         assert_eq!(cmd.loaded_from.as_deref(), Some("commands_DEPRECATED"));
+    }
+
+    #[test]
+    fn build_markdown_command_copies_argument_names_from_frontmatter() {
+        // ARGS.3: the parsed `argNames` are surfaced on the top-level command so
+        // the TUI can render the progressive argument-hint.
+        let fm = CommandFrontmatter {
+            argument_names: vec!["first".to_string(), "second".to_string()],
+            ..CommandFrontmatter::default()
+        };
+        let file = MarkdownCommandFile {
+            file_path: PathBuf::from("/r/.claude/commands/x.md"),
+            base_dir: PathBuf::from("/r/.claude/commands"),
+            frontmatter: fm,
+            content: "# Body".to_string(),
+            source: CommandSource::Project,
+        };
+        let cmd = build_markdown_command(&file, CommandSource::Project);
+        assert_eq!(cmd.argument_names, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn build_markdown_command_defaults_argument_names_to_empty() {
+        // No `arguments` frontmatter → empty list (the built-in default).
+        let file = MarkdownCommandFile {
+            file_path: PathBuf::from("/r/.claude/commands/x.md"),
+            base_dir: PathBuf::from("/r/.claude/commands"),
+            frontmatter: CommandFrontmatter::default(),
+            content: "# Body".to_string(),
+            source: CommandSource::Project,
+        };
+        let cmd = build_markdown_command(&file, CommandSource::Project);
+        assert!(cmd.argument_names.is_empty());
+    }
+
+    #[test]
+    fn slash_command_serde_omits_empty_argument_names() {
+        // Parity guard: an empty `argument_names` must NOT appear in the wire
+        // JSON, keeping the serialized shape byte-identical to before this field
+        // existed (which is what keeps parity_slash_commands*.json unchanged).
+        let cmd = crate::model::SlashCommand {
+            name: "help".to_string(),
+            description: "Show help".to_string(),
+            ..crate::model::SlashCommand::default()
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize");
+        assert!(
+            !json.contains("argument_names"),
+            "empty argument_names must be omitted, got: {json}"
+        );
+        // A non-empty list round-trips.
+        let cmd2 = crate::model::SlashCommand {
+            name: "deploy".to_string(),
+            argument_names: vec!["env".to_string()],
+            ..crate::model::SlashCommand::default()
+        };
+        let json2 = serde_json::to_string(&cmd2).expect("serialize");
+        assert!(json2.contains("\"argument_names\":[\"env\"]"), "got: {json2}");
     }
 
     #[test]

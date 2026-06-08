@@ -55,6 +55,15 @@ pub struct SlashCommand {
     /// `argumentHint`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argument_hint: Option<String>,
+    /// Declared positional argument names (TS `argNames`), already filtered
+    /// through `parseArgumentNames` (no empty/numeric-only names). Drives the
+    /// in-TUI progressive argument-hint (TS `generateProgressiveArgumentHint`
+    /// shown by `useTypeahead` → `BaseTextInput` in the `commandWithoutArgs`
+    /// state). Empty for every built-in, so the `skip_serializing_if` keeps the
+    /// wire JSON byte-identical to the pre-existing `{name, description, source,
+    /// kind, …}` shape when no names are declared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argument_names: Vec<String>,
 }
 
 /// Serde `skip_serializing_if` predicate for `bool` fields that default to

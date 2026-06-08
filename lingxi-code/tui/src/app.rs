@@ -988,6 +988,10 @@ pub fn render_screen(
             prompt_text: prompt_text,
             prompt_cursor: prompt_cursor,
             prompt_width: vp_width,
+            // (ARGS.3) Inline progressive argument-hint computed from the live
+            // buffer + the command→argNames lookup. `None` for every built-in /
+            // non-command buffer, so the prompt is byte-identical to today.
+            prompt_argument_hint: state.prompt_argument_hint(),
             scroll_offset: scroll_offset,
             viewport_height: viewport_height,
             show_spinner: show_spinner,

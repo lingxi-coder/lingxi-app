@@ -320,6 +320,53 @@ pub fn render_line_with_cursor(line: &str, cursor_col_in_line: Option<usize>) ->
     chunks
 }
 
+/// Compute the inline progressive argument-hint shown as dimmed ghost text
+/// after a fully-typed slash command in the `commandWithoutArgs` state.
+///
+/// Faithful port of the claude-code path that produces this hint:
+/// `useTypeahead.tsx:756-759` (build the hint from `exactMatch.argNames` ONLY
+/// when the user has typed the command name followed by a trailing space) fed
+/// into `BaseTextInput.tsx:92,105,111` (render it inline). The combined gate:
+///
+/// * the buffer starts with `/` (a slash command),
+/// * it ends with a single trailing space — TS `value.endsWith(' ')`, the
+///   `commandWithoutArgs` ready-for-arguments state,
+/// * the text before the first space exactly names a known command, and
+/// * that command declares a non-empty `argNames` list.
+///
+/// `arg_names_for` looks up a command name (without the leading `/`) → its
+/// declared argument names; it returns `None`/empty for every command that
+/// declares none (all built-ins), so this function returns `None` and nothing
+/// new renders — byte-identical to today. The remaining-names string itself is
+/// produced by the shared `command_api::generate_progressive_argument_hint`
+/// helper, so the bracketed `"[arg2] [arg3]"` shape matches TS exactly.
+#[must_use]
+pub fn progressive_argument_hint<'a>(
+    buffer: &str,
+    arg_names_for: impl Fn(&str) -> Option<&'a [String]>,
+) -> Option<String> {
+    // Slash command + ready-for-arguments trailing space (TS `value.endsWith(' ')`).
+    if !buffer.starts_with('/') || !buffer.ends_with(' ') {
+        return None;
+    }
+    // The command name is the run between the leading `/` and the first space.
+    let after_slash = &buffer[1..];
+    let space_index = after_slash.find(' ')?;
+    let command_name = &after_slash[..space_index];
+    if command_name.is_empty() {
+        return None;
+    }
+    let arg_names = arg_names_for(command_name)?;
+    if arg_names.is_empty() {
+        return None;
+    }
+    // Everything after the command name's space is the typed-args region; TS
+    // parses it with the shell-quote-faithful `parseArguments`.
+    let args_text = &after_slash[space_index + 1..];
+    let typed_args = command_api::parse_arguments(args_text);
+    command_api::generate_progressive_argument_hint(arg_names, &typed_args)
+}
+
 /// Props for `PromptInput`.
 #[derive(Props)]
 pub struct PromptInputProps {
@@ -334,6 +381,13 @@ pub struct PromptInputProps {
     /// `focus && showCursor && terminalFocus` (`BaseTextInput.tsx:63`) — when
     /// the prompt isn't the active/focused input, no caret is drawn.
     pub show_cursor: bool,
+    /// Inline progressive argument-hint (e.g. `"[arg2] [arg3]"`) to render as
+    /// dimmed ghost text after the typed command, in the `commandWithoutArgs`
+    /// state. `None` (the default for every existing call site and every command
+    /// without declared `argNames`) renders nothing extra, keeping the output
+    /// byte-identical. Mirrors claude-code `BaseTextInput.tsx:105,111` rendering
+    /// `props.argumentHint` as `<Text dimColor>` after the input value.
+    pub argument_hint: Option<String>,
 }
 
 impl Default for PromptInputProps {
@@ -343,6 +397,7 @@ impl Default for PromptInputProps {
             cursor: 0,
             width: 0,
             show_cursor: true,
+            argument_hint: None,
         }
     }
 }
@@ -387,12 +442,22 @@ pub fn PromptInput(props: &PromptInputProps) -> impl Into<AnyElement<'static>> {
             (i, props.text[start..end].to_string())
         })
         .collect();
+    let last_line = lines.len().saturating_sub(1);
+    // Inline progressive argument-hint rendered after the LAST line. By
+    // construction the hint is only ever set in the `commandWithoutArgs` state
+    // (a single-line slash command ending in a space), so the last line is the
+    // command line. `None` ⇒ no extra element ⇒ output byte-identical to today.
+    let argument_hint = props.argument_hint.clone();
     element! {
         View(flex_direction: FlexDirection::Column, height: height as u16) {
             #(lines.into_iter().map(|(i, content)| {
                 let prefix = if i == 0 { "❯ " } else { "  " };
                 let col_in_line = if cursor_line == Some(i) { Some(cursor_col) } else { None };
                 let chunks = render_line_with_cursor(&content, col_in_line);
+                // The hint trails the final line only; the gate already requires a
+                // trailing space, so (mirroring `BaseTextInput.tsx:105`'s
+                // `value.endsWith(" ") ? "" : " "`) no extra separator is added.
+                let line_hint = if i == last_line { argument_hint.clone() } else { None };
                 // iocraft has no "reverse video" attribute; emulate by swapping
                 // fg/bg on the cursor chunk (View(background_color) + Text(color)),
                 // the same swap the theme preview uses. We have no theme handle
@@ -411,6 +476,9 @@ pub fn PromptInput(props: &PromptInputProps) -> impl Into<AnyElement<'static>> {
                                 element! { Text(content: seg) }.into_any()
                             }
                         }))
+                        #(line_hint.map(|hint| element! {
+                            Text(content: hint, color: crate::theme::TuiTheme::DIM)
+                        }))
                     }
                 }
             }))
@@ -421,6 +489,90 @@ pub fn PromptInput(props: &PromptInputProps) -> impl Into<AnyElement<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- progressive_argument_hint (ARGS.3 inline ghost hint) -----
+
+    /// Build a name→argNames lookup for the hint tests.
+    fn lookup<'a>(name: &str, argv: &'a [String]) -> impl Fn(&str) -> Option<&'a [String]> {
+        let key = name.to_string();
+        move |q: &str| if q == key { Some(argv) } else { None }
+    }
+
+    #[test]
+    fn hint_shows_remaining_args_after_command_and_space() {
+        let args = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        // "/deploy " → all three remain.
+        assert_eq!(
+            progressive_argument_hint("/deploy ", lookup("deploy", &args)),
+            Some("[a] [b] [c]".to_string())
+        );
+        // "/deploy prod " → one consumed → two remain.
+        assert_eq!(
+            progressive_argument_hint("/deploy prod ", lookup("deploy", &args)),
+            Some("[b] [c]".to_string())
+        );
+        // "/deploy prod us-east " → two consumed → one remains.
+        assert_eq!(
+            progressive_argument_hint("/deploy prod us-east ", lookup("deploy", &args)),
+            Some("[c]".to_string())
+        );
+    }
+
+    #[test]
+    fn hint_none_when_all_args_filled() {
+        let args = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            progressive_argument_hint("/deploy x y ", lookup("deploy", &args)),
+            None
+        );
+    }
+
+    #[test]
+    fn hint_none_without_trailing_space() {
+        let args = vec!["a".to_string()];
+        // Still typing the command name (palette state, not commandWithoutArgs).
+        assert_eq!(progressive_argument_hint("/deploy", lookup("deploy", &args)), None);
+        // Mid-typing an argument (no trailing space) → no progressive hint.
+        assert_eq!(
+            progressive_argument_hint("/deploy pro", lookup("deploy", &args)),
+            None
+        );
+    }
+
+    #[test]
+    fn hint_none_for_command_without_argnames() {
+        // Empty argNames (every built-in) → nothing renders.
+        let empty: Vec<String> = Vec::new();
+        assert_eq!(
+            progressive_argument_hint("/help ", lookup("help", &empty)),
+            None
+        );
+        // Unknown command (not in the lookup) → nothing renders.
+        let args = vec!["a".to_string()];
+        assert_eq!(
+            progressive_argument_hint("/unknown ", lookup("deploy", &args)),
+            None
+        );
+    }
+
+    #[test]
+    fn hint_none_for_non_slash_or_bare_slash() {
+        let args = vec!["a".to_string()];
+        // Not a slash command.
+        assert_eq!(progressive_argument_hint("deploy ", lookup("deploy", &args)), None);
+        // Bare "/" + space → empty command name → no hint.
+        assert_eq!(progressive_argument_hint("/ ", lookup("deploy", &args)), None);
+    }
+
+    #[test]
+    fn hint_parses_quoted_typed_args_like_shell() {
+        let args = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        // A quoted run counts as ONE typed arg (shell-quote-faithful parsing).
+        assert_eq!(
+            progressive_argument_hint("/deploy \"hello world\" ", lookup("deploy", &args)),
+            Some("[b] [c]".to_string())
+        );
+    }
 
     #[test]
     fn line_starts_single_line() {

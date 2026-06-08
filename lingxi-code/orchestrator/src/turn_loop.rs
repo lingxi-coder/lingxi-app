@@ -425,7 +425,8 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
     // the tool runs and `hook_stopped_continuation` is yielded after success).
     let mut hook_prevent_continuation = false;
     if !tool_uses.is_empty() {
-        let (tool_results, prevent) = dispatch_tool_uses_tracked(orch, &tool_uses).await?;
+        let (tool_results, prevent, injected_messages) =
+            dispatch_tool_uses_tracked(orch, &tool_uses).await?;
         hook_prevent_continuation = prevent;
         // Append a fresh user message carrying the tool results.
         let user_id = MessageId::new();
@@ -436,9 +437,24 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
         {
             let mut s = orch.session.lock().await;
             s.history.push(tool_results_msg.clone());
+            // SKILLEXEC.3 (Part A): a tool may inject follow-up conversation
+            // messages (TS `ToolResult.newMessages` — e.g. the Skill tool's
+            // expanded skill prompt). They enter history IMMEDIATELY AFTER this
+            // turn's tool_result user message, in tool-dispatch order, so the
+            // model processes them on the next API call. `injected_messages` is
+            // empty for every existing tool, so this loop is a strict no-op and
+            // the locked turn-loop parity fixtures stay byte-identical.
+            for m in &injected_messages {
+                s.history.push(m.clone());
+            }
         }
         // M5-07 T13: persist the tool_result user message. Best-effort.
         orch.persist_message_to_jsonl(&tool_results_msg).await;
+        // Persist the injected skill messages too (best-effort), mirroring the
+        // tool_result persist above. No-op when empty.
+        for m in &injected_messages {
+            orch.persist_message_to_jsonl(m).await;
+        }
     }
 
     // 6. Decide loop disposition.
@@ -906,10 +922,18 @@ fn translate_response_blocks(content: &[ContentBlockApi]) -> Vec<ContentBlock> {
 /// next user message.
 ///
 /// Thin wrapper over [`dispatch_tool_uses_tracked`] that drops the
-/// `prevent_continuation` (HOOK.2) signal — preserves the historical
-/// signature for the streaming concurrent path
+/// `prevent_continuation` (HOOK.2) signal AND the tool-injected
+/// `new_messages` (SKILLEXEC.3) — preserves the historical signature for the
+/// streaming concurrent path
 /// ([`crate::streaming_loop::dispatch_tool_uses_concurrent`], which `pop()`s
 /// exactly one block per single-tool dispatch) and the in-file tests.
+///
+/// NOTE: because this wrapper discards the third tuple element, the streaming
+/// concurrent path does NOT yet replay tool-injected `new_messages` into
+/// history. The Skill tool's expanded-prompt injection therefore flows through
+/// the BATCHED turn loop ([`dispatch_tool_uses_tracked`] caller in
+/// [`execute_one_turn`]) only; wiring it through the streaming path is a
+/// scoped-out follow-up.
 pub(crate) async fn dispatch_tool_uses(
     orch: &ConversationOrchestrator,
     tool_uses: &[(ToolUseId, String, serde_json::Value)],
@@ -927,10 +951,16 @@ pub(crate) async fn dispatch_tool_uses(
 pub(crate) async fn dispatch_tool_uses_tracked(
     orch: &ConversationOrchestrator,
     tool_uses: &[(ToolUseId, String, serde_json::Value)],
-) -> Result<(Vec<ContentBlock>, bool), OrchestratorError> {
+) -> Result<(Vec<ContentBlock>, bool, Vec<ConversationMessage>), OrchestratorError> {
     let mut results = Vec::with_capacity(tool_uses.len());
     // HOOK.2: OR-fold each tool's PreToolUse `prevent_continuation` signal.
     let mut prevent_continuation = false;
+    // SKILLEXEC.3 (Part A): conversation messages a tool wants injected AFTER
+    // its tool_result (TS `ToolResult.newMessages`, e.g. the Skill tool's
+    // expanded skill prompt). Accumulated in tool-dispatch order and returned to
+    // the caller, which appends them to history right after this batch's
+    // tool_result user message. Empty for every existing tool → no-op.
+    let mut injected_messages: Vec<ConversationMessage> = Vec::new();
     for (tool_use_id, name, input) in tool_uses {
         orch.output.emit_tool_call(tool_use_id, name, input).await;
 
@@ -1129,6 +1159,20 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         let (content, is_error, emit_payload) = match tool_outcome {
             Ok(result) => {
                 let text = tool_result_to_model_text(&result.data);
+                // SKILLEXEC.3 (Part A): stash any tool-injected conversation
+                // messages so the caller can append them after this batch's
+                // tool_result user message. Non-empty only for the Skill tool
+                // (the expanded skill prompt); empty for every other tool, so
+                // the locked turn-loop fixtures stay byte-identical.
+                injected_messages.extend(result.new_messages);
+                // `result.context_modifier` is intentionally DROPPED here.
+                // The `ToolUseContext` is rebuilt fresh per tool from `orch`
+                // state at the top of this loop (see the `let ctx = ToolUseContext
+                // { … }` synthesis above), so a one-shot mutator could not
+                // persist to subsequent tools in the turn anyway. Applying it to
+                // the about-to-be-discarded per-tool `ctx` would be a no-op
+                // theatre. Honoring `context_modifier` requires turning `ctx`
+                // into a turn-persistent value first — scoped out (see report).
                 (text, false, result.data)
             }
             Err(err) => {
@@ -1351,7 +1395,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             is_error,
         });
     }
-    Ok((results, prevent_continuation))
+    Ok((results, prevent_continuation, injected_messages))
 }
 
 /// Serialize a successful tool result's data into the model-facing string.
@@ -2155,7 +2199,7 @@ mod pre_tool_hook_tests {
     use hooks::registry::{HookContext, HookRegistry};
     use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
     use hooks::HookExecutorImpl;
-    use protocol::{ContentBlock, HookId, ToolUseId};
+    use protocol::{ContentBlock, ConversationMessage, HookId, MessageId, ToolUseId};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2330,6 +2374,85 @@ mod pre_tool_hook_tests {
         }
     }
 
+    /// SKILLEXEC.3 (Part A): a tool that succeeds AND injects a follow-up
+    /// conversation message (the Skill-tool shape — `ToolCallResult.new_messages`
+    /// carrying the expanded skill prompt). Mirrors `EchoTool` but with a
+    /// non-empty `new_messages`.
+    struct InjectingTool;
+    #[async_trait]
+    impl Tool for InjectingTool {
+        fn name(&self) -> &str {
+            "Inject"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024 * 1024
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _input: &serde_json::Value,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: permission::result::PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &serde_json::Value,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "inject".into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: json!({
+                    "content": "TOOL-RESULT",
+                    "model_content": "Launching skill: demo",
+                }),
+                new_messages: vec![ConversationMessage::user(
+                    MessageId::new(),
+                    "EXPANDED-SKILL-PROMPT".into(),
+                )],
+                context_modifier: None,
+                mcp_meta: None,
+            })
+        }
+    }
+
     /// Build an orchestrator wired with the given hook executor + permission gate
     /// and a single `Echo` tool.
     fn orch_with(
@@ -2364,6 +2487,106 @@ mod pre_tool_hook_tests {
         }
     }
 
+    // ----- SKILLEXEC.3 (Part A): tool-injected new_messages -----------------
+
+    /// A tool that returns `new_messages` has those messages threaded out of
+    /// `dispatch_tool_uses_tracked` as the third tuple element (the Skill-tool
+    /// expanded-prompt injection path).
+    #[tokio::test]
+    async fn dispatch_threads_out_tool_injected_new_messages() {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(InjectingTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let uses = vec![(ToolUseId::new(), "Inject".to_string(), json!({}))];
+        let (results, _prevent, injected) =
+            dispatch_tool_uses_tracked(&orch, &uses).await.unwrap();
+        // The tool_result block still rides the first tuple element.
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(!is_error);
+        assert_eq!(content, "Launching skill: demo");
+        // The injected message is surfaced for the caller to append.
+        assert_eq!(injected.len(), 1);
+        match &injected[0] {
+            ConversationMessage::User { content, .. } => match content.first() {
+                Some(ContentBlock::Text { text }) => assert_eq!(text, "EXPANDED-SKILL-PROMPT"),
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
+    }
+
+    /// End-to-end through `execute_one_turn`: the injected message lands in
+    /// history IMMEDIATELY AFTER this turn's tool_result user message, in order.
+    #[tokio::test]
+    async fn new_messages_appended_to_history_after_tool_result() {
+        let tu = ToolUseId::new();
+        let api_resp = mock_message_response(
+            vec![api_client::types::ContentBlockApi::ToolUse {
+                id: tu,
+                name: "Inject".into(),
+                input: json!({}),
+            }],
+            Some("tool_use"),
+        );
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(InjectingTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![api_resp])),
+            Arc::new(registry),
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let _ = execute_one_turn(&orch, None).await.expect("turn step");
+        let h = orch.session.lock().await.history.clone();
+        // Locate the tool_result user message; the very next message must be the
+        // injected expanded-skill-prompt user message.
+        let tr_idx = h
+            .iter()
+            .position(|m| {
+                matches!(m, ConversationMessage::User { content, .. }
+                    if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })))
+            })
+            .expect("tool_result user message present");
+        let injected = &h[tr_idx + 1];
+        match injected {
+            ConversationMessage::User { content, .. } => match content.first() {
+                Some(ContentBlock::Text { text }) => assert_eq!(text, "EXPANDED-SKILL-PROMPT"),
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message after tool_result, got {other:?}"),
+        }
+    }
+
+    /// Byte-identical guard: a tool with EMPTY `new_messages` (every existing
+    /// tool, e.g. `Echo`) threads out an empty injected vec → no extra history.
+    #[tokio::test]
+    async fn empty_new_messages_injects_nothing() {
+        let orch = orch_with(
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            vec![],
+        );
+        let (_results, _prevent, injected) =
+            dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        assert!(
+            injected.is_empty(),
+            "Echo injects no messages → history is byte-identical to before"
+        );
+    }
+
     // ----- HOOK.1: additionalContext / systemMessage surfaced ---------------
 
     #[tokio::test]
@@ -2379,7 +2602,8 @@ mod pre_tool_hook_tests {
             Arc::new(crate::test_support::NoOpPermissionGate),
             vec![],
         );
-        let (results, prevent) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, prevent, _injected) =
+            dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
         assert!(!prevent);
         let (content, is_error) = tool_result(&results[0]);
         assert!(!is_error, "tool ran successfully");
@@ -2403,7 +2627,8 @@ mod pre_tool_hook_tests {
             Arc::new(crate::test_support::NoOpPermissionGate),
             vec![],
         );
-        let (_results, prevent) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (_results, prevent, _injected) =
+            dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
         assert!(prevent, "continue:false must surface as prevent_continuation");
     }
 
@@ -2471,7 +2696,7 @@ mod pre_tool_hook_tests {
             ..HookResponse::default()
         };
         let orch = orch_with(pre_hook_executor(resp), Arc::new(DenyAllGate), vec![]);
-        let (results, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(!is_error, "hook allow bypassed the deny gate; tool ran");
         assert!(content.contains("ECHOED-OUTPUT"));
@@ -2492,7 +2717,7 @@ mod pre_tool_hook_tests {
             Arc::new(crate::test_support::NoOpPermissionGate),
             vec![],
         );
-        let (results, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error);
         assert!(content.contains("Hook blocked: nope"));
@@ -2507,7 +2732,7 @@ mod pre_tool_hook_tests {
             Arc::new(DenyAllGate),
             vec![],
         );
-        let (results, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
+        let (results, _, _) = dispatch_tool_uses_tracked(&orch, &uses()).await.unwrap();
         let (content, is_error) = tool_result(&results[0]);
         assert!(is_error, "gate denial applies when the hook makes no decision");
         assert!(content.contains("Permission denied: denied-by-gate"));

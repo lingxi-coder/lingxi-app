@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod settings_watch;
+mod skill_loader;
 
 use anthropic_oauth::client::ClaudeAiOAuthClient;
 use anthropic_oauth::config::ClaudeAiOAuthConfig;
@@ -258,7 +259,9 @@ pub fn desktop_tool_registry(
     cron_auth: Option<Arc<dyn tool_cron::ClaudeAiAuthProvider>>,
 ) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
-    register_desktop_tools(&mut reg, ctx, coordinator, cron_auth);
+    // Offline / snapshot path: no command registry to back the Skill tool, so it
+    // gets the hermetic `EmptySkillLoader` (tool name unchanged → snapshot-safe).
+    register_desktop_tools(&mut reg, ctx, coordinator, cron_auth, None);
     reg
 }
 
@@ -280,6 +283,7 @@ pub fn register_desktop_tools(
     ctx: BuiltinToolContext,
     coordinator: Option<CoordinatorWiring>,
     cron_auth: Option<Arc<dyn tool_cron::ClaudeAiAuthProvider>>,
+    skill_loader: Option<Arc<dyn tool_skill::skill::SkillLoader>>,
 ) {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
     tool_file::register_all(reg, ctx.clone());
@@ -292,7 +296,21 @@ pub fn register_desktop_tools(
     // registers `ScheduleCron` + `RemoteTrigger` (the latter with `cron_auth`).
     tool_cron::register_all_with_auth(reg, ctx.clone(), cron_auth);
     tool_ui::register_all(reg, ctx.clone());
-    tool_skill::register_all(reg, ctx.clone());
+    // SKILLEXEC.2: when a `SkillLoader` is supplied (real sessions wire the
+    // `CommandRegistry`-backed loader), register the `Skill` tool with it so a
+    // model-invoked skill resolves to a real slash command and expands. The
+    // `None` path (offline registry-snapshot tests) keeps the hermetic
+    // `EmptySkillLoader` — the registered tool NAME ("Skill") is identical
+    // either way, so the locked tool-list snapshot is unaffected.
+    match skill_loader {
+        Some(loader) => {
+            reg.register_builtin(Arc::new(tool_skill::SkillTool::with_loader(
+                ctx.clone(),
+                loader,
+            )));
+        }
+        None => tool_skill::register_all(reg, ctx.clone()),
+    }
     tool_task::register_all(reg, ctx.clone());
     // ----- desktop-only tool crates ----------------------------------------
     tool_agent::register_all(reg, ctx.clone());
@@ -1341,11 +1359,24 @@ pub async fn build(
             credentials: credentials.clone(),
             base_api_url: cfg.api_base.clone(),
         });
+    // SKILLEXEC.2: break the Skill-tool ↔ CommandRegistry init cycle. The tool
+    // registry (which holds the `Skill` tool) must exist before the orchestrator,
+    // and the command registry needs the orchestrator handle — so build the
+    // shared command-registry slot now (empty), hand a `CommandRegistry`-backed
+    // loader to the `Skill` tool, then FILL the same `Arc` with the real registry
+    // at (6) and reuse it for the slash dispatcher. No skill call can fire before
+    // `build()` returns, so the loader never reads the empty registry.
+    let shared_command_registry: Arc<RwLock<CommandRegistry>> =
+        Arc::new(RwLock::new(CommandRegistry::new()));
+    let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = Arc::new(
+        skill_loader::CommandRegistrySkillLoader::new(shared_command_registry.clone()),
+    );
     register_desktop_tools(
         &mut tools_inner,
         tool_ctx,
         coordinator_wiring,
         Some(cron_auth),
+        Some(skill_loader),
     );
     for (conn_id, mcp_tools) in
         tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx).await
@@ -1406,7 +1437,12 @@ pub async fn build(
     // (6) Command registry through the desktop composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
     let reg = desktop_command_registry(handle, auth.clone(), &cfg.cwd, &cfg.claude_home).await;
-    let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+    // SKILLEXEC.2: fill the shared command-registry slot the `Skill` tool's
+    // loader holds, then hand the SAME `Arc` to the slash dispatcher so the tool
+    // and the dispatcher observe one command set (plugin lifecycle mutations via
+    // the dispatcher's write lock are visible to the loader too).
+    *shared_command_registry.write().await = reg;
+    let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone());
 
     // (7) Session lifecycle: fire the `SessionStart` hooks now that the
     //     orchestrator + hook registry are fully wired. claude-code fires the

@@ -94,6 +94,12 @@ pub struct SkillDescriptor {
     pub model: Option<String>,
     /// Tools this skill allows, surfaced in the result (TS `allowedTools`).
     pub allowed_tools: Vec<String>,
+    /// Declared positional argument names (markdown frontmatter `arguments`).
+    /// Threaded into [`command_api::substitute_arguments_faithful`] so a named
+    /// placeholder like `$ticket` in the skill body resolves to the matching
+    /// positional argument. Empty → only `$ARGUMENTS` / `$N` placeholders expand
+    /// (TS `processPromptSlashCommand` passes the command's `argNames`).
+    pub argument_names: Vec<String>,
 }
 
 impl Default for SkillDescriptor {
@@ -106,6 +112,7 @@ impl Default for SkillDescriptor {
             command_type: SkillCommandType::Prompt,
             model: None,
             allowed_tools: Vec::new(),
+            argument_names: Vec::new(),
         }
     }
 }
@@ -391,6 +398,47 @@ impl Tool for SkillTool {
             false
         };
 
+        // SKILLEXEC.3: expand the skill body into the prompt the model must
+        // process. Faithful to TS `processPromptSlashCommand`
+        // (SkillTool.ts:634-643 → `getPromptForCommand`): `$ARGUMENTS` / `$N` /
+        // `$name` substitution over the markdown body with the raw args string
+        // (`args || ''`), `appendIfNoPlaceholder = true`, and the command's
+        // declared argument names. The result is returned as `new_messages` (a
+        // user message) so the turn loop appends it after this tool_result and
+        // the model acts on the skill (SkillTool.ts:735-774 `newMessages`).
+        //
+        // The embedded `!command` shell-expansion step (TS step 3) is NOT run
+        // here: the `SkillDescriptor` carries no shell runner / permission seam
+        // (see module doc), so this performs the argument-substitution subset
+        // only — the faithful slice of `getPromptForCommand` reachable from a
+        // descriptor. The TS tagging of the message with the parent toolUseID
+        // (transient-until-resolved) has no Rust `ConversationMessage` substrate
+        // and is scoped out: the expanded prompt enters as a plain user message.
+        let args_for_expansion = args.as_deref().unwrap_or("");
+        let expanded_prompt = match command_api::substitute_arguments_faithful(
+            &desc.body,
+            Some(args_for_expansion),
+            true,
+            &desc.argument_names,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                emit_failed(
+                    &bus,
+                    "expansion_error",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::Internal(format!(
+                    "Skill {command_name} expansion failed: {e}"
+                )));
+            }
+        };
+        let new_messages = vec![protocol::ConversationMessage::user(
+            protocol::MessageId::new(),
+            expanded_prompt,
+        )];
+
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(
             "duration_ms".into(),
@@ -444,7 +492,7 @@ impl Tool for SkillTool {
 
         Ok(ToolCallResult {
             data,
-            new_messages: vec![],
+            new_messages,
             context_modifier: None,
             mcp_meta: None,
         })
@@ -677,6 +725,93 @@ mod tests {
             .await
             .expect("ok");
         assert!(out2.data.get("args").is_none());
+    }
+
+    /// SKILLEXEC.3: a model-invocable Prompt skill expands its body's
+    /// `$ARGUMENTS` into a `new_messages` user message the turn loop injects, so
+    /// the model acts on the expanded skill prompt.
+    #[tokio::test]
+    async fn expands_arguments_into_new_messages() {
+        let desc = SkillDescriptor {
+            body: "Review PR $ARGUMENTS now".into(),
+            ..prompt_desc("review-pr")
+        };
+        let tool =
+            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let out = tool
+            .call(
+                json!({"skill": "review-pr", "args": "123"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        assert_eq!(out.new_messages.len(), 1, "expanded prompt injected");
+        match &out.new_messages[0] {
+            protocol::ConversationMessage::User { content, .. } => match content.first() {
+                Some(protocol::ContentBlock::Text { text }) => {
+                    assert_eq!(text, "Review PR 123 now");
+                }
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
+        // The inline model-facing string is still the launch line — the body is
+        // NOT leaked into the tool_result content (SKILLEXEC.1 invariant holds).
+        assert_eq!(
+            out.data["model_content"],
+            json!("Launching skill: review-pr")
+        );
+    }
+
+    /// Named frontmatter arguments (`$name`) resolve via the descriptor's
+    /// `argument_names` (TS `processPromptSlashCommand` passes the command's
+    /// `argNames`).
+    #[tokio::test]
+    async fn expands_named_argument_into_new_messages() {
+        let desc = SkillDescriptor {
+            body: "Hello $name".into(),
+            argument_names: vec!["name".into()],
+            ..prompt_desc("greet")
+        };
+        let tool =
+            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let out = tool
+            .call(
+                json!({"skill": "greet", "args": "world"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("ok");
+        match &out.new_messages[0] {
+            protocol::ConversationMessage::User { content, .. } => match content.first() {
+                Some(protocol::ContentBlock::Text { text }) => assert_eq!(text, "Hello world"),
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
+    }
+
+    /// A skill with no placeholders and empty args injects the body verbatim
+    /// (no `$ARGUMENTS` tail append — TS appends only when args is non-empty).
+    #[tokio::test]
+    async fn no_placeholder_no_args_injects_body_verbatim() {
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(prompt_desc("plain")))),
+        );
+        let out = tool
+            .call(json!({"skill": "plain"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        match &out.new_messages[0] {
+            protocol::ConversationMessage::User { content, .. } => match content.first() {
+                Some(protocol::ContentBlock::Text { text }) => assert_eq!(text, "body here"),
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -126,8 +126,9 @@ mod tests {
     struct EchoRunner {
         calls: Mutex<Vec<String>>,
     }
+    #[async_trait::async_trait]
     impl ShellRunner for EchoRunner {
-        fn run(
+        async fn run(
             &self,
             command: &str,
             _shell: Option<FrontmatterShell>,

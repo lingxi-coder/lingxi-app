@@ -47,13 +47,31 @@ fn to_descriptor(cmd: &SlashCommand) -> SkillDescriptor {
             model: frontmatter.model.clone(),
             allowed_tools: frontmatter.allowed_tools.clone().unwrap_or_default(),
             argument_names: frontmatter.argument_names.clone(),
+            // SKILLEXEC.6: forward the frontmatter `shell` selector so embedded
+            // `!command` expansion routes through the author's chosen shell.
+            shell: frontmatter.shell,
+            // On-disk / plugin markdown is NOT MCP-sourced (TS `loadedFrom !==
+            // 'mcp'`), so shell expansion runs for these commands.
+            skip_shell_expansion: false,
         },
-        // Builtin handlers and MCP-prompt bridges are not prompt-based skills.
-        SlashCommandKind::Builtin { .. } | SlashCommandKind::Mcp { .. } => SkillDescriptor {
+        // Builtin handlers are not prompt-based skills.
+        SlashCommandKind::Builtin { .. } => SkillDescriptor {
             name: cmd.name.clone(),
             description: cmd.description.clone(),
             disable_model_invocation: cmd.disable_model_invocation,
             command_type: SkillCommandType::Other,
+            ..SkillDescriptor::default()
+        },
+        // MCP-prompt bridges are not prompt-based skills AND are remote/untrusted:
+        // mark `skip_shell_expansion` so their body is never shell-expanded (TS
+        // `loadedFrom !== 'mcp'` gate). Inert today since `Other` is rejected
+        // before expansion, but kept faithful for when MCP prompts gain substrate.
+        SlashCommandKind::Mcp { .. } => SkillDescriptor {
+            name: cmd.name.clone(),
+            description: cmd.description.clone(),
+            disable_model_invocation: cmd.disable_model_invocation,
+            command_type: SkillCommandType::Other,
+            skip_shell_expansion: true,
             ..SkillDescriptor::default()
         },
     }

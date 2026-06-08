@@ -45,6 +45,15 @@ pub struct HookResponse {
     /// Caller-defined structured payload — for hooks that need to return
     /// metadata not covered by the canonical fields above.
     pub structured_content: Option<Value>,
+    /// Replacement tool output a `PostToolUse` hook returned via
+    /// `hookSpecificOutput.updatedMCPToolOutput` (claude-code
+    /// `parseHookJSONOutput`, `utils/hooks.ts:646-649`). `Some` only when a
+    /// `PostToolUse` hook supplied a replacement output. The orchestrator
+    /// substitutes it for the tool's result — but ONLY for MCP tools, mirroring
+    /// TS's `isMcpTool(tool)` gate (`toolHooks.ts:146` / `toolExecution.ts:1494`).
+    /// Additive default `None`, so non-`PostToolUse` hooks (and `PostToolUse`
+    /// hooks that don't set it) leave the result untouched.
+    pub updated_mcp_tool_output: Option<Value>,
     /// Elicitation answer a hook provided via
     /// `hookSpecificOutput.{action,content}` (claude-code
     /// `parseElicitationHookOutput`, `utils/hooks.ts:4434-4446` /
@@ -153,4 +162,12 @@ pub struct AggregateHookResult {
     /// PROVIDE the response. Additive default `None`, so non-elicitation
     /// callers are unaffected.
     pub elicitation_response: Option<ElicitationHookResponse>,
+    /// The last `updatedMCPToolOutput` any folded `PostToolUse` hook returned
+    /// (claude-code keeps the most recent — `result.updatedMCPToolOutput =
+    /// json.hookSpecificOutput.updatedMCPToolOutput`, `utils/hooks.ts:647`). The
+    /// orchestrator substitutes it for the tool's result, but ONLY for MCP tools
+    /// (`isMcpTool(tool)`, `toolHooks.ts:146`). Additive default `None`, so a
+    /// dispatch with no mutating `PostToolUse` hook leaves the result unchanged
+    /// (byte-identical).
+    pub updated_mcp_tool_output: Option<Value>,
 }

@@ -1135,9 +1135,53 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // hook can rewrite a tool argument before the permission check
         // sees it.
         if !hook_allowed {
+            // PermissionRequest hook (parity with claude-code
+            // `executePermissionRequestHooks`, `utils/hooks.ts:4157-4192`, fired
+            // from the permission seam `permissions.ts:409`). claude-code fires
+            // it when a tool call needs its permission RESOLVED (the engine is
+            // "about to ask the user / auto-policy for permission"). The LingXi
+            // permission seam ([`orch.perms`]) IS that single allow/deny
+            // resolution step — it has no separate interactive "ask" branch — so
+            // we fire `PermissionRequest` immediately BEFORE consulting the gate,
+            // the faithful chokepoint where permission is about to be asked.
+            // Best-effort / observe-only here: the gate's allow/deny verdict
+            // governs the outcome (the LingXi `perms` seam carries no hook-return
+            // override path), exactly as the gate did before this fire. Strict
+            // no-op when no `PermissionRequest` hook is registered, like the
+            // PostToolUse / SubagentStop arms. `reason` mirrors the engine-
+            // supplied prompt rationale; the LingXi gate does not expose a
+            // pre-decision rationale, so we carry the canonical "tool requires
+            // permission" string.
+            let req_event = HookEvent::PermissionRequest {
+                tool_name: name.clone(),
+                tool_input: effective_input.clone(),
+                reason: format!("Tool {name} requires permission"),
+            };
+            let _req_agg = orch.hooks.execute(req_event, hook_ctx.clone()).await;
+
             match orch.perms.check(name, &effective_input).await {
                 PermissionDecision::Allow => {}
                 PermissionDecision::Deny { reason } => {
+                    // PermissionDenied hook (parity with claude-code
+                    // `executePermissionDeniedHooks`, `utils/hooks.ts:3529-3559`,
+                    // fired from `toolExecution.ts:1081` when a permission
+                    // decision denies a tool call). Fires at the gate's deny
+                    // chokepoint, BEFORE the error `tool_result` is pushed, so a
+                    // registered hook observes every denial. Best-effort /
+                    // observe-only: the LingXi `perms` seam has no
+                    // hook-driven `retry` re-resolution path, so the denial
+                    // stands regardless of the hook's reply (the TS `{retry:true}`
+                    // re-prompt rides on its interactive permission loop, which
+                    // this single allow/deny seam does not have). Strict no-op
+                    // when no `PermissionDenied` hook is registered.
+                    let denied_event = HookEvent::PermissionDenied {
+                        tool_name: name.clone(),
+                        tool_input: effective_input.clone(),
+                        tool_use_id: *tool_use_id,
+                        reason: reason.clone(),
+                    };
+                    let _denied_agg = orch.hooks.execute(denied_event, hook_ctx.clone()).await;
+
                     let result_block = ContentBlock::ToolResult {
                         tool_use_id: *tool_use_id,
                         content: fold_pre_context(format!("Permission denied: {reason}")),
@@ -1197,6 +1241,41 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             session: Some(orch.session.clone()),
             subagent_registry: Some(orch.tools.clone()),
         };
+
+        // SubagentStart hook (parity with claude-code `executeSubagentStartHooks`,
+        // `utils/hooks.ts:3932-3952`, fired from `runAgent.ts:532` just before a
+        // subagent begins). claude-code fires it at the START of a subagent's
+        // run, the counterpart to the `SubagentStop` fired when it ends. The
+        // LingXi port spawns subagents only through the registered,
+        // turn_loop-dispatched `Agent` (legacy alias `Task`) tool, so the start
+        // of that tool's dispatch IS the subagent spawn — we fire it immediately
+        // BEFORE `tool_handle.call()`, after the pre-hook + permission gate have
+        // cleared (a blocked / denied call `continue`s above, so no subagent
+        // spawns and no SubagentStart fires — exactly like the SubagentStop arm).
+        // It carries the dispatched `subagent_type` on the hook context's
+        // `agent_type` (claude-code's `agentType`, also the `matchQuery`) and a
+        // fresh `agent_id` for the wire payload's required field — the Agent tool
+        // discards the child's pool id across the frozen `SubagentSpawner` seam
+        // (same documented limitation as the SubagentStop arm). Best-effort:
+        // `orch.hooks.execute` is a strict no-op when no `SubagentStart` hook is
+        // registered, and a failing hook never breaks the spawn.
+        if name == AGENT_TOOL_NAME || name == LEGACY_AGENT_TOOL_NAME {
+            let subagent_type = effective_input
+                .get("subagent_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let start_event = HookEvent::SubagentStart {
+                agent_id: protocol::AgentId::new(),
+                agent_type: subagent_type.clone(),
+                parent_agent_id: None,
+            };
+            let start_ctx = HookContext {
+                agent_type: Some(subagent_type),
+                ..hook_ctx.clone()
+            };
+            let _start_agg = orch.hooks.execute(start_event, start_ctx).await;
+        }
 
         // One-shot progress channel — receiver dropped immediately.
         let (progress_tx, _progress_rx) =
@@ -1296,13 +1375,40 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         #[allow(clippy::cast_possible_truncation)]
         let post_dur_ms = post_started.elapsed().as_millis() as u64;
 
+        // PostToolUse `updatedMCPToolOutput`: a PostToolUse hook may REPLACE the
+        // tool's output (claude-code `parseHookJSONOutput`,
+        // `utils/hooks.ts:646-649`). The replacement is applied ONLY for MCP
+        // tools, mirroring TS's `isMcpTool(tool)` gate (`toolHooks.ts:146` /
+        // `toolExecution.ts:1494-1496`): a non-MCP tool's result is left
+        // untouched even if a hook returns the field. Only a SUCCESSFUL result
+        // is mutated — the `PostToolUseFailure` arm carries no
+        // `updatedMCPToolOutput` in the TS schema, and `post_agg
+        // .updated_mcp_tool_output` is only ever set by a `PostToolUse` (success)
+        // dispatch (the failure arm fires `PostToolUseFailure`, whose parser
+        // never reads the field). When applied, the replacement JSON re-derives
+        // the model-facing text via `tool_result_to_model_text`, exactly as the
+        // original output did, so the model sees the mutated output. A strict
+        // no-op when no hook set the field (the common case) → byte-identical.
+        let (content, mcp_output_mutated) = match (
+            is_error,
+            tool_handle.is_mcp(),
+            post_agg.updated_mcp_tool_output.as_ref(),
+        ) {
+            (false, true, Some(new_output)) => {
+                (tool_result_to_model_text(new_output), true)
+            }
+            _ => (content, false),
+        };
+
         // HOOK.1 + PostToolUse fold: the model-facing tool-result content carries
         // both this dispatch's PreToolUse `additionalContext`/`systemMessage`
         // (`pre_hook_messages`, folded via `fold_pre_context`) and the PostToolUse
         // hooks' `system_messages` — each on its own line. A strict no-op when
         // both are empty, so the result text is byte-identical to before for the
         // locked turn-loop fixtures (noop hooks).
-        let mutated = !pre_hook_messages.is_empty() || !post_agg.system_messages.is_empty();
+        let mutated = !pre_hook_messages.is_empty()
+            || !post_agg.system_messages.is_empty()
+            || mcp_output_mutated;
         let final_content = if mutated {
             let mut out = fold_pre_context(content);
             for msg in &post_agg.system_messages {

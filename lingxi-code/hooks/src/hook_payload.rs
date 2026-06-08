@@ -102,6 +102,7 @@ hook_event_name_marker!(HookEventNamePreCompact, "PreCompact");
 hook_event_name_marker!(HookEventNamePostCompact, "PostCompact");
 hook_event_name_marker!(HookEventNameNotification, "Notification");
 hook_event_name_marker!(HookEventNamePermissionRequest, "PermissionRequest");
+hook_event_name_marker!(HookEventNamePermissionDenied, "PermissionDenied");
 hook_event_name_marker!(HookEventNameSetup, "Setup");
 hook_event_name_marker!(HookEventNameSubagentStart, "SubagentStart");
 hook_event_name_marker!(HookEventNameCwdChanged, "CwdChanged");
@@ -442,6 +443,32 @@ pub struct PermissionRequestPayload {
     pub permission_suggestions: Option<Vec<Value>>,
 }
 
+/// Wire-format `PermissionDenied` payload (1:1 with `coreSchemas.ts:461-471`
+/// `PermissionDeniedHookInputSchema`; constructed at `utils/hooks.ts:3545-3552`).
+///
+/// Carries `tool_name`, `tool_input`, `tool_use_id`, and `reason` — all required
+/// by the schema and fed directly from the `HookEvent::PermissionDenied` variant.
+/// Built with `createBaseHookInput(permissionMode, undefined, toolUseContext)`
+/// (`utils/hooks.ts:3546`), so it threads the engine's `permission_mode`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(missing_docs, reason = "wire-format mirror of claude-code schema")]
+pub struct PermissionDeniedPayload {
+    pub hook_event_name: HookEventNamePermissionDenied,
+    pub session_id: String,
+    pub transcript_path: String,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub permission_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_type: Option<String>,
+    pub tool_name: String,
+    pub tool_input: Value,
+    pub tool_use_id: String,
+    pub reason: String,
+}
+
 /// Wire-format `Setup` payload (1:1 with `coreSchemas.ts:504-511`
 /// `SetupHookInputSchema`; constructed at `utils/hooks.ts:3908-3912`).
 ///
@@ -752,6 +779,22 @@ pub fn parse_response(
         if let Some(upd) = hs.get("updatedInput") {
             resp.updated_input = Some(upd.clone());
         }
+        // `hookSpecificOutput.updatedMCPToolOutput` (claude-code
+        // `parseHookJSONOutput`, `utils/hooks.ts:646-649`). The TS switch only
+        // reads this for the `PostToolUse` case, so we scope it to that event —
+        // a hook returning it on any other event has it ignored, exactly as in
+        // TS. TS guards on truthiness (`if (json.hookSpecificOutput
+        // .updatedMCPToolOutput)`), so a JSON `null` / `false` / `0` / `""` is
+        // NOT treated as a replacement; `Value::is_null()` covers the `null`
+        // case (the only one expressible once the key is present), keeping a
+        // hook that explicitly returns `null` a no-op like TS.
+        if expected_event == "PostToolUse" {
+            if let Some(out) = hs.get("updatedMCPToolOutput") {
+                if !out.is_null() {
+                    resp.updated_mcp_tool_output = Some(out.clone());
+                }
+            }
+        }
         if let Some(addl) = hs.get("additionalContext").and_then(Value::as_str) {
             let combined = match resp.system_message.take() {
                 Some(prev) => format!("{prev}\n{addl}"),
@@ -939,6 +982,80 @@ mod tests {
         )
         .unwrap();
         assert!(r.elicitation_response.is_none());
+    }
+
+    // ---- PostToolUse `updatedMCPToolOutput` parse (claude-code
+    //      `parseHookJSONOutput`, `utils/hooks.ts:646-649`) ------------------
+
+    #[test]
+    fn parse_response_post_extracts_updated_mcp_tool_output() {
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedMCPToolOutput":{"content":"new"}}}"#,
+            "PostToolUse",
+        )
+        .unwrap();
+        assert_eq!(
+            r.updated_mcp_tool_output,
+            Some(json!({ "content": "new" }))
+        );
+    }
+
+    #[test]
+    fn parse_response_pre_ignores_updated_mcp_tool_output() {
+        // The TS switch only reads `updatedMCPToolOutput` for the `PostToolUse`
+        // case — a PreToolUse hook returning it has it dropped.
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedMCPToolOutput":{"content":"new"}}}"#,
+            "PreToolUse",
+        )
+        .unwrap();
+        assert!(r.updated_mcp_tool_output.is_none());
+    }
+
+    #[test]
+    fn parse_response_post_null_updated_mcp_tool_output_is_noop() {
+        // TS guards on truthiness — a JSON `null` is NOT a replacement.
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedMCPToolOutput":null}}"#,
+            "PostToolUse",
+        )
+        .unwrap();
+        assert!(r.updated_mcp_tool_output.is_none());
+    }
+
+    #[test]
+    fn parse_response_post_without_updated_output_leaves_none() {
+        let r = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"hi"}}"#,
+            "PostToolUse",
+        )
+        .unwrap();
+        assert!(r.updated_mcp_tool_output.is_none());
+    }
+
+    // ---- PermissionDenied wire payload (`coreSchemas.ts:461-471`) ---------
+
+    #[test]
+    fn permission_denied_payload_serializes_byte_lock() {
+        let p = PermissionDeniedPayload {
+            hook_event_name: HookEventNamePermissionDenied,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            permission_mode: Some("default".into()),
+            agent_id: None,
+            agent_type: None,
+            tool_name: "Bash".into(),
+            tool_input: json!({ "command": "git push" }),
+            tool_use_id: "tu-9".into(),
+            reason: "policy".into(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains(r#""hook_event_name":"PermissionDenied""#));
+        assert!(s.contains(r#""tool_name":"Bash""#));
+        assert!(s.contains(r#""tool_input":{"command":"git push"}"#));
+        assert!(s.contains(r#""tool_use_id":"tu-9""#));
+        assert!(s.contains(r#""reason":"policy""#));
     }
 
     // ---- B1: lifecycle-event payload byte-lock tests --------------------

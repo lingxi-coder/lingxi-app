@@ -33,6 +33,10 @@ impl BuiltinHookHandler for BlockingBuiltin {
                 // Elicitation batch: additive `elicitation_response` (None here —
                 // this mock is a Block policy, not an elicitation responder).
                 elicitation_response: None,
+                // Hook-firing batch: additive `updated_mcp_tool_output` (None
+                // here — this PreToolUse Block mock returns no PostToolUse
+                // output replacement).
+                updated_mcp_tool_output: None,
             }),
         }
     }

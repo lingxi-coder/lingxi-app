@@ -17,13 +17,15 @@ use crate::hook_payload::{
     parse_response, ConfigChangePayload, CwdChangedPayload, ElicitationPayload, FileChangedPayload,
     HookEventNameConfigChange, HookEventNameCwdChanged, HookEventNameElicitation,
     HookEventNameFileChanged, HookEventNameInstructionsLoaded, HookEventNameNotification,
-    HookEventNamePermissionRequest, HookEventNamePost, HookEventNamePostCompact,
+    HookEventNamePermissionDenied, HookEventNamePermissionRequest, HookEventNamePost,
+    HookEventNamePostCompact,
     HookEventNamePostToolUseFailure, HookEventNamePre, HookEventNamePreCompact,
     HookEventNameSessionEnd, HookEventNameSessionStart, HookEventNameSetup, HookEventNameStop,
     HookEventNameStopFailure, HookEventNameSubagentStart, HookEventNameSubagentStop,
     HookEventNameTaskCompleted, HookEventNameUserPromptSubmit, HookEventNameWorktreeCreate,
     HookEventNameWorktreeRemove, InstructionsLoadedPayload, NotificationPayload,
-    PermissionRequestPayload, PostCompactPayload, PostToolUseFailurePayload, PostToolUsePayload,
+    PermissionDeniedPayload, PermissionRequestPayload, PostCompactPayload,
+    PostToolUseFailurePayload, PostToolUsePayload,
     PreCompactPayload, PreToolUsePayload, SessionEndPayload, SessionStartPayload, SetupPayload,
     StopFailurePayload, StopPayload, SubagentStartPayload, SubagentStopPayload,
     TaskCompletedPayload, UserPromptSubmitPayload, WorktreeCreatePayload, WorktreeRemovePayload,
@@ -563,6 +565,13 @@ impl HookExecutorImpl {
             if let Some(er) = &resp.elicitation_response {
                 agg.elicitation_response = Some(er.clone());
             }
+            // PostToolUse `updatedMCPToolOutput`: keep the latest replacement
+            // any folded hook returned, mirroring TS's per-hook assignment
+            // (`result.updatedMCPToolOutput = …`, `utils/hooks.ts:647`). The
+            // orchestrator applies it only for MCP tools (`isMcpTool(tool)`).
+            if let Some(out) = &resp.updated_mcp_tool_output {
+                agg.updated_mcp_tool_output = Some(out.clone());
+            }
             agg.attachments.extend(resp.attachments.clone());
         }
         agg.all_results.push((hook.id, r));
@@ -668,9 +677,11 @@ impl BaseHookFields {
 /// The final four events (`ConfigChange` / `InstructionsLoaded` /
 /// `Elicitation` / `WorktreeCreate`) — previously deferred because their
 /// `HookEvent` variant lacked a field to source a *required* wire value — now
-/// carry those fields and serialize faithfully. Every remaining (not-yet-ported)
-/// variant — `PermissionDenied`, `TeammateIdle`, `TaskCreated`,
-/// `ElicitationResult` — returns `None` until its wire schema is ported.
+/// carry those fields and serialize faithfully. `PermissionDenied` is likewise
+/// ported here (the hook-firing batch extended its variant with `tool_input` /
+/// `tool_use_id`). Every remaining (not-yet-ported) variant — `TeammateIdle`,
+/// `TaskCreated`, `ElicitationResult` — returns `None` until its wire schema is
+/// ported.
 #[allow(
     clippy::too_many_lines,
     reason = "per-event payload construction fan-out — splitting hurts readability"
@@ -882,6 +893,27 @@ fn build_lifecycle_envelope_body(
                 permission_suggestions: None,
             };
             Some(("PermissionRequest", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::PermissionDenied {
+            tool_name,
+            tool_input,
+            tool_use_id,
+            reason,
+        } => {
+            let payload = PermissionDeniedPayload {
+                hook_event_name: HookEventNamePermissionDenied,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                tool_name: tool_name.clone(),
+                tool_input: tool_input.clone(),
+                tool_use_id: tool_use_id.to_string(),
+                reason: reason.clone(),
+            };
+            Some(("PermissionDenied", serde_json::to_string(&payload).ok()?))
         }
         HookEvent::Setup => {
             let payload = SetupPayload {
@@ -2132,16 +2164,13 @@ mod command_arm_tests {
     #[test]
     fn still_unported_events_return_none() {
         // The deferred-completion batch ported the final four events that lacked
-        // a field to source a *required* wire value. The events still without a
-        // ported wire schema (`PermissionDenied` / `TeammateIdle` /
-        // `TaskCreated` / `ElicitationResult`) must continue to fall through to
-        // `None` until their schema is ported.
+        // a field to source a *required* wire value; the hook-firing batch then
+        // ported `PermissionDenied` (extending its `HookEvent` variant with
+        // `tool_input` / `tool_use_id`). The events still without a ported wire
+        // schema (`TeammateIdle` / `TaskCreated` / `ElicitationResult`) must
+        // continue to fall through to `None` until their schema is ported.
         let ctx = HookContext::default();
         let unported = vec![
-            HookEvent::PermissionDenied {
-                tool_name: "Bash".into(),
-                reason: "denied".into(),
-            },
             HookEvent::TeammateIdle {
                 agent_id: protocol::AgentId::new(),
             },
@@ -2251,6 +2280,15 @@ mod command_arm_tests {
                     reason: "r".into(),
                 },
                 "PermissionRequest",
+            ),
+            (
+                HookEvent::PermissionDenied {
+                    tool_name: "Bash".into(),
+                    tool_input: json!({ "command": "git push" }),
+                    tool_use_id: protocol::ToolUseId::new(),
+                    reason: "denied".into(),
+                },
+                "PermissionDenied",
             ),
             (HookEvent::Setup, "Setup"),
             (
@@ -2958,6 +2996,100 @@ mod once_and_status_message_tests {
             runs.load(Ordering::SeqCst),
             2,
             "the un-removed once hook fires again after an error",
+        );
+    }
+
+    /// A `PostToolUse` Builtin hook returning `updated_mcp_tool_output` has it
+    /// folded into the aggregate's `updated_mcp_tool_output` by `merge`.
+    #[tokio::test]
+    async fn post_hook_updated_mcp_tool_output_reaches_aggregate() {
+        struct RewriteBuiltin;
+        #[async_trait]
+        impl BuiltinHookHandler for RewriteBuiltin {
+            fn id(&self) -> &str {
+                "rewrite"
+            }
+            async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
+                HookResult {
+                    outcome: HookOutcome::Success,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: None,
+                    response: Some(HookResponse {
+                        updated_mcp_tool_output: Some(
+                            serde_json::json!({ "content": "rewritten" }),
+                        ),
+                        ..Default::default()
+                    }),
+                }
+            }
+        }
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "rewrite".into(),
+            events: vec![HookEventType::PostToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "rewrite".into(),
+            },
+            source: HookSource::User,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let (exec, _reg) = executor_with(hook, Arc::new(RewriteBuiltin));
+        let post = HookEvent::PostToolUse {
+            tool_name: "mcp__srv__tool".into(),
+            tool_input: serde_json::json!({}),
+            tool_output: serde_json::json!({ "content": "original" }),
+            tool_use_id: ToolUseId::new(),
+        };
+        let agg = exec.execute(post, HookContext::default()).await;
+        assert_eq!(
+            agg.updated_mcp_tool_output,
+            Some(serde_json::json!({ "content": "rewritten" })),
+            "the hook's updatedMCPToolOutput must reach the aggregate",
+        );
+    }
+
+    /// A `PostToolUse` hook that does NOT set `updated_mcp_tool_output` leaves
+    /// the aggregate's field `None` (strict no-op).
+    #[tokio::test]
+    async fn post_hook_without_mutation_leaves_aggregate_none() {
+        let runs = Arc::new(AtomicU32::new(0));
+        let handler = Arc::new(CountingBuiltin {
+            id: "observe".into(),
+            runs: runs.clone(),
+            outcome: HookOutcome::Success,
+        });
+        let hook = HookDefinition {
+            id: HookId::new(),
+            name: "observe".into(),
+            events: vec![HookEventType::PostToolUse],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "observe".into(),
+            },
+            source: HookSource::User,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+        };
+        let (exec, _reg) = executor_with(hook, handler);
+        let post = HookEvent::PostToolUse {
+            tool_name: "mcp__srv__tool".into(),
+            tool_input: serde_json::json!({}),
+            tool_output: serde_json::json!({ "content": "original" }),
+            tool_use_id: ToolUseId::new(),
+        };
+        let agg = exec.execute(post, HookContext::default()).await;
+        assert!(
+            agg.updated_mcp_tool_output.is_none(),
+            "no mutating hook → the aggregate field stays None",
         );
     }
 

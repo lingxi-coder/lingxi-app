@@ -683,6 +683,8 @@ mod match_event_matcher_tests {
         ));
         let ev = HookEvent::PermissionDenied {
             tool_name: "Bash".into(),
+            tool_input: serde_json::json!({ "command": "git push" }),
+            tool_use_id: ToolUseId::new(),
             reason: "no".into(),
         };
         assert!(matched_names(&reg, &ev).is_empty());

@@ -921,19 +921,16 @@ fn translate_response_blocks(content: &[ContentBlockApi]) -> Vec<ContentBlock> {
 /// hooks. Returns a list of `ContentBlock::ToolResult` blocks for the
 /// next user message.
 ///
-/// Thin wrapper over [`dispatch_tool_uses_tracked`] that drops the
-/// `prevent_continuation` (HOOK.2) signal AND the tool-injected
-/// `new_messages` (SKILLEXEC.3) — preserves the historical signature for the
-/// streaming concurrent path
-/// ([`crate::streaming_loop::dispatch_tool_uses_concurrent`], which `pop()`s
-/// exactly one block per single-tool dispatch) and the in-file tests.
+/// Test-only thin wrapper over [`dispatch_tool_uses_tracked`] that returns just
+/// the `ContentBlock` results (dropping the `prevent_continuation` and injected
+/// `new_messages` tuple elements) for the in-file tests' convenience.
 ///
-/// NOTE: because this wrapper discards the third tuple element, the streaming
-/// concurrent path does NOT yet replay tool-injected `new_messages` into
-/// history. The Skill tool's expanded-prompt injection therefore flows through
-/// the BATCHED turn loop ([`dispatch_tool_uses_tracked`] caller in
-/// [`execute_one_turn`]) only; wiring it through the streaming path is a
-/// scoped-out follow-up.
+/// The production streaming path
+/// ([`crate::streaming_loop::dispatch_tool_uses_concurrent`]) now calls
+/// `dispatch_tool_uses_tracked` directly, so it DOES replay tool-injected
+/// `new_messages` (the Skill tool's expanded prompt) into history after the
+/// `tool_result` — mirroring the batched [`execute_one_turn`] path (SKILLEXEC.3).
+#[cfg(test)]
 pub(crate) async fn dispatch_tool_uses(
     orch: &ConversationOrchestrator,
     tool_uses: &[(ToolUseId, String, serde_json::Value)],

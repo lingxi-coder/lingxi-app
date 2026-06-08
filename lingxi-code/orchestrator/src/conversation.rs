@@ -1917,7 +1917,8 @@ impl ConversationOrchestrator {
             //    user message correlation stays deterministic; the
             //    OutputStream events still fire in completion order.
             if !pumped.tool_uses.is_empty() {
-                let results = dispatch_tool_uses_concurrent(self, &pumped.tool_uses).await?;
+                let (results, injected_messages) =
+                    dispatch_tool_uses_concurrent(self, &pumped.tool_uses).await?;
                 let user_id = MessageId::new();
                 let tool_results_msg = ConversationMessage::User {
                     id: user_id,
@@ -1928,6 +1929,17 @@ impl ConversationOrchestrator {
                     s.history.push(tool_results_msg.clone());
                 }
                 self.persist_message_to_jsonl(&tool_results_msg).await;
+                // SKILLEXEC.3 (streaming): replay any tool-injected `new_messages`
+                // (the Skill tool's expanded prompt) into history right after the
+                // tool_result, mirroring the batched turn loop. Empty for every
+                // non-skill tool → a strict no-op (history/JSONL byte-identical).
+                for m in &injected_messages {
+                    {
+                        let mut s = self.session.lock().await;
+                        s.history.push(m.clone());
+                    }
+                    self.persist_message_to_jsonl(m).await;
+                }
             }
 
             // 6. Decide loop disposition.

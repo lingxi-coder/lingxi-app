@@ -73,6 +73,67 @@ use traits::{AuthHandle, McpTransport, OrchestratorHandle, OutputStream};
 /// count to the single production source of truth (no magic-number drift).
 pub const TEAMMATE_POOL_CAP: usize = 4;
 
+/// Derive the [`permission::SandboxAutoAllowConfig`] the enforced
+/// [`permission::PermissionPolicy`] consults from the same `settings.json`
+/// tiers the policy block already reads.
+///
+/// `raw_tiers` is the per-tier raw `settings.json` text in ASCENDING priority
+/// (user → project → local), exactly the order the enforcement block loads its
+/// rules; a later tier's `sandbox` field overrides an earlier one (last write
+/// wins), mirroring how `defaultMode` is resolved there. Each tier is parsed as
+/// a [`sandbox::runtime_config::SettingsJson`]; only the `sandbox` subsection
+/// (and its `permissions` are irrelevant to the three auto-allow fields) is
+/// consulted, folded into one merged
+/// [`sandbox::runtime_config::SandboxRuntimeConfig`] via
+/// [`sandbox::policy_convert::convert_settings_to_runtime_config`].
+///
+/// The three fields the bash sandbox-auto-allow branch reads are then copied
+/// out (`enabled`, `auto_allow_bash_if_sandboxed`, `excluded_commands`). One
+/// faithfulness fix vs. the raw conversion: claude-code's
+/// `isAutoAllowBashIfSandboxedEnabled()` defaults **true**, but the Rust
+/// `SandboxRuntimeConfig::auto_allow_bash_if_sandboxed` is a bare `bool` that
+/// `serde`-defaults to `false` and the converter only sets it when the settings
+/// explicitly carry it. So we recover the explicit/absent distinction from the
+/// per-tier [`sandbox::runtime_config::SandboxSettingsJson::auto_allow_bash_if_sandboxed`]
+/// (`Option<bool>`): the last tier that set it wins; if NO tier set it the TS
+/// default `true` applies.
+#[must_use]
+fn sandbox_auto_allow_from_settings_tiers(
+    raw_tiers: &[&str],
+) -> permission::sandbox_auto_allow::SandboxAutoAllowConfig {
+    use sandbox::runtime_config::{SandboxSettingsJson, SettingsJson};
+
+    // Fold each tier's `sandbox` subsection, last write wins per the whole
+    // subsection (matching how the converter consumes a single `SettingsJson`).
+    let mut merged_sandbox: Option<SandboxSettingsJson> = None;
+    // Track the explicit auto-allow override separately so the TS default (true)
+    // can be applied only when NO tier set it.
+    let mut explicit_auto_allow: Option<bool> = None;
+    for raw in raw_tiers {
+        let Ok(parsed) = serde_json::from_str::<SettingsJson>(raw) else {
+            continue;
+        };
+        if let Some(s) = parsed.sandbox {
+            if let Some(v) = s.auto_allow_bash_if_sandboxed {
+                explicit_auto_allow = Some(v);
+            }
+            merged_sandbox = Some(s);
+        }
+    }
+
+    let runtime = sandbox::policy_convert::convert_settings_to_runtime_config(&SettingsJson {
+        sandbox: merged_sandbox,
+        ..Default::default()
+    });
+
+    permission::sandbox_auto_allow::SandboxAutoAllowConfig::new(
+        runtime.enabled,
+        // claude-code `isAutoAllowBashIfSandboxedEnabled()` defaults TRUE.
+        explicit_auto_allow.unwrap_or(true),
+        runtime.excluded_commands,
+    )
+}
+
 /// M10 (T13): a late-bound [`traits::tool_invoker::ToolInvoker`] resolving the
 /// composition-root construction cycle.
 ///
@@ -988,6 +1049,9 @@ pub async fn build(
         if std::env::var_os("LINGXI_ENFORCE_PERMISSIONS").is_some_and(|v| !v.is_empty()) {
             let mut rules = Vec::new();
             let mut mode = permission::PermissionMode::Default;
+            // Retain each tier's raw text (in ascending priority) so the
+            // sandbox-auto-allow config can be derived from the SAME settings.
+            let mut raw_tiers: Vec<String> = Vec::new();
             // Bypass-permissions killswitch: if ANY tier sets
             // `disableBypassPermissionsMode: "disable"`, the policy refuses
             // `BypassPermissions` mode (`authorize` falls back to Ask). Sticky
@@ -1028,6 +1092,7 @@ pub async fn build(
                     if permission::bypass_permissions_disabled_from_settings_json(&raw) {
                         bypass_disabled = true; // sticky: any tier disabling wins
                     }
+                    raw_tiers.push(raw); // ascending priority preserved for sandbox derivation
                 }
             }
             let rule_count = rules.len();
@@ -1041,7 +1106,18 @@ pub async fn build(
                 home: dirs::home_dir(),
                 claude_home: cfg.claude_home.clone(),
             };
-            let mut policy = permission::PermissionPolicy::from_rules(mode, rules).with_roots(roots);
+            // Phase 3a-bash: attach the sandbox-auto-allow config derived from
+            // the SAME settings tiers, so a sandboxable bash command that
+            // matched no explicit deny/ask rule is auto-allowed (the sandbox is
+            // the safety boundary). Faithful to claude-code's
+            // `bashToolHasPermission` sandbox branch; a no-op when sandboxing is
+            // disabled in settings (`enabled = false`). OUTSIDE enforce mode this
+            // whole block is skipped, so the layer stays a permanent no-op there.
+            let raw_tier_refs: Vec<&str> = raw_tiers.iter().map(String::as_str).collect();
+            let sandbox_auto_allow = sandbox_auto_allow_from_settings_tiers(&raw_tier_refs);
+            let mut policy = permission::PermissionPolicy::from_rules(mode, rules)
+                .with_roots(roots)
+                .with_sandbox_runtime(sandbox_auto_allow);
             policy.bypass_killswitch_active = bypass_disabled;
             let policy = Arc::new(policy);
             tracing::info!(
@@ -2239,5 +2315,75 @@ mod tests {
             format!("{err}").contains("not wired"),
             "default session must hit the 'MailboxRouterHandle not wired' path, got: {err}"
         );
+    }
+
+    /// Phase 3a-bash: the sandbox-auto-allow config the enforced policy carries
+    /// is derived faithfully from the `settings.json` sandbox subsection across
+    /// tiers — `enabled`, the TS-default-true `autoAllowBashIfSandboxed`, and
+    /// `excludedCommands` — and is an inert/disabled config when sandboxing is
+    /// off or unconfigured.
+    #[test]
+    fn sandbox_auto_allow_from_settings_tiers_maps_faithfully() {
+        use super::sandbox_auto_allow_from_settings_tiers;
+
+        // (1) Sandbox enabled, no explicit autoAllow override → TS default TRUE,
+        //     no excluded commands → every command would be sandboxed +
+        //     auto-allowed.
+        let enabled = sandbox_auto_allow_from_settings_tiers(&[r#"{ "sandbox": { "enabled": true } }"#]);
+        assert!(enabled.enabled, "settings enabled → config enabled");
+        assert!(
+            enabled.auto_allow_bash_if_sandboxed,
+            "autoAllowBashIfSandboxed must default TRUE (claude-code parity)"
+        );
+        assert!(enabled.excluded_commands.is_empty());
+        assert!(
+            enabled.auto_allows("echo hi"),
+            "enabled + default auto-allow → a sandboxable command is auto-allowed"
+        );
+
+        // (2) Explicit excludedCommands flow through; an excluded command is NOT
+        //     auto-allowed, a normal one still is.
+        let with_excludes = sandbox_auto_allow_from_settings_tiers(&[
+            r#"{ "sandbox": { "enabled": true, "excludedCommands": ["bazel:*", "make"] } }"#,
+        ]);
+        assert!(with_excludes.enabled);
+        assert_eq!(
+            with_excludes.excluded_commands,
+            vec!["bazel:*".to_string(), "make".to_string()]
+        );
+        assert!(!with_excludes.auto_allows("bazel build //..."));
+        assert!(with_excludes.auto_allows("echo hi"));
+
+        // (3) Explicit autoAllowBashIfSandboxed:false overrides the TS default;
+        //     the command would still be sandboxed but is NOT auto-allowed.
+        let auto_off = sandbox_auto_allow_from_settings_tiers(&[
+            r#"{ "sandbox": { "enabled": true, "autoAllowBashIfSandboxed": false } }"#,
+        ]);
+        assert!(auto_off.enabled);
+        assert!(!auto_off.auto_allow_bash_if_sandboxed);
+        assert!(!auto_off.auto_allows("echo hi"));
+
+        // (4) Sandbox DISABLED → never auto-allows even though autoAllow defaults
+        //     true.
+        let disabled = sandbox_auto_allow_from_settings_tiers(&[r#"{ "sandbox": { "enabled": false } }"#]);
+        assert!(!disabled.enabled);
+        assert!(!disabled.auto_allows("echo hi"));
+
+        // (5) No `sandbox` subsection at all (the common case) → disabled, inert.
+        let none = sandbox_auto_allow_from_settings_tiers(&[r#"{ "permissions": { "allow": [] } }"#]);
+        assert!(!none.enabled);
+        assert!(!none.auto_allows("echo hi"));
+
+        // (6) Tier precedence: a later tier's sandbox subsection overrides an
+        //     earlier one (ascending priority, last write wins).
+        let layered = sandbox_auto_allow_from_settings_tiers(&[
+            r#"{ "sandbox": { "enabled": false } }"#,            // user
+            r#"{ "sandbox": { "enabled": true } }"#,             // project (wins)
+        ]);
+        assert!(layered.enabled, "later tier's sandbox.enabled wins");
+
+        // (7) Empty / malformed tiers are skipped without panicking.
+        let robust = sandbox_auto_allow_from_settings_tiers(&["", "not json", r#"{ "sandbox": { "enabled": true } }"#]);
+        assert!(robust.enabled);
     }
 }

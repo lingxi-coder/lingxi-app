@@ -1347,7 +1347,16 @@ pub async fn build(
     // model — the same seam the `PoolSubagentSpawner` gets above — so a spawned
     // teammate runs against a concrete wire id instead of passing `"inherit"` raw.
     .with_default_model(orch_cfg.model.clone())
-    .with_status_sink(coordinator_sink as Arc<dyn tasks::handlers::TaskStatusSink>);
+    .with_status_sink(coordinator_sink as Arc<dyn tasks::handlers::TaskStatusSink>)
+    // Fire the `TeammateIdle` hook (claude-code `executeTeammateIdleHooks`,
+    // `stopHooks.ts:403`) each time a teammate finishes a turn-set and parks
+    // awaiting the next message ("about to go idle"). The firer wraps the SAME
+    // `Arc<HookExecutorImpl>` the orchestrator fires its other hooks through, so
+    // the `tasks` leaf reaches `orch.hooks` without a dependency cycle —
+    // mirroring the `TaskCompleted` / `TaskCreated` firers above.
+    .with_teammate_idle_firer(Arc::new(
+        orchestrator::OrchestratorTeammateIdleFirer::new(hooks.clone(), cwd.clone()),
+    ));
     task_registry_inner
         .register_handler(tasks::TaskType::InProcessTeammate, Arc::new(teammate_handler));
 

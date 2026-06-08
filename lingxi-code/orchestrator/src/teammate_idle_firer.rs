@@ -1,0 +1,110 @@
+//! Orchestrator-side [`hooks::TeammateIdleFirer`] implementation.
+//!
+//! The `tasks` crate is a LEAF: the
+//! [`InProcessTeammateHandler`](../../tasks/src/handlers/in_process_teammate.rs)
+//! owns the teammate lifecycle (its streaming worker observes the persistent
+//! runner's per-turn-set `Completed`, at which point the teammate parks awaiting
+//! the next message — "about to go idle") but has no access to a live hook
+//! executor, and the orchestrator depends on `hooks` but NOT on `tasks`. The
+//! firer trait therefore lives in `hooks` (both crates can name it); this
+//! adapter — mirroring [`OrchestratorTaskCompletedFirer`] — closes the seam from
+//! the orchestrator side: it owns the engine's `Arc<hooks::HookExecutorImpl>`
+//! (`orch.hooks`) plus the engine cwd, translates a
+//! [`hooks::TeammateIdleFire`] into a [`hooks::HookEvent::TeammateIdle`], and
+//! fires the handler best-effort.
+//!
+//! Parity: reproduces claude-code's `executeTeammateIdleHooks`
+//! (`utils/hooks.ts:3709`), fired from `stopHooks.ts:403` when a teammate's
+//! query loop stops — the wire payload (`TeammateIdleHookInputSchema`,
+//! `coreSchemas.ts:591-598`) carries `teammate_name` + `team_name` (both
+//! required).
+//!
+//! Best-effort: [`HookExecutorImpl::execute`] never errors out, so a failing or
+//! absent `TeammateIdle` hook degrades to a no-op and never disturbs the
+//! teammate's turn-set loop — matching the `subagent_stop` / `task_completed`
+//! arms.
+//!
+//! Wiring: the composition root (`engine-desktop`) builds an
+//! [`OrchestratorTeammateIdleFirer`] over the SAME `Arc<HookExecutorImpl>` it
+//! hands the orchestrator, then injects it via
+//! `InProcessTeammateHandler::with_teammate_idle_firer` (an `Option`, default
+//! `None` => no fire).
+//!
+//! [`OrchestratorTaskCompletedFirer`]: crate::OrchestratorTaskCompletedFirer
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use hooks::events::HookEvent;
+use hooks::registry::HookContext;
+use hooks::teammate_idle_firer::{TeammateIdleFire, TeammateIdleFirer};
+use hooks::HookExecutorImpl;
+
+/// Adapts the engine's hook executor to the `tasks` crate's `TeammateIdle` firer
+/// seam.
+pub struct OrchestratorTeammateIdleFirer {
+    /// The SAME executor the orchestrator fires its other hooks through.
+    hooks: Arc<HookExecutorImpl>,
+    /// Engine cwd, threaded into the `TeammateIdle` hook payload (`cwd`) and the
+    /// per-hook Command-arm `CLAUDE_PROJECT_DIR` fallback.
+    cwd: PathBuf,
+}
+
+impl OrchestratorTeammateIdleFirer {
+    /// Build a firer over the shared hook executor and engine cwd. Pass the SAME
+    /// `Arc<HookExecutorImpl>` handed to the orchestrator so the `TeammateIdle`
+    /// hook rides the identical registry / async / sandbox plumbing.
+    #[must_use]
+    pub fn new(hooks: Arc<HookExecutorImpl>, cwd: PathBuf) -> Self {
+        Self { hooks, cwd }
+    }
+}
+
+#[async_trait]
+impl TeammateIdleFirer for OrchestratorTeammateIdleFirer {
+    async fn fire(&self, fire: TeammateIdleFire) {
+        let event = HookEvent::TeammateIdle {
+            teammate_name: fire.teammate_name,
+            team_name: fire.team_name,
+        };
+        // Context-light: a per-turn-set teammate idle has no live per-turn
+        // session here, so we thread only the engine cwd (also the
+        // CLAUDE_PROJECT_DIR fallback). Everything else defaults — matching the
+        // orchestrator's other "context-light" hook fires
+        // (`OrchestratorTaskCompletedFirer`).
+        let ctx = HookContext {
+            cwd: self.cwd.clone(),
+            ..Default::default()
+        };
+        // Best-effort: the executor never errors out of `execute`, so a
+        // misbehaving / absent hook degrades to a no-op and never disturbs the
+        // teammate's turn-set loop. The aggregate result is intentionally
+        // dropped — `TeammateIdle` is observational here (claude-code's blocking
+        // path lives in `stopHooks.ts`, not the leaf teammate handler).
+        let _ = self.hooks.execute(event, ctx).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::noop_hook_executor;
+
+    #[tokio::test]
+    async fn no_matching_hook_is_a_noop_fire() {
+        // An executor with an empty registry never intervenes => the fire is a
+        // silent no-op (the "no hook registered" contract).
+        let firer = OrchestratorTeammateIdleFirer::new(
+            noop_hook_executor(),
+            PathBuf::from("/work"),
+        );
+        // Must not panic / hang.
+        firer
+            .fire(TeammateIdleFire {
+                teammate_name: "buddy".into(),
+                team_name: "alpha".into(),
+            })
+            .await;
+    }
+}

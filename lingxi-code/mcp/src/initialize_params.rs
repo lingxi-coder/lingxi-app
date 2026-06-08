@@ -31,7 +31,11 @@ impl Default for ClientCapabilities {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InitializeParams {
-    /// MCP protocol version date — locked to the value claude-code uses.
+    /// MCP protocol version date — the value claude-code sends on initialize.
+    /// claude-code creates its MCP `Client` with no `protocolVersion` override
+    /// (`services/mcp/client.ts:985-1002`), so the SDK sends its
+    /// `LATEST_PROTOCOL_VERSION`; at the pinned SDK (`@modelcontextprotocol/sdk`
+    /// `^1.12.1` → 1.29.0, `types.js:2`) that is `2025-11-25`.
     pub protocol_version: &'static str,
     /// Capability advertisement; see [`ClientCapabilities`].
     pub capabilities: ClientCapabilities,
@@ -42,7 +46,7 @@ pub struct InitializeParams {
 impl Default for InitializeParams {
     fn default() -> Self {
         Self {
-            protocol_version: "2024-11-05",
+            protocol_version: "2025-11-25",
             capabilities: ClientCapabilities::default(),
             client_info: ClientInfo::default(),
         }
@@ -58,8 +62,9 @@ mod tests {
         let params = InitializeParams::default();
         let json = serde_json::to_value(&params).expect("serialize");
 
-        // protocolVersion is the literal MCP date.
-        assert_eq!(json["protocolVersion"], "2024-11-05");
+        // protocolVersion is the literal MCP date the SDK's
+        // LATEST_PROTOCOL_VERSION resolves to (SDK 1.29.0 → 2025-11-25).
+        assert_eq!(json["protocolVersion"], "2025-11-25");
 
         // capabilities is EXACTLY {"roots": {}, "elicitation": {}}.
         let caps = &json["capabilities"];

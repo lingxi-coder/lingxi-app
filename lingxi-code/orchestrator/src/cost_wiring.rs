@@ -5,7 +5,7 @@
 
 use api_client::types::UsageApi;
 use cost::pricing::ProviderId;
-use cost::usage::{TokenUsage, Usage};
+use cost::usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};
 use cost::ModelRef;
 use providers::ModelSpec;
 
@@ -13,8 +13,13 @@ use providers::ModelSpec;
 ///
 /// Maps Anthropic's `cache_creation_input_tokens` to `TokenUsage::cache_write`
 /// and `cache_read_input_tokens` to `TokenUsage::cache_read`.
-/// Reasoning-output and server-tool-use are dropped in v0.7.0 — non-streaming
-/// `messages.create` does not emit those counters.
+///
+/// Also surfaces the two cost-side billing signals the API response carries:
+/// `server_tool_use.web_search_requests` (billed per request — COST.5) and the
+/// `speed` tier, where `"fast"` maps to [`ApiSpeed::Fast`] so the Opus-4.6
+/// fast-mode rates fire (COST.3). Any non-`"fast"` speed string maps to
+/// [`ApiSpeed::Standard`]; an absent `speed`/`server_tool_use` stays `None`,
+/// matching claude-code (`utils/cost-tracker.ts:282`, `utils/modelCost.ts:139`).
 #[must_use]
 pub(crate) fn usage_api_to_cost_usage(api: &UsageApi) -> Usage {
     Usage {
@@ -25,8 +30,17 @@ pub(crate) fn usage_api_to_cost_usage(api: &UsageApi) -> Usage {
             cache_read: api.cache_read_input_tokens,
             reasoning_output: 0,
         },
-        server_tool_use: None,
-        speed: None,
+        server_tool_use: api.server_tool_use.map(|s| ServerToolUsage {
+            // cost's counter is u32; clamp the (u64) wire value defensively.
+            web_search_requests: u32::try_from(s.web_search_requests).unwrap_or(u32::MAX),
+        }),
+        speed: api.speed.as_deref().map(|s| {
+            if s == "fast" {
+                ApiSpeed::Fast
+            } else {
+                ApiSpeed::Standard
+            }
+        }),
     }
 }
 
@@ -84,6 +98,7 @@ mod tests {
             output_tokens: 50,
             cache_creation_input_tokens: 20,
             cache_read_input_tokens: 10,
+            ..Default::default()
         };
         let u = usage_api_to_cost_usage(&api);
         assert_eq!(u.tokens.input, 100);
@@ -91,8 +106,76 @@ mod tests {
         assert_eq!(u.tokens.cache_write, 20);
         assert_eq!(u.tokens.cache_read, 10);
         assert_eq!(u.tokens.reasoning_output, 0);
+        // Absent server_tool_use / speed default to None — no regression.
         assert!(u.server_tool_use.is_none());
         assert!(u.speed.is_none());
+    }
+
+    use api_client::types::ServerToolUseApi;
+    use cost::pricing::{ModelRef, PricingCatalog, ProviderId};
+    use cost::{ApiSpeed, CostCalculator};
+
+    fn opus_4_6_pricing() -> cost::ModelPricing {
+        let c = PricingCatalog::builtin_reference();
+        let mr = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-opus-4-6".into(),
+        };
+        c.resolve(&mr).unwrap().0
+    }
+
+    #[test]
+    fn web_search_requests_thread_through_and_bill_one_cent_each() {
+        // COST.5: usage.server_tool_use.web_search_requests on the wire → cost
+        // Usage → billed at $0.01 (10_000_000 nano-USD) per request.
+        let api = UsageApi {
+            server_tool_use: Some(ServerToolUseApi {
+                web_search_requests: 3,
+            }),
+            ..Default::default()
+        };
+        let u = usage_api_to_cost_usage(&api);
+        assert_eq!(u.server_tool_use.unwrap().web_search_requests, 3);
+        // No tokens → only the web-search charge: 3 × $0.01 = 30_000_000 nano-USD.
+        assert_eq!(
+            CostCalculator::calculate_nano_usd(&u, &opus_4_6_pricing()),
+            30_000_000
+        );
+    }
+
+    #[test]
+    fn speed_fast_threads_through_and_bills_opus_4_6_fast_tier() {
+        // COST.3: usage.speed == "fast" → cost ApiSpeed::Fast → Opus-4.6
+        // rebills at the $30/$150 fast tier instead of the catalog $5/$25.
+        let api = UsageApi {
+            input_tokens: 1_000_000,
+            speed: Some("fast".to_string()),
+            ..Default::default()
+        };
+        let u = usage_api_to_cost_usage(&api);
+        assert_eq!(u.speed, Some(ApiSpeed::Fast));
+        // 1M input × $30/Mtok = 30e9 nano-USD.
+        assert_eq!(
+            CostCalculator::calculate_nano_usd(&u, &opus_4_6_pricing()),
+            30_000_000_000
+        );
+    }
+
+    #[test]
+    fn non_fast_speed_maps_to_standard_and_keeps_base_tier() {
+        // A non-"fast" speed string maps to Standard (explicitly not fast), so
+        // Opus-4.6 stays on the $5/$25 catalog tier.
+        let api = UsageApi {
+            input_tokens: 1_000_000,
+            speed: Some("standard".to_string()),
+            ..Default::default()
+        };
+        let u = usage_api_to_cost_usage(&api);
+        assert_eq!(u.speed, Some(ApiSpeed::Standard));
+        assert_eq!(
+            CostCalculator::calculate_nano_usd(&u, &opus_4_6_pricing()),
+            5_000_000_000
+        );
     }
 
     #[test]

@@ -329,6 +329,10 @@ async fn parity_cost_after_one_turn() {
             output_tokens: 500,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            // COST.3/5: new UsageApi fields default to None (no web-search /
+            // non-fast) → base pricing, so this fixture's asserted cost is
+            // unchanged.
+            ..Default::default()
         },
     };
     let api = Arc::new(MockApiClient::new(vec![response]));

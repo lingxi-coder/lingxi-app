@@ -310,6 +310,7 @@ mod tests {
                     output_tokens: 35,
                     cache_creation_input_tokens: 10,
                     cache_read_input_tokens: 5,
+                    ..Default::default()
                 },
             ),
             message_stop(),

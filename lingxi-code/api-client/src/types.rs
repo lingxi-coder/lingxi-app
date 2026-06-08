@@ -112,12 +112,27 @@ pub enum ContentBlockApi {
     },
 }
 
+/// Server-side tool counters reported in `usage.server_tool_use`.
+///
+/// Anthropic-specific. Mirrors claude-code's
+/// `usage.server_tool_use.web_search_requests` (`services/api/claude.ts:2947`).
+/// `#[serde(default)]` on the field means a missing or partial
+/// `server_tool_use` object still deserializes (count defaults to `0`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ServerToolUseApi {
+    /// Number of server-side web search requests billed for this call.
+    #[serde(default)]
+    pub web_search_requests: u64,
+}
+
 /// Token usage and cache statistics for one API call.
 ///
 /// Anthropic-specific: `cache_creation_input_tokens` and
 /// `cache_read_input_tokens` map to prompt-caching counters; both default to
 /// `0` when the provider omits them.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+// NOTE: not `Copy` — the `speed: Option<String>` field is heap-backed. Callers
+// `.clone()` where they previously relied on an implicit copy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageApi {
     /// Number of input tokens billed.
     pub input_tokens: u64,
@@ -129,6 +144,16 @@ pub struct UsageApi {
     /// Input tokens served from cache (Anthropic-specific).
     #[serde(default)]
     pub cache_read_input_tokens: u64,
+    /// Server-side tool counters (web search, etc.). Anthropic-specific;
+    /// absent on providers that do not bill server tools. Mirrors
+    /// claude-code's `usage.server_tool_use` (`services/api/claude.ts:2947`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_tool_use: Option<ServerToolUseApi>,
+    /// API speed tier actually used for this request (`"fast"` for the
+    /// priority/low-latency tier, otherwise the standard tier or absent).
+    /// Mirrors claude-code's `BetaUsage.speed` (`services/api/claude.ts:2985`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<String>,
 }
 
 /// Streaming event emitted on the SSE channel from the `messages` endpoint.
@@ -320,5 +345,45 @@ mod stream_event_v2_tests {
         });
         let d: ContentDelta = serde_json::from_value(raw).expect("decode");
         assert!(matches!(d, ContentDelta::ConnectorTextDelta { .. }));
+    }
+
+    #[test]
+    fn usage_decodes_server_tool_use_and_speed() {
+        // A response usage carrying web_search_requests + speed "fast" — the
+        // two cost-side billing signals (COST.5 / COST.3) — round-trips via
+        // serde without any manual parsing.
+        let raw = json!({
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "server_tool_use": { "web_search_requests": 3 },
+            "speed": "fast"
+        });
+        let u: UsageApi = serde_json::from_value(raw).expect("decode");
+        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.output_tokens, 50);
+        assert_eq!(u.server_tool_use.map(|s| s.web_search_requests), Some(3));
+        assert_eq!(u.speed.as_deref(), Some("fast"));
+    }
+
+    #[test]
+    fn usage_absent_server_tool_use_and_speed_default_to_none() {
+        // Existing wire shape (no server_tool_use / speed) still deserializes;
+        // both new fields default to None — no regression.
+        let raw = json!({ "input_tokens": 10, "output_tokens": 5 });
+        let u: UsageApi = serde_json::from_value(raw).expect("decode");
+        assert!(u.server_tool_use.is_none());
+        assert!(u.speed.is_none());
+    }
+
+    #[test]
+    fn usage_partial_server_tool_use_defaults_request_count() {
+        // An empty server_tool_use object decodes with the count defaulting to 0.
+        let raw = json!({
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "server_tool_use": {}
+        });
+        let u: UsageApi = serde_json::from_value(raw).expect("decode");
+        assert_eq!(u.server_tool_use.map(|s| s.web_search_requests), Some(0));
     }
 }

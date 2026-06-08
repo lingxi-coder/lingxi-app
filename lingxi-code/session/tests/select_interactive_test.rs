@@ -13,6 +13,8 @@ fn rows(n: usize) -> Vec<SessionMetadata> {
             title: format!("title-{i}"),
             modified: UNIX_EPOCH
                 + Duration::from_secs(1_700_000_000 + u64::try_from(i).unwrap_or(0)),
+            created: UNIX_EPOCH
+                + Duration::from_secs(1_700_000_000 + u64::try_from(i).unwrap_or(0)),
             message_count: 3,
             path: PathBuf::from(format!("s{i}.jsonl")),
         })

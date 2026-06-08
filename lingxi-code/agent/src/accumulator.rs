@@ -277,7 +277,7 @@ fn block_kind_of(content_block: &ContentBlockApi) -> BlockKind {
 /// keep the seed unless the delta reports a non-zero override. This makes the
 /// [`response_to_stream_events`] round-trip exact (the seed already equals the
 /// final usage) and stays correct against a real provider stream.
-fn merge_usage(seed: UsageApi, delta: UsageApi) -> UsageApi {
+fn merge_usage(seed: &UsageApi, delta: &UsageApi) -> UsageApi {
     UsageApi {
         input_tokens: if delta.input_tokens > 0 {
             delta.input_tokens
@@ -295,6 +295,7 @@ fn merge_usage(seed: UsageApi, delta: UsageApi) -> UsageApi {
         } else {
             seed.cache_read_input_tokens
         },
+        ..Default::default()
     }
 }
 
@@ -360,7 +361,7 @@ pub(crate) async fn accumulate_stream(
                     stop_reason = Some(sr);
                 }
                 if let Some(u) = delta_usage {
-                    usage = merge_usage(usage, u);
+                    usage = merge_usage(&usage, &u);
                 }
             }
             StreamEvent::MessageStop => {
@@ -406,7 +407,9 @@ pub(crate) fn response_to_stream_events(resp: MessageResponse) -> Vec<StreamEven
             model: resp.model.clone(),
             content: Vec::new(),
             stop_reason: None,
-            usage: resp.usage,
+            // `resp.usage` is reused below for the final `message_delta`; clone
+            // here since `UsageApi` is no longer `Copy` (carries an owned speed).
+            usage: resp.usage.clone(),
         },
     });
     for (i, block) in resp.content.into_iter().enumerate() {
@@ -660,6 +663,7 @@ mod tests {
                         output_tokens: 0,
                         cache_creation_input_tokens: 7,
                         cache_read_input_tokens: 3,
+                        ..Default::default()
                     },
                 },
             },
@@ -672,6 +676,7 @@ mod tests {
                     output_tokens: 99,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
+                    ..Default::default()
                 }),
             },
             StreamEvent::MessageStop,
@@ -893,6 +898,7 @@ mod tests {
                 output_tokens: 22,
                 cache_creation_input_tokens: 1,
                 cache_read_input_tokens: 2,
+                ..Default::default()
             },
         })
         .await;

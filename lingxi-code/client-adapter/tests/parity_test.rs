@@ -60,6 +60,10 @@ fn session_metadata_parity() {
         uuid: uuid::Uuid::nil(),
         title: "hello".to_string(),
         modified: UNIX_EPOCH + Duration::from_secs(1_748_113_392),
+        // SESSION.6: created (file birthtime) tie-break key; the lowered DTO /
+        // resume row asserts modified/count/path, not created, so this value is
+        // immaterial to the assertions below.
+        created: UNIX_EPOCH + Duration::from_secs(1_748_113_392),
         message_count: 1,
         path: PathBuf::from("/tmp/x.jsonl"),
     };

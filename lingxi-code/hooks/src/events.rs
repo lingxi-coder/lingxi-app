@@ -246,6 +246,12 @@ pub enum HookEvent {
     PermissionDenied {
         /// Tool the permission applied to.
         tool_name: String,
+        /// Tool input that was denied (wire `tool_input`). 1:1 with the
+        /// `PermissionDeniedHookInputSchema` field (`coreSchemas.ts:466`).
+        tool_input: Value,
+        /// Tool invocation ID, matching the prior `PreToolUse`
+        /// (wire `tool_use_id`, `coreSchemas.ts:467`).
+        tool_use_id: ToolUseId,
         /// Stringified reason for the denial.
         reason: String,
     },

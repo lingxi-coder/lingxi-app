@@ -19,7 +19,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
-use telemetry::tengu::tool::{READ_COMPLETED, READ_FAILED, READ_STARTED};
+use telemetry::tengu::tool::{
+    FILE_READ_DEDUP, FILE_READ_LIMITS_OVERRIDE, READ_COMPLETED, READ_FAILED, READ_STARTED,
+    SESSION_FILE_READ,
+};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -122,6 +125,84 @@ pub fn format_binary(path: &std::path::Path) -> String {
         "File {} appears to be binary (first 8KB contains NUL bytes)",
         path.display()
     )
+}
+
+/// `MAX_FILE_EXTENSION_LENGTH` — byte-locked to claude-code
+/// (`services/analytics/metadata.ts:311`). Extensions longer than this bucket to
+/// `"other"` so analytics never leaks a long, potentially-identifying suffix.
+const MAX_FILE_EXTENSION_LENGTH: usize = 10;
+
+/// `getFileExtensionForAnalytics(filePath)` — 1:1 with
+/// `services/analytics/metadata.ts:323-337`. Returns the lowercased extension
+/// without the leading dot, `Some("other")` when it exceeds
+/// [`MAX_FILE_EXTENSION_LENGTH`], and `None` when the path has no extension (TS
+/// `undefined` for empty / `"."`). The analytics ext is intentionally distinct
+/// from the slicing `ext` used elsewhere: TS sources the `tengu_*` `ext` metadata
+/// from this helper (the `AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS`
+/// type), not from the raw `path.extname` used for token estimation.
+#[must_use]
+fn get_file_extension_for_analytics(path: &std::path::Path) -> Option<String> {
+    let ext = path.extension().and_then(|e| e.to_str())?;
+    if ext.is_empty() {
+        return None;
+    }
+    let lower = ext.to_ascii_lowercase();
+    if lower.len() > MAX_FILE_EXTENSION_LENGTH {
+        return Some("other".to_string());
+    }
+    Some(lower)
+}
+
+/// `detectSessionFileType(filePath)` — 1:1 with
+/// `utils/memoryFileDetection.ts:40-59`. Returns `("session_memory")` when the
+/// path is under `<configHome>/.../session-memory/*.md`, `("session_transcript")`
+/// when under `<configHome>/.../projects/*.jsonl`, else `None`. The path is
+/// compared in forward-slash form against the resolved config home
+/// (`$CLAUDE_CONFIG_DIR ?? $HOME/.claude`, mirroring `getClaudeConfigHomeDir()`).
+/// On POSIX (the port target) `toComparable` is a no-op beyond separator
+/// normalization (no case-folding); Windows case-folding is not reproduced here.
+// The `.md` / `.jsonl` suffix checks are a faithful 1:1 port of TS's
+// case-SENSITIVE `normalized.endsWith('.md')` / `endsWith('.jsonl')` (TS only
+// case-folds on Windows, via `toComparable`, which this POSIX port does not do).
+// A case-insensitive comparison would change the matching semantics, so the
+// `case_sensitive_file_extension_comparisons` lint is intentionally suppressed.
+#[must_use]
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+fn detect_session_file_type(path: &std::path::Path) -> Option<&'static str> {
+    let config_dir = claude_config_home_dir();
+    let normalized = to_comparable(path);
+    let config_cmp = to_comparable(&config_dir);
+    if !normalized.starts_with(&config_cmp) {
+        return None;
+    }
+    if normalized.contains("/session-memory/") && normalized.ends_with(".md") {
+        return Some("session_memory");
+    }
+    if normalized.contains("/projects/") && normalized.ends_with(".jsonl") {
+        return Some("session_transcript");
+    }
+    None
+}
+
+/// Forward-slash form of a path (`toPosix`/`toComparable` on POSIX —
+/// `utils/memoryFileDetection.ts:25-34`). No case-folding (POSIX target).
+fn to_comparable(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// Port of `getClaudeConfigHomeDir()` (`envUtils.ts:7-13`): `$CLAUDE_CONFIG_DIR`
+/// when set+non-empty, else `$HOME/.claude` (falling back to `USERPROFILE` then a
+/// bare `.claude`). Mirrors the existing ports in `tools/task` / `commands/core`.
+fn claude_config_home_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        Some(home) => PathBuf::from(home).join(".claude"),
+        None => PathBuf::from(".claude"),
+    }
 }
 
 /// Cyber-risk mitigation reminder appended to the model-facing text of a
@@ -247,6 +328,95 @@ impl FileReadTool {
         );
         self.ctx.bus.log_event(READ_FAILED, md).await;
     }
+
+    /// `tengu_file_read_dedup` (`FileReadTool.ts:559-561`) — fired in the dedup
+    /// short-circuit (the `file_unchanged` path). Metadata: `ext` ONLY when
+    /// present (TS spreads `...(analyticsExt !== undefined && { ext })`); the
+    /// analytics ext comes from [`get_file_extension_for_analytics`].
+    async fn emit_file_read_dedup(&self, path: &std::path::Path) {
+        let mut md: LogEventMetadata = HashMap::new();
+        if let Some(ext) = get_file_extension_for_analytics(path) {
+            md.insert(
+                "ext".to_string(),
+                AnalyticsValue::String(Verified::assert_safe(ext).into_inner()),
+            );
+        }
+        self.ctx.bus.log_event(FILE_READ_DEDUP, md).await;
+    }
+
+    /// `tengu_session_file_read` (`FileReadTool.ts:1069-1083`) — fired after a
+    /// successful TEXT read. Metadata mirrors TS exactly:
+    /// `totalLines`/`readLines`/`totalBytes`/`readBytes`/`offset` (int, always),
+    /// `limit`/`ext`/`messageID` (only-when-present), and the two session-file
+    /// booleans. `messageID` is sourced from the assistant message in TS
+    /// (`parentMessage`), which has no analog reachable from the Rust tool
+    /// context — so it is faithfully OMITTED (matching TS's `undefined` spread).
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_session_file_read(
+        &self,
+        path: &std::path::Path,
+        total_lines: u64,
+        read_lines: u64,
+        total_bytes: u64,
+        read_bytes: u64,
+        offset: u64,
+        limit: Option<u64>,
+    ) {
+        let mut md: LogEventMetadata = HashMap::new();
+        md.insert("totalLines".to_string(), AnalyticsValue::Int(total_lines as i64));
+        md.insert("readLines".to_string(), AnalyticsValue::Int(read_lines as i64));
+        md.insert("totalBytes".to_string(), AnalyticsValue::Int(total_bytes as i64));
+        md.insert("readBytes".to_string(), AnalyticsValue::Int(read_bytes as i64));
+        md.insert("offset".to_string(), AnalyticsValue::Int(offset as i64));
+        if let Some(l) = limit {
+            md.insert("limit".to_string(), AnalyticsValue::Int(l as i64));
+        }
+        if let Some(ext) = get_file_extension_for_analytics(path) {
+            md.insert(
+                "ext".to_string(),
+                AnalyticsValue::String(Verified::assert_safe(ext).into_inner()),
+            );
+        }
+        // messageID: TS spreads `...(messageId !== undefined && { messageID })`.
+        // No assistant-message id is reachable from the Rust tool context, so the
+        // key is faithfully omitted (the TS-undefined branch).
+        let session_type = detect_session_file_type(path);
+        md.insert(
+            "is_session_memory".to_string(),
+            AnalyticsValue::Bool(session_type == Some("session_memory")),
+        );
+        md.insert(
+            "is_session_transcript".to_string(),
+            AnalyticsValue::Bool(session_type == Some("session_transcript")),
+        );
+        self.ctx.bus.log_event(SESSION_FILE_READ, md).await;
+    }
+
+    /// `tengu_file_read_limits_override` (`FileReadTool.ts:512-515`) — fires only
+    /// when `fileReadingLimits !== undefined`. The Rust `ToolUseContext` carries
+    /// NO `fileReadingLimits` field, so this condition is never reachable in the
+    /// port: the event name is registered, but the emit is a documented no-op
+    /// (a faithful port of a never-true branch — no invented source). When TS
+    /// fires it, the metadata is `hasMaxTokens`/`hasMaxSizeBytes` (bool); this
+    /// helper accepts those for shape-parity even though no call site supplies a
+    /// `Some(limits)`.
+    async fn emit_file_read_limits_override(&self, limits: Option<(bool, bool)>) {
+        // TS: `if (fileReadingLimits !== undefined) { logEvent(...) }`.
+        let Some((has_max_tokens, has_max_size_bytes)) = limits else {
+            // Unreachable in the port — `fileReadingLimits` is always `None`.
+            return;
+        };
+        let mut md: LogEventMetadata = HashMap::new();
+        md.insert(
+            "hasMaxTokens".to_string(),
+            AnalyticsValue::Bool(has_max_tokens),
+        );
+        md.insert(
+            "hasMaxSizeBytes".to_string(),
+            AnalyticsValue::Bool(has_max_size_bytes),
+        );
+        self.ctx.bus.log_event(FILE_READ_LIMITS_OVERRIDE, md).await;
+    }
 }
 
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -333,6 +503,14 @@ impl Tool for FileReadTool {
         let path = PathBuf::from(file_path);
         self.emit_started(&invocation_id, &path).await;
 
+        // `tengu_file_read_limits_override` (`FileReadTool.ts:511-516`): TS fires
+        // this at the top of the read iff `fileReadingLimits !== undefined`. The
+        // LingXi `ToolUseContext` has NO `fileReadingLimits` field — there is no
+        // source for caller-overridden read limits — so the condition is never
+        // true and the emit is a documented no-op (faithful port of a never-true
+        // branch; the event NAME is still registered). `None` => never fires.
+        self.emit_file_read_limits_override(None).await;
+
         let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs) {
             Ok(p) => p,
             Err(_) => {
@@ -384,6 +562,12 @@ impl Tool for FileReadTool {
             let is_full_view = entry.offset.is_none() && entry.limit.is_none();
             let range_match = entry.offset == input_offset && entry.limit == input_limit;
             if entry.from_read && is_full_view && range_match && mtime_ms == entry.mtime_ms {
+                // `tengu_file_read_dedup` (`FileReadTool.ts:559-561`) — fired in
+                // the dedup short-circuit, before returning the `file_unchanged`
+                // stub. Metadata: `ext` only when present (the analytics ext of
+                // the resolved path). TS uses `fullFilePath` (`expandPath`); the
+                // Rust analog is the canonicalized path.
+                self.emit_file_read_dedup(&canon).await;
                 // Behaves like the TS early return: the model sees the stub via
                 // `model_content`; the TUI payload `content` mirrors it (there
                 // is no fresh file body to render). `total_lines`/`line_range`
@@ -585,6 +769,28 @@ impl Tool for FileReadTool {
                 from_read: true,
             },
         );
+
+        // `tengu_session_file_read` (`FileReadTool.ts:1069-1083`) — fired after a
+        // successful TEXT read, mirroring TS's site (after `readFileState.set`,
+        // before returning the data). NOT fired on the notebook path (TS returns
+        // before this site) nor on images/PDFs. The byte/line counts mirror
+        // `readFileInRange`'s return: `totalBytes = Buffer.byteLength(text)` →
+        // full content byte length; `readBytes = Buffer.byteLength(content)` →
+        // the selected slice's byte length; `readLines = lineCount` → number of
+        // selected lines (`end_idx - start_idx`). `offset` is the defaulted
+        // offset; `limit` only when supplied. See [`emit_session_file_read`] for
+        // the `ext` / `messageID` (omitted) / session-flag handling.
+        let read_lines = (end_idx - start_idx) as u64;
+        self.emit_session_file_read(
+            &canon,
+            total_lines,
+            read_lines,
+            content.len() as u64,
+            slice.len() as u64,
+            offset,
+            input_limit,
+        )
+        .await;
 
         // Model-facing serialization (FILE.A). `content` above stays the RAW
         // slice — that is what the TUI renders (`emit_tool_result` payload). The
@@ -1449,5 +1655,207 @@ mod tests {
         assert!(CYBER_RISK_MITIGATION_REMINDER.ends_with("</system-reminder>\n"));
         assert!(CYBER_RISK_MITIGATION_REMINDER.contains("would be considered malware"));
         assert!(FILE_UNCHANGED_STUB.starts_with("File unchanged since last read."));
+    }
+
+    // ───────────── FileReadTool tengu analytics events (3) ───────────────────
+
+    /// Find the (single) recorded event with the given name.
+    fn find_event<'a>(
+        events: &'a [telemetry::sinks::in_memory::RecordedEvent],
+        name: &str,
+    ) -> Option<&'a telemetry::sinks::in_memory::RecordedEvent> {
+        events.iter().find(|e| e.name == name)
+    }
+
+    #[test]
+    fn analytics_ext_helper_matches_ts() {
+        use std::path::Path;
+        // Lowercased, no leading dot.
+        assert_eq!(
+            get_file_extension_for_analytics(Path::new("/a/b.RS")).as_deref(),
+            Some("rs")
+        );
+        // No extension → None (TS `undefined`).
+        assert_eq!(get_file_extension_for_analytics(Path::new("/a/README")), None);
+        // Over MAX_FILE_EXTENSION_LENGTH (10) → "other".
+        assert_eq!(
+            get_file_extension_for_analytics(Path::new("/a/b.abcdefghijk")).as_deref(),
+            Some("other")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_file_read_fires_on_normal_text_read_with_counts() {
+        // A normal (non-dedup, non-session) text read fires tengu_session_file_read
+        // with the right line/byte counts and the only-if-present `ext`, and the
+        // omitted `messageID` / false session flags.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("note.rs");
+        std::fs::write(&target, "alpha\nbeta\ngamma\n").unwrap();
+        let (ctx, sink) = make_ctx(&tmp);
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["content"], "alpha\nbeta\ngamma\n");
+
+        let events = sink.events().await;
+        let ev = find_event(&events, "tengu_session_file_read")
+            .expect("tengu_session_file_read must fire on a successful text read");
+        let md = &ev.metadata;
+        // totalLines = 4 (trailing-newline phantom final line, TS readFileInRange).
+        assert!(matches!(md.get("totalLines"), Some(AnalyticsValue::Int(4))));
+        // readLines = number of selected lines = total lines of the full read = 3
+        // (split_inclusive over 3 newlines → 3 fragments).
+        assert!(matches!(md.get("readLines"), Some(AnalyticsValue::Int(3))));
+        // totalBytes = full content byte length; readBytes = selected slice bytes;
+        // a full read makes them equal (17 bytes).
+        assert!(matches!(md.get("totalBytes"), Some(AnalyticsValue::Int(17))));
+        assert!(matches!(md.get("readBytes"), Some(AnalyticsValue::Int(17))));
+        // offset defaulted to 1; limit omitted (only-if-present).
+        assert!(matches!(md.get("offset"), Some(AnalyticsValue::Int(1))));
+        assert!(md.get("limit").is_none());
+        // ext present (only-if-present spread): lowercased "rs".
+        assert!(matches!(md.get("ext"), Some(AnalyticsValue::String(s)) if s == "rs"));
+        // messageID omitted faithfully (unreachable in the port).
+        assert!(md.get("messageID").is_none());
+        // Not a session file → both flags false.
+        assert!(matches!(
+            md.get("is_session_memory"),
+            Some(AnalyticsValue::Bool(false))
+        ));
+        assert!(matches!(
+            md.get("is_session_transcript"),
+            Some(AnalyticsValue::Bool(false))
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_file_read_includes_limit_when_ranged() {
+        // A ranged read carries `limit` (only-if-present) and the ranged counts.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("ranged.txt");
+        std::fs::write(&target, "l1\nl2\nl3\nl4\n").unwrap();
+        let (ctx, sink) = make_ctx(&tmp);
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = FileReadTool::new(ctx);
+        tool.call(
+            json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 2 }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let events = sink.events().await;
+        let md = &find_event(&events, "tengu_session_file_read")
+            .expect("session_file_read fires on ranged read")
+            .metadata;
+        assert!(matches!(md.get("offset"), Some(AnalyticsValue::Int(2))));
+        assert!(matches!(md.get("limit"), Some(AnalyticsValue::Int(2))));
+        // 2 selected lines ("l2\nl3\n").
+        assert!(matches!(md.get("readLines"), Some(AnalyticsValue::Int(2))));
+        // readBytes = bytes of "l2\nl3\n" = 6; totalBytes = full file = 12.
+        assert!(matches!(md.get("readBytes"), Some(AnalyticsValue::Int(6))));
+        assert!(matches!(md.get("totalBytes"), Some(AnalyticsValue::Int(12))));
+        // ext "txt" present.
+        assert!(matches!(md.get("ext"), Some(AnalyticsValue::String(s)) if s == "txt"));
+    }
+
+    #[tokio::test]
+    async fn dedup_path_fires_file_read_dedup_with_ext() {
+        // The dedup short-circuit (file_unchanged) fires tengu_file_read_dedup
+        // (and NOT a second tengu_session_file_read on the deduped read).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("dedup.rs");
+        std::fs::write(&target, "alpha\nbeta\n").unwrap();
+        let (ctx, sink) = make_ctx(&tmp);
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = FileReadTool::new(ctx);
+        // First read populates the registry + fires session_file_read.
+        tool.call(
+            json!({ "file_path": target.to_str().unwrap() }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        sink.clear().await;
+        // Second identical read → dedup stub.
+        let second = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.data["type"], "file_unchanged");
+        let events = sink.events().await;
+        let md = &find_event(&events, "tengu_file_read_dedup")
+            .expect("dedup short-circuit must fire tengu_file_read_dedup")
+            .metadata;
+        // ext present (only-if-present): "rs".
+        assert!(matches!(md.get("ext"), Some(AnalyticsValue::String(s)) if s == "rs"));
+        // The deduped read does NOT fire session_file_read (it returns the stub
+        // before the text-read site).
+        assert!(find_event(&events, "tengu_session_file_read").is_none());
+    }
+
+    #[tokio::test]
+    async fn limits_override_is_wired_but_never_fires() {
+        // The LingXi ToolUseContext has no fileReadingLimits, so the override
+        // event is wired (name registered) but never emitted — a faithful port
+        // of a never-true branch.
+        assert!(
+            telemetry::tengu::ALL_EVENT_NAMES.contains(&"tengu_file_read_limits_override"),
+            "the limits-override event NAME must be registered even though it never fires"
+        );
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("plain.txt");
+        std::fs::write(&target, "x\n").unwrap();
+        let (ctx, sink) = make_ctx(&tmp);
+        ctx.bus.attach_sink(sink.clone()).await;
+        let tool = FileReadTool::new(ctx);
+        tool.call(
+            json!({ "file_path": target.to_str().unwrap() }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let events = sink.events().await;
+        // Unreachable branch (fileReadingLimits == None) → never emitted.
+        assert!(find_event(&events, "tengu_file_read_limits_override").is_none());
+    }
+
+    #[test]
+    fn detect_session_file_type_classifies_under_config_home() {
+        // session_memory: <configHome>/.../session-memory/*.md
+        // session_transcript: <configHome>/.../projects/*.jsonl
+        // Build paths under the resolved config home (no process-global env
+        // mutation — that would race other parallel tests). `claude_config_home_dir`
+        // resolves the same way `detect_session_file_type` reads it.
+        let config_home = claude_config_home_dir();
+        let mem = config_home.join("agents/session-memory/abc.md");
+        let trans = config_home.join("projects/foo/bar.jsonl");
+        let plain = config_home.join("settings.json");
+        assert_eq!(detect_session_file_type(&mem), Some("session_memory"));
+        assert_eq!(
+            detect_session_file_type(&trans),
+            Some("session_transcript")
+        );
+        // .md under the config home but NOT under session-memory/ → None.
+        assert_eq!(detect_session_file_type(&plain), None);
+        // Outside the config home → None.
+        assert_eq!(
+            detect_session_file_type(std::path::Path::new("/definitely/not/claude/x.md")),
+            None
+        );
     }
 }

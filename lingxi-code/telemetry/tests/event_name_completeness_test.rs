@@ -45,7 +45,9 @@ fn registry_is_exactly_330_entries() {
     // tengu_tui_command_palette_opened/vim_mode_entered/key_pressed stay
     // deferred to M8 (no clean/aggregated emit site). 326 + 4 = 330.
     // CronDelete/CronList added 6 (2 tools × 3 lifecycle stages): 330 + 6 = 336.
-    assert_eq!(ALL_EVENT_NAMES.len(), 336);
+    // FileReadTool analytics added 3 at the global tail (tengu_file_read_dedup,
+    // tengu_session_file_read, tengu_file_read_limits_override): 336 + 3 = 339.
+    assert_eq!(ALL_EVENT_NAMES.len(), 339);
 }
 
 #[test]
@@ -224,6 +226,25 @@ fn category_ordering_preserved() {
     for n in &ALL_EVENT_NAMES[323..336] {
         assert!(n.starts_with("tengu_tui_"), "tui block: {n}");
     }
+    // FileReadTool analytics block (3 events) appended at the GLOBAL TAIL — these
+    // are `tengu_file_read_*` / `tengu_session_file_read` (NOT `tengu_tool_*`),
+    // kept after the tui block so every per-block prefix slice above stays valid.
+    assert_eq!(
+        &ALL_EVENT_NAMES[336..339],
+        &[
+            "tengu_file_read_dedup",
+            "tengu_session_file_read",
+            "tengu_file_read_limits_override",
+        ],
+        "FileReadTool analytics tail block",
+    );
+}
+
+#[test]
+fn file_read_analytics_events_registered() {
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_file_read_dedup"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_session_file_read"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_file_read_limits_override"));
 }
 
 #[test]

@@ -11,6 +11,7 @@
 //! writing a chosen path into that file — exactly what a real shell would do.
 
 use async_trait::async_trait;
+use hooks::{CwdChangedFire, CwdChangedFirer};
 use serde_json::json;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -321,4 +322,140 @@ async fn deleted_cwd_and_workspace_yields_locked_error() {
     );
     // No spawn should have happened.
     assert!(runner.fg.lock().unwrap().is_empty());
+}
+
+// ===== BASH.4 CwdChanged hook firer (Shell.ts:409 onCwdChangedForHooks) ======
+
+/// Records every `(old, new)` it is fired with, so a test can assert the
+/// `BashTool` fires `CwdChanged` exactly when the cwd moves.
+struct RecordingFirer {
+    fires: Mutex<Vec<(PathBuf, PathBuf)>>,
+}
+
+impl RecordingFirer {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            fires: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl CwdChangedFirer for RecordingFirer {
+    async fn fire(&self, fire: CwdChangedFire) {
+        self.fires.lock().unwrap().push((fire.old, fire.new));
+    }
+}
+
+/// `tool_with`, but additionally injecting a `CwdChanged` firer via the
+/// optional builder (the desktop-composition wiring path).
+fn tool_with_firer(
+    workspace: &std::path::Path,
+    runner: Arc<RecordingRunner>,
+    firer: Arc<dyn CwdChangedFirer>,
+) -> BashTool {
+    let mut ctx = shell_test_ctx(ProcessOutput {
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: 0,
+        timed_out: false,
+    });
+    ctx.workspace = workspace.to_path_buf();
+    ctx.process = runner;
+    BashTool::new(ctx).with_cwd_changed_firer(firer)
+}
+
+#[tokio::test]
+async fn cwd_change_fires_cwd_changed_hook_with_old_and_new() {
+    // ONE tempdir, and the `cd` target is a real subdirectory inside it. Both
+    // `old` and `new` derive from the SAME canonical root, so there is no second
+    // independent `TempDir` whose creation/canonicalization can drift under the
+    // macOS fseventsd/APFS churn the harness is prone to (a known non-code flake).
+    let workspace = TempDir::new().unwrap();
+    let workspace_canon = std::fs::canonicalize(workspace.path()).unwrap();
+    let sub_canon = workspace_canon.join("sub");
+    std::fs::create_dir(&sub_canon).unwrap();
+
+    // Seed the shell cwd from the CANONICAL workspace so `old` is deterministic
+    // (no `/var` vs `/private/var` raw-vs-canonical ambiguity). Feed the runner
+    // the exact canonical target as the `pwd -P` readback.
+    let runner = RecordingRunner::new(vec![Some(sub_canon.clone())], false);
+    let firer = RecordingFirer::new();
+    let tool = tool_with_firer(&workspace_canon, runner, firer.clone());
+
+    tool.call(
+        json!({ "command": format!("cd {}", sub_canon.display()) }),
+        fresh_ctx(),
+        fresh_tx(),
+    )
+    .await
+    .expect("call ok");
+
+    let recorded = firer.fires.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "exactly one CwdChanged fire expected");
+    // 1:1 onCwdChangedForHooks(cwd, newCwd): `old` = prior shell cwd (canonical
+    // workspace), `new` = canonicalized post-`cd` cwd (the `sub` directory).
+    assert_eq!(
+        recorded[0],
+        (workspace_canon, sub_canon),
+        "CwdChanged must carry (old=workspace, new=sub)"
+    );
+}
+
+#[tokio::test]
+async fn no_cwd_change_does_not_fire() {
+    let workspace = TempDir::new().unwrap();
+
+    // No `cd`: the readback writes nothing, so the cwd is unchanged and the
+    // firer must NOT be invoked (claude-code's `oldCwd !== newCwd` guard).
+    let runner = RecordingRunner::new(vec![None], false);
+    let firer = RecordingFirer::new();
+    let tool = tool_with_firer(workspace.path(), runner, firer.clone());
+
+    tool.call(json!({ "command": "echo hi" }), fresh_ctx(), fresh_tx())
+        .await
+        .expect("call ok");
+
+    assert!(
+        firer.fires.lock().unwrap().is_empty(),
+        "no cwd change => no CwdChanged fire",
+    );
+}
+
+#[tokio::test]
+async fn no_firer_registered_is_a_silent_noop() {
+    // ONE tempdir + a real `sub` subdir (same churn-robust shape as the firing
+    // test) so the canonical paths can't drift under the harness FS flake.
+    let workspace = TempDir::new().unwrap();
+    let workspace_canon = std::fs::canonicalize(workspace.path()).unwrap();
+    let sub_canon = workspace_canon.join("sub");
+    std::fs::create_dir(&sub_canon).unwrap();
+
+    // `tool_with` builds the plain `BashTool::new(ctx)` (no firer) — the mobile /
+    // plain-caller path. A `cd` still updates the persistent cwd (proving the
+    // fire is purely additive), but no firer is invoked (nothing to assert about
+    // it — the point is no panic and identical cwd behavior).
+    let runner = RecordingRunner::new(vec![Some(sub_canon.clone()), None], false);
+    let tool = tool_with(&workspace_canon, runner.clone());
+
+    tool.call(
+        json!({ "command": format!("cd {}", sub_canon.display()) }),
+        fresh_ctx(),
+        fresh_tx(),
+    )
+    .await
+    .expect("first call ok (no firer registered)");
+
+    tool.call(json!({ "command": "pwd" }), fresh_ctx(), fresh_tx())
+        .await
+        .expect("second call ok");
+
+    // The cwd still moved despite no firer — the fire is best-effort/no-op only.
+    let fg = runner.fg.lock().unwrap();
+    assert_eq!(fg.len(), 2);
+    assert_eq!(
+        fg[1].cwd.as_deref(),
+        Some(sub_canon.as_path()),
+        "cwd update is unchanged when no firer is registered",
+    );
 }

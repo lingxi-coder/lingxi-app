@@ -322,7 +322,9 @@ pub fn desktop_tool_registry(
     let mut reg = ToolRegistry::new();
     // Offline / snapshot path: no command registry to back the Skill tool, so it
     // gets the hermetic `EmptySkillLoader` (tool name unchanged → snapshot-safe).
-    register_desktop_tools(&mut reg, ctx, coordinator, cron_auth, None);
+    // No `CwdChanged` firer here either (offline factory has no hook executor) —
+    // the BashTool is the byte-identical no-firer variant.
+    register_desktop_tools(&mut reg, ctx, coordinator, cron_auth, None, None);
     reg
 }
 
@@ -345,10 +347,18 @@ pub fn register_desktop_tools(
     coordinator: Option<CoordinatorWiring>,
     cron_auth: Option<Arc<dyn tool_cron::ClaudeAiAuthProvider>>,
     skill_loader: Option<Arc<dyn tool_skill::skill::SkillLoader>>,
+    cwd_changed_firer: hooks::OptionalCwdChangedFirer,
 ) {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
     tool_file::register_all(reg, ctx.clone());
-    tool_shell::register_all(reg, ctx.clone());
+    // BASH.4 `onCwdChangedForHooks` (Shell.ts:409): when a firer is supplied (real
+    // desktop sessions wire one over the shared `Arc<HookExecutorImpl>`), a `cd`
+    // inside a Bash call fires the `CwdChanged` hook. `None` (the offline
+    // registry-snapshot path) keeps the byte-identical no-firer BashTool — the
+    // registered tool NAMES are unchanged either way, so the locked tool-list
+    // snapshot is unaffected. `engine-mobile` never reaches this call (it does
+    // not register the shell tools).
+    tool_shell::register_all_with_cwd_firer(reg, ctx.clone(), cwd_changed_firer);
     tool_web::register_all(reg, ctx.clone());
     tool_plan::register_all(reg, ctx.clone());
     tool_meta::register_all(reg, ctx.clone());
@@ -1461,12 +1471,24 @@ pub async fn build(
             shared_command_registry.clone(),
             skill_session_id,
         ));
+    // Fire the `CwdChanged` hook (claude-code `onCwdChangedForHooks`,
+    // Shell.ts:409) when a `cd` inside a Bash call moves the persistent shell
+    // cwd. The firer wraps the SAME `Arc<HookExecutorImpl>` the orchestrator
+    // fires its other hooks through (mirrors the `TaskCreated` / `TaskCompleted`
+    // firers), so the `tool-shell` leaf reaches `orch.hooks` without a dependency
+    // cycle. Injected here (the desktop composition root) only — `engine-mobile`
+    // never registers the shell tools, so the mobile path keeps the no-firer
+    // BashTool.
+    let cwd_changed_firer: hooks::OptionalCwdChangedFirer = Some(Arc::new(
+        orchestrator::OrchestratorCwdChangedFirer::new(hooks.clone(), cwd.clone()),
+    ));
     register_desktop_tools(
         &mut tools_inner,
         tool_ctx,
         coordinator_wiring,
         Some(cron_auth),
         Some(skill_loader),
+        cwd_changed_firer,
     );
     for (conn_id, mcp_tools) in
         tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx).await

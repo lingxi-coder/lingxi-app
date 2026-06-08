@@ -309,14 +309,51 @@ pub struct BashTool {
     /// wired. Observable behavior is identical today since nothing else
     /// consumes a shared session-cwd yet.
     shell_cwd: std::sync::Arc<std::sync::Mutex<std::path::PathBuf>>,
+    /// Optional `CwdChanged` hook firer (default `None` => strict no-op).
+    ///
+    /// Closes the seam claude-code's `onCwdChangedForHooks(cwd, newCwd)`
+    /// (`Shell.ts:409`) fills: when the `pwd -P` readback below moves the cwd,
+    /// fire the `CwdChanged` hook best-effort. The firer can NOT ride the
+    /// construction `BuiltinToolContext` (that struct is built by a full literal
+    /// in the FORBIDDEN `engine-mobile` code — a new field would break it), so
+    /// it is injected via [`with_cwd_changed_firer`](BashTool::with_cwd_changed_firer),
+    /// leaving the `BashTool::new` signature unchanged. The desktop composition
+    /// root wires it over the shared `Arc<HookExecutorImpl>`; every other caller
+    /// (mobile, tests) leaves it `None` and the fire is a no-op.
+    cwd_changed_firer: hooks::OptionalCwdChangedFirer,
 }
 
 impl BashTool {
     /// Construct a fresh tool bound to the given builtin context.
+    ///
+    /// The `CwdChanged` firer defaults to `None` (no fire). Inject one via
+    /// [`with_cwd_changed_firer`](BashTool::with_cwd_changed_firer) — the
+    /// signature here is deliberately UNCHANGED so the `engine-mobile` literal
+    /// and every other `BashTool::new(ctx)` caller keep compiling untouched.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
         let shell_cwd = std::sync::Arc::new(std::sync::Mutex::new(ctx.workspace.clone()));
-        Self { ctx, shell_cwd }
+        Self {
+            ctx,
+            shell_cwd,
+            cwd_changed_firer: None,
+        }
+    }
+
+    /// Inject the `CwdChanged` hook firer (builder; default is `None`).
+    ///
+    /// The desktop composition root calls this over the SAME
+    /// `Arc<HookExecutorImpl>` the orchestrator fires its other hooks through,
+    /// so a `cd` inside a Bash call fires the `CwdChanged` hook
+    /// (`onCwdChangedForHooks`, `Shell.ts:409`). Optional + additive: callers
+    /// that skip it (mobile, tests) keep the strict no-op.
+    #[must_use]
+    pub fn with_cwd_changed_firer(
+        mut self,
+        firer: std::sync::Arc<dyn hooks::CwdChangedFirer>,
+    ) -> Self {
+        self.cwd_changed_firer = Some(firer);
+        self
     }
 }
 
@@ -668,7 +705,31 @@ impl Tool for BashTool {
                             let new_cwd = std::path::PathBuf::from(trimmed);
                             if new_cwd != cwd {
                                 if let Ok(canon) = std::fs::canonicalize(&new_cwd) {
-                                    *self.shell_cwd.lock().unwrap() = canon;
+                                    // Update the persistent cwd, then drop the
+                                    // guard BEFORE the best-effort hook fire (no
+                                    // mutex held across an `.await`). `clone_from`
+                                    // keeps `canon` owned for the fire below.
+                                    {
+                                        (*self.shell_cwd.lock().unwrap()).clone_from(&canon);
+                                    }
+                                    // BASH.4 `onCwdChangedForHooks(cwd, newCwd)`
+                                    // (Shell.ts:409): fire the `CwdChanged` hook
+                                    // when the cwd actually moved. We are already
+                                    // inside `new_cwd != cwd`, and the firer
+                                    // re-asserts `old != new` (claude-code's
+                                    // `oldCwd !== newCwd` guard,
+                                    // fileChangedWatcher.ts:137). Best-effort:
+                                    // a no-op when no firer is registered
+                                    // (mobile / plain `new`) or when the hook is
+                                    // absent — never breaks the cwd update.
+                                    if let Some(firer) = &self.cwd_changed_firer {
+                                        firer
+                                            .fire(hooks::CwdChangedFire {
+                                                old: cwd.clone(),
+                                                new: canon,
+                                            })
+                                            .await;
+                                    }
                                 }
                             }
                         }

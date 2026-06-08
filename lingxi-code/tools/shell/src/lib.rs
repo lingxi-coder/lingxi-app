@@ -36,9 +36,34 @@ pub use powershell::PowerShellTool;
 pub use repl::REPLTool;
 
 /// Register Bash, PowerShell, and REPL tools against `reg`.
+///
+/// The `BashTool` is registered with NO `CwdChanged` hook firer (a strict
+/// no-op). Desktop runtimes that want the `CwdChanged` hook fired on a `cd`
+/// call [`register_all_with_cwd_firer`] instead. The mobile composition root
+/// never registers these shell tools at all.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
+    register_all_with_cwd_firer(reg, ctx, None);
+}
+
+/// Register Bash, PowerShell, and REPL tools against `reg`, attaching an
+/// optional `CwdChanged` hook firer to the `BashTool`.
+///
+/// When `cwd_changed_firer` is `Some(..)`, a foreground `cd` inside a Bash call
+/// that moves the persistent shell cwd fires the `CwdChanged` hook (1:1
+/// `onCwdChangedForHooks`, `Shell.ts:409`). When `None`, the `BashTool` is
+/// byte-identical to the plain [`register_all`] path. Only `BashTool` carries
+/// the firer; PowerShell / REPL are unaffected.
+pub fn register_all_with_cwd_firer(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    cwd_changed_firer: hooks::OptionalCwdChangedFirer,
+) {
     use std::sync::Arc;
-    reg.register_builtin(Arc::new(BashTool::new(ctx.clone())));
+    let bash = match cwd_changed_firer {
+        Some(firer) => BashTool::new(ctx.clone()).with_cwd_changed_firer(firer),
+        None => BashTool::new(ctx.clone()),
+    };
+    reg.register_builtin(Arc::new(bash));
     reg.register_builtin(Arc::new(PowerShellTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(REPLTool::new(ctx)));
 }

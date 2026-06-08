@@ -12,7 +12,7 @@ use crate::conversation::ConversationOrchestrator;
 use crate::error::OrchestratorError;
 use crate::sse::accumulator::BlockAccumulator;
 use crate::sse::event_router::{dispatch_event, RouterAction};
-use crate::turn_loop::dispatch_tool_uses;
+use crate::turn_loop::dispatch_tool_uses_tracked;
 use api_client::types::StreamEvent;
 use api_client::ApiError;
 use futures::stream::{BoxStream, StreamExt};
@@ -118,12 +118,16 @@ pub async fn pump_stream(
 
 /// Dispatch N `tool_use` blocks concurrently. Each dispatch goes through
 /// the same pre-tool-hook → permission → tool-call → post-tool-hook
-/// pipeline as the batched path ([`crate::turn_loop::dispatch_tool_uses`]
+/// pipeline as the batched path ([`crate::turn_loop::dispatch_tool_uses_tracked`]
 /// is reused per-tool to keep the byte-locked hook + permission
-/// ordering for each individual dispatch).
+/// ordering for each individual dispatch, AND to thread out each tool's
+/// injected `new_messages`).
 ///
-/// Returns the [`ContentBlock::ToolResult`] blocks IN ORIGINAL ORDER
-/// (matching the `tool_use` block order in the stream). The
+/// Returns `(blocks, injected_messages)`: the [`ContentBlock::ToolResult`]
+/// blocks IN ORIGINAL ORDER (matching the `tool_use` block order in the
+/// stream), plus any tool-injected `new_messages` (SKILLEXEC.3 — the Skill
+/// tool's expanded prompt) flattened in the same tool order so the caller
+/// replays them into history after the `tool_result`. The
 /// `OutputStream::emit_tool_call` / `emit_tool_result` events fire in
 /// COMPLETION order (not dispatch order) — that's the visible
 /// streaming behavior.
@@ -140,7 +144,7 @@ pub async fn pump_stream(
 pub async fn dispatch_tool_uses_concurrent(
     orch: &ConversationOrchestrator,
     observed: &[ObservedToolUse],
-) -> Result<Vec<ContentBlock>, OrchestratorError> {
+) -> Result<(Vec<ContentBlock>, Vec<protocol::ConversationMessage>), OrchestratorError> {
     use futures::future::join_all;
 
     let futures: Vec<_> = observed
@@ -149,23 +153,40 @@ pub async fn dispatch_tool_uses_concurrent(
         .map(|(idx, tu)| {
             let single = vec![(tu.id, tu.name.clone(), tu.input.clone())];
             async move {
-                let mut result = dispatch_tool_uses(orch, &single).await?;
-                let block = result.pop().ok_or_else(|| {
+                // SKILLEXEC.3 (streaming): use the TRACKED dispatch so a tool's
+                // injected `new_messages` (the Skill tool's expanded prompt) are
+                // threaded out and replayed into history, mirroring the batched
+                // path. `prevent_continuation` (.1) is dropped here — the streaming
+                // loop sources that signal separately.
+                let (mut blocks, _prevent, injected) =
+                    dispatch_tool_uses_tracked(orch, &single).await?;
+                let block = blocks.pop().ok_or_else(|| {
                     OrchestratorError::StreamingProtocol(format!(
                         "dispatch returned empty for tool index {idx}"
                     ))
                 })?;
-                Ok::<(usize, ContentBlock), OrchestratorError>((idx, block))
+                Ok::<(usize, ContentBlock, Vec<protocol::ConversationMessage>), OrchestratorError>((
+                    idx, block, injected,
+                ))
             }
         })
         .collect();
 
-    let mut indexed: Vec<(usize, ContentBlock)> = Vec::with_capacity(observed.len());
+    let mut indexed: Vec<(usize, ContentBlock, Vec<protocol::ConversationMessage>)> =
+        Vec::with_capacity(observed.len());
     for r in join_all(futures).await {
         indexed.push(r?);
     }
-    indexed.sort_by_key(|(idx, _)| *idx);
-    Ok(indexed.into_iter().map(|(_, b)| b).collect())
+    indexed.sort_by_key(|(idx, _, _)| *idx);
+    // Blocks IN ORIGINAL ORDER; injected messages flattened in the same tool
+    // order so the Skill prompt lands deterministically after the tool_result.
+    let mut blocks = Vec::with_capacity(indexed.len());
+    let mut injected_all: Vec<protocol::ConversationMessage> = Vec::new();
+    for (_, b, inj) in indexed {
+        blocks.push(b);
+        injected_all.extend(inj);
+    }
+    Ok((blocks, injected_all))
 }
 
 #[cfg(test)]

@@ -33,7 +33,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use client_adapter::ClientEventSink;
+use client_protocol::commands::ImageRefDto;
 use client_protocol::events::{ClientEvent, ErrorKindDto};
+// `ImageSource` is re-exported from the orchestrator (the canonical, FROZEN
+// `protocol` shape) so this library code can name it without taking a direct
+// `protocol` dependency.
+use orchestrator::conversation::ImageSource;
 use orchestrator::{ConversationOrchestrator, OrchestratorError};
 use tokio_util::sync::CancellationToken;
 
@@ -109,17 +114,34 @@ impl OrchestratorTurnDriver {
             message: err.to_string(),
         }
     }
-}
 
-#[async_trait]
-impl TurnDriver for OrchestratorTurnDriver {
-    async fn run_turn(&self, prompt: String) {
+    /// Convert the wire [`ImageRefDto`]s (uniform inline `{media_type, base64}`,
+    /// decision §0.8) into the canonical [`ImageSource::Base64`]. The media type
+    /// and base64 bytes are taken STRAIGHT from the DTO — no content sniffing and
+    /// no temp-file round-trip; the inline bytes ride directly onto the outgoing
+    /// user message.
+    fn to_image_sources(images: Vec<ImageRefDto>) -> Vec<ImageSource> {
+        images
+            .into_iter()
+            .map(|dto| ImageSource::Base64 {
+                media_type: dto.media_type,
+                data: dto.base64,
+            })
+            .collect()
+    }
+
+    /// Drive ONE streaming turn with already-decoded image `sources`, surfacing a
+    /// turn-level failure as a terminal [`ClientEvent::Error`] when an error sink
+    /// is wired. Shared by [`TurnDriver::run_turn`] (no images) and
+    /// [`TurnDriver::run_turn_with_images`]; an empty `sources` vector is
+    /// byte-identical to the pre-MULTIMODAL.1 text-only turn.
+    async fn drive_turn(&self, prompt: String, sources: Vec<ImageSource>) {
         // Each turn gets its own cancel token. Nothing trips it today; it is the
         // seam a future per-turn cancel command fires.
         let cancel = CancellationToken::new();
         match self
             .orchestrator
-            .run_turn_streaming_with_cancel(&prompt, cancel)
+            .run_turn_streaming_with_cancel_image_sources(&prompt, sources, cancel)
             .await
         {
             // Success / cancellation / max-turns all already produced their
@@ -137,5 +159,198 @@ impl TurnDriver for OrchestratorTurnDriver {
                 }
             }
         }
+    }
+}
+
+#[async_trait]
+impl TurnDriver for OrchestratorTurnDriver {
+    async fn run_turn(&self, prompt: String) {
+        // No images: drive with an empty source set — identical to routing through
+        // `run_turn_streaming_with_cancel` (which decodes `&[]` to an empty vec).
+        self.drive_turn(prompt, Vec::new()).await;
+    }
+
+    /// MULTIMODAL.1: route pasted/attached images through to the model instead of
+    /// dropping them. Each inline `ImageRefDto` becomes an
+    /// [`ImageSource::Base64`], which the orchestrator appends to the outgoing
+    /// user message via `ConversationMessage::user_with_images`.
+    async fn run_turn_with_images(&self, prompt: String, images: Vec<ImageRefDto>) {
+        let sources = Self::to_image_sources(images);
+        self.drive_turn(prompt, sources).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use client_adapter::{AdapterOutputStream, ClientEventSink, MockSink};
+    use client_protocol::commands::ImageRefDto;
+    use orchestrator::conversation::ImageSource;
+    use orchestrator::test_support::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, noop_hook_executor, text_delta, MockApiClient, MockStreamingApiClient,
+        NoOpPermissionGate, StaticMemoryProvider,
+    };
+    use orchestrator::{scripted, ConversationOrchestrator, OrchestratorConfig};
+    use permission::gate::PermissionGate;
+    use protocol::{ContentBlock, ConversationMessage};
+
+    use super::OrchestratorTurnDriver;
+    use crate::server::TurnDriver;
+
+    /// A mock streaming client scripting ONE minimal turn (assistant text, then
+    /// `end_turn`) so a `run_turn*` call drives to completion and captures the
+    /// outgoing request via `captured_calls()`.
+    fn streaming_one_turn() -> Arc<MockStreamingApiClient> {
+        Arc::new(MockStreamingApiClient::with_turns(vec![scripted![
+            message_start("m1", "claude-sonnet-4-20250514"),
+            content_block_start_text(0),
+            text_delta(0, "ok"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]]))
+    }
+
+    /// Build a production driver over an orchestrator wired to `streaming` (whose
+    /// `captured_calls()` records the outgoing request messages). No network, no
+    /// API key — the mock streaming client scripts the whole turn.
+    fn build_driver(streaming: Arc<MockStreamingApiClient>) -> OrchestratorTurnDriver {
+        let batched = Arc::new(MockApiClient::new(Vec::new()));
+        let sink = MockSink::arc();
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(AdapterOutputStream::new(sink as Arc<dyn ClientEventSink>));
+        let tools = Arc::new(tool_api::registry::ToolRegistry::new());
+        let orchestrator = Arc::new(ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            batched,
+            streaming,
+            tools,
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate) as Arc<dyn PermissionGate>,
+            output,
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        ));
+        OrchestratorTurnDriver::new(orchestrator)
+    }
+
+    /// Extract the content blocks of the FIRST user message in a captured request.
+    fn first_user_content(messages: &[ConversationMessage]) -> Vec<ContentBlock> {
+        messages
+            .iter()
+            .find_map(|m| match m {
+                ConversationMessage::User { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("a user message must be in the outgoing request")
+    }
+
+    /// The pure DTO→source conversion preserves the media type and base64 bytes
+    /// verbatim (no sniffing, order preserved) — the load-bearing MULTIMODAL.1 map.
+    #[test]
+    fn image_ref_dto_converts_to_base64_source_preserving_fields() {
+        let dtos = vec![
+            ImageRefDto {
+                media_type: "image/png".to_string(),
+                base64: "iVBORw0KGgoAAAA".to_string(),
+            },
+            ImageRefDto {
+                media_type: "image/jpeg".to_string(),
+                base64: "/9j/4AAQSkZJRg".to_string(),
+            },
+        ];
+
+        let sources = OrchestratorTurnDriver::to_image_sources(dtos);
+
+        assert_eq!(
+            sources,
+            vec![
+                ImageSource::Base64 {
+                    media_type: "image/png".to_string(),
+                    data: "iVBORw0KGgoAAAA".to_string(),
+                },
+                ImageSource::Base64 {
+                    media_type: "image/jpeg".to_string(),
+                    data: "/9j/4AAQSkZJRg".to_string(),
+                },
+            ]
+        );
+    }
+
+    /// End-to-end on the BRIDGE path: a turn driven with inline images lands those
+    /// bytes on the OUTGOING user message as a `ContentBlock::Image` carrying the
+    /// exact `ImageSource::Base64` — proving the image reaches the model instead of
+    /// being silently dropped.
+    #[tokio::test]
+    async fn run_turn_with_images_reaches_outgoing_user_message() {
+        let streaming = streaming_one_turn();
+        let driver = build_driver(streaming.clone());
+
+        let dto = ImageRefDto {
+            media_type: "image/png".to_string(),
+            base64: "iVBORw0KGgoAAAA".to_string(),
+        };
+        driver
+            .run_turn_with_images("describe this".to_string(), vec![dto])
+            .await;
+
+        let calls = streaming.captured_calls().await;
+        assert_eq!(calls.len(), 1, "exactly one stream request");
+        let content = first_user_content(&calls[0].messages);
+
+        assert!(
+            content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text } if text == "describe this")),
+            "the prompt text must precede the image: {content:?}"
+        );
+        let source = content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::Image { source } => Some(source.clone()),
+                _ => None,
+            })
+            .expect("an image block must reach the outgoing user message");
+        assert_eq!(
+            source,
+            ImageSource::Base64 {
+                media_type: "image/png".to_string(),
+                data: "iVBORw0KGgoAAAA".to_string(),
+            }
+        );
+    }
+
+    /// With an empty image set, `run_turn_with_images` builds the SAME outgoing
+    /// user message as the plain text-only `run_turn` — no image blocks, identical
+    /// content — proving the additive path is byte-identical when there are no
+    /// images.
+    #[tokio::test]
+    async fn empty_images_matches_text_only_run_turn() {
+        let streaming_plain = streaming_one_turn();
+        build_driver(streaming_plain.clone())
+            .run_turn("hello".to_string())
+            .await;
+
+        let streaming_empty = streaming_one_turn();
+        build_driver(streaming_empty.clone())
+            .run_turn_with_images("hello".to_string(), Vec::new())
+            .await;
+
+        let plain = first_user_content(&streaming_plain.captured_calls().await[0].messages);
+        let empty = first_user_content(&streaming_empty.captured_calls().await[0].messages);
+
+        assert_eq!(
+            plain, empty,
+            "empty-images user content must equal the text-only path"
+        );
+        assert!(
+            plain
+                .iter()
+                .all(|b| !matches!(b, ContentBlock::Image { .. })),
+            "the text-only path carries no image blocks: {plain:?}"
+        );
     }
 }

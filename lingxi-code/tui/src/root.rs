@@ -22,11 +22,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iocraft::prelude::*;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{dispatch, scroll_with_viewport};
+use crate::app::{dispatch, scroll_with_viewport, spawn_streaming_turn};
 use crate::components::prompt_input::completion::CompletionKeyOutcome;
 use crate::components::prompt_input::palette::PaletteKeyOutcome;
 use crate::events::keymap::{CursorMove, KeyAction, ScrollDir};
@@ -83,6 +83,14 @@ pub struct TuiRootProps {
     /// events onto it via `pump_once`. `None` skips the ticker poll.
     pub multiagent_tx:
         Option<tokio::sync::mpsc::UnboundedSender<crate::multiagent::MultiAgentEvent>>,
+    /// (MULTIMODAL.1) Clone of the bridge SENDER. The live-key turn-spawn pump
+    /// (`pump_turn`, on the ticker `use_future`) emits `TurnStarted`/`TurnEnded`
+    /// on it for a streaming turn — the same channel the orchestrator's
+    /// `BridgeOutputStream` streams text/tool events onto, so both land on the
+    /// bridge pump's `bridge_rx`. `None` (resume picker / smoke gates / no
+    /// bridge) makes the turn-spawn pump inert — the live loop echoes the user
+    /// line but spawns no turn, correct for those mounts.
+    pub turn_tx: Option<UnboundedSender<TurnEvent>>,
 }
 
 /// Map an iocraft `KeyEvent` into the workspace's `KeyAction` enum.
@@ -911,6 +919,75 @@ pub async fn pump_open_settings(
     true
 }
 
+/// (MULTIMODAL.1) Async turn-spawn pump — the FIRST production turn-spawn in
+/// the TUI live key loop.
+///
+/// The sync submit path (`app::dispatch(KeyAction::Submit)`) echoes a real
+/// (non-slash) prompt as `UserText`, clears the prompt, and RAISES
+/// `AppState.pending_turn = Some(line)`. It cannot spawn the streaming turn
+/// itself: that needs the [`OrchestratorHandle`] + the bridge sender, and the
+/// pure sync dispatcher holds neither. This pump — driven by the same 100ms
+/// ticker `use_future` that runs the screen-open pumps (where `state.lock()`,
+/// the handle, and the sender are all reachable) — observes the flag, drains
+/// any pasted/dragged image paths via [`crate::components::prompt_input::PasteState::take_image_paths`],
+/// DROPS the lock, then calls [`spawn_streaming_turn`]. That helper emits
+/// `TurnStarted` synchronously (spinner appears at once) and `tokio::spawn`s a
+/// task awaiting [`OrchestratorHandle::run_turn_streaming_with_images`], to
+/// which the drained `image_paths` are forwarded (MULTIMODAL.1: each
+/// `[Image #N]` placeholder in the echoed line points back at one of these
+/// paths; the override loads them into `ImageSource::Base64` content blocks).
+///
+/// The returned [`CancellationToken`] is stored back on
+/// [`AppState::cancel_token`] so Ctrl-C ([`crate::app::handle_ctrl_c`]) can
+/// interrupt the turn; the bridge's `TurnEnded` event clears both `streaming`
+/// and `cancel_token`.
+///
+/// **Priority / single-turn guard:** never spawns while a permission dialog or
+/// a full-page screen owns the surface, or while a turn is already streaming
+/// (one turn at a time). In those cases the flag is left set and a later tick
+/// retries once the surface frees / the turn ends. Returns `true` iff a turn
+/// was spawned (the caller bumps the redraw tick).
+///
+/// [`OrchestratorHandle`]: traits::OrchestratorHandle
+/// [`OrchestratorHandle::run_turn_streaming_with_images`]: traits::OrchestratorHandle::run_turn_streaming_with_images
+/// [`CancellationToken`]: tokio_util::sync::CancellationToken
+pub async fn pump_turn(
+    state: &Arc<Mutex<AppState>>,
+    handle: &Arc<dyn traits::OrchestratorHandle>,
+    turn_tx: &UnboundedSender<TurnEvent>,
+) -> bool {
+    // 1) Take the request under the lock, respecting priority + single-turn.
+    //    Drain the image paths here (under the same lock) so they ride into
+    //    THIS turn and don't leak into the next prompt's registry.
+    let (prompt, image_paths) = {
+        let mut st = state.lock().await;
+        if st.pending_turn.is_none() {
+            return false;
+        }
+        if st.pending_permission.is_some()
+            || st.active_screen.is_some()
+            || st.streaming.is_some()
+        {
+            // Priority 1/2 own the surface, or a turn is already in flight:
+            // leave the flag set and retry on a later tick.
+            return false;
+        }
+        let prompt = st.pending_turn.take().expect("checked is_some");
+        let image_paths = st.paste.take_image_paths();
+        (prompt, image_paths)
+    };
+
+    // 2) Spawn the streaming turn OUTSIDE the lock. `spawn_streaming_turn`
+    //    emits `TurnStarted` synchronously on `turn_tx` (→ bridge pump → spinner)
+    //    and `tokio::spawn`s the awaited `run_turn_streaming_with_images`.
+    let cancel = spawn_streaming_turn(handle.clone(), prompt, image_paths, turn_tx.clone());
+
+    // 3) Store the cancel token so Ctrl-C can interrupt; `TurnEnded` clears it.
+    let mut st = state.lock().await;
+    st.cancel_token = Some(cancel);
+    true
+}
+
 /// (M9-08) Async agent-discovery open pump.
 ///
 /// Mirrors `pump_open_settings`. The sync `/agents` submit path raises
@@ -1715,6 +1792,10 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
         // (no `TaskRegistry` wired) skips the poll entirely.
         let multiagent_feed = props.multiagent_feed.clone();
         let multiagent_tx = props.multiagent_tx.clone();
+        // (MULTIMODAL.1) Bridge sender clone for the live-key turn-spawn pump
+        // (`pump_turn`). `None` (resume picker / smoke gates) makes the pump
+        // inert — the live loop echoes the user line but spawns no turn.
+        let turn_tx = props.turn_tx.clone();
         // (`/color`) Session id for the agent-color persistence pump. `Copy`, so
         // capturing it here does not disturb the key handler's own use.
         let ticker_session_id = session_id;
@@ -1771,6 +1852,18 @@ pub fn TuiRoot(mut hooks: Hooks, props: &TuiRootProps) -> impl Into<AnyElement<'
                         needs_redraw = true;
                     }
                     if pump_switch_model(&state, handle).await {
+                        needs_redraw = true;
+                    }
+                }
+                // (MULTIMODAL.1) Turn-spawn pump — the live loop's only
+                // production turn-spawn. When `dispatch(Submit)` echoed a real
+                // (non-slash) prompt it RAISED `pending_turn`; this spawns the
+                // streaming turn (forwarding any pasted image paths into
+                // `run_turn_streaming_with_images`) and stores the cancel token.
+                // Gated on BOTH a wired handle + bridge sender (the desktop mount
+                // supplies both; resume/smoke mounts pass `None` → inert).
+                if let (Some(handle), Some(tx)) = (orchestrator.as_ref(), turn_tx.as_ref()) {
+                    if pump_turn(&state, handle, tx).await {
                         needs_redraw = true;
                     }
                 }

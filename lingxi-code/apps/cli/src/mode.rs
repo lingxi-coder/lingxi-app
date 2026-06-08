@@ -135,9 +135,13 @@ pub async fn dispatch(
                 tui::multiagent::PollerFeed::new(tui_build.runtime.task_registry.clone()
                     as Arc<dyn traits::task_registry::TaskRegistryHandle>),
             );
+            // (MULTIMODAL.1) Thread the bridge sender clone so the TUI live-key
+            // loop can spawn streaming turns (`tui::root::pump_turn`). Moved out
+            // of `tui_build` (a disjoint field from the already-taken `bridge_rx`).
             let tui_runtime = tui::session::Runtime::with_bridge(session_id, bridge, status)
                 .with_orchestrator(orchestrator)
-                .with_multiagent_feed(task_feed);
+                .with_multiagent_feed(task_feed)
+                .with_turn_tx(tui_build.turn_tx);
             let cancel = CancellationToken::new();
             match tui::run_tui_session(tui_runtime, cancel).await {
                 Ok(()) => exit_codes::SUCCESS,

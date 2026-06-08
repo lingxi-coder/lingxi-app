@@ -116,6 +116,19 @@ pub async fn pump_stream(
     Err(OrchestratorError::StreamEndedWithoutStop)
 }
 
+/// One concurrently-dispatched tool's result, tagged with its original stream
+/// index so the caller can restore stream order after `join_all`. Carries the
+/// tool's `tool_result` block, its injected `new_messages` (each paired with the
+/// injecting tool's `tool_use_id` — TS `sourceToolUseID`), and any
+/// `context_modifier`s. Aliased to keep the type below clippy's
+/// `type_complexity` threshold.
+type IndexedDispatchResult = (
+    usize,
+    ContentBlock,
+    Vec<(protocol::ConversationMessage, ToolUseId)>,
+    Vec<tool_api::ContextModifier>,
+);
+
 /// Dispatch N `tool_use` blocks concurrently. Each dispatch goes through
 /// the same pre-tool-hook → permission → tool-call → post-tool-hook
 /// pipeline as the batched path ([`crate::turn_loop::dispatch_tool_uses_tracked`]
@@ -147,7 +160,7 @@ pub async fn dispatch_tool_uses_concurrent(
 ) -> Result<
     (
         Vec<ContentBlock>,
-        Vec<protocol::ConversationMessage>,
+        Vec<(protocol::ConversationMessage, ToolUseId)>,
         Vec<tool_api::ContextModifier>,
     ),
     OrchestratorError,
@@ -174,25 +187,14 @@ pub async fn dispatch_tool_uses_concurrent(
                         "dispatch returned empty for tool index {idx}"
                     ))
                 })?;
-                Ok::<
-                    (
-                        usize,
-                        ContentBlock,
-                        Vec<protocol::ConversationMessage>,
-                        Vec<tool_api::ContextModifier>,
-                    ),
-                    OrchestratorError,
-                >((idx, block, injected, modifiers))
+                Ok::<IndexedDispatchResult, OrchestratorError>((
+                    idx, block, injected, modifiers,
+                ))
             }
         })
         .collect();
 
-    let mut indexed: Vec<(
-        usize,
-        ContentBlock,
-        Vec<protocol::ConversationMessage>,
-        Vec<tool_api::ContextModifier>,
-    )> = Vec::with_capacity(observed.len());
+    let mut indexed: Vec<IndexedDispatchResult> = Vec::with_capacity(observed.len());
     for r in join_all(futures).await {
         indexed.push(r?);
     }
@@ -201,7 +203,7 @@ pub async fn dispatch_tool_uses_concurrent(
     // in the same tool order so the Skill prompt + model override land
     // deterministically after the tool_result.
     let mut blocks = Vec::with_capacity(indexed.len());
-    let mut injected_all: Vec<protocol::ConversationMessage> = Vec::new();
+    let mut injected_all: Vec<(protocol::ConversationMessage, ToolUseId)> = Vec::new();
     let mut modifiers_all: Vec<tool_api::ContextModifier> = Vec::new();
     for (_, b, inj, mods) in indexed {
         blocks.push(b);

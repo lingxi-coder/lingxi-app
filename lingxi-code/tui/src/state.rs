@@ -602,6 +602,19 @@ pub struct AppState {
     /// per request and never opens over a pending permission or another open
     /// screen (priority order, parent spec §2.5).
     pub pending_open_settings: Option<crate::screens::settings::SettingsTab>,
+    /// (MULTIMODAL.1) Set by the `dispatch(KeyAction::Submit)` real-prompt
+    /// branch: the user line to run as a streaming turn. The SYNC submit path
+    /// echoes the `UserText` + clears the prompt, but it CANNOT spawn the turn
+    /// itself — that needs the `OrchestratorHandle` + the bridge sender, both
+    /// reachable only from the ticker `use_future`. So it RAISES this flag and
+    /// the async turn-spawn pump in `root.rs` (`pump_turn`, on the same 100ms
+    /// ticker as the screen-open pumps) observes it, drains any pasted/dragged
+    /// image paths (`PasteState::take_image_paths`), DROPS the lock, and calls
+    /// `app::spawn_streaming_turn` — which forwards the paths to
+    /// `OrchestratorHandle::run_turn_streaming_with_images`. Mirrors
+    /// `pending_open_settings`. `None` between submits. Slash commands NEVER set
+    /// this — they intercept + return earlier in the `Submit` arm.
+    pub pending_turn: Option<String>,
     /// (M6-04) Currently focused tool block (Up/Down in scroll mode walks
     /// this through the `AssistantToolUse` entries in scrollback order).
     pub focused_tool_id: Option<ToolUseId>,
@@ -802,6 +815,7 @@ impl AppState {
             resume_request: None,
             pending_config_edit: false,
             pending_open_settings: None,
+            pending_turn: None,
             focused_tool_id: None,
             expanded: HashMap::new(),
             tool_call_inputs: HashMap::new(),

@@ -401,6 +401,14 @@ pub fn dispatch(action: KeyAction, st: &mut AppState) -> bool {
             st.prompt_cursor = 0;
             st.history.push(line.clone());
             st.history_cursor = None;
+            // (MULTIMODAL.1) RAISE the turn-spawn request. The sync dispatcher
+            // can't spawn the streaming turn itself (it has no `OrchestratorHandle`
+            // / bridge sender), so it records the line; the ticker `use_future`'s
+            // `root::pump_turn` observes the flag, drains any pasted image paths
+            // (`st.paste` stays untouched here so they reach that turn), and calls
+            // `spawn_streaming_turn`. Slash commands never reach here (they
+            // intercept + return above), so this is always a real prompt.
+            st.pending_turn = Some(line.clone());
             st.push_message(RenderedMessage::UserText {
                 body: line,
                 timestamp: chrono::Utc::now().timestamp(),

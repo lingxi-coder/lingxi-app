@@ -1953,10 +1953,19 @@ impl ConversationOrchestrator {
                 // (the Skill tool's expanded prompt) into history right after the
                 // tool_result, mirroring the batched turn loop. Empty for every
                 // non-skill tool → a strict no-op (history/JSONL byte-identical).
-                for m in &injected_messages {
+                //
+                // Also record each injected message's id → originating
+                // tool_use_id into the in-memory `injected_message_sources`
+                // side-table (faithful port of TS `sourceToolUseID`;
+                // `#[serde(skip)]` so it never reaches the JSONL wire). The
+                // tool_use_id is deliberately NOT passed to
+                // `persist_message_to_jsonl` — TS does not persist
+                // `sourceToolUseID`, so the JSONL bytes stay byte-identical.
+                for (m, tool_use_id) in &injected_messages {
                     {
                         let mut s = self.session.lock().await;
                         s.history.push(m.clone());
+                        s.injected_message_sources.insert(m.id(), *tool_use_id);
                     }
                     self.persist_message_to_jsonl(m).await;
                 }

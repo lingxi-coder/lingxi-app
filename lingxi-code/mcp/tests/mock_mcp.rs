@@ -170,7 +170,7 @@ async fn initialize_emits_literal_claude_code_clientinfo() {
         "literal claude-code clientInfo must appear, got: {frame}",
     );
     assert!(
-        frame.contains(r#""protocolVersion":"2024-11-05""#),
+        frame.contains(r#""protocolVersion":"2025-11-25""#),
         "literal protocolVersion must appear, got: {frame}",
     );
     // Capabilities are EXACTLY {"roots":{},"elicitation":{}}.

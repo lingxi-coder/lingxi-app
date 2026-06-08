@@ -66,6 +66,15 @@ pub struct TuiBuild {
     /// `tui::streaming::apply_event`.
     pub bridge_rx:
         tokio::sync::mpsc::UnboundedReceiver<tui::events::orchestrator_bridge::TurnEvent>,
+    /// (MULTIMODAL.1) A clone of the bridge SENDER, handed to the TUI so its
+    /// live-key turn-spawn pump (`tui::root::pump_turn`) can emit `TurnStarted`
+    /// / `TurnEnded` on the SAME channel the orchestrator's `BridgeOutputStream`
+    /// streams text/tool events onto. Both ends land on `bridge_rx`, so the
+    /// spawned streaming turn's spinner + completion render through the one
+    /// bridge pump. `UnboundedSender` is `Clone`, so cloning it here does not
+    /// disturb the `BridgeOutputStream` that owns the original.
+    pub turn_tx:
+        tokio::sync::mpsc::UnboundedSender<tui::events::orchestrator_bridge::TurnEvent>,
 }
 
 /// Errors surfaced while building a [`Runtime`].
@@ -272,9 +281,17 @@ pub async fn build_runtime(
 /// this channel through `tui::streaming::apply_event`.
 pub async fn build_runtime_for_tui(argv: &Argv) -> Result<TuiBuild, InitError> {
     let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
+    // (MULTIMODAL.1) Clone the sender BEFORE it is moved into the
+    // `BridgeOutputStream` so the TUI's turn-spawn pump can emit
+    // `TurnStarted`/`TurnEnded` on the same channel the orchestrator streams on.
+    let turn_tx = bridge_tx.clone();
     let bridge: Arc<dyn OutputStream> = Arc::new(tui::BridgeOutputStream::new(bridge_tx));
     let runtime = build_runtime(argv, bridge).await?;
-    Ok(TuiBuild { runtime, bridge_rx })
+    Ok(TuiBuild {
+        runtime,
+        bridge_rx,
+        turn_tx,
+    })
 }
 
 #[cfg(test)]

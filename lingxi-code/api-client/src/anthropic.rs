@@ -1216,16 +1216,93 @@ fn ephemeral() -> Value {
 
 /// Port of claude-code `getPromptCachingEnabled` (claude.ts:333-356).
 ///
-/// Caching defaults ON. The global `DISABLE_PROMPT_CACHING` gate (parsed with
-/// `isEnvTruthy` semantics) turns it off for ALL models. The model-specific
-/// gates (`DISABLE_PROMPT_CACHING_HAIKU` / `_SONNET` / `_OPUS`) require the
-/// resolved small-fast / default-sonnet / default-opus model ids, whose
-/// resolvers (`getSmallFastModel` / `getDefaultSonnetModel` /
-/// `getDefaultOpusModel`) are NOT reachable from `api-client` — they live in
-/// the config layer. Those three gates are a deliberate follow-up; only the
-/// global gate is implemented here (it dominates real usage).
-fn prompt_caching_enabled(_model: &str) -> bool {
-    !env_truthy("DISABLE_PROMPT_CACHING")
+/// Caching defaults ON. Four independent disable gates can turn it off; each
+/// env var is read with `isEnvTruthy` semantics (see [`env_truthy`]):
+/// * `DISABLE_PROMPT_CACHING` — global, disables for ALL models (takes
+///   precedence; already shipped).
+/// * `DISABLE_PROMPT_CACHING_HAIKU` — disables iff `model` equals the resolved
+///   small-fast model ([`small_fast_model`], TS `getSmallFastModel`).
+/// * `DISABLE_PROMPT_CACHING_SONNET` — disables iff `model` equals the resolved
+///   default Sonnet model ([`default_sonnet_model`], TS `getDefaultSonnetModel`).
+/// * `DISABLE_PROMPT_CACHING_OPUS` — disables iff `model` equals the resolved
+///   default Opus model ([`default_opus_model`], TS `getDefaultOpusModel`).
+///
+/// `model` is the request model string stamped into the body (the `"model"`
+/// field set by the message-body builders, where [`apply_prompt_caching`] is
+/// called). With NO env var set none of the model-specific gates fire, so the
+/// default (caching-on) decision is byte-identical to before they existed.
+///
+/// The three resolvers reproduce the TS env-override-else-firstParty-literal
+/// shape; see [`DEFAULT_HAIKU_MODEL_FIRST_PARTY`] for the firstParty-only
+/// divergence note (mirroring `opus.rs`).
+fn prompt_caching_enabled(model: &str) -> bool {
+    // Global disable takes precedence (claude.ts:335).
+    if env_truthy("DISABLE_PROMPT_CACHING") {
+        return false;
+    }
+    // Model-specific gates (claude.ts:338-353): each fires only when ITS env
+    // var is truthy AND the request model equals the resolved id.
+    if env_truthy("DISABLE_PROMPT_CACHING_HAIKU") && model == small_fast_model() {
+        return false;
+    }
+    if env_truthy("DISABLE_PROMPT_CACHING_SONNET") && model == default_sonnet_model() {
+        return false;
+    }
+    if env_truthy("DISABLE_PROMPT_CACHING_OPUS") && model == default_opus_model() {
+        return false;
+    }
+    true
+}
+
+/// First-party (Anthropic API) default model IDs, byte-locked to claude-code
+/// `configs.ts:31,73,80` (the `firstParty` field of each config). They back the
+/// model-specific prompt-caching disable gates in [`prompt_caching_enabled`].
+///
+/// ## Documented divergence (1:1 fidelity note)
+///
+/// The TS resolvers (`getDefaultHaikuModel` / `getDefaultSonnetModel` /
+/// `getDefaultOpusModel`, model.ts:105-138) return a *provider-resolved* id and,
+/// for 3P providers (Bedrock / Vertex / Foundry), branch to an older fallback —
+/// e.g. `getDefaultSonnetModel` returns `claude-sonnet-4-5-20250929` for 3P.
+/// Rust hard-codes only the firstParty literal because firstParty is the only
+/// provider wired today (mirrors `opus.rs`). When 3P providers land, their ids
+/// MUST be added here to stay faithful.
+const DEFAULT_HAIKU_MODEL_FIRST_PARTY: &str = "claude-haiku-4-5-20251001"; // CLAUDE_HAIKU_4_5_CONFIG.firstParty
+/// See [`DEFAULT_HAIKU_MODEL_FIRST_PARTY`] for the firstParty-only divergence note.
+const DEFAULT_SONNET_MODEL_FIRST_PARTY: &str = "claude-sonnet-4-6"; // CLAUDE_SONNET_4_6_CONFIG.firstParty
+/// See [`DEFAULT_HAIKU_MODEL_FIRST_PARTY`] for the firstParty-only divergence note.
+const DEFAULT_OPUS_MODEL_FIRST_PARTY: &str = "claude-opus-4-6"; // CLAUDE_OPUS_4_6_CONFIG.firstParty
+
+/// Port of `getSmallFastModel` ∘ `getDefaultHaikuModel` (model.ts:36-38,
+/// 131-138): `ANTHROPIC_SMALL_FAST_MODEL` (non-empty) else
+/// `ANTHROPIC_DEFAULT_HAIKU_MODEL` (non-empty) else the firstParty Haiku literal.
+fn small_fast_model() -> String {
+    env_nonempty("ANTHROPIC_SMALL_FAST_MODEL")
+        .or_else(|| env_nonempty("ANTHROPIC_DEFAULT_HAIKU_MODEL"))
+        .unwrap_or_else(|| DEFAULT_HAIKU_MODEL_FIRST_PARTY.to_string())
+}
+
+/// Port of `getDefaultSonnetModel` (model.ts:119-128):
+/// `ANTHROPIC_DEFAULT_SONNET_MODEL` (non-empty) else the firstParty Sonnet
+/// literal (see [`DEFAULT_HAIKU_MODEL_FIRST_PARTY`] divergence note).
+fn default_sonnet_model() -> String {
+    env_nonempty("ANTHROPIC_DEFAULT_SONNET_MODEL")
+        .unwrap_or_else(|| DEFAULT_SONNET_MODEL_FIRST_PARTY.to_string())
+}
+
+/// Port of `getDefaultOpusModel` (model.ts:105-116):
+/// `ANTHROPIC_DEFAULT_OPUS_MODEL` (non-empty) else the firstParty Opus literal.
+fn default_opus_model() -> String {
+    env_nonempty("ANTHROPIC_DEFAULT_OPUS_MODEL")
+        .unwrap_or_else(|| DEFAULT_OPUS_MODEL_FIRST_PARTY.to_string())
+}
+
+/// Read an env var as a non-empty `String`, mirroring the JS truthy-`||` idiom
+/// (`process.env.X || fallback`, where an empty string is falsy). Reuses the
+/// same `!is_empty()` convention as the 529-fallback gate in
+/// [`resolve_retry_control`].
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
 /// Port of `isEnvTruthy` (envUtils.ts:32-37): lowercase + trim, then `true`
@@ -1944,5 +2021,104 @@ mod prompt_caching_tests {
         std::env::set_var("DISABLE_PROMPT_CACHING", "0"); // not in the truthy set
         assert!(prompt_caching_enabled("claude-x"));
         std::env::remove_var("DISABLE_PROMPT_CACHING");
+    }
+
+    // The model-specific HAIKU gate (claude.ts:338-341) disables caching only
+    // when DISABLE_PROMPT_CACHING_HAIKU is truthy AND the request model equals
+    // the resolved small-fast model; the resolver follows the env-override-else-
+    // firstParty-literal chain (ANTHROPIC_SMALL_FAST_MODEL → ..._DEFAULT_HAIKU_
+    // MODEL → literal).
+    #[test]
+    fn haiku_gate_disables_only_matching_model() {
+        let _g = ENV_LOCK.lock().unwrap();
+        for v in [
+            "DISABLE_PROMPT_CACHING",
+            "DISABLE_PROMPT_CACHING_HAIKU",
+            "ANTHROPIC_SMALL_FAST_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ] {
+            std::env::remove_var(v);
+        }
+        let haiku = super::DEFAULT_HAIKU_MODEL_FIRST_PARTY; // "claude-haiku-4-5-20251001"
+
+        // env unset → still enabled, even for the haiku id.
+        assert!(prompt_caching_enabled(haiku));
+
+        // env truthy + matching firstParty model → disabled.
+        std::env::set_var("DISABLE_PROMPT_CACHING_HAIKU", "1");
+        assert!(!prompt_caching_enabled(haiku));
+        // env truthy + non-matching model → still enabled.
+        assert!(prompt_caching_enabled("claude-sonnet-4-6"));
+
+        // ANTHROPIC_SMALL_FAST_MODEL override moves the match target.
+        std::env::set_var("ANTHROPIC_SMALL_FAST_MODEL", "my-fast-model");
+        assert!(prompt_caching_enabled(haiku)); // literal no longer the resolved model
+        assert!(!prompt_caching_enabled("my-fast-model"));
+        std::env::remove_var("ANTHROPIC_SMALL_FAST_MODEL");
+
+        // ANTHROPIC_DEFAULT_HAIKU_MODEL override (second link of the chain).
+        std::env::set_var("ANTHROPIC_DEFAULT_HAIKU_MODEL", "haiku-custom");
+        assert!(prompt_caching_enabled(haiku));
+        assert!(!prompt_caching_enabled("haiku-custom"));
+        std::env::remove_var("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+
+        std::env::remove_var("DISABLE_PROMPT_CACHING_HAIKU");
+    }
+
+    // The model-specific SONNET gate (claude.ts:344-347).
+    #[test]
+    fn sonnet_gate_disables_only_matching_model() {
+        let _g = ENV_LOCK.lock().unwrap();
+        for v in [
+            "DISABLE_PROMPT_CACHING",
+            "DISABLE_PROMPT_CACHING_SONNET",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        ] {
+            std::env::remove_var(v);
+        }
+        let sonnet = super::DEFAULT_SONNET_MODEL_FIRST_PARTY; // "claude-sonnet-4-6"
+
+        assert!(prompt_caching_enabled(sonnet));
+
+        std::env::set_var("DISABLE_PROMPT_CACHING_SONNET", "yes");
+        assert!(!prompt_caching_enabled(sonnet));
+        assert!(prompt_caching_enabled("claude-opus-4-6"));
+        // The 3P-shaped Sonnet id is NOT the firstParty literal → still enabled
+        // (documented firstParty-only divergence).
+        assert!(prompt_caching_enabled("claude-sonnet-4-5-20250929"));
+
+        std::env::set_var("ANTHROPIC_DEFAULT_SONNET_MODEL", "sonnet-custom");
+        assert!(prompt_caching_enabled(sonnet));
+        assert!(!prompt_caching_enabled("sonnet-custom"));
+        std::env::remove_var("ANTHROPIC_DEFAULT_SONNET_MODEL");
+
+        std::env::remove_var("DISABLE_PROMPT_CACHING_SONNET");
+    }
+
+    // The model-specific OPUS gate (claude.ts:350-353).
+    #[test]
+    fn opus_gate_disables_only_matching_model() {
+        let _g = ENV_LOCK.lock().unwrap();
+        for v in [
+            "DISABLE_PROMPT_CACHING",
+            "DISABLE_PROMPT_CACHING_OPUS",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        ] {
+            std::env::remove_var(v);
+        }
+        let opus = super::DEFAULT_OPUS_MODEL_FIRST_PARTY; // "claude-opus-4-6"
+
+        assert!(prompt_caching_enabled(opus));
+
+        std::env::set_var("DISABLE_PROMPT_CACHING_OPUS", "on");
+        assert!(!prompt_caching_enabled(opus));
+        assert!(prompt_caching_enabled("claude-haiku-4-5-20251001"));
+
+        std::env::set_var("ANTHROPIC_DEFAULT_OPUS_MODEL", "opus-custom");
+        assert!(prompt_caching_enabled(opus));
+        assert!(!prompt_caching_enabled("opus-custom"));
+        std::env::remove_var("ANTHROPIC_DEFAULT_OPUS_MODEL");
+
+        std::env::remove_var("DISABLE_PROMPT_CACHING_OPUS");
     }
 }

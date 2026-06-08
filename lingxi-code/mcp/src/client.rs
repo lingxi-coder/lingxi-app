@@ -180,7 +180,7 @@ impl McpClient {
     /// Emits a JSON-RPC payload whose bytes contain:
     ///   * `"method":"initialize"`
     ///   * `"clientInfo":{"name":"claude-code", ...}`
-    ///   * `"protocolVersion":"2024-11-05"`
+    ///   * `"protocolVersion":"2025-11-25"`
     ///   * `"capabilities":{"roots":{},"elicitation":{}}`
     ///
     /// On success, the parsed [`ServerCapabilitiesDto`] is both returned

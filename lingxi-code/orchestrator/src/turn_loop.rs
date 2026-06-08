@@ -458,15 +458,24 @@ pub(crate) async fn execute_one_turn_with_recovery_tracked(
             // model processes them on the next API call. `injected_messages` is
             // empty for every existing tool, so this loop is a strict no-op and
             // the locked turn-loop parity fixtures stay byte-identical.
-            for m in &injected_messages {
+            //
+            // Also record each injected message's id → originating tool_use_id
+            // into the in-memory `injected_message_sources` side-table (faithful
+            // port of TS `sourceToolUseID`; `#[serde(skip)]` so it never reaches
+            // the JSONL wire). No-op when `injected_messages` is empty.
+            for (m, tool_use_id) in &injected_messages {
                 s.history.push(m.clone());
+                s.injected_message_sources.insert(m.id(), *tool_use_id);
             }
         }
         // M5-07 T13: persist the tool_result user message. Best-effort.
         orch.persist_message_to_jsonl(&tool_results_msg).await;
         // Persist the injected skill messages too (best-effort), mirroring the
-        // tool_result persist above. No-op when empty.
-        for m in &injected_messages {
+        // tool_result persist above. No-op when empty. NOTE: the originating
+        // tool_use_id is deliberately NOT persisted — TS does not write
+        // `sourceToolUseID` to the transcript, so the JSONL bytes stay
+        // byte-identical to before this change.
+        for (m, _tool_use_id) in &injected_messages {
             orch.persist_message_to_jsonl(m).await;
         }
         // SKILLEXEC.3 (model scope): fold this batch's `context_modifier`s and
@@ -972,7 +981,7 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     (
         Vec<ContentBlock>,
         bool,
-        Vec<ConversationMessage>,
+        Vec<(ConversationMessage, ToolUseId)>,
         Vec<ContextModifier>,
     ),
     OrchestratorError,
@@ -985,7 +994,15 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     // expanded skill prompt). Accumulated in tool-dispatch order and returned to
     // the caller, which appends them to history right after this batch's
     // tool_result user message. Empty for every existing tool → no-op.
-    let mut injected_messages: Vec<ConversationMessage> = Vec::new();
+    //
+    // Each injected message is paired with the `tool_use_id` of the tool that
+    // injected it — the faithful port of TS `tagMessagesWithToolUseID`
+    // (`tools/utils.ts:12-25`), which stamps every injected `UserMessage` with
+    // the Skill tool's OWN `tool_use` block id (`sourceToolUseID`). The caller
+    // records the pair into `SessionState::injected_message_sources` (an
+    // in-memory side-table, never serialized to JSONL) when it appends the
+    // message to history.
+    let mut injected_messages: Vec<(ConversationMessage, ToolUseId)> = Vec::new();
     // SKILLEXEC.3 (model scope): one-shot `context_modifier`s a tool returns
     // (TS `ToolResult.contextModifier`, e.g. the Skill tool's `model:` override).
     // Collected in tool-dispatch order and folded POST-BATCH by the caller over a
@@ -1196,8 +1213,13 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                 // messages so the caller can append them after this batch's
                 // tool_result user message. Non-empty only for the Skill tool
                 // (the expanded skill prompt); empty for every other tool, so
-                // the locked turn-loop fixtures stay byte-identical.
-                injected_messages.extend(result.new_messages);
+                // the locked turn-loop fixtures stay byte-identical. Each is
+                // paired with THIS tool's `tool_use_id` (TS
+                // `tagMessagesWithToolUseID` stamps the Skill tool's own block
+                // id as `sourceToolUseID`) for the caller's in-memory
+                // `injected_message_sources` side-table.
+                injected_messages
+                    .extend(result.new_messages.into_iter().map(|m| (m, *tool_use_id)));
                 // SKILLEXEC.3 (model scope): stash any one-shot `context_modifier`
                 // for the caller to fold POST-BATCH. NOT applied to the per-tool
                 // `ctx` here (which is discarded at loop end) and NOT applied
@@ -2581,22 +2603,119 @@ mod pre_tool_hook_tests {
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
         );
-        let uses = vec![(ToolUseId::new(), "Inject".to_string(), json!({}))];
+        let skill_tu = ToolUseId::new();
+        let uses = vec![(skill_tu, "Inject".to_string(), json!({}))];
         let (results, _prevent, injected, _mods) =
             dispatch_tool_uses_tracked(&orch, &uses).await.unwrap();
         // The tool_result block still rides the first tuple element.
         let (content, is_error) = tool_result(&results[0]);
         assert!(!is_error);
         assert_eq!(content, "Launching skill: demo");
-        // The injected message is surfaced for the caller to append.
+        // The injected message is surfaced for the caller to append, PAIRED
+        // with the injecting tool's `tool_use_id` (TS `sourceToolUseID`).
         assert_eq!(injected.len(), 1);
-        match &injected[0] {
+        let (injected_msg, injected_tu) = &injected[0];
+        assert_eq!(
+            *injected_tu, skill_tu,
+            "injected message is tagged with the injecting tool's tool_use_id"
+        );
+        match injected_msg {
             ConversationMessage::User { content, .. } => match content.first() {
                 Some(ContentBlock::Text { text }) => assert_eq!(text, "EXPANDED-SKILL-PROMPT"),
                 other => panic!("expected leading Text block, got {other:?}"),
             },
             other => panic!("expected injected User message, got {other:?}"),
         }
+    }
+
+    /// SOURCE-TOOL-USE-ID parity: after a skill-style tool injects `new_messages`
+    /// through a full turn step, `SessionState::injected_message_sources` maps
+    /// each injected message's id → the injecting tool's `tool_use_id` (faithful
+    /// port of TS `tagMessagesWithToolUseID` stamping `sourceToolUseID`).
+    #[tokio::test]
+    async fn injected_message_sources_records_tool_use_id() {
+        let tu = ToolUseId::new();
+        let api_resp = mock_message_response(
+            vec![api_client::types::ContentBlockApi::ToolUse {
+                id: tu,
+                name: "Inject".into(),
+                input: json!({}),
+            }],
+            Some("tool_use"),
+        );
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(InjectingTool) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![api_resp])),
+            Arc::new(registry),
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let _ = execute_one_turn(&orch, None).await.expect("turn step");
+        let s = orch.session.lock().await;
+        // Find the injected expanded-skill-prompt message in history.
+        let injected = s
+            .history
+            .iter()
+            .find(|m| {
+                matches!(m, ConversationMessage::User { content, .. }
+                    if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "EXPANDED-SKILL-PROMPT")))
+            })
+            .expect("injected skill-prompt message present in history");
+        assert_eq!(
+            s.injected_message_sources.get(&injected.id()),
+            Some(&tu),
+            "injected message id maps to the Skill tool's tool_use_id"
+        );
+        assert_eq!(
+            s.injected_message_sources.len(),
+            1,
+            "exactly one association recorded for one injected message"
+        );
+    }
+
+    /// SOURCE-TOOL-USE-ID parity (negative): a normal tool that injects NO
+    /// `new_messages` (e.g. `Echo`) records NOTHING in the side-table, and the
+    /// in-memory association is `#[serde(skip)]` so the JSONL transcript bytes
+    /// are unchanged (no `sourceToolUseID` ever written, matching TS).
+    #[tokio::test]
+    async fn normal_tool_records_no_source_and_serializes_no_field() {
+        let tu = ToolUseId::new();
+        let api_resp = mock_message_response(
+            vec![api_client::types::ContentBlockApi::ToolUse {
+                id: tu,
+                name: "Echo".into(),
+                input: json!({}),
+            }],
+            Some("tool_use"),
+        );
+        let orch = orch_with(
+            pre_hook_executor(HookResponse::default()),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            vec![api_resp],
+        );
+        let _ = execute_one_turn(&orch, None).await.expect("turn step");
+        let s = orch.session.lock().await;
+        assert!(
+            s.injected_message_sources.is_empty(),
+            "a tool with no injected messages records no source associations"
+        );
+        // The side-table is `#[serde(skip)]`: serializing the session never
+        // emits a `sourceToolUseID`/`injected_message_sources` key, so the
+        // persisted JSONL bytes stay byte-identical to before this change.
+        let json = serde_json::to_string(&*s).expect("serialize session");
+        assert!(
+            !json.contains("injected_message_sources"),
+            "side-table must not serialize: {json}"
+        );
+        assert!(
+            !json.contains("sourceToolUseID"),
+            "sourceToolUseID must never reach the wire: {json}"
+        );
     }
 
     /// End-to-end through `execute_one_turn`: the injected message lands in

@@ -1,8 +1,9 @@
 //! Session state model. Persistence lives in `lingxi-session` (Plan 10).
 
 use crate::token::Usage;
-use protocol::{ConversationMessage, SessionId};
+use protocol::{ConversationMessage, MessageId, SessionId, ToolUseId};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Running total of `Usage` across all turns in a session.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -75,6 +76,19 @@ pub struct SessionState {
     /// `ExitPlanModeTool`. Defaults to `false` on deserialize.
     #[serde(default)]
     pub plan_mode: bool,
+    /// In-memory association of each tool-injected conversation message
+    /// (`MessageId`) to the `tool_use_id` of the tool that injected it
+    /// (the Skill tool's OWN `tool_use` block id). Faithful port of TS
+    /// `tagMessagesWithToolUseID` (`tools/utils.ts:12-25`), which stamps each
+    /// injected `UserMessage` with `sourceToolUseID`. TS treats this as an
+    /// UNTYPED extra prop that is NEVER serialized to the JSONL transcript —
+    /// the sole reader is `getToolUseID` (`utils/messages.ts:2765-2793`) for
+    /// TUI grouping. Mirroring that, this is a side-table marked
+    /// `#[serde(skip)]` so it stays purely in-memory and never reaches the
+    /// wire (JSONL bytes stay byte-identical). No Rust consumer reads it yet
+    /// (the TUI grouping is not ported).
+    #[serde(skip)]
+    pub injected_message_sources: HashMap<MessageId, ToolUseId>,
 }
 
 impl SessionState {
@@ -88,6 +102,7 @@ impl SessionState {
             model,
             todos: Vec::new(),
             plan_mode: false,
+            injected_message_sources: HashMap::new(),
         }
     }
 }

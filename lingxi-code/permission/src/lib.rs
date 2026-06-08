@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auto_edit_safety;
+pub mod bash_security;
 pub mod classifier;
 pub mod dangerous_patterns;
 pub mod dangerous_perms;
@@ -37,6 +38,7 @@ pub use auto_edit_safety::{
     is_dangerous_file_path_to_auto_edit, normalize_case_for_comparison, AutoEditSafety,
     DANGEROUS_DIRECTORIES, DANGEROUS_FILES,
 };
+pub use bash_security::{bash_command_is_safe, BashSafetyVerdict};
 pub use classifier::is_classifier_permissions_enabled;
 pub use dangerous_patterns::{
     dangerous_bash_patterns, CROSS_PLATFORM_CODE_EXEC, POWERSHELL_DANGEROUS_PATTERNS,

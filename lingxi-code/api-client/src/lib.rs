@@ -33,4 +33,4 @@ pub use oauth_hook::{
     register_oauth_hook, BearerToken, MiddlewareError, NoOpOAuthHook, OAuthHookError,
     OAuthRefreshHook, TokenHash,
 };
-pub use types::{ContentDelta, MessageRequest, MessageResponse, StreamEvent};
+pub use types::{ContentDelta, MessageRequest, MessageResponse, StreamEvent, ThinkingApi};

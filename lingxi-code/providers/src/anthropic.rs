@@ -7,7 +7,7 @@
 use crate::capabilities::Capabilities;
 use crate::provider::LlmProvider;
 use crate::request::CanonicalRequest;
-use api_client::types::{MessageResponse, StreamEvent};
+use api_client::types::{MessageResponse, StreamEvent, ThinkingApi};
 use api_client::{AnthropicProvider, ApiError};
 use async_trait::async_trait;
 use cost::ProviderId;
@@ -45,19 +45,26 @@ impl<T: HttpTransport + Send + Sync + 'static> LlmProvider for AnthropicLlmProvi
     }
 
     async fn complete(&self, req: CanonicalRequest) -> Result<MessageResponse, ApiError> {
-        // Forward the full request options via the opts entrypoint: it threads
-        // `req.tools` / `req.max_tokens` / `req.temperature` onto the wire (the
-        // `tools` body key only appears when the list is non-empty, matching
-        // the `MessageRequest` serde rules). This is what stops the non-stream
-        // path from dropping these once `CanonicalRequest.tools` is populated.
+        // Forward the full request options via the thinking-aware entrypoint: it
+        // threads `req.tools` / `req.max_tokens` / `req.temperature` onto the
+        // wire (the `tools` body key only appears when the list is non-empty,
+        // matching the `MessageRequest` serde rules) and, when
+        // `req.thinking_budget` is set, stamps the Anthropic extended-thinking
+        // block (claude-code `claude.ts:1599-1630`). When the budget is `None`
+        // the request is byte-identical to the thinking-free path.
+        let thinking = anthropic_thinking(&req);
         self.inner
-            .messages_create_non_stream_with_opts(
+            .messages_create_non_stream_with_thinking(
                 &req.model,
                 req.system.as_deref(),
                 req.messages,
                 req.max_tokens,
                 req.tools,
                 req.temperature,
+                thinking,
+                None,
+                false,
+                false,
                 self.transport.as_ref(),
             )
             .await
@@ -67,16 +74,33 @@ impl<T: HttpTransport + Send + Sync + 'static> LlmProvider for AnthropicLlmProvi
         &self,
         req: CanonicalRequest,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ApiError>>, ApiError> {
+        // Streaming is the agentic path; thread the real `max_tokens` /
+        // `temperature` / extended-thinking block (claude-code uses
+        // `messages.stream` with the `thinking` field). `None` thinking keeps
+        // the wire byte-identical to the prior 4096/no-temperature default.
+        let thinking = anthropic_thinking(&req);
         self.inner
-            .messages_create_stream(
+            .messages_create_stream_with_opts(
                 &req.model,
                 req.system.as_deref(),
                 req.messages,
                 req.tools,
+                req.max_tokens,
+                req.temperature,
+                thinking,
                 self.transport.clone(),
             )
             .await
     }
+}
+
+/// Translate a [`CanonicalRequest`]'s thinking budget into the Anthropic
+/// extended-thinking block. `thinking_budget: Some(N)` → an *enabled* block with
+/// `budget_tokens: N` (the api-client builder clamps it to `max_tokens - 1`,
+/// `claude.ts:1624`); `None` → no thinking block, keeping the request
+/// byte-identical to the historical thinking-free wire body.
+fn anthropic_thinking(req: &CanonicalRequest) -> Option<ThinkingApi> {
+    req.thinking_budget.map(|budget_tokens| ThinkingApi::Enabled { budget_tokens })
 }
 
 #[cfg(test)]

@@ -147,7 +147,13 @@ pub fn split_command(command: &str) -> Vec<String> {
 /// relative to claude-code's quote-aware/heredoc extractor (that machinery is
 /// part of the deferred path-constraint check); only affects whether an ALLOW
 /// rule matches, never a deny.
-fn strip_output_redirections(cmd: &str) -> String {
+///
+/// Also reused by the 2c bash-safety layer ([`crate::policy`]) to feed each
+/// subcommand to the injection validators with its redirect already stripped —
+/// matching claude-code, where `splitCommand` yields redirect-stripped
+/// subcommands before `bashCommandIsSafe` runs and `checkPathConstraints`
+/// validates the redirect target separately.
+pub(crate) fn strip_output_redirections(cmd: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
         // `N>&M`, `N>>`/`N>` followed by an optional target token, `&>`/`&>>`.
@@ -349,6 +355,45 @@ pub fn command_fully_allowed(allow_contents: &[&str], command: &str) -> bool {
             cands
                 .iter()
                 .any(|cand| rule_matches_candidate(rule, cand, true))
+        })
+    })
+}
+
+/// EXACT-mode ALLOW match: does the FULL trimmed command (NOT split into
+/// subcommands) exactly match one of `allow_contents`? Faithful to claude-code
+/// `bashToolCheckExactMatchPermission` → `matchingRulesForInput(..., 'exact')` →
+/// `filterRulesByContentsMatchingInput(..., 'exact')` for the ALLOW bucket
+/// (bashPermissions.ts:870-934, the `matchMode === 'exact'` arm):
+///
+/// - an `exact`-type rule matches iff `rule.command === candidate`;
+/// - a `prefix`-type rule (`Bash(foo:*)`) matches iff `rule.prefix === candidate`
+///   (the full command equals the bare prefix, no trailing args — the
+///   `case 'exact': return bashRule.prefix === cmdToMatch` arm);
+/// - a `wildcard`-type rule NEVER matches in exact mode (the documented
+///   "SECURITY FIX: In exact match mode, wildcards must NOT match" arm).
+///
+/// The candidate set is the whole command + redirection-stripped + safe-wrapper
+/// fixed-point (`candidates(command, false)`), i.e. the same `commandsForMatching`
+/// / `commandsToTry` construction TS uses in exact mode WITHOUT `stripAllEnvVars`
+/// (allow rules never strip arbitrary env prefixes). No subcommand split and no
+/// compound guard — exact mode matches the unparsed command string.
+#[must_use]
+pub fn command_exact_allowed(allow_contents: &[&str], command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let cands = candidates(trimmed, false);
+    allow_contents.iter().any(|content| {
+        let rule = parse_shell_rule(content);
+        cands.iter().any(|cand| match &rule {
+            // Exact rule: full-string equality (TS `bashRule.command === cmdToMatch`).
+            ShellRule::Exact(s) => cand == s,
+            // Prefix rule in exact mode: only the bare prefix with no args
+            // (TS `bashRule.prefix === cmdToMatch`).
+            ShellRule::Prefix(prefix) => cand == prefix,
+            // Wildcard never matches in exact mode (TS returns false).
+            ShellRule::Wildcard(_) => false,
         })
     })
 }

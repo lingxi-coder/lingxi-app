@@ -245,6 +245,12 @@ impl PermissionPolicy {
     /// Rule + mode evaluation producing the pre-`DontAsk`-transform result.
     /// See [`Self::authorize`] for the public contract and the evaluation order;
     /// [`Self::authorize`] wraps this with the `DontAsk` ask→deny transform.
+    // This is the central precedence dispatcher; it grows by one short branch
+    // per faithfully-ported claude-code gate layer (the 2c bash-safety branch
+    // tipped it one line past the pedantic 100-line cap). Each layer is already
+    // a thin call into a dedicated helper; further splitting the ordered walk
+    // would obscure the 1:1 TS precedence it documents.
+    #[allow(clippy::too_many_lines)]
     fn authorize_inner(&self, tool_name: &str, input: &serde_json::Value) -> PermissionResult {
         let sources = SOURCES_BY_PRIORITY;
 
@@ -329,6 +335,60 @@ impl PermissionPolicy {
                     }
                 }
             }
+        }
+        // 2c. BASH COMMAND-INJECTION SAFETY (claude-code `bashCommandIsSafe`,
+        //     `bashSecurity.ts`'s legacy `bashCommandIsSafe_DEPRECATED` battery,
+        //     wired at `bashPermissions.ts:1217-1239` inside
+        //     `checkCommandAndSuggestRules`). In the external build tree-sitter is
+        //     OFF, so `astParseSucceeded` is false and this validator chain ALWAYS
+        //     runs. It scans the full command with ~23 validators (substitution,
+        //     IFS injection, ANSI-C/locale quoting, backtick/`$()`, CR/newline,
+        //     unicode whitespace, brace expansion, zsh `zmodload`,
+        //     comment-quote-desync, …) and ASKS on the FIRST detection.
+        //
+        //     PRECEDENCE (1:1 with TS `checkCommandAndSuggestRules`): explicit
+        //     DENY and ASK rules already short-circuited above (TS step 2a). The
+        //     safety check runs BEFORE the allow walk below (TS step 4) — so an
+        //     explicit ALLOW rule does NOT override a safety-ask (TS runs
+        //     `bashCommandIsSafe` at step 3, ahead of the allow return at step 4).
+        //     Placed AFTER the sandbox-auto-allow (1d) and the dangerous-removal /
+        //     path-constraint guards (2/2b) — a sandbox-auto-allowed command never
+        //     reaches the per-subcommand safety inner in TS.
+        //
+        //     The check is shell-tool only. Tagged
+        //     [`PermissionDecisionReason::SafetyCheck`] (TS `type: 'other'`
+        //     carrying the validator message; `classifier_approvable` true since
+        //     the TS flow attaches a pending classifier check). SAFETY: this can
+        //     only make the gate STRICTER (more asks); it never downgrades a deny
+        //     and never touches non-shell tools. PER-SUBCOMMAND (1:1 with TS):
+        //     the split + redirect-strip + battery lives in
+        //     [`Self::shell_bash_safety_ask`].
+        //
+        // 2c-exact. EXACT-MATCH ALLOW SHORT-CIRCUIT (claude-code
+        //     `bashToolCheckExactMatchPermission`, wired as step 1 of
+        //     `checkCommandAndSuggestRules`, `bashPermissions.ts:1190-1197`). An
+        //     EXACT allow rule — the WHOLE trimmed command equals the rule content
+        //     (an `Bash(cmd)` rule, or a `Bash(prefix:*)` rule whose bare prefix
+        //     equals the full command) — short-circuits to ALLOW at the very top
+        //     of the TS flow, BEFORE the command-injection safety battery (TS step
+        //     3). So a command the user EXPLICITLY allowed 1:1 is allowed without a
+        //     safety re-ask. This is the EXACT case ONLY: a PREFIX allow rule does
+        //     NOT bypass safety (TS returns the prefix-allow at step 4, AFTER the
+        //     step-3 safety check), so the 2c safety layer below stays AHEAD of the
+        //     `shell_allow` prefix/aggregation walk. Deny/ask (exact or prefix) and
+        //     the dangerous-removal / path-constraint guards already short-circuited
+        //     above, matching TS where exact-deny/ask (step 1 of
+        //     `bashToolCheckExactMatchPermission`) precede the exact-allow return.
+        //     Shell-tool + roots-gated, consistent with the rest of the shell
+        //     content matching. Reuses [`shell_command::command_exact_allowed`]
+        //     (the `matchMode: 'exact'` arm of `filterRulesByContentsMatchingInput`).
+        if self.roots.is_some() && shell_command::is_shell_tool(tool_name) {
+            if let Some(rule) = self.shell_exact_allow(tool_name, input, &sources) {
+                return allow_with_rule(rule);
+            }
+        }
+        if let Some(ask) = Self::shell_bash_safety_ask(tool_name, input) {
+            return ask;
         }
         // 3. Allow. Shell tools need compound aggregation (a single allow rule
         //    matching ONE subcommand must not allow a whole compound command),
@@ -669,6 +729,40 @@ impl PermissionPolicy {
         None
     }
 
+    /// EXACT-match allow decision for a shell tool (claude-code
+    /// `bashToolCheckExactMatchPermission`, the ALLOW arm). Returns the
+    /// highest-priority CONTENT allow rule whose content EXACTLY matches the full
+    /// trimmed command — an `Bash(cmd)` exact rule, or a `Bash(prefix:*)` rule
+    /// whose bare prefix equals the whole command. Tool-wide allow rules
+    /// (`rule_content == None`) are NOT exact matches (TS exact mode matches rule
+    /// CONTENT against the command string), so they are skipped here and handled
+    /// by the later [`Self::shell_allow`] walk. The match itself lives in
+    /// [`shell_command::command_exact_allowed`] (the `matchMode: 'exact'` arm).
+    /// Used only for the safety-bypass short-circuit; the reason is the matched
+    /// content rule (TS `decisionReason: { type: 'rule', rule }`).
+    fn shell_exact_allow(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        sources: &[PermissionRuleSource],
+    ) -> Option<&PermissionRule> {
+        let command = shell_command::command_from_input(input)?;
+        for src in sources {
+            if let Some(rules) = self.allow_rules.get(src) {
+                if let Some(rule) = rules.iter().find(|r| {
+                    r.value.tool_name == tool_name
+                        && r.value
+                            .rule_content
+                            .as_deref()
+                            .is_some_and(|c| shell_command::command_exact_allowed(&[c], command))
+                }) {
+                    return Some(rule);
+                }
+            }
+        }
+        None
+    }
+
     /// Allow decision for a shell tool, with compound-command aggregation.
     ///
     /// 1. A TOOL-WIDE allow rule (`Bash` with no content) allows every command.
@@ -830,6 +924,35 @@ impl PermissionPolicy {
         let roots = self.roots.as_ref()?;
         let command = shell_command::command_from_input(input)?;
         self.sed_constraint_ask(command, roots)
+    }
+
+    /// Shell-only bash command-injection safety ASK (the 2c layer). Splits the
+    /// command into subcommands ([`crate::shell_command::split_command`], the
+    /// claude-code `splitCommand` analogue), strips each subcommand's output
+    /// redirection (matching TS, where `splitCommand` yields redirect-stripped
+    /// subcommands and `checkPathConstraints` validates the redirect target
+    /// separately — our 2b guard), and runs the
+    /// [`crate::bash_security::bash_command_is_safe`] battery on each. Returns the
+    /// FIRST subcommand's ask (1:1 with the per-subcommand
+    /// `checkCommandAndSuggestRules` short-circuit), or `None` for a non-shell
+    /// tool / no command / every subcommand safe.
+    fn shell_bash_safety_ask(
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> Option<PermissionResult> {
+        if !shell_command::is_shell_tool(tool_name) {
+            return None;
+        }
+        let command = shell_command::command_from_input(input)?;
+        for sub in shell_command::split_command(command) {
+            let stripped = shell_command::strip_output_redirections(&sub);
+            if let crate::bash_security::BashSafetyVerdict::Ask { message } =
+                crate::bash_security::bash_command_is_safe(&stripped)
+            {
+                return Some(ask_bash_safety(tool_name, message));
+            }
+        }
+        None
     }
 
     /// Shell-only read-only inference (the 3c layer). `true` iff this is a shell
@@ -1100,6 +1223,32 @@ fn ask_path_constraint(
         prompt: PermissionPrompt {
             title: format!("Allow {tool_name}?"),
             message: ask.message,
+            options: vec!["Allow once".into(), "Deny".into()],
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+/// Bash command-injection safety ask: a shell command whose
+/// [`crate::bash_security::bash_command_is_safe`] battery returned a detection
+/// (claude-code `bashCommandIsSafe` → `checkCommandAndSuggestRules` step 3
+/// returning `behavior: 'ask'`, `bashPermissions.ts:1223-1237`). Tagged
+/// [`PermissionDecisionReason::SafetyCheck`] carrying the byte-faithful validator
+/// `message`. `classifier_approvable` is `true`: the TS flow attaches a pending
+/// `BASH_CLASSIFIER` check that may auto-approve before the user responds (the
+/// classifier itself is unwired here, so this is a hint for a later batch). No
+/// rule-saving suggestion (TS: "Don't suggest saving a potentially dangerous
+/// command", `:1236`).
+fn ask_bash_safety(tool_name: &str, message: String) -> PermissionResult {
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::SafetyCheck {
+            reason: message.clone(),
+            classifier_approvable: true,
+        },
+        prompt: PermissionPrompt {
+            title: format!("Allow {tool_name}?"),
+            message,
             options: vec!["Allow once".into(), "Deny".into()],
         },
         pending_classifier_check: None,
@@ -2972,6 +3121,170 @@ mod tests {
         assert!(matches!(
             p.authorize("Bash", &bash("HTTPS_PROXY=x secret-tool dump")),
             PermissionResult::Deny { .. }
+        ));
+    }
+
+    // ── 2c: bash command-injection safety chain wiring ──────────────────
+
+    /// A dangerous shell command (backtick substitution) with no matching rule
+    /// ASKS via the safety chain, tagged `SafetyCheck`.
+    #[test]
+    fn bash_safety_dangerous_command_asks_via_safety_check() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let r = p.authorize("Bash", &bash("echo `whoami`"));
+        match r {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { reason, .. },
+                ..
+            } => assert!(reason.contains("backticks"), "reason was: {reason}"),
+            other => panic!("expected SafetyCheck ask, got {other:?}"),
+        }
+    }
+
+    /// IFS injection (a different validator) also asks via the safety chain.
+    #[test]
+    fn bash_safety_ifs_injection_asks() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("cat${IFS}/etc/passwd")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { .. },
+                ..
+            }
+        ));
+    }
+
+    /// An explicit DENY rule still wins over the safety chain (deny walk runs
+    /// first) — the safety check must NOT downgrade a deny.
+    #[test]
+    fn bash_safety_explicit_deny_still_denies_dangerous_command() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(curl:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        // `curl \`whoami\`` trips the backtick validator AND the deny rule; deny wins.
+        assert!(matches!(
+            p.authorize("Bash", &bash("curl `whoami`")),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    /// A PREFIX allow rule does NOT override the safety-ask (TS runs
+    /// `bashCommandIsSafe` at step 3 of `checkCommandAndSuggestRules`, BEFORE the
+    /// prefix-allow grant at step 4). Only an EXACT allow rule bypasses safety
+    /// (TS step 1, `bashToolCheckExactMatchPermission`) — see
+    /// `bash_safety_exact_allow_rule_bypasses_safety_ask` for that case.
+    #[test]
+    fn bash_safety_prefix_allow_rule_does_not_override_safety_ask() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(echo:*)"] } }"#,
+            PermissionMode::Default,
+        );
+        // `echo \`whoami\`` is covered by the PREFIX rule Bash(echo:*), but the
+        // command does NOT exactly equal the bare prefix `echo`, so the exact-allow
+        // short-circuit does not fire and the backtick subst asks via safety.
+        match p.authorize("Bash", &bash("echo `whoami`")) {
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { .. },
+                ..
+            } => {}
+            other => panic!("expected SafetyCheck ask despite prefix allow rule, got {other:?}"),
+        }
+    }
+
+    /// An EXACT allow rule (the full command == the rule content) BYPASSES the
+    /// safety-ask: a command the user explicitly allowed 1:1 is allowed without a
+    /// safety re-ask (TS `bashToolCheckExactMatchPermission` short-circuits at the
+    /// very top of `checkCommandAndSuggestRules`, BEFORE the step-3 safety check).
+    #[test]
+    fn bash_safety_exact_allow_rule_bypasses_safety_ask() {
+        // The dangerous command trips the `$()` substitution validator, yet an
+        // EXACT allow rule for that exact command must allow it (not SafetyCheck).
+        let p = policy_with_roots(
+            r#"{ "permissions": { "allow": ["Bash(eval \"echo $(whoami)\")"] } }"#,
+            PermissionMode::Default,
+        );
+        // Sanity: with NO rule the same command asks via the safety chain.
+        assert!(matches!(
+            policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default)
+                .authorize("Bash", &bash(r#"eval "echo $(whoami)""#)),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { .. },
+                ..
+            }
+        ));
+        // With the exact allow rule it is ALLOWED via the matched rule, bypassing
+        // the safety check.
+        match p.authorize("Bash", &bash(r#"eval "echo $(whoami)""#)) {
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::MatchedRule { .. },
+                ..
+            } => {}
+            other => panic!("expected exact-allow to bypass safety, got {other:?}"),
+        }
+    }
+
+    /// An EXACT DENY rule still wins over an exact-allow command shape: the exact
+    /// short-circuit is ALLOW-only and runs AFTER the deny walk, so an explicit
+    /// deny of a dangerous command is unaffected by the new bypass.
+    #[test]
+    fn bash_safety_exact_allow_short_circuit_does_not_override_deny() {
+        let p = policy_with_roots(
+            r#"{ "permissions": { "deny": ["Bash(eval \"echo $(whoami)\")"] } }"#,
+            PermissionMode::Default,
+        );
+        assert!(matches!(
+            p.authorize("Bash", &bash(r#"eval "echo $(whoami)""#)),
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    /// A benign read-only command is unaffected by the safety chain (it passes
+    /// every validator and is auto-allowed by the read-only layer below).
+    #[test]
+    fn bash_safety_benign_command_unaffected() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        // `pwd` passes every safety validator and is read-only → auto-allowed by
+        // the 3c read-only layer (the safety chain must NOT have intercepted it).
+        assert!(matches!(
+            p.authorize("Bash", &bash("pwd")),
+            PermissionResult::Allow { .. }
+        ));
+        // A benign command with NO matching rule that is read-only also allows.
+        assert!(matches!(
+            p.authorize("Bash", &bash("ls")),
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    /// The safety chain is shell-tool only: a non-shell tool whose input happens
+    /// to contain backtick-like text is NOT affected.
+    #[test]
+    fn bash_safety_does_not_affect_non_shell_tools() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        // Edit with a backtick in the path still falls through to the normal
+        // editor flow (Default mode → ask, NOT a SafetyCheck ask). Allow/Deny
+        // are also fine — the point is it must not be a SafetyCheck ask.
+        if let PermissionResult::Ask { reason, .. } =
+            p.authorize("Edit", &edit("/proj/`whoami`.rs"))
+        {
+            assert!(
+                !matches!(reason, PermissionDecisionReason::SafetyCheck { .. }),
+                "non-shell tool must not get a SafetyCheck ask"
+            );
+        }
+    }
+
+    /// A zsh dangerous command (`zmodload`) asks even when wrapped in env/prefix.
+    #[test]
+    fn bash_safety_zsh_zmodload_asks() {
+        let p = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        assert!(matches!(
+            p.authorize("Bash", &bash("zmodload zsh/system")),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { .. },
+                ..
+            }
         ));
     }
 }

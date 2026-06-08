@@ -1970,6 +1970,7 @@ mod read_file_state_tests {
                 mtime_ms: 42,
                 offset: Some(2),
                 limit: Some(1),
+                from_read: true,
             },
         );
         let entry =

@@ -309,22 +309,42 @@ impl Tool for FileWriteTool {
                 mtime_ms: new_mtime_ms,
                 offset: None,
                 limit: None,
+                // A post-write entry is NOT a Read — the Read-dedup gate must
+                // skip it (TS stores `offset: undefined` here; we flag it).
+                from_read: false,
             },
         );
 
         // Model-facing result string is byte-faithful to claude-code
         // (`FileWriteTool.ts:418-433`); it echoes the ORIGINAL `file_path` arg,
         // not the canonicalized path. Batch A's serialization rule emits
-        // `data["content"]` verbatim to the model; `bytes_written` / `type`
-        // remain for the TUI.
+        // `data["content"]` verbatim to the model; `bytes_written` / `type` /
+        // `patch_preview` remain for the TUI.
         let content_message = write_result_message(file_path, is_create);
         let type_str = if is_create { "create" } else { "update" };
+
+        // Pre-write content tracking → diff preview (`FileWriteTool.ts:359-376`):
+        // an `update` (pre-existing non-empty file, `if (oldContent)`) emits a
+        // structured patch of the prior content → the new content
+        // (`getPatchForDisplay({ fileContents: oldContent, … })`). A `create`
+        // emits the empty patch (TS `structuredPatch: []`). The prior content
+        // was captured before the write as `prior_decoded`; we reuse it here so
+        // the TUI can render the diff. Like Edit's `patch_preview`, this is a
+        // TUI-only field (the model sees only `content`); we use the same flat
+        // `+`/`-`/` ` preview builder for a uniform Rust patch representation.
+        let patch_preview = if is_create {
+            String::new()
+        } else {
+            let prior = prior_decoded.as_deref().unwrap_or("");
+            crate::edit::FileEditTool::build_patch_preview(prior, content)
+        };
 
         Ok(ToolCallResult {
             data: json!({
                 "content": content_message,
                 "bytes_written": bytes_written,
                 "type": type_str,
+                "patch_preview": patch_preview,
             }),
             new_messages: vec![],
             context_modifier: None,
@@ -376,6 +396,8 @@ mod tests {
                 mtime_ms,
                 offset: None,
                 limit: None,
+                // Simulates a prior full `Read`.
+                from_read: true,
             },
         );
     }
@@ -439,6 +461,52 @@ mod tests {
         let names: Vec<String> = sink.events().await.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&"tengu_tool_write_started".to_string()));
         assert!(names.contains(&"tengu_tool_write_completed".to_string()));
+    }
+
+    #[tokio::test]
+    async fn create_emits_empty_patch_preview() {
+        // New file → `create` → empty patch (TS `structuredPatch: []`).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("created.txt");
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileWriteTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "content": "hello\nworld\n" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["type"], "create");
+        assert_eq!(result.data["patch_preview"], "");
+    }
+
+    #[tokio::test]
+    async fn update_emits_diff_patch_preview_from_prior_content() {
+        // Pre-existing non-empty file → `update` → patch diffs prior → new.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("upd.txt");
+        std::fs::write(&target, "alpha\nbeta\ngamma\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = FileWriteTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "content": "alpha\nBETA\ngamma\n" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["type"], "update");
+        // The diff preview captures the changed middle line (prior content was
+        // tracked before the write).
+        let preview = result.data["patch_preview"].as_str().unwrap();
+        assert!(preview.contains(" alpha"), "preview: {preview}");
+        assert!(preview.contains("-beta"), "preview: {preview}");
+        assert!(preview.contains("+BETA"), "preview: {preview}");
+        assert!(preview.contains(" gamma"), "preview: {preview}");
     }
 
     #[tokio::test]

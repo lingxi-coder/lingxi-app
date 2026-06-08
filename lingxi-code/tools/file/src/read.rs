@@ -287,6 +287,52 @@ impl Tool for FileReadTool {
             .modified()
             .map(tool_api::read_file_state::mtime_ms_floor)
             .unwrap_or(0);
+
+        // Read dedup (`FileReadTool.ts:536-573`): if this EXACT range was
+        // already read (a prior `Read`, full view, same offset+limit) and the
+        // file's mtime is unchanged on disk, return the byte-locked
+        // `file_unchanged` stub instead of re-sending the content. The earlier
+        // Read tool_result is still in context; two full copies waste
+        // cache_creation tokens on every later turn. Gated on:
+        //   * a recorded entry that came from a `Read` (`from_read`; TS
+        //     `existingState.offset !== undefined`) — never an Edit/Write
+        //     post-write entry, whose content/mtime reflect the post-edit
+        //     state and would misdirect the model;
+        //   * a FULL view (`offset`/`limit` both `None`; TS
+        //     `!existingState.isPartialView`, approximated as in the staleness
+        //     guard);
+        //   * the SAME range (`entry.offset == input_offset &&
+        //     entry.limit == input_limit`; TS `rangeMatch`);
+        //   * unchanged mtime (`mtime_ms == entry.mtime_ms`; TS
+        //     `mtimeMs === existingState.timestamp`).
+        // The GB killswitch (`tengu_read_dedup_killswitch`) is unported — LingXi
+        // has no GrowthBook; dedup is always enabled (3P default = killswitch
+        // off). NOTE: the partial-view (`isPartialView`) flag set by TS's
+        // CLAUDE.md / memory auto-injection has no LingXi analog; the
+        // offset/limit approximation matches for normal `Read`-sourced entries.
+        if let Some(entry) = tool_api::read_file_state::get(&self.ctx.read_file_state, &canon) {
+            let is_full_view = entry.offset.is_none() && entry.limit.is_none();
+            let range_match = entry.offset == input_offset && entry.limit == input_limit;
+            if entry.from_read && is_full_view && range_match && mtime_ms == entry.mtime_ms {
+                // Behaves like the TS early return: the model sees the stub via
+                // `model_content`; the TUI payload `content` mirrors it (there
+                // is no fresh file body to render). `total_lines`/`line_range`
+                // are omitted — this is the `file_unchanged` result variant.
+                self.emit_completed(&invocation_id, 0, started.elapsed().as_millis() as u64)
+                    .await;
+                return Ok(ToolCallResult {
+                    data: json!({
+                        "type": "file_unchanged",
+                        "content": FILE_UNCHANGED_STUB,
+                        "model_content": FILE_UNCHANGED_STUB,
+                    }),
+                    new_messages: vec![],
+                    context_modifier: None,
+                    mcp_meta: None,
+                });
+            }
+        }
+
         // TS applies the byte cap ONLY when no `limit` is supplied
         // (`readFileInRange(..., limit === undefined ? maxSizeBytes : undefined)`
         // — FileReadTool.ts:1026). A ranged read (offset+limit) of a >256KB file
@@ -322,6 +368,69 @@ impl Tool for FileReadTool {
                 )));
             }
         };
+
+        // Notebook (`.ipynb`) structured-cell read (`FileReadTool.ts:822-863`).
+        // A notebook is parsed into an ARRAY of structured cells — NOT the
+        // line-numbered plain text below — so the model sees per-cell
+        // `{ cellType, source, execution_count?, cell_id, language?, outputs? }`
+        // exactly as TS's `readNotebook`. The TUI `data` carries the structured
+        // `cells`; the model-facing string (`model_content`) is the text-block
+        // projection of TS's `mapNotebookCellsToToolResult`. The `ext` is taken
+        // from the ORIGINAL input path (TS `path.extname(file_path)`), matching
+        // the same case-insensitive `.ipynb` test FileEditTool uses to route to
+        // NotebookEdit. A parse failure surfaces the JSON error (TS's
+        // `jsonParse` throws → propagates out of `call`).
+        let ext = std::path::Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        if ext.as_deref() == Some("ipynb") {
+            let cells = match crate::notebook_read::read_notebook(&content) {
+                Ok(c) => c,
+                Err(e) => {
+                    self.emit_failed(&invocation_id, "notebook_parse").await;
+                    return Err(ToolError::Io(e));
+                }
+            };
+            let model_content = crate::notebook_read::render_cells_model_text(&cells);
+
+            let duration_ms = started.elapsed().as_millis() as u64;
+            self.emit_completed(&invocation_id, bytes.len() as u64, duration_ms)
+                .await;
+
+            // Record the read — TS stores the serialized cells JSON as the
+            // entry `content` (`FileReadTool.ts:842-847`) with the DEFAULTED
+            // offset/limit. To keep the registry's full-view discriminator
+            // (used by the staleness guard + dedup) consistent with the rest of
+            // the Rust port, a no-range notebook read records `offset`/`limit`
+            // as the verbatim (un-defaulted) input — `None` for a full read —
+            // matching `read.rs`'s text path. The stored `content` is the
+            // cells JSON (so a same-range re-read dedups byte-for-byte).
+            let cells_json = serde_json::to_string(&cells).unwrap_or_default();
+            tool_api::read_file_state::set(
+                &self.ctx.read_file_state,
+                canon.clone(),
+                tool_api::read_file_state::ReadFileEntry {
+                    content: cells_json,
+                    mtime_ms,
+                    offset: input_offset,
+                    limit: input_limit,
+                    from_read: true,
+                },
+            );
+
+            return Ok(ToolCallResult {
+                data: json!({
+                    "type": "notebook",
+                    "file_path": file_path,
+                    "cells": cells,
+                    "model_content": model_content,
+                }),
+                new_messages: vec![],
+                context_modifier: None,
+                mcp_meta: None,
+            });
+        }
 
         let all_lines: Vec<&str> = content.split_inclusive('\n').collect();
         // FILE.4: `total_lines` must match TS `readFileInRange.totalLines`
@@ -369,6 +478,10 @@ impl Tool for FileReadTool {
                 mtime_ms,
                 offset: input_offset,
                 limit: input_limit,
+                // This entry is the product of a `Read` — the dedup gate
+                // (`FileReadTool.ts:550` `offset !== undefined`) only short-
+                // circuits against Read-sourced entries.
+                from_read: true,
             },
         );
 
@@ -852,6 +965,251 @@ mod tests {
         assert!(should_include_file_read_mitigation("test"));
         // The one exempt model skips the reminder.
         assert!(!should_include_file_read_mitigation("claude-opus-4-6"));
+    }
+
+    // ───────────────────────── Notebook (.ipynb) structured read ────────────
+
+    fn sample_ipynb() -> String {
+        serde_json::to_string(&json!({
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "id": "c1",
+                    "source": ["print(", "'hi')"],
+                    "execution_count": 2,
+                    "outputs": [
+                        { "output_type": "stream", "name": "stdout", "text": "hi\n" }
+                    ]
+                },
+                { "cell_type": "markdown", "id": "c2", "source": "# Title" }
+            ],
+            "metadata": { "language_info": { "name": "python" } },
+            "nbformat": 4,
+            "nbformat_minor": 5
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn ipynb_read_returns_structured_cells() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_ipynb()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        // Notebook result variant: structured `cells`, NOT line-numbered text.
+        assert_eq!(result.data["type"], "notebook");
+        let cells = result.data["cells"].as_array().unwrap();
+        assert_eq!(cells.len(), 2);
+        // Code cell: camelCase cellType, joined source, execution_count, language.
+        assert_eq!(cells[0]["cellType"], "code");
+        assert_eq!(cells[0]["source"], "print('hi')");
+        assert_eq!(cells[0]["execution_count"], 2);
+        assert_eq!(cells[0]["cell_id"], "c1");
+        assert_eq!(cells[0]["language"], "python");
+        assert_eq!(cells[0]["outputs"][0]["output_type"], "stream");
+        assert_eq!(cells[0]["outputs"][0]["text"], "hi\n");
+        // Markdown cell: cellType markdown, no language/outputs.
+        assert_eq!(cells[1]["cellType"], "markdown");
+        assert!(cells[1].get("language").is_none());
+        // The model-facing string is the cell-block text projection.
+        assert_eq!(
+            result.data["model_content"],
+            "<cell id=\"c1\">print('hi')</cell id=\"c1\">\n\nhi\n\n<cell id=\"c2\"><cell_type>markdown</cell_type># Title</cell id=\"c2\">"
+        );
+    }
+
+    #[tokio::test]
+    async fn ipynb_read_records_full_view_registry_entry() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("nb.ipynb");
+        std::fs::write(&target, sample_ipynb()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let map = ctx.read_file_state.clone();
+        let tool = FileReadTool::new(ctx);
+        let canon = std::fs::canonicalize(&target).unwrap();
+        tool.call(
+            json!({ "file_path": target.to_str().unwrap() }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let entry = tool_api::read_file_state::get(&map, &canon).expect("notebook read recorded");
+        // A no-range notebook read is a full view (offset/limit None) and is
+        // flagged as Read-sourced so the staleness guard accepts a follow-up
+        // NotebookEdit and the dedup gate sees a Read entry.
+        assert_eq!(entry.offset, None);
+        assert_eq!(entry.limit, None);
+        assert!(entry.from_read);
+        // Stored content is the serialized cells JSON (so a same-range re-read
+        // dedups byte-for-byte).
+        assert!(entry.content.contains("\"cellType\""));
+    }
+
+    #[tokio::test]
+    async fn ipynb_invalid_json_errors() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("bad.ipynb");
+        std::fs::write(&target, "not a notebook").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        let err = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("notebook JSON parse"), "got: {err}");
+    }
+
+    // ───────────────────────── Read dedup (file_unchanged) ──────────────────
+
+    #[tokio::test]
+    async fn unchanged_reread_returns_file_unchanged_stub() {
+        // A full Read, then an immediate identical re-read with no on-disk
+        // change → the dedup short-circuit returns the byte-locked stub.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("dedup.txt");
+        std::fs::write(&target, "alpha\nbeta\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        // First read populates the registry.
+        let first = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.data["content"], "alpha\nbeta\n");
+        // Second identical read → file_unchanged stub.
+        let second = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.data["type"], "file_unchanged");
+        assert_eq!(second.data["content"], FILE_UNCHANGED_STUB);
+        assert_eq!(second.data["model_content"], FILE_UNCHANGED_STUB);
+    }
+
+    #[tokio::test]
+    async fn changed_file_reread_does_not_dedup() {
+        use filetime::{set_file_mtime, FileTime};
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("changed.txt");
+        std::fs::write(&target, "v0\n").unwrap();
+        set_file_mtime(&target, FileTime::from_unix_time(1_000_000_000, 0)).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        tool.call(
+            json!({ "file_path": target.to_str().unwrap() }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        // External modification bumps mtime → re-read must NOT dedup.
+        std::fs::write(&target, "v1\n").unwrap();
+        set_file_mtime(&target, FileTime::from_unix_time(2_000_000_000, 0)).unwrap();
+        let again = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        // Fresh content returned, not the stub.
+        assert_eq!(again.data["content"], "v1\n");
+        assert!(again.data.get("type").is_none());
+    }
+
+    #[tokio::test]
+    async fn different_range_reread_does_not_dedup() {
+        // First read full, then a ranged re-read of the same (unchanged) file:
+        // the range differs, so dedup must NOT fire.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("range.txt");
+        std::fs::write(&target, "l1\nl2\nl3\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+        tool.call(
+            json!({ "file_path": target.to_str().unwrap() }),
+            fresh_ctx(),
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let ranged = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 1 }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        // Different range → real content, no stub.
+        assert_eq!(ranged.data["content"], "l2\n");
+        assert!(ranged.data.get("type").is_none());
+    }
+
+    #[tokio::test]
+    async fn write_then_read_does_not_dedup_against_post_write_entry() {
+        // A Write records a post-write registry entry with `from_read=false`.
+        // A subsequent Read of the same path must NOT dedup against it (TS gates
+        // dedup on `offset !== undefined`, i.e. Read-sourced entries only).
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("wr.txt");
+        let (ctx, _sink) = make_ctx(&tmp);
+        let map = ctx.read_file_state.clone();
+        let canon = {
+            std::fs::write(&target, "seed\n").unwrap();
+            std::fs::canonicalize(&target).unwrap()
+        };
+        let mtime_ms = std::fs::metadata(&canon)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+        // Simulate a Write's post-write entry: full view, but NOT from a Read.
+        tool_api::read_file_state::set(
+            &map,
+            canon,
+            tool_api::read_file_state::ReadFileEntry {
+                content: "seed\n".into(),
+                mtime_ms,
+                offset: None,
+                limit: None,
+                from_read: false,
+            },
+        );
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": target.to_str().unwrap() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        // Real content returned (the write entry is not a dedup candidate).
+        assert_eq!(result.data["content"], "seed\n");
+        assert!(result.data.get("type").is_none());
     }
 
     #[test]

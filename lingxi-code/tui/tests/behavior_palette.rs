@@ -142,9 +142,9 @@ fn m7_07_registers_no_new_telemetry_events() {
     // the count grew via screen_opened/screen_closed/search_opened + the v0.8.0
     // marker, NOT the palette. If this fails, the palette event leaked in.
     let names = telemetry::tengu::ALL_EVENT_NAMES;
-    // 330 → 336 after the CronDelete/CronList +6 tool events (LSP.7b); the
-    // palette still mints nothing (the contains-check below is the real guard).
-    assert_eq!(names.len(), 336, "registry at 336 (330 + CronDelete/CronList)");
+    // 330 → 336 (CronDelete/CronList +6, LSP.7b) → 339 (FileRead analytics +3, W36);
+    // the palette still mints nothing (the contains-check below is the real guard).
+    assert_eq!(names.len(), 339, "registry at 339 (336 + FileRead analytics)");
     assert!(
         !names.contains(&"tengu_tui_command_palette_opened"),
         "palette telemetry is deferred to M8"

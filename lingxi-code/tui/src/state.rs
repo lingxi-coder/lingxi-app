@@ -1126,6 +1126,27 @@ impl AppState {
         self.messages.push(msg);
     }
 
+    /// Seed the scrollback from a RESUMED session's prior conversation, before
+    /// the first render. `msgs` are the persisted turns already mapped to
+    /// scrollback rows (via [`crate::replay::rebuild_messages`]); they REPLACE
+    /// the (empty) initial `messages` so the resumed history shows on the very
+    /// first frame — the analog of claude-code's REPL `initialMessages`.
+    ///
+    /// Also re-seeds the per-tool `expanded` map to the collapsed default for
+    /// each replayed tool block, so the resumed tool-use/result rows render
+    /// collapsed exactly like a freshly-streamed one (the map is keyed by
+    /// `ToolUseId`; absent keys already default to collapsed, so this only
+    /// makes the intent explicit and keeps focus-walk ids discoverable).
+    ///
+    /// The height cache is intentionally NOT recomputed here — it is rebuilt
+    /// lazily on the first render by [`Self::refresh_height_cache`] with the
+    /// real terminal width (computing it now with width `0` would just be
+    /// thrown away). A FRESH session never calls this, so its first frame is
+    /// byte-identical to today.
+    pub fn seed_resumed_messages(&mut self, msgs: Vec<RenderedMessage>) {
+        self.messages = msgs;
+    }
+
     /// (M7-03) Rebuild the height cache if the log or `width` changed.
     /// Idempotent: a no-op when nothing changed (cheap len + width check).
     pub fn refresh_height_cache(&mut self, width: usize) {

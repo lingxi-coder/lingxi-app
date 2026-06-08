@@ -65,6 +65,16 @@ pub struct Runtime {
     /// progressive argument-hint map. `None` (smoke gates / no-CLI mounts) leaves
     /// the hint map empty — correct (no builtin declares argNames).
     pub command_registry: Option<Arc<tokio::sync::RwLock<command_api::CommandRegistry>>>,
+    /// Prior conversation, mapped to scrollback rows, that a RESUMED session
+    /// seeds into `AppState.messages` BEFORE the first render — the Rust analog
+    /// of claude-code's REPL `initialMessages` prop (`main.tsx` →
+    /// `loadConversationForResume` → `initialMessages` →
+    /// `useState(initialMessages ?? [])`). Built via
+    /// [`crate::replay::rebuild_messages`] from the persisted transcript. EMPTY
+    /// for a FRESH session, so a non-resumed start is byte-identical to today
+    /// (no replay). Set by the CLI's resume branch via
+    /// [`Runtime::with_resumed_messages`].
+    pub resumed_messages: Vec<crate::state::RenderedMessage>,
 }
 
 impl Runtime {
@@ -79,6 +89,7 @@ impl Runtime {
             multiagent_feed: None,
             turn_tx: None,
             command_registry: None,
+            resumed_messages: Vec::new(),
         }
     }
 
@@ -97,6 +108,7 @@ impl Runtime {
             multiagent_feed: None,
             turn_tx: None,
             command_registry: None,
+            resumed_messages: Vec::new(),
         }
     }
 
@@ -146,6 +158,22 @@ impl Runtime {
         self.command_registry = Some(registry);
         self
     }
+
+    /// Seed the prior conversation a RESUMED session should replay into the
+    /// TUI scrollback before the first frame. The CLI's resume branch loads the
+    /// persisted transcript (`session::SessionStorage::load` /
+    /// `session::jsonl::load_session`) and maps it via
+    /// [`crate::replay::rebuild_messages`], then threads the resulting rows
+    /// through here. A FRESH session never calls this — its `resumed_messages`
+    /// stays empty and the first render is byte-identical to today (no replay).
+    #[must_use]
+    pub fn with_resumed_messages(
+        mut self,
+        messages: Vec<crate::state::RenderedMessage>,
+    ) -> Self {
+        self.resumed_messages = messages;
+        self
+    }
 }
 
 /// Public entry point. Drives the TUI to a clean shutdown.
@@ -192,6 +220,14 @@ pub async fn run_tui_session(
     // theme.
     if let Some(setting) = crate::theme_persist::load_theme_setting() {
         initial_state.set_theme(setting);
+    }
+    // Transcript replay on resume: seed the prior conversation into scrollback
+    // BEFORE the first render so a resumed session shows its existing history
+    // on the very first frame (claude-code REPL `initialMessages`). EMPTY for a
+    // fresh session, so this is a strict no-op there and the first frame is
+    // byte-identical to today.
+    if !runtime.resumed_messages.is_empty() {
+        initial_state.seed_resumed_messages(std::mem::take(&mut runtime.resumed_messages));
     }
     let state = Arc::new(Mutex::new(initial_state));
 

@@ -21,6 +21,7 @@ pub mod events;
 pub mod multiagent;
 pub mod permission_bridge;
 pub mod render;
+pub mod replay;
 pub mod root;
 pub mod screens;
 pub mod session;

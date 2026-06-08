@@ -124,7 +124,12 @@ pub fn apply_event(state: &mut AppState, ev: TurnEvent, notify: &Notify) {
 ///   - `MultiEdit` / `NotebookEdit` → only `file_path` populated; the old/new
 ///     bodies are multi-hunk (`edits[]`) / cell-shaped and don't map to a
 ///     single old→new pair. TODO(M8): render their full multi-hunk diff.
-fn diff_inputs_for(
+///
+/// `pub(crate)` so the resume transcript-replay mapper
+/// ([`crate::replay::rebuild_messages`]) groups a persisted `ToolResult` under
+/// its originating `ToolUse` through the *same* diff-input derivation the live
+/// `ToolUseResult` path uses — no duplicated key-mapping logic.
+pub(crate) fn diff_inputs_for(
     tool: &str,
     input: &serde_json::Value,
 ) -> (Option<String>, Option<String>, Option<String>) {

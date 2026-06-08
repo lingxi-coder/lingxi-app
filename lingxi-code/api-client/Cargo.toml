@@ -39,6 +39,14 @@ futures = { workspace = true }
 futures-core.workspace = true
 rand = "0.8"
 regex = "1"
+# Already in the locked graph (anthropic-oauth / posix / commands / filestate /
+# test-harness all pin `sha2 = "0.10"`; locked at 0.10.9). Adds an EDGE, not a
+# new package. The reactive-401 path hashes the token that authenticated the
+# failed request with the SAME SHA-256-of-access-token scheme as
+# `anthropic_oauth::TokenInfo::token_hash`, so the `prev_token_hash` handed to
+# the OAuth hook is byte-comparable against the hook's stored token in its
+# single-flight double-check (OAUTHREF.1).
+sha2 = "0.10"
 tokio = { workspace = true, features = ["time", "sync"] }
 
 [dev-dependencies]

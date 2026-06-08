@@ -646,6 +646,14 @@ pub struct AppState {
     /// (M6-05) Per-dialog state for the `BypassPermissionsMode` dialog.
     pub bypass_dialog_state:
         crate::components::permissions::bypass_permissions::BypassPermissionsState,
+    /// (ARGS.3) Command name (without leading `/`) → declared positional
+    /// argument names (TS `argNames`). Built once at TUI init from the command
+    /// registry; only markdown/plugin commands with a frontmatter `arguments`
+    /// list have a non-empty entry (every built-in is absent/empty). Drives the
+    /// inline progressive argument-hint rendered by `PromptInput`
+    /// (`progressive_argument_hint`), mirroring how claude-code's `useTypeahead`
+    /// reads `exactMatch.argNames`. Empty map ⇒ no command ever shows the hint.
+    pub command_argument_names: HashMap<String, Vec<String>>,
     /// (M7-07) `/` slash-command palette overlay state. `open == false`
     /// between uses; the live dispatcher routes keys here at priority 3.
     pub palette: PaletteState,
@@ -838,6 +846,7 @@ impl AppState {
             bypass_dialog_state:
                 crate::components::permissions::bypass_permissions::BypassPermissionsState::default(
                 ),
+            command_argument_names: HashMap::new(),
             palette: PaletteState::default(),
             completion: CompletionState::default(),
             vim_enabled: false,
@@ -872,6 +881,37 @@ impl AppState {
         self.status_line_config = settings
             .get("statusLine")
             .and_then(crate::components::status_line_command::StatusLineConfig::from_settings_value);
+    }
+
+    /// (ARGS.3) Populate the command name → `argNames` lookup from a command
+    /// registry, mirroring how claude-code's typeahead reads each command's
+    /// `argNames`. Only commands that declare a non-empty list are stored, so the
+    /// map stays empty in practice (every built-in declares none) and the inline
+    /// progressive hint never renders for them. Called once at TUI init where the
+    /// registry is available; idempotent (replaces the map).
+    pub fn set_command_argument_names(&mut self, registry: &command_api::CommandRegistry) {
+        self.command_argument_names = registry
+            .list_all()
+            .into_iter()
+            .filter(|c| !c.argument_names.is_empty())
+            .map(|c| (c.name.clone(), c.argument_names.clone()))
+            .collect();
+    }
+
+    /// (ARGS.3) Compute the inline progressive argument-hint for the current
+    /// prompt buffer (e.g. `"[arg2] [arg3]"`), or `None` when nothing should
+    /// render. Delegates to the pure
+    /// [`crate::components::prompt_input::progressive_argument_hint`] gate, fed by
+    /// this state's `command_argument_names` lookup. `None` for every built-in
+    /// (none declare `argNames`) and whenever the buffer is not a fully-typed
+    /// slash command followed by a trailing space.
+    #[must_use]
+    pub fn prompt_argument_hint(&self) -> Option<String> {
+        crate::components::prompt_input::progressive_argument_hint(&self.prompt_text, |name| {
+            self.command_argument_names
+                .get(name)
+                .map(std::vec::Vec::as_slice)
+        })
     }
 
     /// (M7-11) Open the Doctor screen, carrying the captured diagnostics
@@ -1169,6 +1209,67 @@ mod tests {
         let s = AppState::new(StatusSnapshot::default());
         assert!(!s.vim_enabled);
         assert_eq!(s.vim.mode, crate::components::prompt_input::VimMode::Insert);
+    }
+
+    /// (ARGS.3) A registry seeded with a synthetic markdown command that
+    /// declares `argument_names` makes `prompt_argument_hint` render the inline
+    /// progressive hint after "/<cmd> ", consuming one arg per typed token; a
+    /// built-in (no argNames) and a non-command buffer render nothing.
+    #[test]
+    fn prompt_argument_hint_renders_for_command_with_argnames() {
+        use command_api::model::{CommandSource, SlashCommand, SlashCommandKind};
+        use command_api::CommandRegistry;
+
+        let mut reg = CommandRegistry::new();
+        // Synthetic markdown command WITH declared argNames (does not depend on
+        // any real built-in declaring them).
+        reg.register_command(SlashCommand {
+            name: "deploy".to_string(),
+            description: "Deploy".to_string(),
+            source: CommandSource::Project,
+            kind: SlashCommandKind::Markdown {
+                file_path: std::path::PathBuf::from("/x/deploy.md"),
+                frontmatter: command_api::model::CommandFrontmatter::default(),
+                prompt_template: String::new(),
+            },
+            argument_names: vec!["env".to_string(), "region".to_string()],
+            ..SlashCommand::default()
+        });
+        // A built-in with NO argNames must never surface a hint.
+        reg.register_command(SlashCommand {
+            name: "help".to_string(),
+            description: "Help".to_string(),
+            ..SlashCommand::default()
+        });
+
+        let mut st = AppState::new(fake_status());
+        st.set_command_argument_names(&reg);
+        // Only the command with argNames made it into the map.
+        assert_eq!(st.command_argument_names.len(), 1);
+        assert!(st.command_argument_names.contains_key("deploy"));
+
+        // "/deploy " → both names remain.
+        st.prompt_text = "/deploy ".to_string();
+        assert_eq!(
+            st.prompt_argument_hint(),
+            Some("[env] [region]".to_string())
+        );
+        // One arg typed → consumes the first name.
+        st.prompt_text = "/deploy prod ".to_string();
+        assert_eq!(st.prompt_argument_hint(), Some("[region]".to_string()));
+        // Both filled → nothing.
+        st.prompt_text = "/deploy prod us-east ".to_string();
+        assert_eq!(st.prompt_argument_hint(), None);
+        // No trailing space (still in palette / mid-arg) → nothing.
+        st.prompt_text = "/deploy".to_string();
+        assert_eq!(st.prompt_argument_hint(), None);
+        // Built-in without argNames → nothing.
+        st.prompt_text = "/help ".to_string();
+        assert_eq!(st.prompt_argument_hint(), None);
+        // Empty map (default state) → nothing for anything.
+        let mut bare = AppState::new(fake_status());
+        bare.prompt_text = "/deploy ".to_string();
+        assert_eq!(bare.prompt_argument_hint(), None);
     }
 
     #[test]

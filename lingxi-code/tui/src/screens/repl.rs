@@ -52,6 +52,12 @@ pub struct ReplScreenProps {
     pub prompt_cursor: usize,
     /// Total terminal width — drives the prompt's wrap + content height.
     pub prompt_width: usize,
+    /// (ARGS.3) Inline progressive argument-hint (e.g. `"[arg2] [arg3]"`)
+    /// rendered as dimmed ghost text after the typed command in the
+    /// `commandWithoutArgs` state, or `None` to render nothing. Computed from
+    /// `AppState::prompt_argument_hint`; `None` for every built-in / non-command
+    /// buffer, keeping the prompt byte-identical to today.
+    pub prompt_argument_hint: Option<String>,
     /// Scroll offset (0 = latest at bottom).
     pub scroll_offset: usize,
     /// Live viewport height (rows available for the scrollback).
@@ -130,6 +136,7 @@ impl Default for ReplScreenProps {
             prompt_text: String::new(),
             prompt_cursor: 0,
             prompt_width: 0,
+            prompt_argument_hint: None,
             scroll_offset: 0,
             viewport_height: 0,
             show_spinner: false,
@@ -170,6 +177,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
     let prompt_text = props.prompt_text.clone();
     let prompt_cursor = props.prompt_cursor;
     let prompt_width = props.prompt_width;
+    let prompt_argument_hint = props.prompt_argument_hint.clone();
     let prompt_is_empty = props.prompt_text.is_empty();
     let scroll_offset = props.scroll_offset;
     let viewport_height = props.viewport_height;
@@ -271,6 +279,7 @@ pub fn ReplScreen(props: &ReplScreenProps) -> impl Into<AnyElement<'static>> {
                 cursor: prompt_cursor,
                 width: prompt_width,
                 show_cursor: true,
+                argument_hint: prompt_argument_hint,
             )
             PromptInputFooter(
                 mode: crate::components::prompt_input::FooterMode::Prompt,

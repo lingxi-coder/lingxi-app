@@ -110,6 +110,20 @@ pub struct SkillDescriptor {
     /// remote/untrusted, so their markdown body is NEVER shell-expanded. `false`
     /// (the default) -> expansion runs (the on-disk / plugin markdown case).
     pub skip_shell_expansion: bool,
+    /// The skill's own base directory (TS `baseDir`). `Some(dir)` for file-based
+    /// skills (the SKILL.md / command markdown's parent directory); `None` for
+    /// non-file skills (e.g. MCP-sourced, which have no `baseDir`). When `Some`,
+    /// `${CLAUDE_SKILL_DIR}` in the body is replaced with this path so embedded
+    /// `!command` blocks can reference bundled scripts
+    /// (`loadSkillsDir.ts:359-363`).
+    pub skill_root: Option<std::path::PathBuf>,
+    /// The current session id, surfaced to substitute `${CLAUDE_SESSION_ID}` in
+    /// the body (TS `getSessionId()`, `loadSkillsDir.ts:366-369`). `None` for
+    /// hermetic/loaderless construction (the token is then left as-is); the
+    /// production loader stamps the engine's per-session id here. Carried on the
+    /// descriptor rather than the frozen `BuiltinToolContext` (whose mobile
+    /// construction site cannot be extended).
+    pub session_id: Option<String>,
 }
 
 impl Default for SkillDescriptor {
@@ -125,6 +139,8 @@ impl Default for SkillDescriptor {
             argument_names: Vec::new(),
             shell: None,
             skip_shell_expansion: false,
+            skill_root: None,
+            session_id: None,
         }
     }
 }
@@ -589,9 +605,8 @@ impl Tool for SkillTool {
         // message with the parent toolUseID (transient-until-resolved) has no Rust
         // `ConversationMessage` substrate and is scoped out: the expanded prompt
         // enters as a plain user message. The adjacent TS `${CLAUDE_SKILL_DIR}` /
-        // `${CLAUDE_SESSION_ID}` token replacements (steps 2-3) need data not wired
-        // to the descriptor (skill root, session id) and are scoped out as a
-        // follow-up — they are separate from the `!command` gap closed here.
+        // `${CLAUDE_SESSION_ID}` token replacements (steps 2-3) run between
+        // argument substitution and shell expansion — see just below.
         let args_for_expansion = args.as_deref().unwrap_or("");
         let expanded_prompt = match command_api::substitute_arguments_faithful(
             &desc.body,
@@ -612,6 +627,39 @@ impl Tool for SkillTool {
                 )));
             }
         };
+
+        // SKILLEXEC: `${CLAUDE_SKILL_DIR}` / `${CLAUDE_SESSION_ID}` token
+        // replacement (TS `getPromptForCommand` steps 2-3,
+        // `loadSkillsDir.ts:359-369`). Faithful ordering: AFTER argument
+        // substitution, BEFORE the embedded `!command` shell expansion below, so
+        // a `!command` that references `${CLAUDE_SKILL_DIR}` / `${CLAUDE_SESSION_ID}`
+        // sees the substituted value. Both are plain literal-token replacements
+        // (the tokens carry no regex metacharacters), so `str::replace` (global by
+        // default) matches the TS global-regex `.replace(/.../g, …)` exactly.
+        //
+        // SAFETY (byte-identical): a body containing NEITHER token is returned
+        // unchanged by both `replace` calls (no match → no allocation difference
+        // in output), preserving the byte-for-byte invariant for the common case.
+        let mut expanded_prompt = expanded_prompt;
+        // Step 2: `${CLAUDE_SKILL_DIR}` — only for file-based skills (TS gates on
+        // `baseDir`). On Windows, normalize backslashes to forward slashes BEFORE
+        // the replace so embedded shell commands don't treat them as escapes
+        // (`loadSkillsDir.ts:360-361`).
+        if let Some(skill_root) = desc.skill_root.as_ref() {
+            let skill_dir = skill_root.to_string_lossy();
+            let skill_dir = if cfg!(windows) {
+                skill_dir.replace('\\', "/")
+            } else {
+                skill_dir.into_owned()
+            };
+            expanded_prompt = expanded_prompt.replace("${CLAUDE_SKILL_DIR}", &skill_dir);
+        }
+        // Step 3: `${CLAUDE_SESSION_ID}` — always replaced (TS calls
+        // `getSessionId()` unconditionally). `None` (hermetic/loaderless) leaves
+        // the token untouched rather than substituting an empty string.
+        if let Some(session_id) = desc.session_id.as_ref() {
+            expanded_prompt = expanded_prompt.replace("${CLAUDE_SESSION_ID}", session_id);
+        }
 
         // SKILLEXEC.6: embedded `!command` shell expansion over the substituted
         // body, faithful to TS `getPromptForCommand` step 4
@@ -1309,5 +1357,215 @@ mod tests {
         assert!(err
             .0
             .contains("cannot be used with Skill tool due to disable-model-invocation"));
+    }
+
+    // ========================================================================
+    // ${CLAUDE_SKILL_DIR} / ${CLAUDE_SESSION_ID} token substitution
+    // (TS getPromptForCommand steps 2-3, loadSkillsDir.ts:359-369). The tokens
+    // are substituted AFTER argument substitution and BEFORE shell expansion.
+    // ========================================================================
+
+    /// Extract the leading Text block of the single injected user message.
+    fn injected_text(out: &ToolCallResult) -> String {
+        match &out.new_messages[0] {
+            protocol::ConversationMessage::User { content, .. } => match content.first() {
+                Some(protocol::ContentBlock::Text { text }) => text.clone(),
+                other => panic!("expected leading Text block, got {other:?}"),
+            },
+            other => panic!("expected injected User message, got {other:?}"),
+        }
+    }
+
+    /// Step 2: `${CLAUDE_SKILL_DIR}` is replaced with `skill_root` when present.
+    #[tokio::test]
+    async fn skill_dir_token_replaced_when_skill_root_present() {
+        let desc = SkillDescriptor {
+            body: "scripts live in ${CLAUDE_SKILL_DIR}/bin".into(),
+            skill_root: Some(std::path::PathBuf::from("/skills/foo")),
+            ..prompt_desc("dir")
+        };
+        let tool =
+            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let out = tool
+            .call(json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(injected_text(&out), "scripts live in /skills/foo/bin");
+    }
+
+    /// Step 2 (gate): with NO `skill_root` (e.g. MCP / non-file skills), the
+    /// `${CLAUDE_SKILL_DIR}` token is left untouched (TS gates on `baseDir`).
+    #[tokio::test]
+    async fn skill_dir_token_left_as_is_when_skill_root_absent() {
+        let desc = SkillDescriptor {
+            body: "scripts live in ${CLAUDE_SKILL_DIR}/bin".into(),
+            skill_root: None,
+            ..prompt_desc("dir")
+        };
+        let tool =
+            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let out = tool
+            .call(json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(injected_text(&out), "scripts live in ${CLAUDE_SKILL_DIR}/bin");
+    }
+
+    /// Step 2: ALL occurrences of `${CLAUDE_SKILL_DIR}` are replaced (global,
+    /// matching the TS `/…/g` regex).
+    #[tokio::test]
+    async fn skill_dir_token_replaced_globally() {
+        let desc = SkillDescriptor {
+            body: "${CLAUDE_SKILL_DIR}/a and ${CLAUDE_SKILL_DIR}/b".into(),
+            skill_root: Some(std::path::PathBuf::from("/r")),
+            ..prompt_desc("dir")
+        };
+        let tool =
+            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let out = tool
+            .call(json!({"skill": "dir"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(injected_text(&out), "/r/a and /r/b");
+    }
+
+    /// Step 3: `${CLAUDE_SESSION_ID}` is replaced with the session id (always,
+    /// when one is wired) — including every occurrence.
+    #[tokio::test]
+    async fn session_id_token_replaced() {
+        let desc = SkillDescriptor {
+            body: "session ${CLAUDE_SESSION_ID} = ${CLAUDE_SESSION_ID}".into(),
+            session_id: Some("sess:abc-123".into()),
+            ..prompt_desc("sid")
+        };
+        let tool =
+            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let out = tool
+            .call(json!({"skill": "sid"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(injected_text(&out), "session sess:abc-123 = sess:abc-123");
+    }
+
+    /// Step 3 (gate): with NO `session_id` wired (hermetic loader), the token is
+    /// left untouched rather than substituting an empty string.
+    #[tokio::test]
+    async fn session_id_token_left_as_is_when_unset() {
+        let desc = SkillDescriptor {
+            body: "session ${CLAUDE_SESSION_ID}".into(),
+            session_id: None,
+            ..prompt_desc("sid")
+        };
+        let tool =
+            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let out = tool
+            .call(json!({"skill": "sid"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(injected_text(&out), "session ${CLAUDE_SESSION_ID}");
+    }
+
+    /// A `ProcessRunner` that records the embedded shell command it was handed
+    /// (the last `args` element, which `SkillShellRunner` fills with the expanded
+    /// `-c` command string) so a test can assert WHAT the shell saw.
+    struct CapturingProcess {
+        seen: std::sync::Mutex<Vec<String>>,
+        stdout: String,
+    }
+    #[async_trait]
+    impl traits::process::ProcessRunner for CapturingProcess {
+        async fn run(
+            &self,
+            cmd: &traits::sandbox::SandboxedCommand,
+        ) -> Result<ProcessOutput, traits::process::ProcessError> {
+            if let Some(last) = cmd.inner().args.last() {
+                self.seen.lock().unwrap().push(last.clone());
+            }
+            Ok(ProcessOutput {
+                stdout: self.stdout.clone(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            })
+        }
+        async fn spawn_background(
+            &self,
+            _cmd: &traits::sandbox::SandboxedCommand,
+        ) -> Result<traits::process::ProcessHandle, traits::process::ProcessError> {
+            Err(traits::process::ProcessError::Unsupported)
+        }
+        async fn kill(
+            &self,
+            _handle: &traits::process::ProcessHandle,
+        ) -> Result<(), traits::process::ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    /// ORDERING: a `!command` block that references `${CLAUDE_SESSION_ID}` sees
+    /// the SUBSTITUTED value — token replacement (step 3) runs BEFORE the embedded
+    /// `!command` shell expansion (step 4). We capture the command string the
+    /// shell runner is handed and assert the token is already substituted there.
+    #[tokio::test]
+    async fn token_substitution_precedes_shell_expansion() {
+        let capture = Arc::new(CapturingProcess {
+            seen: std::sync::Mutex::new(Vec::new()),
+            stdout: "OUT\n".into(),
+        });
+        let mut ctx = shell_test_ctx(dummy_out());
+        ctx.process = capture.clone();
+        let desc = SkillDescriptor {
+            body: "pre !`echo ${CLAUDE_SESSION_ID}` post".into(),
+            session_id: Some("sess:zzz".into()),
+            ..prompt_desc("ord")
+        };
+        let tool = SkillTool::with_loader(ctx, Arc::new(FixedLoader(Some(desc))));
+        let out = tool
+            .call(json!({"skill": "ord"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        // The expanded prompt splices the (trimmed) stdout.
+        assert_eq!(injected_text(&out), "pre OUT post");
+        // The command the shell actually ran already had the token substituted.
+        let seen = capture.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "exactly one embedded command ran");
+        assert!(
+            seen[0].contains("echo sess:zzz"),
+            "shell saw substituted session id, got: {}",
+            seen[0]
+        );
+        assert!(
+            !seen[0].contains("${CLAUDE_SESSION_ID}"),
+            "token must be substituted BEFORE shell expansion, got: {}",
+            seen[0]
+        );
+    }
+
+    /// SAFETY INVARIANT: a body containing NEITHER token is byte-identical to the
+    /// arg-substituted text — both `replace` calls are no-ops (and with no
+    /// `!command`, the shell runner is never invoked).
+    #[tokio::test]
+    async fn neither_token_present_is_byte_identical() {
+        let body = "Plain body $ARGUMENTS, no tokens here at all.";
+        let desc = SkillDescriptor {
+            body: body.into(),
+            // Both wired, but the body references neither token.
+            skill_root: Some(std::path::PathBuf::from("/r")),
+            session_id: Some("sess:abc".into()),
+            ..prompt_desc("plain")
+        };
+        let expected =
+            command_api::substitute_arguments_faithful(body, Some("X"), true, &[]).unwrap();
+        let tool =
+            SkillTool::with_loader(shell_test_ctx(dummy_out()), Arc::new(FixedLoader(Some(desc))));
+        let out = tool
+            .call(json!({"skill": "plain", "args": "X"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("ok");
+        assert_eq!(injected_text(&out), expected);
+        assert_eq!(injected_text(&out), "Plain body X, no tokens here at all.");
     }
 }

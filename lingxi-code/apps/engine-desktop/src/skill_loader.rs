@@ -24,19 +24,24 @@ use tool_api::tool_trait::ToolError;
 use tool_skill::skill::{SkillCommandType, SkillDescriptor, SkillLoader};
 
 /// Project a registered [`SlashCommand`] onto the [`SkillDescriptor`] subset the
-/// `Skill` tool surfaces.
-fn to_descriptor(cmd: &SlashCommand) -> SkillDescriptor {
+/// `Skill` tool surfaces. `session_id` is the engine's per-session id, stamped on
+/// every descriptor so the `Skill` tool can substitute `${CLAUDE_SESSION_ID}` in
+/// the body (TS `getSessionId()`).
+fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescriptor {
+    let session_id = session_id.map(str::to_owned);
     match &cmd.kind {
         // Markdown-defined (project/user/managed) or plugin-shipped markdown
         // commands are the model-invocable prompt skills.
         SlashCommandKind::Markdown {
             frontmatter,
             prompt_template,
+            file_path,
             ..
         }
         | SlashCommandKind::Plugin {
             frontmatter,
             prompt_template,
+            file_path,
             ..
         } => SkillDescriptor {
             name: cmd.name.clone(),
@@ -53,6 +58,11 @@ fn to_descriptor(cmd: &SlashCommand) -> SkillDescriptor {
             // On-disk / plugin markdown is NOT MCP-sourced (TS `loadedFrom !==
             // 'mcp'`), so shell expansion runs for these commands.
             skip_shell_expansion: false,
+            // SKILLEXEC: file-based skills carry a base directory (TS `baseDir`)
+            // — the markdown file's parent dir — so `${CLAUDE_SKILL_DIR}` in the
+            // body resolves to it. `None` if the path has no parent (defensive).
+            skill_root: file_path.parent().map(std::path::Path::to_path_buf),
+            session_id,
         },
         // Builtin handlers are not prompt-based skills.
         SlashCommandKind::Builtin { .. } => SkillDescriptor {
@@ -60,6 +70,7 @@ fn to_descriptor(cmd: &SlashCommand) -> SkillDescriptor {
             description: cmd.description.clone(),
             disable_model_invocation: cmd.disable_model_invocation,
             command_type: SkillCommandType::Other,
+            session_id,
             ..SkillDescriptor::default()
         },
         // MCP-prompt bridges are not prompt-based skills AND are remote/untrusted:
@@ -72,6 +83,10 @@ fn to_descriptor(cmd: &SlashCommand) -> SkillDescriptor {
             disable_model_invocation: cmd.disable_model_invocation,
             command_type: SkillCommandType::Other,
             skip_shell_expansion: true,
+            // MCP skills have no `baseDir` (TS), so `${CLAUDE_SKILL_DIR}` is left
+            // as-is; `${CLAUDE_SESSION_ID}` is still substituted (TS step 3 runs
+            // regardless of `loadedFrom`).
+            session_id,
             ..SkillDescriptor::default()
         },
     }
@@ -80,15 +95,35 @@ fn to_descriptor(cmd: &SlashCommand) -> SkillDescriptor {
 /// [`SkillLoader`] backed by the shared desktop [`CommandRegistry`].
 pub struct CommandRegistrySkillLoader {
     registry: Arc<RwLock<CommandRegistry>>,
+    /// The engine's per-session id, stamped on every resolved descriptor so the
+    /// `Skill` tool substitutes `${CLAUDE_SESSION_ID}` in the body (TS
+    /// `getSessionId()`). `None` keeps the token un-substituted (e.g. tests that
+    /// construct the loader without a session).
+    session_id: Option<String>,
 }
 
 impl CommandRegistrySkillLoader {
     /// Wrap the shared command registry handle. The same `Arc` is later filled
     /// with the fully-built registry and handed to the slash dispatcher, so the
-    /// loader and dispatcher observe one command set.
+    /// loader and dispatcher observe one command set. Constructs with no session
+    /// id (the `${CLAUDE_SESSION_ID}` token is left as-is); use
+    /// [`Self::with_session_id`] to wire the engine's session id.
     #[must_use]
     pub fn new(registry: Arc<RwLock<CommandRegistry>>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            session_id: None,
+        }
+    }
+
+    /// Wrap the shared command registry handle and stamp `session_id` on every
+    /// resolved descriptor (so `${CLAUDE_SESSION_ID}` substitutes to it).
+    #[must_use]
+    pub fn with_session_id(registry: Arc<RwLock<CommandRegistry>>, session_id: String) -> Self {
+        Self {
+            session_id: Some(session_id),
+            ..Self::new(registry)
+        }
     }
 }
 
@@ -97,7 +132,9 @@ impl SkillLoader for CommandRegistrySkillLoader {
     async fn load(&self, name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
         // `resolve` follows aliases (TS `findCommand` over name + aliases).
         let reg = self.registry.read().await;
-        Ok(reg.resolve(name).map(to_descriptor))
+        Ok(reg
+            .resolve(name)
+            .map(|cmd| to_descriptor(cmd, self.session_id.as_deref())))
     }
 }
 
@@ -170,6 +207,36 @@ mod tests {
         let desc = loader.load("help").await.expect("load ok").expect("present");
         // → rejected by the tool with the locked "is not a prompt-based skill".
         assert_eq!(desc.command_type, SkillCommandType::Other);
+    }
+
+    #[tokio::test]
+    async fn markdown_descriptor_carries_skill_root_and_session_id() {
+        let mut reg = CommandRegistry::new();
+        // markdown_cmd uses file_path = /x/<name>.md, so skill_root = /x.
+        reg.register_command(markdown_cmd("dir-skill", "uses ${CLAUDE_SKILL_DIR}"));
+        let loader = CommandRegistrySkillLoader::with_session_id(
+            Arc::new(RwLock::new(reg)),
+            "sess:test-1".to_string(),
+        );
+        let desc = loader
+            .load("dir-skill")
+            .await
+            .expect("load ok")
+            .expect("present");
+        assert_eq!(desc.skill_root.as_deref(), Some(std::path::Path::new("/x")));
+        assert_eq!(desc.session_id.as_deref(), Some("sess:test-1"));
+    }
+
+    #[tokio::test]
+    async fn no_session_id_leaves_descriptor_session_unset() {
+        let mut reg = CommandRegistry::new();
+        reg.register_command(markdown_cmd("plain", "body"));
+        // `new` wires no session id.
+        let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
+        let desc = loader.load("plain").await.expect("load ok").expect("present");
+        assert!(desc.session_id.is_none());
+        // file-based skill still carries its base directory.
+        assert_eq!(desc.skill_root.as_deref(), Some(std::path::Path::new("/x")));
     }
 
     #[tokio::test]

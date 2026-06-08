@@ -35,6 +35,74 @@ fn messages_contain_image(msgs: &[ConversationMessage]) -> bool {
     })
 }
 
+/// Maximum media items (images + documents) the API accepts per request.
+/// Above this the provider rejects the request with a confusing error, so we
+/// trim oldest-first instead. Mirrors TS `API_MAX_MEDIA_PER_REQUEST`
+/// (apiLimits.ts:94).
+const MAX_MEDIA_PER_REQUEST: usize = 100;
+
+/// Count media (image/document) content blocks across all messages, mirroring
+/// TS `isMedia` counting in `stripExcessMediaItems` (claude.ts:956-1015),
+/// *including any nested inside `tool_result` content*.
+///
+/// NOTE on the frozen wire types: in this port `ContentBlock::ToolResult.content`
+/// is a `String` and there is no `Document` variant, so the only media a message
+/// can structurally hold is a top-level `ContentBlock::Image`. There is no place
+/// to nest media inside a `tool_result` here, so the "nested in `tool_result`" arm of
+/// the TS counter has nothing to count — this function already covers every media
+/// shape the frozen types permit.
+fn count_media(msgs: &[ConversationMessage]) -> usize {
+    msgs.iter()
+        .map(|m| match m {
+            ConversationMessage::User { content, .. }
+            | ConversationMessage::Assistant { content, .. } => content
+                .iter()
+                .filter(|b| matches!(b, ContentBlock::Image { .. }))
+                .count(),
+            ConversationMessage::System { .. } => 0,
+        })
+        .sum()
+}
+
+/// Return `msgs` with the OLDEST media items stripped until at most `limit`
+/// remain. When already within the limit the input is returned untouched (no
+/// re-allocation), exactly like TS `stripExcessMediaItems` (claude.ts:956-1015).
+///
+/// The caller hands us an owned `Vec` (a clone of conversation history produced
+/// by the orchestrator before the trait call), so trimming it here is a copy and
+/// never mutates stored history. Messages are walked oldest-first and media
+/// blocks are dropped in order until the count is back at `limit`, preserving the
+/// most-recent media.
+fn strip_excess_media(
+    mut msgs: Vec<ConversationMessage>,
+    limit: usize,
+) -> Vec<ConversationMessage> {
+    let total = count_media(&msgs);
+    if total <= limit {
+        return msgs;
+    }
+    let mut to_remove = total - limit;
+    for m in &mut msgs {
+        if to_remove == 0 {
+            break;
+        }
+        let content = match m {
+            ConversationMessage::User { content, .. }
+            | ConversationMessage::Assistant { content, .. } => content,
+            ConversationMessage::System { .. } => continue,
+        };
+        content.retain(|b| {
+            if to_remove > 0 && matches!(b, ContentBlock::Image { .. }) {
+                to_remove -= 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+    msgs
+}
+
 #[async_trait]
 impl OrchestratorApiClient for ProviderApiAdapter {
     async fn messages_create(
@@ -59,6 +127,9 @@ impl OrchestratorApiClient for ProviderApiAdapter {
                 resolved.provider.id()
             ))));
         }
+        // Trim media to the per-request cap on this owned copy (stored history
+        // is untouched) before forwarding — TS stripExcessMediaItems.
+        let msgs = strip_excess_media(msgs, MAX_MEDIA_PER_REQUEST);
         let mut req = CanonicalRequest::new(resolved.model);
         req.system = system.map(str::to_string);
         req.messages = msgs;
@@ -143,6 +214,9 @@ impl StreamingApiClient for ProviderApiAdapter {
                 resolved.provider.id()
             ))));
         }
+        // Trim media to the per-request cap on this owned copy (stored history
+        // is untouched) before forwarding — TS stripExcessMediaItems.
+        let messages = strip_excess_media(messages, MAX_MEDIA_PER_REQUEST);
         let mut req = CanonicalRequest::new(resolved.model);
         req.system = system.map(str::to_string);
         req.messages = messages;
@@ -508,5 +582,120 @@ mod tests {
             }],
         }];
         adapter.messages_create("anthropic/claude", None, msgs, Vec::new()).await.expect("vision model accepts image");
+    }
+
+    // ---- MULTIMODAL.6: per-request media cap (stripExcessMediaItems) ----
+
+    /// A distinct image block whose base64 `data` encodes its index, so tests
+    /// can assert exactly which (oldest) items were dropped.
+    fn img(n: usize) -> protocol::ContentBlock {
+        protocol::ContentBlock::Image {
+            source: protocol::ImageSource::Base64 {
+                media_type: "image/png".to_string(),
+                data: format!("img{n}"),
+            },
+        }
+    }
+
+    /// User message carrying the given image indices (with a leading text block).
+    fn user_with_imgs(range: std::ops::Range<usize>) -> ConversationMessage {
+        let mut content = vec![ContentBlock::Text {
+            text: "hi".to_string(),
+        }];
+        content.extend(range.map(img));
+        ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content,
+        }
+    }
+
+    /// Collect the `data` of every image block across messages, in order.
+    fn image_data_in_order(msgs: &[ConversationMessage]) -> Vec<String> {
+        let mut out = Vec::new();
+        for m in msgs {
+            if let ConversationMessage::User { content, .. }
+            | ConversationMessage::Assistant { content, .. } = m
+            {
+                for b in content {
+                    if let ContentBlock::Image {
+                        source: protocol::ImageSource::Base64 { data, .. },
+                    } = b
+                    {
+                        out.push(data.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn count_media_counts_top_level_images_across_messages() {
+        let msgs = vec![user_with_imgs(0..3), user_with_imgs(3..5)];
+        assert_eq!(count_media(&msgs), 5);
+    }
+
+    #[test]
+    fn tool_result_string_content_contributes_no_media() {
+        // The frozen `ToolResult.content` is a `String`, so no media can nest in
+        // it — it counts as zero, and the cap sees only top-level images.
+        let msgs = vec![ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: protocol::ToolUseId::new(),
+                    content: "lots of text, no media".to_string(),
+                    is_error: false,
+                },
+                img(0),
+            ],
+        }];
+        assert_eq!(count_media(&msgs), 1);
+    }
+
+    #[test]
+    fn strip_excess_media_trims_oldest_to_limit_without_touching_history() {
+        // 102 images spread across two messages (img0 oldest … img101 newest).
+        let stored = vec![user_with_imgs(0..60), user_with_imgs(60..102)];
+        assert_eq!(count_media(&stored), 102);
+
+        // The send path receives a clone (the orchestrator clones history).
+        let to_send = stored.clone();
+        let trimmed = strip_excess_media(to_send, MAX_MEDIA_PER_REQUEST);
+
+        // Exactly 100 remain, and the two OLDEST (img0, img1) were dropped.
+        assert_eq!(count_media(&trimmed), 100);
+        let remaining = image_data_in_order(&trimmed);
+        assert_eq!(remaining.len(), 100);
+        assert_eq!(remaining.first().unwrap(), "img2");
+        assert_eq!(remaining.last().unwrap(), "img101");
+        assert!(!remaining.contains(&"img0".to_string()));
+        assert!(!remaining.contains(&"img1".to_string()));
+
+        // Stored history is a separate allocation and is left completely intact.
+        assert_eq!(count_media(&stored), 102);
+        assert_eq!(image_data_in_order(&stored).first().unwrap(), "img0");
+    }
+
+    #[test]
+    fn strip_excess_media_leaves_within_limit_messages_unchanged() {
+        let msgs = vec![user_with_imgs(0..50), user_with_imgs(50..100)];
+        let before = msgs.clone();
+        let out = strip_excess_media(msgs, MAX_MEDIA_PER_REQUEST);
+        assert_eq!(out, before, "exactly 100 media → no stripping");
+        assert_eq!(count_media(&out), 100);
+    }
+
+    #[test]
+    fn strip_excess_media_no_images_is_noop() {
+        let msgs = vec![ConversationMessage::User {
+            id: protocol::MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "no media here".to_string(),
+            }],
+        }];
+        let before = msgs.clone();
+        let out = strip_excess_media(msgs, MAX_MEDIA_PER_REQUEST);
+        assert_eq!(out, before);
     }
 }

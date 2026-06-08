@@ -1,0 +1,344 @@
+//! SKILLEXEC.3 (streaming twin): a tool whose `ToolCallResult.new_messages` is
+//! non-empty (the Skill-tool shape — the expanded skill prompt) must have those
+//! injected messages replayed into session history right after the turn's
+//! `tool_result` user message, in tool-dispatch order, with each injected
+//! message's id recorded in `SessionState::injected_message_sources` under the
+//! injecting tool's `tool_use_id` (faithful port of TS `tagMessagesWithToolUseID`
+//! stamping `sourceToolUseID`). This is the streaming counterpart of the batched
+//! `turn_loop::tests::injected_message_sources_records_tool_use_id` /
+//! `normal_tool_records_no_source_and_serializes_no_field` tests.
+//!
+//! TS evidence: `services/tools/toolExecution.ts:1565-1570` pushes
+//! `result.newMessages` into `resultingMessages` inside the single shared
+//! tool-execution generator that BOTH the streaming and non-streaming agent
+//! loops drain — there is no separate streaming consumption path in TS, so the
+//! Rust streaming driver must append identically to the batched one.
+
+use async_trait::async_trait;
+use orchestrator::test_support::{
+    content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
+    message_delta_stop, message_start, message_stop, text_delta, MockApiClient, MockOutputStream,
+    MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
+};
+use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
+use permission::result::PermissionMetadata;
+use permission::{PermissionDecisionReason, PermissionResult};
+use protocol::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+use serde_json::json;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tool_api::progress::ToolProgressSender;
+use tool_api::registry::ToolRegistry;
+use tool_api::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    ValidationError,
+};
+
+/// A tool whose success result carries an extra conversation message in
+/// `new_messages` (the Skill-tool shape). The text `"EXPANDED-SKILL-PROMPT"`
+/// matches the batched-path test fixture so the two stay in lock-step.
+struct InjectingTool;
+
+#[async_trait]
+impl Tool for InjectingTool {
+    fn name(&self) -> &str {
+        "Inject"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+            once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        &SCHEMA
+    }
+    fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024 * 1024
+    }
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    async fn validate_input(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> Result<(), ValidationError> {
+        Ok(())
+    }
+    async fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> PermissionResult {
+        PermissionResult::Allow {
+            reason: PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: PermissionMetadata::default(),
+        }
+    }
+    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+        "inject".into()
+    }
+    async fn prompt(&self, _opts: &PromptOptions) -> String {
+        String::new()
+    }
+    async fn call(
+        &self,
+        _input: serde_json::Value,
+        _ctx: tool_api::context::ToolUseContext,
+        _tx: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        Ok(ToolCallResult {
+            data: json!({
+                "content": "TOOL-RESULT",
+                "model_content": "Launching skill: demo",
+            }),
+            new_messages: vec![ConversationMessage::user(
+                MessageId::new(),
+                "EXPANDED-SKILL-PROMPT".into(),
+            )],
+            context_modifier: None,
+            mcp_meta: None,
+        })
+    }
+}
+
+/// A tool whose success result carries NO `new_messages` — the common case for
+/// every non-skill tool. The streaming driver must leave history untouched
+/// beyond the assistant + `tool_result` messages, byte-identical to before.
+struct PlainTool;
+
+#[async_trait]
+impl Tool for PlainTool {
+    fn name(&self) -> &str {
+        "Plain"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+            once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        &SCHEMA
+    }
+    fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024 * 1024
+    }
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    async fn validate_input(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> Result<(), ValidationError> {
+        Ok(())
+    }
+    async fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> PermissionResult {
+        PermissionResult::Allow {
+            reason: PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: PermissionMetadata::default(),
+        }
+    }
+    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+        "plain".into()
+    }
+    async fn prompt(&self, _opts: &PromptOptions) -> String {
+        String::new()
+    }
+    async fn call(
+        &self,
+        _input: serde_json::Value,
+        _ctx: tool_api::context::ToolUseContext,
+        _tx: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        Ok(ToolCallResult {
+            data: json!({ "content": "TOOL-RESULT", "model_content": "ok" }),
+            new_messages: vec![],
+            context_modifier: None,
+            mcp_meta: None,
+        })
+    }
+}
+
+fn registry_with(tool: Arc<dyn Tool>) -> Arc<ToolRegistry> {
+    let mut r = ToolRegistry::new();
+    r.register_builtin(tool);
+    Arc::new(r)
+}
+
+fn streaming_orch(
+    registry: Arc<ToolRegistry>,
+    api: Arc<MockStreamingApiClient>,
+) -> ConversationOrchestrator {
+    let batched = Arc::new(MockApiClient::new(Vec::new()));
+    ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        batched,
+        api,
+        registry,
+        orchestrator::test_support::noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        PathBuf::from("/tmp"),
+    )
+}
+
+/// Turn 1 dispatches `tool_name` once; turn 2 ends with text.
+fn two_turns(tu: ToolUseId, tool_name: &str) -> Arc<MockStreamingApiClient> {
+    let turn1 = scripted![
+        message_start("m1", "claude-opus-4-7"),
+        content_block_start_tool_use(0, tu, tool_name),
+        input_json_delta(0, "{}"),
+        content_block_stop(0),
+        message_delta_stop("tool_use"),
+        message_stop(),
+    ];
+    let turn2 = scripted![
+        message_start("m2", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "done"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ];
+    Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]))
+}
+
+/// A streaming turn whose tool returns `new_messages` replays those messages
+/// into history IMMEDIATELY AFTER the `tool_result` user message, in
+/// tool-dispatch order, and records each injected message's id → the injecting
+/// tool's `tool_use_id` in `injected_message_sources`.
+#[tokio::test]
+async fn streaming_replays_tool_injected_new_messages_into_history() {
+    let tu = ToolUseId::new();
+    let api = two_turns(tu, "Inject");
+    let orch = streaming_orch(registry_with(Arc::new(InjectingTool)), api);
+
+    let outcome = orch.run_turn_streaming("go").await.expect("streaming turn");
+    assert!(
+        matches!(outcome, ConversationOutcome::EndTurn { .. }),
+        "expected EndTurn, got {outcome:?}"
+    );
+
+    let session = orch.session();
+    let s = session.lock().await;
+
+    // History layout for the tool turn: [user "go", assistant(tool_use),
+    // user(tool_result), user("EXPANDED-SKILL-PROMPT"), assistant("done")].
+    // The injected user message must come DIRECTLY after the tool_result user
+    // message and BEFORE the next assistant message.
+    let injected_pos = s
+        .history
+        .iter()
+        .position(|m| {
+            matches!(m, ConversationMessage::User { content, .. }
+                if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "EXPANDED-SKILL-PROMPT")))
+        })
+        .expect("injected skill-prompt message present in streaming history");
+
+    // The message immediately BEFORE the injected one is the tool_result user
+    // message (carries the ToolResult block tagged with this tool_use_id).
+    let before = &s.history[injected_pos - 1];
+    match before {
+        ConversationMessage::User { content, .. } => {
+            assert!(
+                content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if *tool_use_id == tu)),
+                "injected message must sit directly after the tool_result user message"
+            );
+        }
+        other => panic!("expected a tool_result User message before the injected one, got {other:?}"),
+    }
+
+    // The message AFTER the injected one is the next turn's assistant text.
+    let after = &s.history[injected_pos + 1];
+    assert!(
+        matches!(after, ConversationMessage::Assistant { .. }),
+        "the injected message must precede the next assistant message, got {after:?}"
+    );
+
+    // sourceToolUseID side-table records the injecting tool's tool_use_id.
+    let injected_id = s.history[injected_pos].id();
+    assert_eq!(
+        s.injected_message_sources.get(&injected_id),
+        Some(&tu),
+        "injected message id maps to the Inject tool's tool_use_id"
+    );
+    assert_eq!(
+        s.injected_message_sources.len(),
+        1,
+        "exactly one association recorded for one injected message"
+    );
+}
+
+/// A streaming turn whose tool returns NO `new_messages` (the common case)
+/// records nothing in `injected_message_sources`, injects no extra history
+/// message, and never serializes a `sourceToolUseID` key — byte-identical to
+/// before the SKILLEXEC.3 streaming wiring. Mirrors the batched
+/// `normal_tool_records_no_source_and_serializes_no_field` test.
+#[tokio::test]
+async fn streaming_tool_without_new_messages_leaves_history_unchanged() {
+    let tu = ToolUseId::new();
+    let api = two_turns(tu, "Plain");
+    let orch = streaming_orch(registry_with(Arc::new(PlainTool)), api);
+
+    let outcome = orch.run_turn_streaming("go").await.expect("streaming turn");
+    assert!(
+        matches!(outcome, ConversationOutcome::EndTurn { .. }),
+        "expected EndTurn, got {outcome:?}"
+    );
+
+    let session = orch.session();
+    let s = session.lock().await;
+
+    // No injected message text anywhere in history.
+    assert!(
+        !s.history.iter().any(|m| matches!(m, ConversationMessage::User { content, .. }
+            if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "EXPANDED-SKILL-PROMPT")))),
+        "a tool with no new_messages must not inject any history message"
+    );
+
+    // The side-table is empty and never serializes (#[serde(skip)]).
+    assert!(
+        s.injected_message_sources.is_empty(),
+        "a tool with no injected messages records no source associations"
+    );
+    let json = serde_json::to_string(&*s).expect("serialize session");
+    assert!(
+        !json.contains("injected_message_sources"),
+        "side-table must not serialize: {json}"
+    );
+    assert!(
+        !json.contains("sourceToolUseID"),
+        "no sourceToolUseID key may reach the wire: {json}"
+    );
+
+    // Exact history shape (byte-identical to a plain tool turn): user, assistant,
+    // tool_result user, assistant. No extra trailing user message.
+    assert_eq!(
+        s.history.len(),
+        4,
+        "expected [user, assistant, tool_result, assistant]: {:?}",
+        s.history
+    );
+}

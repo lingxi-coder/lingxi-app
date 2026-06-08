@@ -221,7 +221,7 @@ impl SseDecoder for GeminiSseDecoder {
                 delta: MessageDeltaPayload {
                     stop_reason: self.terminal_stop_reason(),
                 },
-                usage: self.usage,
+                usage: self.usage.clone(),
             });
             out.push(StreamEvent::MessageStop);
         }

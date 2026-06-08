@@ -208,7 +208,7 @@ impl SseDecoder for OpenAiSseDecoder {
                     delta: MessageDeltaPayload {
                         stop_reason: self.stop_reason.clone(),
                     },
-                    usage: self.usage,
+                    usage: self.usage.clone(),
                 });
                 out.push(StreamEvent::MessageStop);
             }
@@ -259,7 +259,7 @@ impl SseDecoder for OpenAiSseDecoder {
                 delta: MessageDeltaPayload {
                     stop_reason: self.stop_reason.clone(),
                 },
-                usage: self.usage,
+                usage: self.usage.clone(),
             });
             out.push(StreamEvent::MessageStop);
         }
@@ -450,7 +450,7 @@ mod tests {
             .iter()
             .find_map(|e| match e {
                 StreamEvent::MessageDelta { delta, usage } => {
-                    Some((delta.stop_reason.clone(), *usage))
+                    Some((delta.stop_reason.clone(), usage.clone()))
                 }
                 _ => None,
             })

@@ -132,6 +132,7 @@ pub fn usage_from_value(usage: Option<&Value>) -> UsageApi {
             .get("cachedContentTokenCount")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        ..Default::default()
     }
 }
 

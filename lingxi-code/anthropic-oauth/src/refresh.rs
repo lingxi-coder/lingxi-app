@@ -21,6 +21,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 
+/// Timeout for the refresh-token POST. Matches claude-code's
+/// `refreshOAuthToken` deadline of `timeout: 15000` (15s)
+/// (services/oauth/client.ts:168), the same 15s the exchange path uses.
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// In-memory token state. Kept under `AuthState::token` (`RwLock`) and atomically
 /// swapped on a successful refresh.
 pub struct TokenInfo {
@@ -173,16 +178,21 @@ impl AuthState {
         &self,
         refresh_token: &Secret<String>,
     ) -> Result<TokenEndpointResponse, OAuthError> {
-        // JSON body matching claude-code's `refreshOAuthToken`: includes the
-        // space-joined `scope` param the real endpoint expects.
-        let scope = {
-            let scopes = self.token.read().await.scopes.clone();
-            if scopes.is_empty() {
-                self.config.scopes.join(" ")
-            } else {
-                scopes.join(" ")
-            }
-        };
+        // Scope param matching claude-code's `refreshOAuthToken`: when no
+        // explicit scopes are requested, send the canonical default set.
+        // TS does `scope: (requestedScopes?.length ? requestedScopes :
+        // CLAUDE_AI_OAUTH_SCOPES).join(' ')` (services/oauth/client.ts:159-162),
+        // and `checkAndRefreshOAuthTokenIfNeeded` passes `scopes: undefined`
+        // for subscribers precisely so the canonical default applies and the
+        // backend's refresh-grant scope expansion (e.g. adding user:file_upload)
+        // takes effect without a re-login (utils/auth.ts:1531-1538). The
+        // reactive/proactive driver never carries explicit requested scopes
+        // (the frozen `OAuthRefreshHook::refresh` signature has no scope arg),
+        // so this is always the default-set case. The canonical default is
+        // `config.scopes` (sourced from `CLAUDE_CODE_OAUTH_SCOPES`); we do NOT
+        // echo the current token's (possibly narrower) scopes — that would pin
+        // the grant and defeat scope expansion.
+        let scope = self.config.scopes.join(" ");
         let payload = RefreshRequest {
             grant_type: crate::config::REFRESH_GRANT_TYPE,
             refresh_token: refresh_token.expose_secret(),
@@ -199,7 +209,7 @@ impl AuthState {
                 ("accept".into(), "application/json".into()),
             ],
             body: Some(body),
-            timeout: Some(Duration::from_secs(30)),
+            timeout: Some(REFRESH_TIMEOUT),
         };
         let resp = self
             .http
@@ -788,5 +798,81 @@ mod wire_and_persist_tests {
             }
             other => panic!("expected RefreshFailed, got {other:?}"),
         }
+    }
+
+    /// OAUTHREF.3: the refresh POST requests the canonical default scope set
+    /// (`config.scopes`), NOT the current token's (possibly narrower) scopes.
+    /// Mirrors TS `refreshOAuthToken` defaulting to `CLAUDE_AI_OAUTH_SCOPES`
+    /// when no explicit scopes are requested — this is what lets the backend
+    /// expand scopes on refresh without forcing a re-login. Here the live token
+    /// holds only `read:user`, yet the request must still carry the full
+    /// canonical set.
+    #[tokio::test]
+    async fn refresh_sends_canonical_default_scope_not_current_token_scopes() {
+        let resp = r#"{"access_token":"NEW_ACCESS","refresh_token":"NEW_REFRESH","expires_in":3600,"scope":"read:user write:messages read:projects"}"#;
+        let http = MockHttp::new(vec![(
+            "oauth/token",
+            Canned {
+                status: 200,
+                body: resp.into(),
+            },
+        )]);
+        let clock = TestClock::new(0);
+        let cfg = ClaudeAiOAuthConfig::default_with_port(0);
+        let state = AuthState::new(
+            cfg,
+            Secret::new("ACCESS".into()),
+            Some(Secret::new("REFRESH".into())),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            http.clone() as Arc<dyn traits::HttpTransport>,
+            clock as Arc<dyn traits::Clock>,
+            None,
+            None,
+        );
+        // Simulate a token that currently holds only a narrow subset of scopes.
+        // (token_hash is over the access_token only, so this does not perturb
+        // the double-check-after-acquire.)
+        state.token.write().await.scopes = vec!["read:user".into()];
+
+        let driver = RefreshDriver::new(state.clone());
+        let prev = state.token.read().await.token_hash();
+        driver.refresh(prev).await.expect("refresh ok");
+
+        let req = http.last_request().expect("request made");
+        let sent: serde_json::Value =
+            serde_json::from_str(req.body.as_deref().unwrap()).expect("json body");
+        // Canonical default (config.scopes), NOT the narrow "read:user" held.
+        assert_eq!(sent["scope"], "read:user write:messages read:projects");
+    }
+
+    /// OAUTHREF.2: the refresh POST uses a 15s timeout, matching claude-code's
+    /// `refreshOAuthToken` `timeout: 15000` (services/oauth/client.ts:168).
+    #[tokio::test]
+    async fn refresh_request_uses_15s_timeout() {
+        let http = MockHttp::new(vec![(
+            "oauth/token",
+            Canned {
+                status: 200,
+                body: r#"{"access_token":"NEW_ACCESS","expires_in":3600}"#.into(),
+            },
+        )]);
+        let clock = TestClock::new(0);
+        let cfg = ClaudeAiOAuthConfig::default_with_port(0);
+        let state = AuthState::new(
+            cfg,
+            Secret::new("ACCESS".into()),
+            Some(Secret::new("REFRESH".into())),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            http.clone() as Arc<dyn traits::HttpTransport>,
+            clock as Arc<dyn traits::Clock>,
+            None,
+            None,
+        );
+        let driver = RefreshDriver::new(state.clone());
+        let prev = state.token.read().await.token_hash();
+        driver.refresh(prev).await.expect("refresh ok");
+
+        let req = http.last_request().expect("request made");
+        assert_eq!(req.timeout, Some(Duration::from_secs(15)));
     }
 }

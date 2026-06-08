@@ -229,6 +229,9 @@ impl AnthropicProvider {
         if let Some(t) = temperature {
             body["temperature"] = serde_json::json!(t);
         }
+        // CACHE.1 + CACHE.2 — stamp Anthropic prompt-cache breakpoints at the
+        // wire boundary (no-op + byte-identical when caching is disabled).
+        apply_prompt_caching(&mut body, model);
         body
     }
 
@@ -855,6 +858,9 @@ impl AnthropicProvider {
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);
         }
+        // CACHE.1 + CACHE.2 — same wire-boundary cache stamping as the
+        // non-streaming builder (shared helper keeps both paths in lockstep).
+        apply_prompt_caching(&mut body, model);
 
         let req = self.build_streaming_request(&body);
         let wire_stream = transport.stream_sse(req).await?;
@@ -1107,6 +1113,132 @@ fn resolve_retry_control(
         is_sandbox,
         ..RetryControl::default()
     }
+}
+
+/// CACHE.1 + CACHE.2 — post-process the serialized request `Value` to add
+/// Anthropic prompt-cache breakpoints at the wire boundary. The frozen
+/// `protocol::ContentBlock` carries no `cache_control` field, so the markers
+/// are stamped onto the serialized JSON instead of the typed DTOs.
+///
+/// Ports claude-code:
+/// * `buildSystemPromptBlocks` (claude.ts:3213-3237) — the `system` field is
+///   ALWAYS sent as an array of `{type:'text', text}` blocks, and with caching
+///   enabled each (non-null-scope) block carries `cache_control`. Here the
+///   whole system prompt is a single block, so it becomes one text block.
+/// * `addCacheBreakpoints` (claude.ts:3089-3106) — stamps `cache_control` onto
+///   the LAST content block of the marker message. We implement the
+///   `skipCacheWrite=false` base case, so the marker is the LAST message.
+/// * `userMessageToMessageParam` / `assistantMessageToMessageParam`
+///   (claude.ts:588-674) — a string `content` becomes a single text block, and
+///   for the assistant path the trailing `thinking` / `redacted_thinking`
+///   (and connector-text) blocks are EXCLUDED from being the cache target.
+///
+/// Only the BASE marker `{ "type": "ephemeral" }` is applied. The CACHE.3
+/// `ttl` / `scope` / `cache_reference` extensions are out of scope (and the
+/// frozen `ContentBlock` cannot carry a `cache_reference`). When caching is
+/// disabled the body is left byte-identical to today (system stays a String).
+fn apply_prompt_caching(body: &mut Value, model: &str) {
+    if !prompt_caching_enabled(model) {
+        return;
+    }
+
+    // CACHE.1 — `system`: String → [ { type:text, text, cache_control } ].
+    // An absent/null/already-array system is left untouched (TS only ever
+    // emits the blocks it actually has).
+    if let Some(Value::String(s)) = body.get("system") {
+        let text = s.clone();
+        body["system"] = serde_json::json!([
+            { "type": "text", "text": text, "cache_control": ephemeral() }
+        ]);
+    }
+
+    // CACHE.2 — the marker message is the LAST element of `messages`.
+    if let Some(Value::Array(messages)) = body.get_mut("messages") {
+        if let Some(marker) = messages.last_mut() {
+            stamp_marker_message(marker);
+        }
+    }
+}
+
+/// Stamp `cache_control: {type:ephemeral}` onto the last *eligible* content
+/// block of a single (serialized) message. String content is first wrapped in
+/// a one-element text block, matching `userMessageToMessageParam` /
+/// `assistantMessageToMessageParam` (claude.ts:595-607 / 640-652).
+fn stamp_marker_message(marker: &mut Value) {
+    let is_assistant = marker.get("role").and_then(Value::as_str) == Some("assistant");
+    match marker.get_mut("content") {
+        // String content → wrap into a single text block carrying the marker.
+        Some(content) if content.is_string() => {
+            let text = content.as_str().unwrap_or_default().to_string();
+            *content = serde_json::json!([
+                { "type": "text", "text": text, "cache_control": ephemeral() }
+            ]);
+        }
+        // Array content → stamp the last eligible block in place.
+        Some(Value::Array(blocks)) => {
+            if let Some(i) = last_eligible_block_index(blocks, is_assistant) {
+                if let Some(obj) = blocks[i].as_object_mut() {
+                    obj.insert("cache_control".to_string(), ephemeral());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Index of the content block that should receive the `cache_control` marker.
+///
+/// * user / non-assistant role → the LAST block (TS stamps it unconditionally,
+///   claude.ts:611-618).
+/// * assistant role → the last block that is NOT `thinking` /
+///   `redacted_thinking` (claude.ts:658-661 excludes those — and connector-text,
+///   which has no representable equivalent in the frozen `ContentBlock`). If
+///   every block is excluded, returns `None` (nothing is stamped).
+fn last_eligible_block_index(blocks: &[Value], is_assistant: bool) -> Option<usize> {
+    if blocks.is_empty() {
+        return None;
+    }
+    if !is_assistant {
+        return Some(blocks.len() - 1);
+    }
+    blocks.iter().rposition(|b| {
+        !matches!(
+            b.get("type").and_then(Value::as_str),
+            Some("thinking" | "redacted_thinking")
+        )
+    })
+}
+
+/// The base prompt-cache marker value `{ "type": "ephemeral" }`.
+fn ephemeral() -> Value {
+    serde_json::json!({ "type": "ephemeral" })
+}
+
+/// Port of claude-code `getPromptCachingEnabled` (claude.ts:333-356).
+///
+/// Caching defaults ON. The global `DISABLE_PROMPT_CACHING` gate (parsed with
+/// `isEnvTruthy` semantics) turns it off for ALL models. The model-specific
+/// gates (`DISABLE_PROMPT_CACHING_HAIKU` / `_SONNET` / `_OPUS`) require the
+/// resolved small-fast / default-sonnet / default-opus model ids, whose
+/// resolvers (`getSmallFastModel` / `getDefaultSonnetModel` /
+/// `getDefaultOpusModel`) are NOT reachable from `api-client` — they live in
+/// the config layer. Those three gates are a deliberate follow-up; only the
+/// global gate is implemented here (it dominates real usage).
+fn prompt_caching_enabled(_model: &str) -> bool {
+    !env_truthy("DISABLE_PROMPT_CACHING")
+}
+
+/// Port of `isEnvTruthy` (envUtils.ts:32-37): lowercase + trim, then `true`
+/// iff the value is one of `1` / `true` / `yes` / `on`. An unset var is falsy.
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Helpers that emit the four `tengu_api_*` telemetry events through the
@@ -1518,5 +1650,299 @@ mod reactive_401_refresh_tests {
             Some("Bearer rotated-by-another-task"),
             "retry uses the token another task already rotated to",
         );
+    }
+}
+
+/// CACHE.1 + CACHE.2 — request-body shape tests for prompt caching. They assert
+/// the SERIALIZED wire body (not the typed DTOs): with caching on, `system`
+/// becomes an array of one text block carrying `cache_control:{type:ephemeral}`
+/// and the marker (last) message's last eligible block carries the same; with
+/// `DISABLE_PROMPT_CACHING` set the body is byte-identical to the pre-CACHE
+/// output. Both the non-streaming (`build_messages_body`) and streaming
+/// (`messages_create_stream`) builders are exercised.
+#[cfg(test)]
+// These tests serialize on ENV_LOCK and intentionally hold the guard across the
+// async request call so DISABLE_PROMPT_CACHING stays set for the whole turn.
+#[allow(clippy::await_holding_lock)]
+mod prompt_caching_tests {
+    use super::{
+        apply_prompt_caching, last_eligible_block_index, prompt_caching_enabled, AnthropicProvider,
+    };
+    use protocol::{ContentBlock, ConversationMessage, HttpRequest, HttpResponse, MessageId};
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+    use traits::http::SseStream;
+    use traits::{HttpError, HttpTransport};
+
+    // DISABLE_PROMPT_CACHING is process-global; serialize the env-sensitive
+    // tests so a `set_var` in one can't race the default-on assertions in
+    // another running concurrently in the same test binary.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn user_msgs() -> Vec<ConversationMessage> {
+        vec![ConversationMessage::User {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
+        }]
+    }
+
+    fn assert_ephemeral(v: &Value) {
+        assert_eq!(v["cache_control"]["type"], "ephemeral", "block: {v}");
+    }
+
+    /// Capturing transport: records the request body it is handed and returns an
+    /// empty SSE stream. The streaming builder sends the request inside
+    /// `stream_sse`, so the body is captured even though the stream is dropped.
+    struct CapturingTransport {
+        body: Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpTransport for CapturingTransport {
+        async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, HttpError> {
+            unimplemented!("non-streaming path is not exercised by these tests")
+        }
+        async fn stream_sse(&self, req: HttpRequest) -> Result<SseStream, HttpError> {
+            *self.body.lock().unwrap() = req.body.clone();
+            let stream: SseStream = Box::pin(futures::stream::empty());
+            Ok(stream)
+        }
+    }
+
+    // (a) Non-streaming builder, caching ON by default.
+    #[test]
+    fn non_stream_enabled_stamps_system_and_last_block() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+
+        let msgs = user_msgs();
+        let body =
+            AnthropicProvider::build_messages_body("claude-x", Some("SYS"), &msgs, 4096, &[], None);
+
+        // CACHE.1: system is an array of one text block with cache_control.
+        let sys = &body["system"];
+        assert!(sys.is_array(), "system must be an array, got {sys}");
+        assert_eq!(sys[0]["type"], "text");
+        assert_eq!(sys[0]["text"], "SYS");
+        assert_ephemeral(&sys[0]);
+
+        // CACHE.2: the marker (last) message's last block carries cache_control.
+        let last_block = &body["messages"][0]["content"][0];
+        assert_eq!(last_block["type"], "text");
+        assert_ephemeral(last_block);
+    }
+
+    // (a') Streaming builder, caching ON by default.
+    #[tokio::test]
+    async fn stream_enabled_stamps_system_and_last_block() {
+        let body_str = {
+            let _g = ENV_LOCK.lock().unwrap();
+            std::env::remove_var("DISABLE_PROMPT_CACHING");
+
+            let provider = AnthropicProvider::new("k", None);
+            let transport = Arc::new(CapturingTransport {
+                body: Mutex::new(None),
+            });
+            let _stream = provider
+                .messages_create_stream(
+                    "claude-x",
+                    Some("SYS"),
+                    user_msgs(),
+                    Vec::new(),
+                    transport.clone(),
+                )
+                .await
+                .expect("stream handshake");
+            let captured = transport
+                .body
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("request body captured");
+            captured
+        };
+
+        let body: Value = serde_json::from_str(&body_str).unwrap();
+        assert_eq!(body["stream"], true, "streaming flag still set");
+        let sys = &body["system"];
+        assert!(sys.is_array(), "system must be an array, got {sys}");
+        assert_eq!(sys[0]["text"], "SYS");
+        assert_ephemeral(&sys[0]);
+        assert_ephemeral(&body["messages"][0]["content"][0]);
+    }
+
+    // (b) DISABLE_PROMPT_CACHING set → byte-identical to the pre-CACHE body.
+    #[test]
+    fn disabled_is_byte_identical_non_stream() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("DISABLE_PROMPT_CACHING", "1");
+
+        let msgs = user_msgs();
+        let actual =
+            AnthropicProvider::build_messages_body("claude-x", Some("SYS"), &msgs, 4096, &[], None);
+
+        // Reconstruct exactly what the builder produced before CACHE.1/CACHE.2.
+        let mut expected = json!({
+            "model": "claude-x",
+            "max_tokens": 4096u32,
+            "messages": &msgs,
+        });
+        expected["system"] = Value::String("SYS".into());
+
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+
+        assert_eq!(actual, expected, "disabled path must be byte-identical");
+        assert!(actual["system"].is_string(), "system stays a plain string");
+        assert!(
+            !actual.to_string().contains("cache_control"),
+            "no cache_control anywhere when disabled",
+        );
+    }
+
+    // (b') Streaming disabled → system stays a plain string, no cache_control.
+    #[tokio::test]
+    async fn disabled_is_byte_identical_stream() {
+        let body_str = {
+            let _g = ENV_LOCK.lock().unwrap();
+            std::env::set_var("DISABLE_PROMPT_CACHING", "yes");
+            let provider = AnthropicProvider::new("k", None);
+            let transport = Arc::new(CapturingTransport {
+                body: Mutex::new(None),
+            });
+            let _ = provider
+                .messages_create_stream(
+                    "claude-x",
+                    Some("SYS"),
+                    user_msgs(),
+                    Vec::new(),
+                    transport.clone(),
+                )
+                .await
+                .expect("stream handshake");
+            let b = transport
+                .body
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("request body captured");
+            std::env::remove_var("DISABLE_PROMPT_CACHING");
+            b
+        };
+        let body: Value = serde_json::from_str(&body_str).unwrap();
+        assert!(body["system"].is_string(), "system stays a plain string");
+        assert!(
+            !body_str.contains("cache_control"),
+            "no cache_control when disabled",
+        );
+    }
+
+    // (c) Assistant marker ending in a thinking block → cache_control lands on
+    // the last NON-thinking block (the trailing thinking block is excluded).
+    #[test]
+    fn assistant_trailing_thinking_is_excluded() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+
+        let msgs = vec![ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "answer".into(),
+                },
+                ContentBlock::Thinking {
+                    thinking: "reasoning".into(),
+                    signature: None,
+                },
+            ],
+            stop_reason: None,
+        }];
+        let body =
+            AnthropicProvider::build_messages_body("claude-x", Some("SYS"), &msgs, 4096, &[], None);
+
+        let content = &body["messages"][0]["content"];
+        // text block (index 0) receives the marker...
+        assert_eq!(content[0]["type"], "text");
+        assert_ephemeral(&content[0]);
+        // ...the trailing thinking block (index 1) does NOT.
+        assert_eq!(content[1]["type"], "thinking");
+        assert!(
+            content[1].get("cache_control").is_none(),
+            "trailing thinking block must be excluded",
+        );
+    }
+
+    // (c') redacted_thinking is also excluded. It is not constructible via the
+    // frozen ContentBlock enum, so exercise the helper on a synthetic wire body.
+    #[test]
+    fn redacted_thinking_is_excluded() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+
+        let mut body = json!({
+            "model": "claude-x",
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "a" },
+                    { "type": "redacted_thinking", "data": "xx" }
+                ]
+            }]
+        });
+        apply_prompt_caching(&mut body, "claude-x");
+        let content = &body["messages"][0]["content"];
+        assert_ephemeral(&content[0]);
+        assert!(content[1].get("cache_control").is_none());
+    }
+
+    // String content (e.g. a degenerate string-content message) is wrapped into
+    // a single text block, matching userMessageToMessageParam's string branch.
+    #[test]
+    fn string_content_marker_is_wrapped() {
+        let mut body = json!({
+            "messages": [ { "role": "user", "content": "raw string" } ]
+        });
+        super::stamp_marker_message(&mut body["messages"][0]);
+        let content = &body["messages"][0]["content"];
+        assert!(content.is_array(), "string content must be wrapped: {content}");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "raw string");
+        assert_ephemeral(&content[0]);
+    }
+
+    // Unit coverage for the eligibility walk-back used by CACHE.2.
+    #[test]
+    fn eligibility_index_rules() {
+        let user = vec![json!({"type":"text"}), json!({"type":"text"})];
+        assert_eq!(last_eligible_block_index(&user, false), Some(1));
+
+        let asst_trailing_text = vec![json!({"type":"thinking"}), json!({"type":"text"})];
+        assert_eq!(last_eligible_block_index(&asst_trailing_text, true), Some(1));
+
+        let asst_trailing_thinking = vec![json!({"type":"text"}), json!({"type":"thinking"})];
+        assert_eq!(last_eligible_block_index(&asst_trailing_thinking, true), Some(0));
+
+        let all_excluded = vec![
+            json!({"type":"thinking"}),
+            json!({"type":"redacted_thinking"}),
+        ];
+        assert_eq!(last_eligible_block_index(&all_excluded, true), None);
+
+        let empty: &[Value] = &[];
+        assert_eq!(last_eligible_block_index(empty, false), None);
+    }
+
+    // The enable gate reads DISABLE_PROMPT_CACHING with isEnvTruthy semantics.
+    #[test]
+    fn enable_gate_reads_disable_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+        assert!(prompt_caching_enabled("claude-x"));
+        std::env::set_var("DISABLE_PROMPT_CACHING", "TRUE"); // case-insensitive
+        assert!(!prompt_caching_enabled("claude-x"));
+        std::env::set_var("DISABLE_PROMPT_CACHING", "0"); // not in the truthy set
+        assert!(prompt_caching_enabled("claude-x"));
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
     }
 }
